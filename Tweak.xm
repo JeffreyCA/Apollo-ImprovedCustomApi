@@ -46,6 +46,10 @@ static NSArray *blockedUrls = @[
 static NSString *const ShareLinkRegexPattern = @"^(?:https?:)?//(?:www\\.)?reddit\\.com/r/(\\w+)/s/(\\w+)$";
 static NSRegularExpression *ShareLinkRegex;
 
+// Regex for media share links
+static NSString *const MediaShareLinkPattern = @"^(?:https?:)?//(?:www\\.)?reddit\\.com/media\\?url=(.*?)$";
+static NSRegularExpression *MediaShareLinkRegex;
+
 // Cache storing resolved share URLs - this is an optimization so that we don't need to resolve the share URL every time
 static NSCache <NSString *, ShareUrlTask *> *cache;
 
@@ -162,6 +166,15 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
     if (match) {
         // This exits early if already in cache
         StartShareURLResolveTask(string);
+    }
+    // Fix Reddit Media URL redirects, for example this comment: https://reddit.com/r/TikTokCringe/comments/18cyek4/_/kce86er/?context=1 has an image link in this format: https://www.reddit.com/media?url=https%3A%2F%2Fi.redd.it%2Fpdnxq8dj0w881.jpg
+    NSTextCheckingResult *mediaMatch = [MediaShareLinkRegex firstMatchInString:string options:0 range:NSMakeRange(0, [string length])];
+    if (mediaMatch) {
+        NSRange media = [mediaMatch rangeAtIndex:1];
+        NSString *encodedURLString = [string substringWithRange:media];
+        NSString *decodedURLString = [encodedURLString stringByRemovingPercentEncoding];
+        NSURL *decodedURL = [NSURL URLWithString:decodedURLString];
+        return decodedURL;
     }
     return %orig;
 }
@@ -518,6 +531,7 @@ static NSString *imageID;
     cache = [NSCache new];
     NSError *error = NULL;
     ShareLinkRegex = [NSRegularExpression regularExpressionWithPattern:ShareLinkRegexPattern options:NSRegularExpressionCaseInsensitive error:&error];
+    MediaShareLinkRegex = [NSRegularExpression regularExpressionWithPattern:MediaShareLinkPattern options:NSRegularExpressionCaseInsensitive error:&error];
 
     sRedditClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedditClientId] ?: @"" copy];
     sImgurClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyImgurClientId] ?: @"" copy];
