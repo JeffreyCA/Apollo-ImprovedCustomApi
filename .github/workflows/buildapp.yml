@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
 
       - name: Parse control file version
         id: parse_control
