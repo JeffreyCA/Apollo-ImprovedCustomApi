@@ -5,3 +5,4 @@ static NSString *const UDKeyBlockAnnouncements = @"DisableApollonouncements";
 
 static NSString *const UDKeyApolloSubredditWeather = @"ShowSubredditWeatherTime";
 static NSString *const UDKeyApolloShowUnreadComments = @"ShowUnreadComments";
+static NSString *const UDKeyApolloEnableFLEX = @"EnableFlexDebugging";
