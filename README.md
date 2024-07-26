@@ -39,6 +39,7 @@ Recommended configuration:
 - [Theos](https://github.com/theos/theos)
 
 1. `git clone`
+2. `git submodule update --init --recursive`
 2. `make package`
 
 ## Credits
