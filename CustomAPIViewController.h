@@ -7,3 +7,4 @@ NSString *sRedditClientId;
 NSString *sImgurClientId;
 
 BOOL sBlockAnnouncements;
+BOOL sEnableFlex;

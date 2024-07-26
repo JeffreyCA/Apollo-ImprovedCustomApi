@@ -588,12 +588,13 @@ static NSString *imageID;
     ShareLinkRegex = [NSRegularExpression regularExpressionWithPattern:ShareLinkRegexPattern options:NSRegularExpressionCaseInsensitive error:&error];
     MediaShareLinkRegex = [NSRegularExpression regularExpressionWithPattern:MediaShareLinkPattern options:NSRegularExpressionCaseInsensitive error:&error];
 
-    NSDictionary *defaultValues = @{UDKeyBlockAnnouncements: @YES};
+    NSDictionary *defaultValues = @{UDKeyBlockAnnouncements: @YES, UDKeyApolloEnableFLEX: @NO};
     [[NSUserDefaults standardUserDefaults] registerDefaults:defaultValues];
 
     sRedditClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedditClientId] ?: @"" copy];
     sImgurClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyImgurClientId] ?: @"" copy];
     sBlockAnnouncements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBlockAnnouncements];
+    sEnableFlex = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyApolloEnableFLEX];
 
     %init(SettingsGeneralViewController=objc_getClass("Apollo.SettingsGeneralViewController"));
 
@@ -607,6 +608,12 @@ static NSString *imageID;
         {"SecItemCopyMatching", (void *)SecItemCopyMatching_replacement, (void **)&SecItemCopyMatching_orig},
         {"SecItemUpdate", (void *)SecItemUpdate_replacement, (void **)&SecItemUpdate_orig}
     }, 3);
+
+    if (sEnableFlex) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [[%c(FLEXManager) performSelector:@selector(sharedManager)] performSelector:@selector(showExplorer)];
+        });
+    }
 
     // Redirect user to Custom API modal if no API credentials are set
     if ([sRedditClientId length] == 0) {

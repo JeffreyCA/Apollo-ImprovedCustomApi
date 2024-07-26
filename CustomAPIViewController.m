@@ -127,6 +127,9 @@
     UIStackView *weatherStackView = [self createToggleSwitchWithKey:UDKeyApolloSubredditWeather labelText:@"Subreddit Weather and Time (Beta)" action:@selector(weatherSwitchToggled:)];
     [stackView addArrangedSubview:weatherStackView];
 
+    UIStackView *flexStackView = [self createToggleSwitchWithKey:UDKeyApolloEnableFLEX labelText:@"Enable FLEX Debug (Needs restart)" action:@selector(flexSwitchToggled:)];
+    [stackView addArrangedSubview:flexStackView];
+
     UITextView *textView = [[UITextView alloc] init];
     textView.editable = NO;
     textView.scrollEnabled = NO;
@@ -225,6 +228,11 @@
 - (void)blockAnnouncementsSwitchToggled:(UISwitch *)sender {
     sBlockAnnouncements = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sBlockAnnouncements forKey:UDKeyBlockAnnouncements];
+}
+
+- (void)flexSwitchToggled:(UISwitch *)sender {
+    sEnableFlex = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sEnableFlex forKey:UDKeyApolloEnableFLEX];
 }
 
 @end

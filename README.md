@@ -14,6 +14,8 @@ Apollo for Reddit with in-app configurable API keys and several fixes and improv
 - Support media share links (reddit.com/media?url=)
 - Partially working "New Comments Highlightifier" Ultra feature (new comment count only)
 - Randomize "trending subreddits list" so it doesn't show **iOS**, **Clock**, **Time**, **IfYouDontMind** all the time
+- Use generic user agent
+- Support FLEX debugging
 
 ## Known issues
 - Apollo Ultra features may cause app to crash 
