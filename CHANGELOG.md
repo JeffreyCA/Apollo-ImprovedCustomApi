@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.1.1] - 2024-07-27
+
+- Working hybrid implementation of "New Comments Highlighter" Ultra feature
+- Add FLEX integration for debugging/tweaking purposes (requires app restart after enabling in Settings -> General -> Custom API)
+
 ## [v1.0.12] - 2024-07-25
 
 Use generic user agent independent of bundle ID when sending requests to Reddit
@@ -58,6 +63,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v1.0.12]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.0.12...v1.1.1
 [v1.0.12]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.0.11...v1.0.12
 [v1.0.11]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.0.10...v1.0.11
 [v1.0.10]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.0.9...v1.0.10
