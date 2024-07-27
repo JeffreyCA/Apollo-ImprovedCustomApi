@@ -32,9 +32,9 @@ static OSStatus SecItemUpdate_replacement(CFDictionaryRef query, CFDictionaryRef
     return ((OSStatus (*)(CFDictionaryRef, CFDictionaryRef))SecItemUpdate_orig)((__bridge CFDictionaryRef)strippedQuery, attributesToUpdate);
 }
 
-static NSString *announcementUrl = @"https://apollogur.download/api/apollonouncement";
+static NSString *const announcementUrl = @"https://apollogur.download/api/apollonouncement";
 
-static NSArray *blockedUrls = @[
+static NSArray *const blockedUrls = @[
     @"https://apollopushserver.xyz",
     @"telemetrydeck.com",
     @"https://apollogur.download/api/easter_sale",
@@ -43,7 +43,10 @@ static NSArray *blockedUrls = @[
     @"https://apollogur.download/api/goodbye_wallpaper"
 ];
 
-static NSString *defaultUserAgent = @"Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
+static NSString *const defaultUserAgent = @"Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
+
+// Highlight color for new unread comments
+static UIColor *const NewPostCommentsColor = [UIColorFromRGB(0xFFD16E) colorWithAlphaComponent: 0.15];
 
 // Regex for opaque share links
 static NSString *const ShareLinkRegexPattern = @"^(?:https?:)?//(?:www\\.)?reddit\\.com/(?:r|u)/(\\w+)/s/(\\w+)$";
@@ -55,6 +58,9 @@ static NSRegularExpression *MediaShareLinkRegex;
 
 // Cache storing resolved share URLs - this is an optimization so that we don't need to resolve the share URL every time
 static NSCache <NSString *, ShareUrlTask *> *cache;
+
+// Dictionary of post IDs to last-read timestamp for tracking new unread comments
+static NSMutableDictionary<NSString *, NSDate *> *postSnapshots;
 
 @implementation ShareUrlTask
 - (instancetype)init {
@@ -274,8 +280,37 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
 
 %end
 
+@interface _TtC6Apollo15CommentCellNode
+- (void)didLoad;
+- (void)linkButtonTappedWithSender:(_TtC6Apollo14LinkButtonNode *)arg1;
+@end
+
 // Single comment under an individual post
 %hook _TtC6Apollo15CommentCellNode
+
+- (void)didLoad {
+    %orig;
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyApolloShowUnreadComments] == NO) {
+        return;
+    }
+    RDKComment *comment = MSHookIvar<RDKComment *>(self, "comment");
+    if (comment) {
+        NSDate *createdUTC = MSHookIvar<NSDate *>(comment, "_createdUTC");
+        UIView *view = MSHookIvar<UIView *>(self, "_view");
+        NSString *linkIDWithoutPrefix = [comment linkIDWithoutTypePrefix];
+
+        if (linkIDWithoutPrefix) {
+            NSDate *timestamp = [postSnapshots objectForKey:linkIDWithoutPrefix];
+            // Highlight if comment is newer than the timestamp saved in postSnapshots
+            if (view && createdUTC && timestamp && [createdUTC compare:timestamp] == NSOrderedDescending) {
+                UIView *yellowTintView = [[UIView alloc] initWithFrame: [view bounds]];
+                yellowTintView.backgroundColor = NewPostCommentsColor;
+                yellowTintView.userInteractionEnabled = NO;
+                [view insertSubview:yellowTintView atIndex:1];
+            }
+        }
+    }
+}
 
 - (void)linkButtonTappedWithSender:(_TtC6Apollo14LinkButtonNode *)arg1 {
     %log;
@@ -582,25 +617,80 @@ static NSString *imageID;
 
 %end
 
+static void initializePostSnapshots(NSData *data) {
+    NSError *error = nil;
+    NSArray *jsonArray = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+    if (error) {
+        return;
+    }
+    [postSnapshots removeAllObjects];
+    for (NSUInteger i = 0; i < jsonArray.count; i += 2) {
+        if ([jsonArray[i] isKindOfClass:[NSString class]] &&
+            [jsonArray[i + 1] isKindOfClass:[NSDictionary class]]) {
+            
+            NSString *id = jsonArray[i];
+            NSDictionary *dict = jsonArray[i + 1];
+            NSTimeInterval timestamp = [dict[@"timestamp"] doubleValue];
+            
+            NSDate *date = [NSDate dateWithTimeIntervalSinceReferenceDate:timestamp];
+            postSnapshots[id] = date;
+        }
+    }
+}
+
+@interface ApolloTabBarController : UITabBarController
+@end
+
+%hook ApolloTabBarController
+
+- (void)viewDidLoad {
+    %orig;
+    // Listen for changes to postSnapshots so we can update our internal dictionary
+    [[NSUserDefaults standardUserDefaults] addObserver:self
+                                           forKeyPath:UDKeyApolloPostCommentsSnapshots
+                                           options:NSKeyValueObservingOptionNew
+                                           context:NULL];
+}
+
+- (void)observeValueForKeyPath:(NSString *) keyPath ofObject:(id) object change:(NSDictionary *) change context:(void *) context {
+    if ([keyPath isEqual:UDKeyApolloPostCommentsSnapshots]) {
+        NSData *postSnapshotData = [[NSUserDefaults standardUserDefaults] objectForKey:UDKeyApolloPostCommentsSnapshots];
+        if (postSnapshotData) {
+            initializePostSnapshots(postSnapshotData);
+        }
+    }
+}
+
+- (void) dealloc {
+    %orig;
+    [[NSUserDefaults standardUserDefaults] removeObserver:self forKeyPath:UDKeyApolloPostCommentsSnapshots];
+}
+
+%end
+
 %ctor {
     cache = [NSCache new];
+    postSnapshots = [NSMutableDictionary dictionary];
+
     NSError *error = NULL;
     ShareLinkRegex = [NSRegularExpression regularExpressionWithPattern:ShareLinkRegexPattern options:NSRegularExpressionCaseInsensitive error:&error];
     MediaShareLinkRegex = [NSRegularExpression regularExpressionWithPattern:MediaShareLinkPattern options:NSRegularExpressionCaseInsensitive error:&error];
 
-    NSDictionary *defaultValues = @{UDKeyBlockAnnouncements: @YES, UDKeyApolloEnableFLEX: @NO};
+    NSDictionary *defaultValues = @{UDKeyBlockAnnouncements: @YES, UDKeyEnableFLEX: @NO, UDKeyApolloShowUnreadComments: @NO};
     [[NSUserDefaults standardUserDefaults] registerDefaults:defaultValues];
 
     sRedditClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedditClientId] ?: @"" copy];
     sImgurClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyImgurClientId] ?: @"" copy];
     sBlockAnnouncements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBlockAnnouncements];
-    sEnableFlex = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyApolloEnableFLEX];
 
-    %init(SettingsGeneralViewController=objc_getClass("Apollo.SettingsGeneralViewController"));
+    %init(SettingsGeneralViewController=objc_getClass("Apollo.SettingsGeneralViewController"), ApolloTabBarController=objc_getClass("Apollo.ApolloTabBarController"));
 
     // Suppress wallpaper prompt
     NSDate *dateIn90d = [NSDate dateWithTimeIntervalSinceNow:60*60*24*90];
     [[NSUserDefaults standardUserDefaults] setObject:dateIn90d forKey:@"WallpaperPromptMostRecent2"];
+
+    // Disable subreddit weather time - broken
+    [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"ShowSubredditWeatherTime"];
 
     // Sideload fixes
     rebind_symbols((struct rebinding[3]) {
@@ -609,10 +699,17 @@ static NSString *imageID;
         {"SecItemUpdate", (void *)SecItemUpdate_replacement, (void **)&SecItemUpdate_orig}
     }, 3);
 
-    if (sEnableFlex) {
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFLEX]) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [[%c(FLEXManager) performSelector:@selector(sharedManager)] performSelector:@selector(showExplorer)];
         });
+    }
+
+    NSData *postSnapshotData = [[NSUserDefaults standardUserDefaults] objectForKey:UDKeyApolloPostCommentsSnapshots];
+    if (postSnapshotData) {
+        initializePostSnapshots(postSnapshotData);
+    } else {
+        NSLog(@"No data found in NSUserDefaults for key 'PostCommentsSnapshots'");
     }
 
     // Redirect user to Custom API modal if no API credentials are set

@@ -124,10 +124,7 @@
     UIStackView *unreadCommentsStackView = [self createToggleSwitchWithKey:UDKeyApolloShowUnreadComments labelText:@"New Comments Highlightifier (Beta)" action:@selector(unreadCommentsSwitchToggled:)];
     [stackView addArrangedSubview:unreadCommentsStackView];
 
-    UIStackView *weatherStackView = [self createToggleSwitchWithKey:UDKeyApolloSubredditWeather labelText:@"Subreddit Weather and Time (Beta)" action:@selector(weatherSwitchToggled:)];
-    [stackView addArrangedSubview:weatherStackView];
-
-    UIStackView *flexStackView = [self createToggleSwitchWithKey:UDKeyApolloEnableFLEX labelText:@"Enable FLEX Debug (Needs restart)" action:@selector(flexSwitchToggled:)];
+    UIStackView *flexStackView = [self createToggleSwitchWithKey:UDKeyEnableFLEX labelText:@"FLEX Debugging (Needs restart)" action:@selector(flexSwitchToggled:)];
     [stackView addArrangedSubview:flexStackView];
 
     UITextView *textView = [[UITextView alloc] init];
@@ -221,18 +218,13 @@
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyApolloShowUnreadComments];
 }
 
-- (void)weatherSwitchToggled:(UISwitch *)sender {
-    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyApolloSubredditWeather];
-}
-
 - (void)blockAnnouncementsSwitchToggled:(UISwitch *)sender {
     sBlockAnnouncements = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sBlockAnnouncements forKey:UDKeyBlockAnnouncements];
 }
 
 - (void)flexSwitchToggled:(UISwitch *)sender {
-    sEnableFlex = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sEnableFlex forKey:UDKeyApolloEnableFLEX];
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyEnableFLEX];
 }
 
 @end
