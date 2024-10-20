@@ -46,7 +46,7 @@ jobs:
           submodules: recursive
 
       - name: Build package
-        run: make package FINALPACKAGE=1
+        run: make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
 
         env:
           THEOS: ${{ github.workspace }}/theos
