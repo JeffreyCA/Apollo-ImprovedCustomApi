@@ -509,13 +509,20 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
         NSString *newUrlString = [newImagePrefix stringByAppendingString:suffix];
         NSMutableURLRequest *modifiedRequest = [request mutableCopy];
         [modifiedRequest setURL:[NSURL URLWithString:newUrlString]];
-        return %orig(modifiedRequest,completionHandler);
+        return %orig(modifiedRequest, completionHandler);
     } else if ([urlString isEqualToString:oldAlbumPrefix]) {
         NSMutableURLRequest *modifiedRequest = [request mutableCopy];
         [modifiedRequest setURL:[NSURL URLWithString:newAlbumPrefix]];
-        return %orig(modifiedRequest,completionHandler);
+        return %orig(modifiedRequest, completionHandler);
+    } else if ([urlString hasPrefix:@"https://api.redgifs.com/v2/gifs/"]) {
+        void (^newCompletionHandler)(NSData *data, NSURLResponse *response, NSError *error) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSString *responseText = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            responseText = [responseText stringByReplacingOccurrencesOfString:@"-silent.mp4" withString:@".mp4"];
+            completionHandler([responseText dataUsingEncoding:NSUTF8StringEncoding], response, error);
+        };
+	    return %orig(request, newCompletionHandler);
     }
-    return %orig();
+    return %orig;
 }
 
 // "Unproxy" Imgur requests
