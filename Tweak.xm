@@ -32,21 +32,21 @@ static OSStatus SecItemUpdate_replacement(CFDictionaryRef query, CFDictionaryRef
     return ((OSStatus (*)(CFDictionaryRef, CFDictionaryRef))SecItemUpdate_orig)((__bridge CFDictionaryRef)strippedQuery, attributesToUpdate);
 }
 
-static NSString *const announcementUrl = @"https://apollogur.download/api/apollonouncement";
+static NSString *const announcementUrl = @"apollogur.download/api/apollonouncement";
 
 static NSArray *const blockedUrls = @[
-    @"https://apollopushserver.xyz",
+    @"apollopushserver.xyz",
     @"telemetrydeck.com",
-    @"https://apollogur.download/api/easter_sale",
-    @"https://apollogur.download/api/html_codes",
-    @"https://apollogur.download/api/refund_screen_config",
-    @"https://apollogur.download/api/goodbye_wallpaper"
+    @"apollogur.download/api/easter_sale",
+    @"apollogur.download/api/html_codes",
+    @"apollogur.download/api/refund_screen_config",
+    @"apollogur.download/api/goodbye_wallpaper"
 ];
 
 static NSString *const defaultUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36";
 
 // Highlight color for new unread comments
-static UIColor *const NewPostCommentsColor = [UIColorFromRGB(0xFFD16E) colorWithAlphaComponent: 0.15];
+static UIColor *const NewPostCommentsColor = [UIColor colorWithRed: 1.00 green: 0.82 blue: 0.43 alpha: 0.15];
 
 // Regex for opaque share links
 static NSString *const ShareLinkRegexPattern = @"^(?:https?:)?//(?:www\\.|new\\.|np\\.)?reddit\\.com/(?:r|u)/(\\w+)/s/(\\w+)$";
@@ -205,7 +205,7 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
         NSRange imageIDRange = [imgurWithTitleIdMatch rangeAtIndex:1];
         NSString *imageID = [string substringWithRange:imageIDRange];
         imageID = [[imageID componentsSeparatedByString:@"-"] lastObject];
-        NSString *modifiedURLString = [NSString stringWithFormat:@"https://imgur.com/%@", imageID];
+        NSString *modifiedURLString = [@"https://imgur.com/" stringByAppendingString:imageID];
         return [NSURL URLWithString:modifiedURLString];
     }
     return %orig;
@@ -237,7 +237,7 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
         NSRange imageIDRange = [imgurWithTitleIdMatch rangeAtIndex:1];
         NSString *imageID = [string substringWithRange:imageIDRange];
         imageID = [[imageID componentsSeparatedByString:@"-"] lastObject];
-        NSString *modifiedURLString = [NSString stringWithFormat:@"https://imgur.com/%@", imageID];
+        NSString *modifiedURLString = [@"https://imgur.com/" stringByAppendingString:imageID];
         return [[NSURL alloc] initWithString:modifiedURLString];
     }
     return %orig;
@@ -474,13 +474,11 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
 %hook NSURLSession
 // Imgur Upload
 - (NSURLSessionUploadTask*)uploadTaskWithRequest:(NSURLRequest*)request fromData:(NSData*)bodyData completionHandler:(void (^)(NSData*, NSURLResponse*, NSError*))completionHandler {
-    NSString *urlString = [[request URL] absoluteString];
-    NSString *oldPrefix = @"https://imgur-apiv3.p.rapidapi.com/3/image";
-    NSString *newPrefix = @"https://api.imgur.com/3/image";
-
-    if ([urlString isEqualToString:oldPrefix]) {
+    NSURL *url = [request URL];
+    if ([url.host isEqualToString:@"imgur-apiv3.p.rapidapi.com"] && [url.path isEqualToString:@"/3/image"]) {
         NSMutableURLRequest *modifiedRequest = [request mutableCopy];
-        [modifiedRequest setURL:[NSURL URLWithString:newPrefix]];
+        NSURL *newURL = [NSURL URLWithString:@"https://api.imgur.com/3/image"];
+        [modifiedRequest setURL:newURL];
 
         // Hacky fix for multi-image upload failures - the first attempt may fail but subsequent attempts will succeed
         dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
@@ -498,50 +496,49 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
 
 // Imgur Delete and album creation
 - (NSURLSessionDataTask*)dataTaskWithRequest:(NSURLRequest*)request completionHandler:(void (^)(NSData*, NSURLResponse*, NSError*))completionHandler {
-    NSString *urlString = [[request URL] absoluteString];
-    NSString *oldImagePrefix = @"https://imgur-apiv3.p.rapidapi.com/3/image/";
-    NSString *newImagePrefix = @"https://api.imgur.com/3/image/";
-    NSString *oldAlbumPrefix = @"https://imgur-apiv3.p.rapidapi.com/3/album";
-    NSString *newAlbumPrefix = @"https://api.imgur.com/3/album";
+    NSURL *url = [request URL];
+    NSString *host = [url host];
+    NSString *path = [url path];
 
-    if ([urlString hasPrefix:oldImagePrefix]) {
-        NSString *suffix = [urlString substringFromIndex:oldImagePrefix.length];
-        NSString *newUrlString = [newImagePrefix stringByAppendingString:suffix];
-        NSMutableURLRequest *modifiedRequest = [request mutableCopy];
-        [modifiedRequest setURL:[NSURL URLWithString:newUrlString]];
-        return %orig(modifiedRequest, completionHandler);
-    } else if ([urlString isEqualToString:oldAlbumPrefix]) {
-        NSMutableURLRequest *modifiedRequest = [request mutableCopy];
-        [modifiedRequest setURL:[NSURL URLWithString:newAlbumPrefix]];
-        return %orig(modifiedRequest, completionHandler);
-    } else if ([urlString hasPrefix:@"https://api.redgifs.com/v2/gifs/"]) {
+    if ([host isEqualToString:@"imgur-apiv3.p.rapidapi.com"]) {
+        if ([path hasPrefix:@"/3/image"] || [path hasPrefix:@"/3/album"]) {
+            NSMutableURLRequest *modifiedRequest = [request mutableCopy];
+            NSURL * newURL = [NSURL URLWithString:[@"https://api.imgur.com" stringByAppendingString:path]];
+            [modifiedRequest setURL:newURL];
+            return %orig(modifiedRequest, completionHandler);
+        }
+    } else if ([host isEqualToString:@"api.redgifs.com"] && [path hasPrefix:@"/v2/gifs/"]) {
         void (^newCompletionHandler)(NSData *data, NSURLResponse *response, NSError *error) = ^(NSData *data, NSURLResponse *response, NSError *error) {
             NSString *responseText = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
             responseText = [responseText stringByReplacingOccurrencesOfString:@"-silent.mp4" withString:@".mp4"];
             completionHandler([responseText dataUsingEncoding:NSUTF8StringEncoding], response, error);
         };
-	    return %orig(request, newCompletionHandler);
+        return %orig(request, newCompletionHandler);
     }
     return %orig;
 }
 
 // "Unproxy" Imgur requests
 - (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
-    NSString *imageID = [url.lastPathComponent stringByDeletingPathExtension];
-    if ([url.absoluteString containsString:@"https://apollogur.download/api/image/"]) {
-        NSString *modifiedURLString = [NSString stringWithFormat:@"https://api.imgur.com/3/image/%@", imageID];
-        NSURL *modifiedURL = [NSURL URLWithString:modifiedURLString];
-        // Access the modified URL to get the actual data
-        return %orig(modifiedURL, completionHandler);
-    } else if ([url.absoluteString containsString:@"https://apollogur.download/api/album/"]) {
-        // Parse new URL format with title (/album/some-album-title-<albumid>)
-        NSRange range = [imageID rangeOfString:@"-" options:NSBackwardsSearch];
-        if (range.location != NSNotFound) {
-            imageID = [imageID substringFromIndex:range.location + 1];
+    if ([url.host isEqualToString:@"apollogur.download"]) {
+        NSString *imageID = [url.lastPathComponent stringByDeletingPathExtension];
+        NSURL *modifiedURL;
+        
+        if ([url.path hasPrefix:@"/api/image"]) {
+            // Access the modified URL to get the actual data
+            modifiedURL = [NSURL URLWithString:[@"https://api.imgur.com/3/image/" stringByAppendingString:imageID]];
+        } else if ([url.path hasPrefix:@"/api/album"]) {
+            // Parse new URL format with title (/album/some-album-title-<albumid>)
+            NSRange range = [imageID rangeOfString:@"-" options:NSBackwardsSearch];
+            if (range.location != NSNotFound) {
+                imageID = [imageID substringFromIndex:range.location + 1];
+            }
+            modifiedURL = [NSURL URLWithString:[@"https://api.imgur.com/3/album/" stringByAppendingString:imageID]];
         }
-        NSString *modifiedURLString = [NSString stringWithFormat:@"https://api.imgur.com/3/album/%@", imageID];
-        NSURL *modifiedURL = [NSURL URLWithString:modifiedURLString];
-        return %orig(modifiedURL, completionHandler);
+        
+        if (modifiedURL) {
+            return %orig(modifiedURL, completionHandler);
+        }
     }
     return %orig;
 }
@@ -571,30 +568,31 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
 - (void)_onqueue_resume {
     // Grab the request url
     NSURLRequest *request =  [self valueForKey:@"_originalRequest"];
-    NSString *requestURL = request.URL.absoluteString;
+    NSURL *requestURL = request.URL;
+    NSString *requestString = requestURL.absoluteString;
 
     // Drop blocked URLs
     for (NSString *blockedUrl in blockedUrls) {
-        if ([requestURL containsString:blockedUrl]) {
+        if ([requestString containsString:blockedUrl]) {
             return;
         }
     }
-    if (sBlockAnnouncements && [requestURL containsString:announcementUrl]) {
+    if (sBlockAnnouncements && [requestString containsString:announcementUrl]) {
         return;
     }
 
     // Intercept modified "unproxied" Imgur requests and replace Authorization header with custom client ID
-    if ([requestURL containsString:@"https://api.imgur.com/"]) {
+    if ([requestURL.host isEqualToString:@"api.imgur.com"]) {
         NSMutableURLRequest *mutableRequest = [request mutableCopy];
         // Insert the api credential and update the request on this session task
-        [mutableRequest setValue:[NSString stringWithFormat:@"Client-ID %@", sImgurClientId] forHTTPHeaderField:@"Authorization"];
+        [mutableRequest setValue:[@"Client-ID " stringByAppendingString:sImgurClientId] forHTTPHeaderField:@"Authorization"];
         // Set or else upload will fail with 400
-        if ([requestURL isEqualToString:@"https://api.imgur.com/3/image"]) {
+        if ([requestURL.path isEqualToString:@"/3/image"]) {
             [mutableRequest setValue:@"image/jpeg" forHTTPHeaderField:@"Content-Type"];
         }
         [self setValue:mutableRequest forKey:@"_originalRequest"];
         [self setValue:mutableRequest forKey:@"_currentRequest"];
-    } else if ([requestURL containsString:@"https://oauth.reddit.com/"] || [requestURL containsString:@"https://www.reddit.com/"]) {
+    } else if ([requestURL.host isEqualToString:@"oauth.reddit.com"] || [requestURL.host isEqualToString:@"www.reddit.com"]) {
         NSMutableURLRequest *mutableRequest = [request mutableCopy];
         [mutableRequest setValue:defaultUserAgent forHTTPHeaderField:@"User-Agent"];
         [self setValue:mutableRequest forKey:@"_originalRequest"];
