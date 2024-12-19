@@ -3,3 +3,4 @@
 *.zip
 Resources/
 packages/
+Version.h
