@@ -13,9 +13,9 @@ Apollo for Reddit with in-app configurable API keys and several fixes and improv
 - Support new share link format (reddit.com/r/subreddit/s/xxxxxx) so they open like any other post and not in a browser
 - Support media share links (reddit.com/media?url=)
 - **Fully working** "New Comments Highlightifier" Ultra feature
-- Randomize "trending subreddits list" so it doesn't show **iOS**, **Clock**, **Time**, **IfYouDontMind** all the time
 - Use generic user agent for requests to Reddit
 - Support FLEX debugging
+- Use custom external sources for random and trending subreddits
 
 ## Known issues
 - Apollo Ultra features may cause app to crash 

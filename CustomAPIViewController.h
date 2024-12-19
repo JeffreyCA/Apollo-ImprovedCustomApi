@@ -5,5 +5,8 @@
 
 NSString *sRedditClientId;
 NSString *sImgurClientId;
+NSString *sRandomSubredditsSource;
+NSString *sRandNsfwSubredditsSource;
+NSString *sTrendingSubredditsSource;
 
 BOOL sBlockAnnouncements;

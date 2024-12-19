@@ -2,11 +2,20 @@
 #import "UserDefaultConstants.h"
 #import "B64ImageEncodings.h"
 #import "Version.h"
+#import "DefaultSubreddits.h"
 
 // Implementation derived from https://github.com/ryannair05/ApolloAPI/blob/master/CustomAPIViewController.m
 // Credits to Ryan Nair (@ryannair05) for the original implementation
 
 @implementation CustomAPIViewController
+
+typedef NS_ENUM(NSInteger, Tag) {
+    TagRedditClientId = 0,
+    TagImgurClientId,
+    TagTrendingSubredditsSource,
+    TagRandomSubredditsSource,
+    TagRandNsfwSubredditsSource
+};
 
 - (UIImage *)decodeBase64ToImage:(NSString *)strEncodeData {
   NSData *data = [[NSData alloc]initWithBase64EncodedString:strEncodeData options:NSDataBase64DecodingIgnoreUnknownCharacters];
@@ -56,6 +65,31 @@
     return button;
 }
 
+- (UIStackView *)createLabeledStackViewWithLabelText:(NSString *)labelText placeholder:(NSString *)placeholder text:(NSString *)text tag:(NSInteger)tag {
+    UIStackView *stackView = [[UIStackView alloc] init];
+    stackView.axis = UILayoutConstraintAxisVertical;
+    stackView.distribution = UIStackViewDistributionFillProportionally;
+    stackView.alignment = UIStackViewAlignmentFill; 
+    stackView.spacing = 8;
+
+    UILabel *label = [[UILabel alloc] init];
+    label.text = labelText;
+    label.font = [UIFont systemFontOfSize:17];
+
+    UITextField *textField = [[UITextField alloc] init];
+    textField.placeholder = placeholder;
+    textField.text = text;
+    textField.tag = tag;
+    textField.delegate = self;
+    textField.clearButtonMode = UITextFieldViewModeWhileEditing;
+    textField.font = [UIFont systemFontOfSize:14];
+
+    [stackView addArrangedSubview:label];
+    [stackView addArrangedSubview:textField];
+
+    return stackView;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
 
@@ -89,22 +123,12 @@
         [stackView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
         [stackView.bottomAnchor constraintEqualToAnchor:scrollView.bottomAnchor constant:-20],
     ]];
-    
-    UITextField *redditTextField = [[UITextField alloc] init];
-    redditTextField.tag = 0;
-    redditTextField.placeholder = @"Reddit API Key";
-    redditTextField.text = sRedditClientId;
-    redditTextField.delegate = self;
-    redditTextField.clearButtonMode = UITextFieldViewModeWhileEditing;
-    [stackView addArrangedSubview:redditTextField];
-    
-    UITextField *imgurTextField = [[UITextField alloc] init];
-    imgurTextField.placeholder = @"Imgur API Key";
-    imgurTextField.tag = 1;
-    imgurTextField.text = sImgurClientId;
-    imgurTextField.delegate = self;
-    imgurTextField.clearButtonMode = UITextFieldViewModeWhileEditing;
-    [stackView addArrangedSubview:imgurTextField];
+
+    UIStackView *redditStackView = [self createLabeledStackViewWithLabelText:@"Reddit API Key:" placeholder:@"Reddit API Key" text:sRedditClientId tag:TagRedditClientId];
+    [stackView addArrangedSubview:redditStackView];
+
+    UIStackView *imgurStackView = [self createLabeledStackViewWithLabelText:@"Imgur API Key:" placeholder:@"Imgur API Key" text:sImgurClientId tag:TagImgurClientId];
+    [stackView addArrangedSubview:imgurStackView];
 
     UIButton *websiteButton = [UIButton systemButtonWithPrimaryAction:[UIAction actionWithTitle:@"Reddit API Website" image:nil identifier:nil handler:^(UIAction * action) {
         [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://reddit.com/prefs/apps"] options:@{} completionHandler:nil];
@@ -122,11 +146,26 @@
     UIStackView *blockAnnouncementsStackView = [self createToggleSwitchWithKey:UDKeyBlockAnnouncements labelText:@"Block Announcements" action:@selector(blockAnnouncementsSwitchToggled:)];
     [stackView addArrangedSubview:blockAnnouncementsStackView];
 
-    UIStackView *unreadCommentsStackView = [self createToggleSwitchWithKey:UDKeyApolloShowUnreadComments labelText:@"New Comments Highlightifier (Beta)" action:@selector(unreadCommentsSwitchToggled:)];
+    UIStackView *unreadCommentsStackView = [self createToggleSwitchWithKey:UDKeyApolloShowUnreadComments labelText:@"New Comments Highlightifier" action:@selector(unreadCommentsSwitchToggled:)];
     [stackView addArrangedSubview:unreadCommentsStackView];
 
     UIStackView *flexStackView = [self createToggleSwitchWithKey:UDKeyEnableFLEX labelText:@"FLEX Debugging (Needs restart)" action:@selector(flexSwitchToggled:)];
     [stackView addArrangedSubview:flexStackView];
+
+    UIStackView *limitTrendingStackView = [self createToggleSwitchWithKey:UDKeyLimitTrending labelText:@"Limit trending subreddits to 5" action:@selector(limitTrendingSwitchToggled:)];
+    [stackView addArrangedSubview:limitTrendingStackView];
+
+    UIStackView *randNsfwStackView = [self createToggleSwitchWithKey:UDKeyShowRandNsfw labelText:@"RandNSFW button" action:@selector(randNsfwSwitchToggled:)];
+    [stackView addArrangedSubview:randNsfwStackView];
+
+    UIStackView *trendingSourceStackView = [self createLabeledStackViewWithLabelText:@"Trending subreddits source:" placeholder:defaultTrendingSubredditsSource text:sTrendingSubredditsSource tag:TagTrendingSubredditsSource];
+    [stackView addArrangedSubview:trendingSourceStackView];
+
+    UIStackView *randomSourceStackView = [self createLabeledStackViewWithLabelText:@"Random subreddits source:" placeholder:defaultRandomSubredditsSource text:sRandomSubredditsSource tag:TagRandomSubredditsSource];
+    [stackView addArrangedSubview:randomSourceStackView];
+
+    UIStackView *randNsfwSourceStackView = [self createLabeledStackViewWithLabelText:@"RandNSFW subreddits source:" placeholder:@"(empty)" text:sRandNsfwSubredditsSource tag:TagRandNsfwSubredditsSource];
+    [stackView addArrangedSubview:randNsfwSourceStackView];
 
     UITextView *textView = [[UITextView alloc] init];
     textView.editable = NO;
@@ -149,6 +188,10 @@
         @"2. Fill in the fields \n\t- Application name: *anything* \n\t- Authorization type: `OAuth 2 auth with a callback URL` \n\t- Authorization callback URL: `https://www.getpostman.com/oauth2/callback`\n\t- Email: *your email* \n\t- Description: *anything*\n"
         @"3. Click \"`submit`\"\n"
         @"4. Enter the **Client ID** (not the client secret) above.\n"
+        @"\n"
+        @"**Providing custom subreddit sources:**\n"
+        @"You can provide custom subreddit sources by specifying a URL to a plaintext file with a list of line-separated subreddit names (without the `/r/`). ([Example file](https://jeffreyca.github.io/subreddits/popular.txt))\n"
+        @"**Tip:** You can host the file on services like Pastebin or GitHub.\n"
 
     options:markdownOptions baseURL:nil error:nil];
 
@@ -208,16 +251,33 @@
 }
 
 - (void)textFieldDidEndEditing:(UITextField *)textField {
-    if (textField.tag == 0) {
+    if (textField.tag == TagRedditClientId) {
         // Trim textField.text whitespaces
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         sRedditClientId = textField.text;
         [[NSUserDefaults standardUserDefaults] setValue:sRedditClientId forKey:UDKeyRedditClientId];
-    }
-    else if (textField.tag == 1) {
+    } else if (textField.tag == TagImgurClientId) {
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         sImgurClientId = textField.text;
         [[NSUserDefaults standardUserDefaults] setValue:sImgurClientId forKey:UDKeyImgurClientId];
+    } else if (textField.tag == TagTrendingSubredditsSource) {
+        textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (textField.text.length == 0) {
+            textField.text = defaultTrendingSubredditsSource;
+        }
+        sTrendingSubredditsSource = textField.text;
+        [[NSUserDefaults standardUserDefaults] setValue:sTrendingSubredditsSource forKey:UDKeyTrendingSubredditsSource];
+    } else if (textField.tag == TagRandomSubredditsSource) {
+        textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (textField.text.length == 0) {
+            textField.text = defaultRandomSubredditsSource;
+        }
+        sRandomSubredditsSource = textField.text;
+        [[NSUserDefaults standardUserDefaults] setValue:sRandomSubredditsSource forKey:UDKeyRandomSubredditsSource];
+    } else if (textField.tag == TagRandNsfwSubredditsSource) {
+        textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        sRandNsfwSubredditsSource = textField.text;
+        [[NSUserDefaults standardUserDefaults] setValue:sRandNsfwSubredditsSource forKey:UDKeyRandNsfwSubredditsSource];
     }
 }
 
@@ -232,6 +292,14 @@
 
 - (void)flexSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyEnableFLEX];
+}
+
+- (void)limitTrendingSwitchToggled:(UISwitch *)sender {
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyLimitTrending];
+}
+
+- (void)randNsfwSwitchToggled:(UISwitch *)sender {
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyShowRandNsfw];
 }
 
 @end

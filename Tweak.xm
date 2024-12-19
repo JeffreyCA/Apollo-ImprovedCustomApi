@@ -6,6 +6,7 @@
 #import "Tweak.h"
 #import "UIWindow+Apollo.h"
 #import "UserDefaultConstants.h"
+#import "DefaultSubreddits.h"
 
 // Sideload fixes
 static NSDictionary *stripGroupAccessAttr(CFDictionaryRef attributes) {
@@ -61,7 +62,10 @@ static NSString *const ImgurTitleIdImageLinkPattern = @"^(?:https?:)?//(?:www\\.
 static NSRegularExpression *ImgurTitleIdImageLinkRegex;
 
 // Cache storing resolved share URLs - this is an optimization so that we don't need to resolve the share URL every time
-static NSCache <NSString *, ShareUrlTask *> *cache;
+static NSCache<NSString *, ShareUrlTask *> *cache;
+
+// Cache storing subreddit list source URLs -> response body
+static NSCache<NSString *, NSString *> *subredditListCache;
 
 // Dictionary of post IDs to last-read timestamp for tracking new unread comments
 static NSMutableDictionary<NSString *, NSDate *> *postSnapshots;
@@ -430,33 +434,88 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
 -(NSURL *)URLForResource:(NSString *)name withExtension:(NSString *)ext {
     NSURL *url = %orig;
     if ([name isEqualToString:@"trending-subreddits"] && [ext isEqualToString:@"plist"]) {
+        NSURL *subredditListURL = [NSURL URLWithString:sTrendingSubredditsSource];
+        NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+        // ex: 2023-9-28 (28th September 2023)
+        [formatter setDateFormat:@"yyyy-M-d"];
+
         /*
             - Parse plist
             - Select random list of subreddits from the dict
             - Add today's date to the dict, with the list as the value
             - Return plist as a new file
         */
-
-        NSMutableDictionary *dict = [[NSDictionary dictionaryWithContentsOfURL:url] mutableCopy];
-
+        NSMutableDictionary *fallbackDict = [[NSDictionary dictionaryWithContentsOfURL:url] mutableCopy];
         // Select random array from dict
-        NSArray *keys = [dict allKeys];
-        NSString *randomKey = keys[arc4random_uniform((uint32_t)[keys count])];
-        NSArray *array = dict[randomKey];
+        NSArray *fallbackKeys = [fallbackDict allKeys];
+        NSString *randomFallbackKey = fallbackKeys[arc4random_uniform((uint32_t)[fallbackKeys count])];
+        NSArray *fallbackArray = fallbackDict[randomFallbackKey];
+        if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowRandNsfw]) {
+            fallbackArray = [fallbackArray arrayByAddingObject:@"RandNSFW"];
+        }
+        [fallbackDict setObject:fallbackArray forKey:[formatter stringFromDate:[NSDate date]]];
 
-        // Get string of today's date
-        NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-        // ex: 2023-9-28 (28th September 2023)
-        [formatter setDateFormat:@"yyyy-M-d"];
+        NSURL * (^writeDict)(NSMutableDictionary *d) = ^(NSMutableDictionary *d){
+            // write new file
+            NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"trending-custom.plist"];
+            [[NSFileManager defaultManager] removeItemAtPath:tempPath error:nil]; // remove in case it exists
+            [d writeToFile:tempPath atomically:YES];
+            return [NSURL fileURLWithPath:tempPath];
+        };
 
-        [dict setObject:array forKey:[formatter stringFromDate:[NSDate date]]];
+        __block NSError *error = nil;
+        __block NSString *subredditListContent = nil;
 
-        // write new file
-        NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"trending-custom.plist"];
-        [[NSFileManager defaultManager] removeItemAtPath:tempPath error:nil]; // remove in case it exists
-        [dict writeToFile:tempPath atomically:YES];
+        // Try fetching the subreddit list from the source URL, with timeout of 5 seconds
+        // FIXME: Blocks the UI during the splash screen
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        NSURLRequest *request = [NSURLRequest requestWithURL:subredditListURL cachePolicy:NSURLRequestUseProtocolCachePolicy timeoutInterval:5.0];
+        NSURLSession *session = [NSURLSession sharedSession];
+        NSURLSessionDataTask *dataTask = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *e) {
+            if (e) {
+                error = e;
+            } else {
+                NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+                if (httpResponse.statusCode == 200) {
+                    subredditListContent = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                }
+            }
+            dispatch_semaphore_signal(semaphore);
+        }];
+        [dataTask resume];
+        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
 
-        return [NSURL fileURLWithPath:tempPath];
+        // Use fallback dict if there was an error
+        if (error || ![subredditListContent length]) {
+            return writeDict(fallbackDict);
+        }
+
+        // Parse into array
+        NSMutableArray<NSString *> *subreddits = [[subredditListContent componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]] mutableCopy];
+        [subreddits filterUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
+        if (subreddits.count == 0) {
+            return writeDict(fallbackDict);
+        }
+
+        NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+        // Limit to 5 subreddits, chosen randomly
+        if (subreddits.count > 5 && [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyLimitTrending]) {
+            NSUInteger count = MIN(5, subreddits.count);
+            NSMutableArray<NSString *> *randomSubreddits = [NSMutableArray arrayWithCapacity:count];
+            for (NSUInteger i = 0; i < count; i++) {
+                NSUInteger randomIndex = arc4random_uniform((uint32_t)subreddits.count);
+                [randomSubreddits addObject:subreddits[randomIndex]];
+                // Remove to prevent duplicates
+                [subreddits removeObjectAtIndex:randomIndex];
+            }
+            subreddits = randomSubreddits;
+        }
+
+        if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowRandNsfw]) {
+            [subreddits addObject:@"RandNSFW"];
+        }
+        [dict setObject:subreddits forKey:[formatter stringFromDate:[NSDate date]]];
+        return writeDict(dict);
     }
     return url;
 }
@@ -492,6 +551,62 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
         return task;
     }
     return %orig();
+}
+
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
+    NSURL *url = [request URL];
+    NSURL *subredditListURL;
+
+    // Determine whether request is for random subreddit
+    if ([url.host isEqualToString:@"oauth.reddit.com"] && [url.path hasPrefix:@"/r/random/"]) {
+        if (![sRandomSubredditsSource length]) {
+            return %orig;
+        }
+        subredditListURL = [NSURL URLWithString:sRandomSubredditsSource];
+    } else if ([url.host isEqualToString:@"oauth.reddit.com"] && [url.path hasPrefix:@"/r/randnsfw/"]) {
+        if (![sRandNsfwSubredditsSource length]) {
+            return %orig;
+        }
+        subredditListURL = [NSURL URLWithString:sRandNsfwSubredditsSource];
+    } else {
+        return %orig;
+    }
+
+    NSError *error = nil;
+    // Check cache
+    NSString *subredditListContent = [subredditListCache objectForKey:subredditListURL.absoluteString];
+    bool updateCache = false;
+
+    if (!subredditListContent) {
+        // Not in cache, so fetch subreddit list from source URL
+        // FIXME: The current implementation blocks the UI, but the prefetching in initializeRandomSources() should help
+        subredditListContent = [NSString stringWithContentsOfURL:subredditListURL encoding:NSUTF8StringEncoding error:&error];
+        if (error) {
+            return %orig;
+        }
+        updateCache = true;
+    }
+
+    // Parse the content into a list of strings
+    NSArray<NSString *> *subreddits = [subredditListContent componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    subreddits = [subreddits filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
+    if (subreddits.count == 0) {
+        return %orig;
+    }
+
+    if (updateCache) {
+        [subredditListCache setObject:subredditListContent forKey:subredditListURL.absoluteString];
+    }
+
+    // Pick a random subreddit, then modify the request URL to use that subreddit, simulating a 302 redirect in Reddit's original API behaviour
+    NSString *randomSubreddit = subreddits[arc4random_uniform((uint32_t)subreddits.count)];
+    NSString *urlString = [url absoluteString];
+    NSString *newUrlString = [urlString stringByReplacingOccurrencesOfString:@"/random/" withString:[NSString stringWithFormat:@"/%@/", randomSubreddit]];
+    newUrlString = [newUrlString stringByReplacingOccurrencesOfString:@"/randnsfw/" withString:[NSString stringWithFormat:@"/%@/", randomSubreddit]];
+
+    NSMutableURLRequest *modifiedRequest = [request mutableCopy];
+    [modifiedRequest setURL:[NSURL URLWithString:newUrlString]];
+    return %orig(modifiedRequest);
 }
 
 // Imgur Delete and album creation
@@ -642,6 +757,32 @@ static void initializePostSnapshots(NSData *data) {
     }
 }
 
+// Pre-fetches random subreddit lists in background
+static void initializeRandomSources() {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSArray *sources = @[sRandNsfwSubredditsSource, sRandomSubredditsSource];
+        for (NSString *source in sources) {
+            if (![source length]) {
+                continue;
+            }
+            NSURL *subredditListURL = [NSURL URLWithString:source];
+            NSError *error = nil;
+            NSString *subredditListContent = [NSString stringWithContentsOfURL:subredditListURL encoding:NSUTF8StringEncoding error:&error];
+            if (error) {
+                continue;
+            }
+
+            NSArray<NSString *> *subreddits = [subredditListContent componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+            subreddits = [subreddits filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
+            if (subreddits.count == 0) {
+                continue;
+            }
+
+            [subredditListCache setObject:subredditListContent forKey:subredditListURL.absoluteString];
+        }
+    });
+}
+
 @interface ApolloTabBarController : UITabBarController
 @end
 
@@ -675,18 +816,23 @@ static void initializePostSnapshots(NSData *data) {
 %ctor {
     cache = [NSCache new];
     postSnapshots = [NSMutableDictionary dictionary];
+    subredditListCache = [NSCache new];
 
     NSError *error = NULL;
     ShareLinkRegex = [NSRegularExpression regularExpressionWithPattern:ShareLinkRegexPattern options:NSRegularExpressionCaseInsensitive error:&error];
     MediaShareLinkRegex = [NSRegularExpression regularExpressionWithPattern:MediaShareLinkPattern options:NSRegularExpressionCaseInsensitive error:&error];
     ImgurTitleIdImageLinkRegex = [NSRegularExpression regularExpressionWithPattern:ImgurTitleIdImageLinkPattern options:NSRegularExpressionCaseInsensitive error:&error];
 
-    NSDictionary *defaultValues = @{UDKeyBlockAnnouncements: @YES, UDKeyEnableFLEX: @NO, UDKeyApolloShowUnreadComments: @NO};
+    NSDictionary *defaultValues = @{UDKeyBlockAnnouncements: @YES, UDKeyEnableFLEX: @NO, UDKeyApolloShowUnreadComments: @NO, UDKeyLimitTrending: @YES, UDKeyShowRandNsfw: @NO, UDKeyRandomSubredditsSource:defaultRandomSubredditsSource, UDKeyRandNsfwSubredditsSource: @"", UDKeyTrendingSubredditsSource: defaultTrendingSubredditsSource };
     [[NSUserDefaults standardUserDefaults] registerDefaults:defaultValues];
 
     sRedditClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedditClientId] ?: @"" copy];
     sImgurClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyImgurClientId] ?: @"" copy];
     sBlockAnnouncements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBlockAnnouncements];
+
+    sRandomSubredditsSource = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRandomSubredditsSource];
+    sRandNsfwSubredditsSource = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRandNsfwSubredditsSource];
+    sTrendingSubredditsSource = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTrendingSubredditsSource];
 
     %init(SettingsGeneralViewController=objc_getClass("Apollo.SettingsGeneralViewController"), ApolloTabBarController=objc_getClass("Apollo.ApolloTabBarController"));
 
@@ -716,6 +862,8 @@ static void initializePostSnapshots(NSData *data) {
     } else {
         NSLog(@"No data found in NSUserDefaults for key 'PostCommentsSnapshots'");
     }
+
+    initializeRandomSources();
 
     // Redirect user to Custom API modal if no API credentials are set
     if ([sRedditClientId length] == 0) {
