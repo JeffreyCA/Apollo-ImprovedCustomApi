@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.2.0] - 2024-12-19
+
+- Custom random and trending subreddits - you can now specify an external URL to use as the source for random and trending subreddits (in Settings > General > Custom API)
+    - Sources should be a plaintext file with one subreddit name per line, without the `/r/` prefix (see examples below)
+    - Default trending source (data from [gummysearch.com](https://gummysearch.com/tools/top-subreddits/)): https://jeffreyca.github.io/subreddits/trending-gummy-daily.txt
+    - Default /r/random source: https://jeffreyca.github.io/subreddits/popular.txt
+    - New setting to disable the limit of 5 trending subreddits if the subreddits source has more than 5 subreddits
+    - New setting to show a dedicated RandNSFW button
+- Minor UI updates to the settings view
+- URL optimizations (thanks [@ryannair05](https://github.com/ryannair05)!)
+
 ## [v1.1.8] - 2024-12-07
 
 - Fix RedGIFs links loading without sound (thanks [@iCrazeiOS](https://github.com/iCrazeiOS)!)
@@ -98,6 +109,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v1.2.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.1.8...v1.2.0
 [v1.1.8]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.1.7b...v1.1.8
 [v1.1.7b]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.1.7...v1.1.7b
 [v1.1.7]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.1.6...v1.1.7
