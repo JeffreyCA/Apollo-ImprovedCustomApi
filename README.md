@@ -39,9 +39,10 @@ Recommended configuration:
 ### Requirements
 - [Theos](https://github.com/theos/theos)
 
-1. `git clone`
-2. `git submodule update --init --recursive`
-2. `make package` or `make package THEOS_PACKAGE_SCHEME=rootless` for rootless variant
+1. `git clone https://github.com/JeffreyCA/Apollo-ImprovedCustomApi`
+2. `cd Apollo-ImprovedCustomApi`
+3. `git submodule update --init --recursive`
+4. `make package` or `make package THEOS_PACKAGE_SCHEME=rootless` for rootless variant
 
 ## Credits
 - [Apollo-CustomApiCredentials](https://github.com/EthanArbuckle/Apollo-CustomApiCredentials) by [@EthanArbuckle](https://github.com/EthanArbuckle)
