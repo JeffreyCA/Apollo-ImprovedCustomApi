@@ -72,6 +72,7 @@ jobs:
         env:
           TWEAK_VERSION: ${{ steps.parse_control.outputs.TWEAK_VERSION }}
         with:
+          draft: true
           tag_name: v${{ env.TWEAK_VERSION }}
           name: v${{ env.TWEAK_VERSION }}
           files: |
