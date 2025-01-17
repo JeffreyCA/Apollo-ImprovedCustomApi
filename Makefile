@@ -13,6 +13,8 @@ ApolloImprovedCustomApi_FILES = Tweak.xm CustomAPIViewController.m DefaultSubred
 ApolloImprovedCustomApi_FRAMEWORKS = UIKit
 ApolloImprovedCustomApi_CFLAGS = -fobjc-arc -Wno-unguarded-availability-new -Wno-module-import-in-extern-c
 
+ApolloImprovedCustomApi_OBJ_FILES = $(shell find ffmpeg-kit -name '*.a')
+
 SUBPROJECTS += Tweaks/FLEXing/libflex
 
 CONTROL_FILE = $(THEOS_PROJECT_DIR)/control

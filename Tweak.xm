@@ -8,6 +8,11 @@
 #import "UserDefaultConstants.h"
 #import "DefaultSubreddits.h"
 
+#import "ffmpeg-kit/ffmpeg-kit/include/MediaInformationSession.h"
+#import "ffmpeg-kit/ffmpeg-kit/include/MediaInformation.h"
+#import "ffmpeg-kit/ffmpeg-kit/include/FFmpegKit.h"
+#import "ffmpeg-kit/ffmpeg-kit/include/FFprobeKit.h"
+
 // Sideload fixes
 static NSDictionary *stripGroupAccessAttr(CFDictionaryRef attributes) {
     NSMutableDictionary *newAttributes = [[NSMutableDictionary alloc] initWithDictionary:(__bridge id)attributes];
@@ -257,6 +262,46 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
 }
 %end
 
+%hook _TtC6Apollo17ShareMediaManager
+// Fix audio stream format for certain v.redd.it videos - newer AAC audio streams use the MPEG-TS
+// container format which Apollo doesn't support, so we need to convert them to the supported ADTS format.
+- (void)URLSession:(NSURLSession *)urlSession downloadTask:(NSURLSessionDownloadTask *)downloadTask didFinishDownloadingToURL:(NSURL *)fileUrl {
+    NSURL *originalURL = downloadTask.originalRequest.URL;
+    NSString *path = fileUrl.absoluteString;
+    NSString *fixedPath = [path stringByAppendingString:@".fixed"];
+    if (![[originalURL pathExtension] isEqualToString:@"aac"]) {
+        %orig;
+        return;
+    }
+
+    MediaInformationSession *probeSession = [FFprobeKit getMediaInformation:path];
+    ReturnCode *returnCode = [probeSession getReturnCode];
+    if (![ReturnCode isSuccess:returnCode]) {
+        %orig;
+        return;
+    }
+
+    MediaInformation *mediaInformation = [probeSession getMediaInformation];
+    if (!mediaInformation || ![mediaInformation.getFormat isEqualToString:@"mpegts"]) {
+        %orig;
+        return;
+    }
+
+    NSString *ffmpegCommand = [NSString stringWithFormat:@"-y -loglevel info -i '%@' -map 0 -dn -ignore_unknown -c copy -f adts '%@.fixed'", path, path];
+    FFmpegSession *session = [FFmpegKit execute:ffmpegCommand];
+    returnCode = [session getReturnCode];
+    if ([ReturnCode isSuccess:returnCode]) {
+        // Replace original file with fixed version
+        NSURL *fixedUrl = [NSURL URLWithString:fixedPath];
+        NSFileManager *fileManager = [NSFileManager defaultManager];
+        [fileManager removeItemAtURL:fileUrl error:nil];
+        [fileManager moveItemAtURL:fixedUrl toURL:fileUrl error:nil];
+    }
+    %orig;
+}
+
+%end
+
 // Tappable text link in an inbox item (*not* the links in the PM chat bubbles)
 %hook _TtC6Apollo13InboxCellNode
 
@@ -273,7 +318,6 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
     };
     TryResolveShareUrl([val absoluteString], successHandler, ignoreHandler);
 }
-
 %end
 
 // Text view containing markdown and tappable links, can be in the header of a post or a comment
