@@ -10,12 +10,13 @@ Apollo for Reddit with in-app configurable API keys and several fixes and improv
 - Working Imgur integration (view, delete, and upload single images and multi-image albums) 
 - Handle x.com links as Twitter links so that they can be opened in the Twitter app
 - Suppress unwanted messages on app startup (wallpaper popup, in-app announcements, etc)
-- Support new share link format (reddit.com/r/subreddit/s/xxxxxx) so they open like any other post and not in a browser
-- Support media share links (reddit.com/media?url=)
+- Support /s/ share links (reddit.com/r/subreddit/s/xxxxxx) natively
+- Support media share links (reddit.com/media?url=) natively
 - **Fully working** "New Comments Highlightifier" Ultra feature
 - Use generic user agent for requests to Reddit
-- Support FLEX debugging
-- Use custom external sources for random and trending subreddits
+- FLEX debugging
+- Support custom external sources for random and trending subreddits
+- Working v.redd.it video downloads
 
 ## Known issues
 - Apollo Ultra features may cause app to crash 

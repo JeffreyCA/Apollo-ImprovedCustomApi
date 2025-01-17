@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.2.2] - 2025-01-16
+
+- Fix video downloads failing on certain v.redd.it videos
+    - Note that the `.deb` file is significantly larger (several MB) because of new external dependencies needed to fix the issue (FFmpegKit)
+
 ## [v1.2.1] - 2024-12-19
 
 - Custom random and trending subreddits - you can now specify an external URL to use as the source for random and trending subreddits (in Settings > General > Custom API)
@@ -109,6 +114,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v1.2.2]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.1...v1.2.2
 [v1.2.1]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.1.8...v1.2.1
 [v1.1.8]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.1.7b...v1.1.8
 [v1.1.7b]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.1.7...v1.1.7b
