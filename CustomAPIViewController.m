@@ -166,6 +166,12 @@ typedef NS_ENUM(NSInteger, Tag) {
     UIStackView *trendingSubredditsLimitStackView = [self createLabeledStackViewWithLabelText:@"Limit trending subreddits to:" placeholder:@"(unlimited)" text:sTrendingSubredditsLimit tag:TagTrendingLimit isNumerical:YES];
     [stackView addArrangedSubview:trendingSubredditsLimitStackView];
 
+    UIButton *communitySourcesButton = [UIButton systemButtonWithPrimaryAction:[UIAction actionWithTitle:@"Community Subreddit Sources" image:nil identifier:nil handler:^(UIAction * action) {
+        [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/discussions/60"] options:@{} completionHandler:nil];
+    }]];
+    communitySourcesButton.titleLabel.font = [UIFont systemFontOfSize:16.0];
+    [stackView addArrangedSubview:communitySourcesButton];
+
     UIStackView *trendingSourceStackView = [self createLabeledStackViewWithLabelText:@"Trending subreddits source:" placeholder:defaultTrendingSubredditsSource text:sTrendingSubredditsSource tag:TagTrendingSubredditsSource];
     [stackView addArrangedSubview:trendingSourceStackView];
 
@@ -198,8 +204,8 @@ typedef NS_ENUM(NSInteger, Tag) {
         @"4. Enter the **Client ID** (not the client secret) above.\n"
         @"\n"
         @"**Providing custom subreddit sources:**\n"
-        @"You can provide custom subreddit sources by specifying a URL to a plaintext file with a list of line-separated subreddit names (without the `/r/`). ([Example file](https://jeffreyca.github.io/subreddits/popular.txt))\n"
-        @"**Tip:** You can host the file on services like Pastebin or GitHub.\n"
+        @"You can provide custom subreddit sources by specifying a URL to a plaintext file with a list of line-separated subreddit names (without the `/r/`). ([Example file](https://jeffreyca.github.io/subreddits/popular.txt))\n\n"
+        @"**Tip:** You can host the file on GitHub or pastebin sites."
 
     options:markdownOptions baseURL:nil error:nil];
 
