@@ -661,10 +661,27 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
     NSString *path = [url path];
 
     if ([host isEqualToString:@"imgur-apiv3.p.rapidapi.com"]) {
-        if ([path hasPrefix:@"/3/image"] || [path hasPrefix:@"/3/album"]) {
+        if ([path hasPrefix:@"/3/image"]) {
             NSMutableURLRequest *modifiedRequest = [request mutableCopy];
             NSURL * newURL = [NSURL URLWithString:[@"https://api.imgur.com" stringByAppendingString:path]];
             [modifiedRequest setURL:newURL];
+            return %orig(modifiedRequest, completionHandler);
+        } else if ([path hasPrefix:@"/3/album"]) {
+            NSMutableURLRequest *modifiedRequest = [request mutableCopy];
+            NSURL * newURL = [NSURL URLWithString:[@"https://api.imgur.com" stringByAppendingString:path]];
+            [modifiedRequest setURL:newURL];
+            // Convert from application/x-www-form-urlencoded format to JSON due to API change
+            NSString *bodyString = [[NSString alloc] initWithData:modifiedRequest.HTTPBody encoding:NSUTF8StringEncoding];
+            NSArray *components = [bodyString componentsSeparatedByString:@"="];
+            if (components.count == 2 && [components[0] isEqualToString:@"deletehashes"]) {
+                NSString *deleteHashes = components[1];
+                NSArray *hashes = [deleteHashes componentsSeparatedByString:@","];
+                // Create JSON body
+                NSDictionary *jsonBody = @{@"deletehashes": hashes};
+                NSData *jsonData = [NSJSONSerialization dataWithJSONObject:jsonBody options:0 error:nil];
+                [modifiedRequest setHTTPBody:jsonData];
+                [modifiedRequest setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+            }
             return %orig(modifiedRequest, completionHandler);
         }
     } else if ([host isEqualToString:@"api.redgifs.com"] && [path hasPrefix:@"/v2/gifs/"]) {
