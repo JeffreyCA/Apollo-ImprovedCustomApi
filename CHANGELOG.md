@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.2.3] - 2025-04-07
+
+- Fix issue with Imgur multi-image uploads failing. Note that multi-image uploads still fail on the first attempt but should succeed on the next attempt.
+- Update Custom API settings with link to [GitHub discussion](https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/discussions/60) where you can share your own subreddit sources.
+
 ## [v1.2.2] - 2025-01-16
 
 - Fix video downloads failing on certain v.redd.it videos
