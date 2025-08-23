@@ -684,13 +684,36 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
             }
             return %orig(modifiedRequest, completionHandler);
         }
-    } else if ([host isEqualToString:@"api.redgifs.com"] && [path hasPrefix:@"/v2/gifs/"]) {
+    } else if ([host isEqualToString:@"api.redgifs.com"] && [path isEqualToString:@"/v2/oauth/client"]) {
+        // Redirect to the new temporary token endpoint
+        NSMutableURLRequest *modifiedRequest = [request mutableCopy];
+        NSURL *newURL = [NSURL URLWithString:@"https://api.redgifs.com/v2/auth/temporary"];
+        [modifiedRequest setURL:newURL];
+        [modifiedRequest setHTTPMethod:@"GET"];
+        [modifiedRequest setHTTPBody:nil];
+        [modifiedRequest setValue:nil forHTTPHeaderField:@"Content-Type"];
+        [modifiedRequest setValue:nil forHTTPHeaderField:@"Content-Length"];
+
         void (^newCompletionHandler)(NSData *data, NSURLResponse *response, NSError *error) = ^(NSData *data, NSURLResponse *response, NSError *error) {
-            NSString *responseText = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-            responseText = [responseText stringByReplacingOccurrencesOfString:@"-silent.mp4" withString:@".mp4"];
-            completionHandler([responseText dataUsingEncoding:NSUTF8StringEncoding], response, error);
+            if (!error && data) {
+                NSError *jsonError = nil;
+                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
+                if (!jsonError && json[@"token"]) {
+                    // Transform response to match Apollo's format from '/v2/oauth/client'
+                    NSDictionary *oauthResponse = @{
+                        @"access_token": json[@"token"],
+                        @"token_type": @"Bearer",
+                        @"expires_in": @(82800), // 23 hours
+                        @"scope": @"read"
+                    };
+                    NSData *transformedData = [NSJSONSerialization dataWithJSONObject:oauthResponse options:0 error:nil];
+                    completionHandler(transformedData, response, error);
+                    return;
+                }
+            }
+            completionHandler(data, response, error);
         };
-        return %orig(request, newCompletionHandler);
+        return %orig(modifiedRequest, newCompletionHandler);
     }
     return %orig;
 }
