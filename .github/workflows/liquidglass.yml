@@ -1,8 +1,7 @@
 name: Enable Liquid Glass (iOS 26 only)
 
-# NOTE: This workflow only patches the Apollo IPA to be compatible with
-# the Liquid Glass tweak. It does NOT inject the tweak into the IPA.
-# You must sideload the resulting IPA and the tweak separately.
+# NOTE: This workflow only patches the Apollo IPA to enable Liquid Glass on iOS 26.
+# It does NOT inject the tweak into the IPA.
 #
 # Credit for the patching method goes to @ryannair05:
 # https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/issues/63
