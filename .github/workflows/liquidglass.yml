@@ -1,0 +1,112 @@
+name: Enable Liquid Glass (iOS 26 only)
+
+# NOTE: This workflow only patches the Apollo IPA to be compatible with
+# the Liquid Glass tweak. It does NOT inject the tweak into the IPA.
+# You must sideload the resulting IPA and the tweak separately.
+#
+# Credit for the patching method goes to @ryannair05:
+# https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/issues/63
+
+on:
+  workflow_dispatch:
+    inputs:
+      apollo_ipa_url:
+        description: 'Direct link to Apollo IPA (leave blank if from release)'
+        required: false
+        type: string
+      release_tag:
+        description: 'Release tag to download Apollo IPA artifact from (e.g. v1.0.0)'
+        required: false
+        type: string
+      artifact_filename:
+        description: 'Filename of the Apollo IPA artifact from the release'
+        required: false
+        type: string
+      remove_code_signature:
+        description: 'Remove code signature'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  patch:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v4
+
+    - name: Download and Verify Apollo IPA from URL
+      if: github.event.inputs.apollo_ipa_url != ''
+      run: |
+        echo "Downloading Apollo IPA from: ${{ github.event.inputs.apollo_ipa_url }}"
+        curl -L --fail "${{ github.event.inputs.apollo_ipa_url }}" -o Apollo.ipa
+        
+        echo "Verifying downloaded file..."
+        if ! unzip -t Apollo.ipa > /dev/null; then
+          echo "Error: Downloaded file is not a valid IPA (zip archive) or is corrupted."
+          exit 1
+        fi
+        
+        file_size=$(wc -c < Apollo.ipa)
+        echo "Downloaded Apollo.ipa size: ${file_size} bytes"
+
+    - name: Download Apollo IPA from Release
+      if: github.event.inputs.apollo_ipa_url == '' && github.event.inputs.release_tag != ''
+      uses: robinraju/release-downloader@v1.10
+      with:
+        repository: ${{ github.repository }}
+        tag: ${{ github.event.inputs.release_tag }}
+        fileName: ${{ github.event.inputs.artifact_filename }}
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Rename downloaded artifact
+      if: github.event.inputs.apollo_ipa_url == '' && github.event.inputs.release_tag != ''
+      run: mv "${{ github.event.inputs.artifact_filename }}" Apollo.ipa
+
+    - name: Verify Release Download
+      if: github.event.inputs.apollo_ipa_url == '' && github.event.inputs.release_tag != ''
+      run: |
+        if [ ! -f "Apollo.ipa" ]; then
+          echo "Error: Failed to download artifact from release."
+          exit 1
+        fi
+        echo "Verifying downloaded file..."
+        if ! unzip -t Apollo.ipa > /dev/null; then
+          echo "Error: Downloaded file is not a valid IPA (zip archive) or is corrupted."
+          exit 1
+        fi
+        file_size=$(wc -c < Apollo.ipa)
+        echo "Downloaded Apollo.ipa size: ${file_size} bytes"
+        
+    - name: Patch IPA using script
+      id: patch_script
+      run: |
+        chmod +x ./liquid_glass.sh
+        OUTPUT_IPA_NAME="Apollo-Patched.ipa"
+        
+        if [ "${{ github.event.inputs.remove_code_signature }}" == "true" ]; then
+          ./liquid_glass.sh Apollo.ipa -o "${OUTPUT_IPA_NAME}" --remove-code-signature
+        else
+          ./liquid_glass.sh Apollo.ipa -o "${OUTPUT_IPA_NAME}"
+        fi
+        
+        echo "patched_ipa_name=${OUTPUT_IPA_NAME}" >> $GITHUB_OUTPUT
+
+    - name: Upload IPA Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.patch_script.outputs.patched_ipa_name }}
+        path: ${{ steps.patch_script.outputs.patched_ipa_name }}
+
+    - name: Create release
+      uses: softprops/action-gh-release@v2.0.8
+      with:
+        draft: true
+        tag_name: apollo-liquid-glass-${{ github.run_number }}
+        name: Apollo (Liquid Glass patch) - Build ${{ github.run_number }}
+        files: |
+          ${{ steps.patch_script.outputs.patched_ipa_name }}
+        prerelease: false
