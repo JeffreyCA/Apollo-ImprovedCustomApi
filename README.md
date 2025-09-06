@@ -24,6 +24,28 @@ Apollo for Reddit with in-app configurable API keys and several fixes and improv
     - Uploads usually fail on the first attempt but subsequent retries should succeed
 - Share URLs in private messages and long-tapping them still open in the in-app browser
 
+## Looking for IPA?
+One source where you can get the fully tweaked IPA is [Balackburn/Apollo](https://github.com/Balackburn/Apollo).
+
+## iOS 26 Liquid Glass Patch
+To enable Liquid Glass in Apollo on iOS 26, the IPA must be patched using the `liquid_glass.sh` script or GitHub Action.
+
+> [!NOTE]
+> This **does not** inject the tweak itself; they only enable Liquid Glass. This supports both non-tweaked and tweaked Apollo IPAs.
+>
+> Credit for the patching method goes to [@ryannair05](https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/issues/63).
+
+### 1. Local Script
+Run the `liquid_glass.sh` script to patch the IPA on your machine.
+```bash
+./liquid_glass.sh <path_to_ipa> [--remove-code-signature] [-o|--output <output_file>]
+```
+
+### 2. GitHub Action
+Fork this repo and navigate to the **Actions** tab. Run the **Enable Liquid Glass (iOS 26 only)** workflow.
+
+You can provide the IPA via a direct URL or reference a GitHub release artifact. The workflow will create a draft release with the patched IPA.
+
 ## Sideloadly
 Recommended configuration:
 - **Use automatic bundle ID**: *unchecked*
