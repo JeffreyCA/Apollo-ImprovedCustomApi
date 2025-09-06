@@ -31,7 +31,7 @@ One source where you can get the fully tweaked IPA is [Balackburn/Apollo](https:
 To enable Liquid Glass in Apollo on iOS 26, the IPA must be patched using the `liquid_glass.sh` script or GitHub Action.
 
 > [!NOTE]
-> This **does not** inject the tweak itself; they only enable Liquid Glass. This supports both non-tweaked and tweaked Apollo IPAs.
+> This **does not** inject the tweak itself; it only enables Liquid Glass. This supports both non-tweaked and tweaked Apollo IPAs.
 >
 > Credit for the patching method goes to [@ryannair05](https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/issues/63).
 
