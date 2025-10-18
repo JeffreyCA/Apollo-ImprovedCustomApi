@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <os/log.h>
 
 #import "fishhook.h"
 #import "CustomAPIViewController.h"
@@ -12,6 +13,12 @@
 #import "ffmpeg-kit/ffmpeg-kit/include/MediaInformation.h"
 #import "ffmpeg-kit/ffmpeg-kit/include/FFmpegKit.h"
 #import "ffmpeg-kit/ffmpeg-kit/include/FFprobeKit.h"
+
+// On iOS 26, NSLog redacts strings, so use os_log: https://developer.apple.com/documentation/ios-ipados-release-notes/ios-ipados-26-release-notes#NSLog
+#define ApolloLog(fmt, ...) do { \
+    NSString *logMessage = [NSString stringWithFormat:@"[ApolloFix] " fmt, ##__VA_ARGS__]; \
+    os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, "%{public}s", [logMessage UTF8String]); \
+} while(0)
 
 // Sideload fixes
 static NSDictionary *stripGroupAccessAttr(CFDictionaryRef attributes) {
@@ -185,6 +192,22 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
     }
 }
 
+// Implementation derived from https://github.com/dankrichtofen/apolloliquidglass/blob/main/Tweak.x
+// Credits to @dankrichtofen for the original implementation
+%hook ASImageNode
+
++ (UIImage *)createContentsForkey:(id)key drawParameters:(id)parameters isCancelled:(id)cancelled {
+    @try {
+        UIImage *result = %orig;
+        return result;
+    }
+    @catch (NSException *exception) {
+        return nil;
+    }
+}
+
+%end
+
 %hook NSURL
 // Asynchronously resolve share URLs in background
 // This is an optimization to "pre-resolve" share URLs so that by the time one taps a share URL it should already be resolved
@@ -349,20 +372,34 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
     }
 
     NSURL *url = MSHookIvar<NSURL *>(arg1, "url");
-    NSString *urlString = [url absoluteString];
+    NSString *urlString = nil;
+
+    // For iOS 26 compatibility
+    BOOL canModifyURL = [url respondsToSelector:@selector(absoluteString)];
+    if ([url respondsToSelector:@selector(absoluteString)]) {
+        urlString = [url absoluteString];
+        canModifyURL = YES;
+    } else {
+        %orig;
+        return;
+    }
 
     void (^ignoreHandler)(void) = ^{
         %orig;
     };
     void (^successHandler)(NSString *) = ^(NSString *resolvedURL) {
-        NSURL *newURL = [NSURL URLWithString:resolvedURL];
-        MSHookIvar<NSURL *>(arg1, "url") = newURL;
-        if (rdkLink) {
-            MSHookIvar<RDKLink *>(self, "link").URL = newURL;
+        if (canModifyURL) {
+            NSURL *newURL = [NSURL URLWithString:resolvedURL];
+            MSHookIvar<NSURL *>(arg1, "url") = newURL;
+            if (rdkLink) {
+                MSHookIvar<RDKLink *>(self, "link").URL = newURL;
+            }
+            %orig;
+            MSHookIvar<NSURL *>(arg1, "url") = url;
+            MSHookIvar<RDKLink *>(self, "link").URL = rdkLinkURL;
+        } else {
+            %orig;
         }
-        %orig;
-        MSHookIvar<NSURL *>(arg1, "url") = url;
-        MSHookIvar<RDKLink *>(self, "link").URL = rdkLinkURL;
     };
     TryResolveShareUrl(urlString, successHandler, ignoreHandler);
 }
@@ -418,15 +455,29 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
 - (void)linkButtonTappedWithSender:(_TtC6Apollo14LinkButtonNode *)arg1 {
     %log;
     NSURL *url = MSHookIvar<NSURL *>(arg1, "url");
-    NSString *urlString = [url absoluteString];
+    NSString *urlString = nil;
+
+    // For iOS 26 compatibility
+    BOOL canModifyURL = [url respondsToSelector:@selector(absoluteString)];
+    if ([url respondsToSelector:@selector(absoluteString)]) {
+        urlString = [url absoluteString];
+        canModifyURL = YES;
+    } else {
+        %orig;
+        return;
+    }
 
     void (^ignoreHandler)(void) = ^{
         %orig;
     };
     void (^successHandler)(NSString *) = ^(NSString *resolvedURL) {
-        MSHookIvar<NSURL *>(arg1, "url") = [NSURL URLWithString:resolvedURL];
-        %orig;
-        MSHookIvar<NSURL *>(arg1, "url") = url;
+        if (canModifyURL) {
+            MSHookIvar<NSURL *>(arg1, "url") = [NSURL URLWithString:resolvedURL];
+            %orig;
+            MSHookIvar<NSURL *>(arg1, "url") = url;
+        } else {
+            %orig;
+        }
     };
     TryResolveShareUrl(urlString, successHandler, ignoreHandler);
 }
@@ -442,21 +493,36 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
     if (rdkLink) {
         rdkLinkURL = rdkLink.URL;
     }
+
     NSURL *url = MSHookIvar<NSURL *>(arg1, "url");
-    NSString *urlString = [url absoluteString];
+    NSString *urlString = nil;
+
+    // For iOS 26 compatibility
+    BOOL canModifyURL = [url respondsToSelector:@selector(absoluteString)];
+    if ([url respondsToSelector:@selector(absoluteString)]) {
+        urlString = [url absoluteString];
+        canModifyURL = YES;
+    } else {
+        %orig;
+        return;
+    }
 
     void (^ignoreHandler)(void) = ^{
         %orig;
     };
     void (^successHandler)(NSString *) = ^(NSString *resolvedURL) {
-        NSURL *newURL = [NSURL URLWithString:resolvedURL];
-        MSHookIvar<NSURL *>(arg1, "url") = newURL;
-        if (rdkLink) {
-            MSHookIvar<RDKLink *>(self, "link").URL = newURL;
+        if (canModifyURL) {
+            NSURL *newURL = [NSURL URLWithString:resolvedURL];
+            MSHookIvar<NSURL *>(arg1, "url") = newURL;
+            if (rdkLink) {
+                MSHookIvar<RDKLink *>(self, "link").URL = newURL;
+            }
+            %orig;
+            MSHookIvar<NSURL *>(arg1, "url") = url;
+            MSHookIvar<RDKLink *>(self, "link").URL = rdkLinkURL;
+        } else {
+            %orig;
         }
-        %orig;
-        MSHookIvar<NSURL *>(arg1, "url") = url;
-        MSHookIvar<RDKLink *>(self, "link").URL = rdkLinkURL;
     };
     TryResolveShareUrl(urlString, successHandler, ignoreHandler);
 }
@@ -946,7 +1012,7 @@ static void initializeRandomSources() {
     if (postSnapshotData) {
         initializePostSnapshots(postSnapshotData);
     } else {
-        NSLog(@"No data found in NSUserDefaults for key 'PostCommentsSnapshots'");
+        ApolloLog(@"No data found in NSUserDefaults for key 'PostCommentsSnapshots'");
     }
 
     initializeRandomSources();
