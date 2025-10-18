@@ -18,4 +18,8 @@
 - (id)linkIDWithoutTypePrefix;
 @end
 
+@interface ASImageNode : NSObject
++ (UIImage *)createContentsForkey:(id)key drawParameters:(id)parameters isCancelled:(id)cancelled;
+@end
+
 @class _TtC6Apollo14LinkButtonNode;

@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.2.5] - 2025-10-18
+
+- Fix occassional crashes when scrolling on iOS 26 with Liquid Glass patch (thanks @dankrichtofen for the original implementation)
+- Fix crashes when tapping share URL link buttons on iOS 26
+    - Note that this is **not** a full fix. Tapping the link button now navigates to a webview on iOS 26. As a workaround, tap the inline text (see [comment here](https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/issues/62#issuecomment-3247359652)).
+- Fix debug logging on iOS 26
+
 ## [v1.2.4] - 2025-08-23
 
 - Fix RedGIFs links loading without sound (again)
@@ -123,6 +130,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v1.2.5]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.4...v1.2.5
 [v1.2.4]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.3...v1.2.4
 [v1.2.3]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.2...v1.2.3
 [v1.2.2]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.1...v1.2.2
