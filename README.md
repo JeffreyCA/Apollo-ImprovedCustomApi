@@ -12,7 +12,7 @@ Apollo for Reddit with in-app configurable API keys and several fixes and improv
 - Suppress unwanted messages on app startup (wallpaper popup, in-app announcements, etc)
 - Support /s/ share links (reddit.com/r/subreddit/s/xxxxxx) natively
 - Support media share links (reddit.com/media?url=) natively
-- **Fully working** "New Comments Highlightifier" Ultra feature
+- Working "New Comments Highlightifier" Ultra feature (must enable in Custom API settings)
 - Use generic user agent for requests to Reddit
 - FLEX debugging
 - Support custom external sources for random and trending subreddits
@@ -27,8 +27,12 @@ Apollo for Reddit with in-app configurable API keys and several fixes and improv
 ## Looking for IPA?
 One source where you can get the fully tweaked IPA is [Balackburn/Apollo](https://github.com/Balackburn/Apollo).
 
+## Safari integration
+
+I recommend using the [Open-In-Apollo](https://github.com/AnthonyGress/Open-In-Apollo) userscript to automatically open Reddit links in Apollo. It has enhanced search engine integration so Reddit links on search result pages (Google, Bing, etc.) open directly in Apollo without first redirecting to reddit.com.
+
 ## iOS 26 Liquid Glass Patch
-To enable Liquid Glass in Apollo on iOS 26, the IPA must be patched using the `liquid_glass.sh` script or GitHub Action.
+To enable Liquid Glass in Apollo on iOS 26, the IPA can be patched using the `liquid_glass.sh` script or GitHub Action.
 
 > [!NOTE]
 > This **does not** inject the tweak itself; it only enables Liquid Glass. This supports both non-tweaked and tweaked Apollo IPAs.
