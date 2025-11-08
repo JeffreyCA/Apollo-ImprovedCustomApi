@@ -285,17 +285,105 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
 }
 %end
 
+// Around November 2025, Reddit started using CMAF instead of MPEG-TS for audio streams (v.redd.it).
+// These hooks fix how .m3u8 manifests are parsed to support downloading CMAF videos.
+%hook NSRegularExpression
+
+// Apollo's regex only matches HLS_AUDIO naming pattern, so update to also match CMAF_AUDIO
+- (instancetype)initWithPattern:(NSString *)pattern options:(NSRegularExpressionOptions)options error:(NSError **)error {
+    if ([pattern isEqualToString:@"#EXT-X-MEDIA:.*?\"(HLS_AUDIO.*?)\\.m3u8"]) {
+        NSString *updatedPattern = @"#EXT-X-MEDIA:.*?\"((?:HLS|CMAF)_AUDIO.*?)\\.m3u8";
+        return %orig(updatedPattern, options, error);
+    }
+    return %orig;
+}
+
+- (NSArray<NSTextCheckingResult *> *)matchesInString:(NSString *)string options:(NSMatchingOptions)options range:(NSRange)range {
+    NSArray *results = %orig;
+
+    // CMAF manifests list audio in descending bitrate order:
+    //   #EXT-X-MEDIA:URI="CMAF_AUDIO_128.m3u8",...
+    //   #EXT-X-MEDIA:URI="CMAF_AUDIO_64.m3u8",...
+    // but Apollo expects ascending order (how older MPEG-TS streams were ordered),
+    // so we need to reorder the results so Apollo downloads the highest quality audio.
+    if (results.count >= 2 && [string containsString:@"CMAF_AUDIO"]) {
+        // Sort by extracting bitrate number from captured text
+        results = [results sortedArrayUsingComparator:^NSComparisonResult(NSTextCheckingResult *result1, NSTextCheckingResult *result2) {
+            if (result1.numberOfRanges > 1 && result2.numberOfRanges > 1) {
+                NSString *text1 = [string substringWithRange:[result1 rangeAtIndex:1]];
+                NSString *text2 = [string substringWithRange:[result2 rangeAtIndex:1]];
+
+                // Use NSScanner to extract first integer from each string
+                NSScanner *scanner1 = [NSScanner scannerWithString:text1];
+                NSScanner *scanner2 = [NSScanner scannerWithString:text2];
+                NSInteger bitrate1 = 0, bitrate2 = 0;
+
+                [scanner1 scanUpToCharactersFromSet:[NSCharacterSet decimalDigitCharacterSet] intoString:nil];
+                [scanner1 scanInteger:&bitrate1];
+                [scanner2 scanUpToCharactersFromSet:[NSCharacterSet decimalDigitCharacterSet] intoString:nil];
+                [scanner2 scanInteger:&bitrate2];
+
+                return [@(bitrate1) compare:@(bitrate2)];
+            }
+            return NSOrderedSame;
+        }];
+    }
+    return results;
+}
+
+%end
+
+%hook NSURLRequest
+
++ (instancetype)requestWithURL:(NSURL *)URL {
+    // Fix CMAF audio URLs: Apollo tries to download .aac but CMAF uses .mp4
+    if ([URL.absoluteString containsString:@"CMAF_AUDIO"] && [URL.pathExtension isEqualToString:@"aac"]) {
+        NSURL *fixedURL = [[URL URLByDeletingPathExtension] URLByAppendingPathExtension:@"mp4"];
+        ApolloLog(@"[NSURLRequest] Fixed CMAF audio URL: %@ -> %@", URL.absoluteString, fixedURL.absoluteString);
+        return %orig(fixedURL);
+    }
+    return %orig;
+}
+
+%end
+
 %hook _TtC6Apollo17ShareMediaManager
-// Fix audio stream format for certain v.redd.it videos - newer AAC audio streams use the MPEG-TS
-// container format which Apollo doesn't support, so we need to convert them to the supported ADTS format.
+
+// Patches to fix audio container formats for v.redd.it videos:
+// - Some streams use MPEG-TS containers (fix: convert to ADTS)
+// - Newer streams use CMAF/MP4 containers (fix: extract AAC and wrap in ADTS)
 - (void)URLSession:(NSURLSession *)urlSession downloadTask:(NSURLSessionDownloadTask *)downloadTask didFinishDownloadingToURL:(NSURL *)fileUrl {
     NSURL *originalURL = downloadTask.originalRequest.URL;
     NSString *path = fileUrl.absoluteString;
     NSString *fixedPath = [path stringByAppendingString:@".fixed"];
-    if (![[originalURL pathExtension] isEqualToString:@"aac"]) {
+
+    BOOL isCMAFAudio = [originalURL.absoluteString containsString:@"CMAF_AUDIO"] && [originalURL.pathExtension isEqualToString:@"mp4"];
+    BOOL isHLSAudio = [originalURL.pathExtension isEqualToString:@"aac"];
+
+    if (!isCMAFAudio && !isHLSAudio) {
         %orig;
         return;
     }
+
+    if (isCMAFAudio) {
+        // CMAF audio is MP4 container with AAC - extract to ADTS format
+        ApolloLog(@"[-URLSession:downloadTask:didFinishDownloadingToURL:] Converting CMAF MP4 audio to ADTS: %@", originalURL);
+        NSString *ffmpegCommand = [NSString stringWithFormat:@"-y -loglevel info -i '%@' -vn -acodec copy -f adts '%@.fixed'", path, path];
+        FFmpegSession *session = [FFmpegKit execute:ffmpegCommand];
+        ReturnCode *returnCode = [session getReturnCode];
+        if ([ReturnCode isSuccess:returnCode]) {
+            // Replace original file with fixed version
+            NSURL *fixedUrl = [NSURL URLWithString:fixedPath];
+            NSFileManager *fileManager = [NSFileManager defaultManager];
+            [fileManager removeItemAtURL:fileUrl error:nil];
+            [fileManager moveItemAtURL:fixedUrl toURL:fileUrl error:nil];
+        }
+        %orig;
+        return;
+    }
+
+    // MPEG-TS AAC processing
+    ApolloLog(@"[-URLSession:downloadTask:didFinishDownloadingToURL:] Processing AAC file: %@", originalURL);
 
     MediaInformationSession *probeSession = [FFprobeKit getMediaInformation:path];
     ReturnCode *returnCode = [probeSession getReturnCode];

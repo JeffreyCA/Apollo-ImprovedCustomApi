@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.2.6] - 2025-11-08
+
+- Fix video downloads failing on certain v.redd.it videos
+    - Recently, Reddit started using [CMAF media format](https://developer.apple.com/documentation/http-live-streaming/about-the-common-media-application-format-with-http-live-streaming-hls) for serving video content, which Apollo does not natively support downloading for.
+
 ## [v1.2.5] - 2025-10-18
 
 - Fix occassional crashes when scrolling on iOS 26 with Liquid Glass patch (thanks @dankrichtofen for the original implementation)
@@ -130,6 +135,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v1.2.6]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.5...v1.2.6
 [v1.2.5]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.4...v1.2.5
 [v1.2.4]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.3...v1.2.4
 [v1.2.3]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.2...v1.2.3
