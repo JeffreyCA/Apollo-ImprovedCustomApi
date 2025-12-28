@@ -17,12 +17,14 @@ Apollo for Reddit with in-app configurable API keys and several fixes and improv
 - FLEX debugging
 - Support custom external sources for random and trending subreddits
 - Working v.redd.it video downloads
+- Backup and restore Apollo and tweak settings
 
 ## Known issues
 - Apollo Ultra features may cause app to crash 
 - Imgur multi-image upload
     - Uploads usually fail on the first attempt but subsequent retries should succeed
 - Share URLs in private messages and long-tapping them still open in the in-app browser
+    - On iOS 26, share URLs in link buttons also open in the in-app browser. As a workaround, tap the inline text link (see [comment here](https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/issues/62#issuecomment-3247359652))
 
 ## Looking for IPA?
 One source where you can get the fully tweaked IPA is [Balackburn/Apollo](https://github.com/Balackburn/Apollo).
