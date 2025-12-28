@@ -1,8 +1,10 @@
 #import "CustomAPIViewController.h"
 #import "UserDefaultConstants.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "B64ImageEncodings.h"
 #import "Version.h"
 #import "DefaultSubreddits.h"
+#import "SSZipArchive.h"
 
 // Implementation derived from https://github.com/ryannair05/ApolloAPI/blob/master/CustomAPIViewController.m
 // Credits to Ryan Nair (@ryannair05) for the original implementation
@@ -132,24 +134,78 @@ typedef NS_ENUM(NSInteger, Tag) {
         [stackView.bottomAnchor constraintEqualToAnchor:scrollView.bottomAnchor constant:-20],
     ]];
 
+    // Backup / Restore section
+    UILabel *backupRestoreLabel = [[UILabel alloc] init];
+    backupRestoreLabel.text = @"Backup / Restore";
+    backupRestoreLabel.font = [UIFont boldSystemFontOfSize:18];
+    backupRestoreLabel.textAlignment = NSTextAlignmentCenter;
+    [stackView addArrangedSubview:backupRestoreLabel];
+
+    UIButton *backupButton = [UIButton systemButtonWithPrimaryAction:[UIAction actionWithTitle:@"Backup Settings" image:nil identifier:nil handler:^(UIAction * action) {
+        [self backupSettings];
+    }]];
+    backupButton.titleLabel.font = [UIFont systemFontOfSize:16.0];
+
+    UIButton *restoreButton = [UIButton systemButtonWithPrimaryAction:[UIAction actionWithTitle:@"Restore Settings" image:nil identifier:nil handler:^(UIAction * action) {
+        [self restoreSettings];
+    }]];
+    restoreButton.titleLabel.font = [UIFont systemFontOfSize:16.0];
+
+    UIStackView *backupRestoreStackView = [[UIStackView alloc] initWithArrangedSubviews:@[backupButton, restoreButton]];
+    backupRestoreStackView.axis = UILayoutConstraintAxisHorizontal;
+    backupRestoreStackView.distribution = UIStackViewDistributionFillEqually;
+    backupRestoreStackView.spacing = 10;
+    [stackView addArrangedSubview:backupRestoreStackView];
+
+    UILabel *backupNoteLabel = [[UILabel alloc] init];
+    backupNoteLabel.text = @"Restore Settings does not restore accounts or affect existing ones. The backup .zip contains an accounts.txt with all account usernames for reference.";
+    backupNoteLabel.font = [UIFont systemFontOfSize:13];
+    backupNoteLabel.textColor = [UIColor secondaryLabelColor];
+    backupNoteLabel.numberOfLines = 0;
+    [stackView addArrangedSubview:backupNoteLabel];
+
+    // API Keys section
+    UILabel *apiKeysLabel = [[UILabel alloc] init];
+    apiKeysLabel.text = @"API Keys";
+    apiKeysLabel.font = [UIFont boldSystemFontOfSize:18];
+    apiKeysLabel.textAlignment = NSTextAlignmentCenter;
+    [stackView addArrangedSubview:apiKeysLabel];
+
     UIStackView *redditStackView = [self createLabeledStackViewWithLabelText:@"Reddit API Key:" placeholder:@"Reddit API Key" text:sRedditClientId tag:TagRedditClientId];
     [stackView addArrangedSubview:redditStackView];
 
     UIStackView *imgurStackView = [self createLabeledStackViewWithLabelText:@"Imgur API Key:" placeholder:@"Imgur API Key" text:sImgurClientId tag:TagImgurClientId];
     [stackView addArrangedSubview:imgurStackView];
 
-    UIButton *websiteButton = [UIButton systemButtonWithPrimaryAction:[UIAction actionWithTitle:@"Reddit API Website" image:nil identifier:nil handler:^(UIAction * action) {
+    UIButton *redditWebsiteButton = [UIButton systemButtonWithPrimaryAction:[UIAction actionWithTitle:@"Reddit API Website" image:nil identifier:nil handler:^(UIAction * action) {
         [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://reddit.com/prefs/apps"] options:@{} completionHandler:nil];
     }]];
-    websiteButton.titleLabel.font = [UIFont systemFontOfSize:16.0];
+    redditWebsiteButton.titleLabel.font = [UIFont systemFontOfSize:16.0];
 
-    UIButton *imgurButton = [UIButton systemButtonWithPrimaryAction:[UIAction actionWithTitle:@"Imgur API Website" image:nil identifier:nil handler:^(UIAction * action) {
+    UIButton *imgurWebsiteButton = [UIButton systemButtonWithPrimaryAction:[UIAction actionWithTitle:@"Imgur API Website" image:nil identifier:nil handler:^(UIAction * action) {
         [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://api.imgur.com/oauth2/addclient"] options:@{} completionHandler:nil];
     }]];
-    imgurButton.titleLabel.font = [UIFont systemFontOfSize:16.0];
+    imgurWebsiteButton.titleLabel.font = [UIFont systemFontOfSize:16.0];
 
-    [stackView addArrangedSubview:websiteButton];
-    [stackView addArrangedSubview:imgurButton];
+    UIStackView *apiWebsiteStackView = [[UIStackView alloc] initWithArrangedSubviews:@[redditWebsiteButton, imgurWebsiteButton]];
+    apiWebsiteStackView.axis = UILayoutConstraintAxisHorizontal;
+    apiWebsiteStackView.distribution = UIStackViewDistributionFillEqually;
+    apiWebsiteStackView.spacing = 10;
+    [stackView addArrangedSubview:apiWebsiteStackView];
+
+    UILabel *apiNoteLabel = [[UILabel alloc] init];
+    apiNoteLabel.text = @"Since mid-2025, Reddit API access requires manual approval and Imgur does not allow API key creation. Only known workaround is to use existing keys. Scroll down for old instructions for creating API keys.";
+    apiNoteLabel.font = [UIFont systemFontOfSize:13];
+    apiNoteLabel.textColor = [UIColor secondaryLabelColor];
+    apiNoteLabel.numberOfLines = 0;
+    [stackView addArrangedSubview:apiNoteLabel];
+
+    // General section
+    UILabel *generalLabel = [[UILabel alloc] init];
+    generalLabel.text = @"General";
+    generalLabel.font = [UIFont boldSystemFontOfSize:18];
+    generalLabel.textAlignment = NSTextAlignmentCenter;
+    [stackView addArrangedSubview:generalLabel];
 
     UIStackView *blockAnnouncementsStackView = [self createToggleSwitchWithKey:UDKeyBlockAnnouncements labelText:@"Block Announcements" action:@selector(blockAnnouncementsSwitchToggled:)];
     [stackView addArrangedSubview:blockAnnouncementsStackView];
@@ -166,11 +222,11 @@ typedef NS_ENUM(NSInteger, Tag) {
     UIStackView *trendingSubredditsLimitStackView = [self createLabeledStackViewWithLabelText:@"Limit trending subreddits to:" placeholder:@"(unlimited)" text:sTrendingSubredditsLimit tag:TagTrendingLimit isNumerical:YES];
     [stackView addArrangedSubview:trendingSubredditsLimitStackView];
 
-    UIButton *communitySourcesButton = [UIButton systemButtonWithPrimaryAction:[UIAction actionWithTitle:@"Community Subreddit Sources" image:nil identifier:nil handler:^(UIAction * action) {
-        [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/discussions/60"] options:@{} completionHandler:nil];
-    }]];
-    communitySourcesButton.titleLabel.font = [UIFont systemFontOfSize:16.0];
-    [stackView addArrangedSubview:communitySourcesButton];
+    UILabel *subredditSourcesLabel = [[UILabel alloc] init];
+    subredditSourcesLabel.text = @"Subreddits";
+    subredditSourcesLabel.font = [UIFont boldSystemFontOfSize:18];
+    subredditSourcesLabel.textAlignment = NSTextAlignmentCenter;
+    [stackView addArrangedSubview:subredditSourcesLabel];
 
     UIStackView *trendingSourceStackView = [self createLabeledStackViewWithLabelText:@"Trending subreddits source:" placeholder:defaultTrendingSubredditsSource text:sTrendingSubredditsSource tag:TagTrendingSubredditsSource];
     [stackView addArrangedSubview:trendingSourceStackView];
@@ -180,6 +236,31 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     UIStackView *randNsfwSourceStackView = [self createLabeledStackViewWithLabelText:@"RandNSFW subreddits source:" placeholder:@"(empty)" text:sRandNsfwSubredditsSource tag:TagRandNsfwSubredditsSource];
     [stackView addArrangedSubview:randNsfwSourceStackView];
+
+    UITextView *subredditSourcesNote = [[UITextView alloc] init];
+    subredditSourcesNote.editable = NO;
+    subredditSourcesNote.scrollEnabled = NO;
+    subredditSourcesNote.backgroundColor = [UIColor clearColor];
+    subredditSourcesNote.textContainerInset = UIEdgeInsetsZero;
+    subredditSourcesNote.textContainer.lineFragmentPadding = 0;
+    NSMutableAttributedString *subredditNoteText = [[NSMutableAttributedString alloc] initWithString:@"Configure custom subreddit sources by providing a URL to a plaintext file with line-separated subreddit names (without /r/). "
+        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [UIColor secondaryLabelColor]}];
+    [subredditNoteText appendAttributedString:[[NSAttributedString alloc] initWithString:@"Example file"
+        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://jeffreyca.github.io/subreddits/popular.txt"]}]];
+    [subredditNoteText appendAttributedString:[[NSAttributedString alloc] initWithString:@" ("
+        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [UIColor secondaryLabelColor]}]];
+    [subredditNoteText appendAttributedString:[[NSAttributedString alloc] initWithString:@"GitHub repo"
+        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/JeffreyCA/subreddits"]}]];
+    [subredditNoteText appendAttributedString:[[NSAttributedString alloc] initWithString:@")"
+        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [UIColor secondaryLabelColor]}]];
+    subredditSourcesNote.attributedText = subredditNoteText;
+    [stackView addArrangedSubview:subredditSourcesNote];
+
+    UILabel *instructionsLabel = [[UILabel alloc] init];
+    instructionsLabel.text = @"Instructions";
+    instructionsLabel.font = [UIFont boldSystemFontOfSize:18];
+    instructionsLabel.textAlignment = NSTextAlignmentCenter;
+    [stackView addArrangedSubview:instructionsLabel];
 
     UITextView *textView = [[UITextView alloc] init];
     textView.editable = NO;
@@ -201,11 +282,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         @"1. Sign into your Imgur account and go to the link above ([api.imgur.com/oauth2/addclient](https://api.imgur.com/oauth2/addclient))\n"
         @"2. Fill in the fields \n\t- Application name: *anything* \n\t- Authorization type: `OAuth 2 auth with a callback URL` \n\t- Authorization callback URL: `https://www.getpostman.com/oauth2/callback`\n\t- Email: *your email* \n\t- Description: *anything*\n"
         @"3. Click \"`submit`\"\n"
-        @"4. Enter the **Client ID** (not the client secret) above.\n"
-        @"\n"
-        @"**Providing custom subreddit sources:**\n"
-        @"You can provide custom subreddit sources by specifying a URL to a plaintext file with a list of line-separated subreddit names (without the `/r/`). ([Example file](https://jeffreyca.github.io/subreddits/popular.txt))\n\n"
-        @"**Tip:** You can host the file on GitHub or pastebin sites."
+        @"4. Enter the **Client ID** (not the client secret) above."
 
     options:markdownOptions baseURL:nil error:nil];
 
@@ -236,7 +313,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     [stackView addArrangedSubview:aboutLabel];
 
     NSURL *githubLinkURL = [NSURL URLWithString:@"https://github.com/JeffreyCA/Apollo-ImprovedCustomApi"];
-    UIButton *githubButton = [self creditsButton:@"Open source on GitHub" subtitle:@"@JeffreyCA" linkURL:githubLinkURL b64Image:B64Github];
+    UIButton *githubButton = [self creditsButton:@"Open Source on GitHub" subtitle:@"@JeffreyCA" linkURL:githubLinkURL b64Image:B64Github];
     [stackView addArrangedSubview:githubButton];
 
     UILabel *creditsLabel = [[UILabel alloc] init];
@@ -314,6 +391,236 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)randNsfwSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyShowRandNsfw];
+}
+
+#pragma mark - Backup / Restore
+
+static NSString *const kMainPlistFilename = @"preferences.plist";
+static NSString *const kGroupPlistFilename = @"group.plist";
+static NSString *const kAccountsFilename = @"accounts.txt";
+static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
+
+// Default: Library/Preferences/com.christianselig.Apollo.plist, depending on bundle ID.
+// Contains: most Apollo settings
+- (NSString *)mainPreferencesPath {
+    NSString *containerPath = NSHomeDirectory();
+    NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
+    NSString *plistName = [NSString stringWithFormat:@"Library/Preferences/%@.plist", bundleId];
+    return [containerPath stringByAppendingPathComponent:plistName];
+}
+
+// Should always Library/Preferences/group.com.christianselig.apollo.plist, no matter the bundle ID.
+// Contains: theme settings, keyword filters, some account state
+- (NSString *)groupPreferencesPath {
+    NSString *containerPath = NSHomeDirectory();
+    NSString *plistName = [NSString stringWithFormat:@"Library/Preferences/%@.plist", kGroupSuiteName];
+    return [containerPath stringByAppendingPathComponent:plistName];
+}
+
+- (void)backupSettings {
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    [[[NSUserDefaults alloc] initWithSuiteName:kGroupSuiteName] synchronize];
+
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSString *mainPlistPath = [self mainPreferencesPath];
+    NSString *groupPlistPath = [self groupPreferencesPath];
+
+    if (![fileManager fileExistsAtPath:mainPlistPath]) {
+        [self showAlertWithTitle:@"Backup Failed" message:@"Could not find Apollo preferences file."];
+        return;
+    }
+
+    NSString *tempDir = NSTemporaryDirectory();
+    NSString *backupDir = [tempDir stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
+
+    NSError *error = nil;
+    if (![fileManager createDirectoryAtPath:backupDir withIntermediateDirectories:YES attributes:nil error:&error]) {
+        [self showAlertWithTitle:@"Backup Failed" message:@"Could not create temporary directory."];
+        return;
+    }
+
+    NSString *mainDestPath = [backupDir stringByAppendingPathComponent:kMainPlistFilename];
+    if (![fileManager copyItemAtPath:mainPlistPath toPath:mainDestPath error:&error]) {
+        [self showAlertWithTitle:@"Backup Failed" message:@"Could not copy preferences file."];
+        return;
+    }
+
+    if ([fileManager fileExistsAtPath:groupPlistPath]) {
+        NSString *groupDestPath = [backupDir stringByAppendingPathComponent:kGroupPlistFilename];
+        [fileManager copyItemAtPath:groupPlistPath toPath:groupDestPath error:nil];
+
+        // Extract account usernames from group plist
+        NSDictionary *groupPrefs = [NSDictionary dictionaryWithContentsOfFile:groupPlistPath];
+        NSDictionary *accountDetails = groupPrefs[@"LoggedInAccountDetails"];
+        if (accountDetails && [accountDetails isKindOfClass:[NSDictionary class]] && accountDetails.count > 0) {
+            NSArray *usernames = [accountDetails allValues];
+            NSString *accountsContent = [usernames componentsJoinedByString:@"\n"];
+            NSString *accountsPath = [backupDir stringByAppendingPathComponent:kAccountsFilename];
+            [accountsContent writeToFile:accountsPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+    }
+
+    NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
+    dateFormatter.dateFormat = @"yyyy-MM-dd_HHmmss";
+    NSString *timestamp = [dateFormatter stringFromDate:[NSDate date]];
+    NSString *zipFilename = [NSString stringWithFormat:@"Apollo_Backup_%@.zip", timestamp];
+    NSString *zipPath = [tempDir stringByAppendingPathComponent:zipFilename];
+
+    BOOL success = [SSZipArchive createZipFileAtPath:zipPath withContentsOfDirectory:backupDir];
+    [fileManager removeItemAtPath:backupDir error:nil];
+
+    if (!success) {
+        [self showAlertWithTitle:@"Backup Failed" message:@"Could not create backup archive."];
+        return;
+    }
+
+    _isRestoreOperation = NO;
+    NSURL *zipURL = [NSURL fileURLWithPath:zipPath];
+    UIDocumentPickerViewController *documentPicker = [[UIDocumentPickerViewController alloc] initForExportingURLs:@[zipURL] asCopy:YES];
+    documentPicker.delegate = self;
+    documentPicker.modalPresentationStyle = UIModalPresentationFormSheet;
+    [self presentViewController:documentPicker animated:YES completion:nil];
+}
+
+- (void)restoreSettings {
+    _isRestoreOperation = YES;
+    UIDocumentPickerViewController *documentPicker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeZIP] asCopy:YES];
+    documentPicker.delegate = self;
+    documentPicker.modalPresentationStyle = UIModalPresentationFormSheet;
+    documentPicker.allowsMultipleSelection = NO;
+    [self presentViewController:documentPicker animated:YES completion:nil];
+}
+
+#pragma mark - UIDocumentPickerDelegate
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    if (urls.count == 0) {
+        return;
+    }
+
+    if (!_isRestoreOperation) {
+        NSString *filename = urls.firstObject.lastPathComponent;
+        NSString *message = [NSString stringWithFormat:@"Settings saved as: %@", filename];
+        [self showAlertWithTitle:@"Backup Complete" message:message];
+        return;
+    }
+
+    NSURL *selectedURL = urls.firstObject;
+    [self confirmRestoreWithURL:selectedURL];
+}
+
+- (void)confirmRestoreWithURL:(NSURL *)zipURL {
+    UIAlertController *confirmAlert = [UIAlertController alertControllerWithTitle:@"Confirm Restore"
+        message:@"This will replace all existing settings with the backup. This cannot be undone."
+        preferredStyle:UIAlertControllerStyleAlert];
+
+    UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
+    UIAlertAction *restoreAction = [UIAlertAction actionWithTitle:@"Restore" style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
+        [self restoreFromZipURL:zipURL];
+    }];
+
+    [confirmAlert addAction:cancelAction];
+    [confirmAlert addAction:restoreAction];
+    [self presentViewController:confirmAlert animated:YES completion:nil];
+}
+
+- (void)restoreFromZipURL:(NSURL *)zipURL {
+    [zipURL startAccessingSecurityScopedResource];
+
+    NSString *tempDir = NSTemporaryDirectory();
+    NSString *extractDir = [tempDir stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
+
+    NSError *error = nil;
+    BOOL success = [SSZipArchive unzipFileAtPath:zipURL.path toDestination:extractDir overwrite:YES password:nil error:&error];
+    [zipURL stopAccessingSecurityScopedResource];
+
+    if (!success) {
+        [self showAlertWithTitle:@"Restore Failed" message:@"Could not extract backup archive."];
+        return;
+    }
+
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSString *mainPlistBackupPath = [extractDir stringByAppendingPathComponent:kMainPlistFilename];
+
+    if (![fileManager fileExistsAtPath:mainPlistBackupPath]) {
+        [fileManager removeItemAtPath:extractDir error:nil];
+        [self showAlertWithTitle:@"Invalid Backup" message:@"The selected file is not a valid Apollo backup archive."];
+        return;
+    }
+
+    NSDictionary *mainPrefs = [NSDictionary dictionaryWithContentsOfFile:mainPlistBackupPath];
+    if (!mainPrefs) {
+        [fileManager removeItemAtPath:extractDir error:nil];
+        [self showAlertWithTitle:@"Invalid Backup" message:@"The preferences file in the backup is corrupted or invalid."];
+        return;
+    }
+
+    // Restore main preferences, skipping analytics/tracking keys
+    NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
+    [[NSUserDefaults standardUserDefaults] removePersistentDomainForName:bundleId];
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    for (NSString *key in mainPrefs) {
+        if ([key isEqualToString:@"BugsnagUserUserId"] || [key hasPrefix:@"com.Statsig."]) {
+            continue;
+        }
+        [defaults setObject:mainPrefs[key] forKey:key];
+    }
+    [defaults synchronize];
+
+    // Sync in-memory globals with restored values
+    sRedditClientId = [defaults stringForKey:UDKeyRedditClientId];
+    sImgurClientId = [defaults stringForKey:UDKeyImgurClientId];
+    sBlockAnnouncements = [defaults boolForKey:UDKeyBlockAnnouncements];
+    sTrendingSubredditsSource = [defaults stringForKey:UDKeyTrendingSubredditsSource];
+    sRandomSubredditsSource = [defaults stringForKey:UDKeyRandomSubredditsSource];
+    sRandNsfwSubredditsSource = [defaults stringForKey:UDKeyRandNsfwSubredditsSource];
+    sTrendingSubredditsLimit = [defaults stringForKey:UDKeyTrendingSubredditsLimit];
+
+    // Restore group preferences, preserving account state from current install
+    NSString *groupPlistBackupPath = [extractDir stringByAppendingPathComponent:kGroupPlistFilename];
+    if ([fileManager fileExistsAtPath:groupPlistBackupPath]) {
+        NSDictionary *groupPrefs = [NSDictionary dictionaryWithContentsOfFile:groupPlistBackupPath];
+        if (groupPrefs) {
+            NSUserDefaults *groupDefaults = [[NSUserDefaults alloc] initWithSuiteName:kGroupSuiteName];
+
+            for (NSString *key in groupPrefs) {
+                if ([key isEqualToString:@"LoggedInAccountDetails"] ||
+                    [key isEqualToString:@"CurrentRedditAccountIndex"] ||
+                    [key isEqualToString:@"RedditAccounts2"] ||
+                    [key isEqualToString:@"RedditApplicationOnlyAccount2"]) {
+                    continue;
+                }
+                [groupDefaults setObject:groupPrefs[key] forKey:key];
+            }
+            [groupDefaults synchronize];
+        }
+    }
+
+    [fileManager removeItemAtPath:extractDir error:nil];
+    [self showRestoreCompleteAlert];
+}
+
+- (void)showRestoreCompleteAlert {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Restore Complete"
+        message:@"Settings successfully restored. Apollo needs to restart to apply changes."
+        preferredStyle:UIAlertControllerStyleAlert];
+
+    UIAlertAction *quitAction = [UIAlertAction actionWithTitle:@"Close App" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        exit(0);
+    }];
+
+    [alert addAction:quitAction];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)showAlertWithTitle:(NSString *)title message:(NSString *)message {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+        message:message
+        preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil];
+    [alert addAction:okAction];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 @end
