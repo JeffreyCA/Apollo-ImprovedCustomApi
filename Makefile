@@ -9,9 +9,14 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = ApolloImprovedCustomApi
 
-ApolloImprovedCustomApi_FILES = Tweak.xm CustomAPIViewController.m DefaultSubreddits.m UIWindow+Apollo.m fishhook.c
-ApolloImprovedCustomApi_FRAMEWORKS = UIKit
-ApolloImprovedCustomApi_CFLAGS = -fobjc-arc -Wno-unguarded-availability-new -Wno-module-import-in-extern-c
+SSZIPARCHIVE_FILES = $(wildcard ZipArchive/SSZipArchive/*.m) \
+    $(wildcard ZipArchive/SSZipArchive/minizip/*.c) \
+    $(wildcard ZipArchive/SSZipArchive/minizip/compat/*.c)
+
+ApolloImprovedCustomApi_FILES = Tweak.xm CustomAPIViewController.m DefaultSubreddits.m UIWindow+Apollo.m fishhook.c $(SSZIPARCHIVE_FILES)
+ApolloImprovedCustomApi_FRAMEWORKS = UIKit Security
+ApolloImprovedCustomApi_LIBRARIES = z iconv
+ApolloImprovedCustomApi_CFLAGS = -fobjc-arc -Wno-unguarded-availability-new -Wno-module-import-in-extern-c -IZipArchive/SSZipArchive -IZipArchive/SSZipArchive/minizip -DHAVE_ARC4RANDOM_BUF -DHAVE_ICONV -DHAVE_INTTYPES_H -DHAVE_PKCRYPT -DHAVE_STDINT_H -DHAVE_WZAES -DHAVE_ZLIB -DZLIB_COMPAT
 
 ApolloImprovedCustomApi_OBJ_FILES = $(shell find ffmpeg-kit -name '*.a')
 

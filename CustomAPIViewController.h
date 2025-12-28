@@ -1,6 +1,8 @@
 #import <UIKit/UIKit.h>
 
-@interface CustomAPIViewController : UIViewController <UITextFieldDelegate>
+@interface CustomAPIViewController : UIViewController <UITextFieldDelegate, UIDocumentPickerDelegate> {
+    BOOL _isRestoreOperation;
+}
 @end
 
 NSString *sRedditClientId;

@@ -5,3 +5,6 @@
 [submodule "ffmpeg-kit"]
 	path = ffmpeg-kit
 	url = https://github.com/JeffreyCA/ffmpeg-kit-ios
+[submodule "ZipArchive"]
+	path = ZipArchive
+	url = https://github.com/ZipArchive/ZipArchive.git

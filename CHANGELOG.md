@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.3.0] - 2025-12-28
+
+- Backup and restore most Apollo and tweak settings (in Settings > General > Custom API)
+    - Settings are exported as a .zip file with 2 plist files: preferences.plist (most Apollo and tweak settings) and group.plist (filters, theme settings)
+    - Restoring settings **does not** restore or affect existing account logins. This means on a clean install, accounts need to be re-added manually. The backup .zip contains an accounts.txt with all account usernames for reference.
+- Update Custom API Settings layout
+
 ## [v1.2.6] - 2025-11-08
 
 - Fix video downloads failing on certain v.redd.it videos
@@ -135,6 +142,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v1.3.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.6...v1.3.0
 [v1.2.6]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.5...v1.2.6
 [v1.2.5]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.4...v1.2.5
 [v1.2.4]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.3...v1.2.4
