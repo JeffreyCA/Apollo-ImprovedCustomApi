@@ -15,7 +15,7 @@ concurrency:
 jobs:
   build:
     name: Build and release tweak
-    runs-on: macos-13
+    runs-on: macos-15
     permissions:
       contents: write
 
