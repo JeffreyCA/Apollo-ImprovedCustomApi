@@ -1309,7 +1309,7 @@ static char kASTableViewHasSearchToolbarKey;
         // Retroactively remove target UIView if already added
         for (UIView *existingSubview in [self.subviews copy]) {
             if ([NSStringFromClass([existingSubview class]) isEqualToString:@"UIView"]) {
-                ApolloLog(@"[ASTableView addSubview] Retroactively removing plain UIView");
+                ApolloLog(@"[ASTableView addSubview] Retroactively removing opaque UIView");
                 [existingSubview removeFromSuperview];
             }
         }
@@ -1320,7 +1320,7 @@ static char kASTableViewHasSearchToolbarKey;
     if ([className isEqualToString:@"UIView"]) {
         NSNumber *hasToolbar = objc_getAssociatedObject(self, &kASTableViewHasSearchToolbarKey);
         if ([hasToolbar boolValue]) {
-            ApolloLog(@"[ASTableView addSubview] Blocking plain UIView from being added");
+            ApolloLog(@"[ASTableView addSubview] Blocking opaque UIView from being added");
             return; // Don't call %orig - prevent the view from being added
         }
     }
