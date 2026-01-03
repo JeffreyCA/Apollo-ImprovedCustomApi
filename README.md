@@ -18,6 +18,7 @@ Apollo for Reddit with in-app configurable API keys and several fixes and improv
 - Support custom external sources for random and trending subreddits
 - Working v.redd.it video downloads
 - Backup and restore Apollo and tweak settings
+- Liquid Glass UI enhancements
 
 ## Known issues
 - Apollo Ultra features may cause app to crash 

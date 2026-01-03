@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.3.1] - 2026-01-03
+
+- Liquid Glass UI improvements and fixes:
+    - Restore long press gesture on account tab to open account switcher
+    - Fix opaque nav bar background in dark mode
+    - Fix dark band appearing in nav bar when scrolling
+    - Fix misaligned tab labels on startup
+
 ## [v1.3.0] - 2025-12-28
 
 - Backup and restore most Apollo and tweak settings (in Settings > General > Custom API)
@@ -142,6 +150,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v1.3.1]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.3.0...v1.3.1
 [v1.3.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.6...v1.3.0
 [v1.2.6]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.5...v1.2.6
 [v1.2.5]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.4...v1.2.5

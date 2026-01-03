@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <os/log.h>
+#import <mach-o/dyld.h>
+#import <mach-o/loader.h>
 
 #import "fishhook.h"
 #import "CustomAPIViewController.h"
@@ -19,6 +21,160 @@
     NSString *logMessage = [NSString stringWithFormat:@"[ApolloFix] " fmt, ##__VA_ARGS__]; \
     os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, "%{public}s", [logMessage UTF8String]); \
 } while(0)
+
+// Get the SDK version from the main binary's LC_BUILD_VERSION load command
+// Returns 0 if not found, otherwise packed version (major << 16 | minor << 8 | patch)
+static uint32_t GetLinkedSDKVersion(void) {
+    const struct mach_header_64 *header = (const struct mach_header_64 *)_dyld_get_image_header(0);
+    if (!header) return 0;
+    
+    uintptr_t cursor = (uintptr_t)header + sizeof(struct mach_header_64);
+    for (uint32_t i = 0; i < header->ncmds; i++) {
+        struct load_command *cmd = (struct load_command *)cursor;
+        if (cmd->cmd == LC_BUILD_VERSION) {
+            struct build_version_command *buildCmd = (struct build_version_command *)cmd;
+            return buildCmd->sdk;
+        }
+        cursor += cmd->cmdsize;
+    }
+    return 0;
+}
+
+// Check if Liquid Glass is active by checking if the app binary was linked against iOS 26+ SDK
+static BOOL IsLiquidGlass(void) {
+    static BOOL checked = NO;
+    static BOOL available = NO;
+
+    if (!checked) {
+        checked = YES;
+        // BOOL isiOS26Runtime = (objc_getClass("_UITabButton") != nil);
+        // if (!isiOS26Runtime) {
+        //     ApolloLog(@"[IsLiquidGlass] iOS 26+ runtime not detected");
+        //     available = NO;
+        //     return available;
+        // }
+
+        // iOS 26 SDK version = 19.0 = 0x00130000 (major 19 in high 16 bits)
+        // SDK version format: major << 16 | minor << 8 | patch
+        uint32_t sdkVersion = GetLinkedSDKVersion();
+        uint32_t sdkMajor = (sdkVersion >> 16) & 0xFFFF;
+        available = (sdkMajor >= 19);
+        
+        ApolloLog(@"[IsLiquidGlass] SDK version: 0x%08X (major: %u), linked for iOS 26+: %@", 
+                  sdkVersion, sdkMajor, available ? @"YES" : @"NO");
+    }
+    
+    return available;
+}
+
+/// Helpers for restoring long-press to activate account switcher w/ Liquid Glass
+static char kApolloTabButtonSetupKey;
+
+// Recursively collects all _UITabButton views from the view hierarchy
+static void CollectTabButtonsRecursive(UIView *root, NSMutableArray<UIView *> *buttons, Class tabButtonClass) {
+    if (!root) return;
+    if ([root isKindOfClass:tabButtonClass]) {
+        [buttons addObject:root];
+    }
+    for (UIView *child in root.subviews) {
+        CollectTabButtonsRecursive(child, buttons, tabButtonClass);
+    }
+}
+
+// Returns all tab buttons sorted by horizontal position (left to right)
+static NSArray<UIView *> *OrderedTabButtonsInTabBar(UITabBar *tabBar) {
+    if (!tabBar) return @[];
+
+    NSMutableArray<UIView *> *buttons = [NSMutableArray array];
+    CollectTabButtonsRecursive(tabBar, buttons, objc_getClass("_UITabButton"));
+    
+    return [buttons sortedArrayUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
+        CGFloat ax = [a convertRect:a.bounds toView:tabBar].origin.x;
+        CGFloat bx = [b convertRect:b.bounds toView:tabBar].origin.x;
+        if (ax < bx) return NSOrderedAscending;
+        if (ax > bx) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+}
+
+// Actual tab indices are: 1, 3, 5, 7, 9 due to multiple _UITabButton views per tab. This converts them to logical indices: 0, 1, 2, 3, 4
+static NSUInteger LogicalTabIndexForButton(UITabBar *tabBar, NSArray<UIView *> *orderedButtons, UIView *button) {
+    if (!tabBar || !orderedButtons.count || !button) {
+        return NSNotFound;
+    }
+
+    NSUInteger physicalIndex = [orderedButtons indexOfObjectIdenticalTo:button];
+    if (physicalIndex == NSNotFound) {
+        return NSNotFound;
+    }
+
+    NSUInteger itemsCount = tabBar.items.count;
+    if (itemsCount > 0 && orderedButtons.count >= itemsCount && (orderedButtons.count % itemsCount) == 0) {
+        NSUInteger groupSize = orderedButtons.count / itemsCount;
+        return physicalIndex / groupSize;
+    }
+
+    return physicalIndex;
+}
+
+// Walks up the view hierarchy to find the containing UITabBar
+static UITabBar *FindAncestorTabBar(UIView *view) {
+    while (view && ![view isKindOfClass:[UITabBar class]]) {
+        view = view.superview;
+    }
+    return (UITabBar *)view;
+}
+
+// Opens Apollo's account switcher by invoking ProfileViewController's bar button action
+static void OpenAccountManager(void) {
+    __block UIWindow *lastKeyWindow = nil;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]]) {
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            if (windowScene.keyWindow) {
+                lastKeyWindow = windowScene.keyWindow;
+            }
+        }
+    }
+
+    if (!lastKeyWindow) {
+        return;
+    }
+
+    Class profileVCClass = objc_getClass("Apollo.ProfileViewController");
+    UIViewController *rootVC = lastKeyWindow.rootViewController;
+
+    UITabBarController *tabBarController = nil;
+    if ([rootVC isKindOfClass:[UITabBarController class]]) {
+        tabBarController = (UITabBarController *)rootVC;
+    } else if (rootVC.presentedViewController && [rootVC.presentedViewController isKindOfClass:[UITabBarController class]]) {
+        tabBarController = (UITabBarController *)rootVC.presentedViewController;
+    }
+
+    UIViewController *profileVC = nil;
+    if (tabBarController) {
+        for (UIViewController *vc in tabBarController.viewControllers) {
+            if ([vc isKindOfClass:[UINavigationController class]]) {
+                UINavigationController *navController = (UINavigationController *)vc;
+                // Search through the entire navigation stack, not just topViewController
+                for (UIViewController *stackVC in navController.viewControllers) {
+                    if ([stackVC isKindOfClass:profileVCClass]) {
+                        profileVC = stackVC;
+                        break;
+                    }
+                }
+                if (profileVC) break;
+            } else if ([vc isKindOfClass:profileVCClass]) {
+                profileVC = vc;
+                break;
+            }
+        }
+    }
+
+    if (profileVC && [profileVC respondsToSelector:@selector(accountsBarButtonItemTappedWithSender:)]) {
+        [profileVC performSelector:@selector(accountsBarButtonItemTappedWithSender:) withObject:nil];
+    }
+}
 
 // Sideload fixes
 static NSDictionary *stripGroupAccessAttr(CFDictionaryRef attributes) {
@@ -1048,6 +1204,128 @@ static void initializeRandomSources() {
 - (void) dealloc {
     %orig;
     [[NSUserDefaults standardUserDefaults] removeObserver:self forKeyPath:UDKeyApolloPostCommentsSnapshots];
+}
+
+%end
+
+// Cancel Liquid Lens gesture recognizer to prevent it interfering with our long-press gesture
+static void ApolloCancelLiquidLensGesture(UITabBar *tabBar) {
+    for (UIGestureRecognizer *gesture in tabBar.gestureRecognizers) {
+        if ([gesture isKindOfClass:NSClassFromString(@"_UIContinuousSelectionGestureRecognizer")]) {
+            gesture.enabled = NO;
+            gesture.enabled = YES;
+            return;
+        }
+    }
+}
+
+@interface _UITabButton : UIView
+@property (nonatomic, getter=isHighlighted) BOOL highlighted;
+@end
+
+@interface _UIBarBackground : UIView
+@end
+
+%hook _UITabButton
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (!self.window) return;
+    if (objc_getAssociatedObject(self, &kApolloTabButtonSetupKey)) return;
+    objc_setAssociatedObject(self, &kApolloTabButtonSetupKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    // Restore account tab long-press gesture
+    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc]
+        initWithTarget:self action:@selector(apollo_tabButtonLongPressed:)];
+    longPress.minimumPressDuration = 0.5;
+    longPress.delegate = (id<UIGestureRecognizerDelegate>)self;
+    [(UIView *)self addGestureRecognizer:longPress];
+
+    // Toggle 'highlighted' to trigger Liquid Glass tab bar to re-layout labels correctly
+    BOOL wasHighlighted = self.highlighted;
+    self.highlighted = YES;
+    self.highlighted = wasHighlighted;
+}
+
+%new
+- (void)apollo_tabButtonLongPressed:(UILongPressGestureRecognizer *)recognizer {
+    if (recognizer.state != UIGestureRecognizerStateBegan) {
+        return;
+    }
+
+    UITabBar *tabBar = FindAncestorTabBar(self);
+    NSArray<UIView *> *orderedButtons = OrderedTabButtonsInTabBar(tabBar);
+    NSUInteger index = LogicalTabIndexForButton(tabBar, orderedButtons, self);
+
+    if (index == 2) { // Profile tab
+        ApolloCancelLiquidLensGesture(tabBar);
+        OpenAccountManager();
+    }
+}
+
+%new
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return YES;
+}
+
+%end
+
+// Fix opaque navigation bar background in dark mode on iOS 26 Liquid Glass
+%hook _UIBarBackground
+
+- (void)didAddSubview:(UIView *)subview {
+    %orig;
+    if (!IsLiquidGlass()) return;
+
+    if ([subview isKindOfClass:[UIImageView class]]) {
+        subview.hidden = YES;
+    }
+}
+
+%end
+
+@interface ASTableView : UITableView
+@end
+
+static char kASTableViewHasSearchToolbarKey;
+
+%hook ASTableView
+
+// Prevent opaque view from being added when search bar folds into nav bar w/ Liquid Glass
+- (void)addSubview:(UIView *)subview {
+    if (!IsLiquidGlass()) {
+        %orig;
+        return;
+    }
+
+    NSString *className = NSStringFromClass([subview class]);
+
+    // Track if table view contains a search toolbar
+    if ([className containsString:@"ApolloSearchToolbar"]) {
+        objc_setAssociatedObject(self, &kASTableViewHasSearchToolbarKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        %orig;
+
+        // Retroactively remove target UIView if already added
+        for (UIView *existingSubview in [self.subviews copy]) {
+            if ([NSStringFromClass([existingSubview class]) isEqualToString:@"UIView"]) {
+                ApolloLog(@"[ASTableView addSubview] Retroactively removing opaque UIView");
+                [existingSubview removeFromSuperview];
+            }
+        }
+        return;
+    }
+
+    // Prevent target UIView from being added if search toolbar is present
+    if ([className isEqualToString:@"UIView"]) {
+        NSNumber *hasToolbar = objc_getAssociatedObject(self, &kASTableViewHasSearchToolbarKey);
+        if ([hasToolbar boolValue]) {
+            ApolloLog(@"[ASTableView addSubview] Blocking opaque UIView from being added");
+            return; // Don't call %orig - prevent the view from being added
+        }
+    }
+
+    %orig;
 }
 
 %end
