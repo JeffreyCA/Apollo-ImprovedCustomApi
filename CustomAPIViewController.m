@@ -1,6 +1,7 @@
 #import "CustomAPIViewController.h"
 #import "UserDefaultConstants.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <objc/runtime.h>
 #import "B64ImageEncodings.h"
 #import "Version.h"
 #import "DefaultSubreddits.h"
@@ -45,10 +46,6 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (UIButton *)creditsButton:(NSString *)labelText subtitle:(NSString *)subtitle linkURL:(NSURL *)linkURL b64Image:(NSString *)b64Image {
-    UIButtonConfiguration *buttonConfiguration = [UIButtonConfiguration grayButtonConfiguration];
-    buttonConfiguration.imagePadding = 15;
-    buttonConfiguration.subtitle = subtitle;
-
     UIImage *image = [self decodeBase64ToImage:b64Image];
 
     const CGFloat imageSize = 40;
@@ -58,14 +55,33 @@ typedef NS_ENUM(NSInteger, Tag) {
         [image drawInRect:CGRectMake(0, 0, imageSize, imageSize)];
     }];
 
-    // Create the button with the specified label text, image, and link URL
-    UIButton *button = [UIButton buttonWithConfiguration:buttonConfiguration primaryAction:
-        [UIAction actionWithTitle:labelText image:smallImage identifier:nil handler:^(UIAction * action) {
-            [UIApplication.sharedApplication openURL:linkURL options:@{} completionHandler:nil];
-        }]
-    ];
-    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    UIButton *button;
+    if (@available(iOS 15.0, *)) {
+        UIButtonConfiguration *buttonConfiguration = [UIButtonConfiguration grayButtonConfiguration];
+        buttonConfiguration.imagePadding = 15;
+        buttonConfiguration.subtitle = subtitle;
+
+        button = [UIButton buttonWithConfiguration:buttonConfiguration primaryAction:
+            [UIAction actionWithTitle:labelText image:smallImage identifier:nil handler:^(UIAction * action) {
+                [UIApplication.sharedApplication openURL:linkURL options:@{} completionHandler:nil];
+            }]
+        ];
+        button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    } else {
+        // Fallback for iOS 14 and earlier - simple text button
+        button = [UIButton buttonWithType:UIButtonTypeSystem];
+        [button setTitle:[NSString stringWithFormat:@"%@ - %@", labelText, subtitle] forState:UIControlStateNormal];
+        [button addTarget:self action:@selector(openCreditsLink:) forControlEvents:UIControlEventTouchUpInside];
+        objc_setAssociatedObject(button, @selector(openCreditsLink:), linkURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
     return button;
+}
+
+- (void)openCreditsLink:(UIButton *)sender {
+    NSURL *linkURL = objc_getAssociatedObject(sender, @selector(openCreditsLink:));
+    if (linkURL) {
+        [UIApplication.sharedApplication openURL:linkURL options:@{} completionHandler:nil];
+    }
 }
 
 - (UIStackView *)createLabeledStackViewWithLabelText:(NSString *)labelText placeholder:(NSString *)placeholder text:(NSString *)text tag:(NSInteger)tag isNumerical:(BOOL)isNumerical {
@@ -266,41 +282,58 @@ typedef NS_ENUM(NSInteger, Tag) {
     textView.editable = NO;
     textView.scrollEnabled = NO;
 
-    NSAttributedStringMarkdownParsingOptions *markdownOptions = [[NSAttributedStringMarkdownParsingOptions alloc] init];
-    markdownOptions.interpretedSyntax = NSAttributedStringMarkdownInterpretedSyntaxInlineOnly;
+    if (@available(iOS 15.0, *)) {
+        NSString *instructionsText =
+            @"**Creating a Reddit API credential:**\n"
+            @"*You may need to sign out of all accounts in Apollo*\n\n"
+            @"1. Sign into your Reddit account and go to the link above ([reddit.com/prefs/apps](https://reddit.com/prefs/apps))\n"
+            @"2. Click the \"`are you a developer? create an app...`\" button\n"
+            @"3. Fill in the fields \n\t- Name: *anything* \n\t- Choose \"`Installed App`\" \n\t- Description: *anything*\n\t- About url: *anything* \n\t- Redirect uri: `apollo://reddit-oauth`\n"
+            @"4. Click \"`create app`\"\n"
+            @"5. After creating the app you'll get a client identifier which will be a bunch of random characters. **Enter the key above**.\n"
+            @"\n"
+            @"**Creating an Imgur API credential:**\n"
+            @"1. Sign into your Imgur account and go to the link above ([api.imgur.com/oauth2/addclient](https://api.imgur.com/oauth2/addclient))\n"
+            @"2. Fill in the fields \n\t- Application name: *anything* \n\t- Authorization type: `OAuth 2 auth with a callback URL` \n\t- Authorization callback URL: `https://www.getpostman.com/oauth2/callback`\n\t- Email: *your email* \n\t- Description: *anything*\n"
+            @"3. Click \"`submit`\"\n"
+            @"4. Enter the **Client ID** (not the client secret) above.";
 
-    textView.attributedText = [[NSAttributedString alloc] initWithMarkdownString:
-        @"**Creating a Reddit API credential:**\n"
-        @"*You may need to sign out of all accounts in Apollo*\n\n"
-        @"1. Sign into your Reddit account and go to the link above ([reddit.com/prefs/apps](https://reddit.com/prefs/apps))\n"
-        @"2. Click the \"`are you a developer? create an app...`\" button\n"
-        @"3. Fill in the fields \n\t- Name: *anything* \n\t- Choose \"`Installed App`\" \n\t- Description: *anything*\n\t- About url: *anything* \n\t- Redirect uri: `apollo://reddit-oauth`\n"
-        @"4. Click \"`create app`\"\n"
-        @"5. After creating the app you'll get a client identifier which will be a bunch of random characters. **Enter the key above**.\n"
-        @"\n"
-        @"**Creating an Imgur API credential:**\n"
-        @"1. Sign into your Imgur account and go to the link above ([api.imgur.com/oauth2/addclient](https://api.imgur.com/oauth2/addclient))\n"
-        @"2. Fill in the fields \n\t- Application name: *anything* \n\t- Authorization type: `OAuth 2 auth with a callback URL` \n\t- Authorization callback URL: `https://www.getpostman.com/oauth2/callback`\n\t- Email: *your email* \n\t- Description: *anything*\n"
-        @"3. Click \"`submit`\"\n"
-        @"4. Enter the **Client ID** (not the client secret) above."
+        NSAttributedStringMarkdownParsingOptions *markdownOptions = [[NSAttributedStringMarkdownParsingOptions alloc] init];
+        markdownOptions.interpretedSyntax = NSAttributedStringMarkdownInterpretedSyntaxInlineOnly;
+        textView.attributedText = [[NSAttributedString alloc] initWithMarkdownString:instructionsText options:markdownOptions baseURL:nil error:nil];
 
-    options:markdownOptions baseURL:nil error:nil];
+        // Increase font size for markdown text
+        NSMutableAttributedString *attributedText = [textView.attributedText mutableCopy];
+        [attributedText enumerateAttribute:NSFontAttributeName inRange:NSMakeRange(0, attributedText.length) options:0 usingBlock:^(id value, NSRange range, BOOL *stop) {
+            UIFont *oldFont = (UIFont *)value;
 
-    // Increase font size
-    NSMutableAttributedString *attributedText = [textView.attributedText mutableCopy];
-    [attributedText enumerateAttribute:NSFontAttributeName inRange:NSMakeRange(0, attributedText.length) options:0 usingBlock:^(id value, NSRange range, BOOL *stop) {
-        UIFont *oldFont = (UIFont *)value;
-
-        if (oldFont == nil) {
-            UIFont *newFont = [UIFont systemFontOfSize:15];
-            [attributedText addAttribute:NSFontAttributeName value:newFont range:range];
-        } else {
-            UIFont *newFont = [oldFont fontWithSize:15];
-            [attributedText addAttribute:NSFontAttributeName value:newFont range:range];
-        }
-    }];
-
-    textView.attributedText = attributedText;
+            if (oldFont == nil) {
+                UIFont *newFont = [UIFont systemFontOfSize:15];
+                [attributedText addAttribute:NSFontAttributeName value:newFont range:range];
+            } else {
+                UIFont *newFont = [oldFont fontWithSize:15];
+                [attributedText addAttribute:NSFontAttributeName value:newFont range:range];
+            }
+        }];
+        textView.attributedText = attributedText;
+    } else {
+        // Fallback for iOS 14 and earlier - plain text without markdown
+        textView.font = [UIFont systemFontOfSize:15];
+        textView.text =
+            @"Creating a Reddit API credential:\n"
+            @"You may need to sign out of all accounts in Apollo\n\n"
+            @"1. Sign into your Reddit account and go to the link above (reddit.com/prefs/apps)\n"
+            @"2. Click the \"are you a developer? create an app...\" button\n"
+            @"3. Fill in the fields \n\t- Name: anything \n\t- Choose \"Installed App\" \n\t- Description: anything\n\t- About url: anything \n\t- Redirect uri: apollo://reddit-oauth\n"
+            @"4. Click \"create app\"\n"
+            @"5. After creating the app you'll get a client identifier which will be a bunch of random characters. Enter the key above.\n"
+            @"\n"
+            @"Creating an Imgur API credential:\n"
+            @"1. Sign into your Imgur account and go to the link above (api.imgur.com/oauth2/addclient)\n"
+            @"2. Fill in the fields \n\t- Application name: anything \n\t- Authorization type: OAuth 2 auth with a callback URL \n\t- Authorization callback URL: https://www.getpostman.com/oauth2/callback\n\t- Email: your email \n\t- Description: anything\n"
+            @"3. Click \"submit\"\n"
+            @"4. Enter the Client ID (not the client secret) above.";
+    }
     textView.textColor = UIColor.labelColor;
 
     [textView sizeToFit];
