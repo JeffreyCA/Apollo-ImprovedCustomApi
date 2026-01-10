@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.4.0] - 2026-01-10
+
+- Support custom redirect URI and user agent (in Settings > General > Custom API)
+- Liquid Glass: fix sort options alignment in comment view
+
 ## [v1.3.2] - 2026-01-07
 
 - Fix crashes in Custom API settings on older iOS versions
@@ -154,6 +159,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v1.4.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.3.2...v1.4.0
 [v1.3.2]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.3.1...v1.3.2
 [v1.3.1]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.3.0...v1.3.1
 [v1.3.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.2.6...v1.3.0

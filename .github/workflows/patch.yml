@@ -1,10 +1,9 @@
-name: Enable Liquid Glass (iOS 26 only)
+name: Patch IPA
 
-# NOTE: This workflow only patches the Apollo IPA to enable Liquid Glass on iOS 26.
-# It does NOT inject the tweak into the IPA.
-#
-# Credit for the patching method goes to @ryannair05:
-# https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/issues/63
+# Generic IPA patching workflow (DOES NOT inject the tweak)
+# Supports:
+# - Liquid Glass patch for iOS 26 (credit to @ryannair05: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/issues/63)
+# - Custom URL schemes injection for OAuth redirects
 
 on:
   workflow_dispatch:
@@ -19,6 +18,15 @@ on:
         type: string
       artifact_filename:
         description: 'Filename of the Apollo IPA artifact from the release'
+        required: false
+        type: string
+      liquid_glass:
+        description: 'Apply Liquid Glass patch (iOS 26 only)'
+        required: false
+        type: boolean
+        default: false
+      url_schemes:
+        description: 'Comma-separated URL schemes to add (e.g. "custom, test, myapp")'
         required: false
         type: string
       remove_code_signature:
@@ -37,18 +45,29 @@ jobs:
     - name: Check out repository
       uses: actions/checkout@v4
 
+    - name: Validate inputs
+      run: |
+        if [ -z "${{ github.event.inputs.apollo_ipa_url }}" ] && [ -z "${{ github.event.inputs.release_tag }}" ]; then
+          echo "Error: Either 'apollo_ipa_url' or 'release_tag' must be provided."
+          exit 1
+        fi
+        if [ -n "${{ github.event.inputs.release_tag }}" ] && [ -z "${{ github.event.inputs.artifact_filename }}" ]; then
+          echo "Error: 'artifact_filename' is required when using 'release_tag'."
+          exit 1
+        fi
+
     - name: Download and Verify Apollo IPA from URL
       if: github.event.inputs.apollo_ipa_url != ''
       run: |
         echo "Downloading Apollo IPA from: ${{ github.event.inputs.apollo_ipa_url }}"
         curl -L --fail "${{ github.event.inputs.apollo_ipa_url }}" -o Apollo.ipa
-        
+
         echo "Verifying downloaded file..."
         if ! unzip -t Apollo.ipa > /dev/null; then
           echo "Error: Downloaded file is not a valid IPA (zip archive) or is corrupted."
           exit 1
         fi
-        
+
         file_size=$(wc -c < Apollo.ipa)
         echo "Downloaded Apollo.ipa size: ${file_size} bytes"
 
@@ -79,19 +98,49 @@ jobs:
         fi
         file_size=$(wc -c < Apollo.ipa)
         echo "Downloaded Apollo.ipa size: ${file_size} bytes"
-        
+
+    - name: Build output filename
+      id: build_filename
+      run: |
+        # Build a descriptive output filename based on patches applied
+        SUFFIX=""
+        if [ "${{ github.event.inputs.liquid_glass }}" == "true" ]; then
+          SUFFIX="${SUFFIX}-LiquidGlass"
+        fi
+        if [ -n "${{ github.event.inputs.url_schemes }}" ]; then
+          SUFFIX="${SUFFIX}-URLSchemes"
+        fi
+        if [ -z "$SUFFIX" ]; then
+          SUFFIX="-Patched"
+        fi
+        OUTPUT_NAME="Apollo${SUFFIX}.ipa"
+        echo "output_name=${OUTPUT_NAME}" >> $GITHUB_OUTPUT
+        echo "Output filename: ${OUTPUT_NAME}"
+
     - name: Patch IPA using script
       id: patch_script
       run: |
-        chmod +x ./liquid_glass.sh
-        OUTPUT_IPA_NAME="Apollo-Patched.ipa"
-        
-        if [ "${{ github.event.inputs.remove_code_signature }}" == "true" ]; then
-          ./liquid_glass.sh Apollo.ipa -o "${OUTPUT_IPA_NAME}" --remove-code-signature
-        else
-          ./liquid_glass.sh Apollo.ipa -o "${OUTPUT_IPA_NAME}"
+        chmod +x ./patch.sh
+        OUTPUT_IPA_NAME="${{ steps.build_filename.outputs.output_name }}"
+
+        # Build command arguments
+        CMD_ARGS="Apollo.ipa -o ${OUTPUT_IPA_NAME}"
+
+        if [ "${{ github.event.inputs.liquid_glass }}" == "true" ]; then
+          CMD_ARGS="${CMD_ARGS} --liquid-glass"
         fi
-        
+
+        if [ -n "${{ github.event.inputs.url_schemes }}" ]; then
+          CMD_ARGS="${CMD_ARGS} --url-schemes '${{ github.event.inputs.url_schemes }}'"
+        fi
+
+        if [ "${{ github.event.inputs.remove_code_signature }}" == "true" ]; then
+          CMD_ARGS="${CMD_ARGS} --remove-code-signature"
+        fi
+
+        echo "Running: ./patch.sh ${CMD_ARGS}"
+        eval "./patch.sh ${CMD_ARGS}"
+
         echo "patched_ipa_name=${OUTPUT_IPA_NAME}" >> $GITHUB_OUTPUT
 
     - name: Upload IPA Artifact
@@ -100,12 +149,31 @@ jobs:
         name: ${{ steps.patch_script.outputs.patched_ipa_name }}
         path: ${{ steps.patch_script.outputs.patched_ipa_name }}
 
+    - name: Build release name
+      id: release_name
+      run: |
+        # Build a descriptive release name based on patches applied
+        PATCHES=""
+        if [ "${{ github.event.inputs.liquid_glass }}" == "true" ]; then
+          PATCHES="${PATCHES}Liquid Glass"
+        fi
+        if [ -n "${{ github.event.inputs.url_schemes }}" ]; then
+          if [ -n "$PATCHES" ]; then
+            PATCHES="${PATCHES} + "
+          fi
+          PATCHES="${PATCHES}URL Schemes"
+        fi
+        if [ -z "$PATCHES" ]; then
+          PATCHES="Patched"
+        fi
+        echo "patches=${PATCHES}" >> $GITHUB_OUTPUT
+
     - name: Create release
       uses: softprops/action-gh-release@v2.0.8
       with:
         draft: true
-        tag_name: apollo-liquid-glass-${{ github.run_number }}
-        name: Apollo (Liquid Glass patch) - Build ${{ github.run_number }}
+        tag_name: apollo-patched-${{ github.run_number }}
+        name: Apollo (${{ steps.release_name.outputs.patches }}) - Build ${{ github.run_number }}
         files: |
           ${{ steps.patch_script.outputs.patched_ipa_name }}
         prerelease: false

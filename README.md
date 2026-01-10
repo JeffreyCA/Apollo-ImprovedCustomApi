@@ -7,13 +7,13 @@ Apollo for Reddit with in-app configurable API keys and several fixes and improv
 
 ## Features
 - Use Apollo for Reddit with your own Reddit and Imgur API keys
+- Customizable redirect URI and user agent
 - Working Imgur integration (view, delete, and upload single images and multi-image albums) 
 - Handle x.com links as Twitter links so that they can be opened in the Twitter app
 - Suppress unwanted messages on app startup (wallpaper popup, in-app announcements, etc)
 - Support /s/ share links (reddit.com/r/subreddit/s/xxxxxx) natively
 - Support media share links (reddit.com/media?url=) natively
 - Working "New Comments Highlightifier" Ultra feature (must enable in Custom API settings)
-- Use generic user agent for requests to Reddit
 - FLEX debugging
 - Support custom external sources for random and trending subreddits
 - Working v.redd.it video downloads
@@ -34,24 +34,64 @@ One source where you can get the fully tweaked IPA is [Balackburn/Apollo](https:
 
 I recommend using the [Open-In-Apollo](https://github.com/AnthonyGress/Open-In-Apollo) userscript to automatically open Reddit links in Apollo. It has enhanced search engine integration so Reddit links on search result pages (Google, Bing, etc.) open directly in Apollo without first redirecting to reddit.com.
 
-## iOS 26 Liquid Glass Patch
-To enable Liquid Glass in Apollo on iOS 26, the IPA can be patched using the `liquid_glass.sh` script or GitHub Action.
+## Patching IPA
+
+The `patch.sh` script and **Patch IPA** GitHub Action can be used to apply optional patches to Apollo IPAs:
+
+| Patch | Description |
+|-------|-------------|
+| **Liquid Glass** | Enables Liquid Glass UI on iOS 26 |
+| **Custom URL Schemes** | Adds custom redirect URI schemes for OAuth login |
 
 > [!NOTE]
-> This **does not** inject the tweak itself; it only enables Liquid Glass. This supports both non-tweaked and tweaked Apollo IPAs.
+> These patches **do not** inject the tweak itself. They work with both stock and tweaked Apollo IPAs.
 >
-> Credit for the patching method goes to [@ryannair05](https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/issues/63).
+> Credit for the Liquid Glass patching method goes to [@ryannair05](https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/issues/63).
 
-### 1. Local Script
-Run the `liquid_glass.sh` script to patch the IPA on your machine.
+### Local Script
+
 ```bash
-./liquid_glass.sh <path_to_ipa> [--remove-code-signature] [-o|--output <output_file>]
+./patch.sh <path_to_ipa> [options]
 ```
 
-### 2. GitHub Action
-Fork this repo and navigate to the **Actions** tab. Run the **Enable Liquid Glass (iOS 26 only)** workflow.
+**Options:**
+| Option | Description |
+|--------|-------------|
+| `--liquid-glass` | Apply Liquid Glass patch for iOS 26 |
+| `--url-schemes <schemes>` | Comma-separated URL schemes to add (e.g., `custom,myapp`) |
+| `--remove-code-signature` | Remove code signature from the binary |
+| `-o, --output <file>` | Output filename (default: `Apollo-Patched.ipa`) |
 
-You can provide the IPA via a direct URL or reference a GitHub release artifact. The workflow will create a draft release with the patched IPA.
+### GitHub Action
+
+Fork this repo and navigate to **Actions** > **Patch IPA**. The workflow accepts:
+
+- **IPA source**: Direct URL or a release artifact from this repository
+- **Liquid Glass**: Enable/disable the iOS 26 patch
+- **URL Schemes**: Comma-separated list of schemes to add (e.g., `custom,test`)
+- **Remove Code Signature**: Optionally strip the code signature
+
+The workflow creates a draft release with the patched IPA.
+
+## Custom Redirect URI
+
+To use a custom redirect URI (e.g. `custom://reddit-oauth`), you'll need to also patch the IPA's `Info.plist` file and add the URI scheme (the part before `://`) to `CFBundleURLSchemes`. Otherwise, you won't be able to login to accounts.
+
+```xml
+<key>CFBundleURLTypes</key>
+<array>
+  <dict>
+    <key>CFBundleURLSchemes</key>
+    <array>
+      <string>twitterkit-xyz</string>
+      <string>apollo</string>
+      <string>custom</string> <!-- add if you want to use custom://reddit-oauth -->
+    </array>
+  </dict>
+</array>
+```
+
+You can use `patch.sh` or the GitHub action mentioned above to do this.
 
 ## Sideloadly
 Recommended configuration:

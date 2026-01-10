@@ -7,6 +7,8 @@
 
 NSString *sRedditClientId;
 NSString *sImgurClientId;
+NSString *sRedirectURI;
+NSString *sUserAgent;
 NSString *sRandomSubredditsSource;
 NSString *sRandNsfwSubredditsSource;
 NSString *sTrendingSubredditsSource;

@@ -1,6 +1,8 @@
 // UserDefaults keys
 static NSString *const UDKeyRedditClientId = @"RedditApiClientId";
 static NSString *const UDKeyImgurClientId = @"ImgurApiClientId";
+static NSString *const UDKeyRedirectURI = @"RedirectURI";
+static NSString *const UDKeyUserAgent = @"UserAgent";
 static NSString *const UDKeyBlockAnnouncements = @"DisableApollonouncements";
 static NSString *const UDKeyEnableFLEX = @"EnableFlexDebugging";
 static NSString *const UDKeyShowRandNsfw = @"ShowRandNsfwButton";
