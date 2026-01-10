@@ -1,4 +1,4 @@
-name: Patch IPA
+name: Patch IPA (does not inject tweak)
 
 # Generic IPA patching workflow (DOES NOT inject the tweak)
 # Supports:
