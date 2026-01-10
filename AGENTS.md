@@ -22,7 +22,7 @@ The Makefile automatically generates `Version.h` from the `control` file and lin
 |------|---------|
 | `Tweak.xm` / `Tweak.h` | Main tweak logic using Logos syntax for method hooking |
 | `CustomAPIViewController.{h,m}` | Settings UI for API keys and tweak options |
-| `DefaultSubreddits.{h,m}` | Custom subreddit source functionality |
+| `Defaults.{h,m}` | Default values |
 | `UserDefaultConstants.h` | NSUserDefaults key constants |
 | `UIWindow+Apollo.{h,m}` | Apollo app window extensions |
 | `fishhook.{c,h}` | Runtime function hooking for Security framework workarounds |

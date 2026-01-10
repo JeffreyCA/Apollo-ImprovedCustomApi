@@ -9,7 +9,7 @@
 #import "Tweak.h"
 #import "UIWindow+Apollo.h"
 #import "UserDefaultConstants.h"
-#import "DefaultSubreddits.h"
+#import "Defaults.h"
 
 #import "ffmpeg-kit/ffmpeg-kit/include/MediaInformationSession.h"
 #import "ffmpeg-kit/ffmpeg-kit/include/MediaInformation.h"
@@ -211,8 +211,6 @@ static NSArray *const blockedUrls = @[
     @"apollogur.download/api/refund_screen_config",
     @"apollogur.download/api/goodbye_wallpaper"
 ];
-
-static NSString *const defaultUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36";
 
 // Highlight color for new unread comments
 static UIColor *const NewPostCommentsColor = [UIColor colorWithRed: 1.00 green: 0.82 blue: 0.43 alpha: 0.15];
@@ -780,8 +778,21 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
     return sRedditClientId;
 }
 
+- (NSURL *)redirectURI {
+    NSString *customURI = [sRedirectURI length] > 0 ? sRedirectURI : defaultRedirectURI;
+    return [NSURL URLWithString:customURI];
+}
+
 %end
 
+%hook RDKClient
+
+- (NSString *)userAgent {
+    NSString *customUA = [sUserAgent length] > 0 ? sUserAgent : defaultUserAgent;
+    return customUA;
+}
+
+%end
 
 // Randomise the trending subreddits list
 %hook NSBundle
@@ -1104,7 +1115,8 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
         [self setValue:mutableRequest forKey:@"_currentRequest"];
     } else if ([requestURL.host isEqualToString:@"oauth.reddit.com"] || [requestURL.host isEqualToString:@"www.reddit.com"]) {
         NSMutableURLRequest *mutableRequest = [request mutableCopy];
-        [mutableRequest setValue:defaultUserAgent forHTTPHeaderField:@"User-Agent"];
+        NSString *customUA = [sUserAgent length] > 0 ? sUserAgent : defaultUserAgent;
+        [mutableRequest setValue:customUA forHTTPHeaderField:@"User-Agent"];
         [self setValue:mutableRequest forKey:@"_originalRequest"];
         [self setValue:mutableRequest forKey:@"_currentRequest"];
     }
@@ -1226,6 +1238,9 @@ static void ApolloCancelLiquidLensGesture(UITabBar *tabBar) {
 @interface _UIBarBackground : UIView
 @end
 
+@interface _UITAMICAdaptorView : UIView
+@end
+
 %hook _UITabButton
 
 - (void)didMoveToWindow {
@@ -1280,6 +1295,34 @@ static void ApolloCancelLiquidLensGesture(UITabBar *tabBar) {
 
     if ([subview isKindOfClass:[UIImageView class]]) {
         subview.hidden = YES;
+    }
+}
+
+%end
+
+// Fix nav bar button height misalignment on iOS 26 Liquid Glass
+// UIButtons inside _UITAMICAdaptorView can be taller than their parent
+%hook _UITAMICAdaptorView
+
+- (void)layoutSubviews {
+    %orig;
+    if (!IsLiquidGlass()) return;
+
+    // Find the direct UIView child and fix UIButton heights within it
+    for (UIView *child in self.subviews) {
+        if (![NSStringFromClass([child class]) isEqualToString:@"UIView"]) continue;
+
+        CGFloat parentHeight = child.bounds.size.height;
+        for (UIView *subview in child.subviews) {
+            if (![subview isKindOfClass:[UIButton class]]) continue;
+
+            // Fix button height to match parent
+            if (subview.bounds.size.height != parentHeight) {
+                CGRect frame = subview.frame;
+                frame.size.height = parentHeight;
+                subview.frame = frame;
+            }
+        }
     }
 }
 
@@ -1345,6 +1388,8 @@ static char kASTableViewHasSearchToolbarKey;
 
     sRedditClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedditClientId] ?: @"" copy];
     sImgurClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyImgurClientId] ?: @"" copy];
+    sRedirectURI = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedirectURI] ?: @"" copy];
+    sUserAgent = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyUserAgent] ?: @"" copy];
     sBlockAnnouncements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBlockAnnouncements];
 
     sRandomSubredditsSource = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRandomSubredditsSource];

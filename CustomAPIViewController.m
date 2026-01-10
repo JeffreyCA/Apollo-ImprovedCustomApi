@@ -4,7 +4,7 @@
 #import <objc/runtime.h>
 #import "B64ImageEncodings.h"
 #import "Version.h"
-#import "DefaultSubreddits.h"
+#import "Defaults.h"
 #import "SSZipArchive.h"
 
 // Implementation derived from https://github.com/ryannair05/ApolloAPI/blob/master/CustomAPIViewController.m
@@ -15,11 +15,43 @@
 typedef NS_ENUM(NSInteger, Tag) {
     TagRedditClientId = 0,
     TagImgurClientId,
+    TagRedirectURI,
+    TagUserAgent,
     TagTrendingSubredditsSource,
     TagRandomSubredditsSource,
     TagRandNsfwSubredditsSource,
     TagTrendingLimit,
 };
+
+- (NSArray<NSString *> *)registeredURLSchemes {
+    NSArray *urlTypes = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleURLTypes"];
+    NSMutableArray *schemes = [NSMutableArray array];
+    for (NSDictionary *urlType in urlTypes) {
+        NSArray *urlSchemes = urlType[@"CFBundleURLSchemes"];
+        if (urlSchemes) {
+            [schemes addObjectsFromArray:urlSchemes];
+        }
+    }
+    return schemes;
+}
+
+- (BOOL)isRedirectURISchemeValid:(NSString *)uriString {
+    if (uriString.length == 0) {
+        return YES; // Empty uses default, which is valid
+    }
+    NSURL *url = [NSURL URLWithString:uriString];
+    NSString *scheme = [url scheme];
+    if (!scheme) {
+        return NO;
+    }
+    NSArray *registeredSchemes = [self registeredURLSchemes];
+    for (NSString *registered in registeredSchemes) {
+        if ([scheme caseInsensitiveCompare:registered] == NSOrderedSame) {
+            return YES;
+        }
+    }
+    return NO;
+}
 
 - (UIImage *)decodeBase64ToImage:(NSString *)strEncodeData {
   NSData *data = [[NSData alloc]initWithBase64EncodedString:strEncodeData options:NSDataBase64DecodingIgnoreUnknownCharacters];
@@ -102,6 +134,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     textField.delegate = self;
     textField.clearButtonMode = UITextFieldViewModeWhileEditing;
     textField.font = [UIFont systemFontOfSize:14];
+    textField.autocorrectionType = UITextAutocorrectionTypeNo;
+    textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
     if (isNumerical) {
         textField.keyboardType = UIKeyboardTypeNumberPad;
     }
@@ -193,6 +227,15 @@ typedef NS_ENUM(NSInteger, Tag) {
     UIStackView *imgurStackView = [self createLabeledStackViewWithLabelText:@"Imgur API Key:" placeholder:@"Imgur API Key" text:sImgurClientId tag:TagImgurClientId];
     [stackView addArrangedSubview:imgurStackView];
 
+    UIStackView *redirectURIStackView = [self createLabeledStackViewWithLabelText:@"Redirect URI:" placeholder:defaultRedirectURI text:sRedirectURI tag:TagRedirectURI];
+    [stackView addArrangedSubview:redirectURIStackView];
+    // Set initial color based on validity
+    UITextField *redirectURITextField = (UITextField *)redirectURIStackView.arrangedSubviews.lastObject;
+    redirectURITextField.textColor = [self isRedirectURISchemeValid:sRedirectURI] ? [UIColor labelColor] : [UIColor systemRedColor];
+
+    UIStackView *userAgentStackView = [self createLabeledStackViewWithLabelText:@"User Agent:" placeholder:defaultUserAgent text:sUserAgent tag:TagUserAgent];
+    [stackView addArrangedSubview:userAgentStackView];
+
     UIButton *redditWebsiteButton = [UIButton systemButtonWithPrimaryAction:[UIAction actionWithTitle:@"Reddit API Website" image:nil identifier:nil handler:^(UIAction * action) {
         [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://reddit.com/prefs/apps"] options:@{} completionHandler:nil];
     }]];
@@ -210,7 +253,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     [stackView addArrangedSubview:apiWebsiteStackView];
 
     UILabel *apiNoteLabel = [[UILabel alloc] init];
-    apiNoteLabel.text = @"Since mid-2025, Reddit API access requires manual approval and Imgur does not allow API key creation. Only known workaround is to use existing keys. Scroll down for old instructions for creating API keys.";
+    apiNoteLabel.text = [NSString stringWithFormat:@"As of mid-2025, Reddit API access requires manual approval and Imgur no longer allows API key creation.\n\nFor custom Redirect URIs, the URI scheme (part before ://) must be registered in the app's Info.plist under CFBundleURLTypes.\n\nCurrent registered schemes: %@", [[self registeredURLSchemes] componentsJoinedByString:@", "]];
     apiNoteLabel.font = [UIFont systemFontOfSize:13];
     apiNoteLabel.textColor = [UIColor secondaryLabelColor];
     apiNoteLabel.numberOfLines = 0;
@@ -273,7 +316,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     [stackView addArrangedSubview:subredditSourcesNote];
 
     UILabel *instructionsLabel = [[UILabel alloc] init];
-    instructionsLabel.text = @"Instructions";
+    instructionsLabel.text = @"Instructions (old)";
     instructionsLabel.font = [UIFont boldSystemFontOfSize:18];
     instructionsLabel.textAlignment = NSTextAlignmentCenter;
     [stackView addArrangedSubview:instructionsLabel];
@@ -384,6 +427,15 @@ typedef NS_ENUM(NSInteger, Tag) {
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         sImgurClientId = textField.text;
         [[NSUserDefaults standardUserDefaults] setValue:sImgurClientId forKey:UDKeyImgurClientId];
+    } else if (textField.tag == TagRedirectURI) {
+        textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        sRedirectURI = textField.text;
+        [[NSUserDefaults standardUserDefaults] setValue:sRedirectURI forKey:UDKeyRedirectURI];
+        textField.textColor = [self isRedirectURISchemeValid:textField.text] ? [UIColor labelColor] : [UIColor systemRedColor];
+    } else if (textField.tag == TagUserAgent) {
+        textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        sUserAgent = textField.text;
+        [[NSUserDefaults standardUserDefaults] setValue:sUserAgent forKey:UDKeyUserAgent];
     } else if (textField.tag == TagTrendingSubredditsSource) {
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         if (textField.text.length == 0) {
@@ -604,6 +656,8 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
     // Sync in-memory globals with restored values
     sRedditClientId = [defaults stringForKey:UDKeyRedditClientId];
     sImgurClientId = [defaults stringForKey:UDKeyImgurClientId];
+    sRedirectURI = [defaults stringForKey:UDKeyRedirectURI];
+    sUserAgent = [defaults stringForKey:UDKeyUserAgent];
     sBlockAnnouncements = [defaults boolForKey:UDKeyBlockAnnouncements];
     sTrendingSubredditsSource = [defaults stringForKey:UDKeyTrendingSubredditsSource];
     sRandomSubredditsSource = [defaults stringForKey:UDKeyRandomSubredditsSource];
