@@ -227,6 +227,15 @@ static NSRegularExpression *MediaShareLinkRegex;
 static NSString *const ImgurTitleIdImageLinkPattern = @"^(?:https?:)?//(?:www\\.)?imgur\\.com/(\\w+(?:-\\w+)+)$";
 static NSRegularExpression *ImgurTitleIdImageLinkRegex;
 
+// Regex patterns for v.redd.it CMAF audio streams (Reddit switched from MPEG-TS to CMAF around November 2025)
+static NSString *const HLSAudioRegexPattern = @"#EXT-X-MEDIA:.*?\"(HLS_AUDIO.*?)\\.m3u8";
+static NSString *const CMAFAudioRegexPattern = @"#EXT-X-MEDIA:.*?\"((?:HLS|CMAF)_AUDIO.*?)\\.m3u8";
+static NSString *const CMAFAudioIdentifier = @"CMAF_AUDIO";
+
+// Regex patterns for Streamable URLs (some Streamable links have new query strings)
+static NSString *const StreamableRegexPattern = @"^(?:(?:https?:)?//)?(?:www\\.)?streamable\\.com/(?:edit/)?(\\w+)$";
+static NSString *const StreamableRegexPatternWithQueryString = @"^(?:(?:https?:)?//)?(?:www\\.)?streamable\\.com/(?:edit/)?(\\w+)(?:\\?.*)?$";
+
 // Cache storing resolved share URLs - this is an optimization so that we don't need to resolve the share URL every time
 static NSCache<NSString *, ShareUrlTask *> *cache;
 
@@ -439,15 +448,17 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
 }
 %end
 
-// Around November 2025, Reddit started using CMAF instead of MPEG-TS for audio streams (v.redd.it).
-// These hooks fix how .m3u8 manifests are parsed to support downloading CMAF videos.
 %hook NSRegularExpression
 
-// Apollo's regex only matches HLS_AUDIO naming pattern, so update to also match CMAF_AUDIO
 - (instancetype)initWithPattern:(NSString *)pattern options:(NSRegularExpressionOptions)options error:(NSError **)error {
-    if ([pattern isEqualToString:@"#EXT-X-MEDIA:.*?\"(HLS_AUDIO.*?)\\.m3u8"]) {
-        NSString *updatedPattern = @"#EXT-X-MEDIA:.*?\"((?:HLS|CMAF)_AUDIO.*?)\\.m3u8";
-        return %orig(updatedPattern, options, error);
+    // Around November 2025, Reddit started using CMAF instead of MPEG-TS for audio streams (v.redd.it).
+    // Apollo's regex only matches HLS_AUDIO naming pattern, so update to also match CMAF_AUDIO
+    if ([pattern isEqualToString:HLSAudioRegexPattern]) {
+        return %orig(CMAFAudioRegexPattern, options, error);
+    }
+    // Handle newer Streamable links with query strings like "?src=player-page-share"
+    if ([pattern isEqualToString:StreamableRegexPattern]) {
+        return %orig(StreamableRegexPatternWithQueryString, options, error);
     }
     return %orig;
 }
@@ -460,7 +471,7 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
     //   #EXT-X-MEDIA:URI="CMAF_AUDIO_64.m3u8",...
     // but Apollo expects ascending order (how older MPEG-TS streams were ordered),
     // so we need to reorder the results so Apollo downloads the highest quality audio.
-    if (results.count >= 2 && [string containsString:@"CMAF_AUDIO"]) {
+    if (results.count >= 2 && [string containsString:CMAFAudioIdentifier]) {
         // Sort by extracting bitrate number from captured text
         results = [results sortedArrayUsingComparator:^NSComparisonResult(NSTextCheckingResult *result1, NSTextCheckingResult *result2) {
             if (result1.numberOfRanges > 1 && result2.numberOfRanges > 1) {
@@ -491,7 +502,7 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
 
 + (instancetype)requestWithURL:(NSURL *)URL {
     // Fix CMAF audio URLs: Apollo tries to download .aac but CMAF uses .mp4
-    if ([URL.absoluteString containsString:@"CMAF_AUDIO"] && [URL.pathExtension isEqualToString:@"aac"]) {
+    if ([URL.absoluteString containsString:CMAFAudioIdentifier] && [URL.pathExtension isEqualToString:@"aac"]) {
         NSURL *fixedURL = [[URL URLByDeletingPathExtension] URLByAppendingPathExtension:@"mp4"];
         ApolloLog(@"[NSURLRequest] Fixed CMAF audio URL: %@ -> %@", URL.absoluteString, fixedURL.absoluteString);
         return %orig(fixedURL);
