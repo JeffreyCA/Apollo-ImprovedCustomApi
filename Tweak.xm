@@ -371,6 +371,86 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
 
 %end
 
+// Fix GIF looping playback speed on 120Hz ProMotion displays
+// Implementation derived from https://github.com/Flipboard/FLAnimatedImage/pull/266
+// Credits to @yoshimura-qcul for the original fix
+%hook FLAnimatedImageView
+
+- (void)displayDidRefresh:(CADisplayLink *)displayLink {
+    // Get required ivars
+    FLAnimatedImage *animatedImage = MSHookIvar<FLAnimatedImage *>(self, "_animatedImage");
+    if (!animatedImage) {
+        return;
+    }
+
+    BOOL shouldAnimate = MSHookIvar<BOOL>(self, "_shouldAnimate");
+    if (!shouldAnimate) {
+        return;
+    }
+
+    NSDictionary *delayTimesForIndexes = [animatedImage delayTimesForIndexes];
+    NSUInteger currentFrameIndex = MSHookIvar<NSUInteger>(self, "_currentFrameIndex");
+    NSNumber *delayTimeNumber = [delayTimesForIndexes objectForKey:@(currentFrameIndex)];
+
+    if (delayTimeNumber != nil) {
+        NSTimeInterval delayTime = [delayTimeNumber doubleValue];
+        UIImage *image = [animatedImage imageLazilyCachedAtIndex:currentFrameIndex];
+
+        if (image) {
+            MSHookIvar<UIImage *>(self, "_currentFrame") = image;
+            
+            BOOL needsDisplay = MSHookIvar<BOOL>(self, "_needsDisplayWhenImageBecomesAvailable");
+            if (needsDisplay) {
+                [self.layer setNeedsDisplay];
+                MSHookIvar<BOOL>(self, "_needsDisplayWhenImageBecomesAvailable") = NO;
+            }
+
+            // Fix for 120Hz displays: use preferredFramesPerSecond instead of duration * frameInterval
+            double *accumulatorPtr = &MSHookIvar<double>(self, "_accumulator");
+            if (@available(iOS 10.0, *)) {
+                NSInteger preferredFPS = displayLink.preferredFramesPerSecond;
+                if (preferredFPS > 0) {
+                    *accumulatorPtr += 1.0 / (double)preferredFPS;
+                } else {
+                    *accumulatorPtr += displayLink.duration;
+                }
+            } else {
+                *accumulatorPtr += displayLink.duration;
+            }
+
+            NSUInteger frameCount = [animatedImage frameCount];
+            NSUInteger loopCount = [animatedImage loopCount];
+
+            while (*accumulatorPtr >= delayTime) {
+                *accumulatorPtr -= delayTime;
+                MSHookIvar<NSUInteger>(self, "_currentFrameIndex")++;
+
+                if (MSHookIvar<NSUInteger>(self, "_currentFrameIndex") >= frameCount) {
+                    MSHookIvar<NSUInteger>(self, "_loopCountdown")--;
+
+                    void (^loopCompletionBlock)(NSUInteger) = MSHookIvar<void (^)(NSUInteger)>(self, "_loopCompletionBlock");
+                    if (loopCompletionBlock) {
+                        loopCompletionBlock(MSHookIvar<NSUInteger>(self, "_loopCountdown"));
+                    }
+
+                    if (MSHookIvar<NSUInteger>(self, "_loopCountdown") == 0 && loopCount > 0) {
+                        [self stopAnimating];
+                        return;
+                    }
+                    MSHookIvar<NSUInteger>(self, "_currentFrameIndex") = 0;
+                }
+                MSHookIvar<BOOL>(self, "_needsDisplayWhenImageBecomesAvailable") = YES;
+            }
+        } else {
+            MSHookIvar<BOOL>(self, "_needsDisplayWhenImageBecomesAvailable") = YES;
+        }
+    } else {
+        MSHookIvar<NSUInteger>(self, "_currentFrameIndex")++;
+    }
+}
+
+%end
+
 %hook NSURL
 // Asynchronously resolve share URLs in background
 // This is an optimization to "pre-resolve" share URLs so that by the time one taps a share URL it should already be resolved

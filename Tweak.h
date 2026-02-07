@@ -22,4 +22,18 @@
 + (UIImage *)createContentsForkey:(id)key drawParameters:(id)parameters isCancelled:(id)cancelled;
 @end
 
+// FLAnimatedImage - GIF data model
+@interface FLAnimatedImage : NSObject
+@property (nonatomic, readonly) NSDictionary *delayTimesForIndexes;
+@property (nonatomic, readonly) NSUInteger frameCount;
+@property (nonatomic, readonly) NSUInteger loopCount;
+- (UIImage *)imageLazilyCachedAtIndex:(NSUInteger)index;
+@end
+
+// FLAnimatedImageView - Fix for 120Hz ProMotion displays
+@interface FLAnimatedImageView : UIImageView
+- (void)displayDidRefresh:(CADisplayLink *)displayLink;
+- (void)stopAnimating;
+@end
+
 @class _TtC6Apollo14LinkButtonNode;
