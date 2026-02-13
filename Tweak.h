@@ -16,6 +16,7 @@
     NSString *_linkID;
 }
 - (id)linkIDWithoutTypePrefix;
+@property(readonly, nonatomic) NSDictionary *mediaMetadata;
 @end
 
 @interface ASImageNode : NSObject
