@@ -16,6 +16,7 @@
     NSString *_linkID;
 }
 - (id)linkIDWithoutTypePrefix;
+@property(copy, nonatomic) NSString *body;
 @property(readonly, nonatomic) NSDictionary *mediaMetadata;
 @end
 
