@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.4.4] - 2026-02-13
+
+- Fix GIFs showing up as `Processing img <id>` in comments
+
 ## [v1.4.3] - 2026-02-12
 
 - Fix inline Giphy GIFs not loading in comments
@@ -173,6 +177,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v1.4.4]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.4.3...v1.4.4
 [v1.4.3]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.4.2...v1.4.3
 [v1.4.2]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.4.1...v1.4.2
 [v1.4.1]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.4.0...v1.4.1

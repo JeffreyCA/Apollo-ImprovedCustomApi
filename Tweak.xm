@@ -948,6 +948,51 @@ static BOOL ApolloIsValidGiphyID(NSString *giphyID) {
     return fixed ?: orig;
 }
 
+// Fix "Processing img <id>..." placeholder text in comments where media_metadata has valid data.
+// Reddit's API sometimes returns body/body_html with unprocessed placeholder text even though
+// the media_metadata dictionary contains fully resolved image URLs.
+
+- (NSString *)body {
+    NSString *text = %orig;
+    if (!text || ![text containsString:@"Processing img "]) return text;
+
+    NSDictionary *metadata = self.mediaMetadata;
+    if (![metadata isKindOfClass:[NSDictionary class]] || metadata.count == 0) return text;
+
+    NSMutableString *fixed = [text mutableCopy];
+    static NSRegularExpression *regex;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        regex = [NSRegularExpression regularExpressionWithPattern:@"\\*Processing img ([a-zA-Z0-9_]+)\\.{3}\\*" options:0 error:nil];
+    });
+    NSArray *matches = [regex matchesInString:fixed options:0 range:NSMakeRange(0, fixed.length)];
+
+    for (NSTextCheckingResult *match in [matches reverseObjectEnumerator]) {
+        NSString *mediaId = [fixed substringWithRange:[match rangeAtIndex:1]];
+        NSDictionary *entry = metadata[mediaId];
+        if (![entry isKindOfClass:[NSDictionary class]]) continue;
+        if (![[entry objectForKey:@"status"] isEqualToString:@"valid"]) continue;
+
+        NSDictionary *source = entry[@"s"];
+        if (![source isKindOfClass:[NSDictionary class]]) continue;
+
+        NSString *url = source[@"mp4"] ?: source[@"gif"] ?: source[@"u"];
+        if (!url) {
+            NSArray *previews = entry[@"p"];
+            if ([previews isKindOfClass:[NSArray class]] && previews.count > 0) {
+                url = [previews.lastObject objectForKey:@"u"];
+            }
+        }
+        if (![url isKindOfClass:[NSString class]] || url.length == 0) continue;
+
+        NSString *label = [[entry objectForKey:@"e"] isEqualToString:@"AnimatedImage"] ? @"GIF" : @"Image";
+        NSString *replacement = [NSString stringWithFormat:@"[%@](%@)", label, url];
+        [fixed replaceCharactersInRange:match.range withString:replacement];
+    }
+
+    return fixed;
+}
+
 %end
 
 // Replace Reddit API client ID
