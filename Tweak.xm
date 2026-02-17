@@ -1597,6 +1597,18 @@ static char kASTableViewHasSearchToolbarKey;
 
 %end
 
+// Reddit API can returns "error" as a dict (e.g. {"reason":"UNAUTHORIZED",...})
+// instead of a numeric code. Multiple Apollo code paths call [dict[@"error"] integerValue]
+// on the response, including unhookable block invokes. Adding integerValue to NSDictionary
+// prevents the unrecognized selector crash everywhere; returning 0 means no error code
+// matches, so normal error handling proceeds.
+%hook NSDictionary
+%new
+- (NSInteger)integerValue {
+    return 0;
+}
+%end
+
 %ctor {
     cache = [NSCache new];
     postSnapshots = [NSMutableDictionary dictionary];
