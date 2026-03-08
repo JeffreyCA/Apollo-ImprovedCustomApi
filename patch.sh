@@ -9,7 +9,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Generic IPA patching script
+# Generic IPA patching script (DOES NOT inject the tweak)
 # Supports:
 # - Liquid Glass patch for iOS 26 (credit: @ryannair05)
 # - Custom URL schemes injection

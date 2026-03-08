@@ -1,186 +1,60 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#import <os/log.h>
-#import <mach-o/dyld.h>
-#import <mach-o/loader.h>
+#import <objc/message.h>
+#import <sys/utsname.h>
+#import <Security/Security.h>
 
 #import "fishhook.h"
-#import "CustomAPIViewController.h"
+#import "ApolloCommon.h"
+#import "ApolloState.h"
 #import "Tweak.h"
-#import "UIWindow+Apollo.h"
+#import "CustomAPIViewController.h"
 #import "UserDefaultConstants.h"
 #import "Defaults.h"
 
-#import "ffmpeg-kit/ffmpeg-kit/include/MediaInformationSession.h"
-#import "ffmpeg-kit/ffmpeg-kit/include/MediaInformation.h"
-#import "ffmpeg-kit/ffmpeg-kit/include/FFmpegKit.h"
-#import "ffmpeg-kit/ffmpeg-kit/include/FFprobeKit.h"
+// MARK: - Sideload Fixes
 
-// On iOS 26, NSLog redacts strings, so use os_log: https://developer.apple.com/documentation/ios-ipados-release-notes/ios-ipados-26-release-notes#NSLog
-#define ApolloLog(fmt, ...) do { \
-    NSString *logMessage = [NSString stringWithFormat:@"[ApolloFix] " fmt, ##__VA_ARGS__]; \
-    os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, "%{public}s", [logMessage UTF8String]); \
-} while(0)
-
-// Get the SDK version from the main binary's LC_BUILD_VERSION load command
-// Returns 0 if not found, otherwise packed version (major << 16 | minor << 8 | patch)
-static uint32_t GetLinkedSDKVersion(void) {
-    const struct mach_header_64 *header = (const struct mach_header_64 *)_dyld_get_image_header(0);
-    if (!header) return 0;
-    
-    uintptr_t cursor = (uintptr_t)header + sizeof(struct mach_header_64);
-    for (uint32_t i = 0; i < header->ncmds; i++) {
-        struct load_command *cmd = (struct load_command *)cursor;
-        if (cmd->cmd == LC_BUILD_VERSION) {
-            struct build_version_command *buildCmd = (struct build_version_command *)cmd;
-            return buildCmd->sdk;
-        }
-        cursor += cmd->cmdsize;
-    }
-    return 0;
-}
-
-// Check if Liquid Glass is active by checking if the app binary was linked against iOS 26+ SDK
-static BOOL IsLiquidGlass(void) {
-    static BOOL checked = NO;
-    static BOOL available = NO;
-
-    if (!checked) {
-        checked = YES;
-        // BOOL isiOS26Runtime = (objc_getClass("_UITabButton") != nil);
-        // if (!isiOS26Runtime) {
-        //     ApolloLog(@"[IsLiquidGlass] iOS 26+ runtime not detected");
-        //     available = NO;
-        //     return available;
-        // }
-
-        // iOS 26 SDK version = 19.0 = 0x00130000 (major 19 in high 16 bits)
-        // SDK version format: major << 16 | minor << 8 | patch
-        uint32_t sdkVersion = GetLinkedSDKVersion();
-        uint32_t sdkMajor = (sdkVersion >> 16) & 0xFFFF;
-        available = (sdkMajor >= 19);
-        
-        ApolloLog(@"[IsLiquidGlass] SDK version: 0x%08X (major: %u), linked for iOS 26+: %@", 
-                  sdkVersion, sdkMajor, available ? @"YES" : @"NO");
-    }
-    
-    return available;
-}
-
-/// Helpers for restoring long-press to activate account switcher w/ Liquid Glass
-static char kApolloTabButtonSetupKey;
-
-// Recursively collects all _UITabButton views from the view hierarchy
-static void CollectTabButtonsRecursive(UIView *root, NSMutableArray<UIView *> *buttons, Class tabButtonClass) {
-    if (!root) return;
-    if ([root isKindOfClass:tabButtonClass]) {
-        [buttons addObject:root];
-    }
-    for (UIView *child in root.subviews) {
-        CollectTabButtonsRecursive(child, buttons, tabButtonClass);
-    }
-}
-
-// Returns all tab buttons sorted by horizontal position (left to right)
-static NSArray<UIView *> *OrderedTabButtonsInTabBar(UITabBar *tabBar) {
-    if (!tabBar) return @[];
-
-    NSMutableArray<UIView *> *buttons = [NSMutableArray array];
-    CollectTabButtonsRecursive(tabBar, buttons, objc_getClass("_UITabButton"));
-    
-    return [buttons sortedArrayUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
-        CGFloat ax = [a convertRect:a.bounds toView:tabBar].origin.x;
-        CGFloat bx = [b convertRect:b.bounds toView:tabBar].origin.x;
-        if (ax < bx) return NSOrderedAscending;
-        if (ax > bx) return NSOrderedDescending;
-        return NSOrderedSame;
-    }];
-}
-
-// Actual tab indices are: 1, 3, 5, 7, 9 due to multiple _UITabButton views per tab. This converts them to logical indices: 0, 1, 2, 3, 4
-static NSUInteger LogicalTabIndexForButton(UITabBar *tabBar, NSArray<UIView *> *orderedButtons, UIView *button) {
-    if (!tabBar || !orderedButtons.count || !button) {
-        return NSNotFound;
-    }
-
-    NSUInteger physicalIndex = [orderedButtons indexOfObjectIdenticalTo:button];
-    if (physicalIndex == NSNotFound) {
-        return NSNotFound;
-    }
-
-    NSUInteger itemsCount = tabBar.items.count;
-    if (itemsCount > 0 && orderedButtons.count >= itemsCount && (orderedButtons.count % itemsCount) == 0) {
-        NSUInteger groupSize = orderedButtons.count / itemsCount;
-        return physicalIndex / groupSize;
-    }
-
-    return physicalIndex;
-}
-
-// Walks up the view hierarchy to find the containing UITabBar
-static UITabBar *FindAncestorTabBar(UIView *view) {
-    while (view && ![view isKindOfClass:[UITabBar class]]) {
-        view = view.superview;
-    }
-    return (UITabBar *)view;
-}
-
-// Opens Apollo's account switcher by invoking ProfileViewController's bar button action
-static void OpenAccountManager(void) {
-    __block UIWindow *lastKeyWindow = nil;
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if ([scene isKindOfClass:[UIWindowScene class]]) {
-            UIWindowScene *windowScene = (UIWindowScene *)scene;
-            if (windowScene.keyWindow) {
-                lastKeyWindow = windowScene.keyWindow;
-            }
-        }
-    }
-
-    if (!lastKeyWindow) {
-        return;
-    }
-
-    Class profileVCClass = objc_getClass("Apollo.ProfileViewController");
-    UIViewController *rootVC = lastKeyWindow.rootViewController;
-
-    UITabBarController *tabBarController = nil;
-    if ([rootVC isKindOfClass:[UITabBarController class]]) {
-        tabBarController = (UITabBarController *)rootVC;
-    } else if (rootVC.presentedViewController && [rootVC.presentedViewController isKindOfClass:[UITabBarController class]]) {
-        tabBarController = (UITabBarController *)rootVC.presentedViewController;
-    }
-
-    UIViewController *profileVC = nil;
-    if (tabBarController) {
-        for (UIViewController *vc in tabBarController.viewControllers) {
-            if ([vc isKindOfClass:[UINavigationController class]]) {
-                UINavigationController *navController = (UINavigationController *)vc;
-                // Search through the entire navigation stack, not just topViewController
-                for (UIViewController *stackVC in navController.viewControllers) {
-                    if ([stackVC isKindOfClass:profileVCClass]) {
-                        profileVC = stackVC;
-                        break;
-                    }
-                }
-                if (profileVC) break;
-            } else if ([vc isKindOfClass:profileVCClass]) {
-                profileVC = vc;
-                break;
-            }
-        }
-    }
-
-    if (profileVC && [profileVC respondsToSelector:@selector(accountsBarButtonItemTappedWithSender:)]) {
-        [profileVC performSelector:@selector(accountsBarButtonItemTappedWithSender:) withObject:nil];
-    }
-}
-
-// Sideload fixes
 static NSDictionary *stripGroupAccessAttr(CFDictionaryRef attributes) {
     NSMutableDictionary *newAttributes = [[NSMutableDictionary alloc] initWithDictionary:(__bridge id)attributes];
     [newAttributes removeObjectForKey:(__bridge id)kSecAttrAccessGroup];
     return newAttributes;
+}
+
+// Ultra/Pro status: Valet (SharedGroupValet) stores these in the keychain.
+// Key names are obfuscated. Valet's internal service name includes the full initializer description.
+static NSString *const kValetServiceSubstring = @"com.christianselig.Apollo";
+
+// Map of obfuscated Valet account keys -> override values (from RE of isApolloUltraEnabled/isApolloProEnabled)
+static NSString *ValetOverrideValue(NSString *account) {
+    static NSDictionary *overrideMap;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        overrideMap = @{
+            @"meganotifs":              @"affirmative", // Ultra
+            @"seconds_since2":          @"1473982",     // Pro
+            @"rep_seconds_since2":      @"1473982",     // Pro (alternate?)
+            @"pixelpalfoodtokensgiven": @"affirmative", // Community icons
+            @"rep_seconds_after2":      @"1482118",     // SPCA Animals icon pack
+        };
+    });
+    return overrideMap[account];
+}
+
+static BOOL IsValetQuery(NSDictionary *query) {
+    NSString *service = query[(__bridge id)kSecAttrService];
+    return service && [service containsString:kValetServiceSubstring];
+}
+
+static BOOL IsUltraProOverrideKey(NSDictionary *query) {
+    NSString *account = query[(__bridge id)kSecAttrAccount];
+    if (!account) return NO;
+    if (!IsValetQuery(query)) return NO;
+    return ValetOverrideValue(account) != nil;
+}
+
+static NSData *OverrideDataForAccount(NSString *account) {
+    NSString *value = ValetOverrideValue(account);
+    return [value dataUsingEncoding:NSUTF8StringEncoding];
 }
 
 static void *SecItemAdd_orig;
@@ -192,14 +66,84 @@ static OSStatus SecItemAdd_replacement(CFDictionaryRef query, CFTypeRef *result)
 static void *SecItemCopyMatching_orig;
 static OSStatus SecItemCopyMatching_replacement(CFDictionaryRef query, CFTypeRef *result) {
     NSDictionary *strippedQuery = stripGroupAccessAttr(query);
+
+    // Intercept Ultra/Pro Valet reads and return override values
+    if (IsUltraProOverrideKey(strippedQuery)) {
+        NSString *account = strippedQuery[(__bridge id)kSecAttrAccount];
+        if (result) {
+            NSData *overrideData = OverrideDataForAccount(account);
+            if (strippedQuery[(__bridge id)kSecReturnAttributes]) {
+                *result = (__bridge_retained CFTypeRef)@{
+                    (__bridge id)kSecAttrAccount: account,
+                    (__bridge id)kSecValueData: overrideData,
+                };
+            } else {
+                *result = (__bridge_retained CFTypeRef)overrideData;
+            }
+        }
+        return errSecSuccess;
+    }
+
     return ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemCopyMatching_orig)((__bridge CFDictionaryRef)strippedQuery, result);
 }
 
 static void *SecItemUpdate_orig;
 static OSStatus SecItemUpdate_replacement(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
     NSDictionary *strippedQuery = stripGroupAccessAttr(query);
+
+    // Block attempts to disable Ultra/Pro
+    if (IsUltraProOverrideKey(strippedQuery)) {
+        return errSecSuccess;
+    }
+
     return ((OSStatus (*)(CFDictionaryRef, CFDictionaryRef))SecItemUpdate_orig)((__bridge CFDictionaryRef)strippedQuery, attributesToUpdate);
 }
+
+// --- Device detection (for Pixel Pals and Dynamic Island behaviour) ---
+// Apollo's device model mapper (sub_1007a3cdc) only recognizes models up to iPhone 14 Pro Max.
+// Newer models return "unknown" (0x3f) and get no Pixel Pals.
+// Remap newer machine identifiers to "iPhone15,2" (iPhone 14 Pro) so Apollo
+// treats them as Dynamic Island devices and enables full Pixel Pals + FauxCutOutView.
+static void *uname_orig;
+static int uname_replacement(struct utsname *buf) {
+    int ret = ((int (*)(struct utsname *))uname_orig)(buf);
+    if (ret != 0) return ret;
+
+    // iPhone15,4+ are all unrecognized by Apollo's mapper.
+    // Map Dynamic Island models to iPhone15,2 (iPhone 14 Pro) and notch models to iPhone14,7 (iPhone 14)
+    static NSDictionary *modelRemap;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *di    = @"iPhone15,2";  // iPhone 14 Pro (Dynamic Island)
+        NSString *notch = @"iPhone14,7";  // iPhone 14 (notch)
+
+        modelRemap = @{
+            @"iPhone15,4": di,    // iPhone 15
+            @"iPhone15,5": di,    // iPhone 15 Plus
+            @"iPhone16,1": di,    // iPhone 15 Pro
+            @"iPhone16,2": di,    // iPhone 15 Pro Max
+            @"iPhone17,1": di,    // iPhone 16 Pro
+            @"iPhone17,2": di,    // iPhone 16 Pro Max
+            @"iPhone17,3": di,    // iPhone 16
+            @"iPhone17,4": di,    // iPhone 16 Plus
+            @"iPhone17,5": notch, // iPhone 16e
+            @"iPhone18,1": di,    // iPhone 17 Pro
+            @"iPhone18,2": di,    // iPhone 17 Pro Max
+            @"iPhone18,3": di,    // iPhone 17
+            @"iPhone18,4": di,    // iPhone Air
+            @"iPhone18,5": notch, // iPhone 17e
+        };
+    });
+
+    NSString *machine = @(buf->machine);
+    NSString *remap = modelRemap[machine];
+    if (remap) {
+        strlcpy(buf->machine, remap.UTF8String, sizeof(buf->machine));
+    }
+    return ret;
+}
+
+// MARK: - API / Network
 
 static NSString *const announcementUrl = @"apollogur.download/api/apollonouncement";
 
@@ -212,788 +156,8 @@ static NSArray *const blockedUrls = @[
     @"apollogur.download/api/goodbye_wallpaper"
 ];
 
-// Highlight color for new unread comments
-static UIColor *const NewPostCommentsColor = [UIColor colorWithRed: 1.00 green: 0.82 blue: 0.43 alpha: 0.15];
-
-// Regex for opaque share links
-static NSString *const ShareLinkRegexPattern = @"^(?:https?:)?//(?:www\\.|new\\.|np\\.)?reddit\\.com/(?:r|u)/(\\w+)/s/(\\w+)$";
-static NSRegularExpression *ShareLinkRegex;
-
-// Regex for media share links
-static NSString *const MediaShareLinkPattern = @"^(?:https?:)?//(?:www\\.|np\\.)?reddit\\.com/media\\?url=(.*?)$";
-static NSRegularExpression *MediaShareLinkRegex;
-
-// Regex for Imgur image links with title + ID
-static NSString *const ImgurTitleIdImageLinkPattern = @"^(?:https?:)?//(?:www\\.)?imgur\\.com/(\\w+(?:-\\w+)+)$";
-static NSRegularExpression *ImgurTitleIdImageLinkRegex;
-
-// Regex patterns for v.redd.it CMAF audio streams (Reddit switched from MPEG-TS to CMAF around November 2025)
-static NSString *const HLSAudioRegexPattern = @"#EXT-X-MEDIA:.*?\"(HLS_AUDIO.*?)\\.m3u8";
-static NSString *const CMAFAudioRegexPattern = @"#EXT-X-MEDIA:.*?\"((?:HLS|CMAF)_AUDIO.*?)\\.m3u8";
-static NSString *const CMAFAudioIdentifier = @"CMAF_AUDIO";
-
-// Regex patterns for Streamable URLs (some Streamable links have new query strings)
-static NSString *const StreamableRegexPattern = @"^(?:(?:https?:)?//)?(?:www\\.)?streamable\\.com/(?:edit/)?(\\w+)$";
-static NSString *const StreamableRegexPatternWithQueryString = @"^(?:(?:https?:)?//)?(?:www\\.)?streamable\\.com/(?:edit/)?(\\w+)(?:\\?.*)?$";
-
-// Cache storing resolved share URLs - this is an optimization so that we don't need to resolve the share URL every time
-static NSCache<NSString *, ShareUrlTask *> *cache;
-
 // Cache storing subreddit list source URLs -> response body
 static NSCache<NSString *, NSString *> *subredditListCache;
-
-// Dictionary of post IDs to last-read timestamp for tracking new unread comments
-static NSMutableDictionary<NSString *, NSDate *> *postSnapshots;
-
-@implementation ShareUrlTask
-- (instancetype)init {
-    self = [super init];
-    if (self) {
-        _dispatchGroup = NULL;
-        _resolvedURL = NULL;
-    }
-    return self;
-}
-@end
-
-/// Helper functions for resolving share URLs
-
-// Present loading alert on top of current view controller
-static UIViewController *PresentResolvingShareLinkAlert() {
-    __block UIWindow *lastKeyWindow = nil;
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if ([scene isKindOfClass:[UIWindowScene class]]) {
-            UIWindowScene *windowScene = (UIWindowScene *)scene;
-            if (windowScene.keyWindow) {
-                lastKeyWindow = windowScene.keyWindow;
-            }
-        }
-    }
-
-    UIViewController *visibleViewController = lastKeyWindow.visibleViewController;
-    UIAlertController *alertController = [UIAlertController alertControllerWithTitle:nil message:@"Resolving share link..." preferredStyle:UIAlertControllerStyleAlert];
-
-    [visibleViewController presentViewController:alertController animated:YES completion:nil];
-    return alertController;
-}
-
-// Strip tracking parameters from resolved share URL
-static NSURL *RemoveShareTrackingParams(NSURL *url) {
-    NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
-    NSMutableArray *queryItems = [NSMutableArray arrayWithArray:components.queryItems];
-    [queryItems filterUsingPredicate:[NSPredicate predicateWithFormat:@"name == %@", @"context"]];
-    components.queryItems = queryItems;
-    return components.URL;
-}
-
-// Start async task to resolve share URL
-static void StartShareURLResolveTask(NSURL *url) {
-    NSString *urlString = [url absoluteString];
-    __block ShareUrlTask *task;
-    task = [cache objectForKey:urlString];
-    if (task) {
-        return;
-    }
-
-    dispatch_group_t dispatch_group = dispatch_group_create();
-    task = [[ShareUrlTask alloc] init];
-    task.dispatchGroup = dispatch_group;
-    [cache setObject:task forKey:urlString];
-
-    dispatch_group_enter(task.dispatchGroup);
-    NSURLSessionTask *getTask = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-        if (!error) {
-            NSURL *redirectedURL = [(NSHTTPURLResponse *)response URL];
-            NSURL *cleanedURL = RemoveShareTrackingParams(redirectedURL);
-            NSString *cleanUrlString = [cleanedURL absoluteString];
-            task.resolvedURL = cleanUrlString;
-        } else {
-            task.resolvedURL = urlString;
-        }
-        dispatch_group_leave(task.dispatchGroup);
-    }];
-
-    [getTask resume];
-}
-
-// Asynchronously wait for share URL to resolve
-static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSString *), void (^ignoreHandler)(void)){
-    ShareUrlTask *task = [cache objectForKey:urlString];
-    if (!task) {
-        // The NSURL initWithString hook might not catch every share URL, so check one more time and enqueue a task if needed
-        NSTextCheckingResult *match = [ShareLinkRegex firstMatchInString:urlString options:0 range:NSMakeRange(0, [urlString length])];
-        if (!match) {
-            ignoreHandler();
-            return;
-        }
-        [NSURL URLWithString:urlString];
-        task = [cache objectForKey:urlString];
-    }
-
-    if (task.resolvedURL) {
-        successHandler(task.resolvedURL);
-        return;
-    } else {
-        // Wait for task to finish and show loading alert to not block main thread
-        UIViewController *shareAlertController = PresentResolvingShareLinkAlert();
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            if (!task.dispatchGroup) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [shareAlertController dismissViewControllerAnimated:YES completion:^{
-                        ignoreHandler();
-                    }];
-                });
-                return;
-            }
-            dispatch_group_wait(task.dispatchGroup, DISPATCH_TIME_FOREVER);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [shareAlertController dismissViewControllerAnimated:YES completion:^{
-                    successHandler(task.resolvedURL);
-                }];
-            });
-        });
-    }
-}
-
-// Implementation derived from https://github.com/dankrichtofen/apolloliquidglass/blob/main/Tweak.x
-// Credits to @dankrichtofen for the original implementation
-%hook ASImageNode
-
-+ (UIImage *)createContentsForkey:(id)key drawParameters:(id)parameters isCancelled:(id)cancelled {
-    @try {
-        UIImage *result = %orig;
-        return result;
-    }
-    @catch (NSException *exception) {
-        return nil;
-    }
-}
-
-%end
-
-// Fix GIF looping playback speed on 120Hz ProMotion displays
-// Implementation derived from https://github.com/Flipboard/FLAnimatedImage/pull/266
-// Credits to @yoshimura-qcul for the original fix
-%hook FLAnimatedImageView
-
-- (void)displayDidRefresh:(CADisplayLink *)displayLink {
-    // Get required ivars
-    FLAnimatedImage *animatedImage = MSHookIvar<FLAnimatedImage *>(self, "_animatedImage");
-    if (!animatedImage) {
-        return;
-    }
-
-    BOOL shouldAnimate = MSHookIvar<BOOL>(self, "_shouldAnimate");
-    if (!shouldAnimate) {
-        return;
-    }
-
-    NSDictionary *delayTimesForIndexes = [animatedImage delayTimesForIndexes];
-    NSUInteger currentFrameIndex = MSHookIvar<NSUInteger>(self, "_currentFrameIndex");
-    NSNumber *delayTimeNumber = [delayTimesForIndexes objectForKey:@(currentFrameIndex)];
-
-    if (delayTimeNumber != nil) {
-        NSTimeInterval delayTime = [delayTimeNumber doubleValue];
-        UIImage *image = [animatedImage imageLazilyCachedAtIndex:currentFrameIndex];
-
-        if (image) {
-            MSHookIvar<UIImage *>(self, "_currentFrame") = image;
-            
-            BOOL needsDisplay = MSHookIvar<BOOL>(self, "_needsDisplayWhenImageBecomesAvailable");
-            if (needsDisplay) {
-                [self.layer setNeedsDisplay];
-                MSHookIvar<BOOL>(self, "_needsDisplayWhenImageBecomesAvailable") = NO;
-            }
-
-            // Fix for 120Hz displays: use preferredFramesPerSecond instead of duration * frameInterval
-            double *accumulatorPtr = &MSHookIvar<double>(self, "_accumulator");
-            if (@available(iOS 10.0, *)) {
-                NSInteger preferredFPS = displayLink.preferredFramesPerSecond;
-                if (preferredFPS > 0) {
-                    *accumulatorPtr += 1.0 / (double)preferredFPS;
-                } else {
-                    *accumulatorPtr += displayLink.duration;
-                }
-            } else {
-                *accumulatorPtr += displayLink.duration;
-            }
-
-            NSUInteger frameCount = [animatedImage frameCount];
-            NSUInteger loopCount = [animatedImage loopCount];
-
-            while (*accumulatorPtr >= delayTime) {
-                *accumulatorPtr -= delayTime;
-                MSHookIvar<NSUInteger>(self, "_currentFrameIndex")++;
-
-                if (MSHookIvar<NSUInteger>(self, "_currentFrameIndex") >= frameCount) {
-                    MSHookIvar<NSUInteger>(self, "_loopCountdown")--;
-
-                    void (^loopCompletionBlock)(NSUInteger) = MSHookIvar<void (^)(NSUInteger)>(self, "_loopCompletionBlock");
-                    if (loopCompletionBlock) {
-                        loopCompletionBlock(MSHookIvar<NSUInteger>(self, "_loopCountdown"));
-                    }
-
-                    if (MSHookIvar<NSUInteger>(self, "_loopCountdown") == 0 && loopCount > 0) {
-                        [self stopAnimating];
-                        return;
-                    }
-                    MSHookIvar<NSUInteger>(self, "_currentFrameIndex") = 0;
-                }
-                MSHookIvar<BOOL>(self, "_needsDisplayWhenImageBecomesAvailable") = YES;
-            }
-        } else {
-            MSHookIvar<BOOL>(self, "_needsDisplayWhenImageBecomesAvailable") = YES;
-        }
-    } else {
-        MSHookIvar<NSUInteger>(self, "_currentFrameIndex")++;
-    }
-}
-
-%end
-
-%hook NSURL
-// Asynchronously resolve share URLs in background
-// This is an optimization to "pre-resolve" share URLs so that by the time one taps a share URL it should already be resolved
-// On slower network connections, there may still be a loading alert
-+ (instancetype)URLWithString:(NSString *)string {
-    if (!string) {
-        return %orig;
-    }
-    NSTextCheckingResult *match = [ShareLinkRegex firstMatchInString:string options:0 range:NSMakeRange(0, [string length])];
-    if (match) {
-        NSURL *url = %orig;
-        StartShareURLResolveTask(url);
-        return url;
-    }
-    // Fix Reddit Media URL redirects, for example this comment: https://reddit.com/r/TikTokCringe/comments/18cyek4/_/kce86er/?context=1 has an image link in this format: https://www.reddit.com/media?url=https%3A%2F%2Fi.redd.it%2Fpdnxq8dj0w881.jpg
-    NSTextCheckingResult *mediaMatch = [MediaShareLinkRegex firstMatchInString:string options:0 range:NSMakeRange(0, [string length])];
-    if (mediaMatch) {
-        NSRange media = [mediaMatch rangeAtIndex:1];
-        NSString *encodedURLString = [string substringWithRange:media];
-        NSString *decodedURLString = [encodedURLString stringByRemovingPercentEncoding];
-        NSURL *decodedURL = [NSURL URLWithString:decodedURLString];
-        return decodedURL;
-    }
-
-    NSTextCheckingResult *imgurWithTitleIdMatch = [ImgurTitleIdImageLinkRegex firstMatchInString:string options:0 range:NSMakeRange(0, [string length])];
-    if (imgurWithTitleIdMatch) {
-        NSRange imageIDRange = [imgurWithTitleIdMatch rangeAtIndex:1];
-        NSString *imageID = [string substringWithRange:imageIDRange];
-        imageID = [[imageID componentsSeparatedByString:@"-"] lastObject];
-        NSString *modifiedURLString = [@"https://imgur.com/" stringByAppendingString:imageID];
-        return [NSURL URLWithString:modifiedURLString];
-    }
-    return %orig;
-}
-
-// Duplicate of above as NSURL has 2 main init methods
-- (id)initWithString:(id)string {
-    if (!string) {
-        return %orig;
-    }
-    NSTextCheckingResult *match = [ShareLinkRegex firstMatchInString:string options:0 range:NSMakeRange(0, [string length])];
-    if (match) {
-        NSURL *url = %orig;
-        StartShareURLResolveTask(url);
-        return url;
-    }
-
-    NSTextCheckingResult *mediaMatch = [MediaShareLinkRegex firstMatchInString:string options:0 range:NSMakeRange(0, [string length])];
-    if (mediaMatch) {
-        NSRange media = [mediaMatch rangeAtIndex:1];
-        NSString *encodedURLString = [string substringWithRange:media];
-        NSString *decodedURLString = [encodedURLString stringByRemovingPercentEncoding];
-        NSURL *decodedURL = [[NSURL alloc] initWithString:decodedURLString];
-        return decodedURL;
-    }
-
-    NSTextCheckingResult *imgurWithTitleIdMatch = [ImgurTitleIdImageLinkRegex firstMatchInString:string options:0 range:NSMakeRange(0, [string length])];
-    if (imgurWithTitleIdMatch) {
-        NSRange imageIDRange = [imgurWithTitleIdMatch rangeAtIndex:1];
-        NSString *imageID = [string substringWithRange:imageIDRange];
-        imageID = [[imageID componentsSeparatedByString:@"-"] lastObject];
-        NSString *modifiedURLString = [@"https://imgur.com/" stringByAppendingString:imageID];
-        return [[NSURL alloc] initWithString:modifiedURLString];
-    }
-    return %orig;
-}
-
-// Rewrite x.com links as twitter.com
-- (NSString *)host {
-    NSString *originalHost = %orig;
-    if (originalHost && [originalHost isEqualToString:@"x.com"]) {
-        return @"twitter.com";
-    }
-    return originalHost;
-}
-%end
-
-%hook NSRegularExpression
-
-- (instancetype)initWithPattern:(NSString *)pattern options:(NSRegularExpressionOptions)options error:(NSError **)error {
-    // Around November 2025, Reddit started using CMAF instead of MPEG-TS for audio streams (v.redd.it).
-    // Apollo's regex only matches HLS_AUDIO naming pattern, so update to also match CMAF_AUDIO
-    if ([pattern isEqualToString:HLSAudioRegexPattern]) {
-        return %orig(CMAFAudioRegexPattern, options, error);
-    }
-    // Handle newer Streamable links with query strings like "?src=player-page-share"
-    if ([pattern isEqualToString:StreamableRegexPattern]) {
-        return %orig(StreamableRegexPatternWithQueryString, options, error);
-    }
-    return %orig;
-}
-
-- (NSArray<NSTextCheckingResult *> *)matchesInString:(NSString *)string options:(NSMatchingOptions)options range:(NSRange)range {
-    NSArray *results = %orig;
-
-    // CMAF manifests list audio in descending bitrate order:
-    //   #EXT-X-MEDIA:URI="CMAF_AUDIO_128.m3u8",...
-    //   #EXT-X-MEDIA:URI="CMAF_AUDIO_64.m3u8",...
-    // but Apollo expects ascending order (how older MPEG-TS streams were ordered),
-    // so we need to reorder the results so Apollo downloads the highest quality audio.
-    if (results.count >= 2 && [string containsString:CMAFAudioIdentifier]) {
-        // Sort by extracting bitrate number from captured text
-        results = [results sortedArrayUsingComparator:^NSComparisonResult(NSTextCheckingResult *result1, NSTextCheckingResult *result2) {
-            if (result1.numberOfRanges > 1 && result2.numberOfRanges > 1) {
-                NSString *text1 = [string substringWithRange:[result1 rangeAtIndex:1]];
-                NSString *text2 = [string substringWithRange:[result2 rangeAtIndex:1]];
-
-                // Use NSScanner to extract first integer from each string
-                NSScanner *scanner1 = [NSScanner scannerWithString:text1];
-                NSScanner *scanner2 = [NSScanner scannerWithString:text2];
-                NSInteger bitrate1 = 0, bitrate2 = 0;
-
-                [scanner1 scanUpToCharactersFromSet:[NSCharacterSet decimalDigitCharacterSet] intoString:nil];
-                [scanner1 scanInteger:&bitrate1];
-                [scanner2 scanUpToCharactersFromSet:[NSCharacterSet decimalDigitCharacterSet] intoString:nil];
-                [scanner2 scanInteger:&bitrate2];
-
-                return [@(bitrate1) compare:@(bitrate2)];
-            }
-            return NSOrderedSame;
-        }];
-    }
-    return results;
-}
-
-%end
-
-%hook NSURLRequest
-
-+ (instancetype)requestWithURL:(NSURL *)URL {
-    // Fix CMAF audio URLs: Apollo tries to download .aac but CMAF uses .mp4
-    if ([URL.absoluteString containsString:CMAFAudioIdentifier] && [URL.pathExtension isEqualToString:@"aac"]) {
-        NSURL *fixedURL = [[URL URLByDeletingPathExtension] URLByAppendingPathExtension:@"mp4"];
-        ApolloLog(@"[NSURLRequest] Fixed CMAF audio URL: %@ -> %@", URL.absoluteString, fixedURL.absoluteString);
-        return %orig(fixedURL);
-    }
-    return %orig;
-}
-
-%end
-
-%hook _TtC6Apollo17ShareMediaManager
-
-// Patches to fix audio container formats for v.redd.it videos:
-// - Some streams use MPEG-TS containers (fix: convert to ADTS)
-// - Newer streams use CMAF/MP4 containers (fix: extract AAC and wrap in ADTS)
-- (void)URLSession:(NSURLSession *)urlSession downloadTask:(NSURLSessionDownloadTask *)downloadTask didFinishDownloadingToURL:(NSURL *)fileUrl {
-    NSURL *originalURL = downloadTask.originalRequest.URL;
-    NSString *path = fileUrl.absoluteString;
-    NSString *fixedPath = [path stringByAppendingString:@".fixed"];
-
-    BOOL isCMAFAudio = [originalURL.absoluteString containsString:@"CMAF_AUDIO"] && [originalURL.pathExtension isEqualToString:@"mp4"];
-    BOOL isHLSAudio = [originalURL.pathExtension isEqualToString:@"aac"];
-
-    if (!isCMAFAudio && !isHLSAudio) {
-        %orig;
-        return;
-    }
-
-    if (isCMAFAudio) {
-        // CMAF audio is MP4 container with AAC - extract to ADTS format
-        ApolloLog(@"[-URLSession:downloadTask:didFinishDownloadingToURL:] Converting CMAF MP4 audio to ADTS: %@", originalURL);
-        NSString *ffmpegCommand = [NSString stringWithFormat:@"-y -loglevel info -i '%@' -vn -acodec copy -f adts '%@.fixed'", path, path];
-        FFmpegSession *session = [FFmpegKit execute:ffmpegCommand];
-        ReturnCode *returnCode = [session getReturnCode];
-        if ([ReturnCode isSuccess:returnCode]) {
-            // Replace original file with fixed version
-            NSURL *fixedUrl = [NSURL URLWithString:fixedPath];
-            NSFileManager *fileManager = [NSFileManager defaultManager];
-            [fileManager removeItemAtURL:fileUrl error:nil];
-            [fileManager moveItemAtURL:fixedUrl toURL:fileUrl error:nil];
-        }
-        %orig;
-        return;
-    }
-
-    // MPEG-TS AAC processing
-    ApolloLog(@"[-URLSession:downloadTask:didFinishDownloadingToURL:] Processing AAC file: %@", originalURL);
-
-    MediaInformationSession *probeSession = [FFprobeKit getMediaInformation:path];
-    ReturnCode *returnCode = [probeSession getReturnCode];
-    if (![ReturnCode isSuccess:returnCode]) {
-        %orig;
-        return;
-    }
-
-    MediaInformation *mediaInformation = [probeSession getMediaInformation];
-    if (!mediaInformation || ![mediaInformation.getFormat isEqualToString:@"mpegts"]) {
-        %orig;
-        return;
-    }
-
-    NSString *ffmpegCommand = [NSString stringWithFormat:@"-y -loglevel info -i '%@' -map 0 -dn -ignore_unknown -c copy -f adts '%@.fixed'", path, path];
-    FFmpegSession *session = [FFmpegKit execute:ffmpegCommand];
-    returnCode = [session getReturnCode];
-    if ([ReturnCode isSuccess:returnCode]) {
-        // Replace original file with fixed version
-        NSURL *fixedUrl = [NSURL URLWithString:fixedPath];
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        [fileManager removeItemAtURL:fileUrl error:nil];
-        [fileManager moveItemAtURL:fixedUrl toURL:fileUrl error:nil];
-    }
-    %orig;
-}
-
-%end
-
-// Tappable text link in an inbox item (*not* the links in the PM chat bubbles)
-%hook _TtC6Apollo13InboxCellNode
-
--(void)textNode:(id)textNode tappedLinkAttribute:(id)attr value:(id)val atPoint:(struct CGPoint)point textRange:(struct _NSRange)range {
-    if (![val isKindOfClass:[NSURL class]]) {
-        %orig;
-        return;
-    }
-    void (^ignoreHandler)(void) = ^{
-        %orig;
-    };
-    void (^successHandler)(NSString *) = ^(NSString *resolvedURL) {
-        %orig(textNode, attr, [NSURL URLWithString:resolvedURL], point, range);
-    };
-    TryResolveShareUrl([val absoluteString], successHandler, ignoreHandler);
-}
-%end
-
-// Text view containing markdown and tappable links, can be in the header of a post or a comment
-%hook _TtC6Apollo12MarkdownNode
-
--(void)textNode:(id)textNode tappedLinkAttribute:(id)attr value:(id)val atPoint:(struct CGPoint)point textRange:(struct _NSRange)range {
-    if (![val isKindOfClass:[NSURL class]]) {
-        %orig;
-        return;
-    }
-    void (^ignoreHandler)(void) = ^{
-        %orig;
-    };
-    void (^successHandler)(NSString *) = ^(NSString *resolvedURL) {
-        %orig(textNode, attr, [NSURL URLWithString:resolvedURL], point, range);
-    };
-    TryResolveShareUrl([val absoluteString], successHandler, ignoreHandler);
-}
-
-%end
-
-// Tappable link button of a post in a list view (list view refers to home feed, subreddit view, etc.)
-%hook _TtC6Apollo13RichMediaNode
-- (void)linkButtonTappedWithSender:(_TtC6Apollo14LinkButtonNode *)arg1 {
-    RDKLink *rdkLink = MSHookIvar<RDKLink *>(self, "link");
-    NSURL *rdkLinkURL;
-    if (rdkLink) {
-        rdkLinkURL = rdkLink.URL;
-    }
-
-    NSURL *url = MSHookIvar<NSURL *>(arg1, "url");
-    NSString *urlString = nil;
-
-    // For iOS 26 compatibility
-    BOOL canModifyURL = [url respondsToSelector:@selector(absoluteString)];
-    if ([url respondsToSelector:@selector(absoluteString)]) {
-        urlString = [url absoluteString];
-        canModifyURL = YES;
-    } else {
-        %orig;
-        return;
-    }
-
-    void (^ignoreHandler)(void) = ^{
-        %orig;
-    };
-    void (^successHandler)(NSString *) = ^(NSString *resolvedURL) {
-        if (canModifyURL) {
-            NSURL *newURL = [NSURL URLWithString:resolvedURL];
-            MSHookIvar<NSURL *>(arg1, "url") = newURL;
-            if (rdkLink) {
-                MSHookIvar<RDKLink *>(self, "link").URL = newURL;
-            }
-            %orig;
-            MSHookIvar<NSURL *>(arg1, "url") = url;
-            MSHookIvar<RDKLink *>(self, "link").URL = rdkLinkURL;
-        } else {
-            %orig;
-        }
-    };
-    TryResolveShareUrl(urlString, successHandler, ignoreHandler);
-}
-
--(void)textNode:(id)textNode tappedLinkAttribute:(id)attr value:(id)val atPoint:(struct CGPoint)point textRange:(struct _NSRange)range {
-    if (![val isKindOfClass:[NSURL class]]) {
-        %orig;
-        return;
-    }
-    void (^ignoreHandler)(void) = ^{
-        %orig;
-    };
-    void (^successHandler)(NSString *) = ^(NSString *resolvedURL) {
-        %orig(textNode, attr, [NSURL URLWithString:resolvedURL], point, range);
-    };
-    TryResolveShareUrl([val absoluteString], successHandler, ignoreHandler);
-}
-
-%end
-
-@interface _TtC6Apollo15CommentCellNode
-- (void)didLoad;
-- (void)linkButtonTappedWithSender:(_TtC6Apollo14LinkButtonNode *)arg1;
-@end
-
-// Single comment under an individual post
-%hook _TtC6Apollo15CommentCellNode
-
-- (void)didLoad {
-    %orig;
-    if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyApolloShowUnreadComments] == NO) {
-        return;
-    }
-    RDKComment *comment = MSHookIvar<RDKComment *>(self, "comment");
-    if (comment) {
-        NSDate *createdUTC = MSHookIvar<NSDate *>(comment, "_createdUTC");
-        UIView *view = MSHookIvar<UIView *>(self, "_view");
-        NSString *linkIDWithoutPrefix = [comment linkIDWithoutTypePrefix];
-
-        if (linkIDWithoutPrefix) {
-            NSDate *timestamp = [postSnapshots objectForKey:linkIDWithoutPrefix];
-            // Highlight if comment is newer than the timestamp saved in postSnapshots
-            if (view && createdUTC && timestamp && [createdUTC compare:timestamp] == NSOrderedDescending) {
-                UIView *yellowTintView = [[UIView alloc] initWithFrame: [view bounds]];
-                yellowTintView.backgroundColor = NewPostCommentsColor;
-                yellowTintView.userInteractionEnabled = NO;
-                [view insertSubview:yellowTintView atIndex:1];
-            }
-        }
-    }
-}
-
-- (void)linkButtonTappedWithSender:(_TtC6Apollo14LinkButtonNode *)arg1 {
-    %log;
-    NSURL *url = MSHookIvar<NSURL *>(arg1, "url");
-    NSString *urlString = nil;
-
-    // For iOS 26 compatibility
-    BOOL canModifyURL = [url respondsToSelector:@selector(absoluteString)];
-    if ([url respondsToSelector:@selector(absoluteString)]) {
-        urlString = [url absoluteString];
-        canModifyURL = YES;
-    } else {
-        %orig;
-        return;
-    }
-
-    void (^ignoreHandler)(void) = ^{
-        %orig;
-    };
-    void (^successHandler)(NSString *) = ^(NSString *resolvedURL) {
-        if (canModifyURL) {
-            MSHookIvar<NSURL *>(arg1, "url") = [NSURL URLWithString:resolvedURL];
-            %orig;
-            MSHookIvar<NSURL *>(arg1, "url") = url;
-        } else {
-            %orig;
-        }
-    };
-    TryResolveShareUrl(urlString, successHandler, ignoreHandler);
-}
-
-%end
-
-// Component at the top of a single post view ("header")
-%hook _TtC6Apollo22CommentsHeaderCellNode
-
--(void)linkButtonNodeTappedWithSender:(_TtC6Apollo14LinkButtonNode *)arg1 {
-    RDKLink *rdkLink = MSHookIvar<RDKLink *>(self, "link");
-    NSURL *rdkLinkURL;
-    if (rdkLink) {
-        rdkLinkURL = rdkLink.URL;
-    }
-
-    NSURL *url = MSHookIvar<NSURL *>(arg1, "url");
-    NSString *urlString = nil;
-
-    // For iOS 26 compatibility
-    BOOL canModifyURL = [url respondsToSelector:@selector(absoluteString)];
-    if ([url respondsToSelector:@selector(absoluteString)]) {
-        urlString = [url absoluteString];
-        canModifyURL = YES;
-    } else {
-        %orig;
-        return;
-    }
-
-    void (^ignoreHandler)(void) = ^{
-        %orig;
-    };
-    void (^successHandler)(NSString *) = ^(NSString *resolvedURL) {
-        if (canModifyURL) {
-            NSURL *newURL = [NSURL URLWithString:resolvedURL];
-            MSHookIvar<NSURL *>(arg1, "url") = newURL;
-            if (rdkLink) {
-                MSHookIvar<RDKLink *>(self, "link").URL = newURL;
-            }
-            %orig;
-            MSHookIvar<NSURL *>(arg1, "url") = url;
-            MSHookIvar<RDKLink *>(self, "link").URL = rdkLinkURL;
-        } else {
-            %orig;
-        }
-    };
-    TryResolveShareUrl(urlString, successHandler, ignoreHandler);
-}
-
-%end
-
-static NSString *ApolloExtractGiphyIDFromToken(NSString *token) {
-    if (![token isKindOfClass:[NSString class]] || token.length == 0) {
-        return nil;
-    }
-    NSRange prefixRange = [token rangeOfString:@"giphy|"];
-    if (prefixRange.location == NSNotFound) {
-        return nil;
-    }
-    NSString *suffix = [token substringFromIndex:(prefixRange.location + prefixRange.length)];
-    if (suffix.length == 0) {
-        return nil;
-    }
-    NSRange nextPipe = [suffix rangeOfString:@"|"];
-    NSString *giphyID = (nextPipe.location == NSNotFound) ? suffix : [suffix substringToIndex:nextPipe.location];
-    return giphyID.length > 0 ? giphyID : nil;
-}
-
-static BOOL ApolloIsValidGiphyID(NSString *giphyID) {
-    if (![giphyID isKindOfClass:[NSString class]] || giphyID.length == 0) {
-        return NO;
-    }
-    // Giphy IDs are alphanumeric with possible underscores/dashes
-    for (NSUInteger i = 0; i < giphyID.length; i++) {
-        unichar c = [giphyID characterAtIndex:i];
-        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-')) {
-            return NO;
-        }
-    }
-    return YES;
-}
-
-%hook RDKComment
-
-// Fix invalid giphy media_metadata entries by synthesizing valid-looking metadata
-// with direct giphy CDN URLs.
-- (NSDictionary *)mediaMetadata {
-    NSDictionary *orig = %orig;
-    if (![orig isKindOfClass:[NSDictionary class]] || orig.count == 0) {
-        return orig;
-    }
-
-    NSMutableDictionary *fixed = nil;
-    for (NSString *key in orig) {
-        if (![key isKindOfClass:[NSString class]] || ![key hasPrefix:@"giphy|"]) {
-            continue;
-        }
-        NSDictionary *entry = orig[key];
-        if (![entry isKindOfClass:[NSDictionary class]]) {
-            continue;
-        }
-        NSString *status = entry[@"status"];
-        if ([status isKindOfClass:[NSString class]] && [status isEqualToString:@"valid"]) {
-            continue;
-        }
-
-        // This entry is invalid/missing — synthesize valid metadata
-        NSString *giphyID = ApolloExtractGiphyIDFromToken(key);
-        if (!ApolloIsValidGiphyID(giphyID)) {
-            continue;
-        }
-
-        if (!fixed) {
-            fixed = [orig mutableCopy];
-        }
-
-        NSString *extURL = [NSString stringWithFormat:@"https://giphy.com/gifs/%@", giphyID];
-        NSString *gifURL = [NSString stringWithFormat:@"https://media.giphy.com/media/%@/giphy.gif", giphyID];
-        NSString *thumbURL = [NSString stringWithFormat:@"https://media.giphy.com/media/%@/200w_s.gif", giphyID];
-
-        fixed[key] = @{
-            @"status": @"valid",
-            @"e": @"AnimatedImage",
-            @"m": @"image/gif",
-            @"ext": extURL,
-            @"p": @[@{@"y": @200, @"x": @200, @"u": thumbURL}],
-            // Must use gifURL for 'mp4' or else will open in webview
-            @"s": @{@"y": @200, @"gif": gifURL, @"mp4": gifURL, @"x": @200},
-            @"t": @"giphy",
-            @"id": key,
-        };
-        ApolloLog(@"[Giphy] Synthesized valid metadata for %@ (ID: %@)", key, giphyID);
-    }
-
-    return fixed ?: orig;
-}
-
-// Fix "Processing img <id>..." placeholder text in comments where media_metadata has valid data.
-// Reddit's API sometimes returns body/body_html with unprocessed placeholder text even though
-// the media_metadata dictionary contains fully resolved image URLs.
-
-- (NSString *)body {
-    NSString *text = %orig;
-    if (!text || ![text containsString:@"Processing img "]) return text;
-
-    NSDictionary *metadata = self.mediaMetadata;
-    if (![metadata isKindOfClass:[NSDictionary class]] || metadata.count == 0) return text;
-
-    NSMutableString *fixed = [text mutableCopy];
-    static NSRegularExpression *regex;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        regex = [NSRegularExpression regularExpressionWithPattern:@"\\*Processing img ([a-zA-Z0-9_]+)\\.{3}\\*" options:0 error:nil];
-    });
-    NSArray *matches = [regex matchesInString:fixed options:0 range:NSMakeRange(0, fixed.length)];
-
-    for (NSTextCheckingResult *match in [matches reverseObjectEnumerator]) {
-        NSString *mediaId = [fixed substringWithRange:[match rangeAtIndex:1]];
-        NSDictionary *entry = metadata[mediaId];
-        if (![entry isKindOfClass:[NSDictionary class]]) continue;
-        if (![[entry objectForKey:@"status"] isEqualToString:@"valid"]) continue;
-
-        NSDictionary *source = entry[@"s"];
-        if (![source isKindOfClass:[NSDictionary class]]) continue;
-
-        NSString *url = source[@"mp4"] ?: source[@"gif"] ?: source[@"u"];
-        if (!url) {
-            NSArray *previews = entry[@"p"];
-            if ([previews isKindOfClass:[NSArray class]] && previews.count > 0) {
-                url = [previews.lastObject objectForKey:@"u"];
-            }
-        }
-        if (![url isKindOfClass:[NSString class]] || url.length == 0) continue;
-
-        NSString *label = [[entry objectForKey:@"e"] isEqualToString:@"AnimatedImage"] ? @"GIF" : @"Image";
-        NSString *replacement = [NSString stringWithFormat:@"[%@](%@)", label, url];
-        [fixed replaceCharactersInRange:match.range withString:replacement];
-    }
-
-    return fixed;
-}
-
-%end
 
 // Replace Reddit API client ID
 %hook RDKOAuthCredential
@@ -1111,7 +275,18 @@ static BOOL ApolloIsValidGiphyID(NSString *giphyID) {
 }
 %end
 
+// Does not work on iOS 26+
+%hook NSURL
 
+// Rewrite x.com links as twitter.com
+- (NSString *)host {
+    NSString *originalHost = %orig;
+    if (originalHost && [originalHost isEqualToString:@"x.com"]) {
+        return @"twitter.com";
+    }
+    return originalHost;
+}
+%end
 
 // Implementation derived from https://github.com/ichitaso/ApolloPatcher/blob/v0.0.5/Tweak.x
 // Credits to @ichitaso for the original implementation
@@ -1120,28 +295,13 @@ static BOOL ApolloIsValidGiphyID(NSString *giphyID) {
 - (BOOL)isJSONResponse:(NSURLResponse *)response;
 @end
 
-%hook NSURLSession
-// Imgur Upload
-- (NSURLSessionUploadTask*)uploadTaskWithRequest:(NSURLRequest*)request fromData:(NSData*)bodyData completionHandler:(void (^)(NSData*, NSURLResponse*, NSError*))completionHandler {
-    NSURL *url = [request URL];
-    if ([url.host isEqualToString:@"imgur-apiv3.p.rapidapi.com"] && [url.path isEqualToString:@"/3/image"]) {
-        NSMutableURLRequest *modifiedRequest = [request mutableCopy];
-        NSURL *newURL = [NSURL URLWithString:@"https://api.imgur.com/3/image"];
-        [modifiedRequest setURL:newURL];
-
-        // Hacky fix for multi-image upload failures - the first attempt may fail but subsequent attempts will succeed
-        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-        void (^newCompletionHandler)(NSData*, NSURLResponse*, NSError*) = ^(NSData *data, NSURLResponse *response, NSError *error) {
-            completionHandler(data, response, error);
-            dispatch_semaphore_signal(semaphore);
-        };
-        NSURLSessionUploadTask *task = %orig(modifiedRequest,bodyData,newCompletionHandler);
-        [task resume];
-        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-        return task;
-    }
-    return %orig();
+// Strip RapidAPI-specific headers when redirecting to direct Imgur API
+static void StripRapidAPIHeaders(NSMutableURLRequest *request) {
+    [request setValue:nil forHTTPHeaderField:@"X-RapidAPI-Key"];
+    [request setValue:nil forHTTPHeaderField:@"X-RapidAPI-Host"];
 }
+
+%hook NSURLSession
 
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
     NSURL *url = [request URL];
@@ -1205,30 +365,23 @@ static BOOL ApolloIsValidGiphyID(NSString *giphyID) {
     NSString *host = [url host];
     NSString *path = [url path];
 
-    if ([host isEqualToString:@"imgur-apiv3.p.rapidapi.com"]) {
-        if ([path hasPrefix:@"/3/image"]) {
-            NSMutableURLRequest *modifiedRequest = [request mutableCopy];
-            NSURL * newURL = [NSURL URLWithString:[@"https://api.imgur.com" stringByAppendingString:path]];
-            [modifiedRequest setURL:newURL];
-            return %orig(modifiedRequest, completionHandler);
-        } else if ([path hasPrefix:@"/3/album"]) {
-            NSMutableURLRequest *modifiedRequest = [request mutableCopy];
-            NSURL * newURL = [NSURL URLWithString:[@"https://api.imgur.com" stringByAppendingString:path]];
-            [modifiedRequest setURL:newURL];
-            // Convert from application/x-www-form-urlencoded format to JSON due to API change
-            NSString *bodyString = [[NSString alloc] initWithData:modifiedRequest.HTTPBody encoding:NSUTF8StringEncoding];
-            NSArray *components = [bodyString componentsSeparatedByString:@"="];
-            if (components.count == 2 && [components[0] isEqualToString:@"deletehashes"]) {
-                NSString *deleteHashes = components[1];
-                NSArray *hashes = [deleteHashes componentsSeparatedByString:@","];
-                // Create JSON body
-                NSDictionary *jsonBody = @{@"deletehashes": hashes};
-                NSData *jsonData = [NSJSONSerialization dataWithJSONObject:jsonBody options:0 error:nil];
-                [modifiedRequest setHTTPBody:jsonData];
-                [modifiedRequest setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-            }
-            return %orig(modifiedRequest, completionHandler);
+    if ([host isEqualToString:@"imgur-apiv3.p.rapidapi.com"] && [path hasPrefix:@"/3/album"]) {
+        // Album creation needs body format conversion (form-urlencoded → JSON)
+        // URL redirect and auth are handled by _onqueue_resume
+        NSMutableURLRequest *modifiedRequest = [request mutableCopy];
+        [modifiedRequest setURL:[NSURL URLWithString:[@"https://api.imgur.com" stringByAppendingString:path]]];
+        StripRapidAPIHeaders(modifiedRequest);
+        NSString *bodyString = [[NSString alloc] initWithData:modifiedRequest.HTTPBody encoding:NSUTF8StringEncoding];
+        NSArray *components = [bodyString componentsSeparatedByString:@"="];
+        if (components.count == 2 && [components[0] isEqualToString:@"deletehashes"]) {
+            NSString *deleteHashes = components[1];
+            NSArray *hashes = [deleteHashes componentsSeparatedByString:@","];
+            NSDictionary *jsonBody = @{@"deletehashes": hashes};
+            NSData *jsonData = [NSJSONSerialization dataWithJSONObject:jsonBody options:0 error:nil];
+            [modifiedRequest setHTTPBody:jsonData];
+            [modifiedRequest setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
         }
+        return %orig(modifiedRequest, completionHandler);
     } else if ([host isEqualToString:@"api.redgifs.com"] && [path isEqualToString:@"/v2/oauth/client"]) {
         // Redirect to the new temporary token endpoint
         NSMutableURLRequest *modifiedRequest = [request mutableCopy];
@@ -1268,7 +421,7 @@ static BOOL ApolloIsValidGiphyID(NSString *giphyID) {
     if ([url.host isEqualToString:@"apollogur.download"]) {
         NSString *imageID = [url.lastPathComponent stringByDeletingPathExtension];
         NSURL *modifiedURL;
-        
+
         if ([url.path hasPrefix:@"/api/image"]) {
             // Access the modified URL to get the actual data
             modifiedURL = [NSURL URLWithString:[@"https://api.imgur.com/3/image/" stringByAppendingString:imageID]];
@@ -1280,7 +433,7 @@ static BOOL ApolloIsValidGiphyID(NSString *giphyID) {
             }
             modifiedURL = [NSURL URLWithString:[@"https://api.imgur.com/3/album/" stringByAppendingString:imageID]];
         }
-        
+
         if (modifiedURL) {
             return %orig(modifiedURL, completionHandler);
         }
@@ -1326,17 +479,36 @@ static BOOL ApolloIsValidGiphyID(NSString *giphyID) {
         return;
     }
 
-    // Intercept modified "unproxied" Imgur requests and replace Authorization header with custom client ID
-    if ([requestURL.host isEqualToString:@"api.imgur.com"]) {
+    // Redirect RapidAPI-proxied Imgur requests to direct Imgur API.
+    // This handles upload tasks (where body data is attached to the task, not the request)
+    // as well as any other Imgur requests not caught by NSURLSession data task hooks.
+    if ([requestURL.host isEqualToString:@"imgur-apiv3.p.rapidapi.com"]) {
         NSMutableURLRequest *mutableRequest = [request mutableCopy];
-        // Insert the api credential and update the request on this session task
+        NSString *newURLString = [requestString stringByReplacingOccurrencesOfString:@"imgur-apiv3.p.rapidapi.com" withString:@"api.imgur.com"];
+        [mutableRequest setURL:[NSURL URLWithString:newURLString]];
         [mutableRequest setValue:[@"Client-ID " stringByAppendingString:sImgurClientId] forHTTPHeaderField:@"Authorization"];
-        // Set or else upload will fail with 400
+        StripRapidAPIHeaders(mutableRequest);
         if ([requestURL.path isEqualToString:@"/3/image"]) {
             [mutableRequest setValue:@"image/jpeg" forHTTPHeaderField:@"Content-Type"];
         }
         [self setValue:mutableRequest forKey:@"_originalRequest"];
         [self setValue:mutableRequest forKey:@"_currentRequest"];
+    } else if ([requestURL.host isEqualToString:@"api.imgur.com"]) {
+        // Already redirected — either by the branch above (re-entry) or by NSURLSession
+        // data task hooks (album creation, apollogur unproxy).
+        // Only modify if auth not already set: redundant mutableCopy+setValue on upload
+        // tasks disrupts the internal body data reference, causing empty uploads.
+        NSString *existingAuth = [request valueForHTTPHeaderField:@"Authorization"];
+        if (![existingAuth hasPrefix:@"Client-ID "]) {
+            NSMutableURLRequest *mutableRequest = [request mutableCopy];
+            [mutableRequest setValue:[@"Client-ID " stringByAppendingString:sImgurClientId] forHTTPHeaderField:@"Authorization"];
+            StripRapidAPIHeaders(mutableRequest);
+            if ([requestURL.path isEqualToString:@"/3/image"]) {
+                [mutableRequest setValue:@"image/jpeg" forHTTPHeaderField:@"Content-Type"];
+            }
+            [self setValue:mutableRequest forKey:@"_originalRequest"];
+            [self setValue:mutableRequest forKey:@"_currentRequest"];
+        }
     } else if ([requestURL.host isEqualToString:@"oauth.reddit.com"] || [requestURL.host isEqualToString:@"www.reddit.com"]) {
         NSMutableURLRequest *mutableRequest = [request mutableCopy];
         NSString *customUA = [sUserAgent length] > 0 ? sUserAgent : defaultUserAgent;
@@ -1350,43 +522,27 @@ static BOOL ApolloIsValidGiphyID(NSString *giphyID) {
 
 %end
 
-@interface SettingsGeneralViewController : UIViewController
-@end
-
-%hook SettingsGeneralViewController
-
-- (void)viewDidLoad {
-    %orig;
-    ((SettingsGeneralViewController *)self).navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Custom API" style: UIBarButtonItemStylePlain target:self action:@selector(showAPICredentialViewController)];
+// Unlock "Artificial Superintelligence" Pixel Pal (normally requires Carrot Weather app installed)
+%hook UIApplication
+- (BOOL)canOpenURL:(NSURL *)url {
+    if ([[url scheme] isEqualToString:@"carrotweather"]) {
+        return YES;
+    }
+    return %orig;
 }
-
-%new - (void)showAPICredentialViewController {
-    UINavigationController *navController = [[UINavigationController alloc] initWithRootViewController:[[CustomAPIViewController alloc] init]];
-    [self presentViewController:navController animated:YES completion:nil];
-}
-
 %end
 
-static void initializePostSnapshots(NSData *data) {
-    NSError *error = nil;
-    NSArray *jsonArray = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
-    if (error) {
-        return;
-    }
-    [postSnapshots removeAllObjects];
-    for (NSUInteger i = 0; i < jsonArray.count; i += 2) {
-        if ([jsonArray[i] isKindOfClass:[NSString class]] &&
-            [jsonArray[i + 1] isKindOfClass:[NSDictionary class]]) {
-            
-            NSString *id = jsonArray[i];
-            NSDictionary *dict = jsonArray[i + 1];
-            NSTimeInterval timestamp = [dict[@"timestamp"] doubleValue];
-            
-            NSDate *date = [NSDate dateWithTimeIntervalSinceReferenceDate:timestamp];
-            postSnapshots[id] = date;
-        }
-    }
+// Reddit API can returns "error" as a dict (e.g. {"reason":"UNAUTHORIZED",...})
+// instead of a numeric code. Multiple Apollo code paths call [dict[@"error"] integerValue]
+// on the response, including unhookable block invokes. Adding integerValue to NSDictionary
+// prevents the unrecognized selector crash everywhere; returning 0 means no error code
+// matches, so normal error handling proceeds.
+%hook NSDictionary
+%new
+- (NSInteger)integerValue {
+    return 0;
 }
+%end
 
 // Pre-fetches random subreddit lists in background
 static void initializeRandomSources() {
@@ -1414,188 +570,7 @@ static void initializeRandomSources() {
     });
 }
 
-@interface ApolloTabBarController : UITabBarController
-@end
-
-%hook ApolloTabBarController
-
-- (void)viewDidLoad {
-    %orig;
-    // Listen for changes to postSnapshots so we can update our internal dictionary
-    [[NSUserDefaults standardUserDefaults] addObserver:self
-                                           forKeyPath:UDKeyApolloPostCommentsSnapshots
-                                           options:NSKeyValueObservingOptionNew
-                                           context:NULL];
-}
-
-- (void)observeValueForKeyPath:(NSString *) keyPath ofObject:(id) object change:(NSDictionary *) change context:(void *) context {
-    if ([keyPath isEqual:UDKeyApolloPostCommentsSnapshots]) {
-        NSData *postSnapshotData = [[NSUserDefaults standardUserDefaults] objectForKey:UDKeyApolloPostCommentsSnapshots];
-        if (postSnapshotData) {
-            initializePostSnapshots(postSnapshotData);
-        }
-    }
-}
-
-- (void) dealloc {
-    %orig;
-    [[NSUserDefaults standardUserDefaults] removeObserver:self forKeyPath:UDKeyApolloPostCommentsSnapshots];
-}
-
-%end
-
-// Cancel Liquid Lens gesture recognizer to prevent it interfering with our long-press gesture
-static void ApolloCancelLiquidLensGesture(UITabBar *tabBar) {
-    for (UIGestureRecognizer *gesture in tabBar.gestureRecognizers) {
-        if ([gesture isKindOfClass:NSClassFromString(@"_UIContinuousSelectionGestureRecognizer")]) {
-            gesture.enabled = NO;
-            gesture.enabled = YES;
-            return;
-        }
-    }
-}
-
-@interface _UITabButton : UIView
-@property (nonatomic, getter=isHighlighted) BOOL highlighted;
-@end
-
-@interface _UIBarBackground : UIView
-@end
-
-@interface _UITAMICAdaptorView : UIView
-@end
-
-%hook _UITabButton
-
-- (void)didMoveToWindow {
-    %orig;
-
-    if (!self.window) return;
-    if (objc_getAssociatedObject(self, &kApolloTabButtonSetupKey)) return;
-    objc_setAssociatedObject(self, &kApolloTabButtonSetupKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-    // Restore account tab long-press gesture
-    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc]
-        initWithTarget:self action:@selector(apollo_tabButtonLongPressed:)];
-    longPress.minimumPressDuration = 0.5;
-    longPress.delegate = (id<UIGestureRecognizerDelegate>)self;
-    [(UIView *)self addGestureRecognizer:longPress];
-
-    // Toggle 'highlighted' to trigger Liquid Glass tab bar to re-layout labels correctly
-    BOOL wasHighlighted = self.highlighted;
-    self.highlighted = YES;
-    self.highlighted = wasHighlighted;
-}
-
-%new
-- (void)apollo_tabButtonLongPressed:(UILongPressGestureRecognizer *)recognizer {
-    if (recognizer.state != UIGestureRecognizerStateBegan) {
-        return;
-    }
-
-    UITabBar *tabBar = FindAncestorTabBar(self);
-    NSArray<UIView *> *orderedButtons = OrderedTabButtonsInTabBar(tabBar);
-    NSUInteger index = LogicalTabIndexForButton(tabBar, orderedButtons, self);
-
-    if (index == 2) { // Profile tab
-        ApolloCancelLiquidLensGesture(tabBar);
-        OpenAccountManager();
-    }
-}
-
-%new
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    return YES;
-}
-
-%end
-
-// Fix opaque navigation bar background in dark mode on iOS 26 Liquid Glass
-%hook _UIBarBackground
-
-- (void)didAddSubview:(UIView *)subview {
-    %orig;
-    if (!IsLiquidGlass()) return;
-
-    if ([subview isKindOfClass:[UIImageView class]]) {
-        subview.hidden = YES;
-    }
-}
-
-%end
-
-// Fix nav bar button height misalignment on iOS 26 Liquid Glass
-// UIButtons inside _UITAMICAdaptorView can be taller than their parent
-%hook _UITAMICAdaptorView
-
-- (void)layoutSubviews {
-    %orig;
-    if (!IsLiquidGlass()) return;
-
-    // Find the direct UIView child and fix UIButton heights within it
-    for (UIView *child in self.subviews) {
-        if (![NSStringFromClass([child class]) isEqualToString:@"UIView"]) continue;
-
-        CGFloat parentHeight = child.bounds.size.height;
-        for (UIView *subview in child.subviews) {
-            if (![subview isKindOfClass:[UIButton class]]) continue;
-
-            // Fix button height to match parent
-            if (subview.bounds.size.height != parentHeight) {
-                CGRect frame = subview.frame;
-                frame.size.height = parentHeight;
-                subview.frame = frame;
-            }
-        }
-    }
-}
-
-%end
-
-@interface ASTableView : UITableView
-@end
-
-static char kASTableViewHasSearchToolbarKey;
-
-%hook ASTableView
-
-// Prevent opaque view from being added when search bar folds into nav bar w/ Liquid Glass
-- (void)addSubview:(UIView *)subview {
-    if (!IsLiquidGlass()) {
-        %orig;
-        return;
-    }
-
-    NSString *className = NSStringFromClass([subview class]);
-
-    // Track if table view contains a search toolbar
-    if ([className containsString:@"ApolloSearchToolbar"]) {
-        objc_setAssociatedObject(self, &kASTableViewHasSearchToolbarKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        %orig;
-
-        // Retroactively remove target UIView if already added
-        for (UIView *existingSubview in [self.subviews copy]) {
-            if ([NSStringFromClass([existingSubview class]) isEqualToString:@"UIView"]) {
-                ApolloLog(@"[ASTableView addSubview] Retroactively removing opaque UIView");
-                [existingSubview removeFromSuperview];
-            }
-        }
-        return;
-    }
-
-    // Prevent target UIView from being added if search toolbar is present
-    if ([className isEqualToString:@"UIView"]) {
-        NSNumber *hasToolbar = objc_getAssociatedObject(self, &kASTableViewHasSearchToolbarKey);
-        if ([hasToolbar boolValue]) {
-            ApolloLog(@"[ASTableView addSubview] Blocking opaque UIView from being added");
-            return; // Don't call %orig - prevent the view from being added
-        }
-    }
-
-    %orig;
-}
-
-%end
+// MARK: - Constructor
 
 // Reddit API can returns "error" as a dict (e.g. {"reason":"UNAUTHORIZED",...})
 // instead of a numeric code. Multiple Apollo code paths call [dict[@"error"] integerValue]
@@ -1610,16 +585,19 @@ static char kASTableViewHasSearchToolbarKey;
 %end
 
 %ctor {
-    cache = [NSCache new];
-    postSnapshots = [NSMutableDictionary dictionary];
     subredditListCache = [NSCache new];
 
-    NSError *error = NULL;
-    ShareLinkRegex = [NSRegularExpression regularExpressionWithPattern:ShareLinkRegexPattern options:NSRegularExpressionCaseInsensitive error:&error];
-    MediaShareLinkRegex = [NSRegularExpression regularExpressionWithPattern:MediaShareLinkPattern options:NSRegularExpressionCaseInsensitive error:&error];
-    ImgurTitleIdImageLinkRegex = [NSRegularExpression regularExpressionWithPattern:ImgurTitleIdImageLinkPattern options:NSRegularExpressionCaseInsensitive error:&error];
-
-    NSDictionary *defaultValues = @{UDKeyBlockAnnouncements: @YES, UDKeyEnableFLEX: @NO, UDKeyApolloShowUnreadComments: @NO, UDKeyTrendingSubredditsLimit: @"5", UDKeyShowRandNsfw: @NO, UDKeyRandomSubredditsSource:defaultRandomSubredditsSource, UDKeyRandNsfwSubredditsSource: @"", UDKeyTrendingSubredditsSource: defaultTrendingSubredditsSource };
+    NSDictionary *defaultValues = @{UDKeyBlockAnnouncements: @YES,
+                                    UDKeyEnableFLEX: @NO,
+                                    UDKeyTrendingSubredditsLimit: @"5",
+                                    UDKeyShowRandNsfw: @NO,
+                                    UDKeyRandomSubredditsSource: defaultRandomSubredditsSource,
+                                    UDKeyRandNsfwSubredditsSource: @"",
+                                    UDKeyTrendingSubredditsSource: defaultTrendingSubredditsSource,
+                                    UDKeyReadPostMaxCount: @200,
+                                    UDKeyShowRecentlyReadThumbnails: @YES,
+                                    UDKeyPreferredGIFFallbackFormat: @1,
+                                    UDKeyUnmuteCommentsVideos: @0};
     [[NSUserDefaults standardUserDefaults] registerDefaults:defaultValues];
 
     sRedditClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedditClientId] ?: @"" copy];
@@ -1627,27 +605,79 @@ static char kASTableViewHasSearchToolbarKey;
     sRedirectURI = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedirectURI] ?: @"" copy];
     sUserAgent = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyUserAgent] ?: @"" copy];
     sBlockAnnouncements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBlockAnnouncements];
+    sShowRecentlyReadThumbnails = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowRecentlyReadThumbnails];
+    sPreferredGIFFallbackFormat = ([[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPreferredGIFFallbackFormat] == 0) ? 0 : 1;
+    sReadPostMaxCount = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyReadPostMaxCount];
+    sUnmuteCommentsVideos = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyUnmuteCommentsVideos];
+
+    // Trim ReadPostIDs if over configured max
+    if (sReadPostMaxCount > 0) {
+        NSArray *postIDs = [[NSUserDefaults standardUserDefaults] stringArrayForKey:@"ReadPostIDs"];
+        if (postIDs && (NSInteger)postIDs.count > sReadPostMaxCount) {
+            NSArray *trimmed = [postIDs subarrayWithRange:NSMakeRange(postIDs.count - (NSUInteger)sReadPostMaxCount, (NSUInteger)sReadPostMaxCount)];
+            [[NSUserDefaults standardUserDefaults] setObject:trimmed forKey:@"ReadPostIDs"];
+            ApolloLog(@"[RecentlyRead] Trimmed ReadPostIDs from %lu to %ld entries", (unsigned long)postIDs.count, (long)sReadPostMaxCount);
+        }
+    }
 
     sRandomSubredditsSource = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRandomSubredditsSource];
     sRandNsfwSubredditsSource = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRandNsfwSubredditsSource];
     sTrendingSubredditsSource = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTrendingSubredditsSource];
     sTrendingSubredditsLimit = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTrendingSubredditsLimit];
 
-    %init(SettingsGeneralViewController=objc_getClass("Apollo.SettingsGeneralViewController"), ApolloTabBarController=objc_getClass("Apollo.ApolloTabBarController"));
+    %init;
+
+    // Ultra pre-migration
+    [[NSUserDefaults standardUserDefaults] setObject:@"ya" forKey:@"awesome_notifications"];
+
+    NSUserDefaults *sharedSuite = [[NSUserDefaults alloc] initWithSuiteName:@"group.com.christianselig.apollo"];
+    if (sharedSuite) {
+        // Ultra/Pro flags
+        [sharedSuite setBool:YES forKey:@"UMigrationOccurred"];
+        [sharedSuite setBool:YES forKey:@"ProMigrationOccurred"];
+        [sharedSuite setBool:YES forKey:@"SPMigrationOccurred"];
+        [sharedSuite setBool:YES forKey:@"CommMigrationOccurred"];
+
+        // Secret icon flags
+        [sharedSuite setBool:YES forKey:@"HasUnlockedBeanVault"];  // Beans (Black Friday 2022)
+        [sharedSuite setBool:YES forKey:@"SlothkunUnlocked"];      // Slothkun
+        [sharedSuite setBool:YES forKey:@"iJustineUnlocked"];      // iJustine (sekrit: wrappingpaper)
+        [sharedSuite setBool:YES forKey:@"UnitedStatesUnlocked"];  // America! (sekrit: america)
+        [sharedSuite setBool:YES forKey:@"UnitedStates2Unlocked"]; // Super America (sekrit: superamerica)
+        [sharedSuite setBool:YES forKey:@"UnitedKingdomUnlocked"]; // UK (sekrit: hughlaurie)
+        [sharedSuite setBool:YES forKey:@"TLDTodayUnlocked"];      // Yo. Jonathan Here. (sekrit: tld/jellyfish/crispy)
+        [sharedSuite setBool:YES forKey:@"ApolloBookProUnlocked"]; // ApolloBook Pro (sekrit: apollobookpro)
+        [sharedSuite setBool:YES forKey:@"UnlockedWallpapers"];    // Wallpapers
+        [sharedSuite setBool:YES forKey:@"ATPUnlocked"];           // ATP (sekrit: atp)
+        [sharedSuite setBool:YES forKey:@"PhilUnlocked"];          // Phil Schiller (sekrit: phil/throatpunch)
+        [sharedSuite setBool:YES forKey:@"CanadaUnlocked"];        // Canada D'Eh (sekrit: canadadeh)
+        [sharedSuite setBool:YES forKey:@"UkraineUnlocked"];       // Ukraine (sekrit: ukraine)
+        [sharedSuite setBool:YES forKey:@"ErnestUnlocked"];        // Ernest (sekrit: ernest)
+        [sharedSuite setBool:YES forKey:@"SusUnlocked"];           // Sus/Among Us (sekrit: sus)
+        [sharedSuite setBool:YES forKey:@"Dave2DUnlocked"];        // Dave2D (sekrit: dave2d)
+        [sharedSuite setBool:YES forKey:@"MKBHDUnlocked"];         // MKBHD (sekrit: keith)
+        [sharedSuite setBool:YES forKey:@"PeachyUnlocked"];        // Peachy (sekrit: neonpeach)
+        [sharedSuite setBool:YES forKey:@"LinusUnlocked"];         // Linus Tech Tips (sekrit: livelaughliao)
+        [sharedSuite setBool:YES forKey:@"AndruUnlocked"];         // Andru Edwards (sekrit: andru/prowrestler)
+        [sharedSuite setBool:YES forKey:@"EAPUnlocked"];           // Icons Drop Test (sekrit: everythingapplepro)
+        [sharedSuite setBool:YES forKey:@"ReneUnlocked"];          // Rene Ritchie (sekrit: rene/montrealbagels)
+        [sharedSuite setBool:YES forKey:@"SnazzyUnlocked"];        // Snazzy Labs (sekrit: margaret)
+    }
+
+    // Unlock Chumbus theme (normally requires 1000 boop button taps in Theme Settings)
+    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"airprint-active"];
 
     // Suppress wallpaper prompt
     NSDate *dateIn90d = [NSDate dateWithTimeIntervalSinceNow:60*60*24*90];
     [[NSUserDefaults standardUserDefaults] setObject:dateIn90d forKey:@"WallpaperPromptMostRecent2"];
 
-    // Disable subreddit weather time - broken
-    [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"ShowSubredditWeatherTime"];
-
     // Sideload fixes
-    rebind_symbols((struct rebinding[3]) {
+    rebind_symbols((struct rebinding[4]) {
         {"SecItemAdd", (void *)SecItemAdd_replacement, (void **)&SecItemAdd_orig},
         {"SecItemCopyMatching", (void *)SecItemCopyMatching_replacement, (void **)&SecItemCopyMatching_orig},
-        {"SecItemUpdate", (void *)SecItemUpdate_replacement, (void **)&SecItemUpdate_orig}
-    }, 3);
+        {"SecItemUpdate", (void *)SecItemUpdate_replacement, (void **)&SecItemUpdate_orig},
+        {"uname", (void *)uname_replacement, (void **)&uname_orig}
+    }, 4);
 
     if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFLEX]) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -1655,16 +685,9 @@ static char kASTableViewHasSearchToolbarKey;
         });
     }
 
-    NSData *postSnapshotData = [[NSUserDefaults standardUserDefaults] objectForKey:UDKeyApolloPostCommentsSnapshots];
-    if (postSnapshotData) {
-        initializePostSnapshots(postSnapshotData);
-    } else {
-        ApolloLog(@"No data found in NSUserDefaults for key 'PostCommentsSnapshots'");
-    }
-
     initializeRandomSources();
 
-    // Redirect user to Custom API modal if no API credentials are set
+    // Redirect user to Custom API settings if no API credentials are set
     if ([sRedditClientId length] == 0) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             UIWindow *mainWindow = ((UIWindowScene *)UIApplication.sharedApplication.connectedScenes.anyObject).windows.firstObject;
@@ -1672,20 +695,10 @@ static char kASTableViewHasSearchToolbarKey;
             // Navigate to Settings tab
             tabBarController.selectedViewController = [tabBarController.viewControllers lastObject];
             UINavigationController *settingsNavController = (UINavigationController *) tabBarController.selectedViewController;
-            
-            // Navigate to General Settings
-            UIViewController *settingsGeneralViewController = [[objc_getClass("Apollo.SettingsGeneralViewController") alloc] init];
 
-            [CATransaction begin];
-            [CATransaction setCompletionBlock:^{
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    // Invoke Custom API button
-                    UIBarButtonItem *rightBarButtonItem = settingsGeneralViewController.navigationItem.rightBarButtonItem;
-                    [UIApplication.sharedApplication sendAction:rightBarButtonItem.action to:rightBarButtonItem.target from:settingsGeneralViewController forEvent:nil];
-                });
-            }];
-            [settingsNavController pushViewController:settingsGeneralViewController animated:YES];
-            [CATransaction commit];
+            // Push Custom API directly
+            CustomAPIViewController *vc = [[CustomAPIViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+            [settingsNavController pushViewController:vc animated:YES];
         });
     }
 }

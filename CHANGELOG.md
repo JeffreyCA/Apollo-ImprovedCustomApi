@@ -2,6 +2,89 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v2.0.0] - 2025-03-07
+
+🎉 ***Massive*** update that enables Ultra features like saved categories, new app icons and Pixel Pals! This also brings new features like recently read posts and fixes for some longstanding Apollo bugs.
+
+The Custom API settings view has also been redesigned and is now accessible directly from Settings.
+
+**Note:** Ultra features that rely on push notifications **still do not work**, and are unlikely to ever be supported.
+
+| | | |
+|:--:|:--:|:--:|
+| <img src="img/settings.jpg" alt="Settings" width="200"> | <img src="img/custom.jpg" alt="Custom API Settings" width="200"> | <img src="img/recents.jpg" alt="Recently Read" width="200"> |
+
+### Saved Categories
+- To enable saved categories, set "Allow Saved Categories" in Settings > General > Other
+- New "Saved Categories" section in Settings tab to edit and delete saved categories
+- Fixed: Saved category names are now consistently sorted in menus
+- **Note:** Saved categories are global, while saved items are tied to individual accounts
+
+### Recently Read
+- New "Recently Read" button in Profile tab to view and clear all recently read posts
+- "Disable Marking Posts Read" **must be unchecked** in Settings > General > Mark Read / Hiding Posts
+- **Note:** Recently read is global (not account-specific)
+
+### Media Playback
+- New "Unmute Videos in Comments" setting (Settings > General > Custom API)
+    - **Default**: Default Apollo behaviour
+    - **Remember from Fullscreen Player**: If you unmute a video in the fullscreen player, it stays unmuted when you navigate into comments
+    - **Always**: Header videos are always automatically unmuted after opening comments 
+- New "Preferred GIF Fallback Format" setting (Settings > General > Custom API)
+    - Choose between GIF or MP4 when Apollo fetches certain animated images from Reddit API
+    - Try setting to "GIF" if you find certain animated images get stuck with loading spinner
+
+### Other Issues Fixed
+- Interacting with Ultra features and settings no longer causes app to crash
+    - "New Comments Highlightifier" can be toggled normally in Settings > General, and is removed from Custom API settings
+- Fix multi-image Imgur uploads failing the first time
+- Fix share links opening in webview on iOS 26
+- Fix album image count label placement on newer iPhone models
+- Fix "Processing img" in self-posts
+- Liquid Glass: fix clipping when collapsing long comment chains
+- Add support for YouTube Shorts links
+- Various video playback fixes and improvements
+
+### Pixel Pals
+- Pixel Pals are now available on newer iPhone models
+- Unlock hidden "Artificial Superintelligence" Pixel Pal
+
+### App Icons & Themes
+- Unlock hidden "Chumbus" theme
+- Unlock all app icons, including:
+    - Community Icon Pack
+    - SPCA Animals Pack
+    - Ultra Icons
+    - <details>
+      <summary>22 Sekrit Icons (click to expand)</summary>
+
+        - Beans (Black Friday 2022)
+        - Sloth-kun
+        - iJustine / Wrapping Paper
+        - America!
+        - Super America
+        - UK / Hugh Laurie
+        - Yo. Jonathan Here. (TLD Today)
+        - ApolloBook Pro
+        - Wallpapers
+        - ATP
+        - Phil Schiller
+        - Canada D'Eh
+        - Ukraine
+        - Ernest
+        - Sus (Among Us)
+        - Dave2D
+        - MKBHD (Keith)
+        - Peachy (Neon Peach)
+        - Linus Tech Tips
+        - Andru Edwards
+        - Everything Apple Pro (Icons Drop Test)\*
+        - Rene Ritchie
+        - Snazzy Labs
+
+         The "Icons Drop Test" icon does not show up in App Icons. To set, go to Settings > About, shake device, and input `everythingapplepro`.
+      </details>
+
 ## [v1.4.5] - 2026-02-17
 
 - Prevent certain crashes when Reddit API goes down
@@ -181,6 +264,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v2.0.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.4.5...v2.0.0
 [v1.4.5]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.4.4...v1.4.5
 [v1.4.4]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.4.3...v1.4.4
 [v1.4.3]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.4.2...v1.4.3

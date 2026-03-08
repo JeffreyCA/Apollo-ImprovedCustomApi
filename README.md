@@ -1,81 +1,66 @@
-# Apollo-ImprovedCustomApi
-[![Build and release](https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/actions/workflows/buildapp.yml/badge.svg)](https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/actions/workflows/buildapp.yml)
+# Apollo-ImprovedCustomApi (v2)
+[![Build and release](https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/actions/workflows/buildapp.yml/badge.svg)](https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/actions/workflows/buildapp.yml) ![GitHub Release](https://img.shields.io/github/v/release/JeffreyCA/Apollo-ImprovedCustomApi)
 
-Apollo for Reddit with in-app configurable API keys and several fixes and improvements. Tested on version 1.15.11.
+iOS tweak for [Apollo for Reddit app](https://apolloapp.io/) that lets you continue using Apollo with your own API keys after its shutdown in June 2023. The tweak also unlocks several Ultra features and includes several enhancements and fixes.
 
-<img src="img/demo.gif" alt="demo" width="250"/>
+| | | |
+|:--:|:--:|:--:|
+| <img src="img/settings.jpg" alt="Settings" width="250"> | <img src="img/custom.jpg" alt="Custom API Settings" width="250"> | <img src="img/recents.jpg" alt="Recently Read" width="250"> |
 
 ## Features
-- Use Apollo for Reddit with your own Reddit and Imgur API keys
+
+### General
+
+- Use Apollo with your own Reddit and Imgur API keys ([don't have one?](#dont-have-an-api-key))
 - Customizable redirect URI and user agent
-- Working Imgur integration (view, delete, and upload single images and multi-image albums) 
-- Handle x.com links as Twitter links so that they can be opened in the Twitter app
-- Suppress unwanted messages on app startup (wallpaper popup, in-app announcements, etc)
-- Support /s/ share links (reddit.com/r/subreddit/s/xxxxxx) natively
-- Support media share links (reddit.com/media?url=) natively
-- Working "New Comments Highlightifier" Ultra feature (must enable in Custom API settings)
-- FLEX debugging
-- Support custom external sources for random and trending subreddits
-- Working v.redd.it video downloads
-- Backup and restore Apollo and tweak settings
-- Liquid Glass UI enhancements
+- Fully working Imgur integration (view, delete, upload single and multi-image albums)
+- Liquid Glass UI enhancements for iOS 26
+- Suppress wallpaper popups and in-app announcements
+- Pixel Pals support on newer iPhone models
+- Reddit `/s/` share links support
+- Image viewer and video playback fixes and enhancements
 
-## Known issues
-- Apollo Ultra features may cause app to crash 
-- Imgur multi-image upload
-    - Uploads usually fail on the first attempt but subsequent retries should succeed
-- Share URLs in private messages and long-tapping them still open in the in-app browser
-    - On iOS 26, share URLs in link buttons also open in the in-app browser. As a workaround, tap the inline text link (see [comment here](https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/issues/62#issuecomment-3247359652))
+### Unlocked Ultra Features and Easter Eggs
 
-## Looking for IPA?
-One source where you can get the fully tweaked IPA is [Balackburn/Apollo](https://github.com/Balackburn/Apollo).
+- New Comments Highlightifier
+- Saved Categories
+- App Icons + Wallpapers (Community Icon Pack, SPCA Animals, Ultra Icons, "sekrit" app icons)
+- Pixel Pals (including hidden "Artificial Superintelligence")
+- Themes (including hidden "Chumbus" theme)
+
+### New Features
+
+- **Backup & Restore**: Export and import Apollo and tweak settings as a .zip
+- **Custom Subreddit Sources**: Use external URLs for random and trending subreddits
+- **Recently Read Posts**: View all recently read posts from the Profile tab
+- **Editable Saved Categories**: Add, rename, and delete saved post categories (Settings > Saved Categories)
+
+## Known Issues
+
+- Long-tapping share links open in the in-app browser
 
 ## Safari integration
 
-I recommend using the [Open-In-Apollo](https://github.com/AnthonyGress/Open-In-Apollo) userscript to automatically open Reddit links in Apollo. It has enhanced search engine integration so Reddit links on search result pages (Google, Bing, etc.) open directly in Apollo without first redirecting to reddit.com.
+I recommend using the [Open-In-Apollo](https://github.com/AnthonyGress/Open-In-Apollo) userscript to automatically open Reddit links in Apollo.
 
-## Patching IPA
+## Looking for IPA?
 
-The `patch.sh` script and **Patch IPA** GitHub Action can be used to apply optional patches to Apollo IPAs:
+One source where you can get the fully tweaked IPA is [Balackburn/Apollo](https://github.com/Balackburn/Apollo).
 
-| Patch | Description |
-|-------|-------------|
-| **Liquid Glass** | Enables Liquid Glass UI on iOS 26 |
-| **Custom URL Schemes** | Adds custom redirect URI schemes for OAuth login |
+## Don't have an API key?
 
-> [!NOTE]
-> These patches **do not** inject the tweak itself. They work with both stock and tweaked Apollo IPAs.
->
-> Credit for the Liquid Glass patching method goes to [@ryannair05](https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/issues/63).
+> [!IMPORTANT]
+> Reddit and Imgur no longer allow new API key creation so you'll need to share or use existing keys.
 
-### Local Script
+See [this guide](https://github.com/wchill/patcheddit?tab=readme-ov-file#what-if-i-dont-have-a-client-id) for workarounds (proceed at your own risk).
 
-```bash
-./patch.sh <path_to_ipa> [options]
-```
+When using credentials from another app, set the **Reddit API Key** (OAuth client ID), **Redirect URI**, and **User Agent** in the tweak settings to match the app's values. You'll also need to register the redirect URI scheme in the IPA (see [below](#custom-redirect-uri)).
 
-**Options:**
-| Option | Description |
-|--------|-------------|
-| `--liquid-glass` | Apply Liquid Glass patch for iOS 26 |
-| `--url-schemes <schemes>` | Comma-separated URL schemes to add (e.g., `custom,myapp`) |
-| `--remove-code-signature` | Remove code signature from the binary |
-| `-o, --output <file>` | Output filename (default: `Apollo-Patched.ipa`) |
-
-### GitHub Action
-
-Fork this repo and navigate to **Actions** > **Patch IPA**. The workflow accepts:
-
-- **IPA source**: Direct URL or a release artifact from this repository
-- **Liquid Glass**: Enable/disable the iOS 26 patch
-- **URL Schemes**: Comma-separated list of schemes to add (e.g., `custom,test`)
-- **Remove Code Signature**: Optionally strip the code signature
-
-The workflow creates a draft release with the patched IPA.
+More discussion in [#82](https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/issues/82).
 
 ## Custom Redirect URI
 
-To use a custom redirect URI (e.g. `custom://reddit-oauth`), you'll need to also patch the IPA's `Info.plist` file and add the URI scheme (the part before `://`) to `CFBundleURLSchemes`. Otherwise, you won't be able to login to accounts.
+The redirect URI scheme (the part before `://`) must be registered in the Apollo IPA's `Info.plist` under `CFBundleURLTypes`, otherwise the OAuth callback won't return to Apollo.
 
 ```xml
 <key>CFBundleURLTypes</key>
@@ -85,13 +70,30 @@ To use a custom redirect URI (e.g. `custom://reddit-oauth`), you'll need to also
     <array>
       <string>twitterkit-xyz</string>
       <string>apollo</string>
-      <string>custom</string> <!-- add if you want to use custom://reddit-oauth -->
+      <string>custom</string> <!-- add 'custom' you want to use custom://reddit-oauth -->
     </array>
   </dict>
 </array>
 ```
 
-You can use `patch.sh` or the GitHub action mentioned above to do this.
+You can use `patch.sh` or the GitHub action mentioned below to add URL schemes.
+
+## Patching IPA
+
+`patch.sh` and the **Patch IPA** GitHub Action can apply optional patches (Liquid Glass for iOS 26, custom URL schemes) to Apollo IPAs. These do **not** inject the tweak itself.
+
+```bash
+./patch.sh <path_to_ipa> [--liquid-glass] [--url-schemes <schemes>] [--remove-code-signature] [-o <output>]
+```
+
+To use the GitHub Action, fork this repo and navigate to **Actions** > **Patch IPA**. The workflow accepts:
+
+- **IPA source**: Direct URL or a release artifact from this repository
+- **Liquid Glass**: Enable/disable the iOS 26 patch
+- **URL Schemes**: Comma-separated list of schemes to add (e.g., `custom,test`)
+- **Remove Code Signature**: Optionally strip the code signature
+
+Credit for the Liquid Glass patching method goes to [@ryannair05](https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/issues/63).
 
 ## Sideloadly
 Recommended configuration:
@@ -105,9 +107,11 @@ Recommended configuration:
     - **Sideload Spoofer**: *unchecked*
 
 ## Build
-### Requirements
+
+**Requirements:**
 - [Theos](https://github.com/theos/theos)
 
+**Instructions:**
 1. `git clone https://github.com/JeffreyCA/Apollo-ImprovedCustomApi`
 2. `cd Apollo-ImprovedCustomApi`
 3. `git submodule update --init --recursive`
@@ -117,4 +121,4 @@ Recommended configuration:
 - [Apollo-CustomApiCredentials](https://github.com/EthanArbuckle/Apollo-CustomApiCredentials) by [@EthanArbuckle](https://github.com/EthanArbuckle)
 - [ApolloAPI](https://github.com/ryannair05/ApolloAPI) by [@ryannair05](https://github.com/ryannair05)
 - [ApolloPatcher](https://github.com/ichitaso/ApolloPatcher) by [@ichitaso](https://github.com/ichitaso)
-- [GitHub Copilot](https://github.com/features/copilot)
+- [GitHub Copilot](https://github.com/features/copilot) and [Claude Code](https://claude.com/product/claude-code)

@@ -6,8 +6,28 @@
 @property (atomic, strong) NSString *resolvedURL;
 @end
 
+@interface RDKClient : NSObject
++ (instancetype)sharedClient;
+- (id)currentUser;
+- (void)thingsByFullNames:(NSArray *)fullNames completion:(void(^)(NSArray *, NSError *))completion;
+@end
+
+@class RDKLinkPreviewMedia;
+
 @interface RDKLink
+@property(copy, nonatomic) NSString *fullName;
+@property(copy, nonatomic) NSString *title;
+@property(copy, nonatomic) NSString *author;
+@property(copy, nonatomic) NSString *subreddit;
+@property(copy, nonatomic) NSString *permalink;
+@property(copy, nonatomic) NSString *selfText;
+@property(copy, nonatomic) NSString *selfTextHTML;
 @property(copy, nonatomic) NSURL *URL;
+@property(nonatomic) NSInteger score;
+@property(nonatomic) NSInteger totalComments;
+@property(nonatomic, strong) NSDate *createdUTC;
+@property(retain, nonatomic) NSDictionary *mediaMetadata;
+@property(retain, nonatomic) RDKLinkPreviewMedia *previewMedia;
 @end
 
 @interface RDKComment
@@ -17,7 +37,23 @@
 }
 - (id)linkIDWithoutTypePrefix;
 @property(copy, nonatomic) NSString *body;
+@property(copy, nonatomic) NSString *bodyHTML;
 @property(readonly, nonatomic) NSDictionary *mediaMetadata;
+@end
+
+@interface RDKLinkPreviewItem : NSObject
+@property(copy, nonatomic) NSURL *URL;
+@property(nonatomic) double width;
+@property(nonatomic) double height;
+@end
+
+@interface RDKLinkPreviewMedia : NSObject
+@property(retain, nonatomic) NSArray *images;
+@property(retain, nonatomic) RDKLinkPreviewItem *sourceImage;
+@end
+
+@interface RDKModmailMessage : NSObject
+@property(copy, nonatomic) NSString *bodyHTML;
 @end
 
 @interface ASImageNode : NSObject

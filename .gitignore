@@ -4,3 +4,9 @@
 Resources/
 packages/
 Version.h
+Headers/
+.env
+data/
+.claude/
+Apollo
+.cache
