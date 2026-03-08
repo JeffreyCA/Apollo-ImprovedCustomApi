@@ -1,4 +1,5 @@
 #import "CustomAPIViewController.h"
+#import "ApolloCommon.h"
 #import "UserDefaultConstants.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/runtime.h>
@@ -7,8 +8,16 @@
 #import "Defaults.h"
 #import "SSZipArchive.h"
 
-// Implementation derived from https://github.com/ryannair05/ApolloAPI/blob/master/CustomAPIViewController.m
-// Credits to Ryan Nair (@ryannair05) for the original implementation
+typedef NS_ENUM(NSInteger, SectionIndex) {
+    SectionBackupRestore = 0,
+    SectionAPIKeys,
+    SectionGeneral,
+    SectionMedia,
+    SectionSubreddits,
+    SectionCredits,
+    SectionAbout,
+    SectionCount
+};
 
 @implementation CustomAPIViewController
 
@@ -21,7 +30,10 @@ typedef NS_ENUM(NSInteger, Tag) {
     TagRandomSubredditsSource,
     TagRandNsfwSubredditsSource,
     TagTrendingLimit,
+    TagReadPostMaxCount,
 };
+
+#pragma mark - Helpers
 
 - (NSArray<NSString *> *)registeredURLSchemes {
     NSArray *urlTypes = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleURLTypes"];
@@ -29,7 +41,11 @@ typedef NS_ENUM(NSInteger, Tag) {
     for (NSDictionary *urlType in urlTypes) {
         NSArray *urlSchemes = urlType[@"CFBundleURLSchemes"];
         if (urlSchemes) {
-            [schemes addObjectsFromArray:urlSchemes];
+            for (NSString *scheme in urlSchemes) {
+                if (![scheme hasPrefix:@"twitterkit-"]) {
+                    [schemes addObject:scheme];
+                }
+            }
         }
     }
     return schemes;
@@ -54,372 +70,801 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (UIImage *)decodeBase64ToImage:(NSString *)strEncodeData {
-  NSData *data = [[NSData alloc]initWithBase64EncodedString:strEncodeData options:NSDataBase64DecodingIgnoreUnknownCharacters];
-  return [UIImage imageWithData:data];
+    NSData *data = [[NSData alloc]initWithBase64EncodedString:strEncodeData options:NSDataBase64DecodingIgnoreUnknownCharacters];
+    return [UIImage imageWithData:data];
 }
 
-- (UIStackView *)createToggleSwitchWithKey:(NSString *)key labelText:(NSString *)text action:(SEL)action {
-    UISwitch *toggleSwitch = [[UISwitch alloc] init];
-
-    toggleSwitch.on = [[NSUserDefaults standardUserDefaults] boolForKey:key];
-    [toggleSwitch addTarget:self action:action forControlEvents:UIControlEventValueChanged];
-
-    UILabel *label = [[UILabel alloc] init];
-    label.text = text;
-    label.textAlignment = NSTextAlignmentLeft;
-
-    UIStackView *toggleStackView = [[UIStackView alloc] initWithArrangedSubviews:@[label, toggleSwitch]];
-    toggleStackView.axis = UILayoutConstraintAxisHorizontal;
-    toggleStackView.distribution = UIStackViewDistributionFill;
-    toggleStackView.alignment = UIStackViewAlignmentCenter;
-    toggleStackView.spacing = 10;
-
-    return toggleStackView;
+- (void)showAlertWithTitle:(NSString *)title message:(NSString *)message {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+        message:message
+        preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil];
+    [alert addAction:okAction];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (UIButton *)creditsButton:(NSString *)labelText subtitle:(NSString *)subtitle linkURL:(NSURL *)linkURL b64Image:(NSString *)b64Image {
-    UIImage *image = [self decodeBase64ToImage:b64Image];
-
-    const CGFloat imageSize = 40;
-    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(imageSize, imageSize)];
-    UIImage *smallImage = [renderer imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull context) {
-        [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, imageSize, imageSize) cornerRadius:5.0] addClip];
-        [image drawInRect:CGRectMake(0, 0, imageSize, imageSize)];
+- (UIImage *)roundedImage:(UIImage *)image size:(CGFloat)size cornerRadius:(CGFloat)radius {
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(size, size)];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull context) {
+        [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, size, size) cornerRadius:radius] addClip];
+        [image drawInRect:CGRectMake(0, 0, size, size)];
     }];
-
-    UIButton *button;
-    if (@available(iOS 15.0, *)) {
-        UIButtonConfiguration *buttonConfiguration = [UIButtonConfiguration grayButtonConfiguration];
-        buttonConfiguration.imagePadding = 15;
-        buttonConfiguration.subtitle = subtitle;
-
-        button = [UIButton buttonWithConfiguration:buttonConfiguration primaryAction:
-            [UIAction actionWithTitle:labelText image:smallImage identifier:nil handler:^(UIAction * action) {
-                [UIApplication.sharedApplication openURL:linkURL options:@{} completionHandler:nil];
-            }]
-        ];
-        button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
-    } else {
-        // Fallback for iOS 14 and earlier - simple text button
-        button = [UIButton buttonWithType:UIButtonTypeSystem];
-        [button setTitle:[NSString stringWithFormat:@"%@ - %@", labelText, subtitle] forState:UIControlStateNormal];
-        [button addTarget:self action:@selector(openCreditsLink:) forControlEvents:UIControlEventTouchUpInside];
-        objc_setAssociatedObject(button, @selector(openCreditsLink:), linkURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    return button;
 }
 
-- (void)openCreditsLink:(UIButton *)sender {
-    NSURL *linkURL = objc_getAssociatedObject(sender, @selector(openCreditsLink:));
-    if (linkURL) {
-        [UIApplication.sharedApplication openURL:linkURL options:@{} completionHandler:nil];
+- (NSString *)preferredGIFFallbackFormatText {
+    return (sPreferredGIFFallbackFormat == 0) ? @"GIF" : @"MP4";
+}
+
+- (void)setPreferredGIFFallbackFormat:(NSInteger)format {
+    sPreferredGIFFallbackFormat = (format == 0) ? 0 : 1;
+    [[NSUserDefaults standardUserDefaults] setInteger:sPreferredGIFFallbackFormat forKey:UDKeyPreferredGIFFallbackFormat];
+
+    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:0 inSection:SectionMedia];
+    if ([[self.tableView indexPathsForVisibleRows] containsObject:indexPath]) {
+        [self.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
     }
 }
 
-- (UIStackView *)createLabeledStackViewWithLabelText:(NSString *)labelText placeholder:(NSString *)placeholder text:(NSString *)text tag:(NSInteger)tag isNumerical:(BOOL)isNumerical {
-    UIStackView *stackView = [[UIStackView alloc] init];
-    stackView.axis = UILayoutConstraintAxisVertical;
-    stackView.distribution = UIStackViewDistributionFillProportionally;
-    stackView.alignment = UIStackViewAlignmentFill; 
-    stackView.spacing = 8;
+- (void)presentPreferredGIFFallbackFormatSheetFromSourceView:(UIView *)sourceView {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Preferred GIF Fallback Format"
+                                                                   message:nil
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
 
-    UILabel *label = [[UILabel alloc] init];
-    label.text = labelText;
-    label.font = [UIFont systemFontOfSize:17];
+    NSString *mp4Title = (sPreferredGIFFallbackFormat == 1) ? @"MP4 (Current)" : @"MP4";
+    NSString *gifTitle = (sPreferredGIFFallbackFormat == 0) ? @"GIF (Current)" : @"GIF";
 
-    UITextField *textField = [[UITextField alloc] init];
-    textField.placeholder = placeholder;
-    textField.text = text;
-    textField.tag = tag;
-    textField.delegate = self;
-    textField.clearButtonMode = UITextFieldViewModeWhileEditing;
-    textField.font = [UIFont systemFontOfSize:14];
-    textField.autocorrectionType = UITextAutocorrectionTypeNo;
-    textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    if (isNumerical) {
-        textField.keyboardType = UIKeyboardTypeNumberPad;
+    [sheet addAction:[UIAlertAction actionWithTitle:mp4Title style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [self setPreferredGIFFallbackFormat:1];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:gifTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [self setPreferredGIFFallbackFormat:0];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+
+    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
+    if (popover && sourceView) {
+        popover.sourceView = sourceView;
+        popover.sourceRect = sourceView.bounds;
     }
 
-    [stackView addArrangedSubview:label];
-    [stackView addArrangedSubview:textField];
-
-    return stackView;
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 
-- (UIStackView *)createLabeledStackViewWithLabelText:(NSString *)labelText placeholder:(NSString *)placeholder text:(NSString *)text tag:(NSInteger)tag {
-    return [self createLabeledStackViewWithLabelText:labelText placeholder:placeholder text:text tag:tag isNumerical:NO];
+- (NSString *)unmuteCommentsVideosModeText {
+    switch (sUnmuteCommentsVideos) {
+        case 1:  return @"Remember";
+        case 2:  return @"Always";
+        default: return @"Default";
+    }
 }
+
+- (void)setUnmuteCommentsVideosMode:(NSInteger)mode {
+    sUnmuteCommentsVideos = mode;
+    [[NSUserDefaults standardUserDefaults] setInteger:sUnmuteCommentsVideos forKey:UDKeyUnmuteCommentsVideos];
+
+    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:1 inSection:SectionMedia];
+    if ([[self.tableView indexPathsForVisibleRows] containsObject:indexPath]) {
+        [self.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+    }
+}
+
+- (void)presentUnmuteCommentsVideosModeSheetFromSourceView:(UIView *)sourceView {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Unmute Videos in Comments"
+                                                                   message:nil
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+
+    NSString *defaultTitle = (sUnmuteCommentsVideos == 0) ? @"Default (Current)" : @"Default";
+    NSString *rememberTitle = (sUnmuteCommentsVideos == 1) ? @"Remember from Fullscreen Player (Current)" : @"Remember from Fullscreen Player";
+    NSString *alwaysTitle = (sUnmuteCommentsVideos == 2) ? @"Always (Current)" : @"Always";
+
+    [sheet addAction:[UIAlertAction actionWithTitle:defaultTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [self setUnmuteCommentsVideosMode:0];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:rememberTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [self setUnmuteCommentsVideosMode:1];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:alwaysTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [self setUnmuteCommentsVideosMode:2];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+
+    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
+    if (popover && sourceView) {
+        popover.sourceView = sourceView;
+        popover.sourceRect = sourceView.bounds;
+    }
+
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+#pragma mark - View Lifecycle
 
 - (void)viewDidLoad {
     [super viewDidLoad];
 
     self.title = @"Custom API";
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone primaryAction:[UIAction actionWithHandler:^(UIAction * action) {
-        [self dismissViewControllerAnimated:YES completion:nil];
-    }]];
-    
-    UIScrollView *scrollView = [[UIScrollView alloc] init];
-    scrollView.translatesAutoresizingMaskIntoConstraints = NO;
-    scrollView.backgroundColor = [UIColor systemBackgroundColor];
-    scrollView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
-    [self.view addSubview:scrollView];
-    
-    [NSLayoutConstraint activateConstraints:@[
-        [scrollView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
-        [scrollView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [scrollView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [scrollView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-    ]];
-    
-    UIStackView *stackView = [[UIStackView alloc] init];
-    stackView.axis = UILayoutConstraintAxisVertical;
-    stackView.spacing = 20;
-    stackView.translatesAutoresizingMaskIntoConstraints = NO;
-    [scrollView addSubview:stackView];
-    
-    [NSLayoutConstraint activateConstraints:@[
-        [stackView.topAnchor constraintEqualToAnchor:scrollView.topAnchor constant:20],
-        [stackView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
-        [stackView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
-        [stackView.bottomAnchor constraintEqualToAnchor:scrollView.bottomAnchor constant:-20],
-    ]];
+    self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+}
 
-    // Backup / Restore section
-    UILabel *backupRestoreLabel = [[UILabel alloc] init];
-    backupRestoreLabel.text = @"Backup / Restore";
-    backupRestoreLabel.font = [UIFont boldSystemFontOfSize:18];
-    backupRestoreLabel.textAlignment = NSTextAlignmentCenter;
-    [stackView addArrangedSubview:backupRestoreLabel];
+#pragma mark - UITableViewDataSource
 
-    UIButton *backupButton = [UIButton systemButtonWithPrimaryAction:[UIAction actionWithTitle:@"Backup Settings" image:nil identifier:nil handler:^(UIAction * action) {
-        [self backupSettings];
-    }]];
-    backupButton.titleLabel.font = [UIFont systemFontOfSize:16.0];
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    return SectionCount;
+}
 
-    UIButton *restoreButton = [UIButton systemButtonWithPrimaryAction:[UIAction actionWithTitle:@"Restore Settings" image:nil identifier:nil handler:^(UIAction * action) {
-        [self restoreSettings];
-    }]];
-    restoreButton.titleLabel.font = [UIFont systemFontOfSize:16.0];
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    switch (section) {
+        case SectionBackupRestore: return 2;
+        case SectionAPIKeys: return 5; // 4 text fields + Instructions
+        case SectionGeneral: return 4;
+        case SectionMedia: return 2;
+        case SectionSubreddits: return 5;
+        case SectionAbout: return 3; // GitHub repo link + version + export logs
+        case SectionCredits: return 3;
+        default: return 0;
+    }
+}
 
-    UIStackView *backupRestoreStackView = [[UIStackView alloc] initWithArrangedSubviews:@[backupButton, restoreButton]];
-    backupRestoreStackView.axis = UILayoutConstraintAxisHorizontal;
-    backupRestoreStackView.distribution = UIStackViewDistributionFillEqually;
-    backupRestoreStackView.spacing = 10;
-    [stackView addArrangedSubview:backupRestoreStackView];
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    switch (section) {
+        case SectionBackupRestore: return @"Backup / Restore";
+        case SectionAPIKeys: return @"API Keys";
+        case SectionGeneral: return @"General";
+        case SectionMedia: return @"Media";
+        case SectionSubreddits: return @"Subreddits";
+        case SectionAbout: return @"About";
+        case SectionCredits: return @"Credits";
+        default: return nil;
+    }
+}
 
-    UILabel *backupNoteLabel = [[UILabel alloc] init];
-    backupNoteLabel.text = @"Restore Settings does not restore accounts or affect existing ones. The backup .zip contains an accounts.txt with all account usernames for reference.";
-    backupNoteLabel.font = [UIFont systemFontOfSize:13];
-    backupNoteLabel.textColor = [UIColor secondaryLabelColor];
-    backupNoteLabel.numberOfLines = 0;
-    [stackView addArrangedSubview:backupNoteLabel];
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    switch (indexPath.section) {
+        case SectionBackupRestore: return [self backupRestoreCellForRow:indexPath.row tableView:tableView];
+        case SectionAPIKeys: return [self apiKeyCellForRow:indexPath.row tableView:tableView];
+        case SectionGeneral: return [self generalCellForRow:indexPath.row tableView:tableView];
+        case SectionMedia: return [self mediaCellForRow:indexPath.row tableView:tableView];
+        case SectionSubreddits: return [self subredditCellForRow:indexPath.row tableView:tableView];
+        case SectionAbout: return [self aboutCellForRow:indexPath.row tableView:tableView];
+        case SectionCredits: return [self creditsCellForRow:indexPath.row tableView:tableView];
+        default: return [[UITableViewCell alloc] init];
+    }
+}
 
-    // API Keys section
-    UILabel *apiKeysLabel = [[UILabel alloc] init];
-    apiKeysLabel.text = @"API Keys";
-    apiKeysLabel.font = [UIFont boldSystemFontOfSize:18];
-    apiKeysLabel.textAlignment = NSTextAlignmentCenter;
-    [stackView addArrangedSubview:apiKeysLabel];
+#pragma mark - Cell Builders
 
-    UIStackView *redditStackView = [self createLabeledStackViewWithLabelText:@"Reddit API Key:" placeholder:@"Reddit API Key" text:sRedditClientId tag:TagRedditClientId];
-    [stackView addArrangedSubview:redditStackView];
+- (UITableViewCell *)textFieldCellWithIdentifier:(NSString *)identifier
+                                           label:(NSString *)label
+                                     placeholder:(NSString *)placeholder
+                                            text:(NSString *)text
+                                             tag:(NSInteger)tag
+                                       numerical:(BOOL)numerical {
+    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:identifier];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.textLabel.text = label;
 
-    UIStackView *imgurStackView = [self createLabeledStackViewWithLabelText:@"Imgur API Key:" placeholder:@"Imgur API Key" text:sImgurClientId tag:TagImgurClientId];
-    [stackView addArrangedSubview:imgurStackView];
+        UITextField *textField = [[UITextField alloc] init];
+        textField.placeholder = placeholder;
+        textField.tag = tag;
+        textField.delegate = self;
+        textField.textAlignment = NSTextAlignmentRight;
+        textField.clearButtonMode = UITextFieldViewModeWhileEditing;
+        textField.font = [UIFont systemFontOfSize:16];
+        textField.autocorrectionType = UITextAutocorrectionTypeNo;
+        textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        textField.returnKeyType = UIReturnKeyDone;
+        if (numerical) {
+            textField.keyboardType = UIKeyboardTypeNumberPad;
+        }
 
-    UIStackView *redirectURIStackView = [self createLabeledStackViewWithLabelText:@"Redirect URI:" placeholder:defaultRedirectURI text:sRedirectURI tag:TagRedirectURI];
-    [stackView addArrangedSubview:redirectURIStackView];
-    // Set initial color based on validity
-    UITextField *redirectURITextField = (UITextField *)redirectURIStackView.arrangedSubviews.lastObject;
-    redirectURITextField.textColor = [self isRedirectURISchemeValid:sRedirectURI] ? [UIColor labelColor] : [UIColor systemRedColor];
+        textField.translatesAutoresizingMaskIntoConstraints = NO;
+        [cell.contentView addSubview:textField];
+        [NSLayoutConstraint activateConstraints:@[
+            [textField.trailingAnchor constraintEqualToAnchor:cell.contentView.layoutMarginsGuide.trailingAnchor],
+            [textField.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+            [textField.widthAnchor constraintEqualToAnchor:cell.contentView.widthAnchor multiplier:0.55],
+        ]];
+    }
 
-    UIStackView *userAgentStackView = [self createLabeledStackViewWithLabelText:@"User Agent:" placeholder:defaultUserAgent text:sUserAgent tag:TagUserAgent];
-    [stackView addArrangedSubview:userAgentStackView];
+    // Update text value (handles cell reuse)
+    UITextField *textField = nil;
+    for (UIView *subview in cell.contentView.subviews) {
+        if ([subview isKindOfClass:[UITextField class]]) {
+            textField = (UITextField *)subview;
+            break;
+        }
+    }
+    textField.text = text;
+    cell.textLabel.text = label;
 
-    UIButton *redditWebsiteButton = [UIButton systemButtonWithPrimaryAction:[UIAction actionWithTitle:@"Reddit API Website" image:nil identifier:nil handler:^(UIAction * action) {
-        [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://reddit.com/prefs/apps"] options:@{} completionHandler:nil];
-    }]];
-    redditWebsiteButton.titleLabel.font = [UIFont systemFontOfSize:16.0];
+    return cell;
+}
 
-    UIButton *imgurWebsiteButton = [UIButton systemButtonWithPrimaryAction:[UIAction actionWithTitle:@"Imgur API Website" image:nil identifier:nil handler:^(UIAction * action) {
-        [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://api.imgur.com/oauth2/addclient"] options:@{} completionHandler:nil];
-    }]];
-    imgurWebsiteButton.titleLabel.font = [UIFont systemFontOfSize:16.0];
+- (UITableViewCell *)stackedTextFieldCellWithIdentifier:(NSString *)identifier
+                                                  label:(NSString *)label
+                                            placeholder:(NSString *)placeholder
+                                                   text:(NSString *)text
+                                                    tag:(NSInteger)tag {
+    return [self stackedTextFieldCellWithIdentifier:identifier label:label placeholder:placeholder text:text tag:tag detail:nil];
+}
 
-    UIStackView *apiWebsiteStackView = [[UIStackView alloc] initWithArrangedSubviews:@[redditWebsiteButton, imgurWebsiteButton]];
-    apiWebsiteStackView.axis = UILayoutConstraintAxisHorizontal;
-    apiWebsiteStackView.distribution = UIStackViewDistributionFillEqually;
-    apiWebsiteStackView.spacing = 10;
-    [stackView addArrangedSubview:apiWebsiteStackView];
+- (UITableViewCell *)stackedTextFieldCellWithIdentifier:(NSString *)identifier
+                                                  label:(NSString *)label
+                                            placeholder:(NSString *)placeholder
+                                                   text:(NSString *)text
+                                                    tag:(NSInteger)tag
+                                                 detail:(NSString *)detail {
+    static const NSInteger kLabelTag = 9000;
+    static const NSInteger kDetailTag = 9002;
 
-    UILabel *apiNoteLabel = [[UILabel alloc] init];
-    apiNoteLabel.text = [NSString stringWithFormat:@"As of mid-2025, Reddit API access requires manual approval and Imgur no longer allows API key creation.\n\nFor custom Redirect URIs, the URI scheme (part before ://) must be registered in the app's Info.plist under CFBundleURLTypes.\n\nCurrent registered schemes: %@", [[self registeredURLSchemes] componentsJoinedByString:@", "]];
-    apiNoteLabel.font = [UIFont systemFontOfSize:13];
-    apiNoteLabel.textColor = [UIColor secondaryLabelColor];
-    apiNoteLabel.numberOfLines = 0;
-    [stackView addArrangedSubview:apiNoteLabel];
+    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:identifier];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.textLabel.hidden = YES;
 
-    // General section
-    UILabel *generalLabel = [[UILabel alloc] init];
-    generalLabel.text = @"General";
-    generalLabel.font = [UIFont boldSystemFontOfSize:18];
-    generalLabel.textAlignment = NSTextAlignmentCenter;
-    [stackView addArrangedSubview:generalLabel];
+        UILabel *captionLabel = [[UILabel alloc] init];
+        captionLabel.tag = kLabelTag;
+        captionLabel.font = [UIFont systemFontOfSize:17];
+        captionLabel.translatesAutoresizingMaskIntoConstraints = NO;
 
-    UIStackView *blockAnnouncementsStackView = [self createToggleSwitchWithKey:UDKeyBlockAnnouncements labelText:@"Block Announcements" action:@selector(blockAnnouncementsSwitchToggled:)];
-    [stackView addArrangedSubview:blockAnnouncementsStackView];
+        UITextField *textField = [[UITextField alloc] init];
+        textField.tag = tag;
+        textField.delegate = self;
+        textField.font = [UIFont systemFontOfSize:16];
+        textField.clearButtonMode = UITextFieldViewModeWhileEditing;
+        textField.autocorrectionType = UITextAutocorrectionTypeNo;
+        textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        textField.returnKeyType = UIReturnKeyDone;
+        textField.translatesAutoresizingMaskIntoConstraints = NO;
 
-    UIStackView *unreadCommentsStackView = [self createToggleSwitchWithKey:UDKeyApolloShowUnreadComments labelText:@"New Comments Highlightifier" action:@selector(unreadCommentsSwitchToggled:)];
-    [stackView addArrangedSubview:unreadCommentsStackView];
+        [cell.contentView addSubview:captionLabel];
+        [cell.contentView addSubview:textField];
 
-    UIStackView *flexStackView = [self createToggleSwitchWithKey:UDKeyEnableFLEX labelText:@"FLEX Debugging (Needs restart)" action:@selector(flexSwitchToggled:)];
-    [stackView addArrangedSubview:flexStackView];
+        UILayoutGuide *margins = cell.contentView.layoutMarginsGuide;
+        [NSLayoutConstraint activateConstraints:@[
+            [captionLabel.topAnchor constraintEqualToAnchor:margins.topAnchor],
+            [captionLabel.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+            [captionLabel.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor],
 
-    UIStackView *randNsfwStackView = [self createToggleSwitchWithKey:UDKeyShowRandNsfw labelText:@"RandNSFW button" action:@selector(randNsfwSwitchToggled:)];
-    [stackView addArrangedSubview:randNsfwStackView];
+            [textField.topAnchor constraintEqualToAnchor:captionLabel.bottomAnchor constant:4],
+            [textField.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+            [textField.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor],
+        ]];
 
-    UIStackView *trendingSubredditsLimitStackView = [self createLabeledStackViewWithLabelText:@"Limit trending subreddits to:" placeholder:@"(unlimited)" text:sTrendingSubredditsLimit tag:TagTrendingLimit isNumerical:YES];
-    [stackView addArrangedSubview:trendingSubredditsLimitStackView];
+        if (detail) {
+            UILabel *detailLabel = [[UILabel alloc] init];
+            detailLabel.tag = kDetailTag;
+            detailLabel.font = [UIFont systemFontOfSize:12];
+            detailLabel.textColor = [UIColor secondaryLabelColor];
+            detailLabel.numberOfLines = 0;
+            detailLabel.translatesAutoresizingMaskIntoConstraints = NO;
 
-    UILabel *subredditSourcesLabel = [[UILabel alloc] init];
-    subredditSourcesLabel.text = @"Subreddits";
-    subredditSourcesLabel.font = [UIFont boldSystemFontOfSize:18];
-    subredditSourcesLabel.textAlignment = NSTextAlignmentCenter;
-    [stackView addArrangedSubview:subredditSourcesLabel];
+            [cell.contentView addSubview:detailLabel];
+            [NSLayoutConstraint activateConstraints:@[
+                [detailLabel.topAnchor constraintEqualToAnchor:textField.bottomAnchor constant:4],
+                [detailLabel.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+                [detailLabel.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor],
+                [detailLabel.bottomAnchor constraintEqualToAnchor:margins.bottomAnchor],
+            ]];
+        } else {
+            [textField.bottomAnchor constraintEqualToAnchor:margins.bottomAnchor].active = YES;
+        }
+    }
 
-    UIStackView *trendingSourceStackView = [self createLabeledStackViewWithLabelText:@"Trending subreddits source:" placeholder:defaultTrendingSubredditsSource text:sTrendingSubredditsSource tag:TagTrendingSubredditsSource];
-    [stackView addArrangedSubview:trendingSourceStackView];
+    UILabel *captionLabel = [cell.contentView viewWithTag:kLabelTag];
+    captionLabel.text = label;
 
-    UIStackView *randomSourceStackView = [self createLabeledStackViewWithLabelText:@"Random subreddits source:" placeholder:defaultRandomSubredditsSource text:sRandomSubredditsSource tag:TagRandomSubredditsSource];
-    [stackView addArrangedSubview:randomSourceStackView];
+    UILabel *detailLabel = [cell.contentView viewWithTag:kDetailTag];
+    if (detailLabel) {
+        detailLabel.text = detail;
+    }
 
-    UIStackView *randNsfwSourceStackView = [self createLabeledStackViewWithLabelText:@"RandNSFW subreddits source:" placeholder:@"(empty)" text:sRandNsfwSubredditsSource tag:TagRandNsfwSubredditsSource];
-    [stackView addArrangedSubview:randNsfwSourceStackView];
+    UITextField *textField = nil;
+    for (UIView *subview in cell.contentView.subviews) {
+        if ([subview isKindOfClass:[UITextField class]]) {
+            textField = (UITextField *)subview;
+            break;
+        }
+    }
+    textField.text = text;
+    textField.placeholder = placeholder;
+    textField.adjustsFontSizeToFitWidth = YES;
+    textField.minimumFontSize = 12;
 
-    UITextView *subredditSourcesNote = [[UITextView alloc] init];
-    subredditSourcesNote.editable = NO;
-    subredditSourcesNote.scrollEnabled = NO;
-    subredditSourcesNote.backgroundColor = [UIColor clearColor];
-    subredditSourcesNote.textContainerInset = UIEdgeInsetsZero;
-    subredditSourcesNote.textContainer.lineFragmentPadding = 0;
-    NSMutableAttributedString *subredditNoteText = [[NSMutableAttributedString alloc] initWithString:@"Configure custom subreddit sources by providing a URL to a plaintext file with line-separated subreddit names (without /r/). "
-        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [UIColor secondaryLabelColor]}];
-    [subredditNoteText appendAttributedString:[[NSAttributedString alloc] initWithString:@"Example file"
-        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://jeffreyca.github.io/subreddits/popular.txt"]}]];
-    [subredditNoteText appendAttributedString:[[NSAttributedString alloc] initWithString:@" ("
-        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [UIColor secondaryLabelColor]}]];
-    [subredditNoteText appendAttributedString:[[NSAttributedString alloc] initWithString:@"GitHub repo"
-        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/JeffreyCA/subreddits"]}]];
-    [subredditNoteText appendAttributedString:[[NSAttributedString alloc] initWithString:@")"
-        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [UIColor secondaryLabelColor]}]];
-    subredditSourcesNote.attributedText = subredditNoteText;
-    [stackView addArrangedSubview:subredditSourcesNote];
+    return cell;
+}
 
-    UILabel *instructionsLabel = [[UILabel alloc] init];
-    instructionsLabel.text = @"Instructions (old)";
-    instructionsLabel.font = [UIFont boldSystemFontOfSize:18];
-    instructionsLabel.textAlignment = NSTextAlignmentCenter;
-    [stackView addArrangedSubview:instructionsLabel];
+- (UITableViewCell *)switchCellWithIdentifier:(NSString *)identifier
+                                        label:(NSString *)label
+                                           on:(BOOL)on
+                                       action:(SEL)action {
+    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:identifier];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+
+        UISwitch *toggleSwitch = [[UISwitch alloc] init];
+        [toggleSwitch addTarget:self action:action forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = toggleSwitch;
+    }
+    cell.textLabel.text = label;
+    ((UISwitch *)cell.accessoryView).on = on;
+    return cell;
+}
+
+- (UITableViewCell *)apiKeyCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
+    switch (row) {
+        case 0:
+            return [self textFieldCellWithIdentifier:@"Cell_API_Reddit"
+                                               label:@"Reddit API Key"
+                                         placeholder:@"Reddit API Key"
+                                                text:sRedditClientId
+                                                 tag:TagRedditClientId
+                                           numerical:NO];
+        case 1:
+            return [self textFieldCellWithIdentifier:@"Cell_API_Imgur"
+                                               label:@"Imgur API Key"
+                                         placeholder:@"Imgur API Key"
+                                                text:sImgurClientId
+                                                 tag:TagImgurClientId
+                                           numerical:NO];
+        case 2: {
+            NSString *schemesDetail = [NSString stringWithFormat:@"Must match the app whose API key you're using. URI scheme (part before ://) must be registered in Info.plist under CFBundleURLTypes. Registered: %@", [[self registeredURLSchemes] componentsJoinedByString:@", "]];
+            UITableViewCell *cell = [self stackedTextFieldCellWithIdentifier:@"Cell_API_Redirect"
+                                                                      label:@"Redirect URI"
+                                                                placeholder:defaultRedirectURI
+                                                                       text:sRedirectURI
+                                                                        tag:TagRedirectURI
+                                                                     detail:schemesDetail];
+            // Color the text field based on validity
+            for (UIView *subview in cell.contentView.subviews) {
+                if ([subview isKindOfClass:[UITextField class]]) {
+                    UITextField *tf = (UITextField *)subview;
+                    tf.textColor = [self isRedirectURISchemeValid:sRedirectURI] ? [UIColor labelColor] : [UIColor systemRedColor];
+                    break;
+                }
+            }
+            return cell;
+        }
+        case 3:
+            return [self stackedTextFieldCellWithIdentifier:@"Cell_API_UserAgent"
+                                                      label:@"User Agent"
+                                                placeholder:defaultUserAgent
+                                                       text:sUserAgent
+                                                        tag:TagUserAgent];
+        case 4: {
+            UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_Instructions"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Instructions"];
+                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            }
+            cell.textLabel.text = @"Instructions (old)";
+            return cell;
+        }
+        default: return [[UITableViewCell alloc] init];
+    }
+}
+
+- (UITableViewCell *)generalCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    switch (row) {
+        case 0:
+            return [self switchCellWithIdentifier:@"Cell_Gen_Announce"
+                                            label:@"Block Announcements"
+                                               on:[defaults boolForKey:UDKeyBlockAnnouncements]
+                                           action:@selector(blockAnnouncementsSwitchToggled:)];
+        case 1:
+            return [self switchCellWithIdentifier:@"Cell_Gen_FLEX"
+                                            label:@"FLEX Debugging"
+                                               on:[defaults boolForKey:UDKeyEnableFLEX]
+                                           action:@selector(flexSwitchToggled:)];
+        case 2:
+            return [self switchCellWithIdentifier:@"Cell_Gen_RRThumbs"
+                                            label:@"Recently Read Thumbnails"
+                                               on:[defaults boolForKey:UDKeyShowRecentlyReadThumbnails]
+                                           action:@selector(showRecentlyReadThumbnailsSwitchToggled:)];
+        case 3: {
+            NSString *readPostMaxStr = sReadPostMaxCount > 0 ? [NSString stringWithFormat:@"%ld", (long)sReadPostMaxCount] : @"";
+            return [self textFieldCellWithIdentifier:@"Cell_Gen_ReadMax"
+                                               label:@"Recently Read Posts Limit"
+                                         placeholder:@"(unlimited)"
+                                                text:readPostMaxStr
+                                                 tag:TagReadPostMaxCount
+                                           numerical:YES];
+        }
+        default: return [[UITableViewCell alloc] init];
+    }
+}
+
+- (UITableViewCell *)mediaCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
+    switch (row) {
+        case 0: {
+            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_GIFFallbackFormat"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_GIFFallbackFormat"];
+                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            }
+            cell.textLabel.text = @"Preferred GIF Fallback Format";
+            cell.detailTextLabel.text = [self preferredGIFFallbackFormatText];
+            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+            return cell;
+        }
+        case 1: {
+            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_UnmuteComments"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_UnmuteComments"];
+                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            }
+            cell.textLabel.text = @"Unmute Videos in Comments";
+            cell.detailTextLabel.text = [self unmuteCommentsVideosModeText];
+            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+            return cell;
+        }
+        default: return [[UITableViewCell alloc] init];
+    }
+}
+
+- (UITableViewCell *)subredditCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
+    switch (row) {
+        case 0:
+            return [self textFieldCellWithIdentifier:@"Cell_Sub_TrendLimit"
+                                               label:@"Trending Subreddits Limit"
+                                         placeholder:@"(unlimited)"
+                                                text:sTrendingSubredditsLimit
+                                                 tag:TagTrendingLimit
+                                           numerical:YES];
+        case 1:
+            return [self stackedTextFieldCellWithIdentifier:@"Cell_Sub_Trending"
+                                                      label:@"Trending Source"
+                                                placeholder:defaultTrendingSubredditsSource
+                                                       text:sTrendingSubredditsSource
+                                                        tag:TagTrendingSubredditsSource];
+        case 2:
+            return [self stackedTextFieldCellWithIdentifier:@"Cell_Sub_Random"
+                                                      label:@"Random Source"
+                                                placeholder:defaultRandomSubredditsSource
+                                                       text:sRandomSubredditsSource
+                                                        tag:TagRandomSubredditsSource];
+        case 3:
+            return [self switchCellWithIdentifier:@"Cell_Sub_RandNSFW"
+                                            label:@"Show RandNSFW in Search"
+                                               on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowRandNsfw]
+                                           action:@selector(randNsfwSwitchToggled:)];
+        case 4:
+            return [self stackedTextFieldCellWithIdentifier:@"Cell_Sub_RandNSFW_Source"
+                                                      label:@"RandNSFW Source"
+                                                placeholder:@"(empty)"
+                                                       text:sRandNsfwSubredditsSource
+                                                        tag:TagRandNsfwSubredditsSource];
+        default: return [[UITableViewCell alloc] init];
+    }
+}
+
+- (UITableViewCell *)backupRestoreCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
+    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_Backup"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Backup"];
+    }
+    if (row == 0) {
+        cell.textLabel.text = @"Backup Settings";
+    } else {
+        cell.textLabel.text = @"Restore Settings";
+    }
+    cell.textLabel.textColor = self.view.tintColor;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    return cell;
+}
+
+- (UITableViewCell *)aboutCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
+    switch (row) {
+        case 0: return [self subtitleCellWithIdentifier:@"Cell_About_GitHub"
+                                                  title:@"Open Source on GitHub"
+                                               subtitle:@"@JeffreyCA"
+                                               b64Image:B64Github];
+        case 1: {
+            UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_About_Logs"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_About_Logs"];
+            }
+            cell.textLabel.text = @"Export Debug Logs";
+            cell.textLabel.textColor = self.view.tintColor;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            return cell;
+        }
+        case 2: {
+            UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_About_Version"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_About_Version"];
+                cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            }
+            cell.textLabel.text = @"Version";
+            cell.detailTextLabel.text = @TWEAK_VERSION;
+            return cell;
+        }
+        default: return [[UITableViewCell alloc] init];
+    }
+}
+
+- (UITableViewCell *)creditsCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
+    switch (row) {
+        case 0: return [self subtitleCellWithIdentifier:@"Cell_Credits_CustomApi"
+                                                  title:@"Apollo-CustomApiCredentials"
+                                               subtitle:@"@EthanArbuckle"
+                                               b64Image:B64Ethan];
+        case 1: return [self subtitleCellWithIdentifier:@"Cell_Credits_ApolloAPI"
+                                                  title:@"ApolloAPI"
+                                               subtitle:@"@ryannair05"
+                                               b64Image:B64Ryannair05];
+        case 2: return [self subtitleCellWithIdentifier:@"Cell_Credits_Patcher"
+                                                  title:@"ApolloPatcher"
+                                               subtitle:@"@ichitaso"
+                                               b64Image:B64Ichitaso];
+        default: return [[UITableViewCell alloc] init];
+    }
+}
+
+- (UITableViewCell *)subtitleCellWithIdentifier:(NSString *)identifier
+                                          title:(NSString *)title
+                                       subtitle:(NSString *)subtitle
+                                       b64Image:(NSString *)b64Image {
+    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:identifier];
+    }
+    cell.textLabel.text = title;
+    cell.detailTextLabel.text = subtitle;
+    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    if (b64Image) {
+        cell.imageView.image = [self roundedImage:[self decodeBase64ToImage:b64Image] size:32 cornerRadius:5];
+    }
+    return cell;
+}
+
+#pragma mark - Footer View (sections with tappable links)
+
+- (NSAttributedString *)footerAttributedTextForSection:(NSInteger)section {
+    NSDictionary *plainAttrs = @{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [UIColor secondaryLabelColor]};
+    NSMutableAttributedString *text;
+
+    if (section == SectionBackupRestore) {
+        text = [[NSMutableAttributedString alloc]
+            initWithString:@"Restore does not affect accounts or existing ones. The backup .zip contains an accounts.txt with all account usernames for reference."
+            attributes:plainAttrs];
+    } else if (section == SectionAPIKeys) {
+        text = [[NSMutableAttributedString alloc]
+            initWithString:@"Reddit and Imgur no longer allow new API key creation. Existing keys still work if you have access. You may be able to use credentials from another 3rd-party app ("
+            attributes:plainAttrs];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"more info"
+            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/JeffreyCA/Apollo-ImprovedCustomApi?tab=readme-ov-file#dont-have-an-api-key"]}]];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@")."
+            attributes:plainAttrs]];
+    } else if (section == SectionSubreddits) {
+        text = [[NSMutableAttributedString alloc]
+            initWithString:@"Configure custom subreddit sources by providing a URL to a plaintext file with line-separated subreddit names (without /r/). "
+            attributes:plainAttrs];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"Example file"
+            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://jeffreyca.github.io/subreddits/popular.txt"]}]];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@" ("
+            attributes:plainAttrs]];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"GitHub repo"
+            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/JeffreyCA/subreddits"]}]];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@")"
+            attributes:plainAttrs]];
+    } else {
+        return nil;
+    }
+
+    return text;
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
+    NSAttributedString *text = [self footerAttributedTextForSection:section];
+    if (!text) return nil;
 
     UITextView *textView = [[UITextView alloc] init];
     textView.editable = NO;
     textView.scrollEnabled = NO;
+    textView.backgroundColor = [UIColor clearColor];
+    textView.textContainerInset = UIEdgeInsetsMake(8, 16, 8, 16);
+    textView.attributedText = text;
+
+    return textView;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    NSAttributedString *text = [self footerAttributedTextForSection:section];
+    if (!text) return 12.0;
+
+    CGFloat tableWidth = tableView.bounds.size.width;
+    if (tableWidth <= 0) tableWidth = [UIScreen mainScreen].bounds.size.width;
+
+    // Account for insetGrouped horizontal insets — footer is narrower than the table view
+    UIEdgeInsets margins = tableView.layoutMargins;
+    CGFloat footerWidth = tableWidth - margins.left - margins.right;
+    if (footerWidth <= 0) footerWidth = tableWidth - 40.0;
+
+    UITextView *measureView = [[UITextView alloc] initWithFrame:CGRectMake(0, 0, footerWidth, CGFLOAT_MAX)];
+    measureView.editable = NO;
+    measureView.scrollEnabled = NO;
+    measureView.textContainerInset = UIEdgeInsetsMake(8, 16, 8, 16);
+    measureView.attributedText = text;
+
+    CGSize size = [measureView sizeThatFits:CGSizeMake(footerWidth, CGFLOAT_MAX)];
+    return ceil(size.height);
+}
+
+#pragma mark - UITableViewDelegate
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+
+    if (indexPath.section == SectionBackupRestore) {
+        if (indexPath.row == 0) {
+            [self backupSettings];
+        } else {
+            [self restoreSettings];
+        }
+    } else if (indexPath.section == SectionAPIKeys) {
+        if (indexPath.row == 4) {
+            [self pushInstructionsViewController];
+        }
+    } else if (indexPath.section == SectionAbout) {
+        if (indexPath.row == 0) {
+            [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://github.com/JeffreyCA/Apollo-ImprovedCustomApi"] options:@{} completionHandler:nil];
+        } else if (indexPath.row == 1) {
+            [self exportLogs];
+        }
+    } else if (indexPath.section == SectionMedia) {
+        UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+        if (indexPath.row == 0) {
+            [self presentPreferredGIFFallbackFormatSheetFromSourceView:cell];
+        } else if (indexPath.row == 1) {
+            [self presentUnmuteCommentsVideosModeSheetFromSourceView:cell];
+        }
+    } else if (indexPath.section == SectionCredits) {
+        switch (indexPath.row) {
+            case 0:
+                [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://github.com/EthanArbuckle/Apollo-CustomApiCredentials"] options:@{} completionHandler:nil];
+                break;
+            case 1:
+                [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://github.com/ryannair05/ApolloAPI"] options:@{} completionHandler:nil];
+                break;
+            case 2:
+                [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://github.com/ichitaso/ApolloPatcher"] options:@{} completionHandler:nil];
+                break;
+        }
+    }
+}
+
+- (BOOL)tableView:(UITableView *)tableView shouldHighlightRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == SectionBackupRestore) return YES;
+    if (indexPath.section == SectionAPIKeys && indexPath.row == 4) return YES;
+    if (indexPath.section == SectionMedia && (indexPath.row == 0 || indexPath.row == 1)) return YES;
+    if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1)) return YES;
+    if (indexPath.section == SectionCredits) return YES;
+    return NO;
+}
+
+#pragma mark - Export Logs
+
+- (void)exportLogs {
+    UIAlertController *spinner = [UIAlertController alertControllerWithTitle:@"Collecting logs…"
+                                                                    message:@"\n"
+                                                             preferredStyle:UIAlertControllerStyleAlert];
+    UIActivityIndicatorView *indicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    indicator.translatesAutoresizingMaskIntoConstraints = NO;
+    [indicator startAnimating];
+    [spinner.view addSubview:indicator];
+    [NSLayoutConstraint activateConstraints:@[
+        [indicator.centerXAnchor constraintEqualToAnchor:spinner.view.centerXAnchor],
+        [indicator.bottomAnchor constraintEqualToAnchor:spinner.view.bottomAnchor constant:-20],
+    ]];
+
+    [self presentViewController:spinner animated:YES completion:^{
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            NSString *logs = ApolloCollectLogs();
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [spinner dismissViewControllerAnimated:YES completion:^{
+                    UIActivityViewController *activityVC = [[UIActivityViewController alloc] initWithActivityItems:@[logs] applicationActivities:nil];
+
+                    UIPopoverPresentationController *popover = activityVC.popoverPresentationController;
+                    if (popover) {
+                        NSIndexPath *indexPath = [NSIndexPath indexPathForRow:1 inSection:SectionAbout];
+                        UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:indexPath];
+                        popover.sourceView = cell ?: self.view;
+                        popover.sourceRect = cell ? cell.bounds : CGRectZero;
+                    }
+
+                    [self presentViewController:activityVC animated:YES completion:nil];
+                }];
+            });
+        });
+    }];
+}
+
+#pragma mark - Instructions VC
+
+- (void)pushInstructionsViewController {
+    UIViewController *vc = [[UIViewController alloc] init];
+    vc.title = @"Instructions (old)";
+    vc.view.backgroundColor = [UIColor systemBackgroundColor];
+
+    UITextView *textView = [[UITextView alloc] init];
+    textView.editable = NO;
+    textView.translatesAutoresizingMaskIntoConstraints = NO;
 
     if (@available(iOS 15.0, *)) {
         NSString *instructionsText =
             @"**Creating a Reddit API credential:**\n"
             @"*You may need to sign out of all accounts in Apollo*\n\n"
-            @"1. Sign into your Reddit account and go to the link above ([reddit.com/prefs/apps](https://reddit.com/prefs/apps))\n"
+            @"1. Sign into your Reddit account and go to [reddit.com/prefs/apps](https://reddit.com/prefs/apps)\n"
             @"2. Click the \"`are you a developer? create an app...`\" button\n"
             @"3. Fill in the fields \n\t- Name: *anything* \n\t- Choose \"`Installed App`\" \n\t- Description: *anything*\n\t- About url: *anything* \n\t- Redirect uri: `apollo://reddit-oauth`\n"
             @"4. Click \"`create app`\"\n"
-            @"5. After creating the app you'll get a client identifier which will be a bunch of random characters. **Enter the key above**.\n"
+            @"5. After creating the app you'll get a client identifier which will be a bunch of random characters. **Enter the key in the API Keys section**.\n"
             @"\n"
             @"**Creating an Imgur API credential:**\n"
-            @"1. Sign into your Imgur account and go to the link above ([api.imgur.com/oauth2/addclient](https://api.imgur.com/oauth2/addclient))\n"
+            @"1. Sign into your Imgur account and go to [api.imgur.com/oauth2/addclient](https://api.imgur.com/oauth2/addclient)\n"
             @"2. Fill in the fields \n\t- Application name: *anything* \n\t- Authorization type: `OAuth 2 auth with a callback URL` \n\t- Authorization callback URL: `https://www.getpostman.com/oauth2/callback`\n\t- Email: *your email* \n\t- Description: *anything*\n"
             @"3. Click \"`submit`\"\n"
-            @"4. Enter the **Client ID** (not the client secret) above.";
+            @"4. Enter the **Client ID** (not the client secret) in the API Keys section.";
 
         NSAttributedStringMarkdownParsingOptions *markdownOptions = [[NSAttributedStringMarkdownParsingOptions alloc] init];
         markdownOptions.interpretedSyntax = NSAttributedStringMarkdownInterpretedSyntaxInlineOnly;
         textView.attributedText = [[NSAttributedString alloc] initWithMarkdownString:instructionsText options:markdownOptions baseURL:nil error:nil];
 
-        // Increase font size for markdown text
         NSMutableAttributedString *attributedText = [textView.attributedText mutableCopy];
         [attributedText enumerateAttribute:NSFontAttributeName inRange:NSMakeRange(0, attributedText.length) options:0 usingBlock:^(id value, NSRange range, BOOL *stop) {
             UIFont *oldFont = (UIFont *)value;
-
-            if (oldFont == nil) {
-                UIFont *newFont = [UIFont systemFontOfSize:15];
-                [attributedText addAttribute:NSFontAttributeName value:newFont range:range];
-            } else {
-                UIFont *newFont = [oldFont fontWithSize:15];
-                [attributedText addAttribute:NSFontAttributeName value:newFont range:range];
-            }
+            UIFont *newFont = oldFont ? [oldFont fontWithSize:15] : [UIFont systemFontOfSize:15];
+            [attributedText addAttribute:NSFontAttributeName value:newFont range:range];
         }];
         textView.attributedText = attributedText;
     } else {
-        // Fallback for iOS 14 and earlier - plain text without markdown
         textView.font = [UIFont systemFontOfSize:15];
         textView.text =
             @"Creating a Reddit API credential:\n"
             @"You may need to sign out of all accounts in Apollo\n\n"
-            @"1. Sign into your Reddit account and go to the link above (reddit.com/prefs/apps)\n"
+            @"1. Sign into your Reddit account and go to reddit.com/prefs/apps\n"
             @"2. Click the \"are you a developer? create an app...\" button\n"
             @"3. Fill in the fields \n\t- Name: anything \n\t- Choose \"Installed App\" \n\t- Description: anything\n\t- About url: anything \n\t- Redirect uri: apollo://reddit-oauth\n"
             @"4. Click \"create app\"\n"
-            @"5. After creating the app you'll get a client identifier which will be a bunch of random characters. Enter the key above.\n"
+            @"5. After creating the app you'll get a client identifier which will be a bunch of random characters. Enter the key in the API Keys section.\n"
             @"\n"
             @"Creating an Imgur API credential:\n"
-            @"1. Sign into your Imgur account and go to the link above (api.imgur.com/oauth2/addclient)\n"
+            @"1. Sign into your Imgur account and go to api.imgur.com/oauth2/addclient\n"
             @"2. Fill in the fields \n\t- Application name: anything \n\t- Authorization type: OAuth 2 auth with a callback URL \n\t- Authorization callback URL: https://www.getpostman.com/oauth2/callback\n\t- Email: your email \n\t- Description: anything\n"
             @"3. Click \"submit\"\n"
-            @"4. Enter the Client ID (not the client secret) above.";
+            @"4. Enter the Client ID (not the client secret) in the API Keys section.";
     }
     textView.textColor = UIColor.labelColor;
+    textView.textContainerInset = UIEdgeInsetsMake(16, 16, 16, 16);
 
-    [textView sizeToFit];
-    [stackView addArrangedSubview:textView];
+    [vc.view addSubview:textView];
+    [NSLayoutConstraint activateConstraints:@[
+        [textView.topAnchor constraintEqualToAnchor:vc.view.safeAreaLayoutGuide.topAnchor],
+        [textView.leadingAnchor constraintEqualToAnchor:vc.view.leadingAnchor],
+        [textView.trailingAnchor constraintEqualToAnchor:vc.view.trailingAnchor],
+        [textView.bottomAnchor constraintEqualToAnchor:vc.view.bottomAnchor],
+    ]];
 
-    UILabel *aboutLabel = [[UILabel alloc] init];
-    aboutLabel.text = @"About";
-    aboutLabel.font = [UIFont boldSystemFontOfSize:18];
-    aboutLabel.textAlignment = NSTextAlignmentCenter;
-    [stackView addArrangedSubview:aboutLabel];
+    [self.navigationController pushViewController:vc animated:YES];
+}
 
-    NSURL *githubLinkURL = [NSURL URLWithString:@"https://github.com/JeffreyCA/Apollo-ImprovedCustomApi"];
-    UIButton *githubButton = [self creditsButton:@"Open Source on GitHub" subtitle:@"@JeffreyCA" linkURL:githubLinkURL b64Image:B64Github];
-    [stackView addArrangedSubview:githubButton];
+#pragma mark - UITextFieldDelegate
 
-    UILabel *creditsLabel = [[UILabel alloc] init];
-    creditsLabel.text = @"Credits";
-    creditsLabel.font = [UIFont boldSystemFontOfSize:18];
-    creditsLabel.textAlignment = NSTextAlignmentCenter;
-    [stackView addArrangedSubview:creditsLabel];
-
-    NSURL *customApiLinkURL = [NSURL URLWithString:@"https://github.com/EthanArbuckle/Apollo-CustomApiCredentials"];
-    UIButton *customApiButton = [self creditsButton:@"Apollo-CustomApiCredentials" subtitle:@"@EthanArbuckle" linkURL:customApiLinkURL b64Image:B64Ethan];
-    [stackView addArrangedSubview:customApiButton];
-
-    NSURL *apolloApiLinkURL = [NSURL URLWithString:@"https://github.com/ryannair05/ApolloAPI"];
-    UIButton *apolloApiButton = [self creditsButton:@"ApolloAPI" subtitle:@"@ryannair05" linkURL:apolloApiLinkURL b64Image:B64Ryannair05];
-    [stackView addArrangedSubview:apolloApiButton];
-
-    NSURL *apolloPatcherLinkURL = [NSURL URLWithString:@"https://github.com/ichitaso/ApolloPatcher"];
-    UIButton *apolloPatcherButton = [self creditsButton:@"ApolloPatcher" subtitle:@"@ichitaso" linkURL:apolloPatcherLinkURL b64Image:B64Ichitaso];
-    [stackView addArrangedSubview:apolloPatcherButton];
-
-    UILabel *versionLabel = [[UILabel alloc] init];
-    versionLabel.text = @TWEAK_VERSION;
-    versionLabel.font = [UIFont systemFontOfSize:14];
-    versionLabel.textAlignment = NSTextAlignmentCenter;
-    [stackView addArrangedSubview:versionLabel];
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    [textField resignFirstResponder];
+    return YES;
 }
 
 - (void)textFieldDidEndEditing:(UITextField *)textField {
     if (textField.tag == TagRedditClientId) {
-        // Trim textField.text whitespaces
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         sRedditClientId = textField.text;
         [[NSUserDefaults standardUserDefaults] setValue:sRedditClientId forKey:UDKeyRedditClientId];
@@ -458,12 +903,14 @@ typedef NS_ENUM(NSInteger, Tag) {
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         sTrendingSubredditsLimit = textField.text;
         [[NSUserDefaults standardUserDefaults] setValue:sTrendingSubredditsLimit forKey:UDKeyTrendingSubredditsLimit];
+    } else if (textField.tag == TagReadPostMaxCount) {
+        textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        sReadPostMaxCount = [textField.text integerValue];
+        [[NSUserDefaults standardUserDefaults] setInteger:sReadPostMaxCount forKey:UDKeyReadPostMaxCount];
     }
 }
 
-- (void)unreadCommentsSwitchToggled:(UISwitch *)sender {
-    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyApolloShowUnreadComments];
-}
+#pragma mark - Switch Actions
 
 - (void)blockAnnouncementsSwitchToggled:(UISwitch *)sender {
     sBlockAnnouncements = sender.isOn;
@@ -477,6 +924,12 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)randNsfwSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyShowRandNsfw];
 }
+
+- (void)showRecentlyReadThumbnailsSwitchToggled:(UISwitch *)sender {
+    sShowRecentlyReadThumbnails = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sShowRecentlyReadThumbnails forKey:UDKeyShowRecentlyReadThumbnails];
+}
+
 
 #pragma mark - Backup / Restore
 
@@ -503,6 +956,9 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
 }
 
 - (void)backupSettings {
+    // Flush in-memory ReadPostIDs from the tracker to NSUserDefaults before backup
+    ApolloFlushReadPostIDsToDefaults();
+
     [[NSUserDefaults standardUserDefaults] synchronize];
     [[[NSUserDefaults alloc] initWithSuiteName:kGroupSuiteName] synchronize];
 
@@ -528,6 +984,17 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
     if (![fileManager copyItemAtPath:mainPlistPath toPath:mainDestPath error:&error]) {
         [self showAlertWithTitle:@"Backup Failed" message:@"Could not copy preferences file."];
         return;
+    }
+
+    // The on-disk plist may be stale (cfprefsd manages persistence timing),
+    // so patch in the current in-memory ReadPostIDs directly.
+    NSArray *currentReadPostIDs = [[NSUserDefaults standardUserDefaults] arrayForKey:@"ReadPostIDs"];
+    if (currentReadPostIDs.count > 0) {
+        NSMutableDictionary *plist = [NSMutableDictionary dictionaryWithContentsOfFile:mainDestPath];
+        if (plist) {
+            plist[@"ReadPostIDs"] = currentReadPostIDs;
+            [plist writeToFile:mainDestPath atomically:YES];
+        }
     }
 
     if ([fileManager fileExistsAtPath:groupPlistPath]) {
@@ -663,6 +1130,10 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
     sRandomSubredditsSource = [defaults stringForKey:UDKeyRandomSubredditsSource];
     sRandNsfwSubredditsSource = [defaults stringForKey:UDKeyRandNsfwSubredditsSource];
     sTrendingSubredditsLimit = [defaults stringForKey:UDKeyTrendingSubredditsLimit];
+    sReadPostMaxCount = [defaults integerForKey:UDKeyReadPostMaxCount];
+    sShowRecentlyReadThumbnails = [defaults boolForKey:UDKeyShowRecentlyReadThumbnails];
+    sPreferredGIFFallbackFormat = ([defaults integerForKey:UDKeyPreferredGIFFallbackFormat] == 0) ? 0 : 1;
+    sUnmuteCommentsVideos = [defaults integerForKey:UDKeyUnmuteCommentsVideos];
 
     // Restore group preferences, preserving account state from current install
     NSString *groupPlistBackupPath = [extractDir stringByAppendingPathComponent:kGroupPlistFilename];
@@ -698,15 +1169,6 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
     }];
 
     [alert addAction:quitAction];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)showAlertWithTitle:(NSString *)title message:(NSString *)message {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
-        message:message
-        preferredStyle:UIAlertControllerStyleAlert];
-    UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil];
-    [alert addAction:okAction];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
