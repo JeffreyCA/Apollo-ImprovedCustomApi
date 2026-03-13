@@ -280,6 +280,60 @@ static BOOL ApolloOpenInYouTubeAppIfEnabled(NSURL *normalizedURL) {
     return YES;
 }
 
+// Check if the URL host is a Steam domain
+static BOOL ApolloIsSteamHost(NSString *host) {
+    if (![host isKindOfClass:[NSString class]] || host.length == 0) {
+        return NO;
+    }
+    NSString *lowerHost = [host lowercaseString];
+    return [lowerHost isEqualToString:@"store.steampowered.com"]
+        || [lowerHost isEqualToString:@"steampowered.com"]
+        || [lowerHost isEqualToString:@"www.steampowered.com"]
+        || [lowerHost isEqualToString:@"steamcommunity.com"]
+        || [lowerHost isEqualToString:@"www.steamcommunity.com"];
+}
+
+// Try to open a Steam store URL in the Steam iOS app via Universal Links.
+// Handles any store.steampowered.com URL (app, bundle, sub, publisher, etc.).
+// Returns YES if attempting to open (caller should return early).
+// On failure (Steam not installed), fallbackHandler is called asynchronously
+// on the main thread so the link opens normally in Apollo.
+static BOOL ApolloTryOpenInSteamApp(NSURL *url, void (^fallbackHandler)(void)) {
+    if (![url isKindOfClass:[NSURL class]]) return NO;
+    if (!ApolloIsSteamHost(url.host)) return NO;
+
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:@"OpenLinksInSteamApp"]) return NO;
+
+    // Ensure the URL uses HTTPS for Universal Links
+    NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    components.scheme = @"https";
+
+    // Normalize to store.steampowered.com
+    NSString *host = components.host;
+    if ([host isEqualToString:@"steampowered.com"] || [host isEqualToString:@"www.steampowered.com"]) {
+        components.host = @"store.steampowered.com";
+    }
+
+    NSURL *steamHTTPSURL = components.URL;
+    if (!steamHTTPSURL) return NO;
+
+    ApolloLog(@"[ShareLinks] Opening Steam via Universal Links: %@", steamHTTPSURL);
+    void (^fallback)(void) = [fallbackHandler copy];
+    [[UIApplication sharedApplication] openURL:steamHTTPSURL
+                                       options:@{UIApplicationOpenURLOptionUniversalLinksOnly: @YES}
+                             completionHandler:^(BOOL success) {
+        if (success) {
+            ApolloLog(@"[ShareLinks] Opened Steam via Universal Links: %@", steamHTTPSURL);
+        } else {
+            ApolloLog(@"[ShareLinks] Steam Universal Links failed, falling back: %@", steamHTTPSURL);
+            if (fallback) {
+                dispatch_async(dispatch_get_main_queue(), fallback);
+            }
+        }
+    }];
+    return YES;
+}
+
 // Normalize known problematic URL patterns. Returns nil if no normalization needed.
 // Currently handles:
 //   - reddit.com/media?url=<encoded> -> decoded inner URL (e.g. i.redd.it/...)
@@ -467,6 +521,10 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
     if (normalizedURL) {
         val = normalizedURL;
     }
+    // Steam store links: deep link to Steam app if enabled, fall back to normal handling
+    if (ApolloTryOpenInSteamApp((NSURL *)val, ^{ %orig(textNode, attr, val, point, range); })) {
+        return;
+    }
     void (^ignoreHandler)(void) = ^{
         %orig(textNode, attr, val, point, range);
     };
@@ -488,6 +546,10 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
     NSURL *normalizedURL = ApolloNormalizeLinkURL((NSURL *)val);
     if (normalizedURL) {
         val = normalizedURL;
+    }
+    // Steam store links: deep link to Steam app if enabled, fall back to normal handling
+    if (ApolloTryOpenInSteamApp((NSURL *)val, ^{ %orig(textNode, attr, val, point, range); })) {
+        return;
     }
     void (^ignoreHandler)(void) = ^{
         %orig(textNode, attr, val, point, range);
@@ -517,6 +579,10 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
     NSString *urlString = ApolloGetLinkButtonNodeURLString(arg1);
     if (!urlString && [rdkLinkURL isKindOfClass:[NSURL class]]) {
         urlString = [rdkLinkURL absoluteString];
+    }
+
+    if (ApolloTryOpenInSteamApp([NSURL URLWithString:urlString], ^{ %orig; })) {
+        return;
     }
 
     NSString *normalizedURL = ApolloNormalizeLinkURLString(urlString);
@@ -565,6 +631,10 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
     if (normalizedURL) {
         val = normalizedURL;
     }
+    // Steam store links: deep link to Steam app if enabled, fall back to normal handling
+    if (ApolloTryOpenInSteamApp((NSURL *)val, ^{ %orig(textNode, attr, val, point, range); })) {
+        return;
+    }
     void (^ignoreHandler)(void) = ^{
         %orig(textNode, attr, val, point, range);
     };
@@ -601,6 +671,10 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
         if ([htmlShareURL isKindOfClass:[NSString class]] && htmlShareURL.length > 0) {
             urlString = htmlShareURL;
         }
+    }
+
+    if (ApolloTryOpenInSteamApp([NSURL URLWithString:urlString], ^{ %orig; })) {
+        return;
     }
 
     NSString *normalizedURL = ApolloNormalizeLinkURLString(urlString);
@@ -660,6 +734,10 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
     NSString *urlString = ApolloGetLinkButtonNodeURLString(arg1);
     if (!urlString && [rdkLinkURL isKindOfClass:[NSURL class]]) {
         urlString = [rdkLinkURL absoluteString];
+    }
+
+    if (ApolloTryOpenInSteamApp([NSURL URLWithString:urlString], ^{ %orig; })) {
+        return;
     }
 
     NSString *normalizedURL = ApolloNormalizeLinkURLString(urlString);

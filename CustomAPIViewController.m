@@ -196,7 +196,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     switch (section) {
         case SectionBackupRestore: return 2;
         case SectionAPIKeys: return 5; // 4 text fields + Instructions
-        case SectionGeneral: return 4;
+        case SectionGeneral: return 5;
         case SectionMedia: return 2;
         case SectionSubreddits: return 5;
         case SectionAbout: return 3; // GitHub repo link + version + export logs
@@ -475,6 +475,11 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                  tag:TagReadPostMaxCount
                                            numerical:YES];
         }
+        case 4:
+            return [self switchCellWithIdentifier:@"Cell_Gen_SteamApp"
+                                            label:@"Open Steam Links in App"
+                                               on:[defaults boolForKey:UDKeyOpenLinksInSteamApp]
+                                           action:@selector(steamAppSwitchToggled:)];
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -930,6 +935,9 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSUserDefaults standardUserDefaults] setBool:sShowRecentlyReadThumbnails forKey:UDKeyShowRecentlyReadThumbnails];
 }
 
+- (void)steamAppSwitchToggled:(UISwitch *)sender {
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyOpenLinksInSteamApp];
+}
 
 #pragma mark - Backup / Restore
 
