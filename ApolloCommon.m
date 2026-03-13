@@ -108,23 +108,56 @@ BOOL IsLiquidGlass(void) {
     return available;
 }
 
+// Route a URL through Apollo's own URL handler, bypassing iOS URL dispatch.
+//
+// On iOS 13+ with scenes, the SceneDelegate owns the tabBarController while
+// the AppDelegate's ivar is nil. The AppDelegate's application:openURL:options:
+// handler (sub_100161d08) reads AppDelegate.tabBarController for navigation,
+// so we ensure it has a reference before calling.
 static BOOL ApolloRouteURLThroughUIApplication(NSURL *url) {
     if (![url isKindOfClass:[NSURL class]]) {
         return NO;
     }
 
     UIApplication *application = [UIApplication sharedApplication];
-    if ([application respondsToSelector:@selector(openURL:options:completionHandler:)]) {
-        @try {
-            void (*msgSendOpenURL)(id, SEL, id, id, id) = (void (*)(id, SEL, id, id, id))objc_msgSend;
-            msgSendOpenURL(application, @selector(openURL:options:completionHandler:), url, @{}, nil);
-            return YES;
-        } @catch (NSException *exception) {
-            return NO;
-        }
+    id<UIApplicationDelegate> appDelegate = [application delegate];
+
+    if (![appDelegate respondsToSelector:@selector(application:openURL:options:)]) {
+        return NO;
     }
 
-    return NO;
+    // Ensure AppDelegate.tabBarController is populated
+    @try {
+        Ivar appTabBarIvar = class_getInstanceVariable([appDelegate class], "tabBarController");
+        if (appTabBarIvar && !object_getIvar(appDelegate, appTabBarIvar)) {
+            for (UIScene *scene in application.connectedScenes) {
+                if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+                id sceneDelegate = [(UIWindowScene *)scene delegate];
+                if (!sceneDelegate) continue;
+                Ivar sceneTabBarIvar = class_getInstanceVariable([sceneDelegate class], "tabBarController");
+                if (!sceneTabBarIvar) continue;
+                id sceneTabBar = object_getIvar(sceneDelegate, sceneTabBarIvar);
+                if (sceneTabBar) {
+                    ApolloLog(@"[ApolloRouteURL] Copying SceneDelegate tabBarController to AppDelegate");
+                    object_setIvar(appDelegate, appTabBarIvar, sceneTabBar);
+                    break;
+                }
+            }
+        }
+    } @catch (NSException *e) {
+        ApolloLog(@"[ApolloRouteURL] Failed to copy tabBarController: %@", e);
+    }
+
+    // Call the app delegate's URL handler directly — stays in-process,
+    // never hits iOS's URL scheme dispatch.
+    @try {
+        BOOL (*msgSend)(id, SEL, id, id, id) = (BOOL (*)(id, SEL, id, id, id))objc_msgSend;
+        msgSend(appDelegate, @selector(application:openURL:options:), application, url, @{});
+        return YES;
+    } @catch (NSException *exception) {
+        ApolloLog(@"[ApolloRouteURL] application:openURL:options: threw: %@", exception);
+        return NO;
+    }
 }
 
 NSURL *ApolloURLByConvertingResolvedURLToApolloScheme(NSURL *url) {
