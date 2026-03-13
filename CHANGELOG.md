@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v2.1.0] - 2025-03-12
+
+- Add Steam store deep linking support (thanks @wdeezy for the contribution!)
+    - To enable, toggle "Open Steam Links in App" in Custom API > General
+- Update default recently read posts limit to be unlimited
+- Fix share links opening in different Apollo app
+- Fix Pixel Pals making dynamic island taller than expected on newer iPhone models
+
 ## [v2.0.0] - 2025-03-07
 
 🎉 ***Massive*** update that enables Ultra features like saved categories, new app icons and Pixel Pals! This also brings new features like recently read posts and fixes for some longstanding Apollo bugs.
@@ -264,6 +272,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v2.1.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.0.0...v2.1.0
 [v2.0.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.4.5...v2.0.0
 [v1.4.5]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.4.4...v1.4.5
 [v1.4.4]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.4.3...v1.4.4

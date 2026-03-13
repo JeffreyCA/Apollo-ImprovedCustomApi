@@ -532,6 +532,94 @@ static void StripRapidAPIHeaders(NSMutableURLRequest *request) {
 }
 %end
 
+// --- Dynamic Island frame correction for newer devices ---
+// All DI element positions are hardcoded for iPhone 14 Pro (safeAreaInsets.top=59):
+//   sub_10030afa0: FauxCutOutView y=11.5, w=125, h=37
+//   sub_10030c880: PixelPalView y=-2.0
+//   sub_10030d6c4: tap overlay y=11.0, w=125, h=37, cornerRadius=18.5
+// On devices with different safe area insets, compute the correct DI Y position.
+// The gap between DI bottom and safe area scales proportionally with safeTop.
+// Y is floored to the nearest half-pixel to match the baseline's sub-pixel alignment.
+%hook _TtC6Apollo15ThemeableWindow
+
+- (void)layoutSubviews {
+    %orig;
+
+    UIWindow *window = (UIWindow *)self;
+    CGFloat nativeScale = [UIScreen mainScreen].nativeScale;
+    if (nativeScale != [UIScreen mainScreen].scale) return;
+
+    CGFloat safeTop = window.safeAreaInsets.top;
+    if (safeTop < 50.0 || fabs(safeTop - 59.0) < 0.5) return;
+
+    // Compute correct Y: gap scales proportionally, floor to half-pixel.
+    // Baseline (14 Pro): safeTop=59, y=11.5, gap=10.5, y at half-pixel (34.5px@3x).
+    CGFloat scaledGap = 10.5 * safeTop / 59.0;
+    CGFloat halfPx = 0.5 / nativeScale;
+    CGFloat correctY = floor((safeTop - 37.0 - scaledGap) / halfPx) * halfPx;
+    CGFloat shift = correctY - 11.5;
+
+    // Shift FauxCutOutView — %orig sets y=11.5 via sub_10030afa0
+    Ivar fauxIvar = class_getInstanceVariable(object_getClass(self), "fauxCutOutView");
+    if (!fauxIvar) return;
+    UIView *fauxView = object_getIvar(self, fauxIvar);
+    if (!fauxView || CGRectIsEmpty(fauxView.frame)) return;
+
+    CGRect fauxFrame = fauxView.frame;
+    if (fabs(fauxFrame.origin.y - 11.5) < 0.5) {
+        fauxFrame.origin.y = correctY;
+        fauxView.frame = fauxFrame;
+
+        // Clip to continuous (squircle) corners to match hardware DI shape
+        fauxView.clipsToBounds = YES;
+        fauxView.layer.cornerRadius = CGRectGetHeight(fauxView.bounds) * 0.5;
+        fauxView.layer.cornerCurve = kCACornerCurveContinuous;
+
+        ApolloLog(@"[PixelPals] FauxCutOutView y: 11.5 → %.3f (safeTop=%.1f, gap=%.3f, shift=%.3f)",
+                  correctY, safeTop, scaledGap, shift);
+    }
+
+    // Shift PixelPalView — %orig sets y=-2.0 via sub_10030c880
+    Ivar palIvar = class_getInstanceVariable(object_getClass(self), "pixelPalView");
+    if (!palIvar) return;
+    UIView *palView = object_getIvar(self, palIvar);
+    if (!palView || CGRectIsEmpty(palView.frame)) return;
+
+    CGRect palFrame = palView.frame;
+    if (fabs(palFrame.origin.y - (-2.0)) < 0.5) {
+        palFrame.origin.y = -2.0 + shift;
+        palView.frame = palFrame;
+        ApolloLog(@"[PixelPals] PixelPalView y: -2.0 → %.3f", palFrame.origin.y);
+    }
+}
+
+// Tap overlay (sub_10030d6c4) — created at y=11.0, 125×37, cornerRadius=18.5
+- (void)addSubview:(UIView *)view {
+    %orig;
+
+    UIWindow *window = (UIWindow *)self;
+    CGFloat safeTop = window.safeAreaInsets.top;
+    if (safeTop < 50.0 || fabs(safeTop - 59.0) < 0.5) return;
+    CGFloat nativeScale = [UIScreen mainScreen].nativeScale;
+    if (nativeScale != [UIScreen mainScreen].scale) return;
+
+    if (![view isMemberOfClass:[UIView class]]) return;
+    CGRect f = view.frame;
+    if (fabs(f.size.width - 125.0) > 0.5 || fabs(f.size.height - 37.0) > 0.5) return;
+    if (!view.clipsToBounds || view.layer.cornerRadius < 18.0) return;
+
+    CGFloat scaledGap = 10.5 * safeTop / 59.0;
+    CGFloat halfPx = 0.5 / nativeScale;
+    CGFloat correctY = floor((safeTop - 37.0 - scaledGap) / halfPx) * halfPx;
+    CGFloat shift = correctY - 11.5;
+
+    ApolloLog(@"[PixelPals] Tap overlay y: %.1f → %.3f", f.origin.y, f.origin.y + shift);
+    f.origin.y += shift;
+    view.frame = f;
+}
+
+%end
+
 // Reddit API can returns "error" as a dict (e.g. {"reason":"UNAUTHORIZED",...})
 // instead of a numeric code. Multiple Apollo code paths call [dict[@"error"] integerValue]
 // on the response, including unhookable block invokes. Adding integerValue to NSDictionary
@@ -581,7 +669,7 @@ static void initializeRandomSources() {
                                     UDKeyRandomSubredditsSource: defaultRandomSubredditsSource,
                                     UDKeyRandNsfwSubredditsSource: @"",
                                     UDKeyTrendingSubredditsSource: defaultTrendingSubredditsSource,
-                                    UDKeyReadPostMaxCount: @200,
+                                    UDKeyReadPostMaxCount: @0,
                                     UDKeyShowRecentlyReadThumbnails: @YES,
                                     UDKeyPreferredGIFFallbackFormat: @1,
                                     UDKeyUnmuteCommentsVideos: @0};
