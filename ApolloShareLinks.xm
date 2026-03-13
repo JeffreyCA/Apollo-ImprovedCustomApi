@@ -307,9 +307,13 @@ static BOOL ApolloTryOpenInSteamApp(NSURL *url, void (^fallbackHandler)(void)) {
     // Ensure the URL uses HTTPS for Universal Links
     NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
     components.scheme = @"https";
-    if (!components.host || [components.host isEqualToString:@"steampowered.com"]) {
+
+    // Normalize to store.steampowered.com
+    NSString *host = components.host;
+    if ([host isEqualToString:@"steampowered.com"] || [host isEqualToString:@"www.steampowered.com"]) {
         components.host = @"store.steampowered.com";
     }
+
     NSURL *steamHTTPSURL = components.URL;
     if (!steamHTTPSURL) return NO;
 
