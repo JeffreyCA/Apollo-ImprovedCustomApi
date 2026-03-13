@@ -310,7 +310,7 @@ static UIColor *RecentlyReadMetaColor(void) {
 
 - (void)_clearAllTapped {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Clear Read History"
-        message:@"This will remove all recently read post entries. This cannot be undone."
+        message:@"This will remove all recently read post entries and unmark all read posts. This cannot be undone."
         preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Clear All" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
