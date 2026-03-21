@@ -15,3 +15,4 @@ static NSString *const UDKeyShowRecentlyReadThumbnails = @"ShowRecentlyReadThumb
 static NSString *const UDKeyPreferredGIFFallbackFormat = @"PreferredGIFFallbackFormat";
 static NSString *const UDKeyUnmuteCommentsVideos = @"UnmuteCommentsVideos";
 static NSString *const UDKeyOpenLinksInSteamApp = @"OpenLinksInSteamApp";
+static NSString *const UDKeyCollapsePinnedComments = @"CollapsePinnedComments";

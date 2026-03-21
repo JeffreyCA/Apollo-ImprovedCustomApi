@@ -4,8 +4,10 @@
 #import <objc/runtime.h>
 
 #import "ApolloCommon.h"
+#import "UserDefaultConstants.h"
 
 @interface RDKComment : NSObject
+@property(nonatomic) BOOL stickied;
 @property(nonatomic) BOOL collapsed;
 @end
 
@@ -311,6 +313,16 @@ static void ShowCommentsCollapseCover(NSString *reason) {
 %end
 
 %hook RDKComment
+
+- (void)setStickied:(BOOL)stickied {
+    %orig;
+
+    if (!stickied) return;
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCollapsePinnedComments]) return;
+    if ([self collapsed]) return;
+
+    MSHookIvar<BOOL>(self, "_collapsed") = YES;
+}
 
 - (void)setCollapsed:(BOOL)collapsed {
     BOOL wasCollapsed = [self collapsed];

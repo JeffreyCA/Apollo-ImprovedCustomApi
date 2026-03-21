@@ -20,6 +20,7 @@ iOS tweak for [Apollo for Reddit app](https://apolloapp.io/) that lets you conti
 - Reddit `/s/` share links support
 - Image viewer and video playback fixes and enhancements
 - Deep linking support for Steam, YouTube Shorts
+- Auto-collapse pinned comments
 
 ### Unlocked Ultra Features and Easter Eggs
 

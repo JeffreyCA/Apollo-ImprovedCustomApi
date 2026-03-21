@@ -265,6 +265,62 @@ static char kASTableViewHasSearchToolbarKey;
 
 %end
 
+// MARK: - MessagesCollectionView scroll edge effect fix
+// iOS 26 scroll edge effects (gradient blur behind the nav bar) render incorrectly on
+// inverted collection views (scaleY=-1 transform used for chat-style bottom-anchored
+// scrolling). The effect views inherit the parent transform, causing the blur gradient
+// to cover the full screen instead of just the nav bar edge.
+// 
+// Related: https://github.com/facebook/react-native/issues/54181
+//
+// Fix: counter-invert the _UITouchPassthroughView that hosts the ScrollEdgeEffectViews,
+// cancelling out the parent transform so the gradient blur renders correctly.
+
+@interface _TtC6Apollo22MessagesCollectionView : UICollectionView
+@end
+
+static void FixScrollEdgeEffectInversion(UIScrollView *scrollView) {
+    for (UIView *subview in scrollView.subviews) {
+        if (![NSStringFromClass([subview class]) containsString:@"TouchPassthroughView"]) continue;
+
+        BOOL hasEffectChild = NO;
+        for (UIView *child in subview.subviews) {
+            if ([NSStringFromClass([child class]) containsString:@"ScrollEdgeEffect"]) {
+                hasEffectChild = YES;
+                break;
+            }
+        }
+        if (!hasEffectChild) continue;
+
+        // The collection view has transform scaleY=-1 (inverted for chat UI).
+        // Counter-invert the effect container so the blur gradient renders correctly.
+        CGAffineTransform current = subview.transform;
+        if (current.d > 0) {
+            // Not yet counter-inverted — apply scaleY=-1
+            subview.transform = CGAffineTransformMakeScale(1, -1);
+        }
+    }
+}
+
+%hook _TtC6Apollo22MessagesCollectionView
+
+- (void)didMoveToWindow {
+    %orig;
+    if (!IsLiquidGlass() || !self.window) return;
+
+    FixScrollEdgeEffectInversion(self);
+    ApolloLog(@"[MessagesCollectionView] Counter-inverted scroll edge effect for Liquid Glass");
+}
+
+- (void)layoutSubviews {
+    %orig;
+    if (!IsLiquidGlass()) return;
+
+    FixScrollEdgeEffectInversion(self);
+}
+
+%end
+
 %ctor {
     %init;
 }
