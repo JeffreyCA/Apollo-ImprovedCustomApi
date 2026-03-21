@@ -39,6 +39,9 @@
 @property(copy, nonatomic) NSString *body;
 @property(copy, nonatomic) NSString *bodyHTML;
 @property(readonly, nonatomic) NSDictionary *mediaMetadata;
+@property(copy, nonatomic) NSString *author;
+@property(nonatomic) BOOL stickied;
+@property(nonatomic) BOOL collapsed;
 @end
 
 @interface RDKLinkPreviewItem : NSObject

@@ -38,6 +38,21 @@ A disassembler with MCP support lets agents query the binary directly. This guid
 
 See [AGENTS.md](AGENTS.md) for detailed Hopper MCP tools and investigation patterns.
 
+## Apple Developer Docs MCP Setup
+
+The [apple-docs-mcp](https://github.com/kimsungwhee/apple-docs-mcp) server gives agents live access to Apple Developer documentation, WWDC transcripts, and framework symbol search.
+
+```json
+{
+    "mcpServers": {
+        "apple-dev": {
+            "command": "npx",
+            "args": ["-y", "apple-docs-mcp@latest"]
+        }
+    }
+}
+```
+
 ## Adding a New Feature
 
 Tips for prompting effectively:
