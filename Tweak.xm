@@ -149,7 +149,8 @@ static NSString *const announcementUrl = @"apollogur.download/api/apollonounceme
 
 static NSArray *const blockedUrls = @[
     @"apollopushserver.xyz",
-    @"apolloreq.com/api/req_v2",
+    @"beta.apollonotifications.com",
+    @"apolloreq.com",
     @"notify.bugsnag.com",
     @"sessions.bugsnag.com",
     @"api.mixpanel.com",
