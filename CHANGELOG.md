@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v2.2.1] - 2026-03-25
+
+- Block additional tracking and analytics URLs (thanks @Uranosphaerite!)
+- Liquid Glass: fix header flicker issue in comments
+
 ## [v2.2.0] - 2026-03-20
 
 - Add "Collapse Pinned Comments" setting to auto-collapse pinned/stickied comments
@@ -278,6 +283,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v2.2.1]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.2.0...v2.2.1
 [v2.2.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.1.0...v2.2.0
 [v2.1.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.0.0...v2.1.0
 [v2.0.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v1.4.5...v2.0.0
