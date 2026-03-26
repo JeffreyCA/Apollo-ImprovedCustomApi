@@ -132,10 +132,7 @@ static BOOL ShouldShowCollapseCoverForTopState(UIViewController *viewController,
 
 
 static UIColor *GetCommentsCoverColor(UIViewController *viewController, UITableView *tableView) {
-    UIColor *color = viewController.view.backgroundColor;
-    if (color) return color;
-
-    color = tableView.backgroundColor;
+    UIColor *color = tableView.backgroundColor;
     if (color) return color;
 
     if (@available(iOS 13.0, *)) {
