@@ -130,39 +130,41 @@ static NSURLSession *RecentlyReadThumbnailSession(void) {
     return session;
 }
 
-static UIImage *RecentlyReadNoThumbnailPlaceholderImage(void) {
-    static UIImage *placeholder = nil;
+static UIImage *RecentlyReadPlaceholderImageForAsset(NSString *assetName, CGFloat inset) {
+    UIImage *base = [UIImage imageNamed:assetName];
+    if (!base) return nil;
+
+    // Match Apollo compact placeholder tone (#76787f) and give
+    // the glyph extra breathing room inside the compact-small thumbnail.
+    UIColor *tint = [UIColor colorWithRed:(118.0 / 255.0)
+                                    green:(120.0 / 255.0)
+                                     blue:(127.0 / 255.0)
+                                    alpha:1.0];
+    UIImage *templated = [base imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    CGSize canvasSize = CGSizeMake(kRecentlyReadThumbnailSmallSize, kRecentlyReadThumbnailSmallSize);
+    CGRect canvas = (CGRect){CGPointZero, canvasSize};
+    CGRect paddedBounds = CGRectInset(canvas, inset, inset);
+    CGRect drawRect = RecentlyReadAspectFitRect(base.size, paddedBounds);
+
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:canvasSize];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull context) {
+        [tint setFill];
+        [templated drawInRect:drawRect];
+    }];
+}
+
+static UIImage *RecentlyReadNoThumbnailPlaceholderImage(BOOL isSelfPost) {
+    static UIImage *selfPostPlaceholder = nil;
+    static UIImage *linkPlaceholder = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        UIImage *base = [UIImage imageNamed:@"self-post-indicator"];
-        if (!base) {
-            base = [UIImage imageNamed:@"link-button-image"];
-        }
-        if (!base) {
-            return;
-        }
-
-        // Match Apollo compact self-post placeholder tone (#76787f) and give
-        // the glyph extra breathing room inside the compact-small thumbnail.
-        UIColor *tint = [UIColor colorWithRed:(118.0 / 255.0)
-                                        green:(120.0 / 255.0)
-                                         blue:(127.0 / 255.0)
-                                        alpha:1.0];
-        UIImage *templated = [base imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-        CGSize canvasSize = CGSizeMake(kRecentlyReadThumbnailSmallSize, kRecentlyReadThumbnailSmallSize);
-        CGRect canvas = (CGRect){CGPointZero, canvasSize};
-        CGRect paddedBounds = CGRectInset(canvas,
-                                          kRecentlyReadThumbnailPlaceholderInset,
-                                          kRecentlyReadThumbnailPlaceholderInset);
-        CGRect drawRect = RecentlyReadAspectFitRect(base.size, paddedBounds);
-
-        UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:canvasSize];
-        placeholder = [renderer imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull context) {
-            [tint setFill];
-            [templated drawInRect:drawRect];
-        }];
+        selfPostPlaceholder = RecentlyReadPlaceholderImageForAsset(@"self-post-indicator", kRecentlyReadThumbnailPlaceholderInset);
+        linkPlaceholder = RecentlyReadPlaceholderImageForAsset(@"link-button-reddit", 10.0);
+        // Fallbacks
+        if (!selfPostPlaceholder) selfPostPlaceholder = linkPlaceholder;
+        if (!linkPlaceholder) linkPlaceholder = selfPostPlaceholder;
     });
-    return placeholder;
+    return isSelfPost ? selfPostPlaceholder : linkPlaceholder;
 }
 
 static UIColor *RecentlyReadMetaColor(void) {
@@ -175,6 +177,29 @@ static UIColor *RecentlyReadMetaColor(void) {
         CGFloat t = 0.3;
         return [UIColor colorWithRed:r1 + (r2 - r1) * t green:g1 + (g2 - g1) * t
             blue:b1 + (b2 - b1) * t alpha:a1 + (a2 - a1) * t];
+    }];
+}
+
+static UIImage *RecentlyReadNSFWBadgeImage(CGFloat fontSize) {
+    NSString *text = @"NSFW";
+    UIFont *badgeFont = [UIFont systemFontOfSize:fontSize * 0.9 weight:UIFontWeightMedium];
+    NSDictionary *attrs = @{NSFontAttributeName: badgeFont, NSForegroundColorAttributeName: [UIColor whiteColor]};
+    CGSize textSize = [text sizeWithAttributes:attrs];
+    CGFloat hPad = 4.25;
+    CGFloat vPad = 1.5;
+    CGFloat badgeHeight = textSize.height + vPad * 2;
+    CGFloat badgeWidth = textSize.width + hPad * 2;
+    CGFloat cornerRadius = badgeHeight * 0.325;
+    CGSize canvasSize = CGSizeMake(badgeWidth, badgeHeight);
+
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:canvasSize];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull context) {
+        UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, badgeWidth, badgeHeight)
+                                                        cornerRadius:cornerRadius];
+        // Apollo's native NSFW badge red (#E60000)
+        [[UIColor colorWithRed:(0xE6 / 255.0) green:0.0 blue:0.0 alpha:1.0] setFill];
+        [path fill];
+        [text drawAtPoint:CGPointMake(hPad, vPad) withAttributes:attrs];
     }];
 }
 
@@ -432,23 +457,34 @@ static UIColor *RecentlyReadMetaColor(void) {
 }
 
 - (NSArray *)activePosts {
-    return [self isSearchActive] ? self.filteredPosts : self.posts;
+    if ([self isSearchActive] || [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFilterNSFWRecentlyRead]) {
+        return self.filteredPosts;
+    }
+    return self.posts;
 }
 
 - (void)_refilterPosts {
+    BOOL filterNSFW = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFilterNSFWRecentlyRead];
     NSString *query = self.searchController.searchBar.text;
-    if (![self isSearchActive] || query.length == 0) {
+    BOOL searching = [self isSearchActive] && query.length > 0;
+
+    if (!searching && !filterNSFW) {
         self.filteredPosts = [self.posts mutableCopy];
         return;
     }
-    NSString *lower = query.lowercaseString;
+
+    NSString *lower = searching ? query.lowercaseString : nil;
     NSMutableArray *filtered = [NSMutableArray array];
     for (RDKLink *link in self.posts) {
-        if ((link.title && [link.title.lowercaseString containsString:lower]) ||
-            (link.subreddit && [link.subreddit.lowercaseString containsString:lower]) ||
-            (link.author && [link.author.lowercaseString containsString:lower])) {
-            [filtered addObject:link];
+        if (filterNSFW && link.isNSFW) continue;
+        if (searching &&
+            !(link.title && [link.title.lowercaseString containsString:lower]) &&
+            !(link.subreddit && [link.subreddit.lowercaseString containsString:lower]) &&
+            !(link.author && [link.author.lowercaseString containsString:lower]) &&
+            !(link.isNSFW && [@"nsfw" containsString:lower])) {
+            continue;
         }
+        [filtered addObject:link];
     }
     self.filteredPosts = filtered;
 }
@@ -575,7 +611,7 @@ static UIColor *RecentlyReadMetaColor(void) {
     NSURL *thumbURL = [self thumbnailURLForLink:link];
     if (!thumbURL) {
         thumbnailView.contentMode = UIViewContentModeCenter;
-        thumbnailView.image = RecentlyReadNoThumbnailPlaceholderImage();
+        thumbnailView.image = RecentlyReadNoThumbnailPlaceholderImage(link.isSelfPost);
         objc_setAssociatedObject(thumbnailView, &kThumbURLKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return;
     }
@@ -592,7 +628,7 @@ static UIColor *RecentlyReadMetaColor(void) {
     }
 
     thumbnailView.contentMode = UIViewContentModeScaleAspectFill;
-    thumbnailView.image = RecentlyReadNoThumbnailPlaceholderImage();
+    thumbnailView.image = RecentlyReadNoThumbnailPlaceholderImage(NO);
     __weak UIImageView *weakThumb = thumbnailView;
     NSURLSessionDataTask *task = [RecentlyReadThumbnailSession() dataTaskWithURL:thumbURL
                                                                completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -602,7 +638,7 @@ static UIColor *RecentlyReadMetaColor(void) {
                 if (!strongThumb) return;
                 NSString *current = objc_getAssociatedObject(strongThumb, &kThumbURLKey);
                 if ([current isEqualToString:urlString]) {
-                    strongThumb.image = RecentlyReadNoThumbnailPlaceholderImage();
+                    strongThumb.image = RecentlyReadNoThumbnailPlaceholderImage(NO);
                 }
                 objc_setAssociatedObject(strongThumb, &kThumbTaskKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             });
@@ -615,7 +651,7 @@ static UIColor *RecentlyReadMetaColor(void) {
                 if (!strongThumb) return;
                 NSString *current = objc_getAssociatedObject(strongThumb, &kThumbURLKey);
                 if ([current isEqualToString:urlString]) {
-                    strongThumb.image = RecentlyReadNoThumbnailPlaceholderImage();
+                    strongThumb.image = RecentlyReadNoThumbnailPlaceholderImage(NO);
                 }
                 objc_setAssociatedObject(strongThumb, &kThumbTaskKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             });
@@ -829,7 +865,32 @@ static UIColor *RecentlyReadMetaColor(void) {
         stackLeadingNoThumb.active = YES;
     }
 
-    titleLabel.text = link.title ?: @"(untitled)";
+    // Title with optional NSFW badge
+    NSString *titleText = link.title ?: @"(untitled)";
+    UIFont *titleFont = titleLabel.font;
+    NSMutableParagraphStyle *titlePara = [[NSMutableParagraphStyle alloc] init];
+    titlePara.lineSpacing = 1.5;
+    NSDictionary *titleAttrs = @{NSFontAttributeName: titleFont,
+                                 NSForegroundColorAttributeName: [UIColor labelColor],
+                                 NSParagraphStyleAttributeName: titlePara};
+    if (link.isNSFW) {
+        NSMutableAttributedString *titleAttr = [[NSMutableAttributedString alloc] initWithString:titleText
+            attributes:titleAttrs];
+        // Space before badge
+        [titleAttr appendAttributedString:[[NSAttributedString alloc] initWithString:@" "]];
+        // NSFW badge as inline image
+        UIImage *badge = RecentlyReadNSFWBadgeImage(titleFont.pointSize);
+        NSTextAttachment *att = [[NSTextAttachment alloc] init];
+        att.image = badge;
+        // Vertically center the badge with the text midline
+        CGFloat fontMid = (titleFont.ascender + titleFont.descender) / 2.0;
+        CGFloat yOffset = fontMid - badge.size.height / 2.0;
+        att.bounds = CGRectMake(0, yOffset, badge.size.width, badge.size.height);
+        [titleAttr appendAttributedString:[NSAttributedString attributedStringWithAttachment:att]];
+        titleLabel.attributedText = titleAttr;
+    } else {
+        titleLabel.attributedText = [[NSAttributedString alloc] initWithString:titleText attributes:titleAttrs];
+    }
 
     NSString *subPath = link.subreddit.length > 0 ? [NSString stringWithFormat:@"/r/%@", link.subreddit] : nil;
     NSString *authorPath = link.author.length > 0 ? [NSString stringWithFormat:@"/u/%@", link.author] : nil;

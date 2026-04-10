@@ -196,7 +196,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     switch (section) {
         case SectionBackupRestore: return 2;
         case SectionAPIKeys: return 6; // 4 text fields + Can't sign in? + Instructions
-        case SectionGeneral: return 6;
+        case SectionGeneral: return 7;
         case SectionMedia: return 2;
         case SectionSubreddits: return 5;
         case SectionAbout: return 3; // GitHub repo link + version + export logs
@@ -471,11 +471,16 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                on:[defaults boolForKey:UDKeyEnableFLEX]
                                            action:@selector(flexSwitchToggled:)];
         case 2:
+            return [self switchCellWithIdentifier:@"Cell_Gen_CollapsePinned"
+                                            label:@"Collapse Pinned Comments"
+                                               on:[defaults boolForKey:UDKeyCollapsePinnedComments]
+                                           action:@selector(collapsePinnedCommentsSwitchToggled:)];
+        case 3:
             return [self switchCellWithIdentifier:@"Cell_Gen_RRThumbs"
                                             label:@"Recently Read Thumbnails"
                                                on:[defaults boolForKey:UDKeyShowRecentlyReadThumbnails]
                                            action:@selector(showRecentlyReadThumbnailsSwitchToggled:)];
-        case 3: {
+        case 4: {
             NSString *readPostMaxStr = sReadPostMaxCount > 0 ? [NSString stringWithFormat:@"%ld", (long)sReadPostMaxCount] : @"";
             return [self textFieldCellWithIdentifier:@"Cell_Gen_ReadMax"
                                                label:@"Recently Read Posts Limit"
@@ -484,16 +489,16 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                  tag:TagReadPostMaxCount
                                            numerical:YES];
         }
-        case 4:
+        case 5:
+            return [self switchCellWithIdentifier:@"Cell_Gen_FilterNSFWRR"
+                                            label:@"Hide NSFW in Recently Read"
+                                               on:[defaults boolForKey:UDKeyFilterNSFWRecentlyRead]
+                                           action:@selector(filterNSFWRecentlyReadSwitchToggled:)];
+        case 6:
             return [self switchCellWithIdentifier:@"Cell_Gen_SteamApp"
                                             label:@"Open Steam Links in App"
                                                on:[defaults boolForKey:UDKeyOpenLinksInSteamApp]
                                            action:@selector(steamAppSwitchToggled:)];
-        case 5:
-            return [self switchCellWithIdentifier:@"Cell_Gen_CollapsePinned"
-                                            label:@"Collapse Pinned Comments"
-                                               on:[defaults boolForKey:UDKeyCollapsePinnedComments]
-                                           action:@selector(collapsePinnedCommentsSwitchToggled:)];
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -1018,6 +1023,10 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)collapsePinnedCommentsSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyCollapsePinnedComments];
+}
+
+- (void)filterNSFWRecentlyReadSwitchToggled:(UISwitch *)sender {
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyFilterNSFWRecentlyRead];
 }
 
 #pragma mark - Backup / Restore
