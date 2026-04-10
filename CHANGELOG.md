@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v2.3.0] - 2026-04-09
+
+- Add option to hide NSFW posts in Recently Read
+- Show inline NSFW badge on post titles in Recently Read
+- Use distinct placeholder thumbnails for self-posts vs link posts in Recently Read
+
 ## [v2.2.1] - 2026-03-25
 
 - Block additional tracking and analytics URLs (thanks @Uranosphaerite!)
@@ -283,6 +289,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v2.3.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.2.1...v2.3.0
 [v2.2.1]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.2.0...v2.2.1
 [v2.2.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.1.0...v2.2.0
 [v2.1.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.0.0...v2.1.0
