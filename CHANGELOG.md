@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v2.4.0] - 2026-04-18
+
+- Add option to proxy Imgur images through DuckDuckGo (Settings > General > Custom API > Media)
+    - Only supports viewing single images; albums are not supported
+
 ## [v2.3.0] - 2026-04-09
 
 - Add option to hide NSFW posts in Recently Read
@@ -289,6 +294,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v2.4.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.3.0...v2.4.0
 [v2.3.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.2.1...v2.3.0
 [v2.2.1]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.2.0...v2.2.1
 [v2.2.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.1.0...v2.2.0
