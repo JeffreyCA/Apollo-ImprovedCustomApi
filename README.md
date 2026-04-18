@@ -19,6 +19,7 @@ iOS tweak for [Apollo for Reddit app](https://apolloapp.io/) that lets you conti
 - Pixel Pals support on newer iPhone models
 - Reddit `/s/` share links support
 - Image viewer and video playback fixes and enhancements
+- Proxy Imgur images through DuckDuckGo for regional blocks
 - Deep linking support for Steam, YouTube Shorts
 - Auto-collapse pinned comments
 

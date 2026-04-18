@@ -426,6 +426,66 @@ static void StripRapidAPIHeaders(NSMutableURLRequest *request) {
 - (NSURLSessionDataTask *)dataTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
     if ([url.host isEqualToString:@"apollogur.download"]) {
         NSString *imageID = [url.lastPathComponent stringByDeletingPathExtension];
+
+        if (sProxyImgurDDG && [url.path hasPrefix:@"/api/image"]) {
+            // Fabricate an API response with a DDG-proxied link, skipping api.imgur.com
+            // entirely (also regionally blocked). .jpg is a neutral default; Imgur serves
+            // the correct format regardless and DDG handles both static and animated content.
+            NSString *imgurJPG = [NSString stringWithFormat:@"https://i.imgur.com/%@.jpg", imageID];
+            NSString *ddgProxied = [@"https://external-content.duckduckgo.com/iu/?u=" stringByAppendingString:
+                [imgurJPG stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
+
+            // Match the real Imgur API shape so Unbox's required-key decoding succeeds.
+            NSDictionary *syntheticResponse = @{
+                @"status": @200,
+                @"success": @YES,
+                @"data": @{
+                    @"id": imageID,
+                    @"deletehash": @"",
+                    @"account_id": [NSNull null],
+                    @"account_url": [NSNull null],
+                    @"ad_type": [NSNull null],
+                    @"ad_url": [NSNull null],
+                    @"title": [NSNull null],
+                    @"description": [NSNull null],
+                    @"name": @"",
+                    @"type": @"image/jpeg",
+                    @"width": @1920,
+                    @"height": @1080,
+                    @"size": @0,
+                    @"views": @0,
+                    @"section": [NSNull null],
+                    @"vote": [NSNull null],
+                    @"bandwidth": @0,
+                    @"animated": @NO,
+                    @"favorite": @NO,
+                    @"in_gallery": @NO,
+                    @"in_most_viral": @NO,
+                    @"has_sound": @NO,
+                    @"is_ad": @NO,
+                    @"nsfw": [NSNull null],
+                    @"link": ddgProxied,
+                    @"tags": @[],
+                    @"datetime": @0,
+                    @"mp4": @"",
+                    @"hls": @""
+                }
+            };
+            NSData *jsonData = [NSJSONSerialization dataWithJSONObject:syntheticResponse options:0 error:nil];
+            NSHTTPURLResponse *fakeHTTPResponse = [[NSHTTPURLResponse alloc] initWithURL:url
+                                                                              statusCode:200
+                                                                             HTTPVersion:@"HTTP/1.1"
+                                                                            headerFields:@{@"Content-Type": @"application/json"}];
+
+            ApolloLog(@"[ImgurProxy] Fabricating response for %@", imageID);
+
+            // Route the task to a fast-failing URL; wrapper delivers the synthetic data.
+            void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(__unused NSData *d, __unused NSURLResponse *r, __unused NSError *e) {
+                completionHandler(jsonData, fakeHTTPResponse, nil);
+            };
+            return %orig([NSURL URLWithString:@"http://127.0.0.1:1"], wrappedHandler);
+        }
+
         NSURL *modifiedURL;
 
         if ([url.path hasPrefix:@"/api/image"]) {
@@ -521,6 +581,22 @@ static void StripRapidAPIHeaders(NSMutableURLRequest *request) {
         [mutableRequest setValue:customUA forHTTPHeaderField:@"User-Agent"];
         [self setValue:mutableRequest forKey:@"_originalRequest"];
         [self setValue:mutableRequest forKey:@"_currentRequest"];
+    } else if (sProxyImgurDDG
+               && ([requestURL.host isEqualToString:@"imgur.com"] || [requestURL.host hasSuffix:@".imgur.com"])
+               && ![requestURL.host isEqualToString:@"api.imgur.com"]) {
+        // Proxy direct Imgur content URLs through DuckDuckGo. DDG can't serve .mp4/.gifv,
+        // so rewrite those to .gif first.
+        NSString *imgurURL = requestString;
+        if ([imgurURL hasSuffix:@".mp4"] || [imgurURL hasSuffix:@".gifv"]) {
+            imgurURL = [[imgurURL stringByDeletingPathExtension] stringByAppendingPathExtension:@"gif"];
+        }
+        NSString *proxyURLString = [@"https://external-content.duckduckgo.com/iu/?u=" stringByAppendingString:
+            [imgurURL stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
+        NSMutableURLRequest *mutableRequest = [request mutableCopy];
+        [mutableRequest setURL:[NSURL URLWithString:proxyURLString]];
+        [self setValue:mutableRequest forKey:@"_originalRequest"];
+        [self setValue:mutableRequest forKey:@"_currentRequest"];
+        ApolloLog(@"[ImgurProxy] Proxying %@ via DuckDuckGo", requestString);
     }
 
     %orig;
@@ -678,7 +754,8 @@ static void initializeRandomSources() {
                                     UDKeyReadPostMaxCount: @0,
                                     UDKeyShowRecentlyReadThumbnails: @YES,
                                     UDKeyPreferredGIFFallbackFormat: @1,
-                                    UDKeyUnmuteCommentsVideos: @0};
+                                    UDKeyUnmuteCommentsVideos: @0,
+                                    UDKeyProxyImgurDDG: @NO};
     [[NSUserDefaults standardUserDefaults] registerDefaults:defaultValues];
 
     sRedditClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedditClientId] ?: @"" copy];
@@ -690,6 +767,7 @@ static void initializeRandomSources() {
     sPreferredGIFFallbackFormat = ([[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPreferredGIFFallbackFormat] == 0) ? 0 : 1;
     sReadPostMaxCount = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyReadPostMaxCount];
     sUnmuteCommentsVideos = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyUnmuteCommentsVideos];
+    sProxyImgurDDG = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProxyImgurDDG];
 
     // Trim ReadPostIDs if over configured max
     if (sReadPostMaxCount > 0) {

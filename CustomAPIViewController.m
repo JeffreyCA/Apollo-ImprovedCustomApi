@@ -197,7 +197,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionBackupRestore: return 2;
         case SectionAPIKeys: return 6; // 4 text fields + Can't sign in? + Instructions
         case SectionGeneral: return 7;
-        case SectionMedia: return 2;
+        case SectionMedia: return 3;
         case SectionSubreddits: return 5;
         case SectionAbout: return 3; // GitHub repo link + version + export logs
         case SectionCredits: return 3;
@@ -529,6 +529,11 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             return cell;
         }
+        case 2:
+            return [self switchCellWithIdentifier:@"Cell_Media_ProxyImgur"
+                                            label:@"Proxy Imgur via DuckDuckGo"
+                                               on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProxyImgurDDG]
+                                           action:@selector(proxyImgurDDGSwitchToggled:)];
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -679,6 +684,10 @@ typedef NS_ENUM(NSInteger, Tag) {
             attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/JeffreyCA/subreddits"]}]];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@")"
             attributes:plainAttrs]];
+    } else if (section == SectionMedia) {
+        text = [[NSMutableAttributedString alloc]
+            initWithString:@"Proxying routes Imgur image requests through DuckDuckGo to bypass regional blocks. Albums and uploads are unsupported."
+            attributes:plainAttrs];
     } else {
         return nil;
     }
@@ -1027,6 +1036,11 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)filterNSFWRecentlyReadSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyFilterNSFWRecentlyRead];
+}
+
+- (void)proxyImgurDDGSwitchToggled:(UISwitch *)sender {
+    sProxyImgurDDG = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sProxyImgurDDG forKey:UDKeyProxyImgurDDG];
 }
 
 #pragma mark - Backup / Restore
