@@ -755,7 +755,13 @@ static void initializeRandomSources() {
                                     UDKeyShowRecentlyReadThumbnails: @YES,
                                     UDKeyPreferredGIFFallbackFormat: @1,
                                     UDKeyUnmuteCommentsVideos: @0,
-                                    UDKeyProxyImgurDDG: @NO};
+                                    UDKeyProxyImgurDDG: @NO,
+                                    UDKeyEnableBulkTranslation: @NO,
+                                    UDKeyAutoTranslateOnAppear: @YES,
+                                    UDKeyTranslationTargetLanguage: @"",
+                                    UDKeyTranslationProvider: @"google",
+                                    UDKeyLibreTranslateURL: @"https://libretranslate.de/translate",
+                                    UDKeyLibreTranslateAPIKey: @""};
     [[NSUserDefaults standardUserDefaults] registerDefaults:defaultValues];
 
     sRedditClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedditClientId] ?: @"" copy];
@@ -768,6 +774,24 @@ static void initializeRandomSources() {
     sReadPostMaxCount = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyReadPostMaxCount];
     sUnmuteCommentsVideos = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyUnmuteCommentsVideos];
     sProxyImgurDDG = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProxyImgurDDG];
+    sEnableBulkTranslation = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableBulkTranslation];
+    sAutoTranslateOnAppear = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoTranslateOnAppear];
+
+    NSString *targetLanguage = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTranslationTargetLanguage];
+    sTranslationTargetLanguage = [targetLanguage length] > 0 ? [targetLanguage copy] : nil;
+
+    NSString *provider = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTranslationProvider];
+    if ([provider isEqualToString:@"libre"] || [provider isEqualToString:@"google"]) {
+        sTranslationProvider = [provider copy];
+    } else {
+        sTranslationProvider = @"google";
+    }
+
+    NSString *libreURL = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyLibreTranslateURL];
+    sLibreTranslateURL = [libreURL length] > 0 ? [libreURL copy] : @"https://libretranslate.de/translate";
+
+    NSString *libreAPIKey = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyLibreTranslateAPIKey];
+    sLibreTranslateAPIKey = [libreAPIKey length] > 0 ? [libreAPIKey copy] : nil;
 
     // Trim ReadPostIDs if over configured max
     if (sReadPostMaxCount > 0) {

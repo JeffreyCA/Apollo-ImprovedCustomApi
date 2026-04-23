@@ -1246,6 +1246,20 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
     sShowRecentlyReadThumbnails = [defaults boolForKey:UDKeyShowRecentlyReadThumbnails];
     sPreferredGIFFallbackFormat = ([defaults integerForKey:UDKeyPreferredGIFFallbackFormat] == 0) ? 0 : 1;
     sUnmuteCommentsVideos = [defaults integerForKey:UDKeyUnmuteCommentsVideos];
+    sEnableBulkTranslation = [defaults boolForKey:UDKeyEnableBulkTranslation];
+    sAutoTranslateOnAppear = [defaults boolForKey:UDKeyAutoTranslateOnAppear];
+
+    NSString *targetLanguage = [defaults stringForKey:UDKeyTranslationTargetLanguage];
+    sTranslationTargetLanguage = targetLanguage.length > 0 ? targetLanguage : nil;
+
+    NSString *provider = [defaults stringForKey:UDKeyTranslationProvider];
+    sTranslationProvider = ([provider isEqualToString:@"libre"] || [provider isEqualToString:@"google"]) ? provider : @"google";
+
+    NSString *libreURL = [defaults stringForKey:UDKeyLibreTranslateURL];
+    sLibreTranslateURL = libreURL.length > 0 ? libreURL : @"https://libretranslate.de/translate";
+
+    NSString *libreAPIKey = [defaults stringForKey:UDKeyLibreTranslateAPIKey];
+    sLibreTranslateAPIKey = libreAPIKey.length > 0 ? libreAPIKey : nil;
 
     // Restore group preferences, preserving account state from current install
     NSString *groupPlistBackupPath = [extractDir stringByAppendingPathComponent:kGroupPlistFilename];
