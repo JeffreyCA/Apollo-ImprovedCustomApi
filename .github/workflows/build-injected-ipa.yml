@@ -1,0 +1,108 @@
+name: Build Injected IPA
+
+# Builds the tweak .deb AND injects it into a user-supplied decrypted Apollo IPA.
+# Output: a sideload-ready .ipa uploaded as a workflow artifact.
+#
+# IMPORTANT: The Apollo IPA URL you provide MUST point to a DECRYPTED IPA.
+# App Store IPAs are FairPlay-encrypted and will crash on launch after injection.
+
+on:
+  workflow_dispatch:
+    inputs:
+      apollo_ipa_url:
+        description: 'Direct URL to a DECRYPTED Apollo IPA'
+        required: true
+        type: string
+      output_name:
+        description: 'Output IPA filename (without .ipa extension)'
+        required: false
+        type: string
+        default: 'Apollo-ImprovedCustomApi'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build tweak and inject into IPA
+    runs-on: macos-15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Install build dependencies
+        run: brew install ldid dpkg make
+
+      - name: Add GNU make to PATH
+        run: echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
+
+      - name: Setup Theos
+        uses: actions/checkout@v4
+        with:
+          repository: theos/theos
+          ref: master
+          path: theos
+          submodules: recursive
+
+      - name: Build rootful tweak package
+        run: make package FINALPACKAGE=1
+        env:
+          THEOS: ${{ github.workspace }}/theos
+
+      - name: Locate built .deb
+        id: locate_deb
+        run: |
+          DEB_PATH=$(ls -1t packages/*.deb | head -1)
+          if [ -z "$DEB_PATH" ]; then
+            echo "Error: no .deb produced by make package"
+            exit 1
+          fi
+          echo "deb_path=$DEB_PATH" >> $GITHUB_OUTPUT
+          echo "Built tweak: $DEB_PATH"
+
+      - name: Download Apollo IPA
+        run: |
+          echo "Downloading Apollo IPA..."
+          curl -L --fail --retry 3 "${{ github.event.inputs.apollo_ipa_url }}" -o Apollo.ipa
+          echo "Verifying archive integrity..."
+          if ! unzip -t Apollo.ipa > /dev/null; then
+            echo "Error: downloaded file is not a valid IPA / zip archive."
+            exit 1
+          fi
+          echo "Apollo.ipa size: $(wc -c < Apollo.ipa) bytes"
+
+      - name: Install cyan injector
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --pre cyan
+
+      - name: Inject tweak into IPA
+        id: inject
+        run: |
+          OUTPUT_NAME="${{ github.event.inputs.output_name }}"
+          if [ -z "$OUTPUT_NAME" ]; then
+            OUTPUT_NAME="Apollo-ImprovedCustomApi"
+          fi
+          OUTPUT_IPA="${OUTPUT_NAME}.ipa"
+          echo "Injecting ${{ steps.locate_deb.outputs.deb_path }} into Apollo.ipa..."
+          cyan -i Apollo.ipa -o "$OUTPUT_IPA" -f "${{ steps.locate_deb.outputs.deb_path }}"
+          if [ ! -f "$OUTPUT_IPA" ]; then
+            echo "Error: cyan did not produce $OUTPUT_IPA"
+            ls -la
+            exit 1
+          fi
+          echo "output_ipa=$OUTPUT_IPA" >> $GITHUB_OUTPUT
+          echo "Injected IPA: $OUTPUT_IPA ($(wc -c < $OUTPUT_IPA) bytes)"
+
+      - name: Upload injected IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.inject.outputs.output_ipa }}
+          path: ${{ steps.inject.outputs.output_ipa }}
+          retention-days: 30
