@@ -600,7 +600,9 @@ static RDKComment *ApolloCommentFromCellNode(id commentCellNode) {
     if (!commentIvar) return nil;
 
     id comment = object_getIvar(commentCellNode, commentIvar);
-    return [comment isKindOfClass:[RDKComment class]] ? (RDKComment *)comment : nil;
+    Class rdkCommentClass = NSClassFromString(@"RDKComment");
+    if (!rdkCommentClass || ![comment isKindOfClass:rdkCommentClass]) return nil;
+    return (RDKComment *)comment;
 }
 
 static void ApolloMaybeTranslateCommentCellNode(id commentCellNode, BOOL forceTranslation) {
