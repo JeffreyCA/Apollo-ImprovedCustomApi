@@ -25,6 +25,7 @@ static const void *kApolloTranslationOwnedTextNodeKey = &kApolloTranslationOwned
 static const void *kApolloOwnedNodeOriginalBodyKey = &kApolloOwnedNodeOriginalBodyKey;
 static const void *kApolloOwnedNodeTranslatedTextKey = &kApolloOwnedNodeTranslatedTextKey;
 static const void *kApolloOwnedNodeReentrancyKey = &kApolloOwnedNodeReentrancyKey;
+static const void *kApolloReapplyScheduledKey = &kApolloReapplyScheduledKey;
 // Phase B — status banner above comments.
 static const void *kApolloTranslationBannerKey = &kApolloTranslationBannerKey;
 // Phase C — post selftext translation.
@@ -558,12 +559,20 @@ static void ApolloRestoreOriginalForCellNode(id commentCellNode, RDKComment *com
 #pragma mark - Phase C: post selftext (header cell) translation
 
 // Returns the post (RDKLink) ivar from a header-style cell node, or nil if
-// this cellNode isn't a post header. Searches a couple of common ivar names.
+// this cellNode isn't a post header. Searches a couple of common ivar names,
+// then falls back to scanning ALL `@`-typed ivars in the class hierarchy
+// (cheap — there are only a handful per class) so we catch Apollo's actual
+// ivar name even if it doesn't match our wishlist.
 static RDKLink *ApolloLinkFromHeaderCellNode(id cellNode) {
     if (!cellNode) return nil;
-    static const char *kLinkIvarNames[] = { "link", "post", "_link", NULL };
     Class rdkLink = NSClassFromString(@"RDKLink");
     if (!rdkLink) return nil;
+
+    // Fast path — common names.
+    static const char *kLinkIvarNames[] = {
+        "link", "post", "_link", "_post", "currentLink", "model", "data",
+        "headerLink", "linkModel", "postModel", NULL
+    };
     for (Class cls = [cellNode class]; cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
         for (size_t i = 0; kLinkIvarNames[i]; i++) {
             Ivar iv = class_getInstanceVariable(cls, kLinkIvarNames[i]);
@@ -574,6 +583,63 @@ static RDKLink *ApolloLinkFromHeaderCellNode(id cellNode) {
             @try { v = object_getIvar(cellNode, iv); } @catch (__unused NSException *e) { continue; }
             if ([v isKindOfClass:rdkLink]) return (RDKLink *)v;
         }
+    }
+
+    // Fallback — scan every `@`-typed ivar in the class hierarchy and return
+    // the first RDKLink we find. Bounded by the small number of ivars per
+    // class, so cheap; this is the path that catches Swift-mangled names.
+    for (Class cls = [cellNode class]; cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
+        unsigned int count = 0;
+        Ivar *ivars = class_copyIvarList(cls, &count);
+        if (!ivars) continue;
+        for (unsigned int i = 0; i < count; i++) {
+            const char *type = ivar_getTypeEncoding(ivars[i]);
+            if (!type || type[0] != '@') continue;
+            id v = nil;
+            @try { v = object_getIvar(cellNode, ivars[i]); } @catch (__unused NSException *e) { continue; }
+            if ([v isKindOfClass:rdkLink]) {
+                free(ivars);
+                return (RDKLink *)v;
+            }
+        }
+        free(ivars);
+    }
+    return nil;
+}
+
+static RDKLink *ApolloLinkFromController(UIViewController *vc) {
+    if (!vc) return nil;
+    Class rdkLink = NSClassFromString(@"RDKLink");
+    if (!rdkLink) return nil;
+    static const char *kNames[] = {
+        "link", "post", "thing", "currentLink", "currentPost", "_link", "_post", NULL
+    };
+    for (Class cls = [vc class]; cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
+        for (size_t i = 0; kNames[i]; i++) {
+            Ivar iv = class_getInstanceVariable(cls, kNames[i]);
+            if (!iv) continue;
+            const char *type = ivar_getTypeEncoding(iv);
+            if (!type || type[0] != '@') continue;
+            id v = nil;
+            @try { v = object_getIvar(vc, iv); } @catch (__unused NSException *e) { continue; }
+            if ([v isKindOfClass:rdkLink]) return (RDKLink *)v;
+        }
+    }
+    for (Class cls = [vc class]; cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
+        unsigned int count = 0;
+        Ivar *ivars = class_copyIvarList(cls, &count);
+        if (!ivars) continue;
+        for (unsigned int i = 0; i < count; i++) {
+            const char *type = ivar_getTypeEncoding(ivars[i]);
+            if (!type || type[0] != '@') continue;
+            id v = nil;
+            @try { v = object_getIvar(vc, ivars[i]); } @catch (__unused NSException *e) { continue; }
+            if ([v isKindOfClass:rdkLink]) {
+                free(ivars);
+                return (RDKLink *)v;
+            }
+        }
+        free(ivars);
     }
     return nil;
 }
@@ -1059,11 +1125,26 @@ static BOOL ApolloReapplyCachedTranslationForCellNode(id commentCellNode) {
     return YES;
 }
 
+static void ApolloScheduleCachedTranslationReapplyForCellNode(id commentCellNode) {
+    if (!commentCellNode || !sEnableBulkTranslation) return;
+    if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
+    if ([objc_getAssociatedObject(commentCellNode, kApolloReapplyScheduledKey) boolValue]) return;
+    objc_setAssociatedObject(commentCellNode, kApolloReapplyScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak id weakNode = commentCellNode;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        id strong = weakNode;
+        if (!strong) return;
+        objc_setAssociatedObject(strong, kApolloReapplyScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloReapplyCachedTranslationForCellNode(strong);
+    });
+}
+
 #pragma mark - Phase C: post selftext translation driver
 
-static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, BOOL forceTranslation) {
+static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *fallbackLink, BOOL forceTranslation) {
     if (!headerCellNode) return;
     RDKLink *link = ApolloLinkFromHeaderCellNode(headerCellNode);
+    if (!link) link = fallbackLink;
     if (!link) return;
     NSString *body = link.selfText;
     if (![body isKindOfClass:[NSString class]]) return;
@@ -1108,6 +1189,7 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, BOOL force
         if (!forceTranslation && !ApolloShouldTranslateNow(NO)) return;
 
         RDKLink *strongLink = ApolloLinkFromHeaderCellNode(strongHeader);
+        if (!strongLink) strongLink = fallbackLink;
         if (!strongLink) return;
         ApolloApplyTranslationToHeaderCellNode(strongHeader, strongLink, translated);
     });
@@ -1118,12 +1200,13 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, BOOL force
 static void ApolloMaybeTranslatePostHeaderForController(UIViewController *viewController, BOOL forceTranslation) {
     UITableView *tableView = GetCommentsTableView(viewController);
     if (!tableView) return;
+    RDKLink *controllerLink = ApolloLinkFromController(viewController);
     for (UITableViewCell *cell in [tableView visibleCells]) {
         SEL nodeSelector = NSSelectorFromString(@"node");
         if (![cell respondsToSelector:nodeSelector]) continue;
         id cellNode = ((id (*)(id, SEL))objc_msgSend)(cell, nodeSelector);
-        if (ApolloLinkFromHeaderCellNode(cellNode)) {
-            ApolloMaybeTranslatePostHeaderCellNode(cellNode, forceTranslation);
+        if (ApolloLinkFromHeaderCellNode(cellNode) || (!ApolloCommentFromCellNode(cellNode) && controllerLink)) {
+            ApolloMaybeTranslatePostHeaderCellNode(cellNode, controllerLink, forceTranslation);
         }
     }
 }
@@ -1147,16 +1230,19 @@ static void ApolloTranslateVisibleCommentsForController(UIViewController *viewCo
 static void ApolloRestoreVisibleCommentsForController(UIViewController *viewController) {
     UITableView *tableView = GetCommentsTableView(viewController);
     if (!tableView) return;
+    RDKLink *controllerLink = ApolloLinkFromController(viewController);
 
     for (UITableViewCell *cell in [tableView visibleCells]) {
         SEL nodeSelector = NSSelectorFromString(@"node");
         if (![cell respondsToSelector:nodeSelector]) continue;
 
         id cellNode = ((id (*)(id, SEL))objc_msgSend)(cell, nodeSelector);
+        RDKComment *comment = ApolloCommentFromCellNode(cellNode);
 
         // Header cell? Restore post body and skip the comment path.
         RDKLink *link = ApolloLinkFromHeaderCellNode(cellNode);
-        if (link) {
+        if (link || (!comment && controllerLink)) {
+            if (!link) link = controllerLink;
             NSString *linkFullName = link.fullName;
             if (linkFullName.length > 0) {
                 [sLinkTranslationByFullName removeObjectForKey:linkFullName];
@@ -1164,8 +1250,6 @@ static void ApolloRestoreVisibleCommentsForController(UIViewController *viewCont
             ApolloRestoreOriginalForHeaderCellNode(cellNode, link);
             continue;
         }
-
-        RDKComment *comment = ApolloCommentFromCellNode(cellNode);
 
         // Drop from the persistent fullName cache so cellNodeVisibilityEvent:
         // / didEnterDisplayState don't re-apply it after the user asked for
@@ -1181,7 +1265,7 @@ static void ApolloRestoreVisibleCommentsForController(UIViewController *viewCont
 
 #pragma mark - Phase A/B: nav-bar globe icon + status banner
 
-// Forward declaration so the menu's UIAction handler can call it.
+// Forward declaration so the globe bar button action can call it.
 static void ApolloToggleThreadTranslationForController(UIViewController *vc);
 
 // Returns a localized human name for the active target language (e.g. "en"
@@ -1194,61 +1278,81 @@ static NSString *ApolloLocalizedTargetLanguageName(void) {
     return [[name substringToIndex:1].localizedUppercaseString stringByAppendingString:[name substringFromIndex:1]];
 }
 
-// Lazily install a thin status label pinned to the controller view's safe-area
-// top. Hidden by default; the UI updater shows/hides + recolors.
-static UILabel *ApolloEnsureBannerForController(UIViewController *vc) {
-    UILabel *banner = objc_getAssociatedObject(vc, kApolloTranslationBannerKey);
-    if (banner && banner.superview) return banner;
+// Lazily install our small status caption inside the POST HEADER cell view
+// (the cell that shows the post title / author / score / age). Pinned to
+// the bottom-trailing edge of the cell so it sits on the same row as the
+// "100% 2h" metadata — exactly where the user wants it. Returns the label
+// (creating it if necessary) or nil if the header cell view isn't loaded.
+static UILabel *ApolloEnsureBannerInHeaderCellView(UIView *headerCellView) {
+    if (!headerCellView) return nil;
+    UILabel *banner = objc_getAssociatedObject(headerCellView, kApolloTranslationBannerKey);
+    if (banner && banner.superview == headerCellView) return banner;
 
     banner = [[UILabel alloc] init];
     banner.translatesAutoresizingMaskIntoConstraints = NO;
-    banner.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightMedium];
-    banner.textAlignment = NSTextAlignmentLeft;
+    banner.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
+    banner.textAlignment = NSTextAlignmentRight;
     banner.backgroundColor = [UIColor clearColor];
     banner.numberOfLines = 1;
     banner.adjustsFontSizeToFitWidth = YES;
     banner.minimumScaleFactor = 0.85;
     banner.userInteractionEnabled = NO;
     banner.hidden = YES;
-    [vc.view addSubview:banner];
+    [headerCellView addSubview:banner];
 
-    UILayoutGuide *safe = vc.view.safeAreaLayoutGuide;
+    // Pin trailing/bottom inside the header cell. Bottom is anchored a bit up
+    // from the divider so it visually aligns with the metadata row baseline.
     [NSLayoutConstraint activateConstraints:@[
-        [banner.topAnchor constraintEqualToAnchor:safe.topAnchor constant:2.0],
-        [banner.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:14.0],
-        [banner.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-14.0],
+        [banner.trailingAnchor constraintEqualToAnchor:headerCellView.trailingAnchor constant:-14.0],
+        [banner.bottomAnchor constraintEqualToAnchor:headerCellView.bottomAnchor constant:-44.0],
         [banner.heightAnchor constraintEqualToConstant:14.0],
+        [banner.widthAnchor constraintLessThanOrEqualToAnchor:headerCellView.widthAnchor multiplier:0.6],
     ]];
-    objc_setAssociatedObject(vc, kApolloTranslationBannerKey, banner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(headerCellView, kApolloTranslationBannerKey, banner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return banner;
 }
 
-// Builds (or rebuilds) the UIMenu attached to the globe bar button. The menu
-// has one action whose title reflects what tapping it will DO — "Translate
-// to English" when currently showing original, "Show original" when currently
-// translated. This addresses the user's "feels backwards" complaint with the
-// previous text-label button.
-static UIMenu *ApolloBuildTranslationMenuForController(UIViewController *vc) {
+// Finds the post header cell's view (if visible), returns nil otherwise.
+static UIView *ApolloFindPostHeaderCellViewForController(UIViewController *vc) {
+    UITableView *tableView = GetCommentsTableView(vc);
+    if (!tableView) return nil;
+    RDKLink *controllerLink = ApolloLinkFromController(vc);
+    for (UITableViewCell *cell in [tableView visibleCells]) {
+        SEL nodeSelector = NSSelectorFromString(@"node");
+        if (![cell respondsToSelector:nodeSelector]) continue;
+        id cellNode = ((id (*)(id, SEL))objc_msgSend)(cell, nodeSelector);
+        if (ApolloLinkFromHeaderCellNode(cellNode) || (!ApolloCommentFromCellNode(cellNode) && controllerLink)) {
+            return cell.contentView ?: cell;
+        }
+    }
+    return nil;
+}
+
+static void ApolloUpdateBannerForController(UIViewController *vc) {
+    if (!vc) return;
+    UIView *headerView = ApolloFindPostHeaderCellViewForController(vc);
+    if (!headerView) return;  // header off-screen, nothing to do
+
+    UILabel *banner = ApolloEnsureBannerInHeaderCellView(headerView);
+    if (!banner) return;
+
+    if (!sEnableBulkTranslation) {
+        banner.hidden = YES;
+        return;
+    }
+
     BOOL translatedMode = ApolloControllerIsInTranslatedMode(vc);
     NSString *targetName = ApolloLocalizedTargetLanguageName();
 
-    NSString *title = translatedMode
-        ? @"Show original"
-        : [NSString stringWithFormat:@"Translate to %@", targetName];
-
-    UIImage *image = [UIImage systemImageNamed:translatedMode ? @"text.bubble" : @"globe"];
-
-    __weak UIViewController *weakVC = vc;
-    UIAction *toggle = [UIAction actionWithTitle:title
-                                           image:image
-                                      identifier:nil
-                                         handler:^(__kindof UIAction * _Nonnull action) {
-        UIViewController *strong = weakVC;
-        if (!strong) return;
-        ApolloToggleThreadTranslationForController(strong);
-    }];
-
-    return [UIMenu menuWithTitle:@"" children:@[toggle]];
+    banner.hidden = NO;
+    if (translatedMode) {
+        banner.text = [NSString stringWithFormat:@"Translated to %@", targetName];
+        banner.textColor = [UIColor systemGreenColor];
+    } else {
+        banner.text = @"Original language";
+        banner.textColor = [UIColor systemBlueColor];
+    }
+    [banner.superview bringSubviewToFront:banner];
 }
 
 static void ApolloUpdateTranslationUIForController(id controller) {
@@ -1256,8 +1360,6 @@ static void ApolloUpdateTranslationUIForController(id controller) {
 
     UIBarButtonItem *translationItem = objc_getAssociatedObject(controller, kApolloTranslateBarButtonKey);
     NSMutableArray<UIBarButtonItem *> *items = [vc.navigationItem.rightBarButtonItems mutableCopy] ?: [NSMutableArray array];
-    UILabel *banner = objc_getAssociatedObject(controller, kApolloTranslationBannerKey);
-
     if (!sEnableBulkTranslation) {
         // Feature flipped off: revert any active translation, drop the bar
         // button + hide the banner. Do not leak associations.
@@ -1272,7 +1374,7 @@ static void ApolloUpdateTranslationUIForController(id controller) {
             vc.navigationItem.rightBarButtonItems = items;
             objc_setAssociatedObject(controller, kApolloTranslateBarButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
-        if (banner) banner.hidden = YES;
+        ApolloUpdateBannerForController(vc);
         return;
     }
 
@@ -1285,44 +1387,30 @@ static void ApolloUpdateTranslationUIForController(id controller) {
     if (!translationItem) {
         translationItem = [[UIBarButtonItem alloc] initWithImage:globeImage
                                                            style:UIBarButtonItemStylePlain
-                                                          target:nil
-                                                          action:nil];
+                                                          target:controller
+                                                          action:@selector(apollo_translationGlobeTapped)];
         // Slight visual hint when translated mode is on — same image, distinct
         // tint so the user sees at a glance.
         objc_setAssociatedObject(controller, kApolloTranslateBarButtonKey, translationItem, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     translationItem.image = globeImage;
-    translationItem.tintColor = translatedMode ? [UIColor systemGreenColor] : nil;
-    translationItem.menu = ApolloBuildTranslationMenuForController(vc);
+    translationItem.target = controller;
+    translationItem.action = @selector(apollo_translationGlobeTapped);
+    translationItem.menu = nil;
+    translationItem.tintColor = translatedMode ? [UIColor systemGreenColor] : [UIColor systemBlueColor];
     translationItem.accessibilityLabel = translatedMode
         ? @"Translation: showing translated. Tap to show original."
         : [NSString stringWithFormat:@"Translation: showing original. Tap to translate to %@.", targetName];
 
     if (![items containsObject:translationItem]) {
-        // Insert at the front of the right-side stack so it sits at the far
-        // right edge (Apollo's existing rightBarButtonItems are ordered
-        // right-to-left).
-        [items insertObject:translationItem atIndex:0];
+        // Apollo's rightBarButtonItems are displayed right-to-left. Adding at
+        // the END places the globe on the LEFT side of the existing pill,
+        // keeping the three-dots / sort controls in their original slots.
+        [items addObject:translationItem];
     }
     vc.navigationItem.rightBarButtonItems = items;
 
-    // Phase B — banner.
-    UILabel *b = ApolloEnsureBannerForController(vc);
-    BOOL userInteracted = [objc_getAssociatedObject(controller, kApolloThreadTranslatedModeKey) boolValue] ||
-                          [objc_getAssociatedObject(controller, kApolloThreadOriginalModeKey) boolValue];
-    BOOL showBanner = userInteracted || sAutoTranslateOnAppear;
-    if (!showBanner) {
-        b.hidden = YES;
-    } else {
-        b.hidden = NO;
-        if (translatedMode) {
-            b.text = [NSString stringWithFormat:@"Translated to %@", targetName];
-            b.textColor = [UIColor systemGreenColor];
-        } else {
-            b.text = @"Showing original";
-            b.textColor = [UIColor systemBlueColor];
-        }
-    }
+    ApolloUpdateBannerForController(vc);
 }
 
 static void ApolloToggleThreadTranslationForController(UIViewController *vc) {
@@ -1422,7 +1510,69 @@ static NSAttributedString *ApolloRebuildTranslatedAttrPreservingAttrs(NSAttribut
 
 %end
 
+%hook ASTextNode2
+
+- (void)setAttributedText:(NSAttributedString *)attributedText {
+    if (![objc_getAssociatedObject(self, kApolloTranslationOwnedTextNodeKey) boolValue]) {
+        %orig;
+        return;
+    }
+
+    if ([objc_getAssociatedObject(self, kApolloOwnedNodeReentrancyKey) boolValue]) {
+        %orig;
+        return;
+    }
+
+    NSString *originalBody = objc_getAssociatedObject(self, kApolloOwnedNodeOriginalBodyKey);
+    NSString *translatedText = objc_getAssociatedObject(self, kApolloOwnedNodeTranslatedTextKey);
+
+    if (![originalBody isKindOfClass:[NSString class]] || originalBody.length == 0 ||
+        ![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0 ||
+        ![attributedText isKindOfClass:[NSAttributedString class]]) {
+        %orig;
+        return;
+    }
+
+    NSString *incomingNorm = ApolloNormalizeTextForCompare(attributedText.string);
+    NSString *originalNorm = ApolloNormalizeTextForCompare(originalBody);
+    NSString *translatedNorm = ApolloNormalizeTextForCompare(translatedText);
+
+    if (translatedNorm.length > 0 &&
+        ([incomingNorm isEqualToString:translatedNorm] ||
+         [incomingNorm containsString:translatedNorm] ||
+         [translatedNorm containsString:incomingNorm])) {
+        %orig;
+        return;
+    }
+
+    BOOL incomingIsOriginal = [incomingNorm isEqualToString:originalNorm] ||
+                              [incomingNorm containsString:originalNorm] ||
+                              [originalNorm containsString:incomingNorm];
+    if (incomingIsOriginal) {
+        NSAttributedString *swap = ApolloRebuildTranslatedAttrPreservingAttrs(attributedText, translatedText);
+        objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        @try { %orig(swap); } @catch (__unused NSException *e) {}
+        objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+
+    objc_setAssociatedObject(self, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    %orig;
+}
+
+%end
+
 %hook _TtC6Apollo15CommentCellNode
+
+- (void)setNeedsLayout {
+    %orig;
+    ApolloScheduleCachedTranslationReapplyForCellNode((id)self);
+}
+
+- (void)setNeedsDisplay {
+    %orig;
+    ApolloScheduleCachedTranslationReapplyForCellNode((id)self);
+}
 
 - (void)didLoad {
     %orig;
@@ -1515,6 +1665,11 @@ static NSAttributedString *ApolloRebuildTranslatedAttrPreservingAttrs(NSAttribut
         }
     }
     %orig;
+}
+
+%new
+- (void)apollo_translationGlobeTapped {
+    ApolloToggleThreadTranslationForController((UIViewController *)self);
 }
 
 %end
