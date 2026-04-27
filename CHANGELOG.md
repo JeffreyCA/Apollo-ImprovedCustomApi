@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 - Translation: broaden post-body translation again by falling back to the visible body text node when Apollo does not expose matching selftext through `RDKLink.selfText`.
 - Translation: also scan the comments table header view / plain content view wrappers for post body text, covering post layouts where the selftext is not exposed through a visible cell node.
 - Translation: skip comments and post bodies that contain Markdown/HTML code or preformatted blocks so code snippets stay visible and are not replaced by plain translated text.
+- Translation: allow post body translation from visible header text even when Apollo does not expose an `RDKLink` model for that header layout.
 
 ## [v2.4.0] - 2026-04-18
 

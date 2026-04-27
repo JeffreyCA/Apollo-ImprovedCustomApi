@@ -169,7 +169,6 @@ static BOOL ApolloCommentContainsCodeOrPreformatted(RDKComment *comment) {
 }
 
 static BOOL ApolloLinkContainsCodeOrPreformatted(RDKLink *link, NSString *visibleText) {
-    if (!link) return NO;
     return ApolloTextContainsMarkdownCode(link.selfText) ||
            ApolloHTMLContainsCode(link.selfTextHTML) ||
            ApolloTextContainsMarkdownCode(visibleText);
@@ -837,6 +836,14 @@ static NSString *ApolloVisibleTextFromNode(id textNode) {
     return [attr.string stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 }
 
+static NSString *ApolloVisiblePostCacheKey(RDKLink *link, NSString *sourceText, NSString *targetLanguage) {
+    NSString *fullName = link.fullName;
+    if (fullName.length > 0) return fullName;
+    NSString *sourceNorm = ApolloNormalizeTextForCompare(sourceText ?: @"");
+    if (sourceNorm.length == 0) return nil;
+    return [NSString stringWithFormat:@"_visiblePost|%@|%lu", targetLanguage ?: @"en", (unsigned long)sourceNorm.hash];
+}
+
 // Picks the post-body text node by name first, then falls back to a scored
 // scan. If Apollo's model text is unavailable, choose the longest visible
 // body-like text node that is not title/byline/URL metadata.
@@ -872,7 +879,7 @@ static id ApolloBestPostBodyTextNode(id headerCellNode, RDKLink *link, NSString 
 }
 
 static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *link, NSString *sourceText, NSString *translatedText) {
-    if (!headerCellNode || ![(id)link isKindOfClass:NSClassFromString(@"RDKLink")]) return;
+    if (!headerCellNode) return;
     if (![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return;
     NSString *body = sourceText.length > 0 ? sourceText : ApolloPostBodyTextFromLink(link);
     if (![body isKindOfClass:[NSString class]] || body.length == 0) return;
@@ -1323,7 +1330,6 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *f
     if (!headerCellNode) return;
     RDKLink *link = ApolloLinkFromHeaderCellNode(headerCellNode);
     if (!link) link = fallbackLink;
-    if (!link) return;
     NSString *body = ApolloPostBodyTextFromLink(link);
     id visibleBodyNode = ApolloBestPostBodyTextNode(headerCellNode, link, body);
     NSString *visibleBody = ApolloVisibleTextFromNode(visibleBodyNode);
@@ -1358,9 +1364,9 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *f
     NSString *targetLanguage = ApolloResolvedTargetLanguageCode();
     if (targetLanguage.length == 0) return;
 
-    NSString *fullName = link.fullName;
-    if (fullName.length > 0) {
-        NSString *cached = [sLinkTranslationByFullName objectForKey:fullName];
+    NSString *cacheStoreKey = ApolloVisiblePostCacheKey(link, trimmed, targetLanguage);
+    if (cacheStoreKey.length > 0) {
+        NSString *cached = [sLinkTranslationByFullName objectForKey:cacheStoreKey];
         if (cached.length > 0) {
             ApolloApplyTranslationToHeaderCellNode(headerCellNode, link, trimmed, cached);
             return;
@@ -1382,8 +1388,8 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *f
             if (error) ApolloLog(@"[Translation] Failed to translate post body: %@", error.localizedDescription ?: @"unknown");
             return;
         }
-        if (fullName.length > 0) {
-            [sLinkTranslationByFullName setObject:translated forKey:fullName];
+        if (cacheStoreKey.length > 0) {
+            [sLinkTranslationByFullName setObject:translated forKey:cacheStoreKey];
         }
         if (!strongHeader) return;
         NSString *currentKey = objc_getAssociatedObject(strongHeader, kApolloHeaderCellTranslationKeyKey);
@@ -1392,7 +1398,6 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *f
 
         RDKLink *strongLink = ApolloLinkFromHeaderCellNode(strongHeader);
         if (!strongLink) strongLink = fallbackLink;
-        if (!strongLink) return;
         ApolloApplyTranslationToHeaderCellNode(strongHeader, strongLink, trimmed, translated);
     });
 }
@@ -1446,7 +1451,7 @@ static void ApolloRestoreVisibleCommentsForController(UIViewController *viewCont
     if (!tableView) return;
     RDKLink *controllerLink = ApolloLinkFromController(viewController);
 
-    if (tableView.tableHeaderView && controllerLink) {
+    if (tableView.tableHeaderView) {
         ApolloRestoreOriginalForHeaderCellNode(tableView.tableHeaderView, controllerLink);
     }
 
@@ -1465,7 +1470,7 @@ static void ApolloRestoreVisibleCommentsForController(UIViewController *viewCont
 
         // Header cell? Restore post body and skip the comment path.
         RDKLink *link = ApolloLinkFromHeaderCellNode(cellNode);
-        if (link || (!comment && controllerLink)) {
+        if (link || !comment) {
             if (!link) link = controllerLink;
             NSString *linkFullName = link.fullName;
             if (linkFullName.length > 0) {
