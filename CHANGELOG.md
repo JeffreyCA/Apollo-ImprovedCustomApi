@@ -11,6 +11,8 @@ All notable changes to this project will be documented in this file.
 - Translation: move the translation status caption into the visible post header cell near the metadata row. It now shows green "Translated to <language>" in translated mode and blue "Original language" in original/default-language mode.
 - Translation: also translate the post selftext (post body above comments), not just the comment cells. Post lookup now scans header cell and controller ivars so it still works when Apollo stores the `RDKLink` outside the visible cell node.
 - Translation: voting (up/downvote) on a translated comment is more resilient against Apollo redraws. Text-node interception now covers both `ASTextNode` and `ASTextNode2`, with a throttled cell redraw backstop that re-applies cached translations after score / vote-state refreshes.
+- Translation: keep the globe blue until visible text is actually changed by translation. English/default-language threads no longer show a green globe just because auto-translate mode is enabled.
+- Translation: broaden post-body translation again by falling back to the visible body text node when Apollo does not expose matching selftext through `RDKLink.selfText`.
 
 ## [v2.4.0] - 2026-04-18
 
