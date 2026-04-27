@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+- Translation: fix random crashes when opening a comment thread or tapping Translate / Original (was caused by recursing into weak ivars on partially-deallocated cell nodes; the body-text-node walker now stays inside the ASDisplayNode subnode tree and uses pointer-identity visited tracking).
+- Translation: fix username / upvote count occasionally being overwritten with the translated comment body (now finds the body via well-known ivar names and only writes when the chosen node's text really matches the comment body).
+- Translation: keep the translated text in place after a comment is collapsed and re-expanded, and after the cell is recycled by scrolling away and back (translations now persist by Reddit fullName and re-apply on `cellNodeVisibilityEvent:` / `didEnterDisplayState`).
+
 ## [v2.4.0] - 2026-04-18
 
 - Add option to proxy Imgur images through DuckDuckGo (Settings > General > Custom API > Media)

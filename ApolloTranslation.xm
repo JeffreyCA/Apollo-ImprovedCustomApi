@@ -13,12 +13,31 @@ static const void *kApolloTranslatedTextNodeKey = &kApolloTranslatedTextNodeKey;
 static const void *kApolloCellTranslationKeyKey = &kApolloCellTranslationKeyKey;
 static const void *kApolloThreadTranslatedModeKey = &kApolloThreadTranslatedModeKey;
 static const void *kApolloTranslateBarButtonKey = &kApolloTranslateBarButtonKey;
+static const void *kApolloAppliedTranslationFullNameKey = &kApolloAppliedTranslationFullNameKey;
 
 static NSString *const kApolloDefaultLibreTranslateURL = @"https://libretranslate.de/translate";
 
 static NSCache<NSString *, NSString *> *sTranslationCache;
+// fullName ("t1_xxxxx") -> translated body text. Survives cell reuse / collapse.
+static NSCache<NSString *, NSString *> *sCommentTranslationByFullName;
 static NSMutableDictionary<NSString *, NSMutableArray *> *sPendingTranslationCallbacks;
 static __weak UIViewController *sVisibleCommentsViewController = nil;
+
+// Returns the Reddit fullName ("t1_xxxxx") for a comment. Falls back to a
+// stable derived key when the runtime doesn't expose `name` / `fullName`.
+static NSString *ApolloCommentFullName(RDKComment *comment) {
+    if (!comment) return nil;
+    SEL sels[] = { @selector(name), NSSelectorFromString(@"fullName"), NSSelectorFromString(@"identifier"), NSSelectorFromString(@"id") };
+    for (size_t i = 0; i < sizeof(sels) / sizeof(sels[0]); i++) {
+        if ([comment respondsToSelector:sels[i]]) {
+            id v = ((id (*)(id, SEL))objc_msgSend)(comment, sels[i]);
+            if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0) return (NSString *)v;
+        }
+    }
+    NSString *body = comment.body;
+    if (body.length > 0) return [NSString stringWithFormat:@"_body|%lu|%lu", (unsigned long)body.length, (unsigned long)body.hash];
+    return nil;
+}
 
 static id GetIvarObjectQuiet(id obj, const char *ivarName) {
     if (!obj) return nil;
@@ -202,19 +221,41 @@ static NSUInteger ApolloRemoveNativeTranslateActions(id actionController) {
     return removedCount;
 }
 
+// Walks ONLY the ASDisplayNode subnode tree (and, lazily, UIView subviews when
+// a view is loaded). We deliberately do NOT enumerate arbitrary `@`-typed
+// ivars: many of those are __weak / __unsafe_unretained references to objects
+// (delegates, model objects, captured cells) that may be deallocated during
+// cell reuse — touching them ARC-retains a zombie and crashes (the original
+// `objc_retain + 8` crash reported by users).
+//
+// Caps: depth and a hard visited-node ceiling, so even a misbehaving subtree
+// can't blow the stack or burn unbounded CPU on the main thread.
+static const NSUInteger kApolloMaxVisitedNodes = 256;
+
 static void ApolloCollectAttributedTextNodes(id object,
                                              NSInteger depth,
                                              NSHashTable *visited,
                                              NSMutableArray *nodes) {
-    if (!object || depth < 0 || [visited containsObject:object]) return;
+    if (!object || depth < 0) return;
+    if (visited.count >= kApolloMaxVisitedNodes) return;
+
+    Class displayNodeCls = NSClassFromString(@"ASDisplayNode");
+    BOOL isDisplayNode = displayNodeCls && [object isKindOfClass:displayNodeCls];
+    BOOL isView = [object isKindOfClass:[UIView class]];
+    if (!isDisplayNode && !isView) return;
+
+    if ([visited containsObject:object]) return;
     [visited addObject:object];
 
-    if ([object respondsToSelector:@selector(attributedText)] &&
-        [object respondsToSelector:@selector(setAttributedText:)]) {
-        NSAttributedString *attr = ((id (*)(id, SEL))objc_msgSend)(object, @selector(attributedText));
-        if ([attr isKindOfClass:[NSAttributedString class]] && attr.string.length > 0) {
-            [nodes addObject:object];
+    @try {
+        if ([object respondsToSelector:@selector(attributedText)] &&
+            [object respondsToSelector:@selector(setAttributedText:)]) {
+            NSAttributedString *attr = ((id (*)(id, SEL))objc_msgSend)(object, @selector(attributedText));
+            if ([attr isKindOfClass:[NSAttributedString class]] && attr.string.length > 0) {
+                [nodes addObject:object];
+            }
         }
+    } @catch (__unused NSException *exception) {
     }
 
     if (depth == 0) return;
@@ -225,6 +266,7 @@ static void ApolloCollectAttributedTextNodes(id object,
             NSArray *subnodes = ((id (*)(id, SEL))objc_msgSend)(object, subnodesSel);
             if ([subnodes isKindOfClass:[NSArray class]]) {
                 for (id subnode in subnodes) {
+                    if (visited.count >= kApolloMaxVisitedNodes) break;
                     ApolloCollectAttributedTextNodes(subnode, depth - 1, visited, nodes);
                 }
             }
@@ -232,25 +274,68 @@ static void ApolloCollectAttributedTextNodes(id object,
     } @catch (__unused NSException *exception) {
     }
 
-    for (Class cls = [object class]; cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
-        unsigned int count = 0;
-        Ivar *ivars = class_copyIvarList(cls, &count);
-        if (!ivars) continue;
-
-        for (unsigned int i = 0; i < count; i++) {
-            const char *type = ivar_getTypeEncoding(ivars[i]);
-            if (!type || type[0] != '@') continue;
-
-            id child = object_getIvar(object, ivars[i]);
-            if (!child || child == object) continue;
-
-            ApolloCollectAttributedTextNodes(child, depth - 1, visited, nodes);
+    // Only descend into UIView subviews when the node already has its view
+    // loaded — querying `-view` would force-load and is wrong off-main anyway.
+    @try {
+        SEL isViewLoadedSel = NSSelectorFromString(@"isNodeLoaded");
+        BOOL viewLoaded = isView;
+        if (!viewLoaded && [object respondsToSelector:isViewLoadedSel]) {
+            viewLoaded = ((BOOL (*)(id, SEL))objc_msgSend)(object, isViewLoadedSel);
         }
-
-        free(ivars);
+        if (viewLoaded && [object respondsToSelector:@selector(subviews)]) {
+            NSArray *subviews = ((id (*)(id, SEL))objc_msgSend)(object, @selector(subviews));
+            if ([subviews isKindOfClass:[NSArray class]]) {
+                for (id sub in subviews) {
+                    if (visited.count >= kApolloMaxVisitedNodes) break;
+                    ApolloCollectAttributedTextNodes(sub, depth - 1, visited, nodes);
+                }
+            }
+        }
+    } @catch (__unused NSException *exception) {
     }
 }
 
+// Returns the ASTextNode (or compatible) holding the comment body, by reading
+// well-known body ivar names directly off the cell node. This is the safe
+// fast path: it can't accidentally pick up the username / upvote / byline
+// nodes because we ask the cell explicitly for the body slot.
+static id ApolloKnownBodyTextNode(id commentCellNode) {
+    if (!commentCellNode) return nil;
+    static const char *kCandidateNames[] = {
+        "bodyTextNode",
+        "commentTextNode",
+        "commentBodyNode",
+        "bodyNode",
+        "markdownNode",
+        "commentMarkdownNode",
+        "attributedTextNode",
+        "textNode",
+        "commentBodyTextNode",
+        "bodyMarkdownNode",
+        NULL,
+    };
+    for (Class cls = [commentCellNode class]; cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
+        for (size_t i = 0; kCandidateNames[i]; i++) {
+            Ivar iv = class_getInstanceVariable(cls, kCandidateNames[i]);
+            if (!iv) continue;
+            const char *type = ivar_getTypeEncoding(iv);
+            if (!type || type[0] != '@') continue;
+            id node = nil;
+            @try { node = object_getIvar(commentCellNode, iv); } @catch (__unused NSException *e) { continue; }
+            if (!node) continue;
+            if (![node respondsToSelector:@selector(attributedText)]) continue;
+            return node;
+        }
+    }
+    return nil;
+}
+
+// Score a candidate text node's attributedString against the comment body.
+// Returns NSIntegerMin when the candidate is clearly NOT the body — this is
+// critical: previously we'd fall back to `(NSInteger)candidate.length` which
+// let unrelated nodes (username, upvote count, byline, "X minutes ago", etc.)
+// win the race and get overwritten with the translation. Now only real
+// matches qualify.
 static NSInteger ApolloCandidateScore(NSAttributedString *candidateText, NSString *commentBody) {
     if (![candidateText isKindOfClass:[NSAttributedString class]]) return NSIntegerMin;
 
@@ -258,18 +343,22 @@ static NSInteger ApolloCandidateScore(NSAttributedString *candidateText, NSStrin
     if (candidate.length == 0) return NSIntegerMin;
 
     NSString *body = ApolloNormalizeTextForCompare(commentBody ?: @"");
-    if (body.length == 0) return (NSInteger)candidate.length;
+    if (body.length == 0) return NSIntegerMin;
 
     if ([candidate isEqualToString:body]) {
         return 100000 + (NSInteger)candidate.length;
     }
 
     if ([candidate containsString:body] || [body containsString:candidate]) {
-        return 75000 + (NSInteger)MIN(candidate.length, body.length);
+        // Require the overlap to be a meaningful chunk, not just a stray word.
+        NSUInteger overlap = MIN(candidate.length, body.length);
+        if (overlap >= 12 || overlap == body.length || overlap == candidate.length) {
+            return 75000 + (NSInteger)overlap;
+        }
     }
 
-    NSUInteger prefixLength = MIN((NSUInteger)20, MIN(candidate.length, body.length));
-    if (prefixLength >= 8) {
+    NSUInteger prefixLength = MIN((NSUInteger)24, MIN(candidate.length, body.length));
+    if (prefixLength >= 12) {
         NSString *candidatePrefix = [candidate substringToIndex:prefixLength];
         NSString *bodyPrefix = [body substringToIndex:prefixLength];
         if ([candidatePrefix isEqualToString:bodyPrefix]) {
@@ -277,19 +366,31 @@ static NSInteger ApolloCandidateScore(NSAttributedString *candidateText, NSStrin
         }
     }
 
-    return (NSInteger)candidate.length;
+    return NSIntegerMin;
 }
 
 static id ApolloBestCommentTextNode(id commentCellNode, RDKComment *comment) {
+    // Fast path: ask the cell directly via well-known ivar names. This avoids
+    // both the crash exposure and the wrong-node selection bug.
+    id known = ApolloKnownBodyTextNode(commentCellNode);
+    if (known) return known;
+
     NSMutableArray *candidates = [NSMutableArray array];
-    NSHashTable *visited = [NSHashTable weakObjectsHashTable];
-    ApolloCollectAttributedTextNodes(commentCellNode, 4, visited, candidates);
+    // Pointer-identity hash table — does NOT retain visited objects, which
+    // would otherwise resurrect zombies during cell teardown.
+    NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:64];
+    ApolloCollectAttributedTextNodes(commentCellNode, 5, visited, candidates);
 
     id bestNode = nil;
     NSInteger bestScore = NSIntegerMin;
 
     for (id candidateNode in candidates) {
-        NSAttributedString *attr = ((id (*)(id, SEL))objc_msgSend)(candidateNode, @selector(attributedText));
+        NSAttributedString *attr = nil;
+        @try {
+            attr = ((id (*)(id, SEL))objc_msgSend)(candidateNode, @selector(attributedText));
+        } @catch (__unused NSException *e) {
+            continue;
+        }
         NSInteger score = ApolloCandidateScore(attr, comment.body);
         if (score > bestScore) {
             bestScore = score;
@@ -306,8 +407,37 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     id textNode = ApolloBestCommentTextNode(commentCellNode, comment);
     if (!textNode) return;
 
-    NSAttributedString *current = ((id (*)(id, SEL))objc_msgSend)(textNode, @selector(attributedText));
+    NSAttributedString *current = nil;
+    @try {
+        current = ((id (*)(id, SEL))objc_msgSend)(textNode, @selector(attributedText));
+    } @catch (__unused NSException *e) {
+        return;
+    }
     if (![current isKindOfClass:[NSAttributedString class]]) return;
+
+    // Pre-write match guard: re-verify the chosen node's current text really
+    // is the comment body. If `ApolloBestCommentTextNode` somehow returned a
+    // wrong node (e.g. mid-reuse, body cleared), skip the write rather than
+    // overwriting a username / upvote / byline label.
+    NSString *currentNorm = ApolloNormalizeTextForCompare(current.string);
+    NSString *bodyNorm = ApolloNormalizeTextForCompare(comment.body);
+    NSString *translatedNorm = ApolloNormalizeTextForCompare(translatedText);
+    if (currentNorm.length == 0 || bodyNorm.length == 0) return;
+    BOOL textMatchesBody = [currentNorm isEqualToString:bodyNorm] ||
+                           [currentNorm containsString:bodyNorm] ||
+                           [bodyNorm containsString:currentNorm];
+    BOOL textMatchesTranslation = translatedNorm.length > 0 &&
+        ([currentNorm isEqualToString:translatedNorm] ||
+         [currentNorm containsString:translatedNorm] ||
+         [translatedNorm containsString:currentNorm]);
+    if (!textMatchesBody && !textMatchesTranslation) {
+        ApolloLog(@"[Translation] Skipping write — chosen node text does not match body or translation");
+        return;
+    }
+    // Already showing the translation? No-op.
+    if (textMatchesTranslation && !textMatchesBody) {
+        return;
+    }
 
     NSAttributedString *original = objc_getAssociatedObject(textNode, kApolloOriginalAttributedTextKey);
     if (![original isKindOfClass:[NSAttributedString class]]) {
@@ -320,7 +450,11 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     }
 
     NSAttributedString *translatedAttr = [[NSAttributedString alloc] initWithString:translatedText attributes:attributes ?: @{}];
-    ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), translatedAttr);
+    @try {
+        ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), translatedAttr);
+    } @catch (__unused NSException *e) {
+        return;
+    }
 
     if ([textNode respondsToSelector:@selector(setNeedsLayout)]) {
         ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsLayout));
@@ -330,6 +464,14 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     }
 
     objc_setAssociatedObject(commentCellNode, kApolloTranslatedTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    // Persist the translation by Reddit fullName so we can re-apply after
+    // collapse/expand or cell reuse without hitting the network again.
+    NSString *fullName = ApolloCommentFullName(comment);
+    if (fullName.length > 0) {
+        [sCommentTranslationByFullName setObject:translatedText forKey:fullName];
+        objc_setAssociatedObject(commentCellNode, kApolloAppliedTranslationFullNameKey, fullName, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    }
 }
 
 static void ApolloRestoreOriginalForCellNode(id commentCellNode, RDKComment *comment) {
@@ -344,7 +486,11 @@ static void ApolloRestoreOriginalForCellNode(id commentCellNode, RDKComment *com
     NSAttributedString *original = objc_getAssociatedObject(textNode, kApolloOriginalAttributedTextKey);
     if (![original isKindOfClass:[NSAttributedString class]]) return;
 
-    ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), original);
+    @try {
+        ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), original);
+    } @catch (__unused NSException *e) {
+        return;
+    }
 
     if ([textNode respondsToSelector:@selector(setNeedsLayout)]) {
         ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsLayout));
@@ -352,6 +498,8 @@ static void ApolloRestoreOriginalForCellNode(id commentCellNode, RDKComment *com
     if ([textNode respondsToSelector:@selector(setNeedsDisplay)]) {
         ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsDisplay));
     }
+
+    objc_setAssociatedObject(commentCellNode, kApolloAppliedTranslationFullNameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
 }
 
 static NSString *ApolloExtractGoogleTranslation(id jsonObject) {
@@ -618,6 +766,18 @@ static void ApolloMaybeTranslateCommentCellNode(id commentCellNode, BOOL forceTr
     NSString *targetLanguage = ApolloResolvedTargetLanguageCode();
     if (targetLanguage.length == 0) return;
 
+    // Fast path 1: we already translated this exact comment in this session.
+    // Re-apply from the fullName cache without going to the network. This
+    // makes collapse/expand and cell reuse re-show the translation immediately.
+    NSString *fullName = ApolloCommentFullName(comment);
+    if (fullName.length > 0) {
+        NSString *cachedTranslation = [sCommentTranslationByFullName objectForKey:fullName];
+        if (cachedTranslation.length > 0) {
+            ApolloApplyTranslationToCellNode(commentCellNode, comment, cachedTranslation);
+            return;
+        }
+    }
+
     if (!forceTranslation) {
         NSString *detected = ApolloDetectDominantLanguage(sourceText);
         if ([detected isEqualToString:targetLanguage]) {
@@ -631,7 +791,14 @@ static void ApolloMaybeTranslateCommentCellNode(id commentCellNode, BOOL forceTr
     __weak id weakCellNode = commentCellNode;
     ApolloRequestTranslation(cacheKey, sourceText, targetLanguage, ^(NSString *translated, NSError *error) {
         id strongCellNode = weakCellNode;
-        if (!strongCellNode) return;
+        if (!strongCellNode) {
+            // Cell gone, but stash the translation by fullName so the next
+            // re-displayed cell for this comment picks it up instantly.
+            if ([translated isKindOfClass:[NSString class]] && translated.length > 0 && fullName.length > 0) {
+                [sCommentTranslationByFullName setObject:translated forKey:fullName];
+            }
+            return;
+        }
 
         NSString *currentKey = objc_getAssociatedObject(strongCellNode, kApolloCellTranslationKeyKey);
         if (![currentKey isEqualToString:cacheKey]) return;
@@ -643,6 +810,12 @@ static void ApolloMaybeTranslateCommentCellNode(id commentCellNode, BOOL forceTr
             return;
         }
 
+        // Stash by fullName even if the cell is no longer eligible to render
+        // it, so a future re-display gets it for free.
+        if (fullName.length > 0) {
+            [sCommentTranslationByFullName setObject:translated forKey:fullName];
+        }
+
         if (!forceTranslation && !ApolloShouldTranslateNow(NO)) return;
 
         RDKComment *strongComment = ApolloCommentFromCellNode(strongCellNode);
@@ -650,6 +823,21 @@ static void ApolloMaybeTranslateCommentCellNode(id commentCellNode, BOOL forceTr
 
         ApolloApplyTranslationToCellNode(strongCellNode, strongComment, translated);
     });
+}
+
+// Re-applies a previously-translated body from the fullName cache, without
+// hitting the network or re-running language detection. Used when a cell
+// re-enters display (collapse/expand, scroll-back, reuse).
+static BOOL ApolloReapplyCachedTranslationForCellNode(id commentCellNode) {
+    if (!commentCellNode) return NO;
+    RDKComment *comment = ApolloCommentFromCellNode(commentCellNode);
+    if (!comment) return NO;
+    NSString *fullName = ApolloCommentFullName(comment);
+    if (fullName.length == 0) return NO;
+    NSString *cached = [sCommentTranslationByFullName objectForKey:fullName];
+    if (cached.length == 0) return NO;
+    ApolloApplyTranslationToCellNode(commentCellNode, comment, cached);
+    return YES;
 }
 
 static void ApolloTranslateVisibleCommentsForController(UIViewController *viewController, BOOL forceTranslation) {
@@ -675,6 +863,15 @@ static void ApolloRestoreVisibleCommentsForController(UIViewController *viewCont
 
         id cellNode = ((id (*)(id, SEL))objc_msgSend)(cell, nodeSelector);
         RDKComment *comment = ApolloCommentFromCellNode(cellNode);
+
+        // Drop from the persistent fullName cache so cellNodeVisibilityEvent:
+        // / didEnterDisplayState don't re-apply it after the user asked for
+        // the original text.
+        NSString *fullName = ApolloCommentFullName(comment);
+        if (fullName.length > 0) {
+            [sCommentTranslationByFullName removeObjectForKey:fullName];
+        }
+
         ApolloRestoreOriginalForCellNode(cellNode, comment);
     }
 }
@@ -737,6 +934,34 @@ static void ApolloUpdateTranslationButtonForController(id controller) {
     dispatch_async(dispatch_get_main_queue(), ^{
         ApolloMaybeTranslateCommentCellNode((id)self, NO);
     });
+}
+
+- (void)didEnterDisplayState {
+    %orig;
+
+    // Cell coming on-screen (scroll-back, collapse→expand, reuse). If we have
+    // a cached translation for this comment, re-apply instantly — no network,
+    // no language detection. This fixes the "translation lost on
+    // collapse/uncollapse" report.
+    if (sEnableBulkTranslation) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!ApolloReapplyCachedTranslationForCellNode((id)self)) {
+                ApolloMaybeTranslateCommentCellNode((id)self, NO);
+            }
+        });
+    }
+}
+
+- (void)cellNodeVisibilityEvent:(NSInteger)event {
+    %orig;
+
+    // Event 0 = "will become visible". Re-apply cached translation as soon as
+    // possible so the original text never flashes when re-displaying.
+    if (sEnableBulkTranslation && event == 0) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ApolloReapplyCachedTranslationForCellNode((id)self);
+        });
+    }
 }
 
 %end
@@ -802,6 +1027,8 @@ static void ApolloUpdateTranslationButtonForController(id controller) {
 
 %ctor {
     sTranslationCache = [NSCache new];
+    sCommentTranslationByFullName = [NSCache new];
+    sCommentTranslationByFullName.countLimit = 2048;
     sPendingTranslationCallbacks = [NSMutableDictionary dictionary];
 
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidReceiveMemoryWarningNotification
@@ -809,6 +1036,7 @@ static void ApolloUpdateTranslationButtonForController(id controller) {
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(__unused NSNotification *note) {
         [sTranslationCache removeAllObjects];
+        [sCommentTranslationByFullName removeAllObjects];
     }];
 
     %init;
