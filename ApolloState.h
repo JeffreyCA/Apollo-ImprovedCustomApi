@@ -19,3 +19,10 @@ extern NSInteger sReadPostMaxCount;
 extern NSInteger sUnmuteCommentsVideos;
 
 extern BOOL sProxyImgurDDG;
+
+extern BOOL sEnableBulkTranslation;
+extern BOOL sAutoTranslateOnAppear;
+extern NSString *sTranslationTargetLanguage;
+extern NSString *sTranslationProvider;
+extern NSString *sLibreTranslateURL;
+extern NSString *sLibreTranslateAPIKey;

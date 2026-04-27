@@ -24,9 +24,11 @@ ApolloImprovedCustomApi_FILES = \
     ApolloSettings.xm \
     ApolloRecentlyRead.xm \
     ApolloSavedCategories.xm \
+    ApolloTranslation.xm \
     ApolloVideoUnmute.xm \
     ApolloVideoSwipeFix.xm \
     CustomAPIViewController.m \
+    TranslationSettingsViewController.m \
     SavedCategoriesViewController.m \
     Defaults.m \
     UIWindow+Apollo.m \

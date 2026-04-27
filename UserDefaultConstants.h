@@ -18,3 +18,11 @@ static NSString *const UDKeyOpenLinksInSteamApp = @"OpenLinksInSteamApp";
 static NSString *const UDKeyCollapsePinnedComments = @"CollapsePinnedComments";
 static NSString *const UDKeyFilterNSFWRecentlyRead = @"FilterNSFWRecentlyRead";
 static NSString *const UDKeyProxyImgurDDG = @"ProxyImgurDDG";
+
+// Bulk translation feature
+static NSString *const UDKeyEnableBulkTranslation = @"EnableBulkTranslation";
+static NSString *const UDKeyAutoTranslateOnAppear = @"AutoTranslateOnAppear";
+static NSString *const UDKeyTranslationTargetLanguage = @"TranslationTargetLanguage";
+static NSString *const UDKeyTranslationProvider = @"TranslationProvider"; // google | libre
+static NSString *const UDKeyLibreTranslateURL = @"LibreTranslateURL";
+static NSString *const UDKeyLibreTranslateAPIKey = @"LibreTranslateAPIKey";

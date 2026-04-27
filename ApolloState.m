@@ -18,3 +18,10 @@ NSInteger sReadPostMaxCount = 0;
 NSInteger sUnmuteCommentsVideos = 0; // 0=Default, 1=Remember from Full Screen, 2=Always
 
 BOOL sProxyImgurDDG = NO;
+
+BOOL sEnableBulkTranslation = NO;
+BOOL sAutoTranslateOnAppear = YES;
+NSString *sTranslationTargetLanguage = nil;
+NSString *sTranslationProvider = nil;
+NSString *sLibreTranslateURL = nil;
+NSString *sLibreTranslateAPIKey = nil;
