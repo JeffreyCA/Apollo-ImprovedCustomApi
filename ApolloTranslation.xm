@@ -320,6 +320,24 @@ static void ApolloCollectAttributedTextNodes(id object,
     } @catch (__unused NSException *exception) {
     }
 
+    // Texture/AsyncDisplayKit views often keep the real ASDisplayNode behind
+    // a private category accessor. When the post body lives in the table
+    // header view, walking UIView subviews alone can stop at an _ASDisplayView;
+    // hop back to the backing node so the normal subnode traversal can find
+    // ASTextNode/ASTextNode2 children.
+    @try {
+        SEL nodeSelectors[] = { NSSelectorFromString(@"asyncdisplaykit_node"), NSSelectorFromString(@"node") };
+        for (size_t i = 0; i < sizeof(nodeSelectors) / sizeof(nodeSelectors[0]); i++) {
+            SEL selector = nodeSelectors[i];
+            if (![object respondsToSelector:selector]) continue;
+            id node = ((id (*)(id, SEL))objc_msgSend)(object, selector);
+            if (node && node != object) {
+                ApolloCollectAttributedTextNodes(node, depth - 1, visited, nodes);
+            }
+        }
+    } @catch (__unused NSException *exception) {
+    }
+
     if (depth == 0) return;
 
     @try {
@@ -1261,9 +1279,19 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *f
     if (!link) link = fallbackLink;
     if (!link) return;
     NSString *body = ApolloPostBodyTextFromLink(link);
+    id visibleBodyNode = ApolloBestPostBodyTextNode(headerCellNode, link, body);
+    NSString *visibleBody = ApolloVisibleTextFromNode(visibleBodyNode);
     if (![body isKindOfClass:[NSString class]] || body.length == 0) {
-        id visibleBodyNode = ApolloBestPostBodyTextNode(headerCellNode, link, nil);
-        body = ApolloVisibleTextFromNode(visibleBodyNode);
+        body = visibleBody;
+    } else if (visibleBody.length > 0 && !ApolloPostTextLooksLikeMetadata(visibleBody, link)) {
+        NSString *bodyNorm = ApolloNormalizeTextForCompare(body);
+        NSString *visibleNorm = ApolloNormalizeTextForCompare(visibleBody);
+        BOOL visibleMatchesModel = [visibleNorm isEqualToString:bodyNorm] ||
+                                   [visibleNorm containsString:bodyNorm] ||
+                                   [bodyNorm containsString:visibleNorm];
+        if (!visibleMatchesModel) {
+            body = visibleBody;
+        }
     }
     if (![body isKindOfClass:[NSString class]]) return;
     NSString *trimmed = [body stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -1313,16 +1341,28 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *f
     });
 }
 
-// Walks the comments table looking for the post header cell (the one whose
-// cellNode has a `link` ivar instead of a `comment` ivar) and translates it.
+// Walks the comments table looking for post header roots. Apollo can render
+// the post body as a cell node, a tableHeaderView, or a plain contentView
+// wrapper depending on post type/media layout, so cover those surfaces.
 static void ApolloMaybeTranslatePostHeaderForController(UIViewController *viewController, BOOL forceTranslation) {
     UITableView *tableView = GetCommentsTableView(viewController);
     if (!tableView) return;
     RDKLink *controllerLink = ApolloLinkFromController(viewController);
+
+    if (tableView.tableHeaderView) {
+        ApolloMaybeTranslatePostHeaderCellNode(tableView.tableHeaderView, controllerLink, forceTranslation);
+    }
+
     for (UITableViewCell *cell in [tableView visibleCells]) {
         SEL nodeSelector = NSSelectorFromString(@"node");
-        if (![cell respondsToSelector:nodeSelector]) continue;
-        id cellNode = ((id (*)(id, SEL))objc_msgSend)(cell, nodeSelector);
+        id cellNode = nil;
+        if ([cell respondsToSelector:nodeSelector]) {
+            cellNode = ((id (*)(id, SEL))objc_msgSend)(cell, nodeSelector);
+        }
+        if (!cellNode && controllerLink) {
+            cellNode = cell.contentView ?: cell;
+        }
+        if (!cellNode) continue;
         if (ApolloLinkFromHeaderCellNode(cellNode) || (!ApolloCommentFromCellNode(cellNode) && controllerLink)) {
             ApolloMaybeTranslatePostHeaderCellNode(cellNode, controllerLink, forceTranslation);
         }
@@ -1350,11 +1390,21 @@ static void ApolloRestoreVisibleCommentsForController(UIViewController *viewCont
     if (!tableView) return;
     RDKLink *controllerLink = ApolloLinkFromController(viewController);
 
+    if (tableView.tableHeaderView && controllerLink) {
+        ApolloRestoreOriginalForHeaderCellNode(tableView.tableHeaderView, controllerLink);
+    }
+
     for (UITableViewCell *cell in [tableView visibleCells]) {
         SEL nodeSelector = NSSelectorFromString(@"node");
-        if (![cell respondsToSelector:nodeSelector]) continue;
+        id cellNode = nil;
+        if ([cell respondsToSelector:nodeSelector]) {
+            cellNode = ((id (*)(id, SEL))objc_msgSend)(cell, nodeSelector);
+        }
+        if (!cellNode && controllerLink) {
+            cellNode = cell.contentView ?: cell;
+        }
+        if (!cellNode) continue;
 
-        id cellNode = ((id (*)(id, SEL))objc_msgSend)(cell, nodeSelector);
         RDKComment *comment = ApolloCommentFromCellNode(cellNode);
 
         // Header cell? Restore post body and skip the comment path.

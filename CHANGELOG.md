@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - Translation: voting (up/downvote) on a translated comment is more resilient against Apollo redraws. Text-node interception now covers both `ASTextNode` and `ASTextNode2`, with a throttled cell redraw backstop that re-applies cached translations after score / vote-state refreshes.
 - Translation: keep the globe blue until visible text is actually changed by translation. English/default-language threads no longer show a green globe just because auto-translate mode is enabled.
 - Translation: broaden post-body translation again by falling back to the visible body text node when Apollo does not expose matching selftext through `RDKLink.selfText`.
+- Translation: also scan the comments table header view / plain content view wrappers for post body text, covering post layouts where the selftext is not exposed through a visible cell node.
 
 ## [v2.4.0] - 2026-04-18
 
