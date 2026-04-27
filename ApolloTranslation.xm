@@ -27,10 +27,11 @@ static __weak UIViewController *sVisibleCommentsViewController = nil;
 // stable derived key when the runtime doesn't expose `name` / `fullName`.
 static NSString *ApolloCommentFullName(RDKComment *comment) {
     if (!comment) return nil;
+    id commentObj = (id)comment;
     SEL sels[] = { @selector(name), NSSelectorFromString(@"fullName"), NSSelectorFromString(@"identifier"), NSSelectorFromString(@"id") };
     for (size_t i = 0; i < sizeof(sels) / sizeof(sels[0]); i++) {
-        if ([comment respondsToSelector:sels[i]]) {
-            id v = ((id (*)(id, SEL))objc_msgSend)(comment, sels[i]);
+        if ([commentObj respondsToSelector:sels[i]]) {
+            id v = ((id (*)(id, SEL))objc_msgSend)(commentObj, sels[i]);
             if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 0) return (NSString *)v;
         }
     }
