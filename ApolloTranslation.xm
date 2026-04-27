@@ -138,6 +138,43 @@ static NSString *ApolloNormalizeTextForCompare(NSString *text) {
     return [nonEmpty componentsJoinedByString:@" "];
 }
 
+static BOOL ApolloTextContainsMarkdownCode(NSString *text) {
+    if (![text isKindOfClass:[NSString class]] || text.length == 0) return NO;
+    NSString *lower = text.lowercaseString;
+    if ([lower containsString:@"```"] || [lower containsString:@"~~~"] || [lower containsString:@"`"]) return YES;
+
+    NSArray<NSString *> *lines = [text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    NSUInteger indentedCodeLines = 0;
+    for (NSString *line in lines) {
+        if (line.length == 0) continue;
+        if ([line hasPrefix:@"    "] || [line hasPrefix:@"\t"]) {
+            indentedCodeLines++;
+        }
+    }
+    return indentedCodeLines > 0;
+}
+
+static BOOL ApolloHTMLContainsCode(NSString *html) {
+    if (![html isKindOfClass:[NSString class]] || html.length == 0) return NO;
+    NSString *lower = html.lowercaseString;
+    return [lower containsString:@"<pre"] ||
+           [lower containsString:@"</pre"] ||
+           [lower containsString:@"<code"] ||
+           [lower containsString:@"</code"];
+}
+
+static BOOL ApolloCommentContainsCodeOrPreformatted(RDKComment *comment) {
+    if (!comment) return NO;
+    return ApolloTextContainsMarkdownCode(comment.body) || ApolloHTMLContainsCode(comment.bodyHTML);
+}
+
+static BOOL ApolloLinkContainsCodeOrPreformatted(RDKLink *link, NSString *visibleText) {
+    if (!link) return NO;
+    return ApolloTextContainsMarkdownCode(link.selfText) ||
+           ApolloHTMLContainsCode(link.selfTextHTML) ||
+           ApolloTextContainsMarkdownCode(visibleText);
+}
+
 static BOOL ApolloTranslatedTextDiffersFromSource(NSString *sourceText, NSString *translatedText) {
     NSString *sourceNorm = ApolloNormalizeTextForCompare(sourceText ?: @"");
     NSString *translatedNorm = ApolloNormalizeTextForCompare(translatedText ?: @"");
@@ -1183,10 +1220,19 @@ static void ApolloMaybeTranslateCommentCellNode(id commentCellNode, BOOL forceTr
     NSString *targetLanguage = ApolloResolvedTargetLanguageCode();
     if (targetLanguage.length == 0) return;
 
+    NSString *fullName = ApolloCommentFullName(comment);
+    if (ApolloCommentContainsCodeOrPreformatted(comment)) {
+        if (fullName.length > 0) {
+            [sCommentTranslationByFullName removeObjectForKey:fullName];
+        }
+        ApolloRestoreOriginalForCellNode(commentCellNode, comment);
+        ApolloLog(@"[Translation] Skipping comment with code/preformatted content");
+        return;
+    }
+
     // Fast path 1: we already translated this exact comment in this session.
     // Re-apply from the fullName cache without going to the network. This
     // makes collapse/expand and cell reuse re-show the translation immediately.
-    NSString *fullName = ApolloCommentFullName(comment);
     if (fullName.length > 0) {
         NSString *cachedTranslation = [sCommentTranslationByFullName objectForKey:fullName];
         if (cachedTranslation.length > 0) {
@@ -1296,6 +1342,16 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *f
     if (![body isKindOfClass:[NSString class]]) return;
     NSString *trimmed = [body stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (trimmed.length == 0) return;  // link/image post — nothing to translate
+
+    if (ApolloLinkContainsCodeOrPreformatted(link, trimmed)) {
+        NSString *linkFullName = link.fullName;
+        if (linkFullName.length > 0) {
+            [sLinkTranslationByFullName removeObjectForKey:linkFullName];
+        }
+        ApolloRestoreOriginalForHeaderCellNode(headerCellNode, link);
+        ApolloLog(@"[Translation] Skipping post body with code/preformatted content");
+        return;
+    }
 
     if (!ApolloShouldTranslateNow(forceTranslation)) return;
 
