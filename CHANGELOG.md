@@ -17,6 +17,7 @@ All notable changes to this project will be documented in this file.
 - Translation: skip comments and post bodies that contain Markdown/HTML code or preformatted blocks so code snippets stay visible and are not replaced by plain translated text.
 - Translation: allow post body translation from visible header text even when Apollo does not expose an `RDKLink` model for that header layout.
 - Translation: add a controller-view fallback that translates the visible selftext node above the first comment when Apollo renders the post body outside the comments table/header node path.
+- Translation: re-apply cached post body translation after pull-to-refresh/layout rebuilds so the body stays translated while comments and the globe remain in translated mode.
 
 ## [v2.4.0] - 2026-04-18
 

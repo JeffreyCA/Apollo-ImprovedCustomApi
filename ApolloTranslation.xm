@@ -34,6 +34,7 @@ static const void *kApolloTranslationBannerKey = &kApolloTranslationBannerKey;
 static const void *kApolloAppliedHeaderTranslationFullNameKey = &kApolloAppliedHeaderTranslationFullNameKey;
 static const void *kApolloHeaderTranslatedTextNodeKey = &kApolloHeaderTranslatedTextNodeKey;
 static const void *kApolloHeaderCellTranslationKeyKey = &kApolloHeaderCellTranslationKeyKey;
+static const void *kApolloPostBodyReapplyScheduledKey = &kApolloPostBodyReapplyScheduledKey;
 
 static NSString *const kApolloDefaultLibreTranslateURL = @"https://libretranslate.de/translate";
 
@@ -1596,6 +1597,23 @@ static void ApolloMaybeTranslatePostHeaderForController(UIViewController *viewCo
     ApolloMaybeTranslateVisiblePostBodyForController(viewController, tableView, forceTranslation);
 }
 
+static void ApolloSchedulePostBodyReapplyForController(UIViewController *viewController) {
+    if (!viewController || !sEnableBulkTranslation) return;
+    if (!ApolloControllerIsInTranslatedMode(viewController)) return;
+    if ([objc_getAssociatedObject(viewController, kApolloPostBodyReapplyScheduledKey) boolValue]) return;
+
+    objc_setAssociatedObject(viewController, kApolloPostBodyReapplyScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak UIViewController *weakVC = viewController;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.22 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIViewController *strongVC = weakVC;
+        if (!strongVC) return;
+        objc_setAssociatedObject(strongVC, kApolloPostBodyReapplyScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (!sEnableBulkTranslation || !ApolloControllerIsInTranslatedMode(strongVC)) return;
+        ApolloMaybeTranslatePostHeaderForController(strongVC, NO);
+        ApolloUpdateTranslationUIForController(strongVC);
+    });
+}
+
 static void ApolloTranslateVisibleCommentsForController(UIViewController *viewController, BOOL forceTranslation) {
     UITableView *tableView = GetCommentsTableView(viewController);
     if (!tableView) return;
@@ -2017,6 +2035,12 @@ static NSAttributedString *ApolloRebuildTranslatedAttrPreservingAttrs(NSAttribut
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     ApolloUpdateTranslationUIForController(self);
+    ApolloSchedulePostBodyReapplyForController((UIViewController *)self);
+}
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    ApolloSchedulePostBodyReapplyForController((UIViewController *)self);
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -2030,6 +2054,7 @@ static NSAttributedString *ApolloRebuildTranslatedAttrPreservingAttrs(NSAttribut
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             ApolloTranslateVisibleCommentsForController((UIViewController *)self, NO);
             ApolloUpdateTranslationUIForController(self);
+            ApolloSchedulePostBodyReapplyForController((UIViewController *)self);
         });
     }
 }
