@@ -286,6 +286,159 @@ static NSString *ApolloRestoreTranslationLinks(NSString *translatedText, NSDicti
     return [restoredText copy];
 }
 
+static NSDictionary *ApolloAttributesWithoutLinkAttribute(NSDictionary *attributes) {
+    if (![attributes isKindOfClass:[NSDictionary class]] || attributes.count == 0) return @{};
+    NSMutableDictionary *filteredAttributes = [attributes mutableCopy];
+    [filteredAttributes removeObjectForKey:NSLinkAttributeName];
+    return [filteredAttributes copy];
+}
+
+static NSDictionary *ApolloVisualBaseAttributesFromAttributedString(NSAttributedString *attributedText) {
+    if (![attributedText isKindOfClass:[NSAttributedString class]] || attributedText.length == 0) return @{};
+
+    __block NSDictionary *firstAttributes = nil;
+    __block NSDictionary *firstNonLinkAttributes = nil;
+    [attributedText enumerateAttributesInRange:NSMakeRange(0, attributedText.length)
+                                       options:0
+                                    usingBlock:^(NSDictionary<NSAttributedStringKey, id> *attrs, __unused NSRange range, BOOL *stop) {
+        if (!firstAttributes) firstAttributes = attrs;
+        if (!attrs[NSLinkAttributeName]) {
+            firstNonLinkAttributes = attrs;
+            *stop = YES;
+        }
+    }];
+
+    return ApolloAttributesWithoutLinkAttribute(firstNonLinkAttributes ?: firstAttributes ?: @{});
+}
+
+static NSDictionary *ApolloFirstLinkAttributesFromAttributedString(NSAttributedString *attributedText) {
+    if (![attributedText isKindOfClass:[NSAttributedString class]] || attributedText.length == 0) return nil;
+
+    __block NSDictionary *linkAttributes = nil;
+    [attributedText enumerateAttributesInRange:NSMakeRange(0, attributedText.length)
+                                       options:0
+                                    usingBlock:^(NSDictionary<NSAttributedStringKey, id> *attrs, __unused NSRange range, BOOL *stop) {
+        if (attrs[NSLinkAttributeName]) {
+            linkAttributes = attrs;
+            *stop = YES;
+        }
+    }];
+    return linkAttributes;
+}
+
+static id ApolloLinkAttributeValueForURLString(NSString *urlString) {
+    if (![urlString isKindOfClass:[NSString class]] || urlString.length == 0) return nil;
+    NSURL *url = [NSURL URLWithString:urlString];
+    return url ?: urlString;
+}
+
+static BOOL ApolloRangeIntersectsRange(NSRange lhs, NSRange rhs) {
+    if (lhs.location == NSNotFound || rhs.location == NSNotFound) return NO;
+    return NSIntersectionRange(lhs, rhs).length > 0;
+}
+
+static NSString *ApolloDisplayStringByConvertingMarkdownLinks(NSString *text, NSMutableArray<NSDictionary *> **markdownLinksOut) {
+    if (markdownLinksOut) *markdownLinksOut = [NSMutableArray array];
+    if (![text isKindOfClass:[NSString class]] || text.length == 0) return text;
+
+    NSError *regexError = nil;
+    NSRegularExpression *markdownLinkRegex = [NSRegularExpression regularExpressionWithPattern:@"\\[([^\\]\\n]+)\\]\\((https?://[^\\s)]+)(?:\\s+\\\"[^\\\"]*\\\")?\\)"
+                                                                                       options:NSRegularExpressionCaseInsensitive
+                                                                                         error:&regexError];
+    if (regexError || !markdownLinkRegex) return text;
+
+    NSArray<NSTextCheckingResult *> *matches = [markdownLinkRegex matchesInString:text options:0 range:NSMakeRange(0, text.length)];
+    if (matches.count == 0) return text;
+
+    NSMutableString *display = [NSMutableString string];
+    NSMutableArray<NSDictionary *> *markdownLinks = markdownLinksOut ? *markdownLinksOut : nil;
+    NSUInteger cursor = 0;
+    for (NSTextCheckingResult *match in matches) {
+        if (match.range.location < cursor || NSMaxRange(match.range) > text.length) continue;
+        [display appendString:[text substringWithRange:NSMakeRange(cursor, match.range.location - cursor)]];
+
+        NSRange titleRange = [match rangeAtIndex:1];
+        NSRange urlRange = [match rangeAtIndex:2];
+        NSString *title = (titleRange.location != NSNotFound && NSMaxRange(titleRange) <= text.length) ? [text substringWithRange:titleRange] : nil;
+        NSString *urlString = (urlRange.location != NSNotFound && NSMaxRange(urlRange) <= text.length) ? [text substringWithRange:urlRange] : nil;
+        if (title.length == 0) title = [text substringWithRange:match.range];
+
+        NSRange displayRange = NSMakeRange(display.length, title.length);
+        [display appendString:title];
+        if (markdownLinks && urlString.length > 0 && displayRange.length > 0) {
+            [markdownLinks addObject:@{@"range": [NSValue valueWithRange:displayRange], @"url": urlString}];
+        }
+        cursor = NSMaxRange(match.range);
+    }
+    if (cursor < text.length) {
+        [display appendString:[text substringFromIndex:cursor]];
+    }
+    return [display copy];
+}
+
+static void ApolloApplyLinkAttributes(NSMutableAttributedString *attributedString,
+                                      NSRange range,
+                                      NSString *urlString,
+                                      NSDictionary *baseAttributes,
+                                      NSDictionary *sourceLinkAttributes) {
+    if (![attributedString isKindOfClass:[NSMutableAttributedString class]]) return;
+    if (range.location == NSNotFound || range.length == 0 || NSMaxRange(range) > attributedString.length) return;
+    id linkValue = ApolloLinkAttributeValueForURLString(urlString);
+    if (!linkValue) return;
+
+    NSMutableDictionary *attributes = [NSMutableDictionary dictionaryWithDictionary:baseAttributes ?: @{}];
+    if ([sourceLinkAttributes isKindOfClass:[NSDictionary class]]) {
+        [attributes addEntriesFromDictionary:sourceLinkAttributes];
+    }
+    attributes[NSLinkAttributeName] = linkValue;
+    [attributedString addAttributes:attributes range:range];
+}
+
+static NSAttributedString *ApolloTranslatedAttributedStringPreservingVisualLinks(NSAttributedString *visualBase,
+                                                                                 NSString *translatedText) {
+    if (![translatedText isKindOfClass:[NSString class]]) translatedText = @"";
+
+    NSMutableArray<NSDictionary *> *markdownLinks = nil;
+    NSString *displayText = ApolloDisplayStringByConvertingMarkdownLinks(translatedText, &markdownLinks);
+    NSDictionary *baseAttributes = ApolloVisualBaseAttributesFromAttributedString(visualBase);
+    NSDictionary *sourceLinkAttributes = ApolloFirstLinkAttributesFromAttributedString(visualBase);
+    NSMutableAttributedString *attributed = [[NSMutableAttributedString alloc] initWithString:displayText ?: @"" attributes:baseAttributes ?: @{}];
+
+    for (NSDictionary *linkInfo in markdownLinks) {
+        NSValue *rangeValue = linkInfo[@"range"];
+        NSString *urlString = linkInfo[@"url"];
+        if (![rangeValue isKindOfClass:[NSValue class]] || ![urlString isKindOfClass:[NSString class]]) continue;
+        ApolloApplyLinkAttributes(attributed, rangeValue.rangeValue, urlString, baseAttributes, sourceLinkAttributes);
+    }
+
+    NSError *regexError = nil;
+    NSRegularExpression *bareURLRegex = [NSRegularExpression regularExpressionWithPattern:@"(?i)\\bhttps?://[^\\s<>()\\[\\]{}\\\"']+"
+                                                                                options:0
+                                                                                  error:&regexError];
+    if (!regexError && bareURLRegex && attributed.length > 0) {
+        NSArray<NSTextCheckingResult *> *matches = [bareURLRegex matchesInString:attributed.string options:0 range:NSMakeRange(0, attributed.length)];
+        for (NSTextCheckingResult *match in matches) {
+            NSRange range = ApolloRangeByTrimmingTrailingURLPunctuation(attributed.string, match.range);
+            if (range.length == 0 || NSMaxRange(range) > attributed.length) continue;
+
+            BOOL overlapsMarkdownLink = NO;
+            for (NSDictionary *linkInfo in markdownLinks) {
+                NSValue *rangeValue = linkInfo[@"range"];
+                if ([rangeValue isKindOfClass:[NSValue class]] && ApolloRangeIntersectsRange(range, rangeValue.rangeValue)) {
+                    overlapsMarkdownLink = YES;
+                    break;
+                }
+            }
+            if (overlapsMarkdownLink) continue;
+
+            NSString *urlString = [attributed.string substringWithRange:range];
+            ApolloApplyLinkAttributes(attributed, range, urlString, baseAttributes, sourceLinkAttributes);
+        }
+    }
+
+    return [attributed copy];
+}
+
 static BOOL ApolloThreadTranslationModeEnabledForVisibleCommentsVC(void) __attribute__((unused));
 static BOOL ApolloThreadTranslationModeEnabledForVisibleCommentsVC(void) {
     UIViewController *vc = sVisibleCommentsViewController;
@@ -640,12 +793,7 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
         objc_setAssociatedObject(textNode, kApolloOriginalAttributedTextKey, [current copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
-    NSDictionary *attributes = nil;
-    if (current.length > 0) {
-        attributes = [current attributesAtIndex:0 effectiveRange:NULL];
-    }
-
-    NSAttributedString *translatedAttr = [[NSAttributedString alloc] initWithString:translatedText attributes:attributes ?: @{}];
+    NSAttributedString *translatedAttr = ApolloTranslatedAttributedStringPreservingVisualLinks(current, translatedText);
 
     // Phase D — vote resilience. Mark this text node as ours BEFORE the
     // setAttributedText: write below, so the global setter hook sees the
@@ -1055,8 +1203,7 @@ static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *l
         objc_setAssociatedObject(textNode, kApolloOriginalAttributedTextKey, [current copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
-    NSDictionary *attrs = current.length > 0 ? [current attributesAtIndex:0 effectiveRange:NULL] : nil;
-    NSAttributedString *translatedAttr = [[NSAttributedString alloc] initWithString:translatedText attributes:attrs ?: @{}];
+    NSAttributedString *translatedAttr = ApolloTranslatedAttributedStringPreservingVisualLinks(current, translatedText);
 
     // Same vote-resilience marker pattern as comment cells.
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [body copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -1112,8 +1259,7 @@ static void ApolloApplyTranslationToPostTextNode(id owner, id textNode, NSString
         objc_setAssociatedObject(textNode, kApolloOriginalAttributedTextKey, [current copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
-    NSDictionary *attrs = current.length > 0 ? [current attributesAtIndex:0 effectiveRange:NULL] : nil;
-    NSAttributedString *translatedAttr = [[NSAttributedString alloc] initWithString:translatedText attributes:attrs ?: @{}];
+    NSAttributedString *translatedAttr = ApolloTranslatedAttributedStringPreservingVisualLinks(current, translatedText);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [sourceText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1513,7 +1659,7 @@ static void ApolloScheduleCachedTranslationReapplyForCellNode(id commentCellNode
     if ([objc_getAssociatedObject(commentCellNode, kApolloReapplyScheduledKey) boolValue]) return;
     objc_setAssociatedObject(commentCellNode, kApolloReapplyScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     __weak id weakNode = commentCellNode;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.06 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.01 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         id strong = weakNode;
         if (!strong) return;
         objc_setAssociatedObject(strong, kApolloReapplyScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1919,11 +2065,73 @@ static void ApolloToggleThreadTranslationForController(UIViewController *vc) {
 // `incoming` (which carries Apollo's freshly-computed score color, font size,
 // link styles, etc.) but using our cached translated string.
 static NSAttributedString *ApolloRebuildTranslatedAttrPreservingAttrs(NSAttributedString *incoming, NSString *translatedText) {
-    NSDictionary *attrs = nil;
-    if ([incoming isKindOfClass:[NSAttributedString class]] && incoming.length > 0) {
-        attrs = [incoming attributesAtIndex:0 effectiveRange:NULL];
+    return ApolloTranslatedAttributedStringPreservingVisualLinks(incoming, translatedText);
+}
+
+static BOOL ApolloNormalizedTextMatchesVariant(NSString *incomingNorm, NSString *targetNorm) {
+    if (incomingNorm.length == 0 || targetNorm.length == 0) return NO;
+    if ([incomingNorm isEqualToString:targetNorm]) return YES;
+
+    BOOL contains = [incomingNorm containsString:targetNorm] || [targetNorm containsString:incomingNorm];
+    if (contains) {
+        NSUInteger overlap = MIN(incomingNorm.length, targetNorm.length);
+        if (overlap >= 12) return YES;
     }
-    return [[NSAttributedString alloc] initWithString:translatedText attributes:attrs ?: @{}];
+
+    NSUInteger prefixLength = MIN((NSUInteger)24, MIN(incomingNorm.length, targetNorm.length));
+    if (prefixLength >= 12) {
+        NSString *incomingPrefix = [incomingNorm substringToIndex:prefixLength];
+        NSString *targetPrefix = [targetNorm substringToIndex:prefixLength];
+        if ([incomingPrefix isEqualToString:targetPrefix]) return YES;
+    }
+
+    return NO;
+}
+
+static BOOL ApolloTextMatchesSourceOrVisualDisplay(NSString *incomingText, NSString *targetText) {
+    NSString *incomingNorm = ApolloNormalizeTextForCompare(incomingText);
+    NSString *targetNorm = ApolloNormalizeTextForCompare(targetText);
+    if (ApolloNormalizedTextMatchesVariant(incomingNorm, targetNorm)) return YES;
+
+    NSString *targetDisplay = ApolloDisplayStringByConvertingMarkdownLinks(targetText, nil);
+    NSString *targetDisplayNorm = ApolloNormalizeTextForCompare(targetDisplay);
+    return ![targetDisplayNorm isEqualToString:targetNorm] && ApolloNormalizedTextMatchesVariant(incomingNorm, targetDisplayNorm);
+}
+
+static void ApolloClearTranslationOwnershipForTextNode(id textNode) {
+    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+}
+
+static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
+                                                   NSAttributedString *incomingAttributedText,
+                                                   NSAttributedString **swapOut) {
+    if (swapOut) *swapOut = nil;
+
+    NSString *originalBody = objc_getAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey);
+    NSString *translatedText = objc_getAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey);
+
+    if (![originalBody isKindOfClass:[NSString class]] || originalBody.length == 0 ||
+        ![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0 ||
+        ![incomingAttributedText isKindOfClass:[NSAttributedString class]]) {
+        return NO;
+    }
+
+    NSString *incomingText = incomingAttributedText.string;
+    if (ApolloTextMatchesSourceOrVisualDisplay(incomingText, translatedText)) {
+        return NO;
+    }
+
+    if (ApolloTextMatchesSourceOrVisualDisplay(incomingText, originalBody)) {
+        if (swapOut) *swapOut = ApolloRebuildTranslatedAttrPreservingAttrs(incomingAttributedText, translatedText);
+        return YES;
+    }
+
+    if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) {
+        ApolloClearTranslationOwnershipForTextNode(textNode);
+    }
+    return NO;
 }
 
 // Global setAttributedText: hook on ASTextNode. Strict no-op for any node we
@@ -1947,47 +2155,14 @@ static NSAttributedString *ApolloRebuildTranslatedAttrPreservingAttrs(NSAttribut
         return;
     }
 
-    NSString *originalBody = objc_getAssociatedObject(self, kApolloOwnedNodeOriginalBodyKey);
-    NSString *translatedText = objc_getAssociatedObject(self, kApolloOwnedNodeTranslatedTextKey);
-
-    if (![originalBody isKindOfClass:[NSString class]] || originalBody.length == 0 ||
-        ![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0 ||
-        ![attributedText isKindOfClass:[NSAttributedString class]]) {
-        %orig;
-        return;
-    }
-
-    NSString *incomingNorm = ApolloNormalizeTextForCompare(attributedText.string);
-    NSString *originalNorm = ApolloNormalizeTextForCompare(originalBody);
-    NSString *translatedNorm = ApolloNormalizeTextForCompare(translatedText);
-
-    // If the incoming string already matches our translation, pass through.
-    if (translatedNorm.length > 0 &&
-        ([incomingNorm isEqualToString:translatedNorm] ||
-         [incomingNorm containsString:translatedNorm] ||
-         [translatedNorm containsString:incomingNorm])) {
-        %orig;
-        return;
-    }
-
-    // If the incoming string matches the original body, Apollo is reverting
-    // (e.g. after vote / score color refresh). Substitute the cached
-    // translation, preserving incoming attributes (color, font, links).
-    BOOL incomingIsOriginal = [incomingNorm isEqualToString:originalNorm] ||
-                              [incomingNorm containsString:originalNorm] ||
-                              [originalNorm containsString:incomingNorm];
-    if (incomingIsOriginal) {
-        NSAttributedString *swap = ApolloRebuildTranslatedAttrPreservingAttrs(attributedText, translatedText);
+    NSAttributedString *swap = nil;
+    if (ApolloPrepareTranslatedSwapForTextNode(self, attributedText, &swap)) {
         objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         @try { %orig(swap); } @catch (__unused NSException *e) {}
         objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return;
     }
 
-    // Unknown content (some other text Apollo wants to display). Pass
-    // through unchanged — and clear the marker so this node is no longer
-    // considered ours.
-    objc_setAssociatedObject(self, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     %orig;
 }
 
@@ -2006,40 +2181,14 @@ static NSAttributedString *ApolloRebuildTranslatedAttrPreservingAttrs(NSAttribut
         return;
     }
 
-    NSString *originalBody = objc_getAssociatedObject(self, kApolloOwnedNodeOriginalBodyKey);
-    NSString *translatedText = objc_getAssociatedObject(self, kApolloOwnedNodeTranslatedTextKey);
-
-    if (![originalBody isKindOfClass:[NSString class]] || originalBody.length == 0 ||
-        ![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0 ||
-        ![attributedText isKindOfClass:[NSAttributedString class]]) {
-        %orig;
-        return;
-    }
-
-    NSString *incomingNorm = ApolloNormalizeTextForCompare(attributedText.string);
-    NSString *originalNorm = ApolloNormalizeTextForCompare(originalBody);
-    NSString *translatedNorm = ApolloNormalizeTextForCompare(translatedText);
-
-    if (translatedNorm.length > 0 &&
-        ([incomingNorm isEqualToString:translatedNorm] ||
-         [incomingNorm containsString:translatedNorm] ||
-         [translatedNorm containsString:incomingNorm])) {
-        %orig;
-        return;
-    }
-
-    BOOL incomingIsOriginal = [incomingNorm isEqualToString:originalNorm] ||
-                              [incomingNorm containsString:originalNorm] ||
-                              [originalNorm containsString:incomingNorm];
-    if (incomingIsOriginal) {
-        NSAttributedString *swap = ApolloRebuildTranslatedAttrPreservingAttrs(attributedText, translatedText);
+    NSAttributedString *swap = nil;
+    if (ApolloPrepareTranslatedSwapForTextNode(self, attributedText, &swap)) {
         objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         @try { %orig(swap); } @catch (__unused NSException *e) {}
         objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return;
     }
 
-    objc_setAssociatedObject(self, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     %orig;
 }
 
