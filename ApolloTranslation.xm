@@ -2180,7 +2180,7 @@ static void ApolloUpdateTranslationUIForController(id controller) {
         objc_setAssociatedObject(controller, kApolloTranslateBarButtonKey, translationItem, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     translationItem.image = globeImage;
-    translationItem.imageInsets = UIEdgeInsetsMake(0.0, 6.0, 0.0, -6.0);
+    translationItem.imageInsets = UIEdgeInsetsMake(0.0, -6.0, 0.0, 6.0);
     translationItem.target = controller;
     translationItem.action = @selector(apollo_translationGlobeTapped);
     translationItem.menu = nil;
