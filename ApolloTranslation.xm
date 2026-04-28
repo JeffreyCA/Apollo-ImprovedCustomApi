@@ -208,6 +208,84 @@ static NSString *ApolloTranslationCacheKey(NSString *text, NSString *targetLangu
     return [NSString stringWithFormat:@"%@|%lu", targetLanguage ?: @"en", (unsigned long)text.hash];
 }
 
+static NSString *ApolloTranslationLinkToken(NSUInteger index) {
+    return [NSString stringWithFormat:@"APOLLOTRANSLATIONLINK%luTOKEN", (unsigned long)index];
+}
+
+static NSRange ApolloRangeByTrimmingTrailingURLPunctuation(NSString *text, NSRange range) {
+    if (range.location == NSNotFound || NSMaxRange(range) > text.length) return range;
+
+    NSCharacterSet *trailingPunctuation = [NSCharacterSet characterSetWithCharactersInString:@".,!?;:"];
+    while (range.length > 0) {
+        unichar last = [text characterAtIndex:NSMaxRange(range) - 1];
+        if (![trailingPunctuation characterIsMember:last]) break;
+        range.length--;
+    }
+    return range;
+}
+
+static NSString *ApolloProtectTranslationLinks(NSString *sourceText, NSDictionary<NSString *, NSString *> **protectedLinksOut) {
+    if (protectedLinksOut) *protectedLinksOut = @{};
+    if (![sourceText isKindOfClass:[NSString class]] || sourceText.length == 0) return sourceText;
+
+    NSMutableString *protectedText = [sourceText mutableCopy];
+    NSMutableDictionary<NSString *, NSString *> *protectedLinks = [NSMutableDictionary dictionary];
+    __block NSUInteger nextTokenIndex = 0;
+
+    void (^replaceMatches)(NSRegularExpression *, BOOL) = ^(NSRegularExpression *regex, BOOL trimURLPunctuation) {
+        NSArray<NSTextCheckingResult *> *matches = [regex matchesInString:protectedText options:0 range:NSMakeRange(0, protectedText.length)];
+        for (NSTextCheckingResult *match in [matches reverseObjectEnumerator]) {
+            NSRange range = match.range;
+            if (trimURLPunctuation) {
+                range = ApolloRangeByTrimmingTrailingURLPunctuation(protectedText, range);
+            }
+            if (range.length == 0 || NSMaxRange(range) > protectedText.length) continue;
+
+            NSString *originalLink = [protectedText substringWithRange:range];
+            NSString *token = ApolloTranslationLinkToken(nextTokenIndex++);
+            protectedLinks[token] = originalLink;
+            [protectedText replaceCharactersInRange:range withString:token];
+        }
+    };
+
+    NSError *regexError = nil;
+    NSRegularExpression *markdownLinkRegex = [NSRegularExpression regularExpressionWithPattern:@"\\[[^\\]\\n]+\\]\\([^\\s)]+(?:\\s+\\\"[^\\\"]*\\\")?\\)"
+                                                                                       options:0
+                                                                                         error:&regexError];
+    if (!regexError && markdownLinkRegex) {
+        replaceMatches(markdownLinkRegex, NO);
+    }
+
+    regexError = nil;
+    NSRegularExpression *bareURLRegex = [NSRegularExpression regularExpressionWithPattern:@"(?i)\\bhttps?://[^\\s<>()\\[\\]{}\\\"']+"
+                                                                                options:0
+                                                                                  error:&regexError];
+    if (!regexError && bareURLRegex) {
+        replaceMatches(bareURLRegex, YES);
+    }
+
+    if (protectedLinksOut && protectedLinks.count > 0) {
+        *protectedLinksOut = [protectedLinks copy];
+    }
+    return protectedLinks.count > 0 ? [protectedText copy] : sourceText;
+}
+
+static NSString *ApolloRestoreTranslationLinks(NSString *translatedText, NSDictionary<NSString *, NSString *> *protectedLinks) {
+    if (![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return translatedText;
+    if (![protectedLinks isKindOfClass:[NSDictionary class]] || protectedLinks.count == 0) return translatedText;
+
+    NSMutableString *restoredText = [translatedText mutableCopy];
+    [protectedLinks enumerateKeysAndObjectsUsingBlock:^(NSString *token, NSString *originalLink, __unused BOOL *stop) {
+        if (![token isKindOfClass:[NSString class]] || token.length == 0) return;
+        if (![originalLink isKindOfClass:[NSString class]]) return;
+        [restoredText replaceOccurrencesOfString:token
+                                      withString:originalLink
+                                         options:0
+                                           range:NSMakeRange(0, restoredText.length)];
+    }];
+    return [restoredText copy];
+}
+
 static BOOL ApolloThreadTranslationModeEnabledForVisibleCommentsVC(void) __attribute__((unused));
 static BOOL ApolloThreadTranslationModeEnabledForVisibleCommentsVC(void) {
     UIViewController *vc = sVisibleCommentsViewController;
@@ -1299,20 +1377,24 @@ static void ApolloRequestTranslation(NSString *cacheKey,
 
     if (!shouldStartRequest) return;
 
-    ApolloTranslateTextWithFallback(sourceText, targetLanguage, ^(NSString *translated, NSError *error) {
+    NSDictionary<NSString *, NSString *> *protectedLinks = nil;
+    NSString *requestText = ApolloProtectTranslationLinks(sourceText, &protectedLinks);
+
+    ApolloTranslateTextWithFallback(requestText, targetLanguage, ^(NSString *translated, NSError *error) {
+        NSString *restoredTranslation = ApolloRestoreTranslationLinks(translated, protectedLinks);
         NSArray *callbacks = nil;
         @synchronized (sPendingTranslationCallbacks) {
             callbacks = [sPendingTranslationCallbacks[cacheKey] copy] ?: @[];
             [sPendingTranslationCallbacks removeObjectForKey:cacheKey];
         }
 
-        if ([translated isKindOfClass:[NSString class]] && translated.length > 0) {
-            [sTranslationCache setObject:translated forKey:cacheKey];
+        if ([restoredTranslation isKindOfClass:[NSString class]] && restoredTranslation.length > 0) {
+            [sTranslationCache setObject:restoredTranslation forKey:cacheKey];
         }
 
         for (id callbackObj in callbacks) {
             void (^callback)(NSString *, NSError *) = callbackObj;
-            callback(translated, error);
+            callback(restoredTranslation, error);
         }
     });
 }
