@@ -2045,6 +2045,44 @@ static void ApolloUpdateBannerForController(UIViewController *vc) {
     banner.hidden = YES;
 }
 
+static BOOL ApolloTextMatchesTranslatedDisplayText(NSString *visibleText, NSString *translatedText) {
+    if (ApolloTextQualifiesAsBodyCandidate(visibleText, translatedText)) return YES;
+
+    NSString *translatedDisplay = ApolloDisplayStringByConvertingMarkdownLinks(translatedText, nil);
+    NSString *translatedNorm = ApolloNormalizeTextForCompare(translatedText);
+    NSString *displayNorm = ApolloNormalizeTextForCompare(translatedDisplay);
+    return displayNorm.length > 0 && ![displayNorm isEqualToString:translatedNorm] && ApolloTextQualifiesAsBodyCandidate(visibleText, translatedDisplay);
+}
+
+static BOOL ApolloRefreshVisibleTranslationAppliedForController(UIViewController *vc) {
+    if (!vc || !ApolloControllerIsInTranslatedMode(vc)) return NO;
+
+    NSMutableArray *nodes = [NSMutableArray array];
+    NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:128];
+    ApolloCollectAttributedTextNodes(vc.view, 8, visited, nodes);
+
+    for (id node in nodes) {
+        if (![objc_getAssociatedObject(node, kApolloTranslationOwnedTextNodeKey) boolValue]) continue;
+
+        NSString *originalBody = objc_getAssociatedObject(node, kApolloOwnedNodeOriginalBodyKey);
+        NSString *translatedText = objc_getAssociatedObject(node, kApolloOwnedNodeTranslatedTextKey);
+        if (![originalBody isKindOfClass:[NSString class]] || ![translatedText isKindOfClass:[NSString class]]) continue;
+        if (!ApolloTranslatedTextDiffersFromSource(originalBody, translatedText)) continue;
+
+        NSAttributedString *attr = nil;
+        @try { attr = ((id (*)(id, SEL))objc_msgSend)(node, @selector(attributedText)); }
+        @catch (__unused NSException *e) { continue; }
+        if (![attr isKindOfClass:[NSAttributedString class]] || attr.string.length == 0) continue;
+
+        if (ApolloTextMatchesTranslatedDisplayText(attr.string, translatedText)) {
+            objc_setAssociatedObject(vc, kApolloVisibleTranslationAppliedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
 static void ApolloUpdateTranslationUIForController(id controller) {
     UIViewController *vc = (UIViewController *)controller;
 
@@ -2310,6 +2348,7 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
+    ApolloRefreshVisibleTranslationAppliedForController((UIViewController *)self);
     ApolloUpdateTranslationUIForController(self);
     ApolloSchedulePostBodyReapplyForController((UIViewController *)self);
 }
@@ -2325,10 +2364,11 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
     sVisibleCommentsViewController = (UIViewController *)self;
 
     if (sEnableBulkTranslation && ApolloControllerIsInTranslatedMode((UIViewController *)self)) {
-        ApolloClearVisibleTranslationApplied((UIViewController *)self);
+        ApolloRefreshVisibleTranslationAppliedForController((UIViewController *)self);
         ApolloUpdateTranslationUIForController(self);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             ApolloTranslateVisibleCommentsForController((UIViewController *)self, NO);
+            ApolloRefreshVisibleTranslationAppliedForController((UIViewController *)self);
             ApolloUpdateTranslationUIForController(self);
             ApolloSchedulePostBodyReapplyForController((UIViewController *)self);
         });
