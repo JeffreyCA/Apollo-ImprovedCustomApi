@@ -2127,7 +2127,14 @@ static void ApolloUpdateTranslationUIForController(id controller) {
     translationItem.target = controller;
     translationItem.action = @selector(apollo_translationGlobeTapped);
     translationItem.menu = nil;
-    translationItem.tintColor = visibleTranslationApplied ? [UIColor systemGreenColor] : [UIColor systemBlueColor];
+    UIColor *themeTintColor = vc.view.tintColor;
+    if (!themeTintColor) {
+        themeTintColor = vc.navigationController.navigationBar.tintColor;
+    }
+    if (!themeTintColor) {
+        themeTintColor = [UIColor systemBlueColor];
+    }
+    translationItem.tintColor = visibleTranslationApplied ? [UIColor systemGreenColor] : themeTintColor;
     translationItem.accessibilityLabel = translatedMode
         ? @"Translation: showing translated. Tap to show original."
         : [NSString stringWithFormat:@"Translation: showing original. Tap to translate to %@.", targetName];
