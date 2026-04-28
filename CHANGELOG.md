@@ -4,6 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Translation: fix v12 translated-mode link preview/card display duplication and stale text-node ownership while preserving the upvote/downvote anti-flash behavior.
 - Translation: preserve visual link display while translated by rebuilding translated attributed strings with base styling and reapplying link attributes only to restored Markdown/bare URL ranges.
 - Translation: stop the original-language flash after upvote/downvote redraws by synchronously swapping Apollo's refreshed original text back to the cached translated attributed text.
 - Translation: preserve exact Markdown link and bare URL strings during translation so URLs do not get localized or rewritten by the translation provider.

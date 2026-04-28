@@ -140,6 +140,74 @@ static NSString *ApolloNormalizeTextForCompare(NSString *text) {
     return [nonEmpty componentsJoinedByString:@" "];
 }
 
+static NSString *ApolloTrimmedString(NSString *text) {
+    if (![text isKindOfClass:[NSString class]]) return @"";
+    return [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+static BOOL ApolloTextLooksLikeURLPreview(NSString *text) {
+    NSString *trimmed = ApolloTrimmedString(text);
+    if (trimmed.length == 0) return NO;
+
+    NSString *lower = trimmed.lowercaseString;
+    if ([lower hasPrefix:@"http://"] || [lower hasPrefix:@"https://"] || [lower hasPrefix:@"www."]) return YES;
+
+    NSRange firstWhitespace = [lower rangeOfCharacterFromSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *firstToken = firstWhitespace.location == NSNotFound ? lower : [lower substringToIndex:firstWhitespace.location];
+    if ([firstToken containsString:@"."] && ([firstToken containsString:@"/"] || [firstToken hasSuffix:@"…"] || [firstToken hasSuffix:@"..."])) {
+        return YES;
+    }
+
+    return NO;
+}
+
+static BOOL ApolloTextLooksLikePreviewExcerptOfBody(NSString *candidateText, NSString *bodyText) {
+    NSString *candidate = ApolloTrimmedString(candidateText);
+    NSString *body = ApolloTrimmedString(bodyText);
+    if (candidate.length == 0 || body.length == 0 || candidate.length >= body.length) return NO;
+
+    NSString *candidateNorm = ApolloNormalizeTextForCompare(candidate);
+    NSString *bodyNorm = ApolloNormalizeTextForCompare(body);
+    if (candidateNorm.length == 0 || bodyNorm.length == 0 || ![bodyNorm containsString:candidateNorm]) return NO;
+
+    BOOL visiblyTruncated = [candidate containsString:@"..."] || [candidate containsString:@"…"];
+    BOOL markdownExcerpt = ([candidate containsString:@"**"] || [candidate containsString:@"*"]) && visiblyTruncated;
+    CGFloat ratio = (CGFloat)candidateNorm.length / (CGFloat)bodyNorm.length;
+    return ApolloTextLooksLikeURLPreview(candidate) || markdownExcerpt || ratio < 0.60;
+}
+
+static BOOL ApolloTextQualifiesAsBodyCandidate(NSString *candidateText, NSString *bodyText) {
+    NSString *candidateNorm = ApolloNormalizeTextForCompare(candidateText);
+    NSString *bodyNorm = ApolloNormalizeTextForCompare(bodyText);
+    if (candidateNorm.length == 0 || bodyNorm.length == 0) return NO;
+    if ([candidateNorm isEqualToString:bodyNorm]) return YES;
+
+    if (ApolloTextLooksLikeURLPreview(candidateText) || ApolloTextLooksLikePreviewExcerptOfBody(candidateText, bodyText)) return NO;
+
+    if ([candidateNorm containsString:bodyNorm]) return YES;
+    if ([bodyNorm containsString:candidateNorm]) {
+        CGFloat ratio = (CGFloat)candidateNorm.length / (CGFloat)bodyNorm.length;
+        return ratio >= 0.60 || candidateNorm.length >= 160;
+    }
+
+    NSUInteger prefixLength = MIN((NSUInteger)24, MIN(candidateNorm.length, bodyNorm.length));
+    if (prefixLength >= 12) {
+        NSString *candidatePrefix = [candidateNorm substringToIndex:prefixLength];
+        NSString *bodyPrefix = [bodyNorm substringToIndex:prefixLength];
+        if ([candidatePrefix isEqualToString:bodyPrefix]) {
+            CGFloat ratio = (CGFloat)candidateNorm.length / (CGFloat)bodyNorm.length;
+            return ratio >= 0.60 || candidateNorm.length >= 160;
+        }
+    }
+
+    return NO;
+}
+
+static BOOL ApolloTextIsSubstantiveForOwnershipCleanup(NSString *text) {
+    NSString *norm = ApolloNormalizeTextForCompare(text);
+    return norm.length >= 3;
+}
+
 static BOOL ApolloTextContainsMarkdownCode(NSString *text) {
     if (![text isKindOfClass:[NSString class]] || text.length == 0) return NO;
     NSString *lower = text.lowercaseString;
@@ -361,7 +429,11 @@ static NSString *ApolloDisplayStringByConvertingMarkdownLinks(NSString *text, NS
         NSRange urlRange = [match rangeAtIndex:2];
         NSString *title = (titleRange.location != NSNotFound && NSMaxRange(titleRange) <= text.length) ? [text substringWithRange:titleRange] : nil;
         NSString *urlString = (urlRange.location != NSNotFound && NSMaxRange(urlRange) <= text.length) ? [text substringWithRange:urlRange] : nil;
-        if (title.length == 0) title = [text substringWithRange:match.range];
+        if (title.length == 0 || urlString.length == 0) {
+            [display appendString:[text substringWithRange:match.range]];
+            cursor = NSMaxRange(match.range);
+            continue;
+        }
 
         NSRange displayRange = NSMakeRange(display.length, title.length);
         [display appendString:title];
@@ -698,19 +770,17 @@ static NSInteger ApolloCandidateScore(NSAttributedString *candidateText, NSStrin
         return 100000 + (NSInteger)candidate.length;
     }
 
-    if ([candidate containsString:body] || [body containsString:candidate]) {
+    if (ApolloTextQualifiesAsBodyCandidate(candidateText.string, commentBody)) {
         // Require the overlap to be a meaningful chunk, not just a stray word.
         NSUInteger overlap = MIN(candidate.length, body.length);
-        if (overlap >= 12 || overlap == body.length || overlap == candidate.length) {
-            return 75000 + (NSInteger)overlap;
-        }
+        return 75000 + (NSInteger)overlap;
     }
 
     NSUInteger prefixLength = MIN((NSUInteger)24, MIN(candidate.length, body.length));
     if (prefixLength >= 12) {
         NSString *candidatePrefix = [candidate substringToIndex:prefixLength];
         NSString *bodyPrefix = [body substringToIndex:prefixLength];
-        if ([candidatePrefix isEqualToString:bodyPrefix]) {
+        if ([candidatePrefix isEqualToString:bodyPrefix] && ApolloTextQualifiesAsBodyCandidate(candidateText.string, commentBody)) {
             return 50000 + (NSInteger)candidate.length;
         }
     }
@@ -772,13 +842,8 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     NSString *bodyNorm = ApolloNormalizeTextForCompare(comment.body);
     NSString *translatedNorm = ApolloNormalizeTextForCompare(translatedText);
     if (currentNorm.length == 0 || bodyNorm.length == 0) return;
-    BOOL textMatchesBody = [currentNorm isEqualToString:bodyNorm] ||
-                           [currentNorm containsString:bodyNorm] ||
-                           [bodyNorm containsString:currentNorm];
-    BOOL textMatchesTranslation = translatedNorm.length > 0 &&
-        ([currentNorm isEqualToString:translatedNorm] ||
-         [currentNorm containsString:translatedNorm] ||
-         [translatedNorm containsString:currentNorm]);
+    BOOL textMatchesBody = ApolloTextQualifiesAsBodyCandidate(current.string, comment.body);
+    BOOL textMatchesTranslation = translatedNorm.length > 0 && ApolloTextQualifiesAsBodyCandidate(current.string, translatedText);
     if (!textMatchesBody && !textMatchesTranslation) {
         ApolloLog(@"[Translation] Skipping write — chosen node text does not match body or translation");
         return;
@@ -2068,34 +2133,14 @@ static NSAttributedString *ApolloRebuildTranslatedAttrPreservingAttrs(NSAttribut
     return ApolloTranslatedAttributedStringPreservingVisualLinks(incoming, translatedText);
 }
 
-static BOOL ApolloNormalizedTextMatchesVariant(NSString *incomingNorm, NSString *targetNorm) {
-    if (incomingNorm.length == 0 || targetNorm.length == 0) return NO;
-    if ([incomingNorm isEqualToString:targetNorm]) return YES;
-
-    BOOL contains = [incomingNorm containsString:targetNorm] || [targetNorm containsString:incomingNorm];
-    if (contains) {
-        NSUInteger overlap = MIN(incomingNorm.length, targetNorm.length);
-        if (overlap >= 12) return YES;
-    }
-
-    NSUInteger prefixLength = MIN((NSUInteger)24, MIN(incomingNorm.length, targetNorm.length));
-    if (prefixLength >= 12) {
-        NSString *incomingPrefix = [incomingNorm substringToIndex:prefixLength];
-        NSString *targetPrefix = [targetNorm substringToIndex:prefixLength];
-        if ([incomingPrefix isEqualToString:targetPrefix]) return YES;
-    }
-
-    return NO;
-}
-
 static BOOL ApolloTextMatchesSourceOrVisualDisplay(NSString *incomingText, NSString *targetText) {
-    NSString *incomingNorm = ApolloNormalizeTextForCompare(incomingText);
     NSString *targetNorm = ApolloNormalizeTextForCompare(targetText);
-    if (ApolloNormalizedTextMatchesVariant(incomingNorm, targetNorm)) return YES;
+    if (targetNorm.length == 0) return NO;
+    if (ApolloTextQualifiesAsBodyCandidate(incomingText, targetText)) return YES;
 
     NSString *targetDisplay = ApolloDisplayStringByConvertingMarkdownLinks(targetText, nil);
     NSString *targetDisplayNorm = ApolloNormalizeTextForCompare(targetDisplay);
-    return ![targetDisplayNorm isEqualToString:targetNorm] && ApolloNormalizedTextMatchesVariant(incomingNorm, targetDisplayNorm);
+    return ![targetDisplayNorm isEqualToString:targetNorm] && ApolloTextQualifiesAsBodyCandidate(incomingText, targetDisplay);
 }
 
 static void ApolloClearTranslationOwnershipForTextNode(id textNode) {
@@ -2128,7 +2173,7 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
         return YES;
     }
 
-    if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) {
+    if (ApolloTextIsSubstantiveForOwnershipCleanup(incomingText)) {
         ApolloClearTranslationOwnershipForTextNode(textNode);
     }
     return NO;
