@@ -2178,7 +2178,8 @@ static void ApolloUpdateTranslationUIForController(id controller) {
     }
     if (!globeButton) {
         globeButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        globeButton.frame = CGRectMake(0.0, 0.0, 10.0, 32.0);
+        globeButton.frame = CGRectMake(0.0, 0.0, 22.0, 32.0);
+        globeButton.imageEdgeInsets = UIEdgeInsetsMake(0.0, 14.0, 0.0, -14.0);
         [globeButton addTarget:controller action:@selector(apollo_translationGlobeTapped) forControlEvents:UIControlEventTouchUpInside];
     }
     [globeButton setImage:globeImage forState:UIControlStateNormal];
