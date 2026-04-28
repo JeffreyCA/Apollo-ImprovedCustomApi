@@ -17,6 +17,7 @@ static const void *kApolloThreadTranslatedModeKey = &kApolloThreadTranslatedMode
 // don't clobber the user's preference when sAutoTranslateOnAppear is on).
 static const void *kApolloThreadOriginalModeKey = &kApolloThreadOriginalModeKey;
 static const void *kApolloTranslateBarButtonKey = &kApolloTranslateBarButtonKey;
+static const void *kApolloTranslateNegativeSpacerKey = &kApolloTranslateNegativeSpacerKey;
 static const void *kApolloVisibleTranslationAppliedKey = &kApolloVisibleTranslationAppliedKey;
 static const void *kApolloAppliedTranslationFullNameKey = &kApolloAppliedTranslationFullNameKey;
 // Phase D — vote resilience. When we install a translated string into a text
@@ -2154,10 +2155,13 @@ static void ApolloUpdateTranslationUIForController(id controller) {
         objc_setAssociatedObject(controller, kApolloThreadTranslatedModeKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(controller, kApolloThreadOriginalModeKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-        if (translationItem) {
-            [items removeObject:translationItem];
+        UIBarButtonItem *spacer = objc_getAssociatedObject(controller, kApolloTranslateNegativeSpacerKey);
+        if (translationItem || spacer) {
+            if (translationItem) [items removeObject:translationItem];
+            if (spacer) [items removeObject:spacer];
             vc.navigationItem.rightBarButtonItems = items;
             objc_setAssociatedObject(controller, kApolloTranslateBarButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(controller, kApolloTranslateNegativeSpacerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         ApolloUpdateBannerForController(vc);
         return;
@@ -2180,7 +2184,6 @@ static void ApolloUpdateTranslationUIForController(id controller) {
         objc_setAssociatedObject(controller, kApolloTranslateBarButtonKey, translationItem, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     translationItem.image = globeImage;
-    translationItem.imageInsets = UIEdgeInsetsMake(0.0, -6.0, 0.0, 6.0);
     translationItem.target = controller;
     translationItem.action = @selector(apollo_translationGlobeTapped);
     translationItem.menu = nil;
@@ -2202,12 +2205,21 @@ static void ApolloUpdateTranslationUIForController(id controller) {
         ? @"Translation: showing translated. Tap to show original."
         : [NSString stringWithFormat:@"Translation: showing original. Tap to translate to %@.", targetName];
 
-    if (![items containsObject:translationItem]) {
-        // Apollo's rightBarButtonItems are displayed right-to-left. Adding at
-        // the END places the globe on the LEFT side of the existing pill,
-        // keeping the three-dots / sort controls in their original slots.
-        [items addObject:translationItem];
+    // Pull the globe closer to Apollo's existing nav pill. rightBarButtonItems
+    // are laid out right-to-left, so a negative-width fixed-space placed just
+    // before the globe (one index earlier) shrinks the visual gap between the
+    // globe and the items to its right.
+    UIBarButtonItem *negativeSpacer = objc_getAssociatedObject(controller, kApolloTranslateNegativeSpacerKey);
+    if (!negativeSpacer) {
+        negativeSpacer = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFixedSpace target:nil action:nil];
+        objc_setAssociatedObject(controller, kApolloTranslateNegativeSpacerKey, negativeSpacer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+    negativeSpacer.width = -10.0;
+
+    [items removeObject:translationItem];
+    [items removeObject:negativeSpacer];
+    [items addObject:negativeSpacer];
+    [items addObject:translationItem];
     vc.navigationItem.rightBarButtonItems = items;
 
     ApolloUpdateBannerForController(vc);
