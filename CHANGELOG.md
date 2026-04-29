@@ -5,9 +5,9 @@ All notable changes to this project will be documented in this file.
 ## [v2.5.0] - 2026-04-28
 
 - New bulk translation feature for comment threads and self posts (thanks @icpryde for implementing this feature!)
-    - Enable or configure the feature (auto-translate, target language, provider) in Settings > Translation
-    - Supports both Google and LibreTranslate, with custom LibreTranslate URL and API key
+    - When enabled, loaded comments are translated in-place. Configure in **Settings > Translation**
     - Adds a per-thread globe toggle to switch between translated and original text in comments view
+    - Supports both Google and LibreTranslate, with custom LibreTranslate URL and API key
     - Translations persist in place while voting, collapsing and expanding comments, opening previews, scrolling, and refreshing the thread
     - Preserves links while translated and leaves code or preformatted content untranslated
 
