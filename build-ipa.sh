@@ -3,7 +3,7 @@ set -euo pipefail
 
 IPA_PATH=""
 DEB_PATH=""
-OUTPUT_IPA="Apollo-Translated.ipa"
+OUTPUT_IPA="Apollo-Tweaked.ipa"
 
 usage() {
     echo "Usage: $0 --ipa <Apollo.ipa> [--deb <packages/*.deb>] [-o <output.ipa>]"
@@ -11,12 +11,12 @@ usage() {
     echo "Options:"
     echo "  --ipa <file>      Path to base Apollo IPA (required)"
     echo "  --deb <file>      Path to tweak .deb (default: newest in packages/)"
-    echo "  -o, --output      Output IPA filename (default: Apollo-Translated.ipa)"
+    echo "  -o, --output      Output IPA filename (default: Apollo-Tweaked.ipa)"
     echo "  -h, --help        Show this help"
     echo ""
     echo "Examples:"
     echo "  $0 --ipa ./Apollo.ipa"
-    echo "  $0 --ipa ./Apollo.ipa --deb ./packages/com.jeffreyca.apolloimprovedcustomapi_*.deb -o ./packages/Apollo-Translated.ipa"
+    echo "  $0 --ipa ./Apollo.ipa --deb ./packages/ca.jeffrey.apollo-improvedcustomapi_*.deb -o ./packages/Apollo-Tweaked.ipa"
 }
 
 while [[ $# -gt 0 ]]; do

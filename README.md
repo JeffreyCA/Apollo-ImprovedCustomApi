@@ -121,7 +121,7 @@ make package
 Optional arguments:
 
 ```bash
-./build-ipa.sh --ipa ./Apollo.ipa --deb ./packages/<your_tweak>.deb -o ./packages/Apollo-Translated.ipa
+./build-ipa.sh --ipa ./Apollo.ipa --deb ./packages/<your_tweak>.deb -o ./packages/Apollo-Tweaked.ipa
 ```
 
 Notes:
