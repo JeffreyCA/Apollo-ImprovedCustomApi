@@ -4,6 +4,7 @@
 #import "ApolloCommon.h"
 #import "CustomAPIViewController.h"
 #import "SavedCategoriesViewController.h"
+#import "TranslationSettingsViewController.h"
 
 // MARK: - Settings View Controller (Custom API row injection)
 
@@ -35,7 +36,7 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (section == 1) return 2; // Custom API, Saved Categories
+    if (section == 1) return 3; // Custom API, Saved Categories, Translation
     if (section > 1) return %orig(tableView, section - 1);
     return %orig;
 }
@@ -49,9 +50,12 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
         if (indexPath.row == 0) {
             cell.textLabel.text = @"Custom API";
             cell.imageView.image = createSettingsIcon(@"key.fill", [UIColor systemTealColor]);
-        } else {
+        } else if (indexPath.row == 1) {
             cell.textLabel.text = @"Saved Categories";
             cell.imageView.image = createSettingsIcon(@"bookmark.fill", [UIColor systemOrangeColor]);
+        } else {
+            cell.textLabel.text = @"Translation";
+            cell.imageView.image = createSettingsIcon(@"globe", [UIColor systemIndigoColor]);
         }
         return cell;
     }
@@ -68,8 +72,11 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
         if (indexPath.row == 0) {
             CustomAPIViewController *vc = [[CustomAPIViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
             [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
-        } else {
+        } else if (indexPath.row == 1) {
             SavedCategoriesViewController *vc = [[SavedCategoriesViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+            [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
+        } else {
+            TranslationSettingsViewController *vc = [[TranslationSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
             [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
         }
         return;

@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+- Translation: keep the globe icon green after opening a Reddit/link preview and swiping back when the thread is still visibly translated.
+- Translation: fix v12 translated-mode link preview/card display duplication and stale text-node ownership while preserving the upvote/downvote anti-flash behavior.
+- Translation: preserve visual link display while translated by rebuilding translated attributed strings with base styling and reapplying link attributes only to restored Markdown/bare URL ranges.
+- Translation: stop the original-language flash after upvote/downvote redraws by synchronously swapping Apollo's refreshed original text back to the cached translated attributed text.
+- Translation: preserve exact Markdown link and bare URL strings during translation so URLs do not get localized or rewritten by the translation provider.
+- Translation: fix random crashes when opening a comment thread or tapping Translate / Original (was caused by recursing into weak ivars on partially-deallocated cell nodes; the body-text-node walker now stays inside the ASDisplayNode subnode tree and uses pointer-identity visited tracking).
+- Translation: fix username / upvote count occasionally being overwritten with the translated comment body (now finds the body via well-known ivar names and only writes when the chosen node's text really matches the comment body).
+- Translation: keep the translated text in place after a comment is collapsed and re-expanded, and after the cell is recycled by scrolling away and back (translations now persist by Reddit fullName and re-apply on `cellNodeVisibilityEvent:` / `didEnterDisplayState`).
+- Translation: replace the wide "Translate" / "Original" navigation-bar button with a compact globe icon placed to the left of Apollo's existing right-side controls. The globe is blue while showing original text and green while showing translated text.
+- Translation: move the translation status caption into the visible post header cell near the metadata row. It now shows green "Translated to <language>" in translated mode and blue "Original language" in original/default-language mode.
+- Translation: also translate the post selftext (post body above comments), not just the comment cells. Post lookup now scans header cell and controller ivars so it still works when Apollo stores the `RDKLink` outside the visible cell node.
+- Translation: voting (up/downvote) on a translated comment is more resilient against Apollo redraws. Text-node interception now covers both `ASTextNode` and `ASTextNode2`, with a throttled cell redraw backstop that re-applies cached translations after score / vote-state refreshes.
+- Translation: keep the globe blue until visible text is actually changed by translation. English/default-language threads no longer show a green globe just because auto-translate mode is enabled.
+- Translation: broaden post-body translation again by falling back to the visible body text node when Apollo does not expose matching selftext through `RDKLink.selfText`.
+- Translation: also scan the comments table header view / plain content view wrappers for post body text, covering post layouts where the selftext is not exposed through a visible cell node.
+- Translation: skip comments and post bodies that contain Markdown/HTML code or preformatted blocks so code snippets stay visible and are not replaced by plain translated text.
+- Translation: allow post body translation from visible header text even when Apollo does not expose an `RDKLink` model for that header layout.
+- Translation: add a controller-view fallback that translates the visible selftext node above the first comment when Apollo renders the post body outside the comments table/header node path.
+- Translation: re-apply cached post body translation after pull-to-refresh/layout rebuilds so the body stays translated while comments and the globe remain in translated mode.
+
 ## [v2.4.0] - 2026-04-18
 
 - Add option to proxy Imgur images through DuckDuckGo (Settings > General > Custom API > Media)

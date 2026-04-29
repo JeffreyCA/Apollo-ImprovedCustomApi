@@ -109,6 +109,25 @@ Recommended configuration:
     - **Substitute**: *unchecked*
     - **Sideload Spoofer**: *unchecked*
 
+## Build Injected IPA Locally
+
+You can build the tweak `.deb` and inject it into a stock Apollo IPA using `build-ipa.sh`.
+
+```bash
+make package
+./build-ipa.sh --ipa ./Apollo.ipa
+```
+
+Optional arguments:
+
+```bash
+./build-ipa.sh --ipa ./Apollo.ipa --deb ./packages/<your_tweak>.deb -o ./packages/Apollo-Translated.ipa
+```
+
+Notes:
+- The script expects either `azule` or `cyan` to be installed on your machine.
+- This is a local helper workflow for testing; final signing/sideloading is still done with your preferred signer.
+
 ## Build
 
 **Requirements:**
