@@ -63,6 +63,11 @@ static NSCache<NSString *, NSString *> *sLinkTranslationByFullName;
 // on every visibility / scroll tick for the same comment. Reset whenever
 // the user changes the skip-language list (caches flushed).
 static NSMutableSet<NSString *> *sLoggedSkippedCommentFullNames;
+// Per-session set of post fullNames for which we already emitted the
+// "skipping structured post body" log. Prevents the same per-call flood as
+// above, since the post-body translate path runs on every viewDidAppear
+// retry / cell visibility event. Reset on skip-language changes.
+static NSMutableSet<NSString *> *sLoggedSkippedStructuredPostFullNames;
 // Mirrors of the two persistent caches above. NSCache hides its contents, so
 // we maintain plain NSMutableDictionaries alongside it for snapshot / disk
 // persistence on backgrounding. All writes go through helper macros below.
@@ -291,15 +296,175 @@ static BOOL ApolloHTMLContainsCode(NSString *html) {
            [lower containsString:@"</code"];
 }
 
+// Detects post bodies whose visual structure (markdown tables, headings,
+// many blank-line-separated paragraphs) does not survive a translator round-
+// trip. Our apply path collapses per-range attributes (bold headings,
+// monospace table cells, paragraph spacing) to a single base font, and the
+// translator commonly collapses `\n\n` to single newlines — together those
+// produce illegible output where most visible text disappears and only inline
+// emoji remain. Conservative: when in doubt, treat as structured and skip.
+// Only used for post bodies; comments don't trigger this and continue to
+// translate normally inside structured posts.
+static BOOL ApolloTextLooksLikeStructuredPostBody(NSString *text) {
+    if (![text isKindOfClass:[NSString class]] || text.length == 0) return NO;
+
+    NSArray<NSString *> *lines = [text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    NSCharacterSet *ws = [NSCharacterSet whitespaceCharacterSet];
+
+    NSUInteger pipeRowCount = 0;
+    NSUInteger atxHeadingCount = 0;
+    NSUInteger boldOnlyHeadingCount = 0;
+    BOOL sawTableSeparator = NO;
+
+    NSUInteger scanLimit = MIN(lines.count, (NSUInteger)200);
+    for (NSUInteger i = 0; i < scanLimit; i++) {
+        NSString *line = [lines[i] stringByTrimmingCharactersInSet:ws];
+        if (line.length == 0) continue;
+
+        // Markdown table separator row, e.g. "|---|---|" or "| --- | :---: |"
+        if (!sawTableSeparator && [line hasPrefix:@"|"] && [line hasSuffix:@"|"]) {
+            BOOL onlyDashesAndPipes = YES;
+            for (NSUInteger j = 0; j < line.length; j++) {
+                unichar c = [line characterAtIndex:j];
+                if (c != '|' && c != '-' && c != ':' && c != ' ' && c != '\t') { onlyDashesAndPipes = NO; break; }
+            }
+            if (onlyDashesAndPipes && [line rangeOfString:@"---"].location != NSNotFound) {
+                sawTableSeparator = YES;
+            }
+        }
+
+        // Markdown table content row: starts and ends with `|`.
+        if ([line hasPrefix:@"|"] && [line hasSuffix:@"|"] && line.length >= 3) {
+            pipeRowCount++;
+        }
+
+        // ATX heading: `#`, `##`, ... up to 6.
+        if ([line hasPrefix:@"#"]) {
+            NSUInteger hashCount = 0;
+            while (hashCount < line.length && hashCount < 6 && [line characterAtIndex:hashCount] == '#') hashCount++;
+            if (hashCount > 0 && hashCount < line.length && [line characterAtIndex:hashCount] == ' ') {
+                atxHeadingCount++;
+            }
+        }
+
+        // Bold-only heading lines like "**LINE-UPS**" or "**MATCH STATS**"
+        // — Reddit's post-match thread convention. Whole line wrapped in
+        // `**...**` and no other formatting.
+        if (line.length >= 5 && [line hasPrefix:@"**"] && [line hasSuffix:@"**"]) {
+            NSString *inner = [line substringWithRange:NSMakeRange(2, line.length - 4)];
+            if (inner.length > 0 && [inner rangeOfString:@"**"].location == NSNotFound) {
+                boldOnlyHeadingCount++;
+            }
+        }
+    }
+
+    if (sawTableSeparator) return YES;
+    if (pipeRowCount >= 3) return YES;
+    if (atxHeadingCount >= 1) return YES;
+    if (boldOnlyHeadingCount >= 2) return YES;
+
+    // Heavy paragraph structure: lots of blank-line breaks in a long body.
+    // Translator commonly collapses these and our flat re-render can't
+    // recover the section visuals. Bar lowered after the Shakhtar
+    // post-match thread case showed the visible-text path receives the
+    // rendered output (no `|`/`#`/`**`), so structural-only signals are
+    // gone — only the paragraph-break shape survives.
+    if (text.length >= 200) {
+        NSUInteger blankBreaks = 0;
+        NSRange searchRange = NSMakeRange(0, text.length);
+        while (searchRange.length > 0) {
+            NSRange found = [text rangeOfString:@"\n\n" options:0 range:searchRange];
+            if (found.location == NSNotFound) break;
+            blankBreaks++;
+            NSUInteger next = found.location + found.length;
+            if (next >= text.length) break;
+            searchRange = NSMakeRange(next, text.length - next);
+        }
+        if (blankBreaks >= 3) return YES;
+    }
+
+    // Many "Foo: bar" colon-terminated label lines (Venue:, Referee:,
+    // Manager:, Starting XI:, etc.) is a strong indicator of a structured
+    // post-match / spec-sheet style body even when no markdown survives.
+    NSUInteger labelLineCount = 0;
+    for (NSUInteger i = 0; i < scanLimit; i++) {
+        NSString *line = [lines[i] stringByTrimmingCharactersInSet:ws];
+        if (line.length < 4 || line.length > 80) continue;
+        NSRange colon = [line rangeOfString:@":"];
+        if (colon.location == NSNotFound) continue;
+        // "Word:" or "Word Word:" near start, with content after
+        if (colon.location >= 2 && colon.location <= 30) {
+            labelLineCount++;
+            if (labelLineCount >= 3) return YES;
+        }
+    }
+
+    return NO;
+}
+
 static BOOL ApolloCommentContainsCodeOrPreformatted(RDKComment *comment) {
     if (!comment) return NO;
     return ApolloTextContainsMarkdownCode(comment.body) || ApolloHTMLContainsCode(comment.bodyHTML);
 }
 
+// HTML-side companion to ApolloTextLooksLikeStructuredPostBody. Reddit
+// renders self-post bodies to HTML server-side, and Apollo's ASTextNode
+// pipeline consumes the markdown before our gate sees it — so checking
+// link.selfText / visibleText alone misses tables/headings/HRs whenever
+// the markdown source isn't available locally. The HTML form, however,
+// is reliably populated on RDKLink.selfTextHTML. Cheap case-insensitive
+// substring checks; conservative — any structural tag trips the skip.
+static BOOL ApolloHTMLLooksLikeStructuredPostBody(NSString *html) {
+    if (![html isKindOfClass:[NSString class]] || html.length == 0) return NO;
+    NSStringCompareOptions opts = NSCaseInsensitiveSearch;
+    if ([html rangeOfString:@"<table" options:opts].location != NSNotFound) return YES;
+    if ([html rangeOfString:@"<hr" options:opts].location != NSNotFound) return YES;
+    if ([html rangeOfString:@"<h1" options:opts].location != NSNotFound) return YES;
+    if ([html rangeOfString:@"<h2" options:opts].location != NSNotFound) return YES;
+    if ([html rangeOfString:@"<h3" options:opts].location != NSNotFound) return YES;
+    if ([html rangeOfString:@"<h4" options:opts].location != NSNotFound) return YES;
+    if ([html rangeOfString:@"<h5" options:opts].location != NSNotFound) return YES;
+    if ([html rangeOfString:@"<h6" options:opts].location != NSNotFound) return YES;
+
+    // Many <p> blocks => heavy paragraph structure (matches the >=4
+    // blank-line heuristic used on the markdown side).
+    NSUInteger pCount = 0;
+    NSRange searchRange = NSMakeRange(0, html.length);
+    while (searchRange.length > 0) {
+        NSRange found = [html rangeOfString:@"<p" options:opts range:searchRange];
+        if (found.location == NSNotFound) break;
+        pCount++;
+        if (pCount >= 4) return YES;
+        NSUInteger next = found.location + found.length;
+        if (next >= html.length) break;
+        searchRange = NSMakeRange(next, html.length - next);
+    }
+    return NO;
+}
+
 static BOOL ApolloLinkContainsCodeOrPreformatted(RDKLink *link, NSString *visibleText) {
     return ApolloTextContainsMarkdownCode(link.selfText) ||
            ApolloHTMLContainsCode(link.selfTextHTML) ||
-           ApolloTextContainsMarkdownCode(visibleText);
+           ApolloTextContainsMarkdownCode(visibleText) ||
+           ApolloTextLooksLikeStructuredPostBody(link.selfText) ||
+           ApolloTextLooksLikeStructuredPostBody(visibleText) ||
+           ApolloHTMLLooksLikeStructuredPostBody(link.selfTextHTML);
+}
+
+// One-shot diagnostic helper for post-body skips. The translate path runs
+// on every viewDidAppear retry / cell visibility event, so without a guard
+// the same skip line floods the log dozens of times per post.
+static void ApolloLogPostBodySkipOnce(RDKLink *link, NSString *reason) {
+    NSString *fullName = link.fullName;
+    if (fullName.length == 0) {
+        ApolloLog(@"[Translation] Skipping post body — %@", reason);
+        return;
+    }
+    @synchronized (sLoggedSkippedStructuredPostFullNames) {
+        if ([sLoggedSkippedStructuredPostFullNames containsObject:fullName]) return;
+        [sLoggedSkippedStructuredPostFullNames addObject:fullName];
+    }
+    ApolloLog(@"[Translation] Skipping post body fullName=%@ — %@", fullName, reason);
 }
 
 static BOOL ApolloTranslatedTextDiffersFromSource(NSString *sourceText, NSString *translatedText) {
@@ -2104,6 +2269,30 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *f
     NSString *trimmed = [body stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (trimmed.length == 0) return;  // link/image post — nothing to translate
 
+    // One-shot diagnostic so we can see exactly why a post body did or did
+    // not get gated. Logs once per fullName per session.
+    {
+        NSString *fn = link.fullName ?: @"<no-link>";
+        static NSMutableSet<NSString *> *sLoggedDiag;
+        static dispatch_once_t onceTok;
+        dispatch_once(&onceTok, ^{ sLoggedDiag = [NSMutableSet set]; });
+        BOOL shouldLog = NO;
+        @synchronized (sLoggedDiag) {
+            if (![sLoggedDiag containsObject:fn]) { [sLoggedDiag addObject:fn]; shouldLog = YES; }
+        }
+        if (shouldLog) {
+            BOOL hasLink = (link != nil);
+            NSUInteger selfTextLen = link.selfText.length;
+            NSUInteger selfHTMLLen = link.selfTextHTML.length;
+            NSUInteger trimmedLen = trimmed.length;
+            BOOL textHit = ApolloTextLooksLikeStructuredPostBody(trimmed) || ApolloTextLooksLikeStructuredPostBody(link.selfText);
+            BOOL htmlHit = ApolloHTMLLooksLikeStructuredPostBody(link.selfTextHTML);
+            BOOL codeHit = ApolloTextContainsMarkdownCode(link.selfText) || ApolloHTMLContainsCode(link.selfTextHTML) || ApolloTextContainsMarkdownCode(trimmed);
+            ApolloLog(@"[Translation] post-body diag fn=%@ hasLink=%d selfText=%lu selfHTML=%lu trimmed=%lu textHit=%d htmlHit=%d codeHit=%d",
+                      fn, hasLink, (unsigned long)selfTextLen, (unsigned long)selfHTMLLen, (unsigned long)trimmedLen, textHit, htmlHit, codeHit);
+        }
+    }
+
     if (ApolloLinkContainsCodeOrPreformatted(link, trimmed)) {
         NSString *linkFullName = link.fullName;
         if (linkFullName.length > 0) {
@@ -2111,7 +2300,12 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *f
             ApolloMirrorRemoveLink(linkFullName);
         }
         ApolloRestoreOriginalForHeaderCellNode(headerCellNode, link);
-        ApolloLog(@"[Translation] Skipping post body with code/preformatted content");
+        NSString *reason = (ApolloTextLooksLikeStructuredPostBody(trimmed) ||
+                            ApolloTextLooksLikeStructuredPostBody(link.selfText) ||
+                            ApolloHTMLLooksLikeStructuredPostBody(link.selfTextHTML))
+            ? @"structured content (table / heading / multi-paragraph)"
+            : @"code/preformatted content";
+        ApolloLogPostBodySkipOnce(link, reason);
         return;
     }
 
@@ -2169,7 +2363,11 @@ static void ApolloMaybeTranslateVisiblePostBodyForController(UIViewController *v
     id textNode = ApolloBestVisiblePostBodyTextNodeForController(viewController, tableView, link);
     NSString *sourceText = ApolloVisibleTextFromNode(textNode);
     if (sourceText.length == 0) return;
-    if (ApolloLinkContainsCodeOrPreformatted(link, sourceText)) return;
+    if (ApolloLinkContainsCodeOrPreformatted(link, sourceText)) {
+        // Companion to the header-cell skip just above — same rule, no log
+        // here (header-cell path already logged once for this fullName).
+        return;
+    }
 
     NSString *targetLanguage = ApolloResolvedTargetLanguageCode();
     if (targetLanguage.length == 0) return;
@@ -2397,12 +2595,54 @@ static void ApolloTranslateVisibleCommentsForController(UIViewController *viewCo
     ApolloForceVisibleCommentsTableRelayoutForController(viewController);
 }
 
+// Associated key + helper used to defer the table-level begin/endUpdates pass
+// when the comments table is mid-scroll. Calling [tableView beginUpdates]/
+// [tableView endUpdates] while the table is tracking/dragging/decelerating on
+// iOS 26 collides with UITableView's internal scroll state machine and can
+// leave the table's panGestureRecognizer wedged — the table area stops
+// responding to touches while the back button + bottom toolbar still work.
+// See user-reported "freeze on bottom overscroll with translation on" bug.
+static const void *kApolloTableRelayoutDeferScheduledKey = &kApolloTableRelayoutDeferScheduledKey;
+
+static void ApolloDeferTableRelayoutUntilScrollIdle(UIViewController *viewController, NSUInteger remainingRetries) {
+    if (!viewController) return;
+    if ([objc_getAssociatedObject(viewController, kApolloTableRelayoutDeferScheduledKey) boolValue]) return;
+    objc_setAssociatedObject(viewController, kApolloTableRelayoutDeferScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    __weak UIViewController *weakVC = viewController;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIViewController *strongVC = weakVC;
+        if (!strongVC) return;
+        objc_setAssociatedObject(strongVC, kApolloTableRelayoutDeferScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (!strongVC.isViewLoaded) return;
+
+        UITableView *tableView = GetCommentsTableView(strongVC);
+        if (!tableView) return;
+
+        if (tableView.isTracking || tableView.isDragging || tableView.isDecelerating) {
+            if (remainingRetries > 0) {
+                ApolloDeferTableRelayoutUntilScrollIdle(strongVC, remainingRetries - 1);
+            } else {
+                ApolloLog(@"[Translation] Relayout deferred — gave up after retry budget exhausted");
+            }
+            return;
+        }
+
+        ApolloForceVisibleCommentsTableRelayoutForController(strongVC);
+    });
+}
+
 static void ApolloForceVisibleCommentsTableRelayoutForController(UIViewController *viewController) {
     UITableView *tableView = GetCommentsTableView(viewController);
     if (!tableView) return;
 
+    BOOL tableIsScrolling = tableView.isTracking || tableView.isDragging || tableView.isDecelerating;
+
     @try {
         [UIView performWithoutAnimation:^{
+            // Per-cell layout is always safe — it doesn't touch UITableView's
+            // gesture/scroll state. Visible cells need this to measure
+            // freshly-applied translated text correctly.
             for (UITableViewCell *cell in [tableView visibleCells]) {
                 [cell setNeedsLayout];
                 [cell.contentView setNeedsLayout];
@@ -2413,12 +2653,27 @@ static void ApolloForceVisibleCommentsTableRelayoutForController(UIViewControlle
                     ApolloForceRelayoutForTextNodeAndOwner(cellNode, nil);
                 }
             }
+
+            // Table-level begin/endUpdates is what wedges the pan gesture
+            // when the table is mid-bounce. Defer it until the scroll settles.
+            if (tableIsScrolling) {
+                ApolloLog(@"[Translation] Relayout deferred — table is scrolling (tracking=%d dragging=%d decelerating=%d)",
+                          tableView.isTracking, tableView.isDragging, tableView.isDecelerating);
+                return;
+            }
+
             [tableView beginUpdates];
             [tableView endUpdates];
             [tableView setNeedsLayout];
             [tableView layoutIfNeeded];
         }];
     } @catch (__unused NSException *e) {}
+
+    if (tableIsScrolling) {
+        // Up to 40 retries × 50ms ≈ 2s ceiling — well past any realistic
+        // bounce-back deceleration window.
+        ApolloDeferTableRelayoutUntilScrollIdle(viewController, 40);
+    }
 }
 
 static void ApolloRestoreVisibleCommentsForController(UIViewController *viewController) {
@@ -4396,6 +4651,7 @@ static void ApolloReapplyTranslationOnAppResume(void) {
     sLinkTranslationByFullName = [NSCache new];
     sLinkTranslationByFullName.countLimit = 256;
     sLoggedSkippedCommentFullNames = [NSMutableSet set];
+    sLoggedSkippedStructuredPostFullNames = [NSMutableSet set];
     sCommentTranslationMirror = [NSMutableDictionary dictionary];
     sLinkTranslationMirror = [NSMutableDictionary dictionary];
     sPendingTranslationCallbacks = [NSMutableDictionary dictionary];
@@ -4452,6 +4708,9 @@ static void ApolloReapplyTranslationOnAppResume(void) {
         [sLinkTranslationByFullName removeAllObjects];
         @synchronized (sLoggedSkippedCommentFullNames) {
             [sLoggedSkippedCommentFullNames removeAllObjects];
+        }
+        @synchronized (sLoggedSkippedStructuredPostFullNames) {
+            [sLoggedSkippedStructuredPostFullNames removeAllObjects];
         }
         ApolloLog(@"[Translation] Skip-languages changed; flushed translation caches");
 
