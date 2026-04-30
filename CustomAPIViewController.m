@@ -1,5 +1,6 @@
 #import "CustomAPIViewController.h"
 #import "ApolloCommon.h"
+#import "ApolloState.h"
 #import "UserDefaultConstants.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/runtime.h>
@@ -1253,7 +1254,16 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
     sTranslationTargetLanguage = targetLanguage.length > 0 ? targetLanguage : nil;
 
     NSString *provider = [defaults stringForKey:UDKeyTranslationProvider];
-    sTranslationProvider = ([provider isEqualToString:@"libre"] || [provider isEqualToString:@"google"]) ? provider : @"google";
+    if ([provider isEqualToString:@"libre"]) {
+        sTranslationProvider = @"libre";
+    } else if ([provider isEqualToString:@"google"]) {
+        sTranslationProvider = @"google";
+    } else {
+        // Unset, unrecognized, or legacy "apple" — default to Google.
+        sTranslationProvider = @"google";
+        [defaults setObject:sTranslationProvider forKey:UDKeyTranslationProvider];
+        [defaults setBool:NO forKey:UDKeyTranslationProviderUserSelected];
+    }
 
     NSString *libreURL = [defaults stringForKey:UDKeyLibreTranslateURL];
     sLibreTranslateURL = libreURL.length > 0 ? libreURL : @"https://libretranslate.de/translate";

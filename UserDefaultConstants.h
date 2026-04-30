@@ -22,7 +22,11 @@ static NSString *const UDKeyProxyImgurDDG = @"ProxyImgurDDG";
 // Bulk translation feature
 static NSString *const UDKeyEnableBulkTranslation = @"EnableBulkTranslation";
 static NSString *const UDKeyAutoTranslateOnAppear = @"AutoTranslateOnAppear";
+static NSString *const UDKeyTranslatePostTitles = @"TranslatePostTitles";
 static NSString *const UDKeyTranslationTargetLanguage = @"TranslationTargetLanguage";
 static NSString *const UDKeyTranslationProvider = @"TranslationProvider"; // google | libre
+static NSString *const UDKeyTranslationProviderUserSelected = @"TranslationProviderUserSelected";
 static NSString *const UDKeyLibreTranslateURL = @"LibreTranslateURL";
 static NSString *const UDKeyLibreTranslateAPIKey = @"LibreTranslateAPIKey";
+// Array<String> of 2-letter language codes to leave untranslated (detected source language).
+static NSString *const UDKeyTranslationSkipLanguages = @"TranslationSkipLanguages";

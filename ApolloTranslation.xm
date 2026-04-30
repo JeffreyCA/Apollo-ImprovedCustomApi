@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <NaturalLanguage/NaturalLanguage.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #include <dlfcn.h>
@@ -27,6 +28,16 @@ static const void *kApolloTranslationOwnedTextNodeKey = &kApolloTranslationOwned
 static const void *kApolloOwnedNodeOriginalBodyKey = &kApolloOwnedNodeOriginalBodyKey;
 static const void *kApolloOwnedNodeTranslatedTextKey = &kApolloOwnedNodeTranslatedTextKey;
 static const void *kApolloOwnedNodeReentrancyKey = &kApolloOwnedNodeReentrancyKey;
+// Marker for title text nodes. Title nodes live outside the comments view
+// controller (feeds, search, profiles) so they must bypass the
+// `ApolloControllerIsInTranslatedMode` check used by the comment-thread
+// ownership system. Set in addition to kApolloTranslationOwnedTextNodeKey.
+static const void *kApolloTitleOwnedTextNodeKey = &kApolloTitleOwnedTextNodeKey;
+// Marks a UIViewController as a feed-style VC (Posts/LitePosts/SearchResults).
+// The globe-installation code uses this to gate visibility on
+// sTranslatePostTitles in addition to sEnableBulkTranslation.
+static const void *kApolloFeedTranslationVCKey = &kApolloFeedTranslationVCKey;
+static const void *kApolloFeedSettledTitleRefreshScheduledKey = &kApolloFeedSettledTitleRefreshScheduledKey;
 static const void *kApolloReapplyScheduledKey = &kApolloReapplyScheduledKey;
 // Phase B — status banner above comments.
 static const void *kApolloTranslationBannerKey = &kApolloTranslationBannerKey;
@@ -35,6 +46,10 @@ static const void *kApolloAppliedHeaderTranslationFullNameKey = &kApolloAppliedH
 static const void *kApolloHeaderTranslatedTextNodeKey = &kApolloHeaderTranslatedTextNodeKey;
 static const void *kApolloHeaderCellTranslationKeyKey = &kApolloHeaderCellTranslationKeyKey;
 static const void *kApolloPostBodyReapplyScheduledKey = &kApolloPostBodyReapplyScheduledKey;
+// Per-VC monotonic counter bumped in viewWillDisappear:. Pending toggle
+// reconciles capture this at scheduling time and bail out if it changed,
+// so we don't run multi-pass restore work mid swipe-back.
+static const void *kApolloReconcileGenerationKey = &kApolloReconcileGenerationKey;
 
 static NSString *const kApolloDefaultLibreTranslateURL = @"https://libretranslate.de/translate";
 
@@ -43,11 +58,54 @@ static NSCache<NSString *, NSString *> *sTranslationCache;
 static NSCache<NSString *, NSString *> *sCommentTranslationByFullName;
 // fullName ("t3_xxxxx") -> translated post selftext. Same idea, for posts.
 static NSCache<NSString *, NSString *> *sLinkTranslationByFullName;
+// Per-session set of comment fullNames for which we already emitted the
+// "detected language matches target" skip log. Prevents the log from firing
+// on every visibility / scroll tick for the same comment. Reset whenever
+// the user changes the skip-language list (caches flushed).
+static NSMutableSet<NSString *> *sLoggedSkippedCommentFullNames;
+// Mirrors of the two persistent caches above. NSCache hides its contents, so
+// we maintain plain NSMutableDictionaries alongside it for snapshot / disk
+// persistence on backgrounding. All writes go through helper macros below.
+static NSMutableDictionary<NSString *, NSString *> *sCommentTranslationMirror = nil;
+static NSMutableDictionary<NSString *, NSString *> *sLinkTranslationMirror = nil;
+static inline void ApolloMirrorSetComment(NSString *key, NSString *value) {
+    if (!key || !value) return;
+    @synchronized (sCommentTranslationMirror) { sCommentTranslationMirror[key] = value; }
+}
+static inline void ApolloMirrorRemoveComment(NSString *key) {
+    if (!key) return;
+    @synchronized (sCommentTranslationMirror) { [sCommentTranslationMirror removeObjectForKey:key]; }
+}
+static inline void ApolloMirrorSetLink(NSString *key, NSString *value) {
+    if (!key || !value) return;
+    @synchronized (sLinkTranslationMirror) { sLinkTranslationMirror[key] = value; }
+}
+static inline void ApolloMirrorRemoveLink(NSString *key) {
+    if (!key) return;
+    @synchronized (sLinkTranslationMirror) { [sLinkTranslationMirror removeObjectForKey:key]; }
+}
 static NSMutableDictionary<NSString *, NSMutableArray *> *sPendingTranslationCallbacks;
 static __weak UIViewController *sVisibleCommentsViewController = nil;
+// Weak set of every text node we've stamped with the ownership marker. Lets
+// us walk *all* off-screen / preloaded text nodes on toggle-off, instead of
+// only those whose UITableViewCells happen to be in `visibleCells`.
+static NSHashTable<id> *sOwnedTextNodes = nil;
+static dispatch_queue_t sOwnedTextNodesQueue = NULL;
+static BOOL sPendingVisibleFeedTitleApplied = NO;
+static NSMutableDictionary<NSString *, NSNumber *> *sFeedTitleModeByFeedKey = nil;
+static BOOL sLastFeedTitleModeKnown = NO;
+static BOOL sLastFeedTitleTranslatedMode = YES;
+static __weak UIViewController *sLastInstalledFeedViewController = nil;
 
 static void ApolloUpdateTranslationUIForController(id controller);
 static RDKComment *ApolloCommentFromCellNode(id commentCellNode);
+static void ApolloRegisterOwnedTextNode(id textNode);
+static void ApolloRestoreAllOwnedTextNodes(void);
+static void ApolloRescanTitleNodesForController(UIViewController *vc);
+static UIViewController *ApolloEnclosingViewControllerForNode(id node);
+static BOOL ApolloControllerIsInTranslatedMode(UIViewController *vc);
+static BOOL ApolloRefreshVisibleTranslationAppliedForController(UIViewController *vc);
+static BOOL ApolloRefreshFeedTitleTranslationAppliedForController(UIViewController *vc);
 
 // Returns the Reddit fullName ("t1_xxxxx") for a comment. Falls back to a
 // stable derived key when the runtime doesn't expose `name` / `fullName`.
@@ -254,8 +312,73 @@ static void ApolloMarkVisibleTranslationApplied(NSString *sourceText, NSString *
     if (!ApolloTranslatedTextDiffersFromSource(sourceText, translatedText)) return;
     UIViewController *vc = sVisibleCommentsViewController;
     if (!vc) return;
+    if (!ApolloControllerIsInTranslatedMode(vc)) return;
     objc_setAssociatedObject(vc, kApolloVisibleTranslationAppliedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloUpdateTranslationUIForController(vc);
+}
+
+// Mark a specific (non-comments) controller as having visible translated
+// content so its globe icon turns green. Used by the feed/title path where
+// `sVisibleCommentsViewController` is nil.
+//
+// Strategy (after multiple failed attempts at responder-chain walks): just
+// find the topmost visible feed VC in the key window that we've installed
+// the globe on. The user is only ever looking at one feed at a time, so the
+// "right" target is always the visible one. This avoids all the parent /
+// child / nav-stack indirection that fails on Home (where the title node's
+// responder chain doesn't reach the marked feed VC).
+static UIViewController *ApolloFindTopmostVisibleFeedVC(void) {
+    UIWindow *keyWindow = nil;
+    for (UIWindowScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        if (scene.activationState != UISceneActivationStateForegroundActive) continue;
+        for (UIWindow *w in scene.windows) {
+            if (w.isKeyWindow) { keyWindow = w; break; }
+        }
+        if (keyWindow) break;
+    }
+    if (!keyWindow) return nil;
+
+    // BFS from the root, return the deepest VC marked with the feed key
+    // that is currently visible (view in window, not hidden).
+    NSMutableArray<UIViewController *> *queue = [NSMutableArray array];
+    UIViewController *root = keyWindow.rootViewController;
+    if (root) [queue addObject:root];
+    UIViewController *bestMatch = nil;
+    NSUInteger guard = 0;
+    while (queue.count > 0 && guard++ < 256) {
+        UIViewController *vc = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if ([objc_getAssociatedObject(vc, kApolloFeedTranslationVCKey) boolValue]) {
+            if (vc.isViewLoaded && vc.view.window == keyWindow && !vc.view.hidden) {
+                bestMatch = vc;  // Keep walking; deeper match wins.
+            }
+        }
+        for (UIViewController *child in vc.childViewControllers) [queue addObject:child];
+        if (vc.presentedViewController) [queue addObject:vc.presentedViewController];
+    }
+    return bestMatch;
+}
+
+static void ApolloMarkVisibleFeedTitleApplied(NSString *sourceText, NSString *translatedText) {
+    if (!ApolloTranslatedTextDiffersFromSource(sourceText, translatedText)) return;
+
+    UIViewController *feedVC = ApolloFindTopmostVisibleFeedVC();
+    if (!feedVC) feedVC = sLastInstalledFeedViewController;
+    if (feedVC && [objc_getAssociatedObject(feedVC, kApolloFeedTranslationVCKey) boolValue] && ApolloControllerIsInTranslatedMode(feedVC)) {
+        // Only log on the NO->YES transition; otherwise this fires per
+        // translated title (many per scroll) and floods the log.
+        BOOL wasApplied = [objc_getAssociatedObject(feedVC, kApolloVisibleTranslationAppliedKey) boolValue];
+        objc_setAssociatedObject(feedVC, kApolloVisibleTranslationAppliedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloUpdateTranslationUIForController(feedVC);
+        sPendingVisibleFeedTitleApplied = NO;
+        if (!wasApplied) {
+            ApolloLog(@"[Translation] MarkFeedTitleApplied direct class=%@ ptr=%p", NSStringFromClass([feedVC class]), feedVC);
+        }
+        return;
+    }
+
+    sPendingVisibleFeedTitleApplied = YES;
 }
 
 static void ApolloClearVisibleTranslationApplied(UIViewController *vc) {
@@ -263,13 +386,32 @@ static void ApolloClearVisibleTranslationApplied(UIViewController *vc) {
     objc_setAssociatedObject(vc, kApolloVisibleTranslationAppliedKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
-static NSString *ApolloDetectDominantLanguage(NSString *text) {
-    if (![text isKindOfClass:[NSString class]] || text.length < 12) return nil;
+static BOOL ApolloRefreshFeedTranslationStateForController(UIViewController *vc) {
+    if (!vc) return NO;
+    if (![objc_getAssociatedObject(vc, kApolloFeedTranslationVCKey) boolValue]) {
+        return ApolloRefreshVisibleTranslationAppliedForController(vc);
+    }
 
-    NSLinguisticTagger *tagger = [[NSLinguisticTagger alloc] initWithTagSchemes:@[NSLinguisticTagSchemeLanguage] options:0];
-    tagger.string = text;
-    NSString *language = [tagger dominantLanguage];
-    return ApolloNormalizeLanguageCode(language);
+    if (!sEnableBulkTranslation || !sTranslatePostTitles || !ApolloControllerIsInTranslatedMode(vc)) {
+        ApolloClearVisibleTranslationApplied(vc);
+        ApolloUpdateTranslationUIForController(vc);
+        return NO;
+    }
+
+    BOOL applied = ApolloRefreshVisibleTranslationAppliedForController(vc);
+    if (!applied) applied = ApolloRefreshFeedTitleTranslationAppliedForController(vc);
+    ApolloUpdateTranslationUIForController(vc);
+    return applied;
+}
+
+static void ApolloScheduleFeedTranslationStateRefresh(UIViewController *vc, NSTimeInterval delay) {
+    if (!vc) return;
+    __weak UIViewController *weakVC = vc;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIViewController *strongVC = weakVC;
+        if (!strongVC || !strongVC.isViewLoaded || !strongVC.view.window) return;
+        ApolloRefreshFeedTranslationStateForController(strongVC);
+    });
 }
 
 static NSString *ApolloTranslationCacheKey(NSString *text, NSString *targetLanguage) {
@@ -820,8 +962,70 @@ static id ApolloBestCommentTextNode(id commentCellNode, RDKComment *comment) {
     return bestNode;
 }
 
+static void ApolloForceRelayoutForTextNodeAndOwner(id owner, id textNode) {
+    SEL invalidateSel = NSSelectorFromString(@"invalidateCalculatedLayout");
+    SEL supernodeSel = NSSelectorFromString(@"supernode");
+    SEL transitionSel = NSSelectorFromString(@"transitionLayoutWithAnimation:shouldMeasureAsync:measurementCompletion:");
+
+    void (^nudgeObject)(id) = ^(id object) {
+        if (!object) return;
+        @try {
+            if ([object respondsToSelector:invalidateSel]) {
+                ((void (*)(id, SEL))objc_msgSend)(object, invalidateSel);
+            }
+            if ([object respondsToSelector:@selector(setNeedsLayout)]) {
+                ((void (*)(id, SEL))objc_msgSend)(object, @selector(setNeedsLayout));
+            }
+            if ([object respondsToSelector:@selector(setNeedsDisplay)]) {
+                ((void (*)(id, SEL))objc_msgSend)(object, @selector(setNeedsDisplay));
+            }
+            if ([object isKindOfClass:[UIView class]]) {
+                UIView *view = (UIView *)object;
+                [view setNeedsLayout];
+                [view layoutIfNeeded];
+            }
+        } @catch (__unused NSException *e) {}
+    };
+
+    nudgeObject(textNode);
+    nudgeObject(owner);
+
+    id current = textNode;
+    id cellNode = nil;
+    for (int hops = 0; current && hops < 8; hops++) {
+        nudgeObject(current);
+        const char *className = class_getName([current class]);
+        if (!cellNode && className && strstr(className, "CellNode")) {
+            cellNode = current;
+        }
+        if (![current respondsToSelector:supernodeSel]) break;
+        @try { current = ((id (*)(id, SEL))objc_msgSend)(current, supernodeSel); }
+        @catch (__unused NSException *e) { break; }
+    }
+    if (!cellNode) cellNode = owner;
+
+    @try {
+        if ([cellNode respondsToSelector:transitionSel]) {
+            NSMethodSignature *sig = [cellNode methodSignatureForSelector:transitionSel];
+            if (sig) {
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                inv.target = cellNode;
+                inv.selector = transitionSel;
+                BOOL animated = NO;
+                BOOL async = NO;
+                void (^completion)(void) = nil;
+                [inv setArgument:&animated atIndex:2];
+                [inv setArgument:&async atIndex:3];
+                [inv setArgument:&completion atIndex:4];
+                [inv invoke];
+            }
+        }
+    } @catch (__unused NSException *e) {}
+}
+
 static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *comment, NSString *translatedText) {
     if (!commentCellNode || ![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return;
+    if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
 
     id textNode = ApolloBestCommentTextNode(commentCellNode, comment);
     if (!textNode) return;
@@ -867,6 +1071,7 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [comment.body copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloRegisterOwnedTextNode(textNode);
 
     @try {
         ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), translatedAttr);
@@ -880,6 +1085,7 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     if ([textNode respondsToSelector:@selector(setNeedsDisplay)]) {
         ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsDisplay));
     }
+    ApolloForceRelayoutForTextNodeAndOwner(commentCellNode, textNode);
 
     objc_setAssociatedObject(commentCellNode, kApolloTranslatedTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
@@ -888,6 +1094,7 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     NSString *fullName = ApolloCommentFullName(comment);
     if (fullName.length > 0) {
         [sCommentTranslationByFullName setObject:translatedText forKey:fullName];
+        ApolloMirrorSetComment(fullName, translatedText);
         objc_setAssociatedObject(commentCellNode, kApolloAppliedTranslationFullNameKey, fullName, OBJC_ASSOCIATION_COPY_NONATOMIC);
     }
     ApolloMarkVisibleTranslationApplied(comment.body, translatedText);
@@ -896,11 +1103,18 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
 static void ApolloRestoreOriginalForCellNode(id commentCellNode, RDKComment *comment) {
     if (!commentCellNode) return;
 
-    id textNode = objc_getAssociatedObject(commentCellNode, kApolloTranslatedTextNodeKey);
-    if (!textNode) {
-        textNode = ApolloBestCommentTextNode(commentCellNode, comment);
-    }
+    id currentBodyNode = ApolloBestCommentTextNode(commentCellNode, comment);
+    id associatedNode = objc_getAssociatedObject(commentCellNode, kApolloTranslatedTextNodeKey);
+    id textNode = currentBodyNode ?: associatedNode;
     if (!textNode) return;
+
+    // Capture the cached translated body BEFORE clearing ownership keys, so
+    // we can decide below whether the textNode actually still shows our
+    // translation (safe to write saved-original) or has been reused for a
+    // different comment (must NOT overwrite — the saved original would be
+    // stale and would clobber the new comment's correct text).
+    NSString *cachedTranslatedBody = objc_getAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey);
+    NSString *cachedOriginalBody = objc_getAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey);
 
     // Drop ownership BEFORE writing original text back, otherwise the vote-
     // resilience hook would swap the original right back to translated.
@@ -908,8 +1122,48 @@ static void ApolloRestoreOriginalForCellNode(id commentCellNode, RDKComment *com
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
 
+    // Reuse-safety gate: only write the saved-original if the textNode
+    // currently shows our cached translated body (i.e. the textNode really
+    // is still displaying our stale translation). If the textNode has been
+    // reused for a different comment, leave Apollo's freshly-rendered text
+    // alone — clearing the ownership keys above is enough to prevent the
+    // global setAttributedText hook from re-translating it.
+    NSAttributedString *currentAttr = nil;
+    @try {
+        currentAttr = ((id (*)(id, SEL))objc_msgSend)(textNode, @selector(attributedText));
+    } @catch (__unused NSException *e) {
+        return;
+    }
+    if (![currentAttr isKindOfClass:[NSAttributedString class]]) return;
+
     NSAttributedString *original = objc_getAssociatedObject(textNode, kApolloOriginalAttributedTextKey);
-    if (![original isKindOfClass:[NSAttributedString class]]) return;
+    BOOL originalFromCommentModel = NO;
+    if (![original isKindOfClass:[NSAttributedString class]]) {
+        NSString *modelBody = [comment.body stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (modelBody.length == 0) return;
+        original = ApolloTranslatedAttributedStringPreservingVisualLinks(currentAttr, modelBody);
+        originalFromCommentModel = [original isKindOfClass:[NSAttributedString class]];
+        if (!originalFromCommentModel) return;
+    }
+    NSString *currentText = [currentAttr isKindOfClass:[NSAttributedString class]] ? currentAttr.string : nil;
+    BOOL displaysOurTranslation = NO;
+    if ([cachedTranslatedBody isKindOfClass:[NSString class]] && cachedTranslatedBody.length > 0 && currentText.length > 0) {
+        displaysOurTranslation = ApolloTextQualifiesAsBodyCandidate(currentText, cachedTranslatedBody);
+    }
+    // Also accept the case where the current text already matches the saved
+    // original (idempotent restore — will be a no-op write but harmless).
+    BOOL displaysSavedOriginal = NO;
+    if (!displaysOurTranslation && [cachedOriginalBody isKindOfClass:[NSString class]] && cachedOriginalBody.length > 0 && currentText.length > 0) {
+        displaysSavedOriginal = ApolloTextQualifiesAsBodyCandidate(currentText, cachedOriginalBody);
+    }
+    BOOL shouldForceModelOriginal = NO;
+    if (!displaysOurTranslation && !displaysSavedOriginal && originalFromCommentModel && currentText.length > 0) {
+        shouldForceModelOriginal = !ApolloTextQualifiesAsBodyCandidate(currentText, comment.body);
+    }
+    if (!displaysOurTranslation && !displaysSavedOriginal && !shouldForceModelOriginal) {
+        ApolloLog(@"[Translation] Restore skipped: textNode no longer shows our translation (likely reused)");
+        return;
+    }
 
     @try {
         ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), original);
@@ -923,6 +1177,7 @@ static void ApolloRestoreOriginalForCellNode(id commentCellNode, RDKComment *com
     if ([textNode respondsToSelector:@selector(setNeedsDisplay)]) {
         ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsDisplay));
     }
+    ApolloForceRelayoutForTextNodeAndOwner(commentCellNode, textNode);
 
     objc_setAssociatedObject(commentCellNode, kApolloAppliedTranslationFullNameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
 }
@@ -1238,6 +1493,7 @@ static id ApolloBestPostBodyTextNode(id headerCellNode, RDKLink *link, NSString 
 static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *link, NSString *sourceText, NSString *translatedText) {
     if (!headerCellNode) return;
     if (![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return;
+    if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
     NSString *body = sourceText.length > 0 ? sourceText : ApolloPostBodyTextFromLink(link);
     if (![body isKindOfClass:[NSString class]] || body.length == 0) return;
 
@@ -1274,6 +1530,7 @@ static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *l
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [body copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloRegisterOwnedTextNode(textNode);
 
     @try { ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), translatedAttr); }
     @catch (__unused NSException *e) { return; }
@@ -1290,6 +1547,7 @@ static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *l
     NSString *fullName = link.fullName;
     if (fullName.length > 0) {
         [sLinkTranslationByFullName setObject:translatedText forKey:fullName];
+        ApolloMirrorSetLink(fullName, translatedText);
         objc_setAssociatedObject(headerCellNode, kApolloAppliedHeaderTranslationFullNameKey, fullName, OBJC_ASSOCIATION_COPY_NONATOMIC);
     }
     ApolloMarkVisibleTranslationApplied(body, translatedText);
@@ -1299,6 +1557,7 @@ static void ApolloApplyTranslationToPostTextNode(id owner, id textNode, NSString
     if (!owner || !textNode) return;
     if (![sourceText isKindOfClass:[NSString class]] || sourceText.length == 0) return;
     if (![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return;
+    if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
 
     NSAttributedString *current = nil;
     @try { current = ((id (*)(id, SEL))objc_msgSend)(textNode, @selector(attributedText)); }
@@ -1328,6 +1587,7 @@ static void ApolloApplyTranslationToPostTextNode(id owner, id textNode, NSString
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [sourceText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloRegisterOwnedTextNode(textNode);
 
     @try { ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), translatedAttr); }
     @catch (__unused NSException *e) { return; }
@@ -1536,33 +1796,94 @@ static void ApolloTranslateViaLibre(NSString *text,
     [task resume];
 }
 
+static NSString *ApolloDetectDominantLanguage(NSString *text) {
+    if (![text isKindOfClass:[NSString class]]) return nil;
+    NSString *trimmed = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    // Short strings produce unreliable detections ("lol", "wow", etc.). Skip them.
+    if (trimmed.length < 8) return nil;
+    if (@available(iOS 12.0, *)) {
+        NLLanguageRecognizer *recognizer = [[NLLanguageRecognizer alloc] init];
+        [recognizer processString:trimmed];
+        NSDictionary<NLLanguage, NSNumber *> *hyps = [recognizer languageHypothesesWithMaximum:1];
+        NSString *dominant = nil;
+        double bestProb = 0.0;
+        for (NLLanguage lang in hyps) {
+            double p = hyps[lang].doubleValue;
+            if (p > bestProb) { bestProb = p; dominant = (NSString *)lang; }
+        }
+        // Require reasonable confidence so we don't accidentally skip ambiguous text.
+        if (bestProb < 0.55 || dominant.length == 0) return nil;
+        return ApolloNormalizeLanguageCode(dominant);
+    }
+    return nil;
+}
+
+// Returns YES if the user has asked us not to translate text in `detectedLang`.
+// We intentionally do NOT short-circuit when detected == target: many comments are
+// mixed-language (e.g. mostly English with embedded Japanese), and NLLanguageRecognizer
+// will return only the dominant language. Letting the provider see the full text means
+// the embedded foreign chunks still get translated.
+static BOOL ApolloShouldSkipTranslationForText(NSString *text, NSString *targetLanguage) {
+    (void)targetLanguage;
+    NSArray<NSString *> *skip = sTranslationSkipLanguages;
+    if (![skip isKindOfClass:[NSArray class]] || skip.count == 0) return NO;
+
+    NSString *detected = ApolloDetectDominantLanguage(text);
+    if (detected.length == 0) return NO;
+
+    for (NSString *code in skip) {
+        if (![code isKindOfClass:[NSString class]]) continue;
+        if ([code.lowercaseString isEqualToString:detected]) return YES;
+    }
+    return NO;
+}
+
 static void ApolloTranslateTextWithFallback(NSString *text,
                                             NSString *targetLanguage,
                                             void (^completion)(NSString *translated, NSError *error)) {
-    NSString *primaryProvider = [sTranslationProvider isEqualToString:@"libre"] ? @"libre" : @"google";
-    BOOL googlePrimary = [primaryProvider isEqualToString:@"google"];
+    // User-controlled skip: if the source language is in the skip list, or already
+    // matches the target, return the original text untouched. Downstream callers
+    // treat this as a successful no-op (cache will store source==translation,
+    // making future hits instant).
+    if (ApolloShouldSkipTranslationForText(text, targetLanguage)) {
+        if (completion) {
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(text, nil); });
+        }
+        return;
+    }
 
+    // Provider can be: "google" or "libre". Anything unrecognized defaults to Google.
+    // Primary = user's choice; fallback = the other one.
+    NSString *primaryProvider = sTranslationProvider;
+    if (![primaryProvider isEqualToString:@"libre"] &&
+        ![primaryProvider isEqualToString:@"google"]) {
+        primaryProvider = @"google";
+    }
+
+    void (^callPrimary)(void (^)(NSString *, NSError *)) = ^(void (^cb)(NSString *, NSError *)) {
+        if ([primaryProvider isEqualToString:@"libre"]) {
+            ApolloTranslateViaLibre(text, targetLanguage, cb);
+        } else {
+            ApolloTranslateViaGoogle(text, targetLanguage, cb);
+        }
+    };
+
+    // If the primary provider fails, fall back to the other one.
     void (^fallback)(void) = ^{
-        if (googlePrimary) {
+        if ([primaryProvider isEqualToString:@"google"]) {
             ApolloTranslateViaLibre(text, targetLanguage, completion);
         } else {
             ApolloTranslateViaGoogle(text, targetLanguage, completion);
         }
     };
 
-    void (^primaryCompletion)(NSString *, NSError *) = ^(NSString *translated, NSError *error) {
+    callPrimary(^(NSString *translated, NSError *error) {
         if ([translated isKindOfClass:[NSString class]] && translated.length > 0) {
             completion(translated, nil);
             return;
         }
         fallback();
-    };
-
-    if (googlePrimary) {
-        ApolloTranslateViaGoogle(text, targetLanguage, primaryCompletion);
-    } else {
-        ApolloTranslateViaLibre(text, targetLanguage, primaryCompletion);
-    }
+    });
 }
 
 static void ApolloRequestTranslation(NSString *cacheKey,
@@ -1639,6 +1960,7 @@ static void ApolloMaybeTranslateCommentCellNode(id commentCellNode, BOOL forceTr
     if (ApolloCommentContainsCodeOrPreformatted(comment)) {
         if (fullName.length > 0) {
             [sCommentTranslationByFullName removeObjectForKey:fullName];
+            ApolloMirrorRemoveComment(fullName);
         }
         ApolloRestoreOriginalForCellNode(commentCellNode, comment);
         ApolloLog(@"[Translation] Skipping comment with code/preformatted content");
@@ -1657,8 +1979,31 @@ static void ApolloMaybeTranslateCommentCellNode(id commentCellNode, BOOL forceTr
     }
 
     if (!forceTranslation) {
-        NSString *detected = ApolloDetectDominantLanguage(sourceText);
+        // Detect on link-stripped text so URLs / markdown link targets don't
+        // pollute the signal. A comment like "[title](https://record.pt/...)
+        // body in Portuguese" would otherwise feed NLLanguageRecognizer a
+        // big chunk of URL path that can pull detection toward English /
+        // generic and skip translation.
+        NSString *detectionText = ApolloProtectTranslationLinks(sourceText, NULL);
+        NSString *detected = ApolloDetectDominantLanguage(detectionText);
         if ([detected isEqualToString:targetLanguage]) {
+            // Log only once per fullName per session — this path is hit on
+            // every visibility / scroll tick for the same cell otherwise.
+            NSString *logKey = fullName.length > 0 ? fullName : nil;
+            BOOL shouldLog = YES;
+            if (logKey) {
+                @synchronized (sLoggedSkippedCommentFullNames) {
+                    if ([sLoggedSkippedCommentFullNames containsObject:logKey]) {
+                        shouldLog = NO;
+                    } else {
+                        [sLoggedSkippedCommentFullNames addObject:logKey];
+                    }
+                }
+            }
+            if (shouldLog) {
+                ApolloLog(@"[Translation] Skipping comment fullName=%@ — detected language matches target (%@)",
+                          logKey ?: @"(none)", targetLanguage);
+            }
             return;
         }
     }
@@ -1674,6 +2019,7 @@ static void ApolloMaybeTranslateCommentCellNode(id commentCellNode, BOOL forceTr
             // re-displayed cell for this comment picks it up instantly.
             if ([translated isKindOfClass:[NSString class]] && translated.length > 0 && fullName.length > 0) {
                 [sCommentTranslationByFullName setObject:translated forKey:fullName];
+                ApolloMirrorSetComment(fullName, translated);
             }
             return;
         }
@@ -1692,6 +2038,7 @@ static void ApolloMaybeTranslateCommentCellNode(id commentCellNode, BOOL forceTr
         // it, so a future re-display gets it for free.
         if (fullName.length > 0) {
             [sCommentTranslationByFullName setObject:translated forKey:fullName];
+            ApolloMirrorSetComment(fullName, translated);
         }
 
         if (!forceTranslation && !ApolloShouldTranslateNow(NO)) return;
@@ -1761,6 +2108,7 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *f
         NSString *linkFullName = link.fullName;
         if (linkFullName.length > 0) {
             [sLinkTranslationByFullName removeObjectForKey:linkFullName];
+            ApolloMirrorRemoveLink(linkFullName);
         }
         ApolloRestoreOriginalForHeaderCellNode(headerCellNode, link);
         ApolloLog(@"[Translation] Skipping post body with code/preformatted content");
@@ -1782,7 +2130,9 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *f
     }
 
     if (!forceTranslation) {
-        NSString *detected = ApolloDetectDominantLanguage(trimmed);
+        // Strip links so URLs don't pollute language detection.
+        NSString *detectionText = ApolloProtectTranslationLinks(trimmed, NULL);
+        NSString *detected = ApolloDetectDominantLanguage(detectionText);
         if ([detected isEqualToString:targetLanguage]) return;
     }
 
@@ -1798,6 +2148,7 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *f
         }
         if (cacheStoreKey.length > 0) {
             [sLinkTranslationByFullName setObject:translated forKey:cacheStoreKey];
+            ApolloMirrorSetLink(cacheStoreKey, translated);
         }
         if (!strongHeader) return;
         NSString *currentKey = objc_getAssociatedObject(strongHeader, kApolloHeaderCellTranslationKeyKey);
@@ -1833,7 +2184,9 @@ static void ApolloMaybeTranslateVisiblePostBodyForController(UIViewController *v
     }
 
     if (!forceTranslation) {
-        NSString *detected = ApolloDetectDominantLanguage(sourceText);
+        // Strip links so URLs don't pollute language detection.
+        NSString *detectionText = ApolloProtectTranslationLinks(sourceText, NULL);
+        NSString *detected = ApolloDetectDominantLanguage(detectionText);
         if ([detected isEqualToString:targetLanguage]) return;
     }
 
@@ -1855,6 +2208,7 @@ static void ApolloMaybeTranslateVisiblePostBodyForController(UIViewController *v
 
         if (cacheStoreKey.length > 0) {
             [sLinkTranslationByFullName setObject:translated forKey:cacheStoreKey];
+            ApolloMirrorSetLink(cacheStoreKey, translated);
         }
         ApolloApplyTranslationToPostTextNode(strongVC.view, strongTextNode, sourceText, translated);
     });
@@ -1907,6 +2261,119 @@ static void ApolloSchedulePostBodyReapplyForController(UIViewController *viewCon
     });
 }
 
+static void ApolloReapplyCommentCellNodesInTree(id object, NSInteger depth, NSHashTable *visited, BOOL forceTranslation) {
+    if (!object || depth < 0) return;
+    if (visited.count >= 2048) return;
+    if ([visited containsObject:object]) return;
+    [visited addObject:object];
+
+    Class displayNodeCls = NSClassFromString(@"ASDisplayNode");
+    BOOL isDisplayNode = displayNodeCls && [object isKindOfClass:displayNodeCls];
+    BOOL isView = [object isKindOfClass:[UIView class]];
+    if (!isDisplayNode && !isView) return;
+
+    if (isDisplayNode) {
+        RDKComment *comment = ApolloCommentFromCellNode(object);
+        if (comment) {
+            if (!ApolloReapplyCachedTranslationForCellNode(object)) {
+                ApolloMaybeTranslateCommentCellNode(object, forceTranslation);
+            }
+        }
+    }
+
+    @try {
+        SEL nodeSelectors[] = { NSSelectorFromString(@"asyncdisplaykit_node"), NSSelectorFromString(@"node") };
+        for (size_t i = 0; i < sizeof(nodeSelectors) / sizeof(nodeSelectors[0]); i++) {
+            SEL selector = nodeSelectors[i];
+            if (![object respondsToSelector:selector]) continue;
+            id node = ((id (*)(id, SEL))objc_msgSend)(object, selector);
+            if (node && node != object) ApolloReapplyCommentCellNodesInTree(node, depth - 1, visited, forceTranslation);
+        }
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        SEL subnodesSel = NSSelectorFromString(@"subnodes");
+        if ([object respondsToSelector:subnodesSel]) {
+            NSArray *subnodes = ((id (*)(id, SEL))objc_msgSend)(object, subnodesSel);
+            if ([subnodes isKindOfClass:[NSArray class]]) {
+                for (id subnode in subnodes) ApolloReapplyCommentCellNodesInTree(subnode, depth - 1, visited, forceTranslation);
+            }
+        }
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        if ([object respondsToSelector:@selector(subviews)]) {
+            NSArray *subviews = ((id (*)(id, SEL))objc_msgSend)(object, @selector(subviews));
+            if ([subviews isKindOfClass:[NSArray class]]) {
+                for (id subview in subviews) ApolloReapplyCommentCellNodesInTree(subview, depth - 1, visited, forceTranslation);
+            }
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static void ApolloReapplyVisibleCommentCellNodesForController(UIViewController *viewController, BOOL forceTranslation) {
+    if (!viewController || !viewController.isViewLoaded) return;
+    if (!sEnableBulkTranslation || !ApolloControllerIsInTranslatedMode(viewController)) return;
+    NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:512];
+    ApolloReapplyCommentCellNodesInTree(viewController.view, 18, visited, forceTranslation);
+}
+
+static void ApolloRestoreCommentCellNodesInTree(id object, NSInteger depth, NSHashTable *visited) {
+    if (!object || depth < 0) return;
+    if (visited.count >= 2048) return;
+    if ([visited containsObject:object]) return;
+    [visited addObject:object];
+
+    Class displayNodeCls = NSClassFromString(@"ASDisplayNode");
+    BOOL isDisplayNode = displayNodeCls && [object isKindOfClass:displayNodeCls];
+    BOOL isView = [object isKindOfClass:[UIView class]];
+    if (!isDisplayNode && !isView) return;
+
+    if (isDisplayNode) {
+        RDKComment *comment = ApolloCommentFromCellNode(object);
+        if (comment) {
+            ApolloRestoreOriginalForCellNode(object, comment);
+        }
+    }
+
+    @try {
+        SEL nodeSelectors[] = { NSSelectorFromString(@"asyncdisplaykit_node"), NSSelectorFromString(@"node") };
+        for (size_t i = 0; i < sizeof(nodeSelectors) / sizeof(nodeSelectors[0]); i++) {
+            SEL selector = nodeSelectors[i];
+            if (![object respondsToSelector:selector]) continue;
+            id node = ((id (*)(id, SEL))objc_msgSend)(object, selector);
+            if (node && node != object) ApolloRestoreCommentCellNodesInTree(node, depth - 1, visited);
+        }
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        SEL subnodesSel = NSSelectorFromString(@"subnodes");
+        if ([object respondsToSelector:subnodesSel]) {
+            NSArray *subnodes = ((id (*)(id, SEL))objc_msgSend)(object, subnodesSel);
+            if ([subnodes isKindOfClass:[NSArray class]]) {
+                for (id subnode in subnodes) ApolloRestoreCommentCellNodesInTree(subnode, depth - 1, visited);
+            }
+        }
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        if ([object respondsToSelector:@selector(subviews)]) {
+            NSArray *subviews = ((id (*)(id, SEL))objc_msgSend)(object, @selector(subviews));
+            if ([subviews isKindOfClass:[NSArray class]]) {
+                for (id subview in subviews) ApolloRestoreCommentCellNodesInTree(subview, depth - 1, visited);
+            }
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static void ApolloRestoreVisibleCommentCellNodesForController(UIViewController *viewController) {
+    if (!viewController || !viewController.isViewLoaded) return;
+    NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:512];
+    ApolloRestoreCommentCellNodesInTree(viewController.view, 18, visited);
+}
+
+static void ApolloForceVisibleCommentsTableRelayoutForController(UIViewController *viewController);
+
 static void ApolloTranslateVisibleCommentsForController(UIViewController *viewController, BOOL forceTranslation) {
     UITableView *tableView = GetCommentsTableView(viewController);
     if (!tableView) return;
@@ -1919,8 +2386,39 @@ static void ApolloTranslateVisibleCommentsForController(UIViewController *viewCo
         ApolloMaybeTranslateCommentCellNode(cellNode, forceTranslation);
     }
 
+    // Texture can keep some visible/preloaded comment cell nodes out of
+    // UITableView.visibleCells until a visibility event (collapse/reopen,
+    // screenshot/app snapshot, tiny scroll) wakes them. Walk the loaded node
+    // tree too and hit the same cached-reapply path those events use.
+    ApolloReapplyVisibleCommentCellNodesForController(viewController, forceTranslation);
+
     // Phase C — also translate the post selftext (header cell) if present.
     ApolloMaybeTranslatePostHeaderForController(viewController, forceTranslation);
+    ApolloForceVisibleCommentsTableRelayoutForController(viewController);
+}
+
+static void ApolloForceVisibleCommentsTableRelayoutForController(UIViewController *viewController) {
+    UITableView *tableView = GetCommentsTableView(viewController);
+    if (!tableView) return;
+
+    @try {
+        [UIView performWithoutAnimation:^{
+            for (UITableViewCell *cell in [tableView visibleCells]) {
+                [cell setNeedsLayout];
+                [cell.contentView setNeedsLayout];
+                [cell layoutIfNeeded];
+                SEL nodeSelector = NSSelectorFromString(@"node");
+                if ([cell respondsToSelector:nodeSelector]) {
+                    id cellNode = ((id (*)(id, SEL))objc_msgSend)(cell, nodeSelector);
+                    ApolloForceRelayoutForTextNodeAndOwner(cellNode, nil);
+                }
+            }
+            [tableView beginUpdates];
+            [tableView endUpdates];
+            [tableView setNeedsLayout];
+            [tableView layoutIfNeeded];
+        }];
+    } @catch (__unused NSException *e) {}
 }
 
 static void ApolloRestoreVisibleCommentsForController(UIViewController *viewController) {
@@ -1950,30 +2448,22 @@ static void ApolloRestoreVisibleCommentsForController(UIViewController *viewCont
         RDKLink *link = ApolloLinkFromHeaderCellNode(cellNode);
         if (link || !comment) {
             if (!link) link = controllerLink;
-            NSString *linkFullName = link.fullName;
-            if (linkFullName.length > 0) {
-                [sLinkTranslationByFullName removeObjectForKey:linkFullName];
-            }
             ApolloRestoreOriginalForHeaderCellNode(cellNode, link);
             continue;
         }
 
-        // Drop from the persistent fullName cache so cellNodeVisibilityEvent:
-        // / didEnterDisplayState don't re-apply it after the user asked for
-        // the original text.
-        NSString *fullName = ApolloCommentFullName(comment);
-        if (fullName.length > 0) {
-            [sCommentTranslationByFullName removeObjectForKey:fullName];
-        }
-
         ApolloRestoreOriginalForCellNode(cellNode, comment);
     }
+    ApolloRestoreVisibleCommentCellNodesForController(viewController);
+    ApolloForceVisibleCommentsTableRelayoutForController(viewController);
 }
 
 #pragma mark - Phase A/B: nav-bar globe icon + status banner
 
 // Forward declaration so the globe bar button action can call it.
 static void ApolloToggleThreadTranslationForController(UIViewController *vc);
+static void ApolloToggleFeedTitleTranslationForController(UIViewController *vc);
+static void ApolloScheduleThreadTranslationReconcileForController(UIViewController *vc, BOOL translatedMode);
 
 // Returns a localized human name for the active target language (e.g. "en"
 // → "English"). Falls back to the uppercased code.
@@ -2056,6 +2546,7 @@ static BOOL ApolloTextMatchesTranslatedDisplayText(NSString *visibleText, NSStri
 
 static BOOL ApolloRefreshVisibleTranslationAppliedForController(UIViewController *vc) {
     if (!vc || !ApolloControllerIsInTranslatedMode(vc)) return NO;
+    BOOL isFeedVC = [objc_getAssociatedObject(vc, kApolloFeedTranslationVCKey) boolValue];
 
     NSMutableArray *nodes = [NSMutableArray array];
     NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:128];
@@ -2063,6 +2554,7 @@ static BOOL ApolloRefreshVisibleTranslationAppliedForController(UIViewController
 
     for (id node in nodes) {
         if (![objc_getAssociatedObject(node, kApolloTranslationOwnedTextNodeKey) boolValue]) continue;
+        if (!isFeedVC && [objc_getAssociatedObject(node, kApolloTitleOwnedTextNodeKey) boolValue]) continue;
 
         NSString *originalBody = objc_getAssociatedObject(node, kApolloOwnedNodeOriginalBodyKey);
         NSString *translatedText = objc_getAssociatedObject(node, kApolloOwnedNodeTranslatedTextKey);
@@ -2081,6 +2573,83 @@ static BOOL ApolloRefreshVisibleTranslationAppliedForController(UIViewController
     }
 
     return NO;
+}
+
+static BOOL ApolloFindVisibleTranslatedTitleOwnedTextNodeInTree(id object, NSInteger depth, NSHashTable *visited) {
+    if (!object || depth < 0) return NO;
+    if (visited.count >= 2048) return NO;
+
+    Class displayNodeCls = NSClassFromString(@"ASDisplayNode");
+    BOOL isDisplayNode = displayNodeCls && [object isKindOfClass:displayNodeCls];
+    BOOL isView = [object isKindOfClass:[UIView class]];
+    if (!isDisplayNode && !isView) return NO;
+    if ([visited containsObject:object]) return NO;
+    [visited addObject:object];
+
+    @try {
+        if ([object respondsToSelector:@selector(attributedText)] &&
+            [objc_getAssociatedObject(object, kApolloTranslationOwnedTextNodeKey) boolValue] &&
+            [objc_getAssociatedObject(object, kApolloTitleOwnedTextNodeKey) boolValue]) {
+            NSString *originalBody = objc_getAssociatedObject(object, kApolloOwnedNodeOriginalBodyKey);
+            NSString *translatedText = objc_getAssociatedObject(object, kApolloOwnedNodeTranslatedTextKey);
+            if ([originalBody isKindOfClass:[NSString class]] &&
+                [translatedText isKindOfClass:[NSString class]] &&
+                ApolloTranslatedTextDiffersFromSource(originalBody, translatedText)) {
+                NSAttributedString *attr = ((id (*)(id, SEL))objc_msgSend)(object, @selector(attributedText));
+                if ([attr isKindOfClass:[NSAttributedString class]] &&
+                    ApolloTextMatchesTranslatedDisplayText(attr.string, translatedText)) {
+                    return YES;
+                }
+            }
+        }
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        SEL nodeSelectors[] = { NSSelectorFromString(@"asyncdisplaykit_node"), NSSelectorFromString(@"node") };
+        for (size_t i = 0; i < sizeof(nodeSelectors) / sizeof(nodeSelectors[0]); i++) {
+            SEL selector = nodeSelectors[i];
+            if (![object respondsToSelector:selector]) continue;
+            id node = ((id (*)(id, SEL))objc_msgSend)(object, selector);
+            if (node && node != object && ApolloFindVisibleTranslatedTitleOwnedTextNodeInTree(node, depth - 1, visited)) return YES;
+        }
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        SEL subnodesSel = NSSelectorFromString(@"subnodes");
+        if ([object respondsToSelector:subnodesSel]) {
+            NSArray *subnodes = ((id (*)(id, SEL))objc_msgSend)(object, subnodesSel);
+            if ([subnodes isKindOfClass:[NSArray class]]) {
+                for (id subnode in subnodes) {
+                    if (ApolloFindVisibleTranslatedTitleOwnedTextNodeInTree(subnode, depth - 1, visited)) return YES;
+                }
+            }
+        }
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        if ([object respondsToSelector:@selector(subviews)]) {
+            NSArray *subviews = ((id (*)(id, SEL))objc_msgSend)(object, @selector(subviews));
+            if ([subviews isKindOfClass:[NSArray class]]) {
+                for (id subview in subviews) {
+                    if (ApolloFindVisibleTranslatedTitleOwnedTextNodeInTree(subview, depth - 1, visited)) return YES;
+                }
+            }
+        }
+    } @catch (__unused NSException *e) {}
+
+    return NO;
+}
+
+static BOOL ApolloRefreshFeedTitleTranslationAppliedForController(UIViewController *vc) {
+    if (!vc || !vc.isViewLoaded) return NO;
+    if (![objc_getAssociatedObject(vc, kApolloFeedTranslationVCKey) boolValue]) return NO;
+    if (!sEnableBulkTranslation || !sTranslatePostTitles || !ApolloControllerIsInTranslatedMode(vc)) return NO;
+
+    NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:512];
+    if (!ApolloFindVisibleTranslatedTitleOwnedTextNodeInTree(vc.view, 20, visited)) return NO;
+
+    objc_setAssociatedObject(vc, kApolloVisibleTranslationAppliedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return YES;
 }
 
 static UIColor *ApolloResolvedTintColor(UIColor *color, UITraitCollection *traitCollection) {
@@ -2142,14 +2711,21 @@ static UIColor *ApolloThemeTintColorFromNavigationItems(NSArray<UIBarButtonItem 
 static void ApolloUpdateTranslationUIForController(id controller) {
     UIViewController *vc = (UIViewController *)controller;
 
+    BOOL isFeedVC = [objc_getAssociatedObject(controller, kApolloFeedTranslationVCKey) boolValue];
     UIBarButtonItem *translationItem = objc_getAssociatedObject(controller, kApolloTranslateBarButtonKey);
     NSMutableArray<UIBarButtonItem *> *items = [vc.navigationItem.rightBarButtonItems mutableCopy] ?: [NSMutableArray array];
-    if (!sEnableBulkTranslation) {
+    // Comments VCs require sEnableBulkTranslation.
+    // Feed VCs additionally require sTranslatePostTitles — the only thing
+    // they translate is post titles, so when titles are disabled the globe
+    // shouldn't appear.
+    BOOL gateOK = sEnableBulkTranslation && (!isFeedVC || sTranslatePostTitles);
+    if (!gateOK) {
         // Feature flipped off: revert any active translation, drop the bar
         // button + hide the banner. Do not leak associations.
         if (ApolloControllerIsInTranslatedMode(vc)) {
-            ApolloRestoreVisibleCommentsForController(vc);
+            if (!isFeedVC) ApolloRestoreVisibleCommentsForController(vc);
         }
+        ApolloRestoreAllOwnedTextNodes();
         ApolloClearVisibleTranslationApplied(vc);
         objc_setAssociatedObject(controller, kApolloThreadTranslatedModeKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(controller, kApolloThreadOriginalModeKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -2159,7 +2735,7 @@ static void ApolloUpdateTranslationUIForController(id controller) {
             vc.navigationItem.rightBarButtonItems = items;
             objc_setAssociatedObject(controller, kApolloTranslateBarButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
-        ApolloUpdateBannerForController(vc);
+        if (!isFeedVC) ApolloUpdateBannerForController(vc);
         return;
     }
 
@@ -2221,7 +2797,7 @@ static void ApolloUpdateTranslationUIForController(id controller) {
     }
     vc.navigationItem.rightBarButtonItems = items;
 
-    ApolloUpdateBannerForController(vc);
+    if (!isFeedVC) ApolloUpdateBannerForController(vc);
 }
 
 static void ApolloToggleThreadTranslationForController(UIViewController *vc) {
@@ -2230,15 +2806,134 @@ static void ApolloToggleThreadTranslationForController(UIViewController *vc) {
     if (wasTranslated) {
         // Switch to original.
         ApolloRestoreVisibleCommentsForController(vc);
+        // Off-screen / preloaded text nodes never went through the visible-
+        // cells walk above. Restore every node we still own globally so the
+        // user sees originals as soon as they scroll back, without waiting
+        // for cellNodeVisibilityEvent (which has timing issues for cells
+        // already cached in ASDK's preload range).
+        ApolloRestoreAllOwnedTextNodes();
         ApolloClearVisibleTranslationApplied(vc);
+        sPendingVisibleFeedTitleApplied = NO;
         objc_setAssociatedObject(vc, kApolloThreadTranslatedModeKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(vc, kApolloThreadOriginalModeKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloScheduleThreadTranslationReconcileForController(vc, NO);
     } else {
         // Switch to translated.
         ApolloClearVisibleTranslationApplied(vc);
         objc_setAssociatedObject(vc, kApolloThreadTranslatedModeKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(vc, kApolloThreadOriginalModeKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         ApolloTranslateVisibleCommentsForController(vc, YES);
+        ApolloRescanTitleNodesForController(vc);
+        ApolloScheduleThreadTranslationReconcileForController(vc, YES);
+    }
+    ApolloUpdateTranslationUIForController(vc);
+}
+
+static NSString *ApolloFeedTitleModeKeyForController(UIViewController *vc) {
+    if (!vc) return nil;
+    NSString *title = vc.navigationItem.title ?: vc.title ?: @"";
+    return [NSString stringWithFormat:@"%@|%@", NSStringFromClass([vc class]), title.length > 0 ? title : @"(untitled)"];
+}
+
+static NSNumber *ApolloStoredFeedTitleModeForController(UIViewController *vc) {
+    NSString *key = ApolloFeedTitleModeKeyForController(vc);
+    if (key.length == 0) return nil;
+    return sFeedTitleModeByFeedKey[key];
+}
+
+static void ApolloStoreFeedTitleModeForController(UIViewController *vc, BOOL translated) {
+    NSString *key = ApolloFeedTitleModeKeyForController(vc);
+    if (key.length == 0) return;
+    if (!sFeedTitleModeByFeedKey) sFeedTitleModeByFeedKey = [NSMutableDictionary dictionary];
+    sFeedTitleModeByFeedKey[key] = @(translated);
+    sLastFeedTitleModeKnown = YES;
+    sLastFeedTitleTranslatedMode = translated;
+}
+
+static BOOL ApolloFeedTitlesShouldShowTranslated(UIViewController *feedVC) {
+    if (feedVC) {
+        BOOL translated = ApolloControllerIsInTranslatedMode(feedVC);
+        sLastFeedTitleModeKnown = YES;
+        sLastFeedTitleTranslatedMode = translated;
+        return translated;
+    }
+    return !sLastFeedTitleModeKnown || sLastFeedTitleTranslatedMode;
+}
+
+static BOOL ApolloClassLooksLikeCommentsViewController(Class cls) {
+    if (!cls) return NO;
+    const char *name = class_getName(cls);
+    return name && strstr(name, "CommentsViewController");
+}
+
+static BOOL ApolloTitleOwnedNodeShouldShowTranslated(UIViewController *enclosingVC) {
+    if (enclosingVC && ApolloClassLooksLikeCommentsViewController([enclosingVC class])) {
+        return ApolloControllerIsInTranslatedMode(enclosingVC);
+    }
+    UIViewController *feedVC = ApolloFindTopmostVisibleFeedVC();
+    if (!feedVC && sVisibleCommentsViewController) {
+        return ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController);
+    }
+    return ApolloFeedTitlesShouldShowTranslated(feedVC);
+}
+
+static void ApolloScheduleThreadTranslationReconcileForController(UIViewController *vc, BOOL translatedMode) {
+    if (!vc) return;
+    // Capture the cancel generation at scheduling time. viewWillDisappear
+    // bumps this counter; any reconcile pass that fires after the user has
+    // started swiping back will see a mismatch and bail out before it walks
+    // the owned-textnode registry / forces table relayouts.
+    NSNumber *generationAtSchedule = objc_getAssociatedObject(vc, kApolloReconcileGenerationKey);
+    NSUInteger schedGen = generationAtSchedule.unsignedIntegerValue;
+    NSArray<NSNumber *> *delays = @[ @0.12, @0.35, @0.8 ];
+    for (NSNumber *delayNumber in delays) {
+        __weak UIViewController *weakVC = vc;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayNumber.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UIViewController *strongVC = weakVC;
+            if (!strongVC || !strongVC.isViewLoaded || !strongVC.view.window) return;
+            // Cancelled by viewWillDisappear: \u2014 don't run mid-pop.
+            NSNumber *currentGen = objc_getAssociatedObject(strongVC, kApolloReconcileGenerationKey);
+            if (currentGen.unsignedIntegerValue != schedGen) return;
+            if (ApolloControllerIsInTranslatedMode(strongVC) != translatedMode) return;
+            if (translatedMode) {
+                ApolloTranslateVisibleCommentsForController(strongVC, NO);
+                ApolloRescanTitleNodesForController(strongVC);
+                ApolloRefreshVisibleTranslationAppliedForController(strongVC);
+                ApolloForceVisibleCommentsTableRelayoutForController(strongVC);
+            } else {
+                ApolloRestoreVisibleCommentsForController(strongVC);
+                // Skip the global restore walk when nothing remains to
+                // restore \u2014 avoids the four-deep storm of full-registry walks
+                // per toggle that the user sees as swipe-back / toggle lag.
+                if (sOwnedTextNodes && sOwnedTextNodes.count > 0) {
+                    ApolloRestoreAllOwnedTextNodes();
+                }
+                ApolloClearVisibleTranslationApplied(strongVC);
+                ApolloForceVisibleCommentsTableRelayoutForController(strongVC);
+            }
+            ApolloUpdateTranslationUIForController(strongVC);
+        });
+    }
+}
+
+static void ApolloToggleFeedTitleTranslationForController(UIViewController *vc) {
+    if (!vc) return;
+    BOOL wasTranslated = ApolloControllerIsInTranslatedMode(vc);
+    if (wasTranslated) {
+        ApolloRestoreAllOwnedTextNodes();
+        ApolloClearVisibleTranslationApplied(vc);
+        sPendingVisibleFeedTitleApplied = NO;
+        objc_setAssociatedObject(vc, kApolloThreadTranslatedModeKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(vc, kApolloThreadOriginalModeKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloStoreFeedTitleModeForController(vc, NO);
+        ApolloRescanTitleNodesForController(vc);
+        ApolloRefreshFeedTranslationStateForController(vc);
+    } else {
+        ApolloClearVisibleTranslationApplied(vc);
+        objc_setAssociatedObject(vc, kApolloThreadTranslatedModeKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(vc, kApolloThreadOriginalModeKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloStoreFeedTitleModeForController(vc, YES);
+        ApolloRescanTitleNodesForController(vc);
     }
     ApolloUpdateTranslationUIForController(vc);
 }
@@ -2264,8 +2959,188 @@ static BOOL ApolloTextMatchesSourceOrVisualDisplay(NSString *incomingText, NSStr
 
 static void ApolloClearTranslationOwnershipForTextNode(id textNode) {
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    if (textNode && sOwnedTextNodes) {
+        dispatch_sync(sOwnedTextNodesQueue, ^{
+            [sOwnedTextNodes removeObject:textNode];
+        });
+    }
+}
+
+// Add `textNode` to the global weak registry. Called from
+// ApolloApplyTranslationToCellNode / ApolloApplyTranslationToHeaderCellNode
+// every time we stamp a node with the ownership marker, so the toggle-off
+// walk below can find every owned node — even those whose backing
+// UITableViewCell is currently off-screen.
+static void ApolloRegisterOwnedTextNode(id textNode) {
+    if (!textNode || !sOwnedTextNodes) return;
+    dispatch_sync(sOwnedTextNodesQueue, ^{
+        [sOwnedTextNodes addObject:textNode];
+    });
+}
+
+// Walk every text node we've ever stamped with the ownership marker and
+// restore each one to its saved original attributedText. Used by the toggle-
+// off path so cells that scrolled off-screen while translated immediately
+// revert — instead of waiting for cellNodeVisibilityEvent (which doesn't
+// always fire reliably for cells already cached in ASDK's preload range).
+static void ApolloRestoreAllOwnedTextNodes(void) {
+    if (!sOwnedTextNodes) return;
+    // Cheap fast-path: nothing's been stamped, nothing to do. Avoids the
+    // hashtable snapshot + full log line on every gateOK=NO refresh of
+    // ApolloUpdateTranslationUIForController and on toggle reconciles after
+    // the immediate pass already drained the registry.
+    if (sOwnedTextNodes.count == 0) return;
+    NSArray *snapshot = nil;
+    {
+        __block NSArray *capture = nil;
+        dispatch_sync(sOwnedTextNodesQueue, ^{
+            capture = [sOwnedTextNodes allObjects];
+        });
+        snapshot = capture;
+    }
+    NSUInteger restored = 0, skippedNoOriginal = 0, skippedReuse = 0, skippedTitleStaleReuse = 0;
+    for (id textNode in snapshot) {
+        if (!textNode) continue;
+        // Only act if still tagged.
+        if (![objc_getAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey) boolValue]) continue;
+
+        BOOL isTitleOwned = [objc_getAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey) boolValue];
+        NSString *cachedTranslated = objc_getAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey);
+        NSAttributedString *savedOriginal = objc_getAssociatedObject(textNode, kApolloOriginalAttributedTextKey);
+
+        // Drop ownership keys FIRST so the global setAttributedText: hook
+        // won't re-swap when we write the original below.
+        objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+
+        if (![savedOriginal isKindOfClass:[NSAttributedString class]]) { skippedNoOriginal++; continue; }
+
+        // Reuse-safety: only write if the node currently shows our cached
+        // translation. If it now shows something else (reused for a
+        // different comment), leave it alone — clearing ownership is
+        // sufficient.
+        NSAttributedString *currentAttr = nil;
+        @try {
+            currentAttr = ((id (*)(id, SEL))objc_msgSend)(textNode, @selector(attributedText));
+        } @catch (__unused NSException *e) {
+            continue;
+        }
+        NSString *currentText = [currentAttr isKindOfClass:[NSAttributedString class]] ? currentAttr.string : nil;
+        if (currentText.length == 0) { skippedReuse++; continue; }
+
+        BOOL shouldRestore = NO;
+        if (isTitleOwned) {
+            // Title-owned: be permissive. The strict body-candidate check
+            // (which requires ≥60% length overlap or shared 12+ char prefix)
+            // rejects many short translated titles whose normalized form
+            // doesn't perfectly equal the cached translated string. For
+            // titles, just compare normalized forms for equality OR check
+            // that the saved-original text differs from currentText (i.e.
+            // we haven't already restored). If the cell got reused for a
+            // different post the next setAttributedText: from Apollo will
+            // overwrite our restored stale text — no worse than leaving
+            // stale translated text.
+            NSString *currentNorm = ApolloNormalizeTextForCompare(currentText);
+            NSString *cachedNorm = ApolloNormalizeTextForCompare(cachedTranslated);
+            NSString *origNorm = ApolloNormalizeTextForCompare(savedOriginal.string);
+            if (cachedNorm.length > 0 && [currentNorm isEqualToString:cachedNorm]) {
+                shouldRestore = YES;
+            } else if (origNorm.length > 0 && ![currentNorm isEqualToString:origNorm]) {
+                // Currently showing something other than the saved original
+                // — likely still translated text but with slight format diff.
+                shouldRestore = YES;
+            } else {
+                skippedTitleStaleReuse++;
+            }
+        } else if ([cachedTranslated isKindOfClass:[NSString class]] && cachedTranslated.length > 0) {
+            shouldRestore = ApolloTextQualifiesAsBodyCandidate(currentText, cachedTranslated);
+            if (!shouldRestore) skippedReuse++;
+        } else {
+            skippedReuse++;
+        }
+        if (!shouldRestore) continue;
+
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), savedOriginal);
+        } @catch (__unused NSException *e) {
+            continue;
+        }
+        restored++;
+        if ([textNode respondsToSelector:@selector(setNeedsLayout)]) {
+            ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsLayout));
+        }
+        if ([textNode respondsToSelector:@selector(setNeedsDisplay)]) {
+            ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsDisplay));
+        }
+        // ---- Restore-side cell relayout ----
+        // Same problem as the apply path: the enclosing ASCellNode caches
+        // the (longer) translated layout, so without an explicit transition
+        // the original text gets truncated to "Benfica..." until you scroll.
+        SEL invalidateSel = NSSelectorFromString(@"invalidateCalculatedLayout");
+        SEL supernodeSel = NSSelectorFromString(@"supernode");
+        @try {
+            if ([textNode respondsToSelector:invalidateSel]) {
+                ((void (*)(id, SEL))objc_msgSend)(textNode, invalidateSel);
+            }
+            id supernode = nil;
+            if ([textNode respondsToSelector:supernodeSel]) {
+                supernode = ((id (*)(id, SEL))objc_msgSend)(textNode, supernodeSel);
+            }
+            int hops = 0;
+            id cellNode = nil;
+            while (supernode && hops < 8) {
+                if ([supernode respondsToSelector:invalidateSel]) {
+                    ((void (*)(id, SEL))objc_msgSend)(supernode, invalidateSel);
+                }
+                if ([supernode respondsToSelector:@selector(setNeedsLayout)]) {
+                    ((void (*)(id, SEL))objc_msgSend)(supernode, @selector(setNeedsLayout));
+                }
+                if (!cellNode) {
+                    const char *snName = class_getName([supernode class]);
+                    if (snName && strstr(snName, "CellNode")) cellNode = supernode;
+                }
+                if (![supernode respondsToSelector:supernodeSel]) break;
+                supernode = ((id (*)(id, SEL))objc_msgSend)(supernode, supernodeSel);
+                hops++;
+            }
+            if (cellNode) {
+                SEL transitionSel = NSSelectorFromString(@"transitionLayoutWithAnimation:shouldMeasureAsync:measurementCompletion:");
+                if ([cellNode respondsToSelector:transitionSel]) {
+                    NSMethodSignature *sig = [cellNode methodSignatureForSelector:transitionSel];
+                    if (sig) {
+                        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                        inv.target = cellNode;
+                        inv.selector = transitionSel;
+                        BOOL animated = NO;
+                        BOOL async = NO;
+                        void (^completion)(void) = nil;
+                        [inv setArgument:&animated atIndex:2];
+                        [inv setArgument:&async atIndex:3];
+                        [inv setArgument:&completion atIndex:4];
+                        @try { [inv invoke]; } @catch (__unused NSException *e) {}
+                    }
+                }
+            }
+        } @catch (__unused NSException *e) {}
+    }
+
+    // Drain dead weak entries.
+    dispatch_sync(sOwnedTextNodesQueue, ^{
+        // NSHashTable handles weak entries automatically; a no-op iteration
+        // suffices to compact in some implementations. Nothing else needed.
+        (void)[sOwnedTextNodes count];
+    });
+    ApolloLog(@"[Translation] RestoreAllOwnedTextNodes total=%lu restored=%lu skippedNoOriginal=%lu skippedReuse=%lu skippedTitleStaleReuse=%lu",
+              (unsigned long)snapshot.count,
+              (unsigned long)restored,
+              (unsigned long)skippedNoOriginal,
+              (unsigned long)skippedReuse,
+              (unsigned long)skippedTitleStaleReuse);
 }
 
 static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
@@ -2312,6 +3187,33 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
         return;
     }
 
+    // Title-owned nodes live outside the comments controller (feeds, search,
+    // profile, etc.) — they must bypass the per-thread translated-mode gate.
+    BOOL isTitleOwned = [objc_getAssociatedObject(self, kApolloTitleOwnedTextNodeKey) boolValue];
+
+    // Title-owned toggle-off gate: if the topmost-visible feed VC is in
+    // original mode, drop ownership and let Apollo's incoming text through.
+    if (isTitleOwned) {
+        UIViewController *enclosingVC = ApolloEnclosingViewControllerForNode((id)self);
+        if (!ApolloTitleOwnedNodeShouldShowTranslated(enclosingVC)) {
+            ApolloClearTranslationOwnershipForTextNode(self);
+            %orig;
+            return;
+        }
+    }
+
+    // Toggle-off gate: if the controller is no longer in translated mode,
+    // drop our ownership marker and let Apollo's incoming (original) text
+    // through unchanged. Without this, off-screen text nodes that still
+    // carry the ownership marker would re-swap to translated as soon as
+    // Apollo touches them again on cell reuse / scroll-back, which is the
+    // "translated text persists after toggling off" bug.
+    if (!isTitleOwned && !ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) {
+        ApolloClearTranslationOwnershipForTextNode(self);
+        %orig;
+        return;
+    }
+
     // Re-entrancy guard: when WE call %orig with a substituted string, the
     // hook re-fires. Skip the swap on the inner call.
     if ([objc_getAssociatedObject(self, kApolloOwnedNodeReentrancyKey) boolValue]) {
@@ -2324,6 +3226,16 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
         objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         @try { %orig(swap); } @catch (__unused NSException *e) {}
         objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (isTitleOwned) {
+            NSString *originalBody = objc_getAssociatedObject(self, kApolloOwnedNodeOriginalBodyKey);
+            NSString *translatedText = objc_getAssociatedObject(self, kApolloOwnedNodeTranslatedTextKey);
+            UIViewController *enclosingVC = ApolloEnclosingViewControllerForNode((id)self);
+            if (ApolloClassLooksLikeCommentsViewController([enclosingVC class])) {
+                ApolloMarkVisibleTranslationApplied(originalBody, translatedText);
+            } else {
+                ApolloMarkVisibleFeedTitleApplied(originalBody, translatedText);
+            }
+        }
         return;
     }
 
@@ -2340,6 +3252,24 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
         return;
     }
 
+    BOOL isTitleOwned = [objc_getAssociatedObject(self, kApolloTitleOwnedTextNodeKey) boolValue];
+
+    if (isTitleOwned) {
+        UIViewController *enclosingVC = ApolloEnclosingViewControllerForNode((id)self);
+        if (!ApolloTitleOwnedNodeShouldShowTranslated(enclosingVC)) {
+            ApolloClearTranslationOwnershipForTextNode(self);
+            %orig;
+            return;
+        }
+    }
+
+    // Toggle-off gate (mirror of ASTextNode hook above).
+    if (!isTitleOwned && !ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) {
+        ApolloClearTranslationOwnershipForTextNode(self);
+        %orig;
+        return;
+    }
+
     if ([objc_getAssociatedObject(self, kApolloOwnedNodeReentrancyKey) boolValue]) {
         %orig;
         return;
@@ -2350,10 +3280,761 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
         objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         @try { %orig(swap); } @catch (__unused NSException *e) {}
         objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (isTitleOwned) {
+            NSString *originalBody = objc_getAssociatedObject(self, kApolloOwnedNodeOriginalBodyKey);
+            NSString *translatedText = objc_getAssociatedObject(self, kApolloOwnedNodeTranslatedTextKey);
+            UIViewController *enclosingVC = ApolloEnclosingViewControllerForNode((id)self);
+            if (ApolloClassLooksLikeCommentsViewController([enclosingVC class])) {
+                ApolloMarkVisibleTranslationApplied(originalBody, translatedText);
+            } else {
+                ApolloMarkVisibleFeedTitleApplied(originalBody, translatedText);
+            }
+        }
         return;
     }
 
     %orig;
+}
+
+%end
+
+// ---------------------------------------------------------------------------
+// Post title translation (PostTitleNode / PostTitleURLNode)
+// ---------------------------------------------------------------------------
+//
+// Title translation runs in *every* feed surface (subreddit feed, home feed,
+// search results, profile, and the post-detail header). Title nodes are
+// produced and reused by AsyncDisplayKit *outside* the comments controller,
+// so they bypass the per-thread translated-mode gate via the
+// `kApolloTitleOwnedTextNodeKey` marker (see ASTextNode setAttributedText
+// hooks above).
+//
+// CRITICAL: do NOT hook setNeedsLayout / setNeedsDisplay on title nodes.
+// `setAttributedText:` internally invokes both, so hooking those methods to
+// re-translate would cause unbounded recursion and a stack-overflow crash.
+// (This was the v17 bug that caused the launch-time crash loop.)
+// Re-application on cell reuse, vote refresh, edit, etc. is handled by the
+// global ASTextNode/ASTextNode2 setAttributedText: swap hooks, keyed on
+// `kApolloTranslationOwnedTextNodeKey`.
+
+// Walks up an ASDisplayNode's supernode chain looking for one with a loaded
+// view, then walks the UIView responder chain to find the enclosing
+// UIViewController. Returns nil if the node isn't yet attached to a view
+// hierarchy (e.g. during preload before the cell view is loaded).
+static void ApolloMaybeTranslatePostTitleNode(id titleNode);
+
+static UIViewController *ApolloEnclosingViewControllerForNode(id node) {
+    if (!node) return nil;
+    SEL supernodeSel = NSSelectorFromString(@"supernode");
+    SEL isLoadedSel = NSSelectorFromString(@"isNodeLoaded");
+    SEL viewSel = @selector(view);
+
+    id current = node;
+    int hops = 0;
+    while (current && hops < 16) {
+        @try {
+            BOOL viewLoaded = NO;
+            if ([current respondsToSelector:isLoadedSel]) {
+                viewLoaded = ((BOOL (*)(id, SEL))objc_msgSend)(current, isLoadedSel);
+            }
+            if (viewLoaded && [current respondsToSelector:viewSel]) {
+                UIView *v = ((id (*)(id, SEL))objc_msgSend)(current, viewSel);
+                if ([v isKindOfClass:[UIView class]]) {
+                    UIResponder *r = v.nextResponder;
+                    while (r) {
+                        if ([r isKindOfClass:[UIViewController class]]) {
+                            return (UIViewController *)r;
+                        }
+                        r = r.nextResponder;
+                    }
+                }
+            }
+        } @catch (__unused NSException *e) {}
+        if (![current respondsToSelector:supernodeSel]) break;
+        @try {
+            current = ((id (*)(id, SEL))objc_msgSend)(current, supernodeSel);
+        } @catch (__unused NSException *e) { break; }
+        hops++;
+    }
+    return nil;
+}
+
+// Returns YES if the controller has been confirmed-set to original-mode
+// (either via the per-thread toggle, or via auto-translate-off). Returns NO
+// when the VC is nil or its mode is unknown \u2014 callers use that to *defer*
+// destructive actions (like restoring originals) until viewDidAppear has
+// claimed `sVisibleCommentsViewController`.
+static BOOL ApolloControllerIsConfirmedOriginalMode(UIViewController *vc) {
+    if (!vc) return NO;
+    if ([objc_getAssociatedObject(vc, kApolloThreadOriginalModeKey) boolValue]) return YES;
+    // No explicit per-thread override: the VC follows global auto-translate.
+    // If auto-translate is OFF, mode == original. If ON, the translated-mode
+    // path handles things; we report NO here so callers don't mistakenly
+    // restore originals on a translated thread.
+    if (!sAutoTranslateOnAppear) return YES;
+    return NO;
+}
+
+// Best-effort \"which CommentsViewController owns this cell node?\". Tries the
+// global pointer first (covers the common case); falls back to walking the
+// ASDisplayNode tree so cell-visibility hooks that fire BEFORE viewDidAppear:
+// can still find their owning VC. Returns nil if the cell isn't attached to
+// a view hierarchy yet.
+static UIViewController *ApolloOwningCommentsVCForCellNode(id cellNode) {
+    UIViewController *vc = sVisibleCommentsViewController;
+    if (vc && vc.isViewLoaded && vc.view.window) return vc;
+    UIViewController *enclosing = ApolloEnclosingViewControllerForNode(cellNode);
+    if (enclosing) return enclosing;
+    return vc; // may be nil; callers handle that
+}
+
+
+// when toggling the feed/thread globe on so that already-visible cells get
+// translated immediately (the didLoad/preload/display hooks only fire on
+// new cells).
+static void ApolloRescanTitleNodesInTree(id object, NSInteger depth, NSHashTable *visited) {
+    if (!object || depth < 0) return;
+    if (visited.count >= 2048) return;
+    if ([visited containsObject:object]) return;
+    [visited addObject:object];
+
+    Class displayNodeCls = NSClassFromString(@"ASDisplayNode");
+    BOOL isDisplayNode = displayNodeCls && [object isKindOfClass:displayNodeCls];
+
+    if (isDisplayNode) {
+        const char *clsName = class_getName([object class]);
+        if (clsName && (strstr(clsName, "PostTitleNode") || strstr(clsName, "PostTitleURLNode"))) {
+            ApolloMaybeTranslatePostTitleNode(object);
+            // Don't return — title nodes might contain other PostTitleNodes
+            // (e.g. crossposts), but practically we can stop descending.
+        }
+    }
+
+    @try {
+        SEL nodeSelectors[] = { NSSelectorFromString(@"asyncdisplaykit_node"), NSSelectorFromString(@"node") };
+        for (size_t i = 0; i < sizeof(nodeSelectors) / sizeof(nodeSelectors[0]); i++) {
+            SEL sel = nodeSelectors[i];
+            if (![object respondsToSelector:sel]) continue;
+            id n = ((id (*)(id, SEL))objc_msgSend)(object, sel);
+            if (n && n != object) ApolloRescanTitleNodesInTree(n, depth - 1, visited);
+        }
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        SEL subnodesSel = NSSelectorFromString(@"subnodes");
+        if ([object respondsToSelector:subnodesSel]) {
+            NSArray *subs = ((id (*)(id, SEL))objc_msgSend)(object, subnodesSel);
+            if ([subs isKindOfClass:[NSArray class]]) {
+                for (id s in subs) ApolloRescanTitleNodesInTree(s, depth - 1, visited);
+            }
+        }
+    } @catch (__unused NSException *e) {}
+
+    @try {
+        if ([object respondsToSelector:@selector(subviews)]) {
+            NSArray *subviews = ((id (*)(id, SEL))objc_msgSend)(object, @selector(subviews));
+            if ([subviews isKindOfClass:[NSArray class]]) {
+                for (id s in subviews) ApolloRescanTitleNodesInTree(s, depth - 1, visited);
+            }
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static void ApolloRescanTitleNodesForController(UIViewController *vc) {
+    if (!vc || !vc.isViewLoaded) return;
+    if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
+    BOOL isFeedVC = [objc_getAssociatedObject(vc, kApolloFeedTranslationVCKey) boolValue];
+    NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:256];
+    ApolloRescanTitleNodesInTree(vc.view, 16, visited);
+    if (isFeedVC) ApolloRefreshFeedTranslationStateForController(vc);
+
+    // Some cells haven't fully laid out their title node yet at the moment
+    // the user taps the globe (e.g. cells just scrolled into view, or the
+    // first toggle right after viewDidAppear). Schedule retries so those
+    // late-arriving title nodes still get translated without the user having
+    // to scroll, then repaint the globe from the visible title state.
+    __weak UIViewController *weakVC = vc;
+    void (^scheduleTranslatedRescan)(NSTimeInterval) = ^(NSTimeInterval delay) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UIViewController *strongVC = weakVC;
+            if (!strongVC || !strongVC.isViewLoaded) return;
+            if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
+            if (!ApolloControllerIsInTranslatedMode(strongVC)) return;
+            NSHashTable *visited2 = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:256];
+            ApolloRescanTitleNodesInTree(strongVC.view, 16, visited2);
+            if ([objc_getAssociatedObject(strongVC, kApolloFeedTranslationVCKey) boolValue]) {
+                ApolloRefreshFeedTranslationStateForController(strongVC);
+            }
+        });
+    };
+    scheduleTranslatedRescan(0.15);
+    scheduleTranslatedRescan(0.6);
+}
+
+static id ApolloTitleTextNodeFromTitleNode(id titleNode) {
+    if (!titleNode) return nil;
+
+    // Most likely path: PostTitleNode IS an ASTextNode subclass.
+    if ([titleNode respondsToSelector:@selector(attributedText)]) {
+        @try {
+            NSAttributedString *attr = ((id (*)(id, SEL))objc_msgSend)(titleNode, @selector(attributedText));
+            if ([attr isKindOfClass:[NSAttributedString class]] && attr.length > 0) {
+                return titleNode;
+            }
+        } @catch (__unused NSException *e) {}
+    }
+
+    // Fallback: scan child text nodes and pick the longest non-empty one.
+    NSMutableArray *candidates = [NSMutableArray array];
+    NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:16];
+    ApolloCollectAttributedTextNodes(titleNode, 3, visited, candidates);
+
+    id best = nil;
+    NSUInteger bestLen = 0;
+    for (id n in candidates) {
+        NSAttributedString *attr = nil;
+        @try { attr = ((id (*)(id, SEL))objc_msgSend)(n, @selector(attributedText)); }
+        @catch (__unused NSException *e) { continue; }
+        if (![attr isKindOfClass:[NSAttributedString class]]) continue;
+        if (attr.length > bestLen) { bestLen = attr.length; best = n; }
+    }
+    return best;
+}
+
+static void ApolloApplyTranslationToTitleNode(id titleNode, id textNode, NSString *sourceText, NSString *translatedText) {
+    if (!titleNode || !textNode) return;
+    if (![sourceText isKindOfClass:[NSString class]] || sourceText.length == 0) return;
+    if (![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return;
+
+    NSAttributedString *current = nil;
+    @try { current = ((id (*)(id, SEL))objc_msgSend)(textNode, @selector(attributedText)); }
+    @catch (__unused NSException *e) { return; }
+    if (![current isKindOfClass:[NSAttributedString class]]) return;
+
+    NSString *currentNorm = ApolloNormalizeTextForCompare(current.string);
+    NSString *sourceNorm = ApolloNormalizeTextForCompare(sourceText);
+    NSString *translatedNorm = ApolloNormalizeTextForCompare(translatedText);
+    if (currentNorm.length == 0 || sourceNorm.length == 0) return;
+
+    BOOL textMatchesSource = [currentNorm isEqualToString:sourceNorm] ||
+                             [currentNorm containsString:sourceNorm] ||
+                             [sourceNorm containsString:currentNorm];
+    BOOL textMatchesTranslation = translatedNorm.length > 0 &&
+        ([currentNorm isEqualToString:translatedNorm] ||
+         [currentNorm containsString:translatedNorm] ||
+         [translatedNorm containsString:currentNorm]);
+
+    // Already showing translation, or showing something unrelated (cell
+    // recycled to a different post mid-flight) — nothing to do.
+    if (!textMatchesSource && !textMatchesTranslation) return;
+    if (textMatchesTranslation && !textMatchesSource) return;
+
+    // Save original on first apply for this node so toggle-off / restore can
+    // recover. Subsequent applies for the same node keep the first-seen
+    // original.
+    NSAttributedString *originalSaved = objc_getAssociatedObject(textNode, kApolloOriginalAttributedTextKey);
+    if (![originalSaved isKindOfClass:[NSAttributedString class]]) {
+        objc_setAssociatedObject(textNode, kApolloOriginalAttributedTextKey, [current copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    NSAttributedString *translatedAttr = ApolloTranslatedAttributedStringPreservingVisualLinks(current, translatedText);
+
+    // Vote-resilience / cell-reuse markers (same scheme as comment cells +
+    // post bodies). The title-owned marker tells the global swap hook to
+    // bypass the per-thread translated-mode gate.
+    objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [sourceText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloRegisterOwnedTextNode(textNode);
+
+    @try { ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), translatedAttr); }
+    @catch (__unused NSException *e) { return; }
+
+    // Turn the feed/thread globe green now that we've actually swapped a
+    // visible title to the translated string.
+    UIViewController *enclosingVC = ApolloEnclosingViewControllerForNode(titleNode);
+    if (ApolloClassLooksLikeCommentsViewController([enclosingVC class])) {
+        ApolloMarkVisibleTranslationApplied(sourceText, translatedText);
+    } else {
+        ApolloMarkVisibleFeedTitleApplied(sourceText, translatedText);
+    }
+
+    // ---- Tag overlap fix ----
+    // PostTitleNode / PostTitleURLNode lay out subnodes (title text + tag
+    // pills + URL hostname) using ASDK's flexbox with positions that depend
+    // on the title text's calculated intrinsic size. When we replace the
+    // attributed string in-place, ASDK doesn't always re-flow the parent
+    // automatically — tag pills overlap the (longer) translated title until
+    // a scroll-out / scroll-in forces a fresh layout pass.
+    //
+    // Force a fresh layout pass on both the text node AND its enclosing
+    // title node. We do this from a static helper (NOT a hook), so even
+    // though setNeedsLayout / invalidateCalculatedLayout normally trigger
+    // ASDK relayout work, this never re-enters our translation code path.
+    //
+    // CRITICAL: do NOT install %hooks for setNeedsLayout / setNeedsDisplay
+    // on PostTitleNode — setAttributedText: internally calls them, and
+    // hooking those to invoke maybe-translate is what caused the v17 stack-
+    // overflow crash. Calling them ourselves from this un-hooked function
+    // is safe.
+    SEL invalidateSel = NSSelectorFromString(@"invalidateCalculatedLayout");
+    @try {
+        if ([textNode respondsToSelector:invalidateSel]) {
+            ((void (*)(id, SEL))objc_msgSend)(textNode, invalidateSel);
+        }
+        if (titleNode != textNode) {
+            if ([titleNode respondsToSelector:invalidateSel]) {
+                ((void (*)(id, SEL))objc_msgSend)(titleNode, invalidateSel);
+            }
+            if ([titleNode respondsToSelector:@selector(setNeedsLayout)]) {
+                ((void (*)(id, SEL))objc_msgSend)(titleNode, @selector(setNeedsLayout));
+            }
+        }
+        // Bubble up: the cell node containing the title also caches layout
+        // based on the title's old size. Invalidate the chain of supernodes
+        // until we hit the table/collection node.
+        id supernode = nil;
+        SEL supernodeSel = NSSelectorFromString(@"supernode");
+        if ([titleNode respondsToSelector:supernodeSel]) {
+            supernode = ((id (*)(id, SEL))objc_msgSend)(titleNode, supernodeSel);
+        }
+        int hops = 0;
+        id cellNode = nil;
+        while (supernode && hops < 8) {
+            if ([supernode respondsToSelector:invalidateSel]) {
+                ((void (*)(id, SEL))objc_msgSend)(supernode, invalidateSel);
+            }
+            if ([supernode respondsToSelector:@selector(setNeedsLayout)]) {
+                ((void (*)(id, SEL))objc_msgSend)(supernode, @selector(setNeedsLayout));
+            }
+            // Remember the first ASCellNode we encounter — we trigger an
+            // explicit transition layout on it below so the table view
+            // recalculates the row height around the now-larger title.
+            if (!cellNode) {
+                const char *snName = class_getName([supernode class]);
+                if (snName && strstr(snName, "CellNode")) {
+                    cellNode = supernode;
+                }
+            }
+            if (![supernode respondsToSelector:supernodeSel]) break;
+            supernode = ((id (*)(id, SEL))objc_msgSend)(supernode, supernodeSel);
+            hops++;
+        }
+        // Without a real ASCellNode transition, the table view keeps using
+        // the cached row height for the original (shorter) title — that's
+        // what causes the "Benfica em Roma" -> "Benfica..." truncation.
+        if (cellNode) {
+            SEL transitionSel = NSSelectorFromString(@"transitionLayoutWithAnimation:shouldMeasureAsync:measurementCompletion:");
+            if ([cellNode respondsToSelector:transitionSel]) {
+                NSMethodSignature *sig = [cellNode methodSignatureForSelector:transitionSel];
+                if (sig) {
+                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                    inv.target = cellNode;
+                    inv.selector = transitionSel;
+                    BOOL animated = NO;
+                    BOOL async = NO;
+                    void (^completion)(void) = nil;
+                    [inv setArgument:&animated atIndex:2];
+                    [inv setArgument:&async atIndex:3];
+                    [inv setArgument:&completion atIndex:4];
+                    @try { [inv invoke]; } @catch (__unused NSException *e) {}
+                }
+            }
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static void ApolloMaybeTranslatePostTitleNode(id titleNode) {
+    if (!titleNode) return;
+    if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
+
+    id textNode = ApolloTitleTextNodeFromTitleNode(titleNode);
+    if (!textNode) return;
+
+    NSString *titleText = ApolloVisibleTextFromNode(textNode);
+    if (!titleText || titleText.length < 3) return;
+
+    // ---- Per-VC translated-mode gate ----
+    // The user's contract: title translation in a feed/thread is gated by
+    // that VC's globe state. Use the topmost-visible feed VC (the one the
+    // user is actually looking at) instead of walking the title node's
+    // responder chain — the responder chain often surfaces a child
+    // container VC that doesn't carry the translated-mode flag, which
+    // caused tap-on-after-tap-off to silently restore everything.
+    UIViewController *enclosingVC = ApolloEnclosingViewControllerForNode(titleNode);
+    UIViewController *gateVC = ApolloClassLooksLikeCommentsViewController([enclosingVC class]) ? enclosingVC : ApolloFindTopmostVisibleFeedVC();
+    if (!ApolloTitleOwnedNodeShouldShowTranslated(enclosingVC)) {
+        // Visible feed is in original mode — restore if we previously
+        // translated this node and bail.
+        if ([objc_getAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey) boolValue]) {
+            NSAttributedString *original = objc_getAssociatedObject(textNode, kApolloOriginalAttributedTextKey);
+            ApolloClearTranslationOwnershipForTextNode(textNode);
+            if ([original isKindOfClass:[NSAttributedString class]]) {
+                @try { ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), original); }
+                @catch (__unused NSException *e) {}
+            }
+        }
+        return;
+    }
+
+    // Already owned title nodes can be in either display state after a
+    // toggle cycle: translated (nothing to do) or original (reapply the
+    // cached translation immediately, no network). Do not assume ownership
+    // means the node is currently showing translated text.
+    if ([objc_getAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey) boolValue]) {
+        NSString *ownedTranslated = objc_getAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey);
+        NSString *ownedSource = objc_getAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey);
+        NSString *currentNorm = ApolloNormalizeTextForCompare(titleText);
+        NSString *ownedSourceNorm = ApolloNormalizeTextForCompare(ownedSource);
+        NSString *ownedTranslatedNorm = ApolloNormalizeTextForCompare(ownedTranslated);
+        if ([ownedTranslated isKindOfClass:[NSString class]] && ownedTranslated.length > 0 &&
+            ownedTranslatedNorm.length > 0 && [currentNorm isEqualToString:ownedTranslatedNorm]) {
+            if (ApolloClassLooksLikeCommentsViewController([gateVC class])) {
+                ApolloMarkVisibleTranslationApplied(ownedSource, ownedTranslated);
+            } else {
+                ApolloMarkVisibleFeedTitleApplied(ownedSource, ownedTranslated);
+            }
+            return;
+        }
+        if ([ownedSource isKindOfClass:[NSString class]] && ownedSource.length > 0 &&
+            [ownedTranslated isKindOfClass:[NSString class]] && ownedTranslated.length > 0 &&
+            ownedSourceNorm.length > 0 && [currentNorm isEqualToString:ownedSourceNorm]) {
+            ApolloApplyTranslationToTitleNode(titleNode, textNode, ownedSource, ownedTranslated);
+            return;
+        }
+        // Title text changed (cell reuse for a new post). Drop ownership and
+        // fall through to translate the new text.
+        ApolloClearTranslationOwnershipForTextNode(textNode);
+    }
+
+    NSString *targetLanguage = ApolloResolvedTargetLanguageCode();
+    if (targetLanguage.length == 0) return;
+
+    // Strip links so URLs don't pollute language detection.
+    NSString *detectionText = ApolloProtectTranslationLinks(titleText, NULL);
+    NSString *detected = ApolloDetectDominantLanguage(detectionText);
+    if ([detected isEqualToString:targetLanguage]) return;
+
+    NSString *cacheKey = ApolloTranslationCacheKey(titleText, targetLanguage);
+    __weak id weakTitleNode = titleNode;
+    __weak id weakTextNode = textNode;
+    ApolloRequestTranslation(cacheKey, titleText, targetLanguage, ^(NSString *translated, NSError *error) {
+        if (![translated isKindOfClass:[NSString class]] || translated.length == 0) {
+            if (error) ApolloLog(@"[Translation] Title translate failed: %@", error.localizedDescription ?: @"unknown");
+            return;
+        }
+        if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
+        id strongTitleNode = weakTitleNode;
+        id strongTextNode = weakTextNode;
+        if (!strongTitleNode || !strongTextNode) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // Re-check the visible feed VC mode after async translate — user
+            // may have toggled the globe off while the request was in
+            // flight. Use topmost-visible feed VC (NOT enclosing) for the
+            // same reason as the pre-check above.
+            UIViewController *enclosing = ApolloEnclosingViewControllerForNode(strongTitleNode);
+            UIViewController *vc = ApolloClassLooksLikeCommentsViewController([enclosing class]) ? enclosing : ApolloFindTopmostVisibleFeedVC();
+            if (ApolloClassLooksLikeCommentsViewController([vc class])) {
+                if (!ApolloControllerIsInTranslatedMode(vc)) return;
+            } else if (!ApolloFeedTitlesShouldShowTranslated(vc)) {
+                return;
+            }
+            ApolloApplyTranslationToTitleNode(strongTitleNode, strongTextNode, titleText, translated);
+        });
+    });
+}
+
+%hook _TtC6Apollo13PostTitleNode
+
+- (void)didLoad {
+    %orig;
+    if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
+    __weak id weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{ ApolloMaybeTranslatePostTitleNode(weakSelf); });
+}
+
+- (void)didEnterPreloadState {
+    %orig;
+    if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
+    __weak id weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{ ApolloMaybeTranslatePostTitleNode(weakSelf); });
+}
+
+- (void)didEnterDisplayState {
+    %orig;
+    if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
+    __weak id weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{ ApolloMaybeTranslatePostTitleNode(weakSelf); });
+}
+
+%end
+
+%hook _TtC6Apollo16PostTitleURLNode
+
+- (void)didLoad {
+    %orig;
+    if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
+    __weak id weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{ ApolloMaybeTranslatePostTitleNode(weakSelf); });
+}
+
+- (void)didEnterPreloadState {
+    %orig;
+    if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
+    __weak id weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{ ApolloMaybeTranslatePostTitleNode(weakSelf); });
+}
+
+- (void)didEnterDisplayState {
+    %orig;
+    if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
+    __weak id weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{ ApolloMaybeTranslatePostTitleNode(weakSelf); });
+}
+
+%end
+
+// ---------------------------------------------------------------------------
+// Feed view controllers (Posts / LitePosts / PostsSearchResults / Saved)
+// ---------------------------------------------------------------------------
+//
+// When sTranslatePostTitles is on, install a globe button on each feed VC
+// matching the existing thread-globe behaviour. The globe controls a
+// per-VC translated mode (kApolloThreadTranslatedModeKey) that gates
+// title translation in `ApolloMaybeTranslatePostTitleNode` via
+// `ApolloEnclosingViewControllerForNode`.
+//
+// Settings/UI gating contract per user requirements:
+//   - Settings titles OFF -> globe never shown, no titles translated.
+//   - Settings titles ON  -> globe shown on every feed VC (and existing
+//                            thread VC). Tapping toggles green/grey.
+//   - Globe ON            -> titles translated as cells become visible.
+//   - Globe OFF           -> titles restored to original.
+//
+// We rely entirely on the existing per-VC mode marker + the title hooks'
+// per-VC gate. No additional re-entrant hooks on PostTitleNode.
+
+static void ApolloScheduleFeedSettledTitleRefresh(UIViewController *vc) {
+    if (!vc || !vc.isViewLoaded) return;
+    if (!sEnableBulkTranslation || !sTranslatePostTitles || !ApolloControllerIsInTranslatedMode(vc)) return;
+    if ([objc_getAssociatedObject(vc, kApolloFeedSettledTitleRefreshScheduledKey) boolValue]) return;
+    objc_setAssociatedObject(vc, kApolloFeedSettledTitleRefreshScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    __weak UIViewController *weakVC = vc;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIViewController *strongVC = weakVC;
+        if (!strongVC) return;
+        objc_setAssociatedObject(strongVC, kApolloFeedSettledTitleRefreshScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (!strongVC.isViewLoaded || !strongVC.view.window) return;
+        if (!sEnableBulkTranslation || !sTranslatePostTitles || !ApolloControllerIsInTranslatedMode(strongVC)) return;
+        NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:512];
+        ApolloRescanTitleNodesInTree(strongVC.view, 20, visited);
+        ApolloRefreshFeedTranslationStateForController(strongVC);
+    });
+}
+
+static void ApolloFeedVCInstallGlobe(UIViewController *vc) {
+    if (!vc) return;
+    BOOL alreadyMarked = [objc_getAssociatedObject(vc, kApolloFeedTranslationVCKey) boolValue];
+    objc_setAssociatedObject(vc, kApolloFeedTranslationVCKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    sLastInstalledFeedViewController = vc;
+    // Feed VCs default to "translated mode" so post titles auto-translate
+    // the moment a non-English title scrolls into view (matches user
+    // expectation: settings titles ON => feeds always translate by default).
+    // The globe is a per-VC override the user can flip off.
+    NSNumber *storedMode = ApolloStoredFeedTitleModeForController(vc);
+    if ([storedMode isKindOfClass:[NSNumber class]]) {
+        BOOL translated = storedMode.boolValue;
+        objc_setAssociatedObject(vc, kApolloThreadTranslatedModeKey, @(translated), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(vc, kApolloThreadOriginalModeKey, @(!translated), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        sLastFeedTitleModeKnown = YES;
+        sLastFeedTitleTranslatedMode = translated;
+        if (!translated) {
+            ApolloClearVisibleTranslationApplied(vc);
+            sPendingVisibleFeedTitleApplied = NO;
+        }
+    } else if (![objc_getAssociatedObject(vc, kApolloThreadTranslatedModeKey) boolValue] &&
+               ![objc_getAssociatedObject(vc, kApolloThreadOriginalModeKey) boolValue]) {
+        objc_setAssociatedObject(vc, kApolloThreadTranslatedModeKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        sLastFeedTitleModeKnown = YES;
+        sLastFeedTitleTranslatedMode = YES;
+    } else {
+        sLastFeedTitleModeKnown = YES;
+        sLastFeedTitleTranslatedMode = ApolloControllerIsInTranslatedMode(vc);
+    }
+    if (!alreadyMarked) {
+        ApolloLog(@"[Translation] InstallGlobe class=%@ ptr=%p title='%@'",
+                  NSStringFromClass([vc class]), vc, vc.navigationItem.title ?: vc.title ?: @"(none)");
+    }
+    if (sPendingVisibleFeedTitleApplied && ApolloControllerIsInTranslatedMode(vc)) {
+        objc_setAssociatedObject(vc, kApolloVisibleTranslationAppliedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        sPendingVisibleFeedTitleApplied = NO;
+    }
+    ApolloRefreshFeedTranslationStateForController(vc);
+    ApolloScheduleFeedTranslationStateRefresh(vc, 0.05);
+    ApolloScheduleFeedTranslationStateRefresh(vc, 0.2);
+    ApolloScheduleFeedTranslationStateRefresh(vc, 0.75);
+    ApolloScheduleFeedTranslationStateRefresh(vc, 1.5);
+    ApolloScheduleFeedSettledTitleRefresh(vc);
+    if (ApolloControllerIsInTranslatedMode(vc)) {
+        __weak UIViewController *weakVC = vc;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UIViewController *strongVC = weakVC;
+            if (!strongVC || !strongVC.isViewLoaded || !strongVC.view.window) return;
+            if (!ApolloControllerIsInTranslatedMode(strongVC)) return;
+            ApolloRescanTitleNodesForController(strongVC);
+        });
+    }
+}
+
+// Universal globe-tap selector. The original implementation declared this
+// %new on each Swift feed VC class we hook; that broke whenever Home (or
+// any future feed surface) was hosted by a class we hadn't hooked, because
+// the action selector was silently missing on the target. A category on
+// UIViewController guarantees the selector exists on every controller, so
+// taps always reach our toggle code regardless of host class.
+@interface UIViewController (ApolloTranslationGlobe)
+- (void)apollo_translationGlobeTapped;
+@end
+
+@implementation UIViewController (ApolloTranslationGlobe)
+- (void)apollo_translationGlobeTapped {
+    ApolloLog(@"[Translation] GlobeTapped class=%@ ptr=%p", NSStringFromClass([self class]), self);
+    if ([objc_getAssociatedObject(self, kApolloFeedTranslationVCKey) boolValue]) {
+        ApolloToggleFeedTitleTranslationForController(self);
+    } else {
+        ApolloToggleThreadTranslationForController(self);
+    }
+}
+@end
+
+%hook _TtC6Apollo19PostsViewController
+
+- (void)viewDidLoad {
+    %orig;
+    ApolloFeedVCInstallGlobe((UIViewController *)self);
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    ApolloFeedVCInstallGlobe((UIViewController *)self);
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    ApolloFeedVCInstallGlobe((UIViewController *)self);
+    if (sEnableBulkTranslation && sTranslatePostTitles && ApolloControllerIsInTranslatedMode((UIViewController *)self)) {
+        // Re-translate any visible titles in case the user came back to a
+        // feed that was previously in translated mode.
+        ApolloRescanTitleNodesForController((UIViewController *)self);
+    }
+}
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    ApolloScheduleFeedSettledTitleRefresh((UIViewController *)self);
+}
+
+%new
+- (void)apollo_translationGlobeTapped {
+    ApolloToggleFeedTitleTranslationForController((UIViewController *)self);
+}
+
+%end
+
+%hook _TtC6Apollo23LitePostsViewController
+
+- (void)viewDidLoad {
+    %orig;
+    ApolloFeedVCInstallGlobe((UIViewController *)self);
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    ApolloFeedVCInstallGlobe((UIViewController *)self);
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    ApolloFeedVCInstallGlobe((UIViewController *)self);
+    if (sEnableBulkTranslation && sTranslatePostTitles && ApolloControllerIsInTranslatedMode((UIViewController *)self)) {
+        ApolloRescanTitleNodesForController((UIViewController *)self);
+    }
+}
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    ApolloScheduleFeedSettledTitleRefresh((UIViewController *)self);
+}
+
+%new
+- (void)apollo_translationGlobeTapped {
+    ApolloToggleFeedTitleTranslationForController((UIViewController *)self);
+}
+
+%end
+
+%hook _TtC6Apollo32PostsSearchResultsViewController
+
+- (void)viewDidLoad {
+    %orig;
+    ApolloFeedVCInstallGlobe((UIViewController *)self);
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    ApolloFeedVCInstallGlobe((UIViewController *)self);
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    ApolloFeedVCInstallGlobe((UIViewController *)self);
+    if (sEnableBulkTranslation && sTranslatePostTitles && ApolloControllerIsInTranslatedMode((UIViewController *)self)) {
+        ApolloRescanTitleNodesForController((UIViewController *)self);
+    }
+}
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    ApolloScheduleFeedSettledTitleRefresh((UIViewController *)self);
+}
+
+%new
+- (void)apollo_translationGlobeTapped {
+    ApolloToggleFeedTitleTranslationForController((UIViewController *)self);
+}
+
+%end
+
+%hook _TtC6Apollo25MultiredditViewController
+
+- (void)viewDidLoad {
+    %orig;
+    ApolloFeedVCInstallGlobe((UIViewController *)self);
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    ApolloFeedVCInstallGlobe((UIViewController *)self);
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    ApolloFeedVCInstallGlobe((UIViewController *)self);
+    if (sEnableBulkTranslation && sTranslatePostTitles && ApolloControllerIsInTranslatedMode((UIViewController *)self)) {
+        ApolloRescanTitleNodesForController((UIViewController *)self);
+    }
+}
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    ApolloScheduleFeedSettledTitleRefresh((UIViewController *)self);
+}
+
+%new
+- (void)apollo_translationGlobeTapped {
+    ApolloToggleFeedTitleTranslationForController((UIViewController *)self);
 }
 
 %end
@@ -2397,25 +4078,54 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
     // a cached translation for this comment, re-apply instantly — no network,
     // no language detection. This fixes the "translation lost on
     // collapse/uncollapse" report.
-    if (sEnableBulkTranslation) {
-        dispatch_async(dispatch_get_main_queue(), ^{
+    //
+    // BUT: only do this when the controller is currently in translated mode.
+    // If the user toggled translation OFF, off-screen cells still hold the
+    // translated attributedText on their text nodes (they were never re-laid-
+    // out while we restored visible cells). Force-restore those here so the
+    // original text reappears as the cell scrolls back into view.
+    if (!sEnableBulkTranslation) return;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *owningVC = ApolloOwningCommentsVCForCellNode((id)self);
+        if (ApolloControllerIsInTranslatedMode(owningVC)) {
             if (!ApolloReapplyCachedTranslationForCellNode((id)self)) {
                 ApolloMaybeTranslateCommentCellNode((id)self, NO);
             }
-        });
-    }
+        } else if (ApolloControllerIsConfirmedOriginalMode(owningVC)) {
+            // Only restore if the owning VC is confirmed to be in original
+            // mode. If the VC is unknown (lifecycle race), defer — the
+            // viewDidAppear retries will translate the cell shortly.
+            RDKComment *comment = ApolloCommentFromCellNode((id)self);
+            if (comment) {
+                ApolloRestoreOriginalForCellNode((id)self, comment);
+            }
+        }
+    });
 }
 
 - (void)cellNodeVisibilityEvent:(NSInteger)event {
     %orig;
 
     // Event 0 = "will become visible". Re-apply cached translation as soon as
-    // possible so the original text never flashes when re-displaying.
-    if (sEnableBulkTranslation && event == 0) {
-        dispatch_async(dispatch_get_main_queue(), ^{
+    // possible so the original text never flashes when re-displaying — but
+    // only while the thread is in translated mode. If translation was toggled
+    // off, restore the original to defeat any stale translated attributedText
+    // that's still sitting on the text node from before the toggle-off.
+    if (!sEnableBulkTranslation || event != 0) return;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *owningVC = ApolloOwningCommentsVCForCellNode((id)self);
+        if (ApolloControllerIsInTranslatedMode(owningVC)) {
             ApolloReapplyCachedTranslationForCellNode((id)self);
-        });
-    }
+        } else if (ApolloControllerIsConfirmedOriginalMode(owningVC)) {
+            // Same defer-on-unknown rule as didEnterDisplayState above.
+            RDKComment *comment = ApolloCommentFromCellNode((id)self);
+            if (comment) {
+                ApolloRestoreOriginalForCellNode((id)self, comment);
+            }
+        }
+    });
 }
 
 %end
@@ -2429,6 +4139,16 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
+    // Claim ownership AS EARLY AS POSSIBLE. Cell visibility events
+    // (`cellNodeVisibilityEvent:`, `didEnterDisplayState`) often fire
+    // *before* `viewDidAppear:` on iOS 26, and those handlers gate their
+    // translate-vs-restore decision on `sVisibleCommentsViewController`.
+    // If we wait until `viewDidAppear:` (as we used to), the global pointer
+    // is still nil/stale when those cells arrive, so they take the
+    // restore-original branch and the thread renders untranslated until
+    // the user scrolls. Setting it here closes that race.
+    sVisibleCommentsViewController = (UIViewController *)self;
+
     ApolloRefreshVisibleTranslationAppliedForController((UIViewController *)self);
     ApolloUpdateTranslationUIForController(self);
     ApolloSchedulePostBodyReapplyForController((UIViewController *)self);
@@ -2447,13 +4167,37 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
     if (sEnableBulkTranslation && ApolloControllerIsInTranslatedMode((UIViewController *)self)) {
         ApolloRefreshVisibleTranslationAppliedForController((UIViewController *)self);
         ApolloUpdateTranslationUIForController(self);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            ApolloTranslateVisibleCommentsForController((UIViewController *)self, NO);
-            ApolloRefreshVisibleTranslationAppliedForController((UIViewController *)self);
-            ApolloUpdateTranslationUIForController(self);
-            ApolloSchedulePostBodyReapplyForController((UIViewController *)self);
-        });
+        // Staggered retries: comments may not be loaded at +0.12s on slower
+        // threads (network fetch still in flight, no visible cells yet → the
+        // walk is a no-op and the user is left with original-language
+        // content). Re-walk a few times so late-arriving cells get picked up
+        // without forcing the user to scroll.
+        NSArray<NSNumber *> *retryDelays = @[ @0.12, @0.4, @0.9, @1.8 ];
+        for (NSNumber *delayNumber in retryDelays) {
+            __weak UIViewController *weakSelf = (UIViewController *)self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayNumber.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                UIViewController *strongSelf = weakSelf;
+                if (!strongSelf || !strongSelf.isViewLoaded || !strongSelf.view.window) return;
+                if (!sEnableBulkTranslation || !ApolloControllerIsInTranslatedMode(strongSelf)) return;
+                ApolloTranslateVisibleCommentsForController(strongSelf, NO);
+                ApolloRefreshVisibleTranslationAppliedForController(strongSelf);
+                ApolloUpdateTranslationUIForController(strongSelf);
+                ApolloSchedulePostBodyReapplyForController(strongSelf);
+            });
+        }
     }
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    %orig;
+    // Bump the cancel generation so any pending toggle reconciles bail out
+    // instead of running mid-swipe. Each call to ApolloRestoreAllOwnedTextNodes
+    // walks the entire owned-textnode registry and forces cell relayouts —
+    // doing that 3× during an interactive pop is the swipe-back lag the user
+    // sees.
+    NSNumber *cur = objc_getAssociatedObject((id)self, kApolloReconcileGenerationKey);
+    NSUInteger next = cur.unsignedIntegerValue + 1;
+    objc_setAssociatedObject((id)self, kApolloReconcileGenerationKey, @(next), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
@@ -2481,21 +4225,308 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
 
 %end
 
+// ---- Disk persistence for the per-comment / per-post translation caches ----
+//
+// Background: when the user momentarily backgrounds Apollo (swipes home, opens
+// Control Center, locks the device) and returns, AsyncDisplayKit can drop the
+// attributed text on visible cells, and iOS frequently fires a memory warning
+// while the app is suspended. Without persistence the caches that drive the
+// re-apply path are empty when the user comes back, and the thread reverts
+// to the original language.
+//
+// We snapshot `sCommentTranslationByFullName` / `sLinkTranslationByFullName`
+// to a plist on `DidEnterBackground` and re-hydrate them on launch. Entries
+// are tagged with the provider + target language at write time so toggling
+// providers or switching language never serves stale text.
+
+static const NSTimeInterval kApolloTranslationDiskCacheTTL = 60 * 60; // 1 hour
+static const NSUInteger kApolloTranslationDiskCacheMaxEntries = 2048;
+static NSString *const kApolloTranslationDiskCacheVersion = @"v1";
+
+static NSURL *ApolloTranslationDiskCacheURL(void) {
+    NSURL *dir = [[[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask] firstObject];
+    if (!dir) return nil;
+    return [dir URLByAppendingPathComponent:@"apollo-translation-cache-v1.plist"];
+}
+
+static NSString *ApolloCurrentTranslationTag(void) {
+    NSString *provider = sTranslationProvider.length > 0 ? sTranslationProvider : @"google";
+    NSString *language = sTranslationTargetLanguage.length > 0 ? sTranslationTargetLanguage : @"auto";
+    return [NSString stringWithFormat:@"%@|%@", provider, language];
+}
+
+static void ApolloPersistTranslationCachesToDisk(void) {
+    NSURL *url = ApolloTranslationDiskCacheURL();
+    if (!url) return;
+
+    NSString *tag = ApolloCurrentTranslationTag();
+    NSDate *now = [NSDate date];
+
+    // NSCache doesn't expose its contents — we maintain mirror dictionaries
+    // alongside the caches that hold the same data while the app is alive.
+    NSDictionary *commentSnapshot = nil;
+    NSDictionary *linkSnapshot = nil;
+    @synchronized (sCommentTranslationMirror) {
+        commentSnapshot = [sCommentTranslationMirror copy];
+    }
+    @synchronized (sLinkTranslationMirror) {
+        linkSnapshot = [sLinkTranslationMirror copy];
+    }
+
+    NSMutableArray *commentEntries = [NSMutableArray array];
+    NSUInteger written = 0;
+    for (NSString *key in commentSnapshot) {
+        if (written++ >= kApolloTranslationDiskCacheMaxEntries) break;
+        NSString *text = commentSnapshot[key];
+        if (![key isKindOfClass:[NSString class]] || ![text isKindOfClass:[NSString class]]) continue;
+        [commentEntries addObject:@{ @"k": key, @"v": text, @"t": now, @"tag": tag }];
+    }
+    NSMutableArray *linkEntries = [NSMutableArray array];
+    written = 0;
+    for (NSString *key in linkSnapshot) {
+        if (written++ >= kApolloTranslationDiskCacheMaxEntries) break;
+        NSString *text = linkSnapshot[key];
+        if (![key isKindOfClass:[NSString class]] || ![text isKindOfClass:[NSString class]]) continue;
+        [linkEntries addObject:@{ @"k": key, @"v": text, @"t": now, @"tag": tag }];
+    }
+
+    NSDictionary *root = @{
+        @"version": kApolloTranslationDiskCacheVersion,
+        @"comments": commentEntries,
+        @"links": linkEntries,
+    };
+    NSError *err = nil;
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:root format:NSPropertyListBinaryFormat_v1_0 options:0 error:&err];
+    if (!data) {
+        ApolloLog(@"[translation/persist] serialize failed: %@", err);
+        return;
+    }
+    if (![data writeToURL:url options:NSDataWritingAtomic error:&err]) {
+        ApolloLog(@"[translation/persist] write failed: %@", err);
+        return;
+    }
+    ApolloLog(@"[translation/persist] wrote %lu comment + %lu link entries", (unsigned long)commentEntries.count, (unsigned long)linkEntries.count);
+}
+
+static void ApolloHydrateTranslationCachesFromDisk(void) {
+    NSURL *url = ApolloTranslationDiskCacheURL();
+    if (!url) return;
+    NSData *data = [NSData dataWithContentsOfURL:url];
+    if (!data) return;
+
+    NSError *err = nil;
+    id root = [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:&err];
+    if (![root isKindOfClass:[NSDictionary class]]) {
+        ApolloLog(@"[translation/hydrate] bad plist: %@", err);
+        return;
+    }
+    NSString *version = root[@"version"];
+    if (![version isEqualToString:kApolloTranslationDiskCacheVersion]) return;
+
+    NSString *currentTag = ApolloCurrentTranslationTag();
+    NSDate *now = [NSDate date];
+
+    NSUInteger restored = 0;
+    for (NSDictionary *entry in (NSArray *)root[@"comments"]) {
+        if (![entry isKindOfClass:[NSDictionary class]]) continue;
+        NSString *key = entry[@"k"];
+        NSString *text = entry[@"v"];
+        NSDate *t = entry[@"t"];
+        NSString *tag = entry[@"tag"];
+        if (![key isKindOfClass:[NSString class]] || ![text isKindOfClass:[NSString class]]) continue;
+        if (![tag isEqualToString:currentTag]) continue;
+        if (![t isKindOfClass:[NSDate class]] || [now timeIntervalSinceDate:t] > kApolloTranslationDiskCacheTTL) continue;
+        [sCommentTranslationByFullName setObject:text forKey:key];
+        ApolloMirrorSetComment(key, text);
+        restored++;
+    }
+    NSUInteger restoredLinks = 0;
+    for (NSDictionary *entry in (NSArray *)root[@"links"]) {
+        if (![entry isKindOfClass:[NSDictionary class]]) continue;
+        NSString *key = entry[@"k"];
+        NSString *text = entry[@"v"];
+        NSDate *t = entry[@"t"];
+        NSString *tag = entry[@"tag"];
+        if (![key isKindOfClass:[NSString class]] || ![text isKindOfClass:[NSString class]]) continue;
+        if (![tag isEqualToString:currentTag]) continue;
+        if (![t isKindOfClass:[NSDate class]] || [now timeIntervalSinceDate:t] > kApolloTranslationDiskCacheTTL) continue;
+        [sLinkTranslationByFullName setObject:text forKey:key];
+        ApolloMirrorSetLink(key, text);
+        restoredLinks++;
+    }
+    ApolloLog(@"[translation/hydrate] restored %lu comments + %lu links (tag=%@)", (unsigned long)restored, (unsigned long)restoredLinks, currentTag);
+}
+
+// Re-runs the cache-only translation reapply path for the currently-visible
+// comments controller. Used when the app returns to foreground and ASDK has
+// dropped the attributed text on visible cells. Per-thread translated-mode
+// state is stored as an associated object on the VC and survives backgrounding
+// (the VC isn't dealloc'd while the app is suspended), so we just re-render
+// from cache (force=NO — never burns a network round-trip on resume).
+static void ApolloReapplyTranslationOnAppResume(void) {
+    UIViewController *vc = sVisibleCommentsViewController;
+    if (!vc) return;
+    if (!ApolloControllerIsInTranslatedMode(vc)) return;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *current = sVisibleCommentsViewController;
+        if (!current || !ApolloControllerIsInTranslatedMode(current)) return;
+        ApolloRefreshVisibleTranslationAppliedForController(current);
+        ApolloUpdateTranslationUIForController(current);
+        ApolloTranslateVisibleCommentsForController(current, NO);
+        ApolloSchedulePostBodyReapplyForController(current);
+    });
+
+    // Belt-and-suspenders second pass after ASDK has had a beat to rehydrate
+    // its own display state. force=NO, so this is cheap if everything's
+    // already correct.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIViewController *current = sVisibleCommentsViewController;
+        if (!current || !ApolloControllerIsInTranslatedMode(current)) return;
+        ApolloRefreshVisibleTranslationAppliedForController(current);
+        ApolloTranslateVisibleCommentsForController(current, NO);
+        ApolloSchedulePostBodyReapplyForController(current);
+    });
+}
+
 %ctor {
     sTranslationCache = [NSCache new];
     sCommentTranslationByFullName = [NSCache new];
     sCommentTranslationByFullName.countLimit = 2048;
     sLinkTranslationByFullName = [NSCache new];
     sLinkTranslationByFullName.countLimit = 256;
+    sLoggedSkippedCommentFullNames = [NSMutableSet set];
+    sCommentTranslationMirror = [NSMutableDictionary dictionary];
+    sLinkTranslationMirror = [NSMutableDictionary dictionary];
     sPendingTranslationCallbacks = [NSMutableDictionary dictionary];
+    sFeedTitleModeByFeedKey = [NSMutableDictionary dictionary];
+    sOwnedTextNodes = [NSHashTable hashTableWithOptions:(NSPointerFunctionsWeakMemory | NSPointerFunctionsObjectPointerPersonality)];
+    sOwnedTextNodesQueue = dispatch_queue_create("ca.jeffrey.apollo.translation.ownednodes", DISPATCH_QUEUE_SERIAL);
 
+    // Hydrate disk cache early so any cells laid out during the first frame
+    // already see translations.
+    ApolloHydrateTranslationCachesFromDisk();
+
+    // Memory-warning handler: only drop the raw key->text cache (cheap to
+    // recompute via the persistent fullName caches). Do NOT wipe the
+    // per-comment / per-post caches — iOS sends memory warnings when the app
+    // is backgrounded, and clearing them caused translated threads to revert
+    // to the original language as soon as the user returned to Apollo.
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidReceiveMemoryWarningNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *note) {
+        [sTranslationCache removeAllObjects];
+    }];
+
+    // App lifecycle: snapshot caches when going to background; re-apply the
+    // active thread's translation on return.
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *note) {
+        ApolloPersistTranslationCachesToDisk();
+    }];
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillEnterForegroundNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *note) {
+        ApolloReapplyTranslationOnAppResume();
+    }];
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *note) {
+        ApolloReapplyTranslationOnAppResume();
+    }];
+
+    // When the user changes the "Don't Translate" language list, blow away every
+    // translation cache so previously-skipped (and cached as source==translation)
+    // text gets a fresh provider call on the next view.
+    [[NSNotificationCenter defaultCenter] addObserverForName:@"ApolloTranslationSkipLanguagesChanged"
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(__unused NSNotification *note) {
         [sTranslationCache removeAllObjects];
         [sCommentTranslationByFullName removeAllObjects];
         [sLinkTranslationByFullName removeAllObjects];
+        @synchronized (sLoggedSkippedCommentFullNames) {
+            [sLoggedSkippedCommentFullNames removeAllObjects];
+        }
+        ApolloLog(@"[Translation] Skip-languages changed; flushed translation caches");
+
+        // Actively re-translate visible comments now (instead of waiting for
+        // the next scroll/reuse). If the user just *removed* a language from
+        // the skip list, the visible cells will pick up translations within
+        // ~100ms instead of feeling laggy. If they *added* a language, the
+        // skip-detect inside the per-comment translator path will short-circuit.
+        UIViewController *visibleCommentsVC = sVisibleCommentsViewController;
+        if (visibleCommentsVC && visibleCommentsVC.isViewLoaded && visibleCommentsVC.view.window
+            && ApolloControllerIsInTranslatedMode(visibleCommentsVC)) {
+            ApolloLog(@"[Translation] Re-translating visible comments after skip-languages change");
+            ApolloTranslateVisibleCommentsForController(visibleCommentsVC, NO);
+        }
+
+        // Same idea for the visible feed VC: rescan titles so newly-allowed
+        // languages translate now, AND clear the cached "applied" flag so the
+        // green globe accurately reflects the current visible state. If the
+        // user just added the dominant feed language to the skip list,
+        // nothing visible will translate and the globe should drop back to
+        // its un-applied appearance.
+        UIViewController *visibleFeedVC = ApolloFindTopmostVisibleFeedVC();
+        if (visibleFeedVC && visibleFeedVC.isViewLoaded && visibleFeedVC.view.window
+            && [objc_getAssociatedObject(visibleFeedVC, kApolloFeedTranslationVCKey) boolValue]
+            && ApolloControllerIsInTranslatedMode(visibleFeedVC)) {
+            ApolloLog(@"[Translation] Refreshing visible feed titles after skip-languages change");
+            ApolloClearVisibleTranslationApplied(visibleFeedVC);
+            sPendingVisibleFeedTitleApplied = NO;
+            ApolloRescanTitleNodesForController(visibleFeedVC);
+            // Re-evaluate after the rescan has had time to issue/complete
+            // translations \u2014 if anything came back translated, the globe
+            // flips back to applied; if nothing did, it stays cleared.
+            ApolloScheduleFeedTranslationStateRefresh(visibleFeedVC, 0.6);
+            ApolloScheduleFeedTranslationStateRefresh(visibleFeedVC, 1.5);
+        }
+    }];
+
+    // Live-update when the user toggles "Translate Post Titles" in settings:
+    // refresh the topmost UIViewController so the feed-VC globe is added or
+    // removed immediately and any owned title nodes are restored.
+    [[NSNotificationCenter defaultCenter] addObserverForName:@"ApolloTranslatePostTitlesChanged"
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *note) {
+        if (!sTranslatePostTitles) {
+            // Restore every title node we still own.
+            ApolloRestoreAllOwnedTextNodes();
+            [sFeedTitleModeByFeedKey removeAllObjects];
+            sPendingVisibleFeedTitleApplied = NO;
+            sLastFeedTitleModeKnown = NO;
+            sLastFeedTitleTranslatedMode = YES;
+        }
+        // Walk the keyWindow's VC tree and update any feed VC.
+        UIWindow *keyWindow = nil;
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]] && scene.activationState == UISceneActivationStateForegroundActive) {
+                for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                    if (w.isKeyWindow) { keyWindow = w; break; }
+                }
+                if (keyWindow) break;
+            }
+        }
+        if (!keyWindow) return;
+        UIViewController *root = keyWindow.rootViewController;
+        NSMutableArray *queue = [NSMutableArray array];
+        if (root) [queue addObject:root];
+        while (queue.count) {
+            UIViewController *vc = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            if ([objc_getAssociatedObject(vc, kApolloFeedTranslationVCKey) boolValue]) {
+                ApolloUpdateTranslationUIForController(vc);
+            }
+            for (UIViewController *child in vc.childViewControllers) [queue addObject:child];
+            if (vc.presentedViewController) [queue addObject:vc.presentedViewController];
+        }
     }];
 
     %init;
