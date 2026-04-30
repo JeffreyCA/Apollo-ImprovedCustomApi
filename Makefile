@@ -21,6 +21,7 @@ ApolloImprovedCustomApi_FILES = \
     ApolloMedia.xm \
     ApolloCommentsCollapse.xm \
     ApolloLiquidGlass.xm \
+    ApolloAutoHideTabBar.xm \
     ApolloSettings.xm \
     ApolloRecentlyRead.xm \
     ApolloSavedCategories.xm \
