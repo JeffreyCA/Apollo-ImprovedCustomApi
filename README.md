@@ -37,7 +37,8 @@ iOS tweak for [Apollo for Reddit app](https://apolloapp.io/) that lets you conti
 - **Custom Subreddit Sources**: Use external URLs for random and trending subreddits
 - **Recently Read Posts**: View all recently read posts from the Profile tab
 - **Editable Saved Categories**: Add, rename, and delete saved post categories (Settings > Saved Categories)
-- **Bulk inline translation**: Translate comment threads and self posts inline with configurable provider and target language (Settings > Translation)
+- **Bulk in-place translation**: Translate posts and comments in-place with configurable provider and target language (Settings > Translation)
+- **Tap timestamp for creation date**: Tap a comment or post's relative-time label to see the absolute creation date and time
 
 ## Known Issues
 

@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v2.6.0] - 2026-04-30
+- Bulk translation improvements (thanks @icpryde for continuing to refine this!)
+    - New **Don't Translate** languages list in **Settings > Translation** to keep selected languages untranslated
+    - New option to translate post titles in **Settings > Translation**
+    - Various bug fixes and stability improvements
+- Tap a comment or post's relative-time label (e.g. "2.8y") to show an alert with the absolute creation date and time, mirroring Apollo's existing "Edited" alert
+- Liquid Glass: fix tab bar not reappearing on scrolling up when "Hide Bars on Scroll" is enabled (thanks @icpryde for the fix!)
+- Liquid Glass: hide translucent status bar background strip that appears at the top of the screen when "Hide Bars on Scroll" is enabled
+- Liquid Glass: fix first list row being clipped under nav bar in subreddit list view when "Hide Bars on Scroll" is enabled
+
 ## [v2.5.0] - 2026-04-28
 
 - New bulk translation feature for comment threads and self posts (thanks @icpryde for implementing this feature!)
@@ -303,6 +313,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v2.6.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.5.0...v2.6.0
 [v2.5.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.4.0...v2.5.0
 [v2.4.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.3.0...v2.4.0
 [v2.3.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.2.1...v2.3.0
