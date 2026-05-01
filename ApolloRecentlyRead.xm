@@ -521,9 +521,7 @@ static UIImage *RecentlyReadNSFWBadgeImage(CGFloat fontSize) {
     if (elapsed < 2592000) return [NSString stringWithFormat:@"%ldd", (long)(elapsed / 86400)];
     double months = elapsed / 2592000.0;
     if (months < 12) return [NSString stringWithFormat:@"%.0fmo", months];
-    double years = elapsed / 31536000.0;
-    if (years >= 10) return [NSString stringWithFormat:@"%.0fy", years];
-    return [NSString stringWithFormat:@"%.1fy", years];
+    return [NSString stringWithFormat:@"%.1fy", elapsed / 31556736.0];
 }
 
 - (NSString *)compactScoreString:(NSInteger)score {
