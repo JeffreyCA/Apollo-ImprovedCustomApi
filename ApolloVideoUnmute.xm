@@ -558,6 +558,10 @@ static void HandleCommentsRichMediaVisibilityEvent(id visibilityOwner,
                   withCellFrame:(CGRect)frame {
     %orig;
     id richMediaNode = GetIvarObject(self, "richMediaNode");
+    // event=1 (VisibleRectChanged) fires on every layout tick during scroll.
+    // Skip the verbose path entirely — the icon-sync inside SyncMuteButtonIcon
+    // is a no-op when state already matches, but the log line itself floods.
+    if (event == 1) return;
     HandleCommentsRichMediaVisibilityEvent(self, richMediaNode, event,
                                            @"comments header video");
 }
@@ -570,6 +574,10 @@ static void HandleCommentsRichMediaVisibilityEvent(id visibilityOwner,
                    inScrollView:(id)scrollView
                   withCellFrame:(CGRect)frame {
     %orig;
+
+    // event=1 (VisibleRectChanged) fires on every layout tick during scroll.
+    // Skip entirely — nothing for us to do on rect-change ticks.
+    if (event == 1) return;
 
     id richMediaNode = GetCrosspostRichMediaNodeFromOwner(self);
     if (!richMediaNode) return;

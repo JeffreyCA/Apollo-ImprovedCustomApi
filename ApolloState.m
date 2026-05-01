@@ -21,7 +21,9 @@ BOOL sProxyImgurDDG = NO;
 
 BOOL sEnableBulkTranslation = NO;
 BOOL sAutoTranslateOnAppear = YES;
+BOOL sTranslatePostTitles = NO;
 NSString *sTranslationTargetLanguage = nil;
 NSString *sTranslationProvider = nil;
 NSString *sLibreTranslateURL = nil;
 NSString *sLibreTranslateAPIKey = nil;
+NSArray<NSString *> *sTranslationSkipLanguages = nil;

@@ -758,10 +758,12 @@ static void initializeRandomSources() {
                                     UDKeyProxyImgurDDG: @NO,
                                     UDKeyEnableBulkTranslation: @NO,
                                     UDKeyAutoTranslateOnAppear: @YES,
+                                    UDKeyTranslatePostTitles: @NO,
                                     UDKeyTranslationTargetLanguage: @"",
-                                    UDKeyTranslationProvider: @"google",
+                                    UDKeyTranslationProviderUserSelected: @NO,
                                     UDKeyLibreTranslateURL: @"https://libretranslate.de/translate",
-                                    UDKeyLibreTranslateAPIKey: @""};
+                                    UDKeyLibreTranslateAPIKey: @"",
+                                    UDKeyTranslationSkipLanguages: @[]};
     [[NSUserDefaults standardUserDefaults] registerDefaults:defaultValues];
 
     sRedditClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedditClientId] ?: @"" copy];
@@ -776,15 +778,28 @@ static void initializeRandomSources() {
     sProxyImgurDDG = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProxyImgurDDG];
     sEnableBulkTranslation = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableBulkTranslation];
     sAutoTranslateOnAppear = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoTranslateOnAppear];
+    sTranslatePostTitles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyTranslatePostTitles];
 
     NSString *targetLanguage = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTranslationTargetLanguage];
     sTranslationTargetLanguage = [targetLanguage length] > 0 ? [targetLanguage copy] : nil;
 
-    NSString *provider = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTranslationProvider];
-    if ([provider isEqualToString:@"libre"] || [provider isEqualToString:@"google"]) {
-        sTranslationProvider = [provider copy];
-    } else {
+    // Provider: only "google" or "libre" are supported. Migrate any older
+    // "apple" value to "google" so existing users land on a working provider.
+    NSUserDefaults *standardDefaults = [NSUserDefaults standardUserDefaults];
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+    NSDictionary *persistentDomain = bundleID.length > 0 ? [standardDefaults persistentDomainForName:bundleID] : nil;
+    id providerValue = [persistentDomain objectForKey:UDKeyTranslationProvider];
+    NSString *provider = [providerValue isKindOfClass:[NSString class]] ? (NSString *)providerValue : nil;
+
+    if ([provider isEqualToString:@"libre"]) {
+        sTranslationProvider = @"libre";
+    } else if ([provider isEqualToString:@"google"]) {
         sTranslationProvider = @"google";
+    } else {
+        // Unset, unrecognized, or legacy "apple" — default to Google.
+        sTranslationProvider = @"google";
+        [standardDefaults setObject:sTranslationProvider forKey:UDKeyTranslationProvider];
+        [standardDefaults setBool:NO forKey:UDKeyTranslationProviderUserSelected];
     }
 
     NSString *libreURL = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyLibreTranslateURL];
@@ -792,6 +807,26 @@ static void initializeRandomSources() {
 
     NSString *libreAPIKey = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyLibreTranslateAPIKey];
     sLibreTranslateAPIKey = [libreAPIKey length] > 0 ? [libreAPIKey copy] : nil;
+
+    {
+        id raw = [[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTranslationSkipLanguages];
+        NSMutableArray<NSString *> *clean = [NSMutableArray array];
+        if ([raw isKindOfClass:[NSArray class]]) {
+            for (id v in (NSArray *)raw) {
+                if (![v isKindOfClass:[NSString class]]) continue;
+                NSString *s = [(NSString *)v stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].lowercaseString;
+                if (s.length == 0) continue;
+                NSRange dash = [s rangeOfString:@"-"];
+                NSRange under = [s rangeOfString:@"_"];
+                NSUInteger split = NSNotFound;
+                if (dash.location != NSNotFound) split = dash.location;
+                if (under.location != NSNotFound) split = (split == NSNotFound) ? under.location : MIN(split, under.location);
+                if (split != NSNotFound && split > 0) s = [s substringToIndex:split];
+                if (s.length > 0 && ![clean containsObject:s]) [clean addObject:s];
+            }
+        }
+        sTranslationSkipLanguages = [clean copy];
+    }
 
     // Trim ReadPostIDs if over configured max
     if (sReadPostMaxCount > 0) {

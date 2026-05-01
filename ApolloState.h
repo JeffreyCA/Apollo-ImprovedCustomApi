@@ -22,7 +22,10 @@ extern BOOL sProxyImgurDDG;
 
 extern BOOL sEnableBulkTranslation;
 extern BOOL sAutoTranslateOnAppear;
+extern BOOL sTranslatePostTitles;
 extern NSString *sTranslationTargetLanguage;
 extern NSString *sTranslationProvider;
 extern NSString *sLibreTranslateURL;
 extern NSString *sLibreTranslateAPIKey;
+// Lowercased 2-letter language codes the user has opted out of translating.
+extern NSArray<NSString *> *sTranslationSkipLanguages;
