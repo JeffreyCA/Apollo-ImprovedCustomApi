@@ -2965,6 +2965,7 @@ static UIColor *ApolloThemeTintColorFromNavigationItems(NSArray<UIBarButtonItem 
 
 static void ApolloUpdateTranslationUIForController(id controller) {
     UIViewController *vc = (UIViewController *)controller;
+    if (!sEnableBulkTranslation) return;
 
     BOOL isFeedVC = [objc_getAssociatedObject(controller, kApolloFeedTranslationVCKey) boolValue];
     UIBarButtonItem *translationItem = objc_getAssociatedObject(controller, kApolloTranslateBarButtonKey);
@@ -4091,6 +4092,7 @@ static void ApolloScheduleFeedSettledTitleRefresh(UIViewController *vc) {
 
 static void ApolloFeedVCInstallGlobe(UIViewController *vc) {
     if (!vc) return;
+    if (!sEnableBulkTranslation) return;
     BOOL alreadyMarked = [objc_getAssociatedObject(vc, kApolloFeedTranslationVCKey) boolValue];
     objc_setAssociatedObject(vc, kApolloFeedTranslationVCKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     sLastInstalledFeedViewController = vc;
