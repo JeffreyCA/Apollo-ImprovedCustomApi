@@ -302,6 +302,92 @@ static void FixScrollEdgeEffectInversion(UIScrollView *scrollView) {
     }
 }
 
+// MARK: - ApolloNavigationController fixes for Liquid Glass
+
+@interface _TtC6Apollo26ApolloNavigationController : UINavigationController
+@end
+
+static Class ApolloTableVCClass(void) {
+    static Class cls = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cls = objc_getClass("_TtC6Apollo25ApolloTableViewController"); });
+    return cls;
+}
+
+static Ivar ApolloTableVCTableViewIvar(void) {
+    static Ivar iv = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class c = ApolloTableVCClass();
+        if (c) iv = class_getInstanceVariable(c, "tableView");
+    });
+    return iv;
+}
+
+// Hide the translucent grey statusBarBackgroundView Apollo overlays on the window when
+// "Hide Bars on Scroll" is enabled. Pre-26 it blended with the opaque nav bar; on Liquid
+// Glass it shows through as a visible strip at the top of the screen.
+static void HideApolloStatusBarBackgroundView(UINavigationController *navController) {
+    if (!IsLiquidGlass() || !navController) return;
+
+    static Ivar sIvar = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        Class cls = objc_getClass("_TtC6Apollo26ApolloNavigationController");
+        if (cls) {
+            sIvar = class_getInstanceVariable(cls, "statusBarBackgroundView");
+        }
+    });
+    if (!sIvar) return;
+
+    UIView *bgView = object_getIvar(navController, sIvar);
+    if ([bgView isKindOfClass:[UIView class]] && !bgView.hidden) {
+        bgView.hidden = YES;
+        ApolloLog(@"[ApolloNavigationController] Hid statusBarBackgroundView for Liquid Glass");
+    }
+}
+
+%hook _TtC6Apollo26ApolloNavigationController
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    HideApolloStatusBarBackgroundView(self);
+}
+
+// Fix the first list row sitting under the translucent nav bar after hidesBarsOnSwipe
+// re-reveals it. Apollo's gesture handler applies a negative contentInset.top while the
+// bar is hidden but never resets it on reveal, leaving adjustedContentInset.top too small.
+// Pre-26 the opaque bar masked this; Liquid Glass exposes it.
+- (void)barHideOnSwipeGesturePanned:(UIPanGestureRecognizer *)gr {
+    %orig;
+    if (!IsLiquidGlass()) return;
+    if (gr.state != UIGestureRecognizerStateEnded) return;
+
+    // Only act when bar has settled fully on-screen — leave Apollo's negative inset alone
+    // while the bar is hidden (origin.y < 0).
+    if (self.navigationBar.frame.origin.y < 0) return;
+
+    Class apolloTblCls = ApolloTableVCClass();
+    Ivar tvIvar = ApolloTableVCTableViewIvar();
+    if (!apolloTblCls || !tvIvar) return;
+
+    UIViewController *topVC = self.topViewController;
+    if (![topVC isKindOfClass:apolloTblCls]) return;
+
+    UIScrollView *tv = object_getIvar(topVC, tvIvar);
+    if (![tv isKindOfClass:[UIScrollView class]]) return;
+
+    UIEdgeInsets ci = tv.contentInset;
+    if (ci.top >= 0) return;
+
+    CGFloat oldTop = ci.top;
+    ci.top = 0;
+    tv.contentInset = ci;
+    ApolloLog(@"[ApolloNavigationController] Reset stale contentInset.top %g→0 after bar reveal (Liquid Glass)", oldTop);
+}
+
+%end
+
 %hook _TtC6Apollo22MessagesCollectionView
 
 - (void)didMoveToWindow {
