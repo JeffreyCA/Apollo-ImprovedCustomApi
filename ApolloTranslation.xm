@@ -383,25 +383,12 @@ static BOOL ApolloTextLooksLikeStructuredPostBody(NSString *text) {
     if (atxHeadingCount >= 1) return YES;
     if (boldOnlyHeadingCount >= 2) return YES;
 
-    // Heavy paragraph structure: lots of blank-line breaks in a long body.
-    // Translator commonly collapses these and our flat re-render can't
-    // recover the section visuals. Bar lowered after the Shakhtar
-    // post-match thread case showed the visible-text path receives the
-    // rendered output (no `|`/`#`/`**`), so structural-only signals are
-    // gone — only the paragraph-break shape survives.
-    if (text.length >= 200) {
-        NSUInteger blankBreaks = 0;
-        NSRange searchRange = NSMakeRange(0, text.length);
-        while (searchRange.length > 0) {
-            NSRange found = [text rangeOfString:@"\n\n" options:0 range:searchRange];
-            if (found.location == NSNotFound) break;
-            blankBreaks++;
-            NSUInteger next = found.location + found.length;
-            if (next >= text.length) break;
-            searchRange = NSMakeRange(next, text.length - next);
-        }
-        if (blankBreaks >= 3) return YES;
-    }
+    // NOTE: a previous "blankBreaks >= 3 in any body >= 200 chars" rule
+    // lived here. It was too aggressive — any normal multi-paragraph rant
+    // (4+ paragraphs of prose) trips that count, and Reddit posts written
+    // as plain prose are perfectly translatable. Removed so prose isn't
+    // false-positived; real structured posts still get caught by the
+    // markdown markers above and the HTML structural tags below.
 
     // Many "Foo: bar" colon-terminated label lines (Venue:, Referee:,
     // Manager:, Starting XI:, etc.) is a strong indicator of a structured
@@ -446,19 +433,11 @@ static BOOL ApolloHTMLLooksLikeStructuredPostBody(NSString *html) {
     if ([html rangeOfString:@"<h5" options:opts].location != NSNotFound) return YES;
     if ([html rangeOfString:@"<h6" options:opts].location != NSNotFound) return YES;
 
-    // Many <p> blocks => heavy paragraph structure (matches the >=4
-    // blank-line heuristic used on the markdown side).
-    NSUInteger pCount = 0;
-    NSRange searchRange = NSMakeRange(0, html.length);
-    while (searchRange.length > 0) {
-        NSRange found = [html rangeOfString:@"<p" options:opts range:searchRange];
-        if (found.location == NSNotFound) break;
-        pCount++;
-        if (pCount >= 4) return YES;
-        NSUInteger next = found.location + found.length;
-        if (next >= html.length) break;
-        searchRange = NSMakeRange(next, html.length - next);
-    }
+    // NOTE: a previous "<p> count >= 4" rule lived here as a paragraph-
+    // structure proxy. Reddit wraps every paragraph in <p>, so any 4-
+    // paragraph plain-prose rant tripped it and never translated. Removed;
+    // the explicit table / hr / h1-h6 checks above are sufficient to catch
+    // genuine structured content without false-positiving prose.
     return NO;
 }
 
