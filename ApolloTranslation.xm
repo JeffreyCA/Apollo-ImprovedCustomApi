@@ -383,13 +383,6 @@ static BOOL ApolloTextLooksLikeStructuredPostBody(NSString *text) {
     if (atxHeadingCount >= 1) return YES;
     if (boldOnlyHeadingCount >= 2) return YES;
 
-    // NOTE: a previous "blankBreaks >= 3 in any body >= 200 chars" rule
-    // lived here. It was too aggressive — any normal multi-paragraph rant
-    // (4+ paragraphs of prose) trips that count, and Reddit posts written
-    // as plain prose are perfectly translatable. Removed so prose isn't
-    // false-positived; real structured posts still get caught by the
-    // markdown markers above and the HTML structural tags below.
-
     // Many "Foo: bar" colon-terminated label lines (Venue:, Referee:,
     // Manager:, Starting XI:, etc.) is a strong indicator of a structured
     // post-match / spec-sheet style body even when no markdown survives.
@@ -404,6 +397,35 @@ static BOOL ApolloTextLooksLikeStructuredPostBody(NSString *text) {
             labelLineCount++;
             if (labelLineCount >= 3) return YES;
         }
+    }
+
+    // Structural fingerprint: count "isolated short header-like lines" —
+    // short lines (<40 chars) sitting alone between blank lines, not ending
+    // in regular sentence punctuation. These are how rendered post-match /
+    // line-up / spec-sheet bodies look after their markdown markers
+    // (`**LINE-UPS**`, `# Schalke 04`, `---`) get consumed by the renderer:
+    // bare standalone "LINE-UPS", "Schalke 04", "Fortuna Düsseldorf" lines
+    // surrounded by blank space. Plain prose almost never has these — every
+    // paragraph is a long line ending in `.`/`!`/`?`.
+    NSCharacterSet *sentenceEnders = [NSCharacterSet characterSetWithCharactersInString:@".!?,;"];
+    NSUInteger isolatedHeaderCount = 0;
+    for (NSUInteger i = 0; i < scanLimit; i++) {
+        NSString *line = [lines[i] stringByTrimmingCharactersInSet:ws];
+        if (line.length == 0 || line.length > 40) continue;
+        // Need blank (or start) before and blank (or end) after.
+        BOOL prevBlank = (i == 0) ||
+                         [[lines[i - 1] stringByTrimmingCharactersInSet:ws] length] == 0;
+        BOOL nextBlank = (i + 1 >= lines.count) ||
+                         [[lines[i + 1] stringByTrimmingCharactersInSet:ws] length] == 0;
+        if (!prevBlank || !nextBlank) continue;
+        // Skip lines that look like prose (end with sentence punctuation).
+        unichar lastChar = [line characterAtIndex:line.length - 1];
+        if ([sentenceEnders characterIsMember:lastChar]) continue;
+        // Skip lines that are just a URL or markdown link — those are common
+        // in prose ("Source: <link>") and aren't section headers.
+        if ([line hasPrefix:@"http"] || [line hasPrefix:@"["]) continue;
+        isolatedHeaderCount++;
+        if (isolatedHeaderCount >= 2) return YES;
     }
 
     return NO;
