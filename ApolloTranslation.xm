@@ -46,6 +46,26 @@ static const void *kApolloAppliedHeaderTranslationFullNameKey = &kApolloAppliedH
 static const void *kApolloHeaderTranslatedTextNodeKey = &kApolloHeaderTranslatedTextNodeKey;
 static const void *kApolloHeaderCellTranslationKeyKey = &kApolloHeaderCellTranslationKeyKey;
 static const void *kApolloPostBodyReapplyScheduledKey = &kApolloPostBodyReapplyScheduledKey;
+// Per-header-cell-node scheduling key for the fast (~10ms) cached
+// translation reapply path used by the comments header `setNeedsLayout` /
+// `setNeedsDisplay` hook, mirroring `kApolloReapplyScheduledKey` for
+// comment cells. Catches vote-triggered redisplay before the visible flash.
+static const void *kApolloHeaderReapplyScheduledKey = &kApolloHeaderReapplyScheduledKey;
+// Set on the cell/header node by ApolloApplyTranslationTo*CellNode for ~150ms
+// after a successful apply. Both schedulers skip while this is set, breaking
+// the apply -> setNeedsLayout -> hook -> schedule -> apply feedback loop
+// observed when ASDK propagates layout invalidation up from the text node.
+static const void *kApolloRecentlyAppliedKey = &kApolloRecentlyAppliedKey;
+// Last RDKLink applied to a header cell, retained so we can recover the link
+// when ApolloLinkFromHeaderCellNode returns nil after the cell is rebuilt by
+// a vote tap.
+static const void *kApolloAppliedHeaderLinkKey = &kApolloAppliedHeaderLinkKey;
+// Per-comments-VC last-applied post body translation. Updated on every
+// successful header/post-body apply (any path). Used by the header reapply
+// scheduler to recover after vote tap when Apollo rebuilds the header cell
+// and we can no longer find the RDKLink. Layout: NSDictionary with keys
+// @"link" (RDKLink), @"body" (NSString), @"translated" (NSString).
+static const void *kApolloLastAppliedPostBodyKey = &kApolloLastAppliedPostBodyKey;
 // Per-VC monotonic counter bumped in viewWillDisappear:. Pending toggle
 // reconciles capture this at scheduling time and bail out if it changed,
 // so we don't run multi-pass restore work mid swipe-back.
@@ -1254,6 +1274,18 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
 
     objc_setAssociatedObject(commentCellNode, kApolloTranslatedTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
+    // Re-entrancy guard: stamp the cell node so the setNeedsLayout /
+    // setNeedsDisplay hook below skips scheduling another reapply for the
+    // next ~150ms. Without this, ASDK's layout invalidation propagates from
+    // the text node up to the cell node, fires our hook, schedules a
+    // reapply, which calls us again, ad infinitum (~100/sec).
+    objc_setAssociatedObject(commentCellNode, kApolloRecentlyAppliedKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak id weakCell = commentCellNode;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        id strong = weakCell;
+        if (strong) objc_setAssociatedObject(strong, kApolloRecentlyAppliedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    });
+
     // Persist the translation by Reddit fullName so we can re-apply after
     // collapse/expand or cell reuse without hitting the network again.
     NSString *fullName = ApolloCommentFullName(comment);
@@ -1709,6 +1741,26 @@ static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *l
 
     objc_setAssociatedObject(headerCellNode, kApolloHeaderTranslatedTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
+    // Re-entrancy guard + link recovery for vote-tap rebuild (see comment
+    // cell apply above for rationale).
+    objc_setAssociatedObject(headerCellNode, kApolloRecentlyAppliedKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (link) {
+        objc_setAssociatedObject(headerCellNode, kApolloAppliedHeaderLinkKey, link, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    // Stash the (link, body, translated) tuple on the visible comments VC so
+    // headerReapply can recover post-vote when the header cell loses its
+    // link and no fresh apply has stamped this particular cell instance yet.
+    UIViewController *currentVC = sVisibleCommentsViewController;
+    if (currentVC && link && body.length > 0) {
+        NSDictionary *tuple = @{ @"link": link, @"body": body, @"translated": translatedText };
+        objc_setAssociatedObject(currentVC, kApolloLastAppliedPostBodyKey, tuple, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    __weak id weakHeader = headerCellNode;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        id strong = weakHeader;
+        if (strong) objc_setAssociatedObject(strong, kApolloRecentlyAppliedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    });
+
     NSString *fullName = link.fullName;
     if (fullName.length > 0) {
         [sLinkTranslationByFullName setObject:translatedText forKey:fullName];
@@ -1765,6 +1817,18 @@ static void ApolloApplyTranslationToPostTextNode(id owner, id textNode, NSString
     }
 
     objc_setAssociatedObject(owner, kApolloHeaderTranslatedTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // Mirror the per-VC stash so headerReapply has something to recover
+    // from even when this code path (not ApolloApplyTranslationToHeaderCellNode)
+    // performed the original apply.
+    {
+        UIViewController *currentVC = sVisibleCommentsViewController;
+        RDKLink *link = currentVC ? ApolloLinkFromController(currentVC) : nil;
+        if (currentVC && sourceText.length > 0 && translatedText.length > 0) {
+            NSMutableDictionary *tuple = [NSMutableDictionary dictionaryWithDictionary:@{ @"body": sourceText, @"translated": translatedText }];
+            if (link) tuple[@"link"] = link;
+            objc_setAssociatedObject(currentVC, kApolloLastAppliedPostBodyKey, tuple, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    }
     ApolloMarkVisibleTranslationApplied(sourceText, translatedText);
 }
 
@@ -2221,11 +2285,21 @@ static void ApolloMaybeTranslateCommentCellNode(id commentCellNode, BOOL forceTr
 static BOOL ApolloReapplyCachedTranslationForCellNode(id commentCellNode) {
     if (!commentCellNode) return NO;
     RDKComment *comment = ApolloCommentFromCellNode(commentCellNode);
-    if (!comment) return NO;
+    if (!comment) {
+        ApolloLog(@"[Translation/vote] commentReapply: no RDKComment on cellNode=%p", commentCellNode);
+        return NO;
+    }
     NSString *fullName = ApolloCommentFullName(comment);
-    if (fullName.length == 0) return NO;
+    if (fullName.length == 0) {
+        ApolloLog(@"[Translation/vote] commentReapply: empty fullName cellNode=%p", commentCellNode);
+        return NO;
+    }
     NSString *cached = [sCommentTranslationByFullName objectForKey:fullName];
-    if (cached.length == 0) return NO;
+    if (cached.length == 0) {
+        ApolloLog(@"[Translation/vote] commentReapply: cache MISS fullName=%@", fullName);
+        return NO;
+    }
+    ApolloLog(@"[Translation/vote] commentReapply: cache HIT fullName=%@ → applying (len=%lu)", fullName, (unsigned long)cached.length);
     ApolloApplyTranslationToCellNode(commentCellNode, comment, cached);
     return YES;
 }
@@ -2234,13 +2308,109 @@ static void ApolloScheduleCachedTranslationReapplyForCellNode(id commentCellNode
     if (!commentCellNode || !sEnableBulkTranslation) return;
     if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
     if ([objc_getAssociatedObject(commentCellNode, kApolloReapplyScheduledKey) boolValue]) return;
+    // Re-entrancy guard: skip if we just applied translation here. Breaks
+    // the apply -> ASDK invalidates layout -> hook -> schedule loop.
+    if ([objc_getAssociatedObject(commentCellNode, kApolloRecentlyAppliedKey) boolValue]) return;
     objc_setAssociatedObject(commentCellNode, kApolloReapplyScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloLog(@"[Translation/vote] commentReapply: SCHEDULED cellNode=%p", commentCellNode);
     __weak id weakNode = commentCellNode;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.01 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         id strong = weakNode;
-        if (!strong) return;
+        if (!strong) {
+            ApolloLog(@"[Translation/vote] commentReapply: FIRED but cellNode dealloc'd");
+            return;
+        }
         objc_setAssociatedObject(strong, kApolloReapplyScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         ApolloReapplyCachedTranslationForCellNode(strong);
+    });
+}
+
+// Re-applies a previously-translated post body from the link cache, without
+// hitting the network or re-running language detection. Used when the post
+// header cell node redisplays (e.g. after a vote tap rebuilds its content).
+// Mirror of `ApolloReapplyCachedTranslationForCellNode` but for the post
+// header path, declared early enough for the pre-Phase-D %hook below.
+static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *link, NSString *sourceText, NSString *translatedText);
+static NSString *ApolloPostBodyTextFromLink(RDKLink *link);
+static NSString *ApolloVisiblePostCacheKey(RDKLink *link, NSString *sourceText, NSString *targetLanguage);
+static NSString *ApolloResolvedTargetLanguageCode(void);
+static RDKLink *ApolloLinkFromHeaderCellNode(id cellNode);
+
+static BOOL ApolloReapplyCachedTranslationForHeaderCellNode(id headerCellNode) {
+    if (!headerCellNode) return NO;
+    RDKLink *link = ApolloLinkFromHeaderCellNode(headerCellNode);
+    if (!link) {
+        // Vote-tap rebuilds the header cell and clears its link ivars
+        // momentarily. Fall back to the link we stashed when we last applied
+        // translation, then to the controller's link.
+        link = objc_getAssociatedObject(headerCellNode, kApolloAppliedHeaderLinkKey);
+        if (!link) link = ApolloLinkFromController(sVisibleCommentsViewController);
+    }
+    NSDictionary *vcStash = nil;
+    if (sVisibleCommentsViewController) {
+        id raw = objc_getAssociatedObject(sVisibleCommentsViewController, kApolloLastAppliedPostBodyKey);
+        if ([raw isKindOfClass:[NSDictionary class]]) vcStash = (NSDictionary *)raw;
+    }
+    if (!link && vcStash) link = vcStash[@"link"];
+
+    NSString *targetLanguage = ApolloResolvedTargetLanguageCode();
+    if (targetLanguage.length == 0) {
+        ApolloLog(@"[Translation/vote] headerReapply: empty targetLanguage");
+        return NO;
+    }
+
+    NSString *trimmed = nil;
+    NSString *cached = nil;
+    if (link) {
+        NSString *body = ApolloPostBodyTextFromLink(link);
+        if ([body isKindOfClass:[NSString class]] && body.length > 0) {
+            trimmed = [body stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            NSString *cacheKey = trimmed.length > 0 ? ApolloVisiblePostCacheKey(link, trimmed, targetLanguage) : nil;
+            cached = cacheKey.length > 0 ? [sLinkTranslationByFullName objectForKey:cacheKey] : nil;
+        }
+    }
+
+    // Final fallback: use the per-VC stash directly (covers the case where
+    // the link was found via ApolloApplyTranslationToPostTextNode and the
+    // cache key calculation differs from what we stored).
+    if (cached.length == 0 && vcStash) {
+        NSString *stashBody = vcStash[@"body"];
+        NSString *stashTranslated = vcStash[@"translated"];
+        if ([stashBody isKindOfClass:[NSString class]] && stashBody.length > 0 &&
+            [stashTranslated isKindOfClass:[NSString class]] && stashTranslated.length > 0) {
+            trimmed = [stashBody stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            cached = stashTranslated;
+            if (!link) link = vcStash[@"link"];
+            ApolloLog(@"[Translation/vote] headerReapply: using per-VC stash (linkResolved=%d, len=%lu)", link != nil, (unsigned long)cached.length);
+        }
+    }
+
+    if (cached.length == 0 || trimmed.length == 0) {
+        ApolloLog(@"[Translation/vote] headerReapply: cache MISS (link=%@ body=%lu)", link.fullName ?: @"<nil>", (unsigned long)trimmed.length);
+        return NO;
+    }
+
+    ApolloLog(@"[Translation/vote] headerReapply: cache HIT fullName=%@ → applying (len=%lu)", link.fullName ?: @"<from-stash>", (unsigned long)cached.length);
+    ApolloApplyTranslationToHeaderCellNode(headerCellNode, link, trimmed, cached);
+    return YES;
+}
+
+static void ApolloScheduleCachedTranslationReapplyForHeaderCellNode(id headerCellNode) {
+    if (!headerCellNode || !sEnableBulkTranslation) return;
+    if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
+    if ([objc_getAssociatedObject(headerCellNode, kApolloHeaderReapplyScheduledKey) boolValue]) return;
+    if ([objc_getAssociatedObject(headerCellNode, kApolloRecentlyAppliedKey) boolValue]) return;
+    objc_setAssociatedObject(headerCellNode, kApolloHeaderReapplyScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloLog(@"[Translation/vote] headerReapply: SCHEDULED header=%p", headerCellNode);
+    __weak id weakNode = headerCellNode;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.01 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        id strong = weakNode;
+        if (!strong) {
+            ApolloLog(@"[Translation/vote] headerReapply: FIRED but header dealloc'd");
+            return;
+        }
+        objc_setAssociatedObject(strong, kApolloHeaderReapplyScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloReapplyCachedTranslationForHeaderCellNode(strong);
     });
 }
 
@@ -2448,8 +2618,14 @@ static void ApolloSchedulePostBodyReapplyForController(UIViewController *viewCon
     if ([objc_getAssociatedObject(viewController, kApolloPostBodyReapplyScheduledKey) boolValue]) return;
 
     objc_setAssociatedObject(viewController, kApolloPostBodyReapplyScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloLog(@"[Translation/vote] postBodyReapply: SCHEDULED vc=%p (30ms safety net)", viewController);
     __weak UIViewController *weakVC = viewController;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.22 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // Reduced from 220ms to 30ms: the per-cell `setNeedsLayout` /
+    // `setNeedsDisplay` hook on the post header cell node now covers the
+    // vote-triggered redisplay case at ~10ms, but we keep this controller-
+    // level walk as a safety net for header surfaces that don't go through
+    // the cell-node path (e.g. tableHeaderView on certain post types).
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UIViewController *strongVC = weakVC;
         if (!strongVC) return;
         objc_setAssociatedObject(strongVC, kApolloPostBodyReapplyScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -2476,6 +2652,12 @@ static void ApolloReapplyCommentCellNodesInTree(id object, NSInteger depth, NSHa
             if (!ApolloReapplyCachedTranslationForCellNode(object)) {
                 ApolloMaybeTranslateCommentCellNode(object, forceTranslation);
             }
+        }
+        // Also handle post-header cells found in the tree (covers the case
+        // where the body is scrolled offscreen at toggle-on time).
+        RDKLink *headerLink = ApolloLinkFromHeaderCellNode(object);
+        if (headerLink) {
+            ApolloMaybeTranslatePostHeaderCellNode(object, headerLink, forceTranslation);
         }
     }
 
@@ -2531,6 +2713,12 @@ static void ApolloRestoreCommentCellNodesInTree(id object, NSInteger depth, NSHa
         RDKComment *comment = ApolloCommentFromCellNode(object);
         if (comment) {
             ApolloRestoreOriginalForCellNode(object, comment);
+        }
+        // Also restore post-header cells found in the tree (covers the case
+        // where the body is scrolled offscreen at toggle-off time).
+        RDKLink *headerLink = ApolloLinkFromHeaderCellNode(object);
+        if (headerLink) {
+            ApolloRestoreOriginalForHeaderCellNode(object, headerLink);
         }
     }
 
@@ -3410,23 +3598,97 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
     if (![originalBody isKindOfClass:[NSString class]] || originalBody.length == 0 ||
         ![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0 ||
         ![incomingAttributedText isKindOfClass:[NSAttributedString class]]) {
+        ApolloLog(@"[Translation/vote] prepareSwap: missing markers (orig=%lu trans=%lu) on node=%p",
+                  (unsigned long)originalBody.length, (unsigned long)translatedText.length, textNode);
         return NO;
     }
 
     NSString *incomingText = incomingAttributedText.string;
     if (ApolloTextMatchesSourceOrVisualDisplay(incomingText, translatedText)) {
+        ApolloLog(@"[Translation/vote] prepareSwap: incoming==translated, no-op node=%p", textNode);
         return NO;
     }
 
     if (ApolloTextMatchesSourceOrVisualDisplay(incomingText, originalBody)) {
+        ApolloLog(@"[Translation/vote] prepareSwap: incoming==original → SWAPPING to translated node=%p (incomingLen=%lu)",
+                  textNode, (unsigned long)incomingText.length);
         if (swapOut) *swapOut = ApolloRebuildTranslatedAttrPreservingAttrs(incomingAttributedText, translatedText);
         return YES;
     }
 
+    NSString *incomingPreview = incomingText.length > 60 ? [incomingText substringToIndex:60] : incomingText;
+    NSString *origPreview = originalBody.length > 60 ? [originalBody substringToIndex:60] : originalBody;
     if (ApolloTextIsSubstantiveForOwnershipCleanup(incomingText)) {
+        ApolloLog(@"[Translation/vote] prepareSwap: NO MATCH (substantive) → CLEARING ownership node=%p incoming='%@' orig='%@'",
+                  textNode, incomingPreview, origPreview);
         ApolloClearTranslationOwnershipForTextNode(textNode);
+    } else {
+        ApolloLog(@"[Translation/vote] prepareSwap: NO MATCH (non-substantive, keeping ownership) node=%p incoming='%@' orig='%@'",
+                  textNode, incomingPreview, origPreview);
     }
     return NO;
+}
+
+// Vote-flash mitigation: when the comments header is rebuilt after a vote
+// tap, the new post-body text node has NO ownership markers yet. The
+// scheduler-based reapply path takes ~80-100ms, during which the original
+// (untranslated) body is visible. This helper checks the per-VC stash
+// synchronously: if the incoming text exactly matches the stashed body and
+// the stash carries a translated string, return a swap immediately and
+// adopt ownership so subsequent updates flow through the normal hook.
+//
+// Cost: a single length compare guards everything; we only do the equality
+// check + swap when the visible CommentsVC has a stash.
+static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedString *incoming, NSAttributedString **swapOut) {
+    if (swapOut) *swapOut = nil;
+    if (!textNode || ![incoming isKindOfClass:[NSAttributedString class]]) return NO;
+    UIViewController *vc = sVisibleCommentsViewController;
+    if (!vc) return NO;
+    // Toggle-off gate: if the user just hit the globe to revert to original,
+    // do NOT re-translate the rebuilt body node. The stash still exists from
+    // the previous translated session — it should only drive the preempt
+    // path while the controller is in translated mode.
+    if (!ApolloControllerIsInTranslatedMode(vc)) return NO;
+    id raw = objc_getAssociatedObject(vc, kApolloLastAppliedPostBodyKey);
+    if (![raw isKindOfClass:[NSDictionary class]]) return NO;
+    NSDictionary *stash = (NSDictionary *)raw;
+    NSString *body = stash[@"body"];
+    NSString *translated = stash[@"translated"];
+    if (![body isKindOfClass:[NSString class]] || body.length == 0) return NO;
+    if (![translated isKindOfClass:[NSString class]] || translated.length == 0) return NO;
+    NSString *incomingText = incoming.string;
+    if (incomingText.length != body.length) return NO; // cheap reject
+    if (!ApolloTextMatchesSourceOrVisualDisplay(incomingText, body)) return NO;
+    NSAttributedString *swap = ApolloRebuildTranslatedAttrPreservingAttrs(incoming, translated);
+    if (!swap) return NO;
+    // Adopt ownership so the normal prepareSwap path handles future updates.
+    objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [body copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translated copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // Register in the global owned-nodes set so toggle-off's
+    // ApolloRestoreAllOwnedTextNodes walk will restore us even when the
+    // header is scrolled offscreen and the visible-cells walk skips us.
+    ApolloRegisterOwnedTextNode(textNode);
+    // Save the incoming (original) attributed text so toggle-off restore can
+    // find it. Without this, ApolloRestoreOriginalForHeaderCellNode bails and
+    // the body stays translated when the user taps the globe.
+    if (!objc_getAssociatedObject(textNode, kApolloOriginalAttributedTextKey)) {
+        objc_setAssociatedObject(textNode, kApolloOriginalAttributedTextKey, [incoming copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    // Register this text node on the visible header cell so toggle-off can
+    // find it via kApolloHeaderTranslatedTextNodeKey lookup.
+    {
+        UIViewController *currentVC = sVisibleCommentsViewController;
+        if ([currentVC respondsToSelector:@selector(view)]) {
+            UIView *vcView = [(UIViewController *)currentVC view];
+            if (vcView && !objc_getAssociatedObject(vcView, kApolloHeaderTranslatedTextNodeKey)) {
+                objc_setAssociatedObject(vcView, kApolloHeaderTranslatedTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+        }
+    }
+    if (swapOut) *swapOut = swap;
+    ApolloLog(@"[Translation/vote] preempt: unowned node=%p matched VC stash → SYNC swap (len=%lu)", textNode, (unsigned long)translated.length);
+    return YES;
 }
 
 // Global setAttributedText: hook on ASTextNode. Strict no-op for any node we
@@ -3439,6 +3701,14 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
     if (![objc_getAssociatedObject(self, kApolloTranslationOwnedTextNodeKey) boolValue]) {
+        // Vote-flash preempt: brand-new (rebuilt) header body text node.
+        NSAttributedString *preemptSwap = nil;
+        if (ApolloPreemptUnownedTextNodeFromVCStash(self, attributedText, &preemptSwap)) {
+            objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            @try { %orig(preemptSwap); } @catch (__unused NSException *e) {}
+            objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            return;
+        }
         %orig;
         return;
     }
@@ -3504,6 +3774,14 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
     if (![objc_getAssociatedObject(self, kApolloTranslationOwnedTextNodeKey) boolValue]) {
+        // Vote-flash preempt (mirror of ASTextNode hook above).
+        NSAttributedString *preemptSwap = nil;
+        if (ApolloPreemptUnownedTextNodeFromVCStash(self, attributedText, &preemptSwap)) {
+            objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            @try { %orig(preemptSwap); } @catch (__unused NSException *e) {}
+            objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            return;
+        }
         %orig;
         return;
     }
@@ -4296,6 +4574,30 @@ static void ApolloFeedVCInstallGlobe(UIViewController *vc) {
 
 %end
 
+// Post-body reapply on header cell redisplay. When the user taps the
+// upvote/downvote button on the post in the comments view, Apollo
+// invalidates the header cell which triggers `setNeedsLayout` /
+// `setNeedsDisplay`; without this hook, the body briefly flashes back to
+// the original language until `ApolloSchedulePostBodyReapplyForController`
+// fires its (now 30ms, formerly 220ms) fallback. Calling the cached
+// reapply scheduler here closes the gap to ~10ms, eliminating the visible
+// flash. Only `_TtC6Apollo22CommentsHeaderCellNode` carries selftext
+// bodies — the rich-media variant doesn't host the post body text node
+// path we translate, so we skip hooking it.
+%hook _TtC6Apollo22CommentsHeaderCellNode
+
+- (void)setNeedsLayout {
+    %orig;
+    ApolloScheduleCachedTranslationReapplyForHeaderCellNode((id)self);
+}
+
+- (void)setNeedsDisplay {
+    %orig;
+    ApolloScheduleCachedTranslationReapplyForHeaderCellNode((id)self);
+}
+
+%end
+
 %hook _TtC6Apollo15CommentCellNode
 
 - (void)setNeedsLayout {
@@ -4625,25 +4927,29 @@ static void ApolloReapplyTranslationOnAppResume(void) {
     if (!vc) return;
     if (!ApolloControllerIsInTranslatedMode(vc)) return;
 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *current = sVisibleCommentsViewController;
-        if (!current || !ApolloControllerIsInTranslatedMode(current)) return;
-        ApolloRefreshVisibleTranslationAppliedForController(current);
-        ApolloUpdateTranslationUIForController(current);
-        ApolloTranslateVisibleCommentsForController(current, NO);
-        ApolloSchedulePostBodyReapplyForController(current);
-    });
-
-    // Belt-and-suspenders second pass after ASDK has had a beat to rehydrate
-    // its own display state. force=NO, so this is cheap if everything's
-    // already correct.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIViewController *current = sVisibleCommentsViewController;
-        if (!current || !ApolloControllerIsInTranslatedMode(current)) return;
-        ApolloRefreshVisibleTranslationAppliedForController(current);
-        ApolloTranslateVisibleCommentsForController(current, NO);
-        ApolloSchedulePostBodyReapplyForController(current);
-    });
+    // When the app is suspended long enough for the OS to memory-pressure
+    // ASDK (typical when the user opens another app and lets it load), node
+    // attributed text gets dropped. Cells then come back showing the
+    // original-language strings until the user scrolls and triggers a
+    // visibility/layout cycle. Mirror viewDidAppear's staggered retry
+    // schedule — force=NO so this is cheap when nothing actually needs to
+    // be re-rendered, but each pass will catch any cells whose attributed
+    // text was reset since the last pass.
+    NSArray<NSNumber *> *retryDelays = @[ @0.0, @0.15, @0.4, @0.9, @1.8, @3.0 ];
+    for (NSNumber *delayNumber in retryDelays) {
+        __weak UIViewController *weakVC = vc;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayNumber.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UIViewController *current = weakVC ?: sVisibleCommentsViewController;
+            if (!current || !current.isViewLoaded || !current.view.window) return;
+            if (!ApolloControllerIsInTranslatedMode(current)) return;
+            ApolloRefreshVisibleTranslationAppliedForController(current);
+            ApolloUpdateTranslationUIForController(current);
+            ApolloTranslateVisibleCommentsForController(current, NO);
+            // Tree-walk so loaded-but-not-in-visibleCells nodes also reapply.
+            ApolloReapplyVisibleCommentCellNodesForController(current, NO);
+            ApolloSchedulePostBodyReapplyForController(current);
+        });
+    }
 }
 
 %ctor {
