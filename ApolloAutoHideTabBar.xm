@@ -18,40 +18,16 @@
 - (void)setTabBarHidden:(BOOL)hidden animated:(BOOL)animated; // private
 @end
 
-static UIWindow *ApolloKeyWindow(void) {
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-            if (w.isKeyWindow) return w;
-        }
-    }
-    return nil;
-}
-
-static UITabBarController *ApolloFindTabBarControllerFrom(UIViewController *root) {
-    if (!root) return nil;
-    NSMutableArray *queue = [NSMutableArray arrayWithObject:root];
-    while (queue.count) {
-        UIViewController *vc = queue.firstObject;
-        [queue removeObjectAtIndex:0];
-        if ([vc isKindOfClass:[UITabBarController class]]) return (UITabBarController *)vc;
-        if (vc.presentedViewController) [queue addObject:vc.presentedViewController];
-        for (UIViewController *child in vc.childViewControllers) {
-            [queue addObject:child];
-        }
-    }
-    return nil;
-}
-
+// Walk only the parentViewController chain so modally-presented nav controllers
+// (share sheets, document pickers, etc.) are skipped — mirroring their hidden
+// state onto the main tab bar would spuriously hide it.
 static UITabBarController *ApolloLocateTabBarController(UINavigationController *nav) {
-    UIResponder *r = nav;
-    while (r) {
-        if ([r isKindOfClass:[UITabBarController class]]) return (UITabBarController *)r;
-        r = [r nextResponder];
+    UIViewController *vc = nav;
+    while (vc) {
+        if ([vc isKindOfClass:[UITabBarController class]]) return (UITabBarController *)vc;
+        vc = vc.parentViewController;
     }
-    UITabBarController *tbc = nav.tabBarController;
-    if (tbc) return tbc;
-    return ApolloFindTabBarControllerFrom(ApolloKeyWindow().rootViewController);
+    return nil;
 }
 
 static BOOL ApolloTabBarLooksHidden(UITabBar *tabBar) {

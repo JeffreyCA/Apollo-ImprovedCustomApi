@@ -2,7 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v2.6.1] - 2026-05-01
+
+- Fix tab bar disappearing after sharing content
+
 ## [v2.6.0] - 2026-04-30
+
 - Bulk translation improvements (thanks @icpryde for continuing to refine this!)
     - New **Don't Translate** languages list in **Settings > Translation** to keep selected languages untranslated
     - New option to translate post titles in **Settings > Translation**
@@ -313,6 +318,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v2.6.1]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.6.0...v2.6.1
 [v2.6.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.5.0...v2.6.0
 [v2.5.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.4.0...v2.5.0
 [v2.4.0]: https://github.com/JeffreyCA/Apollo-ImprovedCustomApi/compare/v2.3.0...v2.4.0
