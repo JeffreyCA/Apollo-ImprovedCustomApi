@@ -30,3 +30,18 @@ static NSString *const UDKeyLibreTranslateURL = @"LibreTranslateURL";
 static NSString *const UDKeyLibreTranslateAPIKey = @"LibreTranslateAPIKey";
 // Array<String> of 2-letter language codes to leave untranslated (detected source language).
 static NSString *const UDKeyTranslationSkipLanguages = @"TranslationSkipLanguages";
+
+// Tag filters (NSFW / Spoiler) — hide or blur posts in the feed based on
+// Reddit's built-in tags. Brand Affiliate is intentionally absent because
+// Apollo's RDKLink does not deserialize that field.
+static NSString *const UDKeyTagFilterEnabled = @"TagFilterEnabled";        // master switch
+static NSString *const UDKeyTagFilterMode = @"TagFilterMode";              // "hide" | "blur"
+static NSString *const UDKeyTagFilterNSFW = @"TagFilterNSFW";              // global NSFW
+static NSString *const UDKeyTagFilterSpoiler = @"TagFilterSpoiler";        // global Spoiler
+// Per-subreddit overrides: dictionary keyed by lowercased subreddit name.
+// Each value is a dictionary with optional keys:
+//   "nsfw"    -> NSNumber BOOL  (overrides global NSFW for this sub)
+//   "spoiler" -> NSNumber BOOL  (overrides global Spoiler for this sub)
+//   "mode"    -> NSString       ("hide" | "blur"; overrides global mode)
+// Missing keys fall back to global settings.
+static NSString *const UDKeyTagFilterSubredditOverrides = @"TagFilterSubredditOverrides";

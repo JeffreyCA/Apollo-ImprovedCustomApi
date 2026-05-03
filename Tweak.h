@@ -27,6 +27,7 @@
 @property(nonatomic) NSInteger totalComments;
 @property(nonatomic, strong) NSDate *createdUTC;
 @property(nonatomic, getter=isNSFW) BOOL NSFW;
+@property(nonatomic, getter=isSpoiler) BOOL spoiler;
 @property(nonatomic, getter=isSelfPost) BOOL selfPost;
 @property(retain, nonatomic) NSDictionary *mediaMetadata;
 @property(retain, nonatomic) RDKLinkPreviewMedia *previewMedia;

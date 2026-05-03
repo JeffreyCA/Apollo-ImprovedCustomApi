@@ -29,3 +29,12 @@ extern NSString *sLibreTranslateURL;
 extern NSString *sLibreTranslateAPIKey;
 // Lowercased 2-letter language codes the user has opted out of translating.
 extern NSArray<NSString *> *sTranslationSkipLanguages;
+
+// Tag filter feature (NSFW / Spoiler).
+extern BOOL sTagFilterEnabled;
+extern NSString *sTagFilterMode;          // @"hide" or @"blur"
+extern BOOL sTagFilterNSFW;
+extern BOOL sTagFilterSpoiler;
+// Lowercased subreddit name -> dictionary with optional keys:
+//   nsfw (NSNumber BOOL), spoiler (NSNumber BOOL), mode (NSString).
+extern NSDictionary<NSString *, NSDictionary *> *sTagFilterSubredditOverrides;
