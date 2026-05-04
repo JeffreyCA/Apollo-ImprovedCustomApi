@@ -331,54 +331,6 @@ static void ApolloTagRevealCell(id cell) {
     }
 }
 
-static void ApolloTagSimulateCellSelection(id cell) {
-    if (!cell) return;
-    UIViewController *presenter = ApolloTagPresenterForCell(cell);
-    if (!presenter) return;
-
-    // Walk up to find the nearest tableNode-based VC and its tableNode delegate.
-    // Apollo's PostsViewController acts as its own ASTableNode delegate, so the
-    // closestViewController already implements tableNode:didSelectRowAtIndexPath:.
-    UIView *cellView = ApolloTagCellView(cell);
-    if (!cellView) return;
-
-    // Find ASTableView (subclass of UITableView) up the view hierarchy.
-    UIView *cursor = cellView;
-    UITableView *tableView = nil;
-    while (cursor) {
-        if ([cursor isKindOfClass:[UITableView class]]) {
-            tableView = (UITableView *)cursor;
-            break;
-        }
-        cursor = cursor.superview;
-    }
-
-    NSIndexPath *indexPath = nil;
-    if (tableView) {
-        // Convert cellView center to tableView coords; ASTableView accepts UITableView API.
-        CGPoint center = [cellView.superview convertPoint:cellView.center toView:tableView];
-        indexPath = [tableView indexPathForRowAtPoint:center];
-    }
-
-    if (!indexPath) return;
-
-    // Try ASTableNode delegate selector first, then UITableView delegate.
-    SEL tableNodeSel = NSSelectorFromString(@"tableNode:didSelectRowAtIndexPath:");
-    if ([presenter respondsToSelector:tableNodeSel]) {
-        // Need the tableNode (not tableView). Fetch via tableView.delegate which
-        // for ASTableNode is the VC; the tableNode is held on the VC. Easiest:
-        // call the UITableView delegate, which Apollo also implements via ASDK.
-    }
-    SEL tableViewSel = @selector(tableView:didSelectRowAtIndexPath:);
-    if (tableView && [presenter respondsToSelector:tableViewSel]) {
-        ((void (*)(id, SEL, UITableView *, NSIndexPath *))objc_msgSend)(presenter, tableViewSel, tableView, indexPath);
-        return;
-    }
-
-    // Fallback: synthesize a tap on the cell (Apollo will react via its own gestures).
-    [tableView selectRowAtIndexPath:indexPath animated:NO scrollPosition:UITableViewScrollPositionNone];
-}
-
 static void ApolloTagPresentConfirmAlertForCell(id cell) {
     UIViewController *presenter = ApolloTagPresenterForCell(cell);
     if (!presenter) {
@@ -392,11 +344,8 @@ static void ApolloTagPresentConfirmAlertForCell(id cell) {
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"View" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        // Reveal only — leave navigation to the user's next tap on the now-visible cell.
         ApolloTagRevealCell(cell);
-        // Slight delay so the reveal animation completes before navigation.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            ApolloTagSimulateCellSelection(cell);
-        });
     }]];
     [presenter presentViewController:alert animated:YES completion:nil];
 }
