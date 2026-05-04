@@ -27,3 +27,9 @@ NSString *sTranslationProvider = nil;
 NSString *sLibreTranslateURL = nil;
 NSString *sLibreTranslateAPIKey = nil;
 NSArray<NSString *> *sTranslationSkipLanguages = nil;
+
+BOOL sTagFilterEnabled = NO;
+NSString *sTagFilterMode = @"blur";
+BOOL sTagFilterNSFW = YES;
+BOOL sTagFilterSpoiler = YES;
+NSDictionary<NSString *, NSDictionary *> *sTagFilterSubredditOverrides = nil;

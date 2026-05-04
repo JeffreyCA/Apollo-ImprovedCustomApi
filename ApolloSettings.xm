@@ -5,6 +5,7 @@
 #import "CustomAPIViewController.h"
 #import "SavedCategoriesViewController.h"
 #import "TranslationSettingsViewController.h"
+#import "TagFiltersViewController.h"
 
 // MARK: - Settings View Controller (Custom API row injection)
 
@@ -56,7 +57,7 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (section == 1) return 3; // Custom API, Saved Categories, Translation
+    if (section == 1) return 4; // Custom API, Saved Categories, Translation, Tag Filters
     if (section > 1) return %orig(tableView, section - 1);
     return %orig;
 }
@@ -73,9 +74,12 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
         } else if (indexPath.row == 1) {
             cell.textLabel.text = @"Saved Categories";
             cell.imageView.image = createSettingsIcon(@"bookmark.fill", [UIColor systemOrangeColor]);
-        } else {
+        } else if (indexPath.row == 2) {
             cell.textLabel.text = @"Translation";
             cell.imageView.image = createSettingsIcon(@"globe", [UIColor systemIndigoColor]);
+        } else {
+            cell.textLabel.text = @"Tag Filters";
+            cell.imageView.image = createSettingsIcon(@"eye.slash.fill", [UIColor systemRedColor]);
         }
         return cell;
     }
@@ -95,8 +99,11 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
         } else if (indexPath.row == 1) {
             SavedCategoriesViewController *vc = [[SavedCategoriesViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
             [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
-        } else {
+        } else if (indexPath.row == 2) {
             TranslationSettingsViewController *vc = [[TranslationSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+            [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
+        } else {
+            TagFiltersViewController *vc = [[TagFiltersViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
             [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
         }
         return;

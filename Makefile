@@ -28,10 +28,11 @@ ApolloImprovedCustomApi_FILES = \
     ApolloTranslation.xm \
     ApolloVideoUnmute.xm \
     ApolloVideoSwipeFix.xm \
-    ApolloCreatedAtAlert.xm \
+    ApolloTagFilters.xm \
     CustomAPIViewController.m \
     TranslationSettingsViewController.m \
     SavedCategoriesViewController.m \
+    TagFiltersViewController.m \
     Defaults.m \
     UIWindow+Apollo.m \
     fishhook.c \

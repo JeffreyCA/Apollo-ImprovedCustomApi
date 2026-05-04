@@ -763,7 +763,12 @@ static void initializeRandomSources() {
                                     UDKeyTranslationProviderUserSelected: @NO,
                                     UDKeyLibreTranslateURL: @"https://libretranslate.de/translate",
                                     UDKeyLibreTranslateAPIKey: @"",
-                                    UDKeyTranslationSkipLanguages: @[]};
+                                    UDKeyTranslationSkipLanguages: @[],
+                                    UDKeyTagFilterEnabled: @NO,
+                                    UDKeyTagFilterMode: @"blur",
+                                    UDKeyTagFilterNSFW: @YES,
+                                    UDKeyTagFilterSpoiler: @YES,
+                                    UDKeyTagFilterSubredditOverrides: @{}};
     [[NSUserDefaults standardUserDefaults] registerDefaults:defaultValues];
 
     sRedditClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedditClientId] ?: @"" copy];
@@ -826,6 +831,34 @@ static void initializeRandomSources() {
             }
         }
         sTranslationSkipLanguages = [clean copy];
+    }
+
+    // Tag filter feature hydration.
+    sTagFilterEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyTagFilterEnabled];
+    sTagFilterNSFW = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyTagFilterNSFW];
+    sTagFilterSpoiler = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyTagFilterSpoiler];
+    {
+        NSString *mode = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTagFilterMode];
+        if ([mode isKindOfClass:[NSString class]] && ([mode isEqualToString:@"hide"] || [mode isEqualToString:@"blur"])) {
+            sTagFilterMode = [mode copy];
+        } else {
+            sTagFilterMode = @"blur";
+        }
+    }
+    {
+        id raw = [[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTagFilterSubredditOverrides];
+        NSMutableDictionary<NSString *, NSDictionary *> *clean = [NSMutableDictionary dictionary];
+        if ([raw isKindOfClass:[NSDictionary class]]) {
+            for (id key in (NSDictionary *)raw) {
+                if (![key isKindOfClass:[NSString class]]) continue;
+                NSString *sub = [(NSString *)key stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].lowercaseString;
+                if (sub.length == 0) continue;
+                id v = ((NSDictionary *)raw)[key];
+                if (![v isKindOfClass:[NSDictionary class]]) continue;
+                clean[sub] = (NSDictionary *)v;
+            }
+        }
+        sTagFilterSubredditOverrides = [clean copy];
     }
 
     // Trim ReadPostIDs if over configured max
