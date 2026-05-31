@@ -60,6 +60,7 @@
 
 
     { "id": "bajader-aperture-science", "displayName": "Aperture Science",    "designer": "bajader", "group": "custom" },
-    { "id": "bajader-apollos",          "displayName": "ApollOS",             "designer": "bajader", "group": "custom" }
+    { "id": "bajader-apollos",          "displayName": "ApollOS",             "designer": "bajader", "group": "custom" },
+    { "id": "bajader-glitched",          "displayName": "Glitched",             "designer": "bajader", "group": "custom" }
   ]
 }
