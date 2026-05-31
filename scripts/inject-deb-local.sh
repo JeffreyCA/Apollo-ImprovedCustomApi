@@ -203,6 +203,14 @@ verify_dylib_substrate_linkage() {
 missing_loads=()
 for dylib in "${dylibs[@]}"; do
     source_name="$(basename "$dylib")"
+    # The Open-in-Apollo dylib is for the OpenInUIExtension appex, not the main
+    # app. It's injected separately by scripts/fix-openin-extension.sh (built as
+    # a LIBRARY subproject, normally staged to /usr/lib so it shouldn't land here
+    # at all — this guard is belt-and-suspenders). Never inject it into the app.
+    if [[ "$source_name" == "ApolloOpenInFix.dylib" ]]; then
+        echo "Skipping $source_name (appex-only; handled by fix-openin-extension.sh)"
+        continue
+    fi
     target_name="$(resolve_target_dylib_name "$source_name" || true)"
     if [[ -z "$target_name" ]]; then
         missing_loads+=("$source_name")

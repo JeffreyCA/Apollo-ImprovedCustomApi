@@ -99,6 +99,7 @@ LIQUID_GLASS="false"
 URL_SCHEMES=""
 OUTPUT_IPA_PATH=""
 FIX_SAFARI_EXTENSION="false"
+FIX_OPENIN_EXTENSION="false"
 
 print_usage() {
     echo "Usage: $0 <path_to_ipa> [options]"
@@ -108,6 +109,8 @@ print_usage() {
     echo "  --remove-code-signature       Remove code signature from the binary"
     echo "  --liquid-glass                Apply Liquid Glass patch for iOS 26"
     echo "  --fix-safari-extension        Repair the bundled 'Open in Apollo' Safari extension"
+    echo "  --fix-openin-extension        Repair the bundled 'Open in Apollo' share-sheet action"
+    echo "                                (needs the openin-extension dylib; run 'make package' first)"
     echo "  --url-schemes <schemes>       Comma-separated list of URL schemes to add"
     echo "                                (e.g., 'custom,test,myapp')"
     echo ""
@@ -133,6 +136,10 @@ while [[ "$#" -gt 0 ]]; do
             ;;
         --fix-safari-extension)
             FIX_SAFARI_EXTENSION="true"
+            shift
+            ;;
+        --fix-openin-extension)
+            FIX_OPENIN_EXTENSION="true"
             shift
             ;;
         --url-schemes)
@@ -172,6 +179,7 @@ echo "Output IPA: ${OUTPUT_IPA}"
 echo "Remove code signature: ${REMOVE_CODE_SIGNATURE}"
 echo "Liquid Glass patch: ${LIQUID_GLASS}"
 echo "Fix Safari extension: ${FIX_SAFARI_EXTENSION}"
+echo "Fix Open-in-Apollo action: ${FIX_OPENIN_EXTENSION}"
 echo "URL schemes: ${URL_SCHEMES:-none}"
 
 if [[ "${OUTPUT_IPA}" = /* ]]; then
@@ -329,6 +337,15 @@ cd .. # Back to original directory
 if [ "${FIX_SAFARI_EXTENSION}" == "true" ]; then
     echo "Repairing bundled Safari extension..."
     bash "${SCRIPT_DIR}/scripts/fix-safari-extension.sh" "${OUTPUT_IPA_PATH}"
+fi
+
+# --- 4b. Fix Open-in-Apollo Action extension ---
+# Same timing/rationale as the Safari fix. No-op if the IPA has no
+# OpenInUIExtension.appex. Resolves the dylib from the openin-extension subproject
+# build output (run 'make package' first, or pass it via the script's --dylib).
+if [ "${FIX_OPENIN_EXTENSION}" == "true" ]; then
+    echo "Repairing bundled Open-in-Apollo action extension..."
+    bash "${SCRIPT_DIR}/scripts/fix-openin-extension.sh" "${OUTPUT_IPA_PATH}"
 fi
 
 # Note: Cleanup handled by trap on EXIT

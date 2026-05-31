@@ -81,6 +81,11 @@ ApolloReborn_OBJ_FILES = $(shell find $(FFMPEG_KIT_DIR) -name '*.a')
 ApolloReborn_BUNDLE_RESOURCE_DIRS = resources
 
 SUBPROJECTS += $(FLEXING_DIR)/libflex
+# Standalone dylib for Apollo's "Open in Apollo" Action extension. Built as a
+# LIBRARY (no Substrate/injection plist) into openin-extension/.theos/obj; staged
+# into the appex at package time by scripts/fix-openin-extension.sh, NOT injected
+# into the main app (see scripts/inject-deb-local.sh).
+SUBPROJECTS += openin-extension
 
 CONTROL_FILE = $(THEOS_PROJECT_DIR)/control
 

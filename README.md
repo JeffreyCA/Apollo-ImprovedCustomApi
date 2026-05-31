@@ -70,7 +70,7 @@ The legacy Apollo push backends went dark in June 2023 and are otherwise blocked
 
 ## Opening links in Apollo
 
-There are three ways to open Reddit links in Apollo, depending on your browser and which IPA variant you installed.
+There are a few ways to open Reddit links in Apollo, depending on your browser and which IPA variant you installed.
 
 ### Safari — built-in extension (zero setup)
 
@@ -85,9 +85,15 @@ If you installed a **no-extensions** variant, or you're on a jailbreak/`.deb` in
 
 It auto-redirects Reddit pages to Apollo and rewrites Reddit links on Google/Bing/DuckDuckGo results. (Search-result rewriting is inspired by [AnthonyGress's userscript](https://github.com/AnthonyGress/Open-In-Apollo), which also works.)
 
-### Any other browser (Chrome, Firefox, Edge, Brave) — Shortcut
+### Any other browser (Chrome, Firefox, Edge, Brave) — share sheet
 
-On iOS only Safari can run extensions or userscripts, and Apollo's bundled "Open in Apollo" share-sheet action no longer works on modern iOS (Apple no longer lets a share extension launch its containing app). For any other browser, use a one-time **Shortcut** that works from the share sheet everywhere — Firefox, Chrome, Edge, Brave, and beyond. It rewrites the `reddit.com` URL to Apollo's `apollo://` scheme and runs **Open URLs** — the one launch path iOS still allows from the share sheet (no private APIs; works on any sideload or jailbreak).
+Apollo's bundled **"Open in Apollo"** share-sheet action is fixed in this build and works from **any** browser: on a Reddit page tap **Share → Open in Apollo** and it opens straight in Apollo. (This was previously believed impossible — the stock action called the deprecated `-[UIApplication openURL:]` that iOS 18+ force-fails — but it now opens the link via a non-deprecated path.) Available on the **standard** and **Liquid Glass** variants.
+
+> ⚠️ The action runs inside an app extension. On **iOS 26** that extension only launches if your installer signs it correctly (sets the appex *main-binary* flag): Xcode, Apple's `codesign`, and recent AltStore/SideStore do; some signers (Sideloadly/Feather, as of this writing) do not — in which case the action silently does nothing. If it doesn't fire on your install, use the **Shortcut** below instead; it's signer-independent.
+
+#### Fallback — "Open in Apollo" Shortcut (works on any install)
+
+A one-time **Shortcut** does the same thing from the share sheet on any browser. It rewrites the `reddit.com` URL to Apollo's `apollo://` scheme and runs **Open URLs** — the one launch path iOS always allows from the share sheet (no private APIs; works on any sideload or jailbreak).
 
 <details>
 <summary><b>Build the "Open in Apollo" shortcut</b> (about a minute)</summary>
