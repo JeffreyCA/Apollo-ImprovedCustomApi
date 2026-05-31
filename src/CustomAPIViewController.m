@@ -639,7 +639,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionAPIKeys: return 9; // 7 text fields + Can't sign in? + API key setup guide
         case SectionGeneral: return 8;
         case SectionMedia: return (sShowUserAvatars ? 13 : 12) + (sEnableInlineImages ? 0 : -1);
-        case SectionSubreddits: return 8;
+        case SectionSubreddits: return sSubredditListEnhancements ? 9 : 8;
         case SectionNotificationBackend: return 3; // URL + Registration Token + Test Connection
         case SectionAbout: return 5; // GitHub + Reddit + Thanks To + Export Logs + Version
         default: return 0;
@@ -1162,48 +1162,55 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (UITableViewCell *)subredditCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
-    switch (row) {
+    // Modern Dividers row (logical 1) is hidden when the master toggle is off.
+    NSInteger logicalRow = (row >= 1 && !sSubredditListEnhancements) ? row + 1 : row;
+    switch (logicalRow) {
         case 0:
+            return [self switchCellWithIdentifier:@"Cell_Sub_Enhancements"
+                                            label:@"Subreddit List Enhancements"
+                                               on:sSubredditListEnhancements
+                                           action:@selector(subredditListEnhancementsSwitchToggled:)];
+        case 1:
             return [self switchCellWithIdentifier:@"Cell_Sub_ModernDividers"
                                             label:@"Modern Subreddit Dividers"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers]
                                            action:@selector(modernSubredditDividersSwitchToggled:)];
-        case 1:
+        case 2:
             return [self switchCellWithIdentifier:@"Cell_Sub_Headers"
                                             label:@"Show Subreddit Headers"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders]
                                            action:@selector(subredditHeadersSwitchToggled:)];
-        case 2:
+        case 3:
             return [self textFieldCellWithIdentifier:@"Cell_Sub_TrendLimit"
                                                label:@"Trending Subreddits Limit"
                                          placeholder:@"(unlimited)"
                                                 text:sTrendingSubredditsLimit
                                                  tag:TagTrendingLimit
                                            numerical:YES];
-        case 3:
+        case 4:
             return [self stackedTextFieldCellWithIdentifier:@"Cell_Sub_Trending"
                                                       label:@"Trending Source"
                                                 placeholder:defaultTrendingSubredditsSource
                                                        text:sTrendingSubredditsSource
                                                         tag:TagTrendingSubredditsSource];
-        case 4:
+        case 5:
             return [self stackedTextFieldCellWithIdentifier:@"Cell_Sub_Random"
                                                       label:@"Random Source"
                                                 placeholder:defaultRandomSubredditsSource
                                                        text:sRandomSubredditsSource
                                                         tag:TagRandomSubredditsSource];
-        case 5:
+        case 6:
             return [self switchCellWithIdentifier:@"Cell_Sub_RandNSFW"
                                             label:@"Show RandNSFW in Search"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowRandNsfw]
                                            action:@selector(randNsfwSwitchToggled:)];
-        case 6:
+        case 7:
             return [self stackedTextFieldCellWithIdentifier:@"Cell_Sub_RandNSFW_Source"
                                                       label:@"RandNSFW Source"
                                                 placeholder:@"(empty)"
                                                        text:sRandNsfwSubredditsSource
                                                         tag:TagRandNsfwSubredditsSource];
-        case 7: {
+        case 8: {
             UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Sub_ClearCustomBanners"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Sub_ClearCustomBanners"];
@@ -1533,7 +1540,8 @@ typedef NS_ENUM(NSInteger, Tag) {
             [self exportLogs];
         }
     } else if (indexPath.section == SectionSubreddits) {
-        if (indexPath.row == 7) {
+        NSInteger logicalRow = (indexPath.row >= 1 && !sSubredditListEnhancements) ? indexPath.row + 1 : indexPath.row;
+        if (logicalRow == 8) {
             UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
             [self promptClearCustomSubredditBannersFromSourceView:cell];
         }
@@ -1594,7 +1602,10 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (BOOL)tableView:(UITableView *)tableView shouldHighlightRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == SectionBackupRestore) return YES;
     if (indexPath.section == SectionAPIKeys && (indexPath.row == 7 || indexPath.row == 8)) return YES;
-    if (indexPath.section == SectionSubreddits && indexPath.row == 7) return YES;
+    if (indexPath.section == SectionSubreddits) {
+        NSInteger logicalRow = (indexPath.row >= 1 && !sSubredditListEnhancements) ? indexPath.row + 1 : indexPath.row;
+        return logicalRow == 8;
+    }
     if (indexPath.section == SectionMedia) {
         NSInteger row = (indexPath.row >= 5 && !sEnableInlineImages) ? indexPath.row + 1 : indexPath.row;
         return (row == 0 || row == 1 || row == 2 || row == 5 || row == 6 || row == 7 || row == 8 || row == 11 || row == 12);
@@ -1888,6 +1899,23 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)randNsfwSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyShowRandNsfw];
+}
+
+- (void)subredditListEnhancementsSwitchToggled:(UISwitch *)sender {
+    BOOL wasOn = sSubredditListEnhancements;
+    sSubredditListEnhancements = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sSubredditListEnhancements forKey:UDKeySubredditListEnhancements];
+    if (sSubredditListEnhancements == wasOn) return;
+
+    // Modern Dividers row (logical 1) only exists while the master toggle is on.
+    NSArray<NSIndexPath *> *dividerPaths = @[[NSIndexPath indexPathForRow:1 inSection:SectionSubreddits]];
+    if (sSubredditListEnhancements) {
+        [self.tableView insertRowsAtIndexPaths:dividerPaths withRowAnimation:UITableViewRowAnimationFade];
+    } else {
+        [self.tableView deleteRowsAtIndexPaths:dividerPaths withRowAnimation:UITableViewRowAnimationFade];
+    }
+
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloModernSubredditDividersChangedNotification object:nil];
 }
 
 - (void)modernSubredditDividersSwitchToggled:(UISwitch *)sender {

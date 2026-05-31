@@ -1062,6 +1062,7 @@ static void ApolloSubredditIndexRefreshFavorites(UITableView *tableView, NSStrin
 }
 
 static void ApolloSubredditIndexScheduleFavoritesRefresh(UITableView *tableView, UITableViewCell *cell, NSString *subredditName, UIControl *nativeControl) {
+    if (!sSubredditListEnhancements) return;
     __weak UITableView *weakTable = tableView;
     __weak UIControl *weakControl = nativeControl;
     NSString *name = [subredditName copy];
@@ -1122,6 +1123,7 @@ static void ApolloSubredditIndexInstallStarProxyForCell(UITableViewCell *cell, U
 }
 
 static void ApolloSubredditIndexInstallOrUpdate(UITableView *tableView) {
+    if (!sSubredditListEnhancements) return;
     if (!ApolloSubredditIndexShouldInspectTable(tableView)) return;
 
     NSArray<NSString *> *titles = ApolloSubredditIndexTitlesForTable(tableView);
@@ -1174,6 +1176,7 @@ static void ApolloSubredditIndexInstallOrUpdate(UITableView *tableView) {
 }
 
 static void ApolloSubredditIndexRefreshTablesInView(UIView *view) {
+    if (!sSubredditListEnhancements) return;
     if (!view) return;
 
     if ([view isKindOfClass:[UITableView class]]) {
@@ -1207,6 +1210,7 @@ static void ApolloSubredditIndexRefreshAllVisibleTables(void) {
 }
 
 static BOOL ApolloSubredditIndexEnsureSubredditTable(UITableView *tableView) {
+    if (!sSubredditListEnhancements) return NO;
     if (!tableView) return NO;
     if ([objc_getAssociatedObject(tableView, &kApolloSubredditIndexTableKey) boolValue]) return YES;
     if (!ApolloSubredditIndexShouldInspectTable(tableView)) return NO;
@@ -1353,6 +1357,7 @@ static NSInteger ApolloSubredditIndexMultiredditsSection(UITableView *tableView)
 }
 
 static void ApolloSubredditIndexTrackMultiredditsSection(UITableView *tableView, UIView *headerView, NSInteger section) {
+    if (!sSubredditListEnhancements) return;
     if (!tableView || !headerView) return;
 
     UILabel *label = ApolloSubredditIndexHeaderLabelInView(headerView);
@@ -1486,6 +1491,7 @@ static void ApolloSubredditIndexPrepareCellForDisplay(UITableView *tableView, UI
 }
 
 static void ApolloSubredditIndexStyleHeaderView(UIView *header, UITableView *tableView) {
+    if (!sSubredditListEnhancements) return;
     if (!header || !tableView) return;
     if (![objc_getAssociatedObject(tableView, &kApolloSubredditIndexTableKey) boolValue]) {
         if (!ApolloSubredditIndexShouldInspectTable(tableView)) return;

@@ -16,6 +16,9 @@ static NSString *const UDKeyRandomSubredditsSource = @"RandomSubredditsSource";
 static NSString *const UDKeyRandNsfwSubredditsSource = @"RandNsfwSubredditsSource";
 static NSString *const UDKeyTrendingSubredditsSource = @"TrendingSubredditsSource";
 static NSString *const UDKeyTrendingSubredditsLimit = @"TrendingSubredditsLimit";
+// Master toggle (short-term fix) for all subreddit list polish/enhancements. Default
+// YES. Modern Subreddit Dividers depends on it — that row hides when this is off.
+static NSString *const UDKeySubredditListEnhancements = @"SubredditListEnhancements";
 static NSString *const UDKeyModernSubredditDividers = @"ModernSubredditDividers";
 static NSString *const ApolloModernSubredditDividersChangedNotification = @"ApolloModernSubredditDividersChangedNotification";
 static NSString *const UDKeyReadPostMaxCount = @"ReadPostMaxCount";
