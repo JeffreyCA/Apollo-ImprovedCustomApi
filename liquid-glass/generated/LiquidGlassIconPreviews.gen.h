@@ -77,12 +77,14 @@ static const LGIconRowEntry kLGGroupEntries_custom[] = {
     { "bajader-aperture-science", "Aperture Science", "bajader" },
     { "bajader-apollos", "ApollOS", "bajader" },
     { "bajader-glitched", "Glitched", "bajader" },
+    { "paulo1manso-modern", "Modern", "paulo1manso" },
+    { "paulo1manso-modern-alt", "Modern Alt", "paulo1manso" },
 };
 
 static const LGIconGroupDef kLGIconGroups[] = {
     { "community", "Liquid Glass", LGGroupPresentationInline, kLGGroupEntries_community, 4 },
     { "new-variants", "New Variants", LGGroupPresentationPush, kLGGroupEntries_new_variants, 42 },
-    { "custom", "Custom", LGGroupPresentationPush, kLGGroupEntries_custom, 3 },
+    { "custom", "Custom", LGGroupPresentationPush, kLGGroupEntries_custom, 5 },
 };
 
 static const size_t kLGIconGroupCount = 3;
