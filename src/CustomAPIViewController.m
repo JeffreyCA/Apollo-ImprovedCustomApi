@@ -7,6 +7,7 @@
 #import "ApolloSubredditCustomBannerCache.h"
 #import "ApolloSubredditCustomIconCache.h"
 #import "ApolloSubredditInfoCache.h"
+#import "ApolloBannedProfile.h"
 #import "UserDefaultConstants.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/runtime.h>
@@ -657,11 +658,11 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
-        case SectionBackupRestore: return 2;
+        case SectionBackupRestore: return 4;
         case SectionAPIKeys: return 9; // 7 text fields + Can't sign in? + API key setup guide
         case SectionGeneral: return sShowDeletedComments ? 11 : 10;
-        case SectionMedia: return (sShowUserAvatars ? 14 : 13) + (sEnableInlineImages ? 0 : -kApolloMediaInlineDependentRows);
-        case SectionSubreddits: return sSubredditListEnhancements ? 9 : 8;
+        case SectionMedia: return 12 + (sEnableInlineImages ? 0 : -kApolloMediaInlineDependentRows);
+        case SectionSubreddits: return sSubredditListEnhancements ? 8 : 7;
         case SectionNotificationBackend: return 3; // URL + Registration Token + Test Connection
         case SectionAbout: return 5; // GitHub + Reddit + Thanks To + Export Logs + Version
         default: return 0;
@@ -670,7 +671,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     switch (section) {
-        case SectionBackupRestore: return @"Backup / Restore";
+        case SectionBackupRestore: return @"Data";
         case SectionAPIKeys: return @"API Keys";
         case SectionGeneral: return @"General";
         case SectionMedia: return @"Media";
@@ -1167,37 +1168,6 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Profile Picture Tab Icon"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon]
                                            action:@selector(profileTabAvatarSwitchToggled:)];
-        case 12: {
-            BOOL avatarsOn = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars];
-            if (avatarsOn) {
-                UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_ClearAvatarCache"];
-                if (!cell) {
-                    cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Media_ClearAvatarCache"];
-                }
-                cell.textLabel.text = @"Clear Profile Picture Cache";
-                cell.textLabel.textColor = self.view.tintColor;
-                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-                return cell;
-            }
-            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_ClearLinkPreviewCache"];
-            if (!cell) {
-                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Media_ClearLinkPreviewCache"];
-            }
-            cell.textLabel.text = @"Clear Link Preview Cache";
-            cell.textLabel.textColor = self.view.tintColor;
-            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            return cell;
-        }
-        case 13: {
-            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_ClearLinkPreviewCache"];
-            if (!cell) {
-                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Media_ClearLinkPreviewCache"];
-            }
-            cell.textLabel.text = @"Clear Link Preview Cache";
-            cell.textLabel.textColor = self.view.tintColor;
-            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            return cell;
-        }
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -1251,16 +1221,6 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                 placeholder:@"(empty)"
                                                        text:sRandNsfwSubredditsSource
                                                         tag:TagRandNsfwSubredditsSource];
-        case 8: {
-            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Sub_ClearCustomBanners"];
-            if (!cell) {
-                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Sub_ClearCustomBanners"];
-            }
-            cell.textLabel.text = @"Clear Custom Banners & Icons";
-            cell.textLabel.textColor = self.view.tintColor;
-            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            return cell;
-        }
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -1316,15 +1276,23 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (UITableViewCell *)backupRestoreCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
-    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_Backup"];
+    if (row == 0 || row == 1) {
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Backup"];
+        if (!cell) {
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Backup"];
+        }
+        cell.textLabel.text = (row == 0) ? @"Backup Settings" : @"Restore Settings";
+        cell.textLabel.textColor = self.view.tintColor;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        return cell;
+    }
+
+    NSString *identifier = (row == 2) ? @"Cell_Data_ClearCaches" : @"Cell_Data_ClearCustomBanners";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
     if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Backup"];
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:identifier];
     }
-    if (row == 0) {
-        cell.textLabel.text = @"Backup Settings";
-    } else {
-        cell.textLabel.text = @"Restore Settings";
-    }
+    cell.textLabel.text = (row == 2) ? @"Clear Tweak Caches" : @"Clear Custom Banners & Icons";
     cell.textLabel.textColor = self.view.tintColor;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     return cell;
@@ -1556,10 +1524,15 @@ typedef NS_ENUM(NSInteger, Tag) {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 
     if (indexPath.section == SectionBackupRestore) {
+        UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
         if (indexPath.row == 0) {
             [self backupSettings];
-        } else {
+        } else if (indexPath.row == 1) {
             [self restoreSettings];
+        } else if (indexPath.row == 2) {
+            [self promptClearAllCachesFromSourceView:cell];
+        } else if (indexPath.row == 3) {
+            [self promptClearCustomSubredditBannersFromSourceView:cell];
         }
     } else if (indexPath.section == SectionAPIKeys) {
         if (indexPath.row == 7) {
@@ -1580,12 +1553,6 @@ typedef NS_ENUM(NSInteger, Tag) {
         } else if (indexPath.row == 3) {
             [self exportLogs];
         }
-    } else if (indexPath.section == SectionSubreddits) {
-        NSInteger logicalRow = (indexPath.row >= 1 && !sSubredditListEnhancements) ? indexPath.row + 1 : indexPath.row;
-        if (logicalRow == 8) {
-            UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-            [self promptClearCustomSubredditBannersFromSourceView:cell];
-        }
     } else if (indexPath.section == SectionMedia) {
         UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
         NSInteger row = ApolloMediaLogicalRow(indexPath.row);
@@ -1605,10 +1572,6 @@ typedef NS_ENUM(NSInteger, Tag) {
             [self presentLinkPreviewModeSheetFromSourceView:cell body:NO];
         } else if (row == 9) {
             [self presentLinkPreviewCardColorSheetFromSourceView:cell];
-        } else if (row == 12 && sShowUserAvatars) {
-            [self promptClearProfilePictureCacheFromSourceView:cell];
-        } else if ((row == 12 && !sShowUserAvatars) || (row == 13 && sShowUserAvatars)) {
-            [self promptClearLinkPreviewCacheFromSourceView:cell];
         }
     } else if (indexPath.section == SectionNotificationBackend && indexPath.row == 2) {
         [self testNotificationBackendConnection];
@@ -1645,13 +1608,9 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (BOOL)tableView:(UITableView *)tableView shouldHighlightRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == SectionBackupRestore) return YES;
     if (indexPath.section == SectionAPIKeys && (indexPath.row == 7 || indexPath.row == 8)) return YES;
-    if (indexPath.section == SectionSubreddits) {
-        NSInteger logicalRow = (indexPath.row >= 1 && !sSubredditListEnhancements) ? indexPath.row + 1 : indexPath.row;
-        return logicalRow == 8;
-    }
     if (indexPath.section == SectionMedia) {
         NSInteger row = ApolloMediaLogicalRow(indexPath.row);
-        return (row == 0 || row == 1 || row == 2 || row == 5 || row == 6 || row == 7 || row == 8 || row == 9 || row == 12 || row == 13);
+        return (row == 0 || row == 1 || row == 2 || row == 5 || row == 6 || row == 7 || row == 8 || row == 9);
     }
     if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 || indexPath.row == 3)) return YES;
     if (indexPath.section == SectionNotificationBackend && indexPath.row == 2) return YES;
@@ -2036,19 +1995,9 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (void)userAvatarsSwitchToggled:(UISwitch *)sender {
-    BOOL wasOn = sShowUserAvatars;
     sShowUserAvatars = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sShowUserAvatars forKey:UDKeyShowUserAvatars];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloUserAvatarsToggleChangedNotification" object:nil];
-    if (sShowUserAvatars == wasOn) return;
-    NSArray<NSIndexPath *> *paths = @[[NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(12) inSection:SectionMedia]];
-    if (sShowUserAvatars) {
-        [self.tableView insertRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationFade];
-    } else {
-        [self.tableView deleteRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationFade];
-    }
-    [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(sShowUserAvatars ? 13 : 12) inSection:SectionMedia]]
-                          withRowAnimation:UITableViewRowAnimationNone];
 }
 
 - (void)profileTabAvatarSwitchToggled:(UISwitch *)sender {
@@ -2057,16 +2006,26 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloProfileTabAvatarIconChangedNotification" object:nil];
 }
 
-- (void)promptClearProfilePictureCacheFromSourceView:(UIView *)sourceView {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Clear Profile Picture Cache?"
-                                                                   message:@"Cached user avatars, banners, and profile metadata will be removed. They'll be re-downloaded the next time they're shown."
+- (void)promptClearAllCachesFromSourceView:(UIView *)sourceView {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Clear Tweak Caches?"
+                                                                   message:@"This removes cached profile pictures, banners, link previews, and remembered banned-profile dismissals."
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Clear" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
         [[ApolloUserProfileCache sharedCache] clearAllCaches];
+        [[ApolloLinkPreviewCache sharedCache] flushCache];
+        [[ApolloSubredditInfoCache sharedCache] clearAllCaches];
+        ApolloBannedProfileClearDismissedOverlays();
         // Re-broadcast the avatars-toggle notification so visible profile headers reload immediately.
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloUserAvatarsToggleChangedNotification" object:nil];
     }]];
+
+    UIPopoverPresentationController *popover = alert.popoverPresentationController;
+    if (popover && sourceView) {
+        popover.sourceView = sourceView;
+        popover.sourceRect = sourceView.bounds;
+    }
+
     [self presentViewController:alert animated:YES completion:nil];
 }
 
@@ -2191,17 +2150,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     [alert addAction:[UIAlertAction actionWithTitle:@"Clear" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
         [[ApolloSubredditCustomBannerCache sharedCache] clearAllCustomBanners];
         [[ApolloSubredditCustomIconCache sharedCache] clearAllCustomIcons];
-    }]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)promptClearLinkPreviewCacheFromSourceView:(__unused UIView *)sourceView {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Clear Link Preview Cache?"
-                                                                   message:@"Cached link preview titles, descriptions, and thumbnails will be removed."
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Clear" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
-        [[ApolloLinkPreviewCache sharedCache] flushCache];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }

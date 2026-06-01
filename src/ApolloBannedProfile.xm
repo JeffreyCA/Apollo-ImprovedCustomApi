@@ -15,6 +15,22 @@ static Class sProfileViewControllerClass = Nil;
 static NSMutableSet<NSString *> *sListEndpoint403Usernames = nil;
 static NSSet<NSString *> *sBlockedNavTitles = nil;
 
+// Usernames whose banned overlay the user has manually dismissed. Persisted so
+// the overlay never reappears for that account — the escape hatch for false
+// positives (e.g. your own temporarily-suspended account flashing the overlay
+// for a split second right after login, before RDKClient.currentUser resolves).
+static NSString *const kApolloBannedProfileDismissedUsernamesDefaultsKey = @"ApolloBannedProfileDismissedUsernames";
+static NSMutableSet<NSString *> *sDismissedUsernames = nil;
+
+static void ApolloBannedProfileLoadDismissedUsernames(void) {
+    if (sDismissedUsernames) return;
+    sDismissedUsernames = [NSMutableSet set];
+    NSArray *stored = [[NSUserDefaults standardUserDefaults] arrayForKey:kApolloBannedProfileDismissedUsernamesDefaultsKey];
+    for (id entry in stored) {
+        if ([entry isKindOfClass:[NSString class]]) [sDismissedUsernames addObject:entry];
+    }
+}
+
 static NSString *ApolloBannedProfileNormalizedUsername(NSString *username) {
     if (![username isKindOfClass:[NSString class]]) return nil;
     NSString *clean = [username stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -29,6 +45,33 @@ static BOOL ApolloBannedProfileUsernamesMatch(NSString *left, NSString *right) {
     NSString *normalizedRight = ApolloBannedProfileNormalizedUsername(right);
     if (normalizedLeft.length == 0 || normalizedRight.length == 0) return NO;
     return [normalizedLeft caseInsensitiveCompare:normalizedRight] == NSOrderedSame;
+}
+
+static BOOL ApolloBannedProfileOverlayDismissedForUsername(NSString *username) {
+    NSString *key = ApolloBannedProfileNormalizedUsername(username);
+    if (key.length == 0) return NO;
+    ApolloBannedProfileLoadDismissedUsernames();
+    return [sDismissedUsernames containsObject:key.lowercaseString];
+}
+
+static void ApolloBannedProfileMarkOverlayDismissedForUsername(NSString *username) {
+    NSString *key = ApolloBannedProfileNormalizedUsername(username);
+    if (key.length == 0) return;
+    ApolloBannedProfileLoadDismissedUsernames();
+    NSString *lower = key.lowercaseString;
+    if ([sDismissedUsernames containsObject:lower]) return;
+    [sDismissedUsernames addObject:lower];
+    [[NSUserDefaults standardUserDefaults] setObject:sDismissedUsernames.allObjects
+                                              forKey:kApolloBannedProfileDismissedUsernamesDefaultsKey];
+    ApolloLog(@"[BannedProfile] user dismissed banned overlay for u/%@", key);
+}
+
+void ApolloBannedProfileClearDismissedOverlays(void) {
+    ApolloBannedProfileLoadDismissedUsernames();
+    [sDismissedUsernames removeAllObjects];
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kApolloBannedProfileDismissedUsernamesDefaultsKey];
+    [sListEndpoint403Usernames removeAllObjects];
+    ApolloLog(@"[BannedProfile] cleared all dismissed banned overlays and 403 markers");
 }
 
 // A Swift class instance is a real heap pointer that is safe to read with
@@ -130,6 +173,29 @@ static NSString *ApolloBannedProfileUsernameFromModelObject(id object) {
         }
     }
     return nil;
+}
+
+// Currently logged-in account username, or nil. Used to avoid blocking the
+// user's own profile when their account is temporarily banned.
+static NSString *ApolloBannedProfileCurrentLoggedInUsername(void) {
+    Class clientClass = objc_getClass("RDKClient");
+    SEL sharedClientSEL = @selector(sharedClient);
+    if (!clientClass || ![clientClass respondsToSelector:sharedClientSEL]) return nil;
+
+    id client = ((id (*)(id, SEL))objc_msgSend)(clientClass, sharedClientSEL);
+    if (!client) return nil;
+
+    SEL currentUserSEL = @selector(currentUser);
+    if (![client respondsToSelector:currentUserSEL]) return nil;
+
+    id currentUser = ((id (*)(id, SEL))objc_msgSend)(client, currentUserSEL);
+    return ApolloBannedProfileUsernameFromModelObject(currentUser);
+}
+
+static BOOL ApolloBannedProfileIsCurrentLoggedInUser(NSString *username) {
+    NSString *current = ApolloBannedProfileCurrentLoggedInUsername();
+    if (current.length == 0) return NO;
+    return ApolloBannedProfileUsernamesMatch(current, username);
 }
 
 static NSString *ApolloBannedProfileUsernameFromViewControllerDirect(UIViewController *viewController) {
@@ -537,6 +603,9 @@ NSString *ApolloBannedProfileBannedDescriptionText(void) {
 @interface ApolloBannedProfileOverlayView : UIView
 @property(nonatomic, strong) UIImageView *iconView;
 @property(nonatomic, strong) UILabel *messageLabel;
+@property(nonatomic, strong) UIButton *dismissButton;
+@property(nonatomic, copy) void (^dismissHandler)(void);
+- (void)applyThemeAccentColor:(UIColor *)accent;
 @end
 
 @implementation ApolloBannedProfileOverlayView
@@ -554,17 +623,25 @@ NSString *ApolloBannedProfileBannedDescriptionText(void) {
         _messageLabel = [[UILabel alloc] init];
         _messageLabel.translatesAutoresizingMaskIntoConstraints = NO;
         _messageLabel.text = message;
-        _messageLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleTitle3];
+        _messageLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
         _messageLabel.textColor = [UIColor labelColor];
         _messageLabel.textAlignment = NSTextAlignmentCenter;
         _messageLabel.numberOfLines = 0;
         _messageLabel.adjustsFontForContentSizeCategory = YES;
 
-        UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[_iconView, _messageLabel]];
+        _dismissButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        _dismissButton.translatesAutoresizingMaskIntoConstraints = NO;
+        [_dismissButton setTitle:@"Dismiss Overlay" forState:UIControlStateNormal];
+        _dismissButton.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+        _dismissButton.titleLabel.adjustsFontForContentSizeCategory = YES;
+        [_dismissButton addTarget:self action:@selector(handleDismissTapped) forControlEvents:UIControlEventTouchUpInside];
+
+        UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[_iconView, _messageLabel, _dismissButton]];
         stack.translatesAutoresizingMaskIntoConstraints = NO;
         stack.axis = UILayoutConstraintAxisVertical;
         stack.spacing = 16.0;
         stack.alignment = UIStackViewAlignmentCenter;
+        [stack setCustomSpacing:24.0 afterView:_messageLabel];
         [self addSubview:stack];
 
         [NSLayoutConstraint activateConstraints:@[
@@ -579,7 +656,39 @@ NSString *ApolloBannedProfileBannedDescriptionText(void) {
     return self;
 }
 
+// Apollo applies its accent color directly to views rather than via an
+// inheritable window tint, so adopt the accent resolved from the host profile's
+// chrome instead of the UIKit-default tint. Background stays the solid default.
+- (void)applyThemeAccentColor:(UIColor *)accent {
+    if (accent) {
+        self.tintColor = accent;
+        self.dismissButton.tintColor = accent;
+        [self.dismissButton setTitleColor:accent forState:UIControlStateNormal];
+    }
+}
+
+- (void)handleDismissTapped {
+    if (self.dismissHandler) self.dismissHandler();
+}
+
 @end
+
+// Resolves the active Apollo theme's accent color from the host profile's chrome.
+// Apollo themes its nav/tab bars with the accent color, so prefer those over the
+// UIKit-default view tint (which stays system blue when untouched).
+static UIColor *ApolloBannedProfileResolveAccentColor(UIViewController *viewController) {
+    NSMutableArray<UIColor *> *candidates = [NSMutableArray array];
+    UITabBar *tabBar = viewController.tabBarController.tabBar;
+    if (tabBar.tintColor) [candidates addObject:tabBar.tintColor];
+    UINavigationBar *navBar = viewController.navigationController.navigationBar;
+    if (navBar.tintColor) [candidates addObject:navBar.tintColor];
+    if (viewController.view.window.tintColor) [candidates addObject:viewController.view.window.tintColor];
+    if (viewController.view.tintColor) [candidates addObject:viewController.view.tintColor];
+    for (UIColor *color in candidates) {
+        if ([color isKindOfClass:[UIColor class]]) return color;
+    }
+    return viewController.view.tintColor ?: [UIColor systemBlueColor];
+}
 
 NSString *ApolloBannedProfileMessageForUsername(NSString *username) {
     NSString *clean = ApolloBannedProfileNormalizedUsername(username) ?: @"username";
@@ -589,6 +698,9 @@ NSString *ApolloBannedProfileMessageForUsername(NSString *username) {
 BOOL ApolloBannedProfileCachedIsSuspended(NSString *username) {
     NSString *key = ApolloBannedProfileNormalizedUsername(username);
     if (key.length == 0) return NO;
+    // Never treat the logged-in user's own account as banned; a temporary
+    // suspension must not lock them out of their own profile.
+    if (ApolloBannedProfileIsCurrentLoggedInUser(key)) return NO;
     if ([sListEndpoint403Usernames containsObject:key.lowercaseString]) return YES;
     return [[ApolloUserProfileCache sharedCache] cachedIsSuspendedForUsername:key];
 }
@@ -611,11 +723,26 @@ void ApolloBannedProfileNoteListEndpoint403ForURL(NSURL *url) {
         if (![parts[i] isEqualToString:@"user"]) continue;
         NSString *username = ApolloBannedProfileNormalizedUsername(parts[i + 1]);
         if (username.length == 0) return;
+        // A 403 on the own account's listing is transient (auth/temp ban),
+        // not a permanent suspension; don't poison the cache.
+        if (ApolloBannedProfileIsCurrentLoggedInUser(username)) {
+            ApolloLog(@"[BannedProfile] ignoring list endpoint 403 for own account u/%@", username);
+            return;
+        }
         if (!sListEndpoint403Usernames) sListEndpoint403Usernames = [NSMutableSet set];
         [sListEndpoint403Usernames addObject:username.lowercaseString];
         ApolloLog(@"[BannedProfile] list endpoint 403 for u/%@", username);
         return;
     }
+}
+
+void ApolloBannedProfileClearListEndpoint403ForUsername(NSString *username) {
+    NSString *key = ApolloBannedProfileNormalizedUsername(username);
+    if (key.length == 0 || !sListEndpoint403Usernames) return;
+    NSString *lower = key.lowercaseString;
+    if (![sListEndpoint403Usernames containsObject:lower]) return;
+    [sListEndpoint403Usernames removeObject:lower];
+    ApolloLog(@"[BannedProfile] cleared list endpoint 403 for u/%@ (no longer suspended)", key);
 }
 
 static void ApolloBannedProfileRemoveOverlay(UIViewController *viewController) {
@@ -631,6 +758,14 @@ static void ApolloBannedProfileRemoveOverlay(UIViewController *viewController) {
 static void ApolloBannedProfileInstallOverlay(UIViewController *viewController, NSString *username) {
     UIView *hostView = viewController.view;
     if (!hostView) return;
+
+    // If the user previously dismissed the overlay for this account, never show
+    // it again — reveal the underlying profile instead. This is the escape hatch
+    // for false positives (own temp-banned account flashing on login, etc.).
+    if (ApolloBannedProfileOverlayDismissedForUsername(username)) {
+        ApolloBannedProfileRemoveOverlay(viewController);
+        return;
+    }
 
     NSString *message = ApolloBannedProfileMessageForUsername(username);
     ApolloBannedProfileOverlayView *overlay = objc_getAssociatedObject(viewController, kApolloBannedProfileOverlayKey);
@@ -654,7 +789,18 @@ static void ApolloBannedProfileInstallOverlay(UIViewController *viewController, 
         }
     }
 
+    NSString *dismissUsername = [ApolloBannedProfileNormalizedUsername(username) copy];
+    __weak UIViewController *weakViewController = viewController;
+    overlay.dismissHandler = ^{
+        ApolloBannedProfileMarkOverlayDismissedForUsername(dismissUsername);
+        ApolloBannedProfileRemoveOverlay(weakViewController);
+    };
+
     [hostView bringSubviewToFront:overlay];
+    // Re-resolve each install so the accent tracks the theme once Apollo has
+    // finished tinting the profile's chrome (may not be ready on first pass).
+    UIColor *accent = ApolloBannedProfileResolveAccentColor(viewController);
+    [overlay applyThemeAccentColor:accent];
     ApolloBannedProfileApplyHeaderSuspendedAppearance(viewController, YES);
     ApolloBannedProfileStopVisibleSpinnersInView(viewController.view);
 }
@@ -677,12 +823,18 @@ static void ApolloBannedProfileEvaluateViewController(UIViewController *viewCont
         return;
     }
 
-    if (ApolloBannedProfileCachedIsSuspended(username)) {
-        ApolloBannedProfileApplySuspendedState(viewController, YES, username);
+    // Never block the logged-in user's own profile, even if suspended; clear
+    // any stale overlay installed before the account resolved.
+    if (ApolloBannedProfileIsCurrentLoggedInUser(username)) {
+        ApolloLog(@"[BannedProfile] skipping overlay for own account u/%@", username);
+        ApolloBannedProfileApplySuspendedState(viewController, NO, username);
         return;
     }
 
-    ApolloBannedProfileApplySuspendedState(viewController, NO, username);
+    // Show the cached overlay immediately if suspended, but still revalidate so
+    // a lifted ban clears the overlay instead of persisting for the cache TTL.
+    BOOL cachedSuspended = ApolloBannedProfileCachedIsSuspended(username);
+    ApolloBannedProfileApplySuspendedState(viewController, cachedSuspended, username);
 
     __weak UIViewController *weakViewController = viewController;
     [[ApolloUserProfileCache sharedCache] requestInfoForUsername:username completion:^(ApolloUserProfileInfo *info) {
@@ -690,6 +842,7 @@ static void ApolloBannedProfileEvaluateViewController(UIViewController *viewCont
         if (!strongViewController) return;
         NSString *currentUsername = ApolloBannedProfileUsernameFromViewController(strongViewController);
         if (!ApolloBannedProfileUsernamesMatch(currentUsername, username)) return;
+        if (ApolloBannedProfileIsCurrentLoggedInUser(username)) return;
         BOOL suspended = info.isSuspended || ApolloBannedProfileCachedIsSuspended(username);
         ApolloBannedProfileApplySuspendedState(strongViewController, suspended, username);
     }];
@@ -836,8 +989,14 @@ static BOOL ApolloBannedProfileURLMatchesUserListEndpoint(NSURL *url) {
 
     NSString *username = ApolloBannedProfileUsernameFromViewController(self);
     if (username.length == 0) return;
+    // Respect a manual dismissal: don't re-pin (or churn header layout) for an
+    // account the user chose to reveal.
+    if (ApolloBannedProfileOverlayDismissedForUsername(username)) return;
     if (ApolloBannedProfileCachedIsSuspended(username)) {
+        // Keep the overlay pinned during layout, but also schedule a revalidation
+        // so a lifted ban clears it instead of re-pinning the stale cached state.
         ApolloBannedProfileInstallOverlay(self, username);
+        ApolloBannedProfileScheduleRefresh(self);
     }
 }
 

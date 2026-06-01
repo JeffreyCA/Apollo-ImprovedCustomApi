@@ -393,6 +393,10 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
             if (info) {
                 if (info.isSuspended) {
                     [[ApolloLinkPreviewCache sharedCache] removePreviewsForRedditUsername:key];
+                } else {
+                    // Ban lifted: drop the transient 403 marker so the overlay
+                    // and inline banned hints clear on the next evaluation.
+                    ApolloBannedProfileClearListEndpoint403ForUsername(key);
                 }
                 [[NSNotificationCenter defaultCenter] postNotificationName:ApolloUserProfileInfoUpdatedNotification
                                                                     object:self
@@ -464,7 +468,18 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
         if (info && completion) {
             dispatch_async(dispatch_get_main_queue(), ^{ completion(info); });
         }
-        if (info && [self isFreshInfo:info] && info.suspensionChecked) return;
+        // Always revalidate a cached suspension: a lifted temp ban must clear
+        // promptly instead of persisting for the full cache TTL. Non-suspended
+        // fresh entries still short-circuit and skip the network.
+        if (info && [self isFreshInfo:info] && info.suspensionChecked && !info.isSuspended) return;
+
+        // A cached suspension must be revalidated against the network, not the
+        // HTTP cache. about.json for a suspended user is cacheable, so a normal
+        // fetch can be served the stale suspended response from NSURLCache and
+        // the overlay would never clear after the ban is lifted. Use the local
+        // `info` (not ApolloBannedProfileCachedIsSuspended) to avoid a
+        // dispatch_sync re-entry onto self.queue.
+        BOOL bypassHTTPCache = (info != nil && info.isSuspended);
 
         NSMutableArray<void (^)(ApolloUserProfileInfo *)> *callbacks = self.infoCompletions[key];
         if (callbacks) {
@@ -475,7 +490,7 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
         callbacks = [NSMutableArray array];
         if (completion) [callbacks addObject:[completion copy]];
         self.infoCompletions[key] = callbacks;
-        [self startInfoFetchForKey:key];
+        [self startInfoFetchForKey:key bypassingCache:bypassHTTPCache];
     });
 }
 
