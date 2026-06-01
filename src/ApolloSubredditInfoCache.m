@@ -7,6 +7,10 @@ NSString * const ApolloSubredditNameKey = @"subredditName";
 
 static NSTimeInterval const ApolloSubredditInfoCacheTTL = 7.0 * 24.0 * 60.0 * 60.0;
 static NSUInteger const ApolloSubredditInfoDiskCacheMaxEntries = 800;
+// Cap stored about text: an empty public_description falls back to the full
+// sidebar markdown, and measuring/drawing thousands of chars makes scrolling
+// near the header laggy. We only ever show a few lines anyway.
+static NSUInteger const ApolloSubredditAboutTextMaxLength = 500;
 
 NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
     if (subscriberCount < 0) return @"";
@@ -125,6 +129,26 @@ NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
     return string.length > 0 ? string : nil;
 }
 
+// Clean + cap the about text on a word boundary with an ellipsis.
+- (NSString *)cleanAboutTextFromValue:(id)value {
+    NSString *string = [self cleanStringFromValue:value];
+    if (string.length <= ApolloSubredditAboutTextMaxLength) return string;
+
+    NSString *truncated = [string substringToIndex:ApolloSubredditAboutTextMaxLength];
+    // Snap the cut to a word boundary, else a grapheme boundary, so we never
+    // split a surrogate pair / composed character and leave a stray glyph.
+    NSRange lastSpace = [truncated rangeOfCharacterFromSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]
+                                                   options:NSBackwardsSearch];
+    if (lastSpace.location != NSNotFound && lastSpace.location > ApolloSubredditAboutTextMaxLength / 2) {
+        truncated = [truncated substringToIndex:lastSpace.location];
+    } else {
+        NSRange safe = [string rangeOfComposedCharacterSequenceAtIndex:ApolloSubredditAboutTextMaxLength];
+        truncated = [string substringToIndex:safe.location];
+    }
+    truncated = [truncated stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return [truncated stringByAppendingString:@"\u2026"];
+}
+
 - (BOOL)isFreshInfo:(ApolloSubredditInfo *)info {
     if (!info.fetchedAt) return NO;
     return fabs([info.fetchedAt timeIntervalSinceNow]) < ApolloSubredditInfoCacheTTL;
@@ -152,7 +176,7 @@ NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
     if (subredditName.length == 0) return nil;
 
     NSString *displayName = [self cleanStringFromValue:dict[@"displayName"]];
-    NSString *aboutText = [self cleanStringFromValue:dict[@"aboutText"]];
+    NSString *aboutText = [self cleanAboutTextFromValue:dict[@"aboutText"]];
     NSURL *iconURL = [self URLFromString:dict[@"iconURL"]];
     NSURL *bannerURL = [self URLFromString:dict[@"bannerURL"]];
     NSInteger subscriberCount = -1;
@@ -270,8 +294,8 @@ NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
         [self cleanStringFromValue:dataDict[@"display_name_prefixed"]] ?:
         [self cleanStringFromValue:dataDict[@"display_name"]] ?:
         subredditName;
-    NSString *aboutText = [self cleanStringFromValue:dataDict[@"public_description"]] ?:
-        [self cleanStringFromValue:dataDict[@"description"]];
+    NSString *aboutText = [self cleanAboutTextFromValue:dataDict[@"public_description"]] ?:
+        [self cleanAboutTextFromValue:dataDict[@"description"]];
     NSURL *iconURL = [self URLFromString:dataDict[@"icon_img"]] ?:
         [self URLFromString:dataDict[@"community_icon"]];
     NSURL *bannerURL = [self URLFromString:dataDict[@"banner_img"]] ?:

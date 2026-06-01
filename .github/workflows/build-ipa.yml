@@ -1,0 +1,241 @@
+name: Build IPA
+
+# Build a sideload-ready Apollo IPA on GitHub Actions. Optionally injects the
+# tweak (inject_tweak / no_extensions) and applies patch.sh patches
+# (liquid_glass, liquid_glass_icons, url_schemes, remove_code_signature).
+#
+# IMPORTANT: The Apollo IPA you provide MUST be DECRYPTED. App Store IPAs are
+# FairPlay-encrypted and will crash on launch after injection/patching.
+
+on:
+  workflow_dispatch:
+    inputs:
+      apollo_ipa_url:
+        description: 'Direct URL to a decrypted Apollo IPA or prepared Apollo base IPA'
+        required: true
+        type: string
+        default: 'https://downloads.apolloreborn.app/apollobase.ipa'
+      inject_tweak:
+        description: 'Build and inject the Apollo-Reborn tweak'
+        required: false
+        type: boolean
+        default: true
+      no_extensions:
+        description: 'Strip app extensions during injection (requires inject_tweak)'
+        required: false
+        type: boolean
+        default: false
+      liquid_glass:
+        description: 'Liquid Glass: full iOS 26 UI redesign + icon pack'
+        required: false
+        type: boolean
+        default: false
+      liquid_glass_icons:
+        description: 'Liquid Glass: icon pack only (keeps classic UI). Mutually exclusive with above option.'
+        required: false
+        type: boolean
+        default: false
+      url_schemes:
+        description: 'Comma-separated URL schemes to add (e.g. "custom, test, myapp")'
+        required: false
+        type: string
+      remove_code_signature:
+        description: 'Remove code signature'
+        required: false
+        type: boolean
+        default: false
+      output_name:
+        description: 'Output IPA filename (without .ipa extension)'
+        required: false
+        type: string
+        default: 'Apollo-Reborn'
+      create_release:
+        description: 'Also publish the IPA as a draft GitHub release'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build IPA
+    runs-on: macos-15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # submodules + LFS required so patch.sh --liquid-glass gets the real
+          # Assets.car (Git LFS), not an un-pulled pointer that crashes the IPA.
+          submodules: recursive
+          lfs: true
+
+      - name: Validate inputs
+        run: |
+          if [ "${{ github.event.inputs.liquid_glass }}" == "true" ] && [ "${{ github.event.inputs.liquid_glass_icons }}" == "true" ]; then
+            echo "Error: 'liquid_glass' and 'liquid_glass_icons' are mutually exclusive."
+            exit 1
+          fi
+          if [ "${{ github.event.inputs.no_extensions }}" == "true" ] && [ "${{ github.event.inputs.inject_tweak }}" != "true" ]; then
+            echo "Error: 'no_extensions' only applies when 'inject_tweak' is enabled."
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        run: brew install ldid dpkg make
+
+      - name: Add GNU make to PATH
+        run: echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Setup Theos
+        if: inputs.inject_tweak
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: theos/theos
+          ref: 9bc73406cf80b711ef4d02c15ff1dedc4478a275 # master @ 2026-04-09
+          path: theos
+          submodules: recursive
+
+      - name: Build rootful tweak package
+        if: inputs.inject_tweak
+        run: make package FINALPACKAGE=1
+        env:
+          THEOS: ${{ github.workspace }}/theos
+
+      - name: Locate built .deb
+        if: inputs.inject_tweak
+        id: locate_deb
+        run: |
+          DEB_PATH=$(ls -1t packages/*.deb | head -1)
+          if [ -z "$DEB_PATH" ]; then
+            echo "Error: no .deb produced by make package"
+            exit 1
+          fi
+          echo "deb_path=$DEB_PATH" >> "$GITHUB_OUTPUT"
+          echo "Built tweak: $DEB_PATH"
+
+      - name: Install cyan injector
+        if: inputs.inject_tweak
+        run: |
+          # cyan (pyzule-rw) injector; not the unrelated PyPI "cyan". A venv is
+          # needed because the runner's Homebrew Python is PEP 668 externally
+          # managed. Used directly for no-extensions and as build-ipa.sh fallback.
+          python3 -m venv "$RUNNER_TEMP/cyan-venv"
+          "$RUNNER_TEMP/cyan-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/cyan-venv/bin/python" -m pip install \
+            "https://github.com/asdfzxcvbn/pyzule-rw/archive/refs/tags/v1.4.4.zip"
+          echo "$RUNNER_TEMP/cyan-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/cyan-venv/bin/cyan" --help >/dev/null
+          echo "cyan installed: $RUNNER_TEMP/cyan-venv/bin/cyan"
+
+      - name: Download Apollo IPA
+        run: |
+          curl -L --fail --retry 3 "${{ github.event.inputs.apollo_ipa_url }}" -o Apollo.ipa
+          unzip -t Apollo.ipa >/dev/null
+          echo "Apollo.ipa size: $(wc -c < Apollo.ipa) bytes"
+
+      - name: Inject tweak
+        if: inputs.inject_tweak
+        run: |
+          DEB="${{ steps.locate_deb.outputs.deb_path }}"
+          if [ "${{ github.event.inputs.no_extensions }}" == "true" ]; then
+            echo "Injecting tweak (no extensions) with cyan..."
+            cyan -i Apollo.ipa -f "$DEB" -o injected.ipa -e
+          else
+            echo "Injecting tweak with build-ipa.sh..."
+            chmod +x ./build-ipa.sh
+            bash ./build-ipa.sh --ipa Apollo.ipa --deb "$DEB" -o injected.ipa
+          fi
+          if [ ! -f injected.ipa ]; then
+            echo "Error: injection did not produce injected.ipa"
+            exit 1
+          fi
+          # Continue the pipeline from the injected IPA.
+          mv -f injected.ipa Apollo.ipa
+          echo "Injected Apollo.ipa size: $(wc -c < Apollo.ipa) bytes"
+
+      - name: Build output filename
+        id: outname
+        run: |
+          BASE="${{ github.event.inputs.output_name }}"
+          [ -z "$BASE" ] && BASE="Apollo-Reborn"
+          SUFFIX=""
+          if [ "${{ github.event.inputs.no_extensions }}" == "true" ]; then
+            SUFFIX="${SUFFIX}-NoExt"
+          fi
+          if [ "${{ github.event.inputs.liquid_glass }}" == "true" ]; then
+            SUFFIX="${SUFFIX}-LiquidGlass"
+          fi
+          if [ "${{ github.event.inputs.liquid_glass_icons }}" == "true" ]; then
+            SUFFIX="${SUFFIX}-LiquidGlassIcons"
+          fi
+          if [ -n "${{ github.event.inputs.url_schemes }}" ]; then
+            SUFFIX="${SUFFIX}-URLSchemes"
+          fi
+          OUTPUT_IPA="${BASE}${SUFFIX}.ipa"
+          echo "output_ipa=${OUTPUT_IPA}" >> "$GITHUB_OUTPUT"
+          echo "Output filename: ${OUTPUT_IPA}"
+
+      - name: Apply patches
+        id: patch
+        run: |
+          OUTPUT_IPA="${{ steps.outname.outputs.output_ipa }}"
+          NEEDS_PATCH="false"
+          CMD_ARGS="Apollo.ipa -o ${OUTPUT_IPA}"
+          if [ "${{ github.event.inputs.liquid_glass }}" == "true" ]; then
+            CMD_ARGS="${CMD_ARGS} --liquid-glass"
+            NEEDS_PATCH="true"
+          fi
+          if [ "${{ github.event.inputs.liquid_glass_icons }}" == "true" ]; then
+            CMD_ARGS="${CMD_ARGS} --liquid-glass-icons"
+            NEEDS_PATCH="true"
+          fi
+          if [ -n "${{ github.event.inputs.url_schemes }}" ]; then
+            CMD_ARGS="${CMD_ARGS} --url-schemes '${{ github.event.inputs.url_schemes }}'"
+            NEEDS_PATCH="true"
+          fi
+          if [ "${{ github.event.inputs.remove_code_signature }}" == "true" ]; then
+            CMD_ARGS="${CMD_ARGS} --remove-code-signature"
+            NEEDS_PATCH="true"
+          fi
+
+          if [ "$NEEDS_PATCH" == "true" ]; then
+            echo "Running: ./patch.sh ${CMD_ARGS}"
+            chmod +x ./patch.sh
+            eval "./patch.sh ${CMD_ARGS}"
+          else
+            # No patch options selected: the (possibly injected) IPA is the output.
+            echo "No patch options selected; using IPA as-is."
+            mv -f Apollo.ipa "$OUTPUT_IPA"
+          fi
+
+          if [ ! -f "$OUTPUT_IPA" ]; then
+            echo "Error: expected output $OUTPUT_IPA was not produced."
+            ls -la
+            exit 1
+          fi
+          echo "output_ipa=${OUTPUT_IPA}" >> "$GITHUB_OUTPUT"
+          echo "Final IPA: ${OUTPUT_IPA} ($(wc -c < "$OUTPUT_IPA") bytes)"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.patch.outputs.output_ipa }}
+          path: ${{ steps.patch.outputs.output_ipa }}
+          retention-days: 30
+
+      - name: Create release
+        if: inputs.create_release
+        uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191 # v2.0.8
+        with:
+          draft: true
+          tag_name: build-ipa-${{ github.run_number }}
+          name: Apollo build ${{ github.run_number }}
+          files: |
+            ${{ steps.patch.outputs.output_ipa }}
+          prerelease: false

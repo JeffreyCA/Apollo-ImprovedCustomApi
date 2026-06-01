@@ -138,6 +138,7 @@ struct CDStruct_90e057aa { CGSize min; CGSize max; };
 
 static char kApolloDecompositionMapKey;        // NSDictionary<NSValue (non-retained orig text node ptr), NSArray<id leaf>>
 static char kApolloCachedOrigChildrenKey;      // NSArray (held strongly so element pointers stay valid for compare)
+static char kApolloProvisionalDecompKey;       // NSNumber(BOOL): decomposition built while comment mediaMetadata was unreachable (don't cache)
 static char kApolloImageNodesByURLKey;         // NSMutableDictionary<NSString URL, ASNetworkImageNode> per-MarkdownNode reuse cache
 static char kApolloImageCacheKey;              // NSString stable cache key (set even before deferred image URLs resolve)
 static char kApolloImageURLKey;                // NSURL on the imageNode AND mirrored on the imageNode's view
@@ -2676,6 +2677,61 @@ static void ApolloRequestMarkdownRelayout(ASDisplayNode *hostMarkdownNode) {
     });
 }
 
+// Reddit GIFs posted in comments arrive as /link/<post>/video/<asset>/player
+// URLs. They're only recognized as inline-autoplaying GIFs once the hosting
+// comment's mediaMetadata is reachable (ApolloInlineGIFDisplayURLFromMetadata
+// rewrites the /player URL to i.redd.it/<asset>.gif). But the very first
+// layoutSpecThatFits: pass can run before the MarkdownNode is connected to its
+// CommentCellNode, so ApolloMediaMetadataForHost returns nil and the URL is
+// (mis)classified as a plain video thumbnail — a static poster + play button
+// that never animates. Collapsing and re-expanding the comment recreates the
+// text nodes, which rebuilds the decomposition once metadata IS reachable,
+// which is why that manual workaround "fixes" it.
+//
+// This poll closes that gap automatically: when leaves were built without
+// metadata and at least one candidate could be a Reddit-hosted GIF, retry
+// reading the metadata for a short window. The moment it resolves to a GIF,
+// invalidate the cached children (kApolloCachedOrigChildrenKey) — exactly what
+// collapse/expand does implicitly — and request a relayout so the next pass
+// reclassifies the /player URL as an inline GIF and autoplays it.
+static void ApolloScheduleInlineGIFMetadataRetry(ASDisplayNode *hostMarkdownNode,
+                                                  NSArray<NSURL *> *candidateVideoURLs,
+                                                  NSUInteger attempt) {
+    if (!hostMarkdownNode || candidateVideoURLs.count == 0) return;
+    static const NSTimeInterval kDelays[] = {0.10, 0.20, 0.35, 0.60, 1.0, 2.0};
+    static const NSUInteger kMaxAttempts = sizeof(kDelays) / sizeof(kDelays[0]);
+    if (attempt >= kMaxAttempts) return;
+
+    __weak ASDisplayNode *weakHost = hostMarkdownNode;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kDelays[attempt] * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        ASDisplayNode *host = weakHost;
+        if (!host) return;
+
+        NSDictionary *md = ApolloMediaMetadataForHost(host);
+        if (md.count > 0) {
+            BOOL foundGIF = NO;
+            for (NSURL *u in candidateVideoURLs) {
+                if (ApolloInlineGIFDisplayURLFromMetadata(u, md)) { foundGIF = YES; break; }
+            }
+            if (foundGIF) {
+                // Force the decomposition rebuild (same effect as collapse/expand)
+                // so the /player URL is reclassified as a GIF on the next layout.
+                objc_setAssociatedObject(host, &kApolloCachedOrigChildrenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                ApolloRequestMarkdownRelayout(host);
+                ApolloLog(@"[InlineImages] reddit GIF metadata arrived — rebuilding decomposition host=%p attempt=%lu",
+                          host, (unsigned long)attempt);
+                return;
+            }
+            // Metadata is present but none of the candidates are GIFs — they're
+            // genuine videos. Leave them as thumbnails and stop polling.
+            return;
+        }
+        // Metadata still unreachable — keep trying within the window.
+        ApolloScheduleInlineGIFMetadataRetry(host, candidateVideoURLs, attempt + 1);
+    });
+}
+
 static NSUInteger ApolloUniqueImageChestPostLinkCount(NSAttributedString *attr);
 
 // Returns an array of leaf nodes (ASTextNode + ASNetworkImageNode instances)
@@ -2699,6 +2755,9 @@ static NSArray *ApolloBuildLeavesForTextNode(ASTextNode *textNode,
     NSMutableSet<NSString *> *seenAbs = [NSMutableSet set];
     NSUInteger imageChestPostLinkCount = ApolloUniqueImageChestPostLinkCount(attr);
     NSDictionary *hostMediaMetadata = ApolloMediaMetadataForHost(hostMarkdownNode);
+    // Original /player URLs classified as video while metadata was unavailable;
+    // used to schedule a metadata-arrival retry (see below).
+    NSMutableArray<NSURL *> *videoCandidates = [NSMutableArray array];
 
     [attr enumerateAttributesInRange:NSMakeRange(0, attr.length)
                              options:0
@@ -2727,6 +2786,7 @@ static NSArray *ApolloBuildLeavesForTextNode(ASTextNode *textNode,
             BOOL isImage = ApolloIsInlineRenderableImageURL(urlForClassify);
             BOOL isVideo = !isImage && ApolloIsInlineRenderableVideoURL(urlForClassify);
             if (!isImage && !isVideo) continue;
+            if (isVideo && !metadataGIF) [videoCandidates addObject:url];
             // Expand to the URL's longest effective range so a markdown
             // link with mixed formatting ("[**Bold** plain](url)") gets
             // captured as one span instead of two.
@@ -2749,6 +2809,21 @@ static NSArray *ApolloBuildLeavesForTextNode(ASTextNode *textNode,
             [isBareURL addObject:@(bareURL)];
         }
     }];
+
+    // If we classified one or more URLs as video thumbnails but couldn't reach
+    // the comment's mediaMetadata yet, the /player URL might actually be a
+    // Reddit-hosted GIF. Poll for the metadata and rebuild once it arrives so
+    // the GIF autoplays inline without the user collapsing/expanding the cell.
+    // We ALSO mark this decomposition provisional so layoutSpecThatFits: does
+    // not cache it: an off-screen comment lays out during preheat (metadata
+    // unreachable) and the timed poll can give up before the cell ever becomes
+    // visible. Leaving the result uncached forces a fresh rebuild on the
+    // display-time measurement pass — when the metadata IS reachable — so the
+    // GIF is reclassified correctly the moment the user scrolls to it.
+    if (hostMediaMetadata == nil && videoCandidates.count > 0) {
+        objc_setAssociatedObject(hostMarkdownNode, &kApolloProvisionalDecompKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloScheduleInlineGIFMetadataRetry(hostMarkdownNode, videoCandidates, 0);
+    }
 
     if (ranges.count == 0) return nil;
 
@@ -3009,6 +3084,10 @@ static BOOL ApolloLinkButtonHasInlineHost(ASDisplayNode *linkButtonNode) {
         // Rebuild decomposition. We do NOT removeFromSupernode the previous
         // imageNodes here — ApolloImageNodeForURL reuses them by URL. Text
         // segments ARE recreated each time (cheap, attributedText varies).
+        // ApolloBuildLeavesForTextNode sets kApolloProvisionalDecompKey if it
+        // had to classify a Reddit /player GIF without reachable metadata;
+        // clear it first so it reflects only this rebuild.
+        objc_setAssociatedObject(self, &kApolloProvisionalDecompKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         NSMutableDictionary *newDecomp = [NSMutableDictionary dictionary];
         NSMutableSet<NSString *> *referencedURLs = [NSMutableSet set];
         Class textNodeCls = ApolloASTextNodeClass();
@@ -3052,7 +3131,15 @@ static BOOL ApolloLinkButtonHasInlineHost(ASDisplayNode *linkButtonNode) {
 
         // Always save the orig children (even when no decomposition needed) so
         // we can short-circuit subsequent calls that match this content.
-        objc_setAssociatedObject(self, &kApolloCachedOrigChildrenKey, origChildren, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // EXCEPTION: if the decomposition is provisional (a Reddit /player GIF
+        // was classified as a video thumbnail because the comment's
+        // mediaMetadata wasn't reachable yet), do NOT cache the orig children.
+        // Leaving the cache empty forces a full rebuild on the next
+        // layoutSpecThatFits: pass — which, for an off-screen comment, is the
+        // display-time measurement when metadata becomes reachable — so the GIF
+        // is reclassified and autoplays instead of staying a static thumbnail.
+        BOOL provisional = [objc_getAssociatedObject(self, &kApolloProvisionalDecompKey) boolValue];
+        objc_setAssociatedObject(self, &kApolloCachedOrigChildrenKey, provisional ? nil : origChildren, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(self, &kApolloDecompositionMapKey, newDecomp.count > 0 ? newDecomp : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         decomp = newDecomp.count > 0 ? newDecomp : nil;
     }

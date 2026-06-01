@@ -26,6 +26,8 @@ extern BOOL sUseProfileAvatarTabIcon;
 extern BOOL sShowSubredditHeaders;
 extern BOOL sAutoHideTabBarShowOnIdle;
 extern BOOL sModernSubredditDividers;
+// Master toggle for subreddit list enhancements (see UDKeySubredditListEnhancements).
+extern BOOL sSubredditListEnhancements;
 
 // Render image URLs inline in post selftext and comments. Defaults to YES on
 // fresh installs (registerDefaults). When NO, Apollo's native behavior (text

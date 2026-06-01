@@ -14,7 +14,7 @@ BOOL ApolloShouldAutoplayInlineGIF(void);
 /// Invalidated when settings, reachability, or Low Power Mode changes.
 BOOL ApolloShouldAutoplayInlineGIFCached(void);
 
-/// Current AutoplayGIFs raw string (never / only-on-wifi / always / automatic).
+/// Current AutoplayGIFs raw string (never / only-on-wifi / always).
 NSString *ApolloAutoplayGIFModeString(void);
 
 /// YES for URLs that are typically animated GIFs (not static JPEG/PNG/WebP).

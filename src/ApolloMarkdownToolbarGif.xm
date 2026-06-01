@@ -20,7 +20,12 @@ NSRegularExpression *ApolloNativeGiphyMarkdownTokenRegex(void) {
 static char kApolloMarkdownGifToolbarLastAttemptKey;
 static char kApolloMarkdownGifLoggedDiscoveryKey;
 static char kApolloMarkdownGifLoggedFailureKey;
-static char kApolloMarkdownGifActiveComposeKey;
+// Weak ref so it auto-nils when the compose controller deallocates. Previously
+// stored as an OBJC_ASSOCIATION_ASSIGN associated object on UIApplication, which
+// left a dangling raw pointer after the controller was gone; deferred injection
+// blocks (scheduled up to ~2.5s out) then ARC-retained the dangling id and
+// crashed in objc_retain. (Apollo-Reborn PR #337)
+static __weak UIViewController *sApolloMarkdownGifActiveComposeController = nil;
 static char kApolloMarkdownGifToolbarRootKey;
 static char kApolloMarkdownGifSessionInjectedKey;
 static char kApolloMarkdownGifLayoutLoggedKey;
@@ -1107,11 +1112,11 @@ static void ApolloMarkdownGifPresentMissingAPIKeyAlert(UIViewController *compose
 }
 
 static UIViewController *ApolloMarkdownGifActiveComposeController(void) {
-    return objc_getAssociatedObject([UIApplication sharedApplication], &kApolloMarkdownGifActiveComposeKey);
+    return sApolloMarkdownGifActiveComposeController;
 }
 
 static void ApolloMarkdownGifSetActiveComposeController(UIViewController *controller) {
-    objc_setAssociatedObject([UIApplication sharedApplication], &kApolloMarkdownGifActiveComposeKey, controller, OBJC_ASSOCIATION_ASSIGN);
+    sApolloMarkdownGifActiveComposeController = controller;
 }
 
 static void ApolloMarkdownGifScheduleInjection(UIViewController *composeController, NSString *reason) {

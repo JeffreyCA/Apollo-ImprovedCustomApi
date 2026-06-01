@@ -30,8 +30,14 @@
     "localizedDescription": "Apollo-Reborn is the community-maintained Apollo sideload build powered by the Apollo-Reborn tweak.\n\nIt restores custom API support, media fixes, uploads, inline media, translation, saved categories, Liquid Glass support on iOS 26+, and the rest of the project’s ongoing fixes and enhancements.\n\nThese sources are intended for AltStore Classic, SideStore, and Feather. Apollo-Reborn is not compatible with AltStore PAL.\n\nChoose the source variant that matches how you sideload:\n\n• Standard: full app bundle with extensions intact\n• No Extensions: strips Apollo’s app extensions to reduce App ID usage on free Apple IDs\n• GLASS: adds the Liquid Glass iOS 26 patch and bundled Liquid Glass icon catalog\n• No Extensions + GLASS: combines both options\n\nThis project is not affiliated with Apollo or Christian Selig.",
     "appPermissions": {
       "entitlements": [
+        "com.apple.security.application-groups",
+        "com.apple.developer.associated-domains",
+        "com.apple.developer.group-session",
+        "com.apple.developer.icloud-container-identifiers",
+        "com.apple.developer.ubiquity-kvstore-identifier",
+        "keychain-access-groups",
         "aps-environment",
-        "keychain-access-groups"
+        "com.apple.developer.weatherkit"
       ],
       "privacy": {
         "NSCameraUsageDescription": "Used to take photos to upload for sharing.",
@@ -110,6 +116,38 @@
       "app": {
         "name": "Apollo for Reddit - No Extensions + GLASS",
         "subtitle": "Apollo-Reborn build without extensions and with Liquid Glass patch"
+      }
+    },
+    {
+      "output": "apps_glass_icons.json",
+      "prefix": "GLASS-ICONS",
+      "notesLabel": "Liquid Glass icons-only build.",
+      "newsLabel": "GLASS Icons",
+      "source": {
+        "identifier": "app.apolloreborn.glassicons",
+        "name": "Apollo-Reborn - GLASS Icons",
+        "subtitle": "Apollo-Reborn source with the Liquid Glass icon catalog only",
+        "description": "GLASS Icons Apollo-Reborn source for AltStore Classic, SideStore, and Feather. Bundles the Liquid Glass alternate icon catalog without the iOS 26 UI runtime opt-in, so legacy UIKit behaviors (such as the bottom tab bar swipe gesture) are preserved. Not compatible with AltStore PAL."
+      },
+      "app": {
+        "name": "Apollo for Reddit - GLASS Icons",
+        "subtitle": "Apollo-Reborn build with the Liquid Glass icon catalog only"
+      }
+    },
+    {
+      "output": "apps_noext_glass_icons.json",
+      "prefix": "NO-EXTENSIONS_GLASS-ICONS",
+      "notesLabel": "No Extensions + Liquid Glass icons-only build.",
+      "newsLabel": "No Extensions + GLASS Icons",
+      "source": {
+        "identifier": "app.apolloreborn.noextensionsglassicons",
+        "name": "Apollo-Reborn - No Extensions + GLASS Icons",
+        "subtitle": "Apollo-Reborn source without extensions and with the Liquid Glass icon catalog only",
+        "description": "No Extensions + GLASS Icons Apollo-Reborn source for AltStore Classic, SideStore, and Feather. Uses 1 App ID and bundles the Liquid Glass alternate icon catalog without the iOS 26 UI runtime opt-in. Not compatible with AltStore PAL."
+      },
+      "app": {
+        "name": "Apollo for Reddit - No Extensions + GLASS Icons",
+        "subtitle": "Apollo-Reborn build without extensions and with the Liquid Glass icon catalog only"
       }
     }
   ]

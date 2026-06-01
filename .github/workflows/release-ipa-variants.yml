@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   build-release:
-    name: Build four IPA variants
+    name: Build six IPA variants
     runs-on: macos-15
     permissions:
       contents: write
@@ -241,7 +241,8 @@ jobs:
         run: |
           git config user.name "apollo-source-updater[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add apps.json apps_noext.json apps_glass.json apps_noext_glass.json release-manifest.json
+          git add apps.json apps_noext.json apps_glass.json apps_noext_glass.json \
+                  apps_glass_icons.json apps_noext_glass_icons.json release-manifest.json
           if git diff --cached --quiet; then
             echo "No source JSON changes to commit."
             exit 0

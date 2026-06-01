@@ -1399,14 +1399,24 @@ static id ApolloLPModelFromNodeIvar(ASDisplayNode *node, const char *ivarName) {
     return model;
 }
 
-// V17: positive class-based detection of the owning cell.
-//   _TtC6Apollo15CommentCellNode       — comments area
-//   _TtC6Apollo22CommentsHeaderCellNode — post selftext shown above the
-//      comment list. Apollo treats this as part of the *comments* experience
-//      (user-facing: `Rich Link Previews - Comments` controls cards here;
-//      `Rich Link Previews - Body` only applies to the feed). So we map it
-//      to comments to match the existing rendering observed when both
-//      cards are compact.
+// Positive class-based detection of the owning cell, by user-facing area.
+// The two areas map to Apollo's two data models (see ApolloInlineImages.xm:
+// CommentCellNode holds an RDKComment via a `comment` ivar; the header and
+// feed post cells hold an RDKLink via a `link` ivar):
+//
+//   Comments area (`Rich Link Previews - Comments`):
+//     _TtC6Apollo15CommentCellNode       — a reply in the comment list.
+//
+//   Body area (`Rich Link Previews - Body`, "feeds and post bodies"):
+//     _TtC6Apollo22CommentsHeaderCellNode — OP selftext shown above the
+//        comment list. This is the *post body*, so it follows the Body
+//        setting (issue #318 — previously mis-mapped to comments).
+//     _TtC6Apollo17LargePostCellNode      — feed post cell (large).
+//     _TtC6Apollo19CompactPostCellNode    — feed post cell (compact).
+//
+// The walk below resolves whichever signal is *nearest* the link button, and
+// falls back to the `comment`/`link` ivar as suspenders when a cell class is
+// renamed in a future Apollo build.
 static Class ApolloLPCommentCellClass(void) {
     static Class cls; static dispatch_once_t once;
     dispatch_once(&once, ^{ cls = objc_getClass("_TtC6Apollo15CommentCellNode"); });
@@ -1415,6 +1425,16 @@ static Class ApolloLPCommentCellClass(void) {
 static Class ApolloLPCommentsHeaderCellClass(void) {
     static Class cls; static dispatch_once_t once;
     dispatch_once(&once, ^{ cls = objc_getClass("_TtC6Apollo22CommentsHeaderCellNode"); });
+    return cls;
+}
+static Class ApolloLPLargePostCellClass(void) {
+    static Class cls; static dispatch_once_t once;
+    dispatch_once(&once, ^{ cls = objc_getClass("_TtC6Apollo17LargePostCellNode"); });
+    return cls;
+}
+static Class ApolloLPCompactPostCellClass(void) {
+    static Class cls; static dispatch_once_t once;
+    dispatch_once(&once, ^{ cls = objc_getClass("_TtC6Apollo19CompactPostCellNode"); });
     return cls;
 }
 
@@ -1426,23 +1446,38 @@ static BOOL ApolloLPResolveAreaByWalk(ASDisplayNode *linkButtonNode, ApolloLPAre
     NSUInteger depth = 0;
     Class commentCellCls = ApolloLPCommentCellClass();
     Class headerCellCls = ApolloLPCommentsHeaderCellClass();
+    Class largePostCellCls = ApolloLPLargePostCellClass();
+    Class compactPostCellCls = ApolloLPCompactPostCellClass();
+    // Nearest-ancestor wins: the first node carrying any positive signal
+    // decides the area. Within a node, Comments signals are checked before
+    // Body signals so a comment cell that also references its parent post
+    // still resolves to comments.
     for (ASDisplayNode *node = linkButtonNode; node; node = node.supernode) {
         depth++;
         Class cls = [node class];
+
+        // --- Comments signals (RDKComment) ---
         if (commentCellCls && cls == commentCellCls) {
             if (outArea) *outArea = ApolloLPAreaComments;
             if (outDepth) *outDepth = depth;
             return YES;
         }
-        if (headerCellCls && cls == headerCellCls) {
-            // Header cell = OP selftext in comments view → comments area.
+        if (ApolloLPModelFromNodeIvar(node, "comment")) {
             if (outArea) *outArea = ApolloLPAreaComments;
             if (outDepth) *outDepth = depth;
             return YES;
         }
-        id comment = ApolloLPModelFromNodeIvar(node, "comment");
-        if (comment) {
-            if (outArea) *outArea = ApolloLPAreaComments;
+
+        // --- Body signals (RDKLink): OP selftext header + feed post cells ---
+        if ((headerCellCls && cls == headerCellCls) ||
+            (largePostCellCls && cls == largePostCellCls) ||
+            (compactPostCellCls && cls == compactPostCellCls)) {
+            if (outArea) *outArea = ApolloLPAreaBody;
+            if (outDepth) *outDepth = depth;
+            return YES;
+        }
+        if (ApolloLPModelFromNodeIvar(node, "link")) {
+            if (outArea) *outArea = ApolloLPAreaBody;
             if (outDepth) *outDepth = depth;
             return YES;
         }
@@ -3286,9 +3321,10 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
 
 %end
 
-// V17: pre-stamp area on link buttons inside comment cells so the first
+// V17: pre-stamp area on link buttons inside a cell so the first
 // background-thread measurement of a freshly-recreated cell (e.g. after a
-// vote) does not race the supernode chain attachment.
+// vote) does not race the supernode chain attachment. Comment cells stamp
+// Comments; the OP-selftext header and feed post cells stamp Body (issue #318).
 %hook _TtC6Apollo15CommentCellNode
 - (void)didLoad {
     %orig;
@@ -3299,7 +3335,21 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
 %hook _TtC6Apollo22CommentsHeaderCellNode
 - (void)didLoad {
     %orig;
-    ApolloLPStampLinkButtonAreaInTree((ASDisplayNode *)self, ApolloLPAreaComments);
+    ApolloLPStampLinkButtonAreaInTree((ASDisplayNode *)self, ApolloLPAreaBody);
+}
+%end
+
+%hook _TtC6Apollo17LargePostCellNode
+- (void)didLoad {
+    %orig;
+    ApolloLPStampLinkButtonAreaInTree((ASDisplayNode *)self, ApolloLPAreaBody);
+}
+%end
+
+%hook _TtC6Apollo19CompactPostCellNode
+- (void)didLoad {
+    %orig;
+    ApolloLPStampLinkButtonAreaInTree((ASDisplayNode *)self, ApolloLPAreaBody);
 }
 %end
 

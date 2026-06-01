@@ -788,6 +788,30 @@ typedef UIMenu * (^ApolloNativeActionMenuProvider)(NSArray<UIMenuElement *> *sug
 }
 %end
 
+static UIViewController *ApolloNativeActionMenuViewControllerForView(UIView *view) {
+    UIResponder *responder = view;
+    while (responder) {
+        if ([responder isKindOfClass:[UIViewController class]]) {
+            return (UIViewController *)responder;
+        }
+        responder = responder.nextResponder;
+    }
+    return nil;
+}
+
+// Walk down the presentedViewController chain to the top-most window-backed
+// controller that can legally present a new modal. Skips the window-less
+// ActionController (which the native-menu path never actually presents).
+static UIViewController *ApolloNativeActionMenuTopMostPresenter(UIViewController *viewController) {
+    UIViewController *result = viewController;
+    Class actionControllerClass = objc_getClass("_TtC6Apollo16ActionController");
+    while (result.presentedViewController
+           && ![result.presentedViewController isKindOfClass:actionControllerClass]) {
+        result = result.presentedViewController;
+    }
+    return result;
+}
+
 static BOOL ApolloNativeActionMenuPresent(id presenter, id actionController, void (^completion)(void)) {
     if (!ApolloNativeActionMenusEnabled()) return NO;
     if (![actionController isKindOfClass:objc_getClass("_TtC6Apollo16ActionController")]) return NO;
@@ -1293,6 +1317,31 @@ static BOOL ApolloNativeActionMenuCanFallbackPresent(id presenter, id actionCont
     if (ApolloNativeActionMenuPresent(self, viewControllerToPresent, completion)) {
         return;
     }
+
+    // When an action handler presents a follow-up screen DIRECTLY from the
+    // ActionController (e.g. "Share as Image"), instead of dismissing first,
+    // the controller has no window under the native-menu replacement, so the
+    // presentation is a silent no-op. Redirect it to the real captured
+    // presenter. Working actions (Reply/Give Award/Report) dismiss first, so
+    // their invoking flag is already cleared and they never hit this path.
+    Class actionControllerClass = objc_getClass("_TtC6Apollo16ActionController");
+    if ([self isKindOfClass:actionControllerClass]
+        && [objc_getAssociatedObject(self, &kApolloNativeActionMenuInvokingActionKey) boolValue]
+        && ![viewControllerToPresent isKindOfClass:actionControllerClass]
+        && !((UIViewController *)self).viewIfLoaded.window) {
+        UIView *sourceView = objc_getAssociatedObject(self, &kApolloNativeActionMenuSourceViewKey)
+            ?: sApolloNativeActionMenuSourceView;
+        UIViewController *realPresenter = ApolloNativeActionMenuTopMostPresenter(
+            ApolloNativeActionMenuViewControllerForView(sourceView));
+        if (realPresenter.viewIfLoaded.window) {
+            objc_setAssociatedObject(self, &kApolloNativeActionMenuInvokingActionKey, nil, OBJC_ASSOCIATION_ASSIGN);
+            ApolloLog(@"[NativeActionMenu] Redirecting %@ from window-less ActionController to %@", viewControllerToPresent, realPresenter);
+            [realPresenter presentViewController:viewControllerToPresent animated:flag completion:completion];
+            return;
+        }
+        ApolloLog(@"[NativeActionMenu] Could not resolve a window-backed presenter to redirect %@", viewControllerToPresent);
+    }
+
     %orig;
 }
 

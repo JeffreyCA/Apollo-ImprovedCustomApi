@@ -146,12 +146,15 @@ overrides under each entry in `variants`. Notes on the model:
   example: `3.0.0 -> 286`, `3.0.1 -> 287`, `3.1.0 -> 288`. Do not reuse a
   build number, because AltStore/iOS use it to decide upgrade ordering.
 - **`appPermissions`**: AltStore validates a source's declared entitlements and
-  privacy strings against the downloaded IPA and refuses to install on a
-  mismatch, so these are required. The values were extracted from the Apollo
-  base IPA (`codesign -d --entitlements` for entitlements, `Info.plist` for the
-  `NS*UsageDescription` privacy strings) and are identical across all four
-  variants -- the decrypted base carries the same minimal entitlement set on the
-  main app and every extension, so stripping extensions does not change them.
+  privacy strings against the downloaded IPA and warns ("Install Anyway") or
+  refuses to install on a mismatch, so these must list the complete set the IPA
+  carries. The values are extracted from the Apollo base IPA
+  (`codesign -d --entitlements` across the main app and every `PlugIns/*.appex`
+  for entitlements, `Info.plist` for the `NS*UsageDescription` privacy strings).
+  `application-identifier` and `com.apple.developer.team-identifier` are
+  intentionally omitted per AltStore's guidance. The declared set is identical
+  across all four variants -- the main app binary carries the full entitlement
+  set, so stripping extensions or patching icons does not change it.
 - All four variants share Apollo's bundle identifier, so they cannot be combined
   into one source (the schema forbids duplicate bundle identifiers per source);
   one source per variant is required.

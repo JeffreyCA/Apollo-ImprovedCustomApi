@@ -125,7 +125,7 @@ More discussion in [#82](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/8
 
 ## Custom Redirect URI
 
-The redirect URI scheme (the part before `://`) must be registered in the Apollo IPA's `Info.plist` under `CFBundleURLTypes`, otherwise the OAuth callback won't return to Apollo. Add your scheme with [`patch.sh`](#patching-ipa) or the **Patch IPA** GitHub Action:
+The redirect URI scheme (the part before `://`) must be registered in the Apollo IPA's `Info.plist` under `CFBundleURLTypes`, otherwise the OAuth callback won't return to Apollo. Add your scheme with [`patch.sh`](#patching-ipa) or the **Build IPA** GitHub Action:
 
 ```bash
 ./patch.sh Apollo.ipa --url-schemes custom
@@ -149,19 +149,20 @@ Resulting `Info.plist` entry:
 
 ## Patching IPA
 
-`patch.sh` and the **Patch IPA** GitHub Action apply optional patches to a stock Apollo IPA. They do **not** inject the tweak - use [Sideloadly](#sideloadly) or [`build-ipa.sh`](#build-injected-ipa-locally) for that.
+`patch.sh` and the **Build IPA** GitHub Action apply optional patches to a stock Apollo IPA. By default they do **not** inject the tweak (the Action has an `inject_tweak` toggle for that) - locally use [Sideloadly](#sideloadly) or [`build-ipa.sh`](#build-injected-ipa-locally) to inject.
 
 ```bash
-./patch.sh <path_to_ipa> [--liquid-glass] [--url-schemes <schemes>] [--remove-code-signature] [-o <output>]
+./patch.sh <path_to_ipa> [--liquid-glass | --liquid-glass-icons] [--url-schemes <schemes>] [--remove-code-signature] [-o <output>]
 ```
 
 Available patches:
 
-- **`--liquid-glass`** - enables the iOS 26 Liquid Glass UI and installs a pack of Liquid Glass icons that can be switched between in the tweak's in-app icon picker.
+- **`--liquid-glass`** - enables the iOS 26 Liquid Glass UI and installs a pack of Liquid Glass icons that can be switched between in the tweak's in-app icon picker. Requires the Git LFS asset to be pulled first (`git lfs install && git lfs pull`); see the [Build](#build) note. `patch.sh` will refuse to run with an un-pulled pointer.
+- **`--liquid-glass-icons`** - installs the Liquid Glass icon catalog **only**, without the iOS 26 UI chrome (skips the `vtool` build-version bump that opts the app into the iOS 26 runtime, so legacy UIKit behaviors like the bottom-tab swipe gesture are preserved). Mutually exclusive with `--liquid-glass`. Same Git LFS requirement applies.
 - **`--url-schemes <list>`** - adds comma-separated URL schemes to `CFBundleURLTypes` (see [Custom Redirect URI](#custom-redirect-uri)).
 - **`--remove-code-signature`** - strips the existing code signature.
 
-To run via GitHub Actions, fork this repo and trigger **Actions** > **Patch IPA**. The IPA source can be a direct URL or a release artifact from your fork.
+To run via GitHub Actions, fork this repo and trigger **Actions** > **Build IPA**. It can inject the tweak (`inject_tweak`), strip extensions (`no_extensions`), apply Liquid Glass (`liquid_glass`) or Liquid Glass icons only (`liquid_glass_icons`), add URL schemes, and remove the code signature in one run, from an Apollo IPA URL.
 
 ## Sideloadly
 
@@ -194,8 +195,12 @@ For the in-house four-variant IPA release flow, AltStore Classic/SideStore/Feath
 **Instructions:**
 1. `git clone https://github.com/Apollo-Reborn/Apollo-Reborn`
 2. `cd Apollo-Reborn`
-3. `git submodule update --init --recursive`
-4. `make package` or `make package THEOS_PACKAGE_SCHEME=rootless` for rootless variant
+3. `git lfs install && git lfs pull` (see the note below)
+4. `git submodule update --init --recursive`
+5. `make package` or `make package THEOS_PACKAGE_SCHEME=rootless` for rootless variant
+
+> [!IMPORTANT]
+> The prebuilt Liquid Glass asset catalog (`liquid-glass/prebuilt/Assets.car`) is stored with [Git LFS](https://git-lfs.com). A plain `git clone` without git-lfs installed leaves a tiny text pointer in its place instead of the real ~80 MB file, which makes `patch.sh --liquid-glass` produce a broken IPA that crashes on launch. Run `git lfs install` (one-time per machine) followed by `git lfs pull` to fetch the real asset. Verify with `git lfs ls-files` — a `*` next to the file means it's present.
 
 ## Contributors ✨
 

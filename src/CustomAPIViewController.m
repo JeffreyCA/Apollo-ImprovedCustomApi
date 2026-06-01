@@ -639,7 +639,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionAPIKeys: return 9; // 7 text fields + Can't sign in? + API key setup guide
         case SectionGeneral: return 8;
         case SectionMedia: return (sShowUserAvatars ? 13 : 12) + (sEnableInlineImages ? 0 : -1);
-        case SectionSubreddits: return 8;
+        case SectionSubreddits: return sSubredditListEnhancements ? 9 : 8;
         case SectionNotificationBackend: return 3; // URL + Registration Token + Test Connection
         case SectionAbout: return 5; // GitHub + Reddit + Thanks To + Export Logs + Version
         default: return 0;
@@ -1162,48 +1162,55 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (UITableViewCell *)subredditCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
-    switch (row) {
+    // Modern Dividers row (logical 1) is hidden when the master toggle is off.
+    NSInteger logicalRow = (row >= 1 && !sSubredditListEnhancements) ? row + 1 : row;
+    switch (logicalRow) {
         case 0:
+            return [self switchCellWithIdentifier:@"Cell_Sub_Enhancements"
+                                            label:@"Subreddit List Enhancements"
+                                               on:sSubredditListEnhancements
+                                           action:@selector(subredditListEnhancementsSwitchToggled:)];
+        case 1:
             return [self switchCellWithIdentifier:@"Cell_Sub_ModernDividers"
                                             label:@"Modern Subreddit Dividers"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers]
                                            action:@selector(modernSubredditDividersSwitchToggled:)];
-        case 1:
+        case 2:
             return [self switchCellWithIdentifier:@"Cell_Sub_Headers"
                                             label:@"Show Subreddit Headers"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders]
                                            action:@selector(subredditHeadersSwitchToggled:)];
-        case 2:
+        case 3:
             return [self textFieldCellWithIdentifier:@"Cell_Sub_TrendLimit"
                                                label:@"Trending Subreddits Limit"
                                          placeholder:@"(unlimited)"
                                                 text:sTrendingSubredditsLimit
                                                  tag:TagTrendingLimit
                                            numerical:YES];
-        case 3:
+        case 4:
             return [self stackedTextFieldCellWithIdentifier:@"Cell_Sub_Trending"
                                                       label:@"Trending Source"
                                                 placeholder:defaultTrendingSubredditsSource
                                                        text:sTrendingSubredditsSource
                                                         tag:TagTrendingSubredditsSource];
-        case 4:
+        case 5:
             return [self stackedTextFieldCellWithIdentifier:@"Cell_Sub_Random"
                                                       label:@"Random Source"
                                                 placeholder:defaultRandomSubredditsSource
                                                        text:sRandomSubredditsSource
                                                         tag:TagRandomSubredditsSource];
-        case 5:
+        case 6:
             return [self switchCellWithIdentifier:@"Cell_Sub_RandNSFW"
                                             label:@"Show RandNSFW in Search"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowRandNsfw]
                                            action:@selector(randNsfwSwitchToggled:)];
-        case 6:
+        case 7:
             return [self stackedTextFieldCellWithIdentifier:@"Cell_Sub_RandNSFW_Source"
                                                       label:@"RandNSFW Source"
                                                 placeholder:@"(empty)"
                                                        text:sRandNsfwSubredditsSource
                                                         tag:TagRandNsfwSubredditsSource];
-        case 7: {
+        case 8: {
             UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Sub_ClearCustomBanners"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Sub_ClearCustomBanners"];
@@ -1425,7 +1432,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     if (section == SectionBackupRestore) {
         text = [[NSMutableAttributedString alloc]
-            initWithString:@"Restore does not affect accounts or existing ones. The backup .zip contains an accounts.txt with all account usernames for reference."
+            initWithString:@"Restore also signs you back into the accounts saved in the backup. The backup .zip contains your login credentials — anyone with the file can sign in as you, so keep it private. It also includes an accounts.txt listing the saved usernames."
             attributes:plainAttrs];
     } else if (section == SectionAPIKeys) {
         text = [[NSMutableAttributedString alloc]
@@ -1533,7 +1540,8 @@ typedef NS_ENUM(NSInteger, Tag) {
             [self exportLogs];
         }
     } else if (indexPath.section == SectionSubreddits) {
-        if (indexPath.row == 7) {
+        NSInteger logicalRow = (indexPath.row >= 1 && !sSubredditListEnhancements) ? indexPath.row + 1 : indexPath.row;
+        if (logicalRow == 8) {
             UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
             [self promptClearCustomSubredditBannersFromSourceView:cell];
         }
@@ -1594,7 +1602,10 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (BOOL)tableView:(UITableView *)tableView shouldHighlightRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == SectionBackupRestore) return YES;
     if (indexPath.section == SectionAPIKeys && (indexPath.row == 7 || indexPath.row == 8)) return YES;
-    if (indexPath.section == SectionSubreddits && indexPath.row == 7) return YES;
+    if (indexPath.section == SectionSubreddits) {
+        NSInteger logicalRow = (indexPath.row >= 1 && !sSubredditListEnhancements) ? indexPath.row + 1 : indexPath.row;
+        return logicalRow == 8;
+    }
     if (indexPath.section == SectionMedia) {
         NSInteger row = (indexPath.row >= 5 && !sEnableInlineImages) ? indexPath.row + 1 : indexPath.row;
         return (row == 0 || row == 1 || row == 2 || row == 5 || row == 6 || row == 7 || row == 8 || row == 11 || row == 12);
@@ -1890,6 +1901,23 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyShowRandNsfw];
 }
 
+- (void)subredditListEnhancementsSwitchToggled:(UISwitch *)sender {
+    BOOL wasOn = sSubredditListEnhancements;
+    sSubredditListEnhancements = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sSubredditListEnhancements forKey:UDKeySubredditListEnhancements];
+    if (sSubredditListEnhancements == wasOn) return;
+
+    // Modern Dividers row (logical 1) only exists while the master toggle is on.
+    NSArray<NSIndexPath *> *dividerPaths = @[[NSIndexPath indexPathForRow:1 inSection:SectionSubreddits]];
+    if (sSubredditListEnhancements) {
+        [self.tableView insertRowsAtIndexPaths:dividerPaths withRowAnimation:UITableViewRowAnimationFade];
+    } else {
+        [self.tableView deleteRowsAtIndexPaths:dividerPaths withRowAnimation:UITableViewRowAnimationFade];
+    }
+
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloModernSubredditDividersChangedNotification object:nil];
+}
+
 - (void)modernSubredditDividersSwitchToggled:(UISwitch *)sender {
     sModernSubredditDividers = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sModernSubredditDividers forKey:UDKeyModernSubredditDividers];
@@ -2175,7 +2203,7 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
 
     if (!_isRestoreOperation) {
         NSString *filename = urls.firstObject.lastPathComponent;
-        NSString *message = [NSString stringWithFormat:@"Settings saved as: %@", filename];
+        NSString *message = [NSString stringWithFormat:@"Settings saved as: %@\n\nThis file contains your logged-in account credentials. Keep it private.", filename];
         [self showAlertWithTitle:@"Backup Complete" message:message];
         return;
     }
@@ -2186,7 +2214,7 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
 
 - (void)confirmRestoreWithURL:(NSURL *)zipURL {
     UIAlertController *confirmAlert = [UIAlertController alertControllerWithTitle:@"Confirm Restore"
-        message:@"This will replace all existing settings with the backup. This cannot be undone."
+        message:@"This will replace all existing settings and logged-in accounts with the backup. This cannot be undone."
         preferredStyle:UIAlertControllerStyleAlert];
 
     UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil];
@@ -2289,7 +2317,20 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
     NSString *libreAPIKey = [defaults stringForKey:UDKeyLibreTranslateAPIKey];
     sLibreTranslateAPIKey = libreAPIKey.length > 0 ? libreAPIKey : nil;
 
-    // Restore group preferences, preserving account state from current install
+    // Restore group preferences, including logged-in accounts.
+    //
+    // The account keys (RedditAccounts2, RedditApplicationOnlyAccount2,
+    // CurrentRedditAccountIndex, LoggedInAccountDetails) hold the Reddit OAuth tokens as
+    // self-contained NSKeyedArchiver blobs (RDKClient -> RDKOAuthCredential ->
+    // RDKAccessToken). They carry no keychain dependency and no device binding, so writing
+    // them here and relaunching (exit(0) below) lets AccountManager reload them on next
+    // launch — the user is signed back in without reauthenticating. The restored API keys
+    // (main prefs) match the keys the tokens were minted under, keeping token refresh
+    // consistent.
+    //
+    // Non-destructive by design: only keys present in the backup are written. A backup made
+    // while logged out has no account keys, so the current install's accounts are left
+    // intact rather than wiped.
     NSString *groupPlistBackupPath = [extractDir stringByAppendingPathComponent:kGroupPlistFilename];
     if ([fileManager fileExistsAtPath:groupPlistBackupPath]) {
         NSDictionary *groupPrefs = [NSDictionary dictionaryWithContentsOfFile:groupPlistBackupPath];
@@ -2297,12 +2338,6 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
             NSUserDefaults *groupDefaults = [[NSUserDefaults alloc] initWithSuiteName:kGroupSuiteName];
 
             for (NSString *key in groupPrefs) {
-                if ([key isEqualToString:@"LoggedInAccountDetails"] ||
-                    [key isEqualToString:@"CurrentRedditAccountIndex"] ||
-                    [key isEqualToString:@"RedditAccounts2"] ||
-                    [key isEqualToString:@"RedditApplicationOnlyAccount2"]) {
-                    continue;
-                }
                 [groupDefaults setObject:groupPrefs[key] forKey:key];
             }
             [groupDefaults synchronize];

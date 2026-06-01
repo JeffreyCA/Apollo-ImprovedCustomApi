@@ -18,14 +18,20 @@ LEGACY_ASSET_RE = re.compile(
     r"^(?:(?P<prefix>NO-EXTENSIONS_GLASS|NO-EXTENSIONS|GLASS)_)?"
     r"Apollo-(?P<apollo>[^_]+)_Apollo-Reborn-(?P<tweak>.+)\.ipa$"
 )
+# Longest alternatives first so e.g. "GLASSICONS-NOEXTENSIONS" matches as a
+# whole instead of "GLASSICONS" with "-NOEXTENSIONS" left dangling.
 REBORN_ASSET_RE = re.compile(
-    r"^Apollo-Reborn-(?P<tweak>.+?)(?:-(?P<suffix>GLASS-NOEXTENSIONS|NOEXTENSIONS|GLASS))?\.ipa$"
+    r"^Apollo-Reborn-(?P<tweak>.+?)"
+    r"(?:-(?P<suffix>GLASSICONS-NOEXTENSIONS|GLASS-NOEXTENSIONS|GLASSICONS|NOEXTENSIONS|GLASS))?"
+    r"\.ipa$"
 )
 REBORN_SUFFIX_TO_PREFIX = {
     None: "",
     "GLASS": "GLASS",
     "NOEXTENSIONS": "NO-EXTENSIONS",
     "GLASS-NOEXTENSIONS": "NO-EXTENSIONS_GLASS",
+    "GLASSICONS": "GLASS-ICONS",
+    "GLASSICONS-NOEXTENSIONS": "NO-EXTENSIONS_GLASS-ICONS",
 }
 
 
@@ -54,6 +60,8 @@ def build_variant_key(prefix: str | None) -> str:
         "GLASS": "glass",
         "NO-EXTENSIONS": "noExtensions",
         "NO-EXTENSIONS_GLASS": "noExtensionsGlass",
+        "GLASS-ICONS": "glassIcons",
+        "NO-EXTENSIONS_GLASS-ICONS": "noExtensionsGlassIcons",
     }
     return mapping[prefix]
 

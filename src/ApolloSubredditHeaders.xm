@@ -109,7 +109,14 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
 static void ApolloSubredditTearDownHeader(UIViewController *viewController, BOOL restoreNativeHeader);
 static void ApolloSubredditScheduleRepairPasses(UIViewController *viewController, NSString *reason);
 
-@implementation ApolloSubredditHeaderView
+@implementation ApolloSubredditHeaderView {
+    // Memoized about-text height; layoutSubviews fires often while scrolling, so
+    // avoid re-measuring the about string every pass. Keyed on text/font/width.
+    CGFloat _cachedAboutHeight;
+    CGFloat _cachedAboutWidth;
+    NSString *_cachedAboutText;
+    UIFont *_cachedAboutFont;
+}
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
@@ -172,12 +179,25 @@ static void ApolloSubredditScheduleRepairPasses(UIViewController *viewController
 }
 
 - (CGFloat)apollo_aboutHeightForWidth:(CGFloat)width {
-    if (self.aboutLabel.hidden || self.aboutLabel.text.length == 0 || width <= 0.0) return 0.0;
-    CGRect rect = [self.aboutLabel.text boundingRectWithSize:CGSizeMake(width, CGFLOAT_MAX)
-                                                     options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
-                                                  attributes:@{NSFontAttributeName: self.aboutLabel.font}
-                                                     context:nil];
-    return MIN(ApolloSubredditAboutMaxHeight, MAX(18.0, ceil(rect.size.height)));
+    NSString *text = self.aboutLabel.text;
+    if (self.aboutLabel.hidden || text.length == 0 || width <= 0.0) return 0.0;
+
+    UIFont *font = self.aboutLabel.font;
+    if (_cachedAboutText == text && _cachedAboutFont == font && _cachedAboutWidth == width) {
+        return _cachedAboutHeight;
+    }
+
+    CGRect rect = [text boundingRectWithSize:CGSizeMake(width, CGFLOAT_MAX)
+                                     options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                  attributes:@{NSFontAttributeName: font ?: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote]}
+                                     context:nil];
+    CGFloat height = MIN(ApolloSubredditAboutMaxHeight, MAX(18.0, ceil(rect.size.height)));
+
+    _cachedAboutText = text;
+    _cachedAboutFont = font;
+    _cachedAboutWidth = width;
+    _cachedAboutHeight = height;
+    return height;
 }
 
 - (CGFloat)preferredHeightForWidth:(CGFloat)width {
@@ -485,16 +505,23 @@ static BOOL ApolloSubredditIsLikelyObjectPointer(id value) {
     return YES;
 }
 
-static id ApolloSubredditObjectIvar(id object, NSString *name) {
-    if (!object || name.length == 0) return nil;
+// Read a pointer-sized ObjC object ivar by name and validate it against an
+// expected class. Reads the raw pointer at the ivar offset (rather than relying
+// on object_getIvar + type encoding, which is unreliable for Swift-emitted
+// ivars) and guards every read with isKindOfClass:, so a stale/garbage slot
+// can't be mistaken for a real object.
+static id ApolloSubredditTypedIvar(id object, NSString *name, Class expectedClass) {
+    if (!object || name.length == 0 || !expectedClass) return nil;
     for (Class cls = [object class]; cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
         Ivar ivar = class_getInstanceVariable(cls, name.UTF8String);
         if (!ivar) continue;
-        const char *type = ivar_getTypeEncoding(ivar);
-        if (!type || type[0] != '@') continue;
+        ptrdiff_t offset = ivar_getOffset(ivar);
+        void *raw = NULL;
+        memcpy(&raw, (uint8_t *)(__bridge void *)object + offset, sizeof(raw));
+        id value = (__bridge id)raw;
+        if (!ApolloSubredditIsLikelyObjectPointer(value)) return nil;
         @try {
-            id value = object_getIvar(object, ivar);
-            return ApolloSubredditIsLikelyObjectPointer(value) ? value : nil;
+            return [value isKindOfClass:expectedClass] ? value : nil;
         } @catch (__unused NSException *exception) {
             return nil;
         }
@@ -502,97 +529,64 @@ static id ApolloSubredditObjectIvar(id object, NSString *name) {
     return nil;
 }
 
-static NSString *ApolloSubredditSwiftStringIvar(id object, NSString *name) {
-    if (!object || name.length == 0) return nil;
-    for (Class cls = [object class]; cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
-        Ivar ivar = class_getInstanceVariable(cls, name.UTF8String);
-        if (!ivar) continue;
+// PostsType is a Swift enum stored inline in the `currentPostsType` ivar; its
+// case tag is the byte at offset 0x20 of that storage. Apollo sets it
+// synchronously at init, so it tells us the feed kind immediately (unlike the
+// `currentSubreddit` object, which is fetched asynchronously). Tag 0 is a named
+// single subreddit and tag 5 is "random" (both backed by one subreddit); tag 1
+// is a multireddit and the remaining tags are all/popular/home/profile feeds.
+static const ptrdiff_t kApolloPostsTypeTagOffset = 0x20;
+static const uint8_t kApolloPostsTypeSubreddit = 0;
+static const uint8_t kApolloPostsTypeRandom = 5;
 
-        const char *type = ivar_getTypeEncoding(ivar);
-        if (type && type[0] == '@') continue;
-
-        ptrdiff_t offset = ivar_getOffset(ivar);
-        uint8_t *base = (uint8_t *)(__bridge void *)object + offset;
-        uint64_t low = 0;
-        uint64_t high = 0;
-        memcpy(&low, base, sizeof(low));
-        memcpy(&high, base + sizeof(high), sizeof(high));
-
-        uint8_t discriminator = (uint8_t)(high >> 56);
-        if (discriminator < 0xE0 || discriminator > 0xEF) continue;
-
-        NSUInteger length = discriminator - 0xE0;
-        if (length == 0 || length > 15) continue;
-
-        char buffer[16] = {0};
-        for (NSUInteger i = 0; i < length && i < 8; i++) {
-            buffer[i] = (char)((low >> (i * 8)) & 0xFF);
-        }
-        for (NSUInteger i = 8; i < length; i++) {
-            buffer[i] = (char)((high >> ((i - 8) * 8)) & 0xFF);
-        }
-
-        return [[NSString alloc] initWithBytes:buffer length:length encoding:NSUTF8StringEncoding];
-    }
-    return nil;
+// Read the PostsType case tag. Returns NO (and leaves *tag untouched) when the
+// ivar can't be found, so callers can degrade gracefully on future binaries.
+static BOOL ApolloSubredditPostsTypeTag(id viewController, uint8_t *tag) {
+    Ivar ivar = class_getInstanceVariable([viewController class], "currentPostsType");
+    if (!ivar) return NO;
+    ptrdiff_t offset = ivar_getOffset(ivar);
+    uint8_t value = 0;
+    memcpy(&value, (uint8_t *)(__bridge void *)viewController + offset + kApolloPostsTypeTagOffset, sizeof(value));
+    if (tag) *tag = value;
+    return YES;
 }
 
-static NSString *ApolloSubredditNameFromModelObject(id object) {
-    if (!object) return nil;
-
-    NSArray<NSString *> *selectors = @[@"subreddit", @"subredditName", @"displayNamePrefixed", @"displayName", @"name"];
-    for (NSString *selectorName in selectors) {
-        SEL selector = NSSelectorFromString(selectorName);
-        if (![object respondsToSelector:selector]) continue;
-        id value = ((id (*)(id, SEL))objc_msgSend)(object, selector);
-        if ([value isKindOfClass:[NSString class]]) {
-            NSString *name = ApolloNormalizedSubredditName(value);
-            if (name.length > 0) return name;
-        }
-    }
-
-    if ([object isKindOfClass:[NSDictionary class]]) {
-        NSDictionary *dict = (NSDictionary *)object;
-        for (NSString *key in @[@"subreddit", @"display_name", @"display_name_prefixed", @"name"]) {
-            NSString *name = ApolloNormalizedSubredditName(dict[key]);
-            if (name.length > 0) return name;
-        }
-    }
-    return nil;
-}
-
-// No class-name substring fallback (that was bug #3). We rely on either a
-// concrete ivar on the controller, or the navigation title. Apollo sets the
-// title to the bare subreddit slug (e.g. "googlepixel"), not "r/googlepixel",
-// so we accept either format. The normalizer's blocklist + slug validation
-// rejects special feeds (Home/All/Popular) and multireddits ("foo+bar").
-// Search results VCs are a different class and never reach this hook.
+// Resolve the subreddit slug for Apollo's PostsViewController. This is the fix
+// for #327: we gate on the synchronous PostsType tag so multireddit feeds (even
+// when named like a real subreddit) and profile/special feeds (Upvoted, Hidden,
+// All, Popular, ...) never install a header. For a genuine single-subreddit
+// feed we use `currentSubreddit.name` once Apollo has fetched it, and otherwise
+// fall back to the nav title so the header still appears instantly on
+// navigation instead of waiting for that async object.
+// Apollo's search-results VC is a different class and never reaches this hook.
 static NSString *ApolloSubredditNameFromViewController(UIViewController *viewController) {
     if (!viewController) return nil;
 
-    NSArray<NSString *> *preferredIvars = @[@"currentSubreddit", @"selectedSubreddit", @"postSubreddit",
-                                            @"subreddit", @"subredditName", @"community",
-                                            @"source", @"listing", @"collection"];
-    for (NSString *ivarName in preferredIvars) {
-        id value = ApolloSubredditObjectIvar(viewController, ivarName);
-        if (value) {
-            if ([value isKindOfClass:[NSString class]]) {
-                NSString *name = ApolloNormalizedSubredditName(value);
-                if (name.length > 0) return name;
-            }
-            NSString *name = ApolloSubredditNameFromModelObject(value);
-            if (name.length > 0) return name;
-        }
+    uint8_t tag = 0;
+    BOOL haveTag = ApolloSubredditPostsTypeTag(viewController, &tag);
+    if (haveTag && tag != kApolloPostsTypeSubreddit && tag != kApolloPostsTypeRandom) return nil;
 
-        NSString *swiftValue = ApolloSubredditSwiftStringIvar(viewController, ivarName);
-        if (swiftValue.length > 0) {
-            NSString *name = ApolloNormalizedSubredditName(swiftValue);
-            if (name.length > 0) return name;
+    // Authoritative slug once Apollo has loaded the backing subreddit object.
+    id subreddit = ApolloSubredditTypedIvar(viewController, @"currentSubreddit", objc_getClass("RDKSubreddit"));
+    if (subreddit && [subreddit respondsToSelector:@selector(name)]) {
+        id nameValue = ((id (*)(id, SEL))objc_msgSend)(subreddit, @selector(name));
+        if ([nameValue isKindOfClass:[NSString class]]) {
+            NSString *normalized = ApolloNormalizedSubredditName(nameValue);
+            if (normalized.length) return normalized;
         }
     }
 
-    NSString *title = viewController.navigationItem.title ?: viewController.title;
-    return ApolloNormalizedSubredditName(title);
+    // currentSubreddit is populated asynchronously; for a confirmed
+    // single-subreddit feed (named or random) fall back to the nav title so the
+    // header loads instantly. The tag is already known to be subreddit/random
+    // here, so the title can't belong to a multireddit or profile feed.
+    if (haveTag) {
+        NSString *title = viewController.navigationItem.title;
+        if (title.length == 0) title = viewController.title;
+        return ApolloNormalizedSubredditName(title);
+    }
+
+    return nil;
 }
 
 static UIView *ApolloSubredditFindSubviewOfClass(UIView *root, Class cls) {
@@ -1047,7 +1041,25 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
     }
 
     NSString *subredditName = ApolloSubredditNameFromViewController(viewController);
-    if (subredditName.length == 0) return;
+    if (subredditName.length == 0) {
+        // Not a single-subreddit feed (multireddit, profile section, or special
+        // feed). If this controller was reused and previously hosted our header,
+        // restore the native header and drop our bookkeeping so we don't leave a
+        // stale/mislabeled header behind. (#327)
+        if (wrappedHeader && tableView.tableHeaderView == wrappedHeader) {
+            objc_setAssociatedObject(tableView, kApolloSubredditRewrapInProgressKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            tableView.tableHeaderView = originalHeader;
+            objc_setAssociatedObject(tableView, kApolloSubredditRewrapInProgressKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(viewController, kApolloSubredditHeaderViewKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(viewController, kApolloSubredditWrappedHeaderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(viewController, kApolloSubredditOriginalHeaderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(viewController, kApolloSubredditNameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+            objc_setAssociatedObject(tableView, kApolloSubredditManagedTableKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(tableView, kApolloSubredditTableManagedHeaderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        }
+        return;
+    }
 
     ApolloLog(@"[SubredditHeaders] install vc=%p subreddit=%@", viewController, subredditName);
 

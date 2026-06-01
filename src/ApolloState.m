@@ -25,6 +25,7 @@ BOOL sUseProfileAvatarTabIcon = NO;
 BOOL sShowSubredditHeaders = NO;
 BOOL sAutoHideTabBarShowOnIdle = NO;
 BOOL sModernSubredditDividers = YES;
+BOOL sSubredditListEnhancements = YES;
 BOOL sEnableInlineImages = NO;
 NSInteger sInlineImageAlignment = ApolloInlineImageAlignmentCenter;
 NSInteger sLinkPreviewBodyMode = ApolloLinkPreviewModeOff;

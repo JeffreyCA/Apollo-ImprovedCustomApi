@@ -7,7 +7,6 @@
 #import <objc/runtime.h>
 
 static NSString *const kApolloAutoplayGIFsKey = @"AutoplayGIFs";
-static NSString *const kApolloAutoplayGIFsOverCellularKey = @"AutoplayGifsOverCellular";
 static NSString *const kApolloGroupSuiteName = @"group.com.christianselig.apollo";
 
 static const void *kApolloInlineAnimatedGIFViewKey = &kApolloInlineAnimatedGIFViewKey;
@@ -69,8 +68,7 @@ static void ApolloAutoplaySettingsDidChange(void) {
     (void)object;
     (void)change;
     (void)context;
-    if ([keyPath isEqualToString:kApolloAutoplayGIFsKey] ||
-        [keyPath isEqualToString:kApolloAutoplayGIFsOverCellularKey]) {
+    if ([keyPath isEqualToString:kApolloAutoplayGIFsKey]) {
         ApolloAutoplaySettingsDidChange();
     }
 }
@@ -81,15 +79,13 @@ static ApolloAutoplayDefaultsObserver *sAutoplayDefaultsObserver = nil;
 
 static void ApolloInstallAutoplayDefaultsKVO(NSUserDefaults *defaults) {
     if (!defaults || !sAutoplayDefaultsObserver) return;
-    for (NSString *key in @[kApolloAutoplayGIFsKey, kApolloAutoplayGIFsOverCellularKey]) {
-        @try {
-            [defaults addObserver:sAutoplayDefaultsObserver
-                       forKeyPath:key
-                          options:NSKeyValueObservingOptionNew
-                          context:NULL];
-        } @catch (__unused NSException *exception) {
-            ApolloLog(@"[AutoplayGIF] KVO unavailable for defaults key=%@", key);
-        }
+    @try {
+        [defaults addObserver:sAutoplayDefaultsObserver
+                   forKeyPath:kApolloAutoplayGIFsKey
+                      options:NSKeyValueObservingOptionNew
+                      context:NULL];
+    } @catch (__unused NSException *exception) {
+        ApolloLog(@"[AutoplayGIF] KVO unavailable for defaults key=%@", kApolloAutoplayGIFsKey);
     }
 }
 
@@ -108,20 +104,10 @@ static BOOL ApolloComputeShouldAutoplayInlineGIF(NSString **outMode) {
 
     if ([mode isEqualToString:@"never"]) {
         shouldPlay = NO;
-    } else if ([mode isEqualToString:@"only-on-wifi"] || [mode isEqualToString:@"automatic"]) {
+    } else if ([mode isEqualToString:@"only-on-wifi"]) {
         shouldPlay = ApolloNetworkIsOnWiFi();
     } else if ([mode isEqualToString:@"always"]) {
-        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-        BOOL overCellular = [defaults boolForKey:kApolloAutoplayGIFsOverCellularKey];
-        if (!overCellular) {
-            NSUserDefaults *groupDefaults = [[NSUserDefaults alloc] initWithSuiteName:kApolloGroupSuiteName];
-            overCellular = [groupDefaults boolForKey:kApolloAutoplayGIFsOverCellularKey];
-        }
-        if (ApolloNetworkIsOnCellular() && !overCellular) {
-            shouldPlay = NO;
-        } else {
-            shouldPlay = YES;
-        }
+        shouldPlay = YES;
     }
 
     if (outMode) *outMode = mode;

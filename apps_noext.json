@@ -20,8 +20,14 @@
       "localizedDescription": "Apollo-Reborn is the community-maintained Apollo sideload build powered by the Apollo-Reborn tweak.\n\nIt restores custom API support, media fixes, uploads, inline media, translation, saved categories, Liquid Glass support on iOS 26+, and the rest of the project’s ongoing fixes and enhancements.\n\nThese sources are intended for AltStore Classic, SideStore, and Feather. Apollo-Reborn is not compatible with AltStore PAL.\n\nChoose the source variant that matches how you sideload:\n\n• Standard: full app bundle with extensions intact\n• No Extensions: strips Apollo’s app extensions to reduce App ID usage on free Apple IDs\n• GLASS: adds the Liquid Glass iOS 26 patch and bundled Liquid Glass icon catalog\n• No Extensions + GLASS: combines both options\n\nThis project is not affiliated with Apollo or Christian Selig.",
       "appPermissions": {
         "entitlements": [
+          "com.apple.security.application-groups",
+          "com.apple.developer.associated-domains",
+          "com.apple.developer.group-session",
+          "com.apple.developer.icloud-container-identifiers",
+          "com.apple.developer.ubiquity-kvstore-identifier",
+          "keychain-access-groups",
           "aps-environment",
-          "keychain-access-groups"
+          "com.apple.developer.weatherkit"
         ],
         "privacy": {
           "NSCameraUsageDescription": "Used to take photos to upload for sharing.",

@@ -12,11 +12,13 @@ NAME_PREFIX="Apollo"
 usage() {
     echo "Usage: $0 --ipa <Apollo.ipa> [--deb <packages/*.deb>] [--output-dir <dir>] [--name-prefix <name>]"
     echo ""
-    echo "Builds the four distributable IPA variants used by AltStore/SideStore/Feather:"
+    echo "Builds the six distributable IPA variants used by AltStore/SideStore/Feather:"
     echo "  1. standard"
     echo "  2. no-extensions"
     echo "  3. standard + Liquid Glass"
     echo "  4. no-extensions + Liquid Glass"
+    echo "  5. standard + Liquid Glass icons-only"
+    echo "  6. no-extensions + Liquid Glass icons-only"
 }
 
 absolute_path() {
@@ -224,6 +226,8 @@ STANDARD_IPA="${OUTPUT_DIR}/${BASE_NAME}.ipa"
 NOEXT_IPA="${OUTPUT_DIR}/${BASE_NAME}-NOEXTENSIONS.ipa"
 GLASS_IPA="${OUTPUT_DIR}/${BASE_NAME}-GLASS.ipa"
 NOEXT_GLASS_IPA="${OUTPUT_DIR}/${BASE_NAME}-GLASS-NOEXTENSIONS.ipa"
+GLASS_ICONS_IPA="${OUTPUT_DIR}/${BASE_NAME}-GLASSICONS.ipa"
+NOEXT_GLASS_ICONS_IPA="${OUTPUT_DIR}/${BASE_NAME}-GLASSICONS-NOEXTENSIONS.ipa"
 
 echo "Input IPA     : $IPA_PATH"
 echo "Tweak DEB     : $DEB_PATH"
@@ -232,10 +236,11 @@ echo "Tweak version : $TWEAK_VERSION"
 echo "Build version : $APP_BUILD_VERSION"
 echo "Output dir    : $OUTPUT_DIR"
 
-rm -f "$STANDARD_IPA" "$NOEXT_IPA" "$GLASS_IPA" "$NOEXT_GLASS_IPA"
+rm -f "$STANDARD_IPA" "$NOEXT_IPA" "$GLASS_IPA" "$NOEXT_GLASS_IPA" \
+      "$GLASS_ICONS_IPA" "$NOEXT_GLASS_ICONS_IPA"
 
 echo ""
-echo "[1/4] Building standard injected IPA..."
+echo "[1/6] Building standard injected IPA..."
 bash "${REPO_DIR}/build-ipa.sh" --ipa "$IPA_PATH" --deb "$DEB_PATH" -o "$STANDARD_IPA"
 # Repair the bundled "Open in Apollo" Safari extension. The GLASS variant below
 # is derived from $STANDARD_IPA via patch.sh, so it inherits this fix; the two
@@ -250,21 +255,32 @@ bash "${REPO_DIR}/scripts/fix-openin-extension.sh" "$STANDARD_IPA"
 set_main_app_bundle_versions_in_ipa "$STANDARD_IPA" "$TWEAK_VERSION" "$APP_BUILD_VERSION"
 
 echo ""
-echo "[2/4] Building no-extensions injected IPA..."
+echo "[2/6] Building no-extensions injected IPA..."
 cyan -i "$IPA_PATH" -f "$DEB_PATH" -o "$NOEXT_IPA" -e
 strip_arm64e_from_substrate_in_ipa "$NOEXT_IPA"
 set_main_app_bundle_versions_in_ipa "$NOEXT_IPA" "$TWEAK_VERSION" "$APP_BUILD_VERSION"
 
 echo ""
-echo "[3/4] Applying Liquid Glass patch to standard IPA..."
+echo "[3/6] Applying Liquid Glass patch to standard IPA..."
 bash "${REPO_DIR}/patch.sh" "$STANDARD_IPA" --liquid-glass -o "$GLASS_IPA"
 set_main_app_bundle_versions_in_ipa "$GLASS_IPA" "$TWEAK_VERSION" "$APP_BUILD_VERSION"
 
 echo ""
-echo "[4/4] Applying Liquid Glass patch to no-extensions IPA..."
+echo "[4/6] Applying Liquid Glass patch to no-extensions IPA..."
 bash "${REPO_DIR}/patch.sh" "$NOEXT_IPA" --liquid-glass -o "$NOEXT_GLASS_IPA"
 set_main_app_bundle_versions_in_ipa "$NOEXT_GLASS_IPA" "$TWEAK_VERSION" "$APP_BUILD_VERSION"
 
 echo ""
+echo "[5/6] Applying Liquid Glass icons-only patch to standard IPA..."
+bash "${REPO_DIR}/patch.sh" "$STANDARD_IPA" --liquid-glass-icons -o "$GLASS_ICONS_IPA"
+set_main_app_bundle_versions_in_ipa "$GLASS_ICONS_IPA" "$TWEAK_VERSION" "$APP_BUILD_VERSION"
+
+echo ""
+echo "[6/6] Applying Liquid Glass icons-only patch to no-extensions IPA..."
+bash "${REPO_DIR}/patch.sh" "$NOEXT_IPA" --liquid-glass-icons -o "$NOEXT_GLASS_ICONS_IPA"
+set_main_app_bundle_versions_in_ipa "$NOEXT_GLASS_ICONS_IPA" "$TWEAK_VERSION" "$APP_BUILD_VERSION"
+
+echo ""
 echo "Created:"
-printf '  %s\n' "$STANDARD_IPA" "$NOEXT_IPA" "$GLASS_IPA" "$NOEXT_GLASS_IPA"
+printf '  %s\n' "$STANDARD_IPA" "$NOEXT_IPA" "$GLASS_IPA" "$NOEXT_GLASS_IPA" \
+                "$GLASS_ICONS_IPA" "$NOEXT_GLASS_ICONS_IPA"
