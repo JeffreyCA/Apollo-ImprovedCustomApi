@@ -89,7 +89,7 @@ It auto-redirects Reddit pages to Apollo and rewrites Reddit links on Google/Bin
 
 Apollo's bundled **"Open in Apollo"** share-sheet action is fixed in this build and works from **any** browser: on a Reddit page tap **Share → Open in Apollo** and it opens straight in Apollo. (This was previously believed impossible — the stock action called the deprecated `-[UIApplication openURL:]` that iOS 18+ force-fails — but it now opens the link via a non-deprecated path.) Available on the **standard** and **Liquid Glass** variants.
 
-> ⚠️ The action runs inside an app extension. On **iOS 26** that extension only launches if your installer signs it correctly (sets the appex *main-binary* flag): Xcode, Apple's `codesign`, and recent AltStore/SideStore do; some signers (Sideloadly/Feather, as of this writing) do not — in which case the action silently does nothing. If it doesn't fire on your install, use the **Shortcut** below instead; it's signer-independent.
+> ⚠️ **Depends on how you install.** The action runs inside an app extension, which on **iOS 26** only launches if your installer sets the appex's *main-binary* code-signing flag. **AltStore and SideStore do this** (confirmed), as do Xcode and Apple's `codesign` (`scripts/resign-ipa-codesign.sh` re-signs an IPA this way for direct `ideviceinstaller`/Configurator install). **Sideloadly and Feather currently do not** — with them the extension is killed at launch and the action silently does nothing. If you installed with one of those, use the **Shortcut** below; it's signer-independent.
 
 #### Fallback — "Open in Apollo" Shortcut (works on any install)
 
