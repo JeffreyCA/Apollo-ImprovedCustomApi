@@ -156,6 +156,18 @@ static char kApolloInlineGIFGenerationKey;     // NSNumber — bumped on clear/r
 static char kApolloStackedCardSyncerKey;       // ApolloStackedCardSyncer — keeps the multi-image card peeking behind imageNode
 static char kApolloImageChestItemsKey;         // NSArray<NSDictionary *> direct ImageChest CDN image entries for album pager
 
+// kApolloHostMarkdownNodeKey is an OBJC_ASSOCIATION_ASSIGN (unsafe unretained)
+// reference to the host MarkdownNode. The host can be deallocated before the
+// image node (e.g. during comments table teardown), leaving the association
+// slot pointing at freed memory. Reading it as an `id` lets ARC retain the
+// result, which crashes in objc_retain on the dangling pointer. Bridge-cast to
+// a raw void* so ARC performs no retain/release; we only ever need to know
+// whether the node is an inline-hosted image node, not to message the host.
+static inline BOOL ApolloImageNodeHasInlineHost(id node) {
+    if (!node) return NO;
+    return ((__bridge void *)objc_getAssociatedObject(node, &kApolloHostMarkdownNodeKey)) != NULL;
+}
+
 static void ApolloApplyInlineGIFPlaybackPolicyWithCover(ASNetworkImageNode *imageNode, UIImage *cover, NSUInteger retryIndex);
 static void ApolloStartInlineGIFPlayback(ASNetworkImageNode *imageNode);
 static BOOL ApolloResumeInlineGIFPlaybackIfPossible(ASNetworkImageNode *imageNode);
@@ -1495,7 +1507,7 @@ static BOOL ApolloPresentOrResolveImageChestAlbumURL(NSURL *url, UIView *sourceV
 %hook ASImageNode
 
 - (void)_locked_setAnimatedImage:(id)animatedImage {
-    BOOL hosted = objc_getAssociatedObject(self, &kApolloHostMarkdownNodeKey) != nil;
+    BOOL hosted = ApolloImageNodeHasInlineHost(self);
     if (hosted && animatedImage && !ApolloInlineGIFAnimatedImageArgumentIsUsable(animatedImage)) {
         ApolloLog(@"[InlineImages] _locked_setAnimatedImage rejecting unusable animatedImage node=%p", self);
         ApolloClearInlineGIFNodeState((ASNetworkImageNode *)self);
@@ -1587,7 +1599,7 @@ static BOOL ApolloPresentOrResolveImageChestAlbumURL(NSURL *url, UIView *sourceV
 }
 
 - (void)dealloc {
-    if (objc_getAssociatedObject(self, &kApolloHostMarkdownNodeKey)) {
+    if (ApolloImageNodeHasInlineHost(self)) {
         ApolloCancelInlineGIFPendingPolicyBlocks(self);
         ApolloInlineGIFBumpGeneration(self);
         id anim = objc_getAssociatedObject(self, &kApolloInlineGIFAnimatedImageKey);
@@ -1601,7 +1613,7 @@ static BOOL ApolloPresentOrResolveImageChestAlbumURL(NSURL *url, UIView *sourceV
 %hook ASNetworkImageNode
 
 - (void)setURL:(NSURL *)URL {
-    if (objc_getAssociatedObject(self, &kApolloHostMarkdownNodeKey)) {
+    if (ApolloImageNodeHasInlineHost(self)) {
         NSURL *previous = [self respondsToSelector:@selector(URL)] ? [self URL] : nil;
         if ((previous && URL && ![previous isEqual:URL]) || (previous && !URL)) {
             ApolloLog(@"[AutoplayGIF] clearing GIF state on URL change node=%p", self);
@@ -1612,7 +1624,7 @@ static BOOL ApolloPresentOrResolveImageChestAlbumURL(NSURL *url, UIView *sourceV
 }
 
 - (void)clearImage {
-    if (objc_getAssociatedObject(self, &kApolloHostMarkdownNodeKey)) {
+    if (ApolloImageNodeHasInlineHost(self)) {
         ApolloClearInlineGIFNodeState(self);
     }
     %orig;
