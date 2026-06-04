@@ -7,14 +7,15 @@ NS_ASSUME_NONNULL_BEGIN
 extern "C" {
 #endif
 
-/// Reads Apollo's native General > Autoplay GIFs/Videos setting.
+/// Reads the tweak's "Autoplay Inline GIFs" setting. In Default mode this follows
+/// Apollo's native Autoplay GIFs/Videos setting; otherwise it is independent.
 BOOL ApolloShouldAutoplayInlineGIF(void);
 
 /// Cached autoplay decision for the current settings/reachability epoch.
 /// Invalidated when settings, reachability, or Low Power Mode changes.
 BOOL ApolloShouldAutoplayInlineGIFCached(void);
 
-/// Current AutoplayGIFs raw string (never / only-on-wifi / always).
+/// Current inline-GIF autoplay mode as a normalized string (never / only-on-wifi / always).
 NSString *ApolloAutoplayGIFModeString(void);
 
 /// YES for URLs that are typically animated GIFs (not static JPEG/PNG/WebP).
@@ -61,7 +62,7 @@ BOOL ApolloPauseInlineGIFNodeForAutoplay(id imageNode);
 /// Returns YES when a paused node was reloaded; NO when skipped or resume-only.
 BOOL ApolloReloadInlineGIFImageNodeForAutoplay(id imageNode);
 
-/// Install observers for AutoplayGIFs preference / reachability / Low Power Mode.
+/// Install observers for the Autoplay Inline GIFs preference / reachability / Low Power Mode.
 void ApolloMediaAutoplayInstall(void);
 
 #ifdef __cplusplus

@@ -27,6 +27,28 @@ typedef NS_ENUM(NSInteger, SectionIndex) {
     SectionCount
 };
 
+// The Media section hides two adjacent inline-media-dependent rows (Inline Media
+// Alignment + Autoplay Inline GIFs) when Inline Media Previews is off. These helpers
+// centralize the physical<->logical row mapping so the index math stays consistent.
+static const NSInteger kApolloMediaInlineDependentRows = 2;
+static const NSInteger kApolloMediaFirstInlineDependentRow = 5;
+
+// Map a physical (visible) Media row to its logical row.
+static NSInteger ApolloMediaLogicalRow(NSInteger physicalRow) {
+    if (!sEnableInlineImages && physicalRow >= kApolloMediaFirstInlineDependentRow) {
+        return physicalRow + kApolloMediaInlineDependentRows;
+    }
+    return physicalRow;
+}
+
+// Map a logical Media row to its physical (visible) row.
+static NSInteger ApolloMediaPhysicalRow(NSInteger logicalRow) {
+    if (!sEnableInlineImages && logicalRow >= kApolloMediaFirstInlineDependentRow + kApolloMediaInlineDependentRows) {
+        return logicalRow - kApolloMediaInlineDependentRows;
+    }
+    return logicalRow;
+}
+
 static BOOL sLinkPreviewModeRefreshPending = NO;
 static NSString *sPendingLinkPreviewModeRefreshArea = nil;
 static NSInteger sPendingLinkPreviewModeRefreshMode = ApolloLinkPreviewModeFull;
@@ -442,7 +464,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (void)setLinkPreviewMode:(NSInteger)mode body:(BOOL)body {
-    NSInteger row = (body ? 6 : 7) - (sEnableInlineImages ? 0 : 1);
+    NSInteger row = ApolloMediaPhysicalRow(body ? 7 : 8);
     NSString *key = body ? UDKeyLinkPreviewBodyMode : UDKeyLinkPreviewCommentsMode;
     if (body) {
         sLinkPreviewBodyMode = mode;
@@ -483,7 +505,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                           @"cardColor": @(color),
                                                       }];
 
-    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:8 - (sEnableInlineImages ? 0 : 1) inSection:SectionMedia];
+    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(9) inSection:SectionMedia];
     if ([[self.tableView indexPathsForVisibleRows] containsObject:indexPath]) {
         [self.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
     }
@@ -637,8 +659,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     switch (section) {
         case SectionBackupRestore: return 2;
         case SectionAPIKeys: return 9; // 7 text fields + Can't sign in? + API key setup guide
-        case SectionGeneral: return sShowDeletedComments ? 10 : 9;
-        case SectionMedia: return (sShowUserAvatars ? 13 : 12) + (sEnableInlineImages ? 0 : -1);
+    case SectionGeneral: return sShowDeletedComments ? 10 : 9;
+    case SectionMedia: return (sShowUserAvatars ? 14 : 13) + (sEnableInlineImages ? 0 : -kApolloMediaInlineDependentRows);
         case SectionSubreddits: return sSubredditListEnhancements ? 9 : 8;
         case SectionNotificationBackend: return 3; // URL + Registration Token + Test Connection
         case SectionAbout: return 5; // GitHub + Reddit + Thanks To + Export Logs + Version
@@ -1030,8 +1052,8 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (UITableViewCell *)mediaCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
-    // When the alignment row is hidden, physical rows ≥ 5 map to the next logical row
-    if (row >= 5 && !sEnableInlineImages) row += 1;
+    // When the inline-dependent rows are hidden, physical rows map to later logical rows.
+    row = ApolloMediaLogicalRow(row);
     switch (row) {
         case 0: {
             UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_GIFFallbackFormat"];
@@ -1092,6 +1114,18 @@ typedef NS_ENUM(NSInteger, Tag) {
             return cell;
         }
         case 6: {
+            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_AutoplayInlineGIFs"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_AutoplayInlineGIFs"];
+                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            }
+            cell.textLabel.text = @"Autoplay Inline GIFs";
+            cell.detailTextLabel.text = [self autoplayInlineGIFModeText];
+            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+            return cell;
+        }
+        case 7: {
             UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_LinkPreviewBodyMode"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_LinkPreviewBodyMode"];
@@ -1103,7 +1137,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             return cell;
         }
-        case 7: {
+        case 8: {
             UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_LinkPreviewCommentsMode"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_LinkPreviewCommentsMode"];
@@ -1115,7 +1149,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             return cell;
         }
-        case 8: {
+        case 9: {
             UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_LinkPreviewCardColor"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_LinkPreviewCardColor"];
@@ -1127,17 +1161,17 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             return cell;
         }
-        case 9:
+        case 10:
             return [self switchCellWithIdentifier:@"Cell_Media_UserAvatars"
                                             label:@"Show User Profile Pictures"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars]
                                            action:@selector(userAvatarsSwitchToggled:)];
-        case 10:
+        case 11:
             return [self switchCellWithIdentifier:@"Cell_Media_ProfileTabAvatar"
                                             label:@"Profile Picture Tab Icon"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon]
                                            action:@selector(profileTabAvatarSwitchToggled:)];
-        case 11: {
+        case 12: {
             BOOL avatarsOn = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars];
             if (avatarsOn) {
                 UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_ClearAvatarCache"];
@@ -1158,7 +1192,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
             return cell;
         }
-        case 12: {
+        case 13: {
             UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_ClearLinkPreviewCache"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Media_ClearLinkPreviewCache"];
@@ -1558,7 +1592,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         }
     } else if (indexPath.section == SectionMedia) {
         UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-        NSInteger row = (indexPath.row >= 5 && !sEnableInlineImages) ? indexPath.row + 1 : indexPath.row;
+        NSInteger row = ApolloMediaLogicalRow(indexPath.row);
         if (row == 0) {
             [self presentPreferredGIFFallbackFormatSheetFromSourceView:cell];
         } else if (row == 1) {
@@ -1568,14 +1602,16 @@ typedef NS_ENUM(NSInteger, Tag) {
         } else if (row == 5) {
             [self presentInlineImageAlignmentSheetFromSourceView:cell];
         } else if (row == 6) {
-            [self presentLinkPreviewModeSheetFromSourceView:cell body:YES];
+            [self presentAutoplayInlineGIFModeSheetFromSourceView:cell];
         } else if (row == 7) {
-            [self presentLinkPreviewModeSheetFromSourceView:cell body:NO];
+            [self presentLinkPreviewModeSheetFromSourceView:cell body:YES];
         } else if (row == 8) {
+            [self presentLinkPreviewModeSheetFromSourceView:cell body:NO];
+        } else if (row == 9) {
             [self presentLinkPreviewCardColorSheetFromSourceView:cell];
-        } else if (row == 11 && sShowUserAvatars) {
+        } else if (row == 12 && sShowUserAvatars) {
             [self promptClearProfilePictureCacheFromSourceView:cell];
-        } else if ((row == 11 && !sShowUserAvatars) || (row == 12 && sShowUserAvatars)) {
+        } else if ((row == 12 && !sShowUserAvatars) || (row == 13 && sShowUserAvatars)) {
             [self promptClearLinkPreviewCacheFromSourceView:cell];
         }
     } else if (indexPath.section == SectionNotificationBackend && indexPath.row == 2) {
@@ -1618,8 +1654,8 @@ typedef NS_ENUM(NSInteger, Tag) {
         return logicalRow == 8;
     }
     if (indexPath.section == SectionMedia) {
-        NSInteger row = (indexPath.row >= 5 && !sEnableInlineImages) ? indexPath.row + 1 : indexPath.row;
-        return (row == 0 || row == 1 || row == 2 || row == 5 || row == 6 || row == 7 || row == 8 || row == 11 || row == 12);
+        NSInteger row = ApolloMediaLogicalRow(indexPath.row);
+        return (row == 0 || row == 1 || row == 2 || row == 5 || row == 6 || row == 7 || row == 8 || row == 9 || row == 12 || row == 13);
     }
     if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 || indexPath.row == 3)) return YES;
     if (indexPath.section == SectionNotificationBackend && indexPath.row == 2) return YES;
@@ -2002,14 +2038,13 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSUserDefaults standardUserDefaults] setBool:sShowUserAvatars forKey:UDKeyShowUserAvatars];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloUserAvatarsToggleChangedNotification" object:nil];
     if (sShowUserAvatars == wasOn) return;
-    NSInteger offset = sEnableInlineImages ? 0 : 1;
-    NSArray<NSIndexPath *> *paths = @[[NSIndexPath indexPathForRow:11 - offset inSection:SectionMedia]];
+    NSArray<NSIndexPath *> *paths = @[[NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(12) inSection:SectionMedia]];
     if (sShowUserAvatars) {
         [self.tableView insertRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationFade];
     } else {
         [self.tableView deleteRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationFade];
     }
-    [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:(sShowUserAvatars ? 12 : 11) - offset inSection:SectionMedia]]
+    [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(sShowUserAvatars ? 13 : 12) inSection:SectionMedia]]
                           withRowAnimation:UITableViewRowAnimationNone];
 }
 
@@ -2037,7 +2072,12 @@ typedef NS_ENUM(NSInteger, Tag) {
     sEnableInlineImages = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sEnableInlineImages forKey:UDKeyEnableInlineImages];
     if (sEnableInlineImages == wasOn) return;
-    NSArray<NSIndexPath *> *paths = @[[NSIndexPath indexPathForRow:5 inSection:SectionMedia]];
+    // Two adjacent rows are gated on this toggle: Inline Media Alignment (logical 5)
+    // and Autoplay Inline GIFs (logical 6). Insert/delete both to keep row counts consistent.
+    NSArray<NSIndexPath *> *paths = @[
+        [NSIndexPath indexPathForRow:5 inSection:SectionMedia],
+        [NSIndexPath indexPathForRow:6 inSection:SectionMedia],
+    ];
     if (sEnableInlineImages) {
         [self.tableView insertRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationFade];
     } else {
@@ -2087,6 +2127,57 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSUserDefaults standardUserDefaults] setInteger:sInlineImageAlignment forKey:UDKeyInlineImageAlignment];
     NSIndexPath *alignmentRow = [NSIndexPath indexPathForRow:5 inSection:SectionMedia];
     [self.tableView reloadRowsAtIndexPaths:@[alignmentRow] withRowAnimation:UITableViewRowAnimationNone];
+}
+
+- (NSString *)autoplayInlineGIFModeText {
+    switch (sAutoplayInlineGIFMode) {
+        case ApolloAutoplayInlineGIFModeNever:    return @"Never";
+        case ApolloAutoplayInlineGIFModeWiFiOnly: return @"WiFi Only";
+        case ApolloAutoplayInlineGIFModeAlways:   return @"Always";
+        case ApolloAutoplayInlineGIFModeDefault:
+        default:                                  return @"Default";
+    }
+}
+
+- (void)presentAutoplayInlineGIFModeSheetFromSourceView:(UIView *)sourceView {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Autoplay Inline GIFs"
+                                                                   message:@"Default follows Apollo's Autoplay GIFs/Videos setting in General."
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+
+    NSString *defaultTitle = (sAutoplayInlineGIFMode == ApolloAutoplayInlineGIFModeDefault)  ? @"Default (Current)"   : @"Default";
+    NSString *alwaysTitle  = (sAutoplayInlineGIFMode == ApolloAutoplayInlineGIFModeAlways)   ? @"Always (Current)"    : @"Always";
+    NSString *wifiTitle    = (sAutoplayInlineGIFMode == ApolloAutoplayInlineGIFModeWiFiOnly) ? @"WiFi Only (Current)" : @"WiFi Only";
+    NSString *neverTitle   = (sAutoplayInlineGIFMode == ApolloAutoplayInlineGIFModeNever)    ? @"Never (Current)"     : @"Never";
+
+    [sheet addAction:[UIAlertAction actionWithTitle:defaultTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [self setAutoplayInlineGIFMode:ApolloAutoplayInlineGIFModeDefault];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:alwaysTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [self setAutoplayInlineGIFMode:ApolloAutoplayInlineGIFModeAlways];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:wifiTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [self setAutoplayInlineGIFMode:ApolloAutoplayInlineGIFModeWiFiOnly];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:neverTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [self setAutoplayInlineGIFMode:ApolloAutoplayInlineGIFModeNever];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+
+    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
+    if (popover && sourceView) {
+        popover.sourceView = sourceView;
+        popover.sourceRect = sourceView.bounds;
+    }
+
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)setAutoplayInlineGIFMode:(ApolloAutoplayInlineGIFMode)mode {
+    sAutoplayInlineGIFMode = mode;
+    // The autoplay module observes this key via KVO and re-evaluates visible inline GIFs.
+    [[NSUserDefaults standardUserDefaults] setInteger:sAutoplayInlineGIFMode forKey:UDKeyAutoplayInlineGIFs];
+    NSIndexPath *autoplayRow = [NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(6) inSection:SectionMedia];
+    [self.tableView reloadRowsAtIndexPaths:@[autoplayRow] withRowAnimation:UITableViewRowAnimationNone];
 }
 
 - (void)promptClearCustomSubredditBannersFromSourceView:(__unused UIView *)sourceView {

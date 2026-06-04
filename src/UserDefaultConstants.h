@@ -43,6 +43,10 @@ static NSString *const UDKeyEnableInlineImages = @"EnableInlineImages";
 // Horizontal alignment for inline media that is narrower than the row (e.g. tall portrait images).
 // 0 = Center (default), 1 = Left, 2 = Right.
 static NSString *const UDKeyInlineImageAlignment = @"InlineImageAlignment";
+// Autoplay for inline GIF/animated media previews. 0 = Default (follow Apollo's
+// native "Autoplay GIFs/Videos"), 1 = Never, 2 = WiFi Only, 3 = Always. Only
+// meaningful when Inline Media Previews (UDKeyEnableInlineImages) is on.
+static NSString *const UDKeyAutoplayInlineGIFs = @"AutoplayInlineGIFs";
 
 // Bulk translation feature
 static NSString *const UDKeyEnableBulkTranslation = @"EnableBulkTranslation";

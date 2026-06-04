@@ -44,6 +44,19 @@ typedef NS_ENUM(NSInteger, ApolloInlineImageAlignment) {
     ApolloInlineImageAlignmentRight  = 2,
 };
 extern NSInteger sInlineImageAlignment;
+
+// Autoplay policy for inline GIF/animated media previews. Decoupled from Apollo's
+// native "Autoplay GIFs/Videos" setting, except for the Default mode which follows it.
+// Defaults to Default. Only takes effect when Inline Media Previews
+// (sEnableInlineImages) is on. See ApolloMediaAutoplay.m.
+typedef NS_ENUM(NSInteger, ApolloAutoplayInlineGIFMode) {
+    ApolloAutoplayInlineGIFModeDefault  = 0, // follow Apollo's Autoplay GIFs/Videos
+    ApolloAutoplayInlineGIFModeNever    = 1,
+    ApolloAutoplayInlineGIFModeWiFiOnly = 2,
+    ApolloAutoplayInlineGIFModeAlways   = 3,
+};
+extern NSInteger sAutoplayInlineGIFMode;
+
 typedef NS_ENUM(NSInteger, ApolloLinkPreviewMode) {
     ApolloLinkPreviewModeOff = 0,
     ApolloLinkPreviewModeCompact = 1,

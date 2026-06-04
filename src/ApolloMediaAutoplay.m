@@ -2,11 +2,14 @@
 #import "ApolloCommon.h"
 #import "ApolloMediaMetadata.h"
 #import "ApolloState.h"
+#import "UserDefaultConstants.h"
 
 #import <SystemConfiguration/SystemConfiguration.h>
 #import <objc/runtime.h>
 
-static NSString *const kApolloAutoplayGIFsKey = @"AutoplayGIFs";
+// Apollo's native General > Autoplay GIFs/Videos preference. Followed only when the
+// tweak's Autoplay Inline GIFs setting is in Default mode.
+static NSString *const kApolloNativeAutoplayGIFsKey = @"AutoplayGIFs";
 static NSString *const kApolloGroupSuiteName = @"group.com.christianselig.apollo";
 
 static const void *kApolloInlineAnimatedGIFViewKey = &kApolloInlineAnimatedGIFViewKey;
@@ -30,6 +33,7 @@ static void ApolloStartReachabilityMonitor(void);
 static BOOL ApolloNetworkIsOnWiFi(void);
 static BOOL ApolloNetworkIsOnCellular(void);
 static void ApolloLogAutoplayDecision(NSString *mode, BOOL shouldPlay);
+static void ApolloReloadAutoplayInlineGIFModeFromDefaults(void);
 
 static Class ApolloASNetworkImageNodeClass(void) {
     static Class cls = Nil;
@@ -53,6 +57,7 @@ BOOL ApolloInlineGIFNodeIsRegistryEligible(id imageNode) {
 }
 
 static void ApolloAutoplaySettingsDidChange(void) {
+    ApolloReloadAutoplayInlineGIFModeFromDefaults();
     ApolloRefreshVisibleInlineGIFAutoplay();
 }
 
@@ -68,7 +73,8 @@ static void ApolloAutoplaySettingsDidChange(void) {
     (void)object;
     (void)change;
     (void)context;
-    if ([keyPath isEqualToString:kApolloAutoplayGIFsKey]) {
+    if ([keyPath isEqualToString:UDKeyAutoplayInlineGIFs] ||
+        [keyPath isEqualToString:kApolloNativeAutoplayGIFsKey]) {
         ApolloAutoplaySettingsDidChange();
     }
 }
@@ -77,15 +83,15 @@ static void ApolloAutoplaySettingsDidChange(void) {
 
 static ApolloAutoplayDefaultsObserver *sAutoplayDefaultsObserver = nil;
 
-static void ApolloInstallAutoplayDefaultsKVO(NSUserDefaults *defaults) {
+static void ApolloInstallAutoplayDefaultsKVO(NSUserDefaults *defaults, NSString *keyPath) {
     if (!defaults || !sAutoplayDefaultsObserver) return;
     @try {
         [defaults addObserver:sAutoplayDefaultsObserver
-                   forKeyPath:kApolloAutoplayGIFsKey
+                   forKeyPath:keyPath
                       options:NSKeyValueObservingOptionNew
                       context:NULL];
     } @catch (__unused NSException *exception) {
-        ApolloLog(@"[AutoplayGIF] KVO unavailable for defaults key=%@", kApolloAutoplayGIFsKey);
+        ApolloLog(@"[AutoplayGIF] KVO unavailable for defaults key=%@", keyPath);
     }
 }
 
@@ -149,25 +155,38 @@ static void ApolloStartReachabilityMonitor(void) {
     });
 }
 
-static NSString *ApolloAutoplayGIFModeFromDefaults(NSUserDefaults *defaults) {
-    if (!defaults) return nil;
-    id value = [defaults objectForKey:kApolloAutoplayGIFsKey];
-    if ([value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0) {
-        return [(NSString *)value lowercaseString];
+// Reloads and validates the inline-GIF autoplay mode from user defaults into the
+// shared sAutoplayInlineGIFMode global. Called on KVO changes so external/defaults-
+// driven edits are reflected even when the settings UI isn't the writer.
+static void ApolloReloadAutoplayInlineGIFModeFromDefaults(void) {
+    NSInteger mode = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyAutoplayInlineGIFs];
+    if (mode < ApolloAutoplayInlineGIFModeDefault || mode > ApolloAutoplayInlineGIFModeAlways) {
+        mode = ApolloAutoplayInlineGIFModeDefault;
     }
-    return nil;
+    sAutoplayInlineGIFMode = mode;
+}
+
+// Reads Apollo's native Autoplay GIFs/Videos preference (standard, then group defaults),
+// normalized to never / only-on-wifi / always. Falls back to "never" when unset.
+static NSString *ApolloNativeAutoplayGIFModeString(void) {
+    for (NSUserDefaults *defaults in @[[NSUserDefaults standardUserDefaults],
+                                       [[NSUserDefaults alloc] initWithSuiteName:kApolloGroupSuiteName]]) {
+        id value = [defaults objectForKey:kApolloNativeAutoplayGIFsKey];
+        if ([value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0) {
+            return [(NSString *)value lowercaseString];
+        }
+    }
+    return @"never";
 }
 
 NSString *ApolloAutoplayGIFModeString(void) {
-    NSString *mode = ApolloAutoplayGIFModeFromDefaults([NSUserDefaults standardUserDefaults]);
-    if (mode.length == 0) {
-        NSUserDefaults *groupDefaults = [[NSUserDefaults alloc] initWithSuiteName:kApolloGroupSuiteName];
-        mode = ApolloAutoplayGIFModeFromDefaults(groupDefaults);
+    switch (sAutoplayInlineGIFMode) {
+        case ApolloAutoplayInlineGIFModeNever:    return @"never";
+        case ApolloAutoplayInlineGIFModeWiFiOnly: return @"only-on-wifi";
+        case ApolloAutoplayInlineGIFModeAlways:   return @"always";
+        case ApolloAutoplayInlineGIFModeDefault:
+        default:                                  return ApolloNativeAutoplayGIFModeString();
     }
-    if (mode.length == 0) {
-        mode = @"never";
-    }
-    return mode;
 }
 
 static void ApolloLogAutoplayDecision(NSString *mode, BOOL shouldPlay) {
@@ -475,9 +494,13 @@ void ApolloMediaAutoplayInstall(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         ApolloStartReachabilityMonitor();
+        ApolloReloadAutoplayInlineGIFModeFromDefaults();
         sAutoplayDefaultsObserver = [ApolloAutoplayDefaultsObserver new];
-        ApolloInstallAutoplayDefaultsKVO([NSUserDefaults standardUserDefaults]);
-        ApolloInstallAutoplayDefaultsKVO([[NSUserDefaults alloc] initWithSuiteName:kApolloGroupSuiteName]);
+        // Tweak setting (standard defaults) + Apollo's native setting (standard + group,
+        // followed in Default mode).
+        ApolloInstallAutoplayDefaultsKVO([NSUserDefaults standardUserDefaults], UDKeyAutoplayInlineGIFs);
+        ApolloInstallAutoplayDefaultsKVO([NSUserDefaults standardUserDefaults], kApolloNativeAutoplayGIFsKey);
+        ApolloInstallAutoplayDefaultsKVO([[NSUserDefaults alloc] initWithSuiteName:kApolloGroupSuiteName], kApolloNativeAutoplayGIFsKey);
         if (@available(iOS 9.0, *)) {
             [[NSNotificationCenter defaultCenter] addObserverForName:NSProcessInfoPowerStateDidChangeNotification
                                                               object:nil
