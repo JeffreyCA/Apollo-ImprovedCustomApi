@@ -4,17 +4,35 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Fixes
-
-- Fix the bundled **"Open in Apollo" Safari extension**, which stopped opening links on sideloaded builds. Its default "Automatic" mode redirected through `openinapollo.com`, whose auto-open relies on an iOS Smart App Banner bound to the App Store build — a sideloaded Apollo isn't that app, so it never opened. The extension now redirects straight to `apollo://`, handles `/s/` share links, and no longer references a missing background script. (Applied to the standard and Liquid Glass IPA variants at build time.)
-- Fix the bundled **"Open in Apollo" share-sheet action** (`OpenInUIExtension`) so it opens Reddit links in Apollo from **any** browser (Chrome, Firefox, Edge, Brave, …) — not just Safari. The stock action called the deprecated `-[UIApplication openURL:]`, which iOS 18+ force-fails, so it did nothing; an injected dylib (`ApolloOpenInFix`) now opens the `apollo://` link via a non-deprecated path. Applied to the standard and Liquid Glass variants at build time. **Note:** on iOS 26 the extension only launches if your installer sets the appex main-binary flag — **AltStore/SideStore** and `codesign` (`scripts/resign-ipa-codesign.sh`) do, **Sideloadly/Feather** currently don't, in which case the action does nothing and the Shortcut remains a signer-independent fallback. This corrects the earlier conclusion that the native action couldn't be fixed on modern iOS.
+## [v3.1.0] - 2026-06-05
 
 ### Features
 
-- Add **GLASS Icons** and **No Extensions + GLASS Icons** distribution variants that bundle the Liquid Glass alternate icon catalog without opting the app into the iOS 26 UI runtime. The standard GLASS builds run `vtool -set-build-version ios 15.0 19.0`, which is what activates the new iOS 26 tab bar (whose horizontal swipe switches tabs); the icons-only variants skip that step so legacy UIKit behaviors — notably the bottom tab bar swipe-to-go-back/forward gesture — are preserved.
-- Add `--liquid-glass-icons` flag to `patch.sh` for producing the icons-only variant manually. `--liquid-glass` and `--liquid-glass-icons` are mutually exclusive.
-- Ship an Apollo-Reborn **userscript** (`userscript/open-in-apollo.user.js`) as an app-independent way to auto-open Reddit links in Apollo — handy for the no-extensions IPA variant and jailbreak installs. Install via the free **Userscripts** app.
-- Add an **"Open in Apollo" Shortcut** recipe (in the README) for opening Reddit links in Apollo from Chrome, Firefox, and other browsers via the share sheet — a signer-independent fallback for installs where the bundled share-sheet action's extension can't launch (e.g. iOS 26 builds signed by tools that don't set the appex main-binary flag).
+- **PENDING** Support **any custom redirect URI** for the Reddit API without patching the app's Info.plist, so custom URI schemes authenticate without the "address is invalid" error (also removes the need for LiveContainer users to patch manually) (#368: @DeltAndy123)
+- Add **GLASS Icons** and **No Extensions + GLASS Icons** distribution variants that bundle the Liquid Glass icon catalog without opting into the iOS 26 UI runtime (#317: @nackerr)
+- Add new **Glitched** (@bajader) and **Modern** / **Modern Alt** (@paulo1manso) Liquid Glass app icons (#353: @bajader, @paulo1manso)
+- **Restore logged-in accounts** when restoring a settings backup, so reinstalling no longer requires re-authenticating each Reddit account (#331: @nickclyde)
+- Add a **Subreddit List Enhancements** toggle in **Settings > Apollo Reborn Options > Subreddits** to fall back to Apollo's native list, working around misaligned rows and a broken index scrubber on some devices (#355: @JeffreyCA)
+- **PENDING** Add a **Color Flairs** option in **Settings > Apollo Reborn Options > General** to color post and user flairs using Reddit's flair colors (#360: @icpryde)
+- Add **Show Deleted Comments** to restore deleted or removed comments inline from archived copies when available (#300: @nunoo)
+- **PENDING** Render comments with **two or more link previews** as compact cards instead of stacking full hero cards (#344: @icpryde)
+- **PENDING** Show **feed thumbnails for text posts** that embed images but produce no native thumbnail, in both Large and Compact modes (#351: @icpryde)
+- Fade and disable the comment **image/GIF buttons** when a subreddit doesn't allow that media type, instead of failing only at submit time (#356: @icpryde)
+- **PENDING** Add a separate **Autoplay Inline GIFs** setting in **Settings > Apollo Reborn Options > Media** to control inline GIF autoplay independently of Apollo's native Autoplay GIFs/Videos setting (#365: @JeffreyCA)
+- Ship an Apollo-Reborn **userscript** and an **"Open in Apollo" Shortcut** recipe as app-independent ways to open Reddit links in Apollo from any browser, handy for the no-extensions variant (#307: @nickclyde)
+
+### Fixes
+
+- Fix **"Open in Apollo"** across all browsers by repairing the bundled Safari extension and share-sheet action (#307: @nickclyde)
+- Fix **Recently Read** showing no posts after a Reddit API change (#341: @JeffreyCA)
+- Fix inline **Reddit GIFs in comments** staying frozen instead of autoplaying until collapsed/expanded or refreshed (#349: @icpryde)
+- Fix inline **GIFs not autoplaying on cellular** when Autoplay GIFs/Videos is set to Always (#347: @JeffreyCA)
+- Fix the inline **video play button** missing on post-body Reddit videos and a clipped AirPlay icon (#350: @icpryde)
+- Fix laggy **subreddit header** scrolling and incorrect handling on non-subreddit feeds (#339: @JeffreyCA)
+- Fix **Share as Image** not opening under the iOS 26 native action menu (#335: @icpryde)
+- Fix the **Rich Link Previews – Body** setting having no effect and following the Comments setting instead (#329: @nickclyde)
+- Fix a crash in the banned-profile hook (#326: @JeffreyCA)
+- Fix a crash when navigating into comments from a dangling host pointer in inline image cleanup (#362: @JeffreyCA)
 
 ## [v3.0.0] - 2026-05-29
 
@@ -482,7 +500,8 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
-[v3.0.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v2.14.0...v3.0.0
+[v3.1.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.0.0...v1.15.11_3.1.0
+[v3.0.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v2.14.0...v1.15.11_3.0.0
 [v2.14.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v2.13.0...v2.14.0
 [v2.13.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v2.12.0b...v2.13.0
 [v2.12.0b]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v2.11.0...v2.12.0b
