@@ -4,6 +4,7 @@
 #import <sys/utsname.h>
 #import <Security/Security.h>
 #import <StoreKit/StoreKit.h>
+#import <AuthenticationServices/AuthenticationServices.h>
 
 #import "fishhook.h"
 #import "ApolloCommon.h"
@@ -17,6 +18,7 @@
 #import "UserDefaultConstants.h"
 #import "Defaults.h"
 #import "ApolloMarkdownToolbarGif.h"
+#import "ApolloWebAuthViewController.h"
 
 // MARK: - Sideload Fixes
 
@@ -181,6 +183,81 @@ static NSCache<NSString *, NSString *> *subredditListCache;
 - (NSURL *)redirectURI {
     NSString *customURI = [sRedirectURI length] > 0 ? sRedirectURI : defaultRedirectURI;
     return [NSURL URLWithString:customURI];
+}
+
+%end
+
+static const char kARScheme     = '\0';
+static const char kARAuthURL    = '\0';
+static const char kARCompletion = '\0';
+
+// Replace ASWebAuthenticationSession with a WKWebView-based flow for all
+// Reddit OAuth sign-ins. WKNavigationDelegate fires decidePolicyForNavigationAction
+// for every URL before iOS URL routing, so the callback can be intercepted
+// regardless of whether the redirect URI scheme is registered in CFBundleURLTypes.
+%hook ASWebAuthenticationSession
+
+- (instancetype)initWithURL:(NSURL *)URL
+        callbackURLScheme:(NSString *)callbackURLScheme
+        completionHandler:(void (^)(NSURL *, NSError *))completionHandler {
+    id result = %orig;
+    id target = result ?: self;
+    objc_setAssociatedObject(target, &kARScheme,     callbackURLScheme, OBJC_ASSOCIATION_COPY);
+    objc_setAssociatedObject(target, &kARAuthURL,    URL,               OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(target, &kARCompletion, completionHandler, OBJC_ASSOCIATION_COPY);
+    return result;
+}
+
+- (BOOL)start {
+    NSString *callbackScheme = objc_getAssociatedObject(self, &kARScheme);
+    NSURL *authURL            = objc_getAssociatedObject(self, &kARAuthURL);
+    void (^completion)(NSURL *, NSError *) = objc_getAssociatedObject(self, &kARCompletion);
+
+    if (!authURL || !completion) {
+        ApolloLog(@"[WebAuth] missing authURL or completion — falling back to %%orig");
+        return %orig;
+    }
+
+    // Prefer the scheme from redirect_uri in the auth URL (set by our
+    // RDKOAuthCredential hook); fall back to callbackURLScheme if not found.
+    NSString *interceptScheme = callbackScheme;
+    for (NSURLQueryItem *item in [NSURLComponents componentsWithURL:authURL resolvingAgainstBaseURL:NO].queryItems) {
+        if ([item.name isEqualToString:@"redirect_uri"]) {
+            NSString *s = [NSURL URLWithString:item.value].scheme;
+            if (s.length) interceptScheme = s;
+            break;
+        }
+    }
+
+    ApolloLog(@"[WebAuth] using WKWebView, intercepting scheme=%@", interceptScheme);
+
+    // Use Apollo's own presentationContextProvider — it's set before start is called
+    // and returns the correct window. start is already on the main queue.
+    id<ASWebAuthenticationPresentationContextProviding> provider = [self presentationContextProvider];
+    UIWindow *window = [provider presentationAnchorForWebAuthenticationSession:self];
+
+    if (!window) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (scene.activationState == UISceneActivationStateForegroundActive
+                    && [scene isKindOfClass:[UIWindowScene class]]) {
+                window = ((UIWindowScene *)scene).keyWindow ?: ((UIWindowScene *)scene).windows.firstObject;
+                break;
+            }
+        }
+    }
+
+    ApolloLog(@"[WebAuth] presenting from window=%@", window);
+
+    ApolloWebAuthViewController *authVC = [[ApolloWebAuthViewController alloc]
+        initWithURL:authURL callbackScheme:interceptScheme completionHandler:completion];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:authVC];
+    nav.modalPresentationStyle = UIModalPresentationFormSheet;
+
+    UIViewController *top = window.rootViewController;
+    while (top.presentedViewController) top = top.presentedViewController;
+    [top presentViewController:nav animated:YES completion:nil];
+
+    return YES;
 }
 
 %end

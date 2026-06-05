@@ -910,21 +910,12 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                      detail:@"Required for GIF picker. Get one at developers.giphy.com"];
             break;
         case 5: {
-            NSString *schemesDetail = [NSString stringWithFormat:@"Must match the app whose API key you're using. URI scheme (part before ://) must be registered in Info.plist under CFBundleURLTypes. Registered: %@", [[self registeredURLSchemes] componentsJoinedByString:@", "]];
             UITableViewCell *cell = [self stackedTextFieldCellWithIdentifier:@"Cell_API_Redirect"
                                                                       label:@"Redirect URI"
                                                                 placeholder:defaultRedirectURI
                                                                        text:sRedirectURI
                                                                         tag:TagRedirectURI
-                                                                     detail:schemesDetail];
-            // Color the text field based on validity
-            for (UIView *subview in cell.contentView.subviews) {
-                if ([subview isKindOfClass:[UITextField class]]) {
-                    UITextField *tf = (UITextField *)subview;
-                    tf.textColor = [self isRedirectURISchemeValid:sRedirectURI] ? [UIColor labelColor] : [UIColor systemRedColor];
-                    break;
-                }
-            }
+                                                                     detail:@"Must match the redirect URI registered with your Reddit API app. Any URI scheme is supported."];
             return cell;
         }
         case 6:
@@ -1847,7 +1838,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         sRedirectURI = textField.text;
         [[NSUserDefaults standardUserDefaults] setValue:sRedirectURI forKey:UDKeyRedirectURI];
-        textField.textColor = [self isRedirectURISchemeValid:textField.text] ? [UIColor labelColor] : [UIColor systemRedColor];
+        textField.textColor = [UIColor labelColor];
     } else if (textField.tag == TagUserAgent) {
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         sUserAgent = textField.text;
