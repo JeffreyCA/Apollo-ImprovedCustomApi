@@ -116,12 +116,27 @@ Then, in any browser, on a Reddit page tap **Share → Open in Apollo**.
 
 > [!IMPORTANT]
 > Reddit and Imgur no longer allow new API key creation so you'll need to share or use existing keys.
+>
+> Reddit has also recently started revoking API keys that are specifically used for Apollo or any other third party client.
 
-See [this guide](https://github.com/wchill/patcheddit?tab=readme-ov-file#what-if-i-dont-have-a-client-id) for workarounds (proceed at your own risk).
+Reddit has a special deal with [Dystopia](https://apps.apple.com/us/app/dystopia-for-reddit/id1430599061) and [RedReader](https://play.google.com/store/apps/details?id=org.quantumbadger.redreader) to use the API for free for accessibility reasons. It is possible to use the client ID from one of those apps on either iOS or Android:
 
-When using credentials from another app, set the **Reddit API Key** (OAuth client ID), **Redirect URI**, and **User Agent** in the tweak settings to match the app's values. You'll also need to register the redirect URI scheme in the IPA (see [below](#custom-redirect-uri)).
+1. Install [Dystopia](https://apps.apple.com/us/app/dystopia-for-reddit/id1430599061) from the App Store (if running iOS) or [RedReader](https://play.google.com/store/apps/details?id=org.quantumbadger.redreader) from the Play Store (if running Android).
+2. Log in with your Reddit account in Dystopia/RedReader and allow it access to your account.
+3. After logging in, you should receive an email from Reddit with the subject "You’ve authorized a new app in your Reddit account". Open the email and look for the text after "App ID". Copy that value.
+4. In Apollo Reborn's settings, go to **Custom API** and enter the following values:
+    - **Reddit API Key**: Paste the App ID you copied from the email
+    - **Redirect URI**:
+        - If using Dystopia: `dystopia://response`
+        - If using RedReader: `redreader://rr_oauth_redir`
+    - **User Agent**:
+        - If using Dystopia: `ios:com.CarbonDev.Dystopia:v1.0.1(by /u/DystopiaForReddit)`
+        - If using RedReader: `RedReader/1.25.1`
+5. Log in to Reddit in Apollo normally. Reddit should ask to connect your Reddit account with Dystopia/RedReader instead of your own Reddit app. Accept the connection and you should be good to go!
 
-More discussion in [#82](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/82).
+Credits to [this guide](https://github.com/wchill/patcheddit?tab=readme-ov-file#what-if-i-dont-have-a-client-id) for the original workaround with RedReader.
+
+More discussion in [#82](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/82) and [#367](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/367).
 
 ## Custom Redirect URI
 
