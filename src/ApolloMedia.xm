@@ -2,6 +2,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <AVKit/AVKit.h>
 #import <MediaPlayer/MediaPlayer.h>
+#import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 
@@ -27,40 +28,111 @@ static NSString *const StreamableRegexPattern = @"^(?:(?:https?:)?//)?(?:www\\.)
 static NSString *const StreamableRegexPatternWithQueryString = @"^(?:(?:https?:)?//)?(?:www\\.)?streamable\\.com/(?:edit/)?(\\w+)(?:\\?.*)?$";
 
 static const void *kApolloRouteIconRepairLoggedKey = &kApolloRouteIconRepairLoggedKey;
+static const void *kApolloRouteButtonStyleLoggedKey = &kApolloRouteButtonStyleLoggedKey;
 
 static BOOL ApolloMediaStringContains(NSString *haystack, NSString *needle) {
     return [haystack isKindOfClass:[NSString class]] && needle.length > 0 &&
         [haystack rangeOfString:needle options:NSCaseInsensitiveSearch].location != NSNotFound;
 }
 
-static BOOL ApolloMediaRouteControlIsInMediaViewer(UIView *view) {
+static BOOL ApolloMediaViewIsInClassNamed(UIView *view, NSString *needle) {
     for (UIResponder *responder = view; responder; responder = responder.nextResponder) {
-        NSString *className = NSStringFromClass(responder.class);
-        if (ApolloMediaStringContains(className, @"MediaViewer") || ApolloMediaStringContains(className, @"MediaPage") || ApolloMediaStringContains(className, @"Player")) return YES;
+        if (ApolloMediaStringContains(NSStringFromClass(responder.class), needle)) return YES;
     }
-    for (UIView *ancestor = view.superview; ancestor; ancestor = ancestor.superview) {
-        NSString *className = NSStringFromClass(ancestor.class);
-        if (ApolloMediaStringContains(className, @"MediaViewer") || ApolloMediaStringContains(className, @"MediaPage") || ApolloMediaStringContains(className, @"Player")) return YES;
+    for (UIView *ancestor = view; ancestor; ancestor = ancestor.superview) {
+        if (ApolloMediaStringContains(NSStringFromClass(ancestor.class), needle)) return YES;
     }
     return NO;
 }
 
-// Reads a UIView-typed Swift/ObjC ivar by name. Swift stored properties on
-// classes don't expose @objc getters, so go through the runtime ivar list.
-static UIView *ApolloMediaReadViewIvar(id obj, const char *name) {
-    if (!obj || !name) return nil;
-    Ivar ivar = class_getInstanceVariable([obj class], name);
-    if (!ivar) return nil;
-    id value = nil;
-    @try { value = object_getIvar(obj, ivar); } @catch (__unused NSException *e) {}
-    return [value isKindOfClass:[UIView class]] ? value : nil;
+static BOOL ApolloMediaRouteControlIsInMediaViewer(UIView *view) {
+    return ApolloMediaViewIsInClassNamed(view, @"MediaViewer") ||
+        ApolloMediaViewIsInClassNamed(view, @"MediaPage") ||
+        ApolloMediaViewIsInClassNamed(view, @"Player") ||
+        ApolloMediaViewIsInClassNamed(view, @"VideoControlsView");
 }
 
-// The actual clip/aspect-fit/min-size fixes, applied without any container
-// gate. Callers that need the MediaViewer gate go through
-// ApolloMediaRepairRouteControlLayout below.
-static void ApolloMediaApplyRouteControlLayoutFixes(UIView *routeView, NSString *reason) {
-    if (![routeView isKindOfClass:[UIView class]]) return;
+static void ApolloMediaClearRouteButtonLayer(CALayer *layer, CALayer *primaryImageLayer) {
+    if (!layer) return;
+
+    layer.masksToBounds = NO;
+    layer.cornerRadius = 0.0;
+    layer.borderWidth = 0.0;
+    layer.shadowOpacity = 0.0;
+    if (layer != primaryImageLayer) layer.backgroundColor = nil;
+
+    for (CALayer *sublayer in layer.sublayers) {
+        ApolloMediaClearRouteButtonLayer(sublayer, primaryImageLayer);
+    }
+}
+
+static void ApolloMediaStyleVideoControlsAirPlayButton(UIButton *button, NSString *reason) {
+    if (![button isKindOfClass:[UIButton class]] || !ApolloMediaViewIsInClassNamed(button, @"VideoControlsView")) return;
+
+    UIImage *airPlayImage = [[UIImage imageNamed:@"video-player-airplay"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    if (!airPlayImage) return;
+
+    if ([button respondsToSelector:@selector(setConfiguration:)]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(button, @selector(setConfiguration:), nil);
+    }
+    if ([button respondsToSelector:@selector(setConfigurationUpdateHandler:)]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(button, @selector(setConfigurationUpdateHandler:), nil);
+    }
+
+    const UIControlState states[] = {
+        UIControlStateNormal,
+        UIControlStateHighlighted,
+        UIControlStateSelected,
+        UIControlStateSelected | UIControlStateHighlighted,
+        UIControlStateDisabled,
+        UIControlStateFocused,
+        UIControlStateSelected | UIControlStateFocused,
+        UIControlStateApplication,
+        UIControlStateSelected | UIControlStateApplication,
+    };
+    for (NSUInteger i = 0; i < sizeof(states) / sizeof(states[0]); i++) {
+        [button setImage:airPlayImage forState:states[i]];
+        [button setBackgroundImage:nil forState:states[i]];
+    }
+
+    BOOL activeRoute = button.selected || ((button.state & UIControlStateSelected) == UIControlStateSelected);
+    if (activeRoute) {
+        button.tintColor = [UIColor respondsToSelector:@selector(systemBlueColor)] ? [UIColor systemBlueColor] : [UIColor colorWithRed:0.0 green:0.478 blue:1.0 alpha:1.0];
+    } else {
+        button.tintColor = [UIColor whiteColor];
+    }
+
+    button.backgroundColor = [UIColor clearColor];
+    button.adjustsImageWhenHighlighted = NO;
+    button.showsTouchWhenHighlighted = NO;
+    button.clipsToBounds = NO;
+    button.contentMode = UIViewContentModeScaleAspectFit;
+    button.imageView.hidden = NO;
+    button.imageView.image = airPlayImage;
+    button.imageView.highlightedImage = airPlayImage;
+    button.imageView.tintColor = button.tintColor;
+    button.imageView.backgroundColor = [UIColor clearColor];
+    button.imageView.clipsToBounds = NO;
+    button.imageView.contentMode = UIViewContentModeScaleAspectFit;
+
+    for (UIView *subview in button.subviews) {
+        subview.backgroundColor = [UIColor clearColor];
+        subview.clipsToBounds = NO;
+        subview.layer.masksToBounds = NO;
+        if ([subview isKindOfClass:[UIImageView class]] && subview != button.imageView) {
+            subview.hidden = YES;
+        }
+    }
+    ApolloMediaClearRouteButtonLayer(button.layer, button.imageView.layer);
+
+    if (objc_getAssociatedObject(button, kApolloRouteButtonStyleLoggedKey) == nil) {
+        objc_setAssociatedObject(button, kApolloRouteButtonStyleLoggedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloLog(@"[MediaRouteIcon] styled VideoControlsView AirPlay button class=%@ state=%lu reason=%@", NSStringFromClass(button.class) ?: @"(unknown)", (unsigned long)button.state, reason ?: @"(unknown)");
+    }
+}
+
+static void ApolloMediaRepairRouteControlLayout(UIView *routeView, NSString *reason) {
+    if (![routeView isKindOfClass:[UIView class]] || !ApolloMediaRouteControlIsInMediaViewer(routeView)) return;
     routeView.clipsToBounds = NO;
     routeView.contentMode = UIViewContentModeScaleAspectFit;
     routeView.layer.masksToBounds = NO;
@@ -84,6 +156,7 @@ static void ApolloMediaApplyRouteControlLayoutFixes(UIView *routeView, NSString 
         if ([view isKindOfClass:[UIButton class]]) {
             UIButton *button = (UIButton *)view;
             button.imageView.contentMode = UIViewContentModeScaleAspectFit;
+            ApolloMediaStyleVideoControlsAirPlayButton(button, reason);
         } else if ([view isKindOfClass:[UIImageView class]]) {
             ((UIImageView *)view).contentMode = UIViewContentModeScaleAspectFit;
         }
@@ -94,11 +167,6 @@ static void ApolloMediaApplyRouteControlLayoutFixes(UIView *routeView, NSString 
         objc_setAssociatedObject(routeView, kApolloRouteIconRepairLoggedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         ApolloLog(@"[MediaRouteIcon] repaired route control layout class=%@ frame=%@ reason=%@", NSStringFromClass(routeView.class) ?: @"(unknown)", NSStringFromCGRect(routeView.frame), reason ?: @"(unknown)");
     }
-}
-
-static void ApolloMediaRepairRouteControlLayout(UIView *routeView, NSString *reason) {
-    if (![routeView isKindOfClass:[UIView class]] || !ApolloMediaRouteControlIsInMediaViewer(routeView)) return;
-    ApolloMediaApplyRouteControlLayoutFixes(routeView, reason);
 }
 
 %hook AVRoutePickerView
@@ -119,31 +187,18 @@ static void ApolloMediaRepairRouteControlLayout(UIView *routeView, NSString *rea
 
 %end
 
-// Apollo's in-app player controls bar (a rounded UIVisualEffectView) clips
-// the AirPlay icon at the bottom-left corner. Stop the bar (and its
-// contentView) from clipping, and repair the airPlayButton's own layout so
-// the glyph renders at full size. fauxVolumeView is an MPVolumeView already
-// covered by the hook above; we re-apply here to be safe since this view is
-// unambiguously the in-app player.
 %hook _TtC6Apollo17VideoControlsView
 
 - (void)layoutSubviews {
     %orig;
-    UIVisualEffectView *bar = (UIVisualEffectView *)self;
-    bar.clipsToBounds = NO;
-    bar.layer.masksToBounds = NO;
-    UIView *contentView = [bar respondsToSelector:@selector(contentView)] ? bar.contentView : nil;
-    contentView.clipsToBounds = NO;
-    contentView.layer.masksToBounds = NO;
+    UIButton *airPlayButton = MSHookIvar<UIButton *>(self, "airPlayButton");
+    ApolloMediaStyleVideoControlsAirPlayButton(airPlayButton, @"VideoControlsView layoutSubviews");
+}
 
-    UIView *airPlayButton = ApolloMediaReadViewIvar(self, "airPlayButton");
-    if (airPlayButton) {
-        ApolloMediaApplyRouteControlLayoutFixes(airPlayButton, @"VideoControlsView airPlayButton");
-    }
-    UIView *fauxVolumeView = ApolloMediaReadViewIvar(self, "fauxVolumeView");
-    if (fauxVolumeView) {
-        ApolloMediaApplyRouteControlLayoutFixes(fauxVolumeView, @"VideoControlsView fauxVolumeView");
-    }
+- (void)observeValueForKeyPath:(id)keyPath ofObject:(id)object change:(id)change context:(void *)context {
+    %orig(keyPath, object, change, context);
+    UIButton *airPlayButton = MSHookIvar<UIButton *>(self, "airPlayButton");
+    ApolloMediaStyleVideoControlsAirPlayButton(airPlayButton, @"VideoControlsView KVO");
 }
 
 %end
