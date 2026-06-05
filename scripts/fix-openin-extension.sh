@@ -39,8 +39,10 @@ REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # unsuffixed dir for FINALPACKAGE=1 release builds).
 DYLIB_SRC=""
 DYLIB_CANDIDATES=(
-    "${REPO_DIR}/openin-extension/.theos/obj/debug/ApolloOpenInFix.dylib"
     "${REPO_DIR}/openin-extension/.theos/obj/ApolloOpenInFix.dylib"
+    "${REPO_DIR}/.theos/obj/ApolloOpenInFix.dylib"
+    "${REPO_DIR}/openin-extension/.theos/obj/debug/ApolloOpenInFix.dylib"
+    "${REPO_DIR}/.theos/obj/debug/ApolloOpenInFix.dylib"
 )
 DYLIB_NAME="ApolloOpenInFix.dylib"
 STALE_NAMES=("ApolloOpenInHook.dylib")  # dead prior-attempt artifacts, removed if present
