@@ -2590,7 +2590,8 @@ static UIViewController *ApolloMediaComposerActiveComposeControllerForToken(void
     UIViewController *tracked = ApolloMediaComposerCanonicalBodyController(sApolloMediaComposerActiveBodyController) ?: sApolloMediaComposerActiveBodyController;
     if (tracked) {
         NSString *cls = NSStringFromClass(tracked.class) ?: @"";
-        if ([cls hasSuffix:@"ComposePostViewController"] || [cls hasSuffix:@"ComposeViewController"]) {
+        if ([cls hasPrefix:@"_TtC6Apollo"] &&
+            ([cls hasSuffix:@"ComposePostViewController"] || [cls hasSuffix:@"ComposeViewController"])) {
             return tracked;
         }
     }
@@ -2604,7 +2605,8 @@ static UIViewController *ApolloMediaComposerActiveComposeControllerForToken(void
             NSUInteger guard = 0;
             while (vc && guard++ < 32) {
                 NSString *cls = NSStringFromClass(vc.class) ?: @"";
-                if ([cls hasSuffix:@"ComposePostViewController"] || [cls hasSuffix:@"ComposeViewController"]) {
+                if ([cls hasPrefix:@"_TtC6Apollo"] &&
+                    ([cls hasSuffix:@"ComposePostViewController"] || [cls hasSuffix:@"ComposeViewController"])) {
                     return vc;
                 }
                 vc = vc.presentedViewController;
@@ -3281,12 +3283,16 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
 
 - (void)viewDidLoad {
     %orig;
+    // Never treat Apple's out-of-process share/compose controllers as Apollo
+    // composers — traversing their remote view hierarchy crashes (issue #366).
+    if (ApolloIsSystemShareComposeController(self)) return;
     ApolloMediaComposerMarkContextActive(self, @"viewDidLoad");
     ApolloPhotoComposerRepairControllerSoon(self, @"viewDidLoad");
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
+    if (ApolloIsSystemShareComposeController(self)) return;
     ApolloMediaComposerMarkContextActive(self, @"viewWillAppear");
     if (ApolloMediaComposerControllerLooksLikeNativeTextEditor(self)) {
         ApolloMediaComposerMarkVisibleNativeBodyTextViews(self, @"viewWillAppear-native-editor");
@@ -3298,6 +3304,7 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
+    if (ApolloIsSystemShareComposeController(self)) { %orig; return; }
     ApolloMediaComposerMarkVisibleNativeBodyTextViews(self, @"viewWillDisappear");
     UIViewController *bodyController = ApolloMediaComposerCanonicalBodyController(self);
     if (bodyController) ApolloMediaComposerRestoreOriginalPostType(bodyController, NO, @"viewWillDisappear");
@@ -3306,6 +3313,7 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
+    if (ApolloIsSystemShareComposeController(self)) return;
     ApolloMediaComposerMarkContextActive(self, @"viewDidAppear");
     NSString *className = NSStringFromClass(self.class);
     if (ApolloMediaComposerShouldBridgeVideoPicker() && ApolloPhotoComposerClassLooksLikeMediaPicker(className)) {
@@ -3325,6 +3333,7 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
 
 - (void)viewDidLayoutSubviews {
     %orig;
+    if (ApolloIsSystemShareComposeController(self)) return;
     ApolloMediaComposerMarkContextActive(self, @"viewDidLayoutSubviews");
     if (ApolloMediaComposerControllerLooksLikeNativeTextEditor(self)) {
         ApolloMediaComposerMarkVisibleNativeBodyTextViews(self, @"viewDidLayoutSubviews-native-editor");
@@ -3333,7 +3342,9 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
 }
 
 - (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
-    ApolloPhotoComposerMaybeEnableMoviePicking(self, viewControllerToPresent);
+    if (!ApolloIsSystemShareComposeController(viewControllerToPresent)) {
+        ApolloPhotoComposerMaybeEnableMoviePicking(self, viewControllerToPresent);
+    }
     UIViewController *bodyController = ApolloMediaComposerCanonicalBodyController(self);
     %orig;
     (void)bodyController;
@@ -3360,6 +3371,7 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
+    if (ApolloIsSystemShareComposeController(self)) return;
     NSString *className = NSStringFromClass(self.class);
     if (!ApolloPhotoComposerClassLooksLikeComposer(className)) return;
 

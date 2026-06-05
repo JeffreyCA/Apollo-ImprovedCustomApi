@@ -474,3 +474,20 @@ void ApolloPresentWebURLFromViewController(UIViewController *presenter, NSURL *u
     ApolloRecordBrowserPresent(normalizedURL);
     [[UIApplication sharedApplication] openURL:normalizedURL options:@{} completionHandler:nil];
 }
+
+BOOL ApolloIsSystemShareComposeController(UIViewController *controller) {
+    if (![controller isKindOfClass:[UIViewController class]]) return NO;
+    // Apple's out-of-process compose controllers whose class names collide with
+    // Apollo's "...ComposeViewController" suffix matchers. Treating them as
+    // Apollo composers crashes the GIF/composer machinery (issue #366).
+    static const char *kSystemComposeClassNames[] = {
+        "MFMessageComposeViewController",
+        "MFMailComposeViewController",
+        "SLComposeViewController",
+    };
+    for (size_t i = 0; i < sizeof(kSystemComposeClassNames) / sizeof(kSystemComposeClassNames[0]); i++) {
+        Class cls = objc_getClass(kSystemComposeClassNames[i]);
+        if (cls && [controller isKindOfClass:cls]) return YES;
+    }
+    return NO;
+}

@@ -31,4 +31,12 @@ NSString *ApolloBundledResourcePath(NSString *baseName, NSString *extension);
 // nil if neither path yields a usable string.
 NSString *ApolloGetLinkButtonNodeURLString(id linkButtonNode);
 void ApolloPresentWebURLFromViewController(UIViewController *presenter, NSURL *url);
+
+// Returns YES for Apple's out-of-process share/compose controllers that the
+// tweak must never traverse or mutate. Their class names end in
+// "ComposeViewController" (e.g. MFMessageComposeViewController), so loose
+// suffix matchers misidentify them as Apollo composers and crash when the
+// GIF/composer machinery pokes at the remote view hierarchy (issue #366).
+// Resolved via objc_getClass so we don't link MessageUI/Social.
+BOOL ApolloIsSystemShareComposeController(UIViewController *controller);
 __END_DECLS

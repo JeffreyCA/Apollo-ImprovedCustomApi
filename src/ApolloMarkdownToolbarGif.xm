@@ -78,6 +78,12 @@ static void ApolloMarkdownGifShowGatingToast(UIViewController *host, NSString *m
 static BOOL ApolloMarkdownGifClassLooksLikeCompose(UIViewController *controller) {
     if (!controller) return NO;
     NSString *className = NSStringFromClass(controller.class);
+    // Only Apollo's own Swift composers (mangled to _TtC6Apollo…). Apple's
+    // MFMessageComposeViewController / MFMailComposeViewController also end in
+    // "ComposeViewController"; running the GIF-injection machinery against those
+    // out-of-process controllers crashes when sharing a post to Messages/Mail
+    // (issue #366).
+    if (![className hasPrefix:@"_TtC6Apollo"]) return NO;
     return [className hasSuffix:@"ComposeViewController"] ||
            [className hasSuffix:@"ComposePostViewController"] ||
            [className hasSuffix:@"WatcherComposerViewController"];
@@ -1534,6 +1540,7 @@ void ApolloMarkdownGifInstall(void) {
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
+    if (ApolloIsSystemShareComposeController((UIViewController *)self)) return;
     if (ApolloMarkdownGifClassLooksLikeCompose((UIViewController *)self)) {
         ApolloMarkdownGifScheduleInjection((UIViewController *)self, @"viewController-viewDidAppear");
     }
@@ -1541,6 +1548,7 @@ void ApolloMarkdownGifInstall(void) {
 
 - (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
     %orig;
+    if (ApolloIsSystemShareComposeController(viewControllerToPresent)) return;
     if (ApolloMarkdownGifClassLooksLikeCompose(viewControllerToPresent)) {
         dispatch_async(dispatch_get_main_queue(), ^{
             ApolloMarkdownGifScheduleInjection(viewControllerToPresent, @"presentViewController");
