@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixes
+
+- Fix a **crash when sharing a post to Messages or Mail** from the share sheet — the system compose controller was misidentified as an Apollo composer, leaving GIF-toolbar injection timers that dereferenced the dismissed share UI and crashed (#378: @nickclyde)
+
 ## [v3.1.0] - 2026-06-05
 
 ### Features
