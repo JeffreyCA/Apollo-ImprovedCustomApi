@@ -36,6 +36,22 @@
                              target:self
                              action:@selector(_cancelTapped)];
 
+    // "Old Reddit" button — lets users on any iOS switch to old.reddit.com mid-flow.
+    // On iOS 15 and earlier the modern Reddit login page fails to render, so we auto-rewrite
+    // below; the button is still shown so users can see why the URL changed.
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+        initWithTitle:@"Old Reddit"
+                style:UIBarButtonItemStylePlain
+               target:self
+               action:@selector(_switchToOldReddit)];
+
+    // iOS 15 and earlier can't render the modern Reddit login page.
+    // Rewrite www.reddit.com → old.reddit.com before the first load.
+    if (![self _isModernRedditSupported]) {
+        ApolloLog(@"[WebAuth] iOS < 16 detected — auto-switching to old.reddit.com");
+        self.authURL = [self _rewriteToOldReddit:self.authURL];
+    }
+
     // Non-persistent data store mirrors Apollo's prefersEphemeralWebBrowserSession = YES
     WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
     config.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
@@ -54,6 +70,26 @@
 
     ApolloLog(@"[WebAuth] Loading auth URL: %@", self.authURL);
     [self.webView loadRequest:[NSURLRequest requestWithURL:self.authURL]];
+}
+
+- (BOOL)_isModernRedditSupported {
+    if (@available(iOS 16, *)) return YES;
+    return NO;
+}
+
+- (NSURL *)_rewriteToOldReddit:(NSURL *)url {
+    NSURLComponents *c = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    if ([c.host isEqualToString:@"www.reddit.com"] || [c.host isEqualToString:@"reddit.com"]) {
+        c.host = @"old.reddit.com";
+    }
+    return c.URL ?: url;
+}
+
+- (void)_switchToOldReddit {
+    NSURL *rewritten = [self _rewriteToOldReddit:self.webView.URL ?: self.authURL];
+    ApolloLog(@"[WebAuth] Switching to old Reddit: %@", rewritten);
+    [self.webView loadRequest:[NSURLRequest requestWithURL:rewritten]];
+    self.navigationItem.rightBarButtonItem.enabled = NO;
 }
 
 - (void)_cancelTapped {
@@ -89,6 +125,21 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
         return;
     }
 
+    // On iOS < 16 the modern Reddit web app fails to render. After the user logs in on
+    // old.reddit.com, Reddit's server redirects to www.reddit.com/api/v1/authorize (the
+    // consent page) via the `dest` query param — which is also the modern app and also
+    // fails. Intercept any mid-flow navigation to www.reddit.com and rewrite to
+    // old.reddit.com so the entire OAuth flow stays on old Reddit.
+    if (![self _isModernRedditSupported]) {
+        NSURL *rewritten = [self _rewriteToOldReddit:url];
+        if (![rewritten isEqual:url]) {
+            decisionHandler(WKNavigationActionPolicyCancel);
+            ApolloLog(@"[WebAuth] Rewriting mid-flow www.reddit.com → old.reddit.com: %@", rewritten);
+            [self.webView loadRequest:[NSURLRequest requestWithURL:rewritten]];
+            return;
+        }
+    }
+
     decisionHandler(WKNavigationActionPolicyAllow);
 }
 
@@ -98,6 +149,8 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     [self.spinner stopAnimating];
+    BOOL onOldReddit = [webView.URL.host isEqualToString:@"old.reddit.com"];
+    self.navigationItem.rightBarButtonItem.enabled = !onOldReddit;
 }
 
 - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
