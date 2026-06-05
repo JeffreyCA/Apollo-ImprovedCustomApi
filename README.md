@@ -140,6 +140,9 @@ More discussion in [#82](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/8
 
 ## Custom Redirect URI
 
+> [!NOTE]
+> Starting with Apollo Reborn v3.1.0, patching the `Info.plist` is no longer required to use a custom redirect URI. This section will remain for older versions, but if you're on v3.1.0 or later you can just enter your custom redirect URI in the tweak settings and it will work without any additional patching.
+
 The redirect URI scheme (the part before `://`) must be registered in the Apollo IPA's `Info.plist` under `CFBundleURLTypes`, otherwise the OAuth callback won't return to Apollo. Add your scheme with [`patch.sh`](#patching-ipa) or the **Build IPA** GitHub Action:
 
 ```bash
@@ -174,7 +177,7 @@ Available patches:
 
 - **`--liquid-glass`** - enables the iOS 26 Liquid Glass UI and installs a pack of Liquid Glass icons that can be switched between in the tweak's in-app icon picker. Requires the Git LFS asset to be pulled first (`git lfs install && git lfs pull`); see the [Build](#build) note. `patch.sh` will refuse to run with an un-pulled pointer.
 - **`--liquid-glass-icons`** - installs the Liquid Glass icon catalog **only**, without the iOS 26 UI chrome (skips the `vtool` build-version bump that opts the app into the iOS 26 runtime, so legacy UIKit behaviors like the bottom-tab swipe gesture are preserved). Mutually exclusive with `--liquid-glass`. Same Git LFS requirement applies.
-- **`--url-schemes <list>`** - adds comma-separated URL schemes to `CFBundleURLTypes` (see [Custom Redirect URI](#custom-redirect-uri)).
+- **`--url-schemes <list>`** - adds comma-separated URL schemes to `CFBundleURLTypes` (see [Custom Redirect URI](#custom-redirect-uri), obsolete on v3.1.0+).
 - **`--remove-code-signature`** - strips the existing code signature.
 
 To run via GitHub Actions, fork this repo and trigger **Actions** > **Build IPA**. It can inject the tweak (`inject_tweak`), strip extensions (`no_extensions`), apply Liquid Glass (`liquid_glass`) or Liquid Glass icons only (`liquid_glass_icons`), add URL schemes, and remove the code signature in one run, from an Apollo IPA URL.
