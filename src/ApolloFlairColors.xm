@@ -33,8 +33,26 @@
 #import "ApolloCommon.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
+#import <math.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+
+// ASSizeRange is { CGSize min; CGSize max; }. Match the class-dumped
+// layoutSpecThatFits: ABI used elsewhere in the tweak.
+struct CDStruct_90e057aa { CGSize min; CGSize max; };
+
+// Binary-compatible subset of Texture's ASDimension. We define it locally to
+// avoid pulling Texture headers into the tweak build.
+typedef NS_ENUM(NSInteger, ApolloFlairASDimensionUnit) {
+    ApolloFlairASDimensionUnitAuto = 0,
+    ApolloFlairASDimensionUnitPoints = 1,
+    ApolloFlairASDimensionUnitFraction = 2,
+};
+
+typedef struct {
+    ApolloFlairASDimensionUnit unit;
+    CGFloat value;
+} ApolloFlairASDimension;
 
 #pragma mark - Associated object keys
 
@@ -163,7 +181,21 @@ static NSArray *ApolloFlairSwiftArrayIvar(id node, const char *name) {
         }
         return nil;
     }
+
     return nil;
+}
+
+static BOOL ApolloFlairBoolIvar(id node, const char *name) {
+    if (!node || !name) return NO;
+    for (Class cls = object_getClass(node); cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
+        Ivar ivar = class_getInstanceVariable(cls, name);
+        if (!ivar) continue;
+        const char *type = ivar_getTypeEncoding(ivar);
+        if (!type || (type[0] != 'B' && type[0] != 'c' && type[0] != 'C')) return NO;
+        ptrdiff_t offset = ivar_getOffset(ivar);
+        return *(BOOL *)((uint8_t *)(__bridge void *)node + offset);
+    }
+    return NO;
 }
 
 #pragma mark - Recovery (Mantle deserialization)
@@ -298,6 +330,57 @@ static void ApolloFlairSetBackground(id node, UIColor *background) {
     ((void (*)(id, SEL, BOOL))objc_msgSend)(node, @selector(setClipsToBounds:), YES);
 }
 
+static CGFloat ApolloFlairMaxTextHeight(NSArray *contentNodes) {
+    if (![contentNodes isKindOfClass:[NSArray class]]) return 0.0;
+
+    CGFloat maxHeight = 0.0;
+    for (id contentNode in contentNodes) {
+        if (![contentNode respondsToSelector:@selector(attributedText)]) continue;
+        id attributed = ApolloFlairPerformObject(contentNode, @selector(attributedText));
+        if (![attributed isKindOfClass:[NSAttributedString class]] || [(NSAttributedString *)attributed length] == 0) continue;
+
+        NSAttributedString *text = (NSAttributedString *)attributed;
+        __block CGFloat maxLineHeight = 0.0;
+        [text enumerateAttribute:NSFontAttributeName
+                         inRange:NSMakeRange(0, text.length)
+                         options:0
+                      usingBlock:^(id value, __unused NSRange range, __unused BOOL *stop) {
+            if ([value isKindOfClass:[UIFont class]]) {
+                maxLineHeight = MAX(maxLineHeight, [(UIFont *)value lineHeight]);
+            }
+        }];
+
+        CGRect bounds = [text boundingRectWithSize:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)
+                                          options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                          context:nil];
+        maxHeight = MAX(maxHeight, ceil(MAX(maxLineHeight, bounds.size.height)));
+    }
+    return maxHeight;
+}
+
+static void ApolloFlairSetLayoutMaxHeight(id layoutElement, CGFloat height) {
+    if (!layoutElement || !isfinite(height) || height <= 0.0) return;
+    id style = ApolloFlairPerformObject(layoutElement, @selector(style));
+    if (!style || ![style respondsToSelector:@selector(setMaxHeight:)]) return;
+
+    ApolloFlairASDimension dimension = { ApolloFlairASDimensionUnitPoints, height };
+    ((void (*)(id, SEL, ApolloFlairASDimension))objc_msgSend)(style, @selector(setMaxHeight:), dimension);
+}
+
+static void ApolloFlairFixMaxHeight(id node, id layoutSpec) {
+    NSArray *contentNodes = ApolloFlairSwiftArrayIvar(node, "contentNodes");
+    CGFloat textHeight = ApolloFlairMaxTextHeight(contentNodes);
+    if (textHeight <= 0.0) return;
+
+    BOOL isForAlert = ApolloFlairBoolIvar(node, "isForAlert");
+    CGFloat nativeMaxHeight = isForAlert ? 21.0 : 16.0;
+    CGFloat desiredMaxHeight = MAX(nativeMaxHeight, ceil(textHeight + 2.0));
+    if (desiredMaxHeight <= nativeMaxHeight + 0.5) return;
+
+    id innerStack = ApolloFlairPerformObject(layoutSpec, @selector(child));
+    ApolloFlairSetLayoutMaxHeight(innerStack ?: layoutSpec, desiredMaxHeight);
+}
+
 static void ApolloFlairRecolorTextNodes(NSArray *contentNodes, UIColor *textColor) {
     if (![contentNodes isKindOfClass:[NSArray class]]) return;
     Class imageNodeClass = objc_getClass("ASImageNode");
@@ -417,6 +500,12 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
 %end
 
 %hook _TtC6Apollo9FlairNode
+
+- (id)layoutSpecThatFits:(struct CDStruct_90e057aa)constrainedSize {
+    id spec = %orig;
+    ApolloFlairFixMaxHeight((id)self, spec);
+    return spec;
+}
 
 - (void)didLoad {
     %orig;
