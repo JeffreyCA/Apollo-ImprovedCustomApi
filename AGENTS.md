@@ -146,6 +146,58 @@ Once you have `hopperAddr`:
 
 - `Hopper/goto_address` -> `Hopper/current_procedure` -> decompile around the trap/crash site.
 
+### Symbolicating User Crash Reports With Release dSYMs
+
+Release IPAs are built with `FINALPACKAGE=1`, so the shipped tweak dylib is optimized and stripped. Public release IPAs always come from the `Apollo-Reborn/Apollo-Reborn` release workflow:
+
+```text
+https://github.com/Apollo-Reborn/Apollo-Reborn/actions/workflows/release-ipa-variants.yml
+```
+
+That workflow publishes a matching `*-dSYMs.zip` release asset alongside the IPA/deb assets; use that dSYM for `.ips` reports instead of asking users to reproduce on debug builds.
+
+First identify the release that produced the user's IPA from the IPA filename, release tag, or app/tweak version shown in the `.ips`. Then download and unpack symbols with `gh`:
+
+```bash
+mkdir -p /tmp/apollo-reborn-symbols
+gh release download <release-tag> \
+  --repo Apollo-Reborn/Apollo-Reborn \
+  --pattern '*-dSYMs.zip' \
+  --dir /tmp/apollo-reborn-symbols
+unzip -q /tmp/apollo-reborn-symbols/*-dSYMs.zip -d /tmp/apollo-reborn-symbols/unpacked
+find /tmp/apollo-reborn-symbols/unpacked -name 'ApolloReborn.dylib.dSYM' -type d
+```
+
+If the tag is unknown, inspect recent releases and asset names:
+
+```bash
+gh release list --repo Apollo-Reborn/Apollo-Reborn --limit 20
+gh release view <release-tag> --repo Apollo-Reborn/Apollo-Reborn --json assets --jq '.assets[].name'
+```
+
+For tweak frames like:
+
+```text
+ApolloReborn.dylib  0x103bbca90 0x103ad4000 + 952976
+```
+
+1. Match the `ApolloReborn.dylib` UUID in the `.ips` `usedImages` / `binaryImages` section against:
+
+```bash
+dwarfdump --uuid /tmp/apollo-reborn-symbols/unpacked/symbols/rootful/ApolloReborn.dylib.dSYM
+```
+
+2. Symbolicate every `ApolloReborn.dylib` frame from the crashed thread:
+
+```bash
+atos -arch arm64 \
+  -o /tmp/apollo-reborn-symbols/unpacked/symbols/rootful/ApolloReborn.dylib.dSYM/Contents/Resources/DWARF/ApolloReborn.dylib \
+  -l 0x103ad4000 \
+  0x103bbca90
+```
+
+Use the image load address as `-l` and the frame PC/address as the final argument. If the crash only provides an offset, compute `address = imageLoadAddress + offset`. Once frames resolve to source files/lines, investigate the Logos hook/block at that location and use the rest of the crashed thread plus exception type to infer runtime state.
+
 ### Swift Struct Ivars and iOS Version Pitfalls
 
 Swift value types (structs like `Foundation.URL`) stored as ivars in a class are laid out inline — they are NOT object pointers. `MSHookIvar<NSURL *>` on a `URL` ivar works by accident on older iOS (where `URL`'s first field happened to be an `NSURL *`) but breaks when Apple changes the struct layout (e.g. iOS 26 swift-foundation changes). When you need data from a Swift struct ivar:
