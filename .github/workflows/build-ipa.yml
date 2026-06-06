@@ -119,6 +119,19 @@ jobs:
           echo "deb_path=$DEB_PATH" >> "$GITHUB_OUTPUT"
           echo "Built tweak: $DEB_PATH"
 
+      - name: Collect debug symbols
+        if: inputs.inject_tweak
+        run: bash ./scripts/collect-debug-symbols.sh --label rootful --output-dir ./dist/symbols
+
+      - name: Archive debug symbols
+        if: inputs.inject_tweak
+        id: symbols
+        run: |
+          SYMBOLS_ZIP="Apollo-Reborn-dSYMs-${{ github.run_number }}.zip"
+          (cd dist && zip -qry "../${SYMBOLS_ZIP}" symbols)
+          echo "symbols_zip=${SYMBOLS_ZIP}" >> "$GITHUB_OUTPUT"
+          echo "Debug symbols: ${SYMBOLS_ZIP} ($(wc -c < "${SYMBOLS_ZIP}") bytes)"
+
       - name: Install cyan injector
         if: inputs.inject_tweak
         run: |
@@ -229,8 +242,28 @@ jobs:
           path: ${{ steps.patch.outputs.output_ipa }}
           retention-days: 30
 
+      - name: Upload debug symbols artifact
+        if: inputs.inject_tweak
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.symbols.outputs.symbols_zip }}
+          path: ${{ steps.symbols.outputs.symbols_zip }}
+          retention-days: 30
+
       - name: Create release
-        if: inputs.create_release
+        if: inputs.create_release && inputs.inject_tweak
+        uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191 # v2.0.8
+        with:
+          draft: true
+          tag_name: build-ipa-${{ github.run_number }}
+          name: Apollo build ${{ github.run_number }}
+          files: |
+            ${{ steps.patch.outputs.output_ipa }}
+            ${{ steps.symbols.outputs.symbols_zip }}
+          prerelease: false
+
+      - name: Create release without tweak symbols
+        if: inputs.create_release && !inputs.inject_tweak
         uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191 # v2.0.8
         with:
           draft: true

@@ -78,6 +78,9 @@ jobs:
           echo "deb_path=$DEB_PATH" >> "$GITHUB_OUTPUT"
           echo "Rootful tweak: $DEB_PATH"
 
+      - name: Collect rootful debug symbols
+        run: bash ./scripts/collect-debug-symbols.sh --label rootful --output-dir ./dist/symbols
+
       - name: Clean before rootless build
         run: make clean
         env:
@@ -98,6 +101,9 @@ jobs:
           ROOTLESS_RENAMED="${ROOTLESS_DEB%-arm64.deb}-arm64_rootless.deb"
           mv "$ROOTLESS_DEB" "$ROOTLESS_RENAMED"
           echo "Rootless tweak: $ROOTLESS_RENAMED"
+
+      - name: Collect rootless debug symbols
+        run: bash ./scripts/collect-debug-symbols.sh --label rootless --output-dir ./dist/symbols
 
       - name: Install cyan
         run: |
@@ -153,6 +159,14 @@ jobs:
             --deb "${{ steps.rootful_deb.outputs.deb_path }}" \
             --output-dir ./dist/out
 
+      - name: Archive debug symbols
+        id: symbols
+        run: |
+          SYMBOLS_ZIP="dist/Apollo-Reborn-${{ steps.meta.outputs.tweak_version }}-dSYMs.zip"
+          (cd dist && zip -qry "$(basename "${SYMBOLS_ZIP}")" symbols)
+          echo "symbols_zip=${SYMBOLS_ZIP}" >> "$GITHUB_OUTPUT"
+          echo "Debug symbols: ${SYMBOLS_ZIP} ($(wc -c < "${SYMBOLS_ZIP}") bytes)"
+
       - name: Generate release notes
         run: python3 ./scripts/generate_release_notes.py > RELEASE_NOTES.md
         env:
@@ -170,6 +184,7 @@ jobs:
           files: |
             dist/out/*.ipa
             packages/*.deb
+            ${{ steps.symbols.outputs.symbols_zip }}
 
       - name: Summarize release outputs
         run: |
@@ -188,6 +203,10 @@ jobs:
             for ipa in dist/out/*.ipa; do
               echo "- \`$(basename "$ipa")\` ($(du -h "$ipa" | cut -f1))"
             done
+            echo ""
+            echo "## Debug symbols"
+            echo ""
+            echo "- \`$(basename "${{ steps.symbols.outputs.symbols_zip }}")\` ($(du -h "${{ steps.symbols.outputs.symbols_zip }}" | cut -f1))"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Summarize source URLs
