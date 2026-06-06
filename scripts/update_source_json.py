@@ -310,6 +310,34 @@ def build_news_entry(
     }
 
 
+def version_entry_key(entry: dict[str, Any]) -> tuple[Any, ...]:
+    download_url = entry.get("downloadURL")
+    if download_url:
+        return ("downloadURL", download_url)
+    return (
+        "version",
+        entry.get("version"),
+        entry.get("buildVersion"),
+        entry.get("date"),
+    )
+
+
+def merge_version_entries(
+    new_entries: list[dict[str, Any]],
+    existing_entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for entry in existing_entries:
+        merged[version_entry_key(entry)] = entry
+    for entry in new_entries:
+        merged[version_entry_key(entry)] = entry
+    return sorted(
+        merged.values(),
+        key=lambda item: item.get("date") or "",
+        reverse=True,
+    )
+
+
 def update_source_json(
     output_path: Path,
     releases: list[dict[str, Any]],
@@ -333,6 +361,9 @@ def update_source_json(
     build_version = config["app"].get("buildVersion")
     versions: list[dict[str, Any]] = []
     news: list[dict[str, Any]] = []
+    existing_versions = app.get("versions") or []
+    if not isinstance(existing_versions, list):
+        existing_versions = []
 
     sorted_releases = sorted(
         releases,
@@ -345,17 +376,17 @@ def update_source_json(
         )
         if not entry:
             continue
-        # Historical IPAs were published before the bundle-version rewrite and
-        # still carry Apollo's original 1.15.11/285 plist values. The source
-        # config only knows the current build number, so advertise the newest
-        # installable asset while keeping the full release history in news.
+        # The source config only knows the current IPA build number. Generate the
+        # newest release entry, then preserve older entries already in the source
+        # so their historical buildVersion values remain installable.
         if not versions:
             versions.append(entry)
         news.append(build_news_entry(release, config, variant.get("newsLabel")))
 
-    app["versions"] = versions
-    if versions:
-        latest = versions[0]
+    merged_versions = merge_version_entries(versions, existing_versions)
+    app["versions"] = merged_versions
+    if merged_versions:
+        latest = merged_versions[0]
         app["version"] = latest["version"]
         app["buildVersion"] = latest["buildVersion"]
         app["marketingVersion"] = latest["marketingVersion"]
@@ -364,7 +395,7 @@ def update_source_json(
         app["downloadURL"] = latest["downloadURL"]
         app["size"] = latest["size"]
 
-    data["news"] = sorted(news, key=lambda item: item.get("date") or "", reverse=True)
+    data["news"] = sorted(news, key=lambda item: item.get("date") or "")
 
     output_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
