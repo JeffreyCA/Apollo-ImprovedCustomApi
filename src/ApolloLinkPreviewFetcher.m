@@ -810,7 +810,12 @@ static NSString *ApolloLinkPreviewBrowserUserAgent(void) {
 
 + (void)finishURL:(NSURL *)url preview:(ApolloLinkPreview *)preview {
     if (!preview) {
-        ApolloLog(@"[LinkPreviews] no cache for empty preview host=%@", ApolloLinkPreviewHost(url));
+        // Negatively cache the failure so the next layout resolves from cache
+        // instead of refetching. Without this, a URL that always 404s (e.g. a
+        // removed v.redd.it video surfaced as a redd.it/<id> short link) loops
+        // forever: fetch fails -> node relayouts -> refetches, freezing scroll.
+        ApolloLog(@"[LinkPreviews] caching negative result for empty preview host=%@", ApolloLinkPreviewHost(url));
+        [[ApolloLinkPreviewCache sharedCache] markNoMetadataForURL:url];
         NSString *key = url.absoluteString ?: @"";
         dispatch_async(ApolloLinkPreviewFetcherQueue(), ^{
             NSMutableArray *completions = ApolloLinkPreviewPendingFetches()[key];
