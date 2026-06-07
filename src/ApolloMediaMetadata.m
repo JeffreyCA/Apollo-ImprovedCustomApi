@@ -54,6 +54,23 @@ NSString *ApolloRedditHostedGIFDisplayURL(NSString *assetID) {
     return [NSString stringWithFormat:@"https://i.redd.it/%@.gif", assetID];
 }
 
+// A Reddit-hosted GIF entry only needs our normalization when Reddit's own
+// metadata is incomplete (e.g. a freshly uploaded GIF that came back not-yet
+// "valid", missing the AnimatedImage type, or lacking a usable source URL).
+// Healthy entries — which already carry an efficient signed
+// `preview.redd.it/<id>.gif?format=mp4` in `s.mp4` that the gallery/album
+// viewer streams — must be left untouched so we don't downgrade playback to
+// the full `i.redd.it/<id>.gif`.
+static BOOL ApolloRedditHostedGifEntryNeedsNormalization(NSDictionary *entry) {
+    if (![[entry objectForKey:@"status"] isEqualToString:@"valid"]) return YES;
+    if (![[entry objectForKey:@"e"] isEqualToString:@"AnimatedImage"]) return YES;
+    if (![[entry objectForKey:@"m"] isEqualToString:@"image/gif"]) return YES;
+    NSDictionary *source = [entry[@"s"] isKindOfClass:[NSDictionary class]] ? entry[@"s"] : nil;
+    if (!ApolloStringIsNonEmpty(source[@"gif"])) return YES;
+    if (!ApolloStringIsNonEmpty(source[@"mp4"])) return YES;
+    return NO;
+}
+
 NSDictionary *ApolloFixRedditHostedGifMetadata(NSDictionary *orig, NSUInteger *outFixedCount) {
     if (outFixedCount) *outFixedCount = 0;
     if (![orig isKindOfClass:[NSDictionary class]] || orig.count == 0) return orig;
@@ -66,6 +83,11 @@ NSDictionary *ApolloFixRedditHostedGifMetadata(NSDictionary *orig, NSUInteger *o
 
         NSDictionary *entry = orig[key];
         if (!ApolloMetadataEntryIsRedditHostedGIF(key, entry)) continue;
+        // Only repair entries Reddit returned incomplete. Skipping healthy
+        // entries preserves their efficient signed `preview.redd.it ...
+        // format=mp4` source, fixing the regression where the gallery viewer
+        // started streaming full `i.redd.it/<id>.gif` files (stuck spinner).
+        if (!ApolloRedditHostedGifEntryNeedsNormalization(entry)) continue;
 
         NSString *gifURL = ApolloRedditHostedGIFDisplayURL(key);
         if (!gifURL) continue;
@@ -74,9 +96,13 @@ NSDictionary *ApolloFixRedditHostedGifMetadata(NSDictionary *orig, NSUInteger *o
 
         NSDictionary *existingSource = [entry[@"s"] isKindOfClass:[NSDictionary class]] ? entry[@"s"] : nil;
         NSMutableDictionary *source = existingSource ? [existingSource mutableCopy] : [NSMutableDictionary dictionary];
-        source[@"gif"] = gifURL;
-        // MP4 preference must still resolve to an animatable GIF for Reddit uploads.
-        source[@"mp4"] = gifURL;
+        // Synthesize only the source URLs Reddit left missing. Never overwrite
+        // an existing value: a present `mp4` is Reddit's efficient signed
+        // preview that the gallery streams, and a present `gif` already points
+        // at the animatable i.redd.it asset. A missing `mp4` must still resolve
+        // to an animatable GIF (otherwise Apollo opens it in a webview).
+        if (!ApolloStringIsNonEmpty(source[@"gif"])) source[@"gif"] = gifURL;
+        if (!ApolloStringIsNonEmpty(source[@"mp4"])) source[@"mp4"] = gifURL;
 
         NSMutableDictionary *normalized = [entry mutableCopy];
         normalized[@"status"] = @"valid";
