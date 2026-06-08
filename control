@@ -7,5 +7,5 @@ Maintainer: Apollo Reborn team
 Author: Apollo Reborn team
 Section: Tweaks
 Depends: mobilesubstrate (>= 0.9.5000)
-Conflicts: ca.jeffrey.apollo-improvedcustomapi,com.ichitaso.apollopatcher,com.ryannair05.apolloapi
-Replaces: ca.jeffrey.apollo-improvedcustomapi
+Conflicts: ca.jeffrey.apollo-improvedcustomapi,ca.jeffrey.apollo-customapicredentialsplus,com.ethanarbuckle.apollo-customapicredentials,com.ichitaso.apollopatcher,com.ryannair05.apolloapi
+Replaces: ca.jeffrey.apollo-improvedcustomapi,ca.jeffrey.apollo-customapicredentialsplus,com.ethanarbuckle.apollo-customapicredentials
