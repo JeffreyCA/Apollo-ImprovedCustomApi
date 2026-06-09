@@ -187,7 +187,7 @@ static UIViewController *ApolloRedditVisibleControllerFromController(UIViewContr
 }
 
 static UIAlertController *ApolloRedditActiveUploadingAlert(void) {
-    for (UIWindow *window in [UIApplication.sharedApplication.windows reverseObjectEnumerator]) {
+    for (UIWindow *window in [ApolloAllWindows() reverseObjectEnumerator]) {
         if (window.hidden || window.alpha < 0.01) continue;
         UIViewController *visible = ApolloRedditVisibleControllerFromController(window.rootViewController);
         UIAlertController *alert = [visible isKindOfClass:[UIAlertController class]] ? (UIAlertController *)visible : nil;

@@ -510,7 +510,7 @@ void ApolloBannedProfileRefreshLinkButtonsForUsername(NSString *username) {
     username = ApolloBannedProfileNormalizedUsername(username);
     dispatch_async(dispatch_get_main_queue(), ^{
         NSHashTable *visited = [NSHashTable weakObjectsHashTable];
-        for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        for (UIWindow *window in ApolloAllWindows()) {
             ApolloBannedProfileRefreshLinkButtonsInTree(window.rootViewController.view, visited, username, 0);
             ApolloBannedProfileRefreshLinkButtonsInTree(window.rootViewController, visited, username, 0);
         }
@@ -858,15 +858,15 @@ static void ApolloBannedProfileRefreshViewControllersInTree(UIViewController *vi
 void ApolloBannedProfileRefreshProfilesForUsername(NSString *username) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSHashTable *visited = [NSHashTable weakObjectsHashTable];
-        for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        for (UIWindow *window in ApolloAllWindows()) {
             ApolloBannedProfileRefreshViewControllersInTree(window.rootViewController, username, visited);
         }
         NSHashTable *commentVisited = [NSHashTable weakObjectsHashTable];
-        for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        for (UIWindow *window in ApolloAllWindows()) {
             ApolloBannedProfileRefreshCommentCellsInTree(window.rootViewController, commentVisited, username, 0);
         }
         NSHashTable *linkVisited = [NSHashTable weakObjectsHashTable];
-        for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        for (UIWindow *window in ApolloAllWindows()) {
             ApolloBannedProfileRefreshLinkButtonsInTree(window.rootViewController.view, linkVisited, username, 0);
             ApolloBannedProfileRefreshLinkButtonsInTree(window.rootViewController, linkVisited, username, 0);
         }

@@ -605,9 +605,12 @@ static void ApolloSubredditIndexClearStarChrome(UIControl *control) {
     if ([control isKindOfClass:[UIButton class]]) {
         UIButton *button = (UIButton *)control;
         button.highlighted = NO;
+        // Prevent auto-dimming on a button we don't own (no clean non-deprecated API for this).
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         button.adjustsImageWhenHighlighted = NO;
         button.adjustsImageWhenDisabled = NO;
-        button.showsTouchWhenHighlighted = NO;
+#pragma clang diagnostic pop
 
         UIControlState states[] = {
             UIControlStateNormal,
@@ -1196,7 +1199,7 @@ static void ApolloSubredditIndexRefreshTablesInView(UIView *view) {
 }
 
 static void ApolloSubredditIndexRefreshAllVisibleTables(void) {
-    for (UIWindow *window in UIApplication.sharedApplication.windows) {
+    for (UIWindow *window in ApolloAllWindows()) {
         ApolloSubredditIndexRefreshTablesInView(window);
     }
 }

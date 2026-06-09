@@ -379,7 +379,7 @@ static void ApolloVisitTabBarControllers(UIViewController *vc, NSMutableSet<UITa
 static void ApolloForEachVisibleTabBarController(void (^block)(UITabBarController *tbc)) {
     if (!block) return;
     NSMutableSet<UITabBarController *> *seen = [NSMutableSet set];
-    for (UIWindow *window in UIApplication.sharedApplication.windows) {
+    for (UIWindow *window in ApolloAllWindows()) {
         if (window.hidden || window.alpha <= 0.0) continue;
         ApolloVisitTabBarControllers(window.rootViewController, seen, block);
     }

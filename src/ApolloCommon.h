@@ -34,6 +34,10 @@ NSString *ApolloBundledResourcePath(NSString *baseName, NSString *extension);
 NSString *ApolloGetLinkButtonNodeURLString(id linkButtonNode);
 void ApolloPresentWebURLFromViewController(UIViewController *presenter, NSURL *url);
 
+// Returns all UIWindows across every connected UIWindowScene.
+// Use instead of the deprecated UIApplication.windows property.
+NSArray<UIWindow *> *ApolloAllWindows(void);
+
 // Returns YES for Apple's out-of-process share/compose controllers that the
 // tweak must never traverse or mutate. Their class names end in
 // "ComposeViewController" (e.g. MFMessageComposeViewController), so loose

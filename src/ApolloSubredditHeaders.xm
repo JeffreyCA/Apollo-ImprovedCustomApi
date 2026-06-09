@@ -1189,7 +1189,7 @@ static void ApolloSubredditRefreshBannerForSubreddit(NSString *subredditName) {
     if (subredditName.length == 0) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:16];
-        for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        for (UIWindow *window in ApolloAllWindows()) {
             ApolloSubredditRefreshBannerInTree(window.rootViewController, subredditName, visited);
         }
     });
@@ -1221,7 +1221,7 @@ static void ApolloSubredditRefreshIconForSubreddit(NSString *subredditName) {
     if (subredditName.length == 0) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:16];
-        for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        for (UIWindow *window in ApolloAllWindows()) {
             ApolloSubredditRefreshIconInTree(window.rootViewController, subredditName, visited);
         }
     });
@@ -1248,7 +1248,7 @@ static void ApolloSubredditRefreshViewControllersInTree(UIViewController *viewCo
 static void ApolloSubredditRefreshVisibleControllers(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:64];
-        for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        for (UIWindow *window in ApolloAllWindows()) {
             ApolloSubredditRefreshViewControllersInTree(window.rootViewController, visited);
         }
     });

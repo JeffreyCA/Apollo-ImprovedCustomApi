@@ -108,8 +108,6 @@ static void ApolloMediaStyleVideoControlsAirPlayButton(UIButton *button, NSStrin
     }
 
     button.backgroundColor = [UIColor clearColor];
-    button.adjustsImageWhenHighlighted = NO;
-    button.showsTouchWhenHighlighted = NO;
     button.clipsToBounds = NO;
     button.contentMode = UIViewContentModeScaleAspectFit;
     button.imageView.hidden = NO;
