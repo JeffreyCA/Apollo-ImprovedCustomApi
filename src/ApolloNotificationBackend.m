@@ -114,11 +114,18 @@ static BOOL ApolloPathIsAccountUpsertBulk(NSString *path) {
         && [parts[4] isEqualToString:@"accounts"];
 }
 
+// Match `/v1/live_activities` (Live Activity registration — the backend polls
+// the thread and pushes ActivityKit updates).
+static BOOL ApolloPathIsLiveActivityRegistration(NSString *path) {
+    return [path isEqualToString:@"/v1/live_activities"];
+}
+
 // Endpoints behind REGISTRATION_SECRET on the new backend.
 static BOOL ApolloPathRequiresRegistrationToken(NSString *path) {
     return ApolloPathIsDeviceRegistration(path)
         || ApolloPathIsAccountUpsertSingular(path)
-        || ApolloPathIsAccountUpsertBulk(path);
+        || ApolloPathIsAccountUpsertBulk(path)
+        || ApolloPathIsLiveActivityRegistration(path);
 }
 
 // MARK: - JSON body augmentation
