@@ -94,6 +94,7 @@ static void TestVisibleReplacement(void) {
     Require([data[@"score"] isEqual:@42], @"replaces score");
     Require([data[@"apollo_recovered_deleted_comment"] boolValue], @"sets marker");
     Require([data[@"apollo_recovered_deleted_reason"] isEqualToString:@"user_deleted"], @"sets reason");
+    Require(data[@"author_flair_text"] == nil, @"does not replace author flair with recovered reason");
     Require([data[@"user_vote"] isEqual:@0] && [data[@"likes"] isKindOfClass:[NSNull class]], @"neutralizes vote metadata");
 }
 
@@ -140,6 +141,12 @@ static void TestArcticCooldownPolicy(void) {
     Require(!ApolloDeletedCommentsTestArcticResponseShouldCooldown(200, NSIntegerMax), @"missing quota header does not trigger cooldown");
 }
 
+static void TestReasonLabels(void) {
+    Require([ApolloDeletedCommentsTestDisplayLabelForReason(@"user_deleted") isEqualToString:@"DELETED BY USER"], @"user-deleted reason label");
+    Require([ApolloDeletedCommentsTestDisplayLabelForReason(@"moderator_removed") isEqualToString:@"DELETED BY MOD"], @"mod-deleted reason label");
+    Require([ApolloDeletedCommentsTestDisplayLabelForReason(nil) isEqualToString:@"DELETED BY MOD"], @"default reason label");
+}
+
 int main(void) {
     @autoreleasepool {
         TestURLExtraction();
@@ -149,6 +156,7 @@ int main(void) {
         TestMixedMoreKeepsRemainingChildren();
         TestNoOp();
         TestArcticCooldownPolicy();
+        TestReasonLabels();
         NSLog(@"deleted_comments_tests passed");
     }
     return 0;

@@ -20,6 +20,7 @@ static NSString *sApolloDeletedCommentsLastObservedLinkFullName = nil;
 static NSDate *sApolloDeletedCommentsLastObservedLinkDate = nil;
 static NSMutableDictionary<NSString *, NSString *> *sApolloDeletedCommentsRecoveredReasonsByFullName = nil;
 static NSMutableSet<NSString *> *sApolloDeletedCommentsRecoveredBodyKeys = nil;
+static NSMutableDictionary<NSString *, NSString *> *sApolloDeletedCommentsRecoveredReasonsByBodyKey = nil;
 static NSMutableSet<NSString *> *sApolloDeletedCommentsRevealedFullNames = nil;
 static NSMutableSet<NSString *> *sApolloDeletedCommentsRevealedBodyKeys = nil;
 static NSObject *sApolloDeletedCommentsRegistryLock = nil;
@@ -73,14 +74,18 @@ void ApolloDeletedCommentsRegisterRecoveredComment(NSString *fullName, NSString 
     }
 }
 
-static void ApolloDeletedCommentsRegisterRecoveredBody(NSString *author, NSString *body) {
+static void ApolloDeletedCommentsRegisterRecoveredBody(NSString *author, NSString *body, NSString *reason) {
     NSString *key = ApolloDeletedCommentsRegistryBodyKey(author, body);
     if (key.length == 0) return;
     @synchronized(ApolloDeletedCommentsRegistryLock()) {
         if (!sApolloDeletedCommentsRecoveredBodyKeys) {
             sApolloDeletedCommentsRecoveredBodyKeys = [NSMutableSet set];
         }
+        if (!sApolloDeletedCommentsRecoveredReasonsByBodyKey) {
+            sApolloDeletedCommentsRecoveredReasonsByBodyKey = [NSMutableDictionary dictionary];
+        }
         [sApolloDeletedCommentsRecoveredBodyKeys addObject:key];
+        sApolloDeletedCommentsRecoveredReasonsByBodyKey[key] = reason.length > 0 ? reason : ApolloDeletedCommentsReasonModeratorRemoved;
     }
 }
 
@@ -91,11 +96,27 @@ BOOL ApolloDeletedCommentsIsRecoveredComment(NSString *fullName) {
     }
 }
 
+NSString *ApolloDeletedCommentsRecoveredReasonForComment(NSString *fullName) {
+    if (![fullName isKindOfClass:[NSString class]] || fullName.length == 0) return nil;
+    @synchronized(ApolloDeletedCommentsRegistryLock()) {
+        return sApolloDeletedCommentsRecoveredReasonsByFullName[fullName];
+    }
+}
+
 BOOL ApolloDeletedCommentsIsRecoveredCommentBody(NSString *author, NSString *body) {
     NSString *key = ApolloDeletedCommentsRegistryBodyKey(author, body);
     if (key.length == 0) return NO;
     @synchronized(ApolloDeletedCommentsRegistryLock()) {
         return [sApolloDeletedCommentsRecoveredBodyKeys containsObject:key];
+    }
+}
+
+NSString *ApolloDeletedCommentsRecoveredReasonForCommentBody(NSString *author, NSString *body) {
+    NSString *key = ApolloDeletedCommentsRegistryBodyKey(author, body);
+    if (key.length == 0) return nil;
+    @synchronized(ApolloDeletedCommentsRegistryLock()) {
+        if (![sApolloDeletedCommentsRecoveredBodyKeys containsObject:key]) return nil;
+        return sApolloDeletedCommentsRecoveredReasonsByBodyKey[key] ?: ApolloDeletedCommentsReasonModeratorRemoved;
     }
 }
 
@@ -132,6 +153,21 @@ void ApolloDeletedCommentsMarkCommentBodyRevealed(NSString *author, NSString *bo
             sApolloDeletedCommentsRevealedBodyKeys = [NSMutableSet set];
         }
         [sApolloDeletedCommentsRevealedBodyKeys addObject:key];
+    }
+}
+
+void ApolloDeletedCommentsUnmarkCommentRevealed(NSString *fullName) {
+    if (![fullName isKindOfClass:[NSString class]] || fullName.length == 0) return;
+    @synchronized(ApolloDeletedCommentsRegistryLock()) {
+        [sApolloDeletedCommentsRevealedFullNames removeObject:fullName];
+    }
+}
+
+void ApolloDeletedCommentsUnmarkCommentBodyRevealed(NSString *author, NSString *body) {
+    NSString *key = ApolloDeletedCommentsRegistryBodyKey(author, body);
+    if (key.length == 0) return;
+    @synchronized(ApolloDeletedCommentsRegistryLock()) {
+        [sApolloDeletedCommentsRevealedBodyKeys removeObject:key];
     }
 }
 
@@ -417,9 +453,9 @@ static NSString *ApolloDeletedCommentsReasonForArchived(NSDictionary *archived) 
     return ApolloDeletedCommentsReasonModeratorRemoved;
 }
 
-static NSString *ApolloDeletedCommentsBadgeLabelForReason(NSString *reason) {
-    if ([reason isEqualToString:ApolloDeletedCommentsReasonUserDeleted]) return @"deleted by user";
-    return @"removed by mod";
+NSString *ApolloDeletedCommentsDisplayLabelForReason(NSString *reason) {
+    if ([reason isEqualToString:ApolloDeletedCommentsReasonUserDeleted]) return @"DELETED BY USER";
+    return @"DELETED BY MOD";
 }
 
 static NSString *ApolloDeletedCommentsRedditBodyHTML(NSString *body) {
@@ -474,19 +510,14 @@ static void ApolloDeletedCommentsApplyNeutralVoteMetadata(NSMutableDictionary *d
 }
 
 static void ApolloDeletedCommentsApplyRecoveredMetadata(NSMutableDictionary *data, NSString *reason) {
-    NSString *label = ApolloDeletedCommentsBadgeLabelForReason(reason);
     NSString *fullName = ApolloDeletedCommentsCommentFullName(data);
     NSString *author = [data[@"author"] isKindOfClass:[NSString class]] ? data[@"author"] : nil;
     NSString *body = [data[@"body"] isKindOfClass:[NSString class]] ? data[@"body"] : nil;
     data[ApolloDeletedCommentsMarkerKey] = @YES;
     data[ApolloDeletedCommentsReasonKey] = reason.length > 0 ? reason : ApolloDeletedCommentsReasonModeratorRemoved;
-    data[@"author_flair_text"] = label.length > 0 ? label : @"removed by mod";
-    data[@"author_flair_css_class"] = @"recovered-deleted";
-    data[@"author_flair_type"] = @"text";
-    data[@"author_flair_richtext"] = @[];
     ApolloDeletedCommentsApplyNeutralVoteMetadata(data);
     ApolloDeletedCommentsRegisterRecoveredComment(fullName, reason);
-    ApolloDeletedCommentsRegisterRecoveredBody(author, body);
+    ApolloDeletedCommentsRegisterRecoveredBody(author, body, reason);
 }
 
 static void ApolloDeletedCommentsClearRemovalMetadata(NSMutableDictionary *data) {
@@ -1465,5 +1496,9 @@ NSUInteger ApolloDeletedCommentsTestPatchRedditJSONRoot(id root, NSDictionary<NS
 
 BOOL ApolloDeletedCommentsTestArcticResponseShouldCooldown(NSInteger statusCode, NSInteger remaining) {
     return ApolloDeletedCommentsArcticResponseShouldCooldown(statusCode, remaining);
+}
+
+NSString *ApolloDeletedCommentsTestDisplayLabelForReason(NSString *reason) {
+    return ApolloDeletedCommentsDisplayLabelForReason(reason);
 }
 #endif
