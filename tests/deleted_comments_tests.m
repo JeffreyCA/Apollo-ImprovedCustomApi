@@ -133,6 +133,13 @@ static void TestNoOp(void) {
     Require([root[@"data"][@"children"][0][@"data"][@"body"] isEqualToString:@"[deleted]"], @"body remains unchanged");
 }
 
+static void TestArcticCooldownPolicy(void) {
+    Require(ApolloDeletedCommentsTestArcticResponseShouldCooldown(429, NSIntegerMax), @"429 triggers cooldown");
+    Require(ApolloDeletedCommentsTestArcticResponseShouldCooldown(200, 3), @"low remaining quota triggers cooldown");
+    Require(!ApolloDeletedCommentsTestArcticResponseShouldCooldown(200, 4), @"remaining quota above threshold does not trigger cooldown");
+    Require(!ApolloDeletedCommentsTestArcticResponseShouldCooldown(200, NSIntegerMax), @"missing quota header does not trigger cooldown");
+}
+
 int main(void) {
     @autoreleasepool {
         TestURLExtraction();
@@ -141,6 +148,7 @@ int main(void) {
         TestMoreExpansion();
         TestMixedMoreKeepsRemainingChildren();
         TestNoOp();
+        TestArcticCooldownPolicy();
         NSLog(@"deleted_comments_tests passed");
     }
     return 0;

@@ -23,6 +23,7 @@ void ApolloDeletedCommentsMarkCommentBodyRevealed(NSString *author, NSString *bo
 NSString *ApolloDeletedCommentsTestLinkFullNameFromRedditURL(NSURL *url);
 BOOL ApolloDeletedCommentsTestBodyLooksDeleted(NSString *body, NSString *bodyHTML);
 NSUInteger ApolloDeletedCommentsTestPatchRedditJSONRoot(id root, NSDictionary<NSString *, NSDictionary *> *archivedComments);
+BOOL ApolloDeletedCommentsTestArcticResponseShouldCooldown(NSInteger statusCode, NSInteger remaining);
 #endif
 
 #ifdef __cplusplus

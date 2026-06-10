@@ -1306,13 +1306,8 @@ static void initializeRandomSources() {
                                     UDKeyRedditClientSecret: @""};
     NSUserDefaults *standardDefaults = [NSUserDefaults standardUserDefaults];
     [standardDefaults registerDefaults:defaultValues];
-
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     NSDictionary *persistentDomain = bundleID.length > 0 ? [standardDefaults persistentDomainForName:bundleID] : nil;
-    if (!persistentDomain[UDKeyShowDeletedComments] && persistentDomain[UDKeyLegacyRevealDeletedComments]) {
-        [standardDefaults setBool:[standardDefaults boolForKey:UDKeyLegacyRevealDeletedComments] forKey:UDKeyShowDeletedComments];
-        persistentDomain = bundleID.length > 0 ? [standardDefaults persistentDomainForName:bundleID] : nil;
-    }
 
     sRedditClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedditClientId] ?: @"" copy];
     sRedditClientSecret = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedditClientSecret] ?: @"" copy];

@@ -23,11 +23,25 @@ static NSMutableSet<NSString *> *sApolloDeletedCommentsRecoveredBodyKeys = nil;
 static NSMutableSet<NSString *> *sApolloDeletedCommentsRevealedFullNames = nil;
 static NSMutableSet<NSString *> *sApolloDeletedCommentsRevealedBodyKeys = nil;
 static NSObject *sApolloDeletedCommentsRegistryLock = nil;
+static NSObject *sApolloDeletedCommentsArcticLock = nil;
+static NSMutableDictionary<NSString *, NSDictionary *> *sApolloDeletedCommentsArcticCache = nil;
+static NSMutableDictionary<NSString *, NSMutableArray *> *sApolloDeletedCommentsArcticInflight = nil;
+static NSDate *sApolloDeletedCommentsArcticCooldownUntil = nil;
 
 static NSString *const ApolloDeletedCommentsMarkerKey = @"apollo_recovered_deleted_comment";
 static NSString *const ApolloDeletedCommentsReasonKey = @"apollo_recovered_deleted_reason";
 static NSString *const ApolloDeletedCommentsReasonUserDeleted = @"user_deleted";
 static NSString *const ApolloDeletedCommentsReasonModeratorRemoved = @"moderator_removed";
+static NSString *const ApolloDeletedCommentsArcticCacheCommentsKey = @"comments";
+static NSString *const ApolloDeletedCommentsArcticCacheExpiryKey = @"expires";
+
+static NSTimeInterval const ApolloDeletedCommentsArcticPatchTimeout = 1.5;
+static NSTimeInterval const ApolloDeletedCommentsArcticSuccessCacheTTL = 600.0;
+static NSTimeInterval const ApolloDeletedCommentsArcticEmptyCacheTTL = 60.0;
+static NSTimeInterval const ApolloDeletedCommentsArcticErrorCooldown = 30.0;
+static NSTimeInterval const ApolloDeletedCommentsArcticRateLimitCooldown = 60.0;
+static NSInteger const ApolloDeletedCommentsArcticLowRemainingThreshold = 3;
+static NSUInteger const ApolloDeletedCommentsArcticMaxExactBatches = 2;
 
 static NSString *ApolloDeletedCommentsTrimmedString(NSString *s);
 static NSString *ApolloDeletedCommentsUnescapedHTMLText(NSString *s);
@@ -548,36 +562,170 @@ static NSDictionary<NSString *, NSDictionary *> *ApolloDeletedCommentsArcticComm
     return comments.count > 0 ? comments : nil;
 }
 
+static NSObject *ApolloDeletedCommentsArcticLock(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sApolloDeletedCommentsArcticLock = [NSObject new];
+    });
+    return sApolloDeletedCommentsArcticLock;
+}
+
+static BOOL ApolloDeletedCommentsArcticIsCoolingDown(void) {
+    @synchronized(ApolloDeletedCommentsArcticLock()) {
+        if (!sApolloDeletedCommentsArcticCooldownUntil) return NO;
+        if ([sApolloDeletedCommentsArcticCooldownUntil timeIntervalSinceNow] <= 0.0) {
+            sApolloDeletedCommentsArcticCooldownUntil = nil;
+            return NO;
+        }
+        return YES;
+    }
+}
+
+static void ApolloDeletedCommentsArcticBeginCooldown(NSTimeInterval seconds, NSString *reason) {
+    if (seconds <= 0.0) return;
+    NSDate *until = [NSDate dateWithTimeIntervalSinceNow:seconds];
+    @synchronized(ApolloDeletedCommentsArcticLock()) {
+        if (!sApolloDeletedCommentsArcticCooldownUntil ||
+            [sApolloDeletedCommentsArcticCooldownUntil timeIntervalSinceDate:until] < 0.0) {
+            sApolloDeletedCommentsArcticCooldownUntil = until;
+        }
+    }
+    ApolloLog(@"[DeletedComments] Arctic cooldown for %.0fs (%@)", seconds, reason ?: @"unknown");
+}
+
+static NSInteger ApolloDeletedCommentsIntegerHeader(NSHTTPURLResponse *http, NSString *name, NSInteger fallback) {
+    id value = http.allHeaderFields[name];
+    if (!value) {
+        NSString *lowerName = [name lowercaseString];
+        for (id key in http.allHeaderFields) {
+            if ([[[key description] lowercaseString] isEqualToString:lowerName]) {
+                value = http.allHeaderFields[key];
+                break;
+            }
+        }
+    }
+    if ([value respondsToSelector:@selector(integerValue)]) return [value integerValue];
+    return fallback;
+}
+
+static BOOL ApolloDeletedCommentsArcticResponseShouldCooldown(NSInteger statusCode, NSInteger remaining) {
+    if (statusCode == 429) return YES;
+    return remaining != NSIntegerMax && remaining <= ApolloDeletedCommentsArcticLowRemainingThreshold;
+}
+
+static void ApolloDeletedCommentsRecordArcticResponse(NSHTTPURLResponse *http, NSError *error) {
+    if (error) {
+        ApolloDeletedCommentsArcticBeginCooldown(ApolloDeletedCommentsArcticErrorCooldown, error.localizedDescription ?: @"network error");
+        return;
+    }
+
+    NSInteger statusCode = http ? http.statusCode : 0;
+    if (statusCode == 429) {
+        NSInteger reset = ApolloDeletedCommentsIntegerHeader(http, @"X-RateLimit-Reset", ApolloDeletedCommentsArcticRateLimitCooldown);
+        ApolloDeletedCommentsArcticBeginCooldown(MAX((NSTimeInterval)reset, ApolloDeletedCommentsArcticRateLimitCooldown), @"rate limited");
+        return;
+    }
+
+    NSInteger remaining = ApolloDeletedCommentsIntegerHeader(http, @"X-RateLimit-Remaining", NSIntegerMax);
+    if (ApolloDeletedCommentsArcticResponseShouldCooldown(statusCode, remaining)) {
+        NSInteger reset = ApolloDeletedCommentsIntegerHeader(http, @"X-RateLimit-Reset", ApolloDeletedCommentsArcticRateLimitCooldown);
+        ApolloDeletedCommentsArcticBeginCooldown(MAX((NSTimeInterval)reset, ApolloDeletedCommentsArcticRateLimitCooldown), @"low remaining quota");
+    }
+}
+
+static NSDictionary<NSString *, NSDictionary *> *ApolloDeletedCommentsCachedArcticComments(NSString *linkFullName) {
+    if (linkFullName.length == 0) return nil;
+    @synchronized(ApolloDeletedCommentsArcticLock()) {
+        NSDictionary *entry = sApolloDeletedCommentsArcticCache[linkFullName];
+        NSDate *expires = [entry[ApolloDeletedCommentsArcticCacheExpiryKey] isKindOfClass:[NSDate class]] ? entry[ApolloDeletedCommentsArcticCacheExpiryKey] : nil;
+        if (!entry || !expires || [expires timeIntervalSinceNow] <= 0.0) {
+            if (entry) [sApolloDeletedCommentsArcticCache removeObjectForKey:linkFullName];
+            return nil;
+        }
+        id comments = entry[ApolloDeletedCommentsArcticCacheCommentsKey];
+        return [comments isKindOfClass:[NSDictionary class]] ? comments : @{};
+    }
+}
+
+static void ApolloDeletedCommentsStoreArcticComments(NSString *linkFullName, NSDictionary<NSString *, NSDictionary *> *comments, NSTimeInterval ttl) {
+    if (linkFullName.length == 0 || ttl <= 0.0) return;
+    @synchronized(ApolloDeletedCommentsArcticLock()) {
+        if (!sApolloDeletedCommentsArcticCache) sApolloDeletedCommentsArcticCache = [NSMutableDictionary dictionary];
+        sApolloDeletedCommentsArcticCache[linkFullName] = @{
+            ApolloDeletedCommentsArcticCacheCommentsKey: comments ?: @{},
+            ApolloDeletedCommentsArcticCacheExpiryKey: [NSDate dateWithTimeIntervalSinceNow:ttl],
+        };
+    }
+}
+
+static void ApolloDeletedCommentsFinishInflightArcticFetch(NSString *linkFullName, NSDictionary<NSString *, NSDictionary *> *comments) {
+    NSArray *completions = nil;
+    @synchronized(ApolloDeletedCommentsArcticLock()) {
+        completions = [sApolloDeletedCommentsArcticInflight[linkFullName] copy];
+        [sApolloDeletedCommentsArcticInflight removeObjectForKey:linkFullName];
+    }
+    for (id block in completions) {
+        void (^completion)(NSDictionary<NSString *, NSDictionary *> *) = block;
+        completion(comments ?: @{});
+    }
+}
+
 static void ApolloDeletedCommentsFetchArcticComments(NSString *linkFullName, void (^completion)(NSDictionary<NSString *, NSDictionary *> *comments)) {
     if (linkFullName.length == 0) {
         completion(nil);
         return;
     }
 
+    NSDictionary *cached = ApolloDeletedCommentsCachedArcticComments(linkFullName);
+    if (cached) {
+        completion(cached);
+        return;
+    }
+
+    if (ApolloDeletedCommentsArcticIsCoolingDown()) {
+        completion(@{});
+        return;
+    }
+
+    @synchronized(ApolloDeletedCommentsArcticLock()) {
+        if (!sApolloDeletedCommentsArcticInflight) sApolloDeletedCommentsArcticInflight = [NSMutableDictionary dictionary];
+        NSMutableArray *waiting = sApolloDeletedCommentsArcticInflight[linkFullName];
+        if (waiting) {
+            [waiting addObject:[completion copy]];
+            return;
+        }
+        sApolloDeletedCommentsArcticInflight[linkFullName] = [NSMutableArray arrayWithObject:[completion copy]];
+    }
+
     NSURLComponents *components = [NSURLComponents componentsWithString:@"https://arctic-shift.photon-reddit.com/api/comments/tree"];
     components.queryItems = @[
         [NSURLQueryItem queryItemWithName:@"link_id" value:linkFullName],
-        [NSURLQueryItem queryItemWithName:@"limit" value:@"25000"],
-        [NSURLQueryItem queryItemWithName:@"start_depth" value:@"99"],
-        [NSURLQueryItem queryItemWithName:@"start_breadth" value:@"99"],
+        [NSURLQueryItem queryItemWithName:@"limit" value:@"5000"],
+        [NSURLQueryItem queryItemWithName:@"start_depth" value:@"20"],
+        [NSURLQueryItem queryItemWithName:@"start_breadth" value:@"50"],
         [NSURLQueryItem queryItemWithName:@"md2html" value:@"false"],
     ];
     NSURL *url = components.URL;
     if (!url) {
-        completion(nil);
+        ApolloDeletedCommentsFinishInflightArcticFetch(linkFullName, @{});
         return;
     }
 
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    NSMutableURLRequest *urlRequest = [NSMutableURLRequest requestWithURL:url];
+    urlRequest.timeoutInterval = 10.0;
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:urlRequest completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         NSDictionary *comments = nil;
+        NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        ApolloDeletedCommentsRecordArcticResponse(http, error);
         if (!error && data.length > 0) {
-            NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
             if (!http || (http.statusCode >= 200 && http.statusCode < 300)) {
                 id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
                 comments = ApolloDeletedCommentsArcticCommentMapFromRoot(root);
             }
         }
-        completion(comments);
+        ApolloDeletedCommentsStoreArcticComments(linkFullName, comments ?: @{}, comments.count > 0 ? ApolloDeletedCommentsArcticSuccessCacheTTL : ApolloDeletedCommentsArcticEmptyCacheTTL);
+        ApolloDeletedCommentsFinishInflightArcticFetch(linkFullName, comments ?: @{});
     }];
     [task resume];
 }
@@ -598,6 +746,10 @@ static void ApolloDeletedCommentsFetchArcticCommentsByFullNames(NSArray<NSString
         completion(@{});
         return;
     }
+    if (ApolloDeletedCommentsArcticIsCoolingDown()) {
+        completion(@{});
+        return;
+    }
 
     NSMutableOrderedSet<NSString *> *baseIDs = [NSMutableOrderedSet orderedSet];
     for (NSString *fullName in fullNames) {
@@ -609,7 +761,8 @@ static void ApolloDeletedCommentsFetchArcticCommentsByFullNames(NSArray<NSString
         return;
     }
 
-    NSArray<NSArray<NSString *> *> *batches = ApolloDeletedCommentsBatches(baseIDs.array, 250);
+    NSArray<NSArray<NSString *> *> *allBatches = ApolloDeletedCommentsBatches(baseIDs.array, 250);
+    NSArray<NSArray<NSString *> *> *batches = allBatches.count > ApolloDeletedCommentsArcticMaxExactBatches ? [allBatches subarrayWithRange:NSMakeRange(0, ApolloDeletedCommentsArcticMaxExactBatches)] : allBatches;
     NSMutableDictionary<NSString *, NSDictionary *> *merged = [NSMutableDictionary dictionary];
     __block NSUInteger nextIndex = 0;
     __block void (^fetchNext)(void) = nil;
@@ -632,9 +785,13 @@ static void ApolloDeletedCommentsFetchArcticCommentsByFullNames(NSArray<NSString
             return;
         }
 
-        NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSMutableURLRequest *urlRequest = [NSMutableURLRequest requestWithURL:url];
+        urlRequest.timeoutInterval = 10.0;
+
+        NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:urlRequest completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+            ApolloDeletedCommentsRecordArcticResponse(http, error);
             if (!error && data.length > 0) {
-                NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
                 if (!http || (http.statusCode >= 200 && http.statusCode < 300)) {
                     id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
                     NSDictionary *comments = ApolloDeletedCommentsArcticCommentMapFromFlatData(root);
@@ -1063,61 +1220,53 @@ static void ApolloDeletedCommentsPatchResponseAsync(NSData *data, NSURLRequest *
         return;
     }
 
-    ApolloDeletedCommentsFetchArcticComments(linkFullName, ^(NSDictionary<NSString *, NSDictionary *> *comments) {
-        if (comments.count == 0) {
-            completion(data);
+    NSObject *completionLock = [NSObject new];
+    __block BOOL didComplete = NO;
+    void (^completeOnce)(NSData *) = ^(NSData *patchedData) {
+        BOOL shouldComplete = NO;
+        @synchronized(completionLock) {
+            if (!didComplete) {
+                didComplete = YES;
+                shouldComplete = YES;
+            }
+        }
+        if (shouldComplete) completion(patchedData.length > 0 ? patchedData : data);
+    };
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ApolloDeletedCommentsArcticPatchTimeout * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        BOOL timedOut = NO;
+        @synchronized(completionLock) {
+            timedOut = !didComplete;
+        }
+        if (timedOut) {
+            ApolloLog(@"[DeletedComments] Arctic patch timed out for %@; delivering original Reddit comments", linkFullName);
+            ApolloDeletedCommentsArcticBeginCooldown(ApolloDeletedCommentsArcticErrorCooldown, @"patch timeout");
+            completeOnce(data);
+        }
+    });
+
+    void (^applyPatchWithComments)(NSDictionary<NSString *, NSDictionary *> *, NSUInteger, NSUInteger) = ^(NSDictionary<NSString *, NSDictionary *> *mergedComments, NSUInteger exactLookupCount, NSUInteger exactMatchedCount) {
+        if (mergedComments.count == 0) {
+            completeOnce(data);
             return;
         }
 
-        NSMutableDictionary<NSString *, NSDictionary *> *mergedComments = [comments mutableCopy];
-        NSMutableOrderedSet<NSString *> *exactTargets = [NSMutableOrderedSet orderedSet];
-        ApolloDeletedCommentsCollectExactLookupTargets(root, mergedComments, exactTargets);
-        for (NSString *fullName in ApolloDeletedCommentsRequestedMoreChildren(request)) {
-            ApolloDeletedCommentsAddLookupTarget(exactTargets, fullName);
-        }
-        __block NSUInteger exactMatchedCount = 0;
-
-        void (^applyPatch)(void) = ^{
-            NSMutableSet<NSString *> *visibleNames = [NSMutableSet set];
-            ApolloDeletedCommentsCollectVisibleCommentNames(root, visibleNames);
-            ApolloDeletedCommentsPatchStats stats = {0};
-            stats.exactLookupCount = exactTargets.count;
-            stats.exactMatchCount = exactMatchedCount;
-            NSDictionary<NSString *, NSArray<NSDictionary *> *> *childrenByParent = ApolloDeletedCommentsRecoverableChildrenByParent(mergedComments, &stats);
-            NSUInteger patched = ApolloDeletedCommentsOverlayArchivedDeletedComments(root, linkFullName, childrenByParent, visibleNames, &stats);
-            patched += ApolloDeletedCommentsPatchRedditJSONNode(root, mergedComments, visibleNames, &stats);
-            patched += ApolloDeletedCommentsInsertMissingMoreChildren(root, request, mergedComments, visibleNames, &stats);
-            if (patched == 0) {
-                ApolloLog(@"[DeletedComments] Response patch found no deleted comments to replace for %@ url=%@ (t1=%lu deletedLooking=%lu archivedMatches=%lu recoverable=%lu unrecoverable=%lu overlayInserted=%lu overlayRecoverable=%lu insertedMore=%lu requestedMore=%lu returnedRequested=%lu insertedMissing=%lu skippedMissingNoDelete=%lu exactLookup=%lu exactMatches=%lu archived=%lu)",
-                          linkFullName,
-                          request.URL.absoluteString ?: @"",
-                          (unsigned long)stats.t1Count,
-                          (unsigned long)stats.deletedLookingCount,
-                          (unsigned long)stats.archivedMatchCount,
-                          (unsigned long)stats.recoverableCount,
-                          (unsigned long)stats.unrecoverableCount,
-                          (unsigned long)stats.overlayInsertedCount,
-                          (unsigned long)stats.overlayRecoverableCount,
-                          (unsigned long)stats.insertedFromMoreCount,
-                          (unsigned long)stats.requestedMoreCount,
-                          (unsigned long)stats.returnedRequestedMoreCount,
-                          (unsigned long)stats.insertedMissingMoreCount,
-                          (unsigned long)stats.skippedMissingWithoutDeletionEvidenceCount,
-                          (unsigned long)stats.exactLookupCount,
-                          (unsigned long)stats.exactMatchCount,
-                          (unsigned long)mergedComments.count);
-                completion(data);
-                return;
-            }
-
-            NSData *patchedData = [NSJSONSerialization dataWithJSONObject:root options:0 error:nil];
-            if (patchedData.length == 0) {
-                completion(data);
-                return;
-            }
-            ApolloLog(@"[DeletedComments] Patched Reddit comments response for %@ (%lu comments, visible=%lu, unrecoverable=%lu, overlayInserted=%lu, overlayRecoverable=%lu, insertedMore=%lu, requestedMore=%lu, returnedRequested=%lu, insertedMissing=%lu, skippedMissingNoDelete=%lu, exactLookup=%lu, exactMatches=%lu)",
+        NSMutableSet<NSString *> *visibleNames = [NSMutableSet set];
+        ApolloDeletedCommentsCollectVisibleCommentNames(root, visibleNames);
+        ApolloDeletedCommentsPatchStats stats = {0};
+        stats.exactLookupCount = exactLookupCount;
+        stats.exactMatchCount = exactMatchedCount;
+        NSDictionary<NSString *, NSArray<NSDictionary *> *> *childrenByParent = ApolloDeletedCommentsRecoverableChildrenByParent(mergedComments, &stats);
+        NSUInteger patched = ApolloDeletedCommentsOverlayArchivedDeletedComments(root, linkFullName, childrenByParent, visibleNames, &stats);
+        patched += ApolloDeletedCommentsPatchRedditJSONNode(root, mergedComments, visibleNames, &stats);
+        patched += ApolloDeletedCommentsInsertMissingMoreChildren(root, request, mergedComments, visibleNames, &stats);
+        if (patched == 0) {
+            ApolloLog(@"[DeletedComments] Response patch found no deleted comments to replace for %@ url=%@ (t1=%lu deletedLooking=%lu archivedMatches=%lu recoverable=%lu unrecoverable=%lu overlayInserted=%lu overlayRecoverable=%lu insertedMore=%lu requestedMore=%lu returnedRequested=%lu insertedMissing=%lu skippedMissingNoDelete=%lu exactLookup=%lu exactMatches=%lu archived=%lu)",
                       linkFullName,
-                      (unsigned long)patched,
+                      request.URL.absoluteString ?: @"",
+                      (unsigned long)stats.t1Count,
+                      (unsigned long)stats.deletedLookingCount,
+                      (unsigned long)stats.archivedMatchCount,
                       (unsigned long)stats.recoverableCount,
                       (unsigned long)stats.unrecoverableCount,
                       (unsigned long)stats.overlayInsertedCount,
@@ -1128,19 +1277,69 @@ static void ApolloDeletedCommentsPatchResponseAsync(NSData *data, NSURLRequest *
                       (unsigned long)stats.insertedMissingMoreCount,
                       (unsigned long)stats.skippedMissingWithoutDeletionEvidenceCount,
                       (unsigned long)stats.exactLookupCount,
-                      (unsigned long)stats.exactMatchCount);
-            completion(patchedData);
-        };
+                      (unsigned long)stats.exactMatchCount,
+                      (unsigned long)mergedComments.count);
+            completeOnce(data);
+            return;
+        }
+
+        NSData *patchedData = [NSJSONSerialization dataWithJSONObject:root options:0 error:nil];
+        if (patchedData.length == 0) {
+            completeOnce(data);
+            return;
+        }
+        ApolloLog(@"[DeletedComments] Patched Reddit comments response for %@ (%lu comments, visible=%lu, unrecoverable=%lu, overlayInserted=%lu, overlayRecoverable=%lu, insertedMore=%lu, requestedMore=%lu, returnedRequested=%lu, insertedMissing=%lu, skippedMissingNoDelete=%lu, exactLookup=%lu, exactMatches=%lu)",
+                  linkFullName,
+                  (unsigned long)patched,
+                  (unsigned long)stats.recoverableCount,
+                  (unsigned long)stats.unrecoverableCount,
+                  (unsigned long)stats.overlayInsertedCount,
+                  (unsigned long)stats.overlayRecoverableCount,
+                  (unsigned long)stats.insertedFromMoreCount,
+                  (unsigned long)stats.requestedMoreCount,
+                  (unsigned long)stats.returnedRequestedMoreCount,
+                  (unsigned long)stats.insertedMissingMoreCount,
+                  (unsigned long)stats.skippedMissingWithoutDeletionEvidenceCount,
+                  (unsigned long)stats.exactLookupCount,
+                  (unsigned long)stats.exactMatchCount);
+        completeOnce(patchedData);
+    };
+
+    NSArray<NSString *> *requestedMoreChildren = ApolloDeletedCommentsRequestedMoreChildren(request);
+    if (ApolloDeletedCommentsIsMoreChildrenRequest(request) && requestedMoreChildren.count > 0) {
+        NSMutableOrderedSet<NSString *> *moreTargets = [NSMutableOrderedSet orderedSet];
+        for (NSString *fullName in requestedMoreChildren) {
+            ApolloDeletedCommentsAddLookupTarget(moreTargets, fullName);
+        }
+        ApolloDeletedCommentsFetchArcticCommentsByFullNames(moreTargets.array, ^(NSDictionary<NSString *, NSDictionary *> *exactComments) {
+            applyPatchWithComments(exactComments ?: @{}, moreTargets.count, exactComments.count);
+        });
+        return;
+    }
+
+    ApolloDeletedCommentsFetchArcticComments(linkFullName, ^(NSDictionary<NSString *, NSDictionary *> *comments) {
+        if (comments.count == 0) {
+            completeOnce(data);
+            return;
+        }
+
+        NSMutableDictionary<NSString *, NSDictionary *> *mergedComments = [comments mutableCopy];
+        NSMutableOrderedSet<NSString *> *exactTargets = [NSMutableOrderedSet orderedSet];
+        ApolloDeletedCommentsCollectExactLookupTargets(root, mergedComments, exactTargets);
+        for (NSString *fullName in requestedMoreChildren) {
+            ApolloDeletedCommentsAddLookupTarget(exactTargets, fullName);
+        }
+        __block NSUInteger exactMatchedCount = 0;
 
         if (exactTargets.count == 0) {
-            applyPatch();
+            applyPatchWithComments(mergedComments, exactTargets.count, exactMatchedCount);
             return;
         }
 
         ApolloDeletedCommentsFetchArcticCommentsByFullNames(exactTargets.array, ^(NSDictionary<NSString *, NSDictionary *> *exactComments) {
             exactMatchedCount = exactComments.count;
             if (exactComments.count > 0) [mergedComments addEntriesFromDictionary:exactComments];
-            applyPatch();
+            applyPatchWithComments(mergedComments, exactTargets.count, exactMatchedCount);
         });
     });
 }
@@ -1262,5 +1461,9 @@ NSUInteger ApolloDeletedCommentsTestPatchRedditJSONRoot(id root, NSDictionary<NS
     ApolloDeletedCommentsCollectVisibleCommentNames(root, visibleNames);
     ApolloDeletedCommentsPatchStats stats = {0};
     return ApolloDeletedCommentsPatchRedditJSONNode(root, archivedComments, visibleNames, &stats);
+}
+
+BOOL ApolloDeletedCommentsTestArcticResponseShouldCooldown(NSInteger statusCode, NSInteger remaining) {
+    return ApolloDeletedCommentsArcticResponseShouldCooldown(statusCode, remaining);
 }
 #endif
