@@ -455,7 +455,7 @@ static NSString *ApolloDeletedCommentsReasonForArchived(NSDictionary *archived) 
 
 NSString *ApolloDeletedCommentsDisplayLabelForReason(NSString *reason) {
     if ([reason isEqualToString:ApolloDeletedCommentsReasonUserDeleted]) return @"DELETED BY USER";
-    return @"DELETED BY MOD";
+    return @"REMOVED BY MOD";
 }
 
 static NSString *ApolloDeletedCommentsRedditBodyHTML(NSString *body) {

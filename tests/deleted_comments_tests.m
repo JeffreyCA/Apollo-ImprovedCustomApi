@@ -143,8 +143,8 @@ static void TestArcticCooldownPolicy(void) {
 
 static void TestReasonLabels(void) {
     Require([ApolloDeletedCommentsTestDisplayLabelForReason(@"user_deleted") isEqualToString:@"DELETED BY USER"], @"user-deleted reason label");
-    Require([ApolloDeletedCommentsTestDisplayLabelForReason(@"moderator_removed") isEqualToString:@"DELETED BY MOD"], @"mod-deleted reason label");
-    Require([ApolloDeletedCommentsTestDisplayLabelForReason(nil) isEqualToString:@"DELETED BY MOD"], @"default reason label");
+    Require([ApolloDeletedCommentsTestDisplayLabelForReason(@"moderator_removed") isEqualToString:@"REMOVED BY MOD"], @"mod-deleted reason label");
+    Require([ApolloDeletedCommentsTestDisplayLabelForReason(nil) isEqualToString:@"REMOVED BY MOD"], @"default reason label");
 }
 
 int main(void) {
