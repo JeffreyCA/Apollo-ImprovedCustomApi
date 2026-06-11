@@ -117,7 +117,7 @@ Then, in any browser, on a Reddit page tap **Share → Open in Apollo**.
 > [!IMPORTANT]
 > Reddit and Imgur no longer allow new API key creation so you'll need to share or use existing keys.
 >
-> Reddit has also recently started revoking API keys that are specifically used for Apollo or any other third party client.
+> Reddit has also recently started revoking API keys that are specifically used for Apollo or any other third party client. If you still have your own working key, see [Avoiding API key revocations](#avoiding-api-key-revocations).
 
 Reddit has a special deal with [Dystopia](https://apps.apple.com/us/app/dystopia-for-reddit/id1430599061) and [RedReader](https://play.google.com/store/apps/details?id=org.quantumbadger.redreader) to use the API for free for accessibility reasons. It is possible to use the client ID from one of those apps on either iOS or Android:
 
@@ -137,6 +137,26 @@ Reddit has a special deal with [Dystopia](https://apps.apple.com/us/app/dystopia
 Credits to [this guide](https://github.com/wchill/patcheddit?tab=readme-ov-file#what-if-i-dont-have-a-client-id) for the original workaround with RedReader.
 
 More discussion in [#82](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/82) and [#367](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/367).
+
+## Avoiding API key revocations
+
+> [!NOTE]
+> This section is for users who still have their **own** Reddit API key. If you're using the Dystopia/RedReader client IDs from the section above, do **not** change any of these values — that setup only works because it matches those apps' settings exactly.
+
+Reddit doesn't publish how it decides which keys to revoke, but past revocation waves appear to target keys that identifiably belong to third-party clients. Keys whose settings don't mention Apollo have tended to survive. There are no guarantees, but you can remove the obvious signals. Reddit can see:
+
+1. Your API app's registered settings at [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps): name, description, about URL, and redirect URI.
+2. The `redirect_uri` sent with every sign-in request.
+3. The `User-Agent` header on all API traffic.
+
+To scrub these:
+
+1. **Rename your Reddit API app.** At [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps), edit your app so the name, description, and about URL don't contain "Apollo", "Reborn", or the name of any other third-party client. Something generic and personal works best (e.g. `my-ios-app`).
+2. **Change the redirect URI.** In the same edit form, replace `apollo://reddit-oauth` with a personal scheme (e.g. `myscheme://reddit-oauth`), then enter the **exact same value** in Apollo Reborn's settings under **Custom API** → **Redirect URI**. On v3.1.0 or later no IPA patching is needed — any scheme works (see [Custom Redirect URI](#custom-redirect-uri) if you're on an older version). You won't be signed out: the redirect URI is only checked at sign-in time, so existing sessions keep refreshing normally.
+3. **Set a custom User Agent.** In **Custom API** → **User Agent**, don't leave the field blank — the built-in default is the same browser string for every Apollo Reborn user, which is itself a fingerprint. Use Reddit's recommended format, personalized to you: `ios:<your.bundle.id>:v1.0 (by /u/<your_username>)`.
+4. **(Sideloaders, optional) Pick a bundle ID without "Apollo".** The bundle ID isn't sent to Reddit directly, so this is the least important signal, but it keeps "Apollo" out of any string that could end up in your user agent and costs nothing to change at signing time.
+
+Finally, **don't copy these examples verbatim**. If everyone adopts the same "safe" name and redirect URI, that just becomes the next thing to scan for. The goal is to look like a small one-off personal script, which means values unique to you.
 
 ## Custom Redirect URI
 
@@ -186,7 +206,7 @@ To run via GitHub Actions, fork this repo and trigger **Actions** > **Build IPA*
 
 Recommended configuration:
 
-- **Use automatic bundle ID**: unchecked (e.g. `com.foo.Apollo`)
+- **Use automatic bundle ID**: unchecked — pick a bundle ID that doesn't contain "Apollo" (e.g. `com.foo.bar`, see [Avoiding API key revocations](#avoiding-api-key-revocations))
 - **Signing Mode**: Apple ID Sideload
 - **Inject dylibs/frameworks**: checked - add the `.deb` via **+dylib/deb/bundle**
   - **Cydia Substrate**: checked
