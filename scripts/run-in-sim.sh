@@ -19,11 +19,18 @@
 #   scripts/run-in-sim.sh --fresh-app     # re-patch the base IPA from scratch
 #   scripts/run-in-sim.sh --logs          # stream the app's ApolloLog output after launch
 #   scripts/run-in-sim.sh --drive         # after launch, run an idb UI smoke test (tree + screenshot)
+#   scripts/run-in-sim.sh --dark          # boot the simulator in dark mode (--light forces light)
+#   BUNDLE_ID=com.you.Build scripts/run-in-sim.sh
+#                                         # run under a custom bundle id (rebrands the app + appex
+#                                         # so it matches your installed device build)
+#   scripts/run-in-sim.sh --backup my.zip # preload an Apollo settings backup (API keys + account)
+#                                         # so real features can be tested signed-in
 #
 # Env overrides:
 #   BASE_IPA (./apollo-base.ipa)  BUNDLE_ID (com.christianselig.Apollo)
 #   SIM_NAME (Apollo-Sim)  SIM_DEVICE_TYPE (iPhone 16 Pro)  SIM_RUNTIME (newest iOS)
 #   DEPLOY_MIN (14.0)  WORK_DIR (./.sim)  IDB (idb on PATH)
+#   BACKUP_ZIP (--backup)  APPEARANCE (light|dark, --dark/--light)
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
@@ -36,18 +43,28 @@ SIM_RUNTIME="${SIM_RUNTIME:-}"
 DEPLOY_MIN="${DEPLOY_MIN:-14.0}"
 WORK_DIR="${WORK_DIR:-./.sim}"
 IDB="${IDB:-idb}"
+DEFAULT_BUNDLE_ID="com.christianselig.Apollo"
+APP_GROUP_SUITE="group.com.christianselig.apollo"   # tweak hardcodes this regardless of bundle id
+BACKUP_ZIP="${BACKUP_ZIP:-}"
+APPEARANCE="${APPEARANCE:-}"
 
 DO_BUILD=1; FRESH_APP=0; DO_LOGS=0; DO_DRIVE=0
-for arg in "$@"; do
-    case "$arg" in
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --no-build)   DO_BUILD=0 ;;
         --fresh-app)  FRESH_APP=1 ;;
         --logs)       DO_LOGS=1 ;;
         --drive)      DO_DRIVE=1 ;;
+        --dark)       APPEARANCE=dark ;;
+        --light)      APPEARANCE=light ;;
+        --backup)     BACKUP_ZIP="${2:-}"; shift ;;
+        --backup=*)   BACKUP_ZIP="${1#*=}" ;;
         -h|--help)    grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) echo "unknown arg: $arg" >&2; exit 2 ;;
+        *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
+    shift
 done
+[[ -n "$BACKUP_ZIP" && ! -f "$BACKUP_ZIP" ]] && { echo "error: backup zip not found: $BACKUP_ZIP" >&2; exit 2; }
 
 log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -113,6 +130,18 @@ log "Tweak dylib ready: $DYLIB_DST"
 # ----------------------------------------------------------------------------
 # 2. Prepare the Apollo.app shell (platform-patched + ad-hoc signed). Cached.
 # ----------------------------------------------------------------------------
+# The cached shell carries one specific bundle id; if a different BUNDLE_ID is
+# requested, re-prepare from the base IPA so the app + appex CFBundleIdentifiers
+# match. Read the id straight from the cached Info.plist so this is robust even
+# without a marker file.
+if [[ -f "$APP_DIR/Info.plist" ]]; then
+    CACHED_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_DIR/Info.plist" 2>/dev/null || true)"
+    if [[ -n "$CACHED_ID" && "$CACHED_ID" != "$BUNDLE_ID" ]]; then
+        log "Requested BUNDLE_ID '$BUNDLE_ID' differs from prepared '$CACHED_ID' — re-preparing app"
+        FRESH_APP=1
+    fi
+fi
+
 if [[ "$FRESH_APP" == 1 || ! -d "$APP_DIR" ]]; then
     [[ -f "$BASE_IPA" ]] || die "base IPA not found at $BASE_IPA (set BASE_IPA=...)"
     log "Preparing simulator app shell from $BASE_IPA (one-time; re-run with --fresh-app to redo)"
@@ -126,6 +155,29 @@ if [[ "$FRESH_APP" == 1 || ! -d "$APP_DIR" ]]; then
         | while IFS= read -r -d '' f; do file "$f" 2>/dev/null | grep -q 'Mach-O' && printf '%s\n' "$f"; done)
     log "Patching ${#MACHOS[@]} Mach-O files to iOS-Simulator platform"
     python3 "$PATCH_PY" "${MACHOS[@]}"
+
+    # Optionally rebrand the bundle id (app + every appex) so it matches a custom
+    # device build, mirroring scripts/rebrand-ipa.sh. Only the CFBundleIdentifier
+    # changes; the apollo:// URL scheme and the group.com.christianselig.apollo app
+    # group are left as-is (the tweak hardcodes that group regardless of bundle id).
+    if [[ "$BUNDLE_ID" != "$DEFAULT_BUNDLE_ID" ]]; then
+        PB=/usr/libexec/PlistBuddy
+        OLD_BASE="$("$PB" -c 'Print :CFBundleIdentifier' "$APP_DIR/Info.plist")"
+        log "Rebranding bundle id: $OLD_BASE -> $BUNDLE_ID"
+        "$PB" -c "Set :CFBundleIdentifier $BUNDLE_ID" "$APP_DIR/Info.plist"
+        shopt -s nullglob
+        for ax in "$APP_DIR"/PlugIns/*.appex; do
+            axplist="$ax/Info.plist"
+            [[ -f "$axplist" ]] || continue
+            axid="$("$PB" -c 'Print :CFBundleIdentifier' "$axplist" 2>/dev/null || true)"
+            if [[ "$axid" == "$OLD_BASE" ]]; then
+                "$PB" -c "Set :CFBundleIdentifier $BUNDLE_ID" "$axplist"
+            elif [[ "$axid" == "$OLD_BASE."* ]]; then
+                "$PB" -c "Set :CFBundleIdentifier ${BUNDLE_ID}.${axid#$OLD_BASE.}" "$axplist"
+            fi
+        done
+        shopt -u nullglob
+    fi
 
     # Re-sign ad-hoc inside-out (frameworks, then plugins, then the app).
     log "Re-signing ad-hoc"
@@ -169,12 +221,45 @@ fi
 open -a Simulator >/dev/null 2>&1 || true
 echo "$DEV" > "$WORK_DIR/device.txt"
 
+if [[ -n "$APPEARANCE" ]]; then
+    log "Setting simulator appearance: $APPEARANCE"
+    xcrun simctl ui "$DEV" appearance "$APPEARANCE" >/dev/null 2>&1 || true
+fi
+
 # ----------------------------------------------------------------------------
 # 4. Install the app and launch with the tweak injected.
 # ----------------------------------------------------------------------------
+# When preloading a backup, uninstall first so the data container (and cfprefsd's
+# cached preferences) are wiped — then the injected plists are read cleanly on the
+# next launch instead of being shadowed by stale cached values.
+if [[ -n "$BACKUP_ZIP" ]]; then
+    xcrun simctl uninstall "$DEV" "$BUNDLE_ID" >/dev/null 2>&1 || true
+fi
+
 log "Installing app"
 xcrun simctl install "$DEV" "$APP_DIR"
 xcrun simctl terminate "$DEV" "$BUNDLE_ID" >/dev/null 2>&1 || true
+
+# Preload an Apollo settings backup (the .zip exported from Settings → Backup):
+# preferences.plist -> the app's main prefs domain, group.plist -> the app-group
+# domain. Both live in the app data container in the simulator (the group suite
+# falls back there without full app-group provisioning). This signs the app in with
+# the backup's account and API keys so real, logged-in features can be tested.
+if [[ -n "$BACKUP_ZIP" ]]; then
+    log "Preloading settings backup: $(basename "$BACKUP_ZIP")"
+    BK_DIR="$(mktemp -d)"
+    unzip -q -o "$BACKUP_ZIP" -d "$BK_DIR"
+    BK_MAIN="$(find "$BK_DIR" -name 'preferences.plist' | head -1)"
+    BK_GROUP="$(find "$BK_DIR" -name 'group.plist' | head -1)"
+    [[ -n "$BK_MAIN" ]] || die "backup zip has no preferences.plist"
+    DATA="$(xcrun simctl get_app_container "$DEV" "$BUNDLE_ID" data)"
+    PREFS="$DATA/Library/Preferences"
+    mkdir -p "$PREFS"
+    cp "$BK_MAIN" "$PREFS/$BUNDLE_ID.plist"
+    [[ -n "$BK_GROUP" ]] && cp "$BK_GROUP" "$PREFS/$APP_GROUP_SUITE.plist"
+    rm -rf "$BK_DIR"
+    log "Backup applied (account + API keys preloaded)"
+fi
 
 LOG_PID=""
 if [[ "$DO_LOGS" == 1 ]]; then
