@@ -21,3 +21,6 @@ AsyncDisplayKit.framework/
 docs/
 iPhone18-3_26.1_23B85_Restore/*
 iOS26-Runtime-Headers/
+
+# Local iOS Simulator working dir (scripts/run-in-sim.sh)
+.sim/

@@ -13,10 +13,15 @@
 #import "ApolloMarkdownToolbarGif.h"
 #import "Tweak.h"
 
+// FFmpegKit's static libs are device-arm64 only, so simulator/dev builds
+// (APOLLO_SIM_BUILD, see Makefile + scripts/run-in-sim.sh) compile without it.
+// The v.redd.it CMAF/MPEG-TS audio fix below is stubbed to %orig in that mode.
+#if !APOLLO_SIM_BUILD
 #import "ffmpeg-kit/ffmpeg-kit/include/MediaInformationSession.h"
 #import "ffmpeg-kit/ffmpeg-kit/include/MediaInformation.h"
 #import "ffmpeg-kit/ffmpeg-kit/include/FFmpegKit.h"
 #import "ffmpeg-kit/ffmpeg-kit/include/FFprobeKit.h"
+#endif
 
 // Regex patterns for v.redd.it CMAF audio streams (Reddit switched from MPEG-TS to CMAF around November 2025)
 static NSString *const HLSAudioRegexPattern = @"#EXT-X-MEDIA:.*?\"(HLS_AUDIO.*?)\\.m3u8";
@@ -456,8 +461,11 @@ static const NSTimeInterval kApolloGifLoopSeekDedupeWindow = 0.25;
 // - Newer streams use CMAF/MP4 containers (fix: extract AAC and wrap in ADTS)
 - (void)URLSession:(NSURLSession *)urlSession downloadTask:(NSURLSessionDownloadTask *)downloadTask didFinishDownloadingToURL:(NSURL *)fileUrl {
     NSURL *originalURL = downloadTask.originalRequest.URL;
+#if !APOLLO_SIM_BUILD
+    // Only the FFmpeg remux paths use these; the simulator build stubs them out.
     NSString *path = fileUrl.absoluteString;
     NSString *fixedPath = [path stringByAppendingString:@".fixed"];
+#endif
 
     BOOL isCMAFAudio = [originalURL.absoluteString containsString:@"CMAF_AUDIO"] && [originalURL.pathExtension isEqualToString:@"mp4"];
     BOOL isHLSAudio = [originalURL.pathExtension isEqualToString:@"aac"];
@@ -467,6 +475,14 @@ static const NSTimeInterval kApolloGifLoopSeekDedupeWindow = 0.25;
         return;
     }
 
+#if APOLLO_SIM_BUILD
+    // Simulator/dev build: FFmpegKit is unavailable, so skip the audio container
+    // remux and let Apollo download the stream unmodified. Affected v.redd.it
+    // audio won't play correctly here — test that path on a device build.
+    ApolloLog(@"[-URLSession:downloadTask:didFinishDownloadingToURL:] APOLLO_SIM_BUILD: skipping FFmpeg audio fix for %@", originalURL);
+    %orig;
+    return;
+#else
     if (isCMAFAudio) {
         // CMAF audio is MP4 container with AAC - extract to ADTS format
         ApolloLog(@"[-URLSession:downloadTask:didFinishDownloadingToURL:] Converting CMAF MP4 audio to ADTS: %@", originalURL);
@@ -511,6 +527,7 @@ static const NSTimeInterval kApolloGifLoopSeekDedupeWindow = 0.25;
         [fileManager moveItemAtURL:fixedUrl toURL:fileUrl error:nil];
     }
     %orig;
+#endif
 }
 
 %end

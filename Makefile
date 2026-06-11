@@ -84,8 +84,24 @@ ApolloReborn_FRAMEWORKS = UIKit Security AVFoundation OSLog NaturalLanguage Imag
 ApolloReborn_LIBRARIES = z iconv
 ApolloReborn_CFLAGS = -fobjc-arc -Wno-unguarded-availability-new -Wno-module-import-in-extern-c -I$(THEOS_PROJECT_DIR)/$(SRC_DIR) -I$(THEOS_PROJECT_DIR)/liquid-glass/generated -I$(THEOS_PROJECT_DIR)/$(MODULES_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR)/minizip -DHAVE_ARC4RANDOM_BUF -DHAVE_ICONV -DHAVE_INTTYPES_H -DHAVE_PKCRYPT -DHAVE_STDINT_H -DHAVE_WZAES -DHAVE_ZLIB -DZLIB_COMPAT
 
-ApolloReborn_OBJ_FILES = $(shell find $(FFMPEG_KIT_DIR) -name '*.a')
 ApolloReborn_BUNDLE_RESOURCE_DIRS = resources
+
+# Simulator/dev builds (APOLLO_SIM_BUILD=1; see scripts/run-in-sim.sh) trim the
+# device-only pieces so the tweak links and loads against the iOS simulator SDK:
+#   - FFmpegKit's static libs are device-arm64 only and won't link for the
+#     simulator slice, so we skip them. ApolloMedia.xm stubs the v.redd.it CMAF
+#     audio fix under this macro (the only FFmpeg consumer).
+#   - The FLEX + openin-extension subprojects are device-oriented and not needed
+#     to exercise the tweak in the simulator.
+# run-in-sim.sh additionally builds with LOGOS_DEFAULT_GENERATOR=internal so the
+# dylib uses ObjC-runtime swizzling and has no CydiaSubstrate dependency.
+ifeq ($(APOLLO_SIM_BUILD),1)
+# The internal Logos generator does not auto-include <substrate.h> the way the
+# MobileSubstrate generator does, so force-include it for the MSHookIvar template
+# (a pure ObjC-runtime helper with no CydiaSubstrate link dependency).
+ApolloReborn_CFLAGS += -DAPOLLO_SIM_BUILD=1 -include substrate.h
+else
+ApolloReborn_OBJ_FILES = $(shell find $(FFMPEG_KIT_DIR) -name '*.a')
 
 SUBPROJECTS += $(FLEXING_DIR)/libflex
 # Standalone dylib for Apollo's "Open in Apollo" Action extension. Built as a
@@ -93,6 +109,7 @@ SUBPROJECTS += $(FLEXING_DIR)/libflex
 # into the appex at package time by scripts/fix-openin-extension.sh, NOT injected
 # into the main app (see scripts/inject-deb-local.sh).
 SUBPROJECTS += openin-extension
+endif
 
 CONTROL_FILE = $(THEOS_PROJECT_DIR)/control
 

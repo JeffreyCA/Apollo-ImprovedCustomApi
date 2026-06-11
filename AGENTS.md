@@ -21,6 +21,35 @@ make package
 The Makefile automatically generates `src/Version.h` from the `control` file and links FFmpegKit libraries.
 `THEOS` is available at `~/theos`. Do not rely on Azule/Cyan living in `/tmp`; `build-ipa.sh` uses the repo-local `scripts/inject-deb-local.sh` first for this repo's already-injected `Apollo-base.ipa` flow, then falls back to `azule`/`cyan` only for truly stock IPAs.
 
+### Fast iteration in the iOS Simulator
+
+For UI/settings/nav-bar/Liquid Glass work, `scripts/run-in-sim.sh` runs the tweak inside the iOS Simulator so you can test a change in seconds without building an IPA, signing, or sideloading. **Use this as the default inner loop**; fall back to a device IPA only for the things the simulator can't do (see limits below).
+
+```bash
+scripts/run-in-sim.sh              # build the sim tweak, (re)prepare Apollo, launch it injected
+scripts/run-in-sim.sh --no-build   # relaunch without rebuilding the tweak
+scripts/run-in-sim.sh --logs       # also stream ApolloLog (os_log subsystem "apollofix") after launch
+scripts/run-in-sim.sh --drive      # after launch, capture the idb accessibility tree + a screenshot to ./.sim/
+scripts/run-in-sim.sh --fresh-app  # re-patch the base IPA from scratch (after a new apollo-base.ipa)
+```
+
+How it works (and why each piece is needed):
+
+- **Apollo runs in the sim** because the script patches every Mach-O in `Payload/Apollo.app` (main binary + appex + frameworks) from `LC_BUILD_VERSION` platform iOS (2) to iOS-Simulator (7) and re-signs ad-hoc. The arm64 code is identical on an Apple Silicon Mac; only the platform tag blocks loading. This shell is cached under `./.sim/` and only re-prepared on `--fresh-app`.
+- **The tweak is built for the sim** with `make TARGET=simulator:clang:latest:14.0 LOGOS_DEFAULT_GENERATOR=internal APOLLO_SIM_BUILD=1`. The *internal* Logos generator swizzles via the ObjC runtime, so the dylib has **no CydiaSubstrate dependency** (the shipped device build links CydiaSubstrate, which can't load in the sim). `APOLLO_SIM_BUILD=1` makes the Makefile skip device-only **FFmpegKit** and the FLEX/openin subprojects, and `ApolloMedia.xm` stubs its FFmpeg v.redd.it audio fix under the same macro. `MSHookIvar` still works (it's a header-only ObjC-runtime template, force-included via `-include substrate.h`).
+- **The tweak is injected** via `SIMCTL_CHILD_DYLD_INSERT_LIBRARIES` pointing at `./.sim/ApolloReborn.dylib`. Code-only changes are just `scripts/run-in-sim.sh` again (rebuild + relaunch); no reinstall.
+- **The bundle id is configurable** via `BUNDLE_ID=...` (defaults to `com.christianselig.Apollo`); rebranded bundles pass their own id. Device/runtime are overridable via `SIM_NAME`, `SIM_DEVICE_TYPE`, `SIM_RUNTIME`.
+
+**Verify the tweak actually loaded** (don't assume from a clean launch): check os_log for the `apollofix` subsystem — module load lines and `... hook installed ...` confirm the internal-generator hooks took:
+
+```bash
+xcrun simctl spawn "$(cat .sim/device.txt)" log show --last 2m --predicate 'subsystem == "apollofix"' | grep ApolloFix
+```
+
+**Driving the UI yourself (idb):** `brew install facebook/fb/idb-companion`. The `fb-idb` Python client breaks on Python 3.12+ (`asyncio.get_event_loop()` was removed), so install it into a **Python 3.11 venv** and point the script at it: `IDB=/path/to/venv/bin/idb scripts/run-in-sim.sh --drive`. Useful idb commands: `idb ui describe-all --udid <DEV>` (accessibility tree with labels + frames), `idb ui tap <x> <y>`, `idb ui text "..."`, `idb screenshot --udid <DEV> out.png`. Read screenshots back to confirm visual changes.
+
+**Simulator limits — use a device IPA for these:** APNs push (so Live Activities push-to-start can't be exercised in the sim), the FFmpeg v.redd.it CMAF/MPEG-TS audio remux (stubbed out), and anything genuinely device-only. The sim *is* the same iOS 26.x family as the test device, so Liquid Glass nav-bar/tab-bar behavior reproduces faithfully.
+
 ## Project Structure
 
 ### Core Tweak Modules
