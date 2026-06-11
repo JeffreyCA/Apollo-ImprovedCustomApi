@@ -31,13 +31,17 @@ How it works, briefly: Apollo's App Store binary is built for device iOS, so the
 
 **Custom bundle id.** If your installed device build is rebranded, run the simulator under the same id so behavior matches: `BUNDLE_ID=com.example.MyBuild scripts/run-in-sim.sh`. The script rebrands the cached app (app + every extension) to that id and caches it; switching ids triggers one re-prepare. You can also override `SIM_DEVICE_TYPE`, `SIM_RUNTIME`, and `SIM_NAME`.
 
-**Preload a settings backup.** A fresh simulator install has no API key and no account, so the feed stays empty. Point `--backup` at a `.zip` exported from **Settings → Backup Settings** and the script loads its API keys and signed-in account into the simulator before launch — so you can test real, logged-in features (feeds, voting, media):
+**Preload a settings backup.** A fresh simulator install has no API key, so Reddit content won't load. Point `--backup` at a `.zip` exported from **Settings → Backup Settings** and the script loads its API keys and browsing session into the simulator before launch, so feeds and most features populate:
 
 ```bash
 scripts/run-in-sim.sh --backup ~/Downloads/Apollo_Backup_20260609.zip
 # combine with a custom id + dark mode to mirror your device exactly:
 BUNDLE_ID=com.example.MyBuild scripts/run-in-sim.sh --backup ~/Downloads/Apollo_Backup_20260609.zip --dark
 ```
+
+Or drop the zip at `./.sim/backup.zip` once and it's auto-loaded on every run (no `--backup` needed) — handy for letting an AI agent test signed-in flows without re-specifying the path.
+
+Note: this preloads your **API keys and app-only session** (enough to browse Reddit and exercise most UI), but **not** a fully signed-in Reddit *user* account — Apollo prunes the restored account on launch because the simulator can't host the keychain entitlement the credential needs. The Account tab will still say "sign in"; test profile/inbox/voting on a device build.
 
 A backup `.zip` contains your live Reddit login credentials — keep it out of the repo (the `./.sim/` working dir is gitignored) and don't commit one.
 

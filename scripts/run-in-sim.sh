@@ -64,6 +64,14 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+# Convention: if no backup was named, auto-load ./.sim/backup.zip when present, so
+# agents/devs can drop a settings backup there once and have it preloaded on every
+# run. (./.sim/ is gitignored; a backup zip carries live credentials — never commit
+# it.) Pass --backup '' or BACKUP_ZIP='' explicitly to opt out.
+DEFAULT_BACKUP="$WORK_DIR/backup.zip"
+if [[ -z "$BACKUP_ZIP" && -f "$DEFAULT_BACKUP" ]]; then
+    BACKUP_ZIP="$DEFAULT_BACKUP"
+fi
 [[ -n "$BACKUP_ZIP" && ! -f "$BACKUP_ZIP" ]] && { echo "error: backup zip not found: $BACKUP_ZIP" >&2; exit 2; }
 
 log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -258,7 +266,13 @@ if [[ -n "$BACKUP_ZIP" ]]; then
     cp "$BK_MAIN" "$PREFS/$BUNDLE_ID.plist"
     [[ -n "$BK_GROUP" ]] && cp "$BK_GROUP" "$PREFS/$APP_GROUP_SUITE.plist"
     rm -rf "$BK_DIR"
-    log "Backup applied (account + API keys preloaded)"
+    # API keys + the app-only session load, so the feed populates. A fully
+    # signed-in *user* account does NOT survive: Apollo prunes the restored
+    # account on launch because the credential round-trip needs a keychain-
+    # access-groups entitlement, which the iOS-26 simulator refuses to launch on
+    # an ad-hoc-signed app. Account-bound features (your profile, inbox, voting
+    # as you) must be tested on a device build.
+    log "Backup applied (API keys + browsing session; user login is device-only — see AGENTS.md)"
 fi
 
 LOG_PID=""
