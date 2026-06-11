@@ -18,7 +18,7 @@ body:
     attributes:
       label: Pre-submission checklist
       options:
-        - label: I searched existing issues and the subreddit guides first.
+        - label: I searched existing issues and read the README section first.
           required: true
         - label: I'm running the latest version of Apollo Reborn.
           required: true
@@ -31,7 +31,7 @@ body:
         - My own Reddit API key (own app on reddit.com/prefs/apps)
         - Dystopia
         - RedReader
-        - Custom redirect URI
+        - Other custom redirect URI
         - Not sure
     validations:
       required: true
@@ -49,8 +49,8 @@ body:
     id: redirect-uri
     attributes:
       label: Redirect URI
-      description: The redirect URI you entered in settings (do NOT include any client secret).
-      placeholder: "redreader://rr_oauth_redir"
+      description: The redirect URI you entered in Apollo Reborn settings (do NOT send any client ID or secret here).
+      placeholder: "apollo://reddit-oauth"
     validations:
       required: false
 
@@ -58,7 +58,8 @@ body:
     id: user-agent
     attributes:
       label: User agent
-      placeholder: "org.quantumbadger.redreader/1.25.1"
+      description: The user agent you entered in Apollo Reborn settings.
+      placeholder: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
     validations:
       required: false
 
@@ -94,6 +95,8 @@ body:
         - AltStore Classic/SideStore
         - Feather
         - LiveContainer
+        - Sideloadly
+        - Impactor
         - TrollStore
         - Jailbreak (.deb tweak)
         - Other

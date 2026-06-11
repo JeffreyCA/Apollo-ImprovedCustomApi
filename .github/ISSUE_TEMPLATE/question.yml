@@ -41,3 +41,11 @@ body:
       placeholder: "3.1.1"
     validations:
       required: false
+
+  - type: input
+    id: ios-version
+    attributes:
+      label: iOS version (if applicable)
+      placeholder: "iOS 26.5.1"
+    validations:
+      required: true
