@@ -22,12 +22,15 @@ scripts/run-in-sim.sh --no-build   # relaunch without rebuilding (e.g. after kil
 scripts/run-in-sim.sh --logs       # also stream the tweak's ApolloLog output after launch
 scripts/run-in-sim.sh --fresh-app  # re-prepare the app after dropping in a new apollo-base.ipa
 scripts/run-in-sim.sh --dark       # boot the simulator in dark mode (--light forces light)
-scripts/run-in-sim.sh --backup B.zip  # preload a settings backup so the app launches signed-in
+scripts/run-in-sim.sh --glass      # apply the iOS 26 Liquid Glass patch (--no-glass disables)
+scripts/run-in-sim.sh --backup B.zip  # preload a settings backup (API keys + browsing)
 ```
 
 Requirements: Xcode with an iOS Simulator runtime installed, and the same `apollo-base.ipa` used for device builds in the repo root. The first run prepares a cached, simulator-compatible copy of Apollo under `./.sim/` (a few seconds); subsequent runs reuse it.
 
 How it works, briefly: Apollo's App Store binary is built for device iOS, so the script rewrites each Mach-O's platform tag to iOS-Simulator and re-signs it ad-hoc (the arm64 code is identical on an Apple Silicon Mac). The tweak itself is built against the simulator SDK with Logos's *internal* generator — pure ObjC-runtime swizzling with no CydiaSubstrate dependency — and with `APOLLO_SIM_BUILD=1`, which skips the device-only FFmpegKit libraries. It's then injected with `DYLD_INSERT_LIBRARIES`.
+
+**Liquid Glass.** By default the simulator shows the standard (pre-iOS-26) Apollo UI, because the base IPA is linked against an older SDK. Pass `--glass` to apply the iOS 26 Liquid Glass patch — the floating glass tab bar, capsule nav buttons, and the in-app icon picker. It reuses `patch.sh --liquid-glass` (the same patcher the device builds use) to produce a cached glass base, so it requires the Git-LFS asset catalog to be pulled (`git lfs pull` once). Toggling `--glass` / `--no-glass` re-prepares the app.
 
 **Custom bundle id.** If your installed device build is rebranded, run the simulator under the same id so behavior matches: `BUNDLE_ID=com.example.MyBuild scripts/run-in-sim.sh`. The script rebrands the cached app (app + every extension) to that id and caches it; switching ids triggers one re-prepare. You can also override `SIM_DEVICE_TYPE`, `SIM_RUNTIME`, and `SIM_NAME`.
 

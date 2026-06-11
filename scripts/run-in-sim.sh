@@ -20,17 +20,17 @@
 #   scripts/run-in-sim.sh --logs          # stream the app's ApolloLog output after launch
 #   scripts/run-in-sim.sh --drive         # after launch, run an idb UI smoke test (tree + screenshot)
 #   scripts/run-in-sim.sh --dark          # boot the simulator in dark mode (--light forces light)
+#   scripts/run-in-sim.sh --glass         # apply the iOS 26 Liquid Glass patch (--no-glass disables)
 #   BUNDLE_ID=com.you.Build scripts/run-in-sim.sh
 #                                         # run under a custom bundle id (rebrands the app + appex
 #                                         # so it matches your installed device build)
-#   scripts/run-in-sim.sh --backup my.zip # preload an Apollo settings backup (API keys + account)
-#                                         # so real features can be tested signed-in
+#   scripts/run-in-sim.sh --backup my.zip # preload an Apollo settings backup (API keys + browsing)
 #
 # Env overrides:
 #   BASE_IPA (./apollo-base.ipa)  BUNDLE_ID (com.christianselig.Apollo)
 #   SIM_NAME (Apollo-Sim)  SIM_DEVICE_TYPE (iPhone 16 Pro)  SIM_RUNTIME (newest iOS)
 #   DEPLOY_MIN (14.0)  WORK_DIR (./.sim)  IDB (idb on PATH)
-#   BACKUP_ZIP (--backup)  APPEARANCE (light|dark, --dark/--light)
+#   BACKUP_ZIP (--backup)  APPEARANCE (light|dark, --dark/--light)  GLASS (0|1, --glass)
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
@@ -47,6 +47,7 @@ DEFAULT_BUNDLE_ID="com.christianselig.Apollo"
 APP_GROUP_SUITE="group.com.christianselig.apollo"   # tweak hardcodes this regardless of bundle id
 BACKUP_ZIP="${BACKUP_ZIP:-}"
 APPEARANCE="${APPEARANCE:-}"
+GLASS="${GLASS:-0}"
 
 DO_BUILD=1; FRESH_APP=0; DO_LOGS=0; DO_DRIVE=0
 while [[ $# -gt 0 ]]; do
@@ -57,6 +58,8 @@ while [[ $# -gt 0 ]]; do
         --drive)      DO_DRIVE=1 ;;
         --dark)       APPEARANCE=dark ;;
         --light)      APPEARANCE=light ;;
+        --glass)      GLASS=1 ;;
+        --no-glass)   GLASS=0 ;;
         --backup)     BACKUP_ZIP="${2:-}"; shift ;;
         --backup=*)   BACKUP_ZIP="${1#*=}" ;;
         -h|--help)    grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -149,12 +152,39 @@ if [[ -f "$APP_DIR/Info.plist" ]]; then
         FRESH_APP=1
     fi
 fi
+# Liquid Glass is an irreversible patch baked into the cached shell (SDK bump +
+# Assets.car swap), so re-prepare when the requested --glass state differs from
+# what's cached. The cached state is read from the main binary's linked SDK:
+# >= 19.0 (iOS 26) means glass is on.
+if [[ -f "$APP_DIR/Apollo" ]]; then
+    CACHED_SDK_MAJOR="$(vtool -show-build "$APP_DIR/Apollo" 2>/dev/null | awk '/sdk/{split($2,v,"."); print v[1]}')"
+    CACHED_GLASS=0; [[ -n "$CACHED_SDK_MAJOR" && "$CACHED_SDK_MAJOR" -ge 19 ]] && CACHED_GLASS=1
+    if [[ "$CACHED_GLASS" != "$GLASS" ]]; then
+        log "Requested glass=$GLASS differs from prepared glass=$CACHED_GLASS — re-preparing app"
+        FRESH_APP=1
+    fi
+fi
 
 if [[ "$FRESH_APP" == 1 || ! -d "$APP_DIR" ]]; then
     [[ -f "$BASE_IPA" ]] || die "base IPA not found at $BASE_IPA (set BASE_IPA=...)"
-    log "Preparing simulator app shell from $BASE_IPA (one-time; re-run with --fresh-app to redo)"
+
+    # With --glass, prep from a Liquid-Glass-patched base produced by the canonical
+    # patch.sh --liquid-glass (SDK bump to iOS 26 + duplicate-LC_RPATH fix + Assets.car
+    # swap + CFBundleAlternateIcons metadata — the latter is what flips the tweak's
+    # icon-picker on). Cached as ./.sim/glass-base.ipa; regenerated only when the base
+    # IPA changes. The platform patch below then re-targets it at the simulator.
+    SRC_IPA="$BASE_IPA"
+    if [[ "$GLASS" == 1 ]]; then
+        SRC_IPA="$WORK_DIR/glass-base.ipa"
+        if [[ ! -f "$SRC_IPA" || "$BASE_IPA" -nt "$SRC_IPA" ]]; then
+            log "Generating Liquid Glass base IPA via patch.sh --liquid-glass (cached at $SRC_IPA)"
+            ./patch.sh "$BASE_IPA" --liquid-glass -o "$SRC_IPA"
+        fi
+    fi
+
+    log "Preparing simulator app shell from $SRC_IPA (one-time; re-run with --fresh-app to redo)"
     rm -rf "$WORK_DIR/Payload"
-    unzip -q "$BASE_IPA" 'Payload/*' -d "$WORK_DIR"
+    unzip -q "$SRC_IPA" 'Payload/*' -d "$WORK_DIR"
     [[ -d "$APP_DIR" ]] || die "extracted IPA has no Payload/Apollo.app"
 
     write_patcher

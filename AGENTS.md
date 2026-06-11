@@ -32,7 +32,8 @@ scripts/run-in-sim.sh --logs       # also stream ApolloLog (os_log subsystem "ap
 scripts/run-in-sim.sh --drive      # after launch, capture the idb accessibility tree + a screenshot to ./.sim/
 scripts/run-in-sim.sh --fresh-app  # re-patch the base IPA from scratch (after a new apollo-base.ipa)
 scripts/run-in-sim.sh --dark       # boot the simulator in dark mode (--light forces light)
-scripts/run-in-sim.sh --backup B.zip  # preload an Apollo settings backup (API keys + signed-in account)
+scripts/run-in-sim.sh --glass      # apply the iOS 26 Liquid Glass patch (--no-glass disables)
+scripts/run-in-sim.sh --backup B.zip  # preload an Apollo settings backup (API keys + browsing)
 BUNDLE_ID=com.you.Build scripts/run-in-sim.sh   # run under a custom (rebranded) bundle id
 ```
 
@@ -46,6 +47,7 @@ How it works (and why each piece is needed):
   - **What loads:** the API keys (Reddit/Imgur/Giphy/ImageChest) and the app-only OAuth session — so Reddit content populates and most UI/features are exercisable.
   - **What does NOT:** a fully signed-in *user* account. Apollo prunes the restored account to an empty array on launch (the `RedditAccounts2` blob collapses ~50KB → ~219 bytes). The credential round-trip needs a `keychain-access-groups` entitlement, and the iOS-26 simulator **refuses to launch** an ad-hoc-signed app carrying that entitlement (`SBMainWorkspace` denies it — there's no provisioning profile to back it). So the Account tab still shows "sign in," and account-bound features (your profile, inbox, voting as you) must be tested on a device IPA. The token *is* inline in the backup (not a keychain reference), so this is purely the sim's ad-hoc-signing/entitlement limitation, not a missing-data problem.
 - **Appearance** is set with `xcrun simctl ui <DEV> appearance dark|light` via `--dark`/`--light` (or `APPEARANCE=`); it persists on the device until changed.
+- **Liquid Glass** is off by default (the raw `apollo-base.ipa` links against the iOS 16 SDK, so `IsLiquidGlass()` is NO and both UIKit's iOS-26 chrome and the tweak's LG hooks stay dormant). `--glass` (or `GLASS=1`) prepares the shell from a `patch.sh --liquid-glass` base — the canonical glass patcher, reused so it stays in sync: it bumps the main binary's linked SDK to iOS 26 (which flips `IsLiquidGlass()`, since `GetLinkedSDKVersion()` reads that field), drops the duplicate `@executable_path/Frameworks` LC_RPATH (iOS-26 dyld rejects it — otherwise the launch dies with an `SBMainWorkspace` denial), swaps in the prebuilt `Assets.car`, and writes the `CFBundleAlternateIcons` metadata that turns on the in-app icon picker. The glass base is cached at `./.sim/glass-base.ipa` (regenerated only when `apollo-base.ipa` changes); toggling `--glass`/`--no-glass` re-prepares the app shell (detected from the cached main binary's SDK). Needs the Git-LFS `liquid-glass/prebuilt/Assets.car` pulled (`git lfs pull`).
 
 **Verify the tweak actually loaded** (don't assume from a clean launch): check os_log for the `apollofix` subsystem — module load lines and `... hook installed ...` confirm the internal-generator hooks took:
 
