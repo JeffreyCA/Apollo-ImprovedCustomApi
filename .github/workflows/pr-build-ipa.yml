@@ -85,7 +85,7 @@ jobs:
     timeout-minutes: 15
     env:
       APOLLO_IPA_URL: https://downloads.apolloreborn.app/apollobase.ipa
-      ARTIFACT_RETENTION_DAYS: 14
+      ARTIFACT_RETENTION_DAYS: 7
 
     steps:
       - name: Checkout PR head
