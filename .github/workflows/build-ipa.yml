@@ -36,9 +36,10 @@ on:
         type: boolean
         default: false
       url_schemes:
-        description: 'Comma-separated URL schemes to add (e.g. "custom, test, myapp")'
+        description: 'Comma-separated URL schemes to add'
         required: false
         type: string
+        default: 'dystopia,redreader'
       remove_code_signature:
         description: 'Remove code signature'
         required: false
@@ -207,7 +208,7 @@ jobs:
           if [ "${{ github.event.inputs.liquid_glass_icons }}" == "true" ]; then
             SUFFIX="${SUFFIX}-LiquidGlassIcons"
           fi
-          if [ -n "${{ github.event.inputs.url_schemes }}" ]; then
+          if [ -n "${{ github.event.inputs.url_schemes }}" ] && [ "${{ github.event.inputs.url_schemes }}" != "dystopia,redreader" ]; then
             SUFFIX="${SUFFIX}-URLSchemes"
           fi
           OUTPUT_IPA="${BASE}${SUFFIX}.ipa"

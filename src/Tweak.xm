@@ -346,6 +346,10 @@ static const char kARCompletion = '\0';
 }
 
 - (BOOL)start {
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseCustomOAuthSignIn]) {
+        return %orig;
+    }
+
     NSString *callbackScheme = objc_getAssociatedObject(self, &kARScheme);
     NSURL *authURL            = objc_getAssociatedObject(self, &kARAuthURL);
     void (^completion)(NSURL *, NSError *) = objc_getAssociatedObject(self, &kARCompletion);
@@ -1195,6 +1199,7 @@ static void initializeRandomSources() {
                                     UDKeyProxyImgurDDG: @NO,
                                     UDKeyImageChestAPIToken: @"",
                                     UDKeyGiphyAPIKey: @"",
+                                    UDKeyUseCustomOAuthSignIn: @YES,
                                     UDKeyEnableInlineImages: @YES,
                                     UDKeyInlineImageAlignment: @(ApolloInlineImageAlignmentCenter),
                                     UDKeyAutoplayInlineGIFs: @(ApolloAutoplayInlineGIFModeDefault),

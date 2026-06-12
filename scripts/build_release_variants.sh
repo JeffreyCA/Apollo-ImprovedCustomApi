@@ -54,6 +54,25 @@ print(config["app"]["buildVersion"])
 PY
 }
 
+# Default URL schemes baked into every released IPA so the native
+# ASWebAuthenticationSession sign-in works out-of-the-box for the most common
+# shared-key workarounds (Dystopia / RedReader) without manual Info.plist edits.
+DEFAULT_URL_SCHEMES="dystopia,redreader"
+
+# Run patch.sh over a finished IPA to inject DEFAULT_URL_SCHEMES and write the
+# result back in place. Only the standard/no-extensions variants need this: the
+# four Liquid Glass variants below are derived from those two via patch.sh and
+# therefore inherit the already-injected schemes.
+inject_default_url_schemes_in_place() {
+    local ipa="$1"
+    local work output
+    work="$(mktemp -d)"
+    output="$work/$(basename "$ipa")"
+    bash "${REPO_DIR}/patch.sh" "$ipa" --url-schemes "$DEFAULT_URL_SCHEMES" -o "$output"
+    mv -f "$output" "$ipa"
+    rm -rf "$work"
+}
+
 set_main_app_bundle_versions_in_ipa() {
     local ipa="$1"
     local short_version="$2"
@@ -253,6 +272,7 @@ bash "${REPO_DIR}/scripts/fix-safari-extension.sh" "$STANDARD_IPA"
 # too, and the no-extensions variants have no appex (the script no-ops).
 bash "${REPO_DIR}/scripts/fix-openin-extension.sh" "$STANDARD_IPA"
 set_main_app_bundle_versions_in_ipa "$STANDARD_IPA" "$TWEAK_VERSION" "$APP_BUILD_VERSION"
+inject_default_url_schemes_in_place "$STANDARD_IPA"
 
 # Inject the Reborn widget extension into the STANDARD IPA so the GLASS and
 # GLASSICONS variants (both derived from it via patch.sh below) inherit it. The
@@ -272,6 +292,7 @@ echo "[2/6] Building no-extensions injected IPA..."
 cyan -i "$IPA_PATH" -f "$DEB_PATH" -o "$NOEXT_IPA" -e
 strip_arm64e_from_substrate_in_ipa "$NOEXT_IPA"
 set_main_app_bundle_versions_in_ipa "$NOEXT_IPA" "$TWEAK_VERSION" "$APP_BUILD_VERSION"
+inject_default_url_schemes_in_place "$NOEXT_IPA"
 
 echo ""
 echo "[3/6] Applying Liquid Glass patch to standard IPA..."

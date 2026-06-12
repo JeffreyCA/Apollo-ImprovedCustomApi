@@ -8,6 +8,7 @@ static NSString *const UDKeyImgurClientId = @"ImgurApiClientId";
 static NSString *const UDKeyGiphyAPIKey = @"GiphyAPIKey";
 static NSString *const UDKeyImageChestAPIToken = @"ImageChestAPIToken";
 static NSString *const UDKeyRedirectURI = @"RedirectURI";
+static NSString *const UDKeyUseCustomOAuthSignIn = @"UseCustomOAuthSignIn";
 static NSString *const UDKeyUserAgent = @"UserAgent";
 static NSString *const UDKeyBlockAnnouncements = @"DisableApollonouncements";
 static NSString *const UDKeyEnableFLEX = @"EnableFlexDebugging";

@@ -139,6 +139,26 @@ typedef NS_ENUM(NSInteger, Tag) {
     return NO;
 }
 
+- (BOOL)apollo_usesCustomOAuthSignIn {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseCustomOAuthSignIn];
+}
+
+- (NSString *)apollo_redirectURIDetailText {
+    if ([self apollo_usesCustomOAuthSignIn]) {
+        return @"Must match the redirect URI registered with your Reddit API app. Any URI scheme is supported.";
+    }
+
+    NSString *registered = [[self registeredURLSchemes] componentsJoinedByString:@", "];
+    if (registered.length == 0) registered = @"none";
+    return [NSString stringWithFormat:@"Must match the app whose API key you're using. URI scheme (part before ://) must be registered in Info.plist under CFBundleURLTypes. Registered: %@", registered];
+}
+
+- (void)apollo_applyRedirectURITextColorToCell:(UITableViewCell *)cell {
+    UITextField *textField = [self apollo_textFieldInCell:cell];
+    if (!textField) return;
+    textField.textColor = ([self apollo_usesCustomOAuthSignIn] || [self isRedirectURISchemeValid:textField.text]) ? [UIColor labelColor] : [UIColor systemRedColor];
+}
+
 - (UIImage *)decodeBase64ToImage:(NSString *)strEncodeData {
     NSData *data = [[NSData alloc]initWithBase64EncodedString:strEncodeData options:NSDataBase64DecodingIgnoreUnknownCharacters];
     return [UIImage imageWithData:data];
@@ -660,7 +680,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
         case SectionBackupRestore: return 4;
-        case SectionAPIKeys: return 10; // 7 text fields + Can't sign in? + API key setup guide + Copy Widget Setup Code
+        case SectionAPIKeys: return 11; // 7 text fields + OAuth switch + Can't sign in? + API key setup guide + Copy Widget Setup Code
         case SectionGeneral: return sShowDeletedComments ? 11 : 10;
         case SectionMedia: return 12 + (sEnableInlineImages ? 0 : -kApolloMediaInlineDependentRows);
         case SectionSubreddits: return sSubredditListEnhancements ? 8 : 7;
@@ -939,16 +959,23 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                                 placeholder:defaultRedirectURI
                                                                        text:sRedirectURI
                                                                         tag:TagRedirectURI
-                                                                     detail:@"Must match the redirect URI registered with your Reddit API app. Any URI scheme is supported."];
+                                                                      detail:[self apollo_redirectURIDetailText]];
+            [self apollo_applyRedirectURITextColorToCell:cell];
             return cell;
         }
         case 6:
+            return [self switchCellWithIdentifier:@"Cell_API_CustomOAuth"
+                                            label:@"Universal OAuth Sign-In"
+                                           detail:@"Signs in with an in-app web view so any Redirect URI works. Turn off for Apollo's native sign-in."
+                                               on:[self apollo_usesCustomOAuthSignIn]
+                                           action:@selector(customOAuthSignInSwitchToggled:)];
+        case 7:
             return [self stackedTextFieldCellWithIdentifier:@"Cell_API_UserAgent"
                                                       label:@"User Agent"
                                                 placeholder:defaultUserAgent
-                                                       text:sUserAgent
+                                                        text:sUserAgent
                                                         tag:TagUserAgent];
-        case 7: {
+        case 8: {
             UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_Troubleshooting"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Troubleshooting"];
@@ -957,7 +984,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.textLabel.text = @"Can't sign in?";
             return cell;
         }
-        case 8: {
+        case 9: {
             UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_Instructions"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Instructions"];
@@ -967,7 +994,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.textLabel.text = @"Giphy & ImgChest API Key Setup";
             return cell;
         }
-        case 9: {
+        case 10: {
             UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_WidgetSetupCode"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_WidgetSetupCode"];
@@ -1546,11 +1573,11 @@ typedef NS_ENUM(NSInteger, Tag) {
             [self promptClearCustomSubredditBannersFromSourceView:cell];
         }
     } else if (indexPath.section == SectionAPIKeys) {
-        if (indexPath.row == 7) {
+        if (indexPath.row == 8) {
             [self pushTroubleshootingViewController];
-        } else if (indexPath.row == 8) {
-            [self pushInstructionsViewController];
         } else if (indexPath.row == 9) {
+            [self pushInstructionsViewController];
+        } else if (indexPath.row == 10) {
             [self copyWidgetSetupCode];
         }
     } else if (indexPath.section == SectionAbout) {
@@ -1651,7 +1678,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (BOOL)tableView:(UITableView *)tableView shouldHighlightRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == SectionBackupRestore) return YES;
-    if (indexPath.section == SectionAPIKeys && (indexPath.row == 7 || indexPath.row == 8 || indexPath.row == 9)) return YES;
+    if (indexPath.section == SectionAPIKeys && (indexPath.row == 8 || indexPath.row == 9 || indexPath.row == 10)) return YES;
     if (indexPath.section == SectionMedia) {
         NSInteger row = ApolloMediaLogicalRow(indexPath.row);
         return (row == 0 || row == 1 || row == 2 || row == 5 || row == 6 || row == 7 || row == 8 || row == 9);
@@ -1882,7 +1909,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         sRedirectURI = textField.text;
         [[NSUserDefaults standardUserDefaults] setValue:sRedirectURI forKey:UDKeyRedirectURI];
-        textField.textColor = [UIColor labelColor];
+        textField.textColor = ([self apollo_usesCustomOAuthSignIn] || [self isRedirectURISchemeValid:textField.text]) ? [UIColor labelColor] : [UIColor systemRedColor];
     } else if (textField.tag == TagUserAgent) {
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         sUserAgent = textField.text;
@@ -1952,6 +1979,12 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)randNsfwSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyShowRandNsfw];
+}
+
+- (void)customOAuthSignInSwitchToggled:(UISwitch *)sender {
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyUseCustomOAuthSignIn];
+    [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:5 inSection:SectionAPIKeys]]
+                          withRowAnimation:UITableViewRowAnimationNone];
 }
 
 - (void)subredditListEnhancementsSwitchToggled:(UISwitch *)sender {
