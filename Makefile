@@ -132,5 +132,13 @@ lg-previews:
 	@echo "Regenerating $(notdir $(LG_PREVIEW_HEADER)) from liquid-glass/icons.json"
 	@python3 $(LG_DIR)/scripts/generate_previews_header.py $(LG_PREVIEW_HEADER)
 
+# Move libflex into bundle for rootless deb builds
+#   Remove libflex.plist for all packages since it's not needed
+before-package::
+ifeq ($(THEOS_PACKAGE_SCHEME),rootless)
+	@mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/libflex.dylib $(THEOS_STAGING_DIR)/Library/Application\ Support/ApolloReborn/ApolloReborn.bundle/libflex.dylib
+endif
+	@rm $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/libflex.plist
+
 include $(THEOS_MAKE_PATH)/aggregate.mk
 include $(THEOS_MAKE_PATH)/tweak.mk
