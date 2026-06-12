@@ -24,6 +24,7 @@ struct SinglePostWidgetView: View {
             // gradient, like Apollo's text widgets.
             if render.imageData != nil {
                 imageContent(render.post)
+                    .modifier(AccentedPhotoBackground(data: render.imageData))
             } else {
                 textContent(render.post)
             }
@@ -62,7 +63,7 @@ struct SinglePostWidgetView: View {
             }
         }
         .overlay(alignment: .topTrailing) {
-            NextOverlayButton(rotationKey: entry.rotationKey)
+            NextOverlayButton(rotationKey: entry.rotationKey, kind: "SinglePostWidget")
                 .offset(y: -6)
         }
         .opensInApollo(post)
@@ -74,7 +75,8 @@ struct SinglePostWidgetView: View {
         let caption = entry.caption
         return VStack(alignment: .leading, spacing: 5) {
             WidgetHeader(label: "r/\(post.subreddit)",
-                         trailing: AnyView(NextButton(rotationKey: entry.rotationKey)))
+                         trailing: AnyView(NextButton(rotationKey: entry.rotationKey,
+                                                      kind: "SinglePostWidget")))
             Spacer(minLength: 2)
             Text(post.title)
                 .font(.system(size: family == .systemSmall ? 14 : 17, weight: .semibold))
@@ -143,9 +145,10 @@ struct PhotoWidgetView: View {
                 }
             }
             .overlay(alignment: .topTrailing) {
-                NextOverlayButton(rotationKey: entry.rotationKey)
+                NextOverlayButton(rotationKey: entry.rotationKey, kind: "PhotoWidget")
                     .offset(y: -6)
             }
+            .modifier(AccentedPhotoBackground(data: renders[0].imageData))
             .opensInApollo(post)
         }
     }
@@ -223,7 +226,7 @@ struct FeedWidgetView: View {
             // rounded corner instead of being clipped diagonally.
             Spacer(minLength: 8)
             if let img = imageFromData(render.imageData) {
-                img.resizable().aspectRatio(contentMode: .fill)
+                img.accentedPhotoResizable().aspectRatio(contentMode: .fill)
                     .frame(width: 42, height: 42)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }

@@ -22,7 +22,8 @@ struct ShowerthoughtsWidgetView: View {
             let post = renders[0].post
             VStack(alignment: .leading, spacing: 6) {
                 WidgetHeader(label: "Showerthoughts 🚿",
-                             trailing: AnyView(NextButton(rotationKey: entry.rotationKey)))
+                             trailing: AnyView(NextButton(rotationKey: entry.rotationKey,
+                                                          kind: "ShowerthoughtsWidget")))
                 Spacer(minLength: 2)
                 Text(post.title)
                     .font(titleFont).fontWeight(.semibold)
@@ -69,7 +70,8 @@ struct JokesWidgetView: View {
             VStack(alignment: .leading, spacing: 6) {
                 WidgetHeader(label: "Jokes 😄",
                              tint: Color(red: 1.0, green: 0.82, blue: 0.35),
-                             trailing: AnyView(NextButton(rotationKey: entry.rotationKey)))
+                             trailing: AnyView(NextButton(rotationKey: entry.rotationKey,
+                                                          kind: "JokesWidget")))
                 Spacer(minLength: 2)
                 Text(post.title)
                     .font(setupFont).fontWeight(.semibold)

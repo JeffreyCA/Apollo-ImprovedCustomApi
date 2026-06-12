@@ -78,7 +78,7 @@ struct SetupView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: small ? 7 : 9) {
             Image("ApolloAvatar")
-                .resizable().scaledToFill()
+                .accentedPhotoResizable().scaledToFill()
                 .frame(width: small ? 38 : 46, height: small ? 38 : 46)
                 .clipShape(Circle())
                 .overlay(Circle().strokeBorder(.white.opacity(0.25), lineWidth: 1))
@@ -124,12 +124,13 @@ struct WidgetHeader: View {
 }
 
 /// "Show another" button bound to a widget's rotation key. Renders nothing if
-/// the key is absent.
+/// the key is absent. `kind` is the widget kind to reload explicitly.
 struct NextButton: View {
     let rotationKey: String?
+    var kind: String? = nil
     var body: some View {
         if let key = rotationKey {
-            Button(intent: NextItemIntent(key: key)) {
+            Button(intent: NextItemIntent(key: key, kind: kind)) {
                 Image(systemName: "arrow.clockwise").font(.caption2.weight(.bold))
             }
             .buttonStyle(.plain)
@@ -140,9 +141,10 @@ struct NextButton: View {
 /// Circular ↻ button overlaid on image widgets (Single Post, Photo).
 struct NextOverlayButton: View {
     let rotationKey: String?
+    var kind: String? = nil
     var body: some View {
         if let key = rotationKey {
-            Button(intent: NextItemIntent(key: key)) {
+            Button(intent: NextItemIntent(key: key, kind: kind)) {
                 Image(systemName: "arrow.clockwise")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(.white)
@@ -258,6 +260,50 @@ extension View {
 func imageFromData(_ data: Data?) -> Image? {
     guard let data, let ui = UIImage(data: data) else { return nil }
     return Image(uiImage: ui)
+}
+
+extension Image {
+    /// `resizable()`, with the system's photo treatment in accented rendering
+    /// (iOS 18 tinted and iOS 26 clear/tinted Home Screens): desaturated and
+    /// washed with the accent color, matching Apple's own Photos widget.
+    /// Without the annotation the system flattens every image into a flat
+    /// accent silhouette, which turned photos and thumbnails into blank blobs.
+    @ViewBuilder func accentedPhotoResizable() -> some View {
+        if #available(iOSApplicationExtension 18.0, iOS 18.0, *) {
+            self.resizable().widgetAccentedRenderingMode(.accentedDesaturated)
+        } else {
+            self.resizable()
+        }
+    }
+}
+
+/// Accented rendering (iOS 18 tinted, iOS 26 clear/tinted) DISCARDS the
+/// container background — which is where the full-bleed photos of Photo, Post,
+/// and Calendar live — so those widgets rendered as bare scrims/text floating
+/// on glass. This modifier re-draws the photo as a full-bleed underlay in the
+/// content layer (which accented mode keeps), marked full-color. Inert in
+/// normal light/dark rendering, where the container background still shows.
+struct AccentedPhotoBackground: ViewModifier {
+    @Environment(\.widgetRenderingMode) private var renderingMode
+    @Environment(\.widgetContentMargins) private var margins
+    let data: Data?
+
+    func body(content: Content) -> some View {
+        if renderingMode == .accented, let img = imageFromData(data) {
+            content.background {
+                img.accentedPhotoResizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+                    // Bleed past the default content margins to the widget edge
+                    // (the system clips to the container shape).
+                    .padding(EdgeInsets(top: -margins.top, leading: -margins.leading,
+                                        bottom: -margins.bottom, trailing: -margins.trailing))
+            }
+        } else {
+            content
+        }
+    }
 }
 
 /// First render of a `.posts` entry (for reading its background image).

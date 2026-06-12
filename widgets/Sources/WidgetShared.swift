@@ -264,6 +264,20 @@ func runPostTimeline(
         completion(singleEntry(.needsSetup, refreshIn: 60 * 60))
         return
     }
+    // ↻ ("show another") taps reload this timeline, and a full refetch here
+    // (dozens of posts + a batch of image downloads) keeps the old entry on
+    // screen for seconds — the button looks broken. A fresh fetch can also
+    // reorder the pool mid-cycle. So when the reload was caused by a rotation
+    // tap and we have a cached pool, rebuild straight from cache: instant, and
+    // it cycles deterministically through the already-downloaded posts.
+    if Rotation.recentlyAdvanced(cacheKey) {
+        let cached = PostCache.load(cacheKey)
+        if !cached.isEmpty {
+            rwLog.log("runPostTimeline[\(cacheKey, privacy: .public)]: rotation tap → serving \(cached.count) cached")
+            Task { completion(await assemble(cached)) }
+            return
+        }
+    }
     Task {
         let client = RedditAppOnlyClient(clientID: creds.clientID, userAgent: creds.resolvedUserAgent)
         do {
