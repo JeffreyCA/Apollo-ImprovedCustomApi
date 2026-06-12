@@ -1564,6 +1564,8 @@ static void ApolloSubredditIndexStyleHeaderView(UIView *header, UITableView *tab
         objc_setAssociatedObject(tableView, &kApolloSubredditHeaderLoggedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         ApolloLog(@"[SubredditIndex] styled-header class=%@ title=%@", NSStringFromClass([header class]), text);
     }
+
+    header.backgroundColor = tableView.backgroundColor;
 }
 
 static void ApolloSubredditIndexHeaderLayoutSubviewsHook(id self, SEL _cmd) {
