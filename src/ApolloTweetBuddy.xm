@@ -9,9 +9,17 @@
 // extra link-preview networking in one place.
 
 #import <Foundation/Foundation.h>
+#import <mach-o/dyld.h>
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+
+// Minimal surface for Apollo's vote-count base class. RDKLink and RDKComment
+// both inherit `score` from RDKVotable without overriding it, so hooking
+// RDKVotable covers posts and comments alike.
+@interface RDKVotable : NSObject
+@property (nonatomic) long long score;
+@end
 
 static NSString *const kApolloTweetBaseURL = @"https://apollogur.download/api/tweet/";
 static NSString *const kXHomepageURL = @"https://x.com/";
@@ -23,6 +31,62 @@ static const NSTimeInterval kGuestTokenMaxAge = 9000.0;
 static NSString *sGuestToken = nil;
 static NSDate *sTokenFetchDate = nil;
 static dispatch_queue_t sTokenQueue;
+
+// Apollo only issues the apollogur tweet fetch this protocol intercepts when
+// the post/comment's score is > 40. That gate lives inline in three compiled
+// Swift render paths, each reading -[RDKVotable score] via objc_msgSend right
+// before comparing it:
+//   - CompactPostThumbnailNode (sub_1006f0f60): cmp x0, #0x29  -> b.lt skip
+//   - RichMediaNode            (sub_100587790): cmp x0, #0x28  -> cset w22, gt
+//   - CommentsHeaderCellNode   (sub_100568f58): cmp x0, #0x28  -> cset w23, gt
+// (the first two cover the post feeds; the third is the post detail page's
+// header cell, which has its own separate gate feeding the same link-button
+// builder.)
+// objc_msgSend tail-calls into -score, so __builtin_return_address(0) inside
+// the hooked getter equals the instruction right after each `bl objc_msgSend`
+// above -- i.e. the `cmp` itself. We match on those three exact addresses and
+// report a score of 41 (just enough to pass all gates) only there, leaving
+// every other caller (including the on-screen vote count) untouched.
+//
+// Addresses are Hopper file offsets (preferred base 0x100000000) for the
+// pinned Apollo 1.15.11 (285) binary this tweak ships against.
+static const uintptr_t kGateCompactThumbnailCmp = 0x1006f41acULL; // sub_1006f0f60: cmp x0, #0x29
+static const uintptr_t kGateRichMediaCmp = 0x100587accULL;        // sub_100587790: cmp x0, #0x28
+static const uintptr_t kGateCommentsHeaderCmp = 0x1005697e8ULL;   // sub_100568f58: cmp x0, #0x28
+
+// Expected instruction encodings at the gate sites above, verified once
+// at startup so a re-pinned/altered binary safely disables this fix instead
+// of comparing against the wrong address.
+static const uint32_t kGateCompactThumbnailCmpInsn = 0xF100A41FU; // cmp x0, #0x29
+static const uint32_t kGateRichMediaCmpInsn = 0xF100A01FU;        // cmp x0, #0x28
+static const uint32_t kGateCommentsHeaderCmpInsn = 0xF100A01FU;   // cmp x0, #0x28
+
+static intptr_t sApolloSlide = 0;
+static BOOL sUpvoteGateBypassArmed = NO;
+
+// Image 0 as seen by _dyld_get_image_*() is the first-loaded image, which for
+// an injected dylib is the dylib itself, not Apollo's main executable. Find
+// Apollo's image explicitly by matching the main bundle's executable path.
+static intptr_t ApolloTweetBuddyFindApolloSlide(void) {
+    const char *apolloPath = [[NSBundle mainBundle] executablePath].fileSystemRepresentation;
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strcmp(name, apolloPath) == 0) {
+            return _dyld_get_image_vmaddr_slide(i);
+        }
+    }
+    return 0;
+}
+
+static uintptr_t ApolloTweetBuddyGateAddress(uintptr_t hopperAddr) {
+    return (uintptr_t)((intptr_t)hopperAddr + sApolloSlide);
+}
+
+static BOOL ApolloTweetBuddyVerifyGateInstruction(uintptr_t hopperAddr, uint32_t expected) {
+    uint32_t actual = *(const uint32_t *)ApolloTweetBuddyGateAddress(hopperAddr);
+    return actual == expected;
+}
 
 static NSDictionary *ApolloTweetBuddyTransformResult(NSDictionary *result) {
     NSDictionary *legacy = result[@"legacy"];
@@ -190,6 +254,31 @@ static NSDictionary *ApolloTweetBuddyTransformResult(NSDictionary *result) {
 
 @end
 
+%hook RDKVotable
+
+// Apollo gates the apollogur tweet-preview fetch on score > 40. Inflate the
+// score to 41 only when read from one of the three known gate sites, so
+// previews render for tweet links regardless of vote count while the
+// displayed vote count (and everything else) sees the real score.
+- (long long)score {
+    long long real = %orig;
+
+    if (!sUpvoteGateBypassArmed) return real;
+    if (sLinkPreviewBodyMode == ApolloLinkPreviewModeOff && sLinkPreviewCommentsMode == ApolloLinkPreviewModeOff) return real;
+    if (real > 40) return real;
+
+    uintptr_t ret = (uintptr_t)__builtin_return_address(0);
+    if (ret == ApolloTweetBuddyGateAddress(kGateCompactThumbnailCmp) ||
+        ret == ApolloTweetBuddyGateAddress(kGateRichMediaCmp) ||
+        ret == ApolloTweetBuddyGateAddress(kGateCommentsHeaderCmp)) {
+        return 41;
+    }
+
+    return real;
+}
+
+%end
+
 %hook NSURLSessionConfiguration
 
 + (instancetype)defaultSessionConfiguration {
@@ -208,5 +297,16 @@ static NSDictionary *ApolloTweetBuddyTransformResult(NSDictionary *result) {
 
 %ctor {
     sTokenQueue = dispatch_queue_create("com.apollo.tweetbuddy.tokenqueue", DISPATCH_QUEUE_SERIAL);
+
+    sApolloSlide = ApolloTweetBuddyFindApolloSlide();
+
+    sUpvoteGateBypassArmed = sApolloSlide != 0 &&
+                             ApolloTweetBuddyVerifyGateInstruction(kGateCompactThumbnailCmp, kGateCompactThumbnailCmpInsn) &&
+                             ApolloTweetBuddyVerifyGateInstruction(kGateRichMediaCmp, kGateRichMediaCmpInsn) &&
+                             ApolloTweetBuddyVerifyGateInstruction(kGateCommentsHeaderCmp, kGateCommentsHeaderCmpInsn);
+    if (!sUpvoteGateBypassArmed) {
+        ApolloLog(@"[TweetBuddy] upvote gate bypass disabled: unexpected instructions at gate sites (binary mismatch?)");
+    }
+
     ApolloLog(@"[TweetBuddy] ApolloTweetProtocol ready");
 }
