@@ -1,17 +1,13 @@
 name: PR build IPA variants
 
-# Builds the distributable IPA variants for a PR and posts a sticky comment with
-# per-variant download links, so reviewers can sideload a test build without
-# building locally.
+# Builds the distributable IPA variants for a PR and hands a comment body off to
+# pr-build-ipa-comment.yml, which posts a sticky comment with per-variant
+# download links so reviewers can sideload a test build without building locally.
 #
-# Gated to CODEOWNERS authors: they push branches to this repo directly, so the
-# PR is same-repo and GITHUB_TOKEN is write-scoped (enough to comment). Fork PRs
-# get a read-only token and are not built. No dedicated GitHub App needed.
-#
-# Known limitation: if a code owner opens the PR from a fork, GITHUB_TOKEN is
-# read-only regardless of the requested permissions. The build still runs, but
-# the comment step cannot post (it 403s). Code owners normally push branches to
-# this repo directly, so this is rare in practice.
+# Gated to CODEOWNERS authors (read from the trusted base ref). The build runs on
+# both same-repo and fork PRs, but fork PRs get a read-only token here, so this
+# workflow never comments directly: it uploads the comment body as an artifact
+# and a separate workflow_run workflow (write-scoped) posts it. No GitHub App.
 
 on:
   pull_request:
@@ -32,13 +28,18 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+# No write scopes: this workflow only builds and uploads artifacts. The comment
+# is posted by pr-build-ipa-comment.yml. (Fork PRs get a read-only token anyway.)
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   authorize:
     name: Check PR author is a code owner
+    # Cheap pre-filter to skip the expensive build for non-code-owner PRs. This
+    # is NOT the security boundary for forks (a fork controls this workflow file
+    # and could bypass it) — the authoritative code-owner gate runs in the
+    # fork-uneditable pr-build-ipa-comment.yml before any comment is posted.
     runs-on: ubuntu-latest
     outputs:
       is_owner: ${{ steps.check.outputs.is_owner }}
@@ -46,6 +47,9 @@ jobs:
       - name: Checkout CODEOWNERS
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          # Read CODEOWNERS from the trusted BASE ref, never the PR head: a fork
+          # could otherwise add itself to CODEOWNERS to self-authorize the build.
+          ref: ${{ github.event.pull_request.base.sha }}
           sparse-checkout: .github/CODEOWNERS
           sparse-checkout-cone-mode: false
 
@@ -287,28 +291,14 @@ jobs:
             echo "The IPA build for \`${{ steps.meta.outputs.short_sha || github.event.pull_request.head.sha }}\` failed. See the [workflow run](${RUN_URL}) for logs."
           } > comment.md
 
-      - name: Post or update sticky PR comment
-        # Run on success or failure, but not when the run was cancelled.
+      - name: Upload comment payload
+        # The PR-event token is read-only for fork PRs, so it cannot comment.
+        # Hand the comment body to pr-build-ipa-comment.yml, which runs in the
+        # base-repo context with a write token and posts it. The target PR is
+        # resolved there from trusted event data, so no PR number is passed here.
         if: ${{ !cancelled() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
-          MARKER: '<!-- apollo-pr-ipa-build -->'
-        run: |
-          # Upsert one marker-keyed comment: find our previous comment by its
-          # hidden marker and PATCH it in place, otherwise create a new one. This
-          # keys on the marker (not gh's --edit-last) so it never clobbers an
-          # unrelated github-actions[bot] comment.
-          [ -f comment.md ] || { echo "No comment body to post."; exit 0; }
-          COMMENT_ID=$(gh api --paginate \
-            "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
-            --jq ".[] | select(.body | startswith(\"${MARKER}\")) | .id" | tail -1)
-          if [ -n "$COMMENT_ID" ]; then
-            gh api --method PATCH \
-              "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}" \
-              -f body="$(cat comment.md)" >/dev/null
-            echo "Updated existing comment ${COMMENT_ID}"
-          else
-            gh pr comment "${PR}" --body-file comment.md
-            echo "Created new comment"
-          fi
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pr-comment
+          path: comment.md
+          retention-days: 1
