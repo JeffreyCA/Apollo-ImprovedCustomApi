@@ -451,6 +451,20 @@ static BOOL ApolloNativeActionMenuActionControllerIsModeratorOnly(id actionContr
     return ApolloReadBoolIvar(actionController, "isShowingOnlyModeratorActions", NO);
 }
 
+// Most ActionController subclasses have no custom header. A couple embed a
+// custom header view above the action rows; flattening those into a native
+// UIMenu would silently drop the header. ModeratorReportsController (the
+// "View Reports" moderator action) is special-cased: we DO convert it, but
+// render its report list as native inline menu sections (see
+// ApolloNativeActionMenuBuildModeratorReportSections), so it is not treated as
+// an opaque custom header here.
+static BOOL ApolloNativeActionMenuActionControllerHasCustomHeader(id actionController) {
+    if ([actionController isKindOfClass:objc_getClass("_TtC6Apollo26ModeratorReportsController")]) {
+        return NO;
+    }
+    return ApolloReadObjectIvar(actionController, "headerView") != nil;
+}
+
 static void ApolloNativeActionMenuBeginCaptureStyled(id sender, id owner, BOOL moderatorStyle) {
     if (!ApolloNativeActionMenusEnabled()) return;
 
@@ -596,6 +610,97 @@ static void ApolloNativeActionMenuSortSavedCategoriesIfNeeded(id presenter, id a
     }
 }
 
+// Renders ModeratorReportsController's report data as native inline UIMenu
+// sections. The controller embeds a custom scrollable header table listing
+// moderator state, moderator reports, and user reports. Rather than parse the
+// underlying Swift [[Any]] storage (whose leaves may be Swift String, Int, or
+// bridged NSString/NSNumber), we reuse Apollo's own data source to render the
+// cells and read their labels — this reproduces Apollo's exact formatting.
+//
+// headerTableView / dataSource are non-optional stored properties, so they are
+// created and have their cells registered in the controller's initializer,
+// before presentation — making it safe to dequeue cells here.
+static UIMenuElement *ApolloNativeActionMenuMakeReportRow(NSString *title, NSString *subtitle) {
+    UIAction *row = [UIAction actionWithTitle:title image:nil identifier:nil handler:^(__unused UIAction *action) {}];
+    row.attributes = UIMenuElementAttributesDisabled;
+    if (subtitle.length > 0 && [row respondsToSelector:@selector(setSubtitle:)]) {
+        row.subtitle = subtitle;
+    }
+    return row;
+}
+
+static UIMenu *ApolloNativeActionMenuMakeReportSection(NSString *header, NSArray<UIMenuElement *> *rows) {
+    return [UIMenu menuWithTitle:(header ?: @"") image:nil identifier:nil options:UIMenuOptionsDisplayInline children:rows];
+}
+
+// Section header titles, recovered from Hopper
+// (-[ModeratorReportsControllerDataSource tableView:viewForHeaderInSection:]):
+// section 1 = moderator reports, section 2 = user reports, section 0 = the
+// moderator action/state, whose title depends on the state tag byte.
+static NSString *ApolloNativeActionMenuReportSectionHeader(id controller, NSInteger section) {
+    if (section == 1) return @"Moderator Reports";
+    if (section == 2) return @"User Reports";
+
+    ptrdiff_t stateOffset = ApolloIvarOffset(object_getClass(controller), "state");
+    if (stateOffset < 0) return nil;
+    uint8_t stateTag = *(uint8_t *)((uint8_t *)(__bridge void *)controller + stateOffset + 0x10);
+    switch (stateTag) {
+        case 0: return @"Approved by";
+        case 1: return @"Removed as Spam by";
+        case 2: return @"Removed by";
+        default: return nil;
+    }
+}
+
+static NSArray<UIMenuElement *> *ApolloNativeActionMenuBuildModeratorReportSections(id actionController) {
+    if (![actionController isKindOfClass:objc_getClass("_TtC6Apollo26ModeratorReportsController")]) {
+        return nil;
+    }
+
+    id<UITableViewDataSource> dataSource = (id<UITableViewDataSource>)ApolloReadObjectIvar(actionController, "dataSource");
+    UITableView *table = (UITableView *)ApolloReadObjectIvar(actionController, "headerTableView");
+    if (!dataSource || ![table isKindOfClass:[UITableView class]]) {
+        return nil;
+    }
+    if (![dataSource respondsToSelector:@selector(tableView:numberOfRowsInSection:)]
+        || ![dataSource respondsToSelector:@selector(tableView:cellForRowAtIndexPath:)]) {
+        return nil;
+    }
+
+    NSMutableArray<UIMenuElement *> *sections = [NSMutableArray array];
+    @try {
+        NSInteger sectionCount = 3;
+        if ([dataSource respondsToSelector:@selector(numberOfSectionsInTableView:)]) {
+            sectionCount = [dataSource numberOfSectionsInTableView:table];
+        }
+
+        for (NSInteger section = 0; section < sectionCount; section++) {
+            NSInteger rowCount = [dataSource tableView:table numberOfRowsInSection:section];
+            if (rowCount <= 0) continue;
+
+            NSMutableArray<UIMenuElement *> *rows = [NSMutableArray array];
+            for (NSInteger row = 0; row < rowCount; row++) {
+                NSIndexPath *indexPath = [NSIndexPath indexPathForRow:row inSection:section];
+                UITableViewCell *cell = [dataSource tableView:table cellForRowAtIndexPath:indexPath];
+                NSString *title = cell.textLabel.text;
+                if (title.length == 0) continue;
+                NSString *subtitle = cell.detailTextLabel.text;
+                [rows addObject:ApolloNativeActionMenuMakeReportRow(title, subtitle)];
+            }
+
+            if (rows.count > 0) {
+                NSString *header = ApolloNativeActionMenuReportSectionHeader(actionController, section);
+                [sections addObject:ApolloNativeActionMenuMakeReportSection(header, rows)];
+            }
+        }
+    } @catch (__unused NSException *exception) {
+        ApolloLog(@"[NativeActionMenu] Failed to render moderator reports: %@", exception);
+        return nil;
+    }
+
+    return sections.count > 0 ? sections : nil;
+}
+
 static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderatorStyle) {
     void *actionsBuffer = ApolloReadRawIvar(actionController, "actions");
     void *textActionsBuffer = ApolloReadRawIvar(actionController, "textActions");
@@ -610,6 +715,11 @@ static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderat
     NSMutableArray<UIMenuElement *> *children = [NSMutableArray array];
     UIColor *moderatorTintColor = ApolloNativeActionMenuModeratorColor();
     UIColor *menuTintColor = moderatorStyle ? moderatorTintColor : nil;
+
+    NSArray<UIMenuElement *> *reportSections = ApolloNativeActionMenuBuildModeratorReportSections(actionController);
+    if (reportSections.count > 0) {
+        [children addObjectsFromArray:reportSections];
+    }
 
     for (int64_t i = 0; i < actionCount; i++) {
         uint8_t *element = (uint8_t *)actionsBuffer + 0x20 + i * 0x30;
@@ -816,6 +926,7 @@ static BOOL ApolloNativeActionMenuPresent(id presenter, id actionController, voi
     if (!ApolloNativeActionMenusEnabled()) return NO;
     if (![actionController isKindOfClass:objc_getClass("_TtC6Apollo16ActionController")]) return NO;
     if (ApolloReadBoolIvar(actionController, "showKeyboardOnAppearanceForTextEntryView", NO)) return NO;
+    if (ApolloNativeActionMenuActionControllerHasCustomHeader(actionController)) return NO;
 
     ApolloNativeActionMenuSortSavedCategoriesIfNeeded(presenter, actionController);
 
@@ -875,6 +986,7 @@ static BOOL ApolloNativeActionMenuCanFallbackPresent(id presenter, id actionCont
     if (!ApolloNativeActionMenusEnabled()) return NO;
     if (![actionController isKindOfClass:objc_getClass("_TtC6Apollo16ActionController")]) return NO;
     if (ApolloReadBoolIvar(actionController, "showKeyboardOnAppearanceForTextEntryView", NO)) return NO;
+    if (ApolloNativeActionMenuActionControllerHasCustomHeader(actionController)) return NO;
 
     BOOL moderatorStyle = ApolloNativeActionMenuModeratorStyleActive()
         || sApolloNativeActionMenuNextPresentationModeratorStyle
