@@ -24,7 +24,7 @@
 #   BUNDLE_ID=com.you.Build scripts/run-in-sim.sh
 #                                         # run under a custom bundle id (rebrands the app + appex
 #                                         # so it matches your installed device build)
-#   scripts/run-in-sim.sh --backup my.zip # preload an Apollo settings backup (API keys + browsing)
+#   scripts/run-in-sim.sh --backup my.zip # preload an Apollo settings backup (API keys + account)
 #
 # Env overrides:
 #   BASE_IPA (./apollo-base.ipa)  BUNDLE_ID (com.christianselig.Apollo)
@@ -289,20 +289,32 @@ if [[ -n "$BACKUP_ZIP" ]]; then
     unzip -q -o "$BACKUP_ZIP" -d "$BK_DIR"
     BK_MAIN="$(find "$BK_DIR" -name 'preferences.plist' | head -1)"
     BK_GROUP="$(find "$BK_DIR" -name 'group.plist' | head -1)"
+    BK_KEYCHAIN="$(find "$BK_DIR" -name 'keychain.plist' | head -1)"
     [[ -n "$BK_MAIN" ]] || die "backup zip has no preferences.plist"
     DATA="$(xcrun simctl get_app_container "$DEV" "$BUNDLE_ID" data)"
     PREFS="$DATA/Library/Preferences"
     mkdir -p "$PREFS"
     cp "$BK_MAIN" "$PREFS/$BUNDLE_ID.plist"
     [[ -n "$BK_GROUP" ]] && cp "$BK_GROUP" "$PREFS/$APP_GROUP_SUITE.plist"
+    # Stage the captured keychain items as a seed for the tweak's simulator keychain shim
+    # (Tweak.xm imports Library/Caches/ApolloKeychainSeed.plist on first keychain access).
+    # This is what restores a fully signed-in *user* account in the sim — the accounts blob
+    # lives only in the keychain, and the ad-hoc-signed app can't reach the real one.
+    KC_SEEDED=0
+    if [[ -n "$BK_KEYCHAIN" ]]; then
+        mkdir -p "$DATA/Library/Caches"
+        cp "$BK_KEYCHAIN" "$DATA/Library/Caches/ApolloKeychainSeed.plist"
+        KC_SEEDED=1
+    fi
     rm -rf "$BK_DIR"
-    # API keys + the app-only session load, so the feed populates. A fully
-    # signed-in *user* account does NOT survive: Apollo prunes the restored
-    # account on launch because the credential round-trip needs a keychain-
-    # access-groups entitlement, which the iOS-26 simulator refuses to launch on
-    # an ad-hoc-signed app. Account-bound features (your profile, inbox, voting
-    # as you) must be tested on a device build.
-    log "Backup applied (API keys + browsing session; user login is device-only — see AGENTS.md)"
+    if [[ "$KC_SEEDED" == 1 ]]; then
+        log "Backup applied (API keys + browsing session + signed-in account via keychain seed)"
+    else
+        # Older backup with no keychain.plist: API keys + app-only session load (feed
+        # populates), but the signed-in *user* account won't restore. Re-export a backup
+        # with an updated build to capture the account keychain. See AGENTS.md.
+        log "Backup applied (API keys + browsing; no keychain.plist — user login won't restore, re-export to capture it)"
+    fi
 fi
 
 LOG_PID=""

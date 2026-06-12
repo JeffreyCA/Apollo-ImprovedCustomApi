@@ -1,0 +1,304 @@
+name: PR build IPA variants
+
+# Builds the distributable IPA variants for a PR and hands a comment body off to
+# pr-build-ipa-comment.yml, which posts a sticky comment with per-variant
+# download links so reviewers can sideload a test build without building locally.
+#
+# Gated to CODEOWNERS authors (read from the trusted base ref). The build runs on
+# both same-repo and fork PRs, but fork PRs get a read-only token here, so this
+# workflow never comments directly: it uploads the comment body as an artifact
+# and a separate workflow_run workflow (write-scoped) posts it. No GitHub App.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    # Build only when something that determines the produced IPA changes.
+    paths:
+      - 'src/**'                              # tweak source
+      - 'openin-extension/**'                 # injected OpenIn dylib subproject
+      - 'scripts/**'                          # variant build scripts
+      - 'patch.sh'                            # IPA patcher
+      - 'build-ipa.sh'                        # injection entry point
+      - 'Makefile'                            # build config
+      - 'control'                             # package metadata + version
+      - '.github/workflows/pr-build-ipa.yml'  # this pipeline
+
+concurrency:
+  # One in-flight build per PR; a new push supersedes the previous build.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# No write scopes: this workflow only builds and uploads artifacts. The comment
+# is posted by pr-build-ipa-comment.yml. (Fork PRs get a read-only token anyway.)
+permissions:
+  contents: read
+
+jobs:
+  authorize:
+    name: Check PR author is a code owner
+    # Cheap pre-filter to skip the expensive build for non-code-owner PRs. This
+    # is NOT the security boundary for forks (a fork controls this workflow file
+    # and could bypass it) — the authoritative code-owner gate runs in the
+    # fork-uneditable pr-build-ipa-comment.yml before any comment is posted.
+    runs-on: ubuntu-latest
+    outputs:
+      is_owner: ${{ steps.check.outputs.is_owner }}
+    steps:
+      - name: Checkout CODEOWNERS
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Read CODEOWNERS from the trusted BASE ref, never the PR head: a fork
+          # could otherwise add itself to CODEOWNERS to self-authorize the build.
+          ref: ${{ github.event.pull_request.base.sha }}
+          sparse-checkout: .github/CODEOWNERS
+          sparse-checkout-cone-mode: false
+
+      - name: Determine authorization
+        id: check
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          # Match the PR author against individual @users on the global owners
+          # line (`* ...`) in CODEOWNERS. @org/team entries are not expanded.
+          OWNERS=$(grep -E '^\*[[:space:]]' .github/CODEOWNERS \
+            | sed 's/#.*//' \
+            | grep -oE '@[A-Za-z0-9_-]+' \
+            | sed 's/@//')
+          echo "Global code owners: $(echo "$OWNERS" | tr '\n' ' ')"
+          echo "PR author: ${PR_AUTHOR}"
+          is_owner=false
+          while IFS= read -r owner; do
+            [ -z "$owner" ] && continue
+            if [ "$(echo "$owner" | tr '[:upper:]' '[:lower:]')" = "$(echo "$PR_AUTHOR" | tr '[:upper:]' '[:lower:]')" ]; then
+              is_owner=true
+              break
+            fi
+          done <<< "$OWNERS"
+          echo "is_owner=${is_owner}" >> "$GITHUB_OUTPUT"
+          if [ "$is_owner" = "true" ]; then
+            echo "${PR_AUTHOR} is a code owner; IPA build will run."
+          else
+            echo "${PR_AUTHOR} is not a code owner; skipping IPA build."
+          fi
+
+  build:
+    name: Build IPA variants and comment
+    needs: authorize
+    if: needs.authorize.outputs.is_owner == 'true'
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      APOLLO_IPA_URL: https://downloads.apolloreborn.app/apollobase.ipa
+      ARTIFACT_RETENTION_DAYS: 7
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Build exactly what the PR proposes (its head commit), not a merge ref.
+          ref: ${{ github.event.pull_request.head.sha }}
+          submodules: recursive
+          lfs: true
+
+      - name: Install build dependencies
+        run: brew install ldid dpkg make
+
+      - name: Add GNU make to PATH
+        run: echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Setup Theos
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: theos/theos
+          ref: 9bc73406cf80b711ef4d02c15ff1dedc4478a275 # master @ 2026-04-09
+          path: theos
+          submodules: recursive
+
+      - name: Build rootful tweak package
+        run: make package FINALPACKAGE=1
+        env:
+          THEOS: ${{ github.workspace }}/theos
+
+      - name: Locate rootful package
+        id: rootful_deb
+        run: |
+          DEB_PATH=$(ls -1t packages/*.deb | head -1)
+          if [ -z "$DEB_PATH" ]; then
+            echo "Error: no rootful .deb produced by make package"
+            exit 1
+          fi
+          echo "deb_path=$DEB_PATH" >> "$GITHUB_OUTPUT"
+          echo "Rootful tweak: $DEB_PATH"
+
+      - name: Collect debug symbols
+        run: bash ./scripts/collect-debug-symbols.sh --label rootful --output-dir ./dist/symbols
+
+      - name: Install cyan
+        run: |
+          # cyan = asdfzxcvbn's pyzule-rw IPA injector (builds no-extensions
+          # variants). venv needed: runner's Homebrew Python is PEP 668 managed.
+          python3 -m venv "$RUNNER_TEMP/cyan-venv"
+          "$RUNNER_TEMP/cyan-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/cyan-venv/bin/python" -m pip install \
+            "https://github.com/asdfzxcvbn/pyzule-rw/archive/refs/tags/v1.4.4.zip"
+          echo "$RUNNER_TEMP/cyan-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/cyan-venv/bin/cyan" --help >/dev/null
+          echo "cyan installed: $RUNNER_TEMP/cyan-venv/bin/cyan"
+
+      - name: Download Apollo IPA
+        run: |
+          curl -L --fail --retry 3 "$APOLLO_IPA_URL" -o Apollo.ipa
+          unzip -t Apollo.ipa >/dev/null
+
+      - name: Build IPA variants
+        run: |
+          bash ./scripts/build_release_variants.sh \
+            --ipa ./Apollo.ipa \
+            --deb "${{ steps.rootful_deb.outputs.deb_path }}" \
+            --output-dir ./dist/out
+
+      - name: Compute build metadata
+        id: meta
+        run: |
+          SHORT_SHA=$(echo "${{ github.event.pull_request.head.sha }}" | cut -c1-7)
+          PREFIX="Apollo-Reborn-PR${{ github.event.pull_request.number }}-${SHORT_SHA}"
+          # build_release_variants.sh stamps the tweak version into filenames; the
+          # standard IPA is the only one without a -NOEXTENSIONS/-GLASS/-GLASSICONS
+          # suffix, so recover the base name from it for the exact upload paths.
+          STD=$(ls dist/out/*.ipa | grep -vE -- '-(NOEXTENSIONS|GLASS|GLASSICONS)' | head -1)
+          if [ -z "$STD" ]; then
+            echo "Error: could not locate the standard IPA in dist/out" >&2
+            ls -la dist/out
+            exit 1
+          fi
+          BASE=$(basename "$STD" .ipa)
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "prefix=${PREFIX}" >> "$GITHUB_OUTPUT"
+          echo "base=${BASE}" >> "$GITHUB_OUTPUT"
+
+      # One artifact (one .zip) per variant so the comment can deep-link each via
+      # the action's `artifact-url` (stable .../runs/<id>/artifacts/<id> redirect).
+      - name: Upload Standard IPA
+        id: art_standard
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.meta.outputs.prefix }}-Standard
+          path: dist/out/${{ steps.meta.outputs.base }}.ipa
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      - name: Upload No-Extensions IPA
+        id: art_noext
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.meta.outputs.prefix }}-NoExtensions
+          path: dist/out/${{ steps.meta.outputs.base }}-NOEXTENSIONS.ipa
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      - name: Upload GLASS IPA
+        id: art_glass
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.meta.outputs.prefix }}-GLASS
+          path: dist/out/${{ steps.meta.outputs.base }}-GLASS.ipa
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      - name: Upload GLASS No-Extensions IPA
+        id: art_glass_noext
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.meta.outputs.prefix }}-GLASS-NoExtensions
+          path: dist/out/${{ steps.meta.outputs.base }}-GLASS-NOEXTENSIONS.ipa
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      - name: Upload GLASS Icons IPA
+        id: art_glassicons
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.meta.outputs.prefix }}-GLASSIcons
+          path: dist/out/${{ steps.meta.outputs.base }}-GLASSICONS.ipa
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      - name: Upload GLASS Icons No-Extensions IPA
+        id: art_glassicons_noext
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.meta.outputs.prefix }}-GLASSIcons-NoExtensions
+          path: dist/out/${{ steps.meta.outputs.base }}-GLASSICONS-NOEXTENSIONS.ipa
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      - name: Upload debug symbols artifact
+        id: art_symbols
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.meta.outputs.prefix }}-dSYMs
+          path: dist/symbols
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      - name: Upload tweak .deb artifact
+        id: art_deb
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.meta.outputs.prefix }}-deb
+          path: ${{ steps.rootful_deb.outputs.deb_path }}
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      - name: Build success comment
+        env:
+          URL_STANDARD: ${{ steps.art_standard.outputs.artifact-url }}
+          URL_NOEXT: ${{ steps.art_noext.outputs.artifact-url }}
+          URL_GLASS: ${{ steps.art_glass.outputs.artifact-url }}
+          URL_GLASS_NOEXT: ${{ steps.art_glass_noext.outputs.artifact-url }}
+          URL_GLASSICONS: ${{ steps.art_glassicons.outputs.artifact-url }}
+          URL_GLASSICONS_NOEXT: ${{ steps.art_glassicons_noext.outputs.artifact-url }}
+          URL_SYMBOLS: ${{ steps.art_symbols.outputs.artifact-url }}
+          URL_DEB: ${{ steps.art_deb.outputs.artifact-url }}
+          DEB_PATH: ${{ steps.rootful_deb.outputs.deb_path }}
+          BASE: ${{ steps.meta.outputs.base }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          size_of() { du -h "dist/out/$1" 2>/dev/null | cut -f1 || echo "?"; }
+          {
+            echo "<!-- apollo-pr-ipa-build -->"
+            echo "### 📦 PR Test IPAs"
+            echo ""
+            echo "Built from ${{ steps.meta.outputs.short_sha }}. Each link downloads a \`.zip\` containing that variant's \`.ipa\` (or the rootful \`.deb\`)."
+            echo ""
+            echo "| Variant | Download | Size |"
+            echo "| --- | --- | ---: |"
+            echo "| Standard | [⬇️ Download](${URL_STANDARD}) | $(size_of "${BASE}.ipa") |"
+            echo "| No Extensions | [⬇️ Download](${URL_NOEXT}) | $(size_of "${BASE}-NOEXTENSIONS.ipa") |"
+            echo "| GLASS | [⬇️ Download](${URL_GLASS}) | $(size_of "${BASE}-GLASS.ipa") |"
+            echo "| GLASS · No Extensions | [⬇️ Download](${URL_GLASS_NOEXT}) | $(size_of "${BASE}-GLASS-NOEXTENSIONS.ipa") |"
+            echo "| GLASS Icons | [⬇️ Download](${URL_GLASSICONS}) | $(size_of "${BASE}-GLASSICONS.ipa") |"
+            echo "| GLASS Icons · No Extensions | [⬇️ Download](${URL_GLASSICONS_NOEXT}) | $(size_of "${BASE}-GLASSICONS-NOEXTENSIONS.ipa") |"
+            echo "| Tweak package (rootful \`.deb\`) | [⬇️ Download](${URL_DEB}) | $(du -h "${DEB_PATH}" 2>/dev/null | cut -f1 || echo "?") |"
+            echo ""
+            echo "Debug symbols: [⬇️ dSYMs](${URL_SYMBOLS}) · [workflow run](${RUN_URL})"
+            echo ""
+            echo "> [!NOTE]"
+            echo "> Download links require being signed in to GitHub with access to this repository, and expire when the artifacts do (${ARTIFACT_RETENTION_DAYS} days). Pushing a new commit rebuilds the IPAs and updates this comment."
+          } > comment.md
+          cat comment.md
+
+      - name: Build failure comment
+        if: failure()
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          {
+            echo "<!-- apollo-pr-ipa-build -->"
+            echo "### ⚠️ PR Test IPA build failed"
+            echo ""
+            echo "The IPA build for \`${{ steps.meta.outputs.short_sha || github.event.pull_request.head.sha }}\` failed. See the [workflow run](${RUN_URL}) for logs."
+          } > comment.md
+
+      - name: Upload comment payload
+        # The PR-event token is read-only for fork PRs, so it cannot comment.
+        # Hand the comment body to pr-build-ipa-comment.yml, which runs in the
+        # base-repo context with a write token and posts it. The target PR is
+        # resolved there from trusted event data, so no PR number is passed here.
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pr-comment
+          path: comment.md
+          retention-days: 1
