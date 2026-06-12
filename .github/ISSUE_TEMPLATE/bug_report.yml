@@ -118,6 +118,18 @@ body:
     validations:
       required: true
 
+  - type: dropdown
+    id: was-existing-apollo-bug
+    attributes:
+      label: Was this a previously existing Apollo bug?
+      description: Do you know if this bug existed in the original Apollo app, or is it new to the Apollo Reborn tweak? You can also check the [original Apollo bug tracker](https://github.com/christianselig/apollo-bugs/issues) to see if it's been reported there.
+      options:
+        - "No"
+        - "Yes"
+        - "Not sure"
+    validations:
+      required: false
+
   - type: textarea
     id: additional
     attributes:

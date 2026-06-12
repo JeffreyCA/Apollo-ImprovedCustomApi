@@ -46,7 +46,7 @@ body:
       required: false
 
   - type: dropdown
-    id: was-ultra
+    id: was-existing-apollo-feature
     attributes:
       label: Was this a previously existing Apollo feature?
       description: Knowing whether the data/UI already exists in the binary helps gauge feasibility.
