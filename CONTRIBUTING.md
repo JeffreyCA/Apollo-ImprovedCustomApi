@@ -48,12 +48,14 @@ This restores your **API keys, app-only session, and your signed-in Reddit accou
 
 A backup `.zip` now contains your live Reddit **account credentials** (keychain) in addition to API keys — keep it out of the repo (the `./.sim/` working dir is gitignored) and don't commit one.
 
-**Optional — automate the UI with idb.** To tap, type, and screenshot programmatically, install Facebook's [idb](https://fbidb.io/): `brew install facebook/fb/idb-companion`, then install the `fb-idb` Python client **into a Python 3.11 venv** (it relies on an asyncio API removed in Python 3.12+). Point the script at it and pass `--drive` to capture the accessibility tree and a screenshot after launch:
+**Optional — automate the UI with idb.** To inspect and screenshot programmatically, install Facebook's [idb](https://fbidb.io/): `brew install facebook/fb/idb-companion`, then install the `fb-idb` Python client **into a Python 3.11 venv** (it relies on an asyncio API removed in Python 3.12+ — `uv venv ~/.idb-venv --python 3.11 && uv pip install --python ~/.idb-venv/bin/python fb-idb` works well if you have `uv`). Point the script at it and pass `--drive` to capture the accessibility tree and a screenshot after launch:
 
 ```bash
 python3.11 -m venv ~/.idb-venv && ~/.idb-venv/bin/pip install fb-idb
 IDB=~/.idb-venv/bin/idb scripts/run-in-sim.sh --drive   # writes ./.sim/uitree.json and ./.sim/screenshot.png
 ```
+
+**Xcode 27 / Device Hub.** Simulator.app was replaced by Device Hub (`com.apple.dt.Devices`); the script opens whichever is present. `--drive`'s screenshot is taken via `simctl io screenshot` rather than idb — idb_companion's screenshot RPC returns "No Image available to encode" against Xcode 27's iOS-27 sims. `idb ui describe-all` (the accessibility tree) still works fine. idb's HID commands (`idb ui tap`/`text`/swipe) are currently broken under Xcode 27: idb_companion 1.1.8 hardcodes `SimulatorKit.framework` at the pre-27 path (`Contents/Developer/Library/PrivateFrameworks/`), which Xcode 27 moved to `Contents/SharedFrameworks/`, and Xcode.app's bundle is write-protected so it can't be symlinked back. Until idb_companion ships a fix, drive taps manually in Device Hub.
 
 **What the simulator can't test:** push notifications (so Live Activities push-to-start needs a real device), the FFmpeg-based v.redd.it audio remux (compiled out of sim builds), and any other genuinely device-only behavior. Validate those on a device IPA. Everything else — settings, navigation, Liquid Glass, layout, media playback UI — works in the simulator, which runs the same iOS version family as a modern device.
 
