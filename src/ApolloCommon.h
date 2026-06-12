@@ -16,6 +16,8 @@ BOOL IsLiquidGlass(void);
 NSURL *ApolloURLByConvertingResolvedURLToApolloScheme(NSURL *url);
 BOOL ApolloRouteResolvedURLViaApolloScheme(NSURL *resolvedURL);
 void ApolloFlushReadPostIDsToDefaults(void);
+UITableView *ApolloInheritedSettingsThemeSourceTableView(UITableViewController *controller);
+void ApolloApplyInheritedSettingsTableTheme(UITableViewController *controller);
 UIImage *ApolloEmojiSettingsIcon(NSString *emoji, UIColor *backgroundColor, CGFloat size);
 UIImage *ApolloBuyMeACoffeeSettingsIcon(CGFloat size);
 UIImage *ApolloRebornOptionsSettingsIcon(CGFloat size);

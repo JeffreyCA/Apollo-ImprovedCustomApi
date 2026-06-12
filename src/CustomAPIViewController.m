@@ -56,7 +56,7 @@ static NSInteger sPendingLinkPreviewModeRefreshMode = ApolloLinkPreviewModeFull;
 
 #pragma mark - Thanks To VC (forward decl)
 
-@interface ApolloThanksToViewController : UITableViewController
+@interface ApolloThanksToViewController : ApolloSettingsTableViewController
 @end
 
 static NSString *const kApolloRebornSubredditName = @"ApolloReborn";
@@ -152,34 +152,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (UITableView *)apollo_findTableViewInView:(UIView *)view {
-    if (!view) return nil;
-    if ([view isKindOfClass:[UITableView class]]) return (UITableView *)view;
-    for (UIView *subview in view.subviews) {
-        UITableView *tableView = [self apollo_findTableViewInView:subview];
-        if (tableView) return tableView;
-    }
-    return nil;
-}
-
-- (UITableView *)apollo_sourceThemeTableView {
-    NSArray<UIViewController *> *stack = self.navigationController.viewControllers;
-    NSUInteger index = [stack indexOfObject:self];
-    if (index == NSNotFound || index == 0) return nil;
-
-    UIViewController *source = stack[index - 1];
-    if ([source respondsToSelector:@selector(tableView)]) {
-        id tableView = ((id (*)(id, SEL))objc_msgSend)(source, @selector(tableView));
-        if ([tableView isKindOfClass:[UITableView class]]) return tableView;
-    }
-    return [self apollo_findTableViewInView:source.view];
-}
-
-- (UIColor *)apollo_themeTableBackgroundColor {
-    UITableView *source = [self apollo_sourceThemeTableView];
-    return source.backgroundColor ?: self.tableView.backgroundColor;
-}
-
 - (UIColor *)apollo_themeCellBackgroundColor {
     UITableView *source = [self apollo_sourceThemeTableView];
     for (UITableViewCell *cell in source.visibleCells) {
@@ -187,11 +159,6 @@ typedef NS_ENUM(NSInteger, Tag) {
         if (color) return color;
     }
     return [UIColor secondarySystemGroupedBackgroundColor];
-}
-
-- (UIColor *)apollo_themeSeparatorColor {
-    UITableView *source = [self apollo_sourceThemeTableView];
-    return source.separatorColor ?: [UIColor separatorColor];
 }
 
 - (UIColor *)apollo_themeAccentColor {
@@ -228,11 +195,9 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (void)apollo_applyTheme {
-    UIColor *backgroundColor = [self apollo_themeTableBackgroundColor];
+    [super apollo_applyTheme];
+
     UIColor *accentColor = [self apollo_themeAccentColor];
-    self.view.backgroundColor = backgroundColor;
-    self.tableView.backgroundColor = backgroundColor;
-    self.tableView.separatorColor = [self apollo_themeSeparatorColor];
     self.view.tintColor = accentColor;
     self.tableView.tintColor = accentColor;
     self.navigationController.navigationBar.tintColor = accentColor;
@@ -604,16 +569,10 @@ typedef NS_ENUM(NSInteger, Tag) {
     self.title = @"Apollo Reborn";
     self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
     [self apollo_disableAutoHideTabBarIdleIfUnsupported];
-    [self apollo_applyTheme];
 
     [[ApolloSubredditInfoCache sharedCache] requestInfoForSubreddit:kApolloRebornSubredditName completion:^(ApolloSubredditInfo *info) {
         (void)info;
     }];
-}
-
-- (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];
-    [self apollo_applyTheme];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -643,11 +602,6 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                             object:nil
                                                           userInfo:userInfo];
     });
-}
-
-- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
-    [super traitCollectionDidChange:previousTraitCollection];
-    [self apollo_applyTheme];
 }
 
 #pragma mark - UITableViewDataSource
@@ -1659,8 +1613,8 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)pushTroubleshootingViewController {
     UIViewController *vc = [[UIViewController alloc] init];
     vc.title = @"Can't sign in?";
-    vc.view.backgroundColor = [self apollo_themeTableBackgroundColor];
-    vc.view.tintColor = [self apollo_themeAccentColor];
+    vc.view.backgroundColor = self.tableView.backgroundColor;
+    vc.view.tintColor = self.view.tintColor;
 
     UITextView *textView = [[UITextView alloc] init];
     textView.editable = NO;
@@ -1722,8 +1676,8 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)pushInstructionsViewController {
     UIViewController *vc = [[UIViewController alloc] init];
     vc.title = @"Giphy & ImgChest API Key Setup";
-    vc.view.backgroundColor = [self apollo_themeTableBackgroundColor];
-    vc.view.tintColor = [self apollo_themeAccentColor];
+    vc.view.backgroundColor = self.tableView.backgroundColor;
+    vc.view.tintColor = self.view.tintColor;
 
     UITextView *textView = [[UITextView alloc] init];
     textView.editable = NO;

@@ -1,4 +1,4 @@
-#import <UIKit/UIKit.h>
+#import "ApolloSettingsTableViewController.h"
 
-@interface TranslationSettingsViewController : UITableViewController <UITextFieldDelegate>
+@interface TranslationSettingsViewController : ApolloSettingsTableViewController <UITextFieldDelegate>
 @end

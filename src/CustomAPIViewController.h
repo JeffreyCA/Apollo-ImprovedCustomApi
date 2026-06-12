@@ -1,10 +1,10 @@
-#import <UIKit/UIKit.h>
+#import "ApolloSettingsTableViewController.h"
 #import "ApolloState.h"
 
-@interface CustomAPIViewController : UITableViewController <UITextFieldDelegate, UITextViewDelegate, UIDocumentPickerDelegate> {
+@interface CustomAPIViewController : ApolloSettingsTableViewController <UITextFieldDelegate, UITextViewDelegate, UIDocumentPickerDelegate> {
     BOOL _isRestoreOperation;
 }
 @end
 
-@interface ApolloBuyUsACoffeeViewController : UITableViewController
+@interface ApolloBuyUsACoffeeViewController : ApolloSettingsTableViewController
 @end

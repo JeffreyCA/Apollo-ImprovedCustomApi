@@ -14,7 +14,7 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
 
 #pragma mark - Per-subreddit detail VC
 
-@interface TagFilterSubredditDetailViewController : UITableViewController
+@interface TagFilterSubredditDetailViewController : ApolloSettingsTableViewController
 @property (nonatomic, copy) NSString *subredditName;   // lowercased
 @property (nonatomic, copy) void (^onChange)(void);
 @end

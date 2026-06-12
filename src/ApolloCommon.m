@@ -201,6 +201,44 @@ BOOL ApolloRouteResolvedURLViaApolloScheme(NSURL *resolvedURL) {
     return ApolloRouteURLThroughUIApplication(apolloURL);
 }
 
+#pragma mark - Settings Theme Inheritance
+
+static UITableView *ApolloFindTableViewInView(UIView *view) {
+    if (!view) return nil;
+    if ([view isKindOfClass:[UITableView class]]) return (UITableView *)view;
+    for (UIView *subview in view.subviews) {
+        UITableView *tableView = ApolloFindTableViewInView(subview);
+        if (tableView) return tableView;
+    }
+    return nil;
+}
+
+UITableView *ApolloInheritedSettingsThemeSourceTableView(UITableViewController *controller) {
+    if (!controller) return nil;
+
+    NSArray<UIViewController *> *stack = controller.navigationController.viewControllers;
+    NSUInteger index = [stack indexOfObject:controller];
+    if (index == NSNotFound || index == 0) return nil;
+
+    UIViewController *source = stack[index - 1];
+    if ([source respondsToSelector:@selector(tableView)]) {
+        id tableView = ((id (*)(id, SEL))objc_msgSend)(source, @selector(tableView));
+        if ([tableView isKindOfClass:[UITableView class]]) return tableView;
+    }
+
+    return ApolloFindTableViewInView(source.view);
+}
+
+void ApolloApplyInheritedSettingsTableTheme(UITableViewController *controller) {
+    if (!controller) return;
+
+    UITableView *source = ApolloInheritedSettingsThemeSourceTableView(controller);
+    UIColor *backgroundColor = source.backgroundColor ?: controller.tableView.backgroundColor;
+    controller.view.backgroundColor = backgroundColor;
+    controller.tableView.backgroundColor = backgroundColor;
+    controller.tableView.separatorColor = source.separatorColor ?: [UIColor separatorColor];
+}
+
 #pragma mark - LinkButtonNode URL extraction
 
 // Extract URL string from a LinkButtonNode, with iOS 26 fallback.
