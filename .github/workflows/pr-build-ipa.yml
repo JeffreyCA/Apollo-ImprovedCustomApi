@@ -245,9 +245,9 @@ jobs:
           size_of() { du -h "dist/out/$1" 2>/dev/null | cut -f1 || echo "?"; }
           {
             echo "<!-- apollo-pr-ipa-build -->"
-            echo "### 📦 Apollo-Reborn test IPAs"
+            echo "### 📦 PR Test IPAs"
             echo ""
-            echo "Built from \`${{ steps.meta.outputs.short_sha }}\` for this PR. Each link downloads a \`.zip\` containing that variant's \`.ipa\` — unzip, then sideload with AltStore Classic, SideStore, or Feather."
+            echo "Built from ${{ steps.meta.outputs.short_sha }} for this PR. Each link downloads a \`.zip\` containing that variant's \`.ipa\`."
             echo ""
             echo "| Variant | Download | Size |"
             echo "| --- | --- | ---: |"
@@ -271,7 +271,7 @@ jobs:
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           {
             echo "<!-- apollo-pr-ipa-build -->"
-            echo "### ⚠️ Apollo-Reborn test IPA build failed"
+            echo "### ⚠️ PR Test IPA build failed"
             echo ""
             echo "The IPA build for \`${{ steps.meta.outputs.short_sha || github.event.pull_request.head.sha }}\` failed. See the [workflow run](${RUN_URL}) for logs."
           } > comment.md
