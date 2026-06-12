@@ -23,7 +23,7 @@ scripts/run-in-sim.sh --logs       # also stream the tweak's ApolloLog output af
 scripts/run-in-sim.sh --fresh-app  # re-prepare the app after dropping in a new apollo-base.ipa
 scripts/run-in-sim.sh --dark       # boot the simulator in dark mode (--light forces light)
 scripts/run-in-sim.sh --glass      # apply the iOS 26 Liquid Glass patch (--no-glass disables)
-scripts/run-in-sim.sh --backup B.zip  # preload a settings backup (API keys + browsing)
+scripts/run-in-sim.sh --backup B.zip  # preload a settings backup (API keys + account)
 ```
 
 Requirements: Xcode with an iOS Simulator runtime installed, and the same `apollo-base.ipa` used for device builds in the repo root. The first run prepares a cached, simulator-compatible copy of Apollo under `./.sim/` (a few seconds); subsequent runs reuse it.
@@ -44,9 +44,9 @@ BUNDLE_ID=com.example.MyBuild scripts/run-in-sim.sh --backup ~/Downloads/Apollo_
 
 Or drop the zip at `./.sim/backup.zip` once and it's auto-loaded on every run (no `--backup` needed) — handy for letting an AI agent test signed-in flows without re-specifying the path.
 
-Note: this preloads your **API keys and app-only session** (enough to browse Reddit and exercise most UI), but **not** a fully signed-in Reddit *user* account — Apollo prunes the restored account on launch because the simulator can't host the keychain entitlement the credential needs. The Account tab will still say "sign in"; test profile/inbox/voting on a device build.
+This restores your **API keys, app-only session, and your signed-in Reddit account** — so profile, inbox, and voting work in the simulator, not just browsing. Apollo loads accounts from the keychain (via Valet), and an ad-hoc-signed simulator app can't reach the real keychain, so the tweak virtualizes it: `Backup Settings` now captures Apollo's keychain account items into the backup (`keychain.plist`), and in the simulator the tweak serves them from a file-backed store. **This needs a backup exported by a build that includes this feature** — older backups have no `keychain.plist`, so the account won't restore (you'll see a note to that effect) and the Account tab stays at "sign in"; everything else still loads. Re-export a backup from your device to capture the account.
 
-A backup `.zip` contains your live Reddit login credentials — keep it out of the repo (the `./.sim/` working dir is gitignored) and don't commit one.
+A backup `.zip` now contains your live Reddit **account credentials** (keychain) in addition to API keys — keep it out of the repo (the `./.sim/` working dir is gitignored) and don't commit one.
 
 **Optional — automate the UI with idb.** To tap, type, and screenshot programmatically, install Facebook's [idb](https://fbidb.io/): `brew install facebook/fb/idb-companion`, then install the `fb-idb` Python client **into a Python 3.11 venv** (it relies on an asyncio API removed in Python 3.12+). Point the script at it and pass `--drive` to capture the accessibility tree and a screenshot after launch:
 

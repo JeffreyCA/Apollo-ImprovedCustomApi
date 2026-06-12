@@ -10,6 +10,7 @@
 #import "ApolloBannedProfile.h"
 #import "UserDefaultConstants.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <Security/Security.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "B64ImageEncodings.h"
@@ -2159,7 +2160,70 @@ typedef NS_ENUM(NSInteger, Tag) {
 static NSString *const kMainPlistFilename = @"preferences.plist";
 static NSString *const kGroupPlistFilename = @"group.plist";
 static NSString *const kAccountsFilename = @"accounts.txt";
+static NSString *const kKeychainPlistFilename = @"keychain.plist";
 static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
+
+// Apollo stores logged-in account credentials in the keychain via Valet, whose internal
+// service name embeds the app's bundle id. Match on that substring to capture only Apollo's
+// own keychain items (account blobs, the application-only account, Ultra/Pro flags, etc.).
+static NSString *const kValetServiceSubstring = @"com.christianselig.Apollo";
+
+// Capture Apollo's Valet keychain items so a backup can fully restore a signed-in session —
+// not just the NSUserDefaults mirror. Returns an array of { service, account, data } dicts.
+// The accounts blob lives only in the keychain in Apollo's load path, so without this a
+// restored backup can't sign the user back in. Pairs with ApolloReplayValetKeychainItems and,
+// in the simulator, with the tweak's keychain shim (which serves these on launch).
+static NSArray<NSDictionary *> *ApolloCaptureValetKeychainItems(void) {
+    NSMutableArray *items = [NSMutableArray array];
+    NSDictionary *query = @{
+        (__bridge id)kSecClass:            (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecMatchLimit:       (__bridge id)kSecMatchLimitAll,
+        (__bridge id)kSecReturnAttributes: @YES,
+        (__bridge id)kSecReturnData:       @YES,
+    };
+    CFTypeRef result = NULL;
+    OSStatus st = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    if (st != errSecSuccess || !result) {
+        if (result) CFRelease(result);
+        return items;
+    }
+    NSArray *found = (__bridge_transfer NSArray *)result;
+    for (NSDictionary *item in found) {
+        NSString *service = item[(__bridge id)kSecAttrService];
+        NSData *data = item[(__bridge id)kSecValueData];
+        if (![service isKindOfClass:[NSString class]] || ![service containsString:kValetServiceSubstring]) continue;
+        if (![data isKindOfClass:[NSData class]]) continue;
+        NSString *account = item[(__bridge id)kSecAttrAccount];
+        [items addObject:@{
+            @"service": service,
+            @"account": ([account isKindOfClass:[NSString class]] ? account : @""),
+            @"data":    data,
+        }];
+    }
+    return items;
+}
+
+// Replay captured Valet keychain items back into the keychain. On a device this writes the
+// real keychain (our SecItem hooks strip the access group so the unsigned/sideloaded app can
+// store them); in the simulator the tweak's keychain shim intercepts these adds.
+static void ApolloReplayValetKeychainItems(NSArray<NSDictionary *> *items) {
+    for (NSDictionary *item in items) {
+        NSData *data = item[@"data"];
+        if (![data isKindOfClass:[NSData class]]) continue;
+        NSDictionary *identity = @{
+            (__bridge id)kSecClass:        (__bridge id)kSecClassGenericPassword,
+            (__bridge id)kSecAttrService:  (item[@"service"] ?: @""),
+            (__bridge id)kSecAttrAccount:  (item[@"account"] ?: @""),
+        };
+        NSMutableDictionary *add = [identity mutableCopy];
+        add[(__bridge id)kSecValueData] = data;
+        OSStatus st = SecItemAdd((__bridge CFDictionaryRef)add, NULL);
+        if (st == errSecDuplicateItem) {
+            SecItemUpdate((__bridge CFDictionaryRef)identity,
+                          (__bridge CFDictionaryRef)@{ (__bridge id)kSecValueData: data });
+        }
+    }
+}
 
 // Default: Library/Preferences/com.christianselig.Apollo.plist, depending on bundle ID.
 // Contains: most Apollo settings
@@ -2233,6 +2297,16 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
             NSString *accountsPath = [backupDir stringByAppendingPathComponent:kAccountsFilename];
             [accountsContent writeToFile:accountsPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
         }
+    }
+
+    // Capture Apollo's keychain account credentials (the accounts blob, application-only
+    // account, etc.). These live only in the keychain in Apollo's load path, so this is what
+    // lets a restore — or a simulator run — sign the user back in. Written as a plist of
+    // { service, account, data } items. (Same sensitivity as accounts.txt: keep the zip private.)
+    NSArray *keychainItems = ApolloCaptureValetKeychainItems();
+    if (keychainItems.count > 0) {
+        NSString *keychainDestPath = [backupDir stringByAppendingPathComponent:kKeychainPlistFilename];
+        [keychainItems writeToFile:keychainDestPath atomically:YES];
     }
 
     NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
@@ -2391,16 +2465,11 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
     NSString *libreAPIKey = [defaults stringForKey:UDKeyLibreTranslateAPIKey];
     sLibreTranslateAPIKey = libreAPIKey.length > 0 ? libreAPIKey : nil;
 
-    // Restore group preferences, including logged-in accounts.
-    //
-    // The account keys (RedditAccounts2, RedditApplicationOnlyAccount2,
-    // CurrentRedditAccountIndex, LoggedInAccountDetails) hold the Reddit OAuth tokens as
-    // self-contained NSKeyedArchiver blobs (RDKClient -> RDKOAuthCredential ->
-    // RDKAccessToken). They carry no keychain dependency and no device binding, so writing
-    // them here and relaunching (exit(0) below) lets AccountManager reload them on next
-    // launch — the user is signed back in without reauthenticating. The restored API keys
-    // (main prefs) match the keys the tokens were minted under, keeping token refresh
-    // consistent.
+    // Restore group preferences, including the NSUserDefaults account state
+    // (LoggedInAccountDetails, CurrentRedditAccountIndex, and the RedditAccounts2 /
+    // RedditApplicationOnlyAccount2 mirrors). Apollo's AccountManager actually loads accounts
+    // from the *keychain* via Valet on launch — gated behind Valet.canAccessKeychain() — so
+    // these defaults alone don't sign the user in; the keychain replay below is what does.
     //
     // Non-destructive by design: only keys present in the backup are written. A backup made
     // while logged out has no account keys, so the current install's accounts are left
@@ -2416,6 +2485,15 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
             }
             [groupDefaults synchronize];
         }
+    }
+
+    // Replay the captured keychain account credentials. This is the part that signs the user
+    // back in: AccountManager reads these on the next launch (after exit(0) below). Backups
+    // made before this feature shipped have no keychain.plist and simply skip it.
+    NSString *keychainBackupPath = [extractDir stringByAppendingPathComponent:kKeychainPlistFilename];
+    NSArray *keychainItems = [NSArray arrayWithContentsOfFile:keychainBackupPath];
+    if (keychainItems.count > 0) {
+        ApolloReplayValetKeychainItems(keychainItems);
     }
 
     [fileManager removeItemAtPath:extractDir error:nil];

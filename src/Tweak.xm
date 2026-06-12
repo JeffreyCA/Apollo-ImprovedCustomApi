@@ -64,9 +64,108 @@ static NSData *OverrideDataForAccount(NSString *account) {
     return [value dataUsingEncoding:NSUTF8StringEncoding];
 }
 
+#if APOLLO_SIM_BUILD
+// MARK: - Simulator keychain shim (Valet virtualization)
+//
+// Why this exists: Apollo's AccountManager loads logged-in accounts on launch from the
+// keychain via Valet, and the *entire* load is gated behind `Valet.canAccessKeychain()`.
+// In the simulator the app is ad-hoc signed with NO `application-identifier` /
+// `keychain-access-groups` entitlement, so securityd has no keychain access group to file
+// items under and rejects every Sec* call with errSecMissingEntitlement (-34018) — even
+// after we strip kSecAttrAccessGroup. canAccessKeychain returns NO, the load is skipped, and
+// AccountManager prunes every account. Adding the entitlement is a dead end (iOS-26's
+// simulator refuses to launch an ad-hoc app carrying it; there's no profile to back it).
+//
+// Fix: virtualize the keychain for Valet's queries with a plist-backed store in the app
+// container — a store the sandboxed sim build CAN read and write. add/copy/update/delete all
+// hit this store instead of the (broken) real keychain, so canAccessKeychain's canary
+// round-trips succeed and account reads/writes work. The store is seeded from a settings
+// backup: `backupSettings` captures Apollo's real Valet keychain items on a device, and
+// `scripts/run-in-sim.sh` stages them at ApolloKeychainSeed.plist for import here, so a
+// restored backup signs straight in. Entirely sim-only; the device build is untouched and
+// still uses the real keychain.
+
+// The seed file run-in-sim.sh drops in from a backup's keychain.plist: an array of
+// { service, account, data } dictionaries (Apollo's own keychain items, captured on device).
+static NSString *SimKeychainSeedPath(void) {
+    return [[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches"]
+                stringByAppendingPathComponent:@"ApolloKeychainSeed.plist"];
+}
+
+// The live virtual keychain: { "service\naccount" : valueData }, persisted to disk so account
+// state (and Apollo's own writes) survive relaunch within the simulator.
+static NSString *SimKeychainStorePath(void) {
+    return [[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches"]
+                stringByAppendingPathComponent:@"ApolloSimKeychain.plist"];
+}
+
+static NSString *SimKeychainKey(NSString *service, NSString *account) {
+    return [NSString stringWithFormat:@"%@\n%@", service ?: @"", account ?: @""];
+}
+
+static NSMutableDictionary<NSString *, NSData *> *SimKeychainStore(void) {
+    static NSMutableDictionary *store;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSDictionary *disk = [NSDictionary dictionaryWithContentsOfFile:SimKeychainStorePath()];
+        store = disk ? [disk mutableCopy] : [NSMutableDictionary dictionary];
+
+        // One-time seed import from the staged backup keychain items.
+        NSArray *seed = [NSArray arrayWithContentsOfFile:SimKeychainSeedPath()];
+        if (seed.count) {
+            NSUInteger imported = 0;
+            for (NSDictionary *item in seed) {
+                NSString *svc = item[@"service"];
+                NSString *acct = item[@"account"];
+                NSData *data = item[@"data"];
+                if ([data isKindOfClass:[NSData class]] && (svc || acct)) {
+                    store[SimKeychainKey(svc, acct)] = data;
+                    imported++;
+                }
+            }
+            // Consume the seed so Apollo's own writes own the store from here on.
+            [[NSFileManager defaultManager] removeItemAtPath:SimKeychainSeedPath() error:nil];
+            [store writeToFile:SimKeychainStorePath() atomically:YES];
+            ApolloLog(@"[SimKeychain] seeded %lu item(s) from backup", (unsigned long)imported);
+        }
+    });
+    return store;
+}
+
+static void SimKeychainPersist(void) {
+    [SimKeychainStore() writeToFile:SimKeychainStorePath() atomically:YES];
+}
+
+// Build the SecItemCopyMatching result for stored data, honoring the query's return flags.
+static OSStatus SimKeychainServe(NSDictionary *q, NSData *data, CFTypeRef *result) {
+    if (!result) return errSecSuccess;
+    if (q[(__bridge id)kSecReturnAttributes]) {
+        NSMutableDictionary *attrs = [NSMutableDictionary dictionary];
+        if (q[(__bridge id)kSecAttrAccount]) attrs[(__bridge id)kSecAttrAccount] = q[(__bridge id)kSecAttrAccount];
+        if (q[(__bridge id)kSecAttrService]) attrs[(__bridge id)kSecAttrService] = q[(__bridge id)kSecAttrService];
+        if (q[(__bridge id)kSecReturnData]) attrs[(__bridge id)kSecValueData] = data;
+        *result = (__bridge_retained CFTypeRef)attrs;
+    } else {
+        *result = (__bridge_retained CFTypeRef)data;
+    }
+    return errSecSuccess;
+}
+#endif
+
 static void *SecItemAdd_orig;
 static OSStatus SecItemAdd_replacement(CFDictionaryRef query, CFTypeRef *result) {
     NSDictionary *strippedQuery = stripGroupAccessAttr(query);
+#if APOLLO_SIM_BUILD
+    if (IsValetQuery(strippedQuery)) {
+        id value = strippedQuery[(__bridge id)kSecValueData];
+        if ([value isKindOfClass:[NSData class]]) {
+            SimKeychainStore()[SimKeychainKey(strippedQuery[(__bridge id)kSecAttrService], strippedQuery[(__bridge id)kSecAttrAccount])] = value;
+            SimKeychainPersist();
+            if (result) SimKeychainServe(strippedQuery, value, result);
+        }
+        return errSecSuccess;
+    }
+#endif
     return ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemAdd_orig)((__bridge CFDictionaryRef)strippedQuery, result);
 }
 
@@ -91,6 +190,14 @@ static OSStatus SecItemCopyMatching_replacement(CFDictionaryRef query, CFTypeRef
         return errSecSuccess;
     }
 
+#if APOLLO_SIM_BUILD
+    if (IsValetQuery(strippedQuery)) {
+        NSData *data = SimKeychainStore()[SimKeychainKey(strippedQuery[(__bridge id)kSecAttrService], strippedQuery[(__bridge id)kSecAttrAccount])];
+        if (data) return SimKeychainServe(strippedQuery, data, result);
+        return errSecItemNotFound;
+    }
+#endif
+
     return ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemCopyMatching_orig)((__bridge CFDictionaryRef)strippedQuery, result);
 }
 
@@ -103,8 +210,37 @@ static OSStatus SecItemUpdate_replacement(CFDictionaryRef query, CFDictionaryRef
         return errSecSuccess;
     }
 
+#if APOLLO_SIM_BUILD
+    if (IsValetQuery(strippedQuery)) {
+        NSString *key = SimKeychainKey(strippedQuery[(__bridge id)kSecAttrService], strippedQuery[(__bridge id)kSecAttrAccount]);
+        id value = ((__bridge NSDictionary *)attributesToUpdate)[(__bridge id)kSecValueData];
+        if ([value isKindOfClass:[NSData class]]) {
+            SimKeychainStore()[key] = value;
+            SimKeychainPersist();
+            return errSecSuccess;
+        }
+        return SimKeychainStore()[key] ? errSecSuccess : errSecItemNotFound;
+    }
+#endif
+
     return ((OSStatus (*)(CFDictionaryRef, CFDictionaryRef))SecItemUpdate_orig)((__bridge CFDictionaryRef)strippedQuery, attributesToUpdate);
 }
+
+#if APOLLO_SIM_BUILD
+static void *SecItemDelete_orig;
+static OSStatus SecItemDelete_replacement(CFDictionaryRef query) {
+    NSDictionary *strippedQuery = stripGroupAccessAttr(query);
+    if (IsValetQuery(strippedQuery)) {
+        NSString *key = SimKeychainKey(strippedQuery[(__bridge id)kSecAttrService], strippedQuery[(__bridge id)kSecAttrAccount]);
+        if (SimKeychainStore()[key]) {
+            [SimKeychainStore() removeObjectForKey:key];
+            SimKeychainPersist();
+        }
+        return errSecSuccess;
+    }
+    return ((OSStatus (*)(CFDictionaryRef))SecItemDelete_orig)((__bridge CFDictionaryRef)strippedQuery);
+}
+#endif
 
 // --- Device detection (for Pixel Pals and Dynamic Island behaviour) ---
 // Apollo's device model mapper (sub_1007a3cdc) only recognizes models up to iPhone 14 Pro Max.
@@ -1291,6 +1427,14 @@ static void initializeRandomSources() {
         {"SecItemUpdate", (void *)SecItemUpdate_replacement, (void **)&SecItemUpdate_orig},
         {"uname", (void *)uname_replacement, (void **)&uname_orig}
     }, 4);
+
+#if APOLLO_SIM_BUILD
+    // Virtualized-keychain delete (see the SecItem* shim above): only needed in the simulator,
+    // where the real keychain is unreachable. Kept out of the device rebind set entirely.
+    rebind_symbols((struct rebinding[1]) {
+        {"SecItemDelete", (void *)SecItemDelete_replacement, (void **)&SecItemDelete_orig},
+    }, 1);
+#endif
 
     if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFLEX]) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
