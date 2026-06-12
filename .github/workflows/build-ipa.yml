@@ -123,15 +123,6 @@ jobs:
         if: inputs.inject_tweak
         run: bash ./scripts/collect-debug-symbols.sh --label rootful --output-dir ./dist/symbols
 
-      - name: Archive debug symbols
-        if: inputs.inject_tweak
-        id: symbols
-        run: |
-          SYMBOLS_ZIP="Apollo-Reborn-dSYMs-${{ github.run_number }}.zip"
-          (cd dist && zip -qry "../${SYMBOLS_ZIP}" symbols)
-          echo "symbols_zip=${SYMBOLS_ZIP}" >> "$GITHUB_OUTPUT"
-          echo "Debug symbols: ${SYMBOLS_ZIP} ($(wc -c < "${SYMBOLS_ZIP}") bytes)"
-
       - name: Install cyan injector
         if: inputs.inject_tweak
         run: |
@@ -183,6 +174,26 @@ jobs:
           # Continue the pipeline from the injected IPA.
           mv -f injected.ipa Apollo.ipa
           echo "Injected Apollo.ipa size: $(wc -c < Apollo.ipa) bytes"
+
+      - name: Collect widget debug symbols
+        if: inputs.inject_tweak && github.event.inputs.no_extensions != 'true'
+        run: |
+          WIDGET_DSYM="widgets/build/Build/Products/Release-iphoneos/ApolloRebornWidgets.appex.dSYM"
+          if [ ! -d "$WIDGET_DSYM" ]; then
+            echo "Error: missing widget dSYM: $WIDGET_DSYM" >&2
+            exit 1
+          fi
+          mkdir -p ./dist/symbols/widgets
+          cp -R "$WIDGET_DSYM" ./dist/symbols/widgets/
+
+      - name: Archive debug symbols
+        if: inputs.inject_tweak
+        id: symbols
+        run: |
+          SYMBOLS_ZIP="Apollo-Reborn-dSYMs-${{ github.run_number }}.zip"
+          (cd dist && zip -qry "../${SYMBOLS_ZIP}" symbols)
+          echo "symbols_zip=${SYMBOLS_ZIP}" >> "$GITHUB_OUTPUT"
+          echo "Debug symbols: ${SYMBOLS_ZIP} ($(wc -c < "${SYMBOLS_ZIP}") bytes)"
 
       - name: Build output filename
         id: outname
@@ -246,6 +257,27 @@ jobs:
           fi
           echo "output_ipa=${OUTPUT_IPA}" >> "$GITHUB_OUTPUT"
           echo "Final IPA: ${OUTPUT_IPA} ($(wc -c < "$OUTPUT_IPA") bytes)"
+
+      - name: Validate output IPA
+        if: inputs.inject_tweak
+        run: |
+          IPA="${{ steps.patch.outputs.output_ipa }}"
+          if [ "${{ github.event.inputs.no_extensions }}" == "true" ]; then
+            if unzip -Z1 "$IPA" | grep -Eq '^Payload/[^/]+\.app/PlugIns/[^/]+\.appex/'; then
+              echo "Error: no-extensions output contains app extensions:" >&2
+              unzip -Z1 "$IPA" | grep -E '^Payload/[^/]+\.app/PlugIns/[^/]+\.appex/' >&2
+              exit 1
+            fi
+          else
+            if ! unzip -Z1 "$IPA" | grep -Eq '^Payload/[^/]+\.app/PlugIns/ApolloRebornWidgets\.appex/'; then
+              echo "Error: output IPA is missing ApolloRebornWidgets.appex" >&2
+              exit 1
+            fi
+            if unzip -Z1 "$IPA" | grep -Eq '^Payload/[^/]+\.app/PlugIns/AthenaWidgetExtension\.appex/'; then
+              echo "Error: output IPA still contains stock AthenaWidgetExtension.appex" >&2
+              exit 1
+            fi
+          fi
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

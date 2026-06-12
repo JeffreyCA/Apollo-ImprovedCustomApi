@@ -168,6 +168,19 @@ jobs:
             --deb "${{ steps.rootful_deb.outputs.deb_path }}" \
             --output-dir ./dist/out
 
+      - name: Validate IPA variants
+        run: bash ./scripts/validate_release_variants.sh ./dist/out
+
+      - name: Collect widget debug symbols
+        run: |
+          WIDGET_DSYM="widgets/build/Build/Products/Release-iphoneos/ApolloRebornWidgets.appex.dSYM"
+          if [ ! -d "$WIDGET_DSYM" ]; then
+            echo "Error: missing widget dSYM: $WIDGET_DSYM" >&2
+            exit 1
+          fi
+          mkdir -p ./dist/symbols/widgets
+          cp -R "$WIDGET_DSYM" ./dist/symbols/widgets/
+
       - name: Archive debug symbols
         id: symbols
         run: |
