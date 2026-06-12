@@ -1,0 +1,120 @@
+name: PR build IPA comment
+
+# Posts the sticky "test IPAs" comment for the PR build, on behalf of
+# pr-build-ipa.yml. That workflow runs on the `pull_request` event, whose token
+# is read-only for fork PRs and so cannot comment. This companion runs on
+# `workflow_run`, which executes from the base repo's default branch with a
+# write-scoped token even for fork-originated runs, and only ever handles DATA
+# (the prebuilt comment body) — it never checks out or runs the PR's code. The
+# target PR and its author are resolved from trusted inputs (event data + the
+# API), and the authoritative code-owner gate is enforced HERE, in this
+# fork-uneditable workflow, before any comment is posted.
+#
+# Note: workflow_run only fires once this file exists on the default branch.
+
+on:
+  workflow_run:
+    workflows: ["PR build IPA variants"]
+    types: [completed]
+
+concurrency:
+  # Serialize comment updates per source branch so a newer build's comment wins.
+  group: pr-build-ipa-comment-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read          # download artifacts from the triggering run
+  pull-requests: write   # post/update the comment
+
+jobs:
+  comment:
+    name: Post or update sticky PR comment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download comment payload
+        id: download
+        # Fork-PR builds upload `pr-comment`; non-code-owner or cancelled runs do
+        # not, so a missing artifact is normal — don't fail the job over it.
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pr-comment
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Post or update comment
+        if: steps.download.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MARKER: '<!-- apollo-pr-ipa-build -->'
+          # Attacker-controllable fields (a fork controls the build workflow and
+          # its branch name) MUST go through env, never inline ${{ }} in the
+          # script, to avoid shell injection in this privileged context.
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_OWNER: ${{ github.event.workflow_run.head_repository.owner.login }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          [ -f comment.md ] || { echo "No comment body; nothing to post."; exit 0; }
+
+          # Resolve the target PR from TRUSTED workflow_run event data, not from
+          # the artifact: a build runs the PR head's workflow file and could
+          # otherwise spoof an arbitrary PR number. head_sha is a hex commit id;
+          # branch/owner are only ever passed as data (env / API query field).
+          PR_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/pulls" \
+                --jq 'map(select(.state == "open")) | .[0] // empty' 2>/dev/null || true)
+          if [ -z "$PR_JSON" ]; then
+            # Fallback: match open PRs by head label, then by exact head SHA.
+            PR_JSON=$(gh api --method GET "repos/${GITHUB_REPOSITORY}/pulls" \
+                  -f state=open -f head="${HEAD_OWNER}:${HEAD_BRANCH}" \
+                  --jq "([.[] | select(.head.sha == \"${HEAD_SHA}\")] + .) | .[0] // empty" 2>/dev/null || true)
+          fi
+          if [ -z "$PR_JSON" ]; then
+            echo "No open PR found for ${HEAD_OWNER}:${HEAD_BRANCH} @ ${HEAD_SHA}; skipping."
+            exit 0
+          fi
+          PR=$(echo "$PR_JSON" | jq -r '.number')
+          PR_AUTHOR=$(echo "$PR_JSON" | jq -r '.user.login')
+          echo "Target PR: #${PR} by ${PR_AUTHOR}"
+
+          # Authoritative code-owner gate, enforced HERE (trusted, fork can't edit
+          # this workflow) rather than in the build workflow (whose file the PR
+          # head controls). Read CODEOWNERS from the default branch via the API,
+          # and the author from the resolved PR object — both trusted inputs.
+          OWNERS=$(gh api "repos/${GITHUB_REPOSITORY}/contents/.github/CODEOWNERS" \
+                    -H "Accept: application/vnd.github.raw" 2>/dev/null \
+                    | grep -E '^\*[[:space:]]' | sed 's/#.*//' \
+                    | grep -oE '@[A-Za-z0-9_-]+' | sed 's/@//')
+          is_owner=false
+          while IFS= read -r owner; do
+            [ -z "$owner" ] && continue
+            if [ "$(echo "$owner" | tr '[:upper:]' '[:lower:]')" = "$(echo "$PR_AUTHOR" | tr '[:upper:]' '[:lower:]')" ]; then
+              is_owner=true
+              break
+            fi
+          done <<< "$OWNERS"
+          if [ "$is_owner" != "true" ]; then
+            echo "PR author ${PR_AUTHOR} is not a code owner; not commenting."
+            exit 0
+          fi
+
+          # Build the request body as proper JSON so quotes/backticks/newlines in
+          # the comment are escaped correctly (safer than gh's -F type magic).
+          jq -Rs '{body: .}' comment.md > payload.json
+
+          # Upsert one marker-keyed comment so we never clobber an unrelated
+          # github-actions[bot] comment.
+          COMMENT_ID=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+            --jq ".[] | select(.body | startswith(\"${MARKER}\")) | .id" | tail -1)
+          if [ -n "$COMMENT_ID" ]; then
+            gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}" \
+              --input payload.json >/dev/null
+            echo "Updated existing comment ${COMMENT_ID} on PR #${PR}"
+          else
+            gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+              --input payload.json >/dev/null
+            echo "Created new comment on PR #${PR}"
+          fi
