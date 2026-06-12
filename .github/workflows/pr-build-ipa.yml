@@ -230,6 +230,14 @@ jobs:
           path: dist/symbols
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
+      - name: Upload tweak .deb artifact
+        id: art_deb
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.meta.outputs.prefix }}-deb
+          path: ${{ steps.rootful_deb.outputs.deb_path }}
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
       - name: Build success comment
         env:
           URL_STANDARD: ${{ steps.art_standard.outputs.artifact-url }}
@@ -239,6 +247,8 @@ jobs:
           URL_GLASSICONS: ${{ steps.art_glassicons.outputs.artifact-url }}
           URL_GLASSICONS_NOEXT: ${{ steps.art_glassicons_noext.outputs.artifact-url }}
           URL_SYMBOLS: ${{ steps.art_symbols.outputs.artifact-url }}
+          URL_DEB: ${{ steps.art_deb.outputs.artifact-url }}
+          DEB_PATH: ${{ steps.rootful_deb.outputs.deb_path }}
           BASE: ${{ steps.meta.outputs.base }}
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -247,7 +257,7 @@ jobs:
             echo "<!-- apollo-pr-ipa-build -->"
             echo "### 📦 PR Test IPAs"
             echo ""
-            echo "Built from ${{ steps.meta.outputs.short_sha }} for this PR. Each link downloads a \`.zip\` containing that variant's \`.ipa\`."
+            echo "Built from ${{ steps.meta.outputs.short_sha }}. Each link downloads a \`.zip\` containing that variant's \`.ipa\` (or the rootful \`.deb\`)."
             echo ""
             echo "| Variant | Download | Size |"
             echo "| --- | --- | ---: |"
@@ -257,6 +267,7 @@ jobs:
             echo "| GLASS · No Extensions | [⬇️ Download](${URL_GLASS_NOEXT}) | $(size_of "${BASE}-GLASS-NOEXTENSIONS.ipa") |"
             echo "| GLASS Icons | [⬇️ Download](${URL_GLASSICONS}) | $(size_of "${BASE}-GLASSICONS.ipa") |"
             echo "| GLASS Icons · No Extensions | [⬇️ Download](${URL_GLASSICONS_NOEXT}) | $(size_of "${BASE}-GLASSICONS-NOEXTENSIONS.ipa") |"
+            echo "| Tweak package (rootful \`.deb\`) | [⬇️ Download](${URL_DEB}) | $(du -h "${DEB_PATH}" 2>/dev/null | cut -f1 || echo "?") |"
             echo ""
             echo "Debug symbols: [⬇️ dSYMs](${URL_SYMBOLS}) · [workflow run](${RUN_URL})"
             echo ""
