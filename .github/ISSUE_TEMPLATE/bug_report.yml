@@ -53,11 +53,18 @@ body:
   - type: textarea
     id: logs
     attributes:
-      label: Crash log / console output / screenshots
+      label: Crash log / console output
       description: |
-        Paste any crash backtraces, `ApolloLog` console output, or `.ips` crash reports. Drag and drop screenshots or screen recordings here.
-        Crash reports help enormously — see the README for how to grab them.
+        If you are reporting a crash, paste any crash backtraces, `ApolloLog` console output, or `.ips` crash reports. Crash reports help enormously; see the README for how to grab them.
       render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots / screen recordings
+      description: Drag and drop screenshots or screen recordings here.
     validations:
       required: false
 
@@ -115,6 +122,7 @@ body:
         - Liquid Glass + No Extensions
         - Glass Icons
         - Glass Icons + No Extensions
+        - N/A (used jailbreak with .deb tweak)
     validations:
       required: true
 
@@ -134,6 +142,6 @@ body:
     id: additional
     attributes:
       label: Additional context
-      description: Anything else that might help — custom API keys in use, recently changed settings, etc.
+      description: Anything else that might help — custom API keys in use, recently changed settings, other related bug reports, etc.
     validations:
       required: false

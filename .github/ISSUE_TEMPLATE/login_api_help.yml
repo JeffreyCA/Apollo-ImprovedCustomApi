@@ -32,6 +32,7 @@ body:
         - Dystopia
         - RedReader
         - Other custom redirect URI
+        - API-Key-Free Mode (Experimental)
         - Not sure
     validations:
       required: true
