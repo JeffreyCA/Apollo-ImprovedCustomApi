@@ -98,7 +98,6 @@ jobs:
           # Build exactly what the PR proposes (its head commit), not a merge ref.
           ref: ${{ github.event.pull_request.head.sha }}
           submodules: recursive
-          lfs: true
 
       - name: Install build dependencies
         run: brew install ldid dpkg make

@@ -42,7 +42,6 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: recursive
-          lfs: true
           # The source push at the end uses a GitHub App token that can bypass
           # the protected main ruleset. Do not persist checkout's GITHUB_TOKEN
           # auth header, or Git may push as github-actions[bot] instead.
