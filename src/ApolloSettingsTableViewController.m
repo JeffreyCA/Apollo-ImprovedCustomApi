@@ -79,3 +79,20 @@
 }
 
 @end
+
+
+// UITextView subclass that allows users to tap links within footer text, but not select text
+@implementation ApolloFooterLinkTextView
+
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    UITextPosition *position = [self closestPositionToPoint:point];
+    if (!position) return NO;
+
+    UITextRange *range = [self.tokenizer rangeEnclosingPosition:position withGranularity:UITextGranularityCharacter inDirection:UITextLayoutDirectionLeft];
+    if (!range) return NO;
+
+    NSInteger startIndex = [self offsetFromPosition:self.beginningOfDocument toPosition:range.start];
+    return [self.attributedText attribute:NSLinkAttributeName atIndex:startIndex effectiveRange:nil] != nil;
+}
+
+@end

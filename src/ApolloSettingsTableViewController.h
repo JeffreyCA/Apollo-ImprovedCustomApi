@@ -7,3 +7,6 @@
 - (void)apollo_applyThemeToCell:(UITableViewCell *)cell;
 - (void)apollo_applyTheme;
 @end
+
+@interface ApolloFooterLinkTextView : UITextView
+@end

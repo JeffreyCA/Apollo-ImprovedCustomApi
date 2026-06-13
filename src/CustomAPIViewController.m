@@ -1424,7 +1424,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     NSAttributedString *text = [self footerAttributedTextForSection:section];
     if (!text) return nil;
 
-    UITextView *textView = [[UITextView alloc] init];
+    UITextView *textView = [[ApolloFooterLinkTextView alloc] init];
     textView.editable = NO;
     textView.scrollEnabled = NO;
     textView.backgroundColor = [UIColor clearColor];
