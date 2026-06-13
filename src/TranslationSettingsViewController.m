@@ -72,6 +72,14 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
 }
 
+- (void)apollo_applyTheme {
+    [super apollo_applyTheme];
+
+    NSIndexPath *addLanguageIndexPath = [NSIndexPath indexPathForRow:[self skipLanguageCodes].count inSection:TranslationSettingsSectionSkip];
+    UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:addLanguageIndexPath];
+    if (cell) cell.textLabel.textColor = [self apollo_themeAccentColor];
+}
+
 #pragma mark - Helpers
 
 - (NSString *)normalizedLanguageCodeFromIdentifier:(NSString *)identifier {
@@ -523,7 +531,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         }
         cell.textLabel.text = @"Add Language…";
-        cell.textLabel.textColor = [UIColor systemBlueColor];
+        cell.textLabel.textColor = [self apollo_themeAccentColor];
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;
     }

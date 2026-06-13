@@ -32,16 +32,42 @@
     return [UIColor secondarySystemGroupedBackgroundColor];
 }
 
+- (UIColor *)apollo_themeAccentColor {
+    NSMutableArray<UIColor *> *candidates = [NSMutableArray array];
+    if (self.tabBarController.tabBar.tintColor) [candidates addObject:self.tabBarController.tabBar.tintColor];
+    if (self.navigationController.navigationBar.tintColor) [candidates addObject:self.navigationController.navigationBar.tintColor];
+    if (self.view.tintColor) [candidates addObject:self.view.tintColor];
+    if (self.tableView.tintColor) [candidates addObject:self.tableView.tintColor];
+    if (self.view.window.tintColor) [candidates addObject:self.view.window.tintColor];
+    for (UIColor *color in candidates) {
+        if ([color isKindOfClass:[UIColor class]]) return color;
+    }
+    return self.view.tintColor ?: [UIColor systemBlueColor];
+}
+
 - (void)apollo_applyThemeToCell:(UITableViewCell *)cell {
     if (!cell) return;
 
     UIColor *cellColor = [self apollo_themeCellBackgroundColor];
     cell.backgroundColor = cellColor;
     cell.contentView.backgroundColor = cellColor;
+
+    UIColor *accentColor = [self apollo_themeAccentColor];
+    cell.tintColor = accentColor;
+    if (cell.accessoryView) cell.accessoryView.tintColor = accentColor;
+
+    for (UIView *subview in cell.contentView.subviews) {
+        subview.tintColor = accentColor;
+    }
 }
 
 - (void)apollo_applyTheme {
     ApolloApplyInheritedSettingsTableTheme(self);
+
+    UIColor *accentColor = [self apollo_themeAccentColor];
+    self.view.tintColor = accentColor;
+    self.tableView.tintColor = accentColor;
+    self.navigationController.navigationBar.tintColor = accentColor;
 
     for (UITableViewCell *cell in self.tableView.visibleCells) {
         [self apollo_applyThemeToCell:cell];

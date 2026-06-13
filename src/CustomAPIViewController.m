@@ -62,6 +62,7 @@ static NSInteger sPendingLinkPreviewModeRefreshMode = ApolloLinkPreviewModeFull;
 
 static NSString *const kApolloRebornSubredditName = @"ApolloReborn";
 static char kAboutSubredditIconTaskKey;
+static char kApolloAccentActionCellKey;
 
 @implementation CustomAPIViewController
 
@@ -153,58 +154,40 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (UIColor *)apollo_themeCellBackgroundColor {
-    UITableView *source = [self apollo_sourceThemeTableView];
-    for (UITableViewCell *cell in source.visibleCells) {
-        UIColor *color = cell.backgroundColor ?: cell.contentView.backgroundColor;
-        if (color) return color;
-    }
-    return [UIColor secondarySystemGroupedBackgroundColor];
-}
-
-- (UIColor *)apollo_themeAccentColor {
-    NSMutableArray<UIColor *> *candidates = [NSMutableArray array];
-    if (self.tabBarController.tabBar.tintColor) [candidates addObject:self.tabBarController.tabBar.tintColor];
-    if (self.navigationController.navigationBar.tintColor) [candidates addObject:self.navigationController.navigationBar.tintColor];
-    if (self.view.tintColor) [candidates addObject:self.view.tintColor];
-    if (self.tableView.tintColor) [candidates addObject:self.tableView.tintColor];
-    if (self.view.window.tintColor) [candidates addObject:self.view.window.tintColor];
-    for (UIColor *color in candidates) {
-        if ([color isKindOfClass:[UIColor class]]) return color;
-    }
-    return self.view.tintColor ?: [UIColor systemBlueColor];
-}
-
 - (void)apollo_applyThemeToCell:(UITableViewCell *)cell {
-    if (!cell) return;
-
-    UIColor *cellColor = [self apollo_themeCellBackgroundColor];
-    cell.backgroundColor = cellColor;
-    cell.contentView.backgroundColor = cellColor;
+    [super apollo_applyThemeToCell:cell];
 
     UIView *selectedBackground = [[UIView alloc] init];
     selectedBackground.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.18];
     cell.selectedBackgroundView = selectedBackground;
 
-    UIColor *accentColor = [self apollo_themeAccentColor];
-    cell.tintColor = accentColor;
-    if (cell.accessoryView) cell.accessoryView.tintColor = accentColor;
+    if ([objc_getAssociatedObject(cell, &kApolloAccentActionCellKey) boolValue]) {
+        cell.textLabel.textColor = [self apollo_themeAccentColor];
+    }
+}
 
-    for (UIView *subview in cell.contentView.subviews) {
-        subview.tintColor = accentColor;
+- (void)apollo_applyAccentActionTextColorToCell:(UITableViewCell *)cell {
+    objc_setAssociatedObject(cell, &kApolloAccentActionCellKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    cell.textLabel.textColor = [self apollo_themeAccentColor];
+}
+
+- (void)apollo_refreshFooterTextViews {
+    UIColor *accentColor = [self apollo_themeAccentColor];
+    NSInteger sectionCount = [self numberOfSectionsInTableView:self.tableView];
+    for (NSInteger section = 0; section < sectionCount; section++) {
+        UIView *footerView = [self.tableView footerViewForSection:section];
+        if (![footerView isKindOfClass:[UITextView class]]) continue;
+
+        UITextView *textView = (UITextView *)footerView;
+        textView.tintColor = accentColor;
+        textView.linkTextAttributes = @{NSForegroundColorAttributeName: accentColor};
+        textView.attributedText = [self footerAttributedTextForSection:section];
     }
 }
 
 - (void)apollo_applyTheme {
     [super apollo_applyTheme];
-
-    UIColor *accentColor = [self apollo_themeAccentColor];
-    self.view.tintColor = accentColor;
-    self.tableView.tintColor = accentColor;
-    self.navigationController.navigationBar.tintColor = accentColor;
-    for (UITableViewCell *cell in self.tableView.visibleCells) {
-        [self apollo_applyThemeToCell:cell];
-    }
+    [self apollo_refreshFooterTextViews];
 }
 
 - (UIImage *)roundedImage:(UIImage *)image size:(CGFloat)size cornerRadius:(CGFloat)radius {
@@ -1217,7 +1200,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     }
     cell.textLabel.text = @"Test Connection";
-    cell.textLabel.textColor = self.view.tintColor;
+    [self apollo_applyAccentActionTextColorToCell:cell];
     return cell;
 }
 
@@ -1237,7 +1220,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Backup"];
         }
         cell.textLabel.text = (row == 0) ? @"Backup Settings" : @"Restore Settings";
-        cell.textLabel.textColor = self.view.tintColor;
+        [self apollo_applyAccentActionTextColorToCell:cell];
         cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         return cell;
     }
@@ -1248,7 +1231,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:identifier];
     }
     cell.textLabel.text = (row == 2) ? @"Clear Tweak Caches" : @"Clear Custom Banners & Icons";
-    cell.textLabel.textColor = self.view.tintColor;
+    [self apollo_applyAccentActionTextColorToCell:cell];
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     return cell;
 }
@@ -1286,7 +1269,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_About_Logs"];
             }
             cell.textLabel.text = @"Export Debug Logs";
-            cell.textLabel.textColor = self.view.tintColor;
+            [self apollo_applyAccentActionTextColorToCell:cell];
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
             return cell;
         }
@@ -1446,6 +1429,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     textView.scrollEnabled = NO;
     textView.backgroundColor = [UIColor clearColor];
     textView.textContainerInset = UIEdgeInsetsMake(8, 16, 8, 16);
+    textView.tintColor = [self apollo_themeAccentColor];
+    textView.linkTextAttributes = @{NSForegroundColorAttributeName: [self apollo_themeAccentColor]};
     textView.attributedText = text;
 
     return textView;

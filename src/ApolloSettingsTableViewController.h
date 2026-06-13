@@ -3,6 +3,7 @@
 @interface ApolloSettingsTableViewController : UITableViewController
 - (UITableView *)apollo_sourceThemeTableView;
 - (UIColor *)apollo_themeCellBackgroundColor;
+- (UIColor *)apollo_themeAccentColor;
 - (void)apollo_applyThemeToCell:(UITableViewCell *)cell;
 - (void)apollo_applyTheme;
 @end

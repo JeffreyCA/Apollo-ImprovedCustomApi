@@ -34,6 +34,15 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
     self.title = [NSString stringWithFormat:@"r/%@", self.subredditName];
 }
 
+- (void)apollo_applyTheme {
+    [super apollo_applyTheme];
+
+    UITableViewCell *resetCell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:1]];
+    if (resetCell) {
+        resetCell.textLabel.textColor = [self apollo_themeAccentColor];
+    }
+}
+
 - (NSDictionary *)currentOverride {
     NSDictionary *all = sTagFilterSubredditOverrides;
     NSDictionary *o = all[self.subredditName];
@@ -106,7 +115,7 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
     if (indexPath.section == 1) {
         UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
         cell.textLabel.text = @"Reset to Global Defaults";
-        cell.textLabel.textColor = [UIColor systemBlueColor];
+        cell.textLabel.textColor = [self apollo_themeAccentColor];
         cell.textLabel.textAlignment = NSTextAlignmentCenter;
         return cell;
     }
@@ -159,6 +168,13 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self.tableView reloadData];
+}
+
+- (void)apollo_applyTheme {
+    [super apollo_applyTheme];
+
+    UITableViewCell *addCell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:[self overrideSubreddits].count inSection:TagFiltersSectionOverrides]];
+    if (addCell) addCell.textLabel.textColor = [self apollo_themeAccentColor];
 }
 
 #pragma mark - Helpers
@@ -236,7 +252,7 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
         }
         UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
         cell.textLabel.text = @"Add Subreddit…";
-        cell.textLabel.textColor = [UIColor systemBlueColor];
+        cell.textLabel.textColor = [self apollo_themeAccentColor];
         return cell;
     }
 
