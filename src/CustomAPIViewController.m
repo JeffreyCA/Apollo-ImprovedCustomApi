@@ -622,7 +622,6 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionAbout: cell = [self aboutCellForRow:indexPath.row tableView:tableView]; break;
         default: cell = [[UITableViewCell alloc] init]; break;
     }
-    [self apollo_applyThemeToCell:cell];
     return cell;
 }
 
