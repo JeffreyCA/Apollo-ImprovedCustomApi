@@ -58,7 +58,6 @@ static char kApolloAccentActionCellKey;
 
     UIColor *cellColor = [self apollo_themeCellBackgroundColor];
     cell.backgroundColor = cellColor;
-    cell.contentView.backgroundColor = cellColor;
 
     UIColor *accentColor = [self apollo_themeAccentColor];
     cell.tintColor = accentColor;
