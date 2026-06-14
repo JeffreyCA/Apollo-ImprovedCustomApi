@@ -1,0 +1,47 @@
+name: ApolloRebornWidgets
+
+options:
+  bundleIdPrefix: com.christianselig.Apollo
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    # We always build unsigned; the user's sideload signer (Feather/AltStore/
+    # SideStore/Sideloadly) re-seals the whole app + plugins with their cert.
+    CODE_SIGNING_ALLOWED: NO
+    CODE_SIGNING_REQUIRED: NO
+    ENABLE_BITCODE: NO
+
+targets:
+  ApolloRebornWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Sources
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Apollo Widgets
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        # Nested under the host app's bundle id so iOS attributes these widgets
+        # to Apollo (they show under "Apollo" in the widget gallery).
+        PRODUCT_BUNDLE_IDENTIFIER: com.christianselig.Apollo.RebornWidgets
+        PRODUCT_NAME: ApolloRebornWidgets
+        SKIP_INSTALL: YES
+        GENERATE_INFOPLIST_FILE: NO
+        # Fully system-linked; no embedded Swift runtime needed on iOS 17+.
+        ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: NO
+        # Generate the INIntent subclass from the .intentdefinition. We use the
+        # classic SiriKit IntentConfiguration (not AppIntents) because AppIntents
+        # widget metadata does NOT survive third-party sideload re-signing,
+        # whereas SiriKit IntentConfiguration does.
+        INTENTS_CODEGEN_LANGUAGE: Swift

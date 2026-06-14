@@ -1,0 +1,104 @@
+name: 🔑 Login & API Key Help
+description: Trouble signing in or setting up API keys
+title: "[Login]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Most sign-in problems come from the API key / redirect setup. Please fill this out completely so we (and other users) can help.
+
+        **Please check these first:**
+        - The [Don't have an API key?](https://github.com/Apollo-Reborn/Apollo-Reborn#dont-have-an-api-key) section of the README for setup instructions and troubleshooting.
+        - Existing [login issues](https://github.com/Apollo-Reborn/Apollo-Reborn/issues?q=is%3Aissue+label%3Aquestion+login) — note that Reddit has been revoking API keys, which is **not** something the tweak can fix.
+        - Make sure you are running at least version 3.1.0 of Apollo Reborn if you are using a custom redirect URI.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-submission checklist
+      options:
+        - label: I searched existing issues and read the README section first.
+          required: true
+        - label: I'm running the latest version of Apollo Reborn.
+          required: true
+
+  - type: dropdown
+    id: method
+    attributes:
+      label: Which sign-in method are you using?
+      options:
+        - My own Reddit API key (own app on reddit.com/prefs/apps)
+        - Dystopia
+        - RedReader
+        - Other custom redirect URI
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happens
+    attributes:
+      label: What happens?
+      description: Describe exactly where it fails. Include the error text shown (e.g. "{}", "can't open the page"), and what the in-app browser does at the final "Accept"/"Open in Apollo" step.
+      placeholder: I enter my username and password, tap Accept, and the in-app browser says...
+    validations:
+      required: true
+
+  - type: input
+    id: redirect-uri
+    attributes:
+      label: Redirect URI
+      description: The redirect URI you entered in Apollo Reborn settings (do NOT send any client ID or secret here).
+      placeholder: "apollo://reddit-oauth"
+    validations:
+      required: false
+
+  - type: input
+    id: user-agent
+    attributes:
+      label: User agent
+      description: The user agent you entered in Apollo Reborn settings.
+      placeholder: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots / screen recording
+      description: A recording of the full login flow is the most helpful thing you can attach. Drag and drop here.
+    validations:
+      required: false
+
+  - type: input
+    id: tweak-version
+    attributes:
+      label: Apollo Reborn version
+      placeholder: "3.1.1"
+    validations:
+      required: true
+
+  - type: input
+    id: ios-version
+    attributes:
+      label: iOS version
+      placeholder: "iOS 26.5.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Installation method
+      options:
+        - AltStore Classic/SideStore
+        - Feather
+        - LiveContainer
+        - Sideloadly
+        - Impactor
+        - TrollStore
+        - Jailbreak (.deb tweak)
+        - Other
+    validations:
+      required: true

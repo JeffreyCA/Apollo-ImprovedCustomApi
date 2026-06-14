@@ -266,18 +266,13 @@ if [ "${LIQUID_GLASS}" == "true" ]; then
         exit 1
     fi
 
-    # Guard against an un-pulled Git LFS pointer. Assets.car is stored via Git
-    # LFS, so a plain `git clone` without git-lfs installed leaves a tiny text
-    # pointer in its place. Patching with that stub silently produces a broken
+    # Sanity check against a truncated/corrupt asset catalog. The real
+    # Assets.car is ~80 MB; patching with a stub silently produces a broken
     # IPA that crashes on launch (see issue #314), so fail early with a fix.
     asset_size=$(wc -c < "${LIQUID_GLASS_ASSETS_CAR}" | tr -d ' ')
-    if head -c 64 "${LIQUID_GLASS_ASSETS_CAR}" | grep -q "git-lfs" || [ "${asset_size}" -lt 4096 ]; then
-        echo "Error: ${LIQUID_GLASS_ASSETS_CAR} looks like an un-pulled Git LFS pointer (${asset_size} bytes), not the real asset catalog."
-        echo "       Fetch the LFS content, then re-run this command:"
-        echo ""
-        echo "         git lfs install   # one-time per machine"
-        echo "         git lfs pull"
-        echo ""
+    if [ "${asset_size}" -lt 4096 ]; then
+        echo "Error: ${LIQUID_GLASS_ASSETS_CAR} looks truncated or corrupt (${asset_size} bytes), not the real asset catalog."
+        echo "       Re-fetch the repository contents and try again."
         exit 1
     fi
 

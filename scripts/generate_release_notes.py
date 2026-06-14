@@ -38,7 +38,9 @@ def fallback_notes(apollo_version: str, tweak_version: str) -> str:
             f"Apollo version: `v{apollo_version}`",
             f"Apollo-Reborn version: `v{tweak_version}`",
             "",
-            "This release includes the standard, No Extensions, GLASS, and No Extensions + GLASS IPA variants.",
+            "This release includes the standard, No Extensions, GLASS, No Extensions + GLASS, GLASS Icons, and No Extensions + GLASS Icons IPA variants.",
+            "",
+            "The extension-bearing variants include Apollo-Reborn widgets; No Extensions variants intentionally omit widgets to reduce App ID usage.",
         ]
     )
 

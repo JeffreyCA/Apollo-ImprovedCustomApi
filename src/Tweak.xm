@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <dlfcn.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <sys/utsname.h>
@@ -1437,6 +1438,11 @@ static void initializeRandomSources() {
 #endif
 
     if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFLEX]) {
+        if (!%c(FLEXManager)) {
+            // try to load from our ApolloReborn.bundle/libFLEX.dylib
+            NSString *flexFromBundle = ApolloBundledResourcePath(@"libflex", @"dylib");
+            if (flexFromBundle) dlopen(flexFromBundle.UTF8String, RTLD_LAZY);
+        }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [[%c(FLEXManager) performSelector:@selector(sharedManager)] performSelector:@selector(showExplorer)];
         });

@@ -254,6 +254,19 @@ bash "${REPO_DIR}/scripts/fix-safari-extension.sh" "$STANDARD_IPA"
 bash "${REPO_DIR}/scripts/fix-openin-extension.sh" "$STANDARD_IPA"
 set_main_app_bundle_versions_in_ipa "$STANDARD_IPA" "$TWEAK_VERSION" "$APP_BUILD_VERSION"
 
+# Inject the Reborn widget extension into the STANDARD IPA so the GLASS and
+# GLASSICONS variants (both derived from it via patch.sh below) inherit it. The
+# no-extensions variants are built from $IPA_PATH with `cyan -e` and stay
+# appex-free by design — widgets need an extension slot. Fail loudly if xcodegen
+# is missing so release IPAs cannot silently ship without widgets.
+if ! command -v xcodegen >/dev/null 2>&1; then
+    echo "Error: xcodegen is required to build and inject Reborn widgets." >&2
+    exit 1
+fi
+echo "==> Injecting Reborn widgets into standard IPA (Glass variants inherit; no-ext variants omit)"
+bash "${REPO_DIR}/scripts/inject-widgets.sh" --ipa "$STANDARD_IPA" --build -o "${STANDARD_IPA}.ww"
+mv "${STANDARD_IPA}.ww" "$STANDARD_IPA"
+
 echo ""
 echo "[2/6] Building no-extensions injected IPA..."
 cyan -i "$IPA_PATH" -f "$DEB_PATH" -o "$NOEXT_IPA" -e

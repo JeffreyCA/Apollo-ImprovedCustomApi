@@ -1,0 +1,51 @@
+name: ❓ Question / Support
+description: Ask a question or get help with something that isn't a bug or feature request
+title: "[Question]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have a question about using Apollo Reborn, building it, or whether some behavior is expected? Ask away.
+
+        For faster help with general usage, the [r/ApolloReborn](https://www.reddit.com/r/ApolloReborn/) community is often the quickest place. For **login/API key** problems, please use the dedicated "Login & API Key Help" template instead.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-submission checklist
+      options:
+        - label: I searched existing issues and the README/subreddit, and didn't find an answer.
+          required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: Ask your question clearly. If it's about a specific behavior, describe what you see vs. what you expected.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Screenshots, links, console output, or any other detail that helps. If this is a build/development question, include the full command and error output.
+    validations:
+      required: false
+
+  - type: input
+    id: tweak-version
+    attributes:
+      label: Apollo Reborn version (if applicable)
+      placeholder: "3.1.1"
+    validations:
+      required: false
+
+  - type: input
+    id: ios-version
+    attributes:
+      label: iOS version (if applicable)
+      placeholder: "iOS 26.5.1"
+    validations:
+      required: true

@@ -15,12 +15,14 @@ on:
     # Build only when something that determines the produced IPA changes.
     paths:
       - 'src/**'                              # tweak source
+      - 'widgets/**'                          # injected Reborn widget extension
       - 'openin-extension/**'                 # injected OpenIn dylib subproject
       - 'scripts/**'                          # variant build scripts
       - 'patch.sh'                            # IPA patcher
       - 'build-ipa.sh'                        # injection entry point
       - 'Makefile'                            # build config
       - 'control'                             # package metadata + version
+      - 'distribution/config.json'            # app build/version metadata
       - '.github/workflows/pr-build-ipa.yml'  # this pipeline
 
 concurrency:
@@ -86,7 +88,7 @@ jobs:
     needs: authorize
     if: needs.authorize.outputs.is_owner == 'true'
     runs-on: macos-15
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       APOLLO_IPA_URL: https://downloads.apolloreborn.app/apollobase.ipa
       ARTIFACT_RETENTION_DAYS: 7
@@ -98,7 +100,6 @@ jobs:
           # Build exactly what the PR proposes (its head commit), not a merge ref.
           ref: ${{ github.event.pull_request.head.sha }}
           submodules: recursive
-          lfs: true
 
       - name: Install build dependencies
         run: brew install ldid dpkg make
@@ -145,6 +146,14 @@ jobs:
           "$RUNNER_TEMP/cyan-venv/bin/cyan" --help >/dev/null
           echo "cyan installed: $RUNNER_TEMP/cyan-venv/bin/cyan"
 
+      - name: Install xcodegen
+        run: |
+          # build_release_variants.sh builds and injects ApolloRebornWidgets.appex
+          # into the extension-bearing variants. Keep PR artifacts aligned with
+          # release artifacts by failing here if the widget toolchain is absent.
+          brew install xcodegen
+          xcodegen --version
+
       - name: Download Apollo IPA
         run: |
           curl -L --fail --retry 3 "$APOLLO_IPA_URL" -o Apollo.ipa
@@ -156,6 +165,19 @@ jobs:
             --ipa ./Apollo.ipa \
             --deb "${{ steps.rootful_deb.outputs.deb_path }}" \
             --output-dir ./dist/out
+
+      - name: Validate IPA variants
+        run: bash ./scripts/validate_release_variants.sh ./dist/out
+
+      - name: Collect widget debug symbols
+        run: |
+          WIDGET_DSYM="widgets/build/Build/Products/Release-iphoneos/ApolloRebornWidgets.appex.dSYM"
+          if [ ! -d "$WIDGET_DSYM" ]; then
+            echo "Error: missing widget dSYM: $WIDGET_DSYM" >&2
+            exit 1
+          fi
+          mkdir -p ./dist/symbols/widgets
+          cp -R "$WIDGET_DSYM" ./dist/symbols/widgets/
 
       - name: Compute build metadata
         id: meta
