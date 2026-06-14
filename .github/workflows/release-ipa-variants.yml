@@ -42,7 +42,6 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: recursive
-          lfs: true
           # The source push at the end uses a GitHub App token that can bypass
           # the protected main ruleset. Do not persist checkout's GITHUB_TOKEN
           # auth header, or Git may push as github-actions[bot] instead.
@@ -122,6 +121,15 @@ jobs:
           "$RUNNER_TEMP/cyan-venv/bin/cyan" --help >/dev/null
           echo "cyan installed: $RUNNER_TEMP/cyan-venv/bin/cyan"
 
+      - name: Install xcodegen
+        run: |
+          # Required so build_release_variants.sh can build + inject the Reborn
+          # widget extension into the extension-bearing variants (standard/Glass/
+          # GlassIcons). Without xcodegen the script's guard silently skips
+          # widgets and the release would ship widget-less.
+          brew install xcodegen
+          xcodegen --version
+
       - name: Download Apollo IPA
         run: |
           curl -L --fail --retry 3 "${{ github.event.inputs.apollo_ipa_url }}" -o Apollo.ipa
@@ -158,6 +166,19 @@ jobs:
             --ipa ./Apollo.ipa \
             --deb "${{ steps.rootful_deb.outputs.deb_path }}" \
             --output-dir ./dist/out
+
+      - name: Validate IPA variants
+        run: bash ./scripts/validate_release_variants.sh ./dist/out
+
+      - name: Collect widget debug symbols
+        run: |
+          WIDGET_DSYM="widgets/build/Build/Products/Release-iphoneos/ApolloRebornWidgets.appex.dSYM"
+          if [ ! -d "$WIDGET_DSYM" ]; then
+            echo "Error: missing widget dSYM: $WIDGET_DSYM" >&2
+            exit 1
+          fi
+          mkdir -p ./dist/symbols/widgets
+          cp -R "$WIDGET_DSYM" ./dist/symbols/widgets/
 
       - name: Archive debug symbols
         id: symbols

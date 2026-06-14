@@ -22,5 +22,12 @@ docs/
 iPhone18-3_26.1_23B85_Restore/*
 iOS26-Runtime-Headers/
 
+# Reborn Widgets (xcodegen) — track project.yml + Sources/ only.
+# The .xcodeproj, build output, and Info.plist are all generated.
+widgets/build/
+widgets/build-*/
+widgets/*.xcodeproj/
+widgets/Info.plist
+
 # Local iOS Simulator working dir (scripts/run-in-sim.sh)
 .sim/

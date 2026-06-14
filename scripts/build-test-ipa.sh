@@ -99,6 +99,16 @@ echo "Patching base IPA for Liquid Glass..."
 echo "Injecting tweak..."
 "$BUILD_DIR/build-ipa.sh" --ipa "$PATCHED_IPA" --deb "$DEB_PATH" -o "$OUTPUT_IPA"
 
+# Inject the Reborn widget extension so test builds match what ships. Guarded on
+# xcodegen so the script still produces a (widget-less) IPA where it's absent.
+if command -v xcodegen >/dev/null 2>&1; then
+    echo "Injecting Reborn widgets..."
+    "$BUILD_DIR/scripts/inject-widgets.sh" --ipa "$OUTPUT_IPA" --build -o "$OUTPUT_IPA.ww"
+    mv "$OUTPUT_IPA.ww" "$OUTPUT_IPA"
+else
+    echo "Warning: xcodegen not found — test IPA will NOT include Reborn widgets."
+fi
+
 echo "Verifying CydiaSubstrate linkage..."
 VERIFY_DIR="$(mktemp -d /tmp/apollo-ipa-verify-XXXXXX)"
 unzip -q "$OUTPUT_IPA" -d "$VERIFY_DIR"

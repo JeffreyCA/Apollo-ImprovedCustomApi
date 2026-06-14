@@ -1,0 +1,139 @@
+name: 🐞 Bug Report
+description: Report a bug, crash, or broken feature in Apollo Reborn
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report! Please fill out the sections below so we can reproduce and fix the issue quickly.
+
+        Before submitting, please [search existing issues](https://github.com/Apollo-Reborn/Apollo-Reborn/issues?q=is%3Aissue) to avoid duplicates.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre-submission checklist
+      options:
+        - label: I searched existing issues and this hasn't been reported yet.
+          required: true
+        - label: I'm running the latest version of Apollo Reborn.
+          required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what the bug is.
+      placeholder: When I scroll past an unmuted video in comments, the audio stops...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: How can we reproduce this behavior?
+      placeholder: |
+        1. Go to '...'
+        2. Tap on '...'
+        3. Scroll to '...'
+        4. See the bug
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Crash log / console output / screenshots
+      description: |
+        Paste any crash backtraces, `ApolloLog` console output, or `.ips` crash reports. Drag and drop screenshots or screen recordings here.
+        Crash reports help enormously — see the README for how to grab them.
+      render: text
+    validations:
+      required: false
+
+  - type: input
+    id: tweak-version
+    attributes:
+      label: Apollo Reborn version
+      description: Found in Settings → Apollo Reborn → scroll to bottom, or the IPA filename (e.g. `Apollo-Reborn-3.1.1.ipa`).
+      placeholder: "3.1.1"
+    validations:
+      required: true
+
+  - type: input
+    id: ios-version
+    attributes:
+      label: iOS version
+      placeholder: "iOS 26.5.1"
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: "iPhone 16 Pro"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Installation method
+      description: How did you install the IPA?
+      options:
+        - AltStore Classic/SideStore
+        - Feather
+        - LiveContainer
+        - Sideloadly
+        - Impactor
+        - TrollStore
+        - Jailbreak (.deb tweak)
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: variant
+    attributes:
+      label: IPA variant
+      description: Which build are you running?
+      options:
+        - Standard
+        - No Extensions
+        - Liquid Glass
+        - Liquid Glass + No Extensions
+        - Glass Icons
+        - Glass Icons + No Extensions
+    validations:
+      required: true
+
+  - type: dropdown
+    id: was-existing-apollo-bug
+    attributes:
+      label: Was this a previously existing Apollo bug?
+      description: Do you know if this bug existed in the original Apollo app, or is it new to the Apollo Reborn tweak? You can also check the [original Apollo bug tracker](https://github.com/christianselig/apollo-bugs/issues) to see if it's been reported there.
+      options:
+        - "No"
+        - "Yes"
+        - "Not sure"
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Anything else that might help — custom API keys in use, recently changed settings, etc.
+    validations:
+      required: false
