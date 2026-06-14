@@ -1565,7 +1565,10 @@ static void ApolloSubredditIndexStyleHeaderView(UIView *header, UITableView *tab
         ApolloLog(@"[SubredditIndex] styled-header class=%@ title=%@", NSStringFromClass([header class]), text);
     }
 
-    header.backgroundColor = tableView.backgroundColor;
+    UIColor *tableBGColor = tableView.backgroundColor;
+    if (tableBGColor && ![tableBGColor isEqual:[UIColor clearColor]]) {
+        header.backgroundColor = tableBGColor;
+    }
 }
 
 static void ApolloSubredditIndexHeaderLayoutSubviewsHook(id self, SEL _cmd) {
