@@ -1,6 +1,9 @@
 #import "ApolloSettingsTableViewController.h"
 
 #import "ApolloCommon.h"
+#import <objc/runtime.h>
+
+static char kApolloAccentActionCellKey;
 
 @implementation ApolloSettingsTableViewController
 
@@ -45,6 +48,11 @@
     return self.view.tintColor ?: [UIColor systemBlueColor];
 }
 
+- (void)apollo_applyAccentActionTextColorToCell:(UITableViewCell *)cell {
+    if (!cell) return;
+    objc_setAssociatedObject(cell, &kApolloAccentActionCellKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 - (void)apollo_applyThemeToCell:(UITableViewCell *)cell {
     if (!cell) return;
 
@@ -58,6 +66,10 @@
 
     for (UIView *subview in cell.contentView.subviews) {
         subview.tintColor = accentColor;
+    }
+
+    if ([objc_getAssociatedObject(cell, &kApolloAccentActionCellKey) boolValue]) {
+        cell.textLabel.textColor = accentColor;
     }
 }
 

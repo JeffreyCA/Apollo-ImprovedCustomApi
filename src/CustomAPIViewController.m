@@ -62,7 +62,6 @@ static NSInteger sPendingLinkPreviewModeRefreshMode = ApolloLinkPreviewModeFull;
 
 static NSString *const kApolloRebornSubredditName = @"ApolloReborn";
 static char kAboutSubredditIconTaskKey;
-static char kApolloAccentActionCellKey;
 
 @implementation CustomAPIViewController
 
@@ -160,15 +159,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     UIView *selectedBackground = [[UIView alloc] init];
     selectedBackground.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.18];
     cell.selectedBackgroundView = selectedBackground;
-
-    if ([objc_getAssociatedObject(cell, &kApolloAccentActionCellKey) boolValue]) {
-        cell.textLabel.textColor = [self apollo_themeAccentColor];
-    }
-}
-
-- (void)apollo_applyAccentActionTextColorToCell:(UITableViewCell *)cell {
-    objc_setAssociatedObject(cell, &kApolloAccentActionCellKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    cell.textLabel.textColor = [self apollo_themeAccentColor];
 }
 
 - (void)apollo_refreshFooterTextViews {
