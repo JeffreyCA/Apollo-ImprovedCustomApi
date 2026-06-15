@@ -8,7 +8,8 @@
 - Confirm long usernames do not crowd the recovered-comment reason chip.
 - With "Tap to Show Deleted Comments" on, confirm unrecovered placeholders stay as stable reason chips and do not show `LOADING...`, `NOT AVAILABLE`, or native `SPOILER`.
 - With "Tap to Show Deleted Comments" on, tap a recovered/cached deleted comment and confirm it toggles between the reason chip and recovered body without collapsing the whole comment.
-- With "Tap to Show Deleted Comments" off, confirm recovered bodies are visible by default and still show the reason chip before the body.
+- With "Tap to Show Deleted Comments" off, confirm recovered bodies are visible by default and show the reason chip below the body.
+- Confirm `REMOVED BY MOD` and `DELETED BY USER` use the same chip style but slightly different red highlight shades in light and dark mode.
 - Open a comments thread where removed replies are hidden behind "more replies" and confirm recoverable deleted children appear only as part of Apollo's normal response or "more replies" response, not as a live list shift.
 - With Arctic Shift slow or blocked, confirm the thread still shows Apollo's normal comments immediately instead of waiting 10-20 seconds.
 - Reopen the same recovered thread and confirm cached archive data is reused without another visible loading penalty.
