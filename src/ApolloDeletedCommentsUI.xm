@@ -40,6 +40,7 @@ static const void *kApolloDeletedCommentsBodyOwnerCellKey = &kApolloDeletedComme
 static const void *kApolloDeletedCommentsBodyReplacementTextNodeKey = &kApolloDeletedCommentsBodyReplacementTextNodeKey;
 static const void *kApolloDeletedCommentsOriginalBodyKey = &kApolloDeletedCommentsOriginalBodyKey;
 static const void *kApolloDeletedCommentsOriginalBodyHTMLKey = &kApolloDeletedCommentsOriginalBodyHTMLKey;
+static const void *kApolloDeletedCommentsHostLayoutRefreshScheduledKey = &kApolloDeletedCommentsHostLayoutRefreshScheduledKey;
 
 static NSMutableDictionary<NSString *, NSHashTable *> *sApolloDeletedCommentsVisibleCellsByFullName = nil;
 static NSObject *sApolloDeletedCommentsVisibleCellsLock = nil;
@@ -58,9 +59,13 @@ static NSString *ApolloDeletedCommentsNormalizedReasonLabel(NSString *label);
 static void ApolloDeletedCommentsSetTextNodeAttributedText(id textNode, NSAttributedString *attributedText);
 static NSAttributedString *ApolloDeletedCommentsCurrentAttributedText(id textNode);
 static void ApolloDeletedCommentsSynchronizeCommentModelDisplayState(id cellNode);
+static void __attribute__((unused)) ApolloDeletedCommentsRepairVisibleReasonChipIfNeeded(id cellNode);
+static void ApolloDeletedCommentsScheduleHostLayoutRefresh(id cellNode);
 static BOOL ApolloDeletedCommentsTextLooksLikeDeletedPlaceholderNode(NSString *candidate);
 static BOOL ApolloDeletedCommentsAttributedTextIsRevealPlaceholder(NSAttributedString *attributedText);
 static BOOL ApolloDeletedCommentsAttributedTextHasReasonPrefix(NSAttributedString *attributedText);
+static BOOL ApolloDeletedCommentsAttributedTextHasVisibleReasonChip(NSAttributedString *attributedText);
+static NSAttributedString *ApolloDeletedCommentsAttributedTextByRemovingReasonPrefix(NSAttributedString *attributedText);
 static BOOL ApolloDeletedCommentsTextQualifiesAsBodyCandidate(NSString *candidate, NSString *body);
 static BOOL ApolloDeletedCommentsTextQualifiesAsBodyFragment(NSString *candidate, NSString *body);
 
@@ -272,6 +277,46 @@ static NSString *ApolloDeletedCommentsPlainBodyHTML(NSString *text) {
     return [NSString stringWithFormat:@"&lt;div class=&quot;md&quot;&gt;&lt;p&gt;%@&lt;/p&gt;\n&lt;/div&gt;", escaped];
 }
 
+static NSString *ApolloDeletedCommentsBodyByAppendingReasonLabel(NSString *body, NSString *label) {
+    NSString *trimmedBody = ApolloDeletedCommentsTrimmedString(body);
+    NSString *normalizedLabel = ApolloDeletedCommentsNormalizedReasonLabel(label);
+    if (trimmedBody.length == 0 || normalizedLabel.length == 0) return body;
+
+    NSString *lowerBody = trimmedBody.lowercaseString;
+    NSString *lowerLabel = normalizedLabel.lowercaseString;
+    if ([lowerBody isEqualToString:lowerLabel] || [lowerBody hasSuffix:[@"\n\n" stringByAppendingString:lowerLabel]]) {
+        return trimmedBody;
+    }
+    return [NSString stringWithFormat:@"%@\n\n%@", trimmedBody, normalizedLabel];
+}
+
+static NSString *ApolloDeletedCommentsBodyHTMLByAppendingReasonLabel(NSString *bodyHTML, NSString *body, NSString *label) {
+    NSString *normalizedLabel = ApolloDeletedCommentsNormalizedReasonLabel(label);
+    if (normalizedLabel.length == 0) return bodyHTML;
+
+    NSString *trimmedHTML = ApolloDeletedCommentsTrimmedString(bodyHTML);
+    NSString *escapedParagraph = ApolloDeletedCommentsEscapedHTMLText([NSString stringWithFormat:@"<p>%@</p>", ApolloDeletedCommentsEscapedHTMLText(normalizedLabel)]);
+    if (trimmedHTML.length > 0 &&
+        [trimmedHTML rangeOfString:escapedParagraph options:NSCaseInsensitiveSearch].location == NSNotFound) {
+        NSRange escapedClosingDiv = [trimmedHTML rangeOfString:@"&lt;/div&gt;" options:NSBackwardsSearch | NSCaseInsensitiveSearch];
+        if (escapedClosingDiv.location != NSNotFound) {
+            NSMutableString *mutableHTML = [trimmedHTML mutableCopy];
+            [mutableHTML insertString:[@"\n" stringByAppendingString:escapedParagraph] atIndex:escapedClosingDiv.location];
+            return mutableHTML;
+        }
+
+        NSString *rawParagraph = [NSString stringWithFormat:@"<p>%@</p>", ApolloDeletedCommentsEscapedHTMLText(normalizedLabel)];
+        NSRange rawClosingDiv = [trimmedHTML rangeOfString:@"</div>" options:NSBackwardsSearch | NSCaseInsensitiveSearch];
+        if (rawClosingDiv.location != NSNotFound && [trimmedHTML rangeOfString:rawParagraph options:NSCaseInsensitiveSearch].location == NSNotFound) {
+            NSMutableString *mutableHTML = [trimmedHTML mutableCopy];
+            [mutableHTML insertString:[@"\n" stringByAppendingString:rawParagraph] atIndex:rawClosingDiv.location];
+            return mutableHTML;
+        }
+    }
+
+    return ApolloDeletedCommentsPlainBodyHTML(ApolloDeletedCommentsBodyByAppendingReasonLabel(body, normalizedLabel));
+}
+
 static BOOL ApolloDeletedCommentsStringIsReasonLabel(NSString *text) {
     NSString *normalized = ApolloDeletedCommentsNormalizedReasonLabel(ApolloDeletedCommentsTrimmedString(text));
     return [normalized isEqualToString:@"REMOVED BY MOD"] ||
@@ -465,7 +510,7 @@ static NSAttributedString *ApolloDeletedCommentsReasonChipAttributedText(NSStrin
     label = ApolloDeletedCommentsNormalizedReasonLabel(label);
     UIFont *font = ApolloDeletedCommentsReasonChipFont();
     UIImage *image = ApolloDeletedCommentsReasonChipImage(label, font);
-    CGFloat chipLineHeight = [image isKindOfClass:[UIImage class]] ? image.size.height + 2.0 : font.lineHeight + 2.0;
+    CGFloat chipLineHeight = [image isKindOfClass:[UIImage class]] ? image.size.height + 6.0 : font.lineHeight + 6.0;
     NSMutableParagraphStyle *paragraphStyle = [NSMutableParagraphStyle new];
     paragraphStyle.lineSpacing = 0.0;
     paragraphStyle.paragraphSpacing = 4.0;
@@ -476,7 +521,7 @@ static NSAttributedString *ApolloDeletedCommentsReasonChipAttributedText(NSStrin
     if ([image isKindOfClass:[UIImage class]]) {
         NSTextAttachment *attachment = [NSTextAttachment new];
         attachment.image = image;
-        attachment.bounds = CGRectMake(0.0, -2.0, image.size.width, image.size.height);
+        attachment.bounds = CGRectMake(0.0, -1.0, image.size.width, image.size.height);
         result = [[NSAttributedString attributedStringWithAttachment:attachment] mutableCopy];
         [result addAttribute:NSParagraphStyleAttributeName value:paragraphStyle range:NSMakeRange(0, result.length)];
     } else {
@@ -531,6 +576,7 @@ static void ApolloDeletedCommentsRelayoutCellAndTextNode(id cellNode, id textNod
             @try { ((void (*)(id, SEL))objc_msgSend)(cellNode, sel); } @catch (__unused NSException *e) {}
         }
     }
+    ApolloDeletedCommentsScheduleHostLayoutRefresh(cellNode);
 }
 
 static NSAttributedString *ApolloDeletedCommentsPlaceholderAttributedText(NSAttributedString *original, NSString *reasonLabel) {
@@ -649,6 +695,19 @@ static NSArray *ApolloDeletedCommentsTrackedCellsForFullName(NSString *fullName)
     }
 }
 
+static NSArray *ApolloDeletedCommentsAllTrackedVisibleCells(void) {
+    @synchronized (ApolloDeletedCommentsVisibleCellsLock()) {
+        if (sApolloDeletedCommentsVisibleCellsByFullName.count == 0) return @[];
+        NSMutableArray *allCells = [NSMutableArray array];
+        for (NSHashTable *cells in sApolloDeletedCommentsVisibleCellsByFullName.allValues) {
+            for (id cellNode in cells.allObjects) {
+                if (cellNode) [allCells addObject:cellNode];
+            }
+        }
+        return [allCells copy];
+    }
+}
+
 static BOOL ApolloDeletedCommentsAttributedTextIsRevealPlaceholder(NSAttributedString *attributedText) {
     if (![attributedText isKindOfClass:[NSAttributedString class]] || attributedText.length == 0) return NO;
 
@@ -711,6 +770,13 @@ static NSString *ApolloDeletedCommentsNormalizeTextForCompare(NSString *s) {
     for (NSString *prefix in reasonPrefixes) {
         if ([lowercase hasPrefix:prefix]) {
             trimmed = [[trimmed substringFromIndex:prefix.length] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            break;
+        }
+    }
+    lowercase = trimmed.lowercaseString;
+    for (NSString *suffix in reasonPrefixes) {
+        if ([lowercase hasSuffix:suffix]) {
+            trimmed = [[trimmed substringToIndex:trimmed.length - suffix.length] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
             break;
         }
     }
@@ -915,6 +981,106 @@ static BOOL ApolloDeletedCommentsAttributedTextHasReasonPrefix(NSAttributedStrin
     return hasPrefix;
 }
 
+static BOOL ApolloDeletedCommentsAttributedTextHasVisibleReasonChip(NSAttributedString *attributedText) {
+    if (![attributedText isKindOfClass:[NSAttributedString class]] || attributedText.length == 0) return NO;
+
+    __block BOOL hasAttachmentChip = NO;
+    [attributedText enumerateAttributesInRange:NSMakeRange(0, attributedText.length)
+                                       options:0
+                                    usingBlock:^(NSDictionary<NSAttributedStringKey, id> *attrs, __unused NSRange range, BOOL *stop) {
+        id prefix = attrs[ApolloDeletedCommentsReasonPrefixAttributeName];
+        NSTextAttachment *attachment = [attrs[NSAttachmentAttributeName] isKindOfClass:[NSTextAttachment class]] ? attrs[NSAttachmentAttributeName] : nil;
+        if ([prefix respondsToSelector:@selector(boolValue)] && [prefix boolValue] && [attachment.image isKindOfClass:[UIImage class]]) {
+            hasAttachmentChip = YES;
+            *stop = YES;
+        }
+    }];
+    if (hasAttachmentChip) return YES;
+
+    NSString *upperText = ApolloDeletedCommentsTrimmedString(attributedText.string).uppercaseString;
+    return [upperText containsString:@"REMOVED BY MOD"] ||
+           [upperText containsString:@"DELETED BY USER"];
+}
+
+static NSAttributedString *ApolloDeletedCommentsAttributedTextByRemovingReasonPrefix(NSAttributedString *attributedText) {
+    if (![attributedText isKindOfClass:[NSAttributedString class]] || attributedText.length == 0) return attributedText;
+    if (!ApolloDeletedCommentsAttributedTextHasReasonPrefix(attributedText)) return attributedText;
+
+    NSMutableArray<NSValue *> *ranges = [NSMutableArray array];
+    [attributedText enumerateAttribute:ApolloDeletedCommentsReasonPrefixAttributeName
+                               inRange:NSMakeRange(0, attributedText.length)
+                               options:0
+                            usingBlock:^(id value, NSRange range, __unused BOOL *stop) {
+        if ([value respondsToSelector:@selector(boolValue)] && [value boolValue] && range.length > 0) {
+            [ranges addObject:[NSValue valueWithRange:range]];
+        }
+    }];
+    if (ranges.count == 0) return attributedText;
+
+    NSMutableAttributedString *stripped = [attributedText mutableCopy];
+    for (NSValue *value in [ranges reverseObjectEnumerator]) {
+        NSRange range = value.rangeValue;
+        if (range.location >= stripped.length) continue;
+        range.length = MIN(range.length, stripped.length - range.location);
+
+        if (range.location > 0) {
+            unichar previous = [stripped.string characterAtIndex:range.location - 1];
+            if ([[NSCharacterSet whitespaceAndNewlineCharacterSet] characterIsMember:previous]) {
+                range.location -= 1;
+                range.length += 1;
+            }
+        }
+        if (NSMaxRange(range) < stripped.length) {
+            unichar next = [stripped.string characterAtIndex:NSMaxRange(range)];
+            if ([[NSCharacterSet whitespaceAndNewlineCharacterSet] characterIsMember:next]) {
+                range.length += 1;
+            }
+        }
+        [stripped deleteCharactersInRange:range];
+    }
+
+    NSCharacterSet *trimSet = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    while (stripped.length > 0 && [trimSet characterIsMember:[stripped.string characterAtIndex:stripped.length - 1]]) {
+        [stripped deleteCharactersInRange:NSMakeRange(stripped.length - 1, 1)];
+    }
+    while (stripped.length > 0 && [trimSet characterIsMember:[stripped.string characterAtIndex:0]]) {
+        [stripped deleteCharactersInRange:NSMakeRange(0, 1)];
+    }
+    return stripped;
+}
+
+static NSAttributedString *ApolloDeletedCommentsAttributedTextByRemovingTrailingReasonLabel(NSAttributedString *attributedText, NSString *label) {
+    if (![attributedText isKindOfClass:[NSAttributedString class]] || attributedText.length == 0) return attributedText;
+    NSString *normalizedLabel = ApolloDeletedCommentsNormalizedReasonLabel(label);
+    NSString *string = attributedText.string;
+    if (normalizedLabel.length == 0 || string.length == 0) return attributedText;
+
+    NSUInteger trimmedEnd = string.length;
+    NSCharacterSet *trimSet = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    while (trimmedEnd > 0 && [trimSet characterIsMember:[string characterAtIndex:trimmedEnd - 1]]) {
+        trimmedEnd--;
+    }
+    if (trimmedEnd == 0) return attributedText;
+
+    NSRange searchRange = NSMakeRange(0, trimmedEnd);
+    NSRange labelRange = [string rangeOfString:normalizedLabel
+                                       options:NSBackwardsSearch | NSCaseInsensitiveSearch
+                                         range:searchRange];
+    if (labelRange.location == NSNotFound || NSMaxRange(labelRange) != trimmedEnd) return attributedText;
+
+    NSUInteger deleteStart = labelRange.location;
+    while (deleteStart > 0 && [trimSet characterIsMember:[string characterAtIndex:deleteStart - 1]]) {
+        deleteStart--;
+    }
+    NSMutableAttributedString *stripped = [attributedText mutableCopy];
+    [stripped deleteCharactersInRange:NSMakeRange(deleteStart, trimmedEnd - deleteStart)];
+
+    while (stripped.length > 0 && [trimSet characterIsMember:[stripped.string characterAtIndex:stripped.length - 1]]) {
+        [stripped deleteCharactersInRange:NSMakeRange(stripped.length - 1, 1)];
+    }
+    return stripped;
+}
+
 static void ApolloDeletedCommentsRememberHiddenTextNode(id cellNode, id textNode) {
     if (!cellNode || !textNode) return;
     NSMutableArray *nodes = nil;
@@ -985,9 +1151,13 @@ static NSAttributedString *__attribute__((unused)) ApolloDeletedCommentsAttribut
 static NSAttributedString *ApolloDeletedCommentsAttributedTextWithReasonPrefix(id textNode, NSAttributedString *attributedText) {
     if (!sShowDeletedComments) return attributedText;
     if (![attributedText isKindOfClass:[NSAttributedString class]] || attributedText.length == 0) return attributedText;
-    if (ApolloDeletedCommentsAttributedTextIsRevealPlaceholder(attributedText) ||
-        ApolloDeletedCommentsAttributedTextHasReasonPrefix(attributedText)) {
+    if (ApolloDeletedCommentsAttributedTextIsRevealPlaceholder(attributedText)) {
         return attributedText;
+    }
+    if (ApolloDeletedCommentsAttributedTextHasReasonPrefix(attributedText)) {
+        if (ApolloDeletedCommentsAttributedTextHasVisibleReasonChip(attributedText)) return attributedText;
+        attributedText = ApolloDeletedCommentsAttributedTextByRemovingReasonPrefix(attributedText);
+        if (![attributedText isKindOfClass:[NSAttributedString class]] || attributedText.length == 0) return attributedText;
     }
 
     id cellNode = ApolloDeletedCommentsCommentCellNodeForTextNode(textNode);
@@ -997,13 +1167,16 @@ static NSAttributedString *ApolloDeletedCommentsAttributedTextWithReasonPrefix(i
     if (sTapToRevealDeletedComments && !revealed) return attributedText;
     id bodyTextNode = ApolloDeletedCommentsBestBodyTextNode(cellNode, comment);
     if (bodyTextNode && bodyTextNode != textNode) return attributedText;
-    BOOL bodyCandidate = ApolloDeletedCommentsTextQualifiesAsBodyCandidate(attributedText.string, comment.body) ||
-                         ApolloDeletedCommentsTextQualifiesAsBodyFragment(attributedText.string, comment.body);
+    NSString *label = ApolloDeletedCommentsReasonLabelForComment(comment);
+    NSString *originalBody = objc_getAssociatedObject(comment, kApolloDeletedCommentsOriginalBodyKey);
+    NSString *bodyForCompare = [originalBody isKindOfClass:[NSString class]] && originalBody.length > 0 ? originalBody : comment.body;
+    NSAttributedString *bodySourceText = ApolloDeletedCommentsAttributedTextByRemovingTrailingReasonLabel(attributedText, label);
+    BOOL bodyCandidate = ApolloDeletedCommentsTextQualifiesAsBodyCandidate(bodySourceText.string, bodyForCompare) ||
+                         ApolloDeletedCommentsTextQualifiesAsBodyFragment(bodySourceText.string, bodyForCompare);
     if (!bodyCandidate) return attributedText;
 
-    NSAttributedString *bodyText = ApolloDeletedCommentsRecoveredBodyTextForDisplay(attributedText, comment.body);
+    NSAttributedString *bodyText = ApolloDeletedCommentsRecoveredBodyTextForDisplay(bodySourceText, bodyForCompare);
     NSDictionary *baseAttributes = bodyText.length > 0 ? ([bodyText attributesAtIndex:0 effectiveRange:NULL] ?: @{}) : @{};
-    NSString *label = ApolloDeletedCommentsReasonLabelForComment(comment);
     NSMutableDictionary *spacerAttributes = [baseAttributes mutableCopy];
     NSMutableParagraphStyle *spacerStyle = [NSMutableParagraphStyle new];
     spacerStyle.minimumLineHeight = 20.0;
@@ -1539,6 +1712,55 @@ static UIView *ApolloDeletedCommentsCellView(id cellNode) {
     return [view isKindOfClass:[UIView class]] ? view : nil;
 }
 
+static UIView *ApolloDeletedCommentsHostListViewForCell(id cellNode) {
+    UIView *view = ApolloDeletedCommentsCellView(cellNode);
+    for (NSUInteger i = 0; view && i < 14; i++, view = view.superview) {
+        if ([view isKindOfClass:[UITableView class]] || [view isKindOfClass:[UICollectionView class]]) {
+            return view;
+        }
+    }
+    return nil;
+}
+
+static void ApolloDeletedCommentsScheduleHostLayoutRefresh(id cellNode) {
+    if (!cellNode || !sShowDeletedComments || !ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(cellNode)) return;
+
+    UIView *hostView = ApolloDeletedCommentsHostListViewForCell(cellNode);
+    UIView *cellView = ApolloDeletedCommentsCellView(cellNode);
+    if (![hostView isKindOfClass:[UIView class]] || !hostView.window) return;
+    if (objc_getAssociatedObject(hostView, kApolloDeletedCommentsHostLayoutRefreshScheduledKey)) return;
+
+    objc_setAssociatedObject(hostView, kApolloDeletedCommentsHostLayoutRefreshScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak UIView *weakHostView = hostView;
+    __weak UIView *weakCellView = cellView;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIView *strongHostView = weakHostView;
+        UIView *strongCellView = weakCellView;
+        if (![strongHostView isKindOfClass:[UIView class]]) return;
+
+        objc_setAssociatedObject(strongHostView, kApolloDeletedCommentsHostLayoutRefreshScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        for (UIView *view = strongCellView; view && view != strongHostView.superview; view = view.superview) {
+            [view setNeedsLayout];
+            [view setNeedsDisplay];
+        }
+
+        @try {
+            if ([strongHostView isKindOfClass:[UICollectionView class]]) {
+                [(UICollectionView *)strongHostView performBatchUpdates:nil completion:nil];
+            } else if ([strongHostView isKindOfClass:[UITableView class]]) {
+                UITableView *tableView = (UITableView *)strongHostView;
+                [tableView beginUpdates];
+                [tableView endUpdates];
+            } else {
+                [strongHostView setNeedsLayout];
+                [strongHostView layoutIfNeeded];
+            }
+        } @catch (__unused NSException *e) {
+            [strongHostView setNeedsLayout];
+        }
+    });
+}
+
 static void ApolloDeletedCommentsRemoveCellHighlight(id cellNode) {
     UIView *highlight = objc_getAssociatedObject(cellNode, kApolloDeletedCommentsHighlightViewKey);
     if ([highlight isKindOfClass:[UIView class]]) {
@@ -1731,9 +1953,10 @@ static void ApolloDeletedCommentsApplyCachedArchiveToVisiblePlaceholderCell(id c
 }
 
 static void __attribute__((unused)) ApolloDeletedCommentsRepairVisibleReasonChipIfNeeded(id cellNode) {
-    if (!sShowDeletedComments || sTapToRevealDeletedComments) return;
+    if (!sShowDeletedComments) return;
     RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
     if (!comment || !ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(cellNode)) return;
+    if (sTapToRevealDeletedComments && !ApolloDeletedCommentsCommentIsRevealedByFullName(comment)) return;
 
     NSArray *textNodes = ApolloDeletedCommentsBodyTextNodes(cellNode, comment);
     if (textNodes.count == 0) {
@@ -1755,9 +1978,16 @@ static void __attribute__((unused)) ApolloDeletedCommentsRepairVisibleReasonChip
             ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, textNode);
             return;
         }
-        if (ApolloDeletedCommentsAttributedTextHasReasonPrefix(current)) return;
+        if (ApolloDeletedCommentsAttributedTextHasVisibleReasonChip(current)) return;
 
-        NSAttributedString *repaired = ApolloDeletedCommentsAttributedTextWithReasonPrefix(textNode, current);
+        NSAttributedString *bodySource = current;
+        if (ApolloDeletedCommentsAttributedTextHasReasonPrefix(current)) {
+            bodySource = ApolloDeletedCommentsAttributedTextByRemovingReasonPrefix(current);
+            if (![bodySource isKindOfClass:[NSAttributedString class]] || bodySource.length == 0) {
+                bodySource = ApolloDeletedCommentsBodyAttributedText(current, comment.body);
+            }
+        }
+        NSAttributedString *repaired = ApolloDeletedCommentsAttributedTextWithReasonPrefix(textNode, bodySource);
         if (repaired != current) {
             ApolloDeletedCommentsSetTextNodeAttributedText(textNode, repaired);
             ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, textNode);
@@ -1770,7 +2000,17 @@ static void ApolloDeletedCommentsUpdateCell(id cellNode) {
     ApolloDeletedCommentsTrackVisibleDeletedCommentCell(cellNode);
     ApolloDeletedCommentsApplyCachedArchiveToVisiblePlaceholderCell(cellNode);
     ApolloDeletedCommentsSynchronizeCommentModelDisplayState(cellNode);
+    ApolloDeletedCommentsRepairVisibleReasonChipIfNeeded(cellNode);
     ApolloDeletedCommentsApplyCellHighlight(cellNode);
+}
+
+static void ApolloDeletedCommentsRefreshVisibleDeletedCells(void) {
+    if (!sShowDeletedComments) return;
+    for (id cellNode in ApolloDeletedCommentsAllTrackedVisibleCells()) {
+        ApolloDeletedCommentsUpdateCell(cellNode);
+        ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, ApolloDeletedCommentsKnownBodyContainerNode(cellNode));
+        ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, ApolloDeletedCommentsKnownBodyTextNode(cellNode));
+    }
 }
 
 static void ApolloDeletedCommentsScheduleVisibleCellRefreshForComment(RDKComment *comment) {
@@ -1888,6 +2128,17 @@ static NSAttributedString *ApolloDeletedCommentsRenameRecoveredSpoilerLabel(id t
                                                   usingBlock:^(NSNotification *notification) {
         ApolloDeletedCommentsHandleArcticCacheUpdated(notification);
     }];
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *notification) {
+        NSArray<NSNumber *> *delays = @[@0.0, @0.08, @0.25, @0.60];
+        for (NSNumber *delayNumber in delays) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayNumber.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                ApolloDeletedCommentsRefreshVisibleDeletedCells();
+            });
+        }
+    }];
 }
 
 @interface _TtC6Apollo15CommentCellNode
@@ -1921,7 +2172,19 @@ static NSAttributedString *ApolloDeletedCommentsRenameRecoveredSpoilerLabel(id t
     if (bodyNode) {
         objc_setAssociatedObject(bodyNode, kApolloDeletedCommentsBodyOwnerCellKey, (id)self, OBJC_ASSOCIATION_ASSIGN);
     }
-    return %orig;
+    id spec = %orig;
+    if (sShowDeletedComments && ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment((id)self) && spec) {
+        Class insetClass = ApolloDeletedCommentsASInsetLayoutSpecClass();
+        if (insetClass) {
+            @try {
+                return ((id (*)(Class, SEL, UIEdgeInsets, id))objc_msgSend)(insetClass,
+                                                                             @selector(insetLayoutSpecWithInsets:child:),
+                                                                             UIEdgeInsetsMake(0.0, 0.0, 8.0, 0.0),
+                                                                             spec);
+            } @catch (__unused NSException *e) {}
+        }
+    }
+    return spec;
 }
 
 - (void)layout {
@@ -1950,9 +2213,15 @@ static NSAttributedString *ApolloDeletedCommentsRenameRecoveredSpoilerLabel(id t
         }
         return hiddenLabel;
     }
-    if ([savedBody isKindOfClass:[NSString class]] &&
-        savedBody.length > 0 &&
-        (ApolloDeletedCommentsStringIsReasonLabel(body) || !sTapToRevealDeletedComments)) {
+    NSString *fullName = ApolloDeletedCommentsFullNameForComment((RDKComment *)self);
+    BOOL recovered = ApolloDeletedCommentsIsRecoveredComment(fullName) ||
+                     ApolloDeletedCommentsIsRecoveredCommentBody(((RDKComment *)self).author, bodyForState);
+    BOOL revealed = ApolloDeletedCommentsIsCommentRevealed(fullName) ||
+                    ApolloDeletedCommentsIsCommentBodyRevealed(((RDKComment *)self).author, bodyForState);
+    if (sShowDeletedComments && recovered && (!sTapToRevealDeletedComments || revealed)) {
+        return ApolloDeletedCommentsBodyByAppendingReasonLabel(bodyForState, ApolloDeletedCommentsReasonLabelForComment((RDKComment *)self));
+    }
+    if ([savedBody isKindOfClass:[NSString class]] && savedBody.length > 0 && ApolloDeletedCommentsStringIsReasonLabel(body)) {
         return savedBody;
     }
     return body;
@@ -1971,6 +2240,17 @@ static NSAttributedString *ApolloDeletedCommentsRenameRecoveredSpoilerLabel(id t
     }
 
     NSString *savedBodyHTML = objc_getAssociatedObject((id)self, kApolloDeletedCommentsOriginalBodyHTMLKey);
+    NSString *displayBody = ((NSString *(*)(id, SEL))objc_msgSend)((id)self, @selector(body));
+    NSString *fullName = ApolloDeletedCommentsFullNameForComment((RDKComment *)self);
+    NSString *displayBodyForState = [savedBody isKindOfClass:[NSString class]] && savedBody.length > 0 ? savedBody : displayBody;
+    BOOL recovered = ApolloDeletedCommentsIsRecoveredComment(fullName) ||
+                     ApolloDeletedCommentsIsRecoveredCommentBody(((RDKComment *)self).author, displayBodyForState);
+    BOOL revealed = ApolloDeletedCommentsIsCommentRevealed(fullName) ||
+                    ApolloDeletedCommentsIsCommentBodyRevealed(((RDKComment *)self).author, displayBodyForState);
+    if (sShowDeletedComments && recovered && (!sTapToRevealDeletedComments || revealed)) {
+        NSString *baseHTML = [savedBodyHTML isKindOfClass:[NSString class]] && savedBodyHTML.length > 0 ? savedBodyHTML : bodyHTML;
+        return ApolloDeletedCommentsBodyHTMLByAppendingReasonLabel(baseHTML, displayBodyForState, ApolloDeletedCommentsReasonLabelForComment((RDKComment *)self));
+    }
     if ([savedBodyHTML isKindOfClass:[NSString class]] &&
         savedBodyHTML.length > 0 &&
         (ApolloDeletedCommentsStringIsReasonLabel(ApolloDeletedCommentsTrimmedString(bodyHTML)) || !sTapToRevealDeletedComments)) {
