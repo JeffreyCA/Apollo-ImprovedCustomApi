@@ -14,6 +14,15 @@ iOS tweak for [Apollo for Reddit app](https://apolloapp.io/) that lets you conti
 
 Pre-built IPAs and AltStore Classic/SideStore/Feather sources are now available at **[apolloreborn.app](https://apolloreborn.app/#download)**!
 
+### Which build should I install?
+
+The download page offers **Standard / GLASS** builds (with Apollo's app extensions plus the Apollo-Reborn widgets) and **No Extensions** builds. They are the same app — the difference is how much it costs to sideload:
+
+- **Standard / GLASS** bundle ~6 app extensions, so a sideload registers about **7 App IDs** (one per extension plus the app). A **free Apple ID** can register only **10 App IDs per 7 days**, so a clean single install fits — but it's easy to exceed by installing under more than one bundle ID, reinstalling within the same week, or sideloading other extension-bearing apps. If an install fails with an App ID error, install a **No Extensions** build or wait for older App IDs to expire. A **paid** Apple Developer account has a much higher cap. ([AltStore explains the limit](https://faq.altstore.io/altstore-classic/app-ids).)
+- **No Extensions** strips all app extensions (including widgets), so it only needs **1 App ID** — the reliable choice on a free Apple ID that's running low.
+
+> This is separate from whether an installed extension actually *launches* on iOS 26, which depends on your installer — see the caveat in [Opening links in Apollo](#opening-links-in-apollo).
+
 ## Don't have an API key?
 
 > [!IMPORTANT]

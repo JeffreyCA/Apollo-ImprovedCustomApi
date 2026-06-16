@@ -17,7 +17,7 @@
         "https://raw.githubusercontent.com/Apollo-Reborn/Apollo-Reborn/main/img/avatar-comments.jpg",
         "https://raw.githubusercontent.com/Apollo-Reborn/Apollo-Reborn/main/img/translation.jpg"
       ],
-      "localizedDescription": "Apollo-Reborn is the community-maintained Apollo sideload build powered by the Apollo-Reborn tweak.\n\nIt restores custom API support, media fixes, uploads, inline media, translation, saved categories, Home Screen and Lock Screen widgets, Liquid Glass support on iOS 26+, and the rest of the project’s ongoing fixes and enhancements.\n\nThese sources are intended for AltStore Classic, SideStore, and Feather. Apollo-Reborn is not compatible with AltStore PAL.\n\nChoose the source variant that matches how you sideload:\n\n• Standard: full app bundle with Apollo’s working extensions plus Apollo-Reborn widgets\n• No Extensions: strips app extensions, including widgets, to reduce App ID usage on free Apple IDs\n• GLASS: adds the Liquid Glass iOS 26 patch and bundled Liquid Glass icon catalog\n• No Extensions + GLASS: combines both options\n\nThis project is not affiliated with Apollo or Christian Selig.",
+      "localizedDescription": "Apollo-Reborn is the community-maintained Apollo sideload build powered by the Apollo-Reborn tweak.\n\nIt restores custom API support, media fixes, uploads, inline media, translation, saved categories, Home Screen and Lock Screen widgets, Liquid Glass support on iOS 26+, and the rest of the project’s ongoing fixes and enhancements.\n\nThese sources are intended for AltStore Classic, SideStore, and Feather. Apollo-Reborn is not compatible with AltStore PAL.\n\nChoose the source variant that matches how you sideload:\n\n• Standard: full app bundle with Apollo’s working extensions plus Apollo-Reborn widgets\n• No Extensions: strips app extensions, including widgets, to reduce App ID usage on free Apple IDs\n• GLASS: adds the Liquid Glass iOS 26 patch and bundled Liquid Glass icon catalog\n• No Extensions + GLASS: combines both options\n\nThe extension-bearing builds (Standard and GLASS) register about 7 App IDs, one per bundled app extension. A free Apple ID can register 10 App IDs per 7 days, so a clean single install fits, but it is easy to exceed if you install under more than one bundle ID, reinstall within the same week, or sideload other extension-bearing apps. If an install fails with an App ID error, use a No Extensions build (1 App ID) or wait for older App IDs to expire. A paid Apple Developer account has a much higher cap.\n\nThis project is not affiliated with Apollo or Christian Selig.",
       "appPermissions": {
         "entitlements": [
           "com.apple.security.application-groups",
@@ -122,7 +122,7 @@
   "identifier": "app.apolloreborn.noextensions",
   "name": "Apollo-Reborn - No Extensions",
   "subtitle": "Apollo-Reborn source with app extensions removed",
-  "description": "No Extensions Apollo-Reborn source for AltStore Classic, SideStore, and Feather. Strips app extensions, including widgets, so the sideloaded app uses 1 App ID, which is useful on free Apple IDs. Not compatible with AltStore PAL.",
+  "description": "No Extensions Apollo-Reborn source for AltStore Classic, SideStore, and Feather. Strips app extensions, including widgets, so the sideloaded app uses just 1 App ID, staying well under a free Apple ID’s limit of 10 App IDs per 7 days — the headroom-friendly choice if the extensions build won’t install. Not compatible with AltStore PAL.",
   "featuredApps": [
     "com.christianselig.Apollo"
   ]

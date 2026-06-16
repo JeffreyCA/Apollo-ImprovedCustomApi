@@ -27,6 +27,10 @@ Apollo ships with six `.appex` bundles in addition to the main app:
 
 Keeping them intact uses 7 App IDs total on free Apple IDs: 1 for the main app plus 6 for the extensions above. Removing them leaves only the main app, so AltStore Classic/SideStore only need 1 App ID for Apollo itself. AltStore documents the underlying limit here: <https://faq.altstore.io/altstore-classic/app-ids>.
 
+A free Apple ID can register at most **10 App IDs per rolling 7 days**, so the with-extensions build installs on a clean run but leaves only ~3 App IDs of headroom. Reinstalling within the same week, installing under more than one bundle ID, or sideloading other extension-bearing apps can push past 10, at which point the install fails until older App IDs expire (a paid Apple Developer account has a far higher cap). The No Extensions build (1 App ID) is the headroom-friendly fallback. App-group / keychain-access-group entitlements are **not** a factor here: the main app carries them in both builds and the signer rewrites them on re-sign, so a free Apple ID can install either build — the only difference is the App ID count.
+
+> **Note on the v3.2.0 size drop.** Since v3.2.0 the standard build replaces the stock 28 MB `AthenaWidgetExtension.appex` (a 25.6 MB `Assets.car`) with the much smaller `ApolloRebornWidgets.appex` (the stock widget crash-looped and poisoned WidgetKit enumeration). That is why the with-extensions IPA is ~25 MB smaller than v3.1.1's — all the functional extensions are still present (the with-extensions IPA is still larger than No Extensions); only the bloated stock widget was swapped out. A smaller with-extensions IPA is **not** a sign that extensions were dropped.
+
 ## Local Build Flow
 
 1. Build the tweak:
