@@ -1295,6 +1295,15 @@ static void initializeRandomSources() {
                                     UDKeyLibreTranslateURL: @"https://libretranslate.de/translate",
                                     UDKeyLibreTranslateAPIKey: @"",
                                     UDKeyTranslationSkipLanguages: @[],
+                                    UDKeyPictureInPictureEnabled: @NO,
+                                    UDKeyPictureInPictureActivation: @(ApolloPiPActivationModeUnmutedOnly),
+                                    UDKeyPictureInPictureStartPosition: @(ApolloPiPStartPositionTopRight),
+                                    UDKeyPictureInPictureNative: @NO,
+                                    UDKeyPictureInPictureLoop: @YES,
+                                    UDKeyPictureInPictureStartHidden: @NO,
+                                    UDKeyPictureInPictureSkipButtons: @NO,
+                                    UDKeyPictureInPictureSkipSeconds: @10,
+                                    UDKeyPictureInPictureProgressBar: @NO,
                                     UDKeyTagFilterEnabled: @NO,
                                     UDKeyTagFilterMode: @"blur",
                                     UDKeyTagFilterNSFW: @YES,
@@ -1432,6 +1441,28 @@ static void initializeRandomSources() {
                                                   usingBlock:^(NSNotification *note) {
         [ApolloWebSessionLoginViewController presentExpiredSessionPrompt];
     }];
+    // Picture-in-Picture hydration.
+    sPiPEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPictureInPictureEnabled];
+    sPiPActivationMode = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPictureInPictureActivation];
+    if (sPiPActivationMode < ApolloPiPActivationModeAllVideos || sPiPActivationMode > ApolloPiPActivationModeUnmutedOnly) {
+        sPiPActivationMode = ApolloPiPActivationModeAllVideos;
+        [standardDefaults setInteger:sPiPActivationMode forKey:UDKeyPictureInPictureActivation];
+    }
+    sPiPStartPosition = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPictureInPictureStartPosition];
+    if (sPiPStartPosition < ApolloPiPStartPositionTopLeft || sPiPStartPosition > ApolloPiPStartPositionLastPosition) {
+        sPiPStartPosition = ApolloPiPStartPositionTopRight;
+        [standardDefaults setInteger:sPiPStartPosition forKey:UDKeyPictureInPictureStartPosition];
+    }
+    sPiPNativeEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPictureInPictureNative];
+    sPiPLoop = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPictureInPictureLoop];
+    sPiPStartHidden = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPictureInPictureStartHidden];
+    sPiPSkipButtons = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPictureInPictureSkipButtons];
+    sPiPSkipSeconds = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPictureInPictureSkipSeconds];
+    if (sPiPSkipSeconds != 5 && sPiPSkipSeconds != 10 && sPiPSkipSeconds != 15 && sPiPSkipSeconds != 30) {
+        sPiPSkipSeconds = 10;
+        [standardDefaults setInteger:sPiPSkipSeconds forKey:UDKeyPictureInPictureSkipSeconds];
+    }
+    sPiPProgressBar = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPictureInPictureProgressBar];
 
     // Tag filter feature hydration.
     sTagFilterEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyTagFilterEnabled];
