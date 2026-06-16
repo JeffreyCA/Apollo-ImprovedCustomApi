@@ -371,18 +371,49 @@ static BOOL ApolloDeletedCommentsBodyLooksDeleted(NSString *body) {
     return NO;
 }
 
+static BOOL ApolloDeletedCommentsAuthorLooksDeleted(NSString *author) {
+    NSString *trimmed = [[ApolloDeletedCommentsTrimmedString(author) ?: @"" lowercaseString] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return [trimmed isEqualToString:@"[deleted]"] ||
+           [trimmed isEqualToString:@"[removed]"] ||
+           [trimmed isEqualToString:@"deleted"] ||
+           [trimmed isEqualToString:@"removed"];
+}
+
+static BOOL ApolloDeletedCommentsDataHasRemovalMetadata(NSDictionary *data) {
+    if (![data isKindOfClass:[NSDictionary class]]) return NO;
+    NSString *removedByCategory = [data[@"removed_by_category"] isKindOfClass:[NSString class]] ? data[@"removed_by_category"] : nil;
+    if (removedByCategory.length > 0) return YES;
+    if (data[@"banned_by"] && data[@"banned_by"] != (id)[NSNull null]) return YES;
+    NSString *collapsedReasonCode = [data[@"collapsed_reason_code"] isKindOfClass:[NSString class]] ? data[@"collapsed_reason_code"] : nil;
+    if (collapsedReasonCode.length > 0 &&
+        [collapsedReasonCode rangeOfString:@"removed" options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
+    if (collapsedReasonCode.length > 0 &&
+        [collapsedReasonCode rangeOfString:@"deleted" options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
+    return NO;
+}
+
 static BOOL ApolloDeletedCommentsCommentDataLooksDeleted(NSDictionary *data) {
     if (![data isKindOfClass:[NSDictionary class]]) return NO;
     NSString *body = [data[@"body"] isKindOfClass:[NSString class]] ? data[@"body"] : nil;
-    if (ApolloDeletedCommentsBodyLooksDeleted(body)) return YES;
+    NSString *trimmedBody = ApolloDeletedCommentsTrimmedString(body);
+    if (trimmedBody.length > 0 && ApolloDeletedCommentsBodyLooksDeleted(body)) return YES;
 
     NSString *bodyHTML = [data[@"body_html"] isKindOfClass:[NSString class]] ? data[@"body_html"] : nil;
-    if (bodyHTML.length == 0) return NO;
-    NSString *htmlText = ApolloDeletedCommentsUnescapedHTMLText(bodyHTML);
-    return [htmlText rangeOfString:@"[removed]" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-           [htmlText rangeOfString:@"[deleted]" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-           [htmlText rangeOfString:@"Removed by moderator" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-           [htmlText rangeOfString:@"User deleted comment" options:NSCaseInsensitiveSearch].location != NSNotFound;
+    if (bodyHTML.length > 0) {
+        NSString *htmlText = ApolloDeletedCommentsUnescapedHTMLText(bodyHTML);
+        if ([htmlText rangeOfString:@"[removed]" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [htmlText rangeOfString:@"[deleted]" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [htmlText rangeOfString:@"Removed by moderator" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [htmlText rangeOfString:@"User deleted comment" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+    }
+
+    if (trimmedBody.length == 0) {
+        NSString *author = [data[@"author"] isKindOfClass:[NSString class]] ? data[@"author"] : nil;
+        return ApolloDeletedCommentsAuthorLooksDeleted(author) || ApolloDeletedCommentsDataHasRemovalMetadata(data);
+    }
+    return NO;
 }
 
 static NSString *ApolloDeletedCommentsCommentFullName(NSDictionary *data) {
