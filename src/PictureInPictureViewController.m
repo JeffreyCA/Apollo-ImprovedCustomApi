@@ -101,8 +101,9 @@ typedef NS_ENUM(NSInteger, PictureInPictureSharedRow) {
 
 - (NSString *)activationModeText {
     switch (sPiPActivationMode) {
-        case ApolloPiPActivationModeUnmutedOnly: return @"Unmuted Videos Only";
-        default:                                 return @"All Videos";
+        case ApolloPiPActivationModeUnmutedOnly:    return @"Unmuted Videos Only";
+        case ApolloPiPActivationModeAllVideosAndGifs: return @"All Videos & GIFs";
+        default:                                    return @"All Videos";
     }
 }
 
@@ -185,19 +186,26 @@ static void PiPSetSheetActionIcon(UIAlertAction *action, NSArray<NSString *> *sy
                                                                    message:nil
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
 
-    NSString *allTitle = (sPiPActivationMode == ApolloPiPActivationModeAllVideos)
-        ? @"All Videos (Current)" : @"All Videos";
+    // Increasing inclusiveness: unmuted videos → all videos → all videos + GIFs.
     NSString *unmutedTitle = (sPiPActivationMode == ApolloPiPActivationModeUnmutedOnly)
         ? @"Unmuted Videos Only (Current)" : @"Unmuted Videos Only";
+    NSString *allTitle = (sPiPActivationMode == ApolloPiPActivationModeAllVideos)
+        ? @"All Videos (Current)" : @"All Videos";
+    NSString *gifsTitle = (sPiPActivationMode == ApolloPiPActivationModeAllVideosAndGifs)
+        ? @"All Videos & GIFs (Current)" : @"All Videos & GIFs";
 
     __weak __typeof(self) weakSelf = self;
+    [sheet addAction:[UIAlertAction actionWithTitle:unmutedTitle style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *action) {
+        [weakSelf setActivationMode:ApolloPiPActivationModeUnmutedOnly];
+    }]];
     [sheet addAction:[UIAlertAction actionWithTitle:allTitle style:UIAlertActionStyleDefault
                                             handler:^(__unused UIAlertAction *action) {
         [weakSelf setActivationMode:ApolloPiPActivationModeAllVideos];
     }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:unmutedTitle style:UIAlertActionStyleDefault
+    [sheet addAction:[UIAlertAction actionWithTitle:gifsTitle style:UIAlertActionStyleDefault
                                             handler:^(__unused UIAlertAction *action) {
-        [weakSelf setActivationMode:ApolloPiPActivationModeUnmutedOnly];
+        [weakSelf setActivationMode:ApolloPiPActivationModeAllVideosAndGifs];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
 

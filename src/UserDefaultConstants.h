@@ -78,7 +78,7 @@ static NSString *const UDKeyTranslationSkipLanguages = @"TranslationSkipLanguage
 
 // Picture-in-Picture: floating in-app mini-player for comments-page videos.
 static NSString *const UDKeyPictureInPictureEnabled = @"PictureInPictureEnabled";       // master switch
-// 0 = All Videos, 1 = Unmuted Videos Only (ApolloPiPActivationMode).
+// 0 = All Videos, 1 = Unmuted Videos Only, 2 = All Videos & GIFs (ApolloPiPActivationMode).
 static NSString *const UDKeyPictureInPictureActivation = @"PictureInPictureActivation";
 // Hand off to iOS' system Picture in Picture when the app backgrounds.
 static NSString *const UDKeyPictureInPictureNative = @"PictureInPictureNative";

@@ -91,9 +91,9 @@ static BOOL PiPNodeIsShareable(id videoNode) {
 }
 
 // Does the currently-playing item carry an audio track? This is what separates
-// a real video — which the user can unmute and would want in PiP — from a
-// silent autoplaying GIF (also an inline ASVideoNode), which must never trigger
-// PiP.
+// a real video — which the user can unmute — from a silent autoplaying GIF (also
+// an inline ASVideoNode) in the strict eligibility check below. (GIFs are still
+// admitted to PiP, but separately, by URL in "All Videos & GIFs" mode.)
 //
 // Must stay non-blocking: this runs on the feed-scroll / unmute main thread, and
 // callers only know rate != 0 (a play rate was REQUESTED), which does NOT imply
@@ -122,30 +122,74 @@ static BOOL PiPVideoHasAudio(AVPlayer *player) {
             containsObject:AVMediaCharacteristicAudible];
 }
 
-// Eligibility: Reddit-hosted videos (shareable v.redd.it, plus the compact-mode
-// non-shareable comments players that still point at a v.redd.it asset URL),
+// The source URL of the playing item — preferring the player's AVURLAsset, then
+// the node's assetURL (works even when videoNode is gone, e.g. a weak inline ref
+// cleared by the time a loop observer fires).
+static NSURL *PiPAssetURLForNode(id videoNode, AVPlayer *player) {
+    AVAsset *asset = player.currentItem.asset;
+    if ([asset isKindOfClass:[AVURLAsset class]]) {
+        return [(AVURLAsset *)asset URL];
+    }
+    SEL assetURLSel = NSSelectorFromString(@"assetURL");
+    if (videoNode && [videoNode respondsToSelector:assetURLSel]) {
+        return ((id (*)(id, SEL))objc_msgSend)(videoNode, assetURLSel);
+    }
+    return nil;
+}
+
+// Strict eligibility: Reddit-hosted videos (shareable v.redd.it, plus compact-
+// mode non-shareable comments players that still point at a v.redd.it asset URL),
 // PLUS any other inline video that carries audio — Streamable and similar
-// external hosts. The audio requirement is the GIF guard: a silent autoplaying
-// GIF is also an inline ASVideoNode but must never get PiP.
+// external hosts. The audio requirement excludes silent GIFs here; GIFs are
+// admitted separately, by URL in "All Videos & GIFs" mode (PiPNodeURLIsGif).
 static BOOL PiPIsEligibleVideo(id videoNode, AVPlayer *player) {
     if (PiPNodeIsShareable(videoNode)) return YES;
 
-    NSURL *url = nil;
-    AVAsset *asset = player.currentItem.asset;
-    if ([asset isKindOfClass:[AVURLAsset class]]) {
-        url = [(AVURLAsset *)asset URL];
-    }
-    if (!url) {
-        SEL assetURLSel = NSSelectorFromString(@"assetURL");
-        if ([videoNode respondsToSelector:assetURLSel]) {
-            url = ((id (*)(id, SEL))objc_msgSend)(videoNode, assetURLSel);
-        }
-    }
+    NSURL *url = PiPAssetURLForNode(videoNode, player);
     NSString *host = url.host.lowercaseString;
     if (host != nil && [host containsString:@"v.redd.it"]) return YES;
 
     // Non-Reddit inline video (Streamable etc.): eligible iff it carries audio.
     return PiPVideoHasAudio(player);
+}
+
+// Is this content a GIF by origin URL? Reddit serves GIFs from i.redd.it /
+// preview.redd.it with a .gif path — and crucially the MP4 playback variant
+// keeps ".gif?format=mp4", so the URL still says GIF even though the clip plays
+// as an MP4 that can carry a SILENT audio track (which makes the audio heuristic
+// wrongly call it a video). imgur uses .gifv; Giphy uses giphy.com. The ".gif"
+// substring is safe against real videos: v.redd.it / Streamable / YouTube URLs
+// never contain it, and Reddit signature query params are hex (no "gif").
+static BOOL PiPNodeURLIsGif(id videoNode, AVPlayer *player) {
+    NSString *s = PiPAssetURLForNode(videoNode, player).absoluteString.lowercaseString;
+    if (!s) return NO;
+    return [s containsString:@".gif"] || [s containsString:@"giphy.com"];
+}
+
+// GIF content for PiP purposes (always loops, no audio, no mute button): a GIF
+// by origin URL, OR a non-strictly-eligible silent inline video. At takeover the
+// eligibility gate has already required ReadyToPlay for the non-URL case, so a
+// !PiPIsEligibleVideo result there is a genuinely silent clip, not a still-
+// loading audio video.
+static BOOL PiPNodeIsGifContent(id videoNode, AVPlayer *player) {
+    return PiPNodeURLIsGif(videoNode, player) || !PiPIsEligibleVideo(videoNode, player);
+}
+
+// GIFs are admitted to PiP only in the most inclusive Activate For mode,
+// "All Videos & GIFs".
+static inline BOOL PiPGifsActivated(void) {
+    return sPiPActivationMode == ApolloPiPActivationModeAllVideosAndGifs;
+}
+
+// Eligible to arm inline / feed System PiP (the swipe-home handoff, no floating
+// card). GIF-first, mirroring the card gate: a GIF (by URL) qualifies only in
+// "All Videos & GIFs"; everything else uses the strict audio-bearing check. The
+// URL check must come first — a GIF has no audio, and a compact-mode comments
+// player isn't ReadyToPlay at arm time, so the audio check can't yet see the
+// GIF-as-MP4's silent track.
+static BOOL PiPIsEligibleForInlineNativePiP(id videoNode, AVPlayer *player) {
+    if (PiPNodeURLIsGif(videoNode, player)) return PiPGifsActivated();
+    return PiPIsEligibleVideo(videoNode, player);
 }
 
 // Midpoint visibility test mirroring Apollo's sub_1002063d8 (and the fork's
@@ -368,6 +412,11 @@ static const NSTimeInterval kPiPControlsAutoHideDelay = 3.0;
 // session at some point) — closing must hand the session back even if the
 // user muted the card just before closing.
 @property (nonatomic, assign) BOOL sessionClaimedAudibly;
+// YES when this card holds GIF content — silent inline content with no audio
+// track. Such a card must never claim the Playback session audibly (it would
+// interrupt the user's music for a silent GIF) nor block Apollo's Ambient
+// downgrade; the mute button is hidden for it too.
+@property (nonatomic, assign) BOOL cardIsGifContent;
 
 // UI
 @property (nonatomic, strong) ApolloPiPWindow *window;
@@ -460,6 +509,20 @@ static ApolloPiPController *sPiPSharedController = nil;
             }
             // (Enabling native PiP with an inline video on screen re-arms on
             // the next scroll tick via the visibility handler.)
+
+            // Re-evaluate an inline-armed (not-yet-handed-off) controller against
+            // the possibly-changed activation mode — switching away from "All
+            // Videos & GIFs" must disarm a GIF that armed inline System PiP, or
+            // it would still hand off on background. No visibility event fires on
+            // a settings change, so the visibility-handler disarm can't catch it.
+            if (sPiPNativeEnabled && strongSelf.inlineNativePiP
+                && !strongSelf.inlineNativePiP.pictureInPictureActive
+                && strongSelf.inlineNativePlayer
+                && !PiPIsEligibleForInlineNativePiP(strongSelf.inlineNativeVideoNode,
+                                                    strongSelf.inlineNativePlayer)) {
+                ApolloLog(@"[PiP] Activation mode change made the inline-armed video ineligible — disarming");
+                [strongSelf disarmInlineNativePiPIfIdle];
+            }
 
             // Overlay extras (skip buttons / progress bar) toggled while the
             // card's controls are showing: refresh them in place.
@@ -561,13 +624,26 @@ static ApolloPiPController *sPiPSharedController = nil;
 
     AVPlayer *player = ApolloVideoUnmute_GetPlayerFromVideoNode(videoNode);
 
+    // A visible GIF should be playing — GIFs autoplay and loop — but Apollo
+    // pauses the comments-header GIF while it's off-screen and doesn't auto-resume
+    // it on the way back, leaving it at rate==0 (which blocks both the inline arm
+    // and a fresh takeover). Nudge a loaded, visible, paused GIF back to playing.
+    if (sPiPEnabled && PiPGifsActivated() && visible && !self.active
+        && player && player.rate == 0
+        && player.currentItem.status == AVPlayerItemStatusReadyToPlay
+        && PiPNodeURLIsGif(videoNode, player)) {
+        ApolloLog(@"[PiP] Resuming paused visible GIF for re-activation");
+        PiPRewindIfStoppedAtEnd(player);
+        [player play];
+    }
+
     // System PiP also covers INLINE playback: while an eligible video plays on
     // screen, keep a system PiP controller armed on Apollo's own inline player
     // layer so backgrounding hands it off.
     if (sPiPNativeEnabled && visible) {
         if (player && player.rate != 0
             && !(sPiPActivationMode == ApolloPiPActivationModeUnmutedOnly && player.muted)
-            && PiPIsEligibleVideo(videoNode, player)) {
+            && PiPIsEligibleForInlineNativePiP(videoNode, player)) {
             [self armInlineNativePiPForVideoNode:videoNode player:player];
         } else if (!player || player.rate == 0) {
             // Fresh navigation: the shared layer/player is adopted (and starts
@@ -580,6 +656,12 @@ static ApolloPiPController *sPiPSharedController = nil;
                 ApolloLog(@"[PiP] Inline arm: player not ready at visibility event — scheduling retries");
                 [self retryInlineArmForCell:cellNode videoNode:videoNode attempts:4];
             }
+        } else if (videoNode == self.inlineNativeVideoNode) {
+            // Playing but no longer eligible (e.g. switched away from "All Videos
+            // & GIFs" while this GIF stayed visible) — disarm, mirroring the feed
+            // path's arm/disarm symmetry. Otherwise a stale GIF would still hand
+            // off to System PiP on background in a mode that excludes GIFs.
+            [self disarmInlineNativePiPIfIdle];
         }
     }
 
@@ -589,8 +671,30 @@ static ApolloPiPController *sPiPSharedController = nil;
     // is in-app mini-player takeover, which requires its own toggle.
     if (!sPiPEnabled) return NO;
     if (!player || player.rate == 0.0f) return NO;
-    if (sPiPActivationMode == ApolloPiPActivationModeUnmutedOnly && player.muted) return NO;
-    if (!PiPIsEligibleVideo(videoNode, player)) return NO;
+    // "All Videos & GIFs" widens the in-app card to GIFs the strict audio guard
+    // otherwise rejects. (The inline System-PiP arm admits GIFs in the same mode
+    // via PiPIsEligibleForInlineNativePiP; the feed stays GIF-free because feed
+    // GIFs autoplay muted.)
+    BOOL gifByURL = PiPNodeURLIsGif(videoNode, player);
+    BOOL strictlyEligible = PiPIsEligibleVideo(videoNode, player);
+    if (gifByURL || !strictlyEligible) {
+        // GIF content: a GIF by origin URL (e.g. a Reddit .gif served as MP4,
+        // which is strictly eligible only because its MP4 carries a silent audio
+        // track), or a non-strictly-eligible silent inline video. Admit only in
+        // the "All Videos & GIFs" activation mode. For the non-URL case require
+        // ReadyToPlay so a still-loading audio video (transiently not strictly
+        // eligible) re-evaluates on the strict path instead of slipping in here;
+        // URL-identified GIFs are reliable pre-load. GIFs bypass Unmuted-Only —
+        // no audio to unmute.
+        if (!PiPGifsActivated()) return NO;
+        if (!gifByURL) {
+            AVPlayerItem *item = player.currentItem;
+            if (!item || item.status != AVPlayerItemStatusReadyToPlay) return NO;
+        }
+    } else if (sPiPActivationMode == ApolloPiPActivationModeUnmutedOnly && player.muted) {
+        // Unmuted-Only governs audio-bearing videos.
+        return NO;
+    }
     if ([self isInlineNativePiPActive]) return NO; // system PiP owns rendering right now
 
     [self takeOverFromCell:cellNode richMediaNode:richMediaNode videoNode:videoNode player:player];
@@ -615,10 +719,15 @@ static ApolloPiPController *sPiPSharedController = nil;
     self.videoNode = videoNode;
     self.link = PiPGetIvar(richMediaNode, "link");
     self.ownedNonShareable = !PiPNodeIsShareable(videoNode);
+    // GIF content (always loops, no audio session, no mute button): a GIF by
+    // origin URL — incl. a Reddit .gif served as MP4 that carries a silent audio
+    // track and would otherwise read as a video — or a non-strictly-eligible
+    // silent inline video. v.redd.it/Streamable real videos stay non-GIF.
+    self.cardIsGifContent = PiPNodeIsGifContent(videoNode, player);
     self.active = YES;
     self.restoring = NO;
     self.resumeOnForeground = NO;
-    self.sessionClaimedAudibly = !player.muted;
+    self.sessionClaimedAudibly = !player.muted && !self.cardIsGifContent;
 
     UIView *videoView = PiPViewForNode(videoNode);
     CGSize videoViewSize = videoView ? videoView.bounds.size : CGSizeZero;
@@ -721,6 +830,7 @@ static ApolloPiPController *sPiPSharedController = nil;
     AVPlayer *player = self.player;
     id richMediaNode = self.richMediaNode;
     BOOL sessionWasClaimed = self.sessionClaimedAudibly;
+    BOOL wasGifContent = self.cardIsGifContent;
 
     // A player parked at its end (Loop off) must never be handed back as-is:
     // Apollo's next inline play() would no-op on the at-end item and freeze
@@ -752,13 +862,20 @@ static ApolloPiPController *sPiPSharedController = nil;
     self.restoring = NO;
     self.resumeOnForeground = NO;
     self.sessionClaimedAudibly = NO;
+    self.cardIsGifContent = NO;
     self.player = nil;
     self.playerItem = nil;
     self.link = nil;
     self.richMediaNode = nil;
     self.videoNode = nil;
 
-    if (!keepPlaying && player) {
+    if (!keepPlaying && wasGifContent && player) {
+        // A GIF should keep looping inline, so leave it as-is rather than
+        // pausing/muting — a pause would block the next takeover (rate==0) and
+        // Apollo won't auto-resume it. It's silent, so off-screen playback is
+        // harmless; scrolling back re-activates the card normally.
+        ApolloLog(@"[PiP] Closing GIF — leaving it playing inline (loops)");
+    } else if (!keepPlaying && player) {
         ApolloLog(@"[PiP] Closing — applying scrolled-away state (pause + mute)");
         [player pause];
         // Our own AVPlayer.setMuted: hook blocks mutes on the protected player;
@@ -1540,6 +1657,9 @@ static ApolloPiPController *sPiPSharedController = nil;
 
     self.closeButton.frame = CGRectMake(6, 6, 34, 34);
     self.muteButton.frame = CGRectMake(w - 40, 6, 34, 34);
+    // A silent GIF has no audio to toggle — hide the mute control for it (also
+    // avoids an unmute tap spuriously claiming the Playback session).
+    self.muteButton.hidden = self.cardIsGifContent;
     self.progressTrack.frame = CGRectMake(10, h - 9, w - 20, 3);
     [self syncProgressAnimation]; // re-fit the fill (and its animation) to the new track width
 
@@ -1908,10 +2028,11 @@ static ApolloPiPController *sPiPSharedController = nil;
         }
 
         // PiP requires a Playback audio session active BEFORE controller init.
-        // For muted videos use mixWithOthers so we don't interrupt the user's
-        // music just to enable the handoff.
+        // For muted videos — and silent GIFs, which never produce sound — use
+        // mixWithOthers so we don't interrupt the user's music just to enable
+        // the handoff.
         AVAudioSession *session = [AVAudioSession sharedInstance];
-        AVAudioSessionCategoryOptions options = self.player.muted
+        AVAudioSessionCategoryOptions options = (self.player.muted || self.cardIsGifContent)
             ? AVAudioSessionCategoryOptionMixWithOthers : 0;
         [session setCategory:AVAudioSessionCategoryPlayback
                         mode:AVAudioSessionModeDefault options:options error:nil];
@@ -1985,11 +2106,13 @@ static ApolloPiPController *sPiPSharedController = nil;
         if (![layer isKindOfClass:[AVPlayerLayer class]]) return;
 
         // System PiP needs a Playback session active before controller init.
-        // Best effort for muted videos (mixWithOthers spares the user's music);
-        // unmuted ones already hold a Playback session via the unmute paths.
+        // Best effort for muted videos — and silent GIFs, which never produce
+        // sound — use mixWithOthers so the handoff doesn't interrupt the user's
+        // music; unmuted real videos already hold a Playback session via the
+        // unmute paths. Mirrors the card's setupNativePiP GIF handling.
         AVAudioSession *session = [AVAudioSession sharedInstance];
         if (![session.category isEqualToString:AVAudioSessionCategoryPlayback]) {
-            AVAudioSessionCategoryOptions options = player.muted
+            AVAudioSessionCategoryOptions options = (player.muted || PiPNodeURLIsGif(videoNode, player))
                 ? AVAudioSessionCategoryOptionMixWithOthers : 0;
             [session setCategory:AVAudioSessionCategoryPlayback
                             mode:AVAudioSessionModeDefault options:options error:nil];
@@ -2034,7 +2157,7 @@ static ApolloPiPController *sPiPSharedController = nil;
         AVPlayer *player = ApolloVideoUnmute_GetPlayerFromVideoNode(video);
         if (player && player.rate != 0) {
             if (!(sPiPActivationMode == ApolloPiPActivationModeUnmutedOnly && player.muted)
-                && PiPIsEligibleVideo(video, player)
+                && PiPIsEligibleForInlineNativePiP(video, player)
                 && PiPIsVideoMidpointVisible(video, cell)) {
                 ApolloLog(@"[PiP] Inline arm retry: player ready — arming");
                 [strongSelf armInlineNativePiPForVideoNode:video player:player];
@@ -2247,14 +2370,18 @@ BOOL ApolloPiP_ShouldSuppressLoopForItem(AVPlayerItem *item) {
     if (!controller) return NO;
     // In-app card presenting this player (covers the card and its system PiP).
     if (controller.active && controller.player && controller.player.currentItem == item) {
-        return YES;
+        // GIFs always loop in PiP regardless of the Loop Videos setting; other
+        // content honors the (off) setting and stops at its end.
+        return !controller.cardIsGifContent;
     }
-    // Inline-armed system PiP actively showing this player.
+    // Inline-armed system PiP actively showing this player. A Reddit .gif-as-MP4
+    // is strictly eligible (silent audio track) so it can arm here too; keep it
+    // looping. URL-only GIF check — the only GIFs that arm inline are URL-GIFs.
     if (@available(iOS 15.0, *)) {
         if (controller.inlineNativePiP.pictureInPictureActive
             && controller.inlineNativePlayer
             && controller.inlineNativePlayer.currentItem == item) {
-            return YES;
+            return !PiPNodeURLIsGif(controller.inlineNativeVideoNode, controller.inlineNativePlayer);
         }
     }
     return NO;
@@ -2277,7 +2404,10 @@ static BOOL PiPInlineShieldEngaged(AVPlayer *player) {
 BOOL ApolloPiP_ShouldBlockAudioSessionDowngrade(void) {
     ApolloPiPController *controller = sPiPSharedController;
     if (!controller) return NO;
-    if (controller.active && controller.player && !controller.player.muted) return YES;
+    // A silent GIF card produces no sound, so there is no audio session worth
+    // holding against Apollo's Ambient downgrade.
+    if (controller.active && controller.player
+        && !controller.player.muted && !controller.cardIsGifContent) return YES;
     AVPlayer *inlinePlayer = controller.inlineNativePlayer;
     return inlinePlayer && !inlinePlayer.muted && PiPInlineShieldEngaged(inlinePlayer);
 }
@@ -2299,7 +2429,7 @@ void ApolloPiP_NoteInlineVideoAudible(id videoNode, AVPlayer *player) {
     ApolloPiPController *controller = [ApolloPiPController sharedController];
     if (controller.active) return;
     if (player.rate == 0) return;
-    if (!PiPIsEligibleVideo(videoNode, player)) return;
+    if (!PiPIsEligibleForInlineNativePiP(videoNode, player)) return;
     if (!PiPIsVideoMidpointVisible(videoNode, nil)) return;
     [controller armInlineNativePiPForVideoNode:videoNode player:player];
 }
@@ -2386,7 +2516,7 @@ static void PiPManageInlineNativeForFeedCell(id cellNode) {
 
     AVPlayer *player = ApolloVideoUnmute_GetPlayerFromVideoNode(videoNode);
     BOOL eligible = player && player.rate != 0 && !player.muted
-                 && PiPIsEligibleVideo(videoNode, player)
+                 && PiPIsEligibleForInlineNativePiP(videoNode, player)
                  && PiPIsVideoMidpointVisible(videoNode, cellNode);
     if (eligible) {
         [controller armInlineNativePiPForVideoNode:videoNode player:player];

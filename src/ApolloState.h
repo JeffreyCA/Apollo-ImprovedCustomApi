@@ -172,8 +172,9 @@ extern NSString *sWebSessionUsername;
 // Picture-in-Picture: floating in-app mini-player for comments-page videos
 // scrolled out of view. See ApolloPictureInPicture.xm and docs/pip-design.md.
 typedef NS_ENUM(NSInteger, ApolloPiPActivationMode) {
-    ApolloPiPActivationModeAllVideos = 0,   // any playing video (muted or not)
-    ApolloPiPActivationModeUnmutedOnly = 1, // only videos playing unmuted
+    ApolloPiPActivationModeAllVideos = 0,       // any playing video (muted or not)
+    ApolloPiPActivationModeUnmutedOnly = 1,     // only videos playing unmuted
+    ApolloPiPActivationModeAllVideosAndGifs = 2, // all videos PLUS silent GIFs (in-app card)
 };
 // Where a fresh PiP card first appears. 0–3 match the corner indices used by
 // the geometry code (TL/TR/BL/BR); LastPosition restores the remembered

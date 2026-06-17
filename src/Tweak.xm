@@ -1444,8 +1444,8 @@ static void initializeRandomSources() {
     // Picture-in-Picture hydration.
     sPiPEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPictureInPictureEnabled];
     sPiPActivationMode = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPictureInPictureActivation];
-    if (sPiPActivationMode < ApolloPiPActivationModeAllVideos || sPiPActivationMode > ApolloPiPActivationModeUnmutedOnly) {
-        sPiPActivationMode = ApolloPiPActivationModeAllVideos;
+    if (sPiPActivationMode < ApolloPiPActivationModeAllVideos || sPiPActivationMode > ApolloPiPActivationModeAllVideosAndGifs) {
+        sPiPActivationMode = ApolloPiPActivationModeUnmutedOnly; // matches the registered default
         [standardDefaults setInteger:sPiPActivationMode forKey:UDKeyPictureInPictureActivation];
     }
     sPiPStartPosition = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPictureInPictureStartPosition];
