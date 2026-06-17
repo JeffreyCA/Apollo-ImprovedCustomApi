@@ -41,7 +41,7 @@
 # Env overrides:
 #   BASE_IPA (./apollo-base.ipa)  BUNDLE_ID (com.christianselig.Apollo)
 #   SIM_NAME (Apollo-Sim)  SIM_DEVICE_TYPE (iPhone 16 Pro)  SIM_RUNTIME (newest iOS)
-#   DEPLOY_MIN (14.0)  WORK_DIR (./.sim)  IDB (idb on PATH)
+#   DEPLOY_MIN (15.0)  WORK_DIR (./.sim)  IDB (idb on PATH)
 #   BACKUP_ZIP (--backup)  APPEARANCE (light|dark, --dark/--light)  GLASS (0|1, --glass)
 #
 set -euo pipefail
@@ -52,7 +52,7 @@ BUNDLE_ID="${BUNDLE_ID:-com.christianselig.Apollo}"
 SIM_NAME="${SIM_NAME:-Apollo-Sim}"
 SIM_DEVICE_TYPE="${SIM_DEVICE_TYPE:-iPhone 16 Pro}"
 SIM_RUNTIME="${SIM_RUNTIME:-}"
-DEPLOY_MIN="${DEPLOY_MIN:-14.0}"
+DEPLOY_MIN="${DEPLOY_MIN:-15.0}"
 WORK_DIR="${WORK_DIR:-./.sim}"
 IDB="${IDB:-idb}"
 DEFAULT_BUNDLE_ID="com.christianselig.Apollo"
