@@ -7,8 +7,18 @@
 // in compact mode.
 //
 // Strategy A (non-invasive): we only set the existing thumbnail node's URL on
-// the affected cells. We do NOT change tap routing, post type, or the layout
-// model — eligible posts stay self posts and tapping still opens the post.
+// the affected cells (compact) or inject a hero node above Apollo's content
+// (large). Eligible posts stay self posts; tapping the title/body still opens
+// the post.
+//
+// Consistency additions (issue #419):
+//   * Settings toggle (Media > Text Post Thumbnails, default ON; off restores
+//     Apollo's native no-thumbnail behavior for text posts).
+//   * A "Text Post" pill on the large-mode hero so these thumbnails are
+//     distinguishable from image posts in the feed.
+//   * Tapping the thumbnail opens the embedded image(s) in a fullscreen
+//     zoomable viewer — same expectation as tapping an image post — instead
+//     of opening the thread.
 //
 // Eligibility (strict): act ONLY when
 //   * link.selfPost == YES, AND
@@ -25,6 +35,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloMediaMetadata.h"
+#import "ApolloState.h"
 #import "Tweak.h"
 
 // Tweak.h's RDKLink declares selfPost/selfText/mediaMetadata/previewMedia. The
@@ -88,7 +99,12 @@ typedef NS_ENUM(unsigned char, ApolloFeedStackAlign) {
 @property (nullable, nonatomic, copy) UIColor *placeholderColor;
 @property (nonatomic) BOOL placeholderEnabled;@property (nonatomic) NSTimeInterval placeholderFadeDuration;
 @property (nonatomic, weak) id delegate;
+// ASImageNode is an ASControlNode subclass, so target-action is available.
+- (void)addTarget:(id)target action:(SEL)action forControlEvents:(NSUInteger)controlEvents;
 @end
+
+// ASControlNodeEventTouchUpInside from Texture's ASControlNode.h.
+static const NSUInteger ApolloFeedControlEventTouchUpInside = 1 << 4;
 
 @interface ASLayoutSpec : NSObject
 @property (nullable, nonatomic) NSArray *children;
@@ -109,6 +125,10 @@ typedef NS_ENUM(unsigned char, ApolloFeedStackAlign) {
 
 @interface ASRatioLayoutSpec : ASLayoutSpec
 + (instancetype)ratioLayoutSpecWithRatio:(CGFloat)ratio child:(id)child;
+@end
+
+@interface ASInsetLayoutSpec : ASLayoutSpec
++ (instancetype)insetLayoutSpecWithInsets:(UIEdgeInsets)insets child:(id)child;
 @end
 
 // ASLayoutElementStyle subset for fixing the hero height.
@@ -137,6 +157,22 @@ static char kApolloFeedThumbRatioKey;
 // Associated-object: the ASNetworkImageNode we inject into a RichMediaNode's
 // layout for large-mode text/link posts (created once per node, reused).
 static char kApolloFeedHeroNodeKey;
+
+// Apollo's standard large-cell horizontal content margin (matches the feed
+// search bar and the title/body text), so the rounded hero lines up with the
+// rest of the cell instead of bleeding to the screen edge.
+static const CGFloat kApolloFeedHeroSideInset = 16.0;
+
+// Associated-object on the hero node: the RDKLink it currently displays
+// (updated every layout pass — cells get reused for different links).
+static char kApolloFeedHeroLinkKey;
+
+// Associated-object on an RDKLink: cached full-resolution viewer items
+// (NSArray<NSDictionary *> with @"url"), used when the hero is tapped.
+static char kApolloFeedViewerItemsKey;
+
+// NSNumber(BOOL) on a compact thumbnail node: our tap target is attached.
+static char kApolloFeedCompactTapWiredKey;
 
 // Shared ASNetworkImageNode delegate that fades the hero image in once it
 // finishes loading. ASNetworkImageNode's placeholderFadeDuration only fades the
@@ -183,8 +219,9 @@ static char kApolloFeedHeroNodeKey;
 }
 @end
 
-// Master switch (always on for now; eligibility gate keeps it scoped).
-static BOOL sEnableFeedTextThumbnails = YES;
+// Master switch lives in ApolloState (sFeedTextPostThumbnails), hydrated from
+// UDKeyFeedTextPostThumbnails and toggled from the Media settings section.
+// Off restores Apollo's native behavior (no thumbnails on text posts).
 
 #pragma mark - URL helpers
 
@@ -369,8 +406,9 @@ static NSURL *ApolloFeedThumbURLFromSelfText(NSString *selfText) {
 
 // Resolve (and cache) the thumbnail URL for an eligible self/text post.
 // Returns nil for ineligible posts or when no embedded image was found.
+// Deliberately NOT gated on sFeedTextPostThumbnails — the toggle-off path
+// still needs eligibility to strip raw image URLs from preview text.
 static NSURL *ApolloFeedThumbnailURLForLink(RDKLink *link) {
-    if (!sEnableFeedTextThumbnails) return nil;
     if (!link) return nil;
 
     id cached = objc_getAssociatedObject(link, &kApolloFeedThumbURLKey);
@@ -420,6 +458,138 @@ static NSURL *ApolloFeedThumbnailURLForLink(RDKLink *link) {
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return result;
 }
+
+#pragma mark - Fullscreen viewer plumbing
+
+// Full-resolution viewer items for an eligible text post: every embedded
+// media_metadata image, ordered by first occurrence in the selftext (same
+// ordering rule as the thumbnail choice), as @{ @"url": NSURL } dictionaries
+// for ApolloPresentImageChestItems. Falls back to the single thumbnail URL
+// for selftext-link images. Cached per link.
+static NSArray<NSDictionary *> *ApolloFeedViewerItemsForLink(RDKLink *link) {
+    if (!link) return @[];
+    NSArray *cached = objc_getAssociatedObject(link, &kApolloFeedViewerItemsKey);
+    if ([cached isKindOfClass:[NSArray class]]) return cached;
+
+    NSMutableArray<NSDictionary *> *items = [NSMutableArray array];
+    @try {
+        NSDictionary *mediaMetadata = link.mediaMetadata;
+        NSString *body = [link.selfText isKindOfClass:[NSString class]] ? link.selfText : @"";
+        if ([mediaMetadata isKindOfClass:[NSDictionary class]] && mediaMetadata.count > 0) {
+            NSMutableArray<NSString *> *keys = [NSMutableArray array];
+            for (NSString *assetID in mediaMetadata) {
+                if (ApolloFeedEntryIsImage(mediaMetadata[assetID])) [keys addObject:assetID];
+            }
+            // Body order; images never referenced in the body sort last
+            // (NSNotFound compares greater than any real index).
+            [keys sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+                NSUInteger ia = [body rangeOfString:a].location;
+                NSUInteger ib = [body rangeOfString:b].location;
+                if (ia == ib) return NSOrderedSame;
+                return ia < ib ? NSOrderedAscending : NSOrderedDescending;
+            }];
+            for (NSString *assetID in keys) {
+                NSString *urlString = ApolloMediaDisplayURLFromMetadataEntry(assetID, mediaMetadata[assetID], NO);
+                NSURL *url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
+                if (url) [items addObject:@{ @"url": url }];
+            }
+        }
+        if (items.count == 0) {
+            NSURL *thumb = ApolloFeedThumbnailURLForLink(link);
+            if (thumb) [items addObject:@{ @"url": thumb }];
+        }
+    } @catch (__unused NSException *e) {}
+
+    objc_setAssociatedObject(link, &kApolloFeedViewerItemsKey, items, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return items;
+}
+
+// Route an image URL into Apollo's native link-tap machinery by walking the
+// supernode chain for textNode:tappedLinkAttribute:value:atPoint:textRange:
+// (RichMediaNode and LargePostCellNode implement it). With the "ApolloLink"
+// attribute, Apollo routes direct image URLs into its native MediaViewer —
+// identical to tapping an image link anywhere else in the app. Returns NO
+// when no handler exists in the chain (e.g. compact cells).
+static BOOL ApolloFeedRouteURLToNativeHandler(id startNode, NSURL *url) {
+    if (![url isKindOfClass:[NSURL class]]) return NO;
+    SEL sel = @selector(textNode:tappedLinkAttribute:value:atPoint:textRange:);
+    id target = startNode;
+    for (int hops = 0; target && hops < 24; hops++) {
+        if ([target respondsToSelector:sel]) break;
+        target = [target respondsToSelector:@selector(supernode)] ? [target supernode] : nil;
+    }
+    if (!target) return NO;
+
+    ApolloLog(@"[FeedThumb] routing %@ to native viewer via %@", url.host, NSStringFromClass([target class]));
+    void (*msgSend)(id, SEL, id, id, id, CGPoint, NSRange) =
+        (void (*)(id, SEL, id, id, id, CGPoint, NSRange))objc_msgSend;
+    msgSend(target, sel, target, @"ApolloLink", url, CGPointZero, NSMakeRange(NSNotFound, 0));
+    return YES;
+}
+
+// Shared tap handler: opens the tapped text post's embedded image the same
+// way a normal image post opens its media, instead of confusingly opening
+// the thread.
+static id ApolloFeedIvar(id obj, const char *name);
+
+@interface ApolloFeedHeroTapHandler : NSObject
+@end
+
+@implementation ApolloFeedHeroTapHandler
++ (instancetype)shared {
+    static ApolloFeedHeroTapHandler *sShared = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ sShared = [[ApolloFeedHeroTapHandler alloc] init]; });
+    return sShared;
+}
+
+- (void)heroTapped:(id)sender {
+    @try {
+        RDKLink *link = objc_getAssociatedObject(sender, &kApolloFeedHeroLinkKey);
+        NSArray<NSDictionary *> *items = ApolloFeedViewerItemsForLink(link);
+        ASDisplayNode *node = (ASDisplayNode *)sender;
+        UIView *sourceView = [node isNodeLoaded] ? [node view] : nil;
+
+        // Open the hero's image in Apollo's NATIVE media viewer via the
+        // link-tap handler on the supernode chain (review feedback on the
+        // PR: native viewer with its bottom toolbar and flick-to-dismiss
+        // beats a custom gallery; the hero shows the first image, so that's
+        // the one that opens).
+        NSURL *url = [items.firstObject[@"url"] isKindOfClass:[NSURL class]] ? items.firstObject[@"url"] : nil;
+        if (ApolloFeedRouteURLToNativeHandler(sender, url)) return;
+
+        // Fallback: the tweak's own zoomable viewer.
+        ApolloLog(@"[FeedThumb] hero tapped: no native handler, presenting %lu image(s) in fallback viewer",
+                  (unsigned long)items.count);
+        if (items.count > 0) {
+            ApolloPresentImageChestItems(items, sourceView, 0);
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+// Compact thumbnails we filled have no Apollo-wired tap action (Apollo only
+// wires one for posts with media), so we attach this. Walks to the cell and
+// replays its thumbnailTappedWithSender: — intercepted by the hook below,
+// which points the link at the image so Apollo presents its native viewer.
+// No-ops unless the post is still an eligible self post, so a reused
+// thumbnail node on a media post can't double-fire Apollo's own action.
+- (void)compactThumbTapped:(id)sender {
+    @try {
+        id target = sender;
+        for (int hops = 0; target && hops < 24; hops++) {
+            if ([target respondsToSelector:@selector(thumbnailTappedWithSender:)]) break;
+            target = [target respondsToSelector:@selector(supernode)] ? [target supernode] : nil;
+        }
+        if (!target) {
+            ApolloLog(@"[FeedThumb] compact thumb tap: no cell handler in chain");
+            return;
+        }
+        RDKLink *link = ApolloFeedIvar(target, "link");
+        if (!(link.selfPost && ApolloFeedThumbnailURLForLink(link))) return;
+        ((void (*)(id, SEL, id))objc_msgSend)(target, @selector(thumbnailTappedWithSender:), sender);
+    } @catch (__unused NSException *e) {}
+}
+@end
 
 // Apply the URL to a thumbnail image node (idempotent — skips if already set).
 static void ApolloFeedApplyThumbnailURL(id thumbNode, NSURL *url) {
@@ -566,16 +736,94 @@ static void ApolloFeedReapplyCleanup(id node, BOOL triggerLayout) {
 
 - (id)layoutSpecThatFits:(struct ApolloFeedThumbSizeRange)constrainedSize {
     id spec = %orig;
-    if (!sEnableFeedTextThumbnails) return spec;
+    if (!sFeedTextPostThumbnails) return spec;
     @try {
         RDKLink *link = MSHookIvar<RDKLink *>(self, "link");
         NSURL *url = ApolloFeedThumbnailURLForLink(link);
         if (url) {
             id thumb = MSHookIvar<id>(self, "thumbnailNode");
             ApolloFeedApplyThumbnailURL(thumb, url);
+            // Apollo wires the thumbnail's tap action only for posts with
+            // media, so the squares we fill are inert — taps fell through to
+            // the cell and opened the thread (review feedback on the PR).
+            // Wire our own target once per wrapper; the handler re-checks
+            // eligibility, so node reuse on media posts stays Apollo's.
+            //
+            // The wiring must run on the main queue, and `thumbnailNode` must
+            // be RE-READ there: layoutSpecThatFits runs on Texture's
+            // background layout threads, and a raw ivar pointer captured
+            // across the async hop can dangle if the cell is torn down first
+            // (crashed as doesNotRecognizeSelector on a reincarnated pointer).
+            // Only the wrapper crosses the boundary, weakly.
+            if (![objc_getAssociatedObject(self, &kApolloFeedCompactTapWiredKey) boolValue]) {
+                objc_setAssociatedObject(self, &kApolloFeedCompactTapWiredKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                __weak ASDisplayNode *weakWrapper = (ASDisplayNode *)self;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    @try {
+                        ASDisplayNode *wrapper = weakWrapper;
+                        if (!wrapper) return;
+                        id thumbNode = ApolloFeedIvar(wrapper, "thumbnailNode");
+                        if (![thumbNode respondsToSelector:@selector(addTarget:action:forControlEvents:)] ||
+                            ![thumbNode respondsToSelector:@selector(setUserInteractionEnabled:)]) {
+                            ApolloLog(@"[FeedThumb] compact wiring skipped: thumb=%@ lacks control surface",
+                                      NSStringFromClass([thumbNode class]));
+                            return;
+                        }
+                        // Apollo leaves the whole thumbnail chain inert for
+                        // media-less posts; touches need every ancestor enabled.
+                        wrapper.userInteractionEnabled = YES;
+                        [(ASNetworkImageNode *)thumbNode setUserInteractionEnabled:YES];
+                        [(ASNetworkImageNode *)thumbNode addTarget:[ApolloFeedHeroTapHandler shared]
+                                                            action:@selector(compactThumbTapped:)
+                                                  forControlEvents:ApolloFeedControlEventTouchUpInside];
+                        ApolloLog(@"[FeedThumb] compact tap target wired (thumb=%@)", NSStringFromClass([thumbNode class]));
+                    } @catch (NSException *e) {
+                        ApolloLog(@"[FeedThumb] compact wiring failed: %@", e.reason);
+                    }
+                });
+            }
         }
     } @catch (__unused NSException *e) {}
     return spec;
+}
+
+%end
+
+// Compact cells: Apollo only wires a thumbnail tap action when the post has
+// media, so for our filled-in text post thumbnails the tap fell through to
+// the cell and opened the thread (review feedback on the PR). Intercept the
+// tap and replay Apollo's own handler with the link temporarily pointed at
+// the embedded image: Apollo then presents its native media viewer — bottom
+// toolbar wired to the post's votes/comments, flick-to-dismiss — exactly as
+// if this were an image post. URL and selfPost are restored immediately
+// after the synchronous presentation.
+%hook _TtC6Apollo19CompactPostCellNode
+
+- (void)thumbnailTappedWithSender:(id)sender {
+    if (sFeedTextPostThumbnails) {
+        @try {
+            RDKLink *link = MSHookIvar<RDKLink *>(self, "link");
+            if (link && link.selfPost && ApolloFeedThumbnailURLForLink(link)) {
+                NSArray<NSDictionary *> *items = ApolloFeedViewerItemsForLink(link);
+                NSURL *imageURL = [items.firstObject[@"url"] isKindOfClass:[NSURL class]] ? items.firstObject[@"url"] : nil;
+                if (imageURL) {
+                    ApolloLog(@"[FeedThumb] compact thumbnail tapped: replaying native handler with %@", imageURL.host);
+                    NSURL *originalURL = link.URL;
+                    BOOL originalSelfPost = link.selfPost;
+                    link.URL = imageURL;
+                    link.selfPost = NO;
+                    @try {
+                        %orig;
+                    } @finally {
+                        link.URL = originalURL;
+                        link.selfPost = originalSelfPost;
+                    }
+                    return;
+                }
+            }
+        } @catch (__unused NSException *e) {}
+    }
+    %orig;
 }
 
 %end
@@ -590,7 +838,23 @@ static void ApolloFeedReapplyCleanup(id node, BOOL triggerLayout) {
 
 - (id)layoutSpecThatFits:(struct ApolloFeedThumbSizeRange)constrainedSize {
     id origSpec = %orig;
-    if (!sEnableFeedTextThumbnails) return origSpec;
+    if (!sFeedTextPostThumbnails) {
+        // Toggled off mid-session: a previously injected hero would otherwise
+        // keep its last frame even though it left the layout spec.
+        ASDisplayNode *staleHero = objc_getAssociatedObject(self, &kApolloFeedHeroNodeKey);
+        if (staleHero) staleHero.hidden = YES;
+        // Even without a thumbnail, a naked image URL leading the preview
+        // text is noise — show the post's actual text, like a normal text
+        // post. (Link card stays native.)
+        @try {
+            RDKLink *link = MSHookIvar<RDKLink *>(self, "link");
+            if (link && link.selfPost && ApolloFeedThumbnailURLForLink(link)) {
+                ApolloFeedStripImageURLsFromTextNode(ApolloFeedIvar(self, "selfPostPreviewNode"));
+                [ApolloFeedInjectedNodes() addObject:self];
+            }
+        } @catch (__unused NSException *e) {}
+        return origSpec;
+    }
 
     @try {
         RDKLink *link = MSHookIvar<RDKLink *>(self, "link");
@@ -659,12 +923,26 @@ static void ApolloFeedReapplyCleanup(id node, BOOL triggerLayout) {
                 if ([hero respondsToSelector:@selector(setDelegate:)]) {
                     hero.delegate = [ApolloFeedHeroFadeDelegate shared];
                 }
+                // Tapping the hero opens the embedded image(s) fullscreen,
+                // matching what a thumbnail tap does on a real image post
+                // (issue #419). Taps elsewhere still open the thread.
+                if ([hero respondsToSelector:@selector(addTarget:action:forControlEvents:)]) {
+                    hero.userInteractionEnabled = YES;
+                    [hero addTarget:[ApolloFeedHeroTapHandler shared]
+                             action:@selector(heroTapped:)
+                   forControlEvents:ApolloFeedControlEventTouchUpInside];
+                } else {
+                    ApolloLog(@"[FeedThumb] hero node does not support target-action; tap-to-open disabled");
+                }
             } @catch (__unused NSException *e) {}
             [(ASDisplayNode *)self addSubnode:hero];
             objc_setAssociatedObject(self, &kApolloFeedHeroNodeKey, hero,
                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         if (![hero.URL isEqual:url]) hero.URL = url;
+        hero.hidden = NO;
+        // Cells are reused across links — keep the tap handler's link current.
+        objc_setAssociatedObject(hero, &kApolloFeedHeroLinkKey, link, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
         // Size the hero via an aspect ratio (height/width) layout spec.
         CGFloat ratio = 0.56;
@@ -678,6 +956,19 @@ static void ApolloFeedReapplyCleanup(id node, BOOL triggerLayout) {
         }
 
         id heroSpec = [ratioCls ratioLayoutSpecWithRatio:ratio child:hero];
+
+        // RichMediaNode spans the cell edge-to-edge (Apollo's image posts are
+        // intentionally full-bleed), but a rounded-corner thumbnail looks
+        // clipped flush against the screen edge. Inset it to Apollo's standard
+        // content margin so it lines up with the title/body text (review
+        // feedback on #426).
+        Class insetCls = objc_getClass("ASInsetLayoutSpec");
+        if (insetCls) {
+            id padded = [insetCls insetLayoutSpecWithInsets:UIEdgeInsetsMake(0, kApolloFeedHeroSideInset, 0, kApolloFeedHeroSideInset)
+                                                      child:heroSpec];
+            if (padded) heroSpec = padded;
+        }
+
         id stacked = [stackCls stackLayoutSpecWithDirection:ApolloFeedStackDirectionVertical
                                                     spacing:8.0
                                              justifyContent:ApolloFeedStackJustifyStart
@@ -693,7 +984,7 @@ static void ApolloFeedReapplyCleanup(id node, BOOL triggerLayout) {
 #pragma mark - ctor
 
 %ctor {
-    ApolloLog(@"[FeedThumb] ApolloFeedTextPostThumbnails loaded");
+    ApolloLog(@"[FeedThumb] ApolloFeedTextPostThumbnails loaded enabled=%d", (int)sFeedTextPostThumbnails);
 
     // When the app returns to the foreground, Apollo rebuilds the self-post
     // preview text (re-adding the naked image URL) without re-running our
@@ -704,14 +995,19 @@ static void ApolloFeedReapplyCleanup(id node, BOOL triggerLayout) {
                     object:nil
                      queue:[NSOperationQueue mainQueue]
                 usingBlock:^(NSNotification *note) {
-        if (!sEnableFeedTextThumbnails) return;
         for (NSNumber *delay in @[ @0.0, @0.2, @0.6 ]) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                          (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 @try {
                     for (id node in ApolloFeedInjectedNodes().allObjects) {
-                        ApolloFeedReapplyCleanup(node, YES);
+                        if (sFeedTextPostThumbnails) {
+                            // Full cleanup: hidden link card + stripped URL.
+                            ApolloFeedReapplyCleanup(node, YES);
+                        } else {
+                            // Toggle off: only keep the preview text clean.
+                            ApolloFeedStripImageURLsFromTextNode(ApolloFeedIvar(node, "selfPostPreviewNode"));
+                        }
                     }
                 } @catch (__unused NSException *e) {}
             });

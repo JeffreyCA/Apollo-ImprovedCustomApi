@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v3.2.0] - 2026-06-14
+
+### Features
+
+- New **Apollo Reborn Widgets** — nine Home Screen, Lock Screen, and StandBy widgets (Showerthoughts, Jokes, Post, Feed, Photo, Shortcuts, Apollo Actions, Calendar, and Headline) (#406: @jordanearle)
+  - Most widgets read Reddit through your API key: copy a one-time setup code from **Settings > Apollo Reborn > Copy Widget Setup Code** and paste it into any widget, and the rest pick it up automatically
+  - Tapping a widget opens the post or subreddit in Apollo; included in the standard build but not the no-extensions variant
+- PENDING: New experimental **API-Key-Free Mode** in **Settings > Apollo Reborn > API Keys** to use Apollo without API keys by signing in to reddit.com directly! Supports browsing, voting, commenting, and saving. (#442: @nickclyde)
+- PENDING: Add **Img Chest** as a media upload host in **Settings > Apollo Reborn > Media Upload Host** for single images and albums, with thumbnails and host labels in **Manage Uploads**, the ability to delete Img Chest uploads, and an improved album viewer with share, Save All, an accurate loading percentage, and swipe-to-dismiss (#434: @icpryde)
+- PENDING: Add a **Universal OAuth Sign-In** toggle in **Settings > Apollo Reborn** (on by default) to fall back to Apollo's native sign-in if the in-app login causes trouble, and ship released IPAs with the `dystopia` and `redreader` sign-in URL schemes already registered so the shared API key works without manually editing Info.plist (#432: @JeffreyCA)
+- Add a **manual sign-in fallback** for older iOS versions that can't load Reddit's login page, using an external browser and an Apollo Reborn userscript to paste a sign-in code back into Apollo (#430: @DeltAndy123; sign-in keyboard improvements by @Alstruit)
+- PENDING: Add a **Text Post Thumbnails** toggle in **Settings > Apollo Reborn > Media** (on by default) — text posts that embed an image now show a thumbnail with a **Text Post** badge, and tapping it opens the image in the media viewer instead of the thread (#426: @icpryde)
+- PENDING: Add **Hide Mod Subreddits** to remove moderated subreddits you can't leave from the Subreddits list — tap Edit, then the blue button to hide a subreddit and the green button to bring it back (#424: @icpryde)
+- PENDING: Add a **Search by Flair** row to the top of supported subreddit sidebars, showing the subreddit's post flairs as tappable chips that jump straight to that flair's posts (#439: @icpryde)
+- Show **moderator reports** as native inline sections in the post and comment action menu (#412: @JeffreyCA)
+- Make the **banned-profile overlay** dismissable (#409: @JeffreyCA)
+- Combine cache-clearing options into one **Clear Tweak Caches** button under a renamed **Data** section (#409: @JeffreyCA)
+
+### Fixes
+
+- PENDING: Show the **author avatar and subreddit icon** in **Share as Image** post exports, so the image matches what you see in the app (#438: @icpryde)
+- PENDING: Fix several **link card glitches in feeds** — cards whose text overflowed into the post below, Bluesky posts losing their paragraph breaks, compact cards stuck at full height, and blank image areas on links whose thumbnail isn't ready yet (#427: @icpryde)
+- PENDING: Make **deleted comment recovery** faster and more reliable, with cleaner labels on recovered comments and a heads-up when enabling it that comments may load slower (#418: @nunoo)
+- PENDING: Fix the tweak's settings screens only following the system light/dark mode instead of **Apollo's own color theme**, along with related cell coloring glitches when switching appearance (#440: @iCrazeiOS)
+- Fix **gallery GIFs** getting stuck on a loading spinner when swiping between items in an album (#404: @JeffreyCA)
+- Fix comment and post text showing a literal **`&#x200B;`** or an extra blank line at the end (#405: @JeffreyCA)
+- Fix **comment scrolling freezing** in threads that contain a link to removed media, such as a deleted `v.redd.it` video (#395: @JeffreyCA)
+- Fix spurious **"error :(" overlay** appearing over videos that play fine but whose preview image fails to load (#409: @JeffreyCA)
+- Fix **Live Activities** not updating on secret-protected self-hosted notification backends (#411: @nickclyde)
+- Fix an **installation conflict** when upgrading from some older versions (#401: @Alstruit)
+- Bundle **libFLEX inside the app** so rootless jailbreak users can keep the standalone libFLEX package installed without it conflicting with Apollo Reborn (#437: @iCrazeiOS)
+
 ## [v3.1.1] - 2026-06-07
 
 - Fix a **crash when sharing a post to Messages or Mail** from the share sheet — the system compose controller was misidentified as an Apollo composer, leaving GIF-toolbar injection timers that dereferenced the dismissed share UI and crashed (#378: @nickclyde)
@@ -509,6 +541,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v3.2.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.1.1...v1.15.11_3.2.0
 [v3.1.1]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.1.0...v1.15.11_3.1.1
 [v3.1.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.0.0...v1.15.11_3.1.0
 [v3.0.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v2.14.0...v1.15.11_3.0.0

@@ -41,4 +41,10 @@ void ApolloPresentWebURLFromViewController(UIViewController *presenter, NSURL *u
 // GIF/composer machinery pokes at the remote view hierarchy (issue #366).
 // Resolved via objc_getClass so we don't link MessageUI/Social.
 BOOL ApolloIsSystemShareComposeController(UIViewController *controller);
+
+// Present the tweak's fullscreen zoomable image-album viewer (implemented in
+// ApolloInlineImages). Items are dictionaries with an @"url" NSURL; despite
+// the name it is a generic viewer, not ImageChest-specific. Returns NO when
+// items is empty or no presenter could be found from sourceView.
+BOOL ApolloPresentImageChestItems(NSArray<NSDictionary *> *items, UIView *sourceView, NSInteger initialIndex);
 __END_DECLS

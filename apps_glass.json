@@ -2,7 +2,7 @@
   "apps": [
     {
       "bundleIdentifier": "com.christianselig.Apollo",
-      "buildVersion": "288",
+      "buildVersion": "289",
       "developerName": "Christian Selig (& Apollo-Reborn contributors)",
       "iconURL": "https://apolloreborn.app/assets/icon.png",
       "tintColor": "#F0542D",
@@ -17,7 +17,7 @@
         "https://raw.githubusercontent.com/Apollo-Reborn/Apollo-Reborn/main/img/avatar-comments.jpg",
         "https://raw.githubusercontent.com/Apollo-Reborn/Apollo-Reborn/main/img/translation.jpg"
       ],
-      "localizedDescription": "Apollo-Reborn is the community-maintained Apollo sideload build powered by the Apollo-Reborn tweak.\n\nIt restores custom API support, media fixes, uploads, inline media, translation, saved categories, Liquid Glass support on iOS 26+, and the rest of the project’s ongoing fixes and enhancements.\n\nThese sources are intended for AltStore Classic, SideStore, and Feather. Apollo-Reborn is not compatible with AltStore PAL.\n\nChoose the source variant that matches how you sideload:\n\n• Standard: full app bundle with extensions intact\n• No Extensions: strips Apollo’s app extensions to reduce App ID usage on free Apple IDs\n• GLASS: adds the Liquid Glass iOS 26 patch and bundled Liquid Glass icon catalog\n• No Extensions + GLASS: combines both options\n\nThis project is not affiliated with Apollo or Christian Selig.",
+      "localizedDescription": "Apollo-Reborn is the community-maintained Apollo sideload build powered by the Apollo-Reborn tweak.\n\nIt restores custom API support, media fixes, uploads, inline media, translation, saved categories, Home Screen and Lock Screen widgets, Liquid Glass support on iOS 26+, and the rest of the project’s ongoing fixes and enhancements.\n\nThese sources are intended for AltStore Classic, SideStore, and Feather. Apollo-Reborn is not compatible with AltStore PAL.\n\nChoose the source variant that matches how you sideload:\n\n• Standard: full app bundle with Apollo’s working extensions plus Apollo-Reborn widgets\n• No Extensions: strips app extensions, including widgets, to reduce App ID usage on free Apple IDs\n• GLASS: adds the Liquid Glass iOS 26 patch and bundled Liquid Glass icon catalog\n• No Extensions + GLASS: combines both options\n\nThe extension-bearing builds (Standard and GLASS) register about 7 App IDs, one per bundled app extension. A free Apple ID can register 10 App IDs per 7 days, so a clean single install fits, but it is easy to exceed if you install under more than one bundle ID, reinstall within the same week, or sideload other extension-bearing apps. If an install fails with an App ID error, use a No Extensions build (1 App ID) or wait for older App IDs to expire. A paid Apple Developer account has a much higher cap.\n\nThis project is not affiliated with Apollo or Christian Selig.",
       "appPermissions": {
         "entitlements": [
           "com.apple.security.application-groups",
@@ -42,6 +42,15 @@
       "subtitle": "Apollo-Reborn build with Liquid Glass patch",
       "versions": [
         {
+          "version": "3.2.0",
+          "buildVersion": "289",
+          "marketingVersion": "3.2.0",
+          "date": "2026-06-16T05:15:20Z",
+          "localizedDescription": "Liquid Glass build.\n\n> [!NOTE]\r\n> Stay tuned for our next upcoming release, bringing  *even more* new features like signing in without API keys, Picture-in-Picture (PiP), build your own theme, Img Chest image uploads, Apple on-device translations, redesigned subreddit sidebar, community highlights, and more!\r\n\r\nFeatures\r\n- New Apollo Reborn Widgets — nine Home Screen, Lock Screen, and StandBy widgets (Showerthoughts, Jokes, Post, Feed, Photo, Shortcuts, Apollo Actions, Calendar, and Headline) (#406: @jordanearle)\r\n- To configure widgets: copy the one-time setup code from Settings > Apollo Reborn > Copy Widget Setup Code. Then, long-press any widget → Edit Widget → paste into Setup Code.\r\n- Requires iOS 17 or later. Widgets do not work on iOS 26 if sideloading with Sideloadly - please use an alternative instead. The NOEXTENSIONS IPA variant does not include widgets.\r\n\r\n    <img width=\"300\" alt=\"image\" src=\"https://github.com/user-attachments/assets/0786ef40-83d0-4369-9824-73a479cacdb0\" />\r\n    <img width=\"300\" alt=\"image\" src=\"https://github.com/user-attachments/assets/eba1d9a2-ad93-4001-917d-0339b470c316\" />\r\n- Add a Universal OAuth Sign-In toggle in Settings > Apollo Reborn (on by default) to fall back to Apollo's native sign-in if the in-app login causes trouble (#432: @JeffreyCA)\r\n- All IPAs released from now on have dystopia and redreader URL schemes already registered so no need to manually edit Info.plist anymore\r\n- Add a manual sign-in fallback for older iOS versions that can't load Reddit's login page, using an external browser and an Apollo Reborn userscript to paste a sign-in code back into Apollo (#430: @DeltAndy123; sign-in keyboard improvements by @Alstruit)\r\n- Add a Text Post Thumbnails toggle in Settings > Apollo Reborn > Media (on by default) — text posts that embed an image now show a thumbnail with a Text Post badge, and tapping it opens the image in the media viewer instead of the thread (#426: @icpryde)\r\n- Add Hide Mod Subreddits to remove moderated subreddits you can't leave from the Subreddits list — tap Edit, then the blue button to hide a subreddit and the green button to bring it back (#424: @icpryde)\r\n- Show moderator reports as native inline sections in the post and comment action menu (#412: @JeffreyCA)\r\n- Make the banned-profile overlay dismissable (#409: @JeffreyCA)\r\n- Combine cache-clearing options into one Clear Tweak Caches button under a renamed Data section (#409: @JeffreyCA)\r\n\r\nFixes\r\n- Show the author avatar and subreddit icon in Share as Image post exports, so the image matches what you see in the app (#438: @icpryde)\r\n- Fix several link card glitches in feeds — cards whose text overflowed into the post below, Bluesky posts losing their paragraph breaks, compact cards stuck at full height, and blank image areas on links whose thumbnail isn't ready yet (#427: @icpryde)\r\n- Fix gallery GIFs getting stuck on a loading spinner when swiping between items in an album (#404: @JeffreyCA)\r\n- Fix comment and post text showing a literal &#x200B; or an extra blank line at the end (#405: @JeffreyCA)\r\n- Fix comment scrolling freezing in threads that contain a link to removed media, such as a deleted v.redd.it video (#395: @JeffreyCA)\r\n- Fix spurious \"error :(\" overlay appearing over videos that play fine but whose preview image fails to load (#409: @JeffreyCA)\r\n- Fix Live Activities not updating on secret-protected self-hosted notification backends (#411: @nickclyde)\r\n- Fix an installation conflict when upgrading from some older versions (#401: @Alstruit)\r\n- Bundle libFLEX inside the app so rootless jailbreak users can keep the standalone libFLEX package installed without it conflicting with Apollo Reborn (#437: @iCrazeiOS)",
+          "downloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.2.0/Apollo-Reborn-3.2.0-GLASS.ipa",
+          "size": 112414165
+        },
+        {
           "version": "3.1.1",
           "buildVersion": "288",
           "marketingVersion": "3.1.1",
@@ -60,12 +69,12 @@
           "size": 139226959
         }
       ],
-      "version": "3.1.1",
-      "marketingVersion": "3.1.1",
-      "versionDate": "2026-06-06T18:44:32Z",
-      "versionDescription": "Liquid Glass build.\n\n> [!NOTE]\r\n> We're aware of reports that Reddit has started revoking some users' API keys. Please see our new updated instructions (https://github.com/Apollo-Reborn/Apollo-Reborn#dont-have-an-api-key) for workarounds.\r\n>\r\n> AltStore, SideStore, Feather sources can be found at https://apolloreborn.app/#download\r\n- Fix a crash when sharing a post to Messages or Mail from the share sheet — the system compose controller was misidentified as an Apollo composer, leaving GIF-toolbar injection timers that dereferenced the dismissed share UI and crashed (#378: @nickclyde)\r\n- Fix Reddit login on iOS 15 by automatically falling back to Old Reddit, and add an Old Reddit button to the auth view for users who need to switch manually (#377: @DeltAndy123)\r\n- Fix video controls overlay rendering, including the AirPlay button getting clipped or misaligned (#383: @JeffreyCA)\r\n- Fix flair alignment so post and user flairs no longer sit too low or clip their text (#389: @JeffreyCA)\r\n- Fix Color Flairs reverting to grey or the wrong shade after returning to Apollo from the background (#391: @icpryde)",
-      "downloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.1.1/Apollo-Reborn-3.1.1-GLASS.ipa",
-      "size": 139232703
+      "version": "3.2.0",
+      "marketingVersion": "3.2.0",
+      "versionDate": "2026-06-16T05:15:20Z",
+      "versionDescription": "Liquid Glass build.\n\n> [!NOTE]\r\n> Stay tuned for our next upcoming release, bringing  *even more* new features like signing in without API keys, Picture-in-Picture (PiP), build your own theme, Img Chest image uploads, Apple on-device translations, redesigned subreddit sidebar, community highlights, and more!\r\n\r\nFeatures\r\n- New Apollo Reborn Widgets — nine Home Screen, Lock Screen, and StandBy widgets (Showerthoughts, Jokes, Post, Feed, Photo, Shortcuts, Apollo Actions, Calendar, and Headline) (#406: @jordanearle)\r\n- To configure widgets: copy the one-time setup code from Settings > Apollo Reborn > Copy Widget Setup Code. Then, long-press any widget → Edit Widget → paste into Setup Code.\r\n- Requires iOS 17 or later. Widgets do not work on iOS 26 if sideloading with Sideloadly - please use an alternative instead. The NOEXTENSIONS IPA variant does not include widgets.\r\n\r\n    <img width=\"300\" alt=\"image\" src=\"https://github.com/user-attachments/assets/0786ef40-83d0-4369-9824-73a479cacdb0\" />\r\n    <img width=\"300\" alt=\"image\" src=\"https://github.com/user-attachments/assets/eba1d9a2-ad93-4001-917d-0339b470c316\" />\r\n- Add a Universal OAuth Sign-In toggle in Settings > Apollo Reborn (on by default) to fall back to Apollo's native sign-in if the in-app login causes trouble (#432: @JeffreyCA)\r\n- All IPAs released from now on have dystopia and redreader URL schemes already registered so no need to manually edit Info.plist anymore\r\n- Add a manual sign-in fallback for older iOS versions that can't load Reddit's login page, using an external browser and an Apollo Reborn userscript to paste a sign-in code back into Apollo (#430: @DeltAndy123; sign-in keyboard improvements by @Alstruit)\r\n- Add a Text Post Thumbnails toggle in Settings > Apollo Reborn > Media (on by default) — text posts that embed an image now show a thumbnail with a Text Post badge, and tapping it opens the image in the media viewer instead of the thread (#426: @icpryde)\r\n- Add Hide Mod Subreddits to remove moderated subreddits you can't leave from the Subreddits list — tap Edit, then the blue button to hide a subreddit and the green button to bring it back (#424: @icpryde)\r\n- Show moderator reports as native inline sections in the post and comment action menu (#412: @JeffreyCA)\r\n- Make the banned-profile overlay dismissable (#409: @JeffreyCA)\r\n- Combine cache-clearing options into one Clear Tweak Caches button under a renamed Data section (#409: @JeffreyCA)\r\n\r\nFixes\r\n- Show the author avatar and subreddit icon in Share as Image post exports, so the image matches what you see in the app (#438: @icpryde)\r\n- Fix several link card glitches in feeds — cards whose text overflowed into the post below, Bluesky posts losing their paragraph breaks, compact cards stuck at full height, and blank image areas on links whose thumbnail isn't ready yet (#427: @icpryde)\r\n- Fix gallery GIFs getting stuck on a loading spinner when swiping between items in an album (#404: @JeffreyCA)\r\n- Fix comment and post text showing a literal &#x200B; or an extra blank line at the end (#405: @JeffreyCA)\r\n- Fix comment scrolling freezing in threads that contain a link to removed media, such as a deleted v.redd.it video (#395: @JeffreyCA)\r\n- Fix spurious \"error :(\" overlay appearing over videos that play fine but whose preview image fails to load (#409: @JeffreyCA)\r\n- Fix Live Activities not updating on secret-protected self-hosted notification backends (#411: @nickclyde)\r\n- Fix an installation conflict when upgrading from some older versions (#401: @Alstruit)\r\n- Bundle libFLEX inside the app so rootless jailbreak users can keep the standalone libFLEX package installed without it conflicting with Apollo Reborn (#437: @iCrazeiOS)",
+      "downloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.2.0/Apollo-Reborn-3.2.0-GLASS.ipa",
+      "size": 112414165
     }
   ],
   "news": [
@@ -95,6 +104,15 @@
       "tintColor": "#F0542D",
       "imageURL": "https://raw.githubusercontent.com/Apollo-Reborn/Apollo-Reborn/main/img/lg-icons.jpg",
       "url": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/tag/v1.15.11_3.1.1"
+    },
+    {
+      "title": "Apollo v1.15.11 / Apollo-Reborn v3.2.0 (GLASS)",
+      "identifier": "v1.15.11_3.2.0",
+      "caption": "Apollo-Reborn update available",
+      "date": "2026-06-16T05:15:20Z",
+      "tintColor": "#F0542D",
+      "imageURL": "https://raw.githubusercontent.com/Apollo-Reborn/Apollo-Reborn/main/img/lg-icons.jpg",
+      "url": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/tag/v1.15.11_3.2.0"
     }
   ],
   "iconURL": "https://apolloreborn.app/assets/icon.png",
@@ -104,7 +122,7 @@
   "identifier": "app.apolloreborn.glass",
   "name": "Apollo-Reborn - GLASS",
   "subtitle": "Apollo-Reborn source with Liquid Glass patch",
-  "description": "GLASS Apollo-Reborn source for AltStore Classic, SideStore, and Feather. Includes the Liquid Glass iOS 26 patch and bundled Liquid Glass alternate icons. Not compatible with AltStore PAL.",
+  "description": "GLASS Apollo-Reborn source for AltStore Classic, SideStore, and Feather. Includes Apollo-Reborn widgets, the Liquid Glass iOS 26 patch, and bundled Liquid Glass alternate icons. Registers about 7 App IDs, one per bundled extension; on a free Apple ID (limited to 10 App IDs per 7 days) a clean install fits but leaves little headroom, so use the No Extensions + GLASS source if you hit the App ID limit. Not compatible with AltStore PAL.",
   "featuredApps": [
     "com.christianselig.Apollo"
   ]

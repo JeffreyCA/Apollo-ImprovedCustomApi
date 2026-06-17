@@ -1,66 +1,66 @@
 {
-  "updatedAt": "2026-06-06T18:44:32Z",
+  "updatedAt": "2026-06-16T05:15:20Z",
   "release": {
-    "tag": "v1.15.11_3.1.1",
-    "name": "v3.1.1 - Fix bugs/crashes and login issues on older iOS versions",
-    "url": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/tag/v1.15.11_3.1.1",
+    "tag": "v1.15.11_3.2.0",
+    "name": "v3.2.0 - New Apollo Widgets, sign-in fixes for older iOS versions, and more! ",
+    "url": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/tag/v1.15.11_3.2.0",
     "apolloVersion": "1.15.11",
-    "tweakVersion": "3.1.1"
+    "tweakVersion": "3.2.0"
   },
   "variants": {
     "standard": {
       "label": "Standard Apollo-Reborn build",
       "sourceURL": "https://raw.githubusercontent.com/Apollo-Reborn/Apollo-Reborn/main/apps.json",
-      "directDownloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.1.1/Apollo-Reborn-3.1.1.ipa",
-      "assetName": "Apollo-Reborn-3.1.1.ipa",
-      "size": 116110719
+      "directDownloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.2.0/Apollo-Reborn-3.2.0.ipa",
+      "assetName": "Apollo-Reborn-3.2.0.ipa",
+      "size": 89292182
     },
     "noExtensions": {
       "label": "Apollo-Reborn build without app extensions",
       "sourceURL": "https://raw.githubusercontent.com/Apollo-Reborn/Apollo-Reborn/main/apps_noext.json",
-      "directDownloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.1.1/Apollo-Reborn-3.1.1-NOEXTENSIONS.ipa",
-      "assetName": "Apollo-Reborn-3.1.1-NOEXTENSIONS.ipa",
-      "size": 79231250
+      "directDownloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.2.0/Apollo-Reborn-3.2.0-NOEXTENSIONS.ipa",
+      "assetName": "Apollo-Reborn-3.2.0-NOEXTENSIONS.ipa",
+      "size": 79267428
     },
     "glass": {
       "label": "Apollo-Reborn build with Liquid Glass patch",
       "sourceURL": "https://raw.githubusercontent.com/Apollo-Reborn/Apollo-Reborn/main/apps_glass.json",
-      "directDownloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.1.1/Apollo-Reborn-3.1.1-GLASS.ipa",
-      "assetName": "Apollo-Reborn-3.1.1-GLASS.ipa",
-      "size": 139232703
+      "directDownloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.2.0/Apollo-Reborn-3.2.0-GLASS.ipa",
+      "assetName": "Apollo-Reborn-3.2.0-GLASS.ipa",
+      "size": 112414165
     },
     "noExtensionsGlass": {
       "label": "Apollo-Reborn build without extensions and with Liquid Glass patch",
       "sourceURL": "https://raw.githubusercontent.com/Apollo-Reborn/Apollo-Reborn/main/apps_noext_glass.json",
-      "directDownloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.1.1/Apollo-Reborn-3.1.1-GLASS-NOEXTENSIONS.ipa",
-      "assetName": "Apollo-Reborn-3.1.1-GLASS-NOEXTENSIONS.ipa",
-      "size": 102353234
+      "directDownloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.2.0/Apollo-Reborn-3.2.0-GLASS-NOEXTENSIONS.ipa",
+      "assetName": "Apollo-Reborn-3.2.0-GLASS-NOEXTENSIONS.ipa",
+      "size": 102389411
     },
     "glassIcons": {
       "label": "Apollo-Reborn build with the Liquid Glass icon catalog only",
       "sourceURL": "https://raw.githubusercontent.com/Apollo-Reborn/Apollo-Reborn/main/apps_glass_icons.json",
-      "directDownloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.1.1/Apollo-Reborn-3.1.1-GLASSICONS.ipa",
-      "assetName": "Apollo-Reborn-3.1.1-GLASSICONS.ipa",
-      "size": 139232556
+      "directDownloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.2.0/Apollo-Reborn-3.2.0-GLASSICONS.ipa",
+      "assetName": "Apollo-Reborn-3.2.0-GLASSICONS.ipa",
+      "size": 112414018
     },
     "noExtensionsGlassIcons": {
       "label": "Apollo-Reborn build without extensions and with the Liquid Glass icon catalog only",
       "sourceURL": "https://raw.githubusercontent.com/Apollo-Reborn/Apollo-Reborn/main/apps_noext_glass_icons.json",
-      "directDownloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.1.1/Apollo-Reborn-3.1.1-GLASSICONS-NOEXTENSIONS.ipa",
-      "assetName": "Apollo-Reborn-3.1.1-GLASSICONS-NOEXTENSIONS.ipa",
-      "size": 102353087
+      "directDownloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.2.0/Apollo-Reborn-3.2.0-GLASSICONS-NOEXTENSIONS.ipa",
+      "assetName": "Apollo-Reborn-3.2.0-GLASSICONS-NOEXTENSIONS.ipa",
+      "size": 102389264
     }
   },
   "packages": {
     "rootful": {
-      "downloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.1.1/com.apollo.reborn_3.1.1_iphoneos-arm.deb",
-      "assetName": "com.apollo.reborn_3.1.1_iphoneos-arm.deb",
-      "size": 6506650
+      "downloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.2.0/com.apollo.reborn_3.2.0_iphoneos-arm.deb",
+      "assetName": "com.apollo.reborn_3.2.0_iphoneos-arm.deb",
+      "size": 6532328
     },
     "rootless": {
-      "downloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.1.1/com.apollo.reborn_3.1.1_iphoneos-arm64_rootless.deb",
-      "assetName": "com.apollo.reborn_3.1.1_iphoneos-arm64_rootless.deb",
-      "size": 6499412
+      "downloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.2.0/com.apollo.reborn_3.2.0_iphoneos-arm64_rootless.deb",
+      "assetName": "com.apollo.reborn_3.2.0_iphoneos-arm64_rootless.deb",
+      "size": 6540076
     }
   }
 }

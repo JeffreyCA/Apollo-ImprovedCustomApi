@@ -15,6 +15,7 @@ extern BOOL sBlockAnnouncements;
 extern BOOL sShowDeletedComments;
 extern BOOL sTapToRevealDeletedComments;
 extern BOOL sShowRecentlyReadThumbnails;
+extern BOOL sFeedTextPostThumbnails;
 extern NSInteger sPreferredGIFFallbackFormat;
 
 extern NSInteger sReadPostMaxCount;
@@ -117,6 +118,26 @@ extern NSString *sLibreTranslateURL;
 extern NSString *sLibreTranslateAPIKey;
 // Lowercased 2-letter language codes the user has opted out of translating.
 extern NSArray<NSString *> *sTranslationSkipLanguages;
+
+// Web JSON spike (see ApolloWebJSON.m): when enabled, whitelisted subreddit
+// listing reads are re-pointed from oauth.reddit.com to www.reddit.com/...json,
+// authenticated with a WKWebView-harvested session cookie instead of a bearer
+// token. Dormant escape hatch for Reddit API-key revocation waves. Default NO.
+extern BOOL sWebJSONEnabled;
+// Serialized "name=value; name=value" Cookie header harvested from a
+// www.reddit.com web login (must include reddit_session). nil until the user
+// completes the Web Session Login flow. Persisted in the keychain (it's a full
+// account credential) via ApolloWebJSON; migrated out of standardUserDefaults
+// on first launch after the keychain switch.
+extern NSString *sWebSessionCookieHeader;
+// Modhash for the harvested session, read from /api/me.json (data.modhash) at
+// login time — NOT a cookie. Attached as X-Modhash on web write actions
+// (vote/comment/save/...). nil for anonymous or when the probe returned none.
+extern NSString *sWebSessionModhash;
+// Username the harvested cookie session authenticates as (/api/me.json
+// data.name), captured at login. Used by the identity layer to label the
+// cookie account. nil until a successful harvest.
+extern NSString *sWebSessionUsername;
 
 // Tag filter feature (NSFW / Spoiler).
 extern BOOL sTagFilterEnabled;

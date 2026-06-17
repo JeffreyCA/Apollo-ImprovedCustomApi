@@ -6,6 +6,7 @@
 #import "ApolloCommon.h"
 #import "ApolloState.h"
 #import "ApolloUserProfileCache.h"
+#import "ApolloSubredditInfoCache.h"
 #import "ApolloBannedProfile.h"
 
 static NSString *const ApolloUserAvatarsToggleChangedNotification = @"ApolloUserAvatarsToggleChangedNotification";
@@ -49,6 +50,10 @@ static const void *kApolloProfileTabOriginalImageKey = &kApolloProfileTabOrigina
 static const void *kApolloProfileTabOriginalSelectedImageKey = &kApolloProfileTabOriginalSelectedImageKey;
 static const void *kApolloProfileTabAppliedUsernameKey = &kApolloProfileTabAppliedUsernameKey;
 static const void *kApolloProfileTabAppliedImageKey = &kApolloProfileTabAppliedImageKey;
+// Marker stamped on every rendered profile-tab avatar UIImage so the UIImageView
+// monochromatic-treatment clamp can recognise our avatar regardless of which tab
+// view class hosts it.
+static const void *kApolloProfileTabAvatarImageMarkerKey = &kApolloProfileTabAvatarImageMarkerKey;
 
 @interface ApolloProfileHeaderView : UIView
 @property(nonatomic, strong) UIImageView *bannerImageView;
@@ -1721,7 +1726,38 @@ static void ApolloProfileRestoreTabAvatarItem(UITabBarItem *item) {
 
 static UIImage *ApolloProfileTabAvatarImage(UIImage *sourceImage) {
     UIImage *avatar = ApolloCircularAvatarImage(sourceImage, ApolloProfileTabAvatarDiameter);
-    return [avatar imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+    avatar = [avatar imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+    objc_setAssociatedObject(avatar, kApolloProfileTabAvatarImageMarkerKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return avatar;
+}
+
+// YES when this image view is currently displaying one of our rendered profile-tab
+// avatars (as image or highlightedImage). Used to clamp iOS 26's monochromatic tab
+// treatment so the avatar never renders as a grey silhouette.
+static BOOL ApolloProfileImageViewShowsTabAvatar(UIImageView *imageView) {
+    if (![imageView isKindOfClass:[UIImageView class]]) return NO;
+    if ([objc_getAssociatedObject(imageView.image, kApolloProfileTabAvatarImageMarkerKey) boolValue]) return YES;
+    if ([objc_getAssociatedObject(imageView.highlightedImage, kApolloProfileTabAvatarImageMarkerKey) boolValue]) return YES;
+    return NO;
+}
+
+static BOOL ApolloProfileImageIsTabAvatar(UIImage *image) {
+    return [objc_getAssociatedObject(image, kApolloProfileTabAvatarImageMarkerKey) boolValue];
+}
+
+// Force iOS 26's monochromatic tab treatment off on an image view. Called both when
+// the OS toggles the treatment (the setter hooks) and when our avatar image is first
+// assigned (setImage:), so the clamp wins regardless of the order the OS configures
+// the button in.
+static BOOL sApolloClampingTabTreatment = NO;
+static void ApolloProfileForceTabAvatarColour(UIImageView *imageView) {
+    if (sApolloClampingTabTreatment || ![imageView isKindOfClass:[UIImageView class]]) return;
+    sApolloClampingTabTreatment = YES;
+    SEL eSel = NSSelectorFromString(@"_setEnableMonochromaticTreatment:");
+    SEL mSel = NSSelectorFromString(@"_setMonochromaticTreatment:");
+    if ([imageView respondsToSelector:mSel]) ((void (*)(id, SEL, int64_t))objc_msgSend)(imageView, mSel, 0);
+    if ([imageView respondsToSelector:eSel]) ((void (*)(id, SEL, BOOL))objc_msgSend)(imageView, eSel, NO);
+    sApolloClampingTabTreatment = NO;
 }
 
 static UIImage *ApolloProfileTabOriginalRenderingImage(UIImage *image) {
@@ -1771,6 +1807,46 @@ static UITabBarItem *ApolloProfileTabItemFromFloatingItem(id item) {
         if ([linkedItem isKindOfClass:[UITabBarItem class]]) return linkedItem;
     }
     return nil;
+}
+
+// Resolve the UITabBarItem that owns a tab-icon UIImageView by walking up to its
+// host tab-button / item view. Used by the monochromatic clamp so the decision is
+// keyed on the long-lived item (and its apollo_profileTabAvatarIconActive flag),
+// NOT on the avatar UIImage's associated-object marker — which iOS 26 strips when it
+// re-derives the displayed image on trait/selection cycles (issue #407).
+static UITabBarItem *ApolloProfileTabItemForIconImageView(UIImageView *imageView) {
+    if (![imageView isKindOfClass:[UIImageView class]]) return nil;
+    UIView *cur = imageView;
+    for (int depth = 0; cur && depth < 9; depth++, cur = cur.superview) {
+        NSString *cn = NSStringFromClass([cur class]);
+        if ([cn containsString:@"TabButton"]) {
+            // Primary (platter) button: matched against tabBar.items via _tabBarButton.
+            UITabBarItem *item = ApolloProfileTabItemForTabBarButton(cur);
+            if (item) return item;
+            // Secondary buttons (e.g. the selected-content overlay) aren't registered
+            // as the item's _tabBarButton — fall back to the button's own item ivar.
+            Ivar ivar = class_getInstanceVariable([cur class], "_item") ?: class_getInstanceVariable([cur class], "item");
+            if (ivar) {
+                id maybe = object_getIvar(cur, ivar);
+                if ([maybe isKindOfClass:[UITabBarItem class]]) return (UITabBarItem *)maybe;
+            }
+        } else if ([cn containsString:@"FloatingTabBarItemView"]) {
+            if ([cur respondsToSelector:@selector(item)]) {
+                id floatingItem = ((id (*)(id, SEL))objc_msgSend)(cur, @selector(item));
+                UITabBarItem *item = ApolloProfileTabItemFromFloatingItem(floatingItem);
+                if (item) return item;
+            }
+        }
+    }
+    return nil;
+}
+
+// YES when this image view is the profile tab's avatar slot. Marker fast-path first
+// (covers the freshly-stamped image), then the durable structural lookup.
+static BOOL ApolloProfileImageViewIsProfileTabAvatarSlot(UIImageView *imageView) {
+    if (ApolloProfileImageViewShowsTabAvatar(imageView)) return YES;
+    UITabBarItem *item = ApolloProfileTabItemForIconImageView(imageView);
+    return item && [objc_getAssociatedObject(item, ApolloProfileTabAvatarActiveKey()) boolValue];
 }
 
 static void ApolloProfileSyncLegacyTabButtonAvatar(id button) {
@@ -2034,6 +2110,158 @@ static void ApolloProfileOpenRedditProfileEditor(void) {
 
 %end
 
+// Share as Image renders the post into a fresh SaveAsImagePreviewNode instead
+// of snapshotting the live cell, so the exported image loses the inline author
+// avatar (issue #381). Comments inside the preview are real CommentCellNode
+// instances (hooked above) and already get theirs; only the post's info line
+// needs help. The preview's `link` ivar carries the post author, and the
+// shared text-node machinery handles binding/fetch/late re-apply.
+//
+// The preview node's view is never loaded (Apollo rasterizes the node tree),
+// so didLoad never fires — hook layoutSpecThatFits: like
+// ApolloShareAsImageGallery does. It runs on Texture's background layout
+// threads and fires repeatedly; gate to one main-queue application per node.
+static BOOL ApolloAvatarIvarBool(id obj, const char *name) {
+    if (!obj || !name) return NO;
+    Ivar ivar = class_getInstanceVariable(object_getClass(obj), name);
+    if (!ivar) return NO;
+    const uint8_t *base = (const uint8_t *)(__bridge const void *)obj;
+    return base[ivar_getOffset(ivar)] != 0;
+}
+
+// ASSizeRange { CGSize min; CGSize max; } — same -layoutSpecThatFits: ABI
+// name the rest of the repo uses (see ApolloShareAsImageGallery.xm).
+struct CDStruct_90e057aa { CGSize min; CGSize max; };
+
+static char kApolloAvatarSharePreviewAppliedKey;
+
+// Apollo builds the preview's PostInfoNode with showSubredditIcon=NO — the
+// subredditIconNode is never created, so there is nothing to unhide. Mirror
+// the native icon by inserting it into the byline text in front of the
+// subreddit name, the same way the author avatar rides the username.
+static void ApolloAvatarInsertSubredditIconIntoPostInfo(id postInfo, NSString *subreddit, UIImage *iconImage) {
+    if (!postInfo || subreddit.length == 0 || !iconImage) return;
+    NSMutableArray *textNodes = [NSMutableArray array];
+    ApolloCollectTextNodes(postInfo, [NSMutableSet set], textNodes, 0);
+    for (id textNode in textNodes) {
+        NSAttributedString *text = ApolloAttributedTextForNode(textNode);
+        if (text.length == 0) continue;
+        // Case-insensitive: the model carries the lowercased subreddit name
+        // (e.g. "benfica") while the byline renders the display case
+        // ("Benfica").
+        NSRange range = [text.string rangeOfString:subreddit options:NSCaseInsensitiveSearch];
+        if (range.location == NSNotFound) continue;
+
+        // Already iconed (attachment + spacer directly before the name)?
+        if (range.location >= 2 &&
+            [text attribute:kApolloAvatarAttachmentMarkerAttributeName atIndex:range.location - 2 effectiveRange:nil]) {
+            return;
+        }
+
+        // Same font-scaled sizing as the author avatar attachment, so both
+        // icons in the byline come out the same size.
+        NSUInteger attrIndex = MIN(range.location, text.length - 1);
+        UIFont *font = [text attribute:NSFontAttributeName atIndex:attrIndex effectiveRange:nil];
+        if (![font isKindOfClass:[UIFont class]]) font = [UIFont systemFontOfSize:13.0];
+        CGFloat capHeight = font.capHeight > 0.0 ? font.capHeight : (font.pointSize * 0.7);
+        CGFloat lineHeight = font.lineHeight > 0.0 ? font.lineHeight : (font.pointSize * 1.2);
+        CGFloat diameter = MIN(ApolloFeedInlineAvatarDiameter,
+                               MIN(floor(lineHeight * 1.4), MAX(20.0, floor(capHeight * 2.25))));
+
+        NSTextAttachment *attachment = [[NSTextAttachment alloc] init];
+        attachment.image = ApolloCircularAvatarImage(iconImage, diameter);
+        attachment.bounds = CGRectMake(0.0, (capHeight - diameter) / 2.0, diameter, diameter);
+
+        NSDictionary *baseAttributes = [text attributesAtIndex:attrIndex effectiveRange:nil] ?: @{};
+        NSMutableAttributedString *attachmentString = [[NSMutableAttributedString alloc] initWithAttributedString:[NSAttributedString attributedStringWithAttachment:attachment]];
+        [attachmentString addAttribute:kApolloAvatarAttachmentMarkerAttributeName value:@YES range:NSMakeRange(0, attachmentString.length)];
+
+        NSMutableAttributedString *result = [[NSMutableAttributedString alloc] initWithAttributedString:text];
+        [result insertAttributedString:[[NSAttributedString alloc] initWithString:@" " attributes:baseAttributes] atIndex:range.location];
+        [result insertAttributedString:attachmentString atIndex:range.location];
+        ApolloSetAttributedTextForNode(textNode, result);
+        ApolloNodeSetNeedsLayout(textNode);
+        ApolloLog(@"[UserAvatars] Share preview subreddit icon applied r/%@", subreddit);
+        return;
+    }
+}
+
+// Apollo's own "show subreddit icons on posts" setting — the share preview
+// should mirror the live byline, which follows this, not the tweak's user
+// avatar setting. Missing key = Apollo's default (icons on).
+static BOOL ApolloNativeShowSubredditIconsForPosts(void) {
+    id value = [[NSUserDefaults standardUserDefaults] objectForKey:@"ShowSubredditIconsForPosts"];
+    return value ? [value boolValue] : YES;
+}
+
+static void ApolloAvatarApplySubredditIconToSharePreview(id postInfo, NSString *subreddit) {
+    if (!postInfo || subreddit.length == 0) return;
+    __weak id weakPostInfo = postInfo;
+    void (^applyInfo)(ApolloSubredditInfo *) = ^(ApolloSubredditInfo *info) {
+        if (!info.iconURL) {
+            ApolloLog(@"[UserAvatars] Share preview subreddit icon unavailable r/%@ (no iconURL)", subreddit);
+            return;
+        }
+        [[ApolloUserProfileCache sharedCache] requestImageForURL:info.iconURL completion:^(UIImage *image) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                ApolloAvatarInsertSubredditIconIntoPostInfo(weakPostInfo, subreddit, image);
+            });
+        }];
+    };
+    ApolloSubredditInfoCache *cache = [ApolloSubredditInfoCache sharedCache];
+    ApolloSubredditInfo *cached = [cache cachedInfoForSubreddit:subreddit];
+    if (cached) {
+        applyInfo(cached);
+    } else {
+        [cache requestInfoForSubreddit:subreddit completion:^(ApolloSubredditInfo *info) {
+            applyInfo(info);
+        }];
+    }
+}
+
+%hook _TtC6Apollo22SaveAsImagePreviewNode
+
+- (id)layoutSpecThatFits:(struct CDStruct_90e057aa)constrainedSize {
+    if ((sShowUserAvatars || ApolloNativeShowSubredditIconsForPosts()) &&
+        ![objc_getAssociatedObject(self, &kApolloAvatarSharePreviewAppliedKey) boolValue]) {
+        // Synchronous flip: layout passes come in bursts on multiple threads.
+        objc_setAssociatedObject(self, &kApolloAvatarSharePreviewAppliedKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        __weak id weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id node = weakSelf;
+            if (!node) return;
+            BOOL includePostDetails = ApolloAvatarIvarBool(node, "includePostDetails");
+            BOOL hideUsernames = ApolloAvatarIvarBool(node, "hideUsernames");
+            BOOL hideSubreddit = ApolloAvatarIvarBool(node, "hideSubreddit");
+            NSString *username = ApolloUsernameFromCell(node, @"link");
+            ApolloLog(@"[UserAvatars] Share preview layout details=%d hideUsernames=%d hideSubreddit=%d username=%@ node=%p",
+                      includePostDetails, hideUsernames, hideSubreddit, username, node);
+            // No author line without post details; no avatar when usernames
+            // are hidden — the rendered text won't contain the author.
+            if (!includePostDetails) return;
+            // Each icon follows its own setting, mirroring the live byline:
+            // author avatar = the tweak's user avatars option, subreddit
+            // icon = Apollo's native subreddit icons option.
+            if (sShowUserAvatars && !hideUsernames) {
+                ApolloApplyAvatarToCellWithDiameter(node, username, ApolloFeedInlineAvatarDiameter);
+            }
+            if (ApolloNativeShowSubredditIconsForPosts() && !hideSubreddit) {
+                id link = ApolloObjectIvarValue(node, @"link");
+                NSString *subreddit = nil;
+                @try {
+                    if ([link respondsToSelector:@selector(subreddit)]) subreddit = [link performSelector:@selector(subreddit)];
+                } @catch (__unused NSException *e) {}
+                if ([subreddit isKindOfClass:[NSString class]]) {
+                    ApolloAvatarApplySubredditIconToSharePreview(ApolloObjectIvarValue(node, @"postInfoNode"), subreddit);
+                }
+            }
+        });
+    }
+    return %orig;
+}
+
+%end
+
 %hook _TtC6Apollo21ProfileViewController
 
 - (void)viewDidLoad {
@@ -2169,6 +2397,63 @@ static void ApolloProfileOpenRedditProfileEditor(void) {
 - (void)setCurrentImage {
     %orig;
     ApolloProfileSyncLegacyTabButtonAvatar(((UIView *)self).superview);
+}
+
+%end
+
+// iOS 26's tab bar applies a "monochromatic treatment" to the unselected tab icons
+// (grey silhouette). On the floating/platter tab bar the profile avatar is hosted by
+// plain UIImageViews under _UITabButton, which none of the tab-button-specific hooks
+// above reach — so the avatar would render as a grey blob whenever the OS's coloured
+// "selected content" overlay stops covering it (e.g. after returning from a DM chat
+// room — issue #407). Detect the profile slot structurally (image view -> _UITabButton
+// -> UITabBarItem -> apollo_profileTabAvatarIconActive), which survives the image
+// re-derivation that strips our UIImage marker, then clamp the treatment off and
+// restore our coloured avatar if iOS baked the grey into the derived pixels.
+%hook UIImageView
+
+- (void)setImage:(UIImage *)image {
+    %orig(image);
+    if (sApolloClampingTabTreatment || sApolloProfileTabSyncingView) return;   // ignore our own writes
+    if (!ApolloProfileImageViewIsProfileTabAvatarSlot(self)) return;
+    // iOS 26 sometimes hands the slot a derived copy of our avatar with the
+    // monochrome treatment baked into the pixels (marker stripped). Clamping the
+    // treatment flag can't recolour baked-in grey, so restore our stored colour
+    // avatar whenever the installed image isn't ours.
+    if (!ApolloProfileImageIsTabAvatar(self.image)) {
+        UITabBarItem *item = ApolloProfileTabItemForIconImageView(self);
+        UIImage *avatar = ApolloProfileTabAppliedAvatarForItem(item);
+        if (avatar) {
+            sApolloProfileTabSyncingView = YES;
+            self.image = avatar;
+            self.highlightedImage = avatar;
+            sApolloProfileTabSyncingView = NO;
+        }
+    }
+    ApolloProfileForceTabAvatarColour(self);
+}
+
+- (void)setHighlightedImage:(UIImage *)image {
+    %orig(image);
+    if (!sApolloClampingTabTreatment && ApolloProfileImageViewIsProfileTabAvatarSlot(self)) {
+        ApolloProfileForceTabAvatarColour(self);
+    }
+}
+
+- (void)_setEnableMonochromaticTreatment:(BOOL)enable {
+    if (enable && !sApolloClampingTabTreatment && ApolloProfileImageViewIsProfileTabAvatarSlot(self)) {
+        %orig(NO);
+        return;
+    }
+    %orig(enable);
+}
+
+- (void)_setMonochromaticTreatment:(int64_t)treatment {
+    if (treatment != 0 && !sApolloClampingTabTreatment && ApolloProfileImageViewIsProfileTabAvatarSlot(self)) {
+        %orig(0);
+        return;
+    }
+    %orig(treatment);
 }
 
 %end

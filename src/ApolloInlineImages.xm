@@ -1294,7 +1294,6 @@ static CGFloat ApolloAspectRatioFromURL(NSURL *url) {
 @end
 
 static UIViewController *ApolloTopVCFromView(UIView *v);
-static BOOL ApolloPresentImageChestItems(NSArray<NSDictionary *> *items, UIView *sourceView, NSInteger initialIndex);
 static void ApolloOpenImageChestURLNormally(NSURL *url);
 static BOOL ApolloPresentOrResolveImageChestAlbumURL(NSURL *url, UIView *sourceView, void (^fallback)(void));
 
@@ -1385,7 +1384,11 @@ static UIViewController *ApolloTopVCFromView(UIView *v) {
     return vc;
 }
 
-static BOOL ApolloPresentImageChestItems(NSArray<NSDictionary *> *items, UIView *sourceView, NSInteger initialIndex) {
+// Non-static: also used by ApolloFeedTextPostThumbnails to open a text post's
+// embedded images fullscreen (declared in ApolloCommon.h). Despite the name,
+// the viewer is a generic zoomable image-album viewer; items are dictionaries
+// with an @"url" NSURL.
+BOOL ApolloPresentImageChestItems(NSArray<NSDictionary *> *items, UIView *sourceView, NSInteger initialIndex) {
     if (items.count == 0) return NO;
     UIViewController *top = ApolloTopVCFromView(sourceView);
     if (!top) return NO;

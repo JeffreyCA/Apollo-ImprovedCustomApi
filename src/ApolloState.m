@@ -15,6 +15,7 @@ BOOL sBlockAnnouncements = NO;
 BOOL sShowDeletedComments = NO;
 BOOL sTapToRevealDeletedComments = NO;
 BOOL sShowRecentlyReadThumbnails = YES;
+BOOL sFeedTextPostThumbnails = YES;
 NSInteger sPreferredGIFFallbackFormat = 1; // 0=GIF, 1=MP4
 
 NSInteger sReadPostMaxCount = 0;
@@ -47,6 +48,11 @@ NSString *sTranslationProvider = nil;
 NSString *sLibreTranslateURL = nil;
 NSString *sLibreTranslateAPIKey = nil;
 NSArray<NSString *> *sTranslationSkipLanguages = nil;
+
+BOOL sWebJSONEnabled = NO;
+NSString *sWebSessionCookieHeader = nil;
+NSString *sWebSessionModhash = nil;
+NSString *sWebSessionUsername = nil;
 
 BOOL sTagFilterEnabled = NO;
 NSString *sTagFilterMode = @"blur";

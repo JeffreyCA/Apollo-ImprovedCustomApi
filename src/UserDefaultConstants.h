@@ -8,6 +8,7 @@ static NSString *const UDKeyImgurClientId = @"ImgurApiClientId";
 static NSString *const UDKeyGiphyAPIKey = @"GiphyAPIKey";
 static NSString *const UDKeyImageChestAPIToken = @"ImageChestAPIToken";
 static NSString *const UDKeyRedirectURI = @"RedirectURI";
+static NSString *const UDKeyUseCustomOAuthSignIn = @"UseCustomOAuthSignIn";
 static NSString *const UDKeyUserAgent = @"UserAgent";
 static NSString *const UDKeyBlockAnnouncements = @"DisableApollonouncements";
 static NSString *const UDKeyEnableFLEX = @"EnableFlexDebugging";
@@ -19,6 +20,10 @@ static NSString *const UDKeyTrendingSubredditsLimit = @"TrendingSubredditsLimit"
 // Master toggle (short-term fix) for all subreddit list polish/enhancements. Default
 // YES. Modern Subreddit Dividers depends on it — that row hides when this is off.
 static NSString *const UDKeySubredditListEnhancements = @"SubredditListEnhancements";
+// Subreddits the user moderates but chose to hide from the Subreddits list
+// (Reddit offers no way to leave or delete some dead subreddits). Array of
+// display names, compared case-insensitively.
+static NSString *const UDKeyHiddenModeratorSubreddits = @"HiddenModeratorSubreddits";
 static NSString *const UDKeyModernSubredditDividers = @"ModernSubredditDividers";
 static NSString *const ApolloModernSubredditDividersChangedNotification = @"ApolloModernSubredditDividersChangedNotification";
 // Color post (link) and user/author flairs with Reddit's assigned colors. Default NO.
@@ -78,6 +83,21 @@ static NSString *const UDKeyTagFilterSpoiler = @"TagFilterSpoiler";        // gl
 // Missing keys fall back to global settings.
 static NSString *const UDKeyTagFilterSubredditOverrides = @"TagFilterSubredditOverrides";
 
+// Web JSON spike (see ApolloWebJSON.m). Master switch for re-pointing
+// whitelisted listing reads at cookie-authenticated www.reddit.com JSON.
+static NSString *const UDKeyWebJSONEnabled = @"WebJSONEnabled";
+// Legacy NSUserDefaults location of the harvested "name=value; ..." Cookie
+// header. The cookie is now stored in the keychain (ApolloWebJSON.m); this key
+// is retained only so ApolloWebJSONLoadPersistedCredentials can migrate an older
+// build's value into the keychain and then delete it.
+static NSString *const UDKeyWebSessionCookieHeader = @"WebSessionCookieHeader";
+// Set when an account is synthesized from a *mid-session* web login (the login VC
+// path), so AccountManager — which only loads accounts at launch — hasn't picked
+// it up yet and the account tab is blank until a relaunch. Drives the
+// "restart to activate" indicator on the Web Session Login settings row, and is
+// cleared in %ctor on the next launch (where the fresh account load resolves it).
+static NSString *const UDKeyWebJSONPendingRestart = @"WebJSONPendingRestart";
+
 // Self-hosted notification backend (forked apollo-backend). Empty disables —
 // the legacy hosts remain in the blocklist and requests are silently dropped.
 static NSString *const UDKeyNotificationBackendURL = @"NotificationBackendURL";
@@ -85,6 +105,9 @@ static NSString *const UDKeyNotificationBackendURL = @"NotificationBackendURL";
 // When set, sent as X-Registration-Token on the three POST registration
 // endpoints (/v1/device, /v1/device/{apns}/account[s]).
 static NSString *const UDKeyNotificationBackendRegistrationToken = @"NotificationBackendRegistrationToken";
+
+// Feed thumbnails for text posts with embedded images (off = native behavior).
+static NSString *const UDKeyFeedTextPostThumbnails = @"FeedTextPostThumbnails";
 
 // Rich link preview cards: 0 = Off, 1 = Compact, 2 = Full.
 static NSString *const UDKeyLinkPreviewBodyMode = @"LinkPreviewBodyMode";

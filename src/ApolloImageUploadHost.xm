@@ -13,6 +13,7 @@
 #import "ApolloMarkdownToolbarGif.h"
 #import "ApolloMediaMetadata.h"
 #import "ApolloState.h"
+#import "ApolloWebJSON.h"
 #import "Defaults.h"
 #import "fishhook.h"
 
@@ -270,6 +271,11 @@ void ApolloRedditCaptureBearerTokenFromAuthorization(NSString *authorization, NS
 
     NSString *token = [[authorization substringFromIndex:NSMaxRange(bearerRange)] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (token.length == 0 || [token isEqualToString:sLatestRedditBearerToken]) return;
+    // The Web JSON identity layer installs a synthetic bearer so Apollo issues
+    // requests without real keys; it's a placeholder, not a usable oauth token,
+    // so don't let it overwrite a real captured token (the chokepoint replaces
+    // it with the cookie before it reaches Reddit anyway).
+    if ([token isEqualToString:ApolloWebJSONSyntheticBearerToken]) return;
 
     sLatestRedditBearerToken = [token copy];
     ApolloLog(@"[RedditUpload] Captured Reddit bearer token from %@", source ?: @"unknown source");
@@ -932,13 +938,25 @@ static NSData *ApolloRedditRichTextJSONDataForText(NSString *text);
 
 // MARK: - Request identification
 
+// Reddit write requests normally go to oauth.reddit.com, but in Web JSON mode the
+// chokepoint (ApolloWebJSONRewriteRequest) re-points them at www.reddit.com with
+// cookie+modhash auth. So the request-identification below must accept BOTH hosts,
+// or the comment/submit/upload response post-processing (rich-text injection,
+// asset tracking, permalink resolution) silently no-ops in Web JSON mode. The
+// www.reddit.com form only ever occurs under Web JSON, so this is additive — it
+// doesn't change behavior for the API-key path.
+static BOOL ApolloIsRedditWriteHost(NSURL *url) {
+    NSString *host = url.host;
+    return [host isEqualToString:@"oauth.reddit.com"] || [host isEqualToString:@"www.reddit.com"];
+}
+
 // Matches /api/comment (new comments) and /api/editusertext (edits to existing
 // comments and self-text post bodies). Both accept the same form fields and return
 // the same envelope.
 static BOOL ApolloIsRedditCommentRequest(NSURLRequest *request) {
     if (![request isKindOfClass:[NSURLRequest class]]) return NO;
     NSURL *url = request.URL;
-    if (![url.host isEqualToString:@"oauth.reddit.com"]) return NO;
+    if (!ApolloIsRedditWriteHost(url)) return NO;
     NSString *path = url.path;
     return [path isEqualToString:@"/api/comment"]
         || [path isEqualToString:@"/api/editusertext"]
@@ -948,7 +966,7 @@ static BOOL ApolloIsRedditCommentRequest(NSURLRequest *request) {
 static BOOL ApolloIsRedditSubmitRequest(NSURLRequest *request) {
     if (![request isKindOfClass:[NSURLRequest class]]) return NO;
     NSURL *url = request.URL;
-    return [url.host isEqualToString:@"oauth.reddit.com"] &&
+    return ApolloIsRedditWriteHost(url) &&
         ([url.path isEqualToString:@"/api/submit"] ||
          [url.path isEqualToString:@"/api/submit_gallery_post"] ||
          [url.path isEqualToString:@"/api/submit_gallery_post.json"]);
@@ -957,13 +975,13 @@ static BOOL ApolloIsRedditSubmitRequest(NSURLRequest *request) {
 static BOOL ApolloIsRedditLegacySubmitRequest(NSURLRequest *request) {
     if (![request isKindOfClass:[NSURLRequest class]]) return NO;
     NSURL *url = request.URL;
-    return [url.host isEqualToString:@"oauth.reddit.com"] && [url.path isEqualToString:@"/api/submit"];
+    return ApolloIsRedditWriteHost(url) && [url.path isEqualToString:@"/api/submit"];
 }
 
 static BOOL ApolloIsRedditGallerySubmitRequest(NSURLRequest *request) {
     if (![request isKindOfClass:[NSURLRequest class]]) return NO;
     NSURL *url = request.URL;
-    return [url.host isEqualToString:@"oauth.reddit.com"] &&
+    return ApolloIsRedditWriteHost(url) &&
         ([url.path isEqualToString:@"/api/submit_gallery_post"] || [url.path isEqualToString:@"/api/submit_gallery_post.json"]);
 }
 
@@ -2626,6 +2644,49 @@ static void ApolloLogUnhandledImgurUploadRequestOnce(NSURLRequest *request, NSSt
     ApolloLog(@"[RedditUpload] Observed unsupported Imgur upload request source=%@ path=%@ contentType=%@", source ?: @"(unknown)", request.URL.path ?: @"(missing)", contentType);
 }
 
+// Keyless Web JSON mode + Imgur upload provider + no Imgur API key configured =
+// the Imgur upload will fail with a generic error. Surface a clear, actionable
+// message once per launch instead, telling the user how to make uploads work.
+// Shown once when an image upload is attempted in a keyless Web JSON session with
+// no Imgur key. Native Reddit upload can't work here — its media lease
+// (www.reddit.com/api/media/asset.json) requires a real OAuth bearer and 403s for
+// cookie auth — so Imgur is the only path, and it needs an Imgur API key. The
+// message must NOT suggest switching the provider to Reddit (that doesn't upload
+// keylessly), which the earlier copy incorrectly advised.
+static void ApolloWarnKeylessUploadUnavailableOnce(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIViewController *top = nil;
+            for (UIWindow *window in [UIApplication.sharedApplication.windows reverseObjectEnumerator]) {
+                if (window.hidden || window.alpha < 0.01) continue;
+                top = ApolloRedditVisibleControllerFromController(window.rootViewController);
+                if (top) break;
+            }
+            if (!top) return;
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:@"Image Upload Needs an Imgur Key"
+                                 message:@"You're signed in without API keys. Reddit's image-upload API requires an API key, so it isn't available in Web JSON Mode — Apollo uploads images via Imgur instead, which needs an Imgur API key. Add one under Settings → Apollo to upload images."
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [top presentViewController:alert animated:YES completion:nil];
+        });
+    });
+}
+
+// The bearer used for the Reddit media lease. Prefer the compose's posting-account
+// token, then the last captured token. In the keyless Web JSON escape hatch there
+// is no real bearer, so return the synthetic placeholder — the chokepoint rewrite
+// (ApolloWebJSONRewriteRequest) strips it and authenticates the lease with the
+// session cookie + modhash instead. Returns nil when no upload auth is available.
+static NSString *ApolloRedditUploadBearerToken(void) {
+    NSString *composeToken = ApolloMediaComposerActivePostingBearerToken();
+    if (composeToken.length > 0) return composeToken;
+    if (sLatestRedditBearerToken.length > 0) return [sLatestRedditBearerToken copy];
+    if (ApolloWebJSONHasUsableSession()) return ApolloWebJSONSyntheticBearerToken;
+    return nil;
+}
+
 static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *mediaFileURL, NSString *filename, NSString *mimeType,
                                                   NSData *videoPosterData, NSDictionary *videoContext, NSURL *originalURL, ApolloRedditNativeUploadAttempt *attempt,
                                                   void (^completionHandler)(NSData *, NSURLResponse *, NSError *)) {
@@ -2637,9 +2698,11 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
     // different account, which makes Reddit reject the submit with
     // "All media assets must be owned by the submitter of this post".
     NSString *composeToken = ApolloMediaComposerActivePostingBearerToken();
-    NSString *token = composeToken.length > 0 ? composeToken : [sLatestRedditBearerToken copy];
+    NSString *token = ApolloRedditUploadBearerToken();
     if (composeToken.length > 0 && ![composeToken isEqualToString:sLatestRedditBearerToken]) {
         ApolloLog(@"[RedditUpload] Using temporary posting account token for upload (differs from last captured Reddit token)");
+    } else if ([token isEqualToString:ApolloWebJSONSyntheticBearerToken]) {
+        ApolloLog(@"[RedditUpload] No real bearer token; routing media lease through the Web JSON cookie session");
     }
     NSString *userAgent = sUserAgent.length > 0 ? sUserAgent : defaultUserAgent;
     if (ApolloRedditNativeUploadAttemptIsCancelled(attempt, @"before-media-upload")) return;
@@ -2754,6 +2817,16 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
 - (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromData:(NSData *)bodyData completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
     ApolloRedditCaptureBearerTokenFromRequest(request, @"NSURLSession uploadTaskWithRequest:fromData:");
 
+    // Keyless Web JSON session: there's no real OAuth bearer (only the synthetic
+    // placeholder), and Reddit's media lease (asset.json) 403s for cookie auth, so
+    // native Reddit upload can't work regardless of the provider setting. Fall back
+    // to Apollo's default Imgur path instead of attempting the doomed lease; if no
+    // Imgur key is configured either, warn once with accurate guidance.
+    if (ApolloIsImgurImageUploadRequest(request)
+        && [ApolloRedditUploadBearerToken() isEqualToString:ApolloWebJSONSyntheticBearerToken]) {
+        if (sImgurClientId.length == 0) ApolloWarnKeylessUploadUnavailableOnce();
+        return %orig;
+    }
     if (sImageUploadProvider != ImageUploadProviderReddit || !completionHandler || !ApolloIsImgurImageUploadRequest(request)) {
         if (sImageUploadProvider == ImageUploadProviderReddit && completionHandler) ApolloLogUnhandledImgurUploadRequestOnce(request, @"fromData");
         return %orig;
@@ -2761,7 +2834,10 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
     // The compose's temporaryPostingAccount can supply a token even if no
     // global token has been captured yet (e.g. multi-account user opens the
     // composer and chooses an account before any other Reddit API call runs).
-    if (sLatestRedditBearerToken.length == 0 && ApolloMediaComposerActivePostingBearerToken().length == 0) {
+    // In keyless Web JSON mode there's no real bearer but the cookie session can
+    // carry the lease, so ApolloRedditUploadBearerToken() returns the synthetic
+    // placeholder and we proceed instead of falling back to a (keyless) Imgur upload.
+    if (ApolloRedditUploadBearerToken().length == 0) {
         ApolloLog(@"[RedditUpload] No captured Reddit bearer token yet; using Imgur upload");
         return %orig;
     }
@@ -2830,11 +2906,19 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
 - (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromFile:(NSURL *)fileURL completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
     ApolloRedditCaptureBearerTokenFromRequest(request, @"NSURLSession uploadTaskWithRequest:fromFile:");
 
+    // See the fromData: hook — keyless Web JSON sessions can't do native Reddit
+    // upload (asset.json 403s for cookie auth), so fall back to Apollo's Imgur path
+    // and warn once when no Imgur key is set, rather than attempting the lease.
+    if (ApolloIsImgurImageUploadRequest(request)
+        && [ApolloRedditUploadBearerToken() isEqualToString:ApolloWebJSONSyntheticBearerToken]) {
+        if (sImgurClientId.length == 0) ApolloWarnKeylessUploadUnavailableOnce();
+        return %orig;
+    }
     if (sImageUploadProvider != ImageUploadProviderReddit || !completionHandler || !ApolloIsImgurImageUploadRequest(request)) {
         if (sImageUploadProvider == ImageUploadProviderReddit && completionHandler) ApolloLogUnhandledImgurUploadRequestOnce(request, @"fromFile");
         return %orig;
     }
-    if (sLatestRedditBearerToken.length == 0 && ApolloMediaComposerActivePostingBearerToken().length == 0) {
+    if (ApolloRedditUploadBearerToken().length == 0) {
         ApolloLog(@"[RedditUpload] No captured Reddit bearer token yet; using Imgur upload");
         return %orig;
     }

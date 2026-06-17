@@ -140,6 +140,8 @@ typedef struct {
 
 static void ApolloLPLogOncePerHost(NSString *host, NSString *event);
 static void ApolloLPTriggerRelayoutForHost(ASDisplayNode *node, NSString *host);
+static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, NSString *host);
+static ASDisplayNode *ApolloLPFindOwningCellNode(ASDisplayNode *node);
 static BOOL ApolloLPIsRedditUserProfileURL(NSURL *url);
 static NSString *ApolloLPRedditUsernameFromProfileURL(NSURL *url);
 static BOOL ApolloLPIsRedditSubredditURL(NSURL *url);
@@ -902,6 +904,47 @@ static void ApolloLPSetAvatarNodeVisible(ASNetworkImageNode *avatarNode, BOOL vi
     avatarNode.hidden = !visible;
 }
 
+// V21: dead preview images. Clip hosts (streamin, streamff, ...) publish an
+// og:image URL before the thumbnail file actually exists — fresh clips 404
+// for the first few minutes. Remember definitive 4xx failures per URL so the
+// card can render compact instead of a hero with a big blank image area; the
+// mark expires so the card upgrades itself once the thumbnail is generated.
+static const NSTimeInterval kApolloLPDeadImageRetryCooldown = 300.0;
+
+// Declared here (used by both the dead-image path and the V20 shrink path):
+// host string of a row reload that failed while the node was detached, to be
+// re-fired from didEnterVisibleState.
+static char kApolloLPPendingRowReloadHostKey;
+
+static NSMutableDictionary<NSString *, NSDate *> *ApolloLPDeadImageURLs(void) {
+    static NSMutableDictionary *map;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ map = [NSMutableDictionary dictionary]; });
+    return map;
+}
+
+static void ApolloLPMarkImageURLDead(NSURL *url) {
+    NSString *key = url.absoluteString;
+    if (key.length == 0) return;
+    @synchronized (ApolloLPDeadImageURLs()) {
+        ApolloLPDeadImageURLs()[key] = [NSDate date];
+    }
+}
+
+static BOOL ApolloLPImageURLIsDead(NSURL *url) {
+    NSString *key = url.absoluteString;
+    if (key.length == 0) return NO;
+    @synchronized (ApolloLPDeadImageURLs()) {
+        NSDate *diedAt = ApolloLPDeadImageURLs()[key];
+        if (!diedAt) return NO;
+        if ([[NSDate date] timeIntervalSinceDate:diedAt] > kApolloLPDeadImageRetryCooldown) {
+            [ApolloLPDeadImageURLs() removeObjectForKey:key];
+            return NO;
+        }
+        return YES;
+    }
+}
+
 static void ApolloLPApplyFallbackImage(ASNetworkImageNode *imageNode, NSURL *imageURL, UIImage *image, NSString *host) {
     if (!imageNode || !image || image.size.width <= 0.0 || image.size.height <= 0.0) return;
     NSURL *currentURL = objc_getAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackURLKey);
@@ -923,6 +966,10 @@ static void ApolloLPApplyFallbackImage(ASNetworkImageNode *imageNode, NSURL *ima
 
 static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL *imageURL, NSString *host) {
     if (!imageNode || !ApolloLPURLIsHTTP(imageURL)) return;
+    // Dead-marked URLs don't get re-fetched during the cooldown — refetching
+    // on every re-render loops: 404 -> reflow -> row reload -> re-render ->
+    // fetch -> 404 ... (one reload per second, visible as flickering cells).
+    if (ApolloLPImageURLIsDead(imageURL)) return;
     NSString *key = imageURL.absoluteString;
     if (key.length == 0) return;
 
@@ -943,6 +990,7 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
     NSString *hostCopy = [host copy];
     [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         UIImage *image = data.length > 0 ? [UIImage imageWithData:data scale:UIScreen.mainScreen.scale] : nil;
+        BOOL definitivelyDead = NO;
         if (image) {
             NSUInteger cost = (NSUInteger)(image.size.width * image.size.height * image.scale * image.scale * 4.0);
             [ApolloLPFallbackImageCache() setObject:image forKey:key cost:cost];
@@ -954,6 +1002,11 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
                       (unsigned long)data.length,
                       error.localizedDescription ?: @"nil",
                       imageURL.absoluteString);
+            // 4xx = the file genuinely isn't there (clip hosts publish og:image
+            // before generating the thumbnail). Transient network errors and
+            // 5xx don't dead-mark, so flaky connectivity can't compact-ify
+            // every card.
+            definitivelyDead = httpResponse.statusCode >= 400 && httpResponse.statusCode < 500;
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -961,12 +1014,37 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
             if (!strongImageNode) return;
             objc_setAssociatedObject(strongImageNode, &kApolloLinkPreviewImageFallbackInFlightKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             ApolloLPApplyFallbackImage(strongImageNode, imageURL, image, hostCopy);
+
+            if (definitivelyDead && !ApolloLPImageURLIsDead(imageURL)) {
+                // V21: re-render the host card as compact instead of leaving a
+                // dead hero image area, and fix the row height (or defer the
+                // reload to visibility if the node is detached, as in V20).
+                // The reflow fires only on the FIRST death of a URL — the
+                // dead-mark suppresses further fetches, so repeats mean a
+                // race, and reflowing again would loop the row reload.
+                ApolloLPMarkImageURLDead(imageURL);
+                ASDisplayNode *hostNode = (ASDisplayNode *)strongImageNode;
+                for (int hops = 0; hostNode && hops < 24; hops++) {
+                    if ([NSStringFromClass([hostNode class]) containsString:@"LinkButtonNode"]) break;
+                    hostNode = hostNode.supernode;
+                }
+                if (hostNode) {
+                    ApolloLog(@"[LinkPreviews] V21-dead-image-compact-reflow host=%@", hostCopy ?: ApolloLPHost(imageURL));
+                    ApolloLPTriggerRelayoutForHost(hostNode, hostCopy);
+                    ASDisplayNode *cellNode = ApolloLPFindOwningCellNode(hostNode);
+                    if (!ApolloLPInvokeRowReloadIfPossible(cellNode ?: hostNode, hostCopy)) {
+                        objc_setAssociatedObject(hostNode, &kApolloLPPendingRowReloadHostKey,
+                                                 hostCopy ?: @"?", OBJC_ASSOCIATION_COPY_NONATOMIC);
+                    }
+                }
+            }
         });
     }] resume];
 }
 
 static void ApolloLPScheduleImageFallbackIfNeeded(ASNetworkImageNode *imageNode, NSURL *imageURL, NSString *host) {
     if (!imageNode || !ApolloLPURLIsHTTP(imageURL)) return;
+    if (ApolloLPImageURLIsDead(imageURL)) return;
     objc_setAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackURLKey, imageURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     NSString *cacheKey = imageURL.absoluteString;
@@ -1197,11 +1275,37 @@ static BOOL ApolloLPSetTextNodeAttributedTextIfChanged(ASTextNode *textNode, NSA
 
 static NSString *ApolloLPCleanDisplayText(NSString *text) {
     if (![text isKindOfClass:[NSString class]] || text.length == 0) return text;
-    NSString *clean = [text stringByReplacingOccurrencesOfString:@"&nbsp;" withString:@" "];
+    // Decode HTML entities FIRST (named + numeric, incl. « » ° €) — the fetcher
+    // decodes freshly-stored metadata, but cached and *translated* card text reach
+    // this render choke point raw and would otherwise show literal "&laquo;".
+    // Decoding before tag-stripping also lets an encoded "&lt;b&gt;" collapse out.
+    NSString *clean = ApolloLinkPreviewDecodeEntities(text) ?: text;
     NSRegularExpression *tagRegex = [NSRegularExpression regularExpressionWithPattern:@"<[^>]+>" options:0 error:nil];
     clean = [tagRegex stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@" "];
     NSRegularExpression *whitespace = [NSRegularExpression regularExpressionWithPattern:@"\\s+" options:0 error:nil];
     clean = [whitespace stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@" "];
+    clean = [clean stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return clean.length > 0 ? clean : text;
+}
+
+// Like ApolloLPCleanDisplayText, but preserves the text's line structure —
+// used for the Bluesky post body, where paragraph breaks are part of the
+// post (the fetcher already normalized them). Collapsing \s+ would squish
+// a multi-paragraph post into one run-on blob.
+static NSString *ApolloLPCleanMultilineDisplayText(NSString *text) {
+    if (![text isKindOfClass:[NSString class]] || text.length == 0) return text;
+    // Decode entities first (see ApolloLPCleanDisplayText) — keeps numeric/named
+    // entities out of cached/translated multiline bodies (e.g. Bluesky posts).
+    NSString *clean = ApolloLinkPreviewDecodeEntities(text) ?: text;
+    NSRegularExpression *tagRegex = [NSRegularExpression regularExpressionWithPattern:@"<[^>]+>" options:0 error:nil];
+    clean = [tagRegex stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@" "];
+    // \x0B (vertical tab), NOT \v: in ICU regex \v is a class shorthand for
+    // ALL vertical whitespace including \n — it silently ate the very line
+    // breaks this function exists to preserve.
+    NSRegularExpression *inlineWhitespace = [NSRegularExpression regularExpressionWithPattern:@"[\\t\\f\\x0B ]+" options:0 error:nil];
+    clean = [inlineWhitespace stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@" "];
+    NSRegularExpression *blankRuns = [NSRegularExpression regularExpressionWithPattern:@"\\n{3,}" options:0 error:nil];
+    clean = [blankRuns stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@"\n\n"];
     clean = [clean stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     return clean.length > 0 ? clean : text;
 }
@@ -1850,7 +1954,9 @@ static id ApolloLPBuildCompactCardSpec(ASDisplayNode *hostNode, NSURL *url, Apol
     [[textStack style] setValue:@1.0 forKey:@"flexShrink"];
 
     NSMutableArray *rowChildren = [NSMutableArray array];
-    if (preview.imageURL.absoluteString.length > 0) {
+    // Dead-marked images (V21) render text-only — an 84pt square that will
+    // never load is just a blank box next to the title.
+    if (preview.imageURL.absoluteString.length > 0 && !ApolloLPImageURLIsDead(preview.imageURL)) {
         imageNode.contentMode = UIViewContentModeScaleAspectFill;
         imageNode.cornerRadius = 8.0;
         ApolloLPApplyStyleSize([imageNode style], CGSizeMake(84.0, 84.0));
@@ -2004,7 +2110,16 @@ static id ApolloLPBuildBlueskyPostCardSpec(ASDisplayNode *hostNode, NSURL *url, 
 
     NSString *displayName = preview.authorDisplayName.length > 0 ? preview.authorDisplayName : (ApolloLPDisplayTitleForPreview(preview).length > 0 ? ApolloLPDisplayTitleForPreview(preview) : @"Bluesky");
     NSString *handleText = ApolloLPBlueskyHandleText(preview);
-    NSString *postText = preview.postText.length > 0 ? ApolloLPCleanDisplayText(preview.postText) : ApolloLPDisplayDescriptionForPreview(preview);
+    // Keep the post's own paragraph breaks — squashing them reads terribly
+    // for multi-line posts. Bluesky posts are capped at ~300 chars, so the
+    // body is naturally bounded even without a line limit.
+    NSString *postText = preview.postText.length > 0 ? ApolloLPCleanMultilineDisplayText(preview.postText) : ApolloLPCleanMultilineDisplayText(preview.desc);
+    NSUInteger bodyNewlines = postText.length > 0 ? [postText componentsSeparatedByString:@"\n"].count - 1 : 0;
+    NSUInteger rawNewlines = preview.postText.length > 0 ? [preview.postText componentsSeparatedByString:@"\n"].count - 1 : 0;
+    ApolloLPLogOncePerHost(ApolloLPHost(url),
+        [NSString stringWithFormat:@"V19-bluesky-body source=%@ len=%lu newlines=%lu rawNewlines=%lu",
+         preview.postText.length > 0 ? @"postText" : @"desc",
+         (unsigned long)postText.length, (unsigned long)bodyNewlines, (unsigned long)rawNewlines]);
     BOOL imageIsAvatar = preview.avatarURL.absoluteString.length > 0
         && [preview.imageURL.absoluteString isEqualToString:preview.avatarURL.absoluteString];
     BOOL hasPostImage = preview.imageURL.absoluteString.length > 0 && !imageIsAvatar && !preview.imageIsFallbackIcon;
@@ -2037,7 +2152,9 @@ static id ApolloLPBuildBlueskyPostCardSpec(ASDisplayNode *hostNode, NSURL *url, 
 
     titleNode.maximumNumberOfLines = 1;
     siteNode.maximumNumberOfLines = 1;
-    descriptionNode.maximumNumberOfLines = 10;
+    // No line cap: let the card grow to fit the whole post, like the native
+    // tweet card does.
+    descriptionNode.maximumNumberOfLines = 0;
     ApolloLPSetTextNodeAttributedTextIfChanged(titleNode, ApolloLPAttributedString(displayName, [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold], [UIColor labelColor]));
     ApolloLPSetTextNodeAttributedTextIfChanged(siteNode, ApolloLPAttributedString(handleText, [UIFont systemFontOfSize:13.0 weight:UIFontWeightRegular], [UIColor secondaryLabelColor]));
     ApolloLPSetTextNodeAttributedTextIfChanged(descriptionNode, ApolloLPAttributedString(postText, [UIFont systemFontOfSize:15.0 weight:UIFontWeightRegular], [UIColor labelColor]));
@@ -2611,6 +2728,14 @@ static void ApolloLPTriggerRelayoutForHost(ASDisplayNode *node, NSString *host) 
     ApolloLPTriggerRelayoutInternal(node, YES, host);
 }
 
+// V20: when a placeholder shrinks to a compact card while the node is still
+// detached (cell measured off-tree — the common case for fresh feed cells),
+// BOTH reload attempts below miss ("row-reload-miss no-scroll-cell") and the
+// row keeps its tall hero-placeholder height around a small compact card.
+// Geometry can't detect this oversize case (a card shorter than its cell is
+// normal), so remember the failure on the node (kApolloLPPendingRowReloadHostKey,
+// declared with the dead-image helpers) and re-fire the reload from
+// didEnterVisibleState once the cell actually exists on screen.
 static void ApolloLPTriggerPlaceholderContextRelayout(ASDisplayNode *node, NSString *host, ApolloLPContext fromContext, ApolloLPContext toContext) {
     if (!node) return;
 
@@ -2618,7 +2743,9 @@ static void ApolloLPTriggerPlaceholderContextRelayout(ASDisplayNode *node, NSStr
               host ?: @"(nohost)", ApolloLPContextLogName(fromContext), ApolloLPContextLogName(toContext));
     ApolloLPTriggerRelayoutInternal(node, NO, host);
     ASDisplayNode *cellNode = ApolloLPFindOwningCellNode(node);
-    ApolloLPInvokeRowReloadIfPossible(cellNode ?: node, host);
+    if (!ApolloLPInvokeRowReloadIfPossible(cellNode ?: node, host)) {
+        objc_setAssociatedObject(node, &kApolloLPPendingRowReloadHostKey, host ?: @"?", OBJC_ASSOCIATION_COPY_NONATOMIC);
+    }
 
     __weak ASDisplayNode *weakNode = node;
     NSString *hostCopy = [host copy];
@@ -2626,7 +2753,79 @@ static void ApolloLPTriggerPlaceholderContextRelayout(ASDisplayNode *node, NSStr
         ASDisplayNode *strongNode = weakNode;
         if (!strongNode) return;
         ASDisplayNode *strongCellNode = ApolloLPFindOwningCellNode(strongNode);
-        ApolloLPInvokeRowReloadIfPossible(strongCellNode ?: strongNode, hostCopy);
+        if (ApolloLPInvokeRowReloadIfPossible(strongCellNode ?: strongNode, hostCopy)) {
+            objc_setAssociatedObject(strongNode, &kApolloLPPendingRowReloadHostKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        } else {
+            objc_setAssociatedObject(strongNode, &kApolloLPPendingRowReloadHostKey, hostCopy ?: @"?", OBJC_ASSOCIATION_COPY_NONATOMIC);
+        }
+    });
+}
+
+// MARK: - V18: stale row-height fix for late twitter/bsky card content
+//
+// When a link card's real content lands after the owning cell was measured
+// (slow TweetBuddy / Bluesky fetches), the card redraws at full size but the
+// feed row keeps its placeholder height — the card bleeds over the post's
+// footer. The relayout triggers above are no-ops in the common failure mode
+// because the LinkButtonNode is still detached (supernode == nil) while the
+// cell is measured off-tree, so no owning cell can be found at refresh time.
+// Instead of trusting the triggers, verify geometry after the fact: if the
+// card's rendered content sticks out the bottom of its row's cell view,
+// reload that row. Pure geometry — healthy rows are never reloaded.
+static void ApolloLPRunOverflowHeightCheck(ASDisplayNode *node, NSString *host, NSInteger remainingAttempts) {
+    if (!node) return;
+    @try {
+        BOOL loaded = [node respondsToSelector:@selector(isNodeLoaded)] && [node isNodeLoaded];
+        UIView *nodeView = loaded ? ApolloLPViewForNode(node) : nil;
+        UIView *cellView = nil;
+        if (nodeView.window) {
+            for (UIView *current = nodeView; current; current = current.superview) {
+                if ([current isKindOfClass:[UITableViewCell class]] ||
+                    [current isKindOfClass:[UICollectionViewCell class]]) {
+                    cellView = current;
+                    break;
+                }
+            }
+        }
+        if (!cellView) {
+            // Node not on screen (yet) — retry briefly in case it is mid-attach.
+            if (remainingAttempts > 0) {
+                __weak ASDisplayNode *weakNode = node;
+                NSString *hostCopy = [host copy];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(400 * NSEC_PER_MSEC)),
+                               dispatch_get_main_queue(), ^{
+                    ASDisplayNode *strongNode = weakNode;
+                    if (strongNode) ApolloLPRunOverflowHeightCheck(strongNode, hostCopy, remainingAttempts - 1);
+                });
+            }
+            return;
+        }
+
+        // Views don't clip by default, so a stale row shows content drawn
+        // beyond the node's frame — include one level of subview frames.
+        CGRect content = nodeView.bounds;
+        for (UIView *subview in nodeView.subviews) {
+            content = CGRectUnion(content, subview.frame);
+        }
+        CGRect frameInCell = [nodeView convertRect:content toView:cellView];
+        CGFloat overflow = CGRectGetMaxY(frameInCell) - CGRectGetHeight(cellView.bounds);
+        if (overflow > 8.0) {
+            ApolloLog(@"[LinkPreviews] V18-stale-row-height host=%@ overflow=%.0fpt -> reloading row",
+                      host ?: @"?", overflow);
+            ApolloLPInvokeRowReloadIfPossible(node, host);
+        }
+    } @catch (__unused NSException *exception) {}
+}
+
+// Let layout settle before measuring; runs on main.
+static void ApolloLPScheduleOverflowHeightCheck(ASDisplayNode *node, NSString *host) {
+    if (!node) return;
+    __weak ASDisplayNode *weakNode = node;
+    NSString *hostCopy = [host copy];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(150 * NSEC_PER_MSEC)),
+                   dispatch_get_main_queue(), ^{
+        ASDisplayNode *strongNode = weakNode;
+        if (strongNode) ApolloLPRunOverflowHeightCheck(strongNode, hostCopy, 1);
     });
 }
 
@@ -3218,7 +3417,11 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
     ApolloLPInstallContextMenuForNode((ASDisplayNode *)self, url);
 
     ApolloLinkPreview *cached = [[ApolloLinkPreviewCache sharedCache] cachedPreviewForURL:url];
-    if (cached && ApolloLPIsBlueskyPostURL(url) && !ApolloLPIsBlueskyPostPreview(url, cached)) {
+    // Match the fetcher's staleness rule: a bsky-post preview without
+    // postText renders its flattened desc as the body, so refetch it rather
+    // than reuse it forever (the render gate alone accepts handle-only).
+    if (cached && ApolloLPIsBlueskyPostURL(url) &&
+        (!ApolloLPIsBlueskyPostPreview(url, cached) || cached.postText.length == 0)) {
         ApolloLPLogOncePerHost(host, @"stale-bluesky-inline-refetch");
         cached = nil;
     }
@@ -3318,6 +3521,16 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
         }
     }
 
+    // V21: the preview scraped an image URL but the file 404s (clip hosts
+    // publish og:image before the thumbnail exists). Render compact instead
+    // of a hero with a dead image area; the mark expires (5 min) so the card
+    // upgrades itself once the host generates the thumbnail.
+    if (context == ApolloLPContextSelfText && !isBlueskyPost && !isRedditUser && !isRedditSubreddit &&
+        ApolloLPImageURLIsDead(displayPreview.imageURL)) {
+        context = ApolloLPContextCompact;
+        ApolloLPLogOncePerHost(host, @"V21-dead-image-compact");
+    }
+
     ApolloLPLogMetadataOnce(host, displayPreview, area, selectedMode, context);
     if (!isBlueskyPost && !isRedditUser && !isRedditSubreddit && displayPreview.imageIsFallbackIcon) {
         ApolloLPRememberCompactPlaceholderHost(url);
@@ -3354,6 +3567,10 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
                 } else {
                     ApolloLPTriggerRelayoutForHost(strongSelf, hostCopy);
                 }
+                // V18: the trigger above is a no-op when this node is still
+                // detached (cell measured off-tree); verify the row height by
+                // geometry once things settle.
+                ApolloLPScheduleOverflowHeightCheck(strongSelf, hostCopy);
             });
         }
         ApolloLPClearHostShell((ASDisplayNode *)self);
@@ -3380,6 +3597,43 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
             objc_setAssociatedObject(self, &kApolloLinkPreviewAreaKey, @(resolved), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
     }
+}
+
+// V18: cards whose final content rendered while the node was detached could
+// never fix their row height (no owning cell at refresh time). Verify the
+// geometry whenever the card scrolls on screen; only broken rows reload.
+// V20: also re-fire a placeholder-shrink row reload that failed while the
+// node was detached — the oversized-row case geometry can't detect.
+- (void)didEnterVisibleState {
+    %orig;
+    NSString *pendingHost = objc_getAssociatedObject(self, &kApolloLPPendingRowReloadHostKey);
+    if (pendingHost) {
+        objc_setAssociatedObject(self, &kApolloLPPendingRowReloadHostKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        ApolloLog(@"[LinkPreviews] V20-deferred-row-reload host=%@", pendingHost);
+        __weak ASDisplayNode *weakSelf = (ASDisplayNode *)self;
+        // Let the cell finish attaching before resolving its index path.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(50 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+            ASDisplayNode *strongSelf = weakSelf;
+            if (!strongSelf) return;
+            ASDisplayNode *cellNode = ApolloLPFindOwningCellNode(strongSelf);
+            ApolloLPInvokeRowReloadIfPossible(cellNode ?: strongSelf, pendingHost);
+        });
+    }
+    ApolloLPScheduleOverflowHeightCheck((ASDisplayNode *)self, @"visible-check");
+}
+
+%end
+
+// V18: Apollo's native tweet card (data via the TweetBuddy shim) hits the
+// same stale-row-height race when the tweet arrives after the row was
+// measured — the info node materializes late and bleeds over the footer.
+// Its didLoad is the earliest point with real geometry; the overflow check
+// keeps healthy rows untouched.
+%hook _TtC6Apollo23LinkButtonTweetInfoNode
+
+- (void)didLoad {
+    %orig;
+    ApolloLPScheduleOverflowHeightCheck((ASDisplayNode *)self, @"tweet-info");
 }
 
 %end
@@ -3443,16 +3697,4 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
     }];
 
     ApolloLog(@"[LinkPreviews] ctor: hook installed for _TtC6Apollo14LinkButtonNode bodyMode=%ld commentsMode=%ld cardColor=%ld", (long)sLinkPreviewBodyMode, (long)sLinkPreviewCommentsMode, (long)sLinkPreviewCardColor);
-    ApolloLog(@"[LinkPreviews] V5 polish active");
-    ApolloLog(@"[LinkPreviews] V6 image-kind polish active");
-    ApolloLog(@"[LinkPreviews] V7 display modes and placeholders active");
-    ApolloLog(@"[LinkPreviews] V8 borderless cards active");
-    ApolloLog(@"[LinkPreviews] V9 split body/comment modes active");
-    ApolloLog(@"[LinkPreviews] V10 preview text restore active");
-    ApolloLog(@"[LinkPreviews] V11 hero-card stability and naked-URL hiding active");
-    ApolloLog(@"[LinkPreviews] V13 preset card colors and instant color refresh active");
-    ApolloLog(@"[LinkPreviews] V12 cleanup hero sizing active");
-    ApolloLog(@"[LinkPreviews] V12 hero image ratio cap 0.6 + nature/client-challenge bypass active");
-    ApolloLog(@"[LinkPreviews] V14 translation-aware metadata text active");
-    ApolloLog(@"[LinkPreviews] V15 targeted translation refresh active");
 }
