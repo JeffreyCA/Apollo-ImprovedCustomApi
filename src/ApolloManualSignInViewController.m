@@ -152,9 +152,11 @@ static NSString *ARExtractParam(NSString *urlString, NSString *name);
         self.scrollView.verticalScrollIndicatorInsets = inset;
     } completion:^(BOOL finished) {
         if (bottomInset > 0 && self.codeTextView.isFirstResponder) {
-            CGRect target = [self.scrollView convertRect:self.codeTextView.bounds
-                                                fromView:self.codeTextView];
-            [self.scrollView scrollRectToVisible:CGRectInset(target, 0, -12) animated:YES];
+            CGFloat maxOffsetY = self.scrollView.contentSize.height - self.scrollView.bounds.size.height + self.scrollView.adjustedContentInset.bottom;
+            if (maxOffsetY > 0) {
+                CGPoint bottomOffset = CGPointMake(0, maxOffsetY);
+                [self.scrollView setContentOffset:bottomOffset animated:YES];
+            }
         }
     }];
 }
