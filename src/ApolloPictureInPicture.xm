@@ -2408,8 +2408,11 @@ BOOL ApolloPiP_ShouldBlockAudioSessionDowngrade(void) {
     // holding against Apollo's Ambient downgrade.
     if (controller.active && controller.player
         && !controller.player.muted && !controller.cardIsGifContent) return YES;
+    // Protect the inline-armed player's session through the background handoff
+    // window even when muted: System PiP still needs an active Playback session to
+    // start, and in the "All Videos" modes a muted video is eligible.
     AVPlayer *inlinePlayer = controller.inlineNativePlayer;
-    return inlinePlayer && !inlinePlayer.muted && PiPInlineShieldEngaged(inlinePlayer);
+    return inlinePlayer && PiPInlineShieldEngaged(inlinePlayer);
 }
 
 // Consulted by ApolloVideoUnmute.xm's AVPlayer.setMuted: hook — blocks the
@@ -2446,8 +2449,29 @@ void ApolloPiP_NoteInlinePlayerMuted(AVPlayer *player) {
     if (!controller || !player) return;
     if (controller.active) return;
     if (controller.inlineNativePlayer != player) return;
-    ApolloLog(@"[PiP] Inline-armed player muted — disarming system PiP");
-    [controller disarmInlineNativePiPIfIdle];
+
+    // "Unmuted Videos Only": a muted video is no longer eligible, so a home-swipe
+    // must not hand it off — disarm.
+    if (sPiPActivationMode == ApolloPiPActivationModeUnmutedOnly) {
+        ApolloLog(@"[PiP] Inline-armed player muted (Unmuted Only) — disarming system PiP");
+        [controller disarmInlineNativePiPIfIdle];
+        return;
+    }
+
+    // "All Videos" / "All Videos & GIFs": a muted PLAYING video stays eligible, so
+    // keep the arm. Apollo's mute runs the mute dance, which just set the session
+    // to Ambient and deactivated it — that would stop System PiP from auto-starting
+    // on background, so re-assert a Playback session. mixWithOthers since the video
+    // is now silent (won't interrupt the user's audio), matching the muted-video
+    // inline arm.
+    if (@available(iOS 15.0, *)) {
+        AVAudioSession *session = [AVAudioSession sharedInstance];
+        [session setCategory:AVAudioSessionCategoryPlayback
+                        mode:AVAudioSessionModeDefault
+                     options:AVAudioSessionCategoryOptionMixWithOthers error:nil];
+        [session setActive:YES withOptions:0 error:nil];
+        ApolloLog(@"[PiP] Inline-armed player muted (All Videos) — kept armed, re-asserted Playback for handoff");
+    }
 }
 
 // Audio arbitration: a DIFFERENT video is about to play audibly (the user
