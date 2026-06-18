@@ -606,11 +606,8 @@ static void ApolloSubredditIndexClearStarChrome(UIControl *control) {
         UIButton *button = (UIButton *)control;
         button.highlighted = NO;
         // Prevent auto-dimming on a button we don't own (no clean non-deprecated API for this).
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         button.adjustsImageWhenHighlighted = NO;
         button.adjustsImageWhenDisabled = NO;
-#pragma clang diagnostic pop
 
         UIControlState states[] = {
             UIControlStateNormal,

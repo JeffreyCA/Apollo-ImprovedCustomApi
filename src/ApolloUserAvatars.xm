@@ -147,6 +147,9 @@ static void ApolloProfileScheduleTabAvatarRefresh(NSString *reason);
         _editProfileButton.titleLabel.adjustsFontForContentSizeCategory = YES;
         _editProfileButton.backgroundColor = [UIColor tertiarySystemFillColor];
         _editProfileButton.layer.cornerRadius = 13.0;
+        // contentEdgeInsets is deprecated (iOS 15+) in favor of UIButtonConfiguration, but the
+        // device build floors at iOS 14 (still-supported devices), where UIButtonConfiguration
+        // doesn't exist and would crash.
         _editProfileButton.contentEdgeInsets = UIEdgeInsetsMake(4.0, 12.0, 4.0, 12.0);
         [_editProfileButton addTarget:self action:@selector(apollo_editProfileTapped) forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:_editProfileButton];

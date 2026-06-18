@@ -18,7 +18,7 @@ make package
 2. [theos/sdks](https://github.com/theos/sdks) — best-vetted, but only goes up to iOS 16.5, so it cannot be used for now
 3. [xybp888/iOS-SDKs](https://github.com/xybp888/iOS-SDKs) — contains iOS 26 SDKs, community maintained
 
-See [AGENTS.md](AGENTS.md) under "Required SDK" for the full explanation.
+This only applies to device builds — `scripts/run-in-sim.sh` deliberately doesn't use this trick (see [AGENTS.md](AGENTS.md) under "Required SDK" for why pairing an old Simulator SDK with a newer clang doesn't work the same way). See that same section for the full explanation.
 
 ## Testing in the iOS Simulator
 

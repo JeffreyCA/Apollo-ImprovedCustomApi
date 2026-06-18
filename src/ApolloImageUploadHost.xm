@@ -2663,7 +2663,7 @@ static void ApolloWarnKeylessUploadUnavailableOnce(void) {
     dispatch_once(&onceToken, ^{
         dispatch_async(dispatch_get_main_queue(), ^{
             UIViewController *top = nil;
-            for (UIWindow *window in [UIApplication.sharedApplication.windows reverseObjectEnumerator]) {
+            for (UIWindow *window in [ApolloAllWindows() reverseObjectEnumerator]) {
                 if (window.hidden || window.alpha < 0.01) continue;
                 top = ApolloRedditVisibleControllerFromController(window.rootViewController);
                 if (top) break;

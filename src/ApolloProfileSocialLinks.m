@@ -339,7 +339,7 @@ static NSArray<ApolloSocialLink *> *ApolloSLLinksFromJSON(NSArray *raw) {
         if (![s isKindOfClass:[UIWindowScene class]]) continue;
         for (UIWindow *w in ((UIWindowScene *)s).windows) { if (w.isKeyWindow) win = w; }
     }
-    if (!win) win = UIApplication.sharedApplication.windows.firstObject;
+    if (!win) win = ApolloAllWindows().firstObject;
     if (!win) { [self finish:nil]; return; }
     WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
     config.websiteDataStore = [ApolloSLWebFetch apollo_scrapeDataStore];

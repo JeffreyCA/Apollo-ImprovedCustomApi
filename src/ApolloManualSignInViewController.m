@@ -311,10 +311,7 @@ static NSString *ARExtractParam(NSString *urlString, NSString *name) {
     } else {
         [b setTitle:title forState:UIControlStateNormal];
         b.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         b.contentEdgeInsets = UIEdgeInsetsMake(12, 16, 12, 16); // iOS 14 fallback; ignored under UIButtonConfiguration
-#pragma clang diagnostic pop
         b.layer.cornerRadius = 12;
         b.clipsToBounds = YES;
         UIColor *tint = self.view.tintColor ?: [UIColor systemBlueColor];
