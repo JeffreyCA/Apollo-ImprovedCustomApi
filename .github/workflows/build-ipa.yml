@@ -99,6 +99,10 @@ jobs:
           path: theos
           submodules: recursive
 
+      - name: Select Xcode 26.0.1
+        if: inputs.inject_tweak
+        run: sudo xcode-select -s /Applications/Xcode_26.0.1.app
+
       - name: Build rootful tweak package
         if: inputs.inject_tweak
         run: make package FINALPACKAGE=1

@@ -31,7 +31,7 @@ The fix is to pin the build to an iOS 26.0 SDK explicitly instead of `latest`, w
 
 Because the device build (14.0) and simulator build (15.0) have different floors, code using an iOS-15-deprecated API (`UIApplication.windows`, `UIButton.contentEdgeInsets`/`imageEdgeInsets`, `adjustsImageWhenHighlighted`/`adjustsImageWhenDisabled`, etc.) only trips `-Wdeprecated-declarations` under the simulator target, not the device one. Theos turns on `-Werror` globally (`$THEOS/makefiles/common.mk`), so without intervention that warning would fail simulator-only builds. Rather than wrapping every call site in `#pragma clang diagnostic ignored "-Wdeprecated-declarations"`, `Makefile`'s `ApolloReborn_CFLAGS` carries `-Wno-error=deprecated-declarations` — this demotes the diagnostic back to a non-fatal warning (still visible in build output) without fully hiding it via `-Wno-deprecated-declarations`, and without needing a pragma anywhere. Prefer migrating off a deprecated API outright when there's a safe non-deprecated replacement (e.g. `ApolloAllWindows()` for `UIApplication.windows`); reach for the deprecated API only when the replacement (e.g. `UIButtonConfiguration`) isn't available at the device build's iOS 14 floor.
 
-**If `$THEOS/sdks/iPhoneOS26.0.sdk` is missing on a machine** (fresh setup, CI runner, etc.), get it one of these ways, in order of preference:
+**If `$THEOS/sdks/iPhoneOS26.0.sdk` is missing on a local dev machine** (fresh setup, etc.), get it one of these ways, in order of preference:
 
 1. **Extract from a locally installed Xcode 26.x** (most trustworthy — it's your own Apple-issued copy):
    ```bash
@@ -46,7 +46,9 @@ Whichever source, the result must land at `$THEOS/sdks/iPhoneOS26.0.sdk` (folder
 xcodebuild -showsdks 2>&1  # confirms what Xcode itself sees (won't show $THEOS/sdks entries)
 ls "$THEOS/sdks/"          # confirms Theos has it
 ```
-This SDK lives outside the repo (`$THEOS/sdks` is a local Theos install path, not checked into git) — a new contributor or CI runner needs to repeat this step once.
+This SDK lives outside the repo (`$THEOS/sdks` is a local Theos install path, not checked into git) — a new contributor needs to repeat this step once.
+
+**CI does this differently.** The GitHub Actions `macos-15` runner image ships several Xcode versions side by side, including `/Applications/Xcode_26.0.1.app` (full iOS 26.0 SDK included) alongside the default active Xcode (16.4, which doesn't have it). So the build/release/PR-build workflows just run `sudo xcode-select -s /Applications/Xcode_26.0.1.app` before `make package`, rather than copying anything into `$THEOS/sdks`. This is simpler than the local-dev approach and carries no version-skew risk for CI specifically, because the runner's default Xcode is *older* than 26.0.1, not newer — switching to it is a strict upgrade of the whole toolchain, not a deliberate old-SDK/new-clang pairing the way the local dev setup is. (That pairing risk is real, though — see the Simulator SDK note above — so don't reach for a global `xcode-select` switch on a machine where the default Xcode is *newer* than the SDK you need.)
 
 ### Fast iteration in the iOS Simulator
 
