@@ -12,6 +12,14 @@ git submodule update --init --recursive
 make package
 ```
 
+**Required SDK.** `Makefile` pins `TARGET := iphone:clang:26.0:14.0` so the tweak keeps supporting iOS 14 users even though newer Xcode releases raised their SDK's own minimum deployment target above that. This means an iOS 26.0 SDK must exist at `$THEOS/sdks/iPhoneOS26.0.sdk` — Theos checks `$THEOS/sdks` in addition to the active Xcode's own SDKs directory, so this works without modifying Xcode.app. If it's missing, `make package` will fail to find the SDK; get one via (in order of preference):
+
+1. Copy it out of a locally installed Xcode 26.x: `cp -R "/Applications/Xcode_26.x.x.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk" "$THEOS/sdks/iPhoneOS26.0.sdk"`
+2. [theos/sdks](https://github.com/theos/sdks) — best-vetted, but only goes up to iOS 16.5, so it cannot be used for now
+3. [xybp888/iOS-SDKs](https://github.com/xybp888/iOS-SDKs) — contains iOS 26 SDKs, community maintained
+
+See [AGENTS.md](AGENTS.md) under "Required SDK" for the full explanation.
+
 ## Testing in the iOS Simulator
 
 You don't need a physical device to iterate on most changes. `scripts/run-in-sim.sh` builds the tweak for the iOS Simulator and launches Apollo with it injected, so a code change goes from edit to running app in seconds — no IPA, no certificates, no sideloading.

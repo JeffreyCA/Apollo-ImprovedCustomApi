@@ -142,18 +142,12 @@ static void ApolloProfileScheduleTabAvatarRefresh(NSString *reason);
         [self addSubview:_usernameLabel];
 
         _editProfileButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        UIButtonConfiguration *editConfig = [UIButtonConfiguration plainButtonConfiguration];
-        editConfig.title = @"Edit";
-        editConfig.contentInsets = NSDirectionalEdgeInsetsMake(4.0, 12.0, 4.0, 12.0);
-        editConfig.titleTextAttributesTransformer = ^NSDictionary<NSAttributedStringKey, id> *(NSDictionary<NSAttributedStringKey, id> *incoming) {
-            NSMutableDictionary *attrs = [incoming mutableCopy];
-            attrs[NSFontAttributeName] = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
-            return attrs;
-        };
-        _editProfileButton.configuration = editConfig;
+        [_editProfileButton setTitle:@"Edit" forState:UIControlStateNormal];
+        _editProfileButton.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
         _editProfileButton.titleLabel.adjustsFontForContentSizeCategory = YES;
         _editProfileButton.backgroundColor = [UIColor tertiarySystemFillColor];
         _editProfileButton.layer.cornerRadius = 13.0;
+        _editProfileButton.contentEdgeInsets = UIEdgeInsetsMake(4.0, 12.0, 4.0, 12.0);
         [_editProfileButton addTarget:self action:@selector(apollo_editProfileTapped) forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:_editProfileButton];
         [self apollo_updateEditProfileButtonColors];

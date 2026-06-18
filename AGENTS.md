@@ -21,6 +21,29 @@ make package
 The Makefile automatically generates `src/Version.h` from the `control` file and links FFmpegKit libraries.
 `THEOS` is available at `~/theos`. Do not rely on Azule/Cyan living in `/tmp`; `build-ipa.sh` uses the repo-local `scripts/inject-deb-local.sh` first for this repo's already-injected `Apollo-base.ipa` flow, then falls back to `azule`/`cyan` only for truly stock IPAs.
 
+### Required SDK: iOS 26.0 pinned via `$THEOS/sdks`
+
+`Makefile` sets `TARGET := iphone:clang:26.0:14.0` — the tweak still supports iOS 14 users, but newer Xcode betas (Xcode 27+, shipping the iOS 27 SDK) raised the SDK's own `MinimumDeploymentTarget` to iOS 15.0 (confirmed via `iPhoneOS.sdk/SDKSettings.json` → `SupportedTargets.iphoneos.MinimumDeploymentTarget`), so compiling with `latest` against that SDK can no longer target iOS 14.0 and additionally turns on `-Werror,-Wdeprecated-declarations` for several iOS-15-deprecated UIKit APIs the tweak still legitimately uses below that floor.
+
+The fix is to pin the build to an iOS 26.0 SDK explicitly instead of `latest`, without touching the Xcode.app bundle. Theos merges SDK candidates from both `$THEOS_SDKS_PATH` (`$THEOS/sdks`) and Xcode's bundled SDK directory (see `$THEOS/makefiles/targets/_common/darwin_head.mk`), so dropping an `iPhoneOS26.0.sdk` folder into `$THEOS/sdks/` is enough — no Xcode reinstall or modification required.
+
+**If `$THEOS/sdks/iPhoneOS26.0.sdk` is missing on a machine** (fresh setup, CI runner, etc.), get it one of these ways, in order of preference:
+
+1. **Extract from a locally installed Xcode 26.x** (most trustworthy — it's your own Apple-issued copy):
+   ```bash
+   cp -R "/Applications/Xcode_26.x.x.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk" \
+         "$THEOS/sdks/iPhoneOS26.0.sdk"
+   ```
+2. **[theos/sdks](https://github.com/theos/sdks)** — the Theos org's own collection of extracted SDKs. Best-vetted third-party source, but only goes up to iOS 16.5 as of writing, so this source cannot be used for now.
+3. **[xybp888/iOS-SDKs](https://github.com/xybp888/iOS-SDKs)** — broader version coverage (including iOS 26) and bundles private framework headers/symbols. Less centrally vetted than `theos/sdks` (an individual's repo, not Theos org), but SDK bundles are just headers/`.tbd` stubs/plists — nothing executes at build time — so the practical risk is "bad headers cause a miscompile," not a code-execution supply-chain attack. Reasonable to use when you need a version you can't extract yourself.
+
+Whichever source, the result must land at `$THEOS/sdks/iPhoneOS26.0.sdk` (folder name matters — Theos matches `iPhoneOS<version>.sdk`) for `TARGET := iphone:clang:26.0:14.0` to resolve. Verify with:
+```bash
+xcodebuild -showsdks 2>&1  # confirms what Xcode itself sees (won't show $THEOS/sdks entries)
+ls "$THEOS/sdks/"          # confirms Theos has it
+```
+This SDK lives outside the repo (`$THEOS/sdks` is a local Theos install path, not checked into git) — a new contributor or CI runner needs to repeat this step once.
+
 ### Fast iteration in the iOS Simulator
 
 For UI/settings/nav-bar/Liquid Glass work, `scripts/run-in-sim.sh` runs the tweak inside the iOS Simulator so you can test a change in seconds without building an IPA, signing, or sideloading. **Use this as the default inner loop**; fall back to a device IPA only for the things the simulator can't do (see limits below).
