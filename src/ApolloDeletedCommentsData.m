@@ -399,7 +399,7 @@ static BOOL ApolloDeletedCommentsCommentDataLooksDeleted(NSDictionary *data) {
     if (trimmedBody.length > 0 && ApolloDeletedCommentsBodyLooksDeleted(body)) return YES;
 
     NSString *bodyHTML = [data[@"body_html"] isKindOfClass:[NSString class]] ? data[@"body_html"] : nil;
-    if (bodyHTML.length > 0) {
+    if (trimmedBody.length == 0 && bodyHTML.length > 0) {
         NSString *htmlText = ApolloDeletedCommentsUnescapedHTMLText(bodyHTML);
         if ([htmlText rangeOfString:@"[removed]" options:NSCaseInsensitiveSearch].location != NSNotFound ||
             [htmlText rangeOfString:@"[deleted]" options:NSCaseInsensitiveSearch].location != NSNotFound ||

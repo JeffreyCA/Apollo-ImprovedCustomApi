@@ -104,7 +104,8 @@ static void TestDeletedBodyPolicy(void) {
     Require(ApolloDeletedCommentsTestBodyLooksDeleted(@"[deleted]", nil), @"detects [deleted]");
     Require(ApolloDeletedCommentsTestBodyLooksDeleted(@"[removed]", nil), @"detects [removed]");
     Require(!ApolloDeletedCommentsTestBodyLooksDeleted(@"", nil), @"empty body alone is not deleted");
-    Require(ApolloDeletedCommentsTestBodyLooksDeleted(@"hello", @"&lt;p&gt;Removed by moderator&lt;/p&gt;"), @"detects removed HTML");
+    Require(ApolloDeletedCommentsTestBodyLooksDeleted(@"", @"&lt;p&gt;Removed by moderator&lt;/p&gt;"), @"detects removed HTML without body");
+    Require(!ApolloDeletedCommentsTestBodyLooksDeleted(@"hello", @"&lt;p&gt;Removed by moderator&lt;/p&gt;"), @"stale removed HTML does not override visible body");
     Require(!ApolloDeletedCommentsTestBodyLooksDeleted(@"normal comment", nil), @"normal body is not deleted");
 }
 
