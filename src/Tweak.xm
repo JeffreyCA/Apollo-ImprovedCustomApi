@@ -14,6 +14,7 @@
 #import "ApolloImageUploadHost.h"
 #import "ApolloImgChestUpload.h"
 #import "ApolloNotificationBackend.h"
+#import "ApolloPushNotifications.h"
 #import "ApolloState.h"
 #import "Tweak.h"
 #import "CustomAPIViewController.h"
@@ -1195,6 +1196,34 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
     if ([delegate respondsToSelector:@selector(requestDidFinish:)]) {
         [delegate requestDidFinish:self];
     }
+}
+%end
+
+// Sideloaded builds signed without a paid Apple Developer team never receive an
+// `aps-environment` entitlement, so -registerForRemoteNotifications always fails
+// with NSCocoaErrorDomain 3000 ("no valid 'aps-environment' entitlement string
+// found for application"). Apollo surfaces that raw error as an alarming
+// "Error Loading Notifications — contact developer" alert and aborts the whole
+// notifications flow, inbox watchers included.
+//
+// This is an expected, signing-time condition — not a runtime bug to report —
+// and the project already supports registration + watcher CRUD on free accounts
+// (push simply never arrives; see the README "Self-hosted notifications" note).
+// So, mirroring the SKReceiptRefreshRequest fake-success hook above, we convert
+// *only* this specific entitlement failure into a deterministic placeholder-token
+// success, letting Apollo's pending APNs continuations resolve and the screen
+// load. Genuine failures (offline, rate limiting, …) fall through to %orig and
+// keep their original error so real problems still surface.
+%hook _TtC6Apollo11AppDelegate
+- (void)application:(UIApplication *)application didFailToRegisterForRemoteNotificationsWithError:(NSError *)error {
+    if (ApolloErrorIsMissingPushEntitlement(error)) {
+        ApolloLog(@"[Push] Missing aps-environment entitlement (free-account sideload) — substituting a placeholder APNs token so notification setup proceeds. Push delivery still requires a paid Apple Developer account.");
+        // `self` is only forward-declared here, so route the success callback
+        // through the UIApplicationDelegate protocol the class conforms to.
+        [(id<UIApplicationDelegate>)self application:application didRegisterForRemoteNotificationsWithDeviceToken:ApolloPlaceholderAPNSDeviceToken()];
+        return;
+    }
+    %orig;
 }
 %end
 

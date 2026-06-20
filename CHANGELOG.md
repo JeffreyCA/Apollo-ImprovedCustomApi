@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixes
+
+- Stop **sideloaded (free Apple ID) builds** from showing the alarming "Error Loading Notifications — contact developer" alert (`no valid "aps-environment" entitlement string found for application`) when enabling notifications. The missing push entitlement is an unavoidable signing-time limitation on free accounts, so the tweak now recognizes that specific failure and lets notification registration and watcher setup proceed. Push delivery still requires a paid Apple Developer account; genuine errors (offline, rate limiting) are unaffected.
+
 ## [v3.2.0] - 2026-06-14
 
 ### Features

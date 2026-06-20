@@ -25,6 +25,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloSettingsTableViewController.m \
     $(SRC_DIR)/ApolloRedditMediaUpload.m \
     $(SRC_DIR)/ApolloNotificationBackend.m \
+    $(SRC_DIR)/ApolloPushNotifications.m \
     $(SRC_DIR)/ApolloUserProfileCache.m \
     $(SRC_DIR)/ApolloSubredditInfoCache.m \
     $(SRC_DIR)/ApolloSubredditCustomBannerCache.m \
