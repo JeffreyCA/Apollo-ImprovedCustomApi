@@ -510,6 +510,11 @@ static void ApolloDeletedCommentsSetRecoveredBody(NSMutableDictionary *data, NSS
     if (bodyHTML.length > 0) data[@"body_html"] = bodyHTML;
 }
 
+static void ApolloDeletedCommentsHideRecoveredBodyForTapToReveal(NSMutableDictionary *data, NSString *reason) {
+    if (!sTapToRevealDeletedComments) return;
+    ApolloDeletedCommentsSetRecoveredBody(data, ApolloDeletedCommentsDisplayLabelForReason(reason));
+}
+
 static void ApolloDeletedCommentsSetObjectValue(id object, SEL selector, id value) {
     if (!object || !selector || !value || ![object respondsToSelector:selector]) return;
     @try {
@@ -910,6 +915,7 @@ static NSMutableDictionary *ApolloDeletedCommentsThingFromArchived(NSDictionary 
     data[@"gilded"] = @0;
     ApolloDeletedCommentsApplyRecoveredMetadata(data, reason);
     ApolloDeletedCommentsClearRemovalMetadata(data);
+    ApolloDeletedCommentsHideRecoveredBodyForTapToReveal(data, reason);
     return [@{@"kind": @"t1", @"data": data} mutableCopy];
 }
 
@@ -950,6 +956,7 @@ static NSUInteger ApolloDeletedCommentsPatchRedditJSONNode(id node, NSDictionary
                 NSString *reason = ApolloDeletedCommentsReasonForCurrentBody(currentBody, currentBodyHTML);
                 ApolloDeletedCommentsApplyRecoveredMetadata(data, reason);
                 ApolloDeletedCommentsClearRemovalMetadata(data);
+                ApolloDeletedCommentsHideRecoveredBodyForTapToReveal(data, reason);
                 ApolloLog(@"[DeletedComments] Recovered visible deleted comment %@", fullName ?: @"unknown");
                 patched++;
             } else if (currentLooksDeleted && stats) {

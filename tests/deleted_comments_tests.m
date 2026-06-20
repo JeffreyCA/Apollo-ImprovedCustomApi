@@ -136,9 +136,10 @@ static void TestTapToRevealPatchDoesNotEmitNativeSpoiler(void) {
     sTapToRevealDeletedComments = previousTapSetting;
 
     Require(patched == 1, @"tap-to-reveal patches one visible comment");
-    Require([body isEqualToString:@"Recovered body"], @"tap-to-reveal recovered body remains plain markdown");
+    Require([body isEqualToString:@"DELETED BY USER"], @"tap-to-reveal starts hidden behind the reason label");
     Require([body rangeOfString:@">!"].location == NSNotFound, @"tap-to-reveal body does not use native spoiler markdown");
     Require([bodyHTML rangeOfString:@"md-spoiler-text"].location == NSNotFound, @"tap-to-reveal body_html does not use native spoiler HTML");
+    Require([bodyHTML rangeOfString:@"DELETED BY USER"].location != NSNotFound, @"tap-to-reveal body_html renders the reason label");
 }
 
 static void TestMoreExpansion(void) {

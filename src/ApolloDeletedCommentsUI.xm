@@ -435,6 +435,13 @@ static BOOL ApolloDeletedCommentsCommentIsRevealedByFullName(RDKComment *comment
     return ApolloDeletedCommentsIsCommentRevealed(fullName);
 }
 
+static BOOL ApolloDeletedCommentsShouldKeepModelBodyHidden(RDKComment *comment) {
+    if (!sShowDeletedComments || !sTapToRevealDeletedComments || !comment) return NO;
+    NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
+    return ApolloDeletedCommentsIsRecoveredComment(fullName) &&
+           !ApolloDeletedCommentsIsCommentRevealed(fullName);
+}
+
 static void ApolloDeletedCommentsSynchronizeCommentModelDisplayState(id cellNode) {
     if (!cellNode) return;
     RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
@@ -451,7 +458,11 @@ static void ApolloDeletedCommentsSynchronizeCommentModelDisplayState(id cellNode
 
     if (recovered) {
         ApolloDeletedCommentsRememberOriginalModelBodyIfNeeded(comment);
-        ApolloDeletedCommentsRestoreOriginalModelBodyIfNeeded(comment);
+        if (ApolloDeletedCommentsShouldKeepModelBodyHidden(comment)) {
+            ApolloDeletedCommentsSetModelBodyToReasonLabel(comment, ApolloDeletedCommentsReasonLabelForComment(comment));
+        } else {
+            ApolloDeletedCommentsRestoreOriginalModelBodyIfNeeded(comment);
+        }
     }
 }
 
@@ -2322,7 +2333,10 @@ static NSAttributedString *__attribute__((unused)) ApolloDeletedCommentsRenameRe
 - (NSString *)body {
     NSString *body = %orig;
     NSString *savedBody = objc_getAssociatedObject((id)self, kApolloDeletedCommentsOriginalBodyKey);
-    if ([savedBody isKindOfClass:[NSString class]] && savedBody.length > 0 && ApolloDeletedCommentsStringIsReasonLabel(body)) {
+    if ([savedBody isKindOfClass:[NSString class]] &&
+        savedBody.length > 0 &&
+        ApolloDeletedCommentsStringIsReasonLabel(body) &&
+        !ApolloDeletedCommentsShouldKeepModelBodyHidden((RDKComment *)self)) {
         return savedBody;
     }
     return body;
@@ -2333,7 +2347,8 @@ static NSAttributedString *__attribute__((unused)) ApolloDeletedCommentsRenameRe
     NSString *savedBodyHTML = objc_getAssociatedObject((id)self, kApolloDeletedCommentsOriginalBodyHTMLKey);
     if ([savedBodyHTML isKindOfClass:[NSString class]] &&
         savedBodyHTML.length > 0 &&
-        ApolloDeletedCommentsStringIsReasonLabel(ApolloDeletedCommentsTrimmedString(bodyHTML))) {
+        ApolloDeletedCommentsStringIsReasonLabel(ApolloDeletedCommentsTrimmedString(bodyHTML)) &&
+        !ApolloDeletedCommentsShouldKeepModelBodyHidden((RDKComment *)self)) {
         return savedBodyHTML;
     }
     return bodyHTML;
