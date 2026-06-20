@@ -128,7 +128,7 @@ static UIFont *ApolloDeletedCommentsReasonChipFont(void) {
 }
 
 static UIFont *ApolloDeletedCommentsRecoveredBodyFont(void) {
-    return [UIFont systemFontOfSize:15.0];
+    return [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
 }
 
 static NSString *ApolloDeletedCommentsNormalizeCommentFullName(NSString *value) {
@@ -683,9 +683,6 @@ static NSMutableDictionary *ApolloDeletedCommentsSanitizedBodyAttributes(NSDicti
     if (![font isKindOfClass:[UIFont class]]) return nil;
 
     NSMutableDictionary *attributes = [attrs mutableCopy];
-    if (font.pointSize > 15.5) {
-        attributes[NSFontAttributeName] = [font fontWithSize:15.0];
-    }
     [attributes removeObjectForKey:NSAttachmentAttributeName];
     [attributes removeObjectForKey:NSBackgroundColorAttributeName];
     [attributes removeObjectForKey:NSLinkAttributeName];
@@ -721,10 +718,6 @@ static NSAttributedString *ApolloDeletedCommentsBodyTextByNormalizingFont(NSAttr
                                    options:0
                                 usingBlock:^(NSDictionary<NSAttributedStringKey, id> *attrs, NSRange range, __unused BOOL *stop) {
         if (attrs[NSAttachmentAttributeName]) return;
-        UIFont *font = attrs[NSFontAttributeName];
-        if ([font isKindOfClass:[UIFont class]] && font.pointSize > 15.5) {
-            [normalized addAttribute:NSFontAttributeName value:[font fontWithSize:15.0] range:range];
-        }
         [normalized removeAttribute:NSBackgroundColorAttributeName range:range];
         [normalized removeAttribute:NSLinkAttributeName range:range];
         [normalized removeAttribute:ApolloDeletedCommentsRevealAttributeName range:range];
