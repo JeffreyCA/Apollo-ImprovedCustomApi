@@ -1,22 +1,34 @@
 # Push Notification Sideload Manual Validation
 
 Push registration is device-only — it cannot be exercised in the iOS Simulator —
-so verify these on a **free-account sideloaded** device build (no paid Apple
-Developer team).
+so verify these on real builds.
 
-- Enable notifications on a watcher (e.g. a post or your inbox). Confirm the
-  flow completes **without** the "Error Loading Notifications — contact
-  developer" alert that quotes `no valid "aps-environment" entitlement string`.
-- Confirm the notifications/inbox screen loads and watcher CRUD (add, list,
-  delete) works as before. Actual push delivery is still expected **not** to
-  arrive on a free account — this fix only removes the misleading error and
-  unblocks setup.
+## Free-account sideload (no `aps-environment` entitlement)
+
+- Open **Settings → Notifications**. Confirm it shows the non-interactive
+  **"Notifications Unavailable"** screen (bell.slash icon + explanation) instead
+  of the live controls.
+- Confirm **no** "Error Loading Notifications — contact developer" alert appears
+  (the one that quotes `no valid "aps-environment" entitlement string`).
+- Confirm the explanatory screen swallows taps — nothing underneath can be
+  toggled — and that the navigation bar / back button still work.
 - Stream the tweak log (`scripts/run-in-sim.sh --logs` on device-equivalent
-  tooling, or Console.app) and confirm a single `[Push] Missing aps-environment
-  entitlement …` line appears when registration is attempted.
-- On a **paid** Apple Developer build (real `aps-environment` entitlement),
-  confirm registration succeeds normally and the placeholder path is never hit
-  (no `[Push] Missing aps-environment …` log line).
-- Force a genuine failure (e.g. airplane mode at registration time) and confirm
-  the original error handling still applies — the placeholder substitution must
-  only trigger for the entitlement error.
+  tooling, or Console.app). Confirm a `No aps-environment entitlement … replacing
+  the Notifications screen` line appears, and — if registration is attempted — a
+  single `Missing aps-environment entitlement … Suppressing the misleading
+  registration error` line (and **no** "contact developer" alert).
+
+## Paid Apple Developer sideload (real `aps-environment` entitlement)
+
+- Open **Settings → Notifications**. Confirm the **stock** notifications screen
+  appears unchanged (no "Notifications Unavailable" overlay) and registration
+  succeeds normally.
+- Confirm the suppression path is never hit (no `Missing aps-environment …` or
+  `replacing the Notifications screen` log lines).
+
+## Genuine failures are unaffected
+
+- Force a real registration failure (e.g. airplane mode at registration time on
+  a paid build) and confirm Apollo's original error handling still applies — the
+  entitlement-error suppression must trigger *only* for the missing-entitlement
+  case, never for transient failures.

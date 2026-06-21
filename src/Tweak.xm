@@ -1200,30 +1200,76 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
 %end
 
 // Sideloaded builds signed without a paid Apple Developer team never receive an
-// `aps-environment` entitlement, so -registerForRemoteNotifications always fails
-// with NSCocoaErrorDomain 3000 ("no valid 'aps-environment' entitlement string
-// found for application"). Apollo surfaces that raw error as an alarming
-// "Error Loading Notifications — contact developer" alert and aborts the whole
-// notifications flow, inbox watchers included.
+// `aps-environment` entitlement, so APNs registration always fails with
+// NSCocoaErrorDomain 3000 ("no valid 'aps-environment' entitlement string found
+// for application"). Apollo surfaces that raw error as an alarming "Error
+// Loading Notifications — contact developer" alert — telling users to contact a
+// developer about something no developer can fix at runtime.
 //
-// This is an expected, signing-time condition — not a runtime bug to report —
-// and the project already supports registration + watcher CRUD on free accounts
-// (push simply never arrives; see the README "Self-hosted notifications" note).
-// So, mirroring the SKReceiptRefreshRequest fake-success hook above, we convert
-// *only* this specific entitlement failure into a deterministic placeholder-token
-// success, letting Apollo's pending APNs continuations resolve and the screen
-// load. Genuine failures (offline, rate limiting, …) fall through to %orig and
-// keep their original error so real problems still surface.
+// Push, watchers, and inbox alerts genuinely can't be delivered without the
+// entitlement, so faking a successful registration would only mislead users
+// into thinking notifications work. Instead we (1) swallow *only* this specific,
+// unfixable error here so the scary alert never appears, and (2) replace the
+// Notifications settings screen with a clear explanation (see the
+// NotificationsViewController hook below). Genuine, transient failures (offline,
+// rate limiting, …) fall through to %orig and keep their original error so real
+// problems still surface.
 %hook _TtC6Apollo11AppDelegate
 - (void)application:(UIApplication *)application didFailToRegisterForRemoteNotificationsWithError:(NSError *)error {
     if (ApolloErrorIsMissingPushEntitlement(error)) {
-        ApolloLog(@"[Push] Missing aps-environment entitlement (free-account sideload) — substituting a placeholder APNs token so notification setup proceeds. Push delivery still requires a paid Apple Developer account.");
-        // `self` is only forward-declared here, so route the success callback
-        // through the UIApplicationDelegate protocol the class conforms to.
-        [(id<UIApplicationDelegate>)self application:application didRegisterForRemoteNotificationsWithDeviceToken:ApolloPlaceholderAPNSDeviceToken()];
+        ApolloLog(@"[Push] Missing aps-environment entitlement (free-account sideload) — push can never be delivered on this build. Suppressing the misleading registration error; the Notifications screen explains why instead.");
         return;
     }
     %orig;
+}
+%end
+
+// On a build that can never receive push (a free-account sideload with no
+// `aps-environment` entitlement), Apollo's Notifications settings are a dead end:
+// every toggle ends in the suppressed registration error above, and nothing the
+// user enables can ever deliver. Showing the working-looking controls would give
+// folks false hope, so we replace the screen's contents with a clear,
+// non-interactive explanation. Builds that *can* receive push (a paid-account
+// sideload, or the App Store binary on a jailbreak) are detected via the
+// entitlement and left completely untouched.
+//
+// `_TtC6Apollo27NotificationsViewController` is only forward-declared here, so
+// the install logic lives in a C helper taking a plain UIViewController*.
+static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *controller) {
+    if (ApolloPushNotificationsSupported()) {
+        return;
+    }
+    // 'APNU' — unique enough to find our overlay again without a second add.
+    static const NSInteger kApolloNotificationsUnavailableTag = 0x41504E55;
+    UIView *root = controller.view;
+    if (!root || [root viewWithTag:kApolloNotificationsUnavailableTag]) {
+        return;
+    }
+    UIView *overlay = ApolloMakeNotificationsUnavailableView();
+    if (!overlay) {
+        return;
+    }
+    overlay.tag = kApolloNotificationsUnavailableTag;
+    overlay.translatesAutoresizingMaskIntoConstraints = NO;
+    [root addSubview:overlay];
+    [root bringSubviewToFront:overlay];
+    [NSLayoutConstraint activateConstraints:@[
+        [overlay.topAnchor constraintEqualToAnchor:root.topAnchor],
+        [overlay.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
+        [overlay.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
+        [overlay.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
+    ]];
+    ApolloLog(@"[Push] No aps-environment entitlement on this signing — replacing the Notifications screen with the 'unavailable' explanation.");
+}
+
+%hook _TtC6Apollo27NotificationsViewController
+- (void)viewDidLoad {
+    %orig;
+    ApolloInstallNotificationsUnavailableOverlay((UIViewController *)self);
+}
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    ApolloInstallNotificationsUnavailableOverlay((UIViewController *)self);
 }
 %end
 

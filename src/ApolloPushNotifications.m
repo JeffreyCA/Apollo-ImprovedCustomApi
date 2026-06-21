@@ -1,5 +1,4 @@
 #import "ApolloPushNotifications.h"
-#import <CommonCrypto/CommonDigest.h>
 
 // `aps-environment` registration failures come back as NSCocoaErrorDomain 3000.
 // Kept as named constants so the intent is obvious and the defensive fallback
@@ -37,36 +36,116 @@ BOOL ApolloErrorIsMissingPushEntitlement(NSError *error) {
     return NO;
 }
 
-NSData *ApolloPlaceholderAPNSDeviceTokenForSeed(NSString *seed) {
-    NSString *normalized = ([seed isKindOfClass:[NSString class]] && seed.length > 0)
-        ? seed
-        : @"apollo-reborn-placeholder-apns-seed";
-    NSData *seedData = [normalized dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
-
-    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256(seedData.bytes, (CC_LONG)seedData.length, digest);
-    return [NSData dataWithBytes:digest length:CC_SHA256_DIGEST_LENGTH];
-}
-
 #ifndef APOLLO_PUSH_NOTIFICATIONS_TESTING
 
 #import <UIKit/UIKit.h>
+#import <Security/Security.h>
 
-// Persisted only when identifierForVendor is unavailable (e.g. before first
-// device unlock), so the stand-in token stays stable across launches.
-static NSString *const kApolloPlaceholderAPNSSeedDefaultsKey = @"ApolloPlaceholderAPNSDeviceSeed";
+// SecTaskCopyValueForEntitlement / SecTaskCreateFromSelf read the *current*
+// process's code-signing entitlements. They ship in Security.framework but
+// aren't in the public SDK headers, so declare the two symbols we need.
+typedef struct __SecTask *ApolloSecTaskRef;
+extern ApolloSecTaskRef SecTaskCreateFromSelf(CFAllocatorRef allocator);
+extern CFTypeRef SecTaskCopyValueForEntitlement(ApolloSecTaskRef task,
+                                                CFStringRef entitlement,
+                                                CFErrorRef *error);
 
-NSData *ApolloPlaceholderAPNSDeviceToken(void) {
-    NSString *seed = [UIDevice currentDevice].identifierForVendor.UUIDString;
-    if (seed.length == 0) {
-        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-        seed = [defaults stringForKey:kApolloPlaceholderAPNSSeedDefaultsKey];
-        if (seed.length == 0) {
-            seed = [[NSUUID UUID] UUIDString];
-            [defaults setObject:seed forKey:kApolloPlaceholderAPNSSeedDefaultsKey];
+BOOL ApolloPushNotificationsSupported(void) {
+    // The answer is fixed at signing time, so compute it once.
+    static BOOL supported = YES;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        ApolloSecTaskRef task = SecTaskCreateFromSelf(NULL);
+        if (!task) {
+            // Couldn't introspect entitlements — stay conservative and leave the
+            // stock notifications screen untouched.
+            return;
         }
+        CFTypeRef value = SecTaskCopyValueForEntitlement(task, CFSTR("aps-environment"), NULL);
+        // Any non-null `aps-environment` value ("development" / "production")
+        // means Apple granted the push entitlement and registration can succeed.
+        supported = (value != NULL);
+        if (value) {
+            CFRelease(value);
+        }
+        CFRelease(task);
+    });
+    return supported;
+}
+
+// MARK: - "Notifications unavailable" screen
+
+static UILabel *ApolloUnavailableLabel(NSString *text, UIFont *font, UIColor *color) {
+    UILabel *label = [[UILabel alloc] init];
+    label.text = text;
+    label.font = font;
+    label.textColor = color;
+    label.numberOfLines = 0;
+    label.textAlignment = NSTextAlignmentCenter;
+    label.adjustsFontForContentSizeCategory = YES;
+    return label;
+}
+
+UIView *ApolloMakeNotificationsUnavailableView(void) {
+    UIView *container = [[UIView alloc] initWithFrame:CGRectZero];
+    // Opaque so it fully hides the stock controls, and interactive so it
+    // swallows every touch meant for the disabled page underneath.
+    container.backgroundColor = [UIColor systemBackgroundColor];
+    container.userInteractionEnabled = YES;
+
+    UIImageSymbolConfiguration *iconConfig =
+        [UIImageSymbolConfiguration configurationWithPointSize:52.0 weight:UIImageSymbolWeightRegular];
+    UIImageView *icon = [[UIImageView alloc] initWithImage:
+        [UIImage systemImageNamed:@"bell.slash" withConfiguration:iconConfig]];
+    icon.tintColor = [UIColor secondaryLabelColor];
+    icon.contentMode = UIViewContentModeScaleAspectFit;
+
+    UILabel *title = ApolloUnavailableLabel(
+        @"Notifications Unavailable",
+        [UIFont preferredFontForTextStyle:UIFontTextStyleTitle2],
+        [UIColor labelColor]);
+    // Bold the title while keeping Dynamic Type scaling.
+    UIFontDescriptor *boldDescriptor =
+        [title.font.fontDescriptor fontDescriptorWithSymbolicTraits:UIFontDescriptorTraitBold];
+    if (boldDescriptor) {
+        title.font = [UIFont fontWithDescriptor:boldDescriptor size:0.0];
     }
-    return ApolloPlaceholderAPNSDeviceTokenForSeed(seed);
+
+    UILabel *body = ApolloUnavailableLabel(
+        @"This copy of Apollo was signed with a free Apple ID, which Apple doesn't grant the push notification entitlement. Push alerts, watchers, and inbox notifications can't be delivered to this build.",
+        [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline],
+        [UIColor secondaryLabelColor]);
+
+    UILabel *footnote = ApolloUnavailableLabel(
+        @"To use notifications, install a build signed with a paid Apple Developer account. Everything else in Apollo keeps working as normal.",
+        [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote],
+        [UIColor secondaryLabelColor]);
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[icon, title, body, footnote]];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.alignment = UIStackViewAlignmentCenter;
+    stack.spacing = 12.0;
+    [stack setCustomSpacing:20.0 afterView:icon];
+    [stack setCustomSpacing:18.0 afterView:body];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [container addSubview:stack];
+
+    UILayoutGuide *safe = container.safeAreaLayoutGuide;
+    NSLayoutConstraint *width = [stack.widthAnchor constraintLessThanOrEqualToConstant:360.0];
+    NSLayoutConstraint *centerY = [stack.centerYAnchor constraintEqualToAnchor:safe.centerYAnchor];
+    // Keep the block from floating too low when the safe area is tall.
+    centerY.priority = UILayoutPriorityDefaultHigh;
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+        centerY,
+        width,
+        [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe.leadingAnchor constant:32.0],
+        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor constant:-32.0],
+        [stack.topAnchor constraintGreaterThanOrEqualToAnchor:safe.topAnchor constant:24.0],
+        [stack.bottomAnchor constraintLessThanOrEqualToAnchor:safe.bottomAnchor constant:-24.0],
+    ]];
+
+    return container;
 }
 
 #endif

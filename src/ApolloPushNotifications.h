@@ -1,22 +1,39 @@
 #import <Foundation/Foundation.h>
 
+@class UIView;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// MARK: - Sideload push-registration support
+// MARK: - Sideload push-notification support
 //
-// Apollo registers for remote notifications (watchers, inbox push) the moment a
-// user enables notifications. On a build sideloaded without a paid Apple
-// Developer team there is no `aps-environment` entitlement, so iOS answers
+// APNs delivery requires the `aps-environment` entitlement, which Apple only
+// grants to a paid Apple Developer team and bakes in at signing time. A build
+// sideloaded with a free Apple ID never carries it, so push notifications,
+// watchers, and inbox alerts can never be delivered to that build — no runtime
+// trick can change that.
+//
+// When the user opens Apollo's Notifications settings, Apollo registers for
+// remote notifications; on a free-account sideload iOS answers
 // -application:didFailToRegisterForRemoteNotificationsWithError: with the
 // permanent NSCocoaErrorDomain 3000 ("no valid 'aps-environment' entitlement
-// string found for application"). Apollo then resurfaces that raw error as an
-// alarming "Error Loading Notifications — contact developer" alert.
+// string found for application"), which Apollo resurfaces as an alarming
+// "Error Loading Notifications — contact developer" alert.
 //
-// The helpers below let the tweak recognize that one expected, unfixable
-// condition and substitute a stable stand-in token so registration proceeds,
-// mirroring the existing SKReceiptRefreshRequest sideload fix.
+// Rather than fake a working registration (which would mislead users into
+// thinking push could work), the tweak detects this signing-time limitation up
+// front, replaces the Notifications screen with a clear explanation, and
+// suppresses the misleading error. The helpers below back that behavior.
+
+// YES when the running build carries an `aps-environment` entitlement, i.e. push
+// registration can actually succeed (an App Store build, or a sideload signed
+// with a paid Apple Developer account). NO on a free-account sideload, where
+// push can never be delivered. Determined from the process's own code-signing
+// entitlements, so it is accurate before any registration is attempted. When the
+// entitlement state can't be read it conservatively returns YES, leaving the
+// stock behavior untouched.
+BOOL ApolloPushNotificationsSupported(void);
 
 // YES only when `error` is the missing-`aps-environment`-entitlement failure
 // described above. This is a signing-time condition that can never be resolved
@@ -25,21 +42,13 @@ extern "C" {
 // still surface to the user. Safe to call with nil.
 BOOL ApolloErrorIsMissingPushEntitlement(NSError *error);
 
-// A deterministic, fixed-length (32-byte) stand-in APNs device token derived
-// from `seed` via SHA-256. Pure and side-effect free: the same seed always maps
-// to the same bytes and distinct seeds (practically) never collide. 32 bytes so
-// Apollo hex-encodes it to a 64-character token, matching the real legacy APNs
-// token length. A nil/empty seed falls back to a fixed constant so the result
-// is always well-defined. Push delivery never actually happens on a free
-// account — this only unblocks Apollo's local registration + watcher CRUD.
-NSData *ApolloPlaceholderAPNSDeviceTokenForSeed(NSString *seed);
-
-// Convenience wrapper: resolves a stable per-install seed (the vendor
-// identifier, with a once-generated persisted UUID fallback for the rare case
-// where identifierForVendor is unavailable) and returns
-// ApolloPlaceholderAPNSDeviceTokenForSeed() of it. Stable across launches so a
-// configured self-hosted backend sees a single, consistent device.
-NSData *ApolloPlaceholderAPNSDeviceToken(void);
+// Builds the opaque, non-interactive informational view shown in place of
+// Apollo's Notifications settings on a build that can never receive push (a
+// free-account sideload, no `aps-environment` entitlement). It explains why
+// notifications are unavailable and swallows touches so the disabled controls
+// underneath can't be tapped. Pinning it into the view hierarchy is the
+// caller's responsibility.
+UIView *ApolloMakeNotificationsUnavailableView(void);
 
 #ifdef __cplusplus
 }
