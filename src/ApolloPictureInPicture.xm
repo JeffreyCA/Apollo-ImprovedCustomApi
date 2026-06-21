@@ -2583,13 +2583,25 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
     ApolloPiPController *controller = sPiPSharedController;
     if (!controller || !feedVC) return;
 
+    // An active card is comments-born and floats above forward navigation and tab
+    // switches BY DESIGN (a passthrough window over whatever is shown). Only a
+    // back-pop "returns to the feed" the video lives in, where the card must hand
+    // back to its inline home or dismiss. viewDidAppear fires for both directions,
+    // so distinguish them by THIS VC's own state: isMovingToParent is YES only
+    // when the VC is being PUSHED (forward nav, e.g. tapping a subreddit/user link
+    // in comments), and NO when it re-appears because a child was popped off it
+    // (the back-pop we want). Checking the appearing VC's own flag avoids the
+    // cross-VC timing race an interactive swipe-pop has with sIsNavigatingBack
+    // (CommentsVC.viewDidDisappear can clear that flag before this fires).
+    if (controller.active && [feedVC isMovingToParentViewController]) return;
+
     // A non-shareable (compact-mode) card's video is never reclaimed into a feed
-    // cell — the compact feed shows a thumbnail, not the shared player — so on
-    // return to the feed there is no inline home to restore into and the card
-    // would otherwise float forever. Dismiss it. Shareable (large-thumbnail)
-    // cards fall through to the restore walk below, untouched.
+    // cell — the compact feed shows a thumbnail, not the shared player — so on a
+    // back-pop there is no inline home to restore into; dismiss it (it would
+    // otherwise float forever). Shareable (large-thumbnail) cards fall through to
+    // the restore walk below.
     if (controller.active && controller.ownedNonShareable) {
-        ApolloLog(@"[PiP] Returned to feed with a non-shareable (compact) card — dismissing");
+        ApolloLog(@"[PiP] Back-pop to feed with a non-shareable (compact) card — dismissing");
         [controller closeTapped];
         return;
     }
@@ -2604,8 +2616,8 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
             break;
         }
     }
-    if (!tableView) return;
-
+    // tableView may be nil (feed not laid out the usual way) — the loop simply
+    // doesn't run, and we fall through to the dismiss below.
     for (UITableViewCell *cell in tableView.visibleCells) {
         SEL nodeSel = NSSelectorFromString(@"node");
         if (![cell respondsToSelector:nodeSel]) continue;
@@ -2627,6 +2639,18 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
             [controller restoreInline];
             return;
         }
+    }
+
+    // Back-popped, still presenting after the restore walk: our video's feed cell
+    // isn't on screen — scrolled below the autoplay threshold, or off-screen
+    // entirely — so there is no visible inline home to hand back to. Without this a
+    // shareable (large-thumbnail) card floats over the feed until the user happens
+    // to scroll the cell into view. Dismiss it instead; the shared player returns
+    // to its feed-cell paused/muted state and re-autoplays when the cell scrolls
+    // back on screen, matching normal feed behavior.
+    if (controller.active) {
+        ApolloLog(@"[PiP] Back-pop to feed, our video's cell not on screen — dismissing card");
+        [controller closeTapped];
     }
 }
 
