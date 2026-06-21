@@ -12,7 +12,7 @@ static NSString *ARExtractParam(NSString *urlString, NSString *name);
 
 @interface ApolloManualSignInViewController ()
 @property (nonatomic, copy) NSURL *authURL;
-@property (nonatomic, copy) NSString *callbackScheme;
+@property (nonatomic, copy) NSString *redirectURI;
 @property (nonatomic, copy) void (^onComplete)(NSURL *callbackURL);
 @property (nonatomic, strong) UITextView *codeTextView;
 @property (nonatomic, strong) UIScrollView *scrollView;
@@ -21,12 +21,12 @@ static NSString *ARExtractParam(NSString *urlString, NSString *name);
 @implementation ApolloManualSignInViewController
 
 - (instancetype)initWithAuthURL:(NSURL *)authURL
-                 callbackScheme:(NSString *)scheme
+                    redirectURI:(NSString *)redirectURI
                      onComplete:(void (^)(NSURL *callbackURL))onComplete {
     self = [super init];
     if (self) {
         _authURL = [authURL copy];
-        _callbackScheme = [scheme copy];
+        _redirectURI = [redirectURI copy];
         _onComplete = [onComplete copy];
     }
     return self;
@@ -227,7 +227,7 @@ static NSString *ARExtractParam(NSString *urlString, NSString *name);
         }
     }
     if (redirectURI.length == 0) {
-        redirectURI = [NSString stringWithFormat:@"%@://", self.callbackScheme ?: @"apollo"];
+        redirectURI = self.redirectURI ?: @"apollo://";
     }
 
     NSURLComponents *cb = [NSURLComponents componentsWithString:redirectURI];

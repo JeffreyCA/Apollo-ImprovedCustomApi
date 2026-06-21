@@ -362,18 +362,22 @@ static const char kARCompletion = '\0';
         return %orig;
     }
 
-    // Prefer the scheme from redirect_uri in the auth URL (set by our
-    // RDKOAuthCredential hook); fall back to callbackURLScheme if not found.
-    NSString *interceptScheme = callbackScheme;
+    // Prefer the full redirect_uri from the auth URL (set by our RDKOAuthCredential
+    // hook) so we can match the *entire* callback URL — scheme, host, and path —
+    // rather than just the scheme. This is required for http/https redirect URIs
+    // (Reddit "Web app" API clients), where every Reddit page navigation shares the
+    // same scheme and scheme-only matching would fire on the wrong navigation.
+    // Falls back to callbackURLScheme (as a bare "scheme://") if redirect_uri is
+    // missing from the auth URL for some reason.
+    NSString *interceptRedirectURI = callbackScheme.length ? [callbackScheme stringByAppendingString:@"://"] : nil;
     for (NSURLQueryItem *item in [NSURLComponents componentsWithURL:authURL resolvingAgainstBaseURL:NO].queryItems) {
         if ([item.name isEqualToString:@"redirect_uri"]) {
-            NSString *s = [NSURL URLWithString:item.value].scheme;
-            if (s.length) interceptScheme = s;
+            if (item.value.length) interceptRedirectURI = item.value;
             break;
         }
     }
 
-    ApolloLog(@"[WebAuth] using WKWebView, intercepting scheme=%@", interceptScheme);
+    ApolloLog(@"[WebAuth] using WKWebView, intercepting redirectURI=%@", interceptRedirectURI);
 
     // Use Apollo's own presentationContextProvider — it's set before start is called
     // and returns the correct window. start is already on the main queue.
@@ -393,7 +397,7 @@ static const char kARCompletion = '\0';
     ApolloLog(@"[WebAuth] presenting from window=%@", window);
 
     ApolloWebAuthViewController *authVC = [[ApolloWebAuthViewController alloc]
-        initWithURL:authURL callbackScheme:interceptScheme completionHandler:completion];
+        initWithURL:authURL redirectURI:interceptRedirectURI completionHandler:completion];
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:authVC];
     nav.modalPresentationStyle = UIModalPresentationFormSheet;
 

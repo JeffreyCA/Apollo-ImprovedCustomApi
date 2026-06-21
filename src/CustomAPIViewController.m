@@ -171,7 +171,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (NSString *)apollo_redirectURIDetailText {
     if ([self apollo_usesCustomOAuthSignIn]) {
-        return @"Must match the redirect URI registered with your Reddit API app. Any URI scheme is supported.";
+        return @"Must match the redirect URI registered with your Reddit API app. Any URI scheme is supported, including http/https (required for \"Web app\" Reddit API clients).";
     }
 
     NSString *registered = [[self registeredURLSchemes] componentsJoinedByString:@", "];
@@ -951,7 +951,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         case 6:
             return [self switchCellWithIdentifier:@"Cell_API_CustomOAuth"
                                             label:@"Universal OAuth Sign-In"
-                                           detail:@"Signs in with an in-app web view so any Redirect URI works. Turn off for Apollo's native sign-in."
+                                           detail:@"Signs in with an in-app web view so any Redirect URI works, including http/https (\"Web app\" Reddit API clients). Turn off for Apollo's native sign-in."
                                                on:[self apollo_usesCustomOAuthSignIn]
                                            action:@selector(customOAuthSignInSwitchToggled:)];
         case 7:
