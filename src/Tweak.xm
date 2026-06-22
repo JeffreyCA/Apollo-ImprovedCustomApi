@@ -23,6 +23,7 @@
 #import "ApolloWebAuthViewController.h"
 #import "ApolloWebJSON.h"
 #import "ApolloWebSessionLoginViewController.h"
+#import "ApolloAccountCredentials.h"
 
 // MARK: - Sideload Fixes
 
@@ -313,16 +314,54 @@ static NSArray *const blockedUrls = @[
 
 // Cache storing subreddit list source URLs -> response body
 static NSCache<NSString *, NSString *> *subredditListCache;
-// Replace Reddit API client ID
+// Replace Reddit API client ID. Resolved per-account (see
+// ApolloAccountCredentials.{h,m}): a pending add-account choice, else the
+// active account's stored override, else the global default — instead of
+// unconditionally forcing the single global client id/redirect URI onto every
+// account, which broke a second account's login/refresh under a different key.
 %hook RDKOAuthCredential
 
 - (NSString *)clientIdentifier {
-    return sRedditClientId;
+    return ApolloEffectiveRedditClientId();
 }
 
 - (NSURL *)redirectURI {
-    NSString *customURI = [sRedirectURI length] > 0 ? sRedirectURI : defaultRedirectURI;
-    return [NSURL URLWithString:customURI];
+    return [NSURL URLWithString:ApolloEffectiveRedirectURI()];
+}
+
+%end
+
+// RDKClient always authenticates Reddit's token endpoint (api/v1/access_token —
+// used for both the authorization_code exchange and refresh_token grants) via HTTP
+// Basic Auth with an empty password (-[RDKClient setAuthorizationCredential:],
+// -[RDKClient refreshAccessTokenWithCompletion:completion:], and
+// -[RDKClient retrieveAccessTokenForApplicationOnlyWithCompletion:] all call
+// setAuthorizationHeaderFieldWithUsername:password:@"" directly on the request
+// serializer). That's correct for Reddit "installed app"/public OAuth clients, but
+// "Web app" (confidential) clients require the real client_secret as the password —
+// Reddit 401s every token request otherwise. Hooking at this single low-level call
+// site (rather than each RDKClient method) catches all of them uniformly and leaves
+// the separate "bearer <token>" Authorization header (used for every other Reddit
+// API call once signed in) completely untouched, since that's set via
+// setValue:forHTTPHeaderField: instead.
+//
+// The secret is resolved by reverse-lookup on the client_id presented as
+// `username` (ApolloSecretForClientId — checks every stored per-account entry,
+// then the global default), NOT by "whichever account is active right now".
+// This matters because token *refresh* for a backgrounded/non-active account's
+// session can still land here, and it must authenticate with THAT account's
+// secret, not the foregrounded account's.
+%hook AFHTTPRequestSerializer
+
+- (void)setAuthorizationHeaderFieldWithUsername:(NSString *)username password:(NSString *)password {
+    if (password.length == 0) {
+        NSString *secret = ApolloSecretForClientId(username);
+        if (secret.length > 0) {
+            %orig(username, secret);
+            return;
+        }
+    }
+    %orig;
 }
 
 %end

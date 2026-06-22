@@ -8,6 +8,11 @@ static NSString *const UDKeyImgurClientId = @"ImgurApiClientId";
 static NSString *const UDKeyGiphyAPIKey = @"GiphyAPIKey";
 static NSString *const UDKeyImageChestAPIToken = @"ImageChestAPIToken";
 static NSString *const UDKeyRedirectURI = @"RedirectURI";
+// Per-account Reddit OAuth credential overrides (see ApolloAccountCredentials.{h,m}).
+// Flat dictionary: lowercased username -> {clientId, clientSecret, redirectURI}.
+// An account with no entry here falls back to the global client id/secret/redirect
+// URI above.
+static NSString *const UDKeyPerAccountCredentials = @"PerAccountAPICredentials";
 static NSString *const UDKeyUseCustomOAuthSignIn = @"UseCustomOAuthSignIn";
 static NSString *const UDKeyUserAgent = @"UserAgent";
 static NSString *const UDKeyBlockAnnouncements = @"DisableApollonouncements";

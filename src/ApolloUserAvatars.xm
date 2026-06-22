@@ -9,6 +9,7 @@
 #import "ApolloSubredditInfoCache.h"
 #import "ApolloBannedProfile.h"
 #import "ApolloProfileSocialLinks.h"
+#import "ApolloAccountCredentials.h"
 
 static NSString *const ApolloUserAvatarsToggleChangedNotification = @"ApolloUserAvatarsToggleChangedNotification";
 static NSString *const ApolloProfileTabAvatarIconChangedNotification = @"ApolloProfileTabAvatarIconChangedNotification";
@@ -2523,15 +2524,38 @@ static void ApolloAvatarApplySubredditIconToSharePreview(id postInfo, NSString *
 
 %end
 
+// The first time an account's username appears with no per-account credential
+// override yet (a brand new sign-in, or an existing account's first launch
+// under a build with this feature), pin it to whatever Reddit API client is
+// the CURRENT default. That "session was issued under this key" snapshot is
+// exactly what makes per-account credentials useful: if the user later
+// changes the global default key (e.g. to onboard a different account), this
+// account's refresh keeps using the key it actually has a valid
+// refresh_token for — Reddit binds refresh tokens to the issuing client_id,
+// so naively following a changed global default 400s with invalid_grant
+// (see the AFHTTPRequestSerializer hook in Tweak.xm for the other half of
+// this fix). Never overwrites an existing override — only fills the gap once.
+static void ApolloPinAccountToCurrentDefaultCredentialsIfNeeded(id currentUser) {
+    NSString *username = nil;
+    @try { username = [currentUser valueForKey:@"username"]; }
+    @catch (__unused NSException *e) { return; }
+    if (![username isKindOfClass:[NSString class]] || username.length == 0) return;
+    if (ApolloAccountCredentialsFor(username) != nil) return;
+
+    ApolloAccountCredentialsSet(username, sRedditClientId, sRedditClientSecret, sRedirectURI);
+}
+
 %hook RDKClient
 
 - (void)setCurrentUser:(id)currentUser {
     %orig(currentUser);
+    ApolloPinAccountToCurrentDefaultCredentialsIfNeeded(currentUser);
     ApolloProfileScheduleAccountChangeTabAvatarRefresh(@"RDKClient currentUser");
 }
 
 - (void)updateCurrentUserWithNewUser:(id)newUser {
     %orig(newUser);
+    ApolloPinAccountToCurrentDefaultCredentialsIfNeeded(newUser);
     ApolloProfileScheduleAccountChangeTabAvatarRefresh(@"RDKClient user update");
 }
 

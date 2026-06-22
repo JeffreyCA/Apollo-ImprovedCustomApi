@@ -899,29 +899,36 @@ typedef NS_ENUM(NSInteger, Tag) {
     // rows below it slide up one slot, so map back to the canonical index.
     NSInteger effectiveRow = ApolloAPIKeyCanonicalRow(row);
     switch (effectiveRow) {
+        // The Reddit API Key/Secret/Redirect URI fields below are the DEFAULT
+        // credentials, used by any account that has no per-account override.
+        // Per-account overrides (a different account using a different Reddit
+        // API client) are set from the account switcher's per-account editor
+        // (ApolloAccountSwitcherViewController), not here — see
+        // ApolloAccountCredentials.{h,m} for the resolution precedence.
+        // Stacked (label above, full-width field below) rather than the
+        // inline label-left/field-right layout — "Reddit API Key (Default)"
+        // and "Reddit API Secret (Default)" are long enough to crowd the
+        // field at the inline layout's fixed 0.55 width.
         case 0:
-            cell = [self textFieldCellWithIdentifier:@"Cell_API_Reddit"
-                                               label:@"Reddit API Key"
-                                         placeholder:@"Reddit API Key"
-                                                text:sRedditClientId
-                                                 tag:TagRedditClientId
-                                           numerical:NO];
+            cell = [self stackedTextFieldCellWithIdentifier:@"Cell_API_Reddit"
+                                                       label:@"Reddit API Key"
+                                                 placeholder:@"Reddit API Key"
+                                                        text:sRedditClientId
+                                                         tag:TagRedditClientId];
             break;
         case 1:
-            cell = [self textFieldCellWithIdentifier:@"Cell_API_RedditSecret"
-                                               label:@"Reddit API Secret"
-                                         placeholder:@"(usually empty)"
-                                                text:sRedditClientSecret
-                                                 tag:TagRedditClientSecret
-                                           numerical:NO];
+            cell = [self stackedTextFieldCellWithIdentifier:@"Cell_API_RedditSecret"
+                                                       label:@"Reddit API Secret"
+                                                 placeholder:@"Required for \"Web app\" clients; empty otherwise"
+                                                        text:sRedditClientSecret
+                                                         tag:TagRedditClientSecret];
             break;
         case 2:
-            cell = [self textFieldCellWithIdentifier:@"Cell_API_Imgur"
-                                               label:@"Imgur API Key"
-                                         placeholder:@"Imgur API Key"
-                                                text:sImgurClientId
-                                                 tag:TagImgurClientId
-                                           numerical:NO];
+            cell = [self stackedTextFieldCellWithIdentifier:@"Cell_API_Imgur"
+                                                       label:@"Imgur API Key"
+                                                 placeholder:@"Imgur API Key"
+                                                        text:sImgurClientId
+                                                         tag:TagImgurClientId];
             break;
         case 3:
             cell = [self stackedTextFieldCellWithIdentifier:@"Cell_API_ImageChest"
@@ -1549,7 +1556,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             attributes:plainAttrs];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"more info"
             attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [self apollo_themeAccentColor], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/Apollo-Reborn/Apollo-Reborn?tab=readme-ov-file#dont-have-an-api-key"]}]];
-        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@")."
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"). The Reddit API Key/Secret/Redirect URI above are the default, used by any signed-in account that doesn't have its own key — set a different key per account from the account switcher."
             attributes:plainAttrs]];
     } else if (section == SectionSubreddits) {
         text = [[NSMutableAttributedString alloc]
