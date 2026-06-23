@@ -2239,6 +2239,7 @@ restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:(void (^)(BOOL)
                 AVPlayer *inlinePlayer = weakInline;
                 if (!strongSelf || !inlinePlayer) return;
                 if (strongSelf.inlineNativePiP.pictureInPictureActive) return; // PiP took over — fine
+                if ([UIApplication sharedApplication].applicationState != UIApplicationStateBackground) return; // user already returned — don't pause a foreground video
                 if (inlinePlayer.rate == 0) return;
                 ApolloLog(@"[PiP] Inline System PiP never started on background — pausing to avoid background audio");
                 strongSelf.backgroundPausedInlinePlayer = inlinePlayer;
@@ -2269,8 +2270,29 @@ restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:(void (^)(BOOL)
         nativeMayTakeOver = sPiPNativeEnabled && self.nativePiP != nil;
     }
     if (nativeMayTakeOver) {
-        // Native PiP may be auto-starting right now — never pause here
-        // (WWDC19 503 guidance).
+        // Don't pause synchronously — System PiP may be auto-starting (WWDC19
+        // 503). But iOS can decline auto-start ("Start PiP Automatically" off,
+        // low power), and then nothing stops the card's player — an unmuted card
+        // keeps playing audibly in the background with no PiP window. Failsafe
+        // (mirrors the inline path): pause shortly after if PiP never started.
+        if (@available(iOS 15.0, *)) {
+            __weak __typeof(self) weakSelf = self;
+            __weak AVPlayer *weakCardPlayer = self.player;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                __typeof(self) strongSelf = weakSelf;
+                AVPlayer *cardPlayer = weakCardPlayer;
+                if (!strongSelf || !cardPlayer) return;
+                // Card gone or took over a different player — nothing to pause.
+                if (!strongSelf.active || strongSelf.player != cardPlayer) return;
+                if ([UIApplication sharedApplication].applicationState != UIApplicationStateBackground) return;
+                if (strongSelf.nativePiP.pictureInPictureActive) return; // PiP took over — fine
+                if (cardPlayer.rate == 0) return; // already paused
+                ApolloLog(@"[PiP] Card System PiP never started on background — pausing to avoid background audio");
+                strongSelf.resumeOnForeground = YES;
+                [cardPlayer pause];
+            });
+        }
         return;
     }
     if (self.player.rate != 0) {
@@ -2583,16 +2605,13 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
     ApolloPiPController *controller = sPiPSharedController;
     if (!controller || !feedVC) return;
 
-    // An active card is comments-born and floats above forward navigation and tab
-    // switches BY DESIGN (a passthrough window over whatever is shown). Only a
-    // back-pop "returns to the feed" the video lives in, where the card must hand
-    // back to its inline home or dismiss. viewDidAppear fires for both directions,
-    // so distinguish them by THIS VC's own state: isMovingToParent is YES only
-    // when the VC is being PUSHED (forward nav, e.g. tapping a subreddit/user link
-    // in comments), and NO when it re-appears because a child was popped off it
-    // (the back-pop we want). Checking the appearing VC's own flag avoids the
-    // cross-VC timing race an interactive swipe-pop has with sIsNavigatingBack
-    // (CommentsVC.viewDidDisappear can clear that flag before this fires).
+    // An active card floats above forward navigation by design; only a back-pop
+    // "returns to the feed" the video lives in, where the card hands back inline
+    // or dismisses. Distinguish via THIS VC's own state: isMovingToParent is YES
+    // only when it's being pushed (forward nav, e.g. a subreddit/user link in
+    // comments), NO when revealed by a child pop (the back-pop we want). Using the
+    // appearing VC's own flag avoids the cross-VC race an interactive swipe-pop has
+    // with sIsNavigatingBack (CommentsVC.viewDidDisappear can clear it first).
     if (controller.active && [feedVC isMovingToParentViewController]) return;
 
     // A non-shareable (compact-mode) card's video is never reclaimed into a feed
