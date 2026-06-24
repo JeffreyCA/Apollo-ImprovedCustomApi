@@ -2589,10 +2589,30 @@ static BOOL PiPHandleFeedVisibilityEvent(id cellNode) {
 
     if (PiPIsVideoMidpointVisible(videoNode, cellNode)) {
         // The video's feed cell is on screen — never double-display; hand back.
+        // EXCEPT mid back-swipe: the feed slides in behind comments and fires this
+        // before the pop commits, so restoring here tears the card down early (and
+        // even if the gesture is cancelled). Defer to PiPHandleFeedViewControllerAppeared
+        // (viewDidAppear), which runs only on a committed pop; keep the card and
+        // suppress the feed's pause meanwhile.
+        if (ApolloVideoUnmute_IsNavigatingBack()) return YES;
         [controller restoreInline];
         return NO; // %orig's [player play] is harmless
     }
     return YES; // suppress the feed handler's pause of our player
+}
+
+// Find the feed's UITableView. ASTableViewController feeds nest it as a direct
+// subview; ASDKViewController<ASTableNode> feeds (search/lite) ARE the table; the
+// friends feed buries an ASTableNode a couple levels down. Depth-limited DFS
+// covers all three without matching unrelated deep tables.
+static UITableView *PiPFindFeedTableView(UIView *view, int depth) {
+    if (!view || depth < 0) return nil;
+    if ([view isKindOfClass:[UITableView class]]) return (UITableView *)view;
+    for (UIView *subview in view.subviews) {
+        UITableView *found = PiPFindFeedTableView(subview, depth - 1);
+        if (found) return found;
+    }
+    return nil;
 }
 
 // After a back-pop the feed doesn't scroll, so no visibility events fire even
@@ -2627,14 +2647,7 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
 
     if (!controller.active && !sPiPNativeEnabled) return; // nothing to manage
 
-    UIView *rootView = feedVC.view;
-    UITableView *tableView = nil;
-    for (UIView *subview in rootView.subviews) {
-        if ([subview isKindOfClass:[UITableView class]]) {
-            tableView = (UITableView *)subview;
-            break;
-        }
-    }
+    UITableView *tableView = PiPFindFeedTableView(feedVC.view, 4);
     // tableView may be nil (feed not laid out the usual way) — the loop simply
     // doesn't run, and we fall through to the dismiss below.
     for (UITableViewCell *cell in tableView.visibleCells) {
@@ -2821,7 +2834,11 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
 // ---------------------------------------------------------------------------
 // Feed view controllers: restore PiP into a visible feed cell right after a
 // back-pop (no scroll events fire on pop, so the visibility hook alone would
-// leave the video double-displayed until the user scrolls).
+// leave the video double-displayed until the user scrolls). MUST cover every
+// feed that hosts LargePostCellNode — the cell's visibility hook defers its
+// restore here during a back-swipe, so a feed without this hook would strand the
+// card: the main/subreddit feed, saved/profile feeds, the search-results and
+// lite/peek feeds, and the friends feed.
 // ---------------------------------------------------------------------------
 %hook PostsViewController
 
@@ -2850,6 +2867,33 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
 
 %end
 
+%hook PostsSearchResultsViewController
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    PiPHandleFeedViewControllerAppeared((UIViewController *)self);
+}
+
+%end
+
+%hook LitePostsViewController
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    PiPHandleFeedViewControllerAppeared((UIViewController *)self);
+}
+
+%end
+
+%hook FriendsViewController
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    PiPHandleFeedViewControllerAppeared((UIViewController *)self);
+}
+
+%end
+
 // =============================================================================
 // MARK: - Constructor
 // =============================================================================
@@ -2862,6 +2906,10 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
     Class postsVCClass = objc_getClass("_TtC6Apollo19PostsViewController");
     Class savedPostsVCClass = objc_getClass("_TtC6Apollo32SavedPostsCommentsViewController");
     Class profileVCClass = objc_getClass("_TtC6Apollo21ProfileViewController");
+    // Also LargePostCellNode-hosting feeds — see the feed VC hook comment above.
+    Class searchResultsVCClass = objc_getClass("_TtC6Apollo32PostsSearchResultsViewController");
+    Class litePostsVCClass = objc_getClass("_TtC6Apollo23LitePostsViewController");
+    Class friendsVCClass = objc_getClass("_TtC6Apollo21FriendsViewController");
     Class asVideoNodeClass = objc_getClass("ASVideoNode"); // loop kill-switch
 
     ApolloLog(@"[PiP] ctor: TouchHintVideoNode=%p RichMediaNode=%p LargePostCellNode=%p MediaViewerController=%p PostsVC=%p SavedPostsVC=%p ProfileVC=%p ASVideoNode=%p",
@@ -2884,6 +2932,9 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
         PostsViewController = postsVCClass,
         SavedPostsCommentsViewController = savedPostsVCClass ?: postsVCClass,
         ProfileViewController = profileVCClass ?: postsVCClass,
+        PostsSearchResultsViewController = searchResultsVCClass ?: postsVCClass,
+        LitePostsViewController = litePostsVCClass ?: postsVCClass,
+        FriendsViewController = friendsVCClass ?: postsVCClass,
         ASVideoNode = asVideoNodeClass
     );
 
