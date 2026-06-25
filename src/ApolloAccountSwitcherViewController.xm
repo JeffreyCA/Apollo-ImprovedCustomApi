@@ -376,7 +376,7 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     return section == 0
-        ? @"Each account can use its own Reddit API key, or sign in without one via a web session. Tap an account to switch to it, or tap the key icon to manage its sign-in."
+        ? @"Each account can use its own Reddit API key, or sign in without one via a web session. Tap an account to switch to it, or tap the ellipsis to manage its sign-in."
         : nil;
 }
 
