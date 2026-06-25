@@ -10,18 +10,44 @@
 NSString *const ApolloWebJSONSessionExpiredNotification = @"ApolloWebJSONSessionExpiredNotification";
 NSString *const ApolloWebJSONSyntheticBearerToken = @"apollo-webjson-cookie-session";
 
-// Marks our own /api/me.json session-verification probe so it bypasses the
-// request rewrite and the block-page expiry counter (it already targets
-// www.reddit.com with the cookie, and counting its response would be circular).
-static NSString *const kApolloWebJSONProbeHeader = @"X-Apollo-WebJSON-Probe";
+// Both markers below ride on the request's URL fragment ("#..."), which is
+// stripped by NSURLSession before ever forming the actual request line, so
+// it is never transmitted over the wire.
+
+// Marks our own /api/me.json (and /api/info.json) session-verification probes
+// so they bypass the request rewrite and the block-page expiry counter (they
+// already target www.reddit.com with the cookie, and counting their own
+// response would be circular).
+static NSString *const kApolloWebJSONProbeMarker = @"apollo-webjson-probe";
 
 // Carries the lowercased username a cookie-rewritten request was authenticated
 // as, so the response-side expiry detector (ApolloWebJSONNoteResponse) can key
 // its per-account block-page streak correctly even if the active account has
 // since changed (e.g. the user switched accounts while the request was
-// in-flight). Harmless to leave on the outgoing request — Reddit ignores
-// unrecognized headers, same as kApolloWebJSONProbeHeader above.
-static NSString *const kApolloWebJSONAccountHeader = @"X-Apollo-WebJSON-Account";
+// in-flight).
+static NSString *const kApolloWebJSONAccountMarkerPrefix = @"apollo-webjson-account=";
+
+// Returns a copy of `url` with its fragment replaced (any existing fragment —
+// there shouldn't be one on a Reddit API URL — is overwritten).
+static NSURL *ApolloWebJSONURLWithFragment(NSURL *url, NSString *fragment) {
+    NSURLComponents *c = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    if (!c) return url;
+    c.fragment = fragment;
+    return c.URL ?: url;
+}
+
+static BOOL ApolloWebJSONURLIsProbe(NSURL *url) {
+    return [url.fragment isEqualToString:kApolloWebJSONProbeMarker];
+}
+
+// nil if `url` carries no account marker (e.g. it's a probe, or an unrelated
+// request that never went through ApolloWebJSONRewriteRequest).
+static NSString *ApolloWebJSONAccountFromURL(NSURL *url) {
+    NSString *fragment = url.fragment;
+    if (![fragment hasPrefix:kApolloWebJSONAccountMarkerPrefix]) return nil;
+    NSString *encoded = [fragment substringFromIndex:kApolloWebJSONAccountMarkerPrefix.length];
+    return encoded.stringByRemovingPercentEncoding ?: encoded;
+}
 
 #pragma mark - Keychain-backed credential storage (item 4)
 
@@ -202,6 +228,27 @@ static BOOL ApolloWebJSONWritePathIsRoutable(NSString *path) {
     return YES;
 }
 
+// GET /api/v1/<subreddit>/moderators is the modern moderator-list endpoint —
+// OAuth2-only. Reddit answers it with a 403 "Permission denied" for cookie
+// auth even on www.reddit.com, unlike the rest of the /api/* GET surface
+// (confirmed via a real device capture). The cookie-compatible equivalent is
+// the legacy /r/<sub>/about/moderators.json endpoint, whose response shape is
+// completely different (old-reddit {kind, data:{children:[...]}} vs the modern
+// {moderators:{<fullname>:{...}}, moderatorIds:[...], ...}) — see
+// ApolloWebJSONFixupModeratorsResponseObject for the translation back.
+// Returns the subreddit name, or nil if `path` doesn't match.
+static NSString *ApolloWebJSONModeratorsPathSubreddit(NSString *path) {
+    static NSRegularExpression *re;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:@"^/api/v1/([^/]+)/moderators/?$"
+                                                         options:0 error:NULL];
+    });
+    NSTextCheckingResult *m = [re firstMatchInString:path options:0 range:NSMakeRange(0, path.length)];
+    if (!m || m.numberOfRanges < 2) return nil;
+    return [path substringWithRange:[m rangeAtIndex:1]];
+}
+
 #pragma mark - Request rewrite
 
 NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request) {
@@ -209,7 +256,7 @@ NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request) {
 
     // Our own session-verification probe already targets www.reddit.com with the
     // cookie set; leave it untouched so we don't recurse through the rewrite.
-    if ([request valueForHTTPHeaderField:kApolloWebJSONProbeHeader].length > 0) return nil;
+    if (ApolloWebJSONURLIsProbe(request.URL)) return nil;
 
     // Resolve by the ACTIVE account, not a single global cookie. This is what
     // lets a cookie account and a real OAuth account coexist: when the active
@@ -228,6 +275,30 @@ NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request) {
     NSString *method = request.HTTPMethod.uppercaseString ?: @"GET";
     NSString *path = url.path ?: @"/";
     BOOL isWrite = !([method isEqualToString:@"GET"] || [method isEqualToString:@"HEAD"]);
+
+    // Special-case the moderators endpoint BEFORE the generic /api/* "already
+    // JSON, just swap host" handling below — it needs a full path substitution
+    // (different endpoint entirely), not just a host swap.
+    NSString *moderatorsSubreddit = !isWrite ? ApolloWebJSONModeratorsPathSubreddit(path) : nil;
+    if (moderatorsSubreddit.length > 0) {
+        NSURLComponents *modComponents = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+        modComponents.host = @"www.reddit.com";
+        modComponents.path = [NSString stringWithFormat:@"/r/%@/about/moderators.json", moderatorsSubreddit];
+        modComponents.query = @"raw_json=1";
+        NSURL *modURL = modComponents.URL;
+        if (!modURL) return nil;
+        modURL = ApolloWebJSONURLWithFragment(modURL, [kApolloWebJSONAccountMarkerPrefix stringByAppendingString:
+            [activeUsername stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLFragmentAllowedCharacterSet]] ?: @""]);
+
+        NSMutableURLRequest *modMutable = [request mutableCopy];
+        modMutable.URL = modURL;
+        [modMutable setValue:nil forHTTPHeaderField:@"Authorization"];
+        [modMutable setValue:session.cookieHeader forHTTPHeaderField:@"Cookie"];
+        modMutable.HTTPShouldHandleCookies = NO;
+        [modMutable setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
+        ApolloLog(@"[WebJSON] Rewrote moderators GET %@ -> %@ for u/%@", url.absoluteString, modURL.absoluteString, activeUsername);
+        return modMutable;
+    }
 
     ApolloWebJSONPathKind kind = ApolloWebJSONPathUnsupported;
     if (isWrite) {
@@ -264,6 +335,10 @@ NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request) {
 
     NSURL *rewrittenURL = components.URL;
     if (!rewrittenURL) return nil;
+    // Account marker goes on the URL fragment
+    NSString *accountFragment = [kApolloWebJSONAccountMarkerPrefix stringByAppendingString:
+        [activeUsername stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLFragmentAllowedCharacterSet]] ?: @""];
+    rewrittenURL = ApolloWebJSONURLWithFragment(rewrittenURL, accountFragment);
 
     NSMutableURLRequest *mutable = [request mutableCopy];
     mutable.URL = rewrittenURL;
@@ -285,10 +360,9 @@ NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request) {
     }
 
     [mutable setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
-    [mutable setValue:activeUsername forHTTPHeaderField:kApolloWebJSONAccountHeader];
 
-    ApolloLog(@"[WebJSON] Rewrote %@ %@ -> %@ (%@%@)",
-              method, url.absoluteString, rewrittenURL.absoluteString,
+    ApolloLog(@"[WebJSON] Rewrote %@ %@ -> %@ for u/%@ (%@%@)",
+              method, url.absoluteString, rewrittenURL.absoluteString, activeUsername,
               isWrite ? @"write" : @"read",
               (isWrite && session.modhash.length > 0) ? @", modhash" : @"");
     return mutable;
@@ -340,10 +414,10 @@ static void ApolloWebJSONVerifySessionThenAnnounce(NSString *username) {
         return;
     }
 
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://www.reddit.com/api/me.json"]];
+    NSURL *probeURL = ApolloWebJSONURLWithFragment([NSURL URLWithString:@"https://www.reddit.com/api/me.json"], kApolloWebJSONProbeMarker);
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:probeURL];
     [req setValue:cookie forHTTPHeaderField:@"Cookie"];
     [req setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
-    [req setValue:@"1" forHTTPHeaderField:kApolloWebJSONProbeHeader];
     req.HTTPShouldHandleCookies = NO;
     req.timeoutInterval = 15.0;
 
@@ -380,10 +454,10 @@ static void ApolloWebJSONVerifySessionThenAnnounce(NSString *username) {
 void ApolloWebJSONNoteResponse(NSURLRequest *request, NSURLResponse *response) {
     if (!sWebJSONEnabled) return;
     if (![response isKindOfClass:[NSHTTPURLResponse class]]) return;
-    // Our verification probe must not feed its own result back into the counter.
-    if ([request valueForHTTPHeaderField:kApolloWebJSONProbeHeader].length > 0) return;
-
     NSURL *url = request.URL;
+    // Our verification probe must not feed its own result back into the counter.
+    if (ApolloWebJSONURLIsProbe(url)) return;
+
     if (![url.host.lowercaseString isEqualToString:@"www.reddit.com"]) return;
     // Only react to requests we authenticated with the cookie — those carry the
     // Cookie header we set in ApolloWebJSONRewriteRequest. This skips unrelated
@@ -391,10 +465,11 @@ void ApolloWebJSONNoteResponse(NSURLRequest *request, NSURLResponse *response) {
     // legitimately 403 with HTML without meaning our session died.
     if ([request valueForHTTPHeaderField:@"Cookie"].length == 0) return;
 
-    // The account-tag header was stamped by the rewrite that authenticated this
-    // exact request, so the streak is keyed to the right account even if the
-    // active account changed since (see kApolloWebJSONAccountHeader).
-    NSString *username = [request valueForHTTPHeaderField:kApolloWebJSONAccountHeader];
+    // The account marker was stamped (as a URL fragment — never sent to Reddit,
+    // see kApolloWebJSONAccountMarkerPrefix) by the rewrite that authenticated
+    // this exact request, so the streak is keyed to the right account even if
+    // the active account changed since.
+    NSString *username = ApolloWebJSONAccountFromURL(url);
     if (username.length == 0) return;
 
     BOOL alreadyAnnounced;
@@ -468,10 +543,10 @@ static NSDictionary *ApolloWebJSONFetchModernThingData(NSString *fullname) {
     if (cookie.length == 0 || fullname.length == 0) return nil;
 
     NSString *urlStr = [NSString stringWithFormat:@"https://www.reddit.com/api/info.json?id=%@&raw_json=1", fullname];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
+    NSURL *probeURL = ApolloWebJSONURLWithFragment([NSURL URLWithString:urlStr], kApolloWebJSONProbeMarker);
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:probeURL];
     [req setValue:cookie forHTTPHeaderField:@"Cookie"];
     [req setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
-    [req setValue:@"1" forHTTPHeaderField:kApolloWebJSONProbeHeader];
     req.HTTPShouldHandleCookies = NO;
     req.timeoutInterval = 15.0;
 
@@ -569,6 +644,131 @@ id ApolloWebJSONFixupWriteResponseObject(NSURLResponse *response, id responseObj
         return out ?: responseObject;
     }
     return newRoot;
+}
+
+#pragma mark - Moderators-list shape fixup
+
+// ApolloWebJSONRewriteRequest redirects GET /api/v1/<sub>/moderators (OAuth2-only,
+// 403s "Permission denied" for cookie auth) to the legacy, cookie-compatible
+// /r/<sub>/about/moderators.json. That endpoint's response is the old-reddit
+// {kind:"UserList", data:{children:[{name, author_flair_text, mod_permissions:
+// [...], date, id, ...}]}} shape, which Apollo's model can't parse (it expects
+// {moderators:{<fullname>:{...}}, moderatorIds:[...], ...}). Translate it.
+//
+// Fields the modern shape has that old-reddit's endpoint simply doesn't expose
+// (accountIcon, iconSize, postKarma) are omitted rather than guessed — Apollo's
+// own Mods-list avatar rendering (ApolloModeratorAvatars.xm) already re-fetches
+// each avatar by username via ApolloUserProfileCache, never reading these
+// fields from this response, so their absence doesn't visibly degrade the UI.
+// isAlumni/isActive are set to NO/YES for everyone returned, since old-reddit's
+// endpoint only ever lists current (non-alumni) moderators in the first place.
+// No-op outside Web JSON mode or if the response isn't this endpoint.
+id ApolloWebJSONFixupModeratorsResponseObject(NSURLResponse *response, id responseObject) {
+    if (!ApolloWebJSONHasUsableSession()) return responseObject;
+    if (![response isKindOfClass:[NSHTTPURLResponse class]]) return responseObject;
+
+    NSString *path = [((NSHTTPURLResponse *)response).URL.path lowercaseString] ?: @"";
+    if (![path hasSuffix:@"/about/moderators.json"]) return responseObject;
+
+    BOOL wasData = NO;
+    id root = responseObject;
+    if ([responseObject isKindOfClass:[NSData class]]) {
+        id parsed = [NSJSONSerialization JSONObjectWithData:responseObject options:0 error:NULL];
+        if (![parsed isKindOfClass:[NSDictionary class]]) return responseObject;
+        root = parsed; wasData = YES;
+    } else if (![responseObject isKindOfClass:[NSDictionary class]]) {
+        return responseObject;
+    }
+
+    if (root[@"moderators"] != nil) return responseObject; // already modern shape — no-op
+
+    NSDictionary *data = [root[@"data"] isKindOfClass:[NSDictionary class]] ? root[@"data"] : nil;
+    NSArray *children = [data[@"children"] isKindOfClass:[NSArray class]] ? data[@"children"] : nil;
+    if (!children) return responseObject;
+
+    static NSArray<NSString *> *allPermissionKeys;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        allPermissionKeys = @[@"wiki", @"all", @"posts", @"access",
+                               @"externally_managed_permission", @"mail", @"config", @"flair"];
+    });
+
+    NSMutableDictionary *moderators = [NSMutableDictionary dictionaryWithCapacity:children.count];
+    NSMutableArray *moderatorIds = [NSMutableArray arrayWithCapacity:children.count];
+    for (id child in children) {
+        if (![child isKindOfClass:[NSDictionary class]]) continue;
+        NSDictionary *c = child;
+        NSString *fullname = [c[@"id"] isKindOfClass:[NSString class]] ? c[@"id"] : nil;
+        NSString *username = [c[@"name"] isKindOfClass:[NSString class]] ? c[@"name"] : nil;
+        if (fullname.length == 0 || username.length == 0) continue;
+
+        NSArray *permArray = [c[@"mod_permissions"] isKindOfClass:[NSArray class]] ? c[@"mod_permissions"] : @[];
+        BOOL hasAll = [permArray containsObject:@"all"];
+        NSMutableDictionary *permDict = [NSMutableDictionary dictionaryWithCapacity:allPermissionKeys.count];
+        for (NSString *key in allPermissionKeys) {
+            permDict[key] = @(hasAll || [permArray containsObject:key]);
+        }
+
+        id dateValue = c[@"date"];
+        NSNumber *moddedAtUTC = [dateValue isKindOfClass:[NSNumber class]] ? @(((NSNumber *)dateValue).longLongValue) : @0;
+
+        moderators[fullname] = @{
+            @"username": username,
+            @"id": fullname,
+            @"authorFlairText": c[@"author_flair_text"] ?: [NSNull null],
+            @"moddedAtUTC": moddedAtUTC,
+            @"modPermissions": permDict,
+            @"isAlumni": @NO,
+            @"isActive": @YES,
+        };
+        [moderatorIds addObject:fullname];
+    }
+
+    NSDictionary *newRoot = @{
+        @"after": [NSNull null],
+        @"before": [NSNull null],
+        @"moderators": moderators,
+        @"moderatorIds": moderatorIds,
+        @"allUsersLoaded": @YES,
+        @"invitePending": @NO,
+    };
+
+    ApolloLog(@"[WebJSON] Translated moderators response (%lu mods) to modern shape", (unsigned long)moderatorIds.count);
+
+    if (wasData) {
+        NSData *out = [NSJSONSerialization dataWithJSONObject:newRoot options:0 error:NULL];
+        return out ?: responseObject;
+    }
+    return newRoot;
+}
+
+#pragma mark - Invited-moderators stub (no cookie-compatible equivalent exists)
+
+// Unlike /api/v1/<sub>/moderators (which has the legacy /r/<sub>/about/
+// moderators.json mirror above), GET /api/v1/<sub>/moderators_invited is
+// OAuth2-only with NO cookie-compatible equivalent at all — old-reddit's web
+// surface never exposed pending moderator invitations as a separate JSON
+// resource. The request is left unrewritten (still hits oauth.reddit.com with
+// our synthetic dummy bearer) and predictably 403s; rather than let that
+// surface as a visible error, the response-serializer hook overrides the
+// result to an empty list once a cookie session is active. Apollo's
+// `invitedModerators` is a loosely-typed `[[String:Any]]?` (see
+// Headers/Swift/SubredditModeratorListViewController.swift) with no required
+// fields, so an empty array decodes safely — the Mods screen just shows no
+// pending invitations, a missing feature rather than a broken page. The real
+// OAuth path (key-based accounts) is completely untouched, since this is
+// gated on ApolloWebJSONHasUsableSession().
+BOOL ApolloWebJSONShouldStubInvitedModerators(NSURLResponse *response) {
+    if (!ApolloWebJSONHasUsableSession()) return NO;
+    if (![response isKindOfClass:[NSHTTPURLResponse class]]) return NO;
+    NSString *path = [((NSHTTPURLResponse *)response).URL.path lowercaseString] ?: @"";
+    static NSRegularExpression *re;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:@"^/api/v1/[^/]+/moderators_invited/?$"
+                                                         options:0 error:NULL];
+    });
+    return [re firstMatchInString:path options:0 range:NSMakeRange(0, path.length)] != nil;
 }
 
 #pragma mark - Credential hydration

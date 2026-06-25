@@ -2059,18 +2059,19 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (void)webJSONSwitchToggled:(UISwitch *)sender {
-    // Turning this OFF while the ACTIVE account is currently a web-session
-    // (cookie) account leaves it with no working transport: no OAuth key is
-    // configured (it never needed one) and cookie auth just got disabled by
-    // this flag — every request would hang forever with no visible error.
-    // Confirm before applying so that's a deliberate choice, not a surprise.
-    NSString *activeUsername = ApolloActiveAccountUsername();
-    if (sender.isOn == NO && sWebJSONEnabled && activeUsername.length > 0 && ApolloWebSessionFor(activeUsername) != nil) {
+    // Turning this OFF while ANY account has a stored web session leaves that
+    // account with no working transport: no OAuth key is configured (it never
+    // needed one) and cookie auth just got disabled by this flag — every
+    // request for it would hang forever with no visible error. Confirm before
+    // applying so that's a deliberate choice, not a surprise.
+    NSUInteger webSessionCount = ApolloWebSessionUsernames().count;
+    if (sender.isOn == NO && sWebJSONEnabled && webSessionCount > 0) {
         [sender setOn:YES animated:YES]; // revert the visual toggle pending confirmation
+        NSString *who = webSessionCount == 1 ? @"An account" : [NSString stringWithFormat:@"%lu accounts", (unsigned long)webSessionCount];
         UIAlertController *alert = [UIAlertController
             alertControllerWithTitle:@"Turn Off API-Key-Free Mode?"
                              message:[NSString stringWithFormat:
-                                 @"u/%@ is signed in via a web session, not an API key. Turning this off will make every request for that account hang — switch accounts first, or turn it back on if you change your mind.", activeUsername]
+                                 @"%@ signed in via a web session, not an API key. Turning this off will make every request for it hang. Remove or re-sign-in that account first, or turn it back on if you change your mind.", who]
                       preferredStyle:UIAlertControllerStyleAlert];
         __weak typeof(self) weakSelf = self;
         [alert addAction:[UIAlertAction actionWithTitle:@"Turn Off Anyway" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {

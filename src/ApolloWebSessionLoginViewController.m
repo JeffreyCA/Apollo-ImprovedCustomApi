@@ -1,6 +1,7 @@
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloWebJSON.h"
 #import "ApolloWebSessionStore.h"
+#import "ApolloState.h"
 #import "ApolloCommon.h"
 #import "UIWindow+Apollo.h"
 #import "UserDefaultConstants.h"
@@ -485,6 +486,43 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     [self.spinner stopAnimating];
     if (error.code == NSURLErrorCancelled) return;
     ApolloLog(@"[WebJSON] Navigation failed: %@", error);
+}
+
+#pragma mark - Shared sign-in chooser (reused by the empty-state splash and the account switcher)
+
+void ApolloWebSessionPresentSignInChooser(UIViewController *host, void (^apiKeyHandler)(void)) {
+    apiKeyHandler = [apiKeyHandler copy];
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Add Account"
+                                                                     message:nil
+                                                              preferredStyle:UIAlertControllerStyleActionSheet];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Sign In With API Key"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        if (apiKeyHandler) apiKeyHandler();
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Sign In Without API Key (Experimental)"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        if (!sWebJSONEnabled) {
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:@"API-Key-Free Mode Is Off"
+                                  message:@"Turn on \"API-Key-Free Mode\" in Settings → API Keys first — otherwise a web-session account has no working way to authenticate and every request will hang."
+                           preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [host presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        BOOL hasExistingWebSession = ApolloWebSessionUsernames().count > 0;
+        ApolloWebSessionLoginViewController *vc = hasExistingWebSession
+            ? [ApolloWebSessionLoginViewController loginControllerForAdditionalAccount]
+            : [ApolloWebSessionLoginViewController new];
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        [host presentViewController:nav animated:YES completion:nil];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = host.view;
+    sheet.popoverPresentationController.sourceRect = host.view.bounds;
+    [host presentViewController:sheet animated:YES completion:nil];
 }
 
 @end

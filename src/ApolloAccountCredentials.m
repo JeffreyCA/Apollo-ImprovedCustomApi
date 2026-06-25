@@ -105,19 +105,66 @@ NSString *ApolloSecretForClientId(NSString *clientId) {
     return @"";
 }
 
+// RDKClient.sharedClient.currentUser is NOT a reliable "who is active" signal —
+// empirically confirmed nil (via diagnostic logging) even while a real account
+// is signed in and actively browsing. Apollo apparently doesn't mirror the
+// active account onto a literal +sharedClient instance the way the original
+// design here assumed (Hopper's static call-graph tracing for -setCurrentUser:
+// also turned up zero callers, consistent with it never being reassigned at
+// runtime outside of NSKeyedUnarchiver's KVC-based decode).
+//
+// Resolve from disk instead: AccountManager persists `CurrentRedditAccountIndex`
+// into the shared-group defaults whenever the active account changes, and
+// `RedditAccounts2` is the index-aligned NSKeyedArchiver([RDKClient]) array (see
+// ApolloWebJSONIdentity.xm's synthesis code for the full on-disk format notes).
+// This mirrors ApolloWebSessionStore.m's cold-start fallback, elevated here to
+// the primary (only) mechanism since the live signal can't be trusted at all.
+static NSString *const kApolloAccountCredsGroupSuite = @"group.com.christianselig.apollo";
+
+static id ApolloAccountCredsUnarchive(NSData *data) {
+    if (![data isKindOfClass:[NSData class]]) return nil;
+    NSError *e = nil;
+    NSKeyedUnarchiver *u = [[NSKeyedUnarchiver alloc] initForReadingFromData:data error:&e];
+    if (!u) return nil;
+    u.requiresSecureCoding = NO;
+    id obj = nil;
+    @try { obj = [u decodeTopLevelObjectForKey:NSKeyedArchiveRootObjectKey error:&e]; }
+    @catch (__unused NSException *ex) { obj = nil; }
+    [u finishDecoding];
+    return obj;
+}
+
 NSString *ApolloActiveAccountUsername(void) {
-    Class clientClass = objc_getClass("RDKClient");
-    if (!clientClass || ![clientClass respondsToSelector:@selector(sharedClient)]) return nil;
-    id client = [clientClass sharedClient];
-    if (!client) return nil;
+    NSUserDefaults *group = [[NSUserDefaults alloc] initWithSuiteName:kApolloAccountCredsGroupSuite];
+    id accounts = ApolloAccountCredsUnarchive([group objectForKey:@"RedditAccounts2"]);
+    static NSString *sLastLoggedResult = nil; // throttle: log only on change (called per-request)
+    if (![accounts isKindOfClass:[NSArray class]]) {
+        if (sLastLoggedResult) { ApolloLog(@"[AccountCredentials] ApolloActiveAccountUsername: no RedditAccounts2 array"); sLastLoggedResult = nil; }
+        return nil;
+    }
+    NSInteger index = [group integerForKey:@"CurrentRedditAccountIndex"];
+    if (index < 0 || (NSUInteger)index >= [(NSArray *)accounts count]) {
+        NSString *msg = [NSString stringWithFormat:@"index %ld out of range (count %lu)", (long)index, (unsigned long)[(NSArray *)accounts count]];
+        if (![sLastLoggedResult isEqualToString:msg]) { ApolloLog(@"[AccountCredentials] ApolloActiveAccountUsername: %@", msg); sLastLoggedResult = msg; }
+        return nil;
+    }
+    id client = ((NSArray *)accounts)[(NSUInteger)index];
     id user = nil;
     @try { user = [client valueForKey:@"currentUser"]; }
     @catch (__unused NSException *e) { return nil; }
-    if (!user) return nil;
+    if (!user) {
+        if (![sLastLoggedResult isEqualToString:@"currentUser nil"]) { ApolloLog(@"[AccountCredentials] ApolloActiveAccountUsername: currentUser nil at index %ld", (long)index); sLastLoggedResult = @"currentUser nil"; }
+        return nil;
+    }
     NSString *username = nil;
     @try { username = [user valueForKey:@"username"]; }
     @catch (__unused NSException *e) { return nil; }
-    return [username isKindOfClass:[NSString class]] ? username : nil;
+    BOOL valid = [username isKindOfClass:[NSString class]] && username.length > 0;
+    if (valid && ![sLastLoggedResult isEqualToString:username]) {
+        ApolloLog(@"[AccountCredentials] ApolloActiveAccountUsername: resolved u/%@ (index %ld)", username, (long)index);
+        sLastLoggedResult = username;
+    }
+    return valid ? username : nil;
 }
 
 NSString *ApolloEffectiveRedditClientId(void) {

@@ -48,6 +48,24 @@ void ApolloWebJSONNoteResponse(NSURLRequest *request, NSURLResponse *response);
 // from the RDKResponseSerializer hook with the serializer's output.
 id ApolloWebJSONFixupWriteResponseObject(NSURLResponse *response, id responseObject);
 
+// Fixes up the parsed response object for the cookie-routed moderators-list
+// read (redirected by ApolloWebJSONRewriteRequest from the OAuth2-only
+// /api/v1/<sub>/moderators to the legacy /r/<sub>/about/moderators.json, whose
+// response shape is entirely different). Translates old-reddit's
+// {data:{children:[...]}} into the modern {moderators:{...}, moderatorIds:[...]}
+// shape Apollo's model expects. Returns the input unchanged outside Web JSON
+// mode or for any other endpoint. Called from the RDKResponseSerializer hook.
+id ApolloWebJSONFixupModeratorsResponseObject(NSURLResponse *response, id responseObject);
+
+// YES if `response` is GET /api/v1/<sub>/moderators_invited and a cookie
+// session is active — this endpoint is OAuth2-only with no cookie-compatible
+// equivalent at all (unlike /moderators), so the caller should override the
+// parsed result to an empty array (and clear any parse/status error) rather
+// than let the underlying 403 surface as a visible error. NO for any other
+// endpoint, or when the active account isn't a web-session account (the real
+// OAuth path is untouched). Called from the RDKResponseSerializer hook.
+BOOL ApolloWebJSONShouldStubInvitedModerators(NSURLResponse *response);
+
 // Hydrates the legacy single-session globals from the keychain, migrating any
 // legacy NSUserDefaults cookie value, then any legacy single-global session,
 // into the per-account ApolloWebSessionStore (see that file's harvest path for

@@ -40,4 +40,19 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Presents the two-way "Add Account" action sheet from `host`:
+//   • "Sign In With API Key"          → invokes apiKeyHandler
+//   • "Sign In Without API Key (Experimental)" → presents ApolloWebSessionLoginViewController
+//   • "Cancel"
+// Only call this when sWebJSONEnabled is YES (the caller is responsible for that gate).
+void ApolloWebSessionPresentSignInChooser(UIViewController *host, void (^apiKeyHandler)(void));
+
+#ifdef __cplusplus
+}
+#endif
+
 NS_ASSUME_NONNULL_END

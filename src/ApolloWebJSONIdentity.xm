@@ -524,6 +524,19 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username) {
     if (sWebJSONEnabled) {
         @try { obj = ApolloWebJSONFixupWriteResponseObject(response, obj); }
         @catch (NSException *e) { ApolloLog(@"[WebJSON] write-response fixup failed: %@", e); }
+        @try { obj = ApolloWebJSONFixupModeratorsResponseObject(response, obj); }
+        @catch (NSException *e) { ApolloLog(@"[WebJSON] moderators-response fixup failed: %@", e); }
+        // No legacy equivalent exists for this endpoint at all (see
+        // ApolloWebJSONShouldStubInvitedModerators) — override unconditionally,
+        // including clearing the OAuth-403's validation error, so the Mods
+        // screen just shows no pending invitations instead of an error.
+        @try {
+            if (ApolloWebJSONShouldStubInvitedModerators(response)) {
+                obj = @[];
+                if (error) *error = nil;
+                ApolloLog(@"[WebJSON] Stubbed empty invited-moderators list (no cookie-compatible endpoint)");
+            }
+        } @catch (NSException *e) { ApolloLog(@"[WebJSON] invited-moderators stub failed: %@", e); }
     }
     return obj;
 }

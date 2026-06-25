@@ -118,55 +118,16 @@ NSSet<NSString *> *ApolloWebSessionUsernames(void) {
     return [NSSet setWithArray:[raw isKindOfClass:[NSArray class]] ? raw : @[]];
 }
 
-#pragma mark - Cold-start active-account resolution
+#pragma mark - Active-account resolution
 
-// Non-secure top-level unarchive, mirroring ApolloWebJSONIdentity.xm's
-// ApolloWebJSONUnarchive (duplicated rather than shared: that helper is private
-// to a .xm translation unit and this needs to stay a plain .m file).
-static id ApolloWebSessionUnarchive(NSData *data) {
-    if (![data isKindOfClass:[NSData class]]) return nil;
-    NSError *e = nil;
-    NSKeyedUnarchiver *u = [[NSKeyedUnarchiver alloc] initForReadingFromData:data error:&e];
-    if (!u) return nil;
-    u.requiresSecureCoding = NO;
-    id obj = nil;
-    @try { obj = [u decodeTopLevelObjectForKey:NSKeyedArchiveRootObjectKey error:&e]; }
-    @catch (__unused NSException *ex) { obj = nil; }
-    [u finishDecoding];
-    return obj;
-}
-
-// Same group suite Apollo's AccountManager uses (see ApolloWebJSONIdentity.xm
-// for the full account-blob format notes); duplicated here for the same reason
-// as the keychain service string above.
-static NSString *const kWebSessionApolloGroupSuite = @"group.com.christianselig.apollo";
-
-// Peeks the on-disk `RedditAccounts2` array for the username at
-// `CurrentRedditAccountIndex`, without touching RDKClient. Only needed for the
-// narrow cold-start window (this launch's %ctor, before AccountManager has run)
-// where ApolloActiveAccountUsername() is necessarily nil because no account has
-// been loaded into RDKClient.sharedClient yet.
-static NSString *ApolloWebSessionOnDiskActiveUsername(void) {
-    NSUserDefaults *group = [[NSUserDefaults alloc] initWithSuiteName:kWebSessionApolloGroupSuite];
-    id accounts = ApolloWebSessionUnarchive([group objectForKey:@"RedditAccounts2"]);
-    if (![accounts isKindOfClass:[NSArray class]]) return nil;
-    NSInteger index = [group integerForKey:@"CurrentRedditAccountIndex"];
-    if (index < 0 || (NSUInteger)index >= [(NSArray *)accounts count]) return nil;
-    id client = ((NSArray *)accounts)[(NSUInteger)index];
-    id user = nil;
-    @try { user = [client valueForKey:@"currentUser"]; }
-    @catch (__unused NSException *e) { return nil; }
-    if (!user) return nil;
-    NSString *username = nil;
-    @try { username = [user valueForKey:@"username"]; }
-    @catch (__unused NSException *e) { return nil; }
-    return [username isKindOfClass:[NSString class]] ? username : nil;
-}
-
+// ApolloActiveAccountUsername() (ApolloAccountCredentials.m) now resolves
+// purely from the on-disk RedditAccounts2/CurrentRedditAccountIndex blobs —
+// RDKClient.sharedClient.currentUser turned out to be an unreliable signal
+// (empirically nil even mid-session), so that function no longer depends on a
+// live RDKClient at all. That makes it correct from the very first %ctor call
+// too (no separate cold-start fallback needed here anymore).
 NSString *ApolloActiveWebSessionUsername(void) {
-    NSString *live = ApolloActiveAccountUsername();
-    if (live.length > 0) return live;
-    return ApolloWebSessionOnDiskActiveUsername();
+    return ApolloActiveAccountUsername();
 }
 
 ApolloWebSessionEntry *ApolloActiveWebSession(void) {

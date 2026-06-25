@@ -252,7 +252,7 @@ static NSArray<ApolloSwitcherAccountRow *> *ApolloSwitcherLoadAccountRows(void) 
 
     switch (indexPath.row) {
         case 0:
-            if (!_clientIdField) _clientIdField = [self makeFieldWithPlaceholder:@"Default" text:self.entry.clientId secure:NO];
+            if (!_clientIdField) _clientIdField = [self makeFieldWithPlaceholder:@"Default" text:self.entry.clientId secure:YES];
             return [self stackedCellWithCaption:@"Reddit API Key" field:_clientIdField];
         case 1:
             if (!_secretField) _secretField = [self makeFieldWithPlaceholder:@"Required for \"Web app\" clients" text:self.entry.clientSecret secure:YES];
@@ -268,6 +268,18 @@ static NSArray<ApolloSwitcherAccountRow *> *ApolloSwitcherLoadAccountRows(void) 
     if (indexPath.section == 1 && self.onClear) {
         self.onClear();
         [self.navigationController popViewControllerAnimated:YES];
+    }
+}
+
+- (void)textFieldDidBeginEditing:(UITextField *)textField {
+    if (textField == _clientIdField || textField == _secretField) {
+        textField.secureTextEntry = NO;
+    }
+}
+
+- (void)textFieldDidEndEditing:(UITextField *)textField {
+    if (textField == _clientIdField || textField == _secretField) {
+        textField.secureTextEntry = YES;
     }
 }
 
@@ -606,24 +618,9 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
 // so adding an account means picking ONE of the two up front, rather than the
 // old single-path "+" flow that only ever started Apollo's own OAuth add-account.
 - (void)presentAddAccountChooser {
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Add Account"
-                                                                     message:nil
-                                                              preferredStyle:UIAlertControllerStyleActionSheet];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Sign In with API Key"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *a) {
+    ApolloWebSessionPresentSignInChooser(self, ^{
         [self driveLiveAddAccount];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Sign In with Username & Password"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *a) {
-        [self presentWebSessionAddAccount];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    // Action sheets need a popover anchor on iPad (no-op on iPhone).
-    sheet.popoverPresentationController.sourceView = self.view;
-    sheet.popoverPresentationController.sourceRect = self.view.bounds;
-    [self presentViewController:sheet animated:YES completion:nil];
+    });
 }
 
 // Blocks starting (or re-starting) a web-session login while the master
