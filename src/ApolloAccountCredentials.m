@@ -134,18 +134,29 @@ static id ApolloAccountCredsUnarchive(NSData *data) {
     return obj;
 }
 
+static BOOL ApolloLogIfUsernameResultChanged(NSString *newResult) {
+    static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+    static NSString *last = nil;
+    os_unfair_lock_lock(&lock);
+    BOOL changed = ![last isEqualToString:newResult];
+    if (changed) last = [newResult copy];
+    os_unfair_lock_unlock(&lock);
+    return changed;
+}
+
 NSString *ApolloActiveAccountUsername(void) {
     NSUserDefaults *group = [[NSUserDefaults alloc] initWithSuiteName:kApolloAccountCredsGroupSuite];
     id accounts = ApolloAccountCredsUnarchive([group objectForKey:@"RedditAccounts2"]);
-    static NSString *sLastLoggedResult = nil; // throttle: log only on change (called per-request)
     if (![accounts isKindOfClass:[NSArray class]]) {
-        if (sLastLoggedResult) { ApolloLog(@"[AccountCredentials] ApolloActiveAccountUsername: no RedditAccounts2 array"); sLastLoggedResult = nil; }
+        if (ApolloLogIfUsernameResultChanged(nil))
+            ApolloLog(@"[AccountCredentials] ApolloActiveAccountUsername: no RedditAccounts2 array");
         return nil;
     }
     NSInteger index = [group integerForKey:@"CurrentRedditAccountIndex"];
     if (index < 0 || (NSUInteger)index >= [(NSArray *)accounts count]) {
         NSString *msg = [NSString stringWithFormat:@"index %ld out of range (count %lu)", (long)index, (unsigned long)[(NSArray *)accounts count]];
-        if (![sLastLoggedResult isEqualToString:msg]) { ApolloLog(@"[AccountCredentials] ApolloActiveAccountUsername: %@", msg); sLastLoggedResult = msg; }
+        if (ApolloLogIfUsernameResultChanged(msg))
+            ApolloLog(@"[AccountCredentials] ApolloActiveAccountUsername: %@", msg);
         return nil;
     }
     id client = ((NSArray *)accounts)[(NSUInteger)index];
@@ -153,17 +164,16 @@ NSString *ApolloActiveAccountUsername(void) {
     @try { user = [client valueForKey:@"currentUser"]; }
     @catch (__unused NSException *e) { return nil; }
     if (!user) {
-        if (![sLastLoggedResult isEqualToString:@"currentUser nil"]) { ApolloLog(@"[AccountCredentials] ApolloActiveAccountUsername: currentUser nil at index %ld", (long)index); sLastLoggedResult = @"currentUser nil"; }
+        if (ApolloLogIfUsernameResultChanged(@"currentUser nil"))
+            ApolloLog(@"[AccountCredentials] ApolloActiveAccountUsername: currentUser nil at index %ld", (long)index);
         return nil;
     }
     NSString *username = nil;
     @try { username = [user valueForKey:@"username"]; }
     @catch (__unused NSException *e) { return nil; }
     BOOL valid = [username isKindOfClass:[NSString class]] && username.length > 0;
-    if (valid && ![sLastLoggedResult isEqualToString:username]) {
+    if (valid && ApolloLogIfUsernameResultChanged(username))
         ApolloLog(@"[AccountCredentials] ApolloActiveAccountUsername: resolved u/%@ (index %ld)", username, (long)index);
-        sLastLoggedResult = username;
-    }
     return valid ? username : nil;
 }
 

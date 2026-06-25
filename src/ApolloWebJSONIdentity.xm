@@ -314,7 +314,8 @@ static void ApolloWebJSONBackfillUsernameOnUser(id user) {
 // Reads the Valet `2RedditAccounts2` array ([[String:String]]) — the per-index
 // sensitive dicts paired with the `RedditAccounts2` ([RDKClient]) array. Used so
 // append can read-modify-write rather than clobber existing accounts' secrets.
-static NSArray<NSDictionary *> *ApolloWebJSONReadValetAccountsArray(void) {
+static NSArray<NSDictionary *> *ApolloWebJSONReadValetAccountsArray(BOOL *outReadFailed) {
+    if (outReadFailed) *outReadFailed = NO;
     NSDictionary *query = @{
         (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService: kApolloValetAccountsService,
@@ -324,7 +325,11 @@ static NSArray<NSDictionary *> *ApolloWebJSONReadValetAccountsArray(void) {
     };
     CFTypeRef result = NULL;
     OSStatus st = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-    if (st != errSecSuccess || !result) return @[];
+    if (st == errSecItemNotFound) return @[];
+    if (st != errSecSuccess || !result) {
+        if (outReadFailed) *outReadFailed = YES;
+        return nil;
+    }
     NSData *data = (__bridge_transfer NSData *)result;
     id obj = ApolloWebJSONUnarchive(data);
     return [obj isKindOfClass:[NSArray class]] ? obj : @[];
@@ -421,7 +426,12 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username) {
     // Read-modify-append the Valet array too, at the SAME new index, so existing
     // accounts' sensitive dicts (including other OAuth accounts' real secrets)
     // are preserved rather than clobbered by a fresh one-element array.
-    NSArray<NSDictionary *> *existingValet = ApolloWebJSONReadValetAccountsArray();
+    BOOL valetReadFailed = NO;
+    NSArray<NSDictionary *> *existingValet = ApolloWebJSONReadValetAccountsArray(&valetReadFailed);
+    if (valetReadFailed) {
+        ApolloLog(@"[WebJSON][identity] Valet read error — bailing to avoid clobbering existing accounts");
+        return NO;
+    }
     NSMutableArray *newValet = [existingValet mutableCopy] ?: [NSMutableArray array];
     while (newValet.count < newIndex) [newValet addObject:@{}]; // keep index-aligned even if a prior entry was short
     [newValet addObject:sensitive];
