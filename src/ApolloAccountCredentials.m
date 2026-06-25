@@ -6,6 +6,7 @@
 #import "Tweak.h" // minimal RDKClient stub (+sharedClient) — see Tweak.h
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <os/lock.h>
 
 @implementation ApolloAccountCredentialEntry
 
