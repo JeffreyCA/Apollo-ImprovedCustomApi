@@ -511,8 +511,13 @@ static void ApolloDeletedCommentsSetRecoveredBody(NSMutableDictionary *data, NSS
 }
 
 static void ApolloDeletedCommentsHideRecoveredBodyForTapToReveal(NSMutableDictionary *data, NSString *reason) {
-    if (!sTapToRevealDeletedComments) return;
-    ApolloDeletedCommentsSetRecoveredBody(data, ApolloDeletedCommentsDisplayLabelForReason(reason));
+    if (!sTapToRevealDeletedComments || !data) return;
+    NSString *label = ApolloDeletedCommentsDisplayLabelForReason(reason);
+    if (label.length == 0) return;
+
+    data[@"body"] = label;
+    NSString *bodyHTML = ApolloDeletedCommentsRedditBodyHTML(label);
+    if (bodyHTML.length > 0) data[@"body_html"] = bodyHTML;
 }
 
 static void ApolloDeletedCommentsSetObjectValue(id object, SEL selector, id value) {
@@ -885,6 +890,9 @@ static NSMutableDictionary *ApolloDeletedCommentsThingFromArchived(NSDictionary 
 
     NSString *body = ApolloDeletedCommentsTrimmedString([archived[@"body"] isKindOfClass:[NSString class]] ? archived[@"body"] : nil);
     if (identifier.length == 0 || body.length == 0 || ApolloDeletedCommentsBodyLooksDeleted(body)) return nil;
+    if (fullName.length > 0) {
+        ApolloDeletedCommentsStoreArchivedCommentsByFullName(@{fullName: archived});
+    }
 
     NSString *author = [archived[@"author"] isKindOfClass:[NSString class]] ? archived[@"author"] : @"[deleted]";
     NSMutableDictionary *data = [NSMutableDictionary dictionary];
@@ -949,6 +957,9 @@ static NSUInteger ApolloDeletedCommentsPatchRedditJSONNode(id node, NSDictionary
             if (currentLooksDeleted && archivedBody.length > 0 && !ApolloDeletedCommentsBodyLooksDeleted(archivedBody)) {
                 if (stats) stats->recoverableCount++;
                 NSString *author = [archived[@"author"] isKindOfClass:[NSString class]] ? archived[@"author"] : nil;
+                if (fullName.length > 0) {
+                    ApolloDeletedCommentsStoreArchivedCommentsByFullName(@{fullName: archived});
+                }
                 ApolloDeletedCommentsSetRecoveredBody(data, archivedBody);
                 if (author.length > 0) data[@"author"] = author;
                 if ([archived[@"created_utc"] respondsToSelector:@selector(doubleValue)]) data[@"created_utc"] = archived[@"created_utc"];
