@@ -8,7 +8,7 @@ contact_links:
     about: Pre-built IPAs and AltStore/SideStore/Feather sources.
   - name: 🐞 Original Apollo Bug Tracker
     url: https://github.com/christianselig/apollo-bugs/issues
-    about: Bug tracker for the original Apollo app. Search issues here to see if a bug existed in the original app or is new to Apollo Reborn.
+    about: Bug tracker for the original Apollo app. Search issues here to see if a bug existed in the original app or is new to Apollo Reborn (don't report bugs in the original bug tracker).
   - name: 🤝 Contributing Guide
     url: https://github.com/Apollo-Reborn/Apollo-Reborn/blob/main/CONTRIBUTING.md
     about: Want to build or contribute? Start here.
