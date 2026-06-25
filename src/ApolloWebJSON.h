@@ -48,18 +48,11 @@ void ApolloWebJSONNoteResponse(NSURLRequest *request, NSURLResponse *response);
 // from the RDKResponseSerializer hook with the serializer's output.
 id ApolloWebJSONFixupWriteResponseObject(NSURLResponse *response, id responseObject);
 
-// Updates sWebSessionCookieHeader and persists it to the keychain (nil/empty
-// clears). Called by ApolloWebSessionLoginViewController after harvesting.
-void ApolloWebJSONSetSessionCookieHeader(NSString *cookieHeader);
-
-// Updates sWebSessionModhash / sWebSessionUsername and persists them to the
-// keychain (nil/empty clears). Captured from /api/me.json at login time.
-void ApolloWebJSONSetModhash(NSString *modhash);
-void ApolloWebJSONSetUsername(NSString *username);
-
-// Hydrates sWebSessionCookieHeader / sWebSessionModhash / sWebSessionUsername
-// from the keychain, migrating any legacy cookie value out of NSUserDefaults.
-// Call once from %ctor after sWebJSONEnabled is read.
+// Hydrates the legacy single-session globals from the keychain, migrating any
+// legacy NSUserDefaults cookie value, then any legacy single-global session,
+// into the per-account ApolloWebSessionStore (see that file's harvest path for
+// where every CURRENT session write actually goes). Call once from %ctor after
+// sWebJSONEnabled is read.
 void ApolloWebJSONLoadPersistedCredentials(void);
 
 // YES when Web JSON mode is on and a session cookie has been harvested — i.e.
@@ -67,19 +60,25 @@ void ApolloWebJSONLoadPersistedCredentials(void);
 // to short-circuit the OAuth token path.
 BOOL ApolloWebJSONHasUsableSession(void);
 
-// Synthesizes a signed-in Reddit account from the harvested cookie identity so
-// Apollo's AccountManager loads it on next launch — making the account tab show
-// the user and unblocking write actions (vote/comment), which gate on
-// AccountManager having a current account, not on RDKClient auth state. Writes
-// the `RedditAccounts2` ([RDKClient]) NSUserDefaults blob, the `2RedditAccounts2`
-// Valet keychain blob ([[String:String]]), and `CurrentRedditAccountIndex`.
-// No-op (returns NO) if there's no usable session or an account already exists.
-// Implemented in ApolloWebJSONIdentity.xm. The caller should prompt a relaunch:
-// AccountManager loads accounts once per launch.
-BOOL ApolloWebJSONSynthesizeSignedInAccount(void);
+// Synthesizes a signed-in Reddit account for `username` from its stored
+// per-account web session (ApolloWebSessionStore) so Apollo's AccountManager
+// loads it on next launch — making the account tab show the user and
+// unblocking write actions (vote/comment), which gate on AccountManager having
+// a current account, not on RDKClient auth state. Appends to (never replaces)
+// the `RedditAccounts2` ([RDKClient]) NSUserDefaults array and the
+// `2RedditAccounts2` Valet keychain array ([[String:String]]) at the same
+// index, so existing accounts (OAuth or other web-session accounts) survive,
+// and sets `CurrentRedditAccountIndex` to the new account's index. No-op
+// (returns NO) if `username` has no stored web session or already has an
+// account on disk. Implemented in ApolloWebJSONIdentity.xm. The caller should
+// prompt a relaunch: AccountManager loads accounts once per launch.
+BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username);
 
 // Posted (on the main thread) the first time a harvested session is observed to
-// have expired/been revoked. The settings UI listens to offer re-login.
+// have expired/been revoked, with userInfo[@"username"] set to the (lowercased)
+// account it expired for — expiry is now tracked per-account, since a session
+// can coexist with other OAuth or web-session accounts. The settings UI/Tweak.xm
+// listens to offer re-login for that specific account.
 extern NSString *const ApolloWebJSONSessionExpiredNotification;
 
 // Sentinel access-token string the identity layer (ApolloWebJSONIdentity.xm)

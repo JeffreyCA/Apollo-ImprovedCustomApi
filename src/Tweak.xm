@@ -22,6 +22,7 @@
 #import "ApolloMarkdownToolbarGif.h"
 #import "ApolloWebAuthViewController.h"
 #import "ApolloWebJSON.h"
+#import "ApolloWebSessionStore.h"
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloAccountCredentials.h"
 
@@ -321,12 +322,20 @@ static NSCache<NSString *, NSString *> *subredditListCache;
 // account, which broke a second account's login/refresh under a different key.
 %hook RDKOAuthCredential
 
+// Fall back to %orig (the credential's REAL stored value) when nothing is
+// actually configured for this account. Unconditionally forcing
+// ApolloEffectiveRedditClientId() here used to silently clobber that real
+// value with an empty string whenever sRedditClientId was unset (it has no
+// hardcoded fallback constant, unlike the redirect URI below), breaking token
+// refresh for exactly that account with a blank, unmatchable client_id.
 - (NSString *)clientIdentifier {
-    return ApolloEffectiveRedditClientId();
+    NSString *effective = ApolloEffectiveRedditClientId();
+    return effective.length > 0 ? effective : %orig;
 }
 
 - (NSURL *)redirectURI {
-    return [NSURL URLWithString:ApolloEffectiveRedirectURI()];
+    NSString *effective = ApolloEffectiveRedirectURI();
+    return effective.length > 0 ? [NSURL URLWithString:effective] : %orig;
 }
 
 %end
@@ -1473,7 +1482,8 @@ static void initializeRandomSources() {
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification *note) {
-        [ApolloWebSessionLoginViewController presentExpiredSessionPrompt];
+        NSString *username = note.userInfo[@"username"];
+        [ApolloWebSessionLoginViewController presentExpiredSessionPromptForUsername:username];
     }];
 
     // Tag filter feature hydration.
@@ -1598,31 +1608,41 @@ static void initializeRandomSources() {
 
     // Web JSON keychain hydration — must run after the SecItem fishhooks above so
     // the simulator's virtualized keychain is in place (see the deferral note
-    // where sWebJSONEnabled is read). Migrates any legacy NSUserDefaults cookie.
+    // where sWebJSONEnabled is read). Migrates any legacy NSUserDefaults cookie,
+    // then any legacy single-global session, into the per-account store.
     ApolloWebJSONLoadPersistedCredentials();
     if (sWebJSONEnabled) {
-        ApolloLog(@"[WebJSON] enabled at launch, session cookie %@, modhash %@, user %@",
-                  sWebSessionCookieHeader ? @"present" : @"absent",
-                  sWebSessionModhash.length > 0 ? @"present" : @"absent",
-                  sWebSessionUsername ?: @"(none)");
+        NSArray<NSString *> *webSessionUsers = ApolloWebSessionUsernames().allObjects;
+        ApolloLog(@"[WebJSON] enabled at launch, %lu web-session account(s): %@",
+                  (unsigned long)webSessionUsers.count, webSessionUsers);
     }
 
-    // Cold-start identity: when a usable Web JSON session exists but no signed-in
-    // account is loaded, synthesize one now. This runs in %ctor (after the SecItem
-    // keychain hooks above) and therefore before AccountManager reads its accounts
-    // on this launch, so the account tab + write actions (vote/comment) work
-    // without an OAuth account. No-op when an account already exists.
-    if (ApolloWebJSONHasUsableSession()) {
-        @try { ApolloWebJSONSynthesizeSignedInAccount(); }
-        @catch (NSException *e) { ApolloLog(@"[WebJSON][identity] launch synthesis failed: %@", e); }
+    // Cold-start identity: synthesize a signed-in account for every stored
+    // per-account web session that doesn't have one yet. Deliberately NOT gated
+    // on ApolloWebJSONHasUsableSession() — that now resolves by the ACTIVE
+    // account, which at this point in %ctor is necessarily none (AccountManager
+    // hasn't loaded anything yet this launch), so it would be circular for the
+    // very call that's supposed to create the first account. Gating on the
+    // master flag + iterating every stored web-session username instead handles
+    // both the truly-keyless cold start AND a second/third web-session account
+    // harvested in a previous run that hasn't materialized into RedditAccounts2
+    // yet. ApolloWebJSONSynthesizeSignedInAccount is idempotent per-username.
+    if (sWebJSONEnabled) {
+        for (NSString *username in ApolloWebSessionUsernames()) {
+            @try { ApolloWebJSONSynthesizeSignedInAccount(username); }
+            @catch (NSException *e) { ApolloLog(@"[WebJSON][identity] launch synthesis failed for u/%@: %@", username, e); }
+        }
     }
     // This launch loads accounts fresh, so any "restart to activate" state left
     // over from a mid-session web login is now resolved — clear the indicator.
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:UDKeyWebJSONPendingRestart];
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:UDKeyWebJSONPendingRestartUsername];
 
     // Redirect user to Custom API settings if no API credentials are set — but not
-    // when a Web JSON cookie session is driving things (no API key is expected).
-    if ([sRedditClientId length] == 0 && !ApolloWebJSONHasUsableSession()) {
+    // when at least one web-session account is configured (no API key is expected
+    // for those). Checked by configured-account count, not the active account, so
+    // this doesn't depend on which account happens to be current right now.
+    if ([sRedditClientId length] == 0 && !(sWebJSONEnabled && ApolloWebSessionUsernames().count > 0)) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             UIWindow *mainWindow = ((UIWindowScene *)UIApplication.sharedApplication.connectedScenes.anyObject).windows.firstObject;
             UITabBarController *tabBarController = (UITabBarController *)mainWindow.rootViewController;

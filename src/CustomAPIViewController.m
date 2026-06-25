@@ -2,6 +2,8 @@
 #import "ApolloCommon.h"
 #import "ApolloNotificationBackend.h"
 #import "ApolloWebSessionLoginViewController.h"
+#import "ApolloWebSessionStore.h"
+#import "ApolloAccountCredentials.h"
 #import "ApolloState.h"
 #import "ApolloUserProfileCache.h"
 #import "ApolloLinkPreviewCache.h"
@@ -989,7 +991,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         case kAPIKeyRowWebJSONSwitch:
             return [self switchCellWithIdentifier:@"Cell_API_WebJSON"
                                             label:@"API-Key-Free Mode (Experimental)"
-                                           detail:@"Use Apollo by signing in to reddit.com instead of using API keys (OAuth). Supports browsing, voting, commenting, and saving."
+                                           detail:@"Master switch: lets accounts sign in to reddit.com instead of using API keys (OAuth). Add or manage individual web-session accounts from the account switcher."
                                                on:sWebJSONEnabled
                                            action:@selector(webJSONSwitchToggled:)];
         case kAPIKeyRowWebSessionLogin: {
@@ -1000,24 +1002,28 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
                 cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             }
-            cell.textLabel.text = @"Web Session Login (Experimental)";
+            cell.textLabel.text = @"Web Session Accounts (Experimental)";
             BOOL pendingRestart = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyWebJSONPendingRestart];
-            if (pendingRestart && sWebSessionCookieHeader.length > 0) {
+            NSString *pendingUsername = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyWebJSONPendingRestartUsername];
+            NSUInteger sessionCount = ApolloWebSessionUsernames().count;
+            if (pendingRestart) {
                 // Mid-session login synthesized an account AccountManager hasn't
                 // loaded yet — nudge the user to quit & reopen so it activates.
-                cell.detailTextLabel.text = sWebSessionUsername.length > 0
-                    ? [NSString stringWithFormat:@"Signed in as u/%@ — quit & reopen Apollo to activate", sWebSessionUsername]
+                cell.detailTextLabel.text = pendingUsername.length > 0
+                    ? [NSString stringWithFormat:@"Signed in as u/%@ — quit & reopen Apollo to activate", pendingUsername]
                     : @"Signed in — quit & reopen Apollo to activate";
                 cell.detailTextLabel.textColor = [UIColor systemOrangeColor];
-            } else if (sWebSessionCookieHeader.length > 0) {
+            } else if (sessionCount > 0) {
+                // Sessions are per-account now (the switcher is where you add/
+                // remove/re-auth individual ones) — this row just summarizes how
+                // many are configured and offers a quick way to add another.
                 cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-                cell.detailTextLabel.text = sWebSessionUsername.length > 0
-                    ? [NSString stringWithFormat:@"Signed in as u/%@%@", sWebSessionUsername,
-                       sWebSessionModhash.length > 0 ? @"" : @" (read-only — no write token)"]
-                    : @"Session active";
+                cell.detailTextLabel.text = sessionCount == 1
+                    ? @"1 account signed in — manage from the account switcher"
+                    : [NSString stringWithFormat:@"%lu accounts signed in — manage from the account switcher", (unsigned long)sessionCount];
             } else {
                 cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-                cell.detailTextLabel.text = @"Not signed in — tap to harvest a cookie";
+                cell.detailTextLabel.text = @"Not signed in — tap to add a web-session account";
             }
             return cell;
         }
@@ -1650,7 +1656,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         } else if (row == kAPIKeyRowSetupGuide) {
             [self pushInstructionsViewController];
         } else if (row == kAPIKeyRowWebSessionLogin) {
-            if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyWebJSONPendingRestart] && sWebSessionCookieHeader.length > 0) {
+            if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyWebJSONPendingRestart]) {
                 [self promptQuitToActivateWebSession];
             } else {
                 [self presentWebSessionLoginViewController];
@@ -2053,8 +2059,34 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (void)webJSONSwitchToggled:(UISwitch *)sender {
+    // Turning this OFF while the ACTIVE account is currently a web-session
+    // (cookie) account leaves it with no working transport: no OAuth key is
+    // configured (it never needed one) and cookie auth just got disabled by
+    // this flag — every request would hang forever with no visible error.
+    // Confirm before applying so that's a deliberate choice, not a surprise.
+    NSString *activeUsername = ApolloActiveAccountUsername();
+    if (sender.isOn == NO && sWebJSONEnabled && activeUsername.length > 0 && ApolloWebSessionFor(activeUsername) != nil) {
+        [sender setOn:YES animated:YES]; // revert the visual toggle pending confirmation
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"Turn Off API-Key-Free Mode?"
+                             message:[NSString stringWithFormat:
+                                 @"u/%@ is signed in via a web session, not an API key. Turning this off will make every request for that account hang — switch accounts first, or turn it back on if you change your mind.", activeUsername]
+                      preferredStyle:UIAlertControllerStyleAlert];
+        __weak typeof(self) weakSelf = self;
+        [alert addAction:[UIAlertAction actionWithTitle:@"Turn Off Anyway" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+            [sender setOn:NO animated:YES];
+            [weakSelf _applyWebJSONEnabled:NO];
+        }]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    [self _applyWebJSONEnabled:sender.isOn];
+}
+
+- (void)_applyWebJSONEnabled:(BOOL)enabled {
     BOOL wasOn = sWebJSONEnabled;
-    sWebJSONEnabled = sender.isOn;
+    sWebJSONEnabled = enabled;
     [[NSUserDefaults standardUserDefaults] setBool:sWebJSONEnabled forKey:UDKeyWebJSONEnabled];
     if (sWebJSONEnabled == wasOn) return;
 
@@ -2067,17 +2099,25 @@ typedef NS_ENUM(NSInteger, Tag) {
     }
 }
 
+// Adding ANOTHER web-session account when one already exists must clear the
+// shared WKWebView cookie jar first, or the login page would just silently
+// reuse the already-signed-in web user (see ApolloWebSessionLoginViewController.h).
 - (void)presentWebSessionLoginViewController {
-    ApolloWebSessionLoginViewController *vc = [[ApolloWebSessionLoginViewController alloc] init];
+    BOOL hasExistingWebSession = ApolloWebSessionUsernames().count > 0;
+    ApolloWebSessionLoginViewController *vc = hasExistingWebSession
+        ? [ApolloWebSessionLoginViewController loginControllerForAdditionalAccount]
+        : [ApolloWebSessionLoginViewController new];
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
     [self presentViewController:nav animated:YES completion:nil];
 }
 
 // A mid-session web login synthesized an account that AccountManager only loads at
 // launch. Offer to quit & reopen so it activates; "Re-sign In" falls back to the
-// login flow. The pending flag clears itself on the next launch (Tweak.xm %ctor).
+// login flow. The pending flag (+ username) clears itself on the next launch
+// (Tweak.xm %ctor).
 - (void)promptQuitToActivateWebSession {
-    NSString *who = sWebSessionUsername.length > 0 ? [NSString stringWithFormat:@"u/%@", sWebSessionUsername] : @"your account";
+    NSString *username = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyWebJSONPendingRestartUsername];
+    NSString *who = username.length > 0 ? [NSString stringWithFormat:@"u/%@", username] : @"your account";
     UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:@"Quit & Reopen to Activate"
                          message:[NSString stringWithFormat:

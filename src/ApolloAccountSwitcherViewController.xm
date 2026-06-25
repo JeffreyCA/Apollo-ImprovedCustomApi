@@ -1,5 +1,7 @@
 #import "ApolloAccountSwitcherViewController.h"
 #import "ApolloAccountCredentials.h"
+#import "ApolloWebSessionStore.h"
+#import "ApolloWebSessionLoginViewController.h"
 #import "ApolloState.h"
 #import "ApolloCommon.h"
 #import "UserDefaultConstants.h"
@@ -95,6 +97,11 @@ static void ApolloSwitcherApplyAvatarToCell(UITableViewCell *cell, NSString *use
 @property (nonatomic, copy) NSString *username;
 @property (nonatomic) BOOL isActive;
 @property (nonatomic, copy) NSString *keyStatusText;
+// YES if this account signs in via a harvested web session (cookie) rather
+// than an OAuth API key. Auth modes are mutually exclusive per account — see
+// ApolloWebSessionStore.h — so this and an OAuth key-status badge never both
+// apply to the same row.
+@property (nonatomic) BOOL isWebSession;
 @end
 @implementation ApolloSwitcherAccountRow @end
 
@@ -118,6 +125,17 @@ static NSArray<ApolloSwitcherAccountRow *> *ApolloSwitcherLoadAccountRows(void) 
         ApolloSwitcherAccountRow *row = [ApolloSwitcherAccountRow new];
         row.username = username;
         row.isActive = ((NSInteger)idx == activeIndex);
+
+        // Auth modes are mutually exclusive per account: an account is EITHER a
+        // web-session (cookie) account OR an OAuth account, chosen at "Add
+        // Account" time. Check the web-session store first since it's a simple
+        // presence test, with no OAuth divergence logic to run for these rows.
+        if (ApolloWebSessionFor(username) != nil) {
+            row.isWebSession = YES;
+            row.keyStatusText = @"Web session";
+            [rows addObject:row];
+            return;
+        }
 
         // Every account gets auto-pinned to whatever the default was at sign-in
         // time (see ApolloPinAccountToCurrentDefaultCredentialsIfNeeded in
@@ -346,7 +364,7 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     return section == 0
-        ? @"Each account can use its own Reddit API key. Tap an account to switch to it, or tap the ellipsis to edit its key."
+        ? @"Each account can use its own Reddit API key, or sign in without one via a web session. Tap an account to switch to it, or tap the key icon to manage its sign-in."
         : nil;
 }
 
@@ -406,11 +424,32 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
 
 - (void)editButtonTapped:(UIButton *)sender {
     NSString *username = objc_getAssociatedObject(sender, kApolloSwitcherEditButtonUsernameKey);
-    if (username.length > 0) [self presentCredentialEditorForUsername:username];
+    if (username.length == 0) return;
+    if (ApolloWebSessionFor(username) != nil) {
+        [self presentWebSessionActionsForUsername:username];
+    } else {
+        [self presentCredentialEditorForUsername:username];
+    }
 }
 
 - (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
     return indexPath.section == 0 && self.liveManager != nil;
+}
+
+- (BOOL)tableView:(UITableView *)tableView canMoveRowAtIndexPath:(NSIndexPath *)indexPath {
+    return indexPath.section == 0 && self.liveManager != nil;
+}
+
+// Keeps a drag from landing on (or past) the "Add Account…" row in section 1 —
+// reordering is only meaningful within the account list itself.
+- (NSIndexPath *)tableView:(UITableView *)tableView
+   targetIndexPathForMoveFromRowAtIndexPath:(NSIndexPath *)sourceIndexPath
+                        toProposedIndexPath:(NSIndexPath *)proposedIndexPath {
+    if (proposedIndexPath.section != 0) {
+        NSInteger lastRow = MAX((NSInteger)self.rows.count - 1, 0);
+        return [NSIndexPath indexPathForRow:lastRow inSection:0];
+    }
+    return proposedIndexPath;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForDeleteConfirmationButtonForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -421,8 +460,27 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
     if (editingStyle != UITableViewCellEditingStyleDelete || indexPath.section != 0) return;
     ApolloSwitcherAccountRow *row = self.rows[indexPath.row];
     [self driveLiveCommitEditingStyle:UITableViewCellEditingStyleDelete atRow:indexPath.row];
+    // Harmless no-op for whichever store doesn't have this username (auth modes
+    // are mutually exclusive per account), so both are always safe to call.
     ApolloAccountCredentialsRemove(row.username);
+    ApolloWebSessionRemove(row.username);
     [self reloadRows];
+}
+
+// UIKit has already performed the visual move by the time this is called, so
+// we only need to keep our own data model in the same order — NOT reload the
+// table (that would fight the in-flight animation). Drives the live VC's real
+// move handler so AccountManager's on-disk order actually changes too;
+// reverts the local reorder if that call has no effect (no live manager).
+- (void)tableView:(UITableView *)tableView moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath toIndexPath:(NSIndexPath *)destinationIndexPath {
+    if (sourceIndexPath.section != 0 || destinationIndexPath.section != 0) return;
+    if (!self.liveManager) return;
+    NSMutableArray<ApolloSwitcherAccountRow *> *rows = [self.rows mutableCopy];
+    ApolloSwitcherAccountRow *moved = rows[sourceIndexPath.row];
+    [rows removeObjectAtIndex:sourceIndexPath.row];
+    [rows insertObject:moved atIndex:destinationIndexPath.row];
+    self.rows = rows;
+    [self driveLiveMoveRowFromIndexPath:sourceIndexPath toIndexPath:destinationIndexPath];
 }
 
 #pragma mark - UITableViewDelegate
@@ -431,7 +489,7 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 
     if (indexPath.section == 1) {
-        [self driveLiveAddAccount];
+        [self presentAddAccountChooser];
         return;
     }
 
@@ -492,6 +550,29 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
     }
 }
 
+// Verified selector: -tableView:moveRowAtIndexPath:toIndexPath: (the native
+// switcher's drag-to-reorder handler). Reuses the same NSInvocation pattern as
+// switch/delete above so AccountManager's own persisted account order is what
+// actually changes, rather than just our local row array.
+- (void)driveLiveMoveRowFromIndexPath:(NSIndexPath *)fromPath toIndexPath:(NSIndexPath *)toPath {
+    if (!self.liveManager) return;
+    SEL sel = NSSelectorFromString(@"tableView:moveRowAtIndexPath:toIndexPath:");
+    if (![self.liveManager respondsToSelector:sel]) return;
+    NSMethodSignature *sig = [self.liveManager methodSignatureForSelector:sel];
+    if (!sig) return;
+    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+    inv.selector = sel;
+    id tv = ApolloGetObjectIvar(self.liveManager, "tableView");
+    [inv setArgument:&tv atIndex:2];
+    [inv setArgument:&fromPath atIndex:3];
+    [inv setArgument:&toPath atIndex:4];
+    @try {
+        [inv invokeWithTarget:self.liveManager];
+    } @catch (NSException *ex) {
+        ApolloLog(@"[AccountSwitcher] Live move call failed: %@", ex);
+    }
+}
+
 // Starts Apollo's own OAuth add-account flow via the live instance's real "+"
 // bar button action (verified selector: -addBarButtonItemTapped:). The new
 // account is created with the default API key; set a custom key for it
@@ -517,6 +598,88 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [self reloadRows];
     });
+}
+
+#pragma mark - Add Account: choose sign-in method
+
+// Auth modes are mutually exclusive per account (see ApolloWebSessionStore.h),
+// so adding an account means picking ONE of the two up front, rather than the
+// old single-path "+" flow that only ever started Apollo's own OAuth add-account.
+- (void)presentAddAccountChooser {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Add Account"
+                                                                     message:nil
+                                                              preferredStyle:UIAlertControllerStyleActionSheet];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Sign In with API Key"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        [self driveLiveAddAccount];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Sign In with Username & Password"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        [self presentWebSessionAddAccount];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    // Action sheets need a popover anchor on iPad (no-op on iPhone).
+    sheet.popoverPresentationController.sourceView = self.view;
+    sheet.popoverPresentationController.sourceRect = self.view.bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+// Blocks starting (or re-starting) a web-session login while the master
+// "API-Key-Free Mode" switch is off. Without this, a session could be
+// harvested and stored for an account that ApolloWebJSONHasUsableSession()
+// (gated on sWebJSONEnabled) will never actually treat as usable — the
+// account would have no working OAuth key (none configured) AND no working
+// cookie transport (flag off), so every request just hangs forever with no
+// visible error. Settings already hides its own "Web Session Accounts" row
+// the same way; this is the switcher's equivalent gate.
+- (BOOL)presentWebJSONDisabledAlertIfNeeded {
+    if (sWebJSONEnabled) return NO;
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"API-Key-Free Mode Is Off"
+                          message:@"Turn on \"API-Key-Free Mode\" in Settings → API Keys first — otherwise a web-session account has no working way to authenticate and every request will hang."
+                   preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+    return YES;
+}
+
+// Web-session ("API-Key-Free") sign-in: presents the WKWebView login flow. If a
+// web-session account already exists, the shared persistent cookie jar needs
+// clearing first so the login form actually shows instead of silently reusing
+// the existing web user (see ApolloWebSessionLoginViewController.h).
+- (void)presentWebSessionAddAccount {
+    if ([self presentWebJSONDisabledAlertIfNeeded]) return;
+    BOOL hasExistingWebSession = ApolloWebSessionUsernames().count > 0;
+    ApolloWebSessionLoginViewController *vc = hasExistingWebSession
+        ? [ApolloWebSessionLoginViewController loginControllerForAdditionalAccount]
+        : [ApolloWebSessionLoginViewController new];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+    [self presentViewController:nav animated:YES completion:nil];
+}
+
+// Tapping a web-session row's edit button: there's no API key to edit, so
+// offer re-sign-in instead (the same flow as adding an additional account —
+// clears the cookie jar first, since whatever's there belongs to THIS account
+// and the user is explicitly choosing to replace it).
+- (void)presentWebSessionActionsForUsername:(NSString *)username {
+    UIAlertController *sheet = [UIAlertController
+        alertControllerWithTitle:[NSString stringWithFormat:@"u/%@", username]
+                          message:@"Signed in via web session (no API key needed)."
+                   preferredStyle:UIAlertControllerStyleActionSheet];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Re-Sign In"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        if ([self presentWebJSONDisabledAlertIfNeeded]) return;
+        ApolloWebSessionLoginViewController *vc = [ApolloWebSessionLoginViewController loginControllerForAdditionalAccount];
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        [self presentViewController:nav animated:YES completion:nil];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = self.view;
+    sheet.popoverPresentationController.sourceRect = self.view.bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 
 #pragma mark - Per-account credential editor
