@@ -39,6 +39,30 @@ public final class ApolloFoundationModels: NSObject {
     private var preparedSessions: [String: Any] = [:]
     private var activeTasks: [String: Task<Void, Never>] = [:]
 
+    /// The on-device model used for every summary. We deliberately do NOT use
+    /// `SystemLanguageModel.default`: its default safety guardrail frequently
+    /// false-positives on ordinary news / political Reddit threads, throwing
+    /// `guardrailViolation` ("Detected content likely to be unsafe") and refusing
+    /// to summarize them — the single most common failure users hit.
+    /// `.permissiveContentTransformations` is Apple's sanctioned guardrail set for
+    /// content-transformation use cases (summarizing / rewriting text the user is
+    /// already reading), which is exactly what AI Summaries does. Genuinely unsafe
+    /// content can still trip it; that surfaces as our usual code-7 error. Stored
+    /// untyped (`Any?`) so the property needs no availability annotation; built
+    /// lazily on first use under an `#available` check. Built once and reused so we
+    /// don't re-prepare guardrail assets per session.
+    private static var cachedModel: Any?
+
+    #if canImport(FoundationModels)
+    @available(iOS 26.0, *)
+    private static func summarizationModel() -> SystemLanguageModel {
+        if let model = cachedModel as? SystemLanguageModel { return model }
+        let model = SystemLanguageModel(guardrails: .permissiveContentTransformations)
+        cachedModel = model
+        return model
+    }
+    #endif
+
     /// Mirrors `SystemLanguageModel.Availability`, flattened to an Int so ObjC
     /// can branch without bridging the Swift enum.
     ///   0 = available
@@ -80,7 +104,7 @@ public final class ApolloFoundationModels: NSObject {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *) {
             guard !identifier.isEmpty, preparedSessions[identifier] == nil else { return }
-            let session = LanguageModelSession(instructions: instructions)
+            let session = LanguageModelSession(model: Self.summarizationModel(), instructions: instructions)
             preparedSessions[identifier] = session
             session.prewarm()
         }
@@ -124,29 +148,52 @@ public final class ApolloFoundationModels: NSObject {
         // heavy work on its own executor and only resumes here to deliver
         // snapshots, so the callbacks land on the main thread for free.
         let task = Task { @MainActor in
+            // A fresh, permissive-guardrail session built from `instructions`.
+            // Used when no prepared session was staged, and for the single
+            // empty-response retry below.
+            func makeSession() -> LanguageModelSession {
+                LanguageModelSession(model: Self.summarizationModel(), instructions: instructions)
+            }
+            let options = GenerationOptions(
+                sampling: .greedy,
+                maximumResponseTokens: maximumResponseTokens > 0 ? maximumResponseTokens : nil
+            )
             do {
                 let startedAt = ContinuousClock.now
-                let session: LanguageModelSession
-                if let prepared = preparedSessions.removeValue(forKey: identifier) as? LanguageModelSession {
-                    session = prepared
-                } else {
-                    session = LanguageModelSession(instructions: instructions)
-                }
-                let options = GenerationOptions(
-                    sampling: .greedy,
-                    maximumResponseTokens: maximumResponseTokens > 0 ? maximumResponseTokens : nil
-                )
+                // Reuse the prewarmed prepared session if one was staged.
+                var session = (preparedSessions.removeValue(forKey: identifier) as? LanguageModelSession) ?? makeSession()
                 var latest = ""
                 var loggedFirstToken = false
-                for try await snapshot in session.streamResponse(to: text, options: options) {
-                    latest = snapshot.content
-                    if !loggedFirstToken, !latest.isEmpty {
-                        loggedFirstToken = true
-                        let elapsed = ContinuousClock.now - startedAt
-                        aiLog.debug("first text \(identifier, privacy: .public) after \(String(describing: elapsed), privacy: .public)")
+                // The model very occasionally streams nothing and ends cleanly
+                // (no thrown error, empty content). Retry once on a fresh session
+                // before surfacing an "empty summary" error — the empty turn is not
+                // fed back into the transcript that way.
+                for attempt in 0..<2 {
+                    if attempt > 0 {
+                        session = makeSession()
+                        latest = ""
+                        aiLog.debug("empty response for \(identifier, privacy: .public); retrying once")
                     }
-                    onPartial(latest)
+                    for try await snapshot in session.streamResponse(to: text, options: options) {
+                        latest = snapshot.content
+                        if !loggedFirstToken, !latest.isEmpty {
+                            loggedFirstToken = true
+                            let elapsed = ContinuousClock.now - startedAt
+                            aiLog.debug("first text \(identifier, privacy: .public) after \(String(describing: elapsed), privacy: .public)")
+                        }
+                        onPartial(latest)
+                    }
+                    if !latest.isEmpty || Task.isCancelled { break }
                 }
+                // A cancellation can surface as a clean end-of-stream (the loop
+                // finishing without `streamResponse` throwing `CancellationError`),
+                // especially when the break above fires on `Task.isCancelled`.
+                // Re-check here and route through the catch's code-6 sentinel
+                // instead of falling through as an empty/partial success — otherwise
+                // the ObjC side never sees the navigation-cancellation code and
+                // marks the post failed/suppressed (and won't regenerate on reopen,
+                // since `onComplete` lands after `viewDidDisappear` clears the set).
+                if Task.isCancelled { throw CancellationError() }
                 aiLog.debug("completed \(identifier, privacy: .public) after \(String(describing: ContinuousClock.now - startedAt), privacy: .public)")
                 onComplete(latest, nil)
             } catch {
