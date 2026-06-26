@@ -72,8 +72,8 @@ body:
     id: tweak-version
     attributes:
       label: Apollo Reborn version
-      description: Found in Settings → Apollo Reborn → scroll to bottom, or the IPA filename (e.g. `Apollo-Reborn-3.1.1.ipa`).
-      placeholder: "3.1.1"
+      description: Found in Settings → Apollo Reborn → scroll to bottom, or the IPA filename (e.g. `Apollo-Reborn-3.3.0.ipa`).
+      placeholder: "3.3.0"
     validations:
       required: true
 

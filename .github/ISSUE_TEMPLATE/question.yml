@@ -38,7 +38,7 @@ body:
     id: tweak-version
     attributes:
       label: Apollo Reborn version (if applicable)
-      placeholder: "3.1.1"
+      placeholder: "3.3.0"
     validations:
       required: false
 
