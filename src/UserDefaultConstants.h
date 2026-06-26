@@ -81,6 +81,38 @@ static NSString *const UDKeyLibreTranslateAPIKey = @"LibreTranslateAPIKey";
 // Array<String> of 2-letter language codes to leave untranslated (detected source language).
 static NSString *const UDKeyTranslationSkipLanguages = @"TranslationSkipLanguages";
 
+// Picture-in-Picture: floating in-app mini-player for comments-page videos.
+static NSString *const UDKeyPictureInPictureEnabled = @"PictureInPictureEnabled";       // master switch
+// 0 = All Videos, 1 = Unmuted Videos Only, 2 = All Videos & GIFs (ApolloPiPActivationMode).
+static NSString *const UDKeyPictureInPictureActivation = @"PictureInPictureActivation";
+// Hand off to iOS' system Picture in Picture when the app backgrounds.
+static NSString *const UDKeyPictureInPictureNative = @"PictureInPictureNative";
+// Replay videos in the PiP window when they reach the end. Default YES.
+static NSString *const UDKeyPictureInPictureLoop = @"PictureInPictureLoop";
+// Open the miniplayer tucked off the edge (hidden) for corner Starting
+// Positions. Ignored for Last Position, which remembers hidden state itself.
+static NSString *const UDKeyPictureInPictureStartHidden = @"PictureInPictureStartHidden";
+// Optional overlay extras on the floating window. Skip buttons jump back or
+// ahead by SkipSeconds (5/10/15/30, default 10); the progress bar is a
+// read-only playback position strip. Both default NO.
+static NSString *const UDKeyPictureInPictureSkipButtons = @"PictureInPictureSkipButtons";
+static NSString *const UDKeyPictureInPictureSkipSeconds = @"PictureInPictureSkipSeconds";
+static NSString *const UDKeyPictureInPictureProgressBar = @"PictureInPictureProgressBar";
+// 0–3 = fixed corner (TL/TR/BL/BR), 4 = remember last position (ApolloPiPStartPosition).
+static NSString *const UDKeyPictureInPictureStartPosition = @"PictureInPictureStartPosition";
+// Internal (no settings UI): persisted floating-card geometry. The resting
+// position is a normalized center (fraction of window bounds) so it survives
+// rotation and differing video aspect ratios. The size is stored as an AREA
+// fraction (card area / screenWidth²) rather than a width fraction, so a
+// remembered footprint applied to a differently-shaped next video stays the
+// same size on screen instead of ballooning (portrait) — only Last Position
+// reuses it; fixed corners always spawn at the calibrated default.
+static NSString *const UDKeyPictureInPictureAreaFraction = @"PictureInPictureAreaFraction";
+static NSString *const UDKeyPictureInPictureLastCenterX = @"PictureInPictureLastCenterX";
+static NSString *const UDKeyPictureInPictureLastCenterY = @"PictureInPictureLastCenterY";
+// Whether the card was hidden (tucked off an edge) at rest: 0 = no, -1/+1 = left/right edge.
+static NSString *const UDKeyPictureInPictureLastStashSide = @"PictureInPictureLastStashSide";
+
 // Tag filters (NSFW / Spoiler) — hide or blur posts in the feed based on
 // Reddit's built-in tags. Brand Affiliate is intentionally absent because
 // Apollo's RDKLink does not deserialize that field.
@@ -131,5 +163,11 @@ static NSString *const UDKeyFeedTextPostThumbnails = @"FeedTextPostThumbnails";
 // Rich link preview cards: 0 = Off, 1 = Compact, 2 = Full.
 static NSString *const UDKeyLinkPreviewBodyMode = @"LinkPreviewBodyMode";
 static NSString *const UDKeyLinkPreviewCommentsMode = @"LinkPreviewCommentsMode";
+// Legacy preset color (ApolloLinkPreviewCardColor enum). Superseded by the
+// free-form hex below; still read once at launch to migrate an old selection.
 static NSString *const UDKeyLinkPreviewCardColor = @"LinkPreviewCardColor";
+// Free-form preview card color as a 6-digit "RRGGBB" hex string. Empty string
+// means "Default" (no custom fill — the standard neutral card). A non-empty
+// hex paints the whole card that exact color, with auto-contrasted text.
+static NSString *const UDKeyLinkPreviewCardColorHex = @"LinkPreviewCardColorHex";
 static NSString *const ApolloLinkPreviewModeDidChangeNotification = @"ApolloLinkPreviewModeDidChangeNotification";

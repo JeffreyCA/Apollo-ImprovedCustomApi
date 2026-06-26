@@ -187,7 +187,7 @@ static UIViewController *ApolloRedditVisibleControllerFromController(UIViewContr
 }
 
 static UIAlertController *ApolloRedditActiveUploadingAlert(void) {
-    for (UIWindow *window in [UIApplication.sharedApplication.windows reverseObjectEnumerator]) {
+    for (UIWindow *window in [ApolloAllWindows() reverseObjectEnumerator]) {
         if (window.hidden || window.alpha < 0.01) continue;
         UIViewController *visible = ApolloRedditVisibleControllerFromController(window.rootViewController);
         UIAlertController *alert = [visible isKindOfClass:[UIAlertController class]] ? (UIAlertController *)visible : nil;
@@ -2652,26 +2652,26 @@ static void ApolloLogUnhandledImgurUploadRequestOnce(NSURLRequest *request, NSSt
 // Keyless Web JSON mode + Imgur upload provider + no Imgur API key configured =
 // the Imgur upload will fail with a generic error. Surface a clear, actionable
 // message once per launch instead, telling the user how to make uploads work.
-// Shown once when an image upload is attempted in a keyless Web JSON session with
-// no Imgur key. Native Reddit upload can't work here — its media lease
-// (www.reddit.com/api/media/asset.json) requires a real OAuth bearer and 403s for
-// cookie auth — so Imgur is the only path, and it needs an Imgur API key. The
-// message must NOT suggest switching the provider to Reddit (that doesn't upload
-// keylessly), which the earlier copy incorrectly advised.
+// Shown once when an upload in a keyless Web JSON session can't use the Reddit
+// cookie path and there's no Imgur key to fall back to. Inline IMAGE uploads now
+// go to Reddit via the cookie + modhash web lease (image_upload_s3.json — see
+// ApolloShouldUseCookieRedditUpload), but videos (and the rare read-only session
+// with no modhash) still need Imgur, which requires an Imgur API key. The message
+// must NOT suggest switching the provider to Reddit — that's automatic for images.
 static void ApolloWarnKeylessUploadUnavailableOnce(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         dispatch_async(dispatch_get_main_queue(), ^{
             UIViewController *top = nil;
-            for (UIWindow *window in [UIApplication.sharedApplication.windows reverseObjectEnumerator]) {
+            for (UIWindow *window in [ApolloAllWindows() reverseObjectEnumerator]) {
                 if (window.hidden || window.alpha < 0.01) continue;
                 top = ApolloRedditVisibleControllerFromController(window.rootViewController);
                 if (top) break;
             }
             if (!top) return;
             UIAlertController *alert = [UIAlertController
-                alertControllerWithTitle:@"Image Upload Needs an Imgur Key"
-                                 message:@"You're signed in without API keys. Reddit's image-upload API requires an API key, so it isn't available in Web JSON Mode — Apollo uploads images via Imgur instead, which needs an Imgur API key. Add one under Settings → Apollo to upload images."
+                alertControllerWithTitle:@"This Upload Needs an Imgur Key"
+                                 message:@"In Web JSON Mode, Apollo uploads images straight to Reddit — but videos go through Imgur, which needs an Imgur API key. Add one under Settings → Apollo to upload videos, or attach an image instead."
                           preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
             [top presentViewController:alert animated:YES completion:nil];
@@ -2692,6 +2692,25 @@ static NSString *ApolloRedditUploadBearerToken(void) {
     return nil;
 }
 
+// Whether a keyless Web JSON image upload should go to Reddit via the cookie +
+// modhash web lease (image_upload_s3.json — Hydra's path) instead of falling back
+// to Imgur. True only when: it's an Imgur-host upload request, there's no real
+// bearer (just the synthetic placeholder), a usable cookie session WITH a modhash
+// exists (writes need the modhash), and it's an image. The web lease is image-only,
+// so we bail on a video Content-Type; and a native-video post enters this hook with
+// a poster-image body (the video file is swapped in downstream), so we also bail
+// when a video upload context is/was in flight. Videos keep falling back to Imgur.
+static BOOL ApolloShouldUseCookieRedditUpload(NSURLRequest *request) {
+    if (!ApolloIsImgurImageUploadRequest(request)) return NO;
+    if (![ApolloRedditUploadBearerToken() isEqualToString:ApolloWebJSONSyntheticBearerToken]) return NO;
+    if (!ApolloWebJSONHasUsableSession()) return NO;
+    if (sWebSessionModhash.length == 0) return NO;
+    NSString *mimeType = ApolloMediaMIMETypeForFilename(nil, [request valueForHTTPHeaderField:@"Content-Type"]);
+    if (ApolloMediaMIMETypeIsVideo(mimeType)) return NO;
+    if (ApolloMediaComposerRecentlyHadSelectedVideoContextForUpload()) return NO;
+    return YES;
+}
+
 static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *mediaFileURL, NSString *filename, NSString *mimeType,
                                                   NSData *videoPosterData, NSDictionary *videoContext, NSURL *originalURL, ApolloRedditNativeUploadAttempt *attempt,
                                                   void (^completionHandler)(NSData *, NSURLResponse *, NSError *)) {
@@ -2704,6 +2723,9 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
     // "All media assets must be owned by the submitter of this post".
     NSString *composeToken = ApolloMediaComposerActivePostingBearerToken();
     NSString *token = ApolloRedditUploadBearerToken();
+    // Keyless Web JSON: no real bearer (just the synthetic placeholder), so the
+    // lease goes to the old-reddit web endpoint with cookie + modhash instead.
+    BOOL cookieMode = [token isEqualToString:ApolloWebJSONSyntheticBearerToken];
     if (composeToken.length > 0 && ![composeToken isEqualToString:sLatestRedditBearerToken]) {
         ApolloLog(@"[RedditUpload] Using temporary posting account token for upload (differs from last captured Reddit token)");
     } else if ([token isEqualToString:ApolloWebJSONSyntheticBearerToken]) {
@@ -2719,7 +2741,9 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
     ApolloUpdateActiveUploadAlertProgress(0.0);
     ApolloRedditMediaUploadCompletion mediaCompletion = ^(NSURL *mediaURL, NSString *assetID, NSString *webSocketURL, NSError *error) {
         if (ApolloRedditNativeUploadAttemptIsCancelled(attempt, @"media-upload-completion")) return;
-        if (error || !mediaURL || assetID.length == 0) {
+        // Cookie uploads (image_upload_s3.json) never return an asset_id — the S3
+        // <Location> URL is the whole payload — so only require it off the cookie path.
+        if (error || !mediaURL || (!cookieMode && assetID.length == 0)) {
             ApolloLog(@"[RedditUpload] Upload failed: %@", error.localizedDescription);
             if (videoContext) ApolloMediaComposerCompleteVideoUploadContext(videoContext, YES, @"media-upload-error");
             completionHandler(nil, nil, error ?: [NSError errorWithDomain:@"ApolloRedditMediaUpload" code:50
@@ -2795,9 +2819,13 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
         completeSyntheticUpload();
     };
     if (mediaFileURL) {
-        attempt.mediaOperation = ApolloUploadMediaFileToRedditCancellable(mediaFileURL, filename, mimeType, token, userAgent, progressHandler, mediaCompletion);
+        attempt.mediaOperation = cookieMode
+            ? ApolloUploadMediaFileToRedditViaCookieCancellable(mediaFileURL, filename, mimeType, sWebSessionCookieHeader, sWebSessionModhash, userAgent, progressHandler, mediaCompletion)
+            : ApolloUploadMediaFileToRedditCancellable(mediaFileURL, filename, mimeType, token, userAgent, progressHandler, mediaCompletion);
     } else {
-        attempt.mediaOperation = ApolloUploadMediaDataToRedditCancellable(mediaData, filename, mimeType, token, userAgent, progressHandler, mediaCompletion);
+        attempt.mediaOperation = cookieMode
+            ? ApolloUploadMediaDataToRedditViaCookieCancellable(mediaData, filename, mimeType, sWebSessionCookieHeader, sWebSessionModhash, userAgent, progressHandler, mediaCompletion)
+            : ApolloUploadMediaDataToRedditCancellable(mediaData, filename, mimeType, token, userAgent, progressHandler, mediaCompletion);
     }
 }
 
@@ -2859,17 +2887,22 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
         return %orig(ApolloRedditUploadFastFailRequest(), bodyData ?: [NSData data], chestWrapped);
     }
 
-    // Keyless Web JSON session: there's no real OAuth bearer (only the synthetic
-    // placeholder), and Reddit's media lease (asset.json) 403s for cookie auth, so
-    // native Reddit upload can't work regardless of the provider setting. Fall back
-    // to Apollo's default Imgur path instead of attempting the doomed lease; if no
-    // Imgur key is configured either, warn once with accurate guidance.
+    // Keyless Web JSON session (no real OAuth bearer, just the synthetic
+    // placeholder). Inline IMAGE uploads now go to Reddit via the cookie + modhash
+    // web lease (image_upload_s3.json — see ApolloShouldUseCookieRedditUpload); the
+    // native-upload path below drives it when cookieMode is set, overriding the
+    // (default-Imgur) provider since a cookie-signed-in user's images belong on
+    // Reddit. ImgChest with its own key already returned above. For anything the
+    // web lease can't take — a video, or a read-only session with no modhash — fall
+    // back to Apollo's Imgur path and warn once if no Imgur key is set either.
+    BOOL cookieUpload = ApolloShouldUseCookieRedditUpload(request);
     if (ApolloIsImgurImageUploadRequest(request)
-        && [ApolloRedditUploadBearerToken() isEqualToString:ApolloWebJSONSyntheticBearerToken]) {
+        && [ApolloRedditUploadBearerToken() isEqualToString:ApolloWebJSONSyntheticBearerToken]
+        && !cookieUpload) {
         if (sImgurClientId.length == 0) ApolloWarnKeylessUploadUnavailableOnce();
         return %orig;
     }
-    if (sImageUploadProvider != ImageUploadProviderReddit || !completionHandler || !ApolloIsImgurImageUploadRequest(request)) {
+    if ((sImageUploadProvider != ImageUploadProviderReddit && !cookieUpload) || !completionHandler || !ApolloIsImgurImageUploadRequest(request)) {
         if (sImageUploadProvider == ImageUploadProviderReddit && completionHandler) ApolloLogUnhandledImgurUploadRequestOnce(request, @"fromData");
         return %orig;
     }
@@ -2980,15 +3013,19 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
         return %orig(ApolloRedditUploadFastFailRequest(), fileURL, chestWrapped);
     }
 
-    // See the fromData: hook — keyless Web JSON sessions can't do native Reddit
-    // upload (asset.json 403s for cookie auth), so fall back to Apollo's Imgur path
-    // and warn once when no Imgur key is set, rather than attempting the lease.
+    // See the fromData: hook. Keyless Web JSON image uploads go to Reddit via the
+    // cookie + modhash web lease (image_upload_s3.json); the native-upload path
+    // below drives it when cookieMode is set. Videos / read-only sessions (no
+    // modhash) can't take that path, so they fall back to Imgur (warn once if no
+    // Imgur key). ImgChest with its own key already returned above.
+    BOOL cookieUpload = ApolloShouldUseCookieRedditUpload(request);
     if (ApolloIsImgurImageUploadRequest(request)
-        && [ApolloRedditUploadBearerToken() isEqualToString:ApolloWebJSONSyntheticBearerToken]) {
+        && [ApolloRedditUploadBearerToken() isEqualToString:ApolloWebJSONSyntheticBearerToken]
+        && !cookieUpload) {
         if (sImgurClientId.length == 0) ApolloWarnKeylessUploadUnavailableOnce();
         return %orig;
     }
-    if (sImageUploadProvider != ImageUploadProviderReddit || !completionHandler || !ApolloIsImgurImageUploadRequest(request)) {
+    if ((sImageUploadProvider != ImageUploadProviderReddit && !cookieUpload) || !completionHandler || !ApolloIsImgurImageUploadRequest(request)) {
         if (sImageUploadProvider == ImageUploadProviderReddit && completionHandler) ApolloLogUnhandledImgurUploadRequestOnce(request, @"fromFile");
         return %orig;
     }

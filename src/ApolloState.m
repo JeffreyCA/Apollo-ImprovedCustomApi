@@ -40,6 +40,8 @@ NSInteger sAutoplayInlineGIFMode = ApolloAutoplayInlineGIFModeDefault;
 NSInteger sLinkPreviewBodyMode = ApolloLinkPreviewModeOff;
 NSInteger sLinkPreviewCommentsMode = ApolloLinkPreviewModeOff;
 NSInteger sLinkPreviewCardColor = ApolloLinkPreviewCardColorNeutral;
+NSString *sLinkPreviewCardColorHex = nil;
+volatile uint32_t sLinkPreviewCardColorPacked = 0;
 NSInteger sImageUploadProvider = ImageUploadProviderImgur;
 
 NSString *sLatestRedditBearerToken = nil;
@@ -57,6 +59,15 @@ BOOL sWebJSONEnabled = NO;
 NSString *sWebSessionCookieHeader = nil;
 NSString *sWebSessionModhash = nil;
 NSString *sWebSessionUsername = nil;
+BOOL sPiPEnabled = NO;
+NSInteger sPiPActivationMode = ApolloPiPActivationModeUnmutedOnly;
+NSInteger sPiPStartPosition = ApolloPiPStartPositionTopRight;
+BOOL sPiPNativeEnabled = NO;
+BOOL sPiPLoop = YES;
+BOOL sPiPStartHidden = NO;
+BOOL sPiPSkipButtons = NO;
+NSInteger sPiPSkipSeconds = 10;
+BOOL sPiPProgressBar = NO;
 
 BOOL sTagFilterEnabled = NO;
 NSString *sTagFilterMode = @"blur";

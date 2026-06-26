@@ -113,7 +113,20 @@ typedef NS_ENUM(NSInteger, ApolloLinkPreviewCardColor) {
 // Rich link previews (Open Graph / oEmbed) for link cards in body/feed and comments.
 extern NSInteger sLinkPreviewBodyMode;
 extern NSInteger sLinkPreviewCommentsMode;
+// Legacy preset enum, retained only for one-time migration to the hex below.
 extern NSInteger sLinkPreviewCardColor;
+// Free-form preview card color, 6-digit "RRGGBB" hex. nil/empty = Default (no
+// custom fill). When set, the whole card is painted this exact color.
+// MAIN-THREAD ONLY: read/written by the settings UI and persistence. The card
+// renderer runs on Texture background layout threads and must NOT touch this
+// NSString* (racing a strong-pointer reassign risks a use-after-free); it reads
+// the packed snapshot below instead. Both are updated together via
+// ApolloSetLinkPreviewCardColorHex().
+extern NSString *sLinkPreviewCardColorHex;
+// Render-safe snapshot of the card color, readable from any thread (an aligned
+// 32-bit volatile load is atomic on arm64). 0 = Default; otherwise
+// (1<<24) | (R<<16) | (G<<8) | B.
+extern volatile uint32_t sLinkPreviewCardColorPacked;
 
 // Media upload host selection. Imgur is the default; Reddit uses Apollo's signed-in
 // session to upload directly to Reddit's media storage; ImgChest uploads to
@@ -169,6 +182,41 @@ extern NSString *sWebSessionModhash;
 // data.name), captured at login. Used by the identity layer to label the
 // cookie account. nil until a successful harvest.
 extern NSString *sWebSessionUsername;
+// Picture-in-Picture: floating in-app mini-player for comments-page videos
+// scrolled out of view. See ApolloPictureInPicture.xm and docs/pip-design.md.
+typedef NS_ENUM(NSInteger, ApolloPiPActivationMode) {
+    ApolloPiPActivationModeAllVideos = 0,       // any playing video (muted or not)
+    ApolloPiPActivationModeUnmutedOnly = 1,     // only videos playing unmuted
+    ApolloPiPActivationModeAllVideosAndGifs = 2, // all videos PLUS silent GIFs (in-app card)
+};
+// Where a fresh PiP card first appears. 0–3 match the corner indices used by
+// the geometry code (TL/TR/BL/BR); LastPosition restores the remembered
+// screen-relative center, re-clamped for the new video's card size.
+typedef NS_ENUM(NSInteger, ApolloPiPStartPosition) {
+    ApolloPiPStartPositionTopLeft = 0,
+    ApolloPiPStartPositionTopRight = 1,
+    ApolloPiPStartPositionBottomLeft = 2,
+    ApolloPiPStartPositionBottomRight = 3,
+    ApolloPiPStartPositionLastPosition = 4,
+};
+extern BOOL sPiPEnabled;          // in-app floating mini-player
+extern NSInteger sPiPActivationMode;
+extern NSInteger sPiPStartPosition;
+// Hand off to iOS' system Picture in Picture when the app backgrounds.
+// Independent of sPiPEnabled — works for the inline player on its own.
+extern BOOL sPiPNativeEnabled;
+// Replay the clip when it reaches the end while PiP is presenting it.
+// Default YES (Apollo's native inline behavior).
+extern BOOL sPiPLoop;
+// Open the miniplayer tucked off the edge (hidden). Applies to corner
+// Starting Positions only; Last Position remembers hidden state itself.
+extern BOOL sPiPStartHidden;
+// Optional extra controls on the floating window's overlay. Skip buttons jump
+// back/ahead by sPiPSkipSeconds (5/10/15/30); the progress bar is a read-only
+// playback position indicator along the bottom edge. Both default OFF.
+extern BOOL sPiPSkipButtons;
+extern NSInteger sPiPSkipSeconds;
+extern BOOL sPiPProgressBar;
 
 // Tag filter feature (NSFW / Spoiler).
 extern BOOL sTagFilterEnabled;

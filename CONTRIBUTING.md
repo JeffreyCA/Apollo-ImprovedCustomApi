@@ -12,6 +12,14 @@ git submodule update --init --recursive
 make package
 ```
 
+**Required SDK.** `Makefile` pins `TARGET := iphone:clang:26.0:14.0` so the tweak keeps supporting iOS 14 users even though newer Xcode releases raised their SDK's own minimum deployment target above that. This means an iOS 26.0 SDK must exist at `$THEOS/sdks/iPhoneOS26.0.sdk` — Theos checks `$THEOS/sdks` in addition to the active Xcode's own SDKs directory, so this works without modifying Xcode.app. If it's missing, `make package` will fail to find the SDK; get one via (in order of preference):
+
+1. Copy it out of a locally installed Xcode 26.x: `cp -R "/Applications/Xcode_26.x.x.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk" "$THEOS/sdks/iPhoneOS26.0.sdk"`
+2. [theos/sdks](https://github.com/theos/sdks) — best-vetted, but only goes up to iOS 16.5, so it cannot be used for now
+3. [xybp888/iOS-SDKs](https://github.com/xybp888/iOS-SDKs) — contains iOS 26 SDKs, community maintained
+
+This only applies to device builds — `scripts/run-in-sim.sh` deliberately doesn't use this trick (see [AGENTS.md](AGENTS.md) under "Required SDK" for why pairing an old Simulator SDK with a newer clang doesn't work the same way). See that same section for the full explanation.
+
 ## Testing in the iOS Simulator
 
 You don't need a physical device to iterate on most changes. `scripts/run-in-sim.sh` builds the tweak for the iOS Simulator and launches Apollo with it injected, so a code change goes from edit to running app in seconds — no IPA, no certificates, no sideloading.
@@ -48,12 +56,14 @@ This restores your **API keys, app-only session, and your signed-in Reddit accou
 
 A backup `.zip` now contains your live Reddit **account credentials** (keychain) in addition to API keys — keep it out of the repo (the `./.sim/` working dir is gitignored) and don't commit one.
 
-**Optional — automate the UI with idb.** To tap, type, and screenshot programmatically, install Facebook's [idb](https://fbidb.io/): `brew install facebook/fb/idb-companion`, then install the `fb-idb` Python client **into a Python 3.11 venv** (it relies on an asyncio API removed in Python 3.12+). Point the script at it and pass `--drive` to capture the accessibility tree and a screenshot after launch:
+**Optional — automate the UI with idb.** To inspect and screenshot programmatically, install Facebook's [idb](https://fbidb.io/): `brew install facebook/fb/idb-companion`, then install the `fb-idb` Python client **into a Python 3.11 venv** (it relies on an asyncio API removed in Python 3.12+ — `uv venv ~/.idb-venv --python 3.11 && uv pip install --python ~/.idb-venv/bin/python fb-idb` works well if you have `uv`). Point the script at it and pass `--drive` to capture the accessibility tree and a screenshot after launch:
 
 ```bash
 python3.11 -m venv ~/.idb-venv && ~/.idb-venv/bin/pip install fb-idb
 IDB=~/.idb-venv/bin/idb scripts/run-in-sim.sh --drive   # writes ./.sim/uitree.json and ./.sim/screenshot.png
 ```
+
+**Xcode 27 / Device Hub.** Simulator.app was replaced by Device Hub (`com.apple.dt.Devices`); the script opens whichever is present. `--drive`'s screenshot is taken via `simctl io screenshot` rather than idb — idb_companion's screenshot RPC returns "No Image available to encode" against Xcode 27's iOS-27 sims. `idb ui describe-all` (the accessibility tree) still works fine. idb's HID commands (`idb ui tap`/`text`/swipe) are currently broken under Xcode 27: idb_companion 1.1.8 hardcodes `SimulatorKit.framework` at the pre-27 path (`Contents/Developer/Library/PrivateFrameworks/`), which Xcode 27 moved to `Contents/SharedFrameworks/`, and Xcode.app's bundle is write-protected so it can't be symlinked back. Until idb_companion ships a fix, drive taps manually in Device Hub.
 
 **What the simulator can't test:** push notifications (so Live Activities push-to-start needs a real device), the FFmpeg-based v.redd.it audio remux (compiled out of sim builds), and any other genuinely device-only behavior. Validate those on a device IPA. Everything else — settings, navigation, Liquid Glass, layout, media playback UI — works in the simulator, which runs the same iOS version family as a modern device.
 

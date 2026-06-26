@@ -95,7 +95,7 @@ static UIViewController *ApolloPresenterForNode(ApolloASDisplayNode *node) {
     @try { view = node.view; } @catch (__unused id e) {}
     UIWindow *window = view.window;
     if (!window) {
-        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        for (UIWindow *w in ApolloAllWindows()) {
             if (w.isKeyWindow) { window = w; break; }
         }
     }

@@ -1,4 +1,5 @@
 #import "ApolloCommon.h"
+#import "ApolloState.h"
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
 #import <objc/message.h>
@@ -528,4 +529,96 @@ BOOL ApolloIsSystemShareComposeController(UIViewController *controller) {
         if (cls && [controller isKindOfClass:cls]) return YES;
     }
     return NO;
+}
+
+NSArray<UIWindow *> *ApolloAllWindows(void) {
+    NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]])
+            [windows addObjectsFromArray:((UIWindowScene *)scene).windows];
+    }
+    return windows;
+}
+
+#pragma mark - Color Helpers
+
+UIColor *ApolloColorFromHexString(NSString *hex) {
+    if (![hex isKindOfClass:[NSString class]]) return nil;
+    NSString *clean = [hex stringByReplacingOccurrencesOfString:@"#" withString:@""];
+    clean = [clean stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (clean.length != 6) return nil;
+    unsigned int value = 0;
+    NSScanner *scanner = [NSScanner scannerWithString:clean];
+    if (![scanner scanHexInt:&value] || !scanner.isAtEnd) return nil;
+    return [UIColor colorWithRed:((value >> 16) & 0xFF) / 255.0
+                           green:((value >> 8) & 0xFF) / 255.0
+                            blue:(value & 0xFF) / 255.0
+                           alpha:1.0];
+}
+
+NSString *ApolloHexStringFromColor(UIColor *color) {
+    if (![color isKindOfClass:[UIColor class]]) return nil;
+    CGFloat r = 0.0, g = 0.0, b = 0.0, a = 0.0;
+    if (![color getRed:&r green:&g blue:&b alpha:&a]) return nil;
+    r = MIN(MAX(r, 0.0), 1.0);
+    g = MIN(MAX(g, 0.0), 1.0);
+    b = MIN(MAX(b, 0.0), 1.0);
+    return [NSString stringWithFormat:@"%02X%02X%02X",
+            (int)lround(r * 255.0), (int)lround(g * 255.0), (int)lround(b * 255.0)];
+}
+
+BOOL ApolloColorIsLight(UIColor *color) {
+    CGFloat r = 0.0, g = 0.0, b = 0.0, a = 0.0;
+    if (![color isKindOfClass:[UIColor class]] || ![color getRed:&r green:&g blue:&b alpha:&a]) {
+        return YES;
+    }
+    // Rec.601 perceptual luminance. Bright fills (yellow, mint, lime) land high
+    // and want dark text; saturated blues/purples land low and want white text.
+    CGFloat luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+    return luminance >= 0.6;
+}
+
+UIColor *ApolloLinkPreviewPresetColor(NSInteger preset) {
+    switch (preset) {
+        case ApolloLinkPreviewCardColorGray:     return [UIColor colorWithWhite:0.56 alpha:1.0];
+        case ApolloLinkPreviewCardColorRed:      return [UIColor colorWithRed:1.00 green:0.23 blue:0.19 alpha:1.0];
+        case ApolloLinkPreviewCardColorOrange:   return [UIColor colorWithRed:1.00 green:0.58 blue:0.00 alpha:1.0];
+        case ApolloLinkPreviewCardColorYellow:   return [UIColor colorWithRed:1.00 green:0.80 blue:0.00 alpha:1.0];
+        case ApolloLinkPreviewCardColorGreen:    return [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0];
+        case ApolloLinkPreviewCardColorMint:     return [UIColor colorWithRed:0.00 green:0.78 blue:0.75 alpha:1.0];
+        case ApolloLinkPreviewCardColorTeal:     return [UIColor colorWithRed:0.19 green:0.69 blue:0.78 alpha:1.0];
+        case ApolloLinkPreviewCardColorCyan:     return [UIColor colorWithRed:0.20 green:0.68 blue:0.90 alpha:1.0];
+        case ApolloLinkPreviewCardColorBlue:     return [UIColor colorWithRed:0.00 green:0.48 blue:1.00 alpha:1.0];
+        case ApolloLinkPreviewCardColorIndigo:   return [UIColor colorWithRed:0.35 green:0.34 blue:0.84 alpha:1.0];
+        case ApolloLinkPreviewCardColorPurple:   return [UIColor colorWithRed:0.69 green:0.32 blue:0.87 alpha:1.0];
+        case ApolloLinkPreviewCardColorPink:     return [UIColor colorWithRed:1.00 green:0.18 blue:0.33 alpha:1.0];
+        case ApolloLinkPreviewCardColorBrown:    return [UIColor colorWithRed:0.64 green:0.52 blue:0.37 alpha:1.0];
+        case ApolloLinkPreviewCardColorCoral:    return [UIColor colorWithRed:1.00 green:0.50 blue:0.31 alpha:1.0];
+        case ApolloLinkPreviewCardColorLime:     return [UIColor colorWithRed:0.60 green:0.80 blue:0.00 alpha:1.0];
+        case ApolloLinkPreviewCardColorOlive:    return [UIColor colorWithRed:0.50 green:0.60 blue:0.20 alpha:1.0];
+        case ApolloLinkPreviewCardColorLavender: return [UIColor colorWithRed:0.56 green:0.45 blue:0.90 alpha:1.0];
+        case ApolloLinkPreviewCardColorSlate:    return [UIColor colorWithRed:0.35 green:0.43 blue:0.50 alpha:1.0];
+        case ApolloLinkPreviewCardColorNeutral:
+        default:                                 return [UIColor colorWithWhite:0.72 alpha:1.0];
+    }
+}
+
+uint32_t ApolloPackedColorFromHexString(NSString *hex) {
+    UIColor *color = ApolloColorFromHexString(hex);
+    if (!color) return 0;
+    CGFloat r = 0.0, g = 0.0, b = 0.0, a = 0.0;
+    if (![color getRed:&r green:&g blue:&b alpha:&a]) return 0;
+    uint32_t R = (uint32_t)lround(MIN(MAX(r, 0.0), 1.0) * 255.0);
+    uint32_t G = (uint32_t)lround(MIN(MAX(g, 0.0), 1.0) * 255.0);
+    uint32_t B = (uint32_t)lround(MIN(MAX(b, 0.0), 1.0) * 255.0);
+    return (1u << 24) | (R << 16) | (G << 8) | B;
+}
+
+void ApolloSetLinkPreviewCardColorHex(NSString *hex) {
+    UIColor *color = ApolloColorFromHexString(hex);
+    // Canonicalize to "RRGGBB" uppercase so persistence + UI display stay tidy.
+    sLinkPreviewCardColorHex = color ? ApolloHexStringFromColor(color) : nil;
+    // Publish the render snapshot AFTER the string, so a background reader that
+    // observes a non-zero packed value already has a consistent RGB to draw.
+    sLinkPreviewCardColorPacked = color ? ApolloPackedColorFromHexString(sLinkPreviewCardColorHex) : 0;
 }

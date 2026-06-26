@@ -49,6 +49,10 @@ static NSString *ApolloWebJSONAccountFromURL(NSURL *url) {
     return encoded.stringByRemovingPercentEncoding ?: encoded;
 }
 
+NSURL *ApolloWebJSONProbeURL(NSURL *url) {
+    return ApolloWebJSONURLWithFragment(url, kApolloWebJSONProbeMarker);
+}
+
 #pragma mark - Keychain-backed credential storage (item 4)
 
 // The harvested cookie header, modhash, and username are full account
@@ -215,16 +219,17 @@ static BOOL ApolloWebJSONWritePathIsRoutable(NSString *path) {
     if ([path hasPrefix:@"/api/v1/revoke_token"]) return NO;
     if ([path hasPrefix:@"/api/v1/authorize"]) return NO;
     // Native media uploads POST a lease to oauth.reddit.com/api/media/asset.json
-    // with a bearer token, and the lease ALWAYS stays on the oauth path. With real
-    // API keys the bearer authenticates it there; in the keyless escape hatch there
-    // is no real bearer, so the upload host short-circuits to the Imgur path and
-    // never issues this lease (a spike confirmed www.reddit.com/api/media/asset.json
-    // returns Reddit's 403 block page for cookie+modhash auth — it requires real
-    // OAuth, so routing the lease to www would only break it, including for a
-    // real-account user who also has Web JSON Mode enabled). The big multipart PUT
-    // goes to AWS S3 (self-authenticating) and is untouched either way.
+    // with a bearer token, and that lease ALWAYS stays on the oauth path. With real
+    // API keys the bearer authenticates it there; routing it to www would break it
+    // (www.reddit.com/api/media/asset.json returns Reddit's 403 block page for
+    // cookie+modhash auth — it requires real OAuth). The big multipart PUT goes to
+    // AWS S3 (self-authenticating) and is untouched either way.
     if ([path hasPrefix:@"/api/media/"]) return NO;
     if ([path isEqualToString:@"/api/v1/media/asset.json"]) return NO;
+    // Keyless image uploads use the old-reddit web lease www.reddit.com/api/
+    // image_upload_s3.json, which ApolloRedditMediaUpload.m builds and
+    // authenticates itself (cookie + X-Modhash, probe fragment). Leave it alone.
+    if ([path isEqualToString:@"/api/image_upload_s3.json"]) return NO;
     return YES;
 }
 
@@ -455,7 +460,8 @@ void ApolloWebJSONNoteResponse(NSURLRequest *request, NSURLResponse *response) {
     if (!sWebJSONEnabled) return;
     if (![response isKindOfClass:[NSHTTPURLResponse class]]) return;
     NSURL *url = request.URL;
-    // Our verification probe must not feed its own result back into the counter.
+    // Our verification probe and external-TU requests (upload lease) must not
+    // feed their own results back into the counter.
     if (ApolloWebJSONURLIsProbe(url)) return;
 
     if (![url.host.lowercaseString isEqualToString:@"www.reddit.com"]) return;

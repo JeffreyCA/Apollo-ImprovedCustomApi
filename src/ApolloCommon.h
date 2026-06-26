@@ -34,6 +34,10 @@ NSString *ApolloBundledResourcePath(NSString *baseName, NSString *extension);
 NSString *ApolloGetLinkButtonNodeURLString(id linkButtonNode);
 void ApolloPresentWebURLFromViewController(UIViewController *presenter, NSURL *url);
 
+// Returns all UIWindows across every connected UIWindowScene.
+// Use instead of the deprecated UIApplication.windows property.
+NSArray<UIWindow *> *ApolloAllWindows(void);
+
 // Returns YES for Apple's out-of-process share/compose controllers that the
 // tweak must never traverse or mutate. Their class names end in
 // "ComposeViewController" (e.g. MFMessageComposeViewController), so loose
@@ -50,4 +54,32 @@ BOOL ApolloPresentImageChestItems(NSArray<NSDictionary *> *items, UIView *source
 // As above, but albumURL is the album's page URL when known — it enables the
 // viewer's "Share Album Link" action; pass nil otherwise.
 BOOL ApolloPresentImageChestItemsWithAlbumURL(NSArray<NSDictionary *> *items, UIView *sourceView, NSInteger initialIndex, NSURL *albumURL);
+
+// Convert between a UIColor and a 6-digit "RRGGBB" hex string. The parser
+// tolerates an optional leading '#'; it returns nil for anything that isn't
+// exactly six hex digits. The serializer emits uppercase, no '#'. Shared by
+// the link-preview card color picker and any other free-form color UI.
+UIColor *ApolloColorFromHexString(NSString *hex);
+NSString *ApolloHexStringFromColor(UIColor *color);
+
+// Returns YES when a fill color is light enough that dark (black) text reads
+// better on top of it than white. Uses Rec.601 luminance. Used to auto-contrast
+// the link-preview card text against an arbitrary user-picked card color.
+BOOL ApolloColorIsLight(UIColor *color);
+
+// Maps a legacy ApolloLinkPreviewCardColor preset enum value to its UIColor.
+// Retained only to migrate a pre-existing preset selection into the new
+// free-form hex color the first time a user runs a build with the picker.
+UIColor *ApolloLinkPreviewPresetColor(NSInteger preset);
+
+// Packs a hex color into the render-safe snapshot format used by
+// sLinkPreviewCardColorPacked: 0 for nil/invalid/empty, otherwise
+// (1<<24) | (R<<16) | (G<<8) | B.
+uint32_t ApolloPackedColorFromHexString(NSString *hex);
+
+// Canonical setter for the link-preview card color. Normalizes `hex` (nil for
+// invalid/empty = Default) and updates BOTH sLinkPreviewCardColorHex (the
+// main-thread NSString used by UI/persistence) and the render-safe packed
+// snapshot for the renderer. Call on the main thread.
+void ApolloSetLinkPreviewCardColorHex(NSString *hex);
 __END_DECLS

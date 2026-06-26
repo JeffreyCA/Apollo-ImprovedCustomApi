@@ -106,6 +106,14 @@ extern NSString *const ApolloWebJSONSessionExpiredNotification;
 // capture path must ignore it to avoid poisoning sLatestRedditBearerToken.
 extern NSString *const ApolloWebJSONSyntheticBearerToken;
 
+// Returns a copy of `url` with the internal probe fragment applied. The
+// fragment is stripped by NSURLSession before transmission so it never reaches
+// Reddit's servers; the rewrite and block-page counter hooks read it from the
+// in-memory NSURLRequest to bail before processing. Use this (instead of an
+// HTTP header) to mark any request that the Web JSON layer or its clients
+// (e.g. ApolloRedditMediaUpload.m) issue themselves with the cookie already set.
+NSURL *ApolloWebJSONProbeURL(NSURL *url);
+
 #ifdef __cplusplus
 }
 #endif

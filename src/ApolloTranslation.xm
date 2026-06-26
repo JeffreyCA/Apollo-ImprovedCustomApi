@@ -3747,7 +3747,6 @@ static void ApolloUpdateTranslationUIForController(id controller) {
         // Pre-26: right-align so the glyph tucks against Apollo's adjacent pill.
         // Liquid Glass: ApolloApplyGlobeMergeForNavItem re-centers it in the slot.
         globeButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
-        globeButton.imageEdgeInsets = UIEdgeInsetsZero;
         [globeButton addTarget:controller action:@selector(apollo_translationGlobeTapped) forControlEvents:UIControlEventTouchUpInside];
     }
     [globeButton setImage:globeImage forState:UIControlStateNormal];

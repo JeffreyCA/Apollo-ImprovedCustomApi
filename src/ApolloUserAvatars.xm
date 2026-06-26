@@ -148,6 +148,9 @@ static void ApolloProfileScheduleTabAvatarRefresh(NSString *reason);
         _editProfileButton.titleLabel.adjustsFontForContentSizeCategory = YES;
         _editProfileButton.backgroundColor = [UIColor tertiarySystemFillColor];
         _editProfileButton.layer.cornerRadius = 13.0;
+        // contentEdgeInsets is deprecated (iOS 15+) in favor of UIButtonConfiguration, but the
+        // device build floors at iOS 14 (still-supported devices), where UIButtonConfiguration
+        // doesn't exist and would crash.
         _editProfileButton.contentEdgeInsets = UIEdgeInsetsMake(4.0, 12.0, 4.0, 12.0);
         [_editProfileButton addTarget:self action:@selector(apollo_editProfileTapped) forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:_editProfileButton];
@@ -1697,7 +1700,7 @@ static void ApolloProfileRefreshControllersForUsername(NSString *username) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:128];
         NSUInteger refreshCount = 0;
-        for (UIWindow *window in [UIApplication sharedApplication].windows) {
+        for (UIWindow *window in ApolloAllWindows()) {
             ApolloProfileRefreshViewControllersInTree(window.rootViewController, username, visited, &refreshCount);
         }
         if (username.length > 0 || refreshCount > 0) {
@@ -2010,7 +2013,7 @@ static void ApolloProfileApplyTabAvatarInTree(UIViewController *viewController, 
 static void ApolloProfileApplyTabAvatarForVisibleWindows(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:32];
-        for (UIWindow *window in [UIApplication sharedApplication].windows) {
+        for (UIWindow *window in ApolloAllWindows()) {
             ApolloProfileApplyTabAvatarInTree(window.rootViewController, visited);
         }
     });

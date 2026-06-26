@@ -35,6 +35,11 @@ static CGFloat const kSLPillHGap     = 8.0;    // horizontal gap between pills
 static CGFloat const kSLPillLeadInset = 12.0;
 static CGFloat const kSLPillTrailInset = 14.0;
 static CGFloat const kSLPillIconGap  = 8.0;
+// Canonical square (points) every favicon is normalized to. The 18pt badge/pill
+// views and the sheet's fixed icon box both aspect-fit it. Keeping one canonical
+// size is what makes every icon render uniformly.
+static CGFloat const kSLFaviconCanvas = 28.0;
+static CGFloat const kSLSheetIconBox = 29.0;   // fixed icon column in the sheet — see ApolloSLSheetCell
 
 #pragma mark - Type inference / display names
 
@@ -108,6 +113,74 @@ static UIImage *ApolloSLBundledIconForType(NSString *type) {
     return nil;
 }
 
+// Bounding box (in pixels) of the non-(near-)transparent content of a CGImage.
+// Favicons vary wildly in internal padding — some fill edge-to-edge, others are a
+// centered glyph ringed by transparent margin — so trimming to the real content is
+// what lets every brand glyph render at a consistent visual weight.
+static CGRect ApolloSLAlphaContentRectPx(CGImageRef cg) {
+    size_t w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
+    if (w == 0 || h == 0) return CGRectZero;
+    size_t bytesPerRow = w * 4;
+    uint8_t *buf = (uint8_t *)calloc(h, bytesPerRow);
+    if (!buf) return CGRectMake(0, 0, w, h);
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(buf, w, h, 8, bytesPerRow, cs,
+                                             kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { free(buf); return CGRectMake(0, 0, w, h); }
+    CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cg);
+    CGContextRelease(ctx);
+
+    NSInteger minX = (NSInteger)w, minY = (NSInteger)h, maxX = -1, maxY = -1;
+    const uint8_t alphaThreshold = 12;  // ignore near-transparent antialiasing fuzz
+    for (size_t y = 0; y < h; y++) {
+        uint8_t *row = buf + y * bytesPerRow;
+        for (size_t x = 0; x < w; x++) {
+            if (row[x * 4 + 3] > alphaThreshold) {
+                if ((NSInteger)x < minX) minX = (NSInteger)x;
+                if ((NSInteger)x > maxX) maxX = (NSInteger)x;
+                if ((NSInteger)y < minY) minY = (NSInteger)y;
+                if ((NSInteger)y > maxY) maxY = (NSInteger)y;
+            }
+        }
+    }
+    free(buf);
+    if (maxX < minX || maxY < minY) return CGRectMake(0, 0, w, h);  // fully transparent → keep whole
+    return CGRectMake(minX, minY, maxX - minX + 1, maxY - minY + 1);
+}
+
+// Normalize a raw favicon so every icon renders uniformly regardless of its native
+// pixel size or internal padding: trim the transparent margin, then aspect-fit the
+// content (with a small uniform inset) centered into a kSLFaviconCanvas square.
+// Cheap (favicons are <=64px) and done once per host at cache-store time.
+static UIImage *ApolloSLNormalizedFavicon(UIImage *src) {
+    if (!src) return nil;
+    CGImageRef cg = src.CGImage;
+    if (!cg) return src;  // CIImage-backed / no bitmap — leave alone
+
+    CGRect content = ApolloSLAlphaContentRectPx(cg);
+    if (CGRectIsEmpty(content)) return src;
+    CGImageRef cropped = CGImageCreateWithImageInRect(cg, content);
+    UIImage *trimmed = cropped ? [UIImage imageWithCGImage:cropped scale:1.0 orientation:UIImageOrientationUp] : src;
+    if (cropped) CGImageRelease(cropped);
+
+    CGFloat side = kSLFaviconCanvas;
+    CGFloat inset = side * 0.06;                 // consistent breathing room inside the square
+    CGFloat avail = side - inset * 2.0;
+    CGSize  cs = trimmed.size;
+    CGFloat scale = (cs.width > 0 && cs.height > 0) ? MIN(avail / cs.width, avail / cs.height) : 1.0;
+    if (!isfinite(scale) || scale <= 0) scale = 1.0;
+    CGSize  drawn = CGSizeMake(cs.width * scale, cs.height * scale);
+    CGRect  drawRect = CGRectMake((side - drawn.width) / 2.0, (side - drawn.height) / 2.0, drawn.width, drawn.height);
+
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat preferredFormat];
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(side, side) format:fmt];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *c) {
+        [trimmed drawInRect:drawRect];
+    }];
+}
+
 static NSCache<NSString *, UIImage *> *ApolloSLFaviconCache(void) {
     static NSCache *cache; static dispatch_once_t once;
     dispatch_once(&once, ^{ cache = [[NSCache alloc] init]; cache.countLimit = 120; });
@@ -160,9 +233,13 @@ static void ApolloSLRequestFaviconForHost(NSString *host, void (^completion)(UII
         // Google returns a 16px globe placeholder for unknown domains; keep it anyway
         // (still better than our generic glyph for most real services).
         UIImage *image = data.length > 0 ? [UIImage imageWithData:data] : nil;
+        // Trim + center into a uniform square here (off the main thread) so the sheet
+        // rows and the header badges all render at a consistent size/weight regardless
+        // of each favicon's native pixel size or internal transparent padding.
+        UIImage *normalized = image ? ApolloSLNormalizedFavicon(image) : nil;
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (image) [ApolloSLFaviconCache() setObject:image forKey:key];
-            drain(image);
+            if (normalized) [ApolloSLFaviconCache() setObject:normalized forKey:key];
+            drain(normalized);
         });
     }] resume];
 }
@@ -224,6 +301,32 @@ static NSArray<ApolloSocialLink *> *ApolloSLLinksFromJSON(NSArray *raw) {
 
 @implementation ApolloSLWebFetch
 
+// A single non-persistent (in-memory) WKWebsiteDataStore, reused for every
+// social-links scrape this app session.
+//
+// Why isolate the scrape from the app's shared cookies: Reddit serves the *old*
+// reddit layout at www.reddit.com whenever the logged-in session belongs to an
+// account whose "Use new Reddit as my default experience" preference is disabled.
+// Apollo's OAuth login runs through a www.reddit.com web view, so that account's
+// session + old-reddit preference land in the SHARED default WKWebsiteDataStore.
+// Old reddit has none of the shreddit-* markup the extraction JS targets, so the
+// fallback scrapes footer/sidebar anchors (redditblog.com, posted/commented URLs)
+// and every profile shows the same wrong links. The poison is sticky too —
+// deleting the Apollo account never clears WebKit cookies, so only deleting the
+// whole app cleared it. (Reported on PR #465.)
+//
+// A logged-out, in-memory store sidesteps all of it: with no account session
+// Reddit serves its default (new/shreddit) experience, the scrape can neither
+// poison nor be poisoned by the user's browsing session, and it resets each
+// launch. Shared (not per-scrape) so Reddit's JS bot-challenge cookie warms once
+// per session rather than cold on every profile.
++ (WKWebsiteDataStore *)apollo_scrapeDataStore {
+    static WKWebsiteDataStore *store;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ store = [WKWebsiteDataStore nonPersistentDataStore]; });
+    return store;
+}
+
 - (void)startForUsername:(NSString *)username completion:(void (^)(NSArray<ApolloSocialLink *> *))done {
     // WKWebView must be created/used on the main thread.
     if (![NSThread isMainThread]) {
@@ -236,9 +339,11 @@ static NSArray<ApolloSocialLink *> *ApolloSLLinksFromJSON(NSArray *raw) {
         if (![s isKindOfClass:[UIWindowScene class]]) continue;
         for (UIWindow *w in ((UIWindowScene *)s).windows) { if (w.isKeyWindow) win = w; }
     }
-    if (!win) win = UIApplication.sharedApplication.windows.firstObject;
+    if (!win) win = ApolloAllWindows().firstObject;
     if (!win) { [self finish:nil]; return; }
-    self.web = [[WKWebView alloc] initWithFrame:win.bounds configuration:[[WKWebViewConfiguration alloc] init]];
+    WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
+    config.websiteDataStore = [ApolloSLWebFetch apollo_scrapeDataStore];
+    self.web = [[WKWebView alloc] initWithFrame:win.bounds configuration:config];
     self.web.navigationDelegate = self;
     self.web.alpha = 0.011; self.web.userInteractionEnabled = NO;
     self.web.customUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
@@ -368,6 +473,61 @@ static void ApolloSLFetchLinks(NSString *username, void (^completion)(NSArray<Ap
 // preferred browser), falling back to the system opener.
 static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener);
 
+// Sheet row cell with a FIXED-size icon box so every icon type — favicon, bundled
+// coffee glyph, or placeholder — lands in the same column at the same size, and the
+// title/subtitle of every row line up. (The default UITableViewCell sizes its
+// imageView to each image's natural size, which is what let differently-sized icons
+// stagger the text indentation.)
+@interface ApolloSLSheetCell : UITableViewCell
+@property (nonatomic, strong) UIImageView *iconBox;
+@property (nonatomic, strong) UILabel *titleLabel2;
+@property (nonatomic, strong) UILabel *subtitleLabel2;
+@end
+
+@implementation ApolloSLSheetCell
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    self = [super initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseIdentifier];
+    if (self) {
+        _iconBox = [[UIImageView alloc] init];
+        _iconBox.contentMode = UIViewContentModeScaleAspectFit;
+        _iconBox.clipsToBounds = YES;
+        [self.contentView addSubview:_iconBox];
+
+        _titleLabel2 = [[UILabel alloc] init];
+        _titleLabel2.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+        _titleLabel2.adjustsFontForContentSizeCategory = YES;
+        _titleLabel2.textColor = [UIColor labelColor];
+        [self.contentView addSubview:_titleLabel2];
+
+        _subtitleLabel2 = [[UILabel alloc] init];
+        _subtitleLabel2.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+        _subtitleLabel2.adjustsFontForContentSizeCategory = YES;
+        _subtitleLabel2.textColor = [UIColor secondaryLabelColor];
+        [self.contentView addSubview:_subtitleLabel2];
+
+        self.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    }
+    return self;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat leftPad = 16.0, gap = 12.0, rightPad = 8.0;
+    CGFloat w = self.contentView.bounds.size.width;
+    CGFloat h = self.contentView.bounds.size.height;
+    self.iconBox.frame = CGRectMake(leftPad, (h - kSLSheetIconBox) / 2.0, kSLSheetIconBox, kSLSheetIconBox);
+    CGFloat tx = leftPad + kSLSheetIconBox + gap;
+    CGFloat tw = MAX(0.0, w - tx - rightPad);
+    CGSize ts = [self.titleLabel2 sizeThatFits:CGSizeMake(tw, CGFLOAT_MAX)];
+    CGSize ss = [self.subtitleLabel2 sizeThatFits:CGSizeMake(tw, CGFLOAT_MAX)];
+    CGFloat spacing = 2.0;
+    CGFloat blockH = ts.height + spacing + ss.height;
+    CGFloat top = (h - blockH) / 2.0;
+    self.titleLabel2.frame = CGRectMake(tx, top, tw, ts.height);
+    self.subtitleLabel2.frame = CGRectMake(tx, top + ts.height + spacing, tw, ss.height);
+}
+@end
+
 @interface ApolloSocialLinksSheetViewController : UITableViewController
 @property (nonatomic, copy) NSArray<ApolloSocialLink *> *links;
 @property (nonatomic, weak) UIViewController *opener;
@@ -380,6 +540,8 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener);
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Social Links";
+    self.tableView.rowHeight = 58.0;   // room for the fixed icon box + two text lines
+    [self.tableView registerClass:[ApolloSLSheetCell class] forCellReuseIdentifier:@"SLSheetCell"];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemClose
                                                                                            target:self action:@selector(apollo_close)];
 }
@@ -389,20 +551,18 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener);
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return self.links.count; }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"SLSheetCell"];
-    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"SLSheetCell"];
+    ApolloSLSheetCell *cell = [tableView dequeueReusableCellWithIdentifier:@"SLSheetCell" forIndexPath:indexPath];
     ApolloSocialLink *link = self.links[indexPath.row];
 
-    cell.textLabel.text = link.title;
-    cell.detailTextLabel.text = link.url.host ?: link.urlString;
-    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    cell.titleLabel2.text = link.title;
+    cell.subtitleLabel2.text = link.url.host ?: link.urlString;
 
-    // Bundled glyph, else cached favicon, else placeholder + async swap.
+    // Bundled glyph, else cached (already-normalized) favicon, else placeholder + async swap.
+    // Every image lands in the cell's fixed icon box (aspect-fit), so all rows align.
     UIImage *bundled = ApolloSLBundledIconForType(link.type);
     UIImage *favicon = ApolloSLFaviconCachedForHost(link.url.host);
-    cell.imageView.image = bundled ?: (favicon ?: ApolloSLPlaceholderIcon());
-    cell.imageView.tintColor = [UIColor secondaryLabelColor];
+    cell.iconBox.image = bundled ?: (favicon ?: ApolloSLPlaceholderIcon());
+    cell.iconBox.tintColor = (bundled || favicon) ? nil : [UIColor secondaryLabelColor];
     if (!bundled && !favicon) {
         NSString *wantHost = link.url.host;
         __weak typeof(self) weakSelf = self;  // don't keep the sheet alive past a dismiss
@@ -411,13 +571,12 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener);
             typeof(self) strongSelf = weakSelf;
             UITableView *strongTable = weakTable;
             if (!image || !strongSelf || !strongTable) return;
-            UITableViewCell *live = [strongTable cellForRowAtIndexPath:indexPath];
+            ApolloSLSheetCell *live = (ApolloSLSheetCell *)[strongTable cellForRowAtIndexPath:indexPath];
             // Guard against cell reuse pointing at a different link now.
-            if (live && indexPath.row < (NSInteger)strongSelf.links.count &&
+            if ([live isKindOfClass:[ApolloSLSheetCell class]] && indexPath.row < (NSInteger)strongSelf.links.count &&
                 [strongSelf.links[indexPath.row].url.host isEqualToString:wantHost]) {
-                live.imageView.image = image;
-                live.imageView.tintColor = nil;
-                [live setNeedsLayout];
+                live.iconBox.image = image;
+                live.iconBox.tintColor = nil;
             }
         });
     }

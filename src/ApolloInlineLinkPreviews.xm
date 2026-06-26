@@ -1090,34 +1090,60 @@ static UIColor *ApolloLPBlendColor(UIColor *foreground, UIColor *background, CGF
                            alpha:1.0];
 }
 
-static UIColor *ApolloLPColorForCardPreset(NSInteger preset) {
-    switch (preset) {
-        case ApolloLinkPreviewCardColorGray:     return [UIColor colorWithWhite:0.56 alpha:1.0];
-        case ApolloLinkPreviewCardColorRed:      return [UIColor colorWithRed:1.00 green:0.23 blue:0.19 alpha:1.0];
-        case ApolloLinkPreviewCardColorOrange:   return [UIColor colorWithRed:1.00 green:0.58 blue:0.00 alpha:1.0];
-        case ApolloLinkPreviewCardColorYellow:   return [UIColor colorWithRed:1.00 green:0.80 blue:0.00 alpha:1.0];
-        case ApolloLinkPreviewCardColorGreen:    return [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0];
-        case ApolloLinkPreviewCardColorMint:     return [UIColor colorWithRed:0.00 green:0.78 blue:0.75 alpha:1.0];
-        case ApolloLinkPreviewCardColorTeal:     return [UIColor colorWithRed:0.19 green:0.69 blue:0.78 alpha:1.0];
-        case ApolloLinkPreviewCardColorCyan:     return [UIColor colorWithRed:0.20 green:0.68 blue:0.90 alpha:1.0];
-        case ApolloLinkPreviewCardColorBlue:     return [UIColor colorWithRed:0.00 green:0.48 blue:1.00 alpha:1.0];
-        case ApolloLinkPreviewCardColorIndigo:   return [UIColor colorWithRed:0.35 green:0.34 blue:0.84 alpha:1.0];
-        case ApolloLinkPreviewCardColorPurple:   return [UIColor colorWithRed:0.69 green:0.32 blue:0.87 alpha:1.0];
-        case ApolloLinkPreviewCardColorPink:     return [UIColor colorWithRed:1.00 green:0.18 blue:0.33 alpha:1.0];
-        case ApolloLinkPreviewCardColorBrown:    return [UIColor colorWithRed:0.64 green:0.52 blue:0.37 alpha:1.0];
-        case ApolloLinkPreviewCardColorCoral:    return [UIColor colorWithRed:1.00 green:0.50 blue:0.31 alpha:1.0];
-        case ApolloLinkPreviewCardColorLime:     return [UIColor colorWithRed:0.60 green:0.80 blue:0.00 alpha:1.0];
-        case ApolloLinkPreviewCardColorOlive:    return [UIColor colorWithRed:0.50 green:0.60 blue:0.20 alpha:1.0];
-        case ApolloLinkPreviewCardColorLavender: return [UIColor colorWithRed:0.56 green:0.45 blue:0.90 alpha:1.0];
-        case ApolloLinkPreviewCardColorSlate:    return [UIColor colorWithRed:0.35 green:0.43 blue:0.50 alpha:1.0];
-        case ApolloLinkPreviewCardColorNeutral:
-        default:                                 return [UIColor colorWithWhite:0.72 alpha:1.0];
-    }
+// Resolves the user's free-form card color from the render-safe packed snapshot
+// (sLinkPreviewCardColorPacked). Returns nil when no custom color is set
+// ("Default"), in which case the card keeps the standard neutral background.
+// Reads the volatile uint32 (atomic aligned load on arm64) — never the NSString
+// global, which the settings UI reassigns on the main thread.
+static UIColor *ApolloLPCustomCardColor(void) {
+    uint32_t packed = sLinkPreviewCardColorPacked;
+    if ((packed & (1u << 24)) == 0) return nil;
+    CGFloat r = ((packed >> 16) & 0xFF) / 255.0;
+    CGFloat g = ((packed >> 8) & 0xFF) / 255.0;
+    CGFloat b = (packed & 0xFF) / 255.0;
+    return [UIColor colorWithRed:r green:g blue:b alpha:1.0];
+}
+
+// When a custom card color is active, fills primary/secondary text colors that
+// contrast with it (black-on-light / white-on-dark). Returns NO for the default
+// neutral card so callers keep the dynamic system label colors.
+static BOOL ApolloLPCustomCardTextColors(UIColor **primaryOut, UIColor **secondaryOut) {
+    UIColor *card = ApolloLPCustomCardColor();
+    if (!card) return NO;
+    BOOL light = ApolloColorIsLight(card);
+    UIColor *primary = light ? [UIColor colorWithWhite:0.0 alpha:1.0] : [UIColor colorWithWhite:1.0 alpha:1.0];
+    // Secondary text (site name, description) is the same ink at reduced opacity
+    // so it reads as a softer tier without introducing a clashing hue.
+    UIColor *secondary = [primary colorWithAlphaComponent:light ? 0.62 : 0.78];
+    if (primaryOut) *primaryOut = primary;
+    if (secondaryOut) *secondaryOut = secondary;
+    return YES;
+}
+
+// Rewrites just the foreground color of an existing text node's attributed text,
+// preserving its string + font. Lets a live card recolor instantly when the user
+// changes the card color, without rebuilding the whole layout from the preview.
+static void ApolloLPRecolorTextNode(ASTextNode *node, UIColor *color) {
+    if (!node || !color || ![node respondsToSelector:@selector(attributedText)]) return;
+    NSAttributedString *current = node.attributedText;
+    if (current.length == 0) return;
+    NSMutableAttributedString *mutableText = [current mutableCopy];
+    [mutableText addAttribute:NSForegroundColorAttributeName value:color range:NSMakeRange(0, mutableText.length)];
+    node.attributedText = mutableText;
 }
 
 static UIColor *ApolloLPCardBackgroundColorForNode(ASDisplayNode *hostNode, NSURL *url) {
-    UIColor *tintColor = ApolloLPColorForCardPreset(sLinkPreviewCardColor);
-    ApolloLPLogOncePerHost(ApolloLPHost(url), @"V13-card-color-preset-resolved");
+    UIColor *custom = ApolloLPCustomCardColor();
+    if (custom) {
+        // Paint the card the exact picked color, identical in light/dark, so the
+        // result matches the swatch the user chose (WYSIWYG). Text auto-contrasts.
+        ApolloLPLogOncePerHost(ApolloLPHost(url), @"V13-card-color-custom-resolved");
+        return custom;
+    }
+
+    // Default ("Neutral"): keep the original subtle, theme-aware card background.
+    UIColor *tintColor = ApolloLinkPreviewPresetColor(ApolloLinkPreviewCardColorNeutral);
+    ApolloLPLogOncePerHost(ApolloLPHost(url), @"V13-card-color-default-resolved");
 
     if (@available(iOS 13.0, *)) {
         return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traitCollection) {
@@ -1165,12 +1191,13 @@ static void ApolloLPMarkNodeForColorRefresh(ASDisplayNode *node) {
 static BOOL ApolloLPApplyCardBackgroundColor(ASDisplayNode *hostNode, ASDisplayNode *backgroundNode, NSURL *url, BOOL force) {
     if (!backgroundNode || ![backgroundNode respondsToSelector:@selector(setBackgroundColor:)]) return NO;
 
-    NSNumber *lastPresetNumber = objc_getAssociatedObject(backgroundNode, &kApolloLinkPreviewBackgroundColorPresetKey);
-    BOOL presetChanged = ![lastPresetNumber isKindOfClass:[NSNumber class]] || lastPresetNumber.integerValue != sLinkPreviewCardColor;
+    NSNumber *currentToken = @((unsigned long)sLinkPreviewCardColorPacked);
+    NSNumber *lastToken = objc_getAssociatedObject(backgroundNode, &kApolloLinkPreviewBackgroundColorPresetKey);
+    BOOL presetChanged = ![lastToken isKindOfClass:[NSNumber class]] || ![lastToken isEqualToNumber:currentToken];
     if (!force && !presetChanged) return NO;
 
     backgroundNode.backgroundColor = ApolloLPCardBackgroundColorForNode(hostNode, url);
-    objc_setAssociatedObject(backgroundNode, &kApolloLinkPreviewBackgroundColorPresetKey, @(sLinkPreviewCardColor), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(backgroundNode, &kApolloLinkPreviewBackgroundColorPresetKey, currentToken, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloLPMarkNodeForColorRefresh(backgroundNode);
     ApolloLPMarkNodeForColorRefresh(hostNode);
     return YES;
@@ -1885,9 +1912,14 @@ static NSDictionary *ApolloLPPreparedNodeBundle(ASDisplayNode *hostNode, NSURL *
     avatarNode.contentMode = UIViewContentModeScaleAspectFill;
     avatarNode.clipsToBounds = YES;
     avatarNode.cornerRadius = 18.0;
-    ApolloLPSetTextNodeAttributedTextIfChanged(siteNode, ApolloLPAttributedString([siteName uppercaseString], [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold], [UIColor secondaryLabelColor]));
-    ApolloLPSetTextNodeAttributedTextIfChanged(titleNode, ApolloLPAttributedString(ApolloLPDisplayTitleForPreview(preview), [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold], [UIColor labelColor]));
-    ApolloLPSetTextNodeAttributedTextIfChanged(descriptionNode, ApolloLPAttributedString(ApolloLPDisplayDescriptionForPreview(preview), [UIFont systemFontOfSize:13.0 weight:UIFontWeightRegular], [UIColor secondaryLabelColor]));
+    // On a custom-colored card, swap the dynamic system label colors for ink
+    // that contrasts with the user's chosen fill; otherwise keep label colors.
+    UIColor *titleColor = [UIColor labelColor];
+    UIColor *secondaryColor = [UIColor secondaryLabelColor];
+    ApolloLPCustomCardTextColors(&titleColor, &secondaryColor);
+    ApolloLPSetTextNodeAttributedTextIfChanged(siteNode, ApolloLPAttributedString([siteName uppercaseString], [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold], secondaryColor));
+    ApolloLPSetTextNodeAttributedTextIfChanged(titleNode, ApolloLPAttributedString(ApolloLPDisplayTitleForPreview(preview), [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold], titleColor));
+    ApolloLPSetTextNodeAttributedTextIfChanged(descriptionNode, ApolloLPAttributedString(ApolloLPDisplayDescriptionForPreview(preview), [UIFont systemFontOfSize:13.0 weight:UIFontWeightRegular], secondaryColor));
 
     return bundle;
 }
@@ -2007,7 +2039,9 @@ static id ApolloLPBuildHeroCardSpec(ASDisplayNode *hostNode, NSURL *url, ApolloL
     NSUInteger descriptionLineCount = ApolloLPHeroDescriptionLineCount(preview);
     titleNode.maximumNumberOfLines = 2;
     descriptionNode.maximumNumberOfLines = descriptionLineCount;
-    ApolloLPSetTextNodeAttributedTextIfChanged(titleNode, ApolloLPAttributedString(ApolloLPDisplayTitleForPreview(preview), [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold], [UIColor labelColor]));
+    UIColor *heroTitleColor = [UIColor labelColor];
+    ApolloLPCustomCardTextColors(&heroTitleColor, NULL);
+    ApolloLPSetTextNodeAttributedTextIfChanged(titleNode, ApolloLPAttributedString(ApolloLPDisplayTitleForPreview(preview), [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold], heroTitleColor));
     ApolloLPApplyCardBackgroundColor(hostNode, backgroundNode, url, NO);
     backgroundNode.cornerRadius = 10.0;
     backgroundNode.clipsToBounds = YES;
@@ -2847,6 +2881,12 @@ static ASDisplayNode *ApolloLPNodeForViewIfPossible(UIView *view) {
 static NSUInteger ApolloLPRecolorLinkPreviewBackgroundsForNode(ASDisplayNode *node) {
     if (!node) return 0;
 
+    // Resolve the text ink that matches the (possibly just-changed) card color
+    // up front — it depends only on the global hex, not on any single bundle.
+    UIColor *titleColor = [UIColor labelColor];
+    UIColor *secondaryColor = [UIColor secondaryLabelColor];
+    ApolloLPCustomCardTextColors(&titleColor, &secondaryColor);
+
     NSUInteger recolored = 0;
     NSDictionary<NSString *, NSDictionary *> *bundles = objc_getAssociatedObject(node, &kApolloLinkPreviewNodesKey);
     if ([bundles isKindOfClass:[NSDictionary class]]) {
@@ -2856,6 +2896,11 @@ static NSUInteger ApolloLPRecolorLinkPreviewBackgroundsForNode(ASDisplayNode *no
             NSURL *url = bundle[@"url"];
             if (![url isKindOfClass:[NSURL class]]) continue;
             if (ApolloLPApplyCardBackgroundColor(node, backgroundNode, url, YES)) {
+                // Background changed — bring the text ink along so it keeps
+                // contrasting with the new fill (or reverts to label colors).
+                ApolloLPRecolorTextNode(bundle[@"site"], secondaryColor);
+                ApolloLPRecolorTextNode(bundle[@"title"], titleColor);
+                ApolloLPRecolorTextNode(bundle[@"description"], secondaryColor);
                 recolored++;
             }
         }
@@ -3253,10 +3298,10 @@ static NSString *ApolloLPVariant(ApolloLPArea area, NSInteger mode, ApolloLPCont
 
 static NSString *ApolloLPRenderSignature(NSURL *url, ApolloLinkPreview *preview, NSString *variant) {
     CGSize imageSize = preview.imageSize;
-    return [NSString stringWithFormat:@"%@|%@|%ld|%@|%@|%@|%@|%@|%@|%@|%@|%@|%.1fx%.1f|%d",
+    return [NSString stringWithFormat:@"%@|%@|%lu|%@|%@|%@|%@|%@|%@|%@|%@|%@|%.1fx%.1f|%d",
             variant ?: @"",
             url.absoluteString ?: @"",
-            (long)sLinkPreviewCardColor,
+            (unsigned long)sLinkPreviewCardColorPacked,
             ApolloLPDisplayTitleForPreview(preview) ?: @"",
             ApolloLPDisplayDescriptionForPreview(preview) ?: @"",
             ApolloLPCleanDisplayText(preview.siteName) ?: @"",
@@ -3696,5 +3741,5 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
         }
     }];
 
-    ApolloLog(@"[LinkPreviews] ctor: hook installed for _TtC6Apollo14LinkButtonNode bodyMode=%ld commentsMode=%ld cardColor=%ld", (long)sLinkPreviewBodyMode, (long)sLinkPreviewCommentsMode, (long)sLinkPreviewCardColor);
+    ApolloLog(@"[LinkPreviews] ctor: hook installed for _TtC6Apollo14LinkButtonNode bodyMode=%ld commentsMode=%ld cardColorHex=%@", (long)sLinkPreviewBodyMode, (long)sLinkPreviewCommentsMode, sLinkPreviewCardColorHex ?: @"(default)");
 }
