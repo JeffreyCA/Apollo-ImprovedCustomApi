@@ -9,12 +9,17 @@ All notable changes to this project will be documented in this file.
 ### Features
 
 - Add a **Theme Builder** in **Settings > Appearance > Themes** to create, save, and manage multiple custom themes that behave like Apollo's built-in themes, including importing and exporting themes to share them (#454: @jordanearle, @icpryde)
+- Add **AI Summaries** in **Settings > Apollo Reborn > Apollo AI** (off by default, iOS 26+) — generates post, discussion, and linked-article summaries entirely **on-device** using Apple's FoundationModels (#489, #491: @jordanearle, @icpryde)
+  - Post summaries appear in the comments header between the title and body, and discussion summaries appear above the first comment on larger threads; summaries stream in token-by-token and are cached to disk so reopening a thread is instant
+  - Includes per-type controls and a **Tap to Summarize** option that avoids auto-fetching a linked article's page until you ask for it
 - Add **Picture-in-Picture** for videos and GIFs — a floating in-app miniplayer that keeps playing as you scroll through the comments (drag to reposition, swipe to hide, double-tap to resize), with optional handoff to the iOS system PiP so playback continues when you leave Apollo (#467: @JeffreyCA)
 - New experimental **API-Key-Free Mode** in **Settings > Apollo Reborn > API Keys** to use Apollo without API keys by signing in to reddit.com directly! Supports browsing, voting, commenting, and saving. (#442: @nickclyde)
   - In this mode, images attached to comments and posts now upload straight to Reddit's own CDN instead of falling back to Imgur (#495: @nickclyde)
 - Add **Img Chest** as a media upload host in **Settings > Apollo Reborn > Media Upload Host** for single images and albums, with thumbnails and host labels in **Manage Uploads**, the ability to delete Img Chest uploads, and an improved album viewer with share, Save All, an accurate loading percentage, and swipe-to-dismiss (#434: @icpryde)
 - Revamp the **Subreddit Sidebar** to render new-Reddit's structured content above the existing markdown — community stats (subscribers and created date), a **Search by Flair** chip row that jumps straight to a flair's posts, related communities, resource links, and a table of contents (#462: @icpryde)
 - Add an opt-in **Community Highlights** carousel in **Settings > Apollo Reborn > Subreddits**, showing a subreddit's pinned posts as tappable cards at the top of the feed, with tap-to-collapse, spoiler blurring, and an optional **Load All Highlights** mode that surfaces the full set of pinned posts (#463, #499: @icpryde)
+- Expand **Filters & Blocks** with per-subreddit keyword and post-flair filters plus subreddit-name filtering that hides any subreddit whose name contains a word (e.g. `circlejerk`) across feeds and search (#507: @icpryde)
+- Improve **Direct Chat** with inline images, GIFs, and emoji/snoomoji in message bubbles, ImgChest-backed image sending, a recipient avatar in the composer, a **Direct Chat** inbox filter with avatars on every row, and an **Inline Media in Chat** toggle in **Settings > Media** (#488: @icpryde)
 - Add **Apple's on-device Translation** (iOS 18+) as a translation provider in **Settings > Translation > Primary Provider**, alongside Google and LibreTranslate (#460: @icpryde)
 - Show a user's **Social Links** on their profile page (#465, #496, #498: @icpryde)
 - Move **Rich Link Previews** into its own settings section with a combined Body, Comments, and Color sub-screen, and replace the preset card colors with a full color picker (grid, spectrum, sliders, eyedropper, hex) plus quick swatches, a live card preview, and exact full-fill card coloring with automatic text contrast (#504: @icpryde)
@@ -25,9 +30,6 @@ All notable changes to this project will be documented in this file.
 - Add **0.75× and 1.25× playback speeds** to the fullscreen video player (#476: @icpryde)
 - Add a **hold-for-2× gesture** — press and hold the right side of a fullscreen video to play at 2× while held, then release to restore the previous speed (#479: @icpryde)
 - Add **multi-account credentials** so each signed-in account can use its own Reddit API key (or web session) instead of sharing one, with a redesigned account switcher to add, edit, reorder, and remove accounts, and support for Reddit "Web app" confidential clients (#505: @DeltAndy123)
-- Add off-by-default **AI Summaries** (iOS 26+) powered by Apple's on-device FoundationModels — a streaming post summary in the comments header and a discussion summary above the first comment in larger threads, with per-type controls, a **Tap to Summarize** option, and persistent caching so reopening a thread is instant (#489, #491: @jordanearle, @icpryde)
-- Expand **Filters & Blocks** with per-subreddit keyword and post-flair filters plus subreddit-name filtering that hides any subreddit whose name contains a word (e.g. `circlejerk`) across feeds and search (#507: @icpryde)
-- Improve **Direct Chat** with inline images, GIFs, and emoji/snoomoji in message bubbles, ImgChest-backed image sending, a recipient avatar in the composer, a **Direct Chat** inbox filter with avatars on every row, and an **Inline Media in Chat** toggle in **Settings > Media** (#488: @icpryde)
 
 ### Fixes
 
