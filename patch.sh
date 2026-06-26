@@ -2,81 +2,22 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-LIQUID_GLASS_ASSETS_CAR="${SCRIPT_DIR}/liquid-glass/prebuilt/Assets.car"
-LIQUID_GLASS_ICONS_REGISTRY="${SCRIPT_DIR}/liquid-glass/icons.json"
-LIQUID_GLASS_ICON_NAME="AppIcon"
-LIQUID_GLASS_IPAD_ICON_FILES=("AppIcon60x60" "AppIcon76x76")
-LIQUID_GLASS_IPHONE_ICON_FILES=("AppIcon60x60")
+MODULES_DIR="${SCRIPT_DIR}/scripts/modules"
 
-load_liquid_glass_alternate_icons() {
-    # Register every icon from icons.json as a CFBundleAlternateIcons entry
-    # (including the primary, so setAlternateIconName:<primary> is a valid
-    # no-op switch back to the primary asset).
-    local i=0 id
-    while id=$(plutil -extract "icons.${i}.id" raw -o - "$LIQUID_GLASS_ICONS_REGISTRY" 2>/dev/null); do
-        echo "$id"
-        ((i++))
-    done
-}
-
-LIQUID_GLASS_ALTERNATE_ICONS=()
-while IFS= read -r line; do
-    [[ -n "$line" ]] && LIQUID_GLASS_ALTERNATE_ICONS+=("$line")
-done < <(load_liquid_glass_alternate_icons)
-
-plist_set_string() {
-    local path="$1"
-    local value="$2"
-
-    if /usr/libexec/PlistBuddy -c "Print :${path}" "Info.plist" &>/dev/null; then
-        /usr/libexec/PlistBuddy -c "Set :${path} ${value}" "Info.plist"
-    else
-        /usr/libexec/PlistBuddy -c "Add :${path} string ${value}" "Info.plist"
-    fi
-}
-
-plist_ensure_dict() {
-    local path="$1"
-
-    if ! /usr/libexec/PlistBuddy -c "Print :${path}" "Info.plist" &>/dev/null; then
-        /usr/libexec/PlistBuddy -c "Add :${path} dict" "Info.plist"
-    fi
-}
-
-plist_replace_string_array() {
-    local path="$1"
-    shift
-
-    if /usr/libexec/PlistBuddy -c "Print :${path}" "Info.plist" &>/dev/null; then
-        /usr/libexec/PlistBuddy -c "Delete :${path}" "Info.plist"
-    fi
-    /usr/libexec/PlistBuddy -c "Add :${path} array" "Info.plist"
-
-    for value in "$@"; do
-        /usr/libexec/PlistBuddy -c "Add :${path}: string ${value}" "Info.plist"
-    done
-}
-
-ensure_liquid_glass_icon_metadata() {
-    plist_ensure_dict "CFBundleIcons"
-    plist_ensure_dict "CFBundleIcons:CFBundlePrimaryIcon"
-    plist_ensure_dict "CFBundleIcons:CFBundleAlternateIcons"
-    plist_ensure_dict "CFBundleIcons~ipad"
-    plist_ensure_dict "CFBundleIcons~ipad:CFBundlePrimaryIcon"
-    plist_ensure_dict "CFBundleIcons~ipad:CFBundleAlternateIcons"
-
-    plist_set_string "CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName" "${LIQUID_GLASS_ICON_NAME}"
-    plist_set_string "CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconName" "${LIQUID_GLASS_ICON_NAME}"
-    plist_replace_string_array "CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles" "${LIQUID_GLASS_IPHONE_ICON_FILES[@]}"
-    plist_replace_string_array "CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconFiles" "${LIQUID_GLASS_IPAD_ICON_FILES[@]}"
-
-    for icon_name in "${LIQUID_GLASS_ALTERNATE_ICONS[@]}"; do
-        plist_ensure_dict "CFBundleIcons:CFBundleAlternateIcons:${icon_name}"
-        plist_ensure_dict "CFBundleIcons~ipad:CFBundleAlternateIcons:${icon_name}"
-        plist_set_string "CFBundleIcons:CFBundleAlternateIcons:${icon_name}:CFBundleIconName" "${icon_name}"
-        plist_set_string "CFBundleIcons~ipad:CFBundleAlternateIcons:${icon_name}:CFBundleIconName" "${icon_name}"
-    done
-}
+# The patch operations now live in shared modules (also used by the
+# apply-patches.sh orchestrator), so patch.sh and the release builder can't
+# drift. This script keeps its long-standing CLI and does a single
+# unpack → apply modules → repack.
+# shellcheck source=scripts/modules/liquid-glass-binary.sh
+source "${MODULES_DIR}/liquid-glass-binary.sh"
+# shellcheck source=scripts/modules/liquid-glass-assets.sh
+source "${MODULES_DIR}/liquid-glass-assets.sh"
+# shellcheck source=scripts/modules/inject-url-schemes.sh
+source "${MODULES_DIR}/inject-url-schemes.sh"
+# shellcheck source=scripts/modules/fix-safari-extension.sh
+source "${MODULES_DIR}/fix-safari-extension.sh"
+# shellcheck source=scripts/modules/fix-openin-extension.sh
+source "${MODULES_DIR}/fix-openin-extension.sh"
 
 # Cleanup on exit (success or failure)
 cleanup() {
@@ -212,196 +153,73 @@ fi
 echo "Extracting ${INPUT_IPA}..."
 rm -rf extract_temp
 unzip -q "${INPUT_IPA}" -d extract_temp
-cd extract_temp
 
-if [ ! -d "Payload" ]; then
+if [ ! -d "extract_temp/Payload" ]; then
     echo "Error: Invalid IPA structure - Payload directory not found"
     exit 1
 fi
 
-# Find the app bundle dynamically
-app_bundle=$(ls Payload/ | grep '\.app$' | head -1)
-if [ -z "$app_bundle" ]; then
+# Find the app bundle dynamically (absolute path so the modules don't depend on
+# the current working directory).
+app_bundle_name=$(ls extract_temp/Payload/ | grep '\.app$' | head -1)
+if [ -z "$app_bundle_name" ]; then
     echo "Error: No .app bundle found in Payload directory"
     exit 1
 fi
-echo "Found app bundle: ${app_bundle}"
+APP_BUNDLE="$(pwd)/extract_temp/Payload/${app_bundle_name}"
+echo "Found app bundle: ${app_bundle_name}"
 
-# Get the executable name from Info.plist
-PLIST_PATH="Payload/${app_bundle}/Info.plist"
-EXECUTABLE_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$PLIST_PATH")
-echo "Executable name: ${EXECUTABLE_NAME}"
-
-# --- 2. Apply Modifications ---
+# --- 2. Apply Modifications (via shared modules) ---
 echo "Applying modifications..."
-cd "Payload/${app_bundle}"
 
-# --- 2a. Liquid Glass Patch ---
+# 2a. Liquid Glass (binary + assets)
 if [ "${LIQUID_GLASS}" == "true" ]; then
     echo "Applying Liquid Glass patch for iOS 26..."
-
-    # Install vtool if not available
-    if ! command -v vtool &> /dev/null; then
+    # Convenience: auto-install vtool if missing (long-standing patch.sh behavior).
+    if ! command -v vtool &>/dev/null; then
         echo "Installing vtool..."
         brew install vtool
     fi
-
-    # Apply vtool modifications for iOS 26 compatibility
-    echo "Running vtool to set build version for iOS 26..."
-    vtool -set-build-version ios 15.0 19.0 -replace -output "${EXECUTABLE_NAME}" "${EXECUTABLE_NAME}"
-
-    # Check for duplicate @executable_path/Frameworks LC_RPATH entries
-    echo "Checking for duplicate LC_RPATH entries..."
-    executable_path_count=$(otool -l "${EXECUTABLE_NAME}" | grep -A 2 LC_RPATH | grep "@executable_path/Frameworks" | wc -l | tr -d ' ')
-    echo "Found $executable_path_count @executable_path/Frameworks LC_RPATH entries"
-
-    if [ "$executable_path_count" -gt 1 ]; then
-        echo "Removing duplicate @executable_path/Frameworks LC_RPATH entry..."
-        install_name_tool -delete_rpath "@executable_path/Frameworks" "${EXECUTABLE_NAME}"
-        echo "Duplicate LC_RPATH entry removed"
-    fi
-
-    if [ ! -f "${LIQUID_GLASS_ASSETS_CAR}" ]; then
-        echo "Error: Liquid Glass asset catalog not found at ${LIQUID_GLASS_ASSETS_CAR}"
-        exit 1
-    fi
-
-    # Sanity check against a truncated/corrupt asset catalog. The real
-    # Assets.car is ~80 MB; patching with a stub silently produces a broken
-    # IPA that crashes on launch (see issue #314), so fail early with a fix.
-    asset_size=$(wc -c < "${LIQUID_GLASS_ASSETS_CAR}" | tr -d ' ')
-    if [ "${asset_size}" -lt 4096 ]; then
-        echo "Error: ${LIQUID_GLASS_ASSETS_CAR} looks truncated or corrupt (${asset_size} bytes), not the real asset catalog."
-        echo "       Re-fetch the repository contents and try again."
-        exit 1
-    fi
-
-    echo "Replacing Assets.car with prebuilt Liquid Glass asset catalog..."
-    cp "${LIQUID_GLASS_ASSETS_CAR}" "Assets.car"
-
-    echo "Updating app icon metadata for Liquid Glass multi-icon catalog..."
-    ensure_liquid_glass_icon_metadata
+    patch_liquid_glass_binary_in_app "$APP_BUNDLE"
+    patch_liquid_glass_assets_in_app "$APP_BUNDLE"
 fi
 
-# --- 2a-icons. Liquid Glass icons-only Patch ---
-# Same Assets.car + plist work as --liquid-glass, but skip the vtool
-# build-version bump. That bump is what opts the app into the iOS 26 Liquid
-# Glass UI runtime, which replaces several legacy UIKit behaviors (notably
-# the bottom-tab horizontal swipe gesture). Users who want the new icon
-# catalog without that runtime swap can use this variant instead.
+# 2a-icons. Liquid Glass icons-only (assets only, no SDK bump)
 if [ "${LIQUID_GLASS_ICONS_ONLY}" == "true" ]; then
     echo "Applying Liquid Glass icons-only patch (no iOS 26 UI chrome)..."
-
-    if [ ! -f "${LIQUID_GLASS_ASSETS_CAR}" ]; then
-        echo "Error: Liquid Glass asset catalog not found at ${LIQUID_GLASS_ASSETS_CAR}"
-        exit 1
-    fi
-
-    echo "Replacing Assets.car with prebuilt Liquid Glass asset catalog..."
-    cp "${LIQUID_GLASS_ASSETS_CAR}" "Assets.car"
-
-    echo "Updating app icon metadata for Liquid Glass multi-icon catalog..."
-    ensure_liquid_glass_icon_metadata
+    patch_liquid_glass_assets_in_app "$APP_BUNDLE"
 fi
 
-# --- 2b. URL Schemes Patch ---
+# 2b. URL schemes
 if [ -n "$URL_SCHEMES" ]; then
-    echo "Adding custom URL schemes..."
-
-    # Check if CFBundleURLTypes exists and find entry with CFBundleURLSchemes
-    url_type_index=0
-    found_schemes=false
-
-    if /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes" "Info.plist" &>/dev/null; then
-        # CFBundleURLTypes exists, find entry with CFBundleURLSchemes
-        while /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes:${url_type_index}" "Info.plist" &>/dev/null; do
-            if /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes:${url_type_index}:CFBundleURLSchemes" "Info.plist" &>/dev/null; then
-                found_schemes=true
-                break
-            fi
-            url_type_index=$((url_type_index + 1))
-        done
-
-        if [ "$found_schemes" == "false" ]; then
-            # CFBundleURLTypes exists but no entry has CFBundleURLSchemes, add to first entry
-            echo "Adding CFBundleURLSchemes to existing URL type entry..."
-            /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes array" "Info.plist"
-            url_type_index=0
-            found_schemes=true
-        fi
-    else
-        # CFBundleURLTypes doesn't exist, create it
-        echo "Creating CFBundleURLTypes array..."
-        /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes array" "Info.plist"
-        /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0 dict" "Info.plist"
-        /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes array" "Info.plist"
-        url_type_index=0
-        found_schemes=true
-    fi
-
-    # Get current schemes for display
-    echo "Current URL schemes:"
-    /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes:${url_type_index}:CFBundleURLSchemes" "Info.plist" 2>/dev/null || echo "  (none)"
-
-    # Parse comma-separated schemes, trim whitespace, and add each one
-    IFS=',' read -ra SCHEMES <<< "$URL_SCHEMES"
-    for scheme in "${SCHEMES[@]}"; do
-        # Trim leading and trailing whitespace
-        scheme=$(echo "$scheme" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
-        if [ -n "$scheme" ]; then
-            # Check if scheme already exists (use grep -F for literal match)
-            # PlistBuddy output format has leading spaces, so we check if the scheme appears as a word
-            existing=$(/usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes:${url_type_index}:CFBundleURLSchemes" "Info.plist" 2>/dev/null | grep -cxF "    ${scheme}" || true)
-
-            if [ "$existing" -eq 0 ]; then
-                echo "Adding URL scheme: ${scheme}"
-                /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:${url_type_index}:CFBundleURLSchemes: string ${scheme}" "Info.plist"
-            else
-                echo "URL scheme already exists, skipping: ${scheme}"
-            fi
-        fi
-    done
-
-    echo "Updated URL schemes:"
-    /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes:${url_type_index}:CFBundleURLSchemes" "Info.plist"
+    inject_url_schemes_in_app "$APP_BUNDLE" "$URL_SCHEMES"
 fi
 
-# --- 2c. Remove Code Signature ---
+# 2c. Extension fixes (operate on the unpacked bundle, before repack — no extra
+# unpack/repack cycle). Each no-ops if its appex is absent.
+if [ "${FIX_SAFARI_EXTENSION}" == "true" ]; then
+    fix_safari_extension_in_app "$APP_BUNDLE"
+fi
+if [ "${FIX_OPENIN_EXTENSION}" == "true" ]; then
+    fix_openin_extension_in_app "$APP_BUNDLE"
+fi
+
+# 2d. Remove code signature
 if [ "${REMOVE_CODE_SIGNATURE}" == "true" ]; then
     echo "Removing code signature..."
-    codesign --remove-signature "${EXECUTABLE_NAME}" || true
+    executable_name=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "${APP_BUNDLE}/Info.plist")
+    codesign --remove-signature "${APP_BUNDLE}/${executable_name}" || true
 else
     echo "Keeping code signature."
 fi
 
-cd ../.. # Back to extract_temp directory
-
 # --- 3. Repackage IPA ---
 echo "Repackaging modified IPA..."
-zip -qr "${OUTPUT_IPA_PATH}" Payload/
-cd .. # Back to original directory
-
-# --- 4. Fix Safari Extension ---
-# Done after repackaging so it operates on the finished IPA (it re-zips in
-# place). No-op if the IPA has no Apollofari.appex.
-if [ "${FIX_SAFARI_EXTENSION}" == "true" ]; then
-    echo "Repairing bundled Safari extension..."
-    bash "${SCRIPT_DIR}/scripts/fix-safari-extension.sh" "${OUTPUT_IPA_PATH}"
-fi
-
-# --- 4b. Fix Open-in-Apollo Action extension ---
-# Same timing/rationale as the Safari fix. No-op if the IPA has no
-# OpenInUIExtension.appex. Resolves the dylib from the openin-extension subproject
-# build output (run 'make package' first, or pass it via the script's --dylib).
-if [ "${FIX_OPENIN_EXTENSION}" == "true" ]; then
-    echo "Repairing bundled Open-in-Apollo action extension..."
-    bash "${SCRIPT_DIR}/scripts/fix-openin-extension.sh" "${OUTPUT_IPA_PATH}"
-fi
+( cd extract_temp && zip -qr "${OUTPUT_IPA_PATH}" Payload/ )
 
 # Note: Cleanup handled by trap on EXIT
 
-# --- 5. Final Verification ---
+# --- 4. Final Verification ---
 file_size=$(wc -c < "${OUTPUT_IPA_PATH}")
 echo "Patched IPA created: ${OUTPUT_IPA_PATH} (Size: ${file_size} bytes)"
 

@@ -12,7 +12,9 @@
 #import "ApolloRedditMediaUpload.h"
 #import "ApolloDeletedCommentsData.h"
 #import "ApolloImageUploadHost.h"
+#import "ApolloImgChestUpload.h"
 #import "ApolloNotificationBackend.h"
+#import "ApolloPushNotifications.h"
 #import "ApolloState.h"
 #import "Tweak.h"
 #import "CustomAPIViewController.h"
@@ -20,6 +22,8 @@
 #import "Defaults.h"
 #import "ApolloMarkdownToolbarGif.h"
 #import "ApolloWebAuthViewController.h"
+#import "ApolloWebJSON.h"
+#import "ApolloWebSessionLoginViewController.h"
 
 // MARK: - Sideload Fixes
 
@@ -586,10 +590,26 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
 
 %hook NSURLSession
 
+// Async image loaders (PINRemoteImage etc.) send no User-Agent on imgchest
+// requests, which its CDN rejects with 403; add one across every
+// task-creation entry point.
+- (NSURLSessionDownloadTask *)downloadTaskWithRequest:(NSURLRequest *)request {
+    NSURLRequest *ua = ApolloImgChestRequestByAddingUserAgentIfNeeded(request);
+    return ua ? %orig(ua) : %orig;
+}
+
+- (NSURLSessionDownloadTask *)downloadTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSURL *, NSURLResponse *, NSError *))completionHandler {
+    NSURLRequest *ua = ApolloImgChestRequestByAddingUserAgentIfNeeded(request);
+    return ua ? %orig(ua, completionHandler) : %orig;
+}
+
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
     ApolloRedditCaptureBearerTokenFromRequest(request, @"NSURLSession dataTaskWithRequest:");
     ApolloDeletedCommentsHandleRequestObservation(request, @"dataTaskWithRequest:");
     ApolloDeletedCommentsInstallDelegateTransformerIfNeeded((NSURLSession *)self, request);
+
+    NSURLRequest *imgChestUARequest = ApolloImgChestRequestByAddingUserAgentIfNeeded(request);
+    if (imgChestUARequest) return %orig(imgChestUARequest);
 
     NSURLRequest *redditMediaSubmitRequest = ApolloRedditMaybeRewriteSubmitRequest(request);
     if (redditMediaSubmitRequest) {
@@ -697,6 +717,9 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
     ApolloRedditCaptureBearerTokenFromRequest(request, @"NSURLSession dataTaskWithRequest:completionHandler:");
     ApolloDeletedCommentsHandleRequestObservation(request, @"dataTaskWithRequest:completionHandler:");
 
+    NSURLRequest *imgChestUARequest = ApolloImgChestRequestByAddingUserAgentIfNeeded(request);
+    if (imgChestUARequest) return %orig(imgChestUARequest, completionHandler);
+
     NSURLRequest *redditMediaSubmitRequest = ApolloRedditMaybeRewriteSubmitRequest(request);
     if (redditMediaSubmitRequest) {
         void (^wrappedSubmitCompletionHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -731,6 +754,29 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
             completionHandler(redditAlbumResponseData, fakeHTTPResponse, nil);
         };
         return %orig(ApolloLocalFastFailRequest(@"apollo-reddit-gallery-album"), wrappedHandler);
+    }
+
+    // ImgChest host: combine the member uploads into one multi-image ImgChest
+    // post and answer the Imgur album creation with its link.
+    ApolloImgChestAlbumResponder imgChestAlbumResponder = nil;
+    if (sImageUploadProvider == ImageUploadProviderImgChest) {
+        imgChestAlbumResponder = ApolloImgChestAlbumCreationResponderForRequest(request);
+    }
+    if (completionHandler && imgChestAlbumResponder) {
+        void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(__unused NSData *data, __unused NSURLResponse *response, __unused NSError *error) {
+            imgChestAlbumResponder(completionHandler);
+        };
+        return %orig(ApolloLocalFastFailRequest(@"apollo-imgchest-album"), wrappedHandler);
+    }
+
+    // Manage Uploads (issue #414): deletes of uploads this tweak created are
+    // routed to their real provider (ImgChest server-side delete; Reddit and
+    // merged interim entries acknowledged so they leave Apollo's list).
+    if (completionHandler && ApolloUploadRegistryShouldInterceptDelete(request)) {
+        void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(__unused NSData *data, __unused NSURLResponse *response, __unused NSError *error) {
+            ApolloUploadRegistryHandleImgurDelete(request, completionHandler);
+        };
+        return %orig(ApolloLocalFastFailRequest(@"apollo-upload-registry-delete"), wrappedHandler);
     }
 
     if ([host isEqualToString:@"imgur-apiv3.p.rapidapi.com"] && [path hasPrefix:@"/3/album"]) {
@@ -968,6 +1014,18 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
             [self setValue:mutableRequest forKey:@"_currentRequest"];
         }
     } else if ([requestURL.host isEqualToString:@"oauth.reddit.com"] || [requestURL.host isEqualToString:@"www.reddit.com"]) {
+        // Web JSON spike: when the flag is on, whitelisted listing reads are
+        // re-pointed at cookie-authenticated www.reddit.com/...json instead of
+        // the oauth host (see ApolloWebJSON.m). Returns nil when off/not
+        // applicable, leaving the existing oauth behavior untouched.
+        NSURLRequest *webJSONRequest = ApolloWebJSONRewriteRequest(request);
+        if (webJSONRequest) {
+            [self setValue:webJSONRequest forKey:@"_originalRequest"];
+            [self setValue:webJSONRequest forKey:@"_currentRequest"];
+            %orig;
+            return;
+        }
+
         NSMutableURLRequest *mutableRequest = [request mutableCopy];
         NSString *customUA = [sUserAgent length] > 0 ? sUserAgent : defaultUserAgent;
         [mutableRequest setValue:customUA forHTTPHeaderField:@"User-Agent"];
@@ -1010,6 +1068,20 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
         ApolloLog(@"[ImgurProxy] Proxying %@ via DuckDuckGo", requestString);
     }
 
+    %orig;
+}
+
+// Response-side observation for Web JSON session-expiry detection. Every task's
+// completion passes through here; ApolloWebJSONNoteResponse only reacts when Web
+// JSON mode is on and a cookie-authed www.reddit.com request came back as
+// Reddit's 403 HTML block page (signalling the harvested cookie expired). It's a
+// cheap predicate when the flag is off, so this is safe on the hot path.
+- (void)_onqueue_didFinishWithError:(id)error {
+    if (sWebJSONEnabled) {
+        NSURLSessionTask *task = (NSURLSessionTask *)self;
+        NSURLRequest *finished = task.currentRequest ?: task.originalRequest;
+        ApolloWebJSONNoteResponse(finished, task.response);
+    }
     %orig;
 }
 
@@ -1127,6 +1199,80 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
 }
 %end
 
+// Sideloaded builds signed without a paid Apple Developer team never receive an
+// `aps-environment` entitlement, so APNs registration always fails with
+// NSCocoaErrorDomain 3000 ("no valid 'aps-environment' entitlement string found
+// for application"). Apollo surfaces that raw error as an alarming "Error
+// Loading Notifications — contact developer" alert — telling users to contact a
+// developer about something no developer can fix at runtime.
+//
+// Push, watchers, and inbox alerts genuinely can't be delivered without the
+// entitlement, so faking a successful registration would only mislead users
+// into thinking notifications work. Instead we (1) swallow *only* this specific,
+// unfixable error here so the scary alert never appears, and (2) replace the
+// Notifications settings screen with a clear explanation (see the
+// NotificationsViewController hook below). Genuine, transient failures (offline,
+// rate limiting, …) fall through to %orig and keep their original error so real
+// problems still surface.
+%hook _TtC6Apollo11AppDelegate
+- (void)application:(UIApplication *)application didFailToRegisterForRemoteNotificationsWithError:(NSError *)error {
+    if (ApolloErrorIsMissingPushEntitlement(error)) {
+        ApolloLog(@"[Push] Missing aps-environment entitlement (free-account sideload) — push can never be delivered on this build. Suppressing the misleading registration error; the Notifications screen explains why instead.");
+        return;
+    }
+    %orig;
+}
+%end
+
+// On a build that can never receive push (a free-account sideload with no
+// `aps-environment` entitlement), Apollo's Notifications settings are a dead end:
+// every toggle ends in the suppressed registration error above, and nothing the
+// user enables can ever deliver. Showing the working-looking controls would give
+// folks false hope, so we replace the screen's contents with a clear,
+// non-interactive explanation. Builds that *can* receive push (a paid-account
+// sideload, or the App Store binary on a jailbreak) are detected via the
+// entitlement and left completely untouched.
+//
+// `_TtC6Apollo27NotificationsViewController` is only forward-declared here, so
+// the install logic lives in a C helper taking a plain UIViewController*.
+static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *controller) {
+    if (ApolloPushNotificationsSupported()) {
+        return;
+    }
+    // 'APNU' — unique enough to find our overlay again without a second add.
+    static const NSInteger kApolloNotificationsUnavailableTag = 0x41504E55;
+    UIView *root = controller.view;
+    if (!root || [root viewWithTag:kApolloNotificationsUnavailableTag]) {
+        return;
+    }
+    UIView *overlay = ApolloMakeNotificationsUnavailableView();
+    if (!overlay) {
+        return;
+    }
+    overlay.tag = kApolloNotificationsUnavailableTag;
+    overlay.translatesAutoresizingMaskIntoConstraints = NO;
+    [root addSubview:overlay];
+    [root bringSubviewToFront:overlay];
+    [NSLayoutConstraint activateConstraints:@[
+        [overlay.topAnchor constraintEqualToAnchor:root.topAnchor],
+        [overlay.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
+        [overlay.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
+        [overlay.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
+    ]];
+    ApolloLog(@"[Push] No aps-environment entitlement on this signing — replacing the Notifications screen with the 'unavailable' explanation.");
+}
+
+%hook _TtC6Apollo27NotificationsViewController
+- (void)viewDidLoad {
+    %orig;
+    ApolloInstallNotificationsUnavailableOverlay((UIViewController *)self);
+}
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    ApolloInstallNotificationsUnavailableOverlay((UIViewController *)self);
+}
+%end
+
 // Sideloaded builds have no App Store presence, so review prompts serve no purpose
 // and fire repeatedly without the App Store's rate limiting. Suppress both APIs.
 %hook SKStoreReviewController
@@ -1210,8 +1356,12 @@ static void initializeRandomSources() {
                                     UDKeyImageUploadProvider: @(ImageUploadProviderImgur),
                                     UDKeyShowUserAvatars: @NO,
                                     UDKeyUseProfileAvatarTabIcon: @NO,
+                                    UDKeySocialLinksInProfile: @YES,
                                     UDKeyShowSubredditHeaders: @NO,
+                                    UDKeyCommunityHighlights: @NO,
+                                    UDKeyCommunityHighlightsWeb: @NO,
                                     UDKeyAutoHideTabBarShowOnIdle: @NO,
+                                    UDKeyKeepSearchBarInPlace: @NO,
                                     UDKeyEnableBulkTranslation: @NO,
                                     UDKeyAutoTranslateOnAppear: @YES,
                                     UDKeyTranslatePostTitles: @NO,
@@ -1225,6 +1375,7 @@ static void initializeRandomSources() {
                                     UDKeyTagFilterNSFW: @YES,
                                     UDKeyTagFilterSpoiler: @YES,
                                     UDKeyTagFilterSubredditOverrides: @{},
+                                    UDKeyWebJSONEnabled: @NO,
                                     UDKeyNotificationBackendURL: @"",
                                     UDKeyNotificationBackendRegistrationToken: @"",
                                     UDKeyRedditClientSecret: @""};
@@ -1279,12 +1430,27 @@ static void initializeRandomSources() {
         sLinkPreviewCardColor = ApolloLinkPreviewCardColorNeutral;
         [standardDefaults setInteger:sLinkPreviewCardColor forKey:UDKeyLinkPreviewCardColor];
     }
-    ApolloLog(@"[LinkPreviews] settings loaded bodyMode=%ld commentsMode=%ld cardColor=%ld", (long)sLinkPreviewBodyMode, (long)sLinkPreviewCommentsMode, (long)sLinkPreviewCardColor);
+    // Free-form hex card color. Default is "" — the neutral card — so a bright
+    // full-fill is fully opt-in via the picker. The legacy preset enum is
+    // deliberately NOT promoted into a color: those presets only ever rendered as
+    // a faint 8-14% tint, so turning them into a bold full-card fill on update
+    // would be jarring. Existing pickers re-choose a color if they want one.
+    NSString *cardColorHex = [standardDefaults stringForKey:UDKeyLinkPreviewCardColorHex];
+    if (![standardDefaults objectForKey:UDKeyLinkPreviewCardColorHex]) {
+        cardColorHex = @"";
+        [standardDefaults setObject:@"" forKey:UDKeyLinkPreviewCardColorHex];
+    }
+    ApolloSetLinkPreviewCardColorHex(cardColorHex);
+    ApolloLog(@"[LinkPreviews] settings loaded bodyMode=%ld commentsMode=%ld cardColor=%ld cardColorHex=%@", (long)sLinkPreviewBodyMode, (long)sLinkPreviewCommentsMode, (long)sLinkPreviewCardColor, sLinkPreviewCardColorHex ?: @"(default)");
     sImageUploadProvider = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyImageUploadProvider];
     sShowUserAvatars = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars];
     sUseProfileAvatarTabIcon = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon];
+    sSocialLinksInProfile = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySocialLinksInProfile];
     sShowSubredditHeaders = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders];
+    sCommunityHighlights = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlights];
+    sCommunityHighlightsWeb = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlightsWeb];
     sAutoHideTabBarShowOnIdle = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoHideTabBarShowOnIdle];
+    sKeepSearchBarInPlace = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyKeepSearchBarInPlace];
     sModernSubredditDividers = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers];
     sSubredditListEnhancements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditListEnhancements];
     sEnableFlairColors = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFlairColors];
@@ -1295,8 +1461,8 @@ static void initializeRandomSources() {
     NSString *targetLanguage = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTranslationTargetLanguage];
     sTranslationTargetLanguage = [targetLanguage length] > 0 ? [targetLanguage copy] : nil;
 
-    // Provider: only "google" or "libre" are supported. Migrate any older
-    // "apple" value to "google" so existing users land on a working provider.
+    // Provider: "google", "libre", or "apple" (on-device, iOS 18+). "apple" on an
+    // older system can't run, so migrate it to Google for those users.
     id providerValue = [persistentDomain objectForKey:UDKeyTranslationProvider];
     NSString *provider = [providerValue isKindOfClass:[NSString class]] ? (NSString *)providerValue : nil;
 
@@ -1304,8 +1470,10 @@ static void initializeRandomSources() {
         sTranslationProvider = @"libre";
     } else if ([provider isEqualToString:@"google"]) {
         sTranslationProvider = @"google";
+    } else if ([provider isEqualToString:@"apple"] && IsAppleTranslationSupported()) {
+        sTranslationProvider = @"apple";
     } else {
-        // Unset, unrecognized, or legacy "apple" — default to Google.
+        // Unset, unrecognized, or "apple" on an unsupported OS — default to Google.
         sTranslationProvider = @"google";
         [standardDefaults setObject:sTranslationProvider forKey:UDKeyTranslationProvider];
         [standardDefaults setBool:NO forKey:UDKeyTranslationProviderUserSelected];
@@ -1336,6 +1504,20 @@ static void initializeRandomSources() {
         }
         sTranslationSkipLanguages = [clean copy];
     }
+
+    // Web JSON: read the flag here, but defer the keychain-backed
+    // cookie/modhash/username hydration until AFTER the SecItem fishhooks are
+    // installed below — in the simulator the keychain is virtualized by those
+    // hooks, so reading before they're in place returns nothing.
+    sWebJSONEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyWebJSONEnabled];
+    // Surface a revoked/expired cookie (detected response-side in
+    // ApolloWebJSONNoteResponse) as a re-login prompt wherever the user is.
+    [[NSNotificationCenter defaultCenter] addObserverForName:ApolloWebJSONSessionExpiredNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification *note) {
+        [ApolloWebSessionLoginViewController presentExpiredSessionPrompt];
+    }];
 
     // Tag filter feature hydration.
     sTagFilterEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyTagFilterEnabled];
@@ -1457,8 +1639,33 @@ static void initializeRandomSources() {
 
     initializeRandomSources();
 
-    // Redirect user to Custom API settings if no API credentials are set
-    if ([sRedditClientId length] == 0) {
+    // Web JSON keychain hydration — must run after the SecItem fishhooks above so
+    // the simulator's virtualized keychain is in place (see the deferral note
+    // where sWebJSONEnabled is read). Migrates any legacy NSUserDefaults cookie.
+    ApolloWebJSONLoadPersistedCredentials();
+    if (sWebJSONEnabled) {
+        ApolloLog(@"[WebJSON] enabled at launch, session cookie %@, modhash %@, user %@",
+                  sWebSessionCookieHeader ? @"present" : @"absent",
+                  sWebSessionModhash.length > 0 ? @"present" : @"absent",
+                  sWebSessionUsername ?: @"(none)");
+    }
+
+    // Cold-start identity: when a usable Web JSON session exists but no signed-in
+    // account is loaded, synthesize one now. This runs in %ctor (after the SecItem
+    // keychain hooks above) and therefore before AccountManager reads its accounts
+    // on this launch, so the account tab + write actions (vote/comment) work
+    // without an OAuth account. No-op when an account already exists.
+    if (ApolloWebJSONHasUsableSession()) {
+        @try { ApolloWebJSONSynthesizeSignedInAccount(); }
+        @catch (NSException *e) { ApolloLog(@"[WebJSON][identity] launch synthesis failed: %@", e); }
+    }
+    // This launch loads accounts fresh, so any "restart to activate" state left
+    // over from a mid-session web login is now resolved — clear the indicator.
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:UDKeyWebJSONPendingRestart];
+
+    // Redirect user to Custom API settings if no API credentials are set — but not
+    // when a Web JSON cookie session is driving things (no API key is expected).
+    if ([sRedditClientId length] == 0 && !ApolloWebJSONHasUsableSession()) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             UIWindow *mainWindow = ((UIWindowScene *)UIApplication.sharedApplication.connectedScenes.anyObject).windows.firstObject;
             UITabBarController *tabBarController = (UITabBarController *)mainWindow.rootViewController;

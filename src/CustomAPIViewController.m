@@ -1,13 +1,16 @@
 #import "CustomAPIViewController.h"
 #import "ApolloCommon.h"
 #import "ApolloNotificationBackend.h"
+#import "ApolloWebSessionLoginViewController.h"
 #import "ApolloState.h"
 #import "ApolloUserProfileCache.h"
 #import "ApolloLinkPreviewCache.h"
+#import "ApolloLinkPreviewSettingsViewController.h"
 #import "ApolloSubredditCustomBannerCache.h"
 #import "ApolloSubredditCustomIconCache.h"
 #import "ApolloSubredditInfoCache.h"
 #import "ApolloBannedProfile.h"
+#import "ApolloProfileSocialLinks.h"
 #import "UserDefaultConstants.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <Security/Security.h>
@@ -22,6 +25,7 @@ typedef NS_ENUM(NSInteger, SectionIndex) {
     SectionBackupRestore = 0,
     SectionAPIKeys,
     SectionGeneral,
+    SectionLinkPreviews,
     SectionMedia,
     SectionSubreddits,
     SectionNotificationBackend,
@@ -51,13 +55,37 @@ static NSInteger ApolloMediaPhysicalRow(NSInteger logicalRow) {
     return logicalRow;
 }
 
+// Canonical (mode-on) row indices within SectionAPIKeys. The Web Session Login
+// row only exists while API-Key-Free Mode is on; with it off, that row is absent
+// and every row at or below it slides up one slot. Mirrors the Media-section
+// mapping above so the API Keys index math lives in one place instead of being
+// inlined at each call site.
+typedef NS_ENUM(NSInteger, ApolloAPIKeyRow) {
+    // Rows 0-5 are the API-key text fields, row 6 is the Universal OAuth Sign-In
+    // switch, and row 7 is the User Agent field; the navigable/auxiliary rows below
+    // follow it.
+    kAPIKeyRowTroubleshooting = 8,
+    kAPIKeyRowSetupGuide      = 9,
+    kAPIKeyRowWebJSONSwitch   = 10,
+    kAPIKeyRowWebSessionLogin = 11,
+    kAPIKeyRowWidgetSetupCode = 12,
+};
+
+// Map a displayed (visible) API Keys row to its canonical index (ApolloAPIKeyRow).
+static NSInteger ApolloAPIKeyCanonicalRow(NSInteger displayedRow) {
+    if (!sWebJSONEnabled && displayedRow >= kAPIKeyRowWebSessionLogin) {
+        return displayedRow + 1;
+    }
+    return displayedRow;
+}
+
 static BOOL sLinkPreviewModeRefreshPending = NO;
 static NSString *sPendingLinkPreviewModeRefreshArea = nil;
 static NSInteger sPendingLinkPreviewModeRefreshMode = ApolloLinkPreviewModeFull;
 
 #pragma mark - Thanks To VC (forward decl)
 
-@interface ApolloThanksToViewController : UITableViewController
+@interface ApolloThanksToViewController : ApolloSettingsTableViewController
 @end
 
 static NSString *const kApolloRebornSubredditName = @"ApolloReborn";
@@ -173,99 +201,41 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (UITableView *)apollo_findTableViewInView:(UIView *)view {
-    if (!view) return nil;
-    if ([view isKindOfClass:[UITableView class]]) return (UITableView *)view;
-    for (UIView *subview in view.subviews) {
-        UITableView *tableView = [self apollo_findTableViewInView:subview];
-        if (tableView) return tableView;
-    }
-    return nil;
-}
-
-- (UITableView *)apollo_sourceThemeTableView {
-    NSArray<UIViewController *> *stack = self.navigationController.viewControllers;
-    NSUInteger index = [stack indexOfObject:self];
-    if (index == NSNotFound || index == 0) return nil;
-
-    UIViewController *source = stack[index - 1];
-    if ([source respondsToSelector:@selector(tableView)]) {
-        id tableView = ((id (*)(id, SEL))objc_msgSend)(source, @selector(tableView));
-        if ([tableView isKindOfClass:[UITableView class]]) return tableView;
-    }
-    return [self apollo_findTableViewInView:source.view];
-}
-
-- (UIColor *)apollo_themeTableBackgroundColor {
-    UITableView *source = [self apollo_sourceThemeTableView];
-    return source.backgroundColor ?: self.tableView.backgroundColor;
-}
-
-- (UIColor *)apollo_themeCellBackgroundColor {
-    UITableView *source = [self apollo_sourceThemeTableView];
-    for (UITableViewCell *cell in source.visibleCells) {
-        UIColor *color = cell.backgroundColor ?: cell.contentView.backgroundColor;
-        if (color) return color;
-    }
-    return [UIColor secondarySystemGroupedBackgroundColor];
-}
-
-- (UIColor *)apollo_themeSeparatorColor {
-    UITableView *source = [self apollo_sourceThemeTableView];
-    return source.separatorColor ?: [UIColor separatorColor];
-}
-
-- (UIColor *)apollo_themeAccentColor {
-    NSMutableArray<UIColor *> *candidates = [NSMutableArray array];
-    if (self.tabBarController.tabBar.tintColor) [candidates addObject:self.tabBarController.tabBar.tintColor];
-    if (self.navigationController.navigationBar.tintColor) [candidates addObject:self.navigationController.navigationBar.tintColor];
-    if (self.view.tintColor) [candidates addObject:self.view.tintColor];
-    if (self.tableView.tintColor) [candidates addObject:self.tableView.tintColor];
-    if (self.view.window.tintColor) [candidates addObject:self.view.window.tintColor];
-    for (UIColor *color in candidates) {
-        if ([color isKindOfClass:[UIColor class]]) return color;
-    }
-    return self.view.tintColor ?: [UIColor systemBlueColor];
-}
-
 - (void)apollo_applyThemeToCell:(UITableViewCell *)cell {
+    [super apollo_applyThemeToCell:cell];
     if (!cell) return;
 
-    UIColor *cellColor = [self apollo_themeCellBackgroundColor];
-    // Fill via the cell's own layer, NOT contentView: UIKit layers the
-    // selectedBackgroundView between the background and the contentView, so an
-    // opaque contentView would hide the tap highlight everywhere except the
-    // accessory gutter (the ">" arrow sits outside contentView). Keeping
-    // contentView clear lets the highlight show across the whole row while the
-    // layer fill keeps the unselected colour identical.
-    cell.backgroundColor = cellColor;
+    // Fill via the cell's own layer (super sets cell.backgroundColor), NOT
+    // contentView: UIKit layers the selectedBackgroundView between the
+    // background and the contentView, so an opaque contentView would hide the
+    // tap highlight everywhere except the accessory gutter (the ">" arrow sits
+    // outside contentView). Keeping contentView clear lets the highlight show
+    // across the whole row while the layer fill keeps the unselected colour
+    // identical.
     cell.contentView.backgroundColor = [UIColor clearColor];
 
     UIView *selectedBackground = [[UIView alloc] init];
     selectedBackground.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.18];
     cell.selectedBackgroundView = selectedBackground;
+}
 
+- (void)apollo_refreshFooterTextViews {
     UIColor *accentColor = [self apollo_themeAccentColor];
-    cell.tintColor = accentColor;
-    if (cell.accessoryView) cell.accessoryView.tintColor = accentColor;
+    NSInteger sectionCount = [self numberOfSectionsInTableView:self.tableView];
+    for (NSInteger section = 0; section < sectionCount; section++) {
+        UIView *footerView = [self.tableView footerViewForSection:section];
+        if (![footerView isKindOfClass:[UITextView class]]) continue;
 
-    for (UIView *subview in cell.contentView.subviews) {
-        subview.tintColor = accentColor;
+        UITextView *textView = (UITextView *)footerView;
+        textView.tintColor = accentColor;
+        textView.linkTextAttributes = @{NSForegroundColorAttributeName: accentColor};
+        textView.attributedText = [self footerAttributedTextForSection:section];
     }
 }
 
 - (void)apollo_applyTheme {
-    UIColor *backgroundColor = [self apollo_themeTableBackgroundColor];
-    UIColor *accentColor = [self apollo_themeAccentColor];
-    self.view.backgroundColor = backgroundColor;
-    self.tableView.backgroundColor = backgroundColor;
-    self.tableView.separatorColor = [self apollo_themeSeparatorColor];
-    self.view.tintColor = accentColor;
-    self.tableView.tintColor = accentColor;
-    self.navigationController.navigationBar.tintColor = accentColor;
-    for (UITableViewCell *cell in self.tableView.visibleCells) {
-        [self apollo_applyThemeToCell:cell];
-    }
+    [super apollo_applyTheme];
+    [self apollo_refreshFooterTextViews];
 }
 
 - (UIImage *)roundedImage:(UIImage *)image size:(CGFloat)size cornerRadius:(CGFloat)radius {
@@ -378,9 +348,10 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (NSString *)mediaUploadProviderText {
     switch (sImageUploadProvider) {
-        case ImageUploadProviderReddit: return @"Reddit";
+        case ImageUploadProviderReddit:   return @"Reddit";
+        case ImageUploadProviderImgChest: return @"Img Chest";
         case ImageUploadProviderImgur:
-        default:                        return @"Imgur";
+        default:                          return @"Imgur";
     }
 }
 
@@ -401,12 +372,23 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     NSString *imgurTitle = (sImageUploadProvider == ImageUploadProviderImgur) ? @"Imgur (Current)" : @"Imgur";
     NSString *redditTitle = (sImageUploadProvider == ImageUploadProviderReddit) ? @"Reddit (Current)" : @"Reddit";
+    NSString *imgChestTitle = (sImageUploadProvider == ImageUploadProviderImgChest) ? @"Img Chest (Current)" : @"Img Chest";
 
     [sheet addAction:[UIAlertAction actionWithTitle:imgurTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
         [self setImageUploadProvider:ImageUploadProviderImgur];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:redditTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
         [self setImageUploadProvider:ImageUploadProviderReddit];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:imgChestTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        // Uploading requires an API token (free at imgchest.com); without one
+        // there is nothing to authenticate the POST with.
+        if (sImageChestAPIToken.length == 0) {
+            [self showAlertWithTitle:@"Img Chest API Key Required"
+                             message:@"Add your Img Chest API key in the API Keys section first, then select Img Chest as the upload host."];
+            return;
+        }
+        [self setImageUploadProvider:ImageUploadProviderImgChest];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
 
@@ -428,199 +410,51 @@ typedef NS_ENUM(NSInteger, Tag) {
     }
 }
 
-- (NSString *)linkPreviewCardColorTextForColor:(NSInteger)color {
-    switch (color) {
-        case ApolloLinkPreviewCardColorGray:     return @"Gray";
-        case ApolloLinkPreviewCardColorRed:      return @"Red";
-        case ApolloLinkPreviewCardColorOrange:   return @"Orange";
-        case ApolloLinkPreviewCardColorYellow:   return @"Yellow";
-        case ApolloLinkPreviewCardColorGreen:    return @"Green";
-        case ApolloLinkPreviewCardColorMint:     return @"Mint";
-        case ApolloLinkPreviewCardColorTeal:     return @"Teal";
-        case ApolloLinkPreviewCardColorCyan:     return @"Cyan";
-        case ApolloLinkPreviewCardColorBlue:     return @"Blue";
-        case ApolloLinkPreviewCardColorIndigo:   return @"Indigo";
-        case ApolloLinkPreviewCardColorPurple:   return @"Purple";
-        case ApolloLinkPreviewCardColorPink:     return @"Pink";
-        case ApolloLinkPreviewCardColorBrown:    return @"Brown";
-        case ApolloLinkPreviewCardColorCoral:    return @"Coral";
-        case ApolloLinkPreviewCardColorLime:     return @"Lime";
-        case ApolloLinkPreviewCardColorOlive:    return @"Olive";
-        case ApolloLinkPreviewCardColorLavender: return @"Lavender";
-        case ApolloLinkPreviewCardColorSlate:    return @"Slate";
-        case ApolloLinkPreviewCardColorNeutral:
-        default:                                 return @"Neutral";
+- (UITableViewCell *)linkPreviewsCellForTableView:(UITableView *)tableView {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_LinkPreviews"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"Cell_LinkPreviews"];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     }
+    cell.textLabel.text = @"Rich Link Preview Settings";
+    NSString *colorText = (sLinkPreviewCardColorHex.length > 0)
+        ? [NSString stringWithFormat:@"#%@", [sLinkPreviewCardColorHex uppercaseString]]
+        : @"Default color";
+    cell.detailTextLabel.text = [NSString stringWithFormat:@"Body %@ · Comments %@ · %@",
+                                 [self linkPreviewModeTextForMode:sLinkPreviewBodyMode],
+                                 [self linkPreviewModeTextForMode:sLinkPreviewCommentsMode],
+                                 colorText];
+    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    cell.detailTextLabel.numberOfLines = 0;
+    cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    return cell;
 }
 
-- (UIColor *)linkPreviewCardUIColorForColor:(NSInteger)color {
-    switch (color) {
-        case ApolloLinkPreviewCardColorGray:     return [UIColor colorWithWhite:0.56 alpha:1.0];
-        case ApolloLinkPreviewCardColorRed:      return [UIColor colorWithRed:1.00 green:0.23 blue:0.19 alpha:1.0];
-        case ApolloLinkPreviewCardColorOrange:   return [UIColor colorWithRed:1.00 green:0.58 blue:0.00 alpha:1.0];
-        case ApolloLinkPreviewCardColorYellow:   return [UIColor colorWithRed:1.00 green:0.80 blue:0.00 alpha:1.0];
-        case ApolloLinkPreviewCardColorGreen:    return [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0];
-        case ApolloLinkPreviewCardColorMint:     return [UIColor colorWithRed:0.00 green:0.78 blue:0.75 alpha:1.0];
-        case ApolloLinkPreviewCardColorTeal:     return [UIColor colorWithRed:0.19 green:0.69 blue:0.78 alpha:1.0];
-        case ApolloLinkPreviewCardColorCyan:     return [UIColor colorWithRed:0.20 green:0.68 blue:0.90 alpha:1.0];
-        case ApolloLinkPreviewCardColorBlue:     return [UIColor colorWithRed:0.00 green:0.48 blue:1.00 alpha:1.0];
-        case ApolloLinkPreviewCardColorIndigo:   return [UIColor colorWithRed:0.35 green:0.34 blue:0.84 alpha:1.0];
-        case ApolloLinkPreviewCardColorPurple:   return [UIColor colorWithRed:0.69 green:0.32 blue:0.87 alpha:1.0];
-        case ApolloLinkPreviewCardColorPink:     return [UIColor colorWithRed:1.00 green:0.18 blue:0.33 alpha:1.0];
-        case ApolloLinkPreviewCardColorBrown:    return [UIColor colorWithRed:0.64 green:0.52 blue:0.37 alpha:1.0];
-        case ApolloLinkPreviewCardColorCoral:    return [UIColor colorWithRed:1.00 green:0.50 blue:0.31 alpha:1.0];
-        case ApolloLinkPreviewCardColorLime:     return [UIColor colorWithRed:0.60 green:0.80 blue:0.00 alpha:1.0];
-        case ApolloLinkPreviewCardColorOlive:    return [UIColor colorWithRed:0.50 green:0.60 blue:0.20 alpha:1.0];
-        case ApolloLinkPreviewCardColorLavender: return [UIColor colorWithRed:0.56 green:0.45 blue:0.90 alpha:1.0];
-        case ApolloLinkPreviewCardColorSlate:    return [UIColor colorWithRed:0.35 green:0.43 blue:0.50 alpha:1.0];
-        case ApolloLinkPreviewCardColorNeutral:
-        default:                                 return [UIColor colorWithWhite:0.72 alpha:1.0];
-    }
-}
-
-- (UIImage *)linkPreviewCardColorDotImageForColor:(NSInteger)color {
-    CGSize size = CGSizeMake(18.0, 18.0);
-    CGRect dotRect = CGRectMake(3.0, 3.0, 12.0, 12.0);
-    UIGraphicsBeginImageContextWithOptions(size, NO, 0.0);
-    CGContextRef context = UIGraphicsGetCurrentContext();
-    UIColor *dotColor = [self linkPreviewCardUIColorForColor:color];
-    CGContextSetFillColorWithColor(context, dotColor.CGColor);
-    CGContextFillEllipseInRect(context, dotRect);
-    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-    return [image imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
-}
-
-- (void)setLinkPreviewMode:(NSInteger)mode body:(BOOL)body {
-    NSInteger row = ApolloMediaPhysicalRow(body ? 7 : 8);
-    NSString *key = body ? UDKeyLinkPreviewBodyMode : UDKeyLinkPreviewCommentsMode;
-    if (body) {
-        sLinkPreviewBodyMode = mode;
+- (void)openLinkPreviewSettings {
+    ApolloLinkPreviewSettingsViewController *vc =
+        [[ApolloLinkPreviewSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    __weak typeof(self) weakSelf = self;
+    vc.settingsDidChange = ^(NSString *area) {
+        [weakSelf noteLinkPreviewChangeForArea:area];
+    };
+    if (self.navigationController) {
+        [self.navigationController pushViewController:vc animated:YES];
     } else {
-        sLinkPreviewCommentsMode = mode;
+        UINavigationController *navigation =
+            [[UINavigationController alloc] initWithRootViewController:vc];
+        [self presentViewController:navigation animated:YES completion:nil];
     }
-    [[NSUserDefaults standardUserDefaults] setInteger:mode forKey:key];
+}
+
+// The Rich Link Preview sub-screen mutates the shared state and posts the live
+// notification itself; this just arms the deferred refresh so the feed/comments
+// rebuild once the whole settings stack is dismissed (mirrors the old in-Media
+// setters' use of these flags, consumed in viewWillDisappear).
+- (void)noteLinkPreviewChangeForArea:(NSString *)area {
     sLinkPreviewModeRefreshPending = YES;
-    sPendingLinkPreviewModeRefreshArea = body ? @"body" : @"comments";
-    sPendingLinkPreviewModeRefreshMode = mode;
-    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloLinkPreviewModeDidChangeNotification
-                                                        object:nil
-                                                      userInfo:@{
-                                                          @"area": body ? @"body" : @"comments",
-                                                          @"mode": @(mode),
-                                                      }];
-
-    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:row inSection:SectionMedia];
-    if ([[self.tableView indexPathsForVisibleRows] containsObject:indexPath]) {
-        [self.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
-    }
-}
-
-- (void)setLinkPreviewCardColor:(NSInteger)color {
-    if (color < ApolloLinkPreviewCardColorNeutral || color > ApolloLinkPreviewCardColorSlate) {
-        color = ApolloLinkPreviewCardColorNeutral;
-    }
-
-    sLinkPreviewCardColor = color;
-    [[NSUserDefaults standardUserDefaults] setInteger:sLinkPreviewCardColor forKey:UDKeyLinkPreviewCardColor];
-    sLinkPreviewModeRefreshPending = YES;
-    sPendingLinkPreviewModeRefreshArea = @"card-color";
-    sPendingLinkPreviewModeRefreshMode = sLinkPreviewCardColor;
-    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloLinkPreviewModeDidChangeNotification
-                                                        object:nil
-                                                      userInfo:@{
-                                                          @"area": @"card-color",
-                                                          @"cardColor": @(color),
-                                                      }];
-
-    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(9) inSection:SectionMedia];
-    if ([[self.tableView indexPathsForVisibleRows] containsObject:indexPath]) {
-        [self.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
-    }
-}
-
-- (void)presentLinkPreviewCardColorSheetFromSourceView:(UIView *)sourceView {
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Preview Card Color"
-                                                                   message:@"Choose a color."
-                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-
-    NSArray<NSNumber *> *colors = @[
-        @(ApolloLinkPreviewCardColorNeutral),
-        @(ApolloLinkPreviewCardColorGray),
-        @(ApolloLinkPreviewCardColorRed),
-        @(ApolloLinkPreviewCardColorOrange),
-        @(ApolloLinkPreviewCardColorYellow),
-        @(ApolloLinkPreviewCardColorGreen),
-        @(ApolloLinkPreviewCardColorMint),
-        @(ApolloLinkPreviewCardColorTeal),
-        @(ApolloLinkPreviewCardColorCyan),
-        @(ApolloLinkPreviewCardColorBlue),
-        @(ApolloLinkPreviewCardColorIndigo),
-        @(ApolloLinkPreviewCardColorPurple),
-        @(ApolloLinkPreviewCardColorPink),
-        @(ApolloLinkPreviewCardColorBrown),
-        @(ApolloLinkPreviewCardColorCoral),
-        @(ApolloLinkPreviewCardColorLime),
-        @(ApolloLinkPreviewCardColorOlive),
-        @(ApolloLinkPreviewCardColorLavender),
-        @(ApolloLinkPreviewCardColorSlate),
-    ];
-
-    for (NSNumber *colorNumber in colors) {
-        NSInteger color = colorNumber.integerValue;
-        NSString *name = [self linkPreviewCardColorTextForColor:color];
-        NSString *title = (color == sLinkPreviewCardColor) ? [NSString stringWithFormat:@"%@ (Current)", name] : name;
-        UIAlertAction *colorAction = [UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-            [self setLinkPreviewCardColor:color];
-        }];
-        @try {
-            [colorAction setValue:[self linkPreviewCardColorDotImageForColor:color] forKey:@"image"];
-        } @catch (__unused NSException *exception) {
-        }
-        [sheet addAction:colorAction];
-    }
-
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-
-    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
-    if (popover && sourceView) {
-        popover.sourceView = sourceView;
-        popover.sourceRect = sourceView.bounds;
-    }
-
-    [self presentViewController:sheet animated:YES completion:nil];
-}
-
-- (void)presentLinkPreviewModeSheetFromSourceView:(UIView *)sourceView body:(BOOL)body {
-    NSInteger currentMode = body ? sLinkPreviewBodyMode : sLinkPreviewCommentsMode;
-    NSString *title = body ? @"Body Link Previews" : @"Comment Link Previews";
-    NSString *message = body ? @"Choose how rich link preview cards appear in feeds and post bodies." : @"Choose how rich link preview cards appear in comments.";
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:title
-                                                                   message:message
-                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-
-    NSString *fullTitle = (currentMode == ApolloLinkPreviewModeFull) ? @"Full (Current)" : @"Full";
-    NSString *compactTitle = (currentMode == ApolloLinkPreviewModeCompact) ? @"Compact (Current)" : @"Compact";
-    NSString *offTitle = (currentMode == ApolloLinkPreviewModeOff) ? @"Off (Current)" : @"Off";
-
-    [sheet addAction:[UIAlertAction actionWithTitle:fullTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        [self setLinkPreviewMode:ApolloLinkPreviewModeFull body:body];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:compactTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        [self setLinkPreviewMode:ApolloLinkPreviewModeCompact body:body];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:offTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        [self setLinkPreviewMode:ApolloLinkPreviewModeOff body:body];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-
-    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
-    if (popover && sourceView) {
-        popover.sourceView = sourceView;
-        popover.sourceRect = sourceView.bounds;
-    }
-
-    [self presentViewController:sheet animated:YES completion:nil];
+    sPendingLinkPreviewModeRefreshArea = area.length > 0 ? area : @"card-color";
+    sPendingLinkPreviewModeRefreshMode = ApolloLinkPreviewModeFull;
 }
 
 #pragma mark - View Lifecycle
@@ -631,7 +465,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     self.title = @"Apollo Reborn";
     self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
     [self apollo_disableAutoHideTabBarIdleIfUnsupported];
-    [self apollo_applyTheme];
 
     [[ApolloSubredditInfoCache sharedCache] requestInfoForSubreddit:kApolloRebornSubredditName completion:^(ApolloSubredditInfo *info) {
         (void)info;
@@ -641,6 +474,15 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self apollo_applyTheme];
+    // Refresh the Web Session Login status line after returning from the login
+    // flow (signed-in user / write-token availability may have just changed).
+    if (sWebJSONEnabled && [self.tableView numberOfRowsInSection:SectionAPIKeys] > kAPIKeyRowWebSessionLogin) {
+        [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:kAPIKeyRowWebSessionLogin inSection:SectionAPIKeys]]
+                              withRowAnimation:UITableViewRowAnimationNone];
+    }
+    // Refresh the Rich Link Previews status subtitle after returning from its subview.
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:SectionLinkPreviews]
+                  withRowAnimation:UITableViewRowAnimationNone];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -672,11 +514,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     });
 }
 
-- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
-    [super traitCollectionDidChange:previousTraitCollection];
-    [self apollo_applyTheme];
-}
-
 #pragma mark - UITableViewDataSource
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
@@ -686,10 +523,20 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
         case SectionBackupRestore: return 4;
-        case SectionAPIKeys: return 11; // 7 text fields + OAuth switch + Can't sign in? + API key setup guide + Copy Widget Setup Code
-        case SectionGeneral: return sShowDeletedComments ? 11 : 10;
-        case SectionMedia: return 13 + (sEnableInlineImages ? 0 : -kApolloMediaInlineDependentRows);
-        case SectionSubreddits: return sSubredditListEnhancements ? 8 : 7;
+        // 7 text fields + Universal OAuth switch + Can't sign in? + API key setup
+        // guide + Web JSON switch + Copy Widget Setup Code (+ Web Session Login row,
+        // only while Web JSON mode is on). Widget Setup Code is the last canonical
+        // row, so the count is its index + 1, minus the Web Session Login row when
+        // the mode is off.
+        case SectionAPIKeys: return kAPIKeyRowWidgetSetupCode + (sWebJSONEnabled ? 1 : 0);
+        // General base rows + the search-in-place toggle (effectiveRow 11), minus
+        // the "Tap to Show Deleted Comments" row when Show Deleted Comments is off.
+        case SectionGeneral: return sShowDeletedComments ? 12 : 11;
+        case SectionLinkPreviews: return 1;
+        // Media base rows (the three "Rich Link Previews" rows moved out to their
+        // own SectionLinkPreviews), minus the two inline-dependent rows when off.
+        case SectionMedia: return 11 + (sEnableInlineImages ? 0 : -kApolloMediaInlineDependentRows);
+        case SectionSubreddits: return 10 - (sSubredditListEnhancements ? 0 : 1) - (sCommunityHighlights ? 0 : 1);
         case SectionNotificationBackend: return 3; // URL + Registration Token + Test Connection
         case SectionAbout: return 5; // GitHub + Reddit + Thanks To + Export Logs + Version
         default: return 0;
@@ -701,6 +548,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionBackupRestore: return @"Data";
         case SectionAPIKeys: return @"API Keys";
         case SectionGeneral: return @"General";
+        case SectionLinkPreviews: return @"Rich Link Previews";
         case SectionMedia: return @"Media";
         case SectionSubreddits: return @"Subreddits";
         case SectionNotificationBackend: return @"Notification Backend";
@@ -715,13 +563,13 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionBackupRestore: cell = [self backupRestoreCellForRow:indexPath.row tableView:tableView]; break;
         case SectionAPIKeys: cell = [self apiKeyCellForRow:indexPath.row tableView:tableView]; break;
         case SectionGeneral: cell = [self generalCellForRow:indexPath.row tableView:tableView]; break;
+        case SectionLinkPreviews: cell = [self linkPreviewsCellForTableView:tableView]; break;
         case SectionMedia: cell = [self mediaCellForRow:indexPath.row tableView:tableView]; break;
         case SectionSubreddits: cell = [self subredditCellForRow:indexPath.row tableView:tableView]; break;
         case SectionNotificationBackend: cell = [self notificationBackendCellForRow:indexPath.row tableView:tableView]; break;
         case SectionAbout: cell = [self aboutCellForRow:indexPath.row tableView:tableView]; break;
         default: cell = [[UITableViewCell alloc] init]; break;
     }
-    [self apollo_applyThemeToCell:cell];
     return cell;
 }
 
@@ -919,7 +767,10 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (UITableViewCell *)apiKeyCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
     UITableViewCell *cell = nil;
-    switch (row) {
+    // Web Session Login only exists while Web JSON mode is on; when it's off the
+    // rows below it slide up one slot, so map back to the canonical index.
+    NSInteger effectiveRow = ApolloAPIKeyCanonicalRow(row);
+    switch (effectiveRow) {
         case 0:
             cell = [self textFieldCellWithIdentifier:@"Cell_API_Reddit"
                                                label:@"Reddit API Key"
@@ -981,7 +832,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                 placeholder:defaultUserAgent
                                                         text:sUserAgent
                                                         tag:TagUserAgent];
-        case 8: {
+        case kAPIKeyRowTroubleshooting: {
             UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_Troubleshooting"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Troubleshooting"];
@@ -990,7 +841,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.textLabel.text = @"Can't sign in?";
             return cell;
         }
-        case 9: {
+        case kAPIKeyRowSetupGuide: {
             UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_Instructions"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Instructions"];
@@ -1000,7 +851,42 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.textLabel.text = @"Giphy & ImgChest API Key Setup";
             return cell;
         }
-        case 10: {
+        case kAPIKeyRowWebJSONSwitch:
+            return [self switchCellWithIdentifier:@"Cell_API_WebJSON"
+                                            label:@"API-Key-Free Mode (Experimental)"
+                                           detail:@"Use Apollo by signing in to reddit.com instead of using API keys (OAuth). Supports browsing, voting, commenting, and saving."
+                                               on:sWebJSONEnabled
+                                           action:@selector(webJSONSwitchToggled:)];
+        case kAPIKeyRowWebSessionLogin: {
+            // Subtitle style so we can surface the harvested account / status.
+            UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_API_WebSessionLogin"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"Cell_API_WebSessionLogin"];
+                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+                cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+            }
+            cell.textLabel.text = @"Web Session Login (Experimental)";
+            BOOL pendingRestart = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyWebJSONPendingRestart];
+            if (pendingRestart && sWebSessionCookieHeader.length > 0) {
+                // Mid-session login synthesized an account AccountManager hasn't
+                // loaded yet — nudge the user to quit & reopen so it activates.
+                cell.detailTextLabel.text = sWebSessionUsername.length > 0
+                    ? [NSString stringWithFormat:@"Signed in as u/%@ — quit & reopen Apollo to activate", sWebSessionUsername]
+                    : @"Signed in — quit & reopen Apollo to activate";
+                cell.detailTextLabel.textColor = [UIColor systemOrangeColor];
+            } else if (sWebSessionCookieHeader.length > 0) {
+                cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+                cell.detailTextLabel.text = sWebSessionUsername.length > 0
+                    ? [NSString stringWithFormat:@"Signed in as u/%@%@", sWebSessionUsername,
+                       sWebSessionModhash.length > 0 ? @"" : @" (read-only — no write token)"]
+                    : @"Session active";
+            } else {
+                cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+                cell.detailTextLabel.text = @"Not signed in — tap to harvest a cookie";
+            }
+            return cell;
+        }
+        case kAPIKeyRowWidgetSetupCode: {
             UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_WidgetSetupCode"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_WidgetSetupCode"];
@@ -1088,6 +974,19 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Color Flairs"
                                                on:[defaults boolForKey:UDKeyEnableFlairColors]
                                            action:@selector(flairColorsSwitchToggled:)];
+        case 11: {
+            BOOL lgSupported = IsLiquidGlass();
+            UITableViewCell *cell = [self switchCellWithIdentifier:@"Cell_Gen_KeepSearchInPlace"
+                                                             label:@"Keep Search Bar In Place"
+                                                            detail:@"Requires Liquid Glass."
+                                                                on:lgSupported && [defaults boolForKey:UDKeyKeepSearchBarInPlace]
+                                                            action:@selector(keepSearchBarInPlaceSwitchToggled:)];
+            UISwitch *toggleSwitch = [cell.accessoryView isKindOfClass:[UISwitch class]] ? (UISwitch *)cell.accessoryView : nil;
+            toggleSwitch.enabled = lgSupported;
+            cell.textLabel.enabled = lgSupported;
+            cell.detailTextLabel.enabled = lgSupported;
+            return cell;
+        }
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -1166,64 +1065,42 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             return cell;
         }
-        case 7: {
-            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_LinkPreviewBodyMode"];
-            if (!cell) {
-                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_LinkPreviewBodyMode"];
-                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            }
-            cell.textLabel.text = @"Rich Link Previews - Body";
-            cell.detailTextLabel.text = [self linkPreviewModeTextForMode:sLinkPreviewBodyMode];
-            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-            return cell;
-        }
-        case 8: {
-            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_LinkPreviewCommentsMode"];
-            if (!cell) {
-                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_LinkPreviewCommentsMode"];
-                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            }
-            cell.textLabel.text = @"Rich Link Previews - Comments";
-            cell.detailTextLabel.text = [self linkPreviewModeTextForMode:sLinkPreviewCommentsMode];
-            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-            return cell;
-        }
-        case 9: {
-            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_LinkPreviewCardColor"];
-            if (!cell) {
-                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_LinkPreviewCardColor"];
-                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            }
-            cell.textLabel.text = @"Rich Link Previews - Color";
-            cell.detailTextLabel.text = [self linkPreviewCardColorTextForColor:sLinkPreviewCardColor];
-            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-            return cell;
-        }
-        case 10:
+        case 7:
             return [self switchCellWithIdentifier:@"Cell_Media_TextPostThumbnails"
                                             label:@"Text Post Thumbnails"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFeedTextPostThumbnails]
                                            action:@selector(textPostThumbnailsSwitchToggled:)];
-        case 11:
+        case 8:
             return [self switchCellWithIdentifier:@"Cell_Media_UserAvatars"
                                             label:@"Show User Profile Pictures"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars]
                                            action:@selector(userAvatarsSwitchToggled:)];
-        case 12:
+        case 9:
             return [self switchCellWithIdentifier:@"Cell_Media_ProfileTabAvatar"
                                             label:@"Profile Picture Tab Icon"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon]
                                            action:@selector(profileTabAvatarSwitchToggled:)];
+        case 10:
+            return [self switchCellWithIdentifier:@"Cell_Media_SocialLinks"
+                                            label:@"Social Links in Profile"
+                                               on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeySocialLinksInProfile]
+                                           action:@selector(socialLinksInProfileSwitchToggled:)];
         default: return [[UITableViewCell alloc] init];
     }
 }
 
 - (UITableViewCell *)subredditCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
-    // Modern Dividers row (logical 1) is hidden when the master toggle is off.
-    NSInteger logicalRow = (row >= 1 && !sSubredditListEnhancements) ? row + 1 : row;
+    // Sub-options are hidden when their parent toggle is off: Modern Dividers (logical 1)
+    // under "Subreddit List Enhancements", and "Load All Highlights (Web)" (logical 4)
+    // under "Community Highlights". Map the display row to its logical case by walking the
+    // logical rows in order and skipping any that are currently hidden.
+    BOOL hideDividers = !sSubredditListEnhancements;
+    BOOL hideWeb = !sCommunityHighlights;
+    NSInteger logicalRow = -1;
+    for (NSInteger visible = -1; visible < row; ) {
+        logicalRow++;
+        if (!((logicalRow == 1 && hideDividers) || (logicalRow == 4 && hideWeb))) visible++;
+    }
     switch (logicalRow) {
         case 0:
             return [self switchCellWithIdentifier:@"Cell_Sub_Enhancements"
@@ -1241,30 +1118,40 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders]
                                            action:@selector(subredditHeadersSwitchToggled:)];
         case 3:
+            return [self switchCellWithIdentifier:@"Cell_Sub_Highlights"
+                                            label:@"Community Highlights"
+                                               on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlights]
+                                           action:@selector(communityHighlightsSwitchToggled:)];
+        case 4:
+            return [self switchCellWithIdentifier:@"Cell_Sub_HighlightsWeb"
+                                            label:@"Load All Highlights (Web)"
+                                               on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlightsWeb]
+                                           action:@selector(communityHighlightsWebSwitchToggled:)];
+        case 5:
             return [self textFieldCellWithIdentifier:@"Cell_Sub_TrendLimit"
                                                label:@"Trending Subreddits Limit"
                                          placeholder:@"(unlimited)"
                                                 text:sTrendingSubredditsLimit
                                                  tag:TagTrendingLimit
                                            numerical:YES];
-        case 4:
+        case 6:
             return [self stackedTextFieldCellWithIdentifier:@"Cell_Sub_Trending"
                                                       label:@"Trending Source"
                                                 placeholder:defaultTrendingSubredditsSource
                                                        text:sTrendingSubredditsSource
                                                         tag:TagTrendingSubredditsSource];
-        case 5:
+        case 7:
             return [self stackedTextFieldCellWithIdentifier:@"Cell_Sub_Random"
                                                       label:@"Random Source"
                                                 placeholder:defaultRandomSubredditsSource
                                                        text:sRandomSubredditsSource
                                                         tag:TagRandomSubredditsSource];
-        case 6:
+        case 8:
             return [self switchCellWithIdentifier:@"Cell_Sub_RandNSFW"
                                             label:@"Show RandNSFW in Search"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowRandNsfw]
                                            action:@selector(randNsfwSwitchToggled:)];
-        case 7:
+        case 9:
             return [self stackedTextFieldCellWithIdentifier:@"Cell_Sub_RandNSFW_Source"
                                                       label:@"RandNSFW Source"
                                                 placeholder:@"(empty)"
@@ -1311,7 +1198,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     }
     cell.textLabel.text = @"Test Connection";
-    cell.textLabel.textColor = self.view.tintColor;
+    [self apollo_applyAccentActionTextColorToCell:cell];
     return cell;
 }
 
@@ -1331,7 +1218,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Backup"];
         }
         cell.textLabel.text = (row == 0) ? @"Backup Settings" : @"Restore Settings";
-        cell.textLabel.textColor = self.view.tintColor;
+        [self apollo_applyAccentActionTextColorToCell:cell];
         cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         return cell;
     }
@@ -1342,7 +1229,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:identifier];
     }
     cell.textLabel.text = (row == 2) ? @"Clear Tweak Caches" : @"Clear Custom Banners & Icons";
-    cell.textLabel.textColor = self.view.tintColor;
+    [self apollo_applyAccentActionTextColorToCell:cell];
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     return cell;
 }
@@ -1380,7 +1267,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_About_Logs"];
             }
             cell.textLabel.text = @"Export Debug Logs";
-            cell.textLabel.textColor = self.view.tintColor;
+            [self apollo_applyAccentActionTextColorToCell:cell];
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
             return cell;
         }
@@ -1535,11 +1422,13 @@ typedef NS_ENUM(NSInteger, Tag) {
     NSAttributedString *text = [self footerAttributedTextForSection:section];
     if (!text) return nil;
 
-    UITextView *textView = [[UITextView alloc] init];
+    UITextView *textView = [[ApolloFooterLinkTextView alloc] init];
     textView.editable = NO;
     textView.scrollEnabled = NO;
     textView.backgroundColor = [UIColor clearColor];
     textView.textContainerInset = UIEdgeInsetsMake(8, 16, 8, 16);
+    textView.tintColor = [self apollo_themeAccentColor];
+    textView.linkTextAttributes = @{NSForegroundColorAttributeName: [self apollo_themeAccentColor]};
     textView.attributedText = text;
 
     return textView;
@@ -1572,6 +1461,11 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 
+    if (indexPath.section == SectionLinkPreviews) {
+        [self openLinkPreviewSettings];
+        return;
+    }
+
     if (indexPath.section == SectionBackupRestore) {
         UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
         if (indexPath.row == 0) {
@@ -1584,11 +1478,18 @@ typedef NS_ENUM(NSInteger, Tag) {
             [self promptClearCustomSubredditBannersFromSourceView:cell];
         }
     } else if (indexPath.section == SectionAPIKeys) {
-        if (indexPath.row == 8) {
+        NSInteger row = ApolloAPIKeyCanonicalRow(indexPath.row);
+        if (row == kAPIKeyRowTroubleshooting) {
             [self pushTroubleshootingViewController];
-        } else if (indexPath.row == 9) {
+        } else if (row == kAPIKeyRowSetupGuide) {
             [self pushInstructionsViewController];
-        } else if (indexPath.row == 10) {
+        } else if (row == kAPIKeyRowWebSessionLogin) {
+            if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyWebJSONPendingRestart] && sWebSessionCookieHeader.length > 0) {
+                [self promptQuitToActivateWebSession];
+            } else {
+                [self presentWebSessionLoginViewController];
+            }
+        } else if (row == kAPIKeyRowWidgetSetupCode) {
             [self copyWidgetSetupCode];
         }
     } else if (indexPath.section == SectionAbout) {
@@ -1617,12 +1518,6 @@ typedef NS_ENUM(NSInteger, Tag) {
             [self presentInlineImageAlignmentSheetFromSourceView:cell];
         } else if (row == 6) {
             [self presentAutoplayInlineGIFModeSheetFromSourceView:cell];
-        } else if (row == 7) {
-            [self presentLinkPreviewModeSheetFromSourceView:cell body:YES];
-        } else if (row == 8) {
-            [self presentLinkPreviewModeSheetFromSourceView:cell body:NO];
-        } else if (row == 9) {
-            [self presentLinkPreviewCardColorSheetFromSourceView:cell];
         }
     } else if (indexPath.section == SectionNotificationBackend && indexPath.row == 2) {
         [self testNotificationBackendConnection];
@@ -1689,10 +1584,15 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (BOOL)tableView:(UITableView *)tableView shouldHighlightRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == SectionBackupRestore) return YES;
-    if (indexPath.section == SectionAPIKeys && (indexPath.row == 8 || indexPath.row == 9 || indexPath.row == 10)) return YES;
+    if (indexPath.section == SectionAPIKeys) {
+        NSInteger row = ApolloAPIKeyCanonicalRow(indexPath.row);
+        if (row == kAPIKeyRowTroubleshooting || row == kAPIKeyRowSetupGuide ||
+            row == kAPIKeyRowWebSessionLogin || row == kAPIKeyRowWidgetSetupCode) return YES;
+    }
+    if (indexPath.section == SectionLinkPreviews) return YES;
     if (indexPath.section == SectionMedia) {
         NSInteger row = ApolloMediaLogicalRow(indexPath.row);
-        return (row == 0 || row == 1 || row == 2 || row == 5 || row == 6 || row == 7 || row == 8 || row == 9);
+        return (row == 0 || row == 1 || row == 2 || row == 5 || row == 6);
     }
     if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 || indexPath.row == 3)) return YES;
     if (indexPath.section == SectionNotificationBackend && indexPath.row == 2) return YES;
@@ -1741,8 +1641,8 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)pushTroubleshootingViewController {
     UIViewController *vc = [[UIViewController alloc] init];
     vc.title = @"Can't sign in?";
-    vc.view.backgroundColor = [self apollo_themeTableBackgroundColor];
-    vc.view.tintColor = [self apollo_themeAccentColor];
+    vc.view.backgroundColor = self.tableView.backgroundColor;
+    vc.view.tintColor = self.view.tintColor;
 
     UITextView *textView = [[UITextView alloc] init];
     textView.editable = NO;
@@ -1804,8 +1704,8 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)pushInstructionsViewController {
     UIViewController *vc = [[UIViewController alloc] init];
     vc.title = @"Giphy & ImgChest API Key Setup";
-    vc.view.backgroundColor = [self apollo_themeTableBackgroundColor];
-    vc.view.tintColor = [self apollo_themeAccentColor];
+    vc.view.backgroundColor = self.tableView.backgroundColor;
+    vc.view.tintColor = self.view.tintColor;
 
     UITextView *textView = [[UITextView alloc] init];
     textView.editable = NO;
@@ -1981,6 +1881,47 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyEnableFLEX];
 }
 
+- (void)webJSONSwitchToggled:(UISwitch *)sender {
+    BOOL wasOn = sWebJSONEnabled;
+    sWebJSONEnabled = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sWebJSONEnabled forKey:UDKeyWebJSONEnabled];
+    if (sWebJSONEnabled == wasOn) return;
+
+    // The Web Session Login row only exists while the mode is on.
+    NSArray<NSIndexPath *> *loginPaths = @[[NSIndexPath indexPathForRow:kAPIKeyRowWebSessionLogin inSection:SectionAPIKeys]];
+    if (sWebJSONEnabled) {
+        [self.tableView insertRowsAtIndexPaths:loginPaths withRowAnimation:UITableViewRowAnimationFade];
+    } else {
+        [self.tableView deleteRowsAtIndexPaths:loginPaths withRowAnimation:UITableViewRowAnimationFade];
+    }
+}
+
+- (void)presentWebSessionLoginViewController {
+    ApolloWebSessionLoginViewController *vc = [[ApolloWebSessionLoginViewController alloc] init];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+    [self presentViewController:nav animated:YES completion:nil];
+}
+
+// A mid-session web login synthesized an account that AccountManager only loads at
+// launch. Offer to quit & reopen so it activates; "Re-sign In" falls back to the
+// login flow. The pending flag clears itself on the next launch (Tweak.xm %ctor).
+- (void)promptQuitToActivateWebSession {
+    NSString *who = sWebSessionUsername.length > 0 ? [NSString stringWithFormat:@"u/%@", sWebSessionUsername] : @"your account";
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Quit & Reopen to Activate"
+                         message:[NSString stringWithFormat:
+                             @"You're signed in as %@, but Apollo needs to quit and reopen to load the account and enable voting and commenting.", who]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Quit Apollo" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        exit(0);
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Re-sign In" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [self presentWebSessionLoginViewController];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 - (void)flairColorsSwitchToggled:(UISwitch *)sender {
     BOOL on = sender.isOn;
     sEnableFlairColors = on;
@@ -2082,9 +2023,38 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloSubredditHeaderToggleChangedNotification" object:nil];
 }
 
+- (void)communityHighlightsSwitchToggled:(UISwitch *)sender {
+    BOOL wasOn = sCommunityHighlights;
+    sCommunityHighlights = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sCommunityHighlights forKey:UDKeyCommunityHighlights];
+    if (sCommunityHighlights != wasOn) {
+        // The "Load All Highlights (Web)" sub-row (logical 4) only exists while this master
+        // toggle is on; its display index drops by 1 when the Modern Dividers row (logical 1)
+        // is itself hidden (enhancements off). Mirrors the Enhancements toggle's row anim.
+        NSArray<NSIndexPath *> *webPaths = @[[NSIndexPath indexPathForRow:(sSubredditListEnhancements ? 4 : 3) inSection:SectionSubreddits]];
+        if (sCommunityHighlights) {
+            [self.tableView insertRowsAtIndexPaths:webPaths withRowAnimation:UITableViewRowAnimationFade];
+        } else {
+            [self.tableView deleteRowsAtIndexPaths:webPaths withRowAnimation:UITableViewRowAnimationFade];
+        }
+    }
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloCommunityHighlightsToggleChangedNotification" object:nil];
+}
+
+- (void)communityHighlightsWebSwitchToggled:(UISwitch *)sender {
+    sCommunityHighlightsWeb = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sCommunityHighlightsWeb forKey:UDKeyCommunityHighlightsWeb];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloCommunityHighlightsToggleChangedNotification" object:nil];
+}
+
 - (void)textPostThumbnailsSwitchToggled:(UISwitch *)sender {
     sFeedTextPostThumbnails = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sFeedTextPostThumbnails forKey:UDKeyFeedTextPostThumbnails];
+}
+
+- (void)keepSearchBarInPlaceSwitchToggled:(UISwitch *)sender {
+    sKeepSearchBarInPlace = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sKeepSearchBarInPlace forKey:UDKeyKeepSearchBarInPlace];
 }
 
 - (void)userAvatarsSwitchToggled:(UISwitch *)sender {
@@ -2097,6 +2067,12 @@ typedef NS_ENUM(NSInteger, Tag) {
     sUseProfileAvatarTabIcon = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sUseProfileAvatarTabIcon forKey:UDKeyUseProfileAvatarTabIcon];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloProfileTabAvatarIconChangedNotification" object:nil];
+}
+
+- (void)socialLinksInProfileSwitchToggled:(UISwitch *)sender {
+    sSocialLinksInProfile = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sSocialLinksInProfile forKey:UDKeySocialLinksInProfile];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloSocialLinksToggleChangedNotification object:nil];
 }
 
 - (void)promptClearAllCachesFromSourceView:(UIView *)sourceView {
@@ -2533,6 +2509,15 @@ static void ApolloReplayValetKeychainItems(NSArray<NSDictionary *> *items) {
         sLinkPreviewCardColor = ApolloLinkPreviewCardColorNeutral;
         [defaults setInteger:sLinkPreviewCardColor forKey:UDKeyLinkPreviewCardColor];
     }
+    // Free-form hex card color. A backup made by a build with the color picker
+    // carries the hex key directly; otherwise the card starts neutral (the legacy
+    // preset enum is not promoted to a full-card fill — see Tweak.xm).
+    NSString *restoredCardColorHex = [defaults stringForKey:UDKeyLinkPreviewCardColorHex];
+    if (![defaults objectForKey:UDKeyLinkPreviewCardColorHex]) {
+        restoredCardColorHex = @"";
+        [defaults setObject:@"" forKey:UDKeyLinkPreviewCardColorHex];
+    }
+    ApolloSetLinkPreviewCardColorHex(restoredCardColorHex);
     sEnableBulkTranslation = [defaults boolForKey:UDKeyEnableBulkTranslation];
     sAutoTranslateOnAppear = [defaults boolForKey:UDKeyAutoTranslateOnAppear];
 
@@ -2544,8 +2529,10 @@ static void ApolloReplayValetKeychainItems(NSArray<NSDictionary *> *items) {
         sTranslationProvider = @"libre";
     } else if ([provider isEqualToString:@"google"]) {
         sTranslationProvider = @"google";
+    } else if ([provider isEqualToString:@"apple"] && IsAppleTranslationSupported()) {
+        sTranslationProvider = @"apple";
     } else {
-        // Unset, unrecognized, or legacy "apple" — default to Google.
+        // Unset, unrecognized, or "apple" on an unsupported OS — default to Google.
         sTranslationProvider = @"google";
         [defaults setObject:sTranslationProvider forKey:UDKeyTranslationProvider];
         [defaults setBool:NO forKey:UDKeyTranslationProviderUserSelected];

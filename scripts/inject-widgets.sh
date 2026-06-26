@@ -1,19 +1,21 @@
 #!/bin/bash
-# Inject the Apollo Reborn widget extension into an Apollo IPA.
+# Inject the Apollo Reborn widget extension into an Apollo IPA (thin IPA wrapper
+# around the inject-widgets module). Also optionally builds the appex first.
 #
-# A crash-looping widget extension poisons WidgetKit's enumeration of ALL of
-# the host app's widgets, so by default we REMOVE the stock crash-looping
-# AthenaWidgetExtension.appex. Other extensions (Safari, Open-In, Intentions,
-# notifications) are left untouched. The output IPA is unsigned in the sense
-# that our appex has no signature — the user's sideload tool (Feather/AltStore/
-# SideStore/Sideloadly) re-seals the whole bundle with their cert.
+# The actual bundle mutation (remove stock AthenaWidgetExtension.appex, copy in
+# ApolloRebornWidgets.appex) lives in scripts/modules/inject-widgets.sh and is
+# shared with the apply-patches.sh orchestrator. This wrapper only unpacks the
+# IPA, calls the module, and repacks.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=modules/inject-widgets.sh
+source "$SCRIPT_DIR/modules/inject-widgets.sh"
+
 IPA_PATH=""
 OUTPUT_IPA=""
 APPEX_PATH="$REPO_ROOT/widgets/build/Build/Products/Release-iphoneos/ApolloRebornWidgets.appex"
-KEEP_STOCK=0
 DO_BUILD=0
 
 usage() {
@@ -36,7 +38,7 @@ while [[ $# -gt 0 ]]; do
         -o|--output) OUTPUT_IPA="$2"; shift 2;;
         --appex) APPEX_PATH="$2"; shift 2;;
         --build) DO_BUILD=1; shift;;
-        --keep-stock-widget) KEEP_STOCK=1; shift;;
+        --keep-stock-widget) INJECT_WIDGETS_KEEP_STOCK=1; shift;;
         -h|--help) usage; exit 0;;
         *) echo "Unknown option: $1" >&2; usage; exit 1;;
     esac
@@ -45,7 +47,6 @@ done
 [[ -z "$IPA_PATH" ]] && { echo "error: --ipa is required" >&2; usage; exit 1; }
 [[ ! -f "$IPA_PATH" ]] && { echo "error: IPA not found: $IPA_PATH" >&2; exit 1; }
 [[ -z "$OUTPUT_IPA" ]] && OUTPUT_IPA="${IPA_PATH%.ipa}-Widgets.ipa"
-# Resolve output to an absolute path before we cd anywhere.
 [[ "$OUTPUT_IPA" != /* ]] && OUTPUT_IPA="$PWD/$OUTPUT_IPA"
 
 if [[ "$DO_BUILD" == "1" ]]; then
@@ -72,27 +73,11 @@ unzip -q "$IPA_PATH" -d "$WORK"
 
 APP_DIR="$(find "$WORK/Payload" -maxdepth 1 -name '*.app' -type d | head -1)"
 [[ -z "$APP_DIR" ]] && { echo "error: no .app in Payload" >&2; exit 1; }
-PLUGINS="$APP_DIR/PlugIns"
-mkdir -p "$PLUGINS"
 
-if [[ "$KEEP_STOCK" == "0" ]]; then
-    STOCK="$PLUGINS/AthenaWidgetExtension.appex"
-    if [[ -d "$STOCK" ]]; then
-        echo "==> Removing stock AthenaWidgetExtension.appex (prevents WidgetKit enumeration poisoning)"
-        rm -rf "$STOCK"
-    fi
-fi
-
-echo "==> Injecting $(basename "$APPEX_PATH")"
-rm -rf "$PLUGINS/$(basename "$APPEX_PATH")"
-cp -R "$APPEX_PATH" "$PLUGINS/"
-# Strip any stale signature so the re-signer starts clean.
-rm -rf "$PLUGINS/$(basename "$APPEX_PATH")/_CodeSignature"
+inject_widgets_in_app "$APP_DIR" "$APPEX_PATH"
 
 echo "==> Repacking $OUTPUT_IPA"
 rm -f "$OUTPUT_IPA"
 ( cd "$WORK" && zip -qr "$OUTPUT_IPA" Payload )
 
 echo "==> Done: $OUTPUT_IPA"
-echo "    Remaining PlugIns:"
-ls "$PLUGINS" | sed 's/^/      /'

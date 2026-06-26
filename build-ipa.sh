@@ -2,6 +2,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Canonical CydiaSubstrate arm64e stripper (provides
+# strip_substrate_arm64e_in_ipa). Mirrors the module used by apply-patches.sh.
+# shellcheck source=scripts/modules/strip-substrate-arm64e.sh
+source "$SCRIPT_DIR/scripts/modules/strip-substrate-arm64e.sh"
 IPA_PATH=""
 DEB_PATH=""
 OUTPUT_IPA="Apollo-Tweaked.ipa"
@@ -80,50 +84,9 @@ echo "Output   : $OUTPUT_IPA"
 # (apt.bingner.com/debs/1443.00/mobilesubstrate_0.9.7113, April 2021). Even
 # though the framework is fat (armv6/armv7/arm64/arm64e) and the arm64 slice
 # is fine, dyld picks the arm64e slice first on an arm64e device and aborts.
-# Strip the arm64e slice in-place; dyld then falls through to arm64.
-strip_arm64e_from_substrate_in_ipa() {
-    local ipa="$1"
-    local work
-    work="$(mktemp -d)"
-
-    if ! (cd "$work" && unzip -q "$ipa"); then
-        echo "Warning: could not unzip IPA for slice fix; leaving as-is."
-        rm -rf "$work"
-        return 0
-    fi
-
-    local framework_bin="$work/Payload/Apollo.app/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"
-    if [[ ! -f "$framework_bin" ]]; then
-        rm -rf "$work"
-        return 0
-    fi
-
-    if ! lipo -info "$framework_bin" 2>/dev/null | grep -qw 'arm64e'; then
-        rm -rf "$work"
-        return 0
-    fi
-
-    echo "Stripping arm64e slice from CydiaSubstrate (iOS 26 dyld fix)..."
-    if ! lipo -remove arm64e "$framework_bin" -output "$framework_bin.new" 2>&1; then
-        echo "Warning: lipo -remove arm64e failed; IPA may crash on iOS 26."
-        rm -rf "$work"
-        return 0
-    fi
-    mv -f "$framework_bin.new" "$framework_bin"
-
-    # The framework's prior code signature covers the now-modified binary —
-    # remove it so the user's signer (Sideloadly/AltStore/cert) re-signs cleanly.
-    rm -rf "$(dirname "$framework_bin")/_CodeSignature"
-
-    rm -f "$ipa"
-    if ! (cd "$work" && zip -qry "$ipa" Payload); then
-        echo "Error: could not re-zip IPA after slice fix."
-        rm -rf "$work"
-        return 1
-    fi
-
-    rm -rf "$work"
-}
+# The strip-substrate-arm64e module (sourced above) handles this; the local
+# injector strips internally, while the azule and cyan paths below call
+# strip_substrate_arm64e_in_ipa on the produced IPA.
 
 LOCAL_INJECTOR="$SCRIPT_DIR/scripts/inject-deb-local.sh"
 if [[ -f "$LOCAL_INJECTOR" ]]; then
@@ -157,7 +120,7 @@ if command -v azule >/dev/null 2>&1; then
             rm -rf "$scratch_dir"
             exit 1
         fi
-        if ! strip_arm64e_from_substrate_in_ipa "$generated"; then
+        if ! strip_substrate_arm64e_in_ipa "$generated"; then
             rm -rf "$scratch_dir"
             exit 1
         fi
@@ -176,6 +139,13 @@ if command -v cyan >/dev/null 2>&1; then
     echo "Using cyan for injection..."
 
     if cyan -i "$IPA_PATH" -f "$DEB_PATH" -o "$OUTPUT_IPA"; then
+        # cyan bundles CydiaSubstrate.framework but does not strip its legacy
+        # arm64e slice, so do it here (previously only the azule path did this,
+        # leaving cyan-built IPAs to crash on arm64e iOS 26 devices).
+        if ! strip_substrate_arm64e_in_ipa "$OUTPUT_IPA"; then
+            echo "Error: arm64e strip failed after cyan injection."
+            exit 1
+        fi
         echo "Injected IPA created at: $OUTPUT_IPA"
         exit 0
     fi

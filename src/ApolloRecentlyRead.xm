@@ -3,6 +3,7 @@
 #import <objc/message.h>
 
 #import "ApolloCommon.h"
+#import "ApolloSettingsTableViewController.h"
 #import "ApolloState.h"
 #import "Tweak.h"
 #import "UserDefaultConstants.h"
@@ -71,7 +72,7 @@ void ApolloFlushReadPostIDsToDefaults(void) {
     }
 }
 
-@interface RecentlyReadViewController : UITableViewController <UISearchResultsUpdating>
+@interface RecentlyReadViewController : ApolloSettingsTableViewController <UISearchResultsUpdating>
 @property (nonatomic, strong) NSMutableArray *posts;
 @property (nonatomic, strong) NSMutableArray *filteredPosts;
 @property (nonatomic, strong) UISearchController *searchController;
@@ -96,6 +97,17 @@ static const CGFloat kRecentlyReadThumbnailPlaceholderInset = 15.0;
 static const CGFloat kRecentlyReadCellVerticalInset = 12.0;
 static const CGFloat kRecentlyReadDefaultTopGap = 11.0;
 static const CGFloat kRecentlyReadExpandedTopGap = 11.0;
+static const NSInteger kStackTag = 200;
+static const NSInteger kSubHeaderTag = 201;
+static const NSInteger kTitleTag = 202;
+static const NSInteger kSubFooterTag = 203;
+static const NSInteger kBottomTag = 204;
+static const NSInteger kSepTag = 205;
+static const NSInteger kSubFooterSubredditTag = 207;
+static const NSInteger kSubFooterByTag = 208;
+static const NSInteger kSubFooterAuthorTag = 209;
+static const NSInteger kAuthorTopTag = 210;
+static const NSInteger kThumbTag = 211;
 
 static NSCache<NSString *, UIImage *> *RecentlyReadThumbnailCache(void) {
     static NSCache<NSString *, UIImage *> *cache = nil;
@@ -579,6 +591,10 @@ static UIImage *RecentlyReadNSFWBadgeImage(CGFloat fontSize) {
     return result;
 }
 
+- (UIColor *)apollo_themeCellBackgroundColor {
+    return self.tableView.backgroundColor ?: [super apollo_themeCellBackgroundColor];
+}
+
 - (void)_navigateToAssociatedPath:(UIButton *)sender {
     NSString *path = objc_getAssociatedObject(sender, &kNavPathKey);
     if (!path.length) return;
@@ -675,22 +691,10 @@ static UIImage *RecentlyReadNSFWBadgeImage(CGFloat fontSize) {
     static NSString *cellID = @"RecentPostCell";
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:cellID];
 
-    static const NSInteger kStackTag = 200;
-    static const NSInteger kSubHeaderTag = 201;
-    static const NSInteger kTitleTag = 202;
-    static const NSInteger kSubFooterTag = 203;
-    static const NSInteger kBottomTag = 204;
-    static const NSInteger kSepTag = 205;
-    static const NSInteger kSubFooterSubredditTag = 207;
-    static const NSInteger kSubFooterByTag = 208;
-    static const NSInteger kSubFooterAuthorTag = 209;
-    static const NSInteger kAuthorTopTag = 210;
-    static const NSInteger kThumbTag = 211;
-
     if (!cell) {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:cellID];
         cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-        cell.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+        cell.backgroundColor = [self apollo_themeCellBackgroundColor];
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
 
         UIView *selectedBg = [[UIView alloc] init];
@@ -863,33 +867,6 @@ static UIImage *RecentlyReadNSFWBadgeImage(CGFloat fontSize) {
         stackLeadingNoThumb.active = YES;
     }
 
-    // Title with optional NSFW badge
-    NSString *titleText = link.title ?: @"(untitled)";
-    UIFont *titleFont = titleLabel.font;
-    NSMutableParagraphStyle *titlePara = [[NSMutableParagraphStyle alloc] init];
-    titlePara.lineSpacing = 1.5;
-    NSDictionary *titleAttrs = @{NSFontAttributeName: titleFont,
-                                 NSForegroundColorAttributeName: [UIColor labelColor],
-                                 NSParagraphStyleAttributeName: titlePara};
-    if (link.isNSFW) {
-        NSMutableAttributedString *titleAttr = [[NSMutableAttributedString alloc] initWithString:titleText
-            attributes:titleAttrs];
-        // Space before badge
-        [titleAttr appendAttributedString:[[NSAttributedString alloc] initWithString:@" "]];
-        // NSFW badge as inline image
-        UIImage *badge = RecentlyReadNSFWBadgeImage(titleFont.pointSize);
-        NSTextAttachment *att = [[NSTextAttachment alloc] init];
-        att.image = badge;
-        // Vertically center the badge with the text midline
-        CGFloat fontMid = (titleFont.ascender + titleFont.descender) / 2.0;
-        CGFloat yOffset = fontMid - badge.size.height / 2.0;
-        att.bounds = CGRectMake(0, yOffset, badge.size.width, badge.size.height);
-        [titleAttr appendAttributedString:[NSAttributedString attributedStringWithAttachment:att]];
-        titleLabel.attributedText = titleAttr;
-    } else {
-        titleLabel.attributedText = [[NSAttributedString alloc] initWithString:titleText attributes:titleAttrs];
-    }
-
     NSString *subPath = link.subreddit.length > 0 ? [NSString stringWithFormat:@"/r/%@", link.subreddit] : nil;
     NSString *authorPath = link.author.length > 0 ? [NSString stringWithFormat:@"/u/%@", link.author] : nil;
 
@@ -931,6 +908,30 @@ static UIImage *RecentlyReadNSFWBadgeImage(CGFloat fontSize) {
             byLabel.hidden = YES;
             authorFooterBtn.hidden = YES;
         }
+    }
+
+    // Title with optional NSFW badge
+    NSString *titleText = link.title ?: @"(untitled)";
+    UIFont *titleFont = titleLabel.font;
+    NSMutableParagraphStyle *titlePara = [[NSMutableParagraphStyle alloc] init];
+    titlePara.lineSpacing = 1.5;
+    NSDictionary *titleAttrs = @{NSFontAttributeName: titleFont,
+                                 NSForegroundColorAttributeName: [UIColor labelColor],
+                                 NSParagraphStyleAttributeName: titlePara};
+    if (link.isNSFW) {
+        NSMutableAttributedString *titleAttr = [[NSMutableAttributedString alloc] initWithString:titleText
+            attributes:titleAttrs];
+        [titleAttr appendAttributedString:[[NSAttributedString alloc] initWithString:@" "]];
+        UIImage *badge = RecentlyReadNSFWBadgeImage(titleFont.pointSize);
+        NSTextAttachment *att = [[NSTextAttachment alloc] init];
+        att.image = badge;
+        CGFloat fontMid = (titleFont.ascender + titleFont.descender) / 2.0;
+        CGFloat yOffset = fontMid - badge.size.height / 2.0;
+        att.bounds = CGRectMake(0, yOffset, badge.size.width, badge.size.height);
+        [titleAttr appendAttributedString:[NSAttributedString attributedStringWithAttachment:att]];
+        titleLabel.attributedText = titleAttr;
+    } else {
+        titleLabel.attributedText = [[NSAttributedString alloc] initWithString:titleText attributes:titleAttrs];
     }
 
     statsLabel.attributedText = [self statsAttributedStringForLink:link];

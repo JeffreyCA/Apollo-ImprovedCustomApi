@@ -26,8 +26,27 @@ extern NSInteger sUnmuteCommentsVideos;
 extern BOOL sProxyImgurDDG;
 extern BOOL sShowUserAvatars;
 extern BOOL sUseProfileAvatarTabIcon;
+// When ON, a redditor's profile social links (Buy Me a Coffee, Instagram, X, …) are
+// shown in the profile header between the username and bio: a tappable pill for a
+// single link, or a row of brand badges that opens a slide-up sheet for several.
+// Rendered inside the tweak's custom profile header, so it needs sShowUserAvatars ON.
+// See ApolloProfileSocialLinks.{h,m}.
+extern BOOL sSocialLinksInProfile;
 extern BOOL sShowSubredditHeaders;
+// When ON, a horizontally-scrolling "Community Highlights" carousel of the
+// subreddit's pinned/stickied posts is shown at the top of the feed (mirrors
+// new-Reddit / the official app). See ApolloSubredditHighlights.xm.
+extern BOOL sCommunityHighlights;
+// When ON (and sCommunityHighlights ON), a hidden WKWebView loads the subreddit's
+// new-Reddit page to harvest the FULL highlights set (up to 6), beyond the 2 the
+// REST API exposes. Heavier (loads the web page per sub); opt-in. See
+// ApolloSubredditHighlights.xm (ApolloHLWebFetch).
+extern BOOL sCommunityHighlightsWeb;
 extern BOOL sAutoHideTabBarShowOnIdle;
+// When ON, neutralizes Apollo's feed/subreddit search takeover (nav-hide + fade + toolbar
+// dock/grow); the field stays put and results populate the feed in place. Liquid Glass only;
+// mutually exclusive with the default nav-hide mode. See ApolloSearchInPlace.xm.
+extern BOOL sKeepSearchBarInPlace;
 extern BOOL sModernSubredditDividers;
 // Master toggle for subreddit list enhancements (see UDKeySubredditListEnhancements).
 extern BOOL sSubredditListEnhancements;
@@ -94,13 +113,28 @@ typedef NS_ENUM(NSInteger, ApolloLinkPreviewCardColor) {
 // Rich link previews (Open Graph / oEmbed) for link cards in body/feed and comments.
 extern NSInteger sLinkPreviewBodyMode;
 extern NSInteger sLinkPreviewCommentsMode;
+// Legacy preset enum, retained only for one-time migration to the hex below.
 extern NSInteger sLinkPreviewCardColor;
+// Free-form preview card color, 6-digit "RRGGBB" hex. nil/empty = Default (no
+// custom fill). When set, the whole card is painted this exact color.
+// MAIN-THREAD ONLY: read/written by the settings UI and persistence. The card
+// renderer runs on Texture background layout threads and must NOT touch this
+// NSString* (racing a strong-pointer reassign risks a use-after-free); it reads
+// the packed snapshot below instead. Both are updated together via
+// ApolloSetLinkPreviewCardColorHex().
+extern NSString *sLinkPreviewCardColorHex;
+// Render-safe snapshot of the card color, readable from any thread (an aligned
+// 32-bit volatile load is atomic on arm64). 0 = Default; otherwise
+// (1<<24) | (R<<16) | (G<<8) | B.
+extern volatile uint32_t sLinkPreviewCardColorPacked;
 
 // Media upload host selection. Imgur is the default; Reddit uses Apollo's signed-in
-// session to upload directly to Reddit's media storage.
+// session to upload directly to Reddit's media storage; ImgChest uploads to
+// imgchest.com via the user's API token (see ApolloImgChestUpload.m).
 typedef NS_ENUM(NSInteger, ImageUploadProvider) {
     ImageUploadProviderImgur = 0,
     ImageUploadProviderReddit = 1,
+    ImageUploadProviderImgChest = 2,
 };
 extern NSInteger sImageUploadProvider;
 
@@ -113,11 +147,41 @@ extern BOOL sEnableBulkTranslation;
 extern BOOL sAutoTranslateOnAppear;
 extern BOOL sTranslatePostTitles;
 extern NSString *sTranslationTargetLanguage;
-extern NSString *sTranslationProvider;
+extern NSString *sTranslationProvider; // @"google", @"libre", or @"apple"
 extern NSString *sLibreTranslateURL;
 extern NSString *sLibreTranslateAPIKey;
 // Lowercased 2-letter language codes the user has opted out of translating.
 extern NSArray<NSString *> *sTranslationSkipLanguages;
+
+#ifdef __OBJC__
+// Whether the on-device Apple translation backend (ApolloAppleTranslation.swift,
+// Translation.framework) can run on this OS. iOS 18.0+. Used to gate the "apple"
+// provider in Settings and during settings hydration.
+static inline BOOL IsAppleTranslationSupported(void) {
+    if (@available(iOS 18.0, *)) return YES;
+    return NO;
+}
+#endif
+
+// Web JSON spike (see ApolloWebJSON.m): when enabled, whitelisted subreddit
+// listing reads are re-pointed from oauth.reddit.com to www.reddit.com/...json,
+// authenticated with a WKWebView-harvested session cookie instead of a bearer
+// token. Dormant escape hatch for Reddit API-key revocation waves. Default NO.
+extern BOOL sWebJSONEnabled;
+// Serialized "name=value; name=value" Cookie header harvested from a
+// www.reddit.com web login (must include reddit_session). nil until the user
+// completes the Web Session Login flow. Persisted in the keychain (it's a full
+// account credential) via ApolloWebJSON; migrated out of standardUserDefaults
+// on first launch after the keychain switch.
+extern NSString *sWebSessionCookieHeader;
+// Modhash for the harvested session, read from /api/me.json (data.modhash) at
+// login time — NOT a cookie. Attached as X-Modhash on web write actions
+// (vote/comment/save/...). nil for anonymous or when the probe returned none.
+extern NSString *sWebSessionModhash;
+// Username the harvested cookie session authenticates as (/api/me.json
+// data.name), captured at login. Used by the identity layer to label the
+// cookie account. nil until a successful harvest.
+extern NSString *sWebSessionUsername;
 
 // Tag filter feature (NSFW / Spoiler).
 extern BOOL sTagFilterEnabled;

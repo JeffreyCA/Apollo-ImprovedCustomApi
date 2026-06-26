@@ -16,6 +16,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <Photos/Photos.h>
 #import <math.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -916,6 +917,19 @@ static BOOL ApolloRangeTextLooksLikeBareURL(NSAttributedString *attr, NSRange ra
     return [text rangeOfString:path].location != NSNotFound;
 }
 
+// A comment/post inline GIF is written in markdown as `[GIF](url)` (or
+// `![gif](url)`), so once we render the GIF inline the decomposed text node
+// would still show a redundant "GIF" label directly beneath it. Issue #392:
+// when the link/alt text is exactly the default word "gif" we drop it (the GIF
+// is self-evidently a GIF). Custom alt text like `[my dancing cat](url)` is NOT
+// the default word, so it is kept and shown beneath the image as before.
+static BOOL ApolloRangeTextIsDefaultGIFLabel(NSAttributedString *attr, NSRange range) {
+    if (range.location + range.length > attr.string.length) return NO;
+    NSString *text = [[attr.string substringWithRange:range]
+                      stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return [text caseInsensitiveCompare:@"gif"] == NSOrderedSame;
+}
+
 static CGFloat ApolloAspectRatioFromURL(NSURL *url) {
     NSURLComponents *c = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
     NSString *w = nil, *h = nil;
@@ -945,6 +959,19 @@ static CGFloat ApolloAspectRatioFromURL(NSURL *url) {
 @property (nonatomic) NSInteger imageLoadTotalCount;
 @property (nonatomic) BOOL controlsVisible;
 @property (nonatomic) CGSize lastLayoutSize;
+// Original downloaded bytes per page index — used for save/share so GIFs and
+// WebPs keep their exact data instead of being re-encoded from a UIImage.
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSData *> *imageDataByIndex;
+// In-flight image downloads; their NSProgress drives the progress bar.
+@property (nonatomic, strong) NSMutableArray<NSURLSessionDataTask *> *imageTasks;
+@property (nonatomic, strong) UIProgressView *progressBar;
+@property (nonatomic, strong) NSTimer *progressTimer;
+@property (nonatomic, strong) UIButton *actionButton;
+@property (nonatomic, strong) UILabel *toastLabel;
+@property (nonatomic, strong) UIPanGestureRecognizer *dismissPan;
+// The album's post page URL (imgchest.com/p/...), when known — enables the
+// "Share Album Link" action alongside per-image sharing.
+@property (nonatomic, copy) NSURL *albumURL;
 - (instancetype)initWithItems:(NSArray<NSDictionary *> *)items initialIndex:(NSInteger)initialIndex;
 @end
 
@@ -987,6 +1014,8 @@ static CGFloat ApolloAspectRatioFromURL(NSURL *url) {
     self.view.backgroundColor = UIColor.blackColor;
     self.imageLoadTotalCount = (NSInteger)self.items.count;
     self.imageLoadCompletedCount = 0;
+    self.imageDataByIndex = [NSMutableDictionary dictionary];
+    self.imageTasks = [NSMutableArray array];
 
     self.scrollView = [[UIScrollView alloc] initWithFrame:self.view.bounds];
     self.scrollView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -1029,6 +1058,7 @@ static CGFloat ApolloAspectRatioFromURL(NSURL *url) {
             __weak UIImageView *weakImageView = imageView;
             __weak UIScrollView *weakZoomScrollView = zoomScrollView;
             __weak ApolloImageChestAlbumViewController *weakSelf = self;
+            NSInteger pageIndex = (NSInteger)i;
             NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:imageURL
                                                                      completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
                 UIImage *image = (!error && data.length > 0) ? [UIImage imageWithData:data] : nil;
@@ -1036,10 +1066,14 @@ static CGFloat ApolloAspectRatioFromURL(NSURL *url) {
                     if (image) {
                         weakImageView.image = image;
                         [weakSelf apollo_layoutZoomScrollView:weakZoomScrollView resetZoom:(weakZoomScrollView.zoomScale <= weakZoomScrollView.minimumZoomScale + 0.01)];
+                        // Keep the original bytes so Save/Share exports the
+                        // exact file (animated GIFs survive intact).
+                        if (data) weakSelf.imageDataByIndex[@(pageIndex)] = data;
                     }
                     [weakSelf apollo_imageLoadFinished];
                 });
             }];
+            [self.imageTasks addObject:task];
             [task resume];
         } else {
             [self apollo_imageLoadFinished];
@@ -1053,6 +1087,8 @@ static CGFloat ApolloAspectRatioFromURL(NSURL *url) {
     self.counterLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
     self.counterLabel.layer.cornerRadius = 14.0;
     self.counterLabel.clipsToBounds = YES;
+    // A "1 / 1" pill is noise when viewing a single image.
+    self.counterLabel.hidden = self.items.count <= 1;
     [self.view addSubview:self.counterLabel];
 
     self.loadingLabel = [[UILabel alloc] initWithFrame:CGRectZero];
@@ -1074,20 +1110,104 @@ static CGFloat ApolloAspectRatioFromURL(NSURL *url) {
     [self.closeButton addTarget:self action:@selector(apollo_close) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.closeButton];
 
+    // Share/Save menu (issue #332: the viewer had no save or share options).
+    self.actionButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.actionButton setImage:[UIImage systemImageNamed:@"square.and.arrow.up"] forState:UIControlStateNormal];
+    self.actionButton.tintColor = UIColor.whiteColor;
+    self.actionButton.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
+    self.actionButton.layer.cornerRadius = 16.0;
+    self.actionButton.clipsToBounds = YES;
+    [self.actionButton addTarget:self action:@selector(apollo_actionButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.actionButton];
+
+    // True download progress for big albums, fed by the tasks' NSProgress.
+    self.progressBar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+    self.progressBar.progressTintColor = UIColor.whiteColor;
+    self.progressBar.trackTintColor = [UIColor colorWithWhite:1.0 alpha:0.25];
+    [self.view addSubview:self.progressBar];
+    if (self.imageTasks.count > 0) {
+        self.progressTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
+                                                              target:self
+                                                            selector:@selector(apollo_progressTimerFired:)
+                                                            userInfo:nil
+                                                             repeats:YES];
+    } else {
+        self.progressBar.hidden = YES;
+    }
+
+    // Transient confirmation ("Saved", "Saved 12 images", ...).
+    self.toastLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    self.toastLabel.textColor = UIColor.whiteColor;
+    self.toastLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightSemibold];
+    self.toastLabel.textAlignment = NSTextAlignmentCenter;
+    self.toastLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.65];
+    self.toastLabel.layer.cornerRadius = 14.0;
+    self.toastLabel.clipsToBounds = YES;
+    self.toastLabel.alpha = 0.0;
+    [self.view addSubview:self.toastLabel];
+
     UITapGestureRecognizer *tapRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_viewerTapped:)];
     tapRecognizer.numberOfTapsRequired = 1;
     tapRecognizer.cancelsTouchesInView = NO;
     tapRecognizer.delegate = self;
     [self.view addGestureRecognizer:tapRecognizer];
 
+    // Long-press an image for Save/Share (issue #332).
+    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_viewerLongPressed:)];
+    longPress.delegate = self;
+    [self.view addGestureRecognizer:longPress];
+
+    // Swipe down to dismiss, like Apollo's native media viewer.
+    self.dismissPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_dismissPanned:)];
+    self.dismissPan.delegate = self;
+    [self.view addGestureRecognizer:self.dismissPan];
+
     [self updateCounterForPage:self.initialIndex];
     [self apollo_updateLoadingProgress];
     [self apollo_setControlsVisible:YES animated:NO reschedule:YES];
 }
 
+- (void)dealloc {
+    [_progressTimer invalidate];
+    [_autoHideTimer invalidate];
+}
+
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
     [self apollo_cancelControlsAutoHide];
+
+    // Tear down promptly when the viewer is actually going away. The repeating
+    // progressTimer targets self, so until it's invalidated dealloc can't run;
+    // if the user taps Done / swipes to dismiss while downloads are still in
+    // flight, the viewer (and its imageTasks) would otherwise stay alive until
+    // every task finished. The completion blocks capture weakSelf, so
+    // cancelling the tasks is safe. Gate on isBeingDismissed/isMovingFromParent
+    // so a transient disappearance (e.g. presenting the share sheet) doesn't
+    // cancel still-loading downloads.
+    if (self.isBeingDismissed || self.isMovingFromParentViewController) {
+        [self.progressTimer invalidate];
+        self.progressTimer = nil;
+        for (NSURLSessionDataTask *task in self.imageTasks) {
+            [task cancel];
+        }
+    }
+}
+
+- (void)didReceiveMemoryWarning {
+    [super didReceiveMemoryWarning];
+    // imageDataByIndex keeps the full original bytes of every page for the
+    // viewer's lifetime so Save/Share preserves GIFs/WebPs exactly. For a large
+    // multi-MB album that's a lot of resident memory; under pressure, drop
+    // everything except the page on screen. Save/Share for a dropped page falls
+    // back to re-encoding the displayed image (apollo_dataForPage:), losing only
+    // animation — an acceptable trade when the system is asking for memory.
+    if (self.imageDataByIndex.count == 0) return;
+    // Guard scrollView access — a memory warning can arrive before the view is
+    // loaded, in which case there's no on-screen page to preserve.
+    NSNumber *current = (self.isViewLoaded && self.scrollView) ? @([self apollo_currentPageIndex]) : nil;
+    NSData *keep = current ? self.imageDataByIndex[current] : nil;
+    [self.imageDataByIndex removeAllObjects];
+    if (keep) self.imageDataByIndex[current] = keep;
 }
 
 - (void)viewDidLayoutSubviews {
@@ -1108,8 +1228,13 @@ static CGFloat ApolloAspectRatioFromURL(NSURL *url) {
     CGFloat safeTop = 16.0;
     if (@available(iOS 11.0, *)) safeTop += self.view.safeAreaInsets.top;
     self.closeButton.frame = CGRectMake(bounds.size.width - 84.0, safeTop, 68.0, 32.0);
+    self.actionButton.frame = CGRectMake(16.0, safeTop, 44.0, 32.0);
     self.counterLabel.frame = CGRectMake((bounds.size.width - 86.0) * 0.5, safeTop, 86.0, 28.0);
     self.loadingLabel.frame = CGRectMake((bounds.size.width - 132.0) * 0.5, CGRectGetMaxY(self.counterLabel.frame) + 8.0, 132.0, 26.0);
+    self.progressBar.frame = CGRectMake(24.0, CGRectGetMaxY(self.loadingLabel.frame) + 8.0, bounds.size.width - 48.0, 3.0);
+    CGFloat safeBottom = 24.0;
+    if (@available(iOS 11.0, *)) safeBottom += self.view.safeAreaInsets.bottom;
+    self.toastLabel.frame = CGRectMake((bounds.size.width - 200.0) * 0.5, bounds.size.height - safeBottom - 30.0, 200.0, 28.0);
     [self.scrollView setContentOffset:CGPointMake(bounds.size.width * self.initialIndex, 0.0) animated:NO];
     self.lastLayoutSize = bounds.size;
 }
@@ -1169,21 +1294,246 @@ static CGFloat ApolloAspectRatioFromURL(NSURL *url) {
     NSInteger done = MAX(0, MIN(self.imageLoadCompletedCount, total));
     if (total <= 0 || done >= total) {
         self.loadingLabel.text = total > 0 ? @"Loaded" : @"";
+        [self.progressTimer invalidate];
+        self.progressTimer = nil;
         [UIView animateWithDuration:0.2 animations:^{
             self.loadingLabel.alpha = 0.0;
+            self.progressBar.alpha = 0.0;
         }];
         return;
     }
 
-    NSInteger percent = (NSInteger)llround(((double)done / (double)total) * 100.0);
+    // Percent only — the counter pill above already shows position/total.
+    NSInteger percent = (NSInteger)llround([self apollo_overallDownloadFraction] * 100.0);
     self.loadingLabel.alpha = self.controlsVisible ? 1.0 : 0.0;
-    self.loadingLabel.text = [NSString stringWithFormat:@"Loading %ld / %ld (%ld%%)", (long)done, (long)total, (long)percent];
+    self.loadingLabel.text = [NSString stringWithFormat:@"Loading %ld%%", (long)percent];
+    (void)done;
+}
+
+// Byte-accurate overall progress: mean of each download task's own
+// NSProgress. The old count-of-finished-images percentage sat at 0% while
+// every image was mid-download and then jumped — this moves smoothly.
+- (double)apollo_overallDownloadFraction {
+    if (self.imageTasks.count == 0) return 1.0;
+    double sum = 0.0;
+    for (NSURLSessionDataTask *task in self.imageTasks) {
+        double fraction = task.progress.fractionCompleted;
+        if (task.state == NSURLSessionTaskStateCompleted) fraction = 1.0;
+        sum += MAX(0.0, MIN(fraction, 1.0));
+    }
+    return sum / (double)self.imageTasks.count;
+}
+
+- (void)apollo_progressTimerFired:(NSTimer *)timer {
+    [self.progressBar setProgress:(float)[self apollo_overallDownloadFraction] animated:YES];
+    [self apollo_updateLoadingProgress];
 }
 
 - (BOOL)apollo_loadingInProgress {
     NSInteger total = MAX(self.imageLoadTotalCount, 0);
     NSInteger done = MAX(0, MIN(self.imageLoadCompletedCount, total));
     return total > 0 && done < total;
+}
+
+#pragma mark Save / Share (issue #332)
+
+- (NSInteger)apollo_currentPageIndex {
+    NSInteger page = (NSInteger)llround(self.scrollView.contentOffset.x / MAX(self.scrollView.bounds.size.width, 1.0));
+    return MAX(0, MIN(page, (NSInteger)self.items.count - 1));
+}
+
+// Original bytes if the download kept them; falls back to re-encoding the
+// displayed UIImage (e.g. if the data was never stored).
+- (NSData *)apollo_dataForPage:(NSInteger)page {
+    NSData *data = self.imageDataByIndex[@(page)];
+    if (data.length > 0) return data;
+    UIImageView *imageView = (UIImageView *)[self.scrollView viewWithTag:3000 + page];
+    UIImage *image = [imageView isKindOfClass:[UIImageView class]] ? imageView.image : nil;
+    return image ? UIImagePNGRepresentation(image) : nil;
+}
+
+// Temp file with the original filename/extension so shares and saves keep
+// the real type (GIF stays GIF).
+- (NSURL *)apollo_tempFileURLForPage:(NSInteger)page {
+    NSData *data = [self apollo_dataForPage:page];
+    if (data.length == 0) return nil;
+    NSURL *sourceURL = [self.items[page][@"url"] isKindOfClass:[NSURL class]] ? self.items[page][@"url"] : nil;
+    NSString *name = sourceURL.lastPathComponent.length > 0 ? sourceURL.lastPathComponent : [NSString stringWithFormat:@"image-%ld.png", (long)page + 1];
+    NSURL *fileURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:name]];
+    return [data writeToURL:fileURL atomically:YES] ? fileURL : nil;
+}
+
+- (void)apollo_actionButtonTapped:(UIButton *)sender {
+    [self apollo_presentActionsForPage:[self apollo_currentPageIndex] fromView:sender];
+}
+
+- (void)apollo_viewerLongPressed:(UILongPressGestureRecognizer *)recognizer {
+    if (recognizer.state != UIGestureRecognizerStateBegan) return;
+    [self apollo_presentActionsForPage:[self apollo_currentPageIndex] fromView:self.view];
+}
+
+- (void)apollo_presentActionsForPage:(NSInteger)page fromView:(UIView *)sourceView {
+    [self apollo_cancelControlsAutoHide];
+    NSString *title = self.items.count > 1
+        ? [NSString stringWithFormat:@"Image %ld of %lu", (long)page + 1, (unsigned long)self.items.count]
+        : nil;
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:title
+                                                                   message:nil
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak ApolloImageChestAlbumViewController *weakSelf = self;
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Save Image" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [weakSelf apollo_saveImagesAtIndexes:@[@(page)]];
+    }]];
+    if (self.items.count > 1) {
+        NSMutableArray<NSNumber *> *all = [NSMutableArray array];
+        for (NSUInteger i = 0; i < self.items.count; i++) [all addObject:@(i)];
+        [sheet addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"Save All %lu Images", (unsigned long)self.items.count]
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *action) {
+            [weakSelf apollo_saveImagesAtIndexes:all];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:self.items.count > 1 ? @"Share Image" : @"Share" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [weakSelf apollo_shareImageAtIndex:page fromView:sourceView];
+    }]];
+    if (self.albumURL && self.items.count > 1) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Share Album Link" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            [weakSelf apollo_shareAlbumLinkFromView:sourceView];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+
+    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
+    if (popover) {
+        popover.sourceView = sourceView ?: self.view;
+        popover.sourceRect = sourceView && sourceView != self.view ? sourceView.bounds
+                                                                   : CGRectMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1, 1);
+    }
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)apollo_saveImagesAtIndexes:(NSArray<NSNumber *> *)indexes {
+    __weak ApolloImageChestAlbumViewController *weakSelf = self;
+    void (^performSave)(void) = ^{
+        NSMutableArray<NSData *> *payloads = [NSMutableArray array];
+        for (NSNumber *index in indexes) {
+            NSData *data = [weakSelf apollo_dataForPage:index.integerValue];
+            if (data.length > 0) [payloads addObject:data];
+        }
+        if (payloads.count == 0) {
+            [weakSelf apollo_showToast:@"Nothing to save yet"];
+            return;
+        }
+        [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+            for (NSData *data in payloads) {
+                PHAssetCreationRequest *request = [PHAssetCreationRequest creationRequestForAsset];
+                [request addResourceWithType:PHAssetResourceTypePhoto data:data options:nil];
+            }
+        } completionHandler:^(BOOL success, NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (success) {
+                    [weakSelf apollo_showToast:payloads.count == 1 ? @"Saved"
+                                              : [NSString stringWithFormat:@"Saved %lu images", (unsigned long)payloads.count]];
+                } else {
+                    ApolloLog(@"[InlineImages] album save failed: %@", error.localizedDescription);
+                    [weakSelf apollo_showToast:@"Save failed"];
+                }
+            });
+        }];
+    };
+
+    PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelAddOnly];
+    if (status == PHAuthorizationStatusNotDetermined) {
+        [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelAddOnly handler:^(PHAuthorizationStatus newStatus) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (newStatus == PHAuthorizationStatusAuthorized || newStatus == PHAuthorizationStatusLimited) performSave();
+                else [weakSelf apollo_showToast:@"Photos access denied"];
+            });
+        }];
+    } else if (status == PHAuthorizationStatusAuthorized || status == PHAuthorizationStatusLimited) {
+        performSave();
+    } else {
+        [self apollo_showToast:@"Photos access denied"];
+    }
+}
+
+- (void)apollo_shareImageAtIndex:(NSInteger)page fromView:(UIView *)sourceView {
+    NSURL *fileURL = [self apollo_tempFileURLForPage:page];
+    NSURL *sourceURL = [self.items[page][@"url"] isKindOfClass:[NSURL class]] ? self.items[page][@"url"] : nil;
+    NSArray *activityItems = fileURL ? @[fileURL] : (sourceURL ? @[sourceURL] : nil);
+    if (!activityItems) {
+        [self apollo_showToast:@"Nothing to share yet"];
+        return;
+    }
+    UIActivityViewController *activity = [[UIActivityViewController alloc] initWithActivityItems:activityItems applicationActivities:nil];
+    UIPopoverPresentationController *popover = activity.popoverPresentationController;
+    if (popover) {
+        popover.sourceView = sourceView ?: self.view;
+        popover.sourceRect = sourceView && sourceView != self.view ? sourceView.bounds
+                                                                   : CGRectMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1, 1);
+    }
+    [self presentViewController:activity animated:YES completion:nil];
+}
+
+- (void)apollo_shareAlbumLinkFromView:(UIView *)sourceView {
+    if (!self.albumURL) return;
+    UIActivityViewController *activity = [[UIActivityViewController alloc] initWithActivityItems:@[self.albumURL] applicationActivities:nil];
+    UIPopoverPresentationController *popover = activity.popoverPresentationController;
+    if (popover) {
+        popover.sourceView = sourceView ?: self.view;
+        popover.sourceRect = sourceView && sourceView != self.view ? sourceView.bounds
+                                                                   : CGRectMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1, 1);
+    }
+    [self presentViewController:activity animated:YES completion:nil];
+}
+
+- (void)apollo_showToast:(NSString *)text {
+    self.toastLabel.text = text;
+    [self.view bringSubviewToFront:self.toastLabel];
+    [UIView animateWithDuration:0.2 animations:^{
+        self.toastLabel.alpha = 1.0;
+    }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [UIView animateWithDuration:0.3 animations:^{
+            self.toastLabel.alpha = 0.0;
+        }];
+    });
+}
+
+#pragma mark Swipe-down dismiss
+
+- (void)apollo_dismissPanned:(UIPanGestureRecognizer *)recognizer {
+    CGPoint translation = [recognizer translationInView:self.view.superview ?: self.view];
+    CGFloat dy = MAX(0.0, translation.y);
+    switch (recognizer.state) {
+        case UIGestureRecognizerStateBegan:
+            [self apollo_setControlsVisible:NO animated:YES reschedule:NO];
+            break;
+        case UIGestureRecognizerStateChanged:
+            self.view.transform = CGAffineTransformMakeTranslation(0.0, dy);
+            self.view.alpha = 1.0 - MIN(dy / 600.0, 0.4);
+            break;
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled: {
+            CGFloat velocity = [recognizer velocityInView:self.view].y;
+            if (recognizer.state == UIGestureRecognizerStateEnded && (dy > 140.0 || velocity > 900.0)) {
+                [self dismissViewControllerAnimated:YES completion:nil];
+            } else {
+                [UIView animateWithDuration:0.25
+                                      delay:0.0
+                     usingSpringWithDamping:0.8
+                      initialSpringVelocity:0.0
+                                    options:0
+                                 animations:^{
+                    self.view.transform = CGAffineTransformIdentity;
+                    self.view.alpha = 1.0;
+                } completion:nil];
+            }
+            break;
+        }
+        default:
+            break;
+    }
 }
 
 - (void)apollo_viewerTapped:(UITapGestureRecognizer *)recognizer {
@@ -1194,12 +1544,15 @@ static CGFloat ApolloAspectRatioFromURL(NSURL *url) {
 - (void)apollo_setControlsVisible:(BOOL)visible animated:(BOOL)animated reschedule:(BOOL)reschedule {
     self.controlsVisible = visible;
     self.closeButton.userInteractionEnabled = visible;
+    self.actionButton.userInteractionEnabled = visible;
     CGFloat controlsAlpha = visible ? 1.0 : 0.0;
     CGFloat loadingAlpha = (visible && [self apollo_loadingInProgress]) ? 1.0 : 0.0;
     void (^changes)(void) = ^{
         self.closeButton.alpha = controlsAlpha;
+        self.actionButton.alpha = controlsAlpha;
         self.counterLabel.alpha = controlsAlpha;
         self.loadingLabel.alpha = loadingAlpha;
+        self.progressBar.alpha = loadingAlpha;
     };
     if (animated) {
         [UIView animateWithDuration:0.2 animations:changes];
@@ -1271,10 +1624,20 @@ static CGFloat ApolloAspectRatioFromURL(NSURL *url) {
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
     UIView *view = touch.view;
     while (view) {
-        if (view == self.closeButton) return NO;
+        if (view == self.closeButton || view == self.actionButton) return NO;
         view = view.superview;
     }
     return YES;
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (gestureRecognizer != self.dismissPan) return YES;
+    // Swipe-down dismiss only engages on a clearly downward drag while the
+    // current image isn't zoomed — horizontal drags page, zoomed drags pan.
+    UIScrollView *zoom = (UIScrollView *)[self.scrollView viewWithTag:4000 + [self apollo_currentPageIndex]];
+    if ([zoom isKindOfClass:[UIScrollView class]] && zoom.zoomScale > zoom.minimumZoomScale + 0.01) return NO;
+    CGPoint velocity = [self.dismissPan velocityInView:self.view];
+    return velocity.y > 0.0 && fabs(velocity.y) > fabs(velocity.x) * 1.5;
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
@@ -1329,7 +1692,9 @@ static id ApolloFindResponderForSelector(SEL sel, id imageNode) {
     NSArray *imageChestItems = objc_getAssociatedObject(imageNode, &kApolloImageChestItemsKey);
     if (imageChestItems.count > 0) {
         UIView *view = [imageNode respondsToSelector:@selector(view)] ? [imageNode view] : nil;
-        if (ApolloPresentImageChestItems(imageChestItems, view, 0)) return;
+        NSURL *albumURL = objc_getAssociatedObject(imageNode, &kApolloOriginalImageURLKey);
+        if (![albumURL isKindOfClass:[NSURL class]] || !ApolloImageChestIsPostURL(albumURL)) albumURL = nil;
+        if (ApolloPresentImageChestItemsWithAlbumURL(imageChestItems, view, 0, albumURL)) return;
     }
 
     // Prefer the original album/gallery/share URL when present so taps
@@ -1345,6 +1710,13 @@ static id ApolloFindResponderForSelector(SEL sel, id imageNode) {
             ApolloOpenImageChestURLNormally(url);
         });
         return;
+    }
+    // Single ImgChest images open in the same viewer as albums, so the
+    // chrome (Share top-left, Done top-right) and save options are
+    // consistent instead of falling through to the native X-button viewer.
+    if (ApolloImageChestIsDirectImageURL(url)) {
+        UIView *view = [imageNode respondsToSelector:@selector(view)] ? [imageNode view] : nil;
+        if (ApolloPresentImageChestItems(@[@{ @"url": url }], view, 0)) return;
     }
 
     ASDisplayNode *host = objc_getAssociatedObject(imageNode, &kApolloHostMarkdownNodeKey);
@@ -1384,18 +1756,27 @@ static UIViewController *ApolloTopVCFromView(UIView *v) {
     return vc;
 }
 
-// Non-static: also used by ApolloFeedTextPostThumbnails to open a text post's
-// embedded images fullscreen (declared in ApolloCommon.h). Despite the name,
-// the viewer is a generic zoomable image-album viewer; items are dictionaries
-// with an @"url" NSURL.
-BOOL ApolloPresentImageChestItems(NSArray<NSDictionary *> *items, UIView *sourceView, NSInteger initialIndex) {
+// Non-static: exported via ApolloCommon.h so other modules can open the
+// viewer. Despite the name it is a generic zoomable image-album viewer;
+// items are dictionaries with an @"url" NSURL. albumURL is the album's page
+// URL when known — it enables the viewer's "Share Album Link" action; pass
+// nil otherwise.
+BOOL ApolloPresentImageChestItemsWithAlbumURL(NSArray<NSDictionary *> *items, UIView *sourceView, NSInteger initialIndex, NSURL *albumURL) {
     if (items.count == 0) return NO;
     UIViewController *top = ApolloTopVCFromView(sourceView);
     if (!top) return NO;
 
     ApolloImageChestAlbumViewController *viewer = [[ApolloImageChestAlbumViewController alloc] initWithItems:items initialIndex:initialIndex];
+    viewer.albumURL = albumURL;
     [top presentViewController:viewer animated:YES completion:nil];
     return YES;
+}
+
+// Non-static: also used by ApolloFeedTextPostThumbnails to open a text post's
+// embedded images fullscreen (declared in ApolloCommon.h). Thin wrapper over
+// ApolloPresentImageChestItemsWithAlbumURL with no album link.
+BOOL ApolloPresentImageChestItems(NSArray<NSDictionary *> *items, UIView *sourceView, NSInteger initialIndex) {
+    return ApolloPresentImageChestItemsWithAlbumURL(items, sourceView, initialIndex, nil);
 }
 
 static void ApolloOpenImageChestURLNormally(NSURL *url) {
@@ -1411,14 +1792,14 @@ static BOOL ApolloPresentOrResolveImageChestAlbumURL(NSURL *url, UIView *sourceV
     NSDictionary *cached = ApolloImageChestCachedResolution(url);
     NSArray *cachedItems = [cached[@"images"] isKindOfClass:[NSArray class]] ? cached[@"images"] : nil;
     if (cachedItems.count > 0) {
-        ApolloPresentImageChestItems(cachedItems, sourceView, 0);
+        ApolloPresentImageChestItemsWithAlbumURL(cachedItems, sourceView, 0, url);
         return YES;
     }
 
     ApolloImageChestResolveURL(url, ^(NSDictionary *result) {
         NSArray *items = [result[@"images"] isKindOfClass:[NSArray class]] ? result[@"images"] : nil;
         if (items.count > 0) {
-            ApolloPresentImageChestItems(items, sourceView, 0);
+            ApolloPresentImageChestItemsWithAlbumURL(items, sourceView, 0, url);
         } else if (fallback) {
             fallback();
         }
@@ -2833,6 +3214,9 @@ static NSArray *ApolloBuildLeavesForTextNode(ASTextNode *textNode,
     NSMutableArray<NSNumber *> *isVideoURL = [NSMutableArray array];
     NSMutableArray<NSNumber *> *isImageChestURL = [NSMutableArray array];
     NSMutableArray<NSNumber *> *isBareURL = [NSMutableArray array];
+    // Issue #392: the link/alt text is just the default word "gif" — drop the
+    // redundant label beneath the inline GIF (custom alt text stays visible).
+    NSMutableArray<NSNumber *> *isDefaultGifLabel = [NSMutableArray array];
     NSMutableSet<NSString *> *seenAbs = [NSMutableSet set];
     NSUInteger imageChestPostLinkCount = ApolloUniqueImageChestPostLinkCount(attr);
     NSDictionary *hostMediaMetadata = ApolloMediaMetadataForHost(hostMarkdownNode);
@@ -2879,6 +3263,7 @@ static NSArray *ApolloBuildLeavesForTextNode(ASTextNode *textNode,
             if (!abs.length || [seenAbs containsObject:abs]) continue;
             BOOL imageChestURL = ApolloImageChestIsPostURL(url);
             BOOL bareURL = ApolloRangeTextLooksLikeBareURL(attr, fullRange, url);
+            BOOL defaultGifLabel = ApolloRangeTextIsDefaultGIFLabel(attr, fullRange);
             [seenAbs addObject:abs];
             ApolloRegisterInlineSuppressionURL(url);
             ApolloRegisterInlineSuppressionURL(normalized);
@@ -2888,6 +3273,7 @@ static NSArray *ApolloBuildLeavesForTextNode(ASTextNode *textNode,
             [isVideoURL addObject:@(isVideo)];
             [isImageChestURL addObject:@(imageChestURL)];
             [isBareURL addObject:@(bareURL)];
+            [isDefaultGifLabel addObject:@(defaultGifLabel)];
         }
     }];
 
@@ -2961,13 +3347,31 @@ static NSArray *ApolloBuildLeavesForTextNode(ASTextNode *textNode,
         [leaves addObjectsFromArray:prefixImageNodes];
 
         NSMutableAttributedString *remaining = [[attr attributedSubstringFromRange:pRange] mutableCopy];
-        // Reverse-order deletion of bare-URL ranges (paragraph-relative).
+        // Reverse-order deletion of redundant label ranges (paragraph-relative):
+        // bare URLs (the text just repeats the link) and default "GIF" labels
+        // (issue #392 — the GIF is shown inline, so its "GIF" caption is noise).
         for (NSInteger n = (NSInteger)pIdx.count - 1; n >= 0; n--) {
             NSUInteger ri = [pIdx[n] unsignedIntegerValue];
             NSRange r = [ranges[ri] rangeValue];
-            if ([isBareURL[ri] boolValue]) {
-                [remaining deleteCharactersInRange:NSMakeRange(r.location - pStart, r.length)];
+            if (![isBareURL[ri] boolValue] && ![isDefaultGifLabel[ri] boolValue]) continue;
+            NSUInteger loc = r.location - pStart;
+            NSUInteger len = r.length;
+            // If the removed label sits between two spaces (mid-sentence, e.g.
+            // "lol [gif](url) so funny"), also consume one flanking space so we
+            // don't leave a doubled interior space. ApolloTrimAttributedString
+            // only trims the string's leading/trailing whitespace, not interior
+            // runs. Checked against the current `remaining` state, which is safe
+            // because we delete highest-location ranges first, leaving the chars
+            // at and before `loc` untouched for lower-location ranges.
+            NSString *s = remaining.string;
+            if (loc >= 1 && loc + len < s.length) {
+                NSCharacterSet *ws = [NSCharacterSet whitespaceCharacterSet];
+                if ([ws characterIsMember:[s characterAtIndex:loc - 1]] &&
+                    [ws characterIsMember:[s characterAtIndex:loc + len]]) {
+                    len += 1; // drop the trailing space of the pair
+                }
             }
+            [remaining deleteCharactersInRange:NSMakeRange(loc, len)];
         }
 
         NSAttributedString *trimmed = ApolloTrimAttributedString(remaining);

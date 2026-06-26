@@ -43,8 +43,16 @@ static NSString *const UDKeyProxyImgurDDG = @"ProxyImgurDDG";
 static NSString *const UDKeyImageUploadProvider = @"ImageUploadProvider";
 static NSString *const UDKeyShowUserAvatars = @"ShowUserAvatars";
 static NSString *const UDKeyUseProfileAvatarTabIcon = @"UseProfileAvatarTabIcon";
+static NSString *const UDKeySocialLinksInProfile = @"SocialLinksInProfile";
 static NSString *const UDKeyShowSubredditHeaders = @"ShowSubredditHeaders";
+static NSString *const UDKeyCommunityHighlights = @"CommunityHighlights";
+static NSString *const UDKeyCommunityHighlightsWeb = @"CommunityHighlightsWeb";
 static NSString *const UDKeyAutoHideTabBarShowOnIdle = @"AutoHideTabBarShowOnIdle";
+// When ON, focusing the main feed / subreddit search keeps the nav bar and the search
+// field in place (results populate the feed below the field) instead of Apollo's stock
+// "search takeover" (nav slides away + fades, field docks to the top and grows). Mutually
+// exclusive with the default nav-hide mode. Liquid Glass only. Default NO. See ApolloSearchInPlace.xm.
+static NSString *const UDKeyKeepSearchBarInPlace = @"KeepSearchBarInPlace";
 // Render image URLs (i.redd.it, preview.redd.it, i.imgur.com, generic .png/.jpg/.jpeg/.webp)
 // inline within post selftext and comments instead of leaving them as plain text links.
 static NSString *const UDKeyEnableInlineImages = @"EnableInlineImages";
@@ -61,7 +69,7 @@ static NSString *const UDKeyEnableBulkTranslation = @"EnableBulkTranslation";
 static NSString *const UDKeyAutoTranslateOnAppear = @"AutoTranslateOnAppear";
 static NSString *const UDKeyTranslatePostTitles = @"TranslatePostTitles";
 static NSString *const UDKeyTranslationTargetLanguage = @"TranslationTargetLanguage";
-static NSString *const UDKeyTranslationProvider = @"TranslationProvider"; // google | libre
+static NSString *const UDKeyTranslationProvider = @"TranslationProvider"; // google | libre | apple
 static NSString *const UDKeyTranslationProviderUserSelected = @"TranslationProviderUserSelected";
 static NSString *const UDKeyLibreTranslateURL = @"LibreTranslateURL";
 static NSString *const UDKeyLibreTranslateAPIKey = @"LibreTranslateAPIKey";
@@ -83,6 +91,21 @@ static NSString *const UDKeyTagFilterSpoiler = @"TagFilterSpoiler";        // gl
 // Missing keys fall back to global settings.
 static NSString *const UDKeyTagFilterSubredditOverrides = @"TagFilterSubredditOverrides";
 
+// Web JSON spike (see ApolloWebJSON.m). Master switch for re-pointing
+// whitelisted listing reads at cookie-authenticated www.reddit.com JSON.
+static NSString *const UDKeyWebJSONEnabled = @"WebJSONEnabled";
+// Legacy NSUserDefaults location of the harvested "name=value; ..." Cookie
+// header. The cookie is now stored in the keychain (ApolloWebJSON.m); this key
+// is retained only so ApolloWebJSONLoadPersistedCredentials can migrate an older
+// build's value into the keychain and then delete it.
+static NSString *const UDKeyWebSessionCookieHeader = @"WebSessionCookieHeader";
+// Set when an account is synthesized from a *mid-session* web login (the login VC
+// path), so AccountManager — which only loads accounts at launch — hasn't picked
+// it up yet and the account tab is blank until a relaunch. Drives the
+// "restart to activate" indicator on the Web Session Login settings row, and is
+// cleared in %ctor on the next launch (where the fresh account load resolves it).
+static NSString *const UDKeyWebJSONPendingRestart = @"WebJSONPendingRestart";
+
 // Self-hosted notification backend (forked apollo-backend). Empty disables —
 // the legacy hosts remain in the blocklist and requests are silently dropped.
 static NSString *const UDKeyNotificationBackendURL = @"NotificationBackendURL";
@@ -97,5 +120,11 @@ static NSString *const UDKeyFeedTextPostThumbnails = @"FeedTextPostThumbnails";
 // Rich link preview cards: 0 = Off, 1 = Compact, 2 = Full.
 static NSString *const UDKeyLinkPreviewBodyMode = @"LinkPreviewBodyMode";
 static NSString *const UDKeyLinkPreviewCommentsMode = @"LinkPreviewCommentsMode";
+// Legacy preset color (ApolloLinkPreviewCardColor enum). Superseded by the
+// free-form hex below; still read once at launch to migrate an old selection.
 static NSString *const UDKeyLinkPreviewCardColor = @"LinkPreviewCardColor";
+// Free-form preview card color as a 6-digit "RRGGBB" hex string. Empty string
+// means "Default" (no custom fill — the standard neutral card). A non-empty
+// hex paints the whole card that exact color, with auto-contrasted text.
+static NSString *const UDKeyLinkPreviewCardColorHex = @"LinkPreviewCardColorHex";
 static NSString *const ApolloLinkPreviewModeDidChangeNotification = @"ApolloLinkPreviewModeDidChangeNotification";

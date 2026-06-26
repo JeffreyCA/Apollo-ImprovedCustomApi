@@ -1,0 +1,449 @@
+#import "ApolloWebSessionLoginViewController.h"
+#import "ApolloWebJSON.h"
+#import "ApolloCommon.h"
+#import "UIWindow+Apollo.h"
+#import "UserDefaultConstants.h"
+
+#import <WebKit/WebKit.h>
+
+// We never decide auth state from cookie names: Reddit sets reddit_session (and
+// token_v2) for anonymous web sessions too, and the cookie store can momentarily
+// report stale/empty contents right after WKWebView creation. Instead we ask
+// Reddit directly via /api/me.json (see _probeLoggedInUserWithCompletion:).
+//
+// Reddit's session cookies arrive session-only (iOS drops them on relaunch);
+// the harvest rewrites their expiry ~10,000 days out so the persistent store
+// keeps them (Hydra's trick).
+static const NSTimeInterval kFarFutureCookieInterval = 10000.0 * 24 * 60 * 60;
+
+@interface ApolloWebSessionLoginViewController () <WKNavigationDelegate>
+@property (nonatomic, strong) WKWebView *webView;
+@property (nonatomic, strong) UIActivityIndicatorView *spinner;
+@property (nonatomic, copy) NSURL *loginURL;
+@property (nonatomic, strong) NSTimer *authPollTimer;
+@property (nonatomic) BOOL finished;
+// Set once the first page has loaded, so the probe runs against a real Reddit
+// origin (fetch needs one) instead of about:blank.
+@property (nonatomic) BOOL pageLoaded;
+// Set once we've handled the initial logged-in/out decision (prompt vs. let the
+// user sign in), so subsequent probes don't re-prompt.
+@property (nonatomic) BOOL decisionMade;
+// True while waiting for the user to complete a login; a probe that then reports
+// a logged-in user triggers the harvest.
+@property (nonatomic) BOOL awaitingLogin;
+@end
+
+@implementation ApolloWebSessionLoginViewController
+
+#pragma mark - Expired-session re-auth entry point
+
++ (UIWindow *)_apolloKeyWindow {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+            if (w.isKeyWindow) return w;
+        }
+    }
+    UIScene *anyScene = UIApplication.sharedApplication.connectedScenes.anyObject;
+    if ([anyScene isKindOfClass:[UIWindowScene class]]) {
+        return ((UIWindowScene *)anyScene).windows.firstObject;
+    }
+    return nil;
+}
+
++ (void)presentExpiredSessionPrompt {
+    UIViewController *top = [[self _apolloKeyWindow] visibleViewController];
+    if (!top) return;
+    // Already in the login flow (or some other modal we shouldn't interrupt).
+    if ([top isKindOfClass:[ApolloWebSessionLoginViewController class]]) return;
+
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Reddit Session Expired"
+                         message:@"Your Reddit web session is no longer valid (Reddit returned its sign-in wall). Sign in again to keep using Apollo without API keys."
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Sign In Again"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        ApolloWebSessionLoginViewController *vc = [[ApolloWebSessionLoginViewController alloc] init];
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        UIViewController *presenter = [[self _apolloKeyWindow] visibleViewController] ?: top;
+        [presenter presentViewController:nav animated:YES completion:nil];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Later" style:UIAlertActionStyleCancel handler:nil]];
+    [top presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Reddit Web Login";
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    self.loginURL = [NSURL URLWithString:@"https://www.reddit.com/login"];
+
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc]
+        initWithBarButtonSystemItem:UIBarButtonSystemItemCancel
+                             target:self
+                             action:@selector(_cancelTapped)];
+
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+        initWithImage:[UIImage systemImageNamed:@"ellipsis.circle"]
+                 menu:nil];
+    [self _rebuildOptionsMenu];
+
+    // iOS 15 and earlier can't render the modern Reddit login page.
+    // Rewrite www.reddit.com → old.reddit.com before the first load.
+    if (![self _isModernRedditSupported]) {
+        ApolloLog(@"[WebJSON] iOS < 16 detected — auto-switching to old.reddit.com");
+        self.loginURL = [self _rewriteToOldReddit:self.loginURL];
+    }
+
+    // Persistent store (unlike the OAuth flow's nonPersistentDataStore): the
+    // whole point is keeping the harvested session cookie around.
+    WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
+    config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
+
+    self.webView = [[WKWebView alloc] initWithFrame:self.view.bounds configuration:config];
+    self.webView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.webView.navigationDelegate = self;
+    [self.view addSubview:self.webView];
+
+    self.spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    self.spinner.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin |
+                                    UIViewAutoresizingFlexibleLeftMargin  | UIViewAutoresizingFlexibleRightMargin;
+    self.spinner.center = self.view.center;
+    [self.view addSubview:self.spinner];
+    [self.spinner startAnimating];
+
+    // Load the login page. If the persistent store already holds a logged-in
+    // session, Reddit redirects past the form — the post-load /api/me.json probe
+    // detects that and asks the user whether to reuse it or re-authenticate,
+    // instead of silently harvesting and vanishing.
+    ApolloLog(@"[WebJSON] Loading login URL: %@", self.loginURL);
+    [self.webView loadRequest:[NSURLRequest requestWithURL:self.loginURL]];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    // The modern login form submits via fetch without a full page navigation, so
+    // didFinishNavigation alone can miss the moment auth completes. Poll the auth
+    // state while visible. The probe is gated on pageLoaded, so it's inert until
+    // the first navigation finishes.
+    if (!self.authPollTimer) {
+        self.authPollTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
+                                                              target:self
+                                                            selector:@selector(_evaluateAuthState)
+                                                            userInfo:nil
+                                                             repeats:YES];
+    }
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    [self.authPollTimer invalidate];
+    self.authPollTimer = nil;
+}
+
+#pragma mark - Auth state (source of truth: /api/me.json)
+
+// Asks Reddit, from the page's own origin (so httpOnly cookies are sent), who
+// is logged in. Returns the username, or @"" if anonymous / the request fails.
+- (void)_probeLoggedInUserWithCompletion:(void (^)(NSString *username))completion {
+    if (!self.pageLoaded) { completion(@""); return; }
+    NSString *js =
+        @"try {"
+        @"  const r = await fetch('/api/me.json', {credentials: 'include'});"
+        @"  if (!r.ok) return '';"
+        @"  const j = await r.json();"
+        @"  return (j && j.data && j.data.name) ? j.data.name : '';"
+        @"} catch (e) { return ''; }";
+    [self.webView callAsyncJavaScript:js
+                            arguments:nil
+                              inFrame:nil
+                       inContentWorld:WKContentWorld.pageWorld
+                    completionHandler:^(id result, NSError *error) {
+        completion([result isKindOfClass:[NSString class]] ? (NSString *)result : @"");
+    }];
+}
+
+// Reads the session modhash from /api/me.json (data.modhash). The modhash is
+// the web API's write token — required for vote/comment/save/submit — and is
+// NOT a cookie, so it must be pulled from the identity endpoint at harvest time.
+// Returns @"" when absent (some anonymous/limited sessions omit it).
+- (void)_probeModhashWithCompletion:(void (^)(NSString *modhash))completion {
+    if (!self.pageLoaded) { completion(@""); return; }
+    NSString *js =
+        @"try {"
+        @"  const r = await fetch('/api/me.json', {credentials: 'include'});"
+        @"  if (!r.ok) return '';"
+        @"  const j = await r.json();"
+        @"  return (j && j.data && j.data.modhash) ? j.data.modhash : '';"
+        @"} catch (e) { return ''; }";
+    [self.webView callAsyncJavaScript:js
+                            arguments:nil
+                              inFrame:nil
+                       inContentWorld:WKContentWorld.pageWorld
+                    completionHandler:^(id result, NSError *error) {
+        completion([result isKindOfClass:[NSString class]] ? (NSString *)result : @"");
+    }];
+}
+
+- (void)_evaluateAuthState {
+    if (self.finished || !self.pageLoaded) return;
+    __weak typeof(self) weakSelf = self;
+    [self _probeLoggedInUserWithCompletion:^(NSString *username) {
+        typeof(self) s = weakSelf;
+        if (!s || s.finished) return;
+        BOOL loggedIn = username.length > 0;
+        if (!s.decisionMade) {
+            s.decisionMade = YES;
+            if (loggedIn) {
+                ApolloLog(@"[WebJSON] Existing session detected for u/%@ — prompting", username);
+                [s _promptExistingSessionForUser:username];
+            } else {
+                ApolloLog(@"[WebJSON] No existing session — awaiting login");
+                s.awaitingLogin = YES;
+            }
+        } else if (s.awaitingLogin && loggedIn) {
+            [s _harvestAndFinishForUser:username];
+        }
+    }];
+}
+
+#pragma mark - Existing-session prompt
+
+- (void)_promptExistingSessionForUser:(NSString *)username {
+    if (self.finished) return;
+    [self.spinner stopAnimating];
+
+    NSString *message = [NSString stringWithFormat:
+        @"You're already signed in to Reddit on the web as u/%@. Re-authenticate to sign in as a different account, or keep using the current session.", username];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Already Signed In"
+                                                                  message:message
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Keep Current Session"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) { [weakSelf _harvestAndFinishForUser:username]; }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Re-authenticate"
+                                              style:UIAlertActionStyleDestructive
+                                            handler:^(UIAlertAction *a) { [weakSelf _reauthenticate]; }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                              style:UIAlertActionStyleCancel
+                                            handler:^(UIAlertAction *a) { [weakSelf _cancelTapped]; }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)_reauthenticate {
+    ApolloLog(@"[WebJSON] Clearing existing session for re-authentication");
+    [self.spinner startAnimating];
+    __weak typeof(self) weakSelf = self;
+    [self _clearRedditCookiesWithCompletion:^{
+        typeof(self) s = weakSelf;
+        if (!s || s.finished) return;
+        // Stay decided (don't re-prompt), but now wait for a fresh login. With
+        // the cookies gone, the reloaded /login shows the form instead of
+        // auto-authenticating.
+        s.awaitingLogin = YES;
+        ApolloLog(@"[WebJSON] Reloading login page after clearing cookies");
+        [s.webView loadRequest:[NSURLRequest requestWithURL:s.loginURL]];
+    }];
+}
+
+// Deletes every .reddit.com cookie from the data store so the next login starts
+// clean (the persistent store survives app uninstall in the simulator).
+- (void)_clearRedditCookiesWithCompletion:(void (^)(void))completion {
+    WKHTTPCookieStore *store = self.webView.configuration.websiteDataStore.httpCookieStore;
+    [store getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+        NSMutableArray<NSHTTPCookie *> *redditCookies = [NSMutableArray array];
+        for (NSHTTPCookie *c in cookies) {
+            if ([c.domain.lowercaseString hasSuffix:@"reddit.com"]) [redditCookies addObject:c];
+        }
+        if (redditCookies.count == 0) {
+            dispatch_async(dispatch_get_main_queue(), completion);
+            return;
+        }
+        // WKHTTPCookieStore completion handlers run serially on the main thread,
+        // so the countdown needs no extra synchronization.
+        __block NSUInteger remaining = redditCookies.count;
+        for (NSHTTPCookie *c in redditCookies) {
+            [store deleteCookie:c completionHandler:^{
+                if (--remaining == 0) dispatch_async(dispatch_get_main_queue(), completion);
+            }];
+        }
+    }];
+}
+
+#pragma mark - Cookie harvest
+
+- (void)_harvestAndFinishForUser:(NSString *)username {
+    if (self.finished) return;
+    self.finished = YES; // guard against the poll firing again mid-harvest
+    [self.authPollTimer invalidate];
+    self.authPollTimer = nil;
+
+    WKHTTPCookieStore *cookieStore = self.webView.configuration.websiteDataStore.httpCookieStore;
+    __weak typeof(self) weakSelf = self;
+    // Pull the modhash before the cookie sweep so the write token lands with the
+    // same harvest (it can't be recovered from the cookies).
+    [self _probeModhashWithCompletion:^(NSString *modhash) {
+        typeof(self) s = weakSelf;
+        if (!s) return;
+        [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+            // Rewrite session cookies to a far-future expiry so the persistent
+            // data store keeps them across launches (instead of discarding on quit).
+            NSDate *farFuture = [NSDate dateWithTimeIntervalSinceNow:kFarFutureCookieInterval];
+            NSMutableArray<NSString *> *pairs = [NSMutableArray array];
+            for (NSHTTPCookie *cookie in cookies) {
+                if (![cookie.domain.lowercaseString hasSuffix:@"reddit.com"]) continue;
+                [pairs addObject:[NSString stringWithFormat:@"%@=%@", cookie.name, cookie.value]];
+                if (cookie.sessionOnly || !cookie.expiresDate) {
+                    NSMutableDictionary *props = [cookie.properties mutableCopy];
+                    [props removeObjectForKey:NSHTTPCookieDiscard];
+                    [props removeObjectForKey:NSHTTPCookieMaximumAge];
+                    props[NSHTTPCookieExpires] = farFuture;
+                    NSHTTPCookie *persistent = [NSHTTPCookie cookieWithProperties:props];
+                    if (persistent) [cookieStore setCookie:persistent completionHandler:nil];
+                }
+            }
+            // Persist cookie + write token + identity together (all keychain-backed).
+            ApolloWebJSONSetSessionCookieHeader([pairs componentsJoinedByString:@"; "]);
+            ApolloWebJSONSetModhash(modhash);
+            ApolloWebJSONSetUsername(username);
+            ApolloLog(@"[WebJSON] Harvested session for u/%@, %lu cookies, modhash %@",
+                      username, (unsigned long)pairs.count, modhash.length > 0 ? @"captured" : @"absent");
+
+            // Synthesize a signed-in account so the account tab + write actions
+            // (vote/comment) work — they gate on AccountManager having a current
+            // account, which only loads at launch, so a restart is required.
+            BOOL synthesized = ApolloWebJSONSynthesizeSignedInAccount();
+            [s _finishWithUser:username accountSynthesized:synthesized];
+        }];
+    }];
+}
+
+#pragma mark - Plumbing
+
+- (BOOL)_isModernRedditSupported {
+    if (@available(iOS 16, *)) return YES;
+    return NO;
+}
+
+- (NSURL *)_rewriteToOldReddit:(NSURL *)url {
+    NSURLComponents *c = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    if ([c.host isEqualToString:@"www.reddit.com"] || [c.host isEqualToString:@"reddit.com"]) {
+        c.host = @"old.reddit.com";
+    }
+    return c.URL ?: url;
+}
+
+- (void)_switchToOldReddit {
+    NSURL *rewritten = [self _rewriteToOldReddit:self.webView.URL ?: self.loginURL];
+    ApolloLog(@"[WebJSON] Switching to old Reddit: %@", rewritten);
+    [self.webView loadRequest:[NSURLRequest requestWithURL:rewritten]];
+}
+
+- (void)_rebuildOptionsMenu {
+    BOOL onOldReddit = [self.webView.URL.host isEqualToString:@"old.reddit.com"];
+    __weak typeof(self) weakSelf = self;
+
+    UIAction *oldReddit = [UIAction actionWithTitle:@"Switch to Old Reddit"
+                                              image:[UIImage systemImageNamed:@"arrow.triangle.2.circlepath"]
+                                         identifier:nil
+                                            handler:^(__kindof UIAction *action) {
+        [weakSelf _switchToOldReddit];
+    }];
+    if (onOldReddit) oldReddit.attributes = UIMenuElementAttributesDisabled;
+
+    UIMenu *menu = [UIMenu menuWithTitle:@"Sign-In Options" children:@[oldReddit]];
+    self.navigationItem.rightBarButtonItem.menu = menu;
+}
+
+- (void)_cancelTapped {
+    ApolloLog(@"[WebJSON] User cancelled web session login");
+    self.finished = YES;
+    [self.authPollTimer invalidate];
+    self.authPollTimer = nil;
+    [self _dismiss];
+}
+
+// Called after a successful harvest. When an account was synthesized, Apollo must
+// relaunch for AccountManager to load it (it reads accounts once per launch), so
+// we prompt to quit & reopen — mirroring the settings-restore flow's exit(0).
+// iOS can't relaunch the app for us, so the copy says "quit & reopen", not
+// "restart". If the user defers, we set UDKeyWebJSONPendingRestart so the Web
+// Session Login settings row shows a "restart to activate" reminder rather than
+// leaving them with a silently-blank account tab. Otherwise (account already
+// present / synthesis skipped) just dismiss with no prompt.
+- (void)_finishWithUser:(NSString *)username accountSynthesized:(BOOL)synthesized {
+    if (!synthesized) { [self _dismiss]; return; }
+
+    // Mark the pending state up front; clearing happens at next launch (%ctor).
+    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:UDKeyWebJSONPendingRestart];
+
+    NSString *who = username.length > 0 ? [NSString stringWithFormat:@"u/%@", username] : @"your account";
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Signed In"
+                         message:[NSString stringWithFormat:
+                             @"Signed in as %@. Quit and reopen Apollo to finish signing in — your account, voting, and commenting won't be active until you do.", who]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Quit & Reopen"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) { exit(0); }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Not Now (account stays inactive)"
+                                              style:UIAlertActionStyleCancel
+                                            handler:^(UIAlertAction *a) { [self _dismiss]; }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)_dismiss {
+    [self.navigationController dismissViewControllerAnimated:YES completion:nil];
+}
+
+#pragma mark - WKNavigationDelegate
+
+- (void)webView:(WKWebView *)webView
+decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
+decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+    NSURL *url = navigationAction.request.URL;
+
+    // On iOS < 16 the modern Reddit web app fails to render; keep the whole
+    // login on old.reddit.com (same mid-flow rewrite as the OAuth flow).
+    if (![self _isModernRedditSupported]) {
+        NSURL *rewritten = [self _rewriteToOldReddit:url];
+        if (![rewritten isEqual:url]) {
+            decisionHandler(WKNavigationActionPolicyCancel);
+            ApolloLog(@"[WebJSON] Rewriting mid-flow www.reddit.com → old.reddit.com: %@", rewritten);
+            [self.webView loadRequest:[NSURLRequest requestWithURL:rewritten]];
+            return;
+        }
+    }
+
+    decisionHandler(WKNavigationActionPolicyAllow);
+}
+
+- (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
+    [self.spinner startAnimating];
+}
+
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    [self.spinner stopAnimating];
+    [self _rebuildOptionsMenu];
+    self.pageLoaded = YES;
+    [self _evaluateAuthState];
+}
+
+- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    [self.spinner stopAnimating];
+    // NSURLErrorCancelled (-999) and WebKitErrorDomain 102 are fired by our own
+    // decisionHandler cancels — expected, not failures.
+    if (error.code == NSURLErrorCancelled) return;
+    if ([error.domain isEqualToString:@"WebKitErrorDomain"] && error.code == 102) return;
+    ApolloLog(@"[WebJSON] Provisional navigation failed: %@", error);
+}
+
+- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    [self.spinner stopAnimating];
+    if (error.code == NSURLErrorCancelled) return;
+    ApolloLog(@"[WebJSON] Navigation failed: %@", error);
+}
+
+@end

@@ -71,6 +71,15 @@
 
     ApolloLog(@"[WebAuth] Loading auth URL: %@", self.authURL);
     [self.webView loadRequest:[NSURLRequest requestWithURL:self.authURL]];
+    // Automate transition to manual sign-in for iOS 15.3.1 and below.
+    if (@available(iOS 15.4, *)) {
+        // iOS 15.4+ is supported. Let the web view load normally.
+    } else {
+        ApolloLog(@"[WebAuth] iOS <= 15.3.1 detected. Automating manual sign-in fallback.");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self _showManualSignIn];
+        });
+    }
 }
 
 - (BOOL)_isModernRedditSupported {

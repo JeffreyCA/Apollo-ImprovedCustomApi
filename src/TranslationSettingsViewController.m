@@ -4,6 +4,14 @@
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
 
+// Generated Swift umbrella header — exposes @objc ApolloAppleTranslator (bulk download).
+#if __has_include("ApolloReborn-Swift.h")
+#import "ApolloReborn-Swift.h"
+#define APOLLO_HAS_APPLE_TRANSLATE 1
+#else
+#define APOLLO_HAS_APPLE_TRANSLATE 0
+#endif
+
 typedef NS_ENUM(NSInteger, TranslationSettingsSection) {
     TranslationSettingsSectionGeneral = 0,
     TranslationSettingsSectionSkip,
@@ -70,6 +78,14 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
 
     self.title = @"Translation";
     self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+
+#if APOLLO_HAS_APPLE_TRANSLATE
+    // Prime Apple's supported-language set so the Target Language picker can filter
+    // to it by the time the user taps in (the query is async; result is cached).
+    if ([ApolloAppleTranslator isSupported]) {
+        [ApolloAppleTranslator warmSupportedLanguages];
+    }
+#endif
 }
 
 #pragma mark - Helpers
@@ -132,12 +148,16 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     if ([sTranslationProvider isEqualToString:@"libre"]) {
         return @"libre";
     }
+    if ([sTranslationProvider isEqualToString:@"apple"]) {
+        return @"apple";
+    }
     return @"google";
 }
 
 - (NSString *)providerDetailText {
     NSString *current = [self currentProvider];
     if ([current isEqualToString:@"libre"]) return @"LibreTranslate";
+    if ([current isEqualToString:@"apple"]) return @"Apple (On-Device)";
     return @"Google";
 }
 
@@ -159,7 +179,9 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
 
 - (void)setProvider:(NSString *)provider {
     NSString *normalized = [[provider stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
-    if (![normalized isEqualToString:@"libre"]) {
+    // Valid providers: "libre", "apple" (on-device, iOS 18+ only), otherwise "google".
+    if (![normalized isEqualToString:@"libre"] &&
+        !([normalized isEqualToString:@"apple"] && IsAppleTranslationSupported())) {
         normalized = @"google";
     }
 
@@ -359,6 +381,31 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
+// Target options to offer for the active provider. Apple covers only ~20 languages,
+// so when it's selected we filter the full list down to Apple's supported set (always
+// keeping "Device Default"). If the async query hasn't returned yet we fall back to
+// the full list rather than showing an empty/near-empty picker.
+- (NSArray<NSDictionary<NSString *, NSString *> *> *)targetLanguageOptionsForCurrentProvider {
+    NSArray<NSDictionary<NSString *, NSString *> *> *all = ApolloTranslationLanguageOptions();
+#if APOLLO_HAS_APPLE_TRANSLATE
+    if ([[self currentProvider] isEqualToString:@"apple"] && [ApolloAppleTranslator isSupported]) {
+        NSArray<NSString *> *supported = [ApolloAppleTranslator supportedLanguageCodes];
+        if (supported.count > 0) {
+            NSSet<NSString *> *supportedSet = [NSSet setWithArray:supported];
+            NSMutableArray *filtered = [NSMutableArray array];
+            for (NSDictionary<NSString *, NSString *> *option in all) {
+                NSString *code = option[@"code"];
+                if (code.length == 0 || [supportedSet containsObject:code]) {
+                    [filtered addObject:option];
+                }
+            }
+            if (filtered.count > 1) return filtered;
+        }
+    }
+#endif
+    return all;
+}
+
 - (void)presentTargetLanguageSheetFromSourceView:(UIView *)sourceView {
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Target Language"
                                                                    message:nil
@@ -366,7 +413,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
 
     NSString *currentOverride = [self normalizedLanguageCodeFromIdentifier:sTranslationTargetLanguage] ?: @"";
 
-    for (NSDictionary<NSString *, NSString *> *option in ApolloTranslationLanguageOptions()) {
+    for (NSDictionary<NSString *, NSString *> *option in [self targetLanguageOptionsForCurrentProvider]) {
         NSString *code = option[@"code"];
         NSString *name = option[@"name"];
         BOOL isCurrent = [code isEqualToString:currentOverride];
@@ -388,6 +435,26 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
+// One-time explainer the first time Apple is chosen as the provider: translations are
+// on-device and languages download on first use. There is no public deep link to the
+// system Translate download page (UIApplicationOpenSettingsURLString only opens
+// Apollo's own settings), so we don't offer a button — just describe the flow.
+- (void)showAppleTranslationOnboardingIfNeeded {
+    static NSString *const kOnboardedKey = @"ApolloAppleTranslateOnboarded";
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if ([defaults boolForKey:kOnboardedKey]) return;
+    [defaults setBool:YES forKey:kOnboardedKey];
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"Apple Translation"
+                             message:@"Translations happen entirely on your device. The first time you open a post in a language you haven't downloaded, you'll be asked once to download it.\n\nYou can also pre-download or remove languages anytime in the Settings app under Apps → Translate."
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+    });
+}
+
 - (void)presentProviderSheetFromSourceView:(UIView *)sourceView {
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Primary Provider"
                                                                    message:nil
@@ -395,11 +462,22 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
 
     NSString *currentProvider = [self currentProvider];
     NSString *googleTitle = [currentProvider isEqualToString:@"google"] ? @"Google (Current)" : @"Google";
+    NSString *appleTitle  = [currentProvider isEqualToString:@"apple"]  ? @"Apple (On-Device) (Current)" : @"Apple (On-Device)";
     NSString *libreTitle  = [currentProvider isEqualToString:@"libre"]  ? @"LibreTranslate (Current)" : @"LibreTranslate";
 
     [sheet addAction:[UIAlertAction actionWithTitle:googleTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
         [self setProvider:@"google"];
     }]];
+    // On-device Apple translation is only offered on iOS 18+ (Translation framework).
+    if (IsAppleTranslationSupported()) {
+        [sheet addAction:[UIAlertAction actionWithTitle:appleTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+            [self setProvider:@"apple"];
+            // Languages download on-demand (prompt-on-detect, once per language). The first
+            // time the user picks Apple, explain that and point them to Settings to
+            // pre-download if they want. See ApolloAppleTranslation.swift.
+            [self showAppleTranslationOnboardingIfNeeded];
+        }]];
+    }
     [sheet addAction:[UIAlertAction actionWithTitle:libreTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
         [self setProvider:@"libre"];
     }]];
@@ -445,7 +523,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
         case TranslationSettingsSectionSkip:
             return @"Posts and comments detected as one of these languages will be left in their original form. Mixed-language text is still translated so embedded foreign words come through.";
         case TranslationSettingsSectionLibre:
-            return @"Google is the default provider. If the chosen provider fails, the tweak automatically falls back to the other one. The settings below configure the LibreTranslate endpoint.";
+            return @"Google is the default provider. If Google or LibreTranslate fails, the tweak automatically falls back to the other one. Apple (On-Device) translates privately on your device with no network — it stays Apple (no fallback) and will ask you to download a language the first time it's needed (iOS 18+). The settings below configure the LibreTranslate endpoint.";
         default:
             return nil;
     }
@@ -523,7 +601,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         }
         cell.textLabel.text = @"Add Language…";
-        cell.textLabel.textColor = [UIColor systemBlueColor];
+        [self apollo_applyAccentActionTextColorToCell:cell];
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;
     }

@@ -25,8 +25,12 @@ NSInteger sUnmuteCommentsVideos = 0; // 0=Default, 1=Remember from Full Screen, 
 BOOL sProxyImgurDDG = NO;
 BOOL sShowUserAvatars = NO;
 BOOL sUseProfileAvatarTabIcon = NO;
+BOOL sSocialLinksInProfile = YES;
 BOOL sShowSubredditHeaders = NO;
+BOOL sCommunityHighlights = NO;
+BOOL sCommunityHighlightsWeb = NO;
 BOOL sAutoHideTabBarShowOnIdle = NO;
+BOOL sKeepSearchBarInPlace = NO;
 BOOL sModernSubredditDividers = YES;
 BOOL sSubredditListEnhancements = YES;
 BOOL sEnableFlairColors = NO;
@@ -36,6 +40,8 @@ NSInteger sAutoplayInlineGIFMode = ApolloAutoplayInlineGIFModeDefault;
 NSInteger sLinkPreviewBodyMode = ApolloLinkPreviewModeOff;
 NSInteger sLinkPreviewCommentsMode = ApolloLinkPreviewModeOff;
 NSInteger sLinkPreviewCardColor = ApolloLinkPreviewCardColorNeutral;
+NSString *sLinkPreviewCardColorHex = nil;
+volatile uint32_t sLinkPreviewCardColorPacked = 0;
 NSInteger sImageUploadProvider = ImageUploadProviderImgur;
 
 NSString *sLatestRedditBearerToken = nil;
@@ -48,6 +54,11 @@ NSString *sTranslationProvider = nil;
 NSString *sLibreTranslateURL = nil;
 NSString *sLibreTranslateAPIKey = nil;
 NSArray<NSString *> *sTranslationSkipLanguages = nil;
+
+BOOL sWebJSONEnabled = NO;
+NSString *sWebSessionCookieHeader = nil;
+NSString *sWebSessionModhash = nil;
+NSString *sWebSessionUsername = nil;
 
 BOOL sTagFilterEnabled = NO;
 NSString *sTagFilterMode = @"blur";

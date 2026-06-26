@@ -10,6 +10,7 @@
 #import "ApolloSubredditDefaultAssets.h"
 #import "ApolloSubredditInfoCache.h"
 #import "ApolloUserProfileCache.h"
+#import "ApolloSubredditHighlights.h"
 
 // Mirrors the profile-banner pattern in ApolloUserAvatars.xm exactly:
 // - Only hooks `_TtC6Apollo19PostsViewController`.
@@ -864,6 +865,12 @@ static UIView *ApolloSubredditBuildWrapper(ApolloSubredditHeaderView *header,
                                            UIView *originalHeader,
                                            CGFloat width) {
     if (!header) return nil;
+    // When Community Highlights is on, host its carousel in the original-header
+    // slot (a container stacking the carousel above Apollo's real header). The
+    // sizing/positioning below then accounts for it automatically.
+    if (sCommunityHighlights && header.subredditName.length) {
+        originalHeader = ApolloHLHeaderOriginalSubstitute(header.subredditName, header.hostViewController, originalHeader, width);
+    }
     CGFloat originalHeight = originalHeader ? originalHeader.frame.size.height : 0.0;
     CGFloat headerHeight = [header preferredHeightForWidth:width];
     ApolloSubredditHeaderWrapperView *wrapper = [[ApolloSubredditHeaderWrapperView alloc] initWithFrame:CGRectMake(0.0, 0.0, width, headerHeight + originalHeight)];
@@ -1396,6 +1403,21 @@ static BOOL ApolloSubredditShouldBlockOffset(UITableView *tableView, CGPoint new
     sPostsViewControllerClass = objc_getClass("_TtC6Apollo19PostsViewController");
 
     [[NSNotificationCenter defaultCenter] addObserverForName:@"ApolloSubredditHeaderToggleChangedNotification"
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *note) {
+        ApolloSubredditRefreshVisibleControllers();
+    }];
+
+    // Re-run the wrapper build (which hosts the Community Highlights carousel)
+    // when its toggle flips or its data lands while the header is showing.
+    [[NSNotificationCenter defaultCenter] addObserverForName:@"ApolloCommunityHighlightsToggleChangedNotification"
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *note) {
+        ApolloSubredditRefreshVisibleControllers();
+    }];
+    [[NSNotificationCenter defaultCenter] addObserverForName:ApolloHLDataReadyNotification
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(__unused NSNotification *note) {

@@ -59,93 +59,37 @@ PY
 # shared-key workarounds (Dystopia / RedReader) without manual Info.plist edits.
 DEFAULT_URL_SCHEMES="dystopia,redreader"
 
-# Run patch.sh over a finished IPA to inject DEFAULT_URL_SCHEMES and write the
-# result back in place. Only the standard/no-extensions variants need this: the
-# four Liquid Glass variants below are derived from those two via patch.sh and
-# therefore inherit the already-injected schemes.
-inject_default_url_schemes_in_place() {
-    local ipa="$1"
-    local work output
-    work="$(mktemp -d)"
-    output="$work/$(basename "$ipa")"
-    bash "${REPO_DIR}/patch.sh" "$ipa" --url-schemes "$DEFAULT_URL_SCHEMES" -o "$output"
-    mv -f "$output" "$ipa"
-    rm -rf "$work"
+# The per-variant patch steps are now composed from shared modules run through
+# the single-unpack orchestrator (scripts/apply-patches.sh). The previous inline
+# helpers (inject_default_url_schemes_in_place, set_main_app_bundle_versions_in_ipa,
+# strip_arm64e_from_substrate_in_ipa) each did their own unpack/repack; the
+# orchestrator collapses a variant's whole patch chain into one unpack/repack.
+APPLY_PATCHES="${SCRIPT_DIR}/apply-patches.sh"
+
+# Run apply-patches.sh on an IPA in place (read it, write a temp, move back).
+apply_patches_in_place() {
+    local ipa="$1"; shift
+    local tmp="${ipa}.patched.tmp"
+    bash "$APPLY_PATCHES" --ipa "$ipa" -o "$tmp" "$@"
+    mv -f "$tmp" "$ipa"
 }
 
-set_main_app_bundle_versions_in_ipa() {
-    local ipa="$1"
-    local short_version="$2"
-    local build_version="$3"
-    local work plist app_dir
-    work="$(mktemp -d)"
-
-    if ! (cd "$work" && unzip -q "$ipa"); then
-        echo "Warning: could not unzip IPA for version update; leaving as-is."
-        rm -rf "$work"
-        return 0
+# Build the Reborn widget extension appex once, up front. The inject-widgets
+# module injects this prebuilt appex; fail loudly if xcodegen is missing so a
+# release can't silently ship widget-less.
+build_widget_appex() {
+    if ! command -v xcodegen >/dev/null 2>&1; then
+        echo "Error: xcodegen is required to build and inject Reborn widgets." >&2
+        exit 1
     fi
-
-    plist="$(find "$work/Payload" -maxdepth 2 -name Info.plist -path '*.app/Info.plist' -print -quit)"
-    if [[ -z "$plist" || ! -f "$plist" ]]; then
-        echo "Warning: could not find main app Info.plist in $(basename "$ipa"); leaving as-is."
-        rm -rf "$work"
-        return 0
-    fi
-
-    plutil -replace CFBundleShortVersionString -string "$short_version" "$plist"
-    plutil -replace CFBundleVersion -string "$build_version" "$plist"
-
-    app_dir="$(dirname "$plist")"
-    rm -rf "$app_dir/_CodeSignature"
-
-    rm -f "$ipa"
+    echo "==> Building Reborn widget extension (xcodegen + xcodebuild)"
     (
-        cd "$work"
-        zip -qry "$ipa" Payload
+        cd "${REPO_DIR}/widgets"
+        xcodegen generate
+        xcodebuild -project ApolloRebornWidgets.xcodeproj -scheme ApolloRebornWidgets \
+                   -sdk iphoneos -configuration Release CODE_SIGNING_ALLOWED=NO \
+                   -derivedDataPath build build
     )
-
-    rm -rf "$work"
-}
-
-strip_arm64e_from_substrate_in_ipa() {
-    local ipa="$1"
-    local work
-    work="$(mktemp -d)"
-
-    if ! (cd "$work" && unzip -q "$ipa"); then
-        echo "Warning: could not unzip IPA for slice fix; leaving as-is."
-        rm -rf "$work"
-        return 0
-    fi
-
-    local framework_bin="$work/Payload/Apollo.app/Frameworks/CydiaSubstrate.framework/CydiaSubstrate"
-    if [[ ! -f "$framework_bin" ]]; then
-        rm -rf "$work"
-        return 0
-    fi
-
-    if ! lipo -info "$framework_bin" 2>/dev/null | grep -qw 'arm64e'; then
-        rm -rf "$work"
-        return 0
-    fi
-
-    echo "Stripping arm64e slice from CydiaSubstrate in $(basename "$ipa")..."
-    if ! lipo -remove arm64e "$framework_bin" -output "$framework_bin.new" >/dev/null 2>&1; then
-        echo "Warning: could not strip arm64e from CydiaSubstrate."
-        rm -rf "$work"
-        return 0
-    fi
-    mv -f "$framework_bin.new" "$framework_bin"
-    rm -rf "$(dirname "$framework_bin")/_CodeSignature"
-
-    rm -f "$ipa"
-    (
-        cd "$work"
-        zip -qry "$ipa" Payload
-    )
-
-    rm -rf "$work"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -258,61 +202,67 @@ echo "Output dir    : $OUTPUT_DIR"
 rm -f "$STANDARD_IPA" "$NOEXT_IPA" "$GLASS_IPA" "$NOEXT_GLASS_IPA" \
       "$GLASS_ICONS_IPA" "$NOEXT_GLASS_ICONS_IPA"
 
+# Build the widget appex once; the inject-widgets module injects this prebuilt
+# product into the standard variant (Glass variants inherit it).
+build_widget_appex
+
+# Module spec fragments reused across variants.
+VERSIONS_MODULE="patch-bundle-versions:${TWEAK_VERSION}:${APP_BUILD_VERSION}"
+SCHEMES_MODULE="inject-url-schemes:${DEFAULT_URL_SCHEMES}"
+
 echo ""
 echo "[1/6] Building standard injected IPA..."
+# build-ipa.sh handles tweak injection (+ CydiaSubstrate arm64e strip) on the
+# already-prepared base IPA, preserving its azule/cyan fallback for stock IPAs.
 bash "${REPO_DIR}/build-ipa.sh" --ipa "$IPA_PATH" --deb "$DEB_PATH" -o "$STANDARD_IPA"
-# Repair the bundled "Open in Apollo" Safari extension. The GLASS variant below
-# is derived from $STANDARD_IPA via patch.sh, so it inherits this fix; the two
-# no-extensions variants have no appex and the script no-ops on them.
-bash "${REPO_DIR}/scripts/fix-safari-extension.sh" "$STANDARD_IPA"
-# Repair the bundled "Open in Apollo" Action extension (OpenInUIExtension.appex):
-# inject ApolloOpenInFix.dylib (built by the openin-extension subproject) so the
-# share-sheet action opens links in Apollo from any browser. Same inheritance as
-# the Safari fix above — GLASS is derived from $STANDARD_IPA so it carries this
-# too, and the no-extensions variants have no appex (the script no-ops).
-bash "${REPO_DIR}/scripts/fix-openin-extension.sh" "$STANDARD_IPA"
-set_main_app_bundle_versions_in_ipa "$STANDARD_IPA" "$TWEAK_VERSION" "$APP_BUILD_VERSION"
-inject_default_url_schemes_in_place "$STANDARD_IPA"
-
-# Inject the Reborn widget extension into the STANDARD IPA so the GLASS and
-# GLASSICONS variants (both derived from it via patch.sh below) inherit it. The
-# no-extensions variants are built from $IPA_PATH with `cyan -e` and stay
-# appex-free by design — widgets need an extension slot. Fail loudly if xcodegen
-# is missing so release IPAs cannot silently ship without widgets.
-if ! command -v xcodegen >/dev/null 2>&1; then
-    echo "Error: xcodegen is required to build and inject Reborn widgets." >&2
-    exit 1
-fi
-echo "==> Injecting Reborn widgets into standard IPA (Glass variants inherit; no-ext variants omit)"
-bash "${REPO_DIR}/scripts/inject-widgets.sh" --ipa "$STANDARD_IPA" --build -o "${STANDARD_IPA}.ww"
-mv "${STANDARD_IPA}.ww" "$STANDARD_IPA"
+# Everything else for the standard variant in ONE unpack/repack: repair the
+# Safari + Open-in-Apollo extensions, set versions, inject default URL schemes,
+# inject the widget extension. The GLASS and GLASSICONS variants are derived
+# from this IPA below and inherit all of it; the no-extensions variants have no
+# appex and omit the extension/widget modules.
+apply_patches_in_place "$STANDARD_IPA" \
+    --module fix-safari-extension \
+    --module fix-openin-extension \
+    --module "$VERSIONS_MODULE" \
+    --module "$SCHEMES_MODULE" \
+    --module inject-widgets
 
 echo ""
 echo "[2/6] Building no-extensions injected IPA..."
+# `cyan -e` injects the tweak AND strips all PlugIns (the no-extensions variant);
+# the orchestrator then strips the CydiaSubstrate arm64e slice, sets versions,
+# and injects the default URL schemes in one unpack/repack.
 cyan -i "$IPA_PATH" -f "$DEB_PATH" -o "$NOEXT_IPA" -e
-strip_arm64e_from_substrate_in_ipa "$NOEXT_IPA"
-set_main_app_bundle_versions_in_ipa "$NOEXT_IPA" "$TWEAK_VERSION" "$APP_BUILD_VERSION"
-inject_default_url_schemes_in_place "$NOEXT_IPA"
+apply_patches_in_place "$NOEXT_IPA" \
+    --module strip-substrate-arm64e \
+    --module "$VERSIONS_MODULE" \
+    --module "$SCHEMES_MODULE"
 
 echo ""
 echo "[3/6] Applying Liquid Glass patch to standard IPA..."
-bash "${REPO_DIR}/patch.sh" "$STANDARD_IPA" --liquid-glass -o "$GLASS_IPA"
-set_main_app_bundle_versions_in_ipa "$GLASS_IPA" "$TWEAK_VERSION" "$APP_BUILD_VERSION"
+bash "$APPLY_PATCHES" --ipa "$STANDARD_IPA" -o "$GLASS_IPA" \
+    --module liquid-glass-binary \
+    --module liquid-glass-assets \
+    --module "$VERSIONS_MODULE"
 
 echo ""
 echo "[4/6] Applying Liquid Glass patch to no-extensions IPA..."
-bash "${REPO_DIR}/patch.sh" "$NOEXT_IPA" --liquid-glass -o "$NOEXT_GLASS_IPA"
-set_main_app_bundle_versions_in_ipa "$NOEXT_GLASS_IPA" "$TWEAK_VERSION" "$APP_BUILD_VERSION"
+bash "$APPLY_PATCHES" --ipa "$NOEXT_IPA" -o "$NOEXT_GLASS_IPA" \
+    --module liquid-glass-binary \
+    --module liquid-glass-assets \
+    --module "$VERSIONS_MODULE"
 
 echo ""
 echo "[5/6] Applying Liquid Glass icons-only patch to standard IPA..."
-bash "${REPO_DIR}/patch.sh" "$STANDARD_IPA" --liquid-glass-icons -o "$GLASS_ICONS_IPA"
-set_main_app_bundle_versions_in_ipa "$GLASS_ICONS_IPA" "$TWEAK_VERSION" "$APP_BUILD_VERSION"
+bash "$APPLY_PATCHES" --ipa "$STANDARD_IPA" -o "$GLASS_ICONS_IPA" \
+    --module liquid-glass-assets \
+    --module "$VERSIONS_MODULE"
 
 echo ""
 echo "[6/6] Applying Liquid Glass icons-only patch to no-extensions IPA..."
-bash "${REPO_DIR}/patch.sh" "$NOEXT_IPA" --liquid-glass-icons -o "$NOEXT_GLASS_ICONS_IPA"
-set_main_app_bundle_versions_in_ipa "$NOEXT_GLASS_ICONS_IPA" "$TWEAK_VERSION" "$APP_BUILD_VERSION"
+bash "$APPLY_PATCHES" --ipa "$NOEXT_IPA" -o "$NOEXT_GLASS_ICONS_IPA" \
+    --module liquid-glass-assets \
+    --module "$VERSIONS_MODULE"
 
 echo ""
 echo "Created:"
