@@ -27,6 +27,7 @@ All notable changes to this project will be documented in this file.
 - Add **multi-account credentials** so each signed-in account can use its own Reddit API key (or web session) instead of sharing one, with a redesigned account switcher to add, edit, reorder, and remove accounts, and support for Reddit "Web app" confidential clients (#505: @DeltAndy123)
 - Add off-by-default **AI Summaries** (iOS 26+) powered by Apple's on-device FoundationModels — a streaming post summary in the comments header and a discussion summary above the first comment in larger threads, with per-type controls, a **Tap to Summarize** option, and persistent caching so reopening a thread is instant (#489, #491: @jordanearle, @icpryde)
 - Expand **Filters & Blocks** with per-subreddit keyword and post-flair filters plus subreddit-name filtering that hides any subreddit whose name contains a word (e.g. `circlejerk`) across feeds and search (#507: @icpryde)
+- Improve **Direct Chat** with inline images, GIFs, and emoji/snoomoji in message bubbles, ImgChest-backed image sending, a recipient avatar in the composer, a **Direct Chat** inbox filter with avatars on every row, and an **Inline Media in Chat** toggle in **Settings > Media** (#488: @icpryde)
 
 ### Fixes
 
