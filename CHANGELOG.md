@@ -24,6 +24,7 @@ All notable changes to this project will be documented in this file.
 - Show **moderator avatars** in the subreddit Mods list (#459: @icpryde)
 - Add **0.75× and 1.25× playback speeds** to the fullscreen video player (#476: @icpryde)
 - Add a **hold-for-2× gesture** — press and hold the right side of a fullscreen video to play at 2× while held, then release to restore the previous speed (#479: @icpryde)
+- Add **multi-account credentials** so each signed-in account can use its own Reddit API key (or web session) instead of sharing one, with a redesigned account switcher to add, edit, reorder, and remove accounts, and support for Reddit "Web app" confidential clients (#505: @DeltAndy123)
 
 ### Fixes
 
