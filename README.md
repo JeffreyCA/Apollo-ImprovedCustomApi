@@ -126,7 +126,7 @@ Finally, **don't copy these examples verbatim**. If everyone adopts the same "sa
 The legacy Apollo push backends went dark in June 2023 and are otherwise blocked by the tweak. If you run your own instance of [nickclyde/apollo-backend](https://github.com/nickclyde/apollo-backend) (with your own Reddit OAuth `CLIENT_ID` / `CLIENT_SECRET` baked into its env vars), you can set the URL under **Settings > Custom API > Notification Backend** and the tweak will route all `apollopushserver.xyz`, `beta.apollonotifications.com`, and `apolloreq.com` traffic to that host instead. Leave the field empty to keep the current "silently dropped" behavior.
 
 > [!IMPORTANT]
-> APNs delivery requires a real `aps-environment` entitlement, which Apple only grants under a paid Apple Developer team. Free-account sideloads can still register and exercise the watcher CRUD, but push notifications will never actually arrive.
+> APNs delivery requires a real `aps-environment` entitlement, which Apple only grants under a paid Apple Developer team. Free-account sideloads can still register and exercise the watcher CRUD, but push notifications will never actually arrive. (On a free-account sideload the tweak detects the missing entitlement and replaces the Notifications settings with a clear "Notifications Unavailable" explanation instead of the misleading "Error Loading Notifications — contact developer" alert.)
 
 ## Known Issues
 

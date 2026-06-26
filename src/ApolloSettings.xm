@@ -6,6 +6,7 @@
 #import "SavedCategoriesViewController.h"
 #import "TranslationSettingsViewController.h"
 #import "TagFiltersViewController.h"
+#import "PictureInPictureViewController.h"
 
 // MARK: - Settings View Controller (Custom API row injection)
 
@@ -78,14 +79,14 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
     sApolloLastSettingsVC = (UIViewController *)self;
 }
 
-// Inject a new section 1 (Custom API + Saved Categories) between Tip Jar (section 0) and General (original section 1)
+// Inject a new section 1 (the tweak's settings rows; see the row list in numberOfRowsInSection:) between Tip Jar (section 0) and General (original section 1)
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
     return %orig + 1;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (section == 1) return 4; // Custom API, Saved Categories, Translation, Tag Filters
+    if (section == 1) return 5; // Custom API, Saved Categories, Translation, Tag Filters, Picture-in-Picture
     if (section > 1) return %orig(tableView, section - 1);
     return %orig;
 }
@@ -120,9 +121,14 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
         } else if (indexPath.row == 2) {
             cell.textLabel.text = @"Translation";
             cell.imageView.image = createSettingsIcon(@"globe", [UIColor systemIndigoColor]);
-        } else {
+        } else if (indexPath.row == 3) {
             cell.textLabel.text = @"Tag Filters";
             cell.imageView.image = createSettingsIcon(@"eye.slash.fill", [UIColor systemRedColor]);
+        } else {
+            cell.textLabel.text = @"Picture-in-Picture";
+            // systemBlue mirrors iOS' own Settings > General > Picture in
+            // Picture icon and avoids the neighbors' teal/orange/indigo/red.
+            cell.imageView.image = createSettingsIcon(@"pip.enter", [UIColor systemBlueColor]);
         }
         return cell;
     }
@@ -162,8 +168,11 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
         } else if (indexPath.row == 2) {
             TranslationSettingsViewController *vc = [[TranslationSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
             [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
-        } else {
+        } else if (indexPath.row == 3) {
             TagFiltersViewController *vc = [[TagFiltersViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+            [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
+        } else {
+            PictureInPictureViewController *vc = [[PictureInPictureViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
             [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
         }
         return;

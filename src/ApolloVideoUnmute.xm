@@ -31,6 +31,38 @@
 // =============================================================================
 
 // =============================================================================
+// MARK: - Picture-in-Picture coordination (ApolloPictureInPicture.xm)
+// =============================================================================
+//
+// The PiP module owns the floating-player feature; this module consults it at
+// the points where the two features' policies meet (see docs/pip-design.md):
+//   - ApolloPiP_HandleCommentsVisibilityEvent: called BEFORE %orig in the
+//     comments visibility hooks. Returns YES when PiP owns that cell's player,
+//     in which case %orig must be skipped — Apollo's midpoint-test pause/play
+//     runs synchronously inside %orig (sub_1002060bc) and must not touch a
+//     PiP-owned player. The ASCellNode base implementation is a single ret,
+//     so skipping loses nothing else.
+//   - ApolloPiP_IsOwnedPlayer: exempts the PiP player from the post-pop
+//     "prevent invisible background audio" kill below.
+//   - ApolloPiP_ShouldBlockAudioSessionDowngrade: extends the AVAudioSession
+//     blocking predicates while PiP plays audibly.
+//   - ApolloPiP_ShouldBlockMuteOfPlayer: extends the AVPlayer.setMuted: block
+//     to the inline-armed native-PiP player during background handoff.
+//   - ApolloPiP_YieldAudioToPlayer: mutes an audible PiP card when a tweak
+//     unmute path makes a different video audible (audio arbitration).
+//   - ApolloPiP_NoteInlineVideoAudible: lets the inline native-PiP controller
+//     arm on unmutes, which produce no scroll/visibility event.
+// Both files are Logos/ObjC++, so these declarations mangle identically.
+extern BOOL ApolloPiP_HandleCommentsVisibilityEvent(id cellNode, id richMediaNode,
+                                                    unsigned long long event);
+extern BOOL ApolloPiP_IsOwnedPlayer(AVPlayer *player);
+extern BOOL ApolloPiP_ShouldBlockAudioSessionDowngrade(void);
+extern BOOL ApolloPiP_ShouldBlockMuteOfPlayer(AVPlayer *player);
+extern void ApolloPiP_YieldAudioToPlayer(AVPlayer *newAudiblePlayer);
+extern void ApolloPiP_NoteInlineVideoAudible(id videoNode, AVPlayer *player);
+extern void ApolloPiP_NoteInlinePlayerMuted(AVPlayer *player);
+
+// =============================================================================
 // MARK: - State Variables
 // =============================================================================
 
@@ -357,6 +389,11 @@ static void UnmuteRichMediaNode(id richMediaNode, id videoNode) {
 
     BOOL alreadyUnmuted = ![player isMuted];
 
+    // This video is about to play audibly — if a PiP card is playing a
+    // DIFFERENT video with sound, mute it first (the native activeAudioPlayer
+    // arbitration only covers Apollo's own unmute path, not ours).
+    ApolloPiP_YieldAudioToPlayer(player);
+
     // Even when the player is already unmuted (e.g. re-entry from feed where
     // audio was playing), we must establish protection (sAutoUnmutedPlayer +
     // Playback session). Without this, the mute dance from the feed cell
@@ -405,6 +442,10 @@ static void UnmuteRichMediaNode(id richMediaNode, id videoNode) {
 
     // Step 5: Sync the mute button icon to "unmuted" state (always)
     SyncMuteButtonIcon(richMediaNode, NO);
+
+    // Now audible — let the inline native-PiP controller arm if enabled
+    // (no scroll event fires for a programmatic unmute).
+    ApolloPiP_NoteInlineVideoAudible(videoNode, player);
 
     ApolloLog(@"[VideoUnmute] Auto-unmute complete for player %p", player);
 }
@@ -537,9 +578,10 @@ static void HandleCommentsRichMediaVisibilityEvent(id visibilityOwner,
 // RichMediaHeaderCellNode: the comments header video cell
 // ---------------------------------------------------------------------------
 // cellNodeVisibilityEvent: fires when the cell's visibility changes in the
-// scroll view (visible, invisible, rect changed, etc). Two responsibilities:
+// scroll view (visible, invisible, rect changed, etc). Two responsibilities
+// (both skipped while PiP owns this cell's player, and on event=1 ticks):
 //
-// 1. Icon sync (ALWAYS, native bug fix, runs on every visibility event):
+// 1. Icon sync (native bug fix, runs on visible/invisible events):
 //    For shareable videos, the button setup code (sub_100582a0c) checks
 //    [videoNode player] to set the initial isMuted state. But for shareable
 //    videos, [videoNode player] is nil (the player is on the playerLayer).
@@ -556,8 +598,15 @@ static void HandleCommentsRichMediaVisibilityEvent(id visibilityOwner,
 - (void)cellNodeVisibilityEvent:(unsigned long long)event
                    inScrollView:(id)scrollView
                   withCellFrame:(CGRect)frame {
-    %orig;
     id richMediaNode = GetIvarObject(self, "richMediaNode");
+    // PiP first: it may take over (scroll-away) or restore (scroll-back) on
+    // this event. YES = PiP owns this cell's player and %orig must be skipped
+    // so Apollo's synchronous play/pause never touches it. The unmute handling
+    // below is also skipped — protection state must not change under PiP.
+    if (ApolloPiP_HandleCommentsVisibilityEvent(self, richMediaNode, event)) {
+        return;
+    }
+    %orig;
     // event=1 (VisibleRectChanged) fires on every layout tick during scroll.
     // Skip the verbose path entirely — the icon-sync inside SyncMuteButtonIcon
     // is a no-op when state already matches, but the log line itself floods.
@@ -573,18 +622,22 @@ static void HandleCommentsRichMediaVisibilityEvent(id visibilityOwner,
 - (void)cellNodeVisibilityEvent:(unsigned long long)event
                    inScrollView:(id)scrollView
                   withCellFrame:(CGRect)frame {
+    id crosspostRichMediaNode = GetCrosspostRichMediaNodeFromOwner(self);
+    // PiP first (see RichMediaHeaderCellNode above) — covers crosspost videos.
+    if (ApolloPiP_HandleCommentsVisibilityEvent(self, crosspostRichMediaNode, event)) {
+        return;
+    }
     %orig;
 
     // event=1 (VisibleRectChanged) fires on every layout tick during scroll.
     // Skip entirely — nothing for us to do on rect-change ticks.
     if (event == 1) return;
 
-    id richMediaNode = GetCrosspostRichMediaNodeFromOwner(self);
-    if (!richMediaNode) return;
+    if (!crosspostRichMediaNode) return;
 
     ApolloLog(@"[VideoUnmute] CommentsHeaderCellNode visibility event=%llu for crosspost rich media",
               event);
-    HandleCommentsRichMediaVisibilityEvent(self, richMediaNode, event,
+    HandleCommentsRichMediaVisibilityEvent(self, crosspostRichMediaNode, event,
                                            @"comments crosspost video");
 }
 
@@ -665,6 +718,16 @@ static void HandleCommentsRichMediaVisibilityEvent(id visibilityOwner,
     if (wasMutedAndPaused && playerForResume && ![playerForResume isMuted]) {
         ApolloLog(@"[VideoUnmute] Mute button unmuted a force-paused video — resuming playback");
         [playerForResume play];
+    }
+
+    // If the tap unmuted this video, mute any audible PiP card playing a
+    // different video (native activeAudioPlayer arbitration misses players
+    // that were unmuted by the tweak rather than by Apollo), and give the
+    // inline native-PiP controller a chance to arm (no scroll event fires
+    // for a mute-button tap).
+    if (playerForResume && ![playerForResume isMuted]) {
+        ApolloPiP_YieldAudioToPlayer(playerForResume);
+        ApolloPiP_NoteInlineVideoAudible(videoNodeForResume, playerForResume);
     }
 }
 
@@ -891,7 +954,19 @@ static void HandleCommentsRichMediaVisibilityEvent(id visibilityOwner,
         ApolloLog(@"[VideoUnmute] AVPlayer.setMuted:YES — BLOCKED (protecting auto-unmuted player)");
         return;
     }
+    // Same for the inline-armed native-PiP player during the background
+    // handoff window (the dance's T+100ms setMuted:YES would silence the
+    // system PiP that just took the video).
+    if (muted && !sIsAutoUnmuting && ApolloPiP_ShouldBlockMuteOfPlayer(self)) {
+        ApolloLog(@"[VideoUnmute] AVPlayer.setMuted:YES — BLOCKED (PiP background handoff shield)");
+        return;
+    }
     %orig;
+    // The mute took effect (not blocked): if this is the inline-armed system-PiP
+    // player, drop the arm so a home-swipe can't hand off a now-muted video.
+    if (muted && !sIsAutoUnmuting) {
+        ApolloPiP_NoteInlinePlayerMuted(self);
+    }
 }
 
 %end
@@ -906,13 +981,20 @@ static void HandleCommentsRichMediaVisibilityEvent(id visibilityOwner,
 // Safety: sAutoUnmutedPlayer is __weak — auto-nils when the player deallocates,
 // making these hooks transparent pass-throughs automatically.
 // ---------------------------------------------------------------------------
+// A PiP video playing audibly needs the same session protection as an
+// auto-unmuted one: other videos' mute dances (T+50ms) downgrade the session
+// to Ambient + inactive GLOBALLY, which would silence PiP audio.
+static BOOL ShouldProtectAudioSession(void) {
+    return sAutoUnmutedPlayer != nil || ApolloPiP_ShouldBlockAudioSessionDowngrade();
+}
+
 %hook AVAudioSession
 
 - (BOOL)setCategory:(AVAudioSessionCategory)category
                 mode:(AVAudioSessionMode)mode
              options:(AVAudioSessionCategoryOptions)options
                error:(NSError **)error {
-    if (sAutoUnmutedPlayer && [category isEqualToString:AVAudioSessionCategoryAmbient]) {
+    if (ShouldProtectAudioSession() && [category isEqualToString:AVAudioSessionCategoryAmbient]) {
         ApolloLog(@"[VideoUnmute] Blocking setCategory:Ambient (mode:options: variant)");
         return YES;
     }
@@ -920,7 +1002,7 @@ static void HandleCommentsRichMediaVisibilityEvent(id visibilityOwner,
 }
 
 - (BOOL)setCategory:(AVAudioSessionCategory)category error:(NSError **)error {
-    if (sAutoUnmutedPlayer && [category isEqualToString:AVAudioSessionCategoryAmbient]) {
+    if (ShouldProtectAudioSession() && [category isEqualToString:AVAudioSessionCategoryAmbient]) {
         ApolloLog(@"[VideoUnmute] Blocking setCategory:Ambient (short variant)");
         return YES;
     }
@@ -930,8 +1012,8 @@ static void HandleCommentsRichMediaVisibilityEvent(id visibilityOwner,
 - (BOOL)setActive:(BOOL)active
       withOptions:(AVAudioSessionSetActiveOptions)options
             error:(NSError **)error {
-    if (!active && sAutoUnmutedPlayer) {
-        ApolloLog(@"[VideoUnmute] Blocking setActive:NO while auto-unmuted player active");
+    if (!active && ShouldProtectAudioSession()) {
+        ApolloLog(@"[VideoUnmute] Blocking setActive:NO while protected player active");
         return YES;
     }
     return %orig;
@@ -1065,7 +1147,11 @@ static void HandleCommentsRichMediaVisibilityEvent(id visibilityOwner,
 
                     ApolloLog(@"[VideoUnmute] Mute dance window expired — clearing protection (visibleOnFeed=%d)", visibleOnFeed);
 
-                    if (!visibleOnFeed && p) {
+                    if (p && ApolloPiP_IsOwnedPlayer(p)) {
+                        // The player lives on in the floating PiP card — it is
+                        // intentionally audible/visible off-feed. Don't kill it.
+                        ApolloLog(@"[VideoUnmute] Player is PiP-owned — skipping post-pop mute/pause");
+                    } else if (!visibleOnFeed && p) {
                         // Player is not on any visible feed cell (compact mode
                         // or no matching cell). Mute + pause + reset audio
                         // session to prevent invisible background audio.
@@ -1191,6 +1277,37 @@ void ApolloVideoUnmute_FixDisconnectedPlayerLayer(id postsViewController) {
     if (!foundDisconnected) {
         ApolloLog(@"[VideoUnmute] FixDisconnectedPlayerLayer: no disconnected playerLayer found");
     }
+}
+
+// =============================================================================
+// MARK: - Exported helpers for ApolloPictureInPicture.xm
+// =============================================================================
+
+AVPlayer *ApolloVideoUnmute_GetPlayerFromVideoNode(id videoNode) {
+    return GetPlayerFromVideoNode(videoNode);
+}
+
+void ApolloVideoUnmute_SyncMuteButtonIcon(id richMediaNode, BOOL isMuted) {
+    SyncMuteButtonIcon(richMediaNode, isMuted);
+}
+
+// Drops auto-unmute protection for a specific player so a deliberate mute
+// (e.g. the PiP card's mute button / close) can pass the AVPlayer.setMuted:
+// block above.
+void ApolloVideoUnmute_ClearProtectionIfPlayer(AVPlayer *player) {
+    if (player && sAutoUnmutedPlayer == player) {
+        ApolloLog(@"[VideoUnmute] Clearing auto-unmute protection at PiP's request");
+        sAutoUnmutedPlayer = nil;
+    }
+}
+
+// YES while a CommentsVC is being popped back to its feed (set in
+// viewWillDisappear when isMovingFromParentViewController, cleared in
+// viewDidDisappear). The comments cell fires its Invisible event during the
+// pop; PiP consults this so it does not disarm the inline system-PiP
+// controller mid-reclaim — the same player keeps playing on the feed.
+BOOL ApolloVideoUnmute_IsNavigatingBack(void) {
+    return sIsNavigatingBack;
 }
 
 // =============================================================================

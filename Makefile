@@ -27,6 +27,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloSettingsTableViewController.m \
     $(SRC_DIR)/ApolloRedditMediaUpload.m \
     $(SRC_DIR)/ApolloNotificationBackend.m \
+    $(SRC_DIR)/ApolloPushNotifications.m \
     $(SRC_DIR)/ApolloUserProfileCache.m \
     $(SRC_DIR)/ApolloSubredditInfoCache.m \
     $(SRC_DIR)/ApolloSubredditCustomBannerCache.m \
@@ -36,6 +37,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloProfileSocialLinks.m \
     $(SRC_DIR)/ApolloModeratorAvatars.xm \
     $(SRC_DIR)/ApolloSubredditHeaders.xm \
+    $(SRC_DIR)/ApolloSubredditHighlights.xm \
     $(SRC_DIR)/ApolloBannedProfile.xm \
     $(SRC_DIR)/ApolloImageUploadHost.xm \
     $(SRC_DIR)/ApolloPhotoPostComposerScrollFix.xm \
@@ -63,16 +65,21 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloFlairColors.xm \
     $(SRC_DIR)/ApolloNativeActionMenus.xm \
     $(SRC_DIR)/ApolloShareAsImageGallery.xm \
+    $(SRC_DIR)/ApolloShareAsImageLink.xm \
+    $(SRC_DIR)/ApolloShareAsVideo.xm \
+    $(SRC_DIR)/ApolloShareAsImagePreviewFix.xm \
     $(SRC_DIR)/ApolloTranslation.xm \
     $(SRC_DIR)/ApolloAppleTranslation.swift \
     $(SRC_DIR)/ApolloVideoUnmute.xm \
     $(SRC_DIR)/ApolloVideoSwipeFix.xm \
     $(SRC_DIR)/ApolloVideoPlaybackSpeed.xm \
     $(SRC_DIR)/ApolloVideoHoldSpeed.xm \
+    $(SRC_DIR)/ApolloPictureInPicture.xm \
     $(SRC_DIR)/ApolloMediaPreviewErrorFix.xm \
     $(SRC_DIR)/ApolloSubredditIndexPolish.xm \
     $(SRC_DIR)/ApolloQuickActions.xm \
     $(SRC_DIR)/ApolloHideModSubreddits.xm \
+    $(SRC_DIR)/ApolloSubredditSidebar.xm \
     $(SRC_DIR)/ApolloTagFilters.xm \
     $(SRC_DIR)/ApolloSearchInPlace.xm \
     $(SRC_DIR)/ApolloSearchHeaderOverlapFix.xm \
@@ -93,14 +100,16 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloManualSignInViewController.m \
     $(SRC_DIR)/CustomAPIViewController.m \
     $(SRC_DIR)/ApolloAISettingsViewController.m \
+    $(SRC_DIR)/ApolloLinkPreviewSettingsViewController.m \
     $(SRC_DIR)/TranslationSettingsViewController.m \
     $(SRC_DIR)/SavedCategoriesViewController.m \
     $(SRC_DIR)/TagFiltersViewController.m \
+    $(SRC_DIR)/PictureInPictureViewController.m \
     $(SRC_DIR)/Defaults.m \
     $(SRC_DIR)/UIWindow+Apollo.m \
     $(SRC_DIR)/fishhook.c \
     $(SSZIPARCHIVE_FILES)
-ApolloReborn_FRAMEWORKS = UIKit Security AVFoundation OSLog NaturalLanguage ImageIO StoreKit Photos PhotosUI SafariServices SystemConfiguration WebKit AuthenticationServices SwiftUI
+ApolloReborn_FRAMEWORKS = UIKit Security AVFoundation AVKit OSLog NaturalLanguage ImageIO StoreKit Photos PhotosUI SafariServices SystemConfiguration WebKit AuthenticationServices CoreImage SwiftUI
 ApolloReborn_LIBRARIES = z iconv
 # FoundationModels (Apple on-device AI) only ships in the iOS 26+ SDK. Weak-link
 # it so the dylib still loads on older OSes (the Swift bridge guards every call
