@@ -78,6 +78,12 @@ void ApolloThemeBuilderReloadOverrides(void);
 // enabling the custom theme takes effect without an app relaunch.
 void ApolloThemeBuilderActivateDonorLive(void);
 
+// Switch Apollo's in-memory theme to whatever AppColorTheme currently names in
+// group defaults (falling back to AppColorTheme.default) and repaint — used when
+// disabling the custom theme so the app returns to the user's previously-selected
+// theme without a relaunch.
+void ApolloThemeBuilderActivateCurrentThemeLive(void);
+
 // Force Apollo to repaint all theme colors (flips each window's
 // overrideUserInterfaceStyle for one runloop turn, which drives Apollo's own
 // trait-change repaint cascade).

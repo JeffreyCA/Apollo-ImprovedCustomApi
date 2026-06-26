@@ -50,6 +50,10 @@ NSString * const kApolloThemeRoleText        = @"text";
 static NSString * const kAppColorThemeKey = @"AppColorTheme";
 static NSString * const kDonorThemeName   = @"outrun";
 static NSString * const kAppGroupSuite    = @"group.com.christianselig.apollo";
+// Remembers the theme the user had selected before they enabled the custom
+// theme (which hijacks the donor slot), so toggling the custom theme back off
+// restores their previous theme instead of leaving them on the donor (outrun).
+static NSString * const kPreviousThemeKey = @"ApolloRebornThemeBuilderPreviousTheme";
 
 // ---------------------------------------------------------------------------
 // Donor constant table (outrun, from the runtime mapping pass)
@@ -570,12 +574,35 @@ static NSUserDefaults *GroupDefaults(void) {
 }
 
 void ApolloThemeBuilderSetEnabled(BOOL enabled) {
-    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:kApolloCustomThemeEnabledKey];
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    BOOL wasEnabled = [ud boolForKey:kApolloCustomThemeEnabledKey];
+    [ud setBool:enabled forKey:kApolloCustomThemeEnabledKey];
     if (enabled) {
         // Claim the donor slot in Apollo's own theme system. Takes effect on
         // next launch for views Apollo has already painted; the builder UI
         // also force-repaints, so it's live in practice.
+        if (!wasEnabled) {
+            // Remember the user's current theme before we hijack the donor slot,
+            // so toggling the custom theme off restores it instead of leaving
+            // them on the donor (outrun). The enabled flag guarantees this reads
+            // the user's genuine selection, never a previously-hijacked value.
+            NSString *current = [GroupDefaults() stringForKey:kAppColorThemeKey];
+            if (current.length)
+                [GroupDefaults() setObject:current forKey:kPreviousThemeKey];
+            else
+                [GroupDefaults() removeObjectForKey:kPreviousThemeKey];
+        }
         [GroupDefaults() setObject:kDonorThemeName forKey:kAppColorThemeKey];
+    } else if (wasEnabled) {
+        // Restore the theme the user had before enabling the custom theme. If we
+        // never captured one, drop the key so Apollo falls back to its default
+        // theme rather than leaving the hijacked donor (outrun) selected.
+        NSString *previous = [GroupDefaults() stringForKey:kPreviousThemeKey];
+        if (previous.length)
+            [GroupDefaults() setObject:previous forKey:kAppColorThemeKey];
+        else
+            [GroupDefaults() removeObjectForKey:kAppColorThemeKey];
+        [GroupDefaults() removeObjectForKey:kPreviousThemeKey];
     }
     ApolloThemeBuilderReloadOverrides();
 }
@@ -960,21 +987,60 @@ static void ThemeBuilderApplyAccentImageNode(id cell) {
 // outrun=5 … mint=17.
 static const uint8_t kDonorThemeRawValue = 5; // outrun
 
+// AppColorTheme enum case names, indexed by their raw value (see
+// docs/theme-builder-RE.md). Used to live-switch Apollo's in-memory theme back
+// to whatever the user had selected before the donor slot was hijacked.
+static const char * const kAppColorThemeNames[] = {
+    "default", "nefertiti", "fieryStare", "spookyPumpkin", "solarized",
+    "outrun", "sunset", "sepia", "monochromatic", "navy", "skiesOnSkies",
+    "majesticPurple", "magentasplosion", "sniffingWalnut", "fisherKing",
+    "chumbus", "dracula", "mint",
+};
+
+static BOOL ThemeBuilderRawForThemeName(NSString *name, uint8_t *outRaw) {
+    if (!name.length) return NO;
+    for (uint8_t i = 0; i < sizeof(kAppColorThemeNames) / sizeof(kAppColorThemeNames[0]); i++) {
+        if ([name isEqualToString:[NSString stringWithUTF8String:kAppColorThemeNames[i]]]) {
+            if (outRaw) *outRaw = i;
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static __weak NSObject *sThemeManager = nil;
 
-void ApolloThemeBuilderActivateDonorLive(void) {
+// Write Apollo's in-memory ThemeManager.appColorTheme ivar so a theme switch
+// takes effect without a relaunch. Returns NO (and logs) if ThemeManager hasn't
+// been captured yet, in which case the change still applies on next launch from
+// the persisted AppColorTheme group default.
+static BOOL ThemeBuilderSetLiveAppColorThemeRaw(uint8_t raw) {
     NSObject *tm = sThemeManager;
     if (!tm) {
-        ApolloLog(@"ThemeBuilder: ThemeManager not captured; donor activates on next launch");
-        return;
+        ApolloLog(@"ThemeBuilder: ThemeManager not captured; theme switch applies on next launch");
+        return NO;
     }
     Ivar ivar = class_getInstanceVariable(object_getClass(tm), "appColorTheme");
     if (!ivar) {
-        ApolloLog(@"ThemeBuilder: appColorTheme ivar not found; donor activates on next launch");
-        return;
+        ApolloLog(@"ThemeBuilder: appColorTheme ivar not found; theme switch applies on next launch");
+        return NO;
     }
-    *((uint8_t *)(__bridge void *)tm + ivar_getOffset(ivar)) = kDonorThemeRawValue;
+    *((uint8_t *)(__bridge void *)tm + ivar_getOffset(ivar)) = raw;
+    return YES;
+}
+
+void ApolloThemeBuilderActivateDonorLive(void) {
+    if (!ThemeBuilderSetLiveAppColorThemeRaw(kDonorThemeRawValue)) return;
     ApolloLog(@"ThemeBuilder: switched in-memory theme to donor (outrun)");
+    ApolloThemeBuilderForceRepaint();
+}
+
+void ApolloThemeBuilderActivateCurrentThemeLive(void) {
+    NSString *name = [GroupDefaults() stringForKey:kAppColorThemeKey];
+    uint8_t raw = 0; // AppColorTheme.default — Apollo's fallback when none is set
+    ThemeBuilderRawForThemeName(name, &raw);
+    if (!ThemeBuilderSetLiveAppColorThemeRaw(raw)) return;
+    ApolloLog(@"ThemeBuilder: restored in-memory theme to %@ (raw %d)", name ?: @"default", raw);
     ApolloThemeBuilderForceRepaint();
 }
 
@@ -1529,16 +1595,43 @@ static void ThemeBuilderAppearanceSelect(id self, SEL _cmd, UITableView *tv, NSI
 // that Apollo's theming never touches, so read the themed background off a
 // visible native sibling cell (mirrors ApolloApplyInheritedSettingsTableTheme's
 // approach) and copy it onto our row so it matches the "Themes" row.
-static UIColor *ThemeBuilderNativeAppearanceCellBackground(UITableView *tv, UITableViewCell *exclude) {
-    if (!tv) return nil;
+// Copy the native sibling rows' card chrome onto the injected Theme Builder row
+// when the custom theme is NOT active. Apollo's built-in theme paints those rows
+// (both their card background and their tap-highlight) but never touches our
+// custom cell — and we skip its native willDisplay — so without this the row
+// shows the plain system grouped colour and UIKit's default grey selection: a
+// visibly different shade from the "Themes" row above it, most noticeable on a
+// long-press. Mirrors ApolloApplyInheritedSettingsTableTheme's scrape-a-sibling
+// approach. Returns NO if no themed native sibling is laid out yet, so the caller
+// can retry on the next runloop.
+static BOOL ThemeBuilderApplyNativeAppearanceChrome(UITableView *tv, UITableViewCell *target) {
+    if (!tv || !target) return NO;
     for (UITableViewCell *c in tv.visibleCells) {
-        if (c == exclude || [c isKindOfClass:[ApolloRebornThemeBuilderRowCell class]]) continue;
+        if (c == target || [c isKindOfClass:[ApolloRebornThemeBuilderRowCell class]]) continue;
+
         UIColor *bg = c.backgroundColor;
         if (!bg || CGColorGetAlpha(bg.CGColor) == 0) bg = c.backgroundView.backgroundColor;
         if (!bg || CGColorGetAlpha(bg.CGColor) == 0) bg = c.contentView.backgroundColor;
-        if (bg && CGColorGetAlpha(bg.CGColor) > 0) return bg;
+        if (!bg || CGColorGetAlpha(bg.CGColor) == 0) continue; // not themed yet — keep looking
+
+        target.backgroundColor = bg;
+
+        // Match the native rows' highlight exactly: the same selection style, plus
+        // a clone of their themed selectedBackgroundView colour when Apollo set one
+        // (its built-in themes tint it); otherwise clear ours so it falls back to
+        // UIKit's default selection just like the native cell does.
+        target.selectionStyle = c.selectionStyle;
+        UIColor *sel = c.selectedBackgroundView.backgroundColor;
+        if (sel && CGColorGetAlpha(sel.CGColor) > 0) {
+            UIView *v = [[UIView alloc] init];
+            v.backgroundColor = sel;
+            target.selectedBackgroundView = v;
+        } else {
+            target.selectedBackgroundView = nil;
+        }
+        return YES;
     }
-    return nil;
+    return NO;
 }
 
 static void ThemeBuilderAppearanceWillDisplay(id self, SEL _cmd, UITableView *tv, UITableViewCell *cell, NSIndexPath *ip) {
@@ -1565,25 +1658,17 @@ static void ThemeBuilderAppearanceWillDisplay(id self, SEL _cmd, UITableView *tv
         if (textColor) cell.textLabel.textColor = textColor;
         if (grayColor) cell.detailTextLabel.textColor = grayColor;
     } else if (ThemeBuilderAppearanceIsBuilderRow(ip)) {
-        // Custom theme isn't active, so Apollo's built-in theme paints the native
-        // rows' card background. Our custom cell isn't touched by Apollo's own
-        // theming (and we skip its native willDisplay above), so it would fall
-        // back to the plain system grouped colour — visibly darker/lighter than
-        // the "Themes" row above it. Inherit the themed background from a visible
-        // native sibling so the injected row blends in.
-        UIColor *nativeBG = ThemeBuilderNativeAppearanceCellBackground(tv, cell);
-        if (nativeBG) {
-            cell.backgroundColor = nativeBG;
-        } else {
-            // The native sibling may not be laid out yet on this pass; re-apply
-            // once the table finishes its current layout cascade.
+        // Custom theme isn't active — inherit Apollo's built-in theme card colour
+        // and tap-highlight from a native sibling so the injected row is
+        // indistinguishable from the "Themes" row above it.
+        if (!ThemeBuilderApplyNativeAppearanceChrome(tv, cell)) {
+            // No themed sibling laid out yet on this pass; re-apply once the table
+            // finishes its current layout cascade.
             __weak UITableViewCell *weakCell = cell;
             __weak UITableView *weakTV = tv;
             dispatch_async(dispatch_get_main_queue(), ^{
                 UITableViewCell *c = weakCell; UITableView *t = weakTV;
-                if (!c || !t) return;
-                UIColor *bg = ThemeBuilderNativeAppearanceCellBackground(t, c);
-                if (bg) c.backgroundColor = bg;
+                if (c && t) ThemeBuilderApplyNativeAppearanceChrome(t, c);
             });
         }
     }
@@ -1743,6 +1828,9 @@ static void ThemeBuilderInstallAppearanceHooks(void) {
         if (!donor && ApolloThemeBuilderIsEnabled()) {
             ApolloLog(@"ThemeBuilder: theme changed to %@ — disabling custom theme", value);
             [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kApolloCustomThemeEnabledKey];
+            // The user explicitly picked this theme, so the remembered pre-custom
+            // theme is now obsolete — drop it so a later toggle can't resurrect it.
+            [GroupDefaults() removeObjectForKey:kPreviousThemeKey];
         }
         ApolloThemeBuilderReloadOverrides();
     }

@@ -956,9 +956,20 @@ typedef NS_ENUM(NSInteger, ThemeBuilderSection) {
     if (toggle.on) {
         ApolloThemeBuilderActivateDonorLive();
     } else {
-        ApolloThemeBuilderForceRepaint();
+        // SetEnabled(NO) restored the user's previous theme into AppColorTheme;
+        // switch the live in-memory theme to it so the app reverts immediately.
+        ApolloThemeBuilderActivateCurrentThemeLive();
     }
-    [self refreshPreview];
+    // Repaint this screen deterministically against the new enabled state. The
+    // builder's own cells are themed only in willDisplayCell (and their accents
+    // in cellForRow), so cells already on screen won't pick up the toggle on
+    // their own. Relying on the async ForceRepaint trait-flip cascade to refresh
+    // them races when the switch is toggled in quick succession — leaving the
+    // view stale (looking enabled while off, or vice versa). Reload here, while
+    // the just-set enabled flag and the real (un-flipped) appearance are current,
+    // to force every visible cell back through cellForRow/willDisplayCell.
+    [self applyThemeColors];
+    [self.tableView reloadData];
 }
 
 - (void)applyPreset:(ThemeBuilderPreset *)preset {
