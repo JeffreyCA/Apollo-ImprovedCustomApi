@@ -25,6 +25,7 @@ All notable changes to this project will be documented in this file.
 - Add **0.75× and 1.25× playback speeds** to the fullscreen video player (#476: @icpryde)
 - Add a **hold-for-2× gesture** — press and hold the right side of a fullscreen video to play at 2× while held, then release to restore the previous speed (#479: @icpryde)
 - Add **multi-account credentials** so each signed-in account can use its own Reddit API key (or web session) instead of sharing one, with a redesigned account switcher to add, edit, reorder, and remove accounts, and support for Reddit "Web app" confidential clients (#505: @DeltAndy123)
+- Add off-by-default **AI Summaries** (iOS 26+) powered by Apple's on-device FoundationModels — a streaming post summary in the comments header and a discussion summary above the first comment in larger threads, with per-type controls, a **Tap to Summarize** option, and persistent caching so reopening a thread is instant (#489, #491: @jordanearle, @icpryde)
 
 ### Fixes
 
@@ -41,6 +42,7 @@ All notable changes to this project will be documented in this file.
 - Fix **Pixel Pals** opening their menu over media, web views, and modals (#506: @icpryde)
 - Hide the redundant **GIF** caption beneath inline GIFs (#464: @icpryde)
 - Improve the **manual sign-in fallback** UI on older iOS versions (#480: @Alstruit)
+- Fix **Hide Mod Subreddits** stripping the moderator badge and mod tools when every moderated subreddit was hidden; the Subreddits list now filters display only, leaving the app-wide moderator roster intact (#500: @icpryde)
 
 ## [v3.2.0] - 2026-06-14
 
