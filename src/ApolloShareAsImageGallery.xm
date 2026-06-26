@@ -105,6 +105,17 @@ static void ApolloShareSetIvarBool(id obj, const char *name, BOOL value) {
     base[offset] = value ? 1 : 0;
 }
 
+// Reads a Swift Bool ivar (a single byte at the ivar offset). Returns NO when the
+// ivar is missing. Mirror of ApolloShareSetIvarBool's offset math.
+static BOOL ApolloShareIvarBool(id obj, const char *name) {
+    if (!obj || !name) return NO;
+    Ivar ivar = class_getInstanceVariable(object_getClass(obj), name);
+    if (!ivar) return NO;
+    ptrdiff_t offset = ivar_getOffset(ivar);
+    const unsigned char *base = (const unsigned char *)(__bridge const void *)obj;
+    return base[offset] != 0;
+}
+
 #pragma mark - Gallery model extraction
 
 // Pulls the ordered list of still-image URLs out of an RDKLink's gallery.
@@ -607,15 +618,38 @@ static void ApolloShareGalleryPrepare(id previewNode) {
     NSNumber *stateNum = objc_getAssociatedObject(previewNode, &kApolloShareGalleryStateKey);
     ApolloShareGalleryState state = stateNum ? (ApolloShareGalleryState)stateNum.integerValue
                                              : ApolloShareGalleryStateNone;
-    if (state != ApolloShareGalleryStateNone) return; // already placeholder/applied
+    if (state == ApolloShareGalleryStateApplied) {
+        // Toggling a preview option (e.g. "Include Post Details") makes Apollo
+        // rebuild the node and RESET imageForImagePost/linkButtonNode back to its
+        // native compact link card. Our state is still "Applied", so without this
+        // the collage would be lost and the compact card would show. Re-assert the
+        // cached collage when we detect the reset. Comment / non-gallery shares
+        // never cache a collage, so they no-op here.
+        UIImage *cached = objc_getAssociatedObject(previewNode, &kApolloShareGalleryCollageKey);
+        if ([cached isKindOfClass:[UIImage class]] &&
+            ApolloShareIvarObject(previewNode, "imageForImagePost") == nil) {
+            ApolloLog(@"[ShareGallery] collage reset by a toggle, re-injecting cached image");
+            ApolloShareGalleryInstallImageOnMain(previewNode, cached, YES);
+        }
+        return;
+    }
+    if (state != ApolloShareGalleryStateNone) return; // placeholder in flight
 
-    // Comment-share mode: when the user is sharing a COMMENT (not the post),
-    // the node still carries the post's `link` ivar, but the shared image
-    // should be the comment itself — not the post's gallery/video/spoiler
-    // media. Injecting imageForImagePost here is what made the post images
-    // leak into comment shares, so leave Apollo's native comment rendering
-    // completely alone in this mode.
-    if (ApolloShareIvarObject(previewNode, "comment") != nil) {
+    // Comment-share mode: when the user is sharing a COMMENT (not the post), the
+    // shared image is normally just the comment, so we must NOT touch the post's
+    // media — injecting imageForImagePost there is what made the post's gallery
+    // image leak into a plain comment share.
+    //
+    // EXCEPTION: when the user enables "Include Post Text, Poll, or Image" (the
+    // includePostTextPollOrImage toggle, which only appears in comment mode), Apollo
+    // ALSO renders the underlying post's media region above the comment — and for a
+    // gallery/video/spoiler post that region falls back to Apollo's compact link
+    // card (imageForImagePost stays nil), exactly as it does for a post share. In
+    // that case we DO want to inject the collage/poster into the post media region;
+    // the comment itself (baseCommentNode) is laid out separately and is left
+    // untouched. So only bail here when the post media is NOT being shown.
+    if (ApolloShareIvarObject(previewNode, "comment") != nil &&
+        !ApolloShareIvarBool(previewNode, "includePostTextPollOrImage")) {
         objc_setAssociatedObject(previewNode, &kApolloShareGalleryStateKey,
                                  @(ApolloShareGalleryStateApplied),
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);

@@ -1105,6 +1105,51 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
 // On devices with different safe area insets, compute the correct DI Y position.
 // The gap between DI bottom and safe area scales proportionally with safeTop.
 // Y is floored to the nearest half-pixel to match the baseline's sub-pixel alignment.
+//
+// --- Pixel Pals freeze guard (issue #305) ---
+// Tapping the Dynamic Island Pixel Pals area (pixelPalTappedWithTapGestureRecognizer:)
+// or a pal barking for attention (dogBarkedWithNotification:) both present the
+// PixelPalOverlayViewController on the *topmost* currently-presented view
+// controller — Apollo's presenter (sub_1002cd660) walks rootViewController's
+// presentedViewController chain to the end and presents there. When a fullscreen
+// media viewer or the in-app web browser is open — especially mid-interactive
+// swipe-dismiss — that races the in-flight transition: the overlay is presented
+// onto a controller that is being torn down, leaving an orphaned fullscreen
+// transition view that swallows every touch. The app looks frozen (the video's
+// audio keeps playing underneath) and has to be force-quit.
+//
+// Fix: refuse to open the Pixel Pals menu whenever any non-Pixel-Pals modal is
+// presented, or any present/dismiss transition is in flight, anywhere in the
+// window's view-controller chain. This matches the reporters' own diagnosis
+// ("preventing the pixel pal menu from opening with any media or website open
+// should fix everything") and is a strict superset of Apollo's intended
+// behaviour (the menu is already meant to be unreachable while media is open).
+static BOOL ApolloPixelPalsBlockedByModal(UIWindow *window) {
+    Class overlayCls = objc_getClass("_TtC6Apollo29PixelPalOverlayViewController");
+    UIViewController *vc = window.rootViewController;
+    while (vc) {
+        UIViewController *presented = vc.presentedViewController;
+        if (!presented) break;  // nothing modally presented here — safe to open
+        // A modal present/dismiss is animating at this level — the mid-swipe media
+        // dismiss in the repro. We only consult the coordinator once we know a modal
+        // is actually presented: on iOS 26 the transitionCoordinator getter recurses
+        // into child view controllers, so the root tab controller reports a live
+        // coordinator during ordinary feed push/pop too, and checking it
+        // unconditionally would wrongly swallow taps during normal navigation.
+        if (vc.transitionCoordinator) return YES;
+        // The overlay already being up is harmless — Apollo no-ops a re-tap; descend
+        // past it and keep checking the rest of the chain.
+        if (overlayCls && [presented isKindOfClass:overlayCls]) {
+            vc = presented;
+            continue;
+        }
+        // Some other modal (media viewer, in-app web browser, share/settings sheet)
+        // is on top — presenting the menu over it is exactly what wedges UIKit.
+        return YES;
+    }
+    return NO;
+}
+
 %hook _TtC6Apollo15ThemeableWindow
 
 - (void)layoutSubviews {
@@ -1181,6 +1226,25 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
     ApolloLog(@"[PixelPals] Tap overlay y: %.1f → %.3f", f.origin.y, f.origin.y + shift);
     f.origin.y += shift;
     view.frame = f;
+}
+
+// Suppress the Pixel Pals menu while media / a website / any modal is open or
+// mid-transition — opening it then races UIKit and freezes the app (issue #305).
+- (void)pixelPalTappedWithTapGestureRecognizer:(id)recognizer {
+    if (ApolloPixelPalsBlockedByModal((UIWindow *)self)) {
+        ApolloLog(@"[PixelPals] Tap ignored — a modal is open/transitioning (issue #305 freeze guard)");
+        return;
+    }
+    %orig;
+}
+
+// Same guard for the auto-open path when a pal barks for attention.
+- (void)dogBarkedWithNotification:(id)notification {
+    if (ApolloPixelPalsBlockedByModal((UIWindow *)self)) {
+        ApolloLog(@"[PixelPals] Bark menu suppressed — a modal is open/transitioning (issue #305 freeze guard)");
+        return;
+    }
+    %orig;
 }
 
 %end
@@ -1370,6 +1434,15 @@ static void initializeRandomSources() {
                                     UDKeyLibreTranslateURL: @"https://libretranslate.de/translate",
                                     UDKeyLibreTranslateAPIKey: @"",
                                     UDKeyTranslationSkipLanguages: @[],
+                                    UDKeyPictureInPictureEnabled: @NO,
+                                    UDKeyPictureInPictureActivation: @(ApolloPiPActivationModeUnmutedOnly),
+                                    UDKeyPictureInPictureStartPosition: @(ApolloPiPStartPositionTopRight),
+                                    UDKeyPictureInPictureNative: @NO,
+                                    UDKeyPictureInPictureLoop: @YES,
+                                    UDKeyPictureInPictureStartHidden: @NO,
+                                    UDKeyPictureInPictureSkipButtons: @NO,
+                                    UDKeyPictureInPictureSkipSeconds: @10,
+                                    UDKeyPictureInPictureProgressBar: @NO,
                                     UDKeyTagFilterEnabled: @NO,
                                     UDKeyTagFilterMode: @"blur",
                                     UDKeyTagFilterNSFW: @YES,
@@ -1518,6 +1591,28 @@ static void initializeRandomSources() {
                                                   usingBlock:^(NSNotification *note) {
         [ApolloWebSessionLoginViewController presentExpiredSessionPrompt];
     }];
+    // Picture-in-Picture hydration.
+    sPiPEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPictureInPictureEnabled];
+    sPiPActivationMode = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPictureInPictureActivation];
+    if (sPiPActivationMode < ApolloPiPActivationModeAllVideos || sPiPActivationMode > ApolloPiPActivationModeAllVideosAndGifs) {
+        sPiPActivationMode = ApolloPiPActivationModeUnmutedOnly; // matches the registered default
+        [standardDefaults setInteger:sPiPActivationMode forKey:UDKeyPictureInPictureActivation];
+    }
+    sPiPStartPosition = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPictureInPictureStartPosition];
+    if (sPiPStartPosition < ApolloPiPStartPositionTopLeft || sPiPStartPosition > ApolloPiPStartPositionLastPosition) {
+        sPiPStartPosition = ApolloPiPStartPositionTopRight;
+        [standardDefaults setInteger:sPiPStartPosition forKey:UDKeyPictureInPictureStartPosition];
+    }
+    sPiPNativeEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPictureInPictureNative];
+    sPiPLoop = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPictureInPictureLoop];
+    sPiPStartHidden = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPictureInPictureStartHidden];
+    sPiPSkipButtons = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPictureInPictureSkipButtons];
+    sPiPSkipSeconds = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPictureInPictureSkipSeconds];
+    if (sPiPSkipSeconds != 5 && sPiPSkipSeconds != 10 && sPiPSkipSeconds != 15 && sPiPSkipSeconds != 30) {
+        sPiPSkipSeconds = 10;
+        [standardDefaults setInteger:sPiPSkipSeconds forKey:UDKeyPictureInPictureSkipSeconds];
+    }
+    sPiPProgressBar = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPictureInPictureProgressBar];
 
     // Tag filter feature hydration.
     sTagFilterEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyTagFilterEnabled];

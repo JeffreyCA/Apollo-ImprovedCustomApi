@@ -97,6 +97,7 @@ static const void *kApolloHLActiveSubKey       = &kApolloHLActiveSubKey;      //
 static const void *kApolloHLContainerKey       = &kApolloHLContainerKey;      // ApolloHLHeaderContainerView on the VC (headers-on coexistence)
 static char kApolloHLHiddenRowsKey;            // NSMutableSet<NSNumber*> of de-duped sticky rows, per ASTableNode
 static char kApolloHLStickyCountKey;           // NSNumber (REST sticky count N) per feed ASTableNode — breaker rule
+static char kApolloHLSwitchPendingKey;         // BOOL on the VC — an in-place-switch re-install is already scheduled
 
 #pragma mark - Subreddit detection (adapted from ApolloSubredditHeaders.xm)
 
@@ -475,6 +476,36 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
 @property (nonatomic) int polls;
 @end
 @implementation ApolloHLWebFetch
+
+// A single non-persistent (in-memory) WKWebsiteDataStore, reused for every
+// highlights scrape this app session.
+//
+// Why isolate the scrape from the app's shared cookies: Reddit serves the *old*
+// reddit layout at www.reddit.com whenever the logged-in session belongs to an
+// account whose "Use new Reddit as my default experience" preference is disabled.
+// Apollo's OAuth login runs through a www.reddit.com web view, so that account's
+// session + old-reddit preference land in the SHARED default WKWebsiteDataStore.
+// Old reddit renders none of the "Community Highlights" carousel markup this
+// scraper looks for, so the web upgrade silently finds nothing and the carousel
+// stays stuck on just the two stickied posts the REST listing returns — exactly
+// the "only got the first 2 posts" symptom. The poison is sticky too: deleting
+// the Apollo account never clears WebKit cookies, so only deleting the whole app
+// cleared it. (Same root cause as the Social Links scrape fixed in #496; reported
+// there by @Uranosphaerite as also affecting Community Highlights / #463.)
+//
+// A logged-out, in-memory store sidesteps all of it: with no account session
+// Reddit serves its default (new/shreddit) experience — which DOES carry the
+// highlights carousel — so the scrape can neither poison nor be poisoned by the
+// user's browsing session, and it resets each launch. Shared (not per-scrape) so
+// Reddit's JS bot-challenge cookie warms once per session rather than cold on
+// every subreddit. Highlights are public, so no login is needed.
++ (WKWebsiteDataStore *)apollo_scrapeDataStore {
+    static WKWebsiteDataStore *store;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ store = [WKWebsiteDataStore nonPersistentDataStore]; });
+    return store;
+}
+
 - (void)startForSub:(NSString *)sub completion:(void (^)(NSArray<ApolloHLItem *> *))done {
     self.sub = sub; self.done = done; self.polls = 0;
     UIWindow *win = nil;
@@ -484,7 +515,9 @@ static NSDictionary<NSString *, ApolloHLItem *> *ApolloHLParseInfoListing(NSDict
     }
     if (!win) win = UIApplication.sharedApplication.windows.firstObject;
     if (!win) { [self finish:nil]; return; }
-    self.web = [[WKWebView alloc] initWithFrame:win.bounds configuration:[[WKWebViewConfiguration alloc] init]];
+    WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
+    config.websiteDataStore = [ApolloHLWebFetch apollo_scrapeDataStore];
+    self.web = [[WKWebView alloc] initWithFrame:win.bounds configuration:config];
     self.web.navigationDelegate = self;
     self.web.alpha = 0.011; self.web.userInteractionEnabled = NO;
     [win insertSubview:self.web atIndex:0];
@@ -1821,6 +1854,41 @@ static void ApolloHLCollapseOrphanSeparators(UIViewController *vc) {
 #pragma mark - Hooks
 
 %hook UITableView
+
+// Catch an in-place subreddit switch (the nav-title "jump bar": tap the sub name,
+// type another sub) under a REUSED PostsViewController. On that path Apollo swaps
+// the feed's contents in place — the table re-lays-out repeatedly — but the VC's
+// viewDidLayoutSubviews (which drives ApolloHLInstall) does NOT fire, so the
+// standalone carousel keeps showing the PREVIOUS sub's highlights on the new feed.
+// The feed table's own layoutSubviews DOES fire throughout the switch, so detect
+// the stale carousel here and re-run install. Only managed feed tables (those
+// currently hosting our carousel) are inspected — a single associated-object read
+// short-circuits every other UITableView in the app.
+- (void)layoutSubviews {
+    %orig;
+    if (!sCommunityHighlights || sShowSubredditHeaders) return;
+    if (![objc_getAssociatedObject(self, kApolloHLManagedTableKey) boolValue]) return;
+    UIViewController *vc = objc_getAssociatedObject(self, kApolloHLManagedVCKey);
+    if (!vc) return;
+    NSString *installed = objc_getAssociatedObject(vc, kApolloHLSubredditKey); // carousel's sub
+    if (installed.length == 0) return;
+    NSString *current = ApolloHLSubredditName(vc); // nil for special feeds (all/home/popular/…)
+    if ([installed isEqualToString:current]) return; // still the same sub → nothing to do
+    // The VC now shows a different sub (or a special feed) than the installed carousel.
+    // Re-run install on the next runloop turn — NOT inline: ApolloHLInstall sets
+    // tableHeaderView, which would re-enter layoutSubviews. Guard so a single
+    // re-install is scheduled per switch rather than one per layout pass.
+    if ([objc_getAssociatedObject(vc, &kApolloHLSwitchPendingKey) boolValue]) return;
+    objc_setAssociatedObject(vc, &kApolloHLSwitchPendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak UIViewController *weakVC = vc;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *strongVC = weakVC;
+        if (!strongVC) return;
+        objc_setAssociatedObject(strongVC, &kApolloHLSwitchPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloLog(@"[Highlights] in-place subreddit switch → rebuilding carousel for %@", ApolloHLSubredditName(strongVC) ?: @"(special feed)");
+        ApolloHLInstall(strongVC);
+    });
+}
 
 - (void)setTableHeaderView:(UIView *)tableHeaderView {
     if (![objc_getAssociatedObject(self, kApolloHLManagedTableKey) boolValue]) { %orig; return; }

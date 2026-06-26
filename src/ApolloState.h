@@ -182,6 +182,41 @@ extern NSString *sWebSessionModhash;
 // data.name), captured at login. Used by the identity layer to label the
 // cookie account. nil until a successful harvest.
 extern NSString *sWebSessionUsername;
+// Picture-in-Picture: floating in-app mini-player for comments-page videos
+// scrolled out of view. See ApolloPictureInPicture.xm and docs/pip-design.md.
+typedef NS_ENUM(NSInteger, ApolloPiPActivationMode) {
+    ApolloPiPActivationModeAllVideos = 0,       // any playing video (muted or not)
+    ApolloPiPActivationModeUnmutedOnly = 1,     // only videos playing unmuted
+    ApolloPiPActivationModeAllVideosAndGifs = 2, // all videos PLUS silent GIFs (in-app card)
+};
+// Where a fresh PiP card first appears. 0–3 match the corner indices used by
+// the geometry code (TL/TR/BL/BR); LastPosition restores the remembered
+// screen-relative center, re-clamped for the new video's card size.
+typedef NS_ENUM(NSInteger, ApolloPiPStartPosition) {
+    ApolloPiPStartPositionTopLeft = 0,
+    ApolloPiPStartPositionTopRight = 1,
+    ApolloPiPStartPositionBottomLeft = 2,
+    ApolloPiPStartPositionBottomRight = 3,
+    ApolloPiPStartPositionLastPosition = 4,
+};
+extern BOOL sPiPEnabled;          // in-app floating mini-player
+extern NSInteger sPiPActivationMode;
+extern NSInteger sPiPStartPosition;
+// Hand off to iOS' system Picture in Picture when the app backgrounds.
+// Independent of sPiPEnabled — works for the inline player on its own.
+extern BOOL sPiPNativeEnabled;
+// Replay the clip when it reaches the end while PiP is presenting it.
+// Default YES (Apollo's native inline behavior).
+extern BOOL sPiPLoop;
+// Open the miniplayer tucked off the edge (hidden). Applies to corner
+// Starting Positions only; Last Position remembers hidden state itself.
+extern BOOL sPiPStartHidden;
+// Optional extra controls on the floating window's overlay. Skip buttons jump
+// back/ahead by sPiPSkipSeconds (5/10/15/30); the progress bar is a read-only
+// playback position indicator along the bottom edge. Both default OFF.
+extern BOOL sPiPSkipButtons;
+extern NSInteger sPiPSkipSeconds;
+extern BOOL sPiPProgressBar;
 
 // Tag filter feature (NSFW / Spoiler).
 extern BOOL sTagFilterEnabled;

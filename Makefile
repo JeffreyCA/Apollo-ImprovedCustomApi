@@ -63,12 +63,16 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloFlairColors.xm \
     $(SRC_DIR)/ApolloNativeActionMenus.xm \
     $(SRC_DIR)/ApolloShareAsImageGallery.xm \
+    $(SRC_DIR)/ApolloShareAsImageLink.xm \
+    $(SRC_DIR)/ApolloShareAsVideo.xm \
+    $(SRC_DIR)/ApolloShareAsImagePreviewFix.xm \
     $(SRC_DIR)/ApolloTranslation.xm \
     $(SRC_DIR)/ApolloAppleTranslation.swift \
     $(SRC_DIR)/ApolloVideoUnmute.xm \
     $(SRC_DIR)/ApolloVideoSwipeFix.xm \
     $(SRC_DIR)/ApolloVideoPlaybackSpeed.xm \
     $(SRC_DIR)/ApolloVideoHoldSpeed.xm \
+    $(SRC_DIR)/ApolloPictureInPicture.xm \
     $(SRC_DIR)/ApolloMediaPreviewErrorFix.xm \
     $(SRC_DIR)/ApolloSubredditIndexPolish.xm \
     $(SRC_DIR)/ApolloQuickActions.xm \
@@ -99,11 +103,12 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/TranslationSettingsViewController.m \
     $(SRC_DIR)/SavedCategoriesViewController.m \
     $(SRC_DIR)/TagFiltersViewController.m \
+    $(SRC_DIR)/PictureInPictureViewController.m \
     $(SRC_DIR)/Defaults.m \
     $(SRC_DIR)/UIWindow+Apollo.m \
     $(SRC_DIR)/fishhook.c \
     $(SSZIPARCHIVE_FILES)
-ApolloReborn_FRAMEWORKS = UIKit Security AVFoundation OSLog NaturalLanguage ImageIO StoreKit Photos PhotosUI SafariServices SystemConfiguration WebKit AuthenticationServices CoreImage SwiftUI UniformTypeIdentifiers
+ApolloReborn_FRAMEWORKS = UIKit Security AVFoundation AVKit OSLog NaturalLanguage ImageIO StoreKit Photos PhotosUI SafariServices SystemConfiguration WebKit AuthenticationServices CoreImage SwiftUI UniformTypeIdentifiers
 ApolloReborn_LIBRARIES = z iconv
 # Apple's Translation framework (used by the on-device "apple" translation provider in
 # ApolloAppleTranslation.swift) only exists on iOS 18.0+. Weak-link it so the tweak still
