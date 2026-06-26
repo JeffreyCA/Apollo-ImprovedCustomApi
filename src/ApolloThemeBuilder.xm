@@ -1524,6 +1524,23 @@ static void ThemeBuilderAppearanceSelect(id self, SEL _cmd, UITableView *tv, NSI
     if (sAppearanceSelectOrig) sAppearanceSelectOrig(self, _cmd, tv, adjusted);
 }
 
+// When the custom theme is NOT active, Apollo's own built-in theme paints the
+// native Appearance rows' card background. Our injected cell is a custom class
+// that Apollo's theming never touches, so read the themed background off a
+// visible native sibling cell (mirrors ApolloApplyInheritedSettingsTableTheme's
+// approach) and copy it onto our row so it matches the "Themes" row.
+static UIColor *ThemeBuilderNativeAppearanceCellBackground(UITableView *tv, UITableViewCell *exclude) {
+    if (!tv) return nil;
+    for (UITableViewCell *c in tv.visibleCells) {
+        if (c == exclude || [c isKindOfClass:[ApolloRebornThemeBuilderRowCell class]]) continue;
+        UIColor *bg = c.backgroundColor;
+        if (!bg || CGColorGetAlpha(bg.CGColor) == 0) bg = c.backgroundView.backgroundColor;
+        if (!bg || CGColorGetAlpha(bg.CGColor) == 0) bg = c.contentView.backgroundColor;
+        if (bg && CGColorGetAlpha(bg.CGColor) > 0) return bg;
+    }
+    return nil;
+}
+
 static void ThemeBuilderAppearanceWillDisplay(id self, SEL _cmd, UITableView *tv, UITableViewCell *cell, NSIndexPath *ip) {
     if (!ThemeBuilderAppearanceIsBuilderRow(ip)) {
         NSIndexPath *adjusted = ThemeBuilderAppearanceAdjustedIndexPath(ip);
@@ -1547,6 +1564,28 @@ static void ThemeBuilderAppearanceWillDisplay(id self, SEL _cmd, UITableView *tv
         }
         if (textColor) cell.textLabel.textColor = textColor;
         if (grayColor) cell.detailTextLabel.textColor = grayColor;
+    } else if (ThemeBuilderAppearanceIsBuilderRow(ip)) {
+        // Custom theme isn't active, so Apollo's built-in theme paints the native
+        // rows' card background. Our custom cell isn't touched by Apollo's own
+        // theming (and we skip its native willDisplay above), so it would fall
+        // back to the plain system grouped colour — visibly darker/lighter than
+        // the "Themes" row above it. Inherit the themed background from a visible
+        // native sibling so the injected row blends in.
+        UIColor *nativeBG = ThemeBuilderNativeAppearanceCellBackground(tv, cell);
+        if (nativeBG) {
+            cell.backgroundColor = nativeBG;
+        } else {
+            // The native sibling may not be laid out yet on this pass; re-apply
+            // once the table finishes its current layout cascade.
+            __weak UITableViewCell *weakCell = cell;
+            __weak UITableView *weakTV = tv;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UITableViewCell *c = weakCell; UITableView *t = weakTV;
+                if (!c || !t) return;
+                UIColor *bg = ThemeBuilderNativeAppearanceCellBackground(t, c);
+                if (bg) c.backgroundColor = bg;
+            });
+        }
     }
 }
 

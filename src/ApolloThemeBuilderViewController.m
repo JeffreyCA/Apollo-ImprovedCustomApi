@@ -94,10 +94,13 @@ typedef NS_ENUM(NSInteger, ThemeBuilderSection) {
 
 - (void)applyThemeColors {
     if (!ApolloThemeBuilderIsEnabled()) {
-        // Use the opaque grouped-table default, NOT nil — nil leaves the table
-        // view transparent, which shows the previous screen straight through the
-        // push transition (and behind the cells anywhere the theme isn't active).
-        self.tableView.backgroundColor = UIColor.systemGroupedBackgroundColor;
+        // The custom theme isn't the active app theme, so inherit Apollo's main
+        // app theme colour scheme (background, separator, accent, visible cells)
+        // from the Settings table we were pushed from — matching every other
+        // tweak settings page. This also paints an opaque background before the
+        // push transition's first frame so the previous screen never shows
+        // through while sliding in.
+        [self apollo_applyTheme];
         return;
     }
     NSString *mode = [self previewMode];
@@ -116,7 +119,9 @@ typedef NS_ENUM(NSInteger, ThemeBuilderSection) {
             ApolloThemeBuilderSavedHex(kApolloThemeRoleAccent, [self previewMode]));
         if (accent) return accent;
     }
-    return UIColor.systemBlueColor;
+    // Custom theme isn't active — match Apollo's main app accent (inherited from
+    // the Settings table we were pushed from) instead of a hardcoded system blue.
+    return [self apollo_themeAccentColor];
 }
 
 #pragma mark - Live preview
@@ -669,7 +674,13 @@ typedef NS_ENUM(NSInteger, ThemeBuilderSection) {
 }
 
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (!ApolloThemeBuilderIsEnabled()) return;
+    if (!ApolloThemeBuilderIsEnabled()) {
+        // Custom theme isn't active — inherit Apollo's main app theme colour
+        // scheme for this cell (background + accent tint), matching the other
+        // tweak settings pages, instead of leaving it on system defaults.
+        [self apollo_applyThemeToCell:cell];
+        return;
+    }
     NSString *mode = [self previewMode];
     UIColor *secondaryBG = ApolloThemeBuilderColorFromHex(ApolloThemeBuilderSavedHex(kApolloThemeRoleSecondaryBG, mode));
     UIColor *textColor = ApolloThemeBuilderColorFromHex(ApolloThemeBuilderSavedHex(kApolloThemeRoleText, mode));
