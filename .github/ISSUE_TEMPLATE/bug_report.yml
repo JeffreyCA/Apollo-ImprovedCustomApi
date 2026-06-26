@@ -55,7 +55,7 @@ body:
     attributes:
       label: Crash log / console output
       description: |
-        If you are reporting a crash, paste any crash backtraces, `ApolloLog` console output, or `.ips` crash reports. Crash reports help enormously; see the README for how to grab them.
+        If you are reporting a crash, paste any crash backtraces, `ApolloLog` console output, or `.ips` crash reports. Crash reports help enormously; obtain them in iOS Settings → Privacy & Security → Analytics & Improvements → Analytics Data, then look for files starting with `Apollo-`, with the correct date and time.
       render: text
     validations:
       required: false
