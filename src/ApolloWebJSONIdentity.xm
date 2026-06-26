@@ -30,23 +30,29 @@
 //      safe. A failed real mint does NOT clear the credential (verified in the
 //      trace), so the substitution only has to suppress the error callback.
 //
-//   4. For a truly keyless cold start with NO account at all, a signed-in account
-//      is synthesized from the cookie identity (ApolloWebJSONSynthesizeSignedInAccount,
-//      below) so AccountManager loads it on launch — the account tab shows the
-//      user and write actions (vote/comment) unblock, since those gate on
-//      AccountManager.currentAccountIndex != nil, NOT on RDKClient auth state.
-//      Rather than construct Swift account objects (AccountManager's collection
-//      has no ObjC accessor), we write the on-disk blobs Apollo's own loader
-//      reads (NSUserDefaults `RedditAccounts2` = [RDKClient], Valet keychain
-//      `2RedditAccounts2` = [[String:String]], `CurrentRedditAccountIndex`),
-//      reusing a real archived RDKClient as the template. Triggered both at login
-//      harvest (with a restart prompt) and in %ctor (before AccountManager loads,
-//      so it takes effect same-launch).
+//   4. For an account with a stored web session but no on-disk account yet, a
+//      signed-in account is synthesized from that session
+//      (ApolloWebJSONSynthesizeSignedInAccount(username), below) so AccountManager
+//      loads it on launch — the account tab shows the user and write actions
+//      (vote/comment) unblock, since those gate on AccountManager.currentAccountIndex
+//      != nil, NOT on RDKClient auth state. Rather than construct Swift account
+//      objects (AccountManager's collection has no ObjC accessor), we write the
+//      on-disk blobs Apollo's own loader reads (NSUserDefaults `RedditAccounts2`
+//      = [RDKClient], Valet keychain `2RedditAccounts2` = [[String:String]],
+//      `CurrentRedditAccountIndex`), reusing a real archived RDKClient as the
+//      template. Synthesis APPENDS to both arrays (never replaces), so existing
+//      accounts — OAuth or other web-session users — coexist. Triggered both at
+//      login harvest (with a restart prompt) and in %ctor, once per stored
+//      web-session username (before AccountManager loads, so it takes effect
+//      same-launch).
 //
-// Everything here is gated behind ApolloWebJSONHasUsableSession() — flag on AND a
-// harvested cookie present — and the mint short-circuit additionally requires the
-// client to have no live credential (or our own synthetic one), so a real,
-// working OAuth credential is never bypassed.
+// Per-account resolution (ApolloWebJSONHasUsableSession() / ApolloActiveWebSession()
+// in ApolloWebSessionStore.h) is what lets a web-session account and a real OAuth
+// account coexist: everything here is gated on the ACTIVE account specifically
+// being a web-session account, so an OAuth account's own request/auth path is
+// untouched even while a different account in the switcher uses cookies. The mint
+// short-circuit additionally requires the client to have no live credential (or
+// our own synthetic one), so a real, working OAuth credential is never bypassed.
 //
 // Verified end-to-end in the iOS 26 simulator with a harvested u/<user> cookie:
 // account tab shows the user, personalized reads (subscriptions/profile/inbox/
@@ -61,6 +67,7 @@
 #import "ApolloWebJSON.h"
 #import "ApolloState.h"
 #import "ApolloCommon.h"
+#import "ApolloWebSessionStore.h"
 
 // Minimal surface of Apollo's RedditKit classes used here. Real definitions live
 // in Headers/ObjC/{RDKClient,RDKOAuthCredential,RDKAccessToken}.h (not on the
@@ -172,7 +179,7 @@ static void ApolloWebJSONInstallSyntheticCredentialIfNeeded(RDKClient *client) {
         ApolloWebJSONBackfillUsernameOnUser([client currentUser]);
     }
     ApolloLog(@"[WebJSON][identity] Installed synthetic credential for cookie session (user %@)",
-              sWebSessionUsername ?: @"(unknown)");
+              ApolloActiveWebSessionUsername() ?: @"(unknown)");
 }
 
 // YES when a token mint/refresh should be replaced by an instant synthetic
@@ -259,12 +266,6 @@ static id ApolloWebJSONUnarchive(NSData *data) {
     return obj;
 }
 
-// Returns the count of accounts currently archived in RedditAccounts2 (0 if none).
-static NSUInteger ApolloWebJSONExistingAccountCount(NSUserDefaults *group) {
-    id obj = ApolloWebJSONUnarchive([group objectForKey:@"RedditAccounts2"]);
-    return [obj isKindOfClass:[NSArray class]] ? [(NSArray *)obj count] : 0;
-}
-
 // Backfills the logged-in username onto a live RDKMe/RDKUser when it has none.
 //
 // Why this is needed: when the current account's currentUser is archived WITHOUT
@@ -285,9 +286,17 @@ static NSUInteger ApolloWebJSONExistingAccountCount(NSUserDefaults *group) {
 // cookie session. Idempotent; only ever writes an absent/empty username, so a
 // real OAuth account's name is never touched. Gated on a usable web session.
 static void ApolloWebJSONBackfillUsernameOnUser(id user) {
-    if (!user || !ApolloWebJSONHasUsableSession()) return;
-    NSString *username = sWebSessionUsername;
-    if (username.length == 0) return;
+    // NOTE: deliberately NOT gated on ApolloWebJSONHasUsableSession() here. This
+    // runs from -setCurrentUser: BEFORE %orig installs `user` as the live
+    // currentUser, so ApolloActiveAccountUsername() would still report the OLD
+    // active account at this point — checking "is the active account a web
+    // session" would target the wrong account (or wrongly say no on the very
+    // first install). ApolloActiveWebSessionUsername()'s on-disk fallback
+    // resolves by CurrentRedditAccountIndex, which synthesis/AccountManager's
+    // load keep aligned with the account actually being installed here.
+    if (!user || !sWebJSONEnabled) return;
+    NSString *username = ApolloActiveWebSessionUsername();
+    if (username.length == 0 || !ApolloWebSessionFor(username)) return;
 
     NSString *existing = nil;
     @try { existing = [user valueForKey:@"username"]; }
@@ -302,21 +311,69 @@ static void ApolloWebJSONBackfillUsernameOnUser(id user) {
     }
 }
 
-BOOL ApolloWebJSONSynthesizeSignedInAccount(void) {
-    if (sWebSessionCookieHeader.length == 0) return NO;
+// Reads the Valet `2RedditAccounts2` array ([[String:String]]) — the per-index
+// sensitive dicts paired with the `RedditAccounts2` ([RDKClient]) array. Used so
+// append can read-modify-write rather than clobber existing accounts' secrets.
+static NSArray<NSDictionary *> *ApolloWebJSONReadValetAccountsArray(BOOL *outReadFailed) {
+    if (outReadFailed) *outReadFailed = NO;
+    NSDictionary *query = @{
+        (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: kApolloValetAccountsService,
+        (__bridge id)kSecAttrAccount: kApolloAccountsKeychainKey,
+        (__bridge id)kSecReturnData:  (__bridge id)kCFBooleanTrue,
+        (__bridge id)kSecMatchLimit:  (__bridge id)kSecMatchLimitOne,
+    };
+    CFTypeRef result = NULL;
+    OSStatus st = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    if (st == errSecItemNotFound) return @[];
+    if (st != errSecSuccess || !result) {
+        if (outReadFailed) *outReadFailed = YES;
+        return nil;
+    }
+    NSData *data = (__bridge_transfer NSData *)result;
+    id obj = ApolloWebJSONUnarchive(data);
+    return [obj isKindOfClass:[NSArray class]] ? obj : @[];
+}
+
+// Returns the lowercased username for the account at `index` in RedditAccounts2,
+// or nil if absent/unreadable. Used to detect "this username already has an
+// account" so re-synthesis for the same user is a no-op rather than a duplicate.
+static NSString *ApolloWebJSONUsernameAtIndex(NSArray *accounts, NSUInteger index) {
+    if (index >= accounts.count) return nil;
+    id client = accounts[index];
+    id user = nil;
+    @try { user = [client valueForKey:@"currentUser"]; }
+    @catch (__unused NSException *e) { return nil; }
+    NSString *username = nil;
+    @try { username = [user valueForKey:@"username"]; }
+    @catch (__unused NSException *e) { return nil; }
+    return [username isKindOfClass:[NSString class]] ? username.lowercaseString : nil;
+}
+
+BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username) {
+    if (username.length == 0) return NO;
+    ApolloWebSessionEntry *session = ApolloWebSessionFor(username);
+    if (session.cookieHeader.length == 0) return NO;
     Class clientClass = objc_getClass("RDKClient");
     if (!clientClass) return NO;
 
     NSUserDefaults *group = [[NSUserDefaults alloc] initWithSuiteName:kApolloGroupSuite];
-    if (ApolloWebJSONExistingAccountCount(group) > 0) {
-        // Never clobber an already-loaded account. A present account whose
-        // currentUser lacks a username is fixed at runtime by
-        // ApolloWebJSONBackfillUsernameOnUser (-setCurrentUser: hook below), not here.
-        ApolloLog(@"[WebJSON][identity] Account already present — skipping synthesis");
-        return NO;
-    }
+    NSString *lowerUsername = username.lowercaseString;
 
-    NSString *username = sWebSessionUsername.length > 0 ? sWebSessionUsername : @"redditor";
+    id existingAccountsObj = ApolloWebJSONUnarchive([group objectForKey:@"RedditAccounts2"]);
+    NSArray *existingAccounts = [existingAccountsObj isKindOfClass:[NSArray class]] ? existingAccountsObj : @[];
+
+    // Never clobber an already-loaded account for THIS username. A present
+    // account whose currentUser lacks a username is fixed at runtime by
+    // ApolloWebJSONBackfillUsernameOnUser (-setCurrentUser: hook below), not
+    // here. A DIFFERENT account (OAuth or another web-session user) already
+    // present is exactly the case this append path exists to support.
+    for (NSUInteger i = 0; i < existingAccounts.count; i++) {
+        if ([ApolloWebJSONUsernameAtIndex(existingAccounts, i) isEqualToString:lowerUsername]) {
+            ApolloLog(@"[WebJSON][identity] Account for u/%@ already present — skipping synthesis", username);
+            return NO;
+        }
+    }
 
     // Template: reuse the app-only RDKClient archive (a known-good object graph
     // Apollo itself produced), falling back to a fresh instance.
@@ -327,7 +384,7 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(void) {
     @try {
         // Promote from app-only to a real user account.
         [client setValue:@NO forKey:@"usesApplicationOnlyOAuth"];
-        if (sWebSessionModhash.length > 0) [client setValue:sWebSessionModhash forKey:@"modhash"];
+        if (session.modhash.length > 0) [client setValue:session.modhash forKey:@"modhash"];
         if ([clientClass respondsToSelector:@selector(allScopes)]) {
             unsigned long long all = [clientClass allScopes];
             [client setValue:@(all) forKey:@"authorizationScope"];
@@ -345,13 +402,18 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(void) {
         return NO;
     }
 
+    // Append (not replace) to RedditAccounts2 — the new account's index is the
+    // current count, kept aligned with the Valet array appended below.
+    NSMutableArray *newAccounts = [existingAccounts mutableCopy];
+    [newAccounts addObject:client];
+    NSUInteger newIndex = newAccounts.count - 1;
+
     NSError *err = nil;
-    NSData *accountsData = [NSKeyedArchiver archivedDataWithRootObject:@[client] requiringSecureCoding:NO error:&err];
+    NSData *accountsData = [NSKeyedArchiver archivedDataWithRootObject:newAccounts requiringSecureCoding:NO error:&err];
     if (![accountsData isKindOfClass:[NSData class]]) {
         ApolloLog(@"[WebJSON][identity] failed to archive accounts array: %@", err);
         return NO;
     }
-    [group setObject:accountsData forKey:@"RedditAccounts2"];
 
     // Sensitive dict mirrors the app-only format ({accessToken, clientIdentifier});
     // a dummy token is fine — the cookie authenticates at the chokepoint.
@@ -361,16 +423,32 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(void) {
         @"clientIdentifier": @"",
         @"authorizationCode": @"",
     };
-    NSData *sensitiveData = [NSKeyedArchiver archivedDataWithRootObject:@[sensitive] requiringSecureCoding:NO error:&err];
-    if ([sensitiveData isKindOfClass:[NSData class]]) {
-        ApolloWebJSONWriteValetItem(kApolloAccountsKeychainKey, sensitiveData);
-    } else {
+    // Read-modify-append the Valet array too, at the SAME new index, so existing
+    // accounts' sensitive dicts (including other OAuth accounts' real secrets)
+    // are preserved rather than clobbered by a fresh one-element array.
+    BOOL valetReadFailed = NO;
+    NSArray<NSDictionary *> *existingValet = ApolloWebJSONReadValetAccountsArray(&valetReadFailed);
+    if (valetReadFailed) {
+        ApolloLog(@"[WebJSON][identity] Valet read error — bailing to avoid clobbering existing accounts");
+        return NO;
+    }
+    NSMutableArray *newValet = [existingValet mutableCopy] ?: [NSMutableArray array];
+    while (newValet.count < newIndex) [newValet addObject:@{}]; // keep index-aligned even if a prior entry was short
+    [newValet addObject:sensitive];
+    NSData *sensitiveData = [NSKeyedArchiver archivedDataWithRootObject:newValet requiringSecureCoding:NO error:&err];
+    if (![sensitiveData isKindOfClass:[NSData class]]) {
         ApolloLog(@"[WebJSON][identity] failed to archive sensitive blob: %@", err);
+        return NO;
     }
 
-    [group setInteger:0 forKey:@"CurrentRedditAccountIndex"];
+    // Only commit once both blobs archived successfully, so a failure never
+    // leaves the two index-aligned arrays out of sync.
+    [group setObject:accountsData forKey:@"RedditAccounts2"];
+    ApolloWebJSONWriteValetItem(kApolloAccountsKeychainKey, sensitiveData);
+    [group setInteger:(NSInteger)newIndex forKey:@"CurrentRedditAccountIndex"];
     [group synchronize];
-    ApolloLog(@"[WebJSON][identity] Synthesized signed-in account for u/%@ (restart to load)", username);
+    ApolloLog(@"[WebJSON][identity] Synthesized signed-in account for u/%@ at index %lu (restart to load)",
+              username, (unsigned long)newIndex);
     return YES;
 }
 
@@ -456,6 +534,19 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(void) {
     if (sWebJSONEnabled) {
         @try { obj = ApolloWebJSONFixupWriteResponseObject(response, obj); }
         @catch (NSException *e) { ApolloLog(@"[WebJSON] write-response fixup failed: %@", e); }
+        @try { obj = ApolloWebJSONFixupModeratorsResponseObject(response, obj); }
+        @catch (NSException *e) { ApolloLog(@"[WebJSON] moderators-response fixup failed: %@", e); }
+        // No legacy equivalent exists for this endpoint at all (see
+        // ApolloWebJSONShouldStubInvitedModerators) — override unconditionally,
+        // including clearing the OAuth-403's validation error, so the Mods
+        // screen just shows no pending invitations instead of an error.
+        @try {
+            if (ApolloWebJSONShouldStubInvitedModerators(response)) {
+                obj = @[];
+                if (error) *error = nil;
+                ApolloLog(@"[WebJSON] Stubbed empty invited-moderators list (no cookie-compatible endpoint)");
+            }
+        } @catch (NSException *e) { ApolloLog(@"[WebJSON] invited-moderators stub failed: %@", e); }
     }
     return obj;
 }

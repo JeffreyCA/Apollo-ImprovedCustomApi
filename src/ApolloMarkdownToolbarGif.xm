@@ -550,7 +550,6 @@ static void ApolloMarkdownGifApplyButtonChrome(UIButton *gifButton, UIColor *tin
     gifButton.clipsToBounds = NO;
     gifButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
     gifButton.contentVerticalAlignment = UIControlContentVerticalAlignmentCenter;
-    gifButton.contentEdgeInsets = UIEdgeInsetsZero;
     gifButton.titleLabel.font = [UIFont systemFontOfSize:(slot <= 30.0 ? 8.0 : 9.0) weight:UIFontWeightBold];
     gifButton.titleLabel.adjustsFontSizeToFitWidth = YES;
     gifButton.titleLabel.minimumScaleFactor = 0.75;
@@ -1029,7 +1028,7 @@ static void ApolloMarkdownGifEnumerateWindows(void (^block)(UIWindow *window)) {
             }
         }
     }
-    for (UIWindow *window in UIApplication.sharedApplication.windows) {
+    for (UIWindow *window in ApolloAllWindows()) {
         if (window.hidden || window.alpha < 0.01) continue;
         block(window);
     }

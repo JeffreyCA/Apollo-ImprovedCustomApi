@@ -6,6 +6,7 @@
 #import "SavedCategoriesViewController.h"
 #import "TranslationSettingsViewController.h"
 #import "TagFiltersViewController.h"
+#import "ApolloThemeBuilderViewController.h"
 #import "PictureInPictureViewController.h"
 
 // MARK: - Settings View Controller (Custom API row injection)
@@ -87,6 +88,7 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     if (section == 1) return 5; // Custom API, Saved Categories, Translation, Tag Filters, Picture-in-Picture
+                                // (Theme Builder now lives under Appearance → Themes)
     if (section > 1) return %orig(tableView, section - 1);
     return %orig;
 }

@@ -552,6 +552,15 @@ BOOL ApolloIsSystemShareComposeController(UIViewController *controller) {
     return NO;
 }
 
+NSArray<UIWindow *> *ApolloAllWindows(void) {
+    NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]])
+            [windows addObjectsFromArray:((UIWindowScene *)scene).windows];
+    }
+    return windows;
+}
+
 #pragma mark - Color Helpers
 
 UIColor *ApolloColorFromHexString(NSString *hex) {

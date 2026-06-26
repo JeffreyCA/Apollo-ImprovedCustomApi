@@ -13,6 +13,11 @@
 - (NSArray *)objectsFromListingResponse:(id)response;
 @end
 
+// Minimal forward declaration for AFHTTPRequestSerializer (AFNetworking, statically
+// linked into Apollo — no headers bundled here), just enough for %hook to compile.
+@interface AFHTTPRequestSerializer : NSObject
+@end
+
 @interface RDKPagination : NSObject
 + (instancetype)paginationFromListingResponse:(id)response;
 @end

@@ -23,7 +23,9 @@
 #import "ApolloMarkdownToolbarGif.h"
 #import "ApolloWebAuthViewController.h"
 #import "ApolloWebJSON.h"
+#import "ApolloWebSessionStore.h"
 #import "ApolloWebSessionLoginViewController.h"
+#import "ApolloAccountCredentials.h"
 
 // MARK: - Sideload Fixes
 
@@ -314,16 +316,62 @@ static NSArray *const blockedUrls = @[
 
 // Cache storing subreddit list source URLs -> response body
 static NSCache<NSString *, NSString *> *subredditListCache;
-// Replace Reddit API client ID
+// Replace Reddit API client ID. Resolved per-account (see
+// ApolloAccountCredentials.{h,m}): a pending add-account choice, else the
+// active account's stored override, else the global default — instead of
+// unconditionally forcing the single global client id/redirect URI onto every
+// account, which broke a second account's login/refresh under a different key.
 %hook RDKOAuthCredential
 
+// Fall back to %orig (the credential's REAL stored value) when nothing is
+// actually configured for this account. Unconditionally forcing
+// ApolloEffectiveRedditClientId() here used to silently clobber that real
+// value with an empty string whenever sRedditClientId was unset (it has no
+// hardcoded fallback constant, unlike the redirect URI below), breaking token
+// refresh for exactly that account with a blank, unmatchable client_id.
 - (NSString *)clientIdentifier {
-    return sRedditClientId;
+    NSString *effective = ApolloEffectiveRedditClientId();
+    return effective.length > 0 ? effective : %orig;
 }
 
 - (NSURL *)redirectURI {
-    NSString *customURI = [sRedirectURI length] > 0 ? sRedirectURI : defaultRedirectURI;
-    return [NSURL URLWithString:customURI];
+    NSString *effective = ApolloEffectiveRedirectURI();
+    return effective.length > 0 ? [NSURL URLWithString:effective] : %orig;
+}
+
+%end
+
+// RDKClient always authenticates Reddit's token endpoint (api/v1/access_token —
+// used for both the authorization_code exchange and refresh_token grants) via HTTP
+// Basic Auth with an empty password (-[RDKClient setAuthorizationCredential:],
+// -[RDKClient refreshAccessTokenWithCompletion:completion:], and
+// -[RDKClient retrieveAccessTokenForApplicationOnlyWithCompletion:] all call
+// setAuthorizationHeaderFieldWithUsername:password:@"" directly on the request
+// serializer). That's correct for Reddit "installed app"/public OAuth clients, but
+// "Web app" (confidential) clients require the real client_secret as the password —
+// Reddit 401s every token request otherwise. Hooking at this single low-level call
+// site (rather than each RDKClient method) catches all of them uniformly and leaves
+// the separate "bearer <token>" Authorization header (used for every other Reddit
+// API call once signed in) completely untouched, since that's set via
+// setValue:forHTTPHeaderField: instead.
+//
+// The secret is resolved by reverse-lookup on the client_id presented as
+// `username` (ApolloSecretForClientId — checks every stored per-account entry,
+// then the global default), NOT by "whichever account is active right now".
+// This matters because token *refresh* for a backgrounded/non-active account's
+// session can still land here, and it must authenticate with THAT account's
+// secret, not the foregrounded account's.
+%hook AFHTTPRequestSerializer
+
+- (void)setAuthorizationHeaderFieldWithUsername:(NSString *)username password:(NSString *)password {
+    if (password.length == 0) {
+        NSString *secret = ApolloSecretForClientId(username);
+        if (secret.length > 0) {
+            %orig(username, secret);
+            return;
+        }
+    }
+    %orig;
 }
 
 %end
@@ -363,18 +411,22 @@ static const char kARCompletion = '\0';
         return %orig;
     }
 
-    // Prefer the scheme from redirect_uri in the auth URL (set by our
-    // RDKOAuthCredential hook); fall back to callbackURLScheme if not found.
-    NSString *interceptScheme = callbackScheme;
+    // Prefer the full redirect_uri from the auth URL (set by our RDKOAuthCredential
+    // hook) so we can match the *entire* callback URL — scheme, host, and path —
+    // rather than just the scheme. This is required for http/https redirect URIs
+    // (Reddit "Web app" API clients), where every Reddit page navigation shares the
+    // same scheme and scheme-only matching would fire on the wrong navigation.
+    // Falls back to callbackURLScheme (as a bare "scheme://") if redirect_uri is
+    // missing from the auth URL for some reason.
+    NSString *interceptRedirectURI = callbackScheme.length ? [callbackScheme stringByAppendingString:@"://"] : nil;
     for (NSURLQueryItem *item in [NSURLComponents componentsWithURL:authURL resolvingAgainstBaseURL:NO].queryItems) {
         if ([item.name isEqualToString:@"redirect_uri"]) {
-            NSString *s = [NSURL URLWithString:item.value].scheme;
-            if (s.length) interceptScheme = s;
+            if (item.value.length) interceptRedirectURI = item.value;
             break;
         }
     }
 
-    ApolloLog(@"[WebAuth] using WKWebView, intercepting scheme=%@", interceptScheme);
+    ApolloLog(@"[WebAuth] using WKWebView, intercepting redirectURI=%@", interceptRedirectURI);
 
     // Use Apollo's own presentationContextProvider — it's set before start is called
     // and returns the correct window. start is already on the main queue.
@@ -394,7 +446,7 @@ static const char kARCompletion = '\0';
     ApolloLog(@"[WebAuth] presenting from window=%@", window);
 
     ApolloWebAuthViewController *authVC = [[ApolloWebAuthViewController alloc]
-        initWithURL:authURL callbackScheme:interceptScheme completionHandler:completion];
+        initWithURL:authURL redirectURI:interceptRedirectURI completionHandler:completion];
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:authVC];
     nav.modalPresentationStyle = UIModalPresentationFormSheet;
 
@@ -1458,13 +1510,8 @@ static void initializeRandomSources() {
                                     UDKeyRedditClientSecret: @""};
     NSUserDefaults *standardDefaults = [NSUserDefaults standardUserDefaults];
     [standardDefaults registerDefaults:defaultValues];
-
     NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
     NSDictionary *persistentDomain = bundleID.length > 0 ? [standardDefaults persistentDomainForName:bundleID] : nil;
-    if (!persistentDomain[UDKeyShowDeletedComments] && persistentDomain[UDKeyLegacyRevealDeletedComments]) {
-        [standardDefaults setBool:[standardDefaults boolForKey:UDKeyLegacyRevealDeletedComments] forKey:UDKeyShowDeletedComments];
-        persistentDomain = bundleID.length > 0 ? [standardDefaults persistentDomainForName:bundleID] : nil;
-    }
 
     sRedditClientId = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedditClientId] ?: @"" copy];
     sRedditClientSecret = (NSString *)[[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyRedditClientSecret] ?: @"" copy];
@@ -1597,7 +1644,8 @@ static void initializeRandomSources() {
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(NSNotification *note) {
-        [ApolloWebSessionLoginViewController presentExpiredSessionPrompt];
+        NSString *username = note.userInfo[@"username"];
+        [ApolloWebSessionLoginViewController presentExpiredSessionPromptForUsername:username];
     }];
     // Picture-in-Picture hydration.
     sPiPEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPictureInPictureEnabled];
@@ -1744,31 +1792,41 @@ static void initializeRandomSources() {
 
     // Web JSON keychain hydration — must run after the SecItem fishhooks above so
     // the simulator's virtualized keychain is in place (see the deferral note
-    // where sWebJSONEnabled is read). Migrates any legacy NSUserDefaults cookie.
+    // where sWebJSONEnabled is read). Migrates any legacy NSUserDefaults cookie,
+    // then any legacy single-global session, into the per-account store.
     ApolloWebJSONLoadPersistedCredentials();
     if (sWebJSONEnabled) {
-        ApolloLog(@"[WebJSON] enabled at launch, session cookie %@, modhash %@, user %@",
-                  sWebSessionCookieHeader ? @"present" : @"absent",
-                  sWebSessionModhash.length > 0 ? @"present" : @"absent",
-                  sWebSessionUsername ?: @"(none)");
+        NSArray<NSString *> *webSessionUsers = ApolloWebSessionUsernames().allObjects;
+        ApolloLog(@"[WebJSON] enabled at launch, %lu web-session account(s): %@",
+                  (unsigned long)webSessionUsers.count, webSessionUsers);
     }
 
-    // Cold-start identity: when a usable Web JSON session exists but no signed-in
-    // account is loaded, synthesize one now. This runs in %ctor (after the SecItem
-    // keychain hooks above) and therefore before AccountManager reads its accounts
-    // on this launch, so the account tab + write actions (vote/comment) work
-    // without an OAuth account. No-op when an account already exists.
-    if (ApolloWebJSONHasUsableSession()) {
-        @try { ApolloWebJSONSynthesizeSignedInAccount(); }
-        @catch (NSException *e) { ApolloLog(@"[WebJSON][identity] launch synthesis failed: %@", e); }
+    // Cold-start identity: synthesize a signed-in account for every stored
+    // per-account web session that doesn't have one yet. Deliberately NOT gated
+    // on ApolloWebJSONHasUsableSession() — that now resolves by the ACTIVE
+    // account, which at this point in %ctor is necessarily none (AccountManager
+    // hasn't loaded anything yet this launch), so it would be circular for the
+    // very call that's supposed to create the first account. Gating on the
+    // master flag + iterating every stored web-session username instead handles
+    // both the truly-keyless cold start AND a second/third web-session account
+    // harvested in a previous run that hasn't materialized into RedditAccounts2
+    // yet. ApolloWebJSONSynthesizeSignedInAccount is idempotent per-username.
+    if (sWebJSONEnabled) {
+        for (NSString *username in ApolloWebSessionUsernames()) {
+            @try { ApolloWebJSONSynthesizeSignedInAccount(username); }
+            @catch (NSException *e) { ApolloLog(@"[WebJSON][identity] launch synthesis failed for u/%@: %@", username, e); }
+        }
     }
     // This launch loads accounts fresh, so any "restart to activate" state left
     // over from a mid-session web login is now resolved — clear the indicator.
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:UDKeyWebJSONPendingRestart];
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:UDKeyWebJSONPendingRestartUsername];
 
     // Redirect user to Custom API settings if no API credentials are set — but not
-    // when a Web JSON cookie session is driving things (no API key is expected).
-    if ([sRedditClientId length] == 0 && !ApolloWebJSONHasUsableSession()) {
+    // when at least one web-session account is configured (no API key is expected
+    // for those). Checked by configured-account count, not the active account, so
+    // this doesn't depend on which account happens to be current right now.
+    if ([sRedditClientId length] == 0 && !(sWebJSONEnabled && ApolloWebSessionUsernames().count > 0)) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             UIWindow *mainWindow = ((UIWindowScene *)UIApplication.sharedApplication.connectedScenes.anyObject).windows.firstObject;
             UITabBarController *tabBarController = (UITabBarController *)mainWindow.rootViewController;

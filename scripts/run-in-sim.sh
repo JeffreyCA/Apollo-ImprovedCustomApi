@@ -26,10 +26,22 @@
 #                                         # so it matches your installed device build)
 #   scripts/run-in-sim.sh --backup my.zip # preload an Apollo settings backup (API keys + account)
 #
+# Xcode 27 / Device Hub:
+#   - The simulator GUI is now Device Hub (com.apple.dt.Devices), not Simulator.app;
+#     this script opens whichever is present.
+#   - `--drive`'s screenshot is taken via `simctl io screenshot`, not idb — idb's
+#     screenshot RPC doesn't work against Xcode 27's iOS-27 sims. `idb ui describe-all`
+#     (the accessibility tree) is unaffected.
+#   - idb's HID commands (`idb ui tap`/`text`/swipe) are currently broken under Xcode 27:
+#     idb_companion 1.1.8 hardcodes SimulatorKit.framework at
+#     Contents/Developer/Library/PrivateFrameworks/, which Xcode 27 moved to
+#     Contents/SharedFrameworks/. Xcode.app's bundle can't be patched (write-protected),
+#     so for now drive taps manually in Device Hub until idb_companion ships a fix.
+#
 # Env overrides:
 #   BASE_IPA (./apollo-base.ipa)  BUNDLE_ID (com.christianselig.Apollo)
 #   SIM_NAME (Apollo-Sim)  SIM_DEVICE_TYPE (iPhone 16 Pro)  SIM_RUNTIME (newest iOS)
-#   DEPLOY_MIN (14.0)  WORK_DIR (./.sim)  IDB (idb on PATH)
+#   DEPLOY_MIN (15.0)  WORK_DIR (./.sim)  IDB (idb on PATH)
 #   BACKUP_ZIP (--backup)  APPEARANCE (light|dark, --dark/--light)  GLASS (0|1, --glass)
 #
 set -euo pipefail
@@ -40,7 +52,7 @@ BUNDLE_ID="${BUNDLE_ID:-com.christianselig.Apollo}"
 SIM_NAME="${SIM_NAME:-Apollo-Sim}"
 SIM_DEVICE_TYPE="${SIM_DEVICE_TYPE:-iPhone 16 Pro}"
 SIM_RUNTIME="${SIM_RUNTIME:-}"
-DEPLOY_MIN="${DEPLOY_MIN:-14.0}"
+DEPLOY_MIN="${DEPLOY_MIN:-15.0}"
 WORK_DIR="${WORK_DIR:-./.sim}"
 IDB="${IDB:-idb}"
 DEFAULT_BUNDLE_ID="com.christianselig.Apollo"
@@ -256,7 +268,9 @@ if ! xcrun simctl list devices booted | grep -q "$DEV"; then
     log "Booting simulator $DEV"
     xcrun simctl boot "$DEV" 2>/dev/null || true
 fi
-open -a Simulator >/dev/null 2>&1 || true
+# Xcode 27 replaced Simulator.app with Device Hub (bundle id com.apple.dt.Devices);
+# fall back to the old name for Xcode <= 26.
+open -a "Device Hub" >/dev/null 2>&1 || open -a Simulator >/dev/null 2>&1 || true
 echo "$DEV" > "$WORK_DIR/device.txt"
 
 if [[ -n "$APPEARANCE" ]]; then
@@ -327,7 +341,10 @@ if [[ "$DO_LOGS" == 1 ]]; then
 fi
 
 log "Launching $BUNDLE_ID with ApolloReborn.dylib injected"
-SIMCTL_CHILD_DYLD_INSERT_LIBRARIES="$(cd "$WORK_DIR" && pwd)/ApolloReborn.dylib" \
+DYLIB_INJECT="/tmp/ApolloRebornSim-${BUNDLE_ID//[^A-Za-z0-9_.-]/_}.dylib"
+cp "$DYLIB_DST" "$DYLIB_INJECT"
+codesign -f -s - "$DYLIB_INJECT" >/dev/null 2>&1
+SIMCTL_CHILD_DYLD_INSERT_LIBRARIES="$DYLIB_INJECT" \
     xcrun simctl launch "$DEV" "$BUNDLE_ID"
 
 # ----------------------------------------------------------------------------
@@ -339,11 +356,15 @@ if [[ "$DO_DRIVE" == 1 ]]; then
         log "idb: connecting and capturing UI state"
         "$IDB" connect "$DEV" >/dev/null 2>&1 || true
         "$IDB" ui describe-all --udid "$DEV" > "$WORK_DIR/uitree.json" 2>/dev/null || true
-        "$IDB" screenshot --udid "$DEV" "$WORK_DIR/screenshot.png" 2>/dev/null || true
-        log "idb: wrote $WORK_DIR/uitree.json and $WORK_DIR/screenshot.png"
     else
         echo "  (idb not found on PATH; set IDB=/path/to/idb — see AGENTS.md)" >&2
     fi
+    # Screenshot via simctl, not idb: idb_companion's screenshot RPC returns
+    # "No Image available to encode" against Xcode 27 / Device Hub's iOS-27
+    # simulators (its screen-capture path predates Device Hub's renderer).
+    # `simctl io screenshot` is unaffected and works on every Xcode version.
+    xcrun simctl io "$DEV" screenshot "$WORK_DIR/screenshot.png" >/dev/null 2>&1 || true
+    log "idb/simctl: wrote $WORK_DIR/uitree.json and $WORK_DIR/screenshot.png"
 fi
 
 if [[ -n "$LOG_PID" ]]; then

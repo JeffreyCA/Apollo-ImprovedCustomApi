@@ -1,5 +1,7 @@
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloWebJSON.h"
+#import "ApolloWebSessionStore.h"
+#import "ApolloState.h"
 #import "ApolloCommon.h"
 #import "UIWindow+Apollo.h"
 #import "UserDefaultConstants.h"
@@ -31,9 +33,23 @@ static const NSTimeInterval kFarFutureCookieInterval = 10000.0 * 24 * 60 * 60;
 // True while waiting for the user to complete a login; a probe that then reports
 // a logged-in user triggers the harvest.
 @property (nonatomic) BOOL awaitingLogin;
+// When YES, every .reddit.com cookie is cleared before the first page load —
+// used both for adding an additional web-session account (so the shared
+// WKWebView cookie jar doesn't silently reuse an already-signed-in web user)
+// and for re-authenticating a known-expired session (already dead, so there's
+// nothing worth preserving).
+@property (nonatomic) BOOL clearsExistingSessionBeforeLoad;
 @end
 
 @implementation ApolloWebSessionLoginViewController
+
+#pragma mark - Construction
+
++ (instancetype)loginControllerForAdditionalAccount {
+    ApolloWebSessionLoginViewController *vc = [[self alloc] init];
+    vc.clearsExistingSessionBeforeLoad = YES;
+    return vc;
+}
 
 #pragma mark - Expired-session re-auth entry point
 
@@ -51,20 +67,24 @@ static const NSTimeInterval kFarFutureCookieInterval = 10000.0 * 24 * 60 * 60;
     return nil;
 }
 
-+ (void)presentExpiredSessionPrompt {
++ (void)presentExpiredSessionPromptForUsername:(NSString *)username {
     UIViewController *top = [[self _apolloKeyWindow] visibleViewController];
     if (!top) return;
     // Already in the login flow (or some other modal we shouldn't interrupt).
     if ([top isKindOfClass:[ApolloWebSessionLoginViewController class]]) return;
 
+    NSString *who = username.length > 0 ? [NSString stringWithFormat:@"u/%@", username] : @"your account";
     UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:@"Reddit Session Expired"
-                         message:@"Your Reddit web session is no longer valid (Reddit returned its sign-in wall). Sign in again to keep using Apollo without API keys."
+                         message:[NSString stringWithFormat:
+                             @"%@'s Reddit web session is no longer valid (Reddit returned its sign-in wall). Sign in again to keep using it without API keys.", who]
                   preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Sign In Again"
                                               style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *a) {
-        ApolloWebSessionLoginViewController *vc = [[ApolloWebSessionLoginViewController alloc] init];
+        // The expired session is already known-bad, so clear it before
+        // reloading — same rationale as adding an additional account.
+        ApolloWebSessionLoginViewController *vc = [ApolloWebSessionLoginViewController loginControllerForAdditionalAccount];
         UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
         UIViewController *presenter = [[self _apolloKeyWindow] visibleViewController] ?: top;
         [presenter presentViewController:nav animated:YES completion:nil];
@@ -112,6 +132,24 @@ static const NSTimeInterval kFarFutureCookieInterval = 10000.0 * 24 * 60 * 60;
     self.spinner.center = self.view.center;
     [self.view addSubview:self.spinner];
     [self.spinner startAnimating];
+
+    if (self.clearsExistingSessionBeforeLoad) {
+        // Adding another web-session account (or re-authenticating a known-dead
+        // one) shares the same WKWebView persistent cookie jar as every other
+        // web-session account, so the existing login must be cleared FIRST —
+        // otherwise Reddit would just redirect past the form using the cookie
+        // that's already there, silently re-harvesting the wrong account.
+        ApolloLog(@"[WebJSON] Clearing existing session before loading (additional account / re-auth)");
+        __weak typeof(self) weakSelf = self;
+        [self _clearRedditCookiesWithCompletion:^{
+            typeof(self) s = weakSelf;
+            if (!s) return;
+            s.awaitingLogin = YES; // cookies are gone, so /login will show the form, not auto-authenticate
+            ApolloLog(@"[WebJSON] Loading login URL: %@", s.loginURL);
+            [s.webView loadRequest:[NSURLRequest requestWithURL:s.loginURL]];
+        }];
+        return;
+    }
 
     // Load the login page. If the persistent store already holds a logged-in
     // session, Reddit redirects past the form — the post-load /api/me.json probe
@@ -304,17 +342,17 @@ static const NSTimeInterval kFarFutureCookieInterval = 10000.0 * 24 * 60 * 60;
                     if (persistent) [cookieStore setCookie:persistent completionHandler:nil];
                 }
             }
-            // Persist cookie + write token + identity together (all keychain-backed).
-            ApolloWebJSONSetSessionCookieHeader([pairs componentsJoinedByString:@"; "]);
-            ApolloWebJSONSetModhash(modhash);
-            ApolloWebJSONSetUsername(username);
+            // Persist the cookie + write token under THIS username (not a single
+            // global) — ApolloWebSessionStore, keychain-backed — so it coexists
+            // with any other web-session or OAuth accounts already configured.
+            ApolloWebSessionSet(username, [pairs componentsJoinedByString:@"; "], modhash);
             ApolloLog(@"[WebJSON] Harvested session for u/%@, %lu cookies, modhash %@",
                       username, (unsigned long)pairs.count, modhash.length > 0 ? @"captured" : @"absent");
 
             // Synthesize a signed-in account so the account tab + write actions
             // (vote/comment) work — they gate on AccountManager having a current
             // account, which only loads at launch, so a restart is required.
-            BOOL synthesized = ApolloWebJSONSynthesizeSignedInAccount();
+            BOOL synthesized = ApolloWebJSONSynthesizeSignedInAccount(username);
             [s _finishWithUser:username accountSynthesized:synthesized];
         }];
     }];
@@ -377,7 +415,11 @@ static const NSTimeInterval kFarFutureCookieInterval = 10000.0 * 24 * 60 * 60;
     if (!synthesized) { [self _dismiss]; return; }
 
     // Mark the pending state up front; clearing happens at next launch (%ctor).
+    // The username travels alongside the flag — sessions are per-account now, so
+    // this is the only record of WHICH account is pending (sWebSessionUsername is
+    // migration scratch only and isn't touched by this per-account harvest).
     [[NSUserDefaults standardUserDefaults] setBool:YES forKey:UDKeyWebJSONPendingRestart];
+    [[NSUserDefaults standardUserDefaults] setObject:(username ?: @"") forKey:UDKeyWebJSONPendingRestartUsername];
 
     NSString *who = username.length > 0 ? [NSString stringWithFormat:@"u/%@", username] : @"your account";
     UIAlertController *alert = [UIAlertController
@@ -444,6 +486,43 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     [self.spinner stopAnimating];
     if (error.code == NSURLErrorCancelled) return;
     ApolloLog(@"[WebJSON] Navigation failed: %@", error);
+}
+
+#pragma mark - Shared sign-in chooser (reused by the empty-state splash and the account switcher)
+
+void ApolloWebSessionPresentSignInChooser(UIViewController *host, void (^apiKeyHandler)(void)) {
+    apiKeyHandler = [apiKeyHandler copy];
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Add Account"
+                                                                     message:nil
+                                                              preferredStyle:UIAlertControllerStyleActionSheet];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Sign In With API Key"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        if (apiKeyHandler) apiKeyHandler();
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Sign In Without API Key (Experimental)"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        if (!sWebJSONEnabled) {
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:@"API-Key-Free Mode Is Off"
+                                  message:@"Turn on \"API-Key-Free Mode\" in Settings → API Keys first — otherwise a web-session account has no working way to authenticate and every request will hang."
+                           preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [host presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+        BOOL hasExistingWebSession = ApolloWebSessionUsernames().count > 0;
+        ApolloWebSessionLoginViewController *vc = hasExistingWebSession
+            ? [ApolloWebSessionLoginViewController loginControllerForAdditionalAccount]
+            : [ApolloWebSessionLoginViewController new];
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        [host presentViewController:nav animated:YES completion:nil];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = host.view;
+    sheet.popoverPresentationController.sourceRect = host.view.bounds;
+    [host presentViewController:sheet animated:YES completion:nil];
 }
 
 @end

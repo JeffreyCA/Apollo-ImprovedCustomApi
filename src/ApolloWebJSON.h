@@ -48,18 +48,29 @@ void ApolloWebJSONNoteResponse(NSURLRequest *request, NSURLResponse *response);
 // from the RDKResponseSerializer hook with the serializer's output.
 id ApolloWebJSONFixupWriteResponseObject(NSURLResponse *response, id responseObject);
 
-// Updates sWebSessionCookieHeader and persists it to the keychain (nil/empty
-// clears). Called by ApolloWebSessionLoginViewController after harvesting.
-void ApolloWebJSONSetSessionCookieHeader(NSString *cookieHeader);
+// Fixes up the parsed response object for the cookie-routed moderators-list
+// read (redirected by ApolloWebJSONRewriteRequest from the OAuth2-only
+// /api/v1/<sub>/moderators to the legacy /r/<sub>/about/moderators.json, whose
+// response shape is entirely different). Translates old-reddit's
+// {data:{children:[...]}} into the modern {moderators:{...}, moderatorIds:[...]}
+// shape Apollo's model expects. Returns the input unchanged outside Web JSON
+// mode or for any other endpoint. Called from the RDKResponseSerializer hook.
+id ApolloWebJSONFixupModeratorsResponseObject(NSURLResponse *response, id responseObject);
 
-// Updates sWebSessionModhash / sWebSessionUsername and persists them to the
-// keychain (nil/empty clears). Captured from /api/me.json at login time.
-void ApolloWebJSONSetModhash(NSString *modhash);
-void ApolloWebJSONSetUsername(NSString *username);
+// YES if `response` is GET /api/v1/<sub>/moderators_invited and a cookie
+// session is active — this endpoint is OAuth2-only with no cookie-compatible
+// equivalent at all (unlike /moderators), so the caller should override the
+// parsed result to an empty array (and clear any parse/status error) rather
+// than let the underlying 403 surface as a visible error. NO for any other
+// endpoint, or when the active account isn't a web-session account (the real
+// OAuth path is untouched). Called from the RDKResponseSerializer hook.
+BOOL ApolloWebJSONShouldStubInvitedModerators(NSURLResponse *response);
 
-// Hydrates sWebSessionCookieHeader / sWebSessionModhash / sWebSessionUsername
-// from the keychain, migrating any legacy cookie value out of NSUserDefaults.
-// Call once from %ctor after sWebJSONEnabled is read.
+// Hydrates the legacy single-session globals from the keychain, migrating any
+// legacy NSUserDefaults cookie value, then any legacy single-global session,
+// into the per-account ApolloWebSessionStore (see that file's harvest path for
+// where every CURRENT session write actually goes). Call once from %ctor after
+// sWebJSONEnabled is read.
 void ApolloWebJSONLoadPersistedCredentials(void);
 
 // YES when Web JSON mode is on and a session cookie has been harvested — i.e.
@@ -67,19 +78,25 @@ void ApolloWebJSONLoadPersistedCredentials(void);
 // to short-circuit the OAuth token path.
 BOOL ApolloWebJSONHasUsableSession(void);
 
-// Synthesizes a signed-in Reddit account from the harvested cookie identity so
-// Apollo's AccountManager loads it on next launch — making the account tab show
-// the user and unblocking write actions (vote/comment), which gate on
-// AccountManager having a current account, not on RDKClient auth state. Writes
-// the `RedditAccounts2` ([RDKClient]) NSUserDefaults blob, the `2RedditAccounts2`
-// Valet keychain blob ([[String:String]]), and `CurrentRedditAccountIndex`.
-// No-op (returns NO) if there's no usable session or an account already exists.
-// Implemented in ApolloWebJSONIdentity.xm. The caller should prompt a relaunch:
-// AccountManager loads accounts once per launch.
-BOOL ApolloWebJSONSynthesizeSignedInAccount(void);
+// Synthesizes a signed-in Reddit account for `username` from its stored
+// per-account web session (ApolloWebSessionStore) so Apollo's AccountManager
+// loads it on next launch — making the account tab show the user and
+// unblocking write actions (vote/comment), which gate on AccountManager having
+// a current account, not on RDKClient auth state. Appends to (never replaces)
+// the `RedditAccounts2` ([RDKClient]) NSUserDefaults array and the
+// `2RedditAccounts2` Valet keychain array ([[String:String]]) at the same
+// index, so existing accounts (OAuth or other web-session accounts) survive,
+// and sets `CurrentRedditAccountIndex` to the new account's index. No-op
+// (returns NO) if `username` has no stored web session or already has an
+// account on disk. Implemented in ApolloWebJSONIdentity.xm. The caller should
+// prompt a relaunch: AccountManager loads accounts once per launch.
+BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username);
 
 // Posted (on the main thread) the first time a harvested session is observed to
-// have expired/been revoked. The settings UI listens to offer re-login.
+// have expired/been revoked, with userInfo[@"username"] set to the (lowercased)
+// account it expired for — expiry is now tracked per-account, since a session
+// can coexist with other OAuth or web-session accounts. The settings UI/Tweak.xm
+// listens to offer re-login for that specific account.
 extern NSString *const ApolloWebJSONSessionExpiredNotification;
 
 // Sentinel access-token string the identity layer (ApolloWebJSONIdentity.xm)
@@ -88,6 +105,14 @@ extern NSString *const ApolloWebJSONSessionExpiredNotification;
 // Authorization), but it rides outgoing Authorization headers — so the bearer
 // capture path must ignore it to avoid poisoning sLatestRedditBearerToken.
 extern NSString *const ApolloWebJSONSyntheticBearerToken;
+
+// Returns a copy of `url` with the internal probe fragment applied. The
+// fragment is stripped by NSURLSession before transmission so it never reaches
+// Reddit's servers; the rewrite and block-page counter hooks read it from the
+// in-memory NSURLRequest to bail before processing. Use this (instead of an
+// HTTP header) to mark any request that the Web JSON layer or its clients
+// (e.g. ApolloRedditMediaUpload.m) issue themselves with the cookie already set.
+NSURL *ApolloWebJSONProbeURL(NSURL *url);
 
 #ifdef __cplusplus
 }

@@ -12,7 +12,7 @@ static NSString *ARExtractParam(NSString *urlString, NSString *name);
 
 @interface ApolloManualSignInViewController ()
 @property (nonatomic, copy) NSURL *authURL;
-@property (nonatomic, copy) NSString *callbackScheme;
+@property (nonatomic, copy) NSString *redirectURI;
 @property (nonatomic, copy) void (^onComplete)(NSURL *callbackURL);
 @property (nonatomic, strong) UITextView *codeTextView;
 @property (nonatomic, strong) UIScrollView *scrollView;
@@ -21,12 +21,12 @@ static NSString *ARExtractParam(NSString *urlString, NSString *name);
 @implementation ApolloManualSignInViewController
 
 - (instancetype)initWithAuthURL:(NSURL *)authURL
-                 callbackScheme:(NSString *)scheme
+                    redirectURI:(NSString *)redirectURI
                      onComplete:(void (^)(NSURL *callbackURL))onComplete {
     self = [super init];
     if (self) {
         _authURL = [authURL copy];
-        _callbackScheme = [scheme copy];
+        _redirectURI = [redirectURI copy];
         _onComplete = [onComplete copy];
     }
     return self;
@@ -227,7 +227,7 @@ static NSString *ARExtractParam(NSString *urlString, NSString *name);
         }
     }
     if (redirectURI.length == 0) {
-        redirectURI = [NSString stringWithFormat:@"%@://", self.callbackScheme ?: @"apollo"];
+        redirectURI = self.redirectURI ?: @"apollo://";
     }
 
     NSURLComponents *cb = [NSURLComponents componentsWithString:redirectURI];
@@ -311,10 +311,7 @@ static NSString *ARExtractParam(NSString *urlString, NSString *name) {
     } else {
         [b setTitle:title forState:UIControlStateNormal];
         b.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
         b.contentEdgeInsets = UIEdgeInsetsMake(12, 16, 12, 16); // iOS 14 fallback; ignored under UIButtonConfiguration
-#pragma clang diagnostic pop
         b.layer.cornerRadius = 12;
         b.clipsToBounds = YES;
         UIColor *tint = self.view.tintColor ?: [UIColor systemBlueColor];

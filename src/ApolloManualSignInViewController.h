@@ -8,7 +8,7 @@
 @interface ApolloManualSignInViewController : UIViewController
 
 - (instancetype)initWithAuthURL:(NSURL *)authURL
-                 callbackScheme:(NSString *)scheme
+                    redirectURI:(NSString *)redirectURI
                      onComplete:(void (^)(NSURL *callbackURL))onComplete;
 
 @end

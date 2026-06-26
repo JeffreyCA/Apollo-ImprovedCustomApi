@@ -9,6 +9,7 @@
 #import "ApolloSubredditInfoCache.h"
 #import "ApolloBannedProfile.h"
 #import "ApolloProfileSocialLinks.h"
+#import "ApolloAccountCredentials.h"
 
 static NSString *const ApolloUserAvatarsToggleChangedNotification = @"ApolloUserAvatarsToggleChangedNotification";
 static NSString *const ApolloProfileTabAvatarIconChangedNotification = @"ApolloProfileTabAvatarIconChangedNotification";
@@ -147,6 +148,9 @@ static void ApolloProfileScheduleTabAvatarRefresh(NSString *reason);
         _editProfileButton.titleLabel.adjustsFontForContentSizeCategory = YES;
         _editProfileButton.backgroundColor = [UIColor tertiarySystemFillColor];
         _editProfileButton.layer.cornerRadius = 13.0;
+        // contentEdgeInsets is deprecated (iOS 15+) in favor of UIButtonConfiguration, but the
+        // device build floors at iOS 14 (still-supported devices), where UIButtonConfiguration
+        // doesn't exist and would crash.
         _editProfileButton.contentEdgeInsets = UIEdgeInsetsMake(4.0, 12.0, 4.0, 12.0);
         [_editProfileButton addTarget:self action:@selector(apollo_editProfileTapped) forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:_editProfileButton];
@@ -1696,7 +1700,7 @@ static void ApolloProfileRefreshControllersForUsername(NSString *username) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:128];
         NSUInteger refreshCount = 0;
-        for (UIWindow *window in [UIApplication sharedApplication].windows) {
+        for (UIWindow *window in ApolloAllWindows()) {
             ApolloProfileRefreshViewControllersInTree(window.rootViewController, username, visited, &refreshCount);
         }
         if (username.length > 0 || refreshCount > 0) {
@@ -2009,7 +2013,7 @@ static void ApolloProfileApplyTabAvatarInTree(UIViewController *viewController, 
 static void ApolloProfileApplyTabAvatarForVisibleWindows(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:32];
-        for (UIWindow *window in [UIApplication sharedApplication].windows) {
+        for (UIWindow *window in ApolloAllWindows()) {
             ApolloProfileApplyTabAvatarInTree(window.rootViewController, visited);
         }
     });
@@ -2523,15 +2527,38 @@ static void ApolloAvatarApplySubredditIconToSharePreview(id postInfo, NSString *
 
 %end
 
+// The first time an account's username appears with no per-account credential
+// override yet (a brand new sign-in, or an existing account's first launch
+// under a build with this feature), pin it to whatever Reddit API client is
+// the CURRENT default. That "session was issued under this key" snapshot is
+// exactly what makes per-account credentials useful: if the user later
+// changes the global default key (e.g. to onboard a different account), this
+// account's refresh keeps using the key it actually has a valid
+// refresh_token for — Reddit binds refresh tokens to the issuing client_id,
+// so naively following a changed global default 400s with invalid_grant
+// (see the AFHTTPRequestSerializer hook in Tweak.xm for the other half of
+// this fix). Never overwrites an existing override — only fills the gap once.
+static void ApolloPinAccountToCurrentDefaultCredentialsIfNeeded(id currentUser) {
+    NSString *username = nil;
+    @try { username = [currentUser valueForKey:@"username"]; }
+    @catch (__unused NSException *e) { return; }
+    if (![username isKindOfClass:[NSString class]] || username.length == 0) return;
+    if (ApolloAccountCredentialsFor(username) != nil) return;
+
+    ApolloAccountCredentialsSet(username, sRedditClientId, sRedditClientSecret, sRedirectURI);
+}
+
 %hook RDKClient
 
 - (void)setCurrentUser:(id)currentUser {
     %orig(currentUser);
+    ApolloPinAccountToCurrentDefaultCredentialsIfNeeded(currentUser);
     ApolloProfileScheduleAccountChangeTabAvatarRefresh(@"RDKClient currentUser");
 }
 
 - (void)updateCurrentUserWithNewUser:(id)newUser {
     %orig(newUser);
+    ApolloPinAccountToCurrentDefaultCredentialsIfNeeded(newUser);
     ApolloProfileScheduleAccountChangeTabAvatarRefresh(@"RDKClient user update");
 }
 

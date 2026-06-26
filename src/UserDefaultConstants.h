@@ -8,6 +8,11 @@ static NSString *const UDKeyImgurClientId = @"ImgurApiClientId";
 static NSString *const UDKeyGiphyAPIKey = @"GiphyAPIKey";
 static NSString *const UDKeyImageChestAPIToken = @"ImageChestAPIToken";
 static NSString *const UDKeyRedirectURI = @"RedirectURI";
+// Per-account Reddit OAuth credential overrides (see ApolloAccountCredentials.{h,m}).
+// Flat dictionary: lowercased username -> {clientId, clientSecret, redirectURI}.
+// An account with no entry here falls back to the global client id/secret/redirect
+// URI above.
+static NSString *const UDKeyPerAccountCredentials = @"PerAccountAPICredentials";
 static NSString *const UDKeyUseCustomOAuthSignIn = @"UseCustomOAuthSignIn";
 static NSString *const UDKeyUserAgent = @"UserAgent";
 static NSString *const UDKeyBlockAnnouncements = @"DisableApollonouncements";
@@ -147,6 +152,12 @@ static NSString *const UDKeyWebSessionCookieHeader = @"WebSessionCookieHeader";
 // "restart to activate" indicator on the Web Session Login settings row, and is
 // cleared in %ctor on the next launch (where the fresh account load resolves it).
 static NSString *const UDKeyWebJSONPendingRestart = @"WebJSONPendingRestart";
+// The username the pending-restart synthesis above was for. Sessions are now
+// per-account (ApolloWebSessionStore), so this is the only way the "quit &
+// reopen to activate" UI knows WHICH account to name — the single global
+// sWebSessionUsername is migration scratch only and isn't touched by a fresh
+// per-account harvest. Set alongside UDKeyWebJSONPendingRestart; cleared with it.
+static NSString *const UDKeyWebJSONPendingRestartUsername = @"WebJSONPendingRestartUsername";
 
 // Self-hosted notification backend (forked apollo-backend). Empty disables —
 // the legacy hosts remain in the blocklist and requests are silently dropped.

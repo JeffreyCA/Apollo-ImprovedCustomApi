@@ -453,7 +453,7 @@ static UIViewController *ApolloTagPresenterForCell(id cell) {
     UIView *view = ApolloTagCellView(cell);
     UIWindow *window = view.window;
     if (!window) {
-        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        for (UIWindow *w in ApolloAllWindows()) {
             if (w.isKeyWindow) { window = w; break; }
         }
     }
@@ -532,7 +532,7 @@ static void ApolloTagRefreshAllVisibleCells(void) {
             for (UIView *sub in root.subviews) walk(sub);
         };
         walk = localWalk;
-        for (UIWindow *window in [UIApplication sharedApplication].windows) {
+        for (UIWindow *window in ApolloAllWindows()) {
             walk(window);
         }
         walk = nil;

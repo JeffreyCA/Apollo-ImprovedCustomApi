@@ -2,6 +2,7 @@
 #import "ApolloCommon.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
+#import "ApolloAccountCredentials.h"
 
 // Legacy hosts that previously routed to christianselig/apollo-backend. All
 // three are blocked by the existing blocklist in Tweak.xm; when a backend URL
@@ -134,18 +135,30 @@ static BOOL ApolloPathRequiresRegistrationToken(NSString *path) {
 // accountRegistrationRequest struct requires. Snake_case keys match the
 // struct's explicit json tags. Empty strings are sent for unset settings so
 // the backend returns a clear 422 instead of the tweak silently dropping.
-static NSDictionary<NSString *, NSString *> *ApolloRedditCredentialsForRegistration(void) {
+//
+// Resolved per-account: `username` (already present on every account-upsert
+// body item — it's Apollo's own registration payload, one item per account)
+// looks up that account's stored credential override via
+// ApolloAccountCredentialsFor; missing/empty fields fall back to the global
+// default. This keeps backend push registration correct even when different
+// accounts use different Reddit API clients (see ApolloAccountCredentials.h).
+static NSDictionary<NSString *, NSString *> *ApolloRedditCredentialsForRegistration(NSString *username) {
+    ApolloAccountCredentialEntry *entry = username.length > 0 ? ApolloAccountCredentialsFor(username) : nil;
+    NSString *clientId = (entry && entry.clientId.length > 0) ? entry.clientId : (sRedditClientId ?: @"");
+    NSString *clientSecret = (entry && entry.clientSecret.length > 0) ? entry.clientSecret : (sRedditClientSecret ?: @"");
+    NSString *redirectURI = (entry && entry.redirectURI.length > 0) ? entry.redirectURI : (sRedirectURI ?: @"");
     return @{
-        @"reddit_client_id":     sRedditClientId     ?: @"",
-        @"reddit_client_secret": sRedditClientSecret ?: @"",
-        @"reddit_redirect_uri":  sRedirectURI        ?: @"",
-        @"reddit_user_agent":    sUserAgent          ?: @"",
+        @"reddit_client_id":     clientId,
+        @"reddit_client_secret": clientSecret,
+        @"reddit_redirect_uri":  redirectURI,
+        @"reddit_user_agent":    sUserAgent ?: @"",
     };
 }
 
 static NSDictionary *ApolloAccountObjectWithRedditCredentials(NSDictionary *original) {
     NSMutableDictionary *augmented = [original mutableCopy] ?: [NSMutableDictionary dictionary];
-    NSDictionary<NSString *, NSString *> *creds = ApolloRedditCredentialsForRegistration();
+    NSString *username = [original[@"username"] isKindOfClass:[NSString class]] ? original[@"username"] : nil;
+    NSDictionary<NSString *, NSString *> *creds = ApolloRedditCredentialsForRegistration(username);
     for (NSString *key in creds) {
         // Don't clobber a field Apollo's body somehow already provides — the
         // user's setting is the fallback, not an override.
