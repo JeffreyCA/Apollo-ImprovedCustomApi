@@ -132,6 +132,14 @@ static void ApolloChatSetCGSizeIvar(id obj, const char *name, CGSize sz) {
     *(CGSize *)(base + off) = sz;
 }
 
+// Read a CGSize-typed struct ivar by name.
+static CGSize ApolloChatGetCGSizeIvar(id obj, const char *name) {
+    if (!obj || !name) return CGSizeZero;
+    Ivar iv = class_getInstanceVariable(object_getClass(obj), name);
+    if (!iv) return CGSizeZero;
+    return *(CGSize *)((char *)(__bridge void *)obj + ivar_getOffset(iv));
+}
+
 static NSString *ApolloChatIndexKey(NSIndexPath *ip) {
     return [NSString stringWithFormat:@"%ld.%ld", (long)ip.section, (long)ip.item];
 }
@@ -946,11 +954,19 @@ static BOOL ApolloChatRunIsEmoji(NSString *s) {
     NSArray *attrs = %orig;
     @try {
         NSMutableDictionary *map = objc_getAssociatedObject([(UICollectionViewLayout *)self collectionView], &kApolloChatImgSizeMapKey);
-        if (map.count) {
-            for (UICollectionViewLayoutAttributes *la in attrs) {
-                if (![la isKindOfClass:[UICollectionViewLayoutAttributes class]]) continue;
-                NSValue *mv = map[ApolloChatIndexKey(la.indexPath)];
-                if (mv) ApolloChatSetCGSizeIvar(la, "messageContainerSize", mv.CGSizeValue);
+        for (UICollectionViewLayoutAttributes *la in attrs) {
+            if (![la isKindOfClass:[UICollectionViewLayoutAttributes class]]) continue;
+            NSString *key = ApolloChatIndexKey(la.indexPath);
+            NSValue *mv = map[key];
+            if (mv) {
+                ApolloChatSetCGSizeIvar(la, "messageContainerSize", mv.CGSizeValue);
+            } else if (sShowUserAvatars) {
+                // Widen text bubbles so the avatar prefix doesn't push the timestamp onto
+                // a second header line where it hides the message body.
+                CGSize cur = ApolloChatGetCGSizeIvar(la, "messageContainerSize");
+                if (cur.width > 0)
+                    ApolloChatSetCGSizeIvar(la, "messageContainerSize",
+                        CGSizeMake(cur.width + kApolloChatAvatarDiameter + 6.0, cur.height));
             }
         }
     } @catch (__unused id e) {}
@@ -960,9 +976,17 @@ static BOOL ApolloChatRunIsEmoji(NSString *s) {
     id la = %orig;
     @try {
         NSMutableDictionary *map = objc_getAssociatedObject([(UICollectionViewLayout *)self collectionView], &kApolloChatImgSizeMapKey);
-        NSValue *mv = map[ApolloChatIndexKey(indexPath)];
-        if (mv && [la isKindOfClass:[UICollectionViewLayoutAttributes class]])
-            ApolloChatSetCGSizeIvar(la, "messageContainerSize", mv.CGSizeValue);
+        if ([la isKindOfClass:[UICollectionViewLayoutAttributes class]]) {
+            NSValue *mv = map[ApolloChatIndexKey(indexPath)];
+            if (mv) {
+                ApolloChatSetCGSizeIvar(la, "messageContainerSize", mv.CGSizeValue);
+            } else if (sShowUserAvatars) {
+                CGSize cur = ApolloChatGetCGSizeIvar(la, "messageContainerSize");
+                if (cur.width > 0)
+                    ApolloChatSetCGSizeIvar(la, "messageContainerSize",
+                        CGSizeMake(cur.width + kApolloChatAvatarDiameter + 6.0, cur.height));
+            }
+        }
     } @catch (__unused id e) {}
     return la;
 }
