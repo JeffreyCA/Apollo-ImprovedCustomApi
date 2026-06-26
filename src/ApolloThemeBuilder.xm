@@ -25,6 +25,7 @@
 #import <UIKit/UIKit.h>
 #import <math.h>
 #import <mach-o/dyld.h>
+#import <mach-o/loader.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <os/lock.h>
@@ -135,8 +136,33 @@ static void FindApolloImage(void) {
         if (!name) continue;
         size_t len = strlen(name);
         if (len >= 7 && strcmp(name + len - 7, "/Apollo") == 0) {
-            sApolloStart = (uintptr_t)_dyld_get_image_header(i);
-            sApolloEnd = sApolloStart + 0x8000000;
+            const struct mach_header *mh = _dyld_get_image_header(i);
+            intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+            sApolloStart = (uintptr_t)mh;
+            // Bound Apollo by its ACTUAL mapped extent (max segment vmaddr+vmsize),
+            // not a fixed 128MB window. The old `start + 0x8000000` guess could,
+            // depending on dyld's layout, swallow the separately-loaded tweak dylib
+            // (or a system framework) — misclassifying their colours as Apollo's and
+            // remapping the tweak's own #000000 swatch/picker into an auto-contrast
+            // gray (#7A7A7A). The real image extent can't overlap another image, so
+            // it precisely excludes the tweak.
+            uintptr_t maxEnd = sApolloStart;
+            const uint8_t *p = (const uint8_t *)mh + sizeof(struct mach_header_64);
+            for (uint32_t c = 0; c < mh->ncmds; c++) {
+                const struct load_command *lc = (const struct load_command *)p;
+                if (lc->cmd == LC_SEGMENT_64) {
+                    const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+                    if (strcmp(seg->segname, SEG_PAGEZERO) != 0) {
+                        uintptr_t end = (uintptr_t)((intptr_t)seg->vmaddr + slide) + (uintptr_t)seg->vmsize;
+                        if (end > maxEnd) maxEnd = end;
+                    }
+                }
+                p += lc->cmdsize;
+            }
+            // Fallback: if no segments were parsed (unexpected for a normal arm64
+            // image), keep the old coarse window so the remap still functions rather
+            // than ending up with an empty range that disables the theme entirely.
+            sApolloEnd = (maxEnd > sApolloStart) ? maxEnd : (sApolloStart + 0x8000000);
             return;
         }
     }
