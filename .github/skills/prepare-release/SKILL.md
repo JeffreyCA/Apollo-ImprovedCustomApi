@@ -102,6 +102,7 @@ Insert it as the new top entry of the footer block (entries are ordered newest-f
 ### Bullet style
 
 - **User-facing language.** Describe what the user sees or can do, not the implementation. Drop internal mechanics (thread-safety details, debounce intervals, refactor notes, rebase context).
+- **Keep it to roughly one sentence.** Each bullet should read at a glance, like the surrounding entries. Resist piling on rationale, background, or every edge case — even for nuanced fixes, state the before/after and the one caveat that matters, then stop. Deep explanation belongs in the README or `docs/`, not the changelog. If a bullet grows into multiple sentences with parentheticals, it's too verbose; trim it or split out a sub-bullet.
 - **Bold the feature name or setting path** the first time it appears: `**Inline Media Previews**`, `**Settings > Custom API > Media**`.
 - **Lead with a verb**: "Add", "Fix", "Improve", "Show", "Replace".
 - **Indented sub-bullets** for configuration details, sub-features, or caveats tied to the parent bullet.
