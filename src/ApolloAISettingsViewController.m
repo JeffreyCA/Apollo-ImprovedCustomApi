@@ -105,7 +105,7 @@ typedef NS_ENUM(NSInteger, ApolloAISettingsSection) {
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section == ApolloAISettingsSectionGeneral) {
-        return @"Apollo AI runs entirely on-device using Apple Intelligence. No post or comment text is sent to an external AI service.";
+        return @"Summaries are generated entirely on-device using Apple Intelligence — no post or comment text is sent to an external AI service. Summarizing a linked article does fetch that page from its source website, which happens automatically when you open a thread unless Tap to Summarize is on.";
     }
     if (section == ApolloAISettingsSectionSummaries) {
         return @"Tap to Summarize generates only the card you request. Leave it off to generate enabled summaries automatically when opening a thread.";

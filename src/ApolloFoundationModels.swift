@@ -37,6 +37,7 @@ public final class ApolloFoundationModels: NSObject {
     /// them. Prewarming the actual instructed session avoids paying session
     /// setup and guardrail preparation again when generation starts.
     private var preparedSessions: [String: Any] = [:]
+    private var preparedInstructions: [String: String] = [:]
     private var activeTasks: [String: Task<Void, Never>] = [:]
 
     /// The on-device model used for every summary. We deliberately do NOT use
@@ -103,9 +104,19 @@ public final class ApolloFoundationModels: NSObject {
     @objc public func prepareSession(_ identifier: String, instructions: String) {
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *) {
-            guard !identifier.isEmpty, preparedSessions[identifier] == nil else { return }
+            guard !identifier.isEmpty else { return }
+            // Keep an already-prewarmed session only if it was staged under the
+            // SAME instructions. A post box prewarmed with the Post prompt can
+            // later be asked to summarize post+article under the Both prompt
+            // (they share one request id), so re-prepare when the instructions
+            // differ instead of silently reusing the stale prompt.
+            if preparedSessions[identifier] != nil,
+               preparedInstructions[identifier] == instructions {
+                return
+            }
             let session = LanguageModelSession(model: Self.summarizationModel(), instructions: instructions)
             preparedSessions[identifier] = session
+            preparedInstructions[identifier] = instructions
             session.prewarm()
         }
         #endif
@@ -113,10 +124,12 @@ public final class ApolloFoundationModels: NSObject {
 
     @objc public func discardPreparedSession(_ identifier: String) {
         preparedSessions.removeValue(forKey: identifier)
+        preparedInstructions.removeValue(forKey: identifier)
     }
 
     @objc public func cancelRequest(_ identifier: String) {
         preparedSessions.removeValue(forKey: identifier)
+        preparedInstructions.removeValue(forKey: identifier)
         activeTasks.removeValue(forKey: identifier)?.cancel()
     }
 
@@ -160,8 +173,13 @@ public final class ApolloFoundationModels: NSObject {
             )
             do {
                 let startedAt = ContinuousClock.now
-                // Reuse the prewarmed prepared session if one was staged.
-                var session = (preparedSessions.removeValue(forKey: identifier) as? LanguageModelSession) ?? makeSession()
+                // Reuse the prewarmed prepared session only when it was staged
+                // under the SAME instructions; otherwise the requested mode's
+                // prompt (e.g. Both for a post+article summary) would be silently
+                // ignored in favor of the prewarm's instructions.
+                let prepared = preparedSessions.removeValue(forKey: identifier) as? LanguageModelSession
+                let preparedMatches = preparedInstructions.removeValue(forKey: identifier) == instructions
+                var session = (preparedMatches ? prepared : nil) ?? makeSession()
                 var latest = ""
                 var loggedFirstToken = false
                 // The model very occasionally streams nothing and ends cleanly
@@ -198,6 +216,7 @@ public final class ApolloFoundationModels: NSObject {
                 onComplete(latest, nil)
             } catch {
                 preparedSessions.removeValue(forKey: identifier)
+                preparedInstructions.removeValue(forKey: identifier)
                 if Task.isCancelled {
                     onComplete(nil, Self.makeError(code: 6, message: "Generation cancelled"))
                 } else {
