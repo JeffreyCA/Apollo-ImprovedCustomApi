@@ -4,9 +4,42 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v3.3.0] - 2026-06-26
+
+### Features
+
+- Add a **Theme Builder** in **Settings > Appearance > Themes** to create, save, and manage multiple custom themes that behave like Apollo's built-in themes, including importing and exporting themes to share them (#454: @jordanearle, @icpryde)
+- Add **Picture-in-Picture** for videos and GIFs — a floating in-app miniplayer that keeps playing as you scroll through the comments (drag to reposition, swipe to hide, double-tap to resize), with optional handoff to the iOS system PiP so playback continues when you leave Apollo (#467: @JeffreyCA)
+- New experimental **API-Key-Free Mode** in **Settings > Apollo Reborn > API Keys** to use Apollo without API keys by signing in to reddit.com directly! Supports browsing, voting, commenting, and saving. (#442: @nickclyde)
+  - In this mode, images attached to comments and posts now upload straight to Reddit's own CDN instead of falling back to Imgur (#495: @nickclyde)
+- Add **Img Chest** as a media upload host in **Settings > Apollo Reborn > Media Upload Host** for single images and albums, with thumbnails and host labels in **Manage Uploads**, the ability to delete Img Chest uploads, and an improved album viewer with share, Save All, an accurate loading percentage, and swipe-to-dismiss (#434: @icpryde)
+- Revamp the **Subreddit Sidebar** to render new-Reddit's structured content above the existing markdown — community stats (subscribers and created date), a **Search by Flair** chip row that jumps straight to a flair's posts, related communities, resource links, and a table of contents (#462: @icpryde)
+- Add an opt-in **Community Highlights** carousel in **Settings > Apollo Reborn > Subreddits**, showing a subreddit's pinned posts as tappable cards at the top of the feed, with tap-to-collapse, spoiler blurring, and an optional **Load All Highlights** mode that surfaces the full set of pinned posts (#463, #499: @icpryde)
+- Add **Apple's on-device Translation** (iOS 18+) as a translation provider in **Settings > Translation > Primary Provider**, alongside Google and LibreTranslate (#460: @icpryde)
+- Show a user's **Social Links** on their profile page (#465, #496, #498: @icpryde)
+- Move **Rich Link Previews** into its own settings section with a combined Body, Comments, and Color sub-screen, and replace the preset card colors with a full color picker (grid, spectrum, sliders, eyedropper, hex) plus quick swatches, a live card preview, and exact full-fill card coloring with automatic text contrast (#504: @icpryde)
+- Add **Include Link** and **Share as Video** options to **Share as Image** — attach the post's Reddit link alongside the rendered image, or export the post as a video (#484: @icpryde)
+- Add **Inbox Comment Scroll** so tapping a reply in the Inbox lands on the linked comment instead of the top of the post (#457: @icpryde)
+- Improve the **user flair selector** to handle old (CSS-class) and emoji-based flair systems, add a custom-emoji picker, and show clearer empty states instead of errors or walls of blank rows (#474: @icpryde)
+- Show **moderator avatars** in the subreddit Mods list (#459: @icpryde)
+- Add **0.75× and 1.25× playback speeds** to the fullscreen video player (#476: @icpryde)
+- Add a **hold-for-2× gesture** — press and hold the right side of a fullscreen video to play at 2× while held, then release to restore the previous speed (#479: @icpryde)
+
 ### Fixes
 
-- Replace the alarming "Error Loading Notifications — contact developer" alert on **sideloaded (free Apple ID) builds** (`no valid "aps-environment" entitlement string found for application`) with a clear, honest explanation. Apple only grants the push entitlement to paid Apple Developer accounts, so push, watchers, and inbox alerts can never be delivered to a free-account sideload. The tweak now detects that signing-time limitation up front, swaps the Notifications settings screen for a non-interactive "Notifications Unavailable" explanation (so nobody gets false hope or is told to "contact developer" for something no developer can fix), and suppresses the misleading error. Builds that can actually receive push (paid-account sideloads, or the App Store binary on a jailbreak) are detected via the entitlement and left untouched; genuine errors (offline, rate limiting) are unaffected.
+- Replace the alarming "Error Loading Notifications — contact developer" alert on **sideloaded (free Apple ID) builds** (`no valid "aps-environment" entitlement string found for application`) with a clear, honest explanation. Apple only grants the push entitlement to paid Apple Developer accounts, so push, watchers, and inbox alerts can never be delivered to a free-account sideload. The tweak now detects that signing-time limitation up front, swaps the Notifications settings screen for a non-interactive "Notifications Unavailable" explanation (so nobody gets false hope or is told to "contact developer" for something no developer can fix), and suppresses the misleading error. Builds that can actually receive push (paid-account sideloads, or the App Store binary on a jailbreak) are detected via the entitlement and left untouched; genuine errors (offline, rate limiting) are unaffected. (#492: @federgilad)
+- Make **deleted comment recovery** faster and more reliable, with cleaner labels on recovered comments and a heads-up when enabling it that comments may load slower (#418: @nunoo)
+- Fix the tweak's settings screens only following the system light/dark mode instead of **Apollo's own color theme**, along with related cell coloring glitches when switching appearance (#440: @iCrazeiOS)
+- Keep a profile's **avatar, banner, bio, and social links** visible even when **Show User Profile Pictures** is turned off (#487: @icpryde)
+- Rework the **feed and subreddit search bar** so the navigation bar fully hides on iOS 26 instead of floating half-visible, and add an opt-in **Keep Search Bar In Place** mode in **Settings > Apollo Reborn > General** (#451: @icpryde)
+- Fix **link-preview card text** showing raw HTML entities like `&amp;` (#461: @icpryde)
+- Fix the **SUBREDDIT SUGGESTIONS** header overlapping the first row on the Search tab (#478: @icpryde)
+- Fix the **modern subreddit list** tinting the whole navigation bar when the Home row is selected (#453: @icpryde)
+- Fix the **profile-picture tab icon** greying out after opening a direct chat room from the Inbox (#458: @icpryde)
+- Fix the **translation globe** spacing in the Liquid Glass navigation bar (#455: @icpryde)
+- Fix **Pixel Pals** opening their menu over media, web views, and modals (#506: @icpryde)
+- Hide the redundant **GIF** caption beneath inline GIFs (#464: @icpryde)
+- Improve the **manual sign-in fallback** UI on older iOS versions (#480: @Alstruit)
 
 ## [v3.2.0] - 2026-06-14
 
@@ -15,23 +48,18 @@ All notable changes to this project will be documented in this file.
 - New **Apollo Reborn Widgets** — nine Home Screen, Lock Screen, and StandBy widgets (Showerthoughts, Jokes, Post, Feed, Photo, Shortcuts, Apollo Actions, Calendar, and Headline) (#406: @jordanearle)
   - Most widgets read Reddit through your API key: copy a one-time setup code from **Settings > Apollo Reborn > Copy Widget Setup Code** and paste it into any widget, and the rest pick it up automatically
   - Tapping a widget opens the post or subreddit in Apollo; included in the standard build but not the no-extensions variant
-- PENDING: New experimental **API-Key-Free Mode** in **Settings > Apollo Reborn > API Keys** to use Apollo without API keys by signing in to reddit.com directly! Supports browsing, voting, commenting, and saving. (#442: @nickclyde)
-- PENDING: Add **Img Chest** as a media upload host in **Settings > Apollo Reborn > Media Upload Host** for single images and albums, with thumbnails and host labels in **Manage Uploads**, the ability to delete Img Chest uploads, and an improved album viewer with share, Save All, an accurate loading percentage, and swipe-to-dismiss (#434: @icpryde)
-- PENDING: Add a **Universal OAuth Sign-In** toggle in **Settings > Apollo Reborn** (on by default) to fall back to Apollo's native sign-in if the in-app login causes trouble, and ship released IPAs with the `dystopia` and `redreader` sign-in URL schemes already registered so the shared API key works without manually editing Info.plist (#432: @JeffreyCA)
+- Add a **Universal OAuth Sign-In** toggle in **Settings > Apollo Reborn** (on by default) to fall back to Apollo's native sign-in if the in-app login causes trouble, and ship released IPAs with the `dystopia` and `redreader` sign-in URL schemes already registered so the shared API key works without manually editing Info.plist (#432: @JeffreyCA)
 - Add a **manual sign-in fallback** for older iOS versions that can't load Reddit's login page, using an external browser and an Apollo Reborn userscript to paste a sign-in code back into Apollo (#430: @DeltAndy123; sign-in keyboard improvements by @Alstruit)
-- PENDING: Add a **Text Post Thumbnails** toggle in **Settings > Apollo Reborn > Media** (on by default) — text posts that embed an image now show a thumbnail with a **Text Post** badge, and tapping it opens the image in the media viewer instead of the thread (#426: @icpryde)
-- PENDING: Add **Hide Mod Subreddits** to remove moderated subreddits you can't leave from the Subreddits list — tap Edit, then the blue button to hide a subreddit and the green button to bring it back (#424: @icpryde)
-- PENDING: Add a **Search by Flair** row to the top of supported subreddit sidebars, showing the subreddit's post flairs as tappable chips that jump straight to that flair's posts (#439: @icpryde)
+- Add a **Text Post Thumbnails** toggle in **Settings > Apollo Reborn > Media** (on by default) — text posts that embed an image now show a thumbnail with a **Text Post** badge, and tapping it opens the image in the media viewer instead of the thread (#426: @icpryde)
+- Add **Hide Mod Subreddits** to remove moderated subreddits you can't leave from the Subreddits list — tap Edit, then the blue button to hide a subreddit and the green button to bring it back (#424: @icpryde)
 - Show **moderator reports** as native inline sections in the post and comment action menu (#412: @JeffreyCA)
 - Make the **banned-profile overlay** dismissable (#409: @JeffreyCA)
 - Combine cache-clearing options into one **Clear Tweak Caches** button under a renamed **Data** section (#409: @JeffreyCA)
 
 ### Fixes
 
-- PENDING: Show the **author avatar and subreddit icon** in **Share as Image** post exports, so the image matches what you see in the app (#438: @icpryde)
-- PENDING: Fix several **link card glitches in feeds** — cards whose text overflowed into the post below, Bluesky posts losing their paragraph breaks, compact cards stuck at full height, and blank image areas on links whose thumbnail isn't ready yet (#427: @icpryde)
-- PENDING: Make **deleted comment recovery** faster and more reliable, with cleaner labels on recovered comments and a heads-up when enabling it that comments may load slower (#418: @nunoo)
-- PENDING: Fix the tweak's settings screens only following the system light/dark mode instead of **Apollo's own color theme**, along with related cell coloring glitches when switching appearance (#440: @iCrazeiOS)
+- Show the **author avatar and subreddit icon** in **Share as Image** post exports, so the image matches what you see in the app (#438: @icpryde)
+- Fix several **link card glitches in feeds** — cards whose text overflowed into the post below, Bluesky posts losing their paragraph breaks, compact cards stuck at full height, and blank image areas on links whose thumbnail isn't ready yet (#427: @icpryde)
 - Fix **gallery GIFs** getting stuck on a loading spinner when swiping between items in an album (#404: @JeffreyCA)
 - Fix comment and post text showing a literal **`&#x200B;`** or an extra blank line at the end (#405: @JeffreyCA)
 - Fix **comment scrolling freezing** in threads that contain a link to removed media, such as a deleted `v.redd.it` video (#395: @JeffreyCA)
@@ -545,6 +573,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v3.3.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.2.0...v1.15.11_3.3.0
 [v3.2.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.1.1...v1.15.11_3.2.0
 [v3.1.1]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.1.0...v1.15.11_3.1.1
 [v3.1.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.0.0...v1.15.11_3.1.0

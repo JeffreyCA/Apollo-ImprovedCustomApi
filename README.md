@@ -291,6 +291,9 @@ Thank you to these wonderful people:
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/nackerr"><img src="https://avatars.githubusercontent.com/u/25311402?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="nackerr"/></a><br /><sub><b>nackerr</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/commits?author=nackerr" title="Code">Code</a></td>
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/Alstruit"><img src="https://avatars.githubusercontent.com/u/34786806?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="Alstruit"/></a><br /><sub><b>Alstruit</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/commits?author=Alstruit" title="Code">Code</a></td>
     </tr>
+    <tr>
+      <td align="center" valign="top" width="14.29%"><a href="https://github.com/federgilad"><img src="https://avatars.githubusercontent.com/u/38831140?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="federgilad"/></a><br /><sub><b>federgilad</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/commits?author=federgilad" title="Code">Code</a></td>
+    </tr>
   </tbody>
 </table>
 
