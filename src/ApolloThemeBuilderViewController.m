@@ -1,5 +1,7 @@
 #import "ApolloThemeBuilderViewController.h"
 #import "ApolloThemeBuilder.h"
+#import "ApolloThemeAI.h"
+#import "ApolloThemeAISheets.h"
 #import "ApolloCommon.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
@@ -45,6 +47,7 @@ typedef NS_ENUM(NSInteger, ThemeBuilderSection) {
 @property (nonatomic, assign) CGFloat lastPreviewWidth;
 @property (nonatomic, assign) NSInteger previewContext;
 @property (nonatomic, assign) BOOL colorEditorMode;
+@property (nonatomic, strong) NSDictionary *lastGeneratedThemeResult;
 - (NSInteger)displayedSectionForLogicalSection:(NSInteger)logical;
 - (NSInteger)logicalSectionForDisplayedSection:(NSInteger)section;
 @end
@@ -550,7 +553,7 @@ typedef NS_ENUM(NSInteger, ThemeBuilderSection) {
         case SectionPreview:
             return nil;
         case SectionLightColors:
-            return [self contrastWarningForMode:@"light"] ?: [self contrastWarningForMode:@"dark"];
+            return [self validationWarningForMode:@"light"] ?: [self validationWarningForMode:@"dark"];
         case SectionReset: return nil;
         default: return nil;
     }
@@ -580,6 +583,30 @@ typedef NS_ENUM(NSInteger, ThemeBuilderSection) {
         return @"Your accent's brightness is close to the background; icons may look faint.";
     }
     return nil;
+}
+
+- (NSDictionary<NSString *, NSString *> *)currentThemeColors {
+    NSMutableDictionary *colors = [NSMutableDictionary dictionary];
+    for (NSString *mode in @[@"light", @"dark"]) {
+        for (NSString *role in ApolloThemeBuilderRoleKeys()) {
+            colors[[NSString stringWithFormat:@"%@.%@", role, mode]] = ApolloThemeBuilderSavedHex(role, mode);
+        }
+    }
+    return colors;
+}
+
+- (NSString *)validationWarningForMode:(NSString *)mode {
+    NSDictionary *validation = ApolloThemeAIValidateColors([self currentThemeColors], nil);
+    NSArray *issues = validation[@"issues"];
+    NSArray *warnings = validation[@"warnings"];
+    NSString *prefix = [mode.capitalizedString stringByAppendingString:@" mode"];
+    for (NSString *issue in issues) {
+        if ([issue hasPrefix:prefix]) return issue;
+    }
+    for (NSString *warning in warnings) {
+        if ([warning hasPrefix:prefix]) return warning;
+    }
+    return [self contrastWarningForMode:mode];
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -744,35 +771,115 @@ typedef NS_ENUM(NSInteger, ThemeBuilderSection) {
 }
 
 - (void)presentNewThemeDialog {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"New Theme"
-                                                                   message:@"Name it, then choose a starting palette."
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
-        field.placeholder = @"Theme Name";
-        field.text = @"Custom";
-        field.clearButtonMode = UITextFieldViewModeWhileEditing;
-    }];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Choose Template" style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *action) {
-        NSString *name = alert.textFields.firstObject.text;
+    ApolloNewThemeSheetViewController *sheet = [[ApolloNewThemeSheetViewController alloc] init];
+    sheet.accentColor = [self builderAccentColor];
+    sheet.aiAvailable = ApolloThemeAIIsAvailable();
+    __weak typeof(self) weakSelf = self;
+    sheet.onGenerateAI = ^{ [weakSelf presentAIThemePromptSheetWithInitialPrompt:nil]; };
+    // "Create Manually" keeps template + blank choices (no name field — defaults
+    // to "Custom", renameable later via the ⋯ menu).
+    sheet.onCreateManually = ^{ [weakSelf presentPresetPickerForNewThemeName:@"Custom"]; };
+    sheet.onImport = ^{ [weakSelf presentImportPicker]; };
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+#pragma mark - AI Theme Generation
+
+- (void)presentAIThemePromptSheetWithInitialPrompt:(NSString *)initialPrompt {
+    if (!ApolloThemeAIIsAvailable()) {
+        [self presentImportAlertWithTitle:@"AI Theme Generation Unavailable"
+                                  message:ApolloThemeAIUnavailableMessage()];
+        return;
+    }
+    ApolloThemeGenerateSheetViewController *sheet = [[ApolloThemeGenerateSheetViewController alloc] init];
+    sheet.accentColor = [self builderAccentColor];
+    sheet.initialPrompt = initialPrompt;
+    __weak typeof(self) weakSelf = self;
+    sheet.onGenerate = ^(NSString *prompt) { [weakSelf generateAIThemeFromPrompt:prompt]; };
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)generateAIThemeFromPrompt:(NSString *)prompt {
+    NSString *trimmed = [prompt stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (!trimmed.length) {
+        [self presentImportAlertWithTitle:@"Describe a Theme"
+                                  message:@"Describe the kind of theme you want first."];
+        return;
+    }
+    UIAlertController *loading =
+        [UIAlertController alertControllerWithTitle:@"Creating Theme…"
+                                            message:@"Choosing readable colours and checking contrast."
+                                     preferredStyle:UIAlertControllerStyleAlert];
+    [loading addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel
+                                              handler:^(UIAlertAction *action) {
+        ApolloThemeAICancel();
+    }]];
+    [self presentViewController:loading animated:YES completion:nil];
+    ApolloThemeAIGenerateTheme(trimmed, ^(NSDictionary *result, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self presentPresetPickerForNewThemeName:name];
+            [loading dismissViewControllerAnimated:YES completion:^{
+                if (error || !result) {
+                    [self presentImportAlertWithTitle:@"Couldn’t Generate Theme"
+                                              message:error.localizedDescription ?: @"Try a different description, or start from scratch."];
+                    return;
+                }
+                self.lastGeneratedThemeResult = result;
+                [self presentGeneratedThemeResult:result];
+            }];
         });
+    });
+}
+
+- (void)presentGeneratedThemeResult:(NSDictionary *)result {
+    ApolloThemeResultSheetViewController *sheet = [[ApolloThemeResultSheetViewController alloc] init];
+    sheet.accentColor = [self builderAccentColor];
+    sheet.result = result;
+    sheet.mode = [self previewMode];
+    __weak typeof(self) weakSelf = self;
+    sheet.onUse = ^{ [weakSelf saveGeneratedThemeResult:result apply:YES edit:NO]; };
+    sheet.onEdit = ^{ [weakSelf saveGeneratedThemeResult:result apply:NO edit:YES]; };
+    sheet.onRegenerate = ^{ [weakSelf generateAIThemeFromPrompt:result[@"originalPrompt"] ?: @""]; };
+    sheet.onTweak = ^(NSString *instruction) { [weakSelf modifyGeneratedThemeResult:result instruction:instruction]; };
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)modifyGeneratedThemeResult:(NSDictionary *)result instruction:(NSString *)instruction {
+    UIAlertController *loading =
+        [UIAlertController alertControllerWithTitle:@"Updating Theme…"
+                                            message:@"Applying the tweak and checking contrast."
+                                     preferredStyle:UIAlertControllerStyleAlert];
+    [loading addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel
+                                              handler:^(UIAlertAction *action) {
+        ApolloThemeAICancel();
     }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Blank" style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *action) {
-        ApolloThemeBuilderCreateCustomTheme(alert.textFields.firstObject.text, @{});
-        [self.tableView reloadData];
-        [self refreshPreview];
-        ApolloThemeBuilderForceRepaint();
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Import from File…" style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *action) {
-        // Name comes from the imported file, so the text field above is ignored.
-        dispatch_async(dispatch_get_main_queue(), ^{ [self presentImportPicker]; });
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
+    [self presentViewController:loading animated:YES completion:nil];
+    ApolloThemeAIModifyTheme(result, instruction, ^(NSDictionary *updated, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [loading dismissViewControllerAnimated:YES completion:^{
+                if (error || !updated) {
+                    [self presentImportAlertWithTitle:@"Couldn’t Update Theme"
+                                              message:error.localizedDescription ?: @"Try a different tweak, or edit manually."];
+                    return;
+                }
+                self.lastGeneratedThemeResult = updated;
+                [self presentGeneratedThemeResult:updated];
+            }];
+        });
+    });
+}
+
+- (void)saveGeneratedThemeResult:(NSDictionary *)result apply:(BOOL)apply edit:(BOOL)edit {
+    NSString *themeID = ApolloThemeBuilderCreateCustomTheme(result[@"name"], result[@"colors"] ?: @{});
+    if (apply) {
+        ApolloThemeBuilderSetEnabled(YES);
+        ApolloThemeBuilderActivateDonorLive();
+    }
+    [self.tableView reloadData];
+    [self refreshPreview];
+    ApolloThemeBuilderForceRepaint();
+    if (edit) {
+        [self pushColorEditorForThemeID:themeID];
+    }
 }
 
 #pragma mark - Import / Export
