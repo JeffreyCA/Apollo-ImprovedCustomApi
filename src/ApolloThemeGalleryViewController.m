@@ -11,6 +11,7 @@ static NSString *const kGalleryCellReuseID = @"ApolloThemeGalleryCell";
 @property (nonatomic, assign) BOOL previewDark;
 @property (nonatomic, strong) UIView *previewHost;
 @property (nonatomic, strong) UISegmentedControl *modeControl;
+@property (nonatomic, copy) void (^onCustomize)(void);
 @end
 
 @implementation ApolloThemeGalleryPreviewController
@@ -110,18 +111,9 @@ static NSString *const kGalleryCellReuseID = @"ApolloThemeGalleryCell";
 }
 
 - (void)customizeTapped {
-    NSString *slug = self.theme[@"slug"];
-    NSString *name = self.theme[@"name"];
-    NSDictionary *colors = self.theme[@"colors"];
-    UIViewController *galleryVC = self.presentingViewController;
-    UINavigationController *nav = galleryVC.navigationController;
+    void (^handler)(void) = self.onCustomize;
     [self dismissViewControllerAnimated:YES completion:^{
-        ApolloThemeBuilderApplyGalleryTheme(slug, name, colors);
-        if (nav) {
-            ApolloThemeBuilderViewController *editor = [[ApolloThemeBuilderViewController alloc] initColorEditor];
-            [nav pushViewController:editor animated:YES];
-        }
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloThemeGalleryDidApply" object:nil];
+        if (handler) handler();
     }];
 }
 
@@ -258,6 +250,18 @@ static NSString *const kGalleryCellReuseID = @"ApolloThemeGalleryCell";
     ApolloThemeGalleryPreviewController *preview = [ApolloThemeGalleryPreviewController new];
     preview.theme = theme;
     preview.previewDark = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+    __weak typeof(self) weakSelf = self;
+    NSString *slug = theme[@"slug"];
+    NSString *name = theme[@"name"];
+    NSDictionary *colors = [theme[@"colors"] isKindOfClass:[NSDictionary class]] ? theme[@"colors"] : @{};
+    preview.onCustomize = ^{
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        ApolloThemeBuilderApplyGalleryTheme(slug, name, colors);
+        ApolloThemeBuilderViewController *editor = [[ApolloThemeBuilderViewController alloc] initColorEditor];
+        [self.navigationController pushViewController:editor animated:YES];
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloThemeGalleryDidApply" object:nil];
+    };
     preview.modalPresentationStyle = UIModalPresentationPageSheet;
     if (@available(iOS 15.0, *)) {
         UISheetPresentationController *sheet = preview.sheetPresentationController;
