@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "82AAFF",
+    "accent.light": "4B73D9",
+    "text.dark": "AAB3D3",
+    "text.light": "53535E",
+    "bar.dark": "1E1F32",
+    "bar.light": "F9F9FF",
+    "gray.dark": "AAB3D3",
+    "gray.light": "8C8DA0",
+    "primaryBG.dark": "212337",
+    "primaryBG.light": "F8F8FF",
+    "secondaryBG.dark": "1A1B2B",
+    "secondaryBG.light": "EDEDF4",
+    "separator.dark": "454657",
+    "separator.light": "DFDFE6",
+    "tertiaryBG.dark": "313245",
+    "tertiaryBG.light": "F2F2F9"
+  },
+  "name": "Moonlight"
+}

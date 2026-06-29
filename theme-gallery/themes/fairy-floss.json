@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "FFB8D1",
+    "accent.light": "D8458B",
+    "text.dark": "FEFEFE",
+    "text.light": "4B5763",
+    "bar.dark": "514C69",
+    "bar.light": "FFF8FC",
+    "gray.dark": "DCDADC",
+    "gray.light": "52606D",
+    "primaryBG.dark": "5A5475",
+    "primaryBG.light": "FFF7FB",
+    "secondaryBG.dark": "46425B",
+    "secondaryBG.light": "F4ECF0",
+    "separator.dark": "746F8B",
+    "separator.light": "E6DEE2",
+    "tertiaryBG.dark": "66607F",
+    "tertiaryBG.light": "F9F1F5"
+  },
+  "name": "Fairy Floss"
+}

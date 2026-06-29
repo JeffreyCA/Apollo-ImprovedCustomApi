@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "5DE4C7",
+    "accent.light": "1A8A7A",
+    "text.dark": "BFC3DB",
+    "text.light": "505773",
+    "bar.dark": "181B24",
+    "bar.light": "FAF9F8",
+    "gray.dark": "BFC3DB",
+    "gray.light": "5E6687",
+    "primaryBG.dark": "1A1D26",
+    "primaryBG.light": "FFFEFD",
+    "secondaryBG.dark": "161921",
+    "secondaryBG.light": "F6F5F4",
+    "separator.dark": "44464F",
+    "separator.light": "DEDDDC",
+    "tertiaryBG.dark": "30323B",
+    "tertiaryBG.light": "FBFAF9"
+  },
+  "name": "Poimandres"
+}

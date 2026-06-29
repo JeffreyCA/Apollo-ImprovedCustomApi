@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "88C0D0",
+    "accent.light": "5E81AC",
+    "text.dark": "B9C0CB",
+    "text.light": "485265",
+    "bar.dark": "292F3A",
+    "bar.light": "ECEDF0",
+    "gray.dark": "8D97A9",
+    "gray.light": "4C566A",
+    "primaryBG.dark": "2C323D",
+    "primaryBG.light": "F1F2F5",
+    "secondaryBG.dark": "262B34",
+    "secondaryBG.light": "E9EAEC",
+    "separator.dark": "545962",
+    "separator.light": "D2D3D5",
+    "tertiaryBG.dark": "414651",
+    "tertiaryBG.light": "EDEEF1"
+  },
+  "name": "Nord"
+}

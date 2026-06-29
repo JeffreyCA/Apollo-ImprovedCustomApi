@@ -32,6 +32,7 @@
 #import "ApolloCommon.h"
 #import "ApolloThemeBuilder.h"
 #import "ApolloThemeBuilderViewController.h"
+#import "ApolloThemeGalleryViewController.h"
 
 NSString * const kApolloCustomThemeEnabledKey = @"ApolloRebornCustomThemeEnabled";
 NSString * const kApolloCustomThemeColorsKey  = @"ApolloRebornCustomThemeColors";
@@ -298,6 +299,12 @@ static NSDictionary *ThemeBuilderMakeTheme(NSString *name, NSDictionary *colors)
     };
 }
 
+static NSDictionary *ThemeBuilderMakeGalleryTheme(NSString *name, NSDictionary *colors, NSString *gallerySlug) {
+    NSMutableDictionary *theme = [ThemeBuilderMakeTheme(name, colors) mutableCopy];
+    if (gallerySlug.length) theme[@"gallerySlug"] = gallerySlug;
+    return theme;
+}
+
 static void ApolloThemeBuilderEnsureThemesMigrated(void) {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     NSArray *existing = [ud arrayForKey:kApolloCustomThemesKey];
@@ -558,6 +565,62 @@ BOOL ApolloThemeBuilderParseImport(NSData *data, NSString **outName,
     if (outName) *outName = ThemeBuilderClampName(dict[@"name"], @"Imported Theme");
     if (outColors) *outColors = colors;
     return YES;
+}
+
+NSString *ApolloThemeBuilderHexFromColors(NSDictionary<NSString *, NSString *> *colors,
+                                          NSString *roleKey,
+                                          NSString *mode) {
+    NSString *key = [NSString stringWithFormat:@"%@.%@", roleKey, mode];
+    NSString *hex = [colors[key] isKindOfClass:[NSString class]] ? colors[key] : nil;
+    if (hex.length) {
+        NSString *normalized = ThemeBuilderNormalizeHex(hex);
+        if (normalized) return normalized;
+    }
+    return ApolloThemeBuilderDonorHex(roleKey, mode);
+}
+
+void ApolloThemeBuilderApplyGalleryTheme(NSString *slug,
+                                         NSString *name,
+                                         NSDictionary<NSString *, NSString *> *colors) {
+    if (!slug.length) return;
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    NSMutableArray *themes = [ApolloThemeBuilderCustomThemes() mutableCopy];
+    NSDictionary *sanitized = ThemeBuilderSanitizeColors(colors);
+    NSString *displayName = ThemeBuilderClampName(name, @"Gallery Theme");
+    NSString *themeID = nil;
+
+    for (NSUInteger i = 0; i < themes.count; i++) {
+        NSDictionary *theme = themes[i];
+        if (![theme[@"gallerySlug"] isKindOfClass:[NSString class]]) continue;
+        if (![theme[@"gallerySlug"] isEqualToString:slug]) continue;
+        NSMutableDictionary *updated = [theme mutableCopy];
+        updated[@"colors"] = sanitized;
+        updated[@"name"] = displayName;
+        updated[@"updatedAt"] = @([[NSDate date] timeIntervalSince1970]);
+        themes[i] = updated;
+        themeID = updated[@"id"];
+        break;
+    }
+
+    if (!themeID) {
+        NSString *uniqueName = ThemeBuilderUniqueName(themes, displayName);
+        NSDictionary *theme = ThemeBuilderMakeGalleryTheme(uniqueName, sanitized, slug);
+        [themes addObject:theme];
+        themeID = theme[@"id"];
+    }
+
+    [ud setObject:themes forKey:kApolloCustomThemesKey];
+    [ud setObject:themeID forKey:kApolloActiveCustomThemeIDKey];
+    [ud setObject:sanitized forKey:kApolloCustomThemeColorsKey];
+    ApolloThemeBuilderSetEnabled(YES);
+    ApolloThemeBuilderActivateDonorLive();
+    ApolloThemeBuilderReloadOverrides();
+    ApolloThemeBuilderForceRepaint();
+}
+
+NSString *ApolloThemeBuilderActiveGallerySlug(void) {
+    id slug = ApolloThemeBuilderActiveCustomTheme()[@"gallerySlug"];
+    return [slug isKindOfClass:[NSString class]] && [(NSString *)slug length] ? slug : nil;
 }
 
 BOOL ApolloThemeBuilderIsEnabled(void) {
@@ -1439,7 +1502,9 @@ static UIImage *ThemeBuilderPickerSwatch(void) {
     for (UITableViewCell *c in ((UITableView *)v).visibleCells) {
         if (c == self || ![c isKindOfClass:[UITableViewCell class]]) continue;
         NSString *t = c.textLabel.text;
-        if (c.textLabel.font && t.length && ![t isEqualToString:@"Theme Builder"]) return c.textLabel.font;
+        if (c.textLabel.font && t.length
+            && ![t isEqualToString:@"Theme Builder"]
+            && ![t isEqualToString:@"Theme Gallery"]) return c.textLabel.font;
     }
     return nil;
 }
@@ -1504,65 +1569,75 @@ static void ThemeBuilderAppearanceTraitChange(id self, SEL _cmd, UITraitCollecti
 }
 
 static NSIndexPath *ThemeBuilderAppearanceAdjustedIndexPath(NSIndexPath *ip) {
-    if (ip.section == 0 && ip.row > 1)
-        return [NSIndexPath indexPathForRow:ip.row - 1 inSection:ip.section];
+    if (ip.section == 0 && ip.row > 2)
+        return [NSIndexPath indexPathForRow:ip.row - 2 inSection:ip.section];
     return ip;
 }
 
-static BOOL ThemeBuilderAppearanceIsBuilderRow(NSIndexPath *ip) {
-    return ip.section == 0 && ip.row == 1;
+static BOOL ThemeBuilderAppearanceIsInjectedRow(NSIndexPath *ip) {
+    return ip.section == 0 && (ip.row == 1 || ip.row == 2);
+}
+
+static UITableViewCell *ThemeBuilderAppearanceMakeInjectedCell(UITableView *tv,
+                                                               NSString *reuseID,
+                                                               NSString *title,
+                                                               NSString *symbolName) {
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:reuseID];
+    if (!cell) cell = [[ApolloRebornThemeBuilderRowCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseID];
+    cell.textLabel.text = title;
+    cell.detailTextLabel.text = nil;
+    cell.accessoryView = nil;
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    cell.accessibilityLabel = title;
+    NSString *modeKey = (cell.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark) ? @"dark" : @"light";
+    UIColor *accent = sRemapActive
+        ? (ApolloThemeBuilderColorFromHex(ApolloThemeBuilderSavedHex(kApolloThemeRoleAccent, modeKey))
+           ?: [UIColor colorWithRed:0.51 green:0.29 blue:0.84 alpha:1.0])
+        : [UIColor colorWithRed:0.51 green:0.29 blue:0.84 alpha:1.0];
+    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
+        configurationWithPointSize:15 weight:UIImageSymbolWeightMedium];
+    UIImage *symbol = [[UIImage systemImageNamed:symbolName withConfiguration:cfg]
+                       imageWithTintColor:UIColor.whiteColor
+                       renderingMode:UIImageRenderingModeAlwaysOriginal];
+    CGFloat side = 29;
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat preferredFormat];
+    fmt.opaque = NO;
+    UIImage *badge = [[[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(side, side) format:fmt]
+        imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+            UIBezierPath *bg = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, side, side)
+                                                          cornerRadius:6.5];
+            [accent setFill];
+            [bg fill];
+            CGSize symSize = symbol.size;
+            CGPoint symOrigin = CGPointMake((side - symSize.width) / 2,
+                                           (side - symSize.height) / 2);
+            [symbol drawAtPoint:symOrigin];
+        }];
+    cell.imageView.image = badge;
+    return cell;
 }
 
 static NSInteger ThemeBuilderAppearanceRows(id self, SEL _cmd, UITableView *tv, NSInteger section) {
     NSInteger n = sAppearanceRowsOrig ? sAppearanceRowsOrig(self, _cmd, tv, section) : 0;
-    if (section == 0) n += 1; // Themes, Theme Builder
+    if (section == 0) n += 2; // Theme Builder + Theme Gallery
     return n;
 }
 
 static UITableViewCell *ThemeBuilderAppearanceCell(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
     if (ip.section == 0 && ip.row == 1) {
-        static NSString *reuse = @"ApolloRebornThemeBuilderAppearanceCell";
-        UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:reuse];
-        if (!cell) cell = [[ApolloRebornThemeBuilderRowCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuse];
-        cell.textLabel.text = @"Theme Builder";
-        cell.detailTextLabel.text = nil;
-        cell.accessoryView = nil;
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        cell.accessibilityLabel = @"Theme Builder";
-        // Render a rounded-rect badge icon matching Apollo's Themes row style
-        NSString *modeKey = (cell.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark) ? @"dark" : @"light";
-        UIColor *accent = sRemapActive
-            ? (ApolloThemeBuilderColorFromHex(ApolloThemeBuilderSavedHex(kApolloThemeRoleAccent, modeKey))
-               ?: [UIColor colorWithRed:0.51 green:0.29 blue:0.84 alpha:1.0])
-            : [UIColor colorWithRed:0.51 green:0.29 blue:0.84 alpha:1.0];
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration
-            configurationWithPointSize:15 weight:UIImageSymbolWeightMedium];
-        UIImage *symbol = [[UIImage systemImageNamed:@"paintbrush.fill" withConfiguration:cfg]
-                           imageWithTintColor:UIColor.whiteColor
-                           renderingMode:UIImageRenderingModeAlwaysOriginal];
-        CGFloat side = 29;
-        UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat preferredFormat];
-        fmt.opaque = NO;
-        UIImage *badge = [[[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(side, side) format:fmt]
-            imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-                UIBezierPath *bg = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, side, side)
-                                                              cornerRadius:6.5];
-                [accent setFill];
-                [bg fill];
-                CGSize symSize = symbol.size;
-                CGPoint symOrigin = CGPointMake((side - symSize.width) / 2,
-                                               (side - symSize.height) / 2);
-                [symbol drawAtPoint:symOrigin];
-            }];
-        cell.imageView.image = badge;
-        return cell;
+        return ThemeBuilderAppearanceMakeInjectedCell(tv,
+            @"ApolloRebornThemeBuilderAppearanceCell", @"Theme Builder", @"paintbrush.fill");
+    }
+    if (ip.section == 0 && ip.row == 2) {
+        return ThemeBuilderAppearanceMakeInjectedCell(tv,
+            @"ApolloRebornThemeGalleryAppearanceCell", @"Theme Gallery", @"square.grid.2x2.fill");
     }
     NSIndexPath *adjusted = ThemeBuilderAppearanceAdjustedIndexPath(ip);
     return sAppearanceCellOrig ? sAppearanceCellOrig(self, _cmd, tv, adjusted) : [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
 }
 
 static CGFloat ThemeBuilderAppearanceHeight(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (ThemeBuilderAppearanceIsBuilderRow(ip)) {
+    if (ThemeBuilderAppearanceIsInjectedRow(ip)) {
         NSIndexPath *themes = [NSIndexPath indexPathForRow:0 inSection:0];
         return sAppearanceHeightOrig ? sAppearanceHeightOrig(self, _cmd, tv, themes) : UITableViewAutomaticDimension;
     }
@@ -1571,7 +1646,7 @@ static CGFloat ThemeBuilderAppearanceHeight(id self, SEL _cmd, UITableView *tv, 
 }
 
 static CGFloat ThemeBuilderAppearanceEstimatedHeight(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (ThemeBuilderAppearanceIsBuilderRow(ip)) {
+    if (ThemeBuilderAppearanceIsInjectedRow(ip)) {
         NSIndexPath *themes = [NSIndexPath indexPathForRow:0 inSection:0];
         return sAppearanceEstimatedHeightOrig ? sAppearanceEstimatedHeightOrig(self, _cmd, tv, themes) : 52.0;
     }
@@ -1580,9 +1655,15 @@ static CGFloat ThemeBuilderAppearanceEstimatedHeight(id self, SEL _cmd, UITableV
 }
 
 static void ThemeBuilderAppearanceSelect(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (ThemeBuilderAppearanceIsBuilderRow(ip)) {
+    if (ip.section == 0 && ip.row == 1) {
         [tv deselectRowAtIndexPath:ip animated:YES];
         ApolloThemeBuilderViewController *vc = [[ApolloThemeBuilderViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
+        return;
+    }
+    if (ip.section == 0 && ip.row == 2) {
+        [tv deselectRowAtIndexPath:ip animated:YES];
+        ApolloThemeGalleryViewController *vc = [[ApolloThemeGalleryViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
         return;
     }
@@ -1635,7 +1716,7 @@ static BOOL ThemeBuilderApplyNativeAppearanceChrome(UITableView *tv, UITableView
 }
 
 static void ThemeBuilderAppearanceWillDisplay(id self, SEL _cmd, UITableView *tv, UITableViewCell *cell, NSIndexPath *ip) {
-    if (!ThemeBuilderAppearanceIsBuilderRow(ip)) {
+    if (!ThemeBuilderAppearanceIsInjectedRow(ip)) {
         NSIndexPath *adjusted = ThemeBuilderAppearanceAdjustedIndexPath(ip);
         if (sAppearanceWillDisplayOrig) sAppearanceWillDisplayOrig(self, _cmd, tv, cell, adjusted);
     }
@@ -1657,7 +1738,7 @@ static void ThemeBuilderAppearanceWillDisplay(id self, SEL _cmd, UITableView *tv
         }
         if (textColor) cell.textLabel.textColor = textColor;
         if (grayColor) cell.detailTextLabel.textColor = grayColor;
-    } else if (ThemeBuilderAppearanceIsBuilderRow(ip)) {
+    } else if (ThemeBuilderAppearanceIsInjectedRow(ip)) {
         // Custom theme isn't active — inherit Apollo's built-in theme card colour
         // and tap-highlight from a native sibling so the injected row is
         // indistinguishable from the "Themes" row above it.
@@ -1675,19 +1756,19 @@ static void ThemeBuilderAppearanceWillDisplay(id self, SEL _cmd, UITableView *tv
 }
 
 static void ThemeBuilderAppearanceDidEndDisplaying(id self, SEL _cmd, UITableView *tv, UITableViewCell *cell, NSIndexPath *ip) {
-    if (ThemeBuilderAppearanceIsBuilderRow(ip)) return;
+    if (ThemeBuilderAppearanceIsInjectedRow(ip)) return;
     NSIndexPath *adjusted = ThemeBuilderAppearanceAdjustedIndexPath(ip);
     if (sAppearanceDidEndDisplayingOrig) sAppearanceDidEndDisplayingOrig(self, _cmd, tv, cell, adjusted);
 }
 
 static BOOL ThemeBuilderAppearanceShouldHighlight(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (ThemeBuilderAppearanceIsBuilderRow(ip)) return YES;
+    if (ThemeBuilderAppearanceIsInjectedRow(ip)) return YES;
     NSIndexPath *adjusted = ThemeBuilderAppearanceAdjustedIndexPath(ip);
     return sAppearanceShouldHighlightOrig ? sAppearanceShouldHighlightOrig(self, _cmd, tv, adjusted) : YES;
 }
 
 static NSIndexPath *ThemeBuilderAppearanceWillSelect(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (ThemeBuilderAppearanceIsBuilderRow(ip)) return ip;
+    if (ip.section == 0 && (ip.row == 1 || ip.row == 2)) return ip;
     NSIndexPath *adjusted = ThemeBuilderAppearanceAdjustedIndexPath(ip);
     if (!sAppearanceWillSelectOrig) return ip;
     NSIndexPath *result = sAppearanceWillSelectOrig(self, _cmd, tv, adjusted);
@@ -1695,49 +1776,49 @@ static NSIndexPath *ThemeBuilderAppearanceWillSelect(id self, SEL _cmd, UITableV
 }
 
 static void ThemeBuilderAppearanceDidHighlight(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (ThemeBuilderAppearanceIsBuilderRow(ip)) return;
+    if (ThemeBuilderAppearanceIsInjectedRow(ip)) return;
     NSIndexPath *adjusted = ThemeBuilderAppearanceAdjustedIndexPath(ip);
     if (sAppearanceDidHighlightOrig) sAppearanceDidHighlightOrig(self, _cmd, tv, adjusted);
 }
 
 static void ThemeBuilderAppearanceDidUnhighlight(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (ThemeBuilderAppearanceIsBuilderRow(ip)) return;
+    if (ThemeBuilderAppearanceIsInjectedRow(ip)) return;
     NSIndexPath *adjusted = ThemeBuilderAppearanceAdjustedIndexPath(ip);
     if (sAppearanceDidUnhighlightOrig) sAppearanceDidUnhighlightOrig(self, _cmd, tv, adjusted);
 }
 
 static BOOL ThemeBuilderAppearanceCanEdit(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (ThemeBuilderAppearanceIsBuilderRow(ip)) return NO;
+    if (ThemeBuilderAppearanceIsInjectedRow(ip)) return NO;
     NSIndexPath *adjusted = ThemeBuilderAppearanceAdjustedIndexPath(ip);
     return sAppearanceCanEditOrig ? sAppearanceCanEditOrig(self, _cmd, tv, adjusted) : NO;
 }
 
 static BOOL ThemeBuilderAppearanceCanMove(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (ThemeBuilderAppearanceIsBuilderRow(ip)) return NO;
+    if (ThemeBuilderAppearanceIsInjectedRow(ip)) return NO;
     NSIndexPath *adjusted = ThemeBuilderAppearanceAdjustedIndexPath(ip);
     return sAppearanceCanMoveOrig ? sAppearanceCanMoveOrig(self, _cmd, tv, adjusted) : NO;
 }
 
 static NSInteger ThemeBuilderAppearanceEditingStyle(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (ThemeBuilderAppearanceIsBuilderRow(ip)) return UITableViewCellEditingStyleNone;
+    if (ThemeBuilderAppearanceIsInjectedRow(ip)) return UITableViewCellEditingStyleNone;
     NSIndexPath *adjusted = ThemeBuilderAppearanceAdjustedIndexPath(ip);
     return sAppearanceEditingStyleOrig ? sAppearanceEditingStyleOrig(self, _cmd, tv, adjusted) : UITableViewCellEditingStyleNone;
 }
 
 static NSInteger ThemeBuilderAppearanceIndentation(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (ThemeBuilderAppearanceIsBuilderRow(ip)) return 0;
+    if (ThemeBuilderAppearanceIsInjectedRow(ip)) return 0;
     NSIndexPath *adjusted = ThemeBuilderAppearanceAdjustedIndexPath(ip);
     return sAppearanceIndentationOrig ? sAppearanceIndentationOrig(self, _cmd, tv, adjusted) : 0;
 }
 
 static UISwipeActionsConfiguration *ThemeBuilderAppearanceLeadingSwipe(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (ThemeBuilderAppearanceIsBuilderRow(ip)) return nil;
+    if (ThemeBuilderAppearanceIsInjectedRow(ip)) return nil;
     NSIndexPath *adjusted = ThemeBuilderAppearanceAdjustedIndexPath(ip);
     return sAppearanceLeadingSwipeOrig ? sAppearanceLeadingSwipeOrig(self, _cmd, tv, adjusted) : nil;
 }
 
 static UISwipeActionsConfiguration *ThemeBuilderAppearanceTrailingSwipe(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    if (ThemeBuilderAppearanceIsBuilderRow(ip)) return nil;
+    if (ThemeBuilderAppearanceIsInjectedRow(ip)) return nil;
     NSIndexPath *adjusted = ThemeBuilderAppearanceAdjustedIndexPath(ip);
     return sAppearanceTrailingSwipeOrig ? sAppearanceTrailingSwipeOrig(self, _cmd, tv, adjusted) : nil;
 }

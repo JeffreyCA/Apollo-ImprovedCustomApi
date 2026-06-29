@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "FF7EDB",
+    "accent.light": "D33682",
+    "text.dark": "A8ADC9",
+    "text.light": "614F6D",
+    "bar.dark": "222030",
+    "bar.light": "FAF3F5",
+    "gray.dark": "A6ABC8",
+    "gray.light": "6D597A",
+    "primaryBG.dark": "242233",
+    "primaryBG.light": "FFF8FA",
+    "secondaryBG.dark": "1F1D2B",
+    "secondaryBG.light": "F6EFF1",
+    "separator.dark": "4D4B59",
+    "separator.light": "DED8DA",
+    "tertiaryBG.dark": "3A3747",
+    "tertiaryBG.light": "FBF4F6"
+  },
+  "name": "SynthWave '84"
+}

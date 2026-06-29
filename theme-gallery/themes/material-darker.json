@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "80CBC4",
+    "accent.light": "009688",
+    "text.dark": "AAAAAA",
+    "text.light": "445963",
+    "bar.dark": "1E1E1E",
+    "bar.light": "F6F6F5",
+    "gray.dark": "8D8D8D",
+    "gray.light": "546E7A",
+    "primaryBG.dark": "202020",
+    "primaryBG.light": "FBFBFA",
+    "secondaryBG.dark": "1B1B1B",
+    "secondaryBG.light": "F2F2F1",
+    "separator.dark": "494949",
+    "separator.light": "DADADA",
+    "tertiaryBG.dark": "353535",
+    "tertiaryBG.light": "F7F7F6"
+  },
+  "name": "Material Darker"
+}

@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "FFB454",
+    "accent.light": "FF9940",
+    "text.dark": "A8AEB9",
+    "text.light": "51575F",
+    "bar.dark": "1C202B",
+    "bar.light": "F6F6F5",
+    "gray.dark": "989FAC",
+    "gray.light": "828C99",
+    "primaryBG.dark": "1E232E",
+    "primaryBG.light": "FBFBFA",
+    "secondaryBG.dark": "191E27",
+    "secondaryBG.light": "F2F2F1",
+    "separator.dark": "474B55",
+    "separator.light": "DADADA",
+    "tertiaryBG.dark": "333843",
+    "tertiaryBG.light": "F7F7F6"
+  },
+  "name": "Ayu Mirage"
+}

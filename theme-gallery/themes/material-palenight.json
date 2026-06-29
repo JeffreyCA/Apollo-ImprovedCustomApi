@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "C792EA",
+    "accent.light": "7E57C2",
+    "text.dark": "B4B7CB",
+    "text.light": "465B65",
+    "bar.dark": "252838",
+    "bar.light": "F9F8F7",
+    "gray.dark": "9297B3",
+    "gray.light": "546E7A",
+    "primaryBG.dark": "272B3C",
+    "primaryBG.light": "FEFDFC",
+    "secondaryBG.dark": "222533",
+    "secondaryBG.light": "F5F4F3",
+    "separator.dark": "505361",
+    "separator.light": "DDDCDB",
+    "tertiaryBG.dark": "3C404F",
+    "tertiaryBG.light": "FAF9F8"
+  },
+  "name": "Material Palenight"
+}

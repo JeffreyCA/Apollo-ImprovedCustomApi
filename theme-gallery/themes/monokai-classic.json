@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "F92672",
+    "accent.light": "D33682",
+    "text.dark": "B3B0A6",
+    "text.light": "585546",
+    "bar.dark": "23241F",
+    "bar.light": "F5F4EF",
+    "gray.dark": "9C998B",
+    "gray.light": "75715E",
+    "primaryBG.dark": "252621",
+    "primaryBG.light": "FAF9F4",
+    "secondaryBG.dark": "20211C",
+    "secondaryBG.light": "F1F0EB",
+    "separator.dark": "4E4F4A",
+    "separator.light": "DAD9D4",
+    "tertiaryBG.dark": "3A3B36",
+    "tertiaryBG.light": "F6F5F0"
+  },
+  "name": "Monokai Classic"
+}

@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "EB64B9",
+    "accent.light": "CF3D95",
+    "text.dark": "C8B3D0",
+    "text.light": "4B5763",
+    "bar.dark": "231E2A",
+    "bar.light": "FFF8FC",
+    "gray.dark": "C8B3D0",
+    "gray.light": "52606D",
+    "primaryBG.dark": "27212E",
+    "primaryBG.light": "FFF7FB",
+    "secondaryBG.dark": "1E1A24",
+    "secondaryBG.light": "F4ECF0",
+    "separator.dark": "4A454F",
+    "separator.light": "E6DEE2",
+    "tertiaryBG.dark": "36313D",
+    "tertiaryBG.light": "F9F1F5"
+  },
+  "name": "LaserWave"
+}

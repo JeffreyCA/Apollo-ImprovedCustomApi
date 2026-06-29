@@ -82,7 +82,10 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloSubredditSidebar.xm \
     $(SRC_DIR)/ApolloTagFilters.xm \
     $(SRC_DIR)/ApolloThemeBuilder.xm \
+    $(SRC_DIR)/ApolloThemeBuilderPreview.m \
     $(SRC_DIR)/ApolloThemeBuilderViewController.m \
+    $(SRC_DIR)/ApolloThemeGalleryViewController.m \
+    $(THEME_GALLERY_GEN) \
     $(SRC_DIR)/ApolloSearchInPlace.xm \
     $(SRC_DIR)/ApolloSearchHeaderOverlapFix.xm \
     $(SRC_DIR)/ApolloImageChestResolver.m \
@@ -140,7 +143,10 @@ endif
 # ApolloAppleTranslation.swift) only exists on iOS 18.0+. Weak-link it so the tweak still
 # loads on older iOS, where the Apple provider is gated off at runtime.
 ApolloReborn_LDFLAGS += -weak_framework Translation
-ApolloReborn_CFLAGS = -fobjc-arc -Wno-error=unguarded-availability-new -Wno-error=deprecated-declarations -Wno-module-import-in-extern-c -I$(THEOS_PROJECT_DIR)/$(SRC_DIR) -I$(THEOS_PROJECT_DIR)/liquid-glass/generated -I$(THEOS_PROJECT_DIR)/$(MODULES_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR)/minizip -DHAVE_ARC4RANDOM_BUF -DHAVE_ICONV -DHAVE_INTTYPES_H -DHAVE_PKCRYPT -DHAVE_STDINT_H -DHAVE_WZAES -DHAVE_ZLIB -DZLIB_COMPAT
+THEME_GALLERY_DIR = $(THEOS_PROJECT_DIR)/theme-gallery
+THEME_GALLERY_GEN = $(THEME_GALLERY_DIR)/generated/ApolloThemeGalleryCatalog.gen.m
+
+ApolloReborn_CFLAGS = -fobjc-arc -Wno-error=unguarded-availability-new -Wno-error=deprecated-declarations -Wno-module-import-in-extern-c -I$(THEOS_PROJECT_DIR)/$(SRC_DIR) -I$(THEOS_PROJECT_DIR)/liquid-glass/generated -I$(THEME_GALLERY_DIR)/generated -I$(THEOS_PROJECT_DIR)/$(MODULES_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR)/minizip -DHAVE_ARC4RANDOM_BUF -DHAVE_ICONV -DHAVE_INTTYPES_H -DHAVE_PKCRYPT -DHAVE_STDINT_H -DHAVE_WZAES -DHAVE_ZLIB -DZLIB_COMPAT
 
 ApolloReborn_BUNDLE_RESOURCE_DIRS = resources
 
@@ -183,8 +189,12 @@ endif
 
 CONTROL_FILE = $(THEOS_PROJECT_DIR)/control
 
-# Generate Version.h
-before-all:: generate_version_h
+# Generate Version.h + bundled theme gallery catalog
+before-all:: generate_version_h generate_theme_gallery_catalog
+
+generate_theme_gallery_catalog:
+	@echo "Generating ApolloThemeGalleryCatalog from theme-gallery/themes/"
+	@python3 $(THEME_GALLERY_DIR)/scripts/generate_catalog.py $(THEME_GALLERY_DIR)/generated
 
 generate_version_h:
 	@echo "Generating Version.h from control file"

@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "61AFEF",
+    "accent.light": "4078F2",
+    "text.dark": "B2B5BB",
+    "text.light": "54565F",
+    "bar.dark": "24282F",
+    "bar.light": "F6F6F5",
+    "gray.dark": "8A8F98",
+    "gray.light": "696C77",
+    "primaryBG.dark": "262A32",
+    "primaryBG.light": "FBFBFA",
+    "secondaryBG.dark": "21242B",
+    "secondaryBG.light": "F2F2F1",
+    "separator.dark": "4F5259",
+    "separator.light": "DADADA",
+    "tertiaryBG.dark": "3B3F46",
+    "tertiaryBG.light": "F7F7F6"
+  },
+  "name": "One Dark Pro"
+}

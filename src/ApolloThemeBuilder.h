@@ -52,6 +52,22 @@ void ApolloThemeBuilderRenameActiveCustomTheme(NSString *name);
 BOOL ApolloThemeBuilderDeleteActiveCustomTheme(void);
 void ApolloThemeBuilderResetActiveCustomThemeColors(void);
 
+// Install or update a bundled gallery theme by slug, make it active, and enable
+// the custom theme engine. Re-applying the same slug updates colors in place.
+void ApolloThemeBuilderApplyGalleryTheme(NSString *slug,
+                                         NSString *name,
+                                         NSDictionary<NSString *, NSString *> *colors);
+// gallerySlug on the active custom theme, if it came from the gallery; else nil.
+NSString *ApolloThemeBuilderActiveGallerySlug(void);
+// Hex for role+mode from an arbitrary colors dict (falls back to donor default).
+NSString *ApolloThemeBuilderHexFromColors(NSDictionary<NSString *, NSString *> *colors,
+                                          NSString *roleKey,
+                                          NSString *mode);
+// Mock feed-card preview for a palette (gallery sheet + Theme Builder).
+UIView *ApolloThemeBuilderPreviewView(NSDictionary<NSString *, NSString *> *colors,
+                                      BOOL darkMode,
+                                      CGFloat width);
+
 // Import / Export. Export serializes only a theme's name + colors (no account
 // data, API keys, ids, or timestamps) to portable JSON, so a shared theme file
 // is safe to hand to anyone. Import is strict: it accepts only known role.mode

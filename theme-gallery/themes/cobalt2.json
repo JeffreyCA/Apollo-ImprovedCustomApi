@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "FFC600",
+    "accent.light": "005CC5",
+    "text.dark": "B4BFC7",
+    "text.light": "465B65",
+    "bar.dark": "163042",
+    "bar.light": "FAF9F8",
+    "gray.dark": "A9B6BF",
+    "gray.light": "607D8B",
+    "primaryBG.dark": "183346",
+    "primaryBG.light": "FFFEFD",
+    "secondaryBG.dark": "142B3C",
+    "secondaryBG.light": "F6F5F4",
+    "separator.dark": "42596A",
+    "separator.light": "DEDDDC",
+    "tertiaryBG.dark": "2E4759",
+    "tertiaryBG.light": "FBFAF9"
+  },
+  "name": "Cobalt2"
+}

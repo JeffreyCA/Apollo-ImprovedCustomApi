@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "CBA6F7",
+    "accent.light": "8839EF",
+    "text.dark": "A6A8B6",
+    "text.light": "505262",
+    "bar.dark": "1B1B29",
+    "bar.light": "EEEFF1",
+    "gray.dark": "9598A8",
+    "gray.light": "6C6F85",
+    "primaryBG.dark": "1D1D2C",
+    "primaryBG.light": "F3F4F6",
+    "secondaryBG.dark": "191926",
+    "secondaryBG.light": "EAEBED",
+    "separator.dark": "464654",
+    "separator.light": "D3D4D6",
+    "tertiaryBG.dark": "323241",
+    "tertiaryBG.light": "EFF0F2"
+  },
+  "name": "Catppuccin Latte"
+}

@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "E95678",
+    "accent.light": "D64569",
+    "text.dark": "A4A6BC",
+    "text.light": "4F516B",
+    "bar.dark": "191B22",
+    "bar.light": "F9EEEB",
+    "gray.dark": "9597B1",
+    "gray.light": "6C6F93",
+    "primaryBG.dark": "1B1D24",
+    "primaryBG.light": "FEF3F0",
+    "secondaryBG.dark": "17191F",
+    "secondaryBG.light": "F5EAE8",
+    "separator.dark": "45464D",
+    "separator.light": "DDD3D1",
+    "tertiaryBG.dark": "30323A",
+    "tertiaryBG.light": "FAEFEC"
+  },
+  "name": "Horizon"
+}

@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "7E9CD8",
+    "accent.light": "4D699B",
+    "text.dark": "A9A9A4",
+    "text.light": "4E4E5D",
+    "bar.dark": "1C1C24",
+    "bar.light": "F0EBC7",
+    "gray.dark": "999993",
+    "gray.light": "545464",
+    "primaryBG.dark": "1E1E26",
+    "primaryBG.light": "F5F0CB",
+    "secondaryBG.dark": "191921",
+    "secondaryBG.light": "ECE8C4",
+    "separator.dark": "47474F",
+    "separator.light": "D5D1B1",
+    "tertiaryBG.dark": "33333B",
+    "tertiaryBG.light": "F1ECC8"
+  },
+  "name": "Kanagawa Wave"
+}

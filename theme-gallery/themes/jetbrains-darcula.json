@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "6897BB",
+    "accent.light": "3574F0",
+    "text.dark": "AFB8C1",
+    "text.light": "535455",
+    "bar.dark": "272727",
+    "bar.light": "F8F8F8",
+    "gray.dark": "929EAA",
+    "gray.light": "8B8C8D",
+    "primaryBG.dark": "2B2B2B",
+    "primaryBG.light": "F7F7F7",
+    "secondaryBG.dark": "222222",
+    "secondaryBG.light": "ECECEC",
+    "separator.dark": "4D4D4D",
+    "separator.light": "DEDEDE",
+    "tertiaryBG.dark": "3A3A3A",
+    "tertiaryBG.light": "F1F1F1"
+  },
+  "name": "JetBrains Darcula"
+}

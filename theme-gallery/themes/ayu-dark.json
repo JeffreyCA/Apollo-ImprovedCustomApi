@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "FFB454",
+    "accent.light": "FF9940",
+    "text.dark": "999CA3",
+    "text.light": "51575F",
+    "bar.dark": "090D12",
+    "bar.light": "F6F6F5",
+    "gray.dark": "858991",
+    "gray.light": "828C99",
+    "primaryBG.dark": "0A0D13",
+    "primaryBG.light": "FBFBFA",
+    "secondaryBG.dark": "080B10",
+    "secondaryBG.light": "F2F2F1",
+    "separator.dark": "36393E",
+    "separator.light": "DADADA",
+    "tertiaryBG.dark": "202429",
+    "tertiaryBG.light": "F7F7F6"
+  },
+  "name": "Ayu Dark"
+}

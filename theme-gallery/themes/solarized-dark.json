@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "2AA198",
+    "accent.light": "268BD2",
+    "text.dark": "A5B2B7",
+    "text.light": "4D5759",
+    "bar.dark": "002731",
+    "bar.light": "F9F3E3",
+    "gray.dark": "90A0A6",
+    "gray.light": "839496",
+    "primaryBG.dark": "002934",
+    "primaryBG.light": "FEF8E8",
+    "secondaryBG.dark": "00232C",
+    "secondaryBG.light": "F5EFE0",
+    "separator.dark": "2E515A",
+    "separator.light": "DDD8CA",
+    "tertiaryBG.dark": "173E48",
+    "tertiaryBG.light": "FAF4E5"
+  },
+  "name": "Solarized Dark"
+}

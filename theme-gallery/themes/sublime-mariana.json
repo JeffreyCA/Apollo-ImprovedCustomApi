@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "4EC9B0",
+    "accent.light": "0F7B6C",
+    "text.dark": "C2C8CD",
+    "text.light": "56595C",
+    "bar.dark": "2B333B",
+    "bar.light": "FFFFFF",
+    "gray.dark": "ABB3BA",
+    "gray.light": "898D92",
+    "primaryBG.dark": "303841",
+    "primaryBG.light": "FFFFFF",
+    "secondaryBG.dark": "252C33",
+    "secondaryBG.light": "F4F4F4",
+    "separator.dark": "51585F",
+    "separator.light": "E6E6E6",
+    "tertiaryBG.dark": "3E464E",
+    "tertiaryBG.light": "F9F9F9"
+  },
+  "name": "Sublime Mariana"
+}

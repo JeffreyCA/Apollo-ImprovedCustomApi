@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "58A6FF",
+    "accent.light": "0969DA",
+    "text.dark": "ABB2B9",
+    "text.light": "515963",
+    "bar.dark": "0C0F15",
+    "bar.light": "FAF9F8",
+    "gray.dark": "ABB2B9",
+    "gray.light": "57606A",
+    "primaryBG.dark": "0C1016",
+    "primaryBG.light": "FFFEFD",
+    "secondaryBG.dark": "0B0E13",
+    "secondaryBG.light": "F6F5F4",
+    "separator.dark": "393C41",
+    "separator.light": "DEDDDC",
+    "tertiaryBG.dark": "23262C",
+    "tertiaryBG.light": "FBFAF9"
+  },
+  "name": "GitHub Dark"
+}

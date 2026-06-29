@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "C4A7E7",
+    "accent.light": "907AA9",
+    "text.dark": "AEACBB",
+    "text.light": "55525C",
+    "bar.dark": "201E31",
+    "bar.light": "F6F1EB",
+    "gray.dark": "9794A8",
+    "gray.light": "9893A5",
+    "primaryBG.dark": "222034",
+    "primaryBG.light": "FBF6F0",
+    "secondaryBG.dark": "1D1B2C",
+    "secondaryBG.light": "F2EDE8",
+    "separator.dark": "4B495A",
+    "separator.light": "DAD6D1",
+    "tertiaryBG.dark": "373548",
+    "tertiaryBG.light": "F7F2EC"
+  },
+  "name": "Ros\u00e9 Pine Moon"
+}

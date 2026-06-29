@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "FF5C57",
+    "accent.light": "E64747",
+    "text.dark": "CBCCCA",
+    "text.light": "4D5A66",
+    "bar.dark": "242631",
+    "bar.light": "FFFFFF",
+    "gray.dark": "CBCCCA",
+    "gray.light": "52606D",
+    "primaryBG.dark": "282A36",
+    "primaryBG.light": "FFFFFF",
+    "secondaryBG.dark": "1F212A",
+    "secondaryBG.light": "F4F4F4",
+    "separator.dark": "4A4C56",
+    "separator.light": "E6E6E6",
+    "tertiaryBG.dark": "373944",
+    "tertiaryBG.light": "F9F9F9"
+  },
+  "name": "Snazzy"
+}

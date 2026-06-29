@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "007ACC",
+    "accent.light": "006AB1",
+    "text.dark": "ADADAD",
+    "text.light": "595959",
+    "bar.dark": "1B1B1B",
+    "bar.light": "FFFFFF",
+    "gray.dark": "ADADAD",
+    "gray.light": "898989",
+    "primaryBG.dark": "1E1E1E",
+    "primaryBG.light": "FFFFFF",
+    "secondaryBG.dark": "171717",
+    "secondaryBG.light": "F4F4F4",
+    "separator.dark": "424242",
+    "separator.light": "E6E6E6",
+    "tertiaryBG.dark": "2E2E2E",
+    "tertiaryBG.light": "F9F9F9"
+  },
+  "name": "Visual Studio Dark Plus"
+}

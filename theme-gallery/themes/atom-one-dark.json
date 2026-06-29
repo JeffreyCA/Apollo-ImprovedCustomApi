@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "61AFEF",
+    "accent.light": "4078F2",
+    "text.dark": "B3B8C1",
+    "text.light": "555659",
+    "bar.dark": "24282F",
+    "bar.light": "FBFBFB",
+    "gray.dark": "939AA6",
+    "gray.light": "898B8F",
+    "primaryBG.dark": "282C34",
+    "primaryBG.light": "FAFAFA",
+    "secondaryBG.dark": "1F2229",
+    "secondaryBG.light": "EFEFEF",
+    "separator.dark": "4A4E54",
+    "separator.light": "E1E1E1",
+    "tertiaryBG.dark": "373B42",
+    "tertiaryBG.light": "F4F4F4"
+  },
+  "name": "Atom One Dark"
+}

@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "C6A0F6",
+    "accent.light": "8839EF",
+    "text.dark": "AEB0BF",
+    "text.light": "505262",
+    "bar.dark": "202334",
+    "bar.light": "EEEFF1",
+    "gray.dark": "979AAD",
+    "gray.light": "6C6F85",
+    "primaryBG.dark": "232538",
+    "primaryBG.light": "F3F4F6",
+    "secondaryBG.dark": "1E2030",
+    "secondaryBG.light": "EAEBED",
+    "separator.dark": "4B4E5D",
+    "separator.light": "D3D4D6",
+    "tertiaryBG.dark": "383A4C",
+    "tertiaryBG.light": "EFF0F2"
+  },
+  "name": "Catppuccin Macchiato"
+}

@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "7AA2F7",
+    "accent.light": "3760BF",
+    "text.dark": "9FA4BC",
+    "text.light": "3F4A72",
+    "bar.dark": "171822",
+    "bar.light": "E3E4E6",
+    "gray.dark": "858CAA",
+    "gray.light": "6172B0",
+    "primaryBG.dark": "191A24",
+    "primaryBG.light": "E8E9EB",
+    "secondaryBG.dark": "15161F",
+    "secondaryBG.light": "E0E1E3",
+    "separator.dark": "43444D",
+    "separator.light": "CACBCC",
+    "tertiaryBG.dark": "2F303A",
+    "tertiaryBG.light": "E5E6E7"
+  },
+  "name": "Tokyo Night"
+}

@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "5CCFE6",
+    "accent.light": "0B7FA8",
+    "text.dark": "B4B9C1",
+    "text.light": "54595E",
+    "bar.dark": "151924",
+    "bar.light": "FFFFFF",
+    "gray.dark": "B4B9C1",
+    "gray.light": "868D96",
+    "primaryBG.dark": "171C28",
+    "primaryBG.light": "FFFFFF",
+    "secondaryBG.dark": "12161F",
+    "secondaryBG.light": "F4F4F4",
+    "separator.dark": "3C404A",
+    "separator.light": "E6E6E6",
+    "tertiaryBG.dark": "272C37",
+    "tertiaryBG.light": "F9F9F9"
+  },
+  "name": "Halcyon"
+}

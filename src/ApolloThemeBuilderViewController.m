@@ -156,6 +156,27 @@ typedef NS_ENUM(NSInteger, ThemeBuilderSection) {
 // sees their theme update in place (this settings screen itself is not painted
 // by Apollo's theme system, so without this nothing visibly changes here).
 - (UIView *)makePreviewViewWithWidth:(CGFloat)width {
+    BOOL dark = [[self previewMode] isEqualToString:@"dark"];
+    NSDictionary *colors = ApolloThemeBuilderActiveCustomTheme()[@"colors"] ?: @{};
+
+    if (self.previewContext == 0) {
+        CGFloat margin = 0;
+        UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, 320)];
+        container.backgroundColor = UIColor.clearColor;
+
+        UISegmentedControl *segments = [[UISegmentedControl alloc] initWithItems:@[@"Feed", @"Settings", @"Subreddit"]];
+        segments.frame = CGRectMake(margin, 8, width - 2 * margin, 32);
+        segments.selectedSegmentIndex = self.previewContext;
+        [segments addTarget:self action:@selector(previewSegmentChanged:) forControlEvents:UIControlEventValueChanged];
+        [container addSubview:segments];
+
+        CGFloat screenW = width - 2 * margin;
+        UIView *preview = ApolloThemeBuilderPreviewView(colors, dark, screenW);
+        preview.frame = CGRectMake(margin, 54, screenW, preview.bounds.size.height);
+        [container addSubview:preview];
+        return container;
+    }
+
     UIColor *page      = [self previewColorForRole:kApolloThemeRoleSecondaryBG];
     UIColor *card      = [self previewColorForRole:kApolloThemeRolePrimaryBG];
     UIColor *accent    = [self previewColorForRole:kApolloThemeRoleAccent];
@@ -164,7 +185,6 @@ typedef NS_ENUM(NSInteger, ThemeBuilderSection) {
     UIColor *tertiary  = [self previewColorForRole:kApolloThemeRoleTertiaryBG];
     UIColor *gray      = [self previewColorForRole:kApolloThemeRoleGray];
 
-    BOOL dark = [[self previewMode] isEqualToString:@"dark"];
     UIColor *primaryText = dark ? UIColor.whiteColor : [UIColor colorWithWhite:0.1 alpha:1.0];
 
     CGFloat margin = 0, inset = 14;
@@ -206,7 +226,7 @@ typedef NS_ENUM(NSInteger, ThemeBuilderSection) {
     [screen addSubview:postCard];
 
     if (self.previewContext == 1) {
-        NSArray *rows = @[@"Appearance", @"Theme Builder", @"Text Size"];
+        NSArray *rows = @[@"Appearance", @"Theme Builder", @"Theme Gallery", @"Text Size"];
         for (NSInteger i = 0; i < rows.count; i++) {
             CGFloat y = 16 + i * 44;
             UILabel *row = [[UILabel alloc] initWithFrame:CGRectMake(inset, y, cardW - inset * 2 - 28, 28)];

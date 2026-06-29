@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "A7C080",
+    "accent.light": "35A77C",
+    "text.dark": "BAC2BD",
+    "text.light": "4B575D",
+    "bar.dark": "283035",
+    "bar.light": "F9F3E3",
+    "gray.dark": "A7B1AA",
+    "gray.light": "5C6A72",
+    "primaryBG.dark": "2B3339",
+    "primaryBG.light": "FEF8E8",
+    "secondaryBG.dark": "252B30",
+    "secondaryBG.light": "F5EFE0",
+    "separator.dark": "53595E",
+    "separator.light": "DDD8CA",
+    "tertiaryBG.dark": "40474D",
+    "tertiaryBG.light": "FAF4E5"
+  },
+  "name": "Everforest Dark"
+}

@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "FF6188",
+    "accent.light": "E14775",
+    "text.dark": "B4B4B4",
+    "text.light": "595757",
+    "bar.dark": "282629",
+    "bar.light": "F8F7F5",
+    "gray.dark": "B1B1B1",
+    "gray.light": "72706F",
+    "primaryBG.dark": "2B282C",
+    "primaryBG.light": "FDFCFA",
+    "secondaryBG.dark": "252226",
+    "secondaryBG.light": "F4F3F1",
+    "separator.dark": "535054",
+    "separator.light": "DCDBDA",
+    "tertiaryBG.dark": "403D41",
+    "tertiaryBG.light": "F9F8F6"
+  },
+  "name": "Monokai Pro"
+}

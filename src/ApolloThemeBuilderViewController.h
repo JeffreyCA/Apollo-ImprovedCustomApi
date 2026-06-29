@@ -9,4 +9,5 @@
 // the page keeps painting itself with the live role colours (see applyThemeColors
 // / willDisplayCell) so edits preview in place.
 @interface ApolloThemeBuilderViewController : ApolloSettingsTableViewController
+- (instancetype)initColorEditor;
 @end

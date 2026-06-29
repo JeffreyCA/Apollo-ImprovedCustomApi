@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "5EC4FF",
+    "accent.light": "276EAF",
+    "text.dark": "A3B0BD",
+    "text.light": "4A5662",
+    "bar.dark": "1A2128",
+    "bar.light": "F8F9FB",
+    "gray.dark": "8899A9",
+    "gray.light": "52606D",
+    "primaryBG.dark": "1D252C",
+    "primaryBG.light": "F6F8FA",
+    "secondaryBG.dark": "171D22",
+    "secondaryBG.light": "EBEDEF",
+    "separator.dark": "41484E",
+    "separator.light": "DDDFE1",
+    "tertiaryBG.dark": "2D343B",
+    "tertiaryBG.light": "F0F2F4"
+  },
+  "name": "City Lights"
+}

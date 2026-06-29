@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "8BA4B0",
+    "accent.light": "4D699B",
+    "text.dark": "A3A19F",
+    "text.light": "4E4E5D",
+    "bar.dark": "161414",
+    "bar.light": "F0EBC7",
+    "gray.dark": "8E8B88",
+    "gray.light": "545464",
+    "primaryBG.dark": "171515",
+    "primaryBG.light": "F5F0CB",
+    "secondaryBG.dark": "141212",
+    "secondaryBG.light": "ECE8C4",
+    "separator.dark": "424040",
+    "separator.light": "D5D1B1",
+    "tertiaryBG.dark": "2D2B2B",
+    "tertiaryBG.light": "F1ECC8"
+  },
+  "name": "Kanagawa Dragon"
+}

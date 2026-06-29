@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "FFCC66",
+    "accent.light": "7E57C2",
+    "text.dark": "BEB6EF",
+    "text.light": "5D4E8C",
+    "bar.dark": "28274C",
+    "bar.light": "FAF9F8",
+    "gray.dark": "BEB6EF",
+    "gray.light": "7A67B8",
+    "primaryBG.dark": "2B2952",
+    "primaryBG.light": "FFFEFD",
+    "secondaryBG.dark": "252346",
+    "secondaryBG.light": "F6F5F4",
+    "separator.dark": "535174",
+    "separator.light": "DEDDDC",
+    "tertiaryBG.dark": "403E64",
+    "tertiaryBG.light": "FBFAF9"
+  },
+  "name": "Shades of Purple"
+}

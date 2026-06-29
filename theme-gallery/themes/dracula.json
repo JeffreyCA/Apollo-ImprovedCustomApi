@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "BD93F9",
+    "accent.light": "A3144D",
+    "text.dark": "ABB4CE",
+    "text.light": "5C5740",
+    "bar.dark": "242631",
+    "bar.light": "FAF7E9",
+    "gray.dark": "8E99BD",
+    "gray.light": "6C664B",
+    "primaryBG.dark": "262834",
+    "primaryBG.light": "FFFCEE",
+    "secondaryBG.dark": "21222C",
+    "secondaryBG.light": "F6F3E6",
+    "separator.dark": "4F505A",
+    "separator.light": "DEDBCF",
+    "tertiaryBG.dark": "3B3D48",
+    "tertiaryBG.light": "FBF8EA"
+  },
+  "name": "Dracula"
+}

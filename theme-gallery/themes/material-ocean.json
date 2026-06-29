@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "80CBC4",
+    "accent.light": "009688",
+    "text.dark": "9A9EAD",
+    "text.light": "445963",
+    "bar.dark": "0E0F17",
+    "bar.light": "F6F6F5",
+    "gray.dark": "7D8296",
+    "gray.light": "546E7A",
+    "primaryBG.dark": "0E1019",
+    "primaryBG.light": "FBFBFA",
+    "secondaryBG.dark": "0C0E15",
+    "secondaryBG.light": "F2F2F1",
+    "separator.dark": "3A3C43",
+    "separator.light": "DADADA",
+    "tertiaryBG.dark": "25262F",
+    "tertiaryBG.light": "F7F7F6"
+  },
+  "name": "Material Ocean"
+}

@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "78A9FF",
+    "accent.light": "0F62FE",
+    "text.dark": "A1A1A1",
+    "text.light": "525252",
+    "bar.dark": "141414",
+    "bar.light": "FAF9F8",
+    "gray.dark": "979797",
+    "gray.light": "525252",
+    "primaryBG.dark": "151515",
+    "primaryBG.light": "FFFEFD",
+    "secondaryBG.dark": "121212",
+    "secondaryBG.light": "F6F5F4",
+    "separator.dark": "404040",
+    "separator.light": "DEDDDC",
+    "tertiaryBG.dark": "2B2B2B",
+    "tertiaryBG.light": "FBFAF9"
+  },
+  "name": "Oxocarbon"
+}

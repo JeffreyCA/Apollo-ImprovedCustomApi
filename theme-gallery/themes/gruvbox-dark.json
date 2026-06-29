@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "FABD2F",
+    "accent.light": "B57614",
+    "text.dark": "B9AFA5",
+    "text.light": "595048",
+    "bar.dark": "242424",
+    "bar.light": "F7EFCF",
+    "gray.dark": "B1A69B",
+    "gray.light": "7C6F64",
+    "primaryBG.dark": "262626",
+    "primaryBG.light": "FCF4D3",
+    "secondaryBG.dark": "212121",
+    "secondaryBG.light": "F3EBCC",
+    "separator.dark": "4F4F4F",
+    "separator.light": "DBD4B8",
+    "tertiaryBG.dark": "3B3B3B",
+    "tertiaryBG.light": "F8F0D0"
+  },
+  "name": "Gruvbox Dark"
+}

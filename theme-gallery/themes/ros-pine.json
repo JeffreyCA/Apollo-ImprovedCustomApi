@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "C4A7E7",
+    "accent.light": "907AA9",
+    "text.dark": "A3A1B2",
+    "text.light": "55525C",
+    "bar.dark": "161520",
+    "bar.light": "F6F1EB",
+    "gray.dark": "9794A8",
+    "gray.light": "9893A5",
+    "primaryBG.dark": "181623",
+    "primaryBG.light": "FBF6F0",
+    "secondaryBG.dark": "14131E",
+    "secondaryBG.light": "F2EDE8",
+    "separator.dark": "42414B",
+    "separator.light": "DAD6D1",
+    "tertiaryBG.dark": "2E2C38",
+    "tertiaryBG.light": "F7F2EC"
+  },
+  "name": "Ros\u00e9 Pine"
+}

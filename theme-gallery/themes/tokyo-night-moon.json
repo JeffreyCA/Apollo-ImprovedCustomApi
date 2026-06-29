@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "82AAFF",
+    "accent.light": "3760BF",
+    "text.dark": "A7ADCD",
+    "text.light": "3F4A72",
+    "bar.dark": "1F2031",
+    "bar.light": "E3E4E6",
+    "gray.dark": "A5ABCC",
+    "gray.light": "6172B0",
+    "primaryBG.dark": "212334",
+    "primaryBG.light": "E8E9EB",
+    "secondaryBG.dark": "1C1E2C",
+    "secondaryBG.light": "E0E1E3",
+    "separator.dark": "4A4B5A",
+    "separator.light": "CACBCC",
+    "tertiaryBG.dark": "363848",
+    "tertiaryBG.light": "E5E6E7"
+  },
+  "name": "Tokyo Night Moon"
+}

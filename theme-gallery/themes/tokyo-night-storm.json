@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "7AA2F7",
+    "accent.light": "3760BF",
+    "text.dark": "ADB2C6",
+    "text.light": "3F4A72",
+    "bar.dark": "202435",
+    "bar.light": "E3E4E6",
+    "gray.dark": "858CAA",
+    "gray.light": "6172B0",
+    "primaryBG.dark": "232639",
+    "primaryBG.light": "E8E9EB",
+    "secondaryBG.dark": "1E2130",
+    "secondaryBG.light": "E0E1E3",
+    "separator.dark": "4B4F5E",
+    "separator.light": "CACBCC",
+    "tertiaryBG.dark": "383B4D",
+    "tertiaryBG.light": "E5E6E7"
+  },
+  "name": "Tokyo Night Storm"
+}

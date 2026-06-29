@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "A9B665",
+    "accent.light": "7DAEA3",
+    "text.dark": "B9AFA5",
+    "text.light": "5D534B",
+    "bar.dark": "242424",
+    "bar.light": "F9F3E3",
+    "gray.dark": "B1A69B",
+    "gray.light": "7C6F64",
+    "primaryBG.dark": "262626",
+    "primaryBG.light": "FEF8E8",
+    "secondaryBG.dark": "212121",
+    "secondaryBG.light": "F5EFE0",
+    "separator.dark": "4F4F4F",
+    "separator.light": "DDD8CA",
+    "tertiaryBG.dark": "3B3B3B",
+    "tertiaryBG.light": "FAF4E5"
+  },
+  "name": "Gruvbox Material"
+}

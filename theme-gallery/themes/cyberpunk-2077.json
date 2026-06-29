@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "FCEE0A",
+    "accent.light": "D6BE00",
+    "text.dark": "02C5D7",
+    "text.light": "595561",
+    "bar.dark": "0C021E",
+    "bar.light": "FFFDEB",
+    "gray.dark": "02C5D7",
+    "gray.light": "8E879A",
+    "primaryBG.dark": "0D0221",
+    "primaryBG.light": "FFFDE7",
+    "secondaryBG.dark": "0A021A",
+    "secondaryBG.light": "F4F2DD",
+    "separator.dark": "342A45",
+    "separator.light": "E6E4D0",
+    "tertiaryBG.dark": "1E1431",
+    "tertiaryBG.light": "F9F7E1"
+  },
+  "name": "Cyberpunk 2077"
+}

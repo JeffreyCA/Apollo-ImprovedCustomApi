@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "82AAFF",
+    "accent.light": "4876D6",
+    "text.dark": "95A2A2",
+    "text.light": "4E5767",
+    "bar.dark": "011423",
+    "bar.light": "F7F7F5",
+    "gray.dark": "8F9D9D",
+    "gray.light": "5F6A7D",
+    "primaryBG.dark": "011525",
+    "primaryBG.light": "FCFCFA",
+    "secondaryBG.dark": "011220",
+    "secondaryBG.light": "F3F3F1",
+    "separator.dark": "2F404E",
+    "separator.light": "DBDBDA",
+    "tertiaryBG.dark": "182B3A",
+    "tertiaryBG.light": "F8F8F6"
+  },
+  "name": "Night Owl"
+}

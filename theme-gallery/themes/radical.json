@@ -1,0 +1,22 @@
+{
+  "apolloThemeBuilder": 1,
+  "colors": {
+    "accent.dark": "FF6AC1",
+    "accent.light": "E5439B",
+    "text.dark": "B6B5D7",
+    "text.light": "4B5864",
+    "bar.dark": "12111F",
+    "bar.light": "FFFAFE",
+    "gray.dark": "B6B5D7",
+    "gray.light": "52606D",
+    "primaryBG.dark": "141322",
+    "primaryBG.light": "FFF9FE",
+    "secondaryBG.dark": "100F1B",
+    "secondaryBG.light": "F4EEF3",
+    "separator.dark": "3A3945",
+    "separator.light": "E6E0E5",
+    "tertiaryBG.dark": "242431",
+    "tertiaryBG.light": "F9F3F8"
+  },
+  "name": "Radical"
+}
