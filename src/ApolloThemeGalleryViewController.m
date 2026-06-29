@@ -169,7 +169,6 @@ static NSString *const kGalleryCellReuseID = @"ApolloThemeGalleryCell";
     self.navigationItem.hidesSearchBarWhenScrolling = YES;
     self.definesPresentationContext = YES;
 
-    self.tableView.tableFooterView = [self makeFooterView];
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(themeApplied:)
                                                  name:@"ApolloThemeGalleryDidApply"
@@ -182,21 +181,6 @@ static NSString *const kGalleryCellReuseID = @"ApolloThemeGalleryCell";
 
 - (void)themeApplied:(NSNotification *)note {
     [self.tableView reloadData];
-}
-
-- (UIView *)makeFooterView {
-    CGFloat width = CGRectGetWidth(self.view.bounds);
-    if (width <= 0) width = UIScreen.mainScreen.bounds.size.width;
-    UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(16, 8, width - 32, 60)];
-    label.text = @"Curated editor palettes. Applied themes appear in Theme Builder → My Themes.";
-    label.font = [UIFont systemFontOfSize:13];
-    label.textColor = UIColor.secondaryLabelColor;
-    label.numberOfLines = 0;
-    [label sizeToFit];
-    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, label.bounds.size.height + 16)];
-    label.frame = CGRectMake(16, 8, width - 32, label.bounds.size.height);
-    [footer addSubview:label];
-    return footer;
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -223,6 +207,13 @@ static NSString *const kGalleryCellReuseID = @"ApolloThemeGalleryCell";
 }
 
 #pragma mark - Table
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    if (section == 0) {
+        return @"Tap a theme to preview and apply. Applied themes are saved in Theme Builder under My Themes.";
+    }
+    return nil;
+}
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     return (NSInteger)self.filteredThemes.count;
