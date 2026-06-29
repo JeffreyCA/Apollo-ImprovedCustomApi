@@ -13,10 +13,12 @@
 		10D3DA5AB4BBC013A5167E85 /* RefreshIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 250AAFAA2D43293AAE6A7BF2 /* RefreshIntents.swift */; };
 		195D1340E1BD26D8F71CB75D /* CalendarProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 421A94C7892C49148B5EE528 /* CalendarProvider.swift */; };
 		19B6DB965FE7B44FD205B006 /* SetupCode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72CCCB968402A863A86C04A5 /* SetupCode.swift */; };
+		1A37101A10DF57C0ADC1095A /* FollowThreadLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04F2A567C5494F21BBDDB095 /* FollowThreadLiveActivity.swift */; };
 		3A6A02CBB883EDFC84A02FB9 /* RedditAppOnlyClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80E654406A332FE6A70DAB87 /* RedditAppOnlyClient.swift */; };
 		5DC27DB91656EEE2213B8B6F /* ApolloRebornWidgetBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8025C96F504C282AF74FE637 /* ApolloRebornWidgetBundle.swift */; };
 		6658535877ED335402417725 /* Headline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3249E8A3BADAFDAD5602C5F2 /* Headline.swift */; };
 		6F85E60539F14DC0DEB6FAA7 /* ShowerthoughtsViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31E94759338F8BD2CAA5AC01 /* ShowerthoughtsViews.swift */; };
+		701475AEBE1002C4082F23FF /* FollowThreadActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 425771AF333AFCDCAEB0654E /* FollowThreadActivity.swift */; };
 		789622FCFB38A7885ECF3AF6 /* ShortcutsProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13AE04DD75C1C3E84CA2739E /* ShortcutsProvider.swift */; };
 		861BE6CF6DB82764C7EA09E5 /* CalendarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4DC027941674A82D58586A3 /* CalendarView.swift */; };
 		8FAFF4EB4AF9BC40F994C9AB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 19FB33ECA1BE1325C7761FE7 /* Assets.xcassets */; };
@@ -29,6 +31,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		04F2A567C5494F21BBDDB095 /* FollowThreadLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowThreadLiveActivity.swift; sourceTree = "<group>"; };
 		13AE04DD75C1C3E84CA2739E /* ShortcutsProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutsProvider.swift; sourceTree = "<group>"; };
 		19FB33ECA1BE1325C7761FE7 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		1DA3E81AD2A9A201602141B6 /* RedditModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RedditModels.swift; sourceTree = "<group>"; };
@@ -39,6 +42,7 @@
 		37BC757CD716A47F38065607 /* ImageLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageLoader.swift; sourceTree = "<group>"; };
 		3B124098BE2D596B04372038 /* WidgetViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetViews.swift; sourceTree = "<group>"; };
 		421A94C7892C49148B5EE528 /* CalendarProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarProvider.swift; sourceTree = "<group>"; };
+		425771AF333AFCDCAEB0654E /* FollowThreadActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowThreadActivity.swift; sourceTree = "<group>"; };
 		72CCCB968402A863A86C04A5 /* SetupCode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupCode.swift; sourceTree = "<group>"; };
 		8025C96F504C282AF74FE637 /* ApolloRebornWidgetBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApolloRebornWidgetBundle.swift; sourceTree = "<group>"; };
 		80E654406A332FE6A70DAB87 /* RedditAppOnlyClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RedditAppOnlyClient.swift; sourceTree = "<group>"; };
@@ -75,6 +79,8 @@
 				19FB33ECA1BE1325C7761FE7 /* Assets.xcassets */,
 				421A94C7892C49148B5EE528 /* CalendarProvider.swift */,
 				B4DC027941674A82D58586A3 /* CalendarView.swift */,
+				425771AF333AFCDCAEB0654E /* FollowThreadActivity.swift */,
+				04F2A567C5494F21BBDDB095 /* FollowThreadLiveActivity.swift */,
 				3249E8A3BADAFDAD5602C5F2 /* Headline.swift */,
 				37BC757CD716A47F38065607 /* ImageLoader.swift */,
 				A3D361D9E538B994FB81CD76 /* MediaProviders.swift */,
@@ -164,6 +170,8 @@
 				5DC27DB91656EEE2213B8B6F /* ApolloRebornWidgetBundle.swift in Sources */,
 				195D1340E1BD26D8F71CB75D /* CalendarProvider.swift in Sources */,
 				861BE6CF6DB82764C7EA09E5 /* CalendarView.swift in Sources */,
+				701475AEBE1002C4082F23FF /* FollowThreadActivity.swift in Sources */,
+				1A37101A10DF57C0ADC1095A /* FollowThreadLiveActivity.swift in Sources */,
 				6658535877ED335402417725 /* Headline.swift in Sources */,
 				0977095EDD050E8F4940841D /* ImageLoader.swift in Sources */,
 				E5CB147570C744716506D5EE /* MediaProviders.swift in Sources */,

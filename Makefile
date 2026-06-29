@@ -86,10 +86,13 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloHideModSubreddits.xm \
     $(SRC_DIR)/ApolloSubredditSidebar.xm \
     $(SRC_DIR)/ApolloTagFilters.xm \
-    $(SRC_DIR)/ApolloThemeBuilder.xm \
-    $(SRC_DIR)/ApolloThemeAI.m \
-    $(SRC_DIR)/ApolloThemeAISheets.m \
-    $(SRC_DIR)/ApolloThemeBuilderViewController.m \
+    $(SRC_DIR)/ApolloThemeTokens.m \
+    $(SRC_DIR)/ApolloThemeCompiler.m \
+    $(SRC_DIR)/ApolloThemeStore.m \
+    $(SRC_DIR)/ApolloThemeRuntime.xm \
+    $(SRC_DIR)/ApolloThemeManagerViewController.m \
+    $(SRC_DIR)/ApolloThemeManagerIntegration.xm \
+    $(SRC_DIR)/ApolloThemeIntegrations.xm \
     $(SRC_DIR)/ApolloSearchInPlace.xm \
     $(SRC_DIR)/ApolloSearchHeaderOverlapFix.xm \
     $(SRC_DIR)/ApolloImageChestResolver.m \
