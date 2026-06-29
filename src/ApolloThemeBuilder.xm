@@ -56,6 +56,9 @@ static NSString * const kAppGroupSuite    = @"group.com.christianselig.apollo";
 // restores their previous theme instead of leaving them on the donor (outrun).
 static NSString * const kPreviousThemeKey = @"ApolloRebornThemeBuilderPreviousTheme";
 
+static BOOL sForceRepaintInFlight = NO;
+static BOOL sForceRepaintCoalesced = NO;
+
 // ---------------------------------------------------------------------------
 // Donor constant table (outrun, from the runtime mapping pass)
 // ---------------------------------------------------------------------------
@@ -763,6 +766,16 @@ void ApolloThemeBuilderForceRepaint(void) {
     // light/dark switch takes) by flipping each window's override style for
     // one runloop turn. Theme role colors are re-created on repaint, which
     // re-runs them through the remap hooks.
+    //
+    // Coalesce overlapping requests: gallery apply (and other callers) often
+    // schedule two repaints back-to-back (ActivateDonorLive + post-
+    // ReloadOverrides). Without coalescing, the second flip saves the first
+    // flip's temporary override and can restore to the wrong style.
+    if (sForceRepaintInFlight) {
+        sForceRepaintCoalesced = YES;
+        return;
+    }
+    sForceRepaintInFlight = YES;
     dispatch_async(dispatch_get_main_queue(), ^{
         NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
         for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
@@ -780,6 +793,12 @@ void ApolloThemeBuilderForceRepaint(void) {
             [windows enumerateObjectsUsingBlock:^(UIWindow *window, NSUInteger idx, BOOL *stop) {
                 window.overrideUserInterfaceStyle = (UIUserInterfaceStyle)savedStyles[idx].integerValue;
             }];
+            BOOL runAgain = sForceRepaintCoalesced;
+            sForceRepaintCoalesced = NO;
+            sForceRepaintInFlight = NO;
+            if (runAgain) {
+                ApolloThemeBuilderForceRepaint();
+            }
         });
     });
 }
