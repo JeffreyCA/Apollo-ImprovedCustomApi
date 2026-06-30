@@ -82,6 +82,7 @@ typedef NS_ENUM(unsigned char, ApolloLinkPreviewStackAlignItems) {
 @property (nonatomic) CGFloat cornerRadius;
 @property (nonatomic) BOOL placeholderEnabled;
 @property (nonatomic, copy) UIColor *placeholderColor;
+@property (nonatomic) BOOL shouldRenderProgressImages;
 - (void)addTarget:(id)target action:(SEL)action forControlEvents:(NSUInteger)controlEvents;
 @end
 
@@ -131,10 +132,8 @@ static char kApolloLinkPreviewImageFallbackInFlightKey;
 static char kApolloLinkPreviewImageFallbackAppliedURLKey;
 static char kApolloLinkPreviewRenderSignaturesKey;
 static char kApolloLinkPreviewV17LogCountKey;
-static char kApolloLinkPreviewDirectImageNodeKey;
+static char kApolloLinkPreviewDirectImageStateKey;
 static char kApolloLinkPreviewDirectImageRelayoutScheduledKey;
-static char kApolloLinkPreviewDirectImageAspectRatioKey;
-static char kApolloLinkPreviewDirectImageAspectFetchScheduledURLKey;
 
 static NSHashTable<id> *sApolloLPRegisteredLinkNodes = nil;
 static dispatch_queue_t sApolloLPRegisteredLinkNodesQueue = NULL;
@@ -146,6 +145,16 @@ typedef struct {
 } ApolloLPRegisteredRecolorResult;
 
 static const NSUInteger ApolloLPControlEventTouchUpInside = 1 << 4;
+
+#ifndef APOLLO_DIRECT_IMAGE_DEBUG
+#define APOLLO_DIRECT_IMAGE_DEBUG 0
+#endif
+
+#if APOLLO_DIRECT_IMAGE_DEBUG
+#define ApolloLPDirectImageDebug(...) ApolloLog(__VA_ARGS__)
+#else
+#define ApolloLPDirectImageDebug(...)
+#endif
 
 static void ApolloLPLogOncePerHost(NSString *host, NSString *event);
 static void ApolloLPTriggerRelayoutForHost(ASDisplayNode *node, NSString *host);
@@ -308,6 +317,16 @@ static BOOL ApolloLPRouteURLToNativeHandler(id startNode, NSURL *url) {
         [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
     }
 }
+@end
+
+@interface ApolloLPDirectImageState : NSObject
+@property (nonatomic, strong) ASNetworkImageNode *imageNode;
+@property (nonatomic, copy) NSString *aspectFetchKey;
+@property (nonatomic, strong) NSURL *currentLoadURL;
+@property (nonatomic) CGFloat aspectRatio;
+@end
+
+@implementation ApolloLPDirectImageState
 @end
 
 static UIColor *ApolloLPResolvedColor(UIColor *color, UITraitCollection *traitCollection) {
@@ -1096,6 +1115,85 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
             }
         });
     }] resume];
+}
+
+static void ApolloLPApplyCompletedDirectFeedImage(ASNetworkImageNode *imageNode, NSURL *imageURL, UIImage *image) {
+    if (!imageNode || !image || image.size.width <= 0.0 || image.size.height <= 0.0) {
+        return;
+    }
+    NSURL *currentURL = objc_getAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackURLKey);
+    if (![currentURL.absoluteString isEqualToString:imageURL.absoluteString]) {
+        return;
+    }
+
+    // ASNetworkImageNode can publish a progressive frame and then leave it in
+    // imageNode.image. For direct feed images that looks like a thin strip in a
+    // correctly-sized media area. Unlike the generic fallback path, overwrite
+    // any existing image here once our completed response has decoded.
+    ApolloLPDirectImageDebug(@"[LinkPreviews] direct-feed-final-image url=%@ image=%.0fx%.0f@%.1f",
+                             imageURL.absoluteString,
+                             image.size.width,
+                             image.size.height,
+                             image.scale);
+    imageNode.image = image;
+    if ([imageNode respondsToSelector:@selector(setDefaultImage:)]) {
+        imageNode.defaultImage = image;
+    }
+    imageNode.backgroundColor = nil;
+    objc_setAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackAppliedURLKey, imageURL.absoluteString, OBJC_ASSOCIATION_COPY_NONATOMIC);
+}
+
+static void ApolloLPFetchDirectImageData(NSURL *imageURL, NSTimeInterval timeout, void (^completion)(NSData *data, NSURLResponse *response, NSError *error)) {
+    if (![imageURL isKindOfClass:[NSURL class]] || !completion) return;
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:imageURL cachePolicy:NSURLRequestReturnCacheDataElseLoad timeoutInterval:timeout];
+    [request setValue:@"image/avif,image/webp,image/apng,image/*,*/*;q=0.8" forHTTPHeaderField:@"Accept"];
+    [request setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1" forHTTPHeaderField:@"User-Agent"];
+    [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:completion] resume];
+}
+
+static void ApolloLPScheduleCompletedDirectFeedImageIfNeeded(ASNetworkImageNode *imageNode, NSURL *imageURL, NSString *host) {
+    if (!imageNode || !ApolloLPURLIsHTTP(imageURL)) {
+        return;
+    }
+    objc_setAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackURLKey, imageURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    NSString *cacheKey = imageURL.absoluteString;
+    UIImage *cachedImage = cacheKey.length > 0 ? [ApolloLPFallbackImageCache() objectForKey:cacheKey] : nil;
+    if (cachedImage) {
+        ApolloLPApplyCompletedDirectFeedImage(imageNode, imageURL, cachedImage);
+        return;
+    }
+
+    NSString *scheduledURL = objc_getAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackScheduledKey);
+    if ([scheduledURL isEqualToString:imageURL.absoluteString]) {
+        return;
+    }
+    objc_setAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackScheduledKey, imageURL.absoluteString, OBJC_ASSOCIATION_COPY_NONATOMIC);
+
+    __weak ASNetworkImageNode *weakImageNode = imageNode;
+    NSString *hostCopy = [host copy];
+    ApolloLPFetchDirectImageData(imageURL, 20.0, ^(NSData *data, NSURLResponse *response, NSError *error) {
+        UIImage *image = data.length > 0 ? [UIImage imageWithData:data] : nil;
+        NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        if (image.size.width > 0.0 && image.size.height > 0.0) {
+            NSUInteger cost = (NSUInteger)(image.size.width * image.size.height * image.scale * image.scale * 4.0);
+            [ApolloLPFallbackImageCache() setObject:image forKey:cacheKey cost:cost];
+        } else {
+            ApolloLog(@"[LinkPreviews] direct-feed-complete-image failed host=%@ status=%ld bytes=%lu err=%@ url=%@",
+                      hostCopy ?: ApolloLPHost(imageURL),
+                      (long)httpResponse.statusCode,
+                      (unsigned long)data.length,
+                      error.localizedDescription ?: @"nil",
+                      imageURL.absoluteString);
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ASNetworkImageNode *strongImageNode = weakImageNode;
+            if (!strongImageNode) return;
+            objc_setAssociatedObject(strongImageNode, &kApolloLinkPreviewImageFallbackScheduledKey, nil, OBJC_ASSOCIATION_ASSIGN);
+            ApolloLPApplyCompletedDirectFeedImage(strongImageNode, imageURL, image);
+        });
+    });
 }
 
 static void ApolloLPScheduleImageFallbackIfNeeded(ASNetworkImageNode *imageNode, NSURL *imageURL, NSString *host) {
@@ -3467,6 +3565,24 @@ static ASLayoutSpec *ApolloLPEmptyLayoutSpec(void) {
 
 #pragma mark - Direct feed images
 
+typedef struct {
+    __unsafe_unretained ASDisplayNode *node;
+    __unsafe_unretained NSURL *displayURL;
+    __unsafe_unretained NSURL *loadURL;
+    CGFloat aspectRatio;
+    BOOL aspectKnown;
+} ApolloLPDirectImageContext;
+
+static ApolloLPDirectImageState *ApolloLPDirectImageStateForNode(ASDisplayNode *node, BOOL createIfMissing) {
+    if (!node) return nil;
+    ApolloLPDirectImageState *state = objc_getAssociatedObject(node, &kApolloLinkPreviewDirectImageStateKey);
+    if (!state && createIfMissing) {
+        state = [[ApolloLPDirectImageState alloc] init];
+        objc_setAssociatedObject(node, &kApolloLinkPreviewDirectImageStateKey, state, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return state;
+}
+
 static BOOL ApolloLPNodeHasAncestorClass(ASDisplayNode *node, Class cls) {
     if (!node || !cls) return NO;
     for (ASDisplayNode *cur = node; cur; cur = cur.supernode) {
@@ -3590,17 +3706,19 @@ static CGFloat ApolloLPMetadataDirectImageAspectRatio(ASDisplayNode *node, NSURL
 static NSURL *ApolloLPResolvedDirectImageURLForNode(ASDisplayNode *node, NSURL *fallbackURL) {
     id sourceImage = ApolloLPSourceImageForNode(node);
     NSURL *sourceURL = ApolloLPURLValue(ApolloLPObjectBySendingNoArg(sourceImage, @selector(URL)));
-    if (sourceURL) return sourceURL;
 
     id link = ApolloLPLinkModelForNode(node);
     NSURL *thumbnailURL = ApolloLPURLValue(ApolloLPObjectBySendingNoArg(link, @selector(thumbnailURL)));
-    if (thumbnailURL) return thumbnailURL;
 
     // Short redd.it image URLs shown in Apollo's link button are not always
     // loadable directly; their image CDN form lives on i.redd.it.
     NSString *fallbackHost = ApolloLPHost(fallbackURL);
-    if ([fallbackHost isEqualToString:@"redd.it"]) return ApolloLPLoadableRedditImageURLFromShortURL(fallbackURL);
-    return fallbackURL;
+    NSURL *shortRedditURL = [fallbackHost isEqualToString:@"redd.it"] ? ApolloLPLoadableRedditImageURLFromShortURL(fallbackURL) : nil;
+    NSURL *resolvedURL = sourceURL ?: thumbnailURL ?: shortRedditURL ?: fallbackURL;
+    ApolloLPDirectImageDebug(@"[LinkPreviews] direct-image-url fallback=%@ resolved=%@",
+                             fallbackURL.absoluteString,
+                             resolvedURL.absoluteString);
+    return resolvedURL;
 }
 
 static NSURL *ApolloLPDirectImageURLForRichMediaNode(id richMediaNode) {
@@ -3623,41 +3741,40 @@ static NSURL *ApolloLPDirectImageURLForRichMediaNode(id richMediaNode) {
     return ApolloLPIsDirectInlineImageURL(buttonURL) ? buttonURL : nil;
 }
 
-static CGFloat ApolloLPDirectImageAspectRatioForNode(ASDisplayNode *node, NSURL *loadURL, BOOL *known) {
+static CGFloat ApolloLPDirectImageAspectRatioForNode(ASDisplayNode *node, NSURL *loadURL, ApolloLPDirectImageState *state, BOOL *known) {
     if (known) *known = NO;
-    NSNumber *cachedRatio = objc_getAssociatedObject(node, &kApolloLinkPreviewDirectImageAspectRatioKey);
-    if ([cachedRatio isKindOfClass:[NSNumber class]] && cachedRatio.doubleValue > 0.0) {
+    if (state.aspectRatio > 0.0) {
         if (known) *known = YES;
-        return (CGFloat)cachedRatio.doubleValue;
+        return state.aspectRatio;
     }
 
     CGFloat globalRatio = ApolloLPCachedDirectImageAspectRatio(loadURL);
     if (globalRatio > 0.0) {
         if (known) *known = YES;
+        state.aspectRatio = globalRatio;
         return globalRatio;
     }
 
     CGFloat metadataRatio = ApolloLPMetadataDirectImageAspectRatio(node, loadURL);
     if (metadataRatio > 0.0) {
         if (known) *known = YES;
+        state.aspectRatio = metadataRatio;
         return metadataRatio;
     }
     return 9.0 / 16.0;
 }
 
-static void ApolloLPScheduleDirectImageAspectFetchIfNeeded(ASDisplayNode *node, NSURL *loadURL) {
+static void ApolloLPScheduleDirectImageAspectFetchIfNeeded(ASDisplayNode *node, NSURL *loadURL, ApolloLPDirectImageState *state) {
     if (!node || ![loadURL isKindOfClass:[NSURL class]]) return;
+    state = state ?: ApolloLPDirectImageStateForNode(node, YES);
     NSString *cacheKey = ApolloLPDirectImageAspectCacheKey(loadURL);
     if (cacheKey.length == 0 || ApolloLPCachedDirectImageAspectRatio(loadURL) > 0.0) return;
-    NSString *scheduledKey = objc_getAssociatedObject(node, &kApolloLinkPreviewDirectImageAspectFetchScheduledURLKey);
-    if ([scheduledKey isEqualToString:cacheKey]) return;
-    objc_setAssociatedObject(node, &kApolloLinkPreviewDirectImageAspectFetchScheduledURLKey, cacheKey, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if ([state.aspectFetchKey isEqualToString:cacheKey]) return;
+    state.aspectFetchKey = cacheKey;
 
-    NSURLRequest *request = [NSURLRequest requestWithURL:loadURL
-                                             cachePolicy:NSURLRequestReturnCacheDataElseLoad
-                                         timeoutInterval:15.0];
     __weak ASDisplayNode *weakNode = node;
-    [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    __weak ApolloLPDirectImageState *weakState = state;
+    ApolloLPFetchDirectImageData(loadURL, 15.0, ^(NSData *data, NSURLResponse *response, NSError *error) {
         CGFloat width = 0.0;
         CGFloat height = 0.0;
         if (!error && data.length > 0) {
@@ -3669,15 +3786,26 @@ static void ApolloLPScheduleDirectImageAspectFetchIfNeeded(ASDisplayNode *node, 
                 height = [properties[(__bridge NSString *)kCGImagePropertyPixelHeight] doubleValue];
                 CFRelease(source);
             }
+            if (width > 1.0 && height > 1.0) {
+                UIImage *image = [UIImage imageWithData:data];
+                if (image.size.width > 0.0 && image.size.height > 0.0) {
+                    NSUInteger cost = (NSUInteger)(image.size.width * image.size.height * image.scale * image.scale * 4.0);
+                    [ApolloLPFallbackImageCache() setObject:image forKey:loadURL.absoluteString cost:cost];
+                }
+            }
         }
         if (width <= 1.0 || height <= 1.0) {
-            ApolloLog(@"[LinkPreviews] direct-image-aspect-fetch-failed host=%@ err=%@ bytes=%lu",
-                      ApolloLPHost(loadURL), error.localizedDescription ?: @"(nil)", (unsigned long)data.length);
+            NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+            ApolloLog(@"[LinkPreviews] direct-image-aspect fetch-failed host=%@ status=%ld err=%@ bytes=%lu url=%@",
+                      ApolloLPHost(loadURL),
+                      (long)httpResponse.statusCode,
+                      error.localizedDescription ?: @"(nil)",
+                      (unsigned long)data.length,
+                      loadURL.absoluteString);
             dispatch_async(dispatch_get_main_queue(), ^{
                 ASDisplayNode *strongNode = weakNode;
-                if (strongNode) {
-                    objc_setAssociatedObject(strongNode, &kApolloLinkPreviewDirectImageAspectFetchScheduledURLKey, nil, OBJC_ASSOCIATION_ASSIGN);
-                }
+                ApolloLPDirectImageState *strongState = weakState ?: ApolloLPDirectImageStateForNode(strongNode, NO);
+                strongState.aspectFetchKey = nil;
             });
             return;
         }
@@ -3687,11 +3815,12 @@ static void ApolloLPScheduleDirectImageAspectFetchIfNeeded(ASDisplayNode *node, 
         dispatch_async(dispatch_get_main_queue(), ^{
             ASDisplayNode *strongNode = weakNode;
             if (!strongNode) return;
-            objc_setAssociatedObject(strongNode, &kApolloLinkPreviewDirectImageAspectFetchScheduledURLKey, nil, OBJC_ASSOCIATION_ASSIGN);
-            objc_setAssociatedObject(strongNode, &kApolloLinkPreviewDirectImageAspectRatioKey, @(ratio), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            ApolloLPDirectImageState *strongState = weakState ?: ApolloLPDirectImageStateForNode(strongNode, YES);
+            strongState.aspectFetchKey = nil;
+            strongState.aspectRatio = ratio;
             ApolloLPInvalidateNodeAndCell(strongNode);
         });
-    }] resume];
+    });
 }
 
 static void ApolloLPInvalidateNodeAndCell(ASDisplayNode *node) {
@@ -3735,7 +3864,8 @@ static void ApolloLPScheduleDirectImageFeedRelayoutIfNeeded(ASDisplayNode *node,
 
 static void ApolloLPScheduleVisibleDirectImageRefreshIfNeeded(ASDisplayNode *node) {
     if (!node || !ApolloLPDirectImageIsInFeedCell(node)) return;
-    if (objc_getAssociatedObject(node, &kApolloLinkPreviewDirectImageNodeKey)) return;
+    ApolloLPDirectImageState *state = ApolloLPDirectImageStateForNode(node, NO);
+    if (state.imageNode) return;
 
     NSString *urlString = ApolloGetLinkButtonNodeURLString(node);
     NSURL *url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
@@ -3754,38 +3884,54 @@ static void ApolloLPScheduleVisibleDirectImageRefreshIfNeeded(ASDisplayNode *nod
     });
 }
 
-static ASLayoutSpec *ApolloLPDirectImageLayoutSpec(id linkButtonNode, NSURL *url) {
-    if (!ApolloLPIsDirectInlineImageURL(url)) return nil;
-    ASDisplayNode *linkNode = (ASDisplayNode *)linkButtonNode;
-    if (!ApolloLPDirectImageIsInFeedCell(linkNode)) return nil;
+static BOOL ApolloLPBuildDirectImageContext(ASDisplayNode *node, NSURL *url, ApolloLPDirectImageContext *context) {
+    if (!context) return NO;
+    memset(context, 0, sizeof(ApolloLPDirectImageContext));
+    if (!ApolloLPIsDirectInlineImageURL(url) || !ApolloLPDirectImageIsInFeedCell(node)) return NO;
 
-    NSURL *loadURL = ApolloLPResolvedDirectImageURLForNode(linkNode, url);
+    NSURL *loadURL = ApolloLPResolvedDirectImageURLForNode(node, url);
     if (!loadURL) {
         ApolloLPLogOncePerHost(ApolloLPHost(url), @"direct-image-no-load-url");
-        return nil;
+        return NO;
     }
 
-    Class ratioClass = ApolloLPClass(@"ASRatioLayoutSpec");
-    if (!ratioClass) return nil;
+    ApolloLPDirectImageState *state = ApolloLPDirectImageStateForNode(node, YES);
+    if (state.currentLoadURL.absoluteString.length > 0 &&
+        ![state.currentLoadURL.absoluteString isEqualToString:loadURL.absoluteString]) {
+        state.aspectRatio = 0.0;
+        state.aspectFetchKey = nil;
+    }
+    state.currentLoadURL = loadURL;
 
     BOOL aspectKnown = NO;
-    CGFloat ratio = ApolloLPDirectImageAspectRatioForNode(linkNode, loadURL, &aspectKnown);
-    if (!aspectKnown) {
-        ApolloLPScheduleDirectImageAspectFetchIfNeeded(linkNode, loadURL);
-        return ApolloLPEmptyLayoutSpec();
-    }
+    CGFloat ratio = ApolloLPDirectImageAspectRatioForNode(node, loadURL, state, &aspectKnown);
 
+    context->node = node;
+    context->displayURL = url;
+    context->loadURL = loadURL;
+    context->aspectRatio = ratio;
+    context->aspectKnown = aspectKnown;
+    if (!aspectKnown) {
+        ApolloLPScheduleDirectImageAspectFetchIfNeeded(node, loadURL, state);
+    }
+    return YES;
+}
+
+static ASNetworkImageNode *ApolloLPDirectImageNodeForContext(ApolloLPDirectImageContext context) {
     Class imageNodeClass = ApolloLPClass(@"ASNetworkImageNode");
-    Class insetClass = ApolloLPClass(@"ASInsetLayoutSpec");
     if (!imageNodeClass) return nil;
 
-    ASNetworkImageNode *imageNode = objc_getAssociatedObject(linkButtonNode, &kApolloLinkPreviewDirectImageNodeKey);
+    ApolloLPDirectImageState *state = ApolloLPDirectImageStateForNode(context.node, YES);
+    ASNetworkImageNode *imageNode = state.imageNode;
     if (![imageNode isKindOfClass:imageNodeClass]) {
         imageNode = [[imageNodeClass alloc] init];
         imageNode.contentMode = UIViewContentModeScaleAspectFill;
         imageNode.clipsToBounds = YES;
         imageNode.cornerRadius = 0.0;
         imageNode.backgroundColor = [UIColor clearColor];
+        if ([imageNode respondsToSelector:@selector(setShouldRenderProgressImages:)]) {
+            imageNode.shouldRenderProgressImages = NO;
+        }
         imageNode.placeholderEnabled = YES;
         imageNode.placeholderColor = [UIColor clearColor];
         imageNode.userInteractionEnabled = YES;
@@ -3794,18 +3940,40 @@ static ASLayoutSpec *ApolloLPDirectImageLayoutSpec(id linkButtonNode, NSURL *url
                          action:@selector(directImageTapped:)
                forControlEvents:ApolloLPControlEventTouchUpInside];
         }
-        if (!imageNode.supernode && [linkNode respondsToSelector:@selector(addSubnode:)]) {
-            [linkNode addSubnode:imageNode];
+        if (!imageNode.supernode && [context.node respondsToSelector:@selector(addSubnode:)]) {
+            [context.node addSubnode:imageNode];
         }
-        objc_setAssociatedObject(linkButtonNode, &kApolloLinkPreviewDirectImageNodeKey, imageNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        state.imageNode = imageNode;
     }
 
-    ApolloLPSetNetworkImageURLPreservingImage(imageNode, loadURL);
-    ApolloLPScheduleImageFallbackIfNeeded(imageNode, loadURL, ApolloLPHost(url));
-    objc_setAssociatedObject(imageNode, &kApolloLinkPreviewURLKey, loadURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    ApolloLPInstallContextMenuForNode(imageNode, loadURL);
+    return imageNode;
+}
 
-    ASLayoutSpec *imageSpec = [ratioClass ratioLayoutSpecWithRatio:ratio child:imageNode];
+static ASLayoutSpec *ApolloLPDirectImageLayoutSpec(id linkButtonNode, NSURL *url, struct CDStruct_90e057aa constrainedSize) {
+    ApolloLPDirectImageContext context;
+    if (!ApolloLPBuildDirectImageContext((ASDisplayNode *)linkButtonNode, url, &context)) return nil;
+    if (!context.aspectKnown) return nil;
+
+    Class ratioClass = ApolloLPClass(@"ASRatioLayoutSpec");
+    Class insetClass = ApolloLPClass(@"ASInsetLayoutSpec");
+    if (!ratioClass) return nil;
+
+    ASNetworkImageNode *imageNode = ApolloLPDirectImageNodeForContext(context);
+    if (!imageNode) return nil;
+
+    CGFloat width = constrainedSize.max.width;
+    if (isfinite(width) && width > 1.0 && isfinite(context.aspectRatio) && context.aspectRatio > 0.0) {
+        ApolloLPApplyStyleSize([imageNode style], CGSizeMake(width, width * context.aspectRatio));
+    } else {
+        ApolloLPClearStyleSize([imageNode style]);
+    }
+
+    ApolloLPSetNetworkImageURLPreservingImage(imageNode, context.loadURL);
+    ApolloLPScheduleCompletedDirectFeedImageIfNeeded(imageNode, context.loadURL, ApolloLPHost(context.displayURL));
+    objc_setAssociatedObject(imageNode, &kApolloLinkPreviewURLKey, context.loadURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloLPInstallContextMenuForNode(imageNode, context.loadURL);
+
+    ASLayoutSpec *imageSpec = [ratioClass ratioLayoutSpecWithRatio:context.aspectRatio child:imageNode];
     if (insetClass) {
         imageSpec = [insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(0, 0, 0, 0) child:imageSpec] ?: imageSpec;
     }
@@ -3825,7 +3993,7 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
 - (id)layoutSpecThatFits:(struct CDStruct_90e057aa)constrainedSize {
     NSURL *url = ApolloLPDirectImageURLForRichMediaNode(self);
     if (url) {
-        ASLayoutSpec *directImageSpec = ApolloLPDirectImageLayoutSpec(self, url);
+        ASLayoutSpec *directImageSpec = ApolloLPDirectImageLayoutSpec(self, url, constrainedSize);
         if (directImageSpec) {
             return directImageSpec;
         }
@@ -3897,7 +4065,7 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
             ASLayoutSpec *empty = ApolloLPEmptyLayoutSpec();
             return empty ?: %orig;
         }
-        ASLayoutSpec *directImageSpec = ApolloLPDirectImageLayoutSpec(self, url);
+        ASLayoutSpec *directImageSpec = ApolloLPDirectImageLayoutSpec(self, url, constrainedSize);
         if (directImageSpec) return directImageSpec;
         ApolloLPScheduleDirectImageFeedRelayoutIfNeeded((ASDisplayNode *)self, url);
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
