@@ -2,6 +2,8 @@
 #import "ApolloThemeStore.h"
 #import "ApolloThemeCompiler.h"
 #import "ApolloCommon.h"
+#import <mach-o/dyld.h>
+#import <mach-o/loader.h>
 #import <objc/runtime.h>
 #import <os/lock.h>
 
@@ -13,6 +15,60 @@ static volatile bool sEnabled = false;
 static uint32_t sTokens[ApolloThemeModeCount][ApolloThemeTokenCount];
 static os_unfair_lock sLock = OS_UNFAIR_LOCK_INIT;
 static bool sDebugLogging = false;
+static uintptr_t sApolloStart = 0;
+static uintptr_t sApolloEnd = 0;
+static uintptr_t sTweakStart = 0;
+static uintptr_t sTweakEnd = 0;
+
+static void RecordImageBounds(const struct mach_header *mh, intptr_t slide, uintptr_t *outStart, uintptr_t *outEnd) {
+    if (!mh || mh->magic != MH_MAGIC_64) return;
+
+    uintptr_t start = (uintptr_t)mh;
+    uintptr_t end = start;
+    const uint8_t *p = (const uint8_t *)mh + sizeof(struct mach_header_64);
+    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
+    for (uint32_t c = 0; c < mh64->ncmds; c++) {
+        const struct load_command *lc = (const struct load_command *)p;
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            if (strcmp(seg->segname, SEG_PAGEZERO) != 0) {
+                uintptr_t segEnd = (uintptr_t)((intptr_t)seg->vmaddr + slide) + (uintptr_t)seg->vmsize;
+                if (segEnd > end) end = segEnd;
+            }
+        }
+        p += lc->cmdsize;
+    }
+
+    *outStart = start;
+    *outEnd = (end > start) ? end : (start + 0x8000000);
+}
+
+static void FindRuntimeImages(void) {
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (!name) continue;
+
+        const struct mach_header *mh = _dyld_get_image_header(i);
+        intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+        size_t len = strlen(name);
+        if (len >= 7 && strcmp(name + len - 7, "/Apollo") == 0) {
+            RecordImageBounds(mh, slide, &sApolloStart, &sApolloEnd);
+        } else if (strstr(name, "ApolloReborn")) {
+            RecordImageBounds(mh, slide, &sTweakStart, &sTweakEnd);
+        }
+    }
+}
+
+static inline BOOL CallerMayUseThemeRuntime(uintptr_t caller) {
+    if (sApolloStart && caller >= sApolloStart && caller < sApolloEnd) return YES;
+    if (sTweakStart && caller >= sTweakStart && caller < sTweakEnd) return YES;
+    return NO;
+}
+
+static inline UIColor *SemColor(ApolloThemeToken t, uintptr_t caller) {
+    if (!CallerMayUseThemeRuntime(caller)) return nil;
+    return ApolloThemeRuntimeColor(t);
+}
 // Repaint strategy. The window-style flip is the PRIMARY, proven-safe mechanism:
 // it toggles each window's overrideUserInterfaceStyle for one runloop turn,
 // which drives a trait-change cascade that re-resolves our dynamic token colours
@@ -25,8 +81,13 @@ static bool sDebugLogging = false;
 // theme value. Posting them standalone made Apollo's observers (ThemeableWindow,
 // retained CommentsViewControllers) repaint against state we never set up, which
 // crashed on the post-apply repaint. Kept behind a flag for future use.
-static bool sLegacyRepaint = true;
-static bool sPostNativeNotifications = false;
+// Repaint via Apollo's own theme-change notifications (flash-free, repaints live).
+// The earlier crash was the UIColor value-constructor over-release, NOT the
+// notifications, so these are safe now that the constructors are fixed. The
+// window-style flip is kept behind a flag as a fallback but is OFF by default
+// because it causes a visible white flash when toggling.
+static bool sLegacyRepaint = false;
+static bool sPostNativeNotifications = true;
 
 // Re-entrancy guard: while a dynamic-colour provider is building a concrete
 // colour for a token, the UIColor constructor hook must not re-map it.
@@ -94,7 +155,8 @@ static void BuildByteFilter(void) {
         sRByteFilter[(kNeutralEntries[i].rgb >> 16) & 0xFF] = 1;
 }
 
-static inline BOOL LookupToken(uint32_t rgb, ApolloThemeToken *out, uint8_t *outMode) {
+static inline BOOL LookupToken(uint32_t rgb, uintptr_t caller, ApolloThemeToken *out, uint8_t *outMode) {
+    if (!CallerMayUseThemeRuntime(caller)) return NO;
     if (!sRByteFilter[(rgb >> 16) & 0xFF]) return NO;
     for (size_t i = 0; i < sizeof(kDonorEntries) / sizeof(kDonorEntries[0]); i++) {
         if (kDonorEntries[i].rgb == rgb) { *out = kDonorEntries[i].token; *outMode = kDonorEntries[i].mode; return YES; }
@@ -366,10 +428,11 @@ void ApolloThemeRuntimeInvalidate(void) {
 // light<->dark change, and our invalidate flips the window style, so static is OK.
 
 + (UIColor *)colorWithRed:(CGFloat)r green:(CGFloat)g blue:(CGFloat)b alpha:(CGFloat)a {
-    if (sEnabled && !sBypassHook && a >= 0.99) {
+    if (sEnabled && !sBypassHook) {
         uint32_t rgb = ApolloThemeRGBKeyFromComponents(r, g, b);
+        uintptr_t caller = (uintptr_t)__builtin_return_address(0);
         ApolloThemeToken token; uint8_t mode;
-        if (LookupToken(rgb, &token, &mode)) {
+        if (LookupToken(rgb, caller, &token, &mode)) {
             if (sDebugLogging) ApolloLog(@"ThemeRuntime: donor #%06X -> %@", rgb, ApolloThemeTokenKey(token));
             CGFloat R, G, B; ApolloThemeTokenComponents(token, mode, &R, &G, &B);
             return %orig(R, G, B, a);
@@ -381,10 +444,12 @@ void ApolloThemeRuntimeInvalidate(void) {
 // Apollo is Swift: UIColor(red:green:blue:alpha:) compiles to this instance
 // initialiser, so this is the primary donor entry point.
 - (UIColor *)initWithRed:(CGFloat)r green:(CGFloat)g blue:(CGFloat)b alpha:(CGFloat)a {
-    if (sEnabled && !sBypassHook && a >= 0.99) {
+    if (sEnabled && !sBypassHook) {
         uint32_t rgb = ApolloThemeRGBKeyFromComponents(r, g, b);
+        uintptr_t caller = (uintptr_t)__builtin_return_address(0);
         ApolloThemeToken token; uint8_t mode;
-        if (LookupToken(rgb, &token, &mode)) {
+        if (LookupToken(rgb, caller, &token, &mode)) {
+            if (sDebugLogging) ApolloLog(@"ThemeRuntime: donor(init) #%06X a=%.2f -> %@", rgb, a, ApolloThemeTokenKey(token));
             CGFloat R, G, B; ApolloThemeTokenComponents(token, mode, &R, &G, &B);
             return %orig(R, G, B, a);
         }
@@ -410,28 +475,28 @@ void ApolloThemeRuntimeInvalidate(void) {
 // explicitly because Logos preprocessing runs before the C preprocessor, so
 // %orig can't live inside a C macro.
 
-+ (UIColor *)systemBackgroundColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenBackground); return c ?: %orig; }
-+ (UIColor *)secondarySystemBackgroundColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryBackground); return c ?: %orig; }
-+ (UIColor *)tertiarySystemBackgroundColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenTertiaryBackground); return c ?: %orig; }
-+ (UIColor *)systemGroupedBackgroundColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenBackground); return c ?: %orig; }
-+ (UIColor *)secondarySystemGroupedBackgroundColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryBackground); return c ?: %orig; }
-+ (UIColor *)tertiarySystemGroupedBackgroundColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenTertiaryBackground); return c ?: %orig; }
++ (UIColor *)systemBackgroundColor { UIColor *c = SemColor(ApolloThemeTokenBackground, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)secondarySystemBackgroundColor { UIColor *c = SemColor(ApolloThemeTokenSecondaryBackground, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)tertiarySystemBackgroundColor { UIColor *c = SemColor(ApolloThemeTokenTertiaryBackground, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)systemGroupedBackgroundColor { UIColor *c = SemColor(ApolloThemeTokenBackground, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)secondarySystemGroupedBackgroundColor { UIColor *c = SemColor(ApolloThemeTokenSecondaryBackground, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)tertiarySystemGroupedBackgroundColor { UIColor *c = SemColor(ApolloThemeTokenTertiaryBackground, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
 
-+ (UIColor *)labelColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenLabel); return c ?: %orig; }
-+ (UIColor *)secondaryLabelColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryLabel); return c ?: %orig; }
-+ (UIColor *)tertiaryLabelColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenTertiaryLabel); return c ?: %orig; }
-+ (UIColor *)quaternaryLabelColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenQuaternaryLabel); return c ?: %orig; }
-+ (UIColor *)placeholderTextColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenPlaceholderText); return c ?: %orig; }
++ (UIColor *)labelColor { UIColor *c = SemColor(ApolloThemeTokenLabel, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)secondaryLabelColor { UIColor *c = SemColor(ApolloThemeTokenSecondaryLabel, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)tertiaryLabelColor { UIColor *c = SemColor(ApolloThemeTokenTertiaryLabel, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)quaternaryLabelColor { UIColor *c = SemColor(ApolloThemeTokenQuaternaryLabel, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)placeholderTextColor { UIColor *c = SemColor(ApolloThemeTokenPlaceholderText, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
 
-+ (UIColor *)separatorColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenSeparator); return c ?: %orig; }
-+ (UIColor *)opaqueSeparatorColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenOpaqueSeparator); return c ?: %orig; }
++ (UIColor *)separatorColor { UIColor *c = SemColor(ApolloThemeTokenSeparator, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)opaqueSeparatorColor { UIColor *c = SemColor(ApolloThemeTokenOpaqueSeparator, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
 
-+ (UIColor *)systemFillColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenFill); return c ?: %orig; }
-+ (UIColor *)secondarySystemFillColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryFill); return c ?: %orig; }
-+ (UIColor *)tertiarySystemFillColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenTertiaryFill); return c ?: %orig; }
-+ (UIColor *)quaternarySystemFillColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenQuaternaryFill); return c ?: %orig; }
++ (UIColor *)systemFillColor { UIColor *c = SemColor(ApolloThemeTokenFill, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)secondarySystemFillColor { UIColor *c = SemColor(ApolloThemeTokenSecondaryFill, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)tertiarySystemFillColor { UIColor *c = SemColor(ApolloThemeTokenTertiaryFill, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)quaternarySystemFillColor { UIColor *c = SemColor(ApolloThemeTokenQuaternaryFill, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
 
-+ (UIColor *)linkColor { UIColor *c = ApolloThemeRuntimeColor(ApolloThemeTokenLink); return c ?: %orig; }
++ (UIColor *)linkColor { UIColor *c = SemColor(ApolloThemeTokenLink, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
 
 %end
 
@@ -443,6 +508,7 @@ void ApolloThemeRuntimeInvalidate(void) {
 
 %ctor {
     @autoreleasepool {
+        FindRuntimeImages();
         BuildByteFilter();
         %init(ApolloThemeRuntimeHooks);
         BOOL haveTM = objc_getClass("_TtC6Apollo12ThemeManager") != nil;

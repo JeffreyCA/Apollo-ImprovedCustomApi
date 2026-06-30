@@ -120,7 +120,7 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
     if (self.editingThemeID) {
         switch (section) {
             case ESName:     return 1;
-            case ESVariant:  return 2;  // variant, appearance mode
+            case ESVariant:  return 1;  // appearance mode (Light/Dark) only — variant is AI-only
             case ESColors:   return ApolloThemeDefaultInputKeys().count;
             case ESAdvanced: return ApolloThemeAdvancedInputKeys().count;
             case ESGenerate: return 1;
@@ -188,18 +188,17 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
         UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
         NSDictionary *theme = [store allThemes][ip.row];
         cell.textLabel.text = theme[@"name"];
-        cell.detailTextLabel.text = [ApolloThemeVariantKey(ApolloThemeVariantFromKey(theme[@"variant"])) capitalizedString];
         ApolloCompiledTheme *c = [ApolloCompiledTheme compiledThemeWithInput:theme[@"input"]
                                                                      variant:ApolloThemeVariantFromKey(theme[@"variant"])];
         UIColor *l = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenAccent mode:ApolloThemeModeLight]);
         UIColor *d = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenBackground mode:ApolloThemeModeDark]);
         cell.imageView.image = DualSwatchImage(l, d, 29);
-        BOOL active = [theme[@"id"] isEqualToString:store.activeThemeID];
-        cell.accessoryType = active ? UITableViewCellAccessoryDetailDisclosureButton
-                                    : UITableViewCellAccessoryDisclosureIndicator;
-        if (active && store.customThemeEnabled) {
-            cell.textLabel.text = [NSString stringWithFormat:@"%@ ✓", theme[@"name"]];
-        }
+        // Whole row opens the editor (disclosure chevron). Active theme shown via
+        // a checkmark in the detail text when custom theming is on.
+        BOOL active = [theme[@"id"] isEqualToString:store.activeThemeID] && store.customThemeEnabled;
+        cell.detailTextLabel.text = active ? @"✓ Active" : nil;
+        cell.detailTextLabel.textColor = self.view.tintColor;
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;
     }
     // Actions
@@ -231,23 +230,15 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
             return cell;
         }
         case ESVariant: {
+            // Appearance (Light/Dark) only. The subtle/balanced/bold variant is
+            // an AI-generation concept and is not user-editable here.
             UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            if (ip.row == 0) {
-                cell.textLabel.text = @"Style";
-                UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"Subtle", @"Balanced", @"Bold"]];
-                seg.selectedSegmentIndex = ApolloThemeVariantFromKey(theme[@"variant"]);
-                seg.tag = 1;
-                [seg addTarget:self action:@selector(variantChanged:) forControlEvents:UIControlEventValueChanged];
-                cell.accessoryView = seg;
-            } else {
-                cell.textLabel.text = @"Appearance";
-                UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"Light", @"Dark"]];
-                seg.selectedSegmentIndex = self.editingMode;
-                seg.tag = 2;
-                [seg addTarget:self action:@selector(modeChanged:) forControlEvents:UIControlEventValueChanged];
-                cell.accessoryView = seg;
-            }
+            cell.textLabel.text = @"Appearance";
+            UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"Light", @"Dark"]];
+            seg.selectedSegmentIndex = self.editingMode;
+            [seg addTarget:self action:@selector(modeChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = seg;
             return cell;
         }
         case ESColors:
@@ -341,20 +332,11 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
     [self listDidSelect:ip];
 }
 
-- (void)tableView:(UITableView *)tv accessoryButtonTappedForRowWithIndexPath:(NSIndexPath *)ip {
-    if (!self.editingThemeID && ip.section == LSThemes) {
+- (void)listDidSelect:(NSIndexPath *)ip {
+    if (ip.section == LSThemes) {
+        // Whole row opens the editor (where Apply sets it active). No more 'i' button.
         NSDictionary *theme = [[self store] allThemes][ip.row];
         [self openEditorForThemeID:theme[@"id"]];
-    }
-}
-
-- (void)listDidSelect:(NSIndexPath *)ip {
-    ApolloThemeStore *store = [self store];
-    if (ip.section == LSThemes) {
-        NSDictionary *theme = [store allThemes][ip.row];
-        store.activeThemeID = theme[@"id"];
-        if (store.customThemeEnabled) { ApolloThemeRuntimeReload(); ApolloThemeRuntimeInvalidate(); }
-        [self.tableView reloadData];
         return;
     }
     if (ip.section == LSActions) {
@@ -449,13 +431,6 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 // ===========================================================================
 // Editor actions
 // ===========================================================================
-
-- (void)variantChanged:(UISegmentedControl *)seg {
-    [[self store] setVariant:(ApolloThemeVariant)seg.selectedSegmentIndex themeID:self.editingThemeID];
-    [self recompilePreview];
-    [self maybeLiveReload];
-    [self.tableView reloadData];
-}
 
 - (void)modeChanged:(UISegmentedControl *)seg {
     self.editingMode = (ApolloThemeMode)seg.selectedSegmentIndex;
