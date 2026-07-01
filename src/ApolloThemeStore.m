@@ -416,13 +416,19 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
         input[mode] = m;
     }
     NSInteger ts = NowTS();
+    // v1 had no separate advanced-options concept — every role (including
+    // text/gray/separator) was always user-editable. Turn Advanced on here iff
+    // the v1 theme actually customized one of those, so a migrated theme keeps
+    // rendering exactly as it did in v1 instead of silently falling back to
+    // auto-derived text/separator colours the user never asked for.
+    BOOL advancedEnabled = InputHasAnyAdvancedOverrides(input);
     return @{ @"schemaVersion": @(kApolloThemeSchemaVersion),
               @"id": NewUUID(),
               @"name": ClampName(old[@"name"]),
               @"createdAt": @(ts), @"updatedAt": @(ts),
               @"variant": ApolloThemeVariantKey(ApolloThemeVariantBalanced),
               @"input": input,
-              kApolloThemeAdvancedOptionsEnabledKey: @NO,
+              kApolloThemeAdvancedOptionsEnabledKey: @(advancedEnabled),
               @"generation": @{ @"source": @"migrated-v1" } };
 }
 
