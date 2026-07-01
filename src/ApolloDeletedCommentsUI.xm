@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 #import <math.h>
 #import <string.h>
+#import <os/lock.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 
@@ -63,6 +64,47 @@ static NSDictionary<NSAttributedStringKey, id> *sApolloDeletedCommentsBodyAttrib
 // makes deleted bodies match exactly and track in-app/system text-size changes.
 static UIFont *sApolloDeletedCommentsLiveCommentBodyFont = nil;
 static BOOL sApolloDeletedCommentsBodyAttributesRefreshScheduled = NO;
+
+// Both shared globals above (the captured live body font + the derived body
+// attributes template) are read AND written from multiple threads: the
+// setAttributedText: capture and the MarkdownNode layoutSpec resolver fire on
+// background AsyncDisplayKit node-allocation threads, while cell-prep/refresh
+// paths run on the main thread. An ARC store to a __strong global releases the
+// previous object, so a store racing a read on another thread can free an
+// object mid-`isKindOfClass:` — the intermittent EXC_BAD_ACCESS in
+// ApolloDeletedCommentsCaptureLiveCommentBodyFont (two comment bodies rendering
+// on two threads: one stores a new font while the other reads the old pointer).
+// Funnel every access through these lock-guarded accessors: a getter retains
+// its snapshot into a strong local UNDER the lock, so the returned value stays
+// valid for the caller even if another thread stores (and releases the old
+// value) the instant the lock is dropped.
+static os_unfair_lock sApolloDeletedCommentsFontStateLock = OS_UNFAIR_LOCK_INIT;
+
+static UIFont *ApolloDeletedCommentsLiveBodyFontGet(void) {
+    os_unfair_lock_lock(&sApolloDeletedCommentsFontStateLock);
+    UIFont *font = sApolloDeletedCommentsLiveCommentBodyFont;
+    os_unfair_lock_unlock(&sApolloDeletedCommentsFontStateLock);
+    return font;
+}
+
+static void ApolloDeletedCommentsLiveBodyFontSet(UIFont *font) {
+    os_unfair_lock_lock(&sApolloDeletedCommentsFontStateLock);
+    sApolloDeletedCommentsLiveCommentBodyFont = font;
+    os_unfair_lock_unlock(&sApolloDeletedCommentsFontStateLock);
+}
+
+static NSDictionary<NSAttributedStringKey, id> *ApolloDeletedCommentsBodyTemplateGet(void) {
+    os_unfair_lock_lock(&sApolloDeletedCommentsFontStateLock);
+    NSDictionary<NSAttributedStringKey, id> *tmpl = sApolloDeletedCommentsBodyAttributesTemplate;
+    os_unfair_lock_unlock(&sApolloDeletedCommentsFontStateLock);
+    return tmpl;
+}
+
+static void ApolloDeletedCommentsBodyTemplateSet(NSDictionary<NSAttributedStringKey, id> *tmpl) {
+    os_unfair_lock_lock(&sApolloDeletedCommentsFontStateLock);
+    sApolloDeletedCommentsBodyAttributesTemplate = tmpl;
+    os_unfair_lock_unlock(&sApolloDeletedCommentsFontStateLock);
+}
 static NSString *const ApolloDeletedCommentsRevealURLString = @"apollo-deleted-comments://reveal";
 static NSString *const ApolloDeletedCommentsRevealAttributeName = @"ApolloDeletedCommentsRevealAttribute";
 static NSString *const ApolloDeletedCommentsReasonPrefixAttributeName = @"ApolloDeletedCommentsReasonPrefixAttribute";
@@ -159,7 +201,8 @@ static UIFont *ApolloDeletedCommentsReasonChipFont(void) {
 static UIFont *ApolloDeletedCommentsReasonChipFontForBaseAttributes(NSDictionary *baseAttributes) {
     UIFont *bodyFont = [baseAttributes isKindOfClass:[NSDictionary class]] ? baseAttributes[NSFontAttributeName] : nil;
     if (![bodyFont isKindOfClass:[UIFont class]]) {
-        bodyFont = [sApolloDeletedCommentsBodyAttributesTemplate isKindOfClass:[NSDictionary class]] ? sApolloDeletedCommentsBodyAttributesTemplate[NSFontAttributeName] : nil;
+        NSDictionary *tmpl = ApolloDeletedCommentsBodyTemplateGet();
+        bodyFont = [tmpl isKindOfClass:[NSDictionary class]] ? tmpl[NSFontAttributeName] : nil;
     }
     if (![bodyFont isKindOfClass:[UIFont class]]) {
         bodyFont = ApolloDeletedCommentsDefaultBodyAttributes()[NSFontAttributeName];
@@ -177,8 +220,9 @@ static UIFont *ApolloDeletedCommentsReasonChipFontForBaseAttributes(NSDictionary
 
 static UIFont *ApolloDeletedCommentsRecoveredBodyFont(void) {
     // Prefer Apollo's real captured comment font when we've seen one.
-    if ([sApolloDeletedCommentsLiveCommentBodyFont isKindOfClass:[UIFont class]]) {
-        return sApolloDeletedCommentsLiveCommentBodyFont;
+    UIFont *live = ApolloDeletedCommentsLiveBodyFontGet();
+    if ([live isKindOfClass:[UIFont class]]) {
+        return live;
     }
     // Last-resort fallback: Apollo's comment body is UIFontTextStyleSubheadline
     // (15pt @ .large), NOT Body (17pt).
@@ -805,9 +849,9 @@ static NSAttributedString *ApolloDeletedCommentsPlaceholderAttributedText(NSAttr
 }
 
 static NSMutableDictionary *ApolloDeletedCommentsDefaultBodyAttributes(void) {
-    if ([sApolloDeletedCommentsBodyAttributesTemplate isKindOfClass:[NSDictionary class]] &&
-        sApolloDeletedCommentsBodyAttributesTemplate.count > 0) {
-        return [sApolloDeletedCommentsBodyAttributesTemplate mutableCopy];
+    NSDictionary *tmpl = ApolloDeletedCommentsBodyTemplateGet();
+    if ([tmpl isKindOfClass:[NSDictionary class]] && tmpl.count > 0) {
+        return [tmpl mutableCopy];
     }
 
     UIColor *textColor = nil;
@@ -908,8 +952,9 @@ static UIFont *ApolloDeletedCommentsAppCommentBodyFontForNode(id node) {
     // Prefer Apollo's real captured comment font (always matches normal comments and
     // tracks text-size changes). Fall back to the derived size only before we've seen
     // a normal comment render.
-    if ([sApolloDeletedCommentsLiveCommentBodyFont isKindOfClass:[UIFont class]]) {
-        return sApolloDeletedCommentsLiveCommentBodyFont;
+    UIFont *live = ApolloDeletedCommentsLiveBodyFontGet();
+    if ([live isKindOfClass:[UIFont class]]) {
+        return live;
     }
     NSString *category = ApolloDeletedCommentsEffectiveContentSizeCategory(node, NULL);
     if (![category isKindOfClass:[NSString class]] || category.length == 0) {
@@ -927,10 +972,8 @@ static NSDictionary *ApolloDeletedCommentsAppBodyAttributesForNode(id node) {
     UIFont *font = ApolloDeletedCommentsAppCommentBodyFontForNode(node);
     if (![font isKindOfClass:[UIFont class]]) return nil;
 
-    NSDictionary *base = [sApolloDeletedCommentsBodyAttributesTemplate isKindOfClass:[NSDictionary class]] &&
-                         sApolloDeletedCommentsBodyAttributesTemplate.count > 0
-                             ? sApolloDeletedCommentsBodyAttributesTemplate
-                             : nil;
+    NSDictionary *tmpl = ApolloDeletedCommentsBodyTemplateGet();
+    NSDictionary *base = [tmpl isKindOfClass:[NSDictionary class]] && tmpl.count > 0 ? tmpl : nil;
     NSMutableDictionary *attributes = [NSMutableDictionary dictionary];
     UIColor *color = base[NSForegroundColorAttributeName];
     if (![color isKindOfClass:[UIColor class]]) {
@@ -980,13 +1023,13 @@ static NSMutableDictionary *ApolloDeletedCommentsBodyAttributesFromAttributedTex
 
 static BOOL ApolloDeletedCommentsBodyAttributesNeedRefresh(NSDictionary *attributes) {
     if (![attributes isKindOfClass:[NSDictionary class]]) return NO;
-    if (![sApolloDeletedCommentsBodyAttributesTemplate isKindOfClass:[NSDictionary class]] ||
-        sApolloDeletedCommentsBodyAttributesTemplate.count == 0) {
+    NSDictionary *tmpl = ApolloDeletedCommentsBodyTemplateGet();
+    if (![tmpl isKindOfClass:[NSDictionary class]] || tmpl.count == 0) {
         return NO;
     }
 
     UIFont *currentFont = attributes[NSFontAttributeName];
-    UIFont *targetFont = sApolloDeletedCommentsBodyAttributesTemplate[NSFontAttributeName];
+    UIFont *targetFont = tmpl[NSFontAttributeName];
     if (![currentFont isKindOfClass:[UIFont class]] || ![targetFont isKindOfClass:[UIFont class]]) return NO;
 
     if (fabs(currentFont.pointSize - targetFont.pointSize) > 0.1) return YES;
@@ -1010,7 +1053,8 @@ static NSAttributedString *ApolloDeletedCommentsBodyTextByNormalizingFont(NSAttr
 
     NSMutableAttributedString *normalized = [attributedText mutableCopy];
     NSRange fullRange = NSMakeRange(0, normalized.length);
-    NSDictionary *targetAttributes = [sApolloDeletedCommentsBodyAttributesTemplate isKindOfClass:[NSDictionary class]] ? sApolloDeletedCommentsBodyAttributesTemplate : nil;
+    NSDictionary *bodyTemplate = ApolloDeletedCommentsBodyTemplateGet();
+    NSDictionary *targetAttributes = [bodyTemplate isKindOfClass:[NSDictionary class]] ? bodyTemplate : nil;
     [normalized enumerateAttributesInRange:fullRange
                                    options:0
                                 usingBlock:^(NSDictionary<NSAttributedStringKey, id> *attrs, NSRange range, __unused BOOL *stop) {
@@ -2407,7 +2451,7 @@ static void ApolloDeletedCommentsScheduleBodyAttributesRefresh(void) {
 // visible deleted cells so they re-resolve at the new size (relevant when "Use
 // System Text Size" is on).
 static void ApolloDeletedCommentsHandleContentSizeChanged(__unused NSNotification *note) {
-    sApolloDeletedCommentsBodyAttributesTemplate = nil;
+    ApolloDeletedCommentsBodyTemplateSet(nil);
     if (sShowDeletedComments) {
         ApolloDeletedCommentsScheduleBodyAttributesRefresh();
     }
@@ -2517,8 +2561,9 @@ static void ApolloDeletedCommentsApplyCellHighlight(id cellNode) {
 // (reason-chip labels) and image attachments (the chip itself) untouched.
 static NSAttributedString *ApolloDeletedCommentsBodyFontUnifiedText(NSAttributedString *text) {
     if (![text isKindOfClass:[NSAttributedString class]] || text.length == 0) return text;
-    UIFont *templateFont = [sApolloDeletedCommentsBodyAttributesTemplate isKindOfClass:[NSDictionary class]]
-                               ? sApolloDeletedCommentsBodyAttributesTemplate[NSFontAttributeName]
+    NSDictionary *bodyTemplate = ApolloDeletedCommentsBodyTemplateGet();
+    UIFont *templateFont = [bodyTemplate isKindOfClass:[NSDictionary class]]
+                               ? bodyTemplate[NSFontAttributeName]
                                : nil;
     if (![templateFont isKindOfClass:[UIFont class]]) return text;
 
@@ -2718,9 +2763,10 @@ static id __attribute__((unused)) ApolloDeletedCommentsDeletedMarkdownLayoutSpec
     // moves the in-app text-size slider), refresh the visible deleted cells.
     if (ApolloDeletedCommentsBodyAttributesAreUsable(appAttributes)) {
         NSDictionary *cap = ApolloDeletedCommentsRegularizedBodyAttributes([appAttributes copy]);
-        if (![sApolloDeletedCommentsBodyAttributesTemplate isKindOfClass:[NSDictionary class]] ||
-            ApolloDeletedCommentsBodyAttributeFontsDiffer(sApolloDeletedCommentsBodyAttributesTemplate, cap)) {
-            sApolloDeletedCommentsBodyAttributesTemplate = cap;
+        NSDictionary *tmpl = ApolloDeletedCommentsBodyTemplateGet();
+        if (![tmpl isKindOfClass:[NSDictionary class]] ||
+            ApolloDeletedCommentsBodyAttributeFontsDiffer(tmpl, cap)) {
+            ApolloDeletedCommentsBodyTemplateSet(cap);
             if (sShowDeletedComments) ApolloDeletedCommentsScheduleBodyAttributesRefresh();
         }
         appAttributes = cap;
@@ -3044,18 +3090,19 @@ static void ApolloDeletedCommentsCaptureLiveCommentBodyFont(id textNode, NSAttri
         *stop = YES;
     }];
     if (![candidate isKindOfClass:[UIFont class]]) return;
-    if ([sApolloDeletedCommentsLiveCommentBodyFont isKindOfClass:[UIFont class]] &&
-        fabs(sApolloDeletedCommentsLiveCommentBodyFont.pointSize - candidate.pointSize) <= 0.5 &&
-        [sApolloDeletedCommentsLiveCommentBodyFont.fontName isEqualToString:candidate.fontName]) {
+    UIFont *live = ApolloDeletedCommentsLiveBodyFontGet();
+    if ([live isKindOfClass:[UIFont class]] &&
+        fabs(live.pointSize - candidate.pointSize) <= 0.5 &&
+        [live.fontName isEqualToString:candidate.fontName]) {
         return; // unchanged — cheap steady-state exit
     }
     // Capture from any markdown body (comment or post self-text — Apollo renders both
     // at the same text-size setting). The cell hierarchy isn't wired up yet at
     // setAttributedText: time, so we can't reliably scope to comment cells here.
-    sApolloDeletedCommentsLiveCommentBodyFont = candidate;
+    ApolloDeletedCommentsLiveBodyFontSet(candidate);
     // Drop the cached body template so deleted cells re-resolve at the new size, and
     // refresh the visible ones (this is what makes a text-size change propagate).
-    sApolloDeletedCommentsBodyAttributesTemplate = nil;
+    ApolloDeletedCommentsBodyTemplateSet(nil);
     if (sShowDeletedComments) ApolloDeletedCommentsScheduleBodyAttributesRefresh();
 }
 
