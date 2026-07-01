@@ -33,6 +33,7 @@
 
 static volatile bool sEnabled = false;
 static uint32_t sTokens[ApolloThemeModeCount][ApolloThemeTokenCount];
+static uint64_t sEpoch = 0; // bumped whenever sTokens or sEnabled changes
 static os_unfair_lock sLock = OS_UNFAIR_LOCK_INIT;
 static bool sDebugLogging = false;
 static uintptr_t sApolloStart = 0;
@@ -333,6 +334,13 @@ UIColor *ApolloThemeRuntimeColor(ApolloThemeToken token) {
     return ApolloThemeMakeDynamicColor(token);
 }
 
+uint64_t ApolloThemeRuntimeEpoch(void) {
+    os_unfair_lock_lock(&sLock);
+    uint64_t e = sEpoch;
+    os_unfair_lock_unlock(&sLock);
+    return e;
+}
+
 static UIColor *ThemedTextColorForSourceColor(UIColor *source, id owner, uintptr_t caller) {
     if (!TextSinkMayUseTheme(owner, caller)) return source;
 
@@ -409,6 +417,7 @@ void ApolloThemeRuntimeReload(void) {
     if (!theme) {
         os_unfair_lock_lock(&sLock);
         sEnabled = false;
+        sEpoch++;
         os_unfair_lock_unlock(&sLock);
         ApolloLog(@"ThemeRuntime: reload -> INACTIVE (enabledFlag=%d crashKill=%d activeTheme=%@)",
                   store.customThemeEnabled, crashed, store.activeThemeID ?: @"(none)");
@@ -418,11 +427,12 @@ void ApolloThemeRuntimeReload(void) {
     ApolloCompiledTheme *compiled = nil;
     @try {
         compiled = [ApolloCompiledTheme compiledThemeWithInput:theme[@"input"]
-                                                       variant:ApolloThemeVariantFromKey(theme[@"variant"])];
+                                                       variant:ApolloThemeVariantFromKey(theme[@"variant"])
+                                               advancedEnabled:[theme[kApolloThemeAdvancedOptionsEnabledKey] boolValue]];
     } @catch (NSException *e) {
         ApolloLog(@"ThemeRuntime: COMPILE EXCEPTION %@ — %@ (theme=%@ input=%@)",
                   e.name, e.reason, theme[@"name"], theme[@"input"]);
-        os_unfair_lock_lock(&sLock); sEnabled = false; os_unfair_lock_unlock(&sLock);
+        os_unfair_lock_lock(&sLock); sEnabled = false; sEpoch++; os_unfair_lock_unlock(&sLock);
         return;
     }
 
@@ -433,6 +443,7 @@ void ApolloThemeRuntimeReload(void) {
         }
     }
     sEnabled = true;
+    sEpoch++;
     os_unfair_lock_unlock(&sLock);
 
     ApolloLog(@"ThemeRuntime: reload -> ACTIVE theme='%@' variant=%@ | light bg=#%06X card=#%06X accent=#%06X label=#%06X | dark bg=#%06X card=#%06X accent=#%06X",
@@ -518,6 +529,7 @@ void ApolloThemeRuntimeDisable(void) {
     store.customThemeEnabled = NO;
     os_unfair_lock_lock(&sLock);
     sEnabled = false;
+    sEpoch++;
     os_unfair_lock_unlock(&sLock);
 
     NSString *prev = store.previousApolloTheme;

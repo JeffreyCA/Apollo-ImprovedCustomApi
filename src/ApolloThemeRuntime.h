@@ -24,6 +24,16 @@ BOOL ApolloThemeRuntimeIsActive(void);
 // Cached dynamic colour for a token, or nil if inactive / out of range.
 UIColor *ApolloThemeRuntimeColor(ApolloThemeToken token);
 
+// Monotonic counter bumped whenever the compiled token table or the
+// enabled/disabled state changes (reload/enable/disable). ApolloThemeRuntimeColor
+// itself always allocates a fresh dynamic-provider colour (a shared/cached
+// instance over-releases at certain UIKit cell-prep call sites — see the
+// Runtime's implementation comment), so callers that want to skip redundant
+// re-application of an unchanged colour (e.g. on every layoutSubviews pass)
+// should cache this epoch alongside their own applied state instead of
+// comparing UIColor pointers, which are never equal across calls.
+uint64_t ApolloThemeRuntimeEpoch(void);
+
 // Recompile from the Store's active theme and rebuild the runtime tables.
 // Honours the enabled flag and the crash kill-switch. Call after any edit.
 void ApolloThemeRuntimeReload(void);

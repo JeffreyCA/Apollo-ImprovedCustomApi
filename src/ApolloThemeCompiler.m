@@ -159,13 +159,22 @@ static uint32_t InputColor(NSDictionary *modeInput, NSString *key, ApolloThemeMo
     uint32_t _tokens[ApolloThemeModeCount][ApolloThemeTokenCount];
 }
 
-+ (instancetype)compiledThemeWithInput:(NSDictionary *)input variant:(ApolloThemeVariant)variant {
++ (instancetype)compiledThemeWithInput:(NSDictionary *)input
+                               variant:(ApolloThemeVariant)variant
+                       advancedEnabled:(BOOL)advancedEnabled {
     ApolloCompiledTheme *theme = [[self alloc] init];
     if (![input isKindOfClass:[NSDictionary class]]) input = @{};
     VariantTuning tune = TuningFor(variant);
     for (ApolloThemeMode mode = ApolloThemeModeLight; mode < ApolloThemeModeCount; mode++) {
         NSDictionary *modeInput = input[ApolloThemeModeKey(mode)];
         if (![modeInput isKindOfClass:[NSDictionary class]]) modeInput = @{};
+        if (!advancedEnabled) {
+            // Ignore any stored overrides while Advanced is off, without
+            // mutating the theme's persisted input — see header note.
+            NSMutableDictionary *stripped = [modeInput mutableCopy];
+            for (NSString *key in ApolloThemeAdvancedInputKeys()) [stripped removeObjectForKey:key];
+            modeInput = stripped;
+        }
         [theme compileMode:mode input:modeInput tuning:tune];
     }
     return theme;

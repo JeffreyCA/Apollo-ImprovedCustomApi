@@ -75,10 +75,9 @@ export THEOS
 echo "Syncing repo to $BUILD_DIR (Theos path must not contain spaces)..."
 rsync -a --delete \
     --exclude '.git' \
-    --exclude '.theos' \
     --exclude 'packages/*.ipa' \
     --exclude 'Tweaks/FLEXing' \
-    --exclude '/ffmpeg-kit' \
+    --exclude 'ffmpeg-kit' \
     --exclude 'iOS26-Runtime-Headers' \
     --exclude 'iPhone18-3_26.1_23B85_Restore' \
     "$REPO_ROOT/" "$BUILD_DIR/"

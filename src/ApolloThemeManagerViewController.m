@@ -112,7 +112,8 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
     NSDictionary *input = active[@"input"];
     if ([input isKindOfClass:[NSDictionary class]]) {
         ApolloCompiledTheme *compiled = [ApolloCompiledTheme compiledThemeWithInput:input
-                                                                            variant:ApolloThemeVariantFromKey(active[@"variant"])];
+                                                                            variant:ApolloThemeVariantFromKey(active[@"variant"])
+                                                                    advancedEnabled:[active[kApolloThemeAdvancedOptionsEnabledKey] boolValue]];
         return ApolloThemeUIColorFromRGB([compiled rgbForToken:token mode:CurrentAppearanceMode(self.traitCollection)]);
     }
 
@@ -207,7 +208,8 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
     if (!self.editingThemeID) { self.previewCompiled = nil; return; }
     NSDictionary *t = [[self store] themeWithID:self.editingThemeID];
     self.previewCompiled = [ApolloCompiledTheme compiledThemeWithInput:t[@"input"]
-                                                               variant:ApolloThemeVariantFromKey(t[@"variant"])];
+                                                               variant:ApolloThemeVariantFromKey(t[@"variant"])
+                                                       advancedEnabled:[t[kApolloThemeAdvancedOptionsEnabledKey] boolValue]];
 }
 
 - (UIColor *)previewColorForToken:(ApolloThemeToken)token {
@@ -316,7 +318,8 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
         NSDictionary *theme = [store allThemes][ip.row];
         cell.textLabel.text = theme[@"name"];
         ApolloCompiledTheme *c = [ApolloCompiledTheme compiledThemeWithInput:theme[@"input"]
-                                                                     variant:ApolloThemeVariantFromKey(theme[@"variant"])];
+                                                                     variant:ApolloThemeVariantFromKey(theme[@"variant"])
+                                                             advancedEnabled:[theme[kApolloThemeAdvancedOptionsEnabledKey] boolValue]];
         UIColor *l = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenAccent mode:ApolloThemeModeLight]);
         UIColor *d = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenBackground mode:ApolloThemeModeDark]);
         cell.imageView.image = DualSwatchImage(l, d, 29);
@@ -548,11 +551,23 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
     [self.navigationController pushViewController:editor animated:YES];
 }
 
+// Deleting can reassign activeThemeID (if the deleted theme was active) or empty
+// the theme list entirely — reload+invalidate unconditionally so the running
+// theme (or its absence) is never left showing a just-deleted theme's stale
+// colours until some unrelated trigger happens to reload it.
+- (void)deleteThemeAndRefresh:(NSString *)themeID {
+    [[self store] deleteTheme:themeID];
+    if ([self store].customThemeEnabled) {
+        ApolloThemeRuntimeReload();
+        ApolloThemeRuntimeInvalidate();
+    }
+    [self.tableView reloadData];
+}
+
 - (void)tableView:(UITableView *)tv commitEditingStyle:(UITableViewCellEditingStyle)style forRowAtIndexPath:(NSIndexPath *)ip {
     if (self.editingThemeID || ip.section != LSThemes || style != UITableViewCellEditingStyleDelete) return;
     NSDictionary *theme = [[self store] allThemes][ip.row];
-    [[self store] deleteTheme:theme[@"id"]];
-    [self.tableView reloadData];
+    [self deleteThemeAndRefresh:theme[@"id"]];
 }
 
 - (BOOL)tableView:(UITableView *)tv canEditRowAtIndexPath:(NSIndexPath *)ip {
@@ -576,8 +591,7 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
     exp.backgroundColor = UIColor.systemBlueColor;
     UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
         title:@"Delete" handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
-            [[self store] deleteTheme:theme[@"id"]];
-            [self.tableView reloadData];
+            [self deleteThemeAndRefresh:theme[@"id"]];
             done(YES);
         }];
     return [UISwipeActionsConfiguration configurationWithActions:@[del, exp, dup]];
@@ -622,38 +636,18 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
     [self presentViewController:picker animated:YES completion:nil];
 }
 
-- (BOOL)isAdvancedKey:(NSString *)key { return [ApolloThemeAdvancedInputKeys() containsObject:key]; }
-
 - (BOOL)advancedOptionsEnabledForTheme:(NSDictionary *)theme {
     return [theme[kApolloThemeAdvancedOptionsEnabledKey] boolValue];
 }
 
-- (NSDictionary *)themeByRemovingAdvancedOverrides:(NSDictionary *)theme {
-    if (![theme isKindOfClass:[NSDictionary class]]) return theme;
-    NSMutableDictionary *updated = [theme mutableCopy];
-    NSMutableDictionary *input = [updated[@"input"] mutableCopy] ?: [NSMutableDictionary dictionary];
-    for (NSString *mode in @[@"light", @"dark"]) {
-        NSMutableDictionary *modeInput = [input[mode] mutableCopy] ?: [NSMutableDictionary dictionary];
-        for (NSString *key in ApolloThemeAdvancedInputKeys()) [modeInput removeObjectForKey:key];
-        input[mode] = modeInput;
-    }
-    updated[@"input"] = input;
-    return updated;
-}
-
+// Flips the flag only — the theme's stored input is never touched here.
+// While off, the Compiler ignores any stored text/mutedText/separator
+// overrides (auto-deriving those tokens instead); turning Advanced back on
+// makes the compiler see them again, exactly as the user left them.
 - (void)setAdvancedOptionsEnabled:(BOOL)enabled {
     ApolloThemeStore *store = [self store];
     [store updateTheme:self.editingThemeID mutations:^(NSMutableDictionary *t) {
         t[kApolloThemeAdvancedOptionsEnabledKey] = @(enabled);
-        if (!enabled) {
-            NSMutableDictionary *input = [t[@"input"] mutableCopy] ?: [NSMutableDictionary dictionary];
-            for (NSString *mode in @[@"light", @"dark"]) {
-                NSMutableDictionary *modeInput = [input[mode] mutableCopy] ?: [NSMutableDictionary dictionary];
-                for (NSString *key in ApolloThemeAdvancedInputKeys()) [modeInput removeObjectForKey:key];
-                input[mode] = modeInput;
-            }
-            t[@"input"] = input;
-        }
     }];
     [self recompilePreview];
     [self maybeLiveReload];

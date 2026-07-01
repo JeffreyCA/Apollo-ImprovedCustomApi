@@ -23,6 +23,24 @@ typedef struct { CGSize min; CGSize max; } ApolloASSizeRange;
 
 static char kAppliedSourceImageKey;
 static char kAppliedTemplateImageKey;
+static char kAppliedColorStateKey;
+
+// ApolloThemeRuntimeColor/the Accent/Selection/Card token helpers below always
+// allocate a FRESH dynamic-provider colour on every call (see ApolloThemeRuntime.h
+// — a shared/cached instance over-releases at certain UIKit cell-prep call
+// sites), so two colours that are semantically identical are never pointer-equal.
+// Comparing against them directly to skip redundant work therefore never skips
+// anything. Cache ApolloThemeRuntimeEpoch() (bumped only when the compiled
+// tokens or enabled state actually change) alongside any other state the applied
+// colour depends on (e.g. highlighted), and skip re-applying when that composite
+// key hasn't moved — this is what actually avoids reallocating/reassigning on
+// every layoutSubviews/layoutSpecThatFits pass during scroll.
+static inline BOOL ApolloThemeStateUnchanged(id object, const void *key, uint64_t state) {
+    NSNumber *cached = objc_getAssociatedObject(object, key);
+    if ([cached unsignedLongLongValue] == state && cached != nil) return YES;
+    objc_setAssociatedObject(object, key, @(state), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return NO;
+}
 
 static inline UIColor *AccentToken(void)    { return ApolloThemeRuntimeColor(ApolloThemeTokenAccent); }
 static inline UIColor *SelectionToken(void) { return ApolloThemeRuntimeColor(ApolloThemeTokenSelection); }
@@ -59,20 +77,21 @@ static void ColorListCell(UITableViewCell *cell) {
     if (!owner) return;
     UIColor *sel = SelectionToken();
     if (!sel) return;
-    // Eureka cells highlight via selectedBackgroundView — idiomatic + self-
-    // restoring. Set the dynamic token once (pointer-identity compare).
-    if (cell.selectedBackgroundView.backgroundColor != sel) {
-        UIView *bg = [[UIView alloc] init];
-        bg.backgroundColor = sel;
-        cell.selectedBackgroundView = bg;
-    }
+
+    BOOL highlighted = cell.highlighted;
+    uint64_t state = (ApolloThemeRuntimeEpoch() << 1) | (highlighted ? 1 : 0);
+    if (ApolloThemeStateUnchanged(cell, &kAppliedColorStateKey, state)) return;
+    // Eureka cells highlight via selectedBackgroundView — idiomatic + self-restoring.
+    UIView *bg = [[UIView alloc] init];
+    bg.backgroundColor = sel;
+    cell.selectedBackgroundView = bg;
     // Apollo's OWN cells ignore selectedBackgroundView and swap backgroundColor,
     // which the seam collapses onto the card — paint the selection directly while
     // pressed and restore the card token on release. Skip Appearance (owns its bg).
     BOOL isApolloCell = [NSStringFromClass([cell class]) containsString:@"Apollo"];
     if (isApolloCell && ![owner containsString:@"Appearance"]) {
-        UIColor *want = cell.highlighted ? sel : CardToken();
-        if (want && cell.contentView.backgroundColor != want) {
+        UIColor *want = highlighted ? sel : CardToken();
+        if (want) {
             cell.backgroundColor = want;
             cell.contentView.backgroundColor = want;
         }
@@ -113,7 +132,9 @@ static void ApplyAccentImageView(id cell) {
     if (hi && hi.renderingMode != UIImageRenderingModeAlwaysTemplate)
         icon.highlightedImage = [hi imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     UIColor *accent = AccentToken();
-    if (accent && icon.tintColor != accent) icon.tintColor = accent;
+    if (!accent) return;
+    if (ApolloThemeStateUnchanged(icon, &kAppliedColorStateKey, ApolloThemeRuntimeEpoch())) return;
+    icon.tintColor = accent;
 }
 
 %hook _TtC6Apollo21IconTextTableViewCell
@@ -155,11 +176,13 @@ static void ApplyAccentImageNode(id cell) {
             ((void (*)(id, SEL, UIImage *))objc_msgSend)(iconNode, @selector(setImage:), templated);
     }
     UIColor *accent = AccentToken();
-    if (accent && [iconNode respondsToSelector:@selector(setTintColor:)])
+    if (!accent) return;
+    if (ApolloThemeStateUnchanged(iconNode, &kAppliedColorStateKey, ApolloThemeRuntimeEpoch())) return;
+    if ([iconNode respondsToSelector:@selector(setTintColor:)])
         ((void (*)(id, SEL, UIColor *))objc_msgSend)(iconNode, @selector(setTintColor:), accent);
-    if (accent && [iconNode respondsToSelector:@selector(view)]) {
+    if ([iconNode respondsToSelector:@selector(view)]) {
         UIView *view = ((UIView *(*)(id, SEL))objc_msgSend)(iconNode, @selector(view));
-        if (view.tintColor != accent) view.tintColor = accent;
+        view.tintColor = accent;
     }
 }
 

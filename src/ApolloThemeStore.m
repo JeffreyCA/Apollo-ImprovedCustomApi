@@ -206,8 +206,12 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
     NSMutableArray *themes = [[self allThemes] mutableCopy];
     NSString *unique = [self uniqueName:ClampName(name) inThemes:themes excludingID:nil];
     NSInteger ts = NowTS();
+    // NB: advanced overrides are NOT stripped here even when advancedOptionsEnabled
+    // is NO — the Compiler is the single place that decides whether to honour them
+    // (see ApolloThemeCompiler's advancedEnabled: param), so a duplicated or
+    // re-imported theme keeps any dormant overrides intact and they reappear
+    // correctly if Advanced is turned back on later.
     NSDictionary *normalizedInput = NormalizeInput(input ?: StarterInput());
-    if (!advancedOptionsEnabled) normalizedInput = StripAdvancedOverrides(normalizedInput);
     NSDictionary *theme = @{
         @"schemaVersion": @(kApolloThemeSchemaVersion),
         @"id": NewUUID(),
@@ -217,7 +221,6 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
         @"variant": ApolloThemeVariantKey(variant),
         @"input": normalizedInput,
         kApolloThemeAdvancedOptionsEnabledKey: @(advancedOptionsEnabled),
-        @"locks": @{},
         @"generation": generation ?: @{ @"source": @"manual" },
     };
     ApolloLog(@"ThemeStore: createThemeNamed '%@' -> id=%@ variant=%@ (now %lu themes)",
@@ -420,7 +423,6 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
               @"variant": ApolloThemeVariantKey(ApolloThemeVariantBalanced),
               @"input": input,
               kApolloThemeAdvancedOptionsEnabledKey: @NO,
-              @"locks": @{},
               @"generation": @{ @"source": @"migrated-v1" } };
 }
 
@@ -438,7 +440,6 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
     NSDictionary *normalizedInput = NormalizeInput(theme[@"input"]);
     portable[@"input"] = advancedEnabled ? normalizedInput : StripAdvancedOverrides(normalizedInput);
     portable[kApolloThemeAdvancedOptionsEnabledKey] = @(advancedEnabled);
-    if ([theme[@"locks"] isKindOfClass:[NSDictionary class]]) portable[@"locks"] = theme[@"locks"];
     if ([theme[@"generation"] isKindOfClass:[NSDictionary class]]) portable[@"generation"] = theme[@"generation"];
     return [NSJSONSerialization dataWithJSONObject:portable
                                            options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys
@@ -479,7 +480,6 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
         ? [obj[kApolloThemeAdvancedOptionsEnabledKey] boolValue]
         : InputHasAnyAdvancedOverrides(input);
     parsed[kApolloThemeAdvancedOptionsEnabledKey] = @(enabled);
-    if ([obj[@"locks"] isKindOfClass:[NSDictionary class]]) parsed[@"locks"] = obj[@"locks"];
     if ([obj[@"generation"] isKindOfClass:[NSDictionary class]]) parsed[@"generation"] = obj[@"generation"];
     parsed[@"schemaVersion"] = @(schema ?: kApolloThemeSchemaVersion);
     return parsed;

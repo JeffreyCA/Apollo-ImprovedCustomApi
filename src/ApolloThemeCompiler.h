@@ -21,8 +21,17 @@ __BEGIN_DECLS
 // `input` may be partial or invalid; the compiler validates every hex, fills
 // missing advanced overrides, and never returns nil — a wholly-empty input
 // yields a sane neutral palette.
+//
+// `advancedEnabled` gates the three optional overrides (text/mutedText/
+// separator): when NO they are ignored even if present in `input` and those
+// tokens are auto-derived instead. The Store never deletes a stored override
+// when the user turns Advanced off — the theme dict keeps its `input` intact,
+// only the flag flips — so toggling Advanced back on restores exactly what
+// was there before, without the compiler ever seeing stale hidden values in
+// the meantime.
 + (instancetype)compiledThemeWithInput:(NSDictionary *)input
-                               variant:(ApolloThemeVariant)variant;
+                               variant:(ApolloThemeVariant)variant
+                       advancedEnabled:(BOOL)advancedEnabled;
 
 // Resolved 0xRRGGBB for a token in a mode. Out-of-range -> 0.
 - (uint32_t)rgbForToken:(ApolloThemeToken)token mode:(ApolloThemeMode)mode;
