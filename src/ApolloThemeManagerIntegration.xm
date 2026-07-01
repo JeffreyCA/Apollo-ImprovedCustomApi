@@ -350,7 +350,11 @@ static UIImage *CustomPickerSwatch(void) {
         ApolloThemeStore *store = [ApolloThemeStore shared];
         if ([store runtimeDisabledDueToCrash]) [store clearCrashDisable];
         if ([store allThemes].count == 0)
-            [store createThemeNamed:@"My Theme" input:nil variant:ApolloThemeVariantBalanced generation:nil];
+            [store createThemeNamed:@"My Theme"
+                               input:nil
+                             variant:ApolloThemeVariantBalanced
+              advancedOptionsEnabled:NO
+                           generation:nil];
         ApolloThemeRuntimeEnable();
         [tv reloadData];
         return;

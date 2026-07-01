@@ -36,6 +36,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSString *)createThemeNamed:(nullable NSString *)name
                          input:(nullable NSDictionary *)input
                        variant:(ApolloThemeVariant)variant
+           advancedOptionsEnabled:(BOOL)advancedOptionsEnabled
                     generation:(nullable NSDictionary *)generation;
 
 // Mutate a stored theme in place (bumps updatedAt, persists). No-op if missing.

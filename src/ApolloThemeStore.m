@@ -103,6 +103,34 @@ static NSDictionary *NormalizeInput(NSDictionary *input) {
     return result;
 }
 
+static NSDictionary *StripAdvancedOverrides(NSDictionary *input) {
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    for (NSString *mode in @[@"light", @"dark"]) {
+        NSDictionary *rawMode = [input isKindOfClass:[NSDictionary class]] ? input[mode] : nil;
+        NSMutableDictionary *modeDict = [NSMutableDictionary dictionary];
+        if ([rawMode isKindOfClass:[NSDictionary class]]) {
+            for (NSString *key in ApolloThemeDefaultInputKeys()) {
+                id v = rawMode[key];
+                if ([v isKindOfClass:[NSString class]]) modeDict[key] = v;
+            }
+        }
+        result[mode] = modeDict;
+    }
+    return result;
+}
+
+static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
+    if (![input isKindOfClass:[NSDictionary class]]) return NO;
+    for (NSString *mode in @[@"light", @"dark"]) {
+        NSDictionary *m = input[mode];
+        if (![m isKindOfClass:[NSDictionary class]]) continue;
+        for (NSString *key in ApolloThemeAdvancedInputKeys()) {
+            if ([m[key] isKindOfClass:[NSString class]]) return YES;
+        }
+    }
+    return NO;
+}
+
 // ---------------------------------------------------------------------------
 
 @implementation ApolloThemeStore
@@ -173,10 +201,13 @@ static NSDictionary *NormalizeInput(NSDictionary *input) {
 - (NSString *)createThemeNamed:(NSString *)name
                          input:(NSDictionary *)input
                        variant:(ApolloThemeVariant)variant
+           advancedOptionsEnabled:(BOOL)advancedOptionsEnabled
                     generation:(NSDictionary *)generation {
     NSMutableArray *themes = [[self allThemes] mutableCopy];
     NSString *unique = [self uniqueName:ClampName(name) inThemes:themes excludingID:nil];
     NSInteger ts = NowTS();
+    NSDictionary *normalizedInput = NormalizeInput(input ?: StarterInput());
+    if (!advancedOptionsEnabled) normalizedInput = StripAdvancedOverrides(normalizedInput);
     NSDictionary *theme = @{
         @"schemaVersion": @(kApolloThemeSchemaVersion),
         @"id": NewUUID(),
@@ -184,7 +215,8 @@ static NSDictionary *NormalizeInput(NSDictionary *input) {
         @"createdAt": @(ts),
         @"updatedAt": @(ts),
         @"variant": ApolloThemeVariantKey(variant),
-        @"input": NormalizeInput(input ?: StarterInput()),
+        @"input": normalizedInput,
+        kApolloThemeAdvancedOptionsEnabledKey: @(advancedOptionsEnabled),
         @"locks": @{},
         @"generation": generation ?: @{ @"source": @"manual" },
     };
@@ -214,9 +246,11 @@ static NSDictionary *NormalizeInput(NSDictionary *input) {
 - (NSString *)duplicateTheme:(NSString *)themeID {
     NSDictionary *src = [self themeWithID:themeID];
     if (!src) return nil;
+    BOOL advanced = [src[kApolloThemeAdvancedOptionsEnabledKey] boolValue];
     return [self createThemeNamed:[src[@"name"] stringByAppendingString:@" Copy"]
                             input:src[@"input"]
                           variant:ApolloThemeVariantFromKey(src[@"variant"])
+            advancedOptionsEnabled:advanced
                        generation:src[@"generation"]];
 }
 
@@ -384,7 +418,9 @@ static NSDictionary *NormalizeInput(NSDictionary *input) {
               @"name": ClampName(old[@"name"]),
               @"createdAt": @(ts), @"updatedAt": @(ts),
               @"variant": ApolloThemeVariantKey(ApolloThemeVariantBalanced),
-              @"input": input, @"locks": @{},
+              @"input": input,
+              kApolloThemeAdvancedOptionsEnabledKey: @NO,
+              @"locks": @{},
               @"generation": @{ @"source": @"migrated-v1" } };
 }
 
@@ -398,7 +434,10 @@ static NSDictionary *NormalizeInput(NSDictionary *input) {
     portable[@"schemaVersion"] = @(kApolloThemeSchemaVersion);
     portable[@"name"] = ClampName(theme[@"name"]);
     portable[@"variant"] = ApolloThemeVariantKey(ApolloThemeVariantFromKey(theme[@"variant"]));
-    portable[@"input"] = NormalizeInput(theme[@"input"]);
+    BOOL advancedEnabled = [theme[kApolloThemeAdvancedOptionsEnabledKey] boolValue];
+    NSDictionary *normalizedInput = NormalizeInput(theme[@"input"]);
+    portable[@"input"] = advancedEnabled ? normalizedInput : StripAdvancedOverrides(normalizedInput);
+    portable[kApolloThemeAdvancedOptionsEnabledKey] = @(advancedEnabled);
     if ([theme[@"locks"] isKindOfClass:[NSDictionary class]]) portable[@"locks"] = theme[@"locks"];
     if ([theme[@"generation"] isKindOfClass:[NSDictionary class]]) portable[@"generation"] = theme[@"generation"];
     return [NSJSONSerialization dataWithJSONObject:portable
@@ -436,6 +475,10 @@ static NSDictionary *NormalizeInput(NSDictionary *input) {
     parsed[@"name"] = ClampName(obj[@"name"]);
     parsed[@"variant"] = ApolloThemeVariantKey(ApolloThemeVariantFromKey(obj[@"variant"]));
     parsed[@"input"] = input;
+    BOOL enabled = [obj[kApolloThemeAdvancedOptionsEnabledKey] respondsToSelector:@selector(boolValue)]
+        ? [obj[kApolloThemeAdvancedOptionsEnabledKey] boolValue]
+        : InputHasAnyAdvancedOverrides(input);
+    parsed[kApolloThemeAdvancedOptionsEnabledKey] = @(enabled);
     if ([obj[@"locks"] isKindOfClass:[NSDictionary class]]) parsed[@"locks"] = obj[@"locks"];
     if ([obj[@"generation"] isKindOfClass:[NSDictionary class]]) parsed[@"generation"] = obj[@"generation"];
     parsed[@"schemaVersion"] = @(schema ?: kApolloThemeSchemaVersion);
@@ -448,6 +491,7 @@ static NSDictionary *NormalizeInput(NSDictionary *input) {
     return [self createThemeNamed:parsed[@"name"]
                             input:parsed[@"input"]
                           variant:ApolloThemeVariantFromKey(parsed[@"variant"])
+             advancedOptionsEnabled:[parsed[kApolloThemeAdvancedOptionsEnabledKey] boolValue]
                        generation:parsed[@"generation"]];
 }
 

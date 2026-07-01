@@ -110,6 +110,7 @@ extern NSString * const kApolloRebornThemeSchemaVersionKey;     // NSInteger
 extern NSString * const kApolloRebornThemeRuntimeDisabledKey;   // BOOL (crash kill-switch)
 // v1 data archived here for one release during migration.
 extern NSString * const kApolloRebornThemeV1BackupKey;
+extern NSString * const kApolloThemeAdvancedOptionsEnabledKey;  // BOOL
 
 // Current schema version.
 extern const NSInteger kApolloThemeSchemaVersion; // = 2

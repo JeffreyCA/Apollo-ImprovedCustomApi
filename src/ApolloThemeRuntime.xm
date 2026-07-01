@@ -4,8 +4,28 @@
 #import "ApolloCommon.h"
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 #import <os/lock.h>
+
+@class ASDisplayNode;
+
+@interface ASDisplayNode : NSObject
+- (ASDisplayNode *)supernode;
+@end
+
+@interface ASTextNode : ASDisplayNode
+@property (nonatomic, copy) NSAttributedString *attributedText;
+@end
+
+@interface ASTextNode2 : ASTextNode
+@end
+
+@interface ASButtonNode : ASDisplayNode
+- (void)setAttributedTitle:(NSAttributedString *)title forState:(NSUInteger)state;
+- (void)setTitle:(NSString *)title withFont:(UIFont *)font withColor:(UIColor *)color forState:(NSUInteger)state;
+- (void)setTitle:(NSString *)title withFont:(UIFont *)font withColor:(UIColor *)color withShadowColor:(UIColor *)shadowColor withShadowOffset:(CGSize)shadowOffset forState:(NSUInteger)state;
+@end
 
 // ===========================================================================
 // Runtime state
@@ -84,9 +104,10 @@ static inline UIColor *SemColor(ApolloThemeToken t, uintptr_t caller) {
 // Repaint via Apollo's own theme-change notifications (flash-free, repaints live).
 // The earlier crash was the UIColor value-constructor over-release, NOT the
 // notifications, so these are safe now that the constructors are fixed. The
-// window-style flip is kept behind a flag as a fallback but is OFF by default
-// because it causes a visible white flash when toggling.
-static bool sLegacyRepaint = false;
+// window-style flip is ON by default because donor-constructor remaps produce
+// static colours; without a trait cascade, already-created views can keep stale
+// background/card colours until they are recreated naturally.
+static bool sLegacyRepaint = true;
 static bool sPostNativeNotifications = true;
 
 // Re-entrancy guard: while a dynamic-colour provider is building a concrete
@@ -94,7 +115,7 @@ static bool sPostNativeNotifications = true;
 static __thread int sBypassHook = 0;
 
 // ---------------------------------------------------------------------------
-// Donor + known-neutral lookup tables (spec §8.1, §11.2)
+// Donor + exact Apollo palette lookup tables (spec §8.1, §11.2)
 // ---------------------------------------------------------------------------
 
 // mode: 0 = light, 1 = dark, 0xFF = mode-independent (resolve via current trait).
@@ -132,16 +153,56 @@ static const RGBTokenEntry kDonorEntries[] = {
     { 0x484E5B, ApolloThemeTokenSecondaryLabel,      ApolloThemeModeDark  },
 };
 
-// Closed set of known Apollo theme-independent neutral constants (spec §11.2).
-// Emitted identically in both modes, so resolve against the current trait. Only
-// add values verified by screenshots/logging. Unknown greys are untouched.
-static const RGBTokenEntry kNeutralEntries[] = {
-    { 0x919191, ApolloThemeTokenSecondaryLabel, kModeCurrent },
-    { 0x84878C, ApolloThemeTokenSecondaryLabel, kModeCurrent },
-    { 0x666666, ApolloThemeTokenTertiaryLabel,  kModeCurrent },
-    { 0x858585, ApolloThemeTokenTertiaryLabel,  kModeCurrent },
+// Apollo's separator constants are emitted outside the donor slot and outside
+// text sinks, so they stay on the value-constructor path. Text palette constants
+// are handled later at ASTextNode/ASButtonNode/UILabel sinks instead of here:
+// matching them by render class avoids the old v1 "near-neutral gray" sweep.
+static const RGBTokenEntry kSeparatorEntries[] = {
     { 0xC7C7CC, ApolloThemeTokenSeparator,      kModeCurrent },
     { 0x646466, ApolloThemeTokenSeparator,      kModeCurrent },
+};
+
+typedef struct { uint32_t rgb; ApolloThemeToken token; } TextPaletteEntry;
+
+// Decoded from Apollo's native text palette helper sub_100689abc(role, read,
+// dark). The helper builds these as hex strings and then calls sub_100752f2c,
+// which ends in UIColor initWithRed:green:blue:alpha:. We intentionally use the
+// constants only at text render sinks, never as global constructor remaps.
+static const TextPaletteEntry kTextPaletteEntries[] = {
+    // role 0: primary. Read-state primary is intentionally routed to secondary.
+    { 0x000000, ApolloThemeTokenLabel },
+    { 0x303030, ApolloThemeTokenLabel },
+    { 0xEEEFF5, ApolloThemeTokenLabel },
+    { 0xD0D1D6, ApolloThemeTokenLabel },
+    { 0x999999, ApolloThemeTokenSecondaryLabel },
+    { 0x939499, ApolloThemeTokenSecondaryLabel },
+    { 0x86868A, ApolloThemeTokenSecondaryLabel },
+
+    // role 1: secondary.
+    { 0x666666, ApolloThemeTokenSecondaryLabel },
+    { 0xB3B3B3, ApolloThemeTokenSecondaryLabel },
+    { 0x94969D, ApolloThemeTokenSecondaryLabel },
+    { 0x75777A, ApolloThemeTokenSecondaryLabel },
+    { 0x97AEB4, ApolloThemeTokenSecondaryLabel },
+    { 0x628087, ApolloThemeTokenSecondaryLabel },
+    { 0x919191, ApolloThemeTokenSecondaryLabel },
+    { 0x84878C, ApolloThemeTokenSecondaryLabel },
+
+    // role 2: tertiary.
+    { 0x858585, ApolloThemeTokenTertiaryLabel },
+    { 0xBFBFBF, ApolloThemeTokenTertiaryLabel },
+    { 0x61626A, ApolloThemeTokenTertiaryLabel },
+    { 0x5D5E61, ApolloThemeTokenTertiaryLabel },
+    { 0x7E9296, ApolloThemeTokenTertiaryLabel },
+    { 0x5B6A6D, ApolloThemeTokenTertiaryLabel },
+
+    // role 3/default: quaternary.
+    { 0xB5B5B5, ApolloThemeTokenQuaternaryLabel },
+    { 0xD7D7D7, ApolloThemeTokenQuaternaryLabel },
+    { 0x505257, ApolloThemeTokenQuaternaryLabel },
+    { 0x424345, ApolloThemeTokenQuaternaryLabel },
+    { 0x69797D, ApolloThemeTokenQuaternaryLabel },
+    { 0x465154, ApolloThemeTokenQuaternaryLabel },
 };
 
 // Fast first-byte (red) filter so the hot path bails before scanning.
@@ -151,8 +212,8 @@ static void BuildByteFilter(void) {
     memset(sRByteFilter, 0, sizeof(sRByteFilter));
     for (size_t i = 0; i < sizeof(kDonorEntries) / sizeof(kDonorEntries[0]); i++)
         sRByteFilter[(kDonorEntries[i].rgb >> 16) & 0xFF] = 1;
-    for (size_t i = 0; i < sizeof(kNeutralEntries) / sizeof(kNeutralEntries[0]); i++)
-        sRByteFilter[(kNeutralEntries[i].rgb >> 16) & 0xFF] = 1;
+    for (size_t i = 0; i < sizeof(kSeparatorEntries) / sizeof(kSeparatorEntries[0]); i++)
+        sRByteFilter[(kSeparatorEntries[i].rgb >> 16) & 0xFF] = 1;
 }
 
 static inline BOOL LookupToken(uint32_t rgb, uintptr_t caller, ApolloThemeToken *out, uint8_t *outMode) {
@@ -161,10 +222,81 @@ static inline BOOL LookupToken(uint32_t rgb, uintptr_t caller, ApolloThemeToken 
     for (size_t i = 0; i < sizeof(kDonorEntries) / sizeof(kDonorEntries[0]); i++) {
         if (kDonorEntries[i].rgb == rgb) { *out = kDonorEntries[i].token; *outMode = kDonorEntries[i].mode; return YES; }
     }
-    for (size_t i = 0; i < sizeof(kNeutralEntries) / sizeof(kNeutralEntries[0]); i++) {
-        if (kNeutralEntries[i].rgb == rgb) { *out = kNeutralEntries[i].token; *outMode = kNeutralEntries[i].mode; return YES; }
+    for (size_t i = 0; i < sizeof(kSeparatorEntries) / sizeof(kSeparatorEntries[0]); i++) {
+        if (kSeparatorEntries[i].rgb == rgb) { *out = kSeparatorEntries[i].token; *outMode = kSeparatorEntries[i].mode; return YES; }
     }
     return NO;
+}
+
+static BOOL TextPaletteTokenForRGB(uint32_t rgb, ApolloThemeToken *out) {
+    for (size_t i = 0; i < sizeof(kTextPaletteEntries) / sizeof(kTextPaletteEntries[0]); i++) {
+        if (kTextPaletteEntries[i].rgb == rgb) {
+            if (out) *out = kTextPaletteEntries[i].token;
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL ColorComponents(UIColor *color, CGFloat *outR, CGFloat *outG, CGFloat *outB, CGFloat *outA) {
+    if (![color isKindOfClass:[UIColor class]]) return NO;
+    CGFloat r = 0, g = 0, b = 0, a = 1;
+    if ([color getRed:&r green:&g blue:&b alpha:&a]) {
+        if (outR) *outR = r; if (outG) *outG = g; if (outB) *outB = b; if (outA) *outA = a;
+        return YES;
+    }
+    CGFloat w = 0;
+    if ([color getWhite:&w alpha:&a]) {
+        if (outR) *outR = w; if (outG) *outG = w; if (outB) *outB = w; if (outA) *outA = a;
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL TextPaletteTokenForColor(UIColor *color, ApolloThemeToken *outToken, CGFloat *outAlpha) {
+    CGFloat r = 0, g = 0, b = 0, a = 1;
+    if (!ColorComponents(color, &r, &g, &b, &a)) return NO;
+    if (outAlpha) *outAlpha = a;
+    return TextPaletteTokenForRGB(ApolloThemeRGBKeyFromComponents(r, g, b), outToken);
+}
+
+static BOOL ClassNameLooksApolloOwned(const char *name) {
+    if (!name) return NO;
+    return strncmp(name, "_TtC6Apollo", 11) == 0 ||
+           strncmp(name, "Apollo", 6) == 0 ||
+           strstr(name, ".Apollo") != NULL;
+}
+
+static BOOL ObjectChainLooksApolloOwned(id object) {
+    id current = object;
+    for (NSUInteger i = 0; current && i < 12; i++) {
+        if (ClassNameLooksApolloOwned(class_getName(object_getClass(current)))) return YES;
+
+        id next = nil;
+        if ([current respondsToSelector:@selector(supernode)]) {
+            @try {
+                next = ((id (*)(id, SEL))objc_msgSend)(current, @selector(supernode));
+            } @catch (__unused NSException *e) {
+                next = nil;
+            }
+        }
+        if (!next && [current respondsToSelector:@selector(superview)]) {
+            @try {
+                next = ((id (*)(id, SEL))objc_msgSend)(current, @selector(superview));
+            } @catch (__unused NSException *e) {
+                next = nil;
+            }
+        }
+        if (next == current) break;
+        current = next;
+    }
+    return NO;
+}
+
+static BOOL TextSinkMayUseTheme(id object, uintptr_t caller) {
+    if (!sEnabled) return NO;
+    if (CallerMayUseThemeRuntime(caller)) return YES;
+    return ObjectChainLooksApolloOwned(object);
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +331,42 @@ static UIColor *ApolloThemeMakeDynamicColor(ApolloThemeToken token) {
 UIColor *ApolloThemeRuntimeColor(ApolloThemeToken token) {
     if (!sEnabled || token >= ApolloThemeTokenCount) return nil;
     return ApolloThemeMakeDynamicColor(token);
+}
+
+static UIColor *ThemedTextColorForSourceColor(UIColor *source, id owner, uintptr_t caller) {
+    if (!TextSinkMayUseTheme(owner, caller)) return source;
+
+    ApolloThemeToken token;
+    CGFloat alpha = 1;
+    if (!TextPaletteTokenForColor(source, &token, &alpha)) return source;
+
+    UIColor *replacement = ApolloThemeRuntimeColor(token);
+    if (!replacement) return source;
+    if (alpha < 0.995) replacement = [replacement colorWithAlphaComponent:alpha];
+    if (sDebugLogging) {
+        uint32_t rgb = ApolloThemeRGBFromUIColor(source);
+        ApolloLog(@"ThemeRuntime: text #%06X -> %@", rgb, ApolloThemeTokenKey(token));
+    }
+    return replacement;
+}
+
+static NSAttributedString *ThemedAttributedText(NSAttributedString *text, id owner, uintptr_t caller) {
+    if (![text isKindOfClass:[NSAttributedString class]] || text.length == 0) return text;
+    if (!TextSinkMayUseTheme(owner, caller)) return text;
+
+    __block NSMutableAttributedString *rewritten = nil;
+    NSRange full = NSMakeRange(0, text.length);
+    [text enumerateAttribute:NSForegroundColorAttributeName
+                     inRange:full
+                     options:0
+                  usingBlock:^(id value, NSRange range, BOOL *stop) {
+        if (![value isKindOfClass:[UIColor class]]) return;
+        UIColor *replacement = ThemedTextColorForSourceColor(value, owner, caller);
+        if (replacement == value) return;
+        if (!rewritten) rewritten = [text mutableCopy];
+        [rewritten addAttribute:NSForegroundColorAttributeName value:replacement range:range];
+    }];
+    return rewritten ?: text;
 }
 
 // Resolve a token's static RGB components (0..1) for a mode. The value-
@@ -421,11 +589,13 @@ void ApolloThemeRuntimeInvalidate(void) {
 
 %hook UIColor
 
-// --- donor-constant + known-neutral remap (hot path) ---
+// --- donor-constant + separator remap (hot path) ---
 // These VALUE CONSTRUCTORS return STATIC plain colours (never dynamic provider
 // colours — those over-release inside UIKit cell prep). The donor constant pins
-// the mode; greys resolve against the current trait. Apollo re-emits these on a
-// light<->dark change, and our invalidate flips the window style, so static is OK.
+// the mode; separator constants resolve against the current trait. Apollo
+// re-emits these on a light<->dark change, and our invalidate flips the window
+// style, so static is OK. Native text palette colours are handled by the text
+// sink hooks below, not by this constructor path.
 
 + (UIColor *)colorWithRed:(CGFloat)r green:(CGFloat)g blue:(CGFloat)b alpha:(CGFloat)a {
     if (sEnabled && !sBypassHook) {
@@ -497,6 +667,57 @@ void ApolloThemeRuntimeInvalidate(void) {
 + (UIColor *)quaternarySystemFillColor { UIColor *c = SemColor(ApolloThemeTokenQuaternaryFill, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
 
 + (UIColor *)linkColor { UIColor *c = SemColor(ApolloThemeTokenLink, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
+
+%end
+
+%hook ASTextNode
+
+- (void)setAttributedText:(NSAttributedString *)attributedText {
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    %orig(ThemedAttributedText(attributedText, (id)self, caller));
+}
+
+%end
+
+%hook ASTextNode2
+
+- (void)setAttributedText:(NSAttributedString *)attributedText {
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    %orig(ThemedAttributedText(attributedText, (id)self, caller));
+}
+
+%end
+
+%hook ASButtonNode
+
+- (void)setAttributedTitle:(NSAttributedString *)title forState:(NSUInteger)state {
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    %orig(ThemedAttributedText(title, (id)self, caller), state);
+}
+
+- (void)setTitle:(NSString *)title withFont:(UIFont *)font withColor:(UIColor *)color forState:(NSUInteger)state {
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    %orig(title, font, ThemedTextColorForSourceColor(color, (id)self, caller), state);
+}
+
+- (void)setTitle:(NSString *)title withFont:(UIFont *)font withColor:(UIColor *)color withShadowColor:(UIColor *)shadowColor withShadowOffset:(CGSize)shadowOffset forState:(NSUInteger)state {
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    %orig(title, font, ThemedTextColorForSourceColor(color, (id)self, caller), shadowColor, shadowOffset, state);
+}
+
+%end
+
+%hook UILabel
+
+- (void)setTextColor:(UIColor *)textColor {
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    %orig(ThemedTextColorForSourceColor(textColor, (id)self, caller));
+}
+
+- (void)setAttributedText:(NSAttributedString *)attributedText {
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    %orig(ThemedAttributedText(attributedText, (id)self, caller));
+}
 
 %end
 

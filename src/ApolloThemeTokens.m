@@ -19,6 +19,7 @@ NSString * const kApolloRebornRuntimeDonorThemeKey    = @"ApolloReborn.runtimeDo
 NSString * const kApolloRebornThemeSchemaVersionKey   = @"ApolloReborn.themeSchemaVersion";
 NSString * const kApolloRebornThemeRuntimeDisabledKey = @"ApolloReborn.themeRuntimeDisabled";
 NSString * const kApolloRebornThemeV1BackupKey        = @"ApolloReborn.themeV1Backup";
+NSString * const kApolloThemeAdvancedOptionsEnabledKey = @"advancedEnabled";
 
 const NSInteger kApolloThemeSchemaVersion = 2;
 
@@ -102,7 +103,7 @@ NSString *ApolloThemeInputDisplayName(NSString *inputKey) {
             kApolloThemeInputBackground: @"Background",
             kApolloThemeInputCard:       @"Card",
             kApolloThemeInputRaised:     @"Raised",
-            kApolloThemeInputBars:       @"Bars",
+            kApolloThemeInputBars:       @"Bars & Chrome",
             kApolloThemeInputText:       @"Text",
             kApolloThemeInputMutedText:  @"Muted Text",
             kApolloThemeInputSeparator:  @"Separators",

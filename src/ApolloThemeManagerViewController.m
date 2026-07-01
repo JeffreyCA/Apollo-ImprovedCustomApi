@@ -46,6 +46,31 @@ static UIImage *DualSwatchImage(UIColor *light, UIColor *dark, CGFloat side) {
     }];
 }
 
+static ApolloThemeMode CurrentAppearanceMode(UITraitCollection *traits) {
+    return traits.userInterfaceStyle == UIUserInterfaceStyleDark
+        ? ApolloThemeModeDark : ApolloThemeModeLight;
+}
+
+static NSString *ThemeInputDescription(NSString *key) {
+    if ([key isEqualToString:kApolloThemeInputAccent])
+        return @"Selected tabs, links, switches, buttons, and active controls.";
+    if ([key isEqualToString:kApolloThemeInputBackground])
+        return @"Main page background behind cards and grouped sections.";
+    if ([key isEqualToString:kApolloThemeInputCard])
+        return @"List rows, setting cells, post cards, and grouped panels.";
+    if ([key isEqualToString:kApolloThemeInputRaised])
+        return @"Raised surfaces such as inset controls and elevated panels.";
+    if ([key isEqualToString:kApolloThemeInputBars])
+        return @"Navigation bars, tab bar backing, and other app chrome.";
+    if ([key isEqualToString:kApolloThemeInputText])
+        return @"Primary text. Auto keeps contrast readable against the background.";
+    if ([key isEqualToString:kApolloThemeInputMutedText])
+        return @"Secondary labels, metadata, placeholders, and disabled text.";
+    if ([key isEqualToString:kApolloThemeInputSeparator])
+        return @"Thin divider lines between rows, cells, and grouped sections.";
+    return nil;
+}
+
 // ---------------------------------------------------------------------------
 
 @interface ApolloThemeManagerViewController () <UIColorPickerViewControllerDelegate, UIDocumentPickerDelegate>
@@ -55,6 +80,12 @@ static UIImage *DualSwatchImage(UIColor *light, UIColor *dark, CGFloat side) {
 @property (nonatomic, strong) ApolloCompiledTheme *previewCompiled; // cached for editor preview
 @end
 
+// List mode:   0 Enable | 1 Themes | 2 New/Import
+// Editor mode: 0 Name | 1 Variant+Mode | 2 Colours | 3 Advanced | 4 Generate
+//              5 Preview | 6 Apply
+enum { LSEnable, LSThemes, LSActions, LSCount };
+enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, ESCount };
+
 @implementation ApolloThemeManagerViewController
 
 - (instancetype)init {
@@ -63,15 +94,89 @@ static UIImage *DualSwatchImage(UIColor *light, UIColor *dark, CGFloat side) {
 
 - (instancetype)initEditorForThemeID:(NSString *)themeID {
     self = [super initWithStyle:UITableViewStyleInsetGrouped];
-    if (self) { _editingThemeID = [themeID copy]; _editingMode = ApolloThemeModeLight; }
+    if (self) {
+        _editingThemeID = [themeID copy];
+        _editingMode = CurrentAppearanceMode(UIScreen.mainScreen.traitCollection);
+    }
     return self;
 }
 
 - (ApolloThemeStore *)store { return [ApolloThemeStore shared]; }
 
+- (UIColor *)themeColorForToken:(ApolloThemeToken)token fallback:(UIColor *)fallback {
+    UIColor *runtimeColor = ApolloThemeRuntimeColor(token);
+    if (runtimeColor) return runtimeColor;
+
+    ApolloThemeStore *store = [self store];
+    NSDictionary *active = store.customThemeEnabled ? [store activeTheme] : nil;
+    NSDictionary *input = active[@"input"];
+    if ([input isKindOfClass:[NSDictionary class]]) {
+        ApolloCompiledTheme *compiled = [ApolloCompiledTheme compiledThemeWithInput:input
+                                                                            variant:ApolloThemeVariantFromKey(active[@"variant"])];
+        return ApolloThemeUIColorFromRGB([compiled rgbForToken:token mode:CurrentAppearanceMode(self.traitCollection)]);
+    }
+
+    return fallback;
+}
+
+- (UIColor *)themeAccentColor {
+    return [self themeColorForToken:ApolloThemeTokenAccent
+                           fallback:self.navigationController.view.tintColor ?: UIColor.systemBlueColor];
+}
+
+- (void)applyThemeTint {
+    UIColor *accent = [self themeAccentColor];
+    UIColor *background = [self themeColorForToken:ApolloThemeTokenBackground
+                                          fallback:UIColor.systemGroupedBackgroundColor];
+    UIColor *separator = [self themeColorForToken:ApolloThemeTokenSeparator
+                                         fallback:UIColor.separatorColor];
+
+    self.view.tintColor = accent;
+    self.tableView.tintColor = accent;
+    self.navigationController.navigationBar.tintColor = accent;
+    self.view.backgroundColor = background;
+    self.tableView.backgroundColor = background;
+    self.tableView.separatorColor = separator;
+}
+
+- (void)applyThemeToCell:(UITableViewCell *)cell atIndexPath:(NSIndexPath *)ip {
+    if (!cell || (self.editingThemeID && ip.section == ESPreview)) return;
+
+    UIColor *card = [self themeColorForToken:ApolloThemeTokenSecondaryBackground
+                                    fallback:UIColor.secondarySystemGroupedBackgroundColor];
+    UIColor *label = [self themeColorForToken:ApolloThemeTokenLabel
+                                     fallback:UIColor.labelColor];
+    UIColor *secondary = [self themeColorForToken:ApolloThemeTokenSecondaryLabel
+                                         fallback:UIColor.secondaryLabelColor];
+    UIColor *accent = [self themeAccentColor];
+
+    cell.backgroundColor = card;
+    cell.contentView.backgroundColor = card;
+    cell.tintColor = accent;
+    cell.imageView.tintColor = accent;
+    cell.textLabel.textColor = label;
+    cell.detailTextLabel.textColor = secondary;
+    if (cell.accessoryView) cell.accessoryView.tintColor = accent;
+    cell.selectedBackgroundView = nil;
+
+    if (!self.editingThemeID && ip.section == LSThemes) {
+        ApolloThemeStore *store = [self store];
+        NSDictionary *theme = [store allThemes][ip.row];
+        BOOL active = [theme[@"id"] isEqualToString:store.activeThemeID] && store.customThemeEnabled;
+        if (active) cell.detailTextLabel.textColor = accent;
+    }
+    if ((!self.editingThemeID && ip.section == LSActions) ||
+        (self.editingThemeID && (ip.section == ESGenerate || ip.section == ESApply))) {
+        cell.textLabel.textColor = accent;
+    }
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     ApolloLog(@"ThemeUI: viewDidLoad mode=%@ themeID=%@", self.editingThemeID ? @"editor" : @"list", self.editingThemeID ?: @"-");
+    [self applyThemeTint];
+    self.tableView.rowHeight = UITableViewAutomaticDimension;
+    self.tableView.estimatedRowHeight = 72.0;
     if (self.editingThemeID) {
         NSDictionary *t = [[self store] themeWithID:self.editingThemeID];
         self.title = t[@"name"] ?: @"Edit Theme";
@@ -86,6 +191,14 @@ static UIImage *DualSwatchImage(UIColor *light, UIColor *dark, CGFloat side) {
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    [self applyThemeTint];
+    [self recompilePreview];
+    [self.tableView reloadData];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    [self applyThemeTint];
     [self recompilePreview];
     [self.tableView reloadData];
 }
@@ -105,24 +218,18 @@ static UIImage *DualSwatchImage(UIColor *light, UIColor *dark, CGFloat side) {
 // ===========================================================================
 // Section layout
 // ===========================================================================
-// List mode:   0 Enable | 1 Themes | 2 New/Import
-// Editor mode: 0 Name | 1 Variant+Mode | 2 Colours | 3 Advanced | 4 Generate
-//              5 Preview | 6 Apply
-
-enum { LSEnable, LSThemes, LSActions, LSCount };
-enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, ESCount };
-
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
     return self.editingThemeID ? ESCount : LSCount;
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     if (self.editingThemeID) {
+        BOOL advancedEnabled = [self advancedOptionsEnabledForTheme:[[self store] themeWithID:self.editingThemeID]];
         switch (section) {
             case ESName:     return 1;
             case ESVariant:  return 1;  // appearance mode (Light/Dark) only — variant is AI-only
             case ESColors:   return ApolloThemeDefaultInputKeys().count;
-            case ESAdvanced: return ApolloThemeAdvancedInputKeys().count;
+            case ESAdvanced: return 1 + (advancedEnabled ? ApolloThemeAdvancedInputKeys().count : 0);
             case ESGenerate: return 1;
             case ESPreview:  return 4;
             case ESApply:    return 1;
@@ -152,7 +259,7 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
     if (self.editingThemeID && section == ESAdvanced)
-        return @"Leave blank to derive text and separators automatically.";
+        return @"Turn on advanced options to override text and separator colours.";
     if (self.editingThemeID && section == ESApply)
         return @"Applying selects this theme and enables custom theming.";
     if (!self.editingThemeID && section == LSEnable && [[self store] runtimeDisabledDueToCrash])
@@ -166,6 +273,26 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     return self.editingThemeID ? [self editorCellForIndexPath:ip] : [self listCellForIndexPath:ip];
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)ip {
+    [self applyThemeToCell:cell atIndexPath:ip];
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayHeaderView:(UIView *)view forSection:(NSInteger)section {
+    if (![view isKindOfClass:[UITableViewHeaderFooterView class]]) return;
+    UITableViewHeaderFooterView *header = (UITableViewHeaderFooterView *)view;
+    header.textLabel.textColor = [self themeColorForToken:ApolloThemeTokenSecondaryLabel
+                                                 fallback:UIColor.secondaryLabelColor];
+    header.contentView.backgroundColor = UIColor.clearColor;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayFooterView:(UIView *)view forSection:(NSInteger)section {
+    if (![view isKindOfClass:[UITableViewHeaderFooterView class]]) return;
+    UITableViewHeaderFooterView *footer = (UITableViewHeaderFooterView *)view;
+    footer.textLabel.textColor = [self themeColorForToken:ApolloThemeTokenSecondaryLabel
+                                                 fallback:UIColor.secondaryLabelColor];
+    footer.contentView.backgroundColor = UIColor.clearColor;
 }
 
 #pragma mark - List cells
@@ -220,6 +347,7 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
     NSDictionary *theme = [[self store] themeWithID:self.editingThemeID];
     NSString *modeKey = ApolloThemeModeKey(self.editingMode);
     NSDictionary *modeInput = theme[@"input"][modeKey];
+    BOOL advancedEnabled = [self advancedOptionsEnabledForTheme:theme];
 
     switch (ip.section) {
         case ESName: {
@@ -243,19 +371,33 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
         }
         case ESColors:
         case ESAdvanced: {
+            UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+            if (ip.section == ESAdvanced && ip.row == 0) {
+                cell.textLabel.text = @"Advanced options";
+                cell.detailTextLabel.text = @"Text and separator overrides";
+                UISwitch *sw = [[UISwitch alloc] init];
+                sw.on = advancedEnabled;
+                [sw addTarget:self action:@selector(advancedOptionsSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+                cell.accessoryView = sw;
+                cell.selectionStyle = UITableViewCellSelectionStyleNone;
+                return cell;
+            }
             NSArray *keys = (ip.section == ESColors) ? ApolloThemeDefaultInputKeys() : ApolloThemeAdvancedInputKeys();
-            NSString *key = keys[ip.row];
-            UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
+            NSString *key = (ip.section == ESColors) ? keys[ip.row] : keys[ip.row - 1];
             cell.textLabel.text = ApolloThemeInputDisplayName(key);
             id raw = modeInput[key];
             uint32_t rgb = 0;
+            NSString *value = nil;
             if ([raw isKindOfClass:[NSString class]] && ApolloThemeParseHex(raw, &rgb)) {
-                cell.detailTextLabel.text = [@"#" stringByAppendingString:ApolloThemeHexFromRGB(rgb)];
+                value = [@"#" stringByAppendingString:ApolloThemeHexFromRGB(rgb)];
                 cell.imageView.image = SwatchImage(ApolloThemeUIColorFromRGB(rgb), 29);
             } else {
-                cell.detailTextLabel.text = @"Auto";
+                value = @"Auto";
                 cell.imageView.image = SwatchImage(nil, 29);
             }
+            NSString *desc = ThemeInputDescription(key);
+            cell.detailTextLabel.text = desc.length ? [NSString stringWithFormat:@"%@ · %@", value, desc] : value;
+            cell.detailTextLabel.numberOfLines = 0;
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             return cell;
         }
@@ -351,7 +493,12 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
         case ESColors:
             [self beginPickingInputKey:ApolloThemeDefaultInputKeys()[ip.row]]; break;
         case ESAdvanced:
-            [self beginPickingInputKey:ApolloThemeAdvancedInputKeys()[ip.row]]; break;
+            if (ip.row == 0) {
+                [self setAdvancedOptionsEnabled:![self advancedOptionsEnabledForTheme:[[self store] themeWithID:self.editingThemeID]]];
+            } else {
+                [self beginPickingInputKey:ApolloThemeAdvancedInputKeys()[ip.row - 1]];
+            }
+            break;
         case ESGenerate: [self generateOppositeMode]; break;
         case ESApply: [self applyTheme]; break;
     }
@@ -368,7 +515,11 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
         if ([store runtimeDisabledDueToCrash]) [store clearCrashDisable];
         if ([store allThemes].count == 0) {
             ApolloLog(@"ThemeUI: no themes yet — creating starter before enable");
-            [store createThemeNamed:@"My Theme" input:nil variant:ApolloThemeVariantBalanced generation:nil];
+            [store createThemeNamed:@"My Theme"
+                               input:nil
+                             variant:ApolloThemeVariantBalanced
+              advancedOptionsEnabled:NO
+                           generation:nil];
         }
         ApolloThemeRuntimeEnable();
     } else {
@@ -381,7 +532,11 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 - (void)newThemeTapped {
     ApolloLog(@"ThemeUI: New Theme tapped");
     ApolloThemeStore *store = [self store];
-    NSString *newID = [store createThemeNamed:@"My Theme" input:nil variant:ApolloThemeVariantBalanced generation:nil];
+    NSString *newID = [store createThemeNamed:@"My Theme"
+                                         input:nil
+                                       variant:ApolloThemeVariantBalanced
+                        advancedOptionsEnabled:NO
+                                    generation:nil];
     [self.tableView reloadData];
     ApolloLog(@"ThemeUI: New Theme created id=%@ — opening editor", newID);
     [self openEditorForThemeID:newID];
@@ -469,12 +624,54 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 
 - (BOOL)isAdvancedKey:(NSString *)key { return [ApolloThemeAdvancedInputKeys() containsObject:key]; }
 
+- (BOOL)advancedOptionsEnabledForTheme:(NSDictionary *)theme {
+    return [theme[kApolloThemeAdvancedOptionsEnabledKey] boolValue];
+}
+
+- (NSDictionary *)themeByRemovingAdvancedOverrides:(NSDictionary *)theme {
+    if (![theme isKindOfClass:[NSDictionary class]]) return theme;
+    NSMutableDictionary *updated = [theme mutableCopy];
+    NSMutableDictionary *input = [updated[@"input"] mutableCopy] ?: [NSMutableDictionary dictionary];
+    for (NSString *mode in @[@"light", @"dark"]) {
+        NSMutableDictionary *modeInput = [input[mode] mutableCopy] ?: [NSMutableDictionary dictionary];
+        for (NSString *key in ApolloThemeAdvancedInputKeys()) [modeInput removeObjectForKey:key];
+        input[mode] = modeInput;
+    }
+    updated[@"input"] = input;
+    return updated;
+}
+
+- (void)setAdvancedOptionsEnabled:(BOOL)enabled {
+    ApolloThemeStore *store = [self store];
+    [store updateTheme:self.editingThemeID mutations:^(NSMutableDictionary *t) {
+        t[kApolloThemeAdvancedOptionsEnabledKey] = @(enabled);
+        if (!enabled) {
+            NSMutableDictionary *input = [t[@"input"] mutableCopy] ?: [NSMutableDictionary dictionary];
+            for (NSString *mode in @[@"light", @"dark"]) {
+                NSMutableDictionary *modeInput = [input[mode] mutableCopy] ?: [NSMutableDictionary dictionary];
+                for (NSString *key in ApolloThemeAdvancedInputKeys()) [modeInput removeObjectForKey:key];
+                input[mode] = modeInput;
+            }
+            t[@"input"] = input;
+        }
+    }];
+    [self recompilePreview];
+    [self maybeLiveReload];
+    [self.tableView reloadData];
+}
+
+- (void)advancedOptionsSwitchChanged:(UISwitch *)sw {
+    if (!sw) return;
+    [self setAdvancedOptionsEnabled:sw.on];
+}
+
 - (void)saveColor:(UIColor *)color forCurrentKey:(BOOL)clear {
     if (!self.pickingInputKey) return;
     NSString *hex = (clear || !color) ? nil : ApolloThemeHexFromRGB(ApolloThemeRGBFromUIColor(color));
     [[self store] setInputHex:hex forKey:self.pickingInputKey mode:self.editingMode themeID:self.editingThemeID];
     [self recompilePreview];
     [self maybeLiveReload];
+    [self applyThemeTint];
     [self.tableView reloadData];
 }
 
