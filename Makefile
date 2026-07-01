@@ -90,6 +90,8 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloThemeCompiler.m \
     $(SRC_DIR)/ApolloThemeStore.m \
     $(SRC_DIR)/ApolloThemeRuntime.xm \
+    $(SRC_DIR)/ApolloThemeAI.m \
+    $(SRC_DIR)/ApolloThemeAISheets.m \
     $(SRC_DIR)/ApolloThemeManagerViewController.m \
     $(SRC_DIR)/ApolloThemeManagerIntegration.xm \
     $(SRC_DIR)/ApolloThemeIntegrations.xm \
@@ -145,6 +147,19 @@ ApolloReborn_LIBRARIES = z iconv
 # feature simply reports unavailable in that build).
 ifneq ($(wildcard $(SYSROOT)/System/Library/Frameworks/FoundationModels.framework),)
 ApolloReborn_LDFLAGS += -weak_framework FoundationModels
+endif
+# The @Generable / @Guide macros used by ApolloFoundationModels.swift's Theme
+# Manager schema are implemented by the FoundationModelsMacros compiler plugin,
+# which ships in the iPhoneOS *platform* plugin dir — NOT the toolchain's default
+# host/plugins. Because we build against the copied SDK in $THEOS/sdks (outside
+# the .platform), swiftc doesn't auto-add that path, so the macro can't resolve
+# ("plugin for module 'FoundationModelsMacros' not found"). Point swiftc at the
+# platform plugin dir explicitly, only when it's present — older toolchains that
+# lack FoundationModels never compile the macro'd code (it's behind
+# `#if canImport(FoundationModels)`), so they don't need it.
+FM_PLUGIN_PATH := $(shell xcode-select -p)/Platforms/iPhoneOS.platform/Developer/usr/lib/swift/host/plugins
+ifneq ($(wildcard $(FM_PLUGIN_PATH)/libFoundationModelsMacros.dylib),)
+ApolloReborn_SWIFTFLAGS += -plugin-path $(FM_PLUGIN_PATH)
 endif
 # Apple's Translation framework (used by the on-device "apple" translation provider in
 # ApolloAppleTranslation.swift) only exists on iOS 18.0+. Weak-link it so the tweak still
