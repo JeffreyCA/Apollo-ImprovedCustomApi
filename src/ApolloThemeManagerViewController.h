@@ -3,7 +3,7 @@
 // ApolloThemeManagerViewController — the v2 Theme Manager UI (spec §13).
 //
 // Two roles in one class:
-//   * list mode (default init): enable switch, theme list, new/import/export.
+//   * list mode (default init): consolidated Themes hub.
 //   * editor mode (initEditorForThemeID:): name, variant, light/dark colours,
 //     advanced overrides, live preview, apply.
 @interface ApolloThemeManagerViewController : UITableViewController
