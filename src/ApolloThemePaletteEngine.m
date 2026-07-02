@@ -72,6 +72,20 @@ static const double kAccentToneBand[ApolloThemeModeCount][2] = {
 static const double kAccentMinChroma = 48;
 static const double kAccentMinContrast = 3.0;
 
+// Light-mode near-white tones can't carry chroma for many hues (blue tops out
+// at C~12 by T94, red at C~7), so the tiers' chroma multipliers all clip to
+// the same pastel and the three intensities become indistinguishable. Fix:
+// tone yields to chroma. Each tier PROMISES a minimum surface tint (capped by
+// what the seed itself asks for); when the promise can't be met at the spec
+// tone, the whole ramp shifts darker until it can, up to a cap that keeps
+// light mode light. Dark tones already carry chroma, so dark never shifts.
+static const double kSurfaceMinChroma[ApolloThemeAIIntensityCount] = {
+    [ApolloThemeAIIntensitySubtle]   = 0,
+    [ApolloThemeAIIntensityBalanced] = 14,
+    [ApolloThemeAIIntensityBold]     = 24,
+};
+static const double kSurfaceToneShiftCap = 12;
+
 // Text is tinted with the primary seed's hue but stays near the tone extremes;
 // the contrast clamp against the worst surface is a safety net, not the
 // normal path (the tone tables above already clear it with margin).
@@ -156,6 +170,22 @@ static double ATPPickTextTone(double baseTone, double minimumContrast, ApolloThe
     return MAX(baseTone, limit);
 }
 
+// How far a light-mode surface ramp must shift darker (in tone) for the tier's
+// promised tint to survive the sRGB gamut at this hue. Walks in exact 0.5
+// steps to stay bit-identical to the JS reference's surfaceToneShift.
+static double ATPSurfaceToneShift(double hue, double desiredChroma, double tierMinChroma,
+                                  ApolloThemeMode mode, double anchorTone) {
+    if (mode == ApolloThemeModeDark) return 0;
+    double target = MIN(tierMinChroma, desiredChroma);
+    if (target < 1) return 0;
+    if (ApolloHCTSolved(hue, 200, anchorTone).chroma >= target) return 0;
+    for (int i = 1; i <= (int)(kSurfaceToneShiftCap * 2); i++) {
+        double shift = i * 0.5;
+        if (ApolloHCTSolved(hue, 200, anchorTone - shift).chroma >= target) return shift;
+    }
+    return kSurfaceToneShiftCap;
+}
+
 NSDictionary<NSString *, NSString *> *
 ApolloThemePaletteEngineGenerate(ApolloThemeAISeeds seeds,
                                  BOOL allowMonochrome,
@@ -177,11 +207,25 @@ ApolloThemePaletteEngineGenerate(ApolloThemeAISeeds seeds,
 
     NSMutableDictionary<NSString *, NSString *> *colors = [NSMutableDictionary dictionary];
     for (ApolloThemeMode mode = ApolloThemeModeLight; mode < ApolloThemeModeCount; mode++) {
-        const ATPToneRow *tones = &spec->tones[mode];
         NSString *modeKey = ApolloThemeModeKey(mode);
         void (^put)(NSString *, uint32_t) = ^(NSString *inputKey, uint32_t rgb) {
             colors[[NSString stringWithFormat:@"%@.%@", inputKey, modeKey]] = ApolloThemeHexFromRGB(rgb);
         };
+
+        // Tone yields to chroma: each ramp shifts independently (the canvas
+        // keyed on its background, the frame on the bars tone), preserving
+        // the tier's internal surface spacing.
+        double canvasShift = ATPSurfaceToneShift(canvasHue, canvasChroma, kSurfaceMinChroma[intensity],
+                                                 mode, spec->tones[mode].background);
+        double frameShift = ATPSurfaceToneShift(frameHue, frameChroma, kSurfaceMinChroma[intensity],
+                                                mode, spec->tones[mode].barsChrome);
+        ATPToneRow shifted = {
+            .background = spec->tones[mode].background - canvasShift,
+            .card       = spec->tones[mode].card - canvasShift,
+            .raised     = spec->tones[mode].raised - canvasShift,
+            .barsChrome = spec->tones[mode].barsChrome - frameShift,
+        };
+        const ATPToneRow *tones = &shifted;
 
         put(kApolloThemeInputAccent, ApolloHCTToRGB(n.accent.hue, accentRampChroma,
                                                     ATPPickAccentTone(n.accent.tone, mode, tones->background)));

@@ -456,7 +456,6 @@ static UIButton *ATBChipButton(NSString *title, UIColor *accent) {
 // to select it (accent-tinted border on the selected card).
 - (UIView *)cardForVariant:(NSDictionary *)variant accent:(UIColor *)accent {
     NSString *intensity = variant[@"intensity"];
-    NSString *mode = self.mode.length ? self.mode : @"dark";
     NSDictionary *colors = [variant[@"colors"] isKindOfClass:NSDictionary.class] ? variant[@"colors"] : @{};
 
     UIView *card = [UIView new];
@@ -480,32 +479,50 @@ static UIButton *ATBChipButton(NSString *title, UIColor *accent) {
     desc.textColor = UIColor.secondaryLabelColor;
     desc.numberOfLines = 2;
 
+    // BOTH modes get a swatch row — judging a theme from one mode is how
+    // "all three look the same" happens (a blue theme's light row is pastel
+    // by design while its dark row is navy). Sun/moon glyphs label the rows.
     // No separator swatch — the AI doesn't produce one (see ApolloThemeAI.m),
     // it's left for the Compiler to auto-derive like a manually-created theme.
     NSArray *roleOrder = @[kApolloThemeInputAccent, kApolloThemeInputCard, kApolloThemeInputBackground,
                            kApolloThemeInputRaised, kApolloThemeInputBars, kApolloThemeInputText, kApolloThemeInputMutedText];
-    UIStackView *swatches = [[UIStackView alloc] init];
-    swatches.axis = UILayoutConstraintAxisHorizontal;
-    swatches.spacing = 6.0;
-    swatches.distribution = UIStackViewDistributionFillEqually;
-    for (NSString *role in roleOrder) {
-        NSString *hex = colors[[NSString stringWithFormat:@"%@.%@", role, mode]];
-        UIView *swatch = [UIView new];
-        uint32_t rgb;
-        swatch.backgroundColor = ApolloThemeParseHex(hex, &rgb) ? ApolloThemeUIColorFromRGB(rgb) : UIColor.tertiarySystemFillColor;
-        swatch.layer.cornerRadius = 6.0;
-        swatch.layer.cornerCurve = kCACornerCurveContinuous;
-        [swatch.heightAnchor constraintEqualToConstant:28].active = YES;
-        [swatches addArrangedSubview:swatch];
-    }
+    UIView *(^swatchRow)(NSString *, NSString *) = ^UIView *(NSString *mode, NSString *symbolName) {
+        UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:symbolName]];
+        icon.tintColor = UIColor.tertiaryLabelColor;
+        icon.contentMode = UIViewContentModeScaleAspectFit;
+        icon.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithPointSize:11 weight:UIImageSymbolWeightMedium];
+        [icon.widthAnchor constraintEqualToConstant:18].active = YES;
+        UIStackView *swatches = [[UIStackView alloc] init];
+        swatches.axis = UILayoutConstraintAxisHorizontal;
+        swatches.spacing = 6.0;
+        swatches.distribution = UIStackViewDistributionFillEqually;
+        for (NSString *role in roleOrder) {
+            NSString *hex = colors[[NSString stringWithFormat:@"%@.%@", role, mode]];
+            UIView *swatch = [UIView new];
+            uint32_t rgb;
+            swatch.backgroundColor = ApolloThemeParseHex(hex, &rgb) ? ApolloThemeUIColorFromRGB(rgb) : UIColor.tertiarySystemFillColor;
+            swatch.layer.cornerRadius = 6.0;
+            swatch.layer.cornerCurve = kCACornerCurveContinuous;
+            [swatch.heightAnchor constraintEqualToConstant:24].active = YES;
+            [swatches addArrangedSubview:swatch];
+        }
+        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[icon, swatches]];
+        row.axis = UILayoutConstraintAxisHorizontal;
+        row.spacing = 8.0;
+        row.alignment = UIStackViewAlignmentCenter;
+        return row;
+    };
+    UIView *lightRow = swatchRow(@"light", @"sun.max.fill");
+    UIView *darkRow = swatchRow(@"dark", @"moon.fill");
 
     // No Readability/Prompt-match labels — legibility is guaranteed by
     // construction in the palette engine (contrast clamps on HCT tone), so
     // there's nothing to score. Swatches speak for themselves.
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[name, desc, swatches]];
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[name, desc, lightRow, darkRow]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 8.0;
     [stack setCustomSpacing:4 afterView:name];
+    [stack setCustomSpacing:6 afterView:lightRow];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [card addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[
