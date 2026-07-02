@@ -5,7 +5,7 @@
 #import "UserDefaultConstants.h"
 
 typedef NS_ENUM(NSInteger, ApolloDCSettingsSection) {
-    ApolloDCSettingsSectionShow = 0,   // Show + (conditional) Tap to Show
+    ApolloDCSettingsSectionShow = 0,   // Always Show + (conditional) Tap to Show
     ApolloDCSettingsSectionPassive,    // Passive per-thread mode
     ApolloDCSettingsSectionCount,
 };
@@ -31,10 +31,6 @@ typedef NS_ENUM(NSInteger, ApolloDCSettingsSection) {
     [toggle addTarget:self action:action forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = toggle;
     return cell;
-}
-
-- (void)noteSettingsChanged {
-    if (self.settingsDidChange) self.settingsDidChange();
 }
 
 #pragma mark - UITableViewDataSource
@@ -63,7 +59,7 @@ typedef NS_ENUM(NSInteger, ApolloDCSettingsSection) {
         case ApolloDCSettingsSectionShow:
             return @"Recovers removed and deleted comments in every thread. Tap to Show hides each recovered comment behind its removal reason until you tap it. This can slow down comment loading.";
         case ApolloDCSettingsSectionPassive:
-            return @"With only Passive on, deleted comments stay off until you turn them on for a single thread from the ⋯ menu in the comments view. They turn off again when you leave that thread.\n\nThe ⋯ menu always includes a Show/Hide Deleted Comments shortcut.";
+            return @"With Passive on, deleted comments stay off until you turn them on for a single thread from the ⋯ menu in the comments view. They turn off again when you leave that thread.\n\nOnly one of Always Show and Passive can be on — turning one on turns the other off. The ⋯ menu always includes a Show/Hide Deleted Comments shortcut.";
         default: return nil;
     }
 }
@@ -72,7 +68,7 @@ typedef NS_ENUM(NSInteger, ApolloDCSettingsSection) {
     UITableViewCell *cell = nil;
     if (indexPath.section == ApolloDCSettingsSectionShow) {
         if (indexPath.row == 0) {
-            cell = [self switchCellWithLabel:@"Show Deleted Comments"
+            cell = [self switchCellWithLabel:@"Always Show Deleted Comments"
                                           on:sShowDeletedComments
                                       action:@selector(showDeletedCommentsSwitchToggled:)];
         } else {
@@ -96,30 +92,50 @@ typedef NS_ENUM(NSInteger, ApolloDCSettingsSection) {
     [[NSUserDefaults standardUserDefaults] setBool:sShowDeletedComments forKey:UDKeyShowDeletedComments];
     if (sShowDeletedComments == wasOn) return;
 
-    NSArray<NSIndexPath *> *paths = @[[NSIndexPath indexPathForRow:1 inSection:ApolloDCSettingsSectionShow]];
+    NSArray<NSIndexPath *> *tapToShowPaths = @[[NSIndexPath indexPathForRow:1 inSection:ApolloDCSettingsSectionShow]];
     if (sShowDeletedComments) {
-        [self.tableView insertRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationFade];
+        // Always Show and Passive are one-or-the-other.
+        if (sPassiveDeletedComments) {
+            sPassiveDeletedComments = NO;
+            [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyPassiveDeletedComments];
+        }
+        [self.tableView beginUpdates];
+        [self.tableView insertRowsAtIndexPaths:tapToShowPaths withRowAnimation:UITableViewRowAnimationFade];
+        [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:0 inSection:ApolloDCSettingsSectionPassive]]
+                              withRowAnimation:UITableViewRowAnimationNone];
+        [self.tableView endUpdates];
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"⚠️ WARNING"
                                                                        message:@"This feature can slow down comment loading. If you notice comments loading slowly, turn this feature off."
                                                                 preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
         [self presentViewController:alert animated:YES completion:nil];
     } else {
-        [self.tableView deleteRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationFade];
+        [self.tableView deleteRowsAtIndexPaths:tapToShowPaths withRowAnimation:UITableViewRowAnimationFade];
     }
-    [self noteSettingsChanged];
 }
 
 - (void)tapToRevealDeletedCommentsSwitchToggled:(UISwitch *)sender {
     sTapToRevealDeletedComments = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sTapToRevealDeletedComments forKey:UDKeyTapToRevealDeletedComments];
-    [self noteSettingsChanged];
 }
 
 - (void)passiveDeletedCommentsSwitchToggled:(UISwitch *)sender {
+    BOOL wasOn = sPassiveDeletedComments;
     sPassiveDeletedComments = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sPassiveDeletedComments forKey:UDKeyPassiveDeletedComments];
-    [self noteSettingsChanged];
+    if (sPassiveDeletedComments == wasOn) return;
+
+    // Always Show and Passive are one-or-the-other.
+    if (sPassiveDeletedComments && sShowDeletedComments) {
+        sShowDeletedComments = NO;
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyShowDeletedComments];
+        [self.tableView beginUpdates];
+        [self.tableView deleteRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:1 inSection:ApolloDCSettingsSectionShow]]
+                              withRowAnimation:UITableViewRowAnimationFade];
+        [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:0 inSection:ApolloDCSettingsSectionShow]]
+                              withRowAnimation:UITableViewRowAnimationNone];
+        [self.tableView endUpdates];
+    }
 }
 
 @end

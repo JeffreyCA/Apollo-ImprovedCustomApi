@@ -473,34 +473,17 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (UITableViewCell *)deletedCommentsCellForTableView:(UITableView *)tableView {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Gen_DeletedComments"];
     if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"Cell_Gen_DeletedComments"];
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_Gen_DeletedComments"];
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     }
     cell.textLabel.text = @"Deleted Comments";
-    NSString *detail;
-    if (sShowDeletedComments) {
-        detail = sTapToRevealDeletedComments ? @"On · Tap to Show" : @"On";
-    } else if (sPassiveDeletedComments) {
-        detail = @"Passive · per thread from the comments ⋯ menu";
-    } else {
-        detail = @"Off";
-    }
-    cell.detailTextLabel.text = detail;
-    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-    cell.detailTextLabel.numberOfLines = 0;
-    cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
     return cell;
 }
 
 - (void)openDeletedCommentsSettings {
     ApolloDeletedCommentsSettingsViewController *vc =
         [[ApolloDeletedCommentsSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-    __weak typeof(self) weakSelf = self;
-    vc.settingsDidChange = ^{
-        [weakSelf.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:3 inSection:SectionGeneral]]
-                                  withRowAnimation:UITableViewRowAnimationNone];
-    };
     if (self.navigationController) {
         [self.navigationController pushViewController:vc animated:YES];
     } else {
