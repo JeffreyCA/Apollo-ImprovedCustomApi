@@ -329,8 +329,7 @@ typedef void (^ApolloThemeGalleryAction)(NSString *slug);
         && [[ApolloThemeStore shared].activeGallerySlug isEqualToString:slug];
 
     cell.textLabel.text = theme[@"name"] ?: slug;
-    cell.detailTextLabel.text = active ? @"Active Gallery Theme" : nil;
-    cell.detailTextLabel.textColor = active ? self.view.tintColor : UIColor.secondaryLabelColor;
+    cell.detailTextLabel.text = nil;
     cell.imageView.image = GalleryRowImage(compiled, mode);
     cell.accessoryType = active ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryDisclosureIndicator;
     cell.tintColor = self.view.tintColor;

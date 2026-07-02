@@ -1,7 +1,8 @@
 // ApolloThemeManagerIntegration.xm — settings entry point for the v2 Theme
 // Manager. Repoints Apollo's native Appearance > Themes row to
-// ApolloThemeManagerViewController, while the hub itself pushes Apollo's native
-// picker when the user chooses "Apollo Themes".
+// ApolloThemeManagerViewController, while the hub pushes filtered views of
+// Apollo's native theme screen: the picker ("Apollo Themes"), the light/dark
+// options, and the comments theme, each showing only its own sections.
 
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
@@ -38,7 +39,73 @@ static UISwipeActionsConfiguration *(*sTrailingSwipeOrig)(id, SEL, UITableView *
 
 static inline BOOL IsThemesRow(NSIndexPath *ip) { return ip.section == 0 && ip.row == 0; }
 
-extern "C" BOOL ApolloThemeOpenNativeThemePickerFromHub(UIViewController *hub) {
+// ---------------------------------------------------------------------------
+// Native theme screen modes.
+//
+// Apollo's SettingsThemeViewController is one screen holding the theme list
+// AND the appearance options (Comments Theme, Use System Light/Dark Mode,
+// Pure/PURER Black, plus the conditional automatic-dark-mode UI: sunset via
+// CLLocation, brightness threshold, schedule pickers). The hub splits it into
+// three views of the same instance: "Apollo Themes" shows only the theme list,
+// while "Light/Dark Mode" and "Comments Theme" show only the options sections.
+// Hidden sections keep their NATIVE indices (they just report 0 rows, nil
+// header/footer, ~0 heights) so Apollo's own insert/delete/reloadSections
+// bookkeeping stays consistent in every mode.
+// ---------------------------------------------------------------------------
+
+typedef NS_ENUM(NSInteger, ApolloNativeThemeScreenMode) {
+    ApolloNativeThemeScreenFull = 0,   // untouched native screen (non-hub entry)
+    ApolloNativeThemeScreenPicker,     // theme list only (section 0)
+    ApolloNativeThemeScreenOptions,    // everything but the list and comments
+    ApolloNativeThemeScreenComments,   // comments theme section only
+};
+
+static const void *kNativeScreenModeKey = &kNativeScreenModeKey;
+static ApolloNativeThemeScreenMode sPendingNativeScreenMode = ApolloNativeThemeScreenFull;
+
+static ApolloNativeThemeScreenMode NativeScreenModeFor(id vc) {
+    NSNumber *n = objc_getAssociatedObject(vc, kNativeScreenModeKey);
+    return n ? (ApolloNativeThemeScreenMode)n.integerValue : ApolloNativeThemeScreenFull;
+}
+
+// Section classification is by header title because the options sections are
+// conditional (toggling "Use System" inserts/removes sections), so indices
+// aren't stable — but "Comments Theme" vs the rest is. The flag lets our own
+// titleForHeaderInSection hook pass the raw title through when we're the caller.
+static BOOL sRawHeaderTitleQuery = NO;
+
+static NSString *NativeScreenRawHeaderTitle(id vc, UITableView *tv, long long section) {
+    sRawHeaderTitleQuery = YES;
+    id title = ((id (*)(id, SEL, id, long long))objc_msgSend)(
+        vc, @selector(tableView:titleForHeaderInSection:), tv, section);
+    sRawHeaderTitleQuery = NO;
+    return [title isKindOfClass:NSString.class] ? title : nil;
+}
+
+static BOOL NativeScreenSectionVisibleWithTitle(id vc, long long section, NSString *title) {
+    switch (NativeScreenModeFor(vc)) {
+        case ApolloNativeThemeScreenFull:
+            return YES;
+        case ApolloNativeThemeScreenPicker:
+            return section == 0;
+        case ApolloNativeThemeScreenOptions:
+            return section != 0 &&
+                   [title rangeOfString:@"comment" options:NSCaseInsensitiveSearch].location == NSNotFound;
+        case ApolloNativeThemeScreenComments:
+            return section != 0 &&
+                   [title rangeOfString:@"comment" options:NSCaseInsensitiveSearch].location != NSNotFound;
+    }
+    return YES;
+}
+
+static BOOL NativeScreenSectionVisible(id vc, UITableView *tv, long long section) {
+    if (NativeScreenModeFor(vc) == ApolloNativeThemeScreenFull) return YES; // skip the title query
+    return NativeScreenSectionVisibleWithTitle(vc, section, NativeScreenRawHeaderTitle(vc, tv, section));
+}
+
+static BOOL OpenNativeThemeScreenFromHub(UIViewController *hub,
+                                         ApolloNativeThemeScreenMode mode,
+                                         NSString *title) {
     if (!sSelectOrig || !hub.navigationController) return NO;
     Class appearanceClass = objc_getClass("_TtC6Apollo32SettingsAppearanceViewController");
     if (!appearanceClass) return NO;
@@ -49,15 +116,40 @@ extern "C" BOOL ApolloThemeOpenNativeThemePickerFromHub(UIViewController *hub) {
             tableView = ((UITableView *(*)(id, SEL))objc_msgSend)(vc, @selector(tableView));
         }
         if (!tableView) return NO;
+        // Consumed by the pushed VC's viewDidLoad, so the table is filtered
+        // from its very first layout (no flash of the full screen mid-push).
+        sPendingNativeScreenMode = mode;
         NSIndexPath *themes = [NSIndexPath indexPathForRow:0 inSection:0];
         sSelectOrig(vc, @selector(tableView:didSelectRowAtIndexPath:), tableView, themes);
         dispatch_async(dispatch_get_main_queue(), ^{
+            sPendingNativeScreenMode = ApolloNativeThemeScreenFull; // if the push never made a VC
             UIViewController *top = hub.navigationController.topViewController;
-            if (top && top != hub) top.title = @"Apollo Themes";
+            if (!top || top == hub) return;
+            top.title = title;
+            // Repair path: if viewDidLoad somehow ran without consuming the
+            // pending mode, stamp it now and refilter.
+            if (NativeScreenModeFor(top) != mode &&
+                [top isKindOfClass:objc_getClass("_TtC6Apollo27SettingsThemeViewController")]) {
+                objc_setAssociatedObject(top, kNativeScreenModeKey, @(mode), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                if ([top respondsToSelector:@selector(tableView)]) {
+                    UITableView *tv = ((UITableView *(*)(id, SEL))objc_msgSend)(top, @selector(tableView));
+                    [tv reloadData];
+                }
+            }
         });
         return YES;
     }
     return NO;
+}
+
+extern "C" BOOL ApolloThemeOpenNativeThemePickerFromHub(UIViewController *hub) {
+    return OpenNativeThemeScreenFromHub(hub, ApolloNativeThemeScreenPicker, @"Apollo Themes");
+}
+extern "C" BOOL ApolloThemeOpenNativeLightDarkFromHub(UIViewController *hub) {
+    return OpenNativeThemeScreenFromHub(hub, ApolloNativeThemeScreenOptions, @"Light/Dark Mode");
+}
+extern "C" BOOL ApolloThemeOpenNativeCommentsThemeFromHub(UIViewController *hub) {
+    return OpenNativeThemeScreenFromHub(hub, ApolloNativeThemeScreenComments, @"Comments Theme");
 }
 
 static NSInteger Rows(id self, SEL _cmd, UITableView *tv, NSInteger section) {
@@ -225,10 +317,49 @@ static UIImage *CustomPickerSwatch(void) {
 
 %hook _TtC6Apollo27SettingsThemeViewController
 
+- (void)viewDidLoad {
+    %orig;
+    if (sPendingNativeScreenMode != ApolloNativeThemeScreenFull) {
+        objc_setAssociatedObject(self, kNativeScreenModeKey,
+                                 @(sPendingNativeScreenMode), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        sPendingNativeScreenMode = ApolloNativeThemeScreenFull;
+    }
+}
+
 - (long long)tableView:(UITableView *)tv numberOfRowsInSection:(long long)section {
+    if (!NativeScreenSectionVisible(self, tv, section)) return 0;
     long long n = %orig;
     if (section == 0) n += 1; // injected "Custom" row
     return n;
+}
+
+- (id)tableView:(UITableView *)tv titleForHeaderInSection:(long long)section {
+    id title = %orig;
+    if (sRawHeaderTitleQuery) return title; // classification query — unfiltered
+    NSString *t = [title isKindOfClass:NSString.class] ? title : nil;
+    if (!NativeScreenSectionVisibleWithTitle(self, section, t)) return nil;
+    return title;
+}
+
+- (id)tableView:(UITableView *)tv viewForFooterInSection:(long long)section {
+    if (!NativeScreenSectionVisible(self, tv, section)) return nil;
+    return %orig;
+}
+
+// The class relies on UIKit's defaults for header/footer heights, which keep
+// ~35pt of grouped spacing even for a 0-row nil-title section. These %new
+// delegate methods collapse hidden sections to nothing and defer to automatic
+// sizing everywhere else (identical to the methods not existing).
+%new
+- (double)tableView:(UITableView *)tv heightForHeaderInSection:(long long)section {
+    if (!NativeScreenSectionVisible(self, tv, section)) return 0.001;
+    return UITableViewAutomaticDimension;
+}
+
+%new
+- (double)tableView:(UITableView *)tv heightForFooterInSection:(long long)section {
+    if (!NativeScreenSectionVisible(self, tv, section)) return 0.001;
+    return UITableViewAutomaticDimension;
 }
 
 - (id)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
