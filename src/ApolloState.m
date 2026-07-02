@@ -14,6 +14,7 @@ NSString *sTrendingSubredditsLimit = nil;
 BOOL sBlockAnnouncements = NO;
 BOOL sShowDeletedComments = NO;
 BOOL sTapToRevealDeletedComments = NO;
+BOOL sPassiveDeletedComments = NO;
 BOOL sShowRecentlyReadThumbnails = YES;
 BOOL sFeedTextPostThumbnails = YES;
 NSInteger sPreferredGIFFallbackFormat = 1; // 0=GIF, 1=MP4

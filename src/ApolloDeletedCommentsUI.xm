@@ -329,9 +329,29 @@ static BOOL ApolloDeletedCommentsCellNodeIsDeletedPlaceholder(id cellNode) {
     return trimmedBody.length == 0 && ApolloDeletedCommentsAuthorLooksDeleted(comment.author);
 }
 
+// Passive-mode scoping: with the global toggle off, only threads whose
+// per-thread override is active may render treatment. The registries are
+// global and outlive a cleared override, so without this a stale entry could
+// stamp chips in a non-overridden thread while some other thread's override
+// is live. When the comment's linkID can't be read, fall back to the coarse
+// gate (no worse than the registries alone).
+static BOOL ApolloDeletedCommentsTreatmentAllowedForComment(RDKComment *comment) {
+    NSString *linkID = nil;
+    if ([(id)comment respondsToSelector:@selector(linkID)]) {
+        @try {
+            linkID = ((NSString *(*)(id, SEL))objc_msgSend)((id)comment, @selector(linkID));
+        } @catch (__unused NSException *e) {}
+    }
+    if (![linkID isKindOfClass:[NSString class]] || linkID.length == 0) return YES;
+    return ApolloDeletedCommentsActiveForLink(linkID);
+}
+
 static BOOL ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(id cellNode) {
-    return ApolloDeletedCommentsCellNodeIsRecovered(cellNode) ||
-           ApolloDeletedCommentsCellNodeIsDeletedPlaceholder(cellNode);
+    if (!ApolloDeletedCommentsCellNodeIsRecovered(cellNode) &&
+        !ApolloDeletedCommentsCellNodeIsDeletedPlaceholder(cellNode)) {
+        return NO;
+    }
+    return ApolloDeletedCommentsTreatmentAllowedForComment(ApolloDeletedCommentsCommentFromCellNode(cellNode));
 }
 
 static BOOL ApolloDeletedCommentsCellNodeCanRevealRecoveredBody(id cellNode) {
@@ -577,7 +597,7 @@ static BOOL ApolloDeletedCommentsCommentIsRevealedByFullName(RDKComment *comment
 }
 
 static BOOL __attribute__((unused)) ApolloDeletedCommentsShouldKeepModelBodyHidden(RDKComment *comment) {
-    if (!sShowDeletedComments || !sTapToRevealDeletedComments || !comment) return NO;
+    if (!ApolloDeletedCommentsFeatureActive() || !sTapToRevealDeletedComments || !comment) return NO;
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
     if (fullName.length == 0) return NO;
     return ApolloDeletedCommentsIsRecoveredComment(fullName) &&
@@ -623,7 +643,7 @@ static NSString *ApolloDeletedCommentsReasonLabelForCommentAndBody(RDKComment *c
 }
 
 static NSString *__attribute__((unused)) ApolloDeletedCommentsHiddenReasonLabelForCommentBody(RDKComment *comment, NSString *body) {
-    if (!sShowDeletedComments || !comment) return nil;
+    if (!ApolloDeletedCommentsFeatureActive() || !comment) return nil;
 
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
     NSString *savedBody = objc_getAssociatedObject(comment, kApolloDeletedCommentsOriginalBodyKey);
@@ -1638,7 +1658,7 @@ static BOOL ApolloDeletedCommentsCellAlreadyHasHiddenPlaceholder(id cellNode, NS
 }
 
 static NSAttributedString *__attribute__((unused)) ApolloDeletedCommentsAttributedTextWithTapToRevealPlaceholder(id textNode, NSAttributedString *attributedText) {
-    if (!sShowDeletedComments || !sTapToRevealDeletedComments) return attributedText;
+    if (!ApolloDeletedCommentsFeatureActive() || !sTapToRevealDeletedComments) return attributedText;
     if (![attributedText isKindOfClass:[NSAttributedString class]] || attributedText.length == 0) return attributedText;
     if (ApolloDeletedCommentsAttributedTextIsRevealPlaceholder(attributedText)) return attributedText;
 
@@ -1683,7 +1703,7 @@ static NSAttributedString *__attribute__((unused)) ApolloDeletedCommentsAttribut
 }
 
 static NSAttributedString *ApolloDeletedCommentsAttributedTextWithReasonPrefix(id textNode, NSAttributedString *attributedText) {
-    if (!sShowDeletedComments) return attributedText;
+    if (!ApolloDeletedCommentsFeatureActive()) return attributedText;
     if (![attributedText isKindOfClass:[NSAttributedString class]] || attributedText.length == 0) return attributedText;
     if (ApolloDeletedCommentsAttributedTextIsRevealPlaceholder(attributedText)) {
         return attributedText;
@@ -1724,7 +1744,7 @@ static NSAttributedString *ApolloDeletedCommentsAttributedTextWithReasonPrefix(i
 }
 
 static NSAttributedString *__attribute__((unused)) ApolloDeletedCommentsAttributedTextWithReasonChipIfNeeded(id textNode, NSAttributedString *attributedText) {
-    if (!sShowDeletedComments) return attributedText;
+    if (!ApolloDeletedCommentsFeatureActive()) return attributedText;
     if (![attributedText isKindOfClass:[NSAttributedString class]] || attributedText.length == 0) return attributedText;
     if (ApolloDeletedCommentsAttributedTextHasVisibleReasonChip(attributedText)) return attributedText;
 
@@ -1946,7 +1966,7 @@ static void ApolloDeletedCommentsApplyStaticPlaceholderChip(id cellNode, NSArray
 // collapsing: tap-to-reveal is on, the body is recoverable, and it isn't revealed
 // yet. (Whether it is currently collapsed is handled by the caller.)
 static BOOL ApolloDeletedCommentsCommentArmedForReveal(RDKComment *comment) {
-    if (!sShowDeletedComments || !sTapToRevealDeletedComments || !comment) return NO;
+    if (!ApolloDeletedCommentsFeatureActive() || !sTapToRevealDeletedComments || !comment) return NO;
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
     if (fullName.length == 0) return NO;
     return ApolloDeletedCommentsIsRecoveredComment(fullName) &&
@@ -2097,7 +2117,7 @@ static void __attribute__((unused)) ApolloDeletedCommentsApplyTapToRevealIfNeede
 
     BOOL recovered = ApolloDeletedCommentsCellNodeCanRevealRecoveredBody(cellNode);
     BOOL revealed = ApolloDeletedCommentsIsCommentRevealed(fullName);
-    BOOL shouldHide = sShowDeletedComments &&
+    BOOL shouldHide = ApolloDeletedCommentsFeatureActive() &&
                       sTapToRevealDeletedComments &&
                       recovered &&
                       !revealed;
@@ -2452,7 +2472,7 @@ static void ApolloDeletedCommentsScheduleBodyAttributesRefresh(void) {
 // System Text Size" is on).
 static void ApolloDeletedCommentsHandleContentSizeChanged(__unused NSNotification *note) {
     ApolloDeletedCommentsBodyTemplateSet(nil);
-    if (sShowDeletedComments) {
+    if (ApolloDeletedCommentsFeatureActive()) {
         ApolloDeletedCommentsScheduleBodyAttributesRefresh();
     }
 }
@@ -2479,7 +2499,7 @@ static UIView *ApolloDeletedCommentsHostListViewForCell(id cellNode) {
 }
 
 static void ApolloDeletedCommentsScheduleHostLayoutRefresh(id cellNode) {
-    if (!cellNode || !sShowDeletedComments || !ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(cellNode)) return;
+    if (!cellNode || !ApolloDeletedCommentsFeatureActive() || !ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(cellNode)) return;
 
     UIView *hostView = ApolloDeletedCommentsHostListViewForCell(cellNode);
     UIView *cellView = ApolloDeletedCommentsCellView(cellNode);
@@ -2526,7 +2546,7 @@ static void ApolloDeletedCommentsRemoveCellHighlight(id cellNode) {
 }
 
 static void ApolloDeletedCommentsApplyCellHighlight(id cellNode) {
-    if (!sShowDeletedComments || !ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(cellNode)) {
+    if (!ApolloDeletedCommentsFeatureActive() || !ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(cellNode)) {
         ApolloDeletedCommentsRemoveCellHighlight(cellNode);
         return;
     }
@@ -2719,7 +2739,7 @@ static id __attribute__((unused)) ApolloDeletedCommentsDeletedMarkdownLayoutSpec
                            !ApolloDeletedCommentsCellNodeIsRecovered(cellNode);
     BOOL recovered = ApolloDeletedCommentsCellNodeCanRevealRecoveredBody(cellNode);
     BOOL revealed = ApolloDeletedCommentsIsCommentRevealed(fullName);
-    BOOL shouldHide = sShowDeletedComments &&
+    BOOL shouldHide = ApolloDeletedCommentsFeatureActive() &&
                       sTapToRevealDeletedComments &&
                       recovered &&
                       !revealed;
@@ -2728,7 +2748,7 @@ static id __attribute__((unused)) ApolloDeletedCommentsDeletedMarkdownLayoutSpec
     // from the hidden "[removed]" body, so it never shows the recovered text. By
     // staying on our replacement text node and just swapping its content from the
     // chip to the body, a single tap renders the body in place.
-    BOOL revealedRecovered = sShowDeletedComments &&
+    BOOL revealedRecovered = ApolloDeletedCommentsFeatureActive() &&
                              sTapToRevealDeletedComments &&
                              recovered &&
                              revealed;
@@ -2767,7 +2787,7 @@ static id __attribute__((unused)) ApolloDeletedCommentsDeletedMarkdownLayoutSpec
         if (![tmpl isKindOfClass:[NSDictionary class]] ||
             ApolloDeletedCommentsBodyAttributeFontsDiffer(tmpl, cap)) {
             ApolloDeletedCommentsBodyTemplateSet(cap);
-            if (sShowDeletedComments) ApolloDeletedCommentsScheduleBodyAttributesRefresh();
+            if (ApolloDeletedCommentsFeatureActive()) ApolloDeletedCommentsScheduleBodyAttributesRefresh();
         }
         appAttributes = cap;
     }
@@ -2839,7 +2859,7 @@ static void ApolloDeletedCommentsApplyRecoveredArchiveToVisibleCell(id cellNode,
 }
 
 static void ApolloDeletedCommentsHandleArcticCacheUpdated(NSNotification *notification) {
-    if (!sShowDeletedComments) return;
+    if (!ApolloDeletedCommentsFeatureActive()) return;
     NSDictionary *comments = [notification.userInfo[@"comments"] isKindOfClass:[NSDictionary class]] ? notification.userInfo[@"comments"] : nil;
     if (comments.count == 0) return;
 
@@ -2879,7 +2899,7 @@ static void ApolloDeletedCommentsApplyCachedArchiveToVisibleDeletedCell(id cellN
 }
 
 static void __attribute__((unused)) ApolloDeletedCommentsRepairVisibleReasonChipIfNeeded(id cellNode) {
-    if (!sShowDeletedComments) return;
+    if (!ApolloDeletedCommentsFeatureActive()) return;
     RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
     if (!comment || !ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(cellNode)) return;
     BOOL hiddenTapToReveal = sTapToRevealDeletedComments && !ApolloDeletedCommentsCommentIsRevealedByFullName(comment);
@@ -2930,7 +2950,7 @@ static void __attribute__((unused)) ApolloDeletedCommentsRepairVisibleReasonChip
 }
 
 static void ApolloDeletedCommentsScheduleReasonChipRepair(id cellNode) {
-    if (!sShowDeletedComments || !cellNode) return;
+    if (!ApolloDeletedCommentsFeatureActive() || !cellNode) return;
     if ([objc_getAssociatedObject(cellNode, kApolloDeletedCommentsReasonChipRepairScheduledKey) boolValue]) return;
 
     RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
@@ -2969,13 +2989,13 @@ static void ApolloDeletedCommentsUpdateCell(id cellNode) {
     ApolloDeletedCommentsRepairVisibleReasonChipIfNeeded(cellNode);
     ApolloDeletedCommentsScheduleReasonChipRepair(cellNode);
     ApolloDeletedCommentsApplyCellHighlight(cellNode);
-    if (sShowDeletedComments && sTapToRevealDeletedComments) {
+    if (ApolloDeletedCommentsFeatureActive() && sTapToRevealDeletedComments) {
         ApolloDeletedCommentsInstallRevealTapGestureOnCell(cellNode);
     }
 }
 
 static void ApolloDeletedCommentsRefreshVisibleDeletedCells(void) {
-    if (!sShowDeletedComments) return;
+    if (!ApolloDeletedCommentsFeatureActive()) return;
     for (id cellNode in ApolloDeletedCommentsAllTrackedVisibleCells()) {
         ApolloDeletedCommentsUpdateCell(cellNode);
         ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, ApolloDeletedCommentsKnownBodyContainerNode(cellNode));
@@ -3016,7 +3036,7 @@ static BOOL ApolloDeletedCommentsIsRevealLink(id attribute, id value) {
 }
 
 static NSAttributedString *__attribute__((unused)) ApolloDeletedCommentsRenameRecoveredSpoilerLabel(id textNode, NSAttributedString *attributedText) {
-    if (!sShowDeletedComments || !sTapToRevealDeletedComments) return attributedText;
+    if (!ApolloDeletedCommentsFeatureActive() || !sTapToRevealDeletedComments) return attributedText;
     if (![attributedText isKindOfClass:[NSAttributedString class]] || attributedText.length == 0) return attributedText;
     NSString *text = ApolloDeletedCommentsTrimmedString(attributedText.string);
     if (![text isEqualToString:@"SPOILER"]) return attributedText;
@@ -3103,7 +3123,7 @@ static void ApolloDeletedCommentsCaptureLiveCommentBodyFont(id textNode, NSAttri
     // Drop the cached body template so deleted cells re-resolve at the new size, and
     // refresh the visible ones (this is what makes a text-size change propagate).
     ApolloDeletedCommentsBodyTemplateSet(nil);
-    if (sShowDeletedComments) ApolloDeletedCommentsScheduleBodyAttributesRefresh();
+    if (ApolloDeletedCommentsFeatureActive()) ApolloDeletedCommentsScheduleBodyAttributesRefresh();
 }
 
 %hook ASTextNode
@@ -3198,7 +3218,7 @@ static void ApolloDeletedCommentsCaptureLiveCommentBodyFont(id textNode, NSAttri
         objc_setAssociatedObject(bodyNode, kApolloDeletedCommentsBodyOwnerCellKey, (id)self, OBJC_ASSOCIATION_ASSIGN);
     }
     id spec = %orig;
-    if (sShowDeletedComments &&
+    if (ApolloDeletedCommentsFeatureActive() &&
         !ApolloDeletedCommentsCommentIsCollapsed(comment) &&
         ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment((id)self) &&
         spec) {

@@ -49,6 +49,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloCreatedAtAlert.xm \
     $(SRC_DIR)/ApolloDeletedCommentsData.m \
     $(SRC_DIR)/ApolloDeletedCommentsUI.xm \
+    $(SRC_DIR)/ApolloDeletedCommentsMenu.xm \
     $(SRC_DIR)/ApolloState.m \
     $(SRC_DIR)/ApolloShareLinks.xm \
     $(SRC_DIR)/ApolloMedia.xm \
@@ -115,6 +116,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloSignInSplash.xm \
     $(SRC_DIR)/CustomAPIViewController.m \
     $(SRC_DIR)/ApolloAISettingsViewController.m \
+    $(SRC_DIR)/ApolloDeletedCommentsSettingsViewController.m \
     $(SRC_DIR)/ApolloLinkPreviewSettingsViewController.m \
     $(SRC_DIR)/TranslationSettingsViewController.m \
     $(SRC_DIR)/SavedCategoriesViewController.m \

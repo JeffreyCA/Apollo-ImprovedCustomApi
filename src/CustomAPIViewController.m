@@ -8,6 +8,7 @@
 #import "ApolloState.h"
 #import "ApolloUserProfileCache.h"
 #import "ApolloLinkPreviewCache.h"
+#import "ApolloDeletedCommentsSettingsViewController.h"
 #import "ApolloLinkPreviewSettingsViewController.h"
 #import "ApolloSubredditCustomBannerCache.h"
 #import "ApolloSubredditCustomIconCache.h"
@@ -469,6 +470,46 @@ typedef NS_ENUM(NSInteger, Tag) {
     }
 }
 
+- (UITableViewCell *)deletedCommentsCellForTableView:(UITableView *)tableView {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Gen_DeletedComments"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"Cell_Gen_DeletedComments"];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    }
+    cell.textLabel.text = @"Deleted Comments";
+    NSString *detail;
+    if (sShowDeletedComments) {
+        detail = sTapToRevealDeletedComments ? @"On · Tap to Show" : @"On";
+    } else if (sPassiveDeletedComments) {
+        detail = @"Passive · per thread from the comments ⋯ menu";
+    } else {
+        detail = @"Off";
+    }
+    cell.detailTextLabel.text = detail;
+    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    cell.detailTextLabel.numberOfLines = 0;
+    cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    return cell;
+}
+
+- (void)openDeletedCommentsSettings {
+    ApolloDeletedCommentsSettingsViewController *vc =
+        [[ApolloDeletedCommentsSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    __weak typeof(self) weakSelf = self;
+    vc.settingsDidChange = ^{
+        [weakSelf.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:3 inSection:SectionGeneral]]
+                                  withRowAnimation:UITableViewRowAnimationNone];
+    };
+    if (self.navigationController) {
+        [self.navigationController pushViewController:vc animated:YES];
+    } else {
+        UINavigationController *navigation =
+            [[UINavigationController alloc] initWithRootViewController:vc];
+        [self presentViewController:navigation animated:YES completion:nil];
+    }
+}
+
 // The Rich Link Preview sub-screen mutates the shared state and posts the live
 // notification itself; this just arms the deferred refresh so the feed/comments
 // rebuild once the whole settings stack is dismissed (mirrors the old in-Media
@@ -552,11 +593,9 @@ typedef NS_ENUM(NSInteger, Tag) {
         // row, so the count is its index + 1, minus the Web Session Login row when
         // the mode is off.
         case SectionAPIKeys: return kAPIKeyRowWidgetSetupCode + (sWebJSONEnabled ? 1 : 0);
-        // General base rows + the search-in-place (effectiveRow 11),
-        // follow-live-comments (effectiveRow 12) and iPad-tab-bar-bottom
-        // (effectiveRow 13) toggles, minus the conditional "Tap to Show Deleted
-        // Comments" row.
-        case SectionGeneral: return sShowDeletedComments ? 14 : 13;
+        // General base rows; the two deleted-comments toggles now live on the
+        // "Deleted Comments" sub-screen behind the disclosure row (row 3).
+        case SectionGeneral: return 13;
         case SectionApolloAI: return 1;
         case SectionLinkPreviews: return 1;
         // Media base rows (the three "Rich Link Previews" rows moved out to their
@@ -946,8 +985,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (UITableViewCell *)generalCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSInteger effectiveRow = (!sShowDeletedComments && row >= 4) ? row + 1 : row;
-    switch (effectiveRow) {
+    switch (row) {
         case 0:
             return [self switchCellWithIdentifier:@"Cell_Gen_Announce"
                                             label:@"Block Announcements"
@@ -964,21 +1002,13 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                on:[defaults boolForKey:UDKeyCollapsePinnedComments]
                                            action:@selector(collapsePinnedCommentsSwitchToggled:)];
         case 3:
-            return [self switchCellWithIdentifier:@"Cell_Gen_ShowDeletedComments"
-                                            label:@"Show Deleted Comments"
-                                               on:[defaults boolForKey:UDKeyShowDeletedComments]
-                                           action:@selector(showDeletedCommentsSwitchToggled:)];
+            return [self deletedCommentsCellForTableView:tableView];
         case 4:
-            return [self switchCellWithIdentifier:@"Cell_Gen_TapToRevealDeletedComments"
-                                            label:@"Tap to Show Deleted Comments"
-                                               on:[defaults boolForKey:UDKeyTapToRevealDeletedComments]
-                                           action:@selector(tapToRevealDeletedCommentsSwitchToggled:)];
-        case 5:
             return [self switchCellWithIdentifier:@"Cell_Gen_RRThumbs"
                                             label:@"Recently Read Thumbnails"
                                                on:[defaults boolForKey:UDKeyShowRecentlyReadThumbnails]
                                            action:@selector(showRecentlyReadThumbnailsSwitchToggled:)];
-        case 6: {
+        case 5: {
             NSString *readPostMaxStr = sReadPostMaxCount > 0 ? [NSString stringWithFormat:@"%ld", (long)sReadPostMaxCount] : @"";
             return [self textFieldCellWithIdentifier:@"Cell_Gen_ReadMax"
                                                label:@"Recently Read Posts Limit"
@@ -987,17 +1017,17 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                  tag:TagReadPostMaxCount
                                            numerical:YES];
         }
-        case 7:
+        case 6:
             return [self switchCellWithIdentifier:@"Cell_Gen_FilterNSFWRR"
                                             label:@"Hide NSFW in Recently Read"
                                                on:[defaults boolForKey:UDKeyFilterNSFWRecentlyRead]
                                            action:@selector(filterNSFWRecentlyReadSwitchToggled:)];
-        case 8:
+        case 7:
             return [self switchCellWithIdentifier:@"Cell_Gen_SteamApp"
                                             label:@"Open Steam Links in App"
                                                on:[defaults boolForKey:UDKeyOpenLinksInSteamApp]
                                            action:@selector(steamAppSwitchToggled:)];
-        case 9: {
+        case 8: {
             BOOL idleSupported = [self apollo_supportsAutoHideTabBarIdleSetting];
             UITableViewCell *cell = [self switchCellWithIdentifier:@"Cell_Gen_TabBarIdle"
                                                              label:@"Tab Bar Re-Expands When Idle"
@@ -1010,12 +1040,12 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.detailTextLabel.enabled = idleSupported;
             return cell;
         }
-        case 10:
+        case 9:
             return [self switchCellWithIdentifier:@"Cell_Gen_FlairColors"
                                             label:@"Color Flairs"
                                                on:[defaults boolForKey:UDKeyEnableFlairColors]
                                            action:@selector(flairColorsSwitchToggled:)];
-        case 11: {
+        case 10: {
             BOOL lgSupported = IsLiquidGlass();
             UITableViewCell *cell = [self switchCellWithIdentifier:@"Cell_Gen_KeepSearchInPlace"
                                                              label:@"Keep Search Bar In Place"
@@ -1028,13 +1058,13 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.detailTextLabel.enabled = lgSupported;
             return cell;
         }
-        case 12:
+        case 11:
             return [self switchCellWithIdentifier:@"Cell_Gen_LiveCommentsFollow"
                                             label:@"Follow New Live Comments"
                                            detail:@"During Live Update comment sort, keep the newest at the top and show a jump button when you've scrolled down."
                                                on:[defaults boolForKey:UDKeyLiveCommentsFollow]
                                            action:@selector(liveCommentsFollowSwitchToggled:)];
-        case 13: {
+        case 12: {
             // Temporary iPad stopgap (#387): dock the floating tab bar at the
             // bottom instead of the top-center pill that overlaps the search bar.
             BOOL supported = (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) && IsLiquidGlass();
@@ -1597,6 +1627,11 @@ typedef NS_ENUM(NSInteger, Tag) {
         return;
     }
 
+    if (indexPath.section == SectionGeneral && indexPath.row == 3) {
+        [self openDeletedCommentsSettings];
+        return;
+    }
+
     if (indexPath.section == SectionBackupRestore) {
         UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
         if (indexPath.row == 0) {
@@ -1724,6 +1759,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     }
     if (indexPath.section == SectionApolloAI) return YES;
     if (indexPath.section == SectionLinkPreviews) return YES;
+    if (indexPath.section == SectionGeneral && indexPath.row == 3) return YES; // Deleted Comments sub-screen
     if (indexPath.section == SectionMedia) {
         NSInteger row = ApolloMediaLogicalRow(indexPath.row);
         return (row == 0 || row == 1 || row == 2 || row == 5 || row == 6 || row == 13);
@@ -2142,27 +2178,6 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)collapsePinnedCommentsSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyCollapsePinnedComments];
-}
-
-- (void)showDeletedCommentsSwitchToggled:(UISwitch *)sender {
-    BOOL wasOn = sShowDeletedComments;
-    sShowDeletedComments = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sShowDeletedComments forKey:UDKeyShowDeletedComments];
-    if (sShowDeletedComments == wasOn) return;
-
-    NSArray<NSIndexPath *> *paths = @[[NSIndexPath indexPathForRow:4 inSection:SectionGeneral]];
-    if (sShowDeletedComments) {
-        [self.tableView insertRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationFade];
-        [self showAlertWithTitle:@"⚠️ WARNING"
-                          message:@"This feature can slow down comment loading. If you notice comments loading slowly, turn this feature off."];
-    } else {
-        [self.tableView deleteRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationFade];
-    }
-}
-
-- (void)tapToRevealDeletedCommentsSwitchToggled:(UISwitch *)sender {
-    sTapToRevealDeletedComments = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sTapToRevealDeletedComments forKey:UDKeyTapToRevealDeletedComments];
 }
 
 - (void)filterNSFWRecentlyReadSwitchToggled:(UISwitch *)sender {
@@ -2751,6 +2766,7 @@ static void ApolloReplayValetKeychainItems(NSArray<NSDictionary *> *items) {
     sReadPostMaxCount = [defaults integerForKey:UDKeyReadPostMaxCount];
     sShowDeletedComments = [defaults boolForKey:UDKeyShowDeletedComments];
     sTapToRevealDeletedComments = [defaults boolForKey:UDKeyTapToRevealDeletedComments];
+    sPassiveDeletedComments = [defaults boolForKey:UDKeyPassiveDeletedComments];
     sShowRecentlyReadThumbnails = [defaults boolForKey:UDKeyShowRecentlyReadThumbnails];
     sEnableFlairColors = [defaults boolForKey:UDKeyEnableFlairColors];
     sPreferredGIFFallbackFormat = ([defaults integerForKey:UDKeyPreferredGIFFallbackFormat] == 0) ? 0 : 1;

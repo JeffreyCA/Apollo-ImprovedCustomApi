@@ -101,4 +101,12 @@ void ApolloSetLinkPreviewCardColorHex(NSString *hex);
 // `children` (an NSMutableArray<UIMenuElement *>). No-op for any other menu.
 // Called from ApolloNativeActionMenuBuildMenu as it converts the action sheet.
 void ApolloInjectPublicStickyAsSubredditIfNeeded(NSMutableArray *children, NSString *menuTitle);
+
+// ApolloDeletedCommentsMenu: when the comments view's "..." menu is being
+// built, append a "Show/Hide Deleted Comments" UIAction to `children`
+// (an NSMutableArray<UIMenuElement *>). No-op for any other menu. Called from
+// ApolloNativeActionMenuBuildMenu as it converts the action sheet; the
+// ActionController is tagged on first build so re-builds re-inject and other
+// menus can't claim the item.
+void ApolloInjectDeletedCommentsMenuItemIfNeeded(NSMutableArray *children, NSString *menuTitle, id actionController);
 __END_DECLS

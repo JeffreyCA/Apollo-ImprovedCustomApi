@@ -9,6 +9,16 @@ extern NSString *const ApolloDeletedCommentsArcticCacheUpdatedNotification;
 
 typedef void (^ApolloDeletedCommentsURLSessionCompletion)(NSData *data, NSURLResponse *response, NSError *error);
 
+// Master gate: global toggle OR any per-thread "Passive" override active.
+// Every deleted-comments code path checks this instead of sShowDeletedComments
+// directly so passive per-thread enables reuse the whole machinery.
+BOOL ApolloDeletedCommentsFeatureActive(void);
+// Per-thread overrides (post fullName t3_xxx; bare ids accepted). In-memory
+// only; managed by ApolloDeletedCommentsMenu.xm.
+void ApolloDeletedCommentsSetThreadOverride(NSString *linkFullName, BOOL enabled);
+BOOL ApolloDeletedCommentsHasThreadOverride(NSString *linkFullName);
+// Global toggle OR an override for this specific post (t3_xxx or bare id).
+BOOL ApolloDeletedCommentsActiveForLink(NSString *linkFullName);
 void ApolloDeletedCommentsHandleRequestObservation(NSURLRequest *request, NSString *source);
 ApolloDeletedCommentsURLSessionCompletion ApolloDeletedCommentsMaybeWrapCompletion(NSURLRequest *request, ApolloDeletedCommentsURLSessionCompletion completion);
 void ApolloDeletedCommentsInstallDelegateTransformerIfNeeded(NSURLSession *session, NSURLRequest *request);

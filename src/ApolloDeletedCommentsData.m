@@ -31,6 +31,7 @@ static NSObject *sApolloDeletedCommentsArcticLock = nil;
 static NSMutableDictionary<NSString *, NSDictionary *> *sApolloDeletedCommentsArcticCache = nil;
 static NSMutableDictionary<NSString *, NSMutableArray *> *sApolloDeletedCommentsArcticInflight = nil;
 static NSDate *sApolloDeletedCommentsArcticCooldownUntil = nil;
+static NSMutableSet<NSString *> *sApolloDeletedCommentsThreadOverrides = nil;
 
 static NSString *const ApolloDeletedCommentsMarkerKey = @"apollo_recovered_deleted_comment";
 static NSString *const ApolloDeletedCommentsReasonKey = @"apollo_recovered_deleted_reason";
@@ -50,6 +51,7 @@ static NSInteger const ApolloDeletedCommentsArcticLowRemainingThreshold = 3;
 
 static NSString *ApolloDeletedCommentsTrimmedString(NSString *s);
 static NSString *ApolloDeletedCommentsUnescapedHTMLText(NSString *s);
+static NSString *ApolloDeletedCommentsNormalizeLinkID(NSString *identifier);
 static NSString *ApolloDeletedCommentsCommentFullName(NSDictionary *data);
 static NSString *ApolloDeletedCommentsReasonForArchived(NSDictionary *archived);
 static BOOL ApolloDeletedCommentsBodyLooksDeleted(NSString *body);
@@ -70,6 +72,59 @@ static NSString *ApolloDeletedCommentsRegistryBodyKey(NSString *author, NSString
     if (trimmedBody.length == 0) return nil;
     NSString *trimmedAuthor = ApolloDeletedCommentsTrimmedString(author) ?: @"";
     return [NSString stringWithFormat:@"%@\n%lu\n%@", trimmedAuthor, (unsigned long)trimmedBody.length, trimmedBody];
+}
+
+#pragma mark - ThreadOverrides
+
+// Per-thread overrides for "Passive Deleted Comments": each entry is a post
+// fullName (t3_xxx) whose comment thread has recovery turned on from the
+// comments "..." menu while the global toggle is off. In-memory only — leaving
+// the thread clears its entry (ApolloDeletedCommentsMenu.xm) and nothing
+// survives relaunch by design.
+
+static NSString *ApolloDeletedCommentsOverrideKeyForLink(NSString *linkFullName) {
+    if (![linkFullName isKindOfClass:[NSString class]]) return nil;
+    return [ApolloDeletedCommentsNormalizeLinkID(linkFullName) lowercaseString];
+}
+
+void ApolloDeletedCommentsSetThreadOverride(NSString *linkFullName, BOOL enabled) {
+    NSString *key = ApolloDeletedCommentsOverrideKeyForLink(linkFullName);
+    if (key.length == 0) return;
+    @synchronized(ApolloDeletedCommentsRegistryLock()) {
+        if (enabled) {
+            if (!sApolloDeletedCommentsThreadOverrides) {
+                sApolloDeletedCommentsThreadOverrides = [NSMutableSet set];
+            }
+            [sApolloDeletedCommentsThreadOverrides addObject:key];
+        } else {
+            [sApolloDeletedCommentsThreadOverrides removeObject:key];
+        }
+    }
+    ApolloLog(@"[DeletedComments] Thread override %@ for %@", enabled ? @"ON" : @"OFF", key);
+}
+
+BOOL ApolloDeletedCommentsHasThreadOverride(NSString *linkFullName) {
+    NSString *key = ApolloDeletedCommentsOverrideKeyForLink(linkFullName);
+    if (key.length == 0) return NO;
+    @synchronized(ApolloDeletedCommentsRegistryLock()) {
+        return [sApolloDeletedCommentsThreadOverrides containsObject:key];
+    }
+}
+
+// Master gate: the machinery runs when the global toggle is on OR any thread
+// override is active. Cell/registry-level code uses this coarse form; the
+// network entry points below additionally gate per-link so only overridden
+// threads fetch and patch while the global toggle is off.
+BOOL ApolloDeletedCommentsFeatureActive(void) {
+    if (sShowDeletedComments) return YES;
+    @synchronized(ApolloDeletedCommentsRegistryLock()) {
+        return sApolloDeletedCommentsThreadOverrides.count > 0;
+    }
+}
+
+BOOL ApolloDeletedCommentsActiveForLink(NSString *linkFullName) {
+    if (sShowDeletedComments) return YES;
+    return ApolloDeletedCommentsHasThreadOverride(linkFullName);
 }
 
 void ApolloDeletedCommentsRegisterRecoveredComment(NSString *fullName, NSString *reason) {
@@ -311,9 +366,10 @@ static BOOL ApolloDeletedCommentsIsMoreChildrenRequest(NSURLRequest *request) {
 }
 
 static BOOL ApolloDeletedCommentsShouldTransformRequest(NSURLRequest *request) {
-    if (!sShowDeletedComments || !request.URL || !ApolloDeletedCommentsIsRedditHost(request.URL.host)) return NO;
+    if (!ApolloDeletedCommentsFeatureActive() || !request.URL || !ApolloDeletedCommentsIsRedditHost(request.URL.host)) return NO;
     if (!ApolloDeletedCommentsRequestLooksLikeCommentsPayload(request)) return NO;
-    return ApolloDeletedCommentsLinkFullNameForRequest(request).length > 0;
+    NSString *linkFullName = ApolloDeletedCommentsLinkFullNameForRequest(request);
+    return linkFullName.length > 0 && ApolloDeletedCommentsActiveForLink(linkFullName);
 }
 
 static BOOL ApolloDeletedCommentsShouldTransformTask(NSURLSessionTask *task) {
@@ -323,16 +379,24 @@ static BOOL ApolloDeletedCommentsShouldTransformTask(NSURLSessionTask *task) {
 }
 
 void ApolloDeletedCommentsHandleRequestObservation(NSURLRequest *request, NSString *source) {
-    if (!sShowDeletedComments) return;
+    if (!ApolloDeletedCommentsFeatureActive()) return;
     NSString *fullName = ApolloDeletedCommentsLinkFullNameFromRedditURL(request.URL);
     if (fullName.length == 0) return;
 
+    // Track EVERY observed thread (not just gated ones) so the 45s
+    // morechildren fallback in ApolloDeletedCommentsLinkFullNameForRequest
+    // always points at the thread the user is actually in — otherwise a
+    // non-overridden thread's "load more comments" (whose URL has no link id)
+    // would be misattributed to a previously overridden thread.
     BOOL changed = ![sApolloDeletedCommentsLastObservedLinkFullName isEqualToString:fullName];
     sApolloDeletedCommentsLastObservedLinkFullName = [fullName copy];
     sApolloDeletedCommentsLastObservedLinkDate = [NSDate date];
     if (changed) {
         ApolloLog(@"[DeletedComments] Observed Reddit comments request %@ (%@)", fullName, source ?: @"unknown");
     }
+
+    // Only gated threads warm the archive and notify.
+    if (!ApolloDeletedCommentsActiveForLink(fullName)) return;
 
     if (!ApolloDeletedCommentsIsMoreChildrenRequest(request)) {
         ApolloDeletedCommentsWarmArcticCacheForLink(fullName, source ?: @"request observation");
@@ -1102,7 +1166,8 @@ static NSData *ApolloDeletedCommentsSerializedResponseData(id root, NSData *fall
 }
 
 static NSData *__attribute__((unused)) ApolloDeletedCommentsPatchResponseImmediate(NSData *data, NSURLRequest *request) {
-    NSString *linkFullName = sShowDeletedComments ? ApolloDeletedCommentsLinkFullNameForRequest(request) : nil;
+    NSString *linkFullName = ApolloDeletedCommentsLinkFullNameForRequest(request);
+    if (!ApolloDeletedCommentsActiveForLink(linkFullName)) linkFullName = nil;
     if (linkFullName.length == 0 || data.length == 0) {
         return data;
     }
@@ -1130,7 +1195,8 @@ static NSData *__attribute__((unused)) ApolloDeletedCommentsPatchResponseImmedia
 }
 
 static void ApolloDeletedCommentsPatchResponseAsync(NSData *data, NSURLRequest *request, void (^completion)(NSData *patchedData)) {
-    NSString *linkFullName = sShowDeletedComments ? ApolloDeletedCommentsLinkFullNameForRequest(request) : nil;
+    NSString *linkFullName = ApolloDeletedCommentsLinkFullNameForRequest(request);
+    if (!ApolloDeletedCommentsActiveForLink(linkFullName)) linkFullName = nil;
     if (linkFullName.length == 0 || data.length == 0) {
         completion(data);
         return;
@@ -1229,8 +1295,16 @@ static void ApolloDeletedCommentsInstallResponseTransformerForDelegate(id delega
     IMP originalDidReceiveDataIMP = didReceiveDataMethod ? method_getImplementation(didReceiveDataMethod) : NULL;
     const char *didReceiveDataTypes = didReceiveDataMethod ? method_getTypeEncoding(didReceiveDataMethod) : "v@:@@@";
     IMP didReceiveDataIMP = imp_implementationWithBlock(^(id selfObject, NSURLSession *session, NSURLSessionDataTask *dataTask, NSData *data) {
-        if (sShowDeletedComments && ApolloDeletedCommentsShouldTransformTask(dataTask) && data.length > 0) {
-            NSMutableData *buffered = objc_getAssociatedObject(dataTask, kApolloDeletedCommentsResponseDataKey);
+        // Once a task starts buffering, keep buffering even if the gate flips
+        // off mid-flight (a passive per-thread override can clear at any time,
+        // e.g. when the thread is popped) — otherwise the head of the response
+        // would be withheld from the original delegate and the tail delivered
+        // raw, corrupting the payload. didComplete below delivers by buffer
+        // presence for the same reason.
+        NSMutableData *buffered = objc_getAssociatedObject(dataTask, kApolloDeletedCommentsResponseDataKey);
+        BOOL shouldBuffer = buffered != nil ||
+            (ApolloDeletedCommentsFeatureActive() && ApolloDeletedCommentsShouldTransformTask(dataTask));
+        if (shouldBuffer && data.length > 0) {
             if (!buffered) {
                 buffered = [NSMutableData data];
                 objc_setAssociatedObject(dataTask, kApolloDeletedCommentsResponseDataKey, buffered, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1267,11 +1341,20 @@ static void ApolloDeletedCommentsInstallResponseTransformerForDelegate(id delega
     };
 
     IMP didCompleteIMP = imp_implementationWithBlock(^(id selfObject, NSURLSession *session, NSURLSessionTask *task, NSError *error) {
-        if (sShowDeletedComments && ApolloDeletedCommentsShouldTransformTask(task)) {
-            NSMutableData *buffered = objc_getAssociatedObject(task, kApolloDeletedCommentsResponseDataKey);
+        // Deliver by buffer presence, NOT by re-evaluating the gate: if the
+        // per-thread override cleared while this task was in flight, the
+        // buffered bytes must still reach the original delegate (the patch
+        // call below no-ops for a link whose gate is off, so the payload is
+        // delivered verbatim).
+        NSMutableData *buffered = objc_getAssociatedObject(task, kApolloDeletedCommentsResponseDataKey);
+        if (buffered) {
             objc_setAssociatedObject(task, kApolloDeletedCommentsResponseDataKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             NSURLRequest *request = task.originalRequest ?: task.currentRequest;
-            if (buffered.length > 0 && !error) {
+            if (buffered.length > 0) {
+                if (error) {
+                    deliverOriginal(session, task, buffered, error, selfObject);
+                    return;
+                }
                 ApolloDeletedCommentsPatchResponseAsync(buffered, request, ^(NSData *patchedData) {
                     deliverOriginal(session, task, patchedData.length > 0 ? patchedData : buffered, error, selfObject);
                 });

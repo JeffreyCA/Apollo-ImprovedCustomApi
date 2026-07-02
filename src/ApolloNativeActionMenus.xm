@@ -780,6 +780,9 @@ static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderat
     // Issue #515: append "Public Sticky from Subreddit" when this is the removal
     // "Notify user via…" menu (no-op otherwise).
     ApolloInjectPublicStickyAsSubredditIfNeeded(children, title);
+    // Append "Show/Hide Deleted Comments" when this is a comments view's "..."
+    // menu (no-op otherwise; see ApolloDeletedCommentsMenu.xm).
+    ApolloInjectDeletedCommentsMenuItemIfNeeded(children, title, actionController);
     return [UIMenu menuWithTitle:title children:children];
 }
 
