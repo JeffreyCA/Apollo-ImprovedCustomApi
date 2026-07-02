@@ -5,6 +5,7 @@
 #import <objc/message.h>
 
 #import "ApolloCommon.h"
+#import "ApolloMediaAutoplay.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
 
@@ -45,6 +46,11 @@
 // audio — Streamable and similar external hosts — gated by PiPIsEligibleVideo.
 // Silent GIFs (also inline ASVideoNodes, but no audio track) and feed-initiated
 // card takeover are intentionally out of scope (see docs/pip-design.md §3).
+//
+// Second entry point (issue #528): a PiP button in the fullscreen media
+// viewer, available ONLY while Apollo's native autoplay is effectively off
+// (never / wifi-only on cellular) and the viewer owns its player — see the
+// "Fullscreen → PiP entry point" section.
 //
 // =============================================================================
 
@@ -274,6 +280,83 @@ static const void *kPiPPrevVisibleKey = &kPiPPrevVisibleKey;
 // Dedupe flag for the inline native-PiP arm retry chain (the player often
 // does not exist yet at the cell's first visibility event).
 static const void *kPiPArmRetryPendingKey = &kPiPArmRetryPendingKey;
+
+// Dedupe flag for the same-link stale-card recheck (a compact comments header
+// creates its fresh player asynchronously, with no visibility event when it
+// attaches — the recheck closes the card once that player really plays).
+static const void *kPiPSameLinkRecheckKey = &kPiPSameLinkRecheckKey;
+
+// =============================================================================
+// MARK: Fullscreen → PiP entry point state (issue #528)
+// =============================================================================
+//
+// A "PiP" button in the fullscreen media viewer dismisses it and hands the
+// video to the in-app card. The button exists ONLY when both hold:
+//   1. Apollo's native Autoplay GIFs/Videos is effectively off right now
+//      ("never", or wifi-only on cellular) — with autoplay on, scroll-away
+//      takeover already covers PiP entry.
+//   2. The viewer OWNS its player (the `player` ivar — nil when a shared
+//      layer was adopted). An owned player has no inline home, so the card
+//      is always the sole renderer.
+
+// Pending request captured at button-tap time, resolved after the dismissal
+// completes (MediaPageViewController.viewDidDisappear). The player is held
+// STRONGLY so a fullscreen-owned (non-shareable) player survives its view
+// controller's dealloc until the card adopts it.
+static BOOL sFSPiPPending = NO;
+static AVPlayer *sFSPiPPlayer = nil;
+static BOOL sFSPiPWasMuted = NO;
+static BOOL sFSPiPWasPlaying = NO;
+static id sFSPiPLink = nil;
+static NSUInteger sFSPiPRequestToken = 0; // keys each request's expiry failsafe
+
+// Resolution timestamp — guards PiPHandleFeedViewControllerAppeared against
+// closing a card that a fullscreen dismissal is creating at this very moment
+// (a modal dismissal fires the presenting feed VC's viewDidAppear, whose
+// ordering against MediaPageViewController.viewDidDisappear is undefined).
+static CFAbsoluteTime sFSPiPResolvedAt = 0;
+
+// Mirrors the native closeButton's alpha/hidden (the chrome fade toggles each
+// chrome view individually inside a UIView animation — KVO fires within the
+// animation block, so the mirrored writes inherit the same animation). Holds
+// the observed button strongly: associated objects are released AFTER
+// .cxx_destruct during dealloc, so a weak/unretained ref could dangle by the
+// time this observer needs removing.
+@interface ApolloPiPFullscreenButtonMirror : NSObject
+@property (nonatomic, strong) UIButton *sourceButton;
+@property (nonatomic, strong) UIButton *pipButton;
+@end
+
+@implementation ApolloPiPFullscreenButtonMirror
+
+- (instancetype)initWithSource:(UIButton *)source pipButton:(UIButton *)pipButton {
+    if ((self = [super init])) {
+        _sourceButton = source;
+        _pipButton = pipButton;
+        [source addObserver:self forKeyPath:@"alpha" options:0 context:NULL];
+        [source addObserver:self forKeyPath:@"hidden" options:0 context:NULL];
+    }
+    return self;
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object
+                        change:(NSDictionary *)change context:(void *)context {
+    self.pipButton.alpha = self.sourceButton.alpha;
+    if (self.sourceButton.hidden) self.pipButton.hidden = YES;
+    // Un-hiding is owned by the visibility refresh (autoplay gate + owned-
+    // player check), not mirrored — an image page (or a gated video page)
+    // must keep the button hidden while the X shows.
+}
+
+- (void)dealloc {
+    [_sourceButton removeObserver:self forKeyPath:@"alpha"];
+    [_sourceButton removeObserver:self forKeyPath:@"hidden"];
+}
+
+@end
+
+static const void *kPiPFullscreenButtonKey = &kPiPFullscreenButtonKey;
+static const void *kPiPFullscreenMirrorKey = &kPiPFullscreenMirrorKey;
 
 // A loop-suppressed video parks at its end (rate 0, currentTime == duration).
 // Calling play() on an at-end item is a no-op and never re-fires the end
@@ -512,6 +595,11 @@ static const NSTimeInterval kPiPControlsAutoHideDelay = 3.0;
 @property (nonatomic, assign) BOOL nativePiPBornUnderPlayback;
 @property (nonatomic, assign) BOOL inlineNativePiPBornUnderPlayback;
 
+// YES for a card created from the fullscreen viewer's PiP button. Such a card
+// has no inline video-node identity (owned players only) — it floats until
+// closed, and the feed back-pop walk must not misread it as stranded.
+@property (nonatomic, assign) BOOL cardFromFullscreen;
+
 @end
 
 @implementation ApolloPiPController
@@ -622,11 +710,27 @@ static BOOL sPiPSessionHandbackInProgress = NO;
             // player, or the shared layer was released while we were away):
             // identity checks fail but the content is ours. Close the stale
             // PiP — otherwise the video displays (and can play audio) twice.
+            // Only when the cell actually HAS a player: a home with no player
+            // (autoplay off — the header shows a static poster) can't double-
+            // display anything, and a fullscreen-initiated card legitimately
+            // floats over exactly that cell.
             id cellLink = PiPGetIvar(richMediaNode, "link");
-            if (self.link && cellLink
-                && (cellLink == self.link || [cellLink isEqual:self.link])) {
+            BOOL sameLink = self.link && cellLink
+                         && (cellLink == self.link || [cellLink isEqual:self.link]);
+            // Fullscreen-origin cards legitimately float over their own post's
+            // static poster (autoplay off) — for THEM a playerless same-link
+            // cell is fine, and the deferred recheck below covers the fresh
+            // player attaching asynchronously. Every other card keeps the
+            // shipped behavior: close on any same-link sighting (the fresh
+            // player often attaches ~500ms after the event, with no event of
+            // its own — waiting for it would double-play).
+            if (sameLink && (player || !self.cardFromFullscreen)) {
                 ApolloLog(@"[PiP] Same post re-entered with a new player — closing stale PiP");
                 [self teardownKeepPlaying:NO];
+            } else if (sameLink) {
+                [self scheduleSameLinkRecheckForCell:cellNode
+                                       richMediaNode:richMediaNode
+                                           videoNode:videoNode];
             }
             return NO;
         }
@@ -773,6 +877,56 @@ static BOOL sPiPSessionHandbackInProgress = NO;
     return YES;
 }
 
+// Deferred arm of the same-link stale-card guard above: the cell's fresh
+// player attaches asynchronously (no visibility event fires for it), so poll
+// a few times and close the card if a DIFFERENT live player starts rendering
+// our post. The video node is re-derived from the rich media node at fire
+// time — the node itself can be recreated rather than given a player.
+- (void)sameLinkRecheckWithRichMediaNode:(__weak id)weakRich attempts:(NSUInteger)attempts
+                              generation:(NSUInteger)generation cell:(__weak id)weakCell {
+    __weak __typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        __typeof(self) strongSelf = weakSelf;
+        BOOL done = YES;
+        if (strongSelf && strongSelf.active && strongSelf.generation == generation) {
+            // Re-verify against CURRENT content — cell reuse can swap the post.
+            id cellLink = PiPGetIvar(weakRich, "link");
+            BOOL sameLink = strongSelf.link && cellLink
+                         && (cellLink == strongSelf.link || [cellLink isEqual:strongSelf.link]);
+            if (sameLink) {
+                id videoNode = PiPVideoNodeFromRichMedia(weakRich);
+                AVPlayer *fresh = videoNode ? ApolloVideoUnmute_GetPlayerFromVideoNode(videoNode) : nil;
+                if (fresh && fresh != strongSelf.player && fresh.rate != 0) {
+                    ApolloLog(@"[PiP] Same post's fresh player materialized — closing stale PiP");
+                    [strongSelf teardownKeepPlaying:NO];
+                } else if (attempts > 1) {
+                    done = NO;
+                    [strongSelf sameLinkRecheckWithRichMediaNode:weakRich attempts:attempts - 1
+                                                      generation:generation cell:weakCell];
+                }
+            }
+        }
+        if (done) {
+            id cell = weakCell;
+            if (cell) {
+                objc_setAssociatedObject(cell, kPiPSameLinkRecheckKey, nil,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+        }
+    });
+}
+
+- (void)scheduleSameLinkRecheckForCell:(id)cellNode
+                         richMediaNode:(id)richMediaNode
+                             videoNode:(id)videoNode {
+    if (!cellNode || objc_getAssociatedObject(cellNode, kPiPSameLinkRecheckKey)) return;
+    objc_setAssociatedObject(cellNode, kPiPSameLinkRecheckKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [self sameLinkRecheckWithRichMediaNode:richMediaNode attempts:3
+                                generation:self.generation cell:cellNode];
+}
+
 // =============================================================================
 // MARK: Takeover / restore / teardown
 // =============================================================================
@@ -796,6 +950,7 @@ static BOOL sPiPSessionHandbackInProgress = NO;
     // track and would otherwise read as a video — or a non-strictly-eligible
     // silent inline video. v.redd.it/Streamable real videos stay non-GIF.
     self.cardIsGifContent = PiPNodeIsGifContent(videoNode, player);
+    self.cardFromFullscreen = NO; // fullscreen resolution flips it after takeover
     self.active = YES;
     self.restoring = NO;
     self.resumeOnForeground = NO;
@@ -2880,7 +3035,7 @@ static void PiPManageInlineNativeForFeedCell(id cellNode) {
     }
 }
 
-static BOOL PiPHandleFeedVisibilityEvent(id cellNode) {
+static BOOL PiPHandleFeedVisibilityEvent(id cellNode, unsigned long long event) {
     ApolloPiPController *controller = sPiPSharedController;
     if (!controller) return NO;
     if (!controller.active) {
@@ -2894,7 +3049,25 @@ static BOOL PiPHandleFeedVisibilityEvent(id cellNode) {
     if (!videoNode) return NO;
 
     AVPlayer *player = ApolloVideoUnmute_GetPlayerFromVideoNode(videoNode);
-    if (!player || player != controller.player) return NO;
+    if (!player || player != controller.player) {
+        // Same-post dedupe: a feed cell playing a DIFFERENT live player for the
+        // post our card holds would double-render — close the card, the inline
+        // cell wins. Scoped to fullscreen-origin cards (the only cards that
+        // float over feeds with no identity home; comments-origin cards defer
+        // to the appeared-walk on back-pop) and deferred through interactive
+        // back-swipes — these events fire mid-gesture even when the gesture is
+        // cancelled, mirroring the owned path's deferral below.
+        if (player && player.rate != 0
+            && controller.cardFromFullscreen && !controller.restoring
+            && controller.link && !ApolloVideoUnmute_IsNavigatingBack()) {
+            id cellLink = PiPGetIvar(richMediaNode, "link");
+            if (cellLink && (cellLink == controller.link || [cellLink isEqual:controller.link])) {
+                ApolloLog(@"[PiP] Feed cell playing our post with a different player — closing card");
+                [controller teardownKeepPlaying:NO];
+            }
+        }
+        return NO;
+    }
 
     if (PiPIsVideoMidpointVisible(videoNode, cellNode)) {
         // The video's feed cell is on screen — never double-display; hand back.
@@ -2942,6 +3115,19 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
     // appearing VC's own flag avoids the cross-VC race an interactive swipe-pop has
     // with sIsNavigatingBack (CommentsVC.viewDidDisappear can clear it first).
     if (controller.active && [feedVC isMovingToParentViewController]) return;
+
+    // Fullscreen-origin cards are homeless BY DESIGN (no inline identity —
+    // autoplay off / compact feed / fullscreen-owned player): the dismiss
+    // branches below would misread one as a stranded back-pop card. Also skip
+    // while a fullscreen→PiP resolution from the same dismissal is in flight —
+    // the modal dismissal fires this feed VC's viewDidAppear, whose ordering
+    // against MediaPageViewController.viewDidDisappear is undefined.
+    if (controller.active
+        && (controller.cardFromFullscreen
+            || sFSPiPPending
+            || CFAbsoluteTimeGetCurrent() - sFSPiPResolvedAt < 1.5)) {
+        return;
+    }
 
     // A non-shareable (compact-mode) card's video is never reclaimed into a feed
     // cell — the compact feed shows a thumbnail, not the shared player — so on a
@@ -2993,6 +3179,186 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
         ApolloLog(@"[PiP] Back-pop to feed, our video's cell not on screen — dismissing card");
         [controller closeTapped];
     }
+}
+
+// =============================================================================
+// MARK: - Fullscreen → PiP entry point (issue #528)
+// =============================================================================
+
+// Set in %ctor. The fullscreen pager (MediaPageViewController) hosts one child
+// viewer per media item; only MediaViewerController children can hold a player.
+static Class sPiPMediaViewerClass = Nil;
+static Class sPiPMediaPageVCClass = Nil;
+
+// The fullscreen pager a child viewer belongs to, via the UIKit containment
+// chain. (The parentMediaPageViewController ivar is a Swift weak box — reading
+// it raw through object_getIvar would be unsafe.)
+static UIViewController *PiPMediaPageVCForChild(UIViewController *child) {
+    UIViewController *parent = child.parentViewController;
+    while (parent && (!sPiPMediaPageVCClass || ![parent isKindOfClass:sPiPMediaPageVCClass])) {
+        parent = parent.parentViewController;
+    }
+    return parent;
+}
+
+// The current page's OWNED player: MediaViewerController's `player` ivar, set
+// only when the viewer created the player itself (Apollo's togglePlayPause
+// treats it and the adopted playerLayerContainerView layer as disjoint). nil
+// for image pages AND adopted shared-layer pages — a shared player has a live
+// inline home the card would double-render.
+static AVPlayer *PiPOwnedPlayerFromMediaPageVC(id pageVC) {
+    if (!pageVC || ![pageVC respondsToSelector:@selector(viewControllers)]) return nil;
+    id mediaVC = [[(UIPageViewController *)pageVC viewControllers] firstObject];
+    if (!mediaVC || (sPiPMediaViewerClass && ![mediaVC isKindOfClass:sPiPMediaViewerClass])) return nil;
+    return PiPGetIvar(mediaVC, "player");
+}
+
+// Restore the user's fullscreen playback state on the card after the native
+// dismissal's mute dance settles (T+0 force-mute, T+50ms Ambient downgrade,
+// T+100ms setMuted:YES — relative to viewDidDisappear).
+static void PiPScheduleFullscreenFixup(AVPlayer *player, BOOL wasMuted, BOOL wasPlaying,
+                                       ApolloPiPController *cardController) {
+    __weak AVPlayer *weakPlayer = player;
+    __weak ApolloPiPController *weakController = cardController;
+    NSUInteger generation = cardController.generation;
+    // fullRestore = YES only on the first run (+250ms, dance settled): it may
+    // touch mute/session state. The second run (+700ms) is a rate-only net for
+    // stragglers (a trailing unpause/interruption can re-pause a beat later)
+    // and must never override a mute the user may have set since.
+    void (^fixup)(BOOL) = ^(BOOL fullRestore) {
+        AVPlayer *fixupPlayer = weakPlayer;
+        if (!fixupPlayer) return;
+        ApolloPiPController *card = weakController;
+        if (!card || !card.active || card.generation != generation
+            || card.player != fixupPlayer) {
+            return; // the card this fixup was scheduled for is gone
+        }
+        // wasPlaying gates the audible restore too: an unmuted-but-PAUSED video
+        // must not claim the exclusive Playback session (it would stop other
+        // apps' audio behind a card playing nothing).
+        if (fullRestore && !wasMuted && !card.cardIsGifContent && wasPlaying) {
+            // Mirror the card's own unmute path (muteTapped): exclusive
+            // Playback first — Apollo's Ambient silences an unmuted player.
+            if (fixupPlayer.muted) {
+                AVAudioSession *session = [AVAudioSession sharedInstance];
+                [session setCategory:AVAudioSessionCategoryPlayback
+                                mode:AVAudioSessionModeDefault options:0 error:nil];
+                [session setActive:YES withOptions:0 error:nil];
+                [fixupPlayer setMuted:NO];
+            }
+            card.sessionClaimedAudibly = YES;
+        }
+        if (wasPlaying && fixupPlayer.rate == 0) {
+            PiPRewindIfStoppedAtEnd(fixupPlayer);
+            [fixupPlayer play];
+        }
+    };
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ fixup(YES); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ fixup(NO); });
+}
+
+// Runs after the dismissal completes (MediaPageViewController.viewDidDisappear).
+// One landing shape: the button only offers fullscreen-OWNED players, which
+// have no inline home — the card takes the captured player directly.
+static void PiPResolveFullscreenPiPRequest(void) {
+    if (!sFSPiPPending) return;
+    AVPlayer *player = sFSPiPPlayer;
+    BOOL wasMuted = sFSPiPWasMuted;
+    BOOL wasPlaying = sFSPiPWasPlaying;
+    id link = sFSPiPLink;
+    // Consume on the next runloop turn: ApolloVideoUnmute's own
+    // viewDidDisappear hook (order against ours is undefined) must still see
+    // the pending flag and skip its "Remember from Full Screen" re-unmute.
+    // Token-guarded so the deferred clear can never clobber a NEWER request.
+    NSUInteger token = sFSPiPRequestToken;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (sFSPiPRequestToken != token) return;
+        sFSPiPPending = NO;
+        sFSPiPPlayer = nil;
+        sFSPiPLink = nil;
+    });
+    if (!player) return;
+    sFSPiPResolvedAt = CFAbsoluteTimeGetCurrent();
+
+    ApolloPiPController *controller = [ApolloPiPController sharedController];
+    ApolloLog(@"[PiP] Fullscreen PiP: card takeover on owned player");
+    [controller takeOverFromCell:nil richMediaNode:nil videoNode:nil player:player];
+    if (controller.active) {
+        // No richMediaNode lent a link, so backfill it from the pager's — the
+        // same-post dedupe guards key on controller.link, and without it
+        // re-opening this post would double-render against the card.
+        controller.cardFromFullscreen = YES;
+        if (!controller.link && link) controller.link = link;
+    }
+    PiPScheduleFullscreenFixup(player, wasMuted, wasPlaying, controller);
+}
+
+// Build/refresh the fullscreen "enter PiP" button. Called from the pager's
+// viewDidLayoutSubviews (page swipes, rotation) and the child viewer's (the
+// player can materialize without a parent re-layout). Mirrors the native
+// closeButton: frame reflected onto the trailing edge (native layout already
+// resolves notch vs legacy insets) and alpha KVO-mirrored for the chrome fade.
+static void PiPRefreshFullscreenPiPButton(id pageVC) {
+    if (!pageVC) return;
+    UIViewController *pageViewController = (UIViewController *)pageVC;
+    UIButton *closeButton = PiPGetIvar(pageVC, "closeButton");
+    UIButton *pipButton = objc_getAssociatedObject(pageVC, kPiPFullscreenButtonKey);
+    if (!closeButton || !closeButton.superview || !pageViewController.isViewLoaded) {
+        pipButton.hidden = YES;
+        return;
+    }
+    if (!sPiPEnabled) {
+        pipButton.hidden = YES;
+        return;
+    }
+    if (!pipButton) {
+        UIImageSymbolConfiguration *config =
+            [UIImageSymbolConfiguration configurationWithPointSize:18
+                                                            weight:UIImageSymbolWeightMedium];
+        UIImage *icon = [UIImage systemImageNamed:@"pip.enter" withConfiguration:config];
+        if (!icon) return;
+        pipButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        [pipButton setImage:icon forState:UIControlStateNormal];
+        pipButton.tintColor = [UIColor whiteColor];
+        pipButton.accessibilityLabel = @"Picture in Picture";
+        [pipButton addTarget:pageVC action:NSSelectorFromString(@"apolloPiP_enterTapped:")
+            forControlEvents:UIControlEventTouchUpInside];
+        if (@available(iOS 13.4, *)) {
+            pipButton.pointerInteractionEnabled = YES;
+        }
+        objc_setAssociatedObject(pageVC, kPiPFullscreenButtonKey, pipButton,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloPiPFullscreenButtonMirror *mirror =
+            [[ApolloPiPFullscreenButtonMirror alloc] initWithSource:closeButton
+                                                          pipButton:pipButton];
+        objc_setAssociatedObject(pageVC, kPiPFullscreenMirrorKey, mirror,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (pipButton.superview != closeButton.superview) {
+        [closeButton.superview addSubview:pipButton];
+    }
+    CGRect closeFrame = closeButton.frame;
+    CGFloat width = closeButton.superview.bounds.size.width;
+    pipButton.frame = CGRectMake(width - closeFrame.origin.x - closeFrame.size.width,
+                                 closeFrame.origin.y,
+                                 closeFrame.size.width, closeFrame.size.height);
+    pipButton.alpha = closeButton.alpha;
+    // Only when autoplay is effectively off AND the page has a fullscreen-
+    // OWNED player (image pages and adopted shared-layer pages keep the X
+    // alone). Live checks — every layout/page-swipe pass re-evaluates.
+    pipButton.hidden = closeButton.hidden
+        || !ApolloNativeAutoplayEffectivelyOff()
+        || (PiPOwnedPlayerFromMediaPageVC(pageVC) == nil);
+}
+
+// Consulted by ApolloVideoUnmute.xm's MediaPageViewController.viewDidDisappear
+// hook: while a fullscreen→PiP request is in flight, the PiP side owns the
+// post-dismissal mute state — "Remember/Always from Full Screen" must not
+// fight it.
+BOOL ApolloPiP_WillHandleFullscreenDismiss(void) {
+    return sFSPiPPending;
 }
 
 // =============================================================================
@@ -3093,7 +3459,7 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
 - (void)cellNodeVisibilityEvent:(unsigned long long)event
                    inScrollView:(id)scrollView
                   withCellFrame:(CGRect)frame {
-    if (PiPHandleFeedVisibilityEvent(self)) {
+    if (PiPHandleFeedVisibilityEvent(self, event)) {
         return;
     }
     %orig;
@@ -3113,6 +3479,14 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
 - (void)viewDidLayoutSubviews {
     %orig;
 
+    // The child's layout pass is where the player materializes (shared-layer
+    // adoption or own-player creation) without any parent re-layout — refresh
+    // the parent's PiP button visibility from here too.
+    if (sPiPEnabled) {
+        UIViewController *pager = PiPMediaPageVCForChild((UIViewController *)self);
+        if (pager) PiPRefreshFullscreenPiPButton(pager);
+    }
+
     ApolloPiPController *controller = sPiPSharedController;
     if (!controller) return;
     if (!controller.active && !controller.inlineNativePiP) return;
@@ -3130,12 +3504,105 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
     if (controller.active && fullscreenPlayer == controller.player) {
         ApolloLog(@"[PiP] Fullscreen viewer adopted our player — yielding");
         [controller teardownKeepPlaying:YES];
+    } else if (controller.active && controller.link) {
+        // Same post re-opened in fullscreen with a DIFFERENT player (a
+        // fullscreen-origin card's player was never adopted by an inline
+        // node, so re-tapping the post media creates a fresh one). Two live
+        // players of the same content — close the card, fullscreen wins.
+        UIViewController *pager = PiPMediaPageVCForChild((UIViewController *)self);
+        id pageLink = pager ? PiPGetIvar(pager, "link") : nil;
+        if (pageLink && (pageLink == controller.link || [pageLink isEqual:controller.link])) {
+            ApolloLog(@"[PiP] Fullscreen re-opened our post with a new player — closing card");
+            // Clear sessionClaimedAudibly FIRST (mirrors
+            // ApolloPiP_YieldAudioToPlayer): fullscreen owns the session now —
+            // its native Unmute-When-Opened claim carries no sAutoUnmutedPlayer
+            // protection, so the teardown's Ambient + setActive:NO handback
+            // would land on top of it, interrupting the fresh player (opens
+            // stopped) and leaving it muted==NO-but-silent (#560 signature).
+            // The music resume cue is merely deferred to the fullscreen's own
+            // dismissal mute dance.
+            controller.sessionClaimedAudibly = NO;
+            [controller teardownKeepPlaying:NO];
+        }
     }
     // Fullscreen creates its own (dormant) AVPictureInPictureController on the
     // shared layer — retire our inline one to avoid two controllers on it.
     if (fullscreenPlayer == controller.inlineNativePlayer) {
         [controller disarmInlineNativePiPIfIdle];
     }
+}
+
+%end
+
+// ---------------------------------------------------------------------------
+// MediaPageViewController (the fullscreen pager, hosts the chrome): the "enter
+// PiP" button + the dismissal that resolves a pending PiP request. See the
+// "Fullscreen → PiP entry point" section above.
+// ---------------------------------------------------------------------------
+%hook MediaPageViewController
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    PiPRefreshFullscreenPiPButton(self);
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig; // native force-mute + mute dance scheduling happen in here
+    PiPResolveFullscreenPiPRequest();
+}
+
+// Album page swipes: viewControllers (and so the current page's player) only
+// updates when the transition completes — no reliable layout pass follows, so
+// refresh the button's visibility here too.
+- (void)pageViewController:(id)pageViewController didFinishAnimating:(BOOL)finished
+   previousViewControllers:(id)previousViewControllers transitionCompleted:(BOOL)completed {
+    %orig;
+    if (completed) PiPRefreshFullscreenPiPButton(self);
+}
+
+%new
+- (void)apolloPiP_enterTapped:(id)sender {
+    if (![self respondsToSelector:NSSelectorFromString(@"close")]) return;
+    // Re-check the gate at tap time: visibility only re-evaluates on layout
+    // passes, so a reachability flip while the viewer sits open can leave the
+    // button stale-visible. Hide and stand down instead of acting.
+    if (!ApolloNativeAutoplayEffectivelyOff()) {
+        ApolloLog(@"[PiP] Fullscreen PiP tapped but autoplay is on now — hiding button");
+        PiPRefreshFullscreenPiPButton(self);
+        return;
+    }
+    AVPlayer *player = PiPOwnedPlayerFromMediaPageVC(self);
+    if (!player) {
+        PiPRefreshFullscreenPiPButton(self); // same stale-visible recovery
+        return;
+    }
+    sFSPiPPending = YES;
+    sFSPiPPlayer = player; // strong — must outlive the viewer (it owns the player)
+    // Deliberate audibility, NOT raw player.muted: a preference-muted
+    // fullscreen player reads muted == NO under an Ambient session, and
+    // restoring "unmuted" from that would claim the exclusive Playback session
+    // for content the user never audibly played (issue #560).
+    sFSPiPWasMuted = !PiPPlayerIsDeliberatelyAudible(player);
+    sFSPiPWasPlaying = player.rate != 0;
+    sFSPiPLink = PiPGetIvar(self, "link");
+    NSUInteger token = ++sFSPiPRequestToken;
+    ApolloLog(@"[PiP] Fullscreen PiP button tapped (muted=%d, playing=%d) — dismissing viewer",
+              sFSPiPWasMuted, sFSPiPWasPlaying);
+    // Failsafe: if the dismissal never completes, drop the request so stale
+    // state can't hijack a later dismissal. Token-keyed — a second request can
+    // legitimately start within this window, which the first request's expiry
+    // must not clobber.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (sFSPiPPending && sFSPiPRequestToken == token) {
+            ApolloLog(@"[PiP] Fullscreen PiP request expired unresolved — dropping");
+            sFSPiPPending = NO;
+            sFSPiPPlayer = nil;
+            sFSPiPLink = nil;
+        }
+    });
+    // The native X path: haptic + closeMethod=0 + dismissViewControllerAnimated.
+    ((void (*)(id, SEL))objc_msgSend)(self, NSSelectorFromString(@"close"));
 }
 
 %end
@@ -3212,6 +3679,7 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
     Class richMediaNodeClass = objc_getClass("_TtC6Apollo13RichMediaNode");
     Class largePostCellClass = objc_getClass("_TtC6Apollo17LargePostCellNode");
     Class mediaViewerClass = objc_getClass("_TtC6Apollo21MediaViewerController");
+    Class mediaPageVCClass = objc_getClass("_TtC6Apollo23MediaPageViewController");
     Class postsVCClass = objc_getClass("_TtC6Apollo19PostsViewController");
     Class savedPostsVCClass = objc_getClass("_TtC6Apollo32SavedPostsCommentsViewController");
     Class profileVCClass = objc_getClass("_TtC6Apollo21ProfileViewController");
@@ -3228,16 +3696,20 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
               (void *)asVideoNodeClass);
 
     if (!touchHintVideoNodeClass || !richMediaNodeClass || !largePostCellClass
-        || !mediaViewerClass || !postsVCClass || !asVideoNodeClass) {
+        || !mediaViewerClass || !mediaPageVCClass || !postsVCClass || !asVideoNodeClass) {
         ApolloLog(@"[PiP] ctor: FATAL — required classes not found, PiP disabled");
         return;
     }
+
+    sPiPMediaViewerClass = mediaViewerClass;
+    sPiPMediaPageVCClass = mediaPageVCClass;
 
     %init(
         TouchHintVideoNode = touchHintVideoNodeClass,
         RichMediaNode = richMediaNodeClass,
         LargePostCellNode = largePostCellClass,
         MediaViewerController = mediaViewerClass,
+        MediaPageViewController = mediaPageVCClass,
         PostsViewController = postsVCClass,
         SavedPostsCommentsViewController = savedPostsVCClass ?: postsVCClass,
         ProfileViewController = profileVCClass ?: postsVCClass,
