@@ -113,25 +113,42 @@ static NSArray<UIColor *> *ATGDefaultPalette(void) {
     return self;
 }
 
+// Device/pipeline/queue are process-wide: MSL source compilation costs tens of
+// milliseconds on older hardware, so pay it once (first overlay) and never again.
+static id<MTLDevice> sBlobDevice;
+static id<MTLCommandQueue> sBlobQueue;
+static id<MTLRenderPipelineState> sBlobPipeline;
+
+static BOOL ATGEnsureBlobPipeline(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        sBlobDevice = MTLCreateSystemDefaultDevice();
+        if (!sBlobDevice) { ApolloLog(@"ThemeBlob: no Metal device — gradient fallback"); return; }
+        NSError *error = nil;
+        id<MTLLibrary> library = [sBlobDevice newLibraryWithSource:kBlobShaderSource options:nil error:&error];
+        if (!library) { ApolloLog(@"ThemeBlob: shader compile FAILED: %@", error); return; }
+        MTLRenderPipelineDescriptor *desc = [MTLRenderPipelineDescriptor new];
+        desc.vertexFunction = [library newFunctionWithName:@"atg_vert"];
+        desc.fragmentFunction = [library newFunctionWithName:@"atg_frag"];
+        MTLRenderPipelineColorAttachmentDescriptor *att = desc.colorAttachments[0];
+        att.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        att.blendingEnabled = YES; // premultiplied source-over
+        att.sourceRGBBlendFactor = MTLBlendFactorOne;
+        att.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        att.sourceAlphaBlendFactor = MTLBlendFactorOne;
+        att.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        sBlobPipeline = [sBlobDevice newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (!sBlobPipeline) { ApolloLog(@"ThemeBlob: pipeline FAILED: %@", error); return; }
+        sBlobQueue = [sBlobDevice newCommandQueue];
+    });
+    return sBlobPipeline != nil && sBlobQueue != nil;
+}
+
 - (void)setUpMetal {
-    _device = MTLCreateSystemDefaultDevice();
-    if (!_device) { ApolloLog(@"ThemeBlob: no Metal device — gradient fallback"); return; }
-    NSError *error = nil;
-    id<MTLLibrary> library = [_device newLibraryWithSource:kBlobShaderSource options:nil error:&error];
-    if (!library) { ApolloLog(@"ThemeBlob: shader compile FAILED: %@", error); return; }
-    MTLRenderPipelineDescriptor *desc = [MTLRenderPipelineDescriptor new];
-    desc.vertexFunction = [library newFunctionWithName:@"atg_vert"];
-    desc.fragmentFunction = [library newFunctionWithName:@"atg_frag"];
-    MTLRenderPipelineColorAttachmentDescriptor *att = desc.colorAttachments[0];
-    att.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    att.blendingEnabled = YES; // premultiplied source-over
-    att.sourceRGBBlendFactor = MTLBlendFactorOne;
-    att.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-    att.sourceAlphaBlendFactor = MTLBlendFactorOne;
-    att.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-    _pipeline = [_device newRenderPipelineStateWithDescriptor:desc error:&error];
-    if (!_pipeline) { ApolloLog(@"ThemeBlob: pipeline FAILED: %@", error); return; }
-    _queue = [_device newCommandQueue];
+    if (!ATGEnsureBlobPipeline()) return;
+    _device = sBlobDevice;
+    _queue = sBlobQueue;
+    _pipeline = sBlobPipeline;
 
     CAMetalLayer *layer = (CAMetalLayer *)self.layer;
     layer.device = _device;
@@ -181,23 +198,37 @@ static NSArray<UIColor *> *ATGDefaultPalette(void) {
 
 - (void)didMoveToWindow {
     [super didMoveToWindow];
+    NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
     if (self.window && _metalReady) {
         if (!_displayLink) {
             _displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(renderFrame)];
-            _displayLink.preferredFramesPerSecond = 60;
+            _displayLink.preferredFramesPerSecond = 60; // caps ProMotion at 60; older displays already run ≤60
             [_displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+            // Don't burn GPU/battery while the app is in the background.
+            [nc addObserver:self selector:@selector(appResignedActive)
+                       name:UIApplicationWillResignActiveNotification object:nil];
+            [nc addObserver:self selector:@selector(appBecameActive)
+                       name:UIApplicationDidBecomeActiveNotification object:nil];
         }
     } else {
         [_displayLink invalidate];
         _displayLink = nil;
+        [nc removeObserver:self];
     }
 }
+
+- (void)appResignedActive { _displayLink.paused = YES; }
+- (void)appBecameActive { _displayLink.paused = NO; }
 
 - (void)layoutSubviews {
     [super layoutSubviews];
     if (_metalReady) {
         CAMetalLayer *layer = (CAMetalLayer *)self.layer;
         CGFloat scale = self.window.screen.scale ?: UIScreen.mainScreen.scale;
+        // Render at HALF resolution: the blob is soft gradients end to end, so
+        // CA's upscale is visually lossless and the fragment cost drops 4x —
+        // the difference between "warm phone" and "free" on older devices.
+        scale *= 0.5;
         layer.contentsScale = scale;
         CGSize size = CGSizeMake(self.bounds.size.width * scale, self.bounds.size.height * scale);
         if (size.width >= 1 && size.height >= 1 &&
@@ -246,6 +277,7 @@ static NSArray<UIColor *> *ATGDefaultPalette(void) {
 
 - (void)dealloc {
     [_displayLink invalidate];
+    [NSNotificationCenter.defaultCenter removeObserver:self];
 }
 
 @end
@@ -262,6 +294,11 @@ static NSArray<UIColor *> *ATGDefaultPalette(void) {
     NSUInteger _statusIndex;
     void (^_onCancel)(void);
     BOOL _dismissing;
+    // Haptics: the blob "breathes" under your fingers — a soft pulse at each
+    // breath peak, a lighter tick when the status line advances.
+    UIImpactFeedbackGenerator *_breathHaptic;
+    UIImpactFeedbackGenerator *_tickHaptic;
+    NSTimer *_breathTimer;
 }
 
 + (instancetype)overlayWithHeadline:(NSString *)headline
@@ -372,6 +409,12 @@ static NSArray<UIColor *> *ATGDefaultPalette(void) {
     self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.alpha = 0;
     [container addSubview:self];
+    _breathHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleSoft];
+    _tickHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [_breathHaptic prepare];
+    // A firm swell as the blob arrives.
+    UIImpactFeedbackGenerator *arrive = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [arrive impactOccurredWithIntensity:0.8];
     // The blob swells into place while the blur fades up; the slow breathing
     // loop starts only AFTER the spring settles (starting both at once would
     // cancel one of the transform animations).
@@ -388,7 +431,19 @@ static NSArray<UIColor *> *ATGDefaultPalette(void) {
                                     UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction
                          animations:^{ self->_blob.transform = CGAffineTransformMakeScale(1.05, 1.05); }
                          completion:nil];
+        // Soft pulse at each breath PEAK (one full in-out cycle = 4.8s, peak
+        // at 2.4s into it — fire on the autoreverse boundary).
+        __weak typeof(self) weakSelf = self;
+        self->_breathTimer = [NSTimer scheduledTimerWithTimeInterval:4.8 repeats:YES block:^(NSTimer *timer) {
+            [weakSelf breathPulse];
+        }];
+        self->_breathTimer.fireDate = [NSDate dateWithTimeIntervalSinceNow:2.4];
     }];
+}
+
+- (void)breathPulse {
+    [_breathHaptic impactOccurredWithIntensity:0.55];
+    [_breathHaptic prepare];
 }
 
 // Fade + gentle zoom so the freshly presented results underneath appear to
@@ -398,6 +453,8 @@ static NSArray<UIColor *> *ATGDefaultPalette(void) {
     _dismissing = YES;
     [_statusTimer invalidate];
     _statusTimer = nil;
+    [_breathTimer invalidate];
+    _breathTimer = nil;
     [UIView animateWithDuration:0.55
                           delay:0
                         options:UIViewAnimationOptionCurveEaseIn
@@ -414,6 +471,7 @@ static NSArray<UIColor *> *ATGDefaultPalette(void) {
     // Advance to the next line, holding on the last (it reads as "almost done").
     if (_statusIndex + 1 >= _statusLines.count) return;
     _statusIndex++;
+    [_tickHaptic impactOccurredWithIntensity:0.4]; // progress you can feel
     [UIView transitionWithView:_statusLabel
                       duration:0.35
                        options:UIViewAnimationOptionTransitionCrossDissolve
@@ -422,6 +480,7 @@ static NSArray<UIColor *> *ATGDefaultPalette(void) {
 }
 
 - (void)cancelTapped {
+    [_tickHaptic impactOccurredWithIntensity:0.6];
     void (^cb)(void) = _onCancel;
     if (cb) cb();
     [self dismissAnimated];

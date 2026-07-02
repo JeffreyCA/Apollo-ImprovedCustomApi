@@ -243,6 +243,22 @@ public final class ApolloFoundationModels: NSObject {
         #endif
     }
 
+    /// Pre-build (and prewarm) the plain no-instructions session the next
+    /// `plainCompletion` for `identifier` will use. Session construction +
+    /// guardrail preparation cost real time on older devices; calling this
+    /// when the prompt UI OPENS hides that entirely behind the user's typing.
+    @objc public func prewarmPlainSession(_ identifier: String) {
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *) {
+            guard !identifier.isEmpty, preparedSessions[identifier] == nil else { return }
+            let session = LanguageModelSession(model: Self.summarizationModel())
+            preparedSessions[identifier] = session
+            preparedInstructions[identifier] = "" // sentinel: plain (no instructions)
+            session.prewarm()
+        }
+        #endif
+    }
+
     /// One-shot plain completion: a fresh session with NO system instructions,
     /// `prompt` in, the model's literal text out. This is the exact shape the
     /// model handles most reliably (matches the system "Use On-Device model"
@@ -258,11 +274,16 @@ public final class ApolloFoundationModels: NSObject {
             onComplete(nil, Self.makeError(code: 4, message: "Requires iOS 26 or later"))
             return
         }
+        // Consume a prewarmed plain session if one was staged for this id
+        // (empty-string instructions sentinel — never an instructed one).
+        let prepared = preparedSessions.removeValue(forKey: identifier) as? LanguageModelSession
+        let preparedIsPlain = preparedInstructions.removeValue(forKey: identifier) == ""
         let task = Task { @MainActor in
             do {
                 if Task.isCancelled { throw CancellationError() }
                 let startedAt = ContinuousClock.now
-                let session = LanguageModelSession(model: Self.summarizationModel())
+                let session = (preparedIsPlain ? prepared : nil)
+                    ?? LanguageModelSession(model: Self.summarizationModel())
                 let options = GenerationOptions(temperature: 0.7)
                 aiLog.debug("plain completion REQUEST \(identifier, privacy: .public): \(prompt, privacy: .public)")
                 let response = try await session.respond(to: prompt, options: options)

@@ -23,6 +23,11 @@ typedef void (^ApolloThemeAICompletion)(NSDictionary *_Nullable result, NSError 
 BOOL ApolloThemeAIIsAvailable(void);
 NSString *ApolloThemeAIUnavailableMessage(void);
 
+// Pre-build + prewarm the model session the next generation will use. Call
+// when the prompt UI opens — session setup then overlaps the user's typing
+// instead of delaying the first visible token. Cheap and idempotent.
+void ApolloThemeAIPrewarm(void);
+
 // Generates a theme GENERATION SET from a prompt:
 // {
 //   originalPrompt, name, shortDescription,

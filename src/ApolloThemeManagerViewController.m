@@ -27,34 +27,44 @@ static UIImage *SwatchImage(UIColor *color, CGFloat side) {
     }];
 }
 
-// Theme preview for the list: light background top-left, dark background
-// bottom-right (diagonal split), the accent as a centred dot — one glance
-// shows both modes plus the theme's signature colour.
-static UIImage *ThemePreviewSwatch(UIColor *lightBG, UIColor *darkBG, UIColor *accent, CGFloat side) {
+// Leading image for a theme row: an unmistakable selection radio on the left
+// (filled check = active, hollow ring = not), then a colour indicator beside
+// it — a circle split light/dark down the middle with the accent as a ring.
+static UIImage *ThemeRowImage(UIColor *lightBG, UIColor *darkBG, UIColor *accent,
+                              BOOL active, UIColor *radioOnColor) {
+    const CGFloat radio = 24, gap = 8, swatch = 26;
+    const CGFloat height = swatch;
     UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat preferredFormat];
     fmt.opaque = NO;
-    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(side, side) format:fmt];
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc]
+        initWithSize:CGSizeMake(radio + gap + swatch, height) format:fmt];
     return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        UIBezierPath *clip = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0.5, 0.5, side - 1, side - 1) cornerRadius:7];
-        [clip addClip];
+        // Selection radio (Mail-edit style).
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:20 weight:UIImageSymbolWeightRegular];
+        UIImage *symbol = [[UIImage systemImageNamed:(active ? @"checkmark.circle.fill" : @"circle")
+                                    withConfiguration:cfg]
+                           imageWithTintColor:(active ? (radioOnColor ?: UIColor.systemBlueColor)
+                                                      : UIColor.tertiaryLabelColor)
+                                renderingMode:UIImageRenderingModeAlwaysOriginal];
+        [symbol drawAtPoint:CGPointMake((radio - symbol.size.width) / 2,
+                                        (height - symbol.size.height) / 2)];
+        // Colour indicator: light | dark halves inside an accent border — a
+        // rounded SQUARE so it can't be mistaken for a second radio.
+        CGRect swatchRect = CGRectMake(radio + gap, 0, swatch, swatch);
+        CGRect innerRect = CGRectInset(swatchRect, 3, 3);
+        UIBezierPath *inner = [UIBezierPath bezierPathWithRoundedRect:innerRect cornerRadius:5];
+        CGContextSaveGState(ctx.CGContext);
+        [inner addClip];
         [(lightBG ?: UIColor.systemBackgroundColor) setFill];
-        UIRectFill(CGRectMake(0, 0, side, side));
-        UIBezierPath *tri = [UIBezierPath bezierPath];
-        [tri moveToPoint:CGPointMake(side, 0)];
-        [tri addLineToPoint:CGPointMake(side, side)];
-        [tri addLineToPoint:CGPointMake(0, side)];
-        [tri closePath];
+        UIRectFill(CGRectMake(swatchRect.origin.x, 0, swatch / 2, swatch));
         [(darkBG ?: UIColor.secondarySystemBackgroundColor) setFill];
-        [tri fill];
-        CGFloat dot = side * 0.48;
-        CGRect dotRect = CGRectMake((side - dot) / 2, (side - dot) / 2, dot, dot);
-        UIBezierPath *circle = [UIBezierPath bezierPathWithOvalInRect:dotRect];
-        [(accent ?: UIColor.systemBlueColor) setFill];
-        [circle fill];
-        [[UIColor.whiteColor colorWithAlphaComponent:0.85] setStroke];
-        circle.lineWidth = 1.5; [circle stroke];
-        [[UIColor.separatorColor colorWithAlphaComponent:0.6] setStroke];
-        clip.lineWidth = 1; [clip stroke];
+        UIRectFill(CGRectMake(swatchRect.origin.x + swatch / 2, 0, swatch / 2, swatch));
+        CGContextRestoreGState(ctx.CGContext);
+        UIBezierPath *ring = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(swatchRect, 1, 1)
+                                                        cornerRadius:7];
+        [(accent ?: UIColor.systemBlueColor) setStroke];
+        ring.lineWidth = 2.0;
+        [ring stroke];
     }];
 }
 
@@ -90,13 +100,18 @@ static NSString *ThemeInputDescription(NSString *key) {
 @property (nonatomic, assign) ApolloThemeMode editingMode; // which appearance the editor shows
 @property (nonatomic, copy) NSString *pickingInputKey;     // input key currently in the colour picker
 @property (nonatomic, strong) ApolloCompiledTheme *previewCompiled; // cached for editor preview
+// Compile results for list swatches / fallback tinting, keyed on
+// id|updatedAt|variant|advanced — recompiling per cell per layout pass is the
+// hottest thing this screen does.
+@property (nonatomic, strong) NSMutableDictionary<NSString *, ApolloCompiledTheme *> *compileCache;
 @end
 
-// List mode:   0 Enable | 1 Themes | 2 New/Import
+// List mode:   0 Enable | 1 New/Import (actions first — a long theme list must
+//              never push Generate/New/Import off-screen) | 2 Themes
 // Editor mode: 0 Name | 1 Variant+Mode | 2 Colours | 3 Advanced | 4 Generate
-//              5 Preview | 6 Apply
-enum { LSEnable, LSThemes, LSActions, LSCount };
-enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, ESCount };
+//              5 Preview | 6 Apply | 7 Delete
+enum { LSEnable, LSActions, LSThemes, LSCount };
+enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, ESDelete, ESCount };
 
 @implementation ApolloThemeManagerViewController
 
@@ -108,6 +123,10 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
     self = [super initWithStyle:UITableViewStyleInsetGrouped];
     if (self) {
         _editingThemeID = [themeID copy];
+        // Provisional only — viewDidLoad re-reads OUR trait collection, which
+        // reflects any window-level appearance override (Apollo's own theme
+        // system / the runtime); the raw screen traits can disagree with what
+        // the user is actually looking at.
         _editingMode = CurrentAppearanceMode(UIScreen.mainScreen.traitCollection);
     }
     return self;
@@ -115,17 +134,31 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 
 - (ApolloThemeStore *)store { return [ApolloThemeStore shared]; }
 
+- (ApolloCompiledTheme *)compiledForTheme:(NSDictionary *)theme {
+    if (![theme[@"input"] isKindOfClass:[NSDictionary class]]) return nil;
+    if (!self.compileCache) self.compileCache = [NSMutableDictionary dictionary];
+    NSString *key = [NSString stringWithFormat:@"%@|%@|%@|%d",
+                     theme[@"id"], theme[@"updatedAt"], theme[@"variant"],
+                     [theme[kApolloThemeAdvancedOptionsEnabledKey] boolValue]];
+    ApolloCompiledTheme *compiled = self.compileCache[key];
+    if (!compiled) {
+        compiled = [ApolloCompiledTheme compiledThemeWithInput:theme[@"input"]
+                                                       variant:ApolloThemeVariantFromKey(theme[@"variant"])
+                                               advancedEnabled:[theme[kApolloThemeAdvancedOptionsEnabledKey] boolValue]];
+        if (self.compileCache.count > 64) [self.compileCache removeAllObjects]; // stale-edit bound
+        self.compileCache[key] = compiled;
+    }
+    return compiled;
+}
+
 - (UIColor *)themeColorForToken:(ApolloThemeToken)token fallback:(UIColor *)fallback {
     UIColor *runtimeColor = ApolloThemeRuntimeColor(token);
     if (runtimeColor) return runtimeColor;
 
     ApolloThemeStore *store = [self store];
     NSDictionary *active = store.customThemeEnabled ? [store activeTheme] : nil;
-    NSDictionary *input = active[@"input"];
-    if ([input isKindOfClass:[NSDictionary class]]) {
-        ApolloCompiledTheme *compiled = [ApolloCompiledTheme compiledThemeWithInput:input
-                                                                            variant:ApolloThemeVariantFromKey(active[@"variant"])
-                                                                    advancedEnabled:[active[kApolloThemeAdvancedOptionsEnabledKey] boolValue]];
+    ApolloCompiledTheme *compiled = active ? [self compiledForTheme:active] : nil;
+    if (compiled) {
         return ApolloThemeUIColorFromRGB([compiled rgbForToken:token mode:CurrentAppearanceMode(self.traitCollection)]);
     }
 
@@ -185,6 +218,9 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
         (self.editingThemeID && (ip.section == ESGenerate || ip.section == ESApply))) {
         cell.textLabel.textColor = accent;
     }
+    if (self.editingThemeID && ip.section == ESDelete) {
+        cell.textLabel.textColor = UIColor.systemRedColor; // stays destructive under any theme
+    }
 }
 
 - (void)viewDidLoad {
@@ -196,6 +232,10 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
     if (self.editingThemeID) {
         NSDictionary *t = [[self store] themeWithID:self.editingThemeID];
         self.title = t[@"name"] ?: @"Edit Theme";
+        // Open on the palette the user is LOOKING at: dark device -> dark
+        // colours first, and vice versa. The VC's traits are authoritative
+        // here (they include window-level appearance overrides).
+        self.editingMode = CurrentAppearanceMode(self.traitCollection);
         [self recompilePreview];
     } else {
         self.title = @"Theme Manager";
@@ -220,6 +260,9 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 }
 
 - (void)recompilePreview {
+    // Edits within the same wall-clock second share an updatedAt, so the
+    // compile cache can't tell them apart — drop it on every recompile.
+    [self.compileCache removeAllObjects];
     if (!self.editingThemeID) { self.previewCompiled = nil; return; }
     NSDictionary *t = [[self store] themeWithID:self.editingThemeID];
     self.previewCompiled = [ApolloCompiledTheme compiledThemeWithInput:t[@"input"]
@@ -250,6 +293,7 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
             case ESGenerate: return 1;
             case ESPreview:  return 4;
             case ESApply:    return 1;
+            case ESDelete:   return 1;
         }
         return 0;
     }
@@ -351,17 +395,15 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
         }
         NSDictionary *theme = [store allThemes][ip.row];
         cell.textLabel.text = theme[@"name"];
-        ApolloCompiledTheme *c = [ApolloCompiledTheme compiledThemeWithInput:theme[@"input"]
-                                                                     variant:ApolloThemeVariantFromKey(theme[@"variant"])
-                                                             advancedEnabled:[theme[kApolloThemeAdvancedOptionsEnabledKey] boolValue]];
+        ApolloCompiledTheme *c = [self compiledForTheme:theme];
         UIColor *lightBG = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenBackground mode:ApolloThemeModeLight]);
         UIColor *darkBG = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenBackground mode:ApolloThemeModeDark]);
         UIColor *accent = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenAccent
                                                              mode:CurrentAppearanceMode(self.traitCollection)]);
-        cell.imageView.image = ThemePreviewSwatch(lightBG, darkBG, accent, 29);
-        // Tap APPLIES the theme (checkmark = active); the ⓘ button opens the
-        // editor. Long-press for the full menu (apply/edit/rename/…).
+        // Tap APPLIES the theme (the left radio fills in); the ⓘ button opens
+        // the editor. Long-press for the full menu (apply/edit/rename/…).
         BOOL active = [theme[@"id"] isEqualToString:store.activeThemeID] && store.customThemeEnabled;
+        cell.imageView.image = ThemeRowImage(lightBG, darkBG, accent, active, self.view.tintColor);
         NSDictionary *generation = [theme[@"generation"] isKindOfClass:NSDictionary.class] ? theme[@"generation"] : nil;
         NSString *source;
         if ([generation[@"source"] isEqualToString:@"ai"]) {
@@ -372,8 +414,9 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
         } else {
             source = @"Manual";
         }
-        cell.detailTextLabel.text = active ? [@"Active · " stringByAppendingString:source] : source;
+        cell.detailTextLabel.text = source; // "active" is the radio's job now
         cell.detailTextLabel.textColor = active ? self.view.tintColor : UIColor.secondaryLabelColor;
+        cell.accessibilityValue = active ? @"Active" : nil; // VoiceOver can't see the radio
         cell.detailTextLabel.numberOfLines = 1;
         cell.accessoryType = UITableViewCellAccessoryDetailButton; // ⓘ = edit, on every row
         return cell;
@@ -477,6 +520,13 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
             cell.textLabel.text = @"Apply Theme";
             cell.textLabel.textAlignment = NSTextAlignmentCenter;
             cell.textLabel.textColor = self.view.tintColor;
+            return cell;
+        }
+        case ESDelete: {
+            UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+            cell.textLabel.text = @"Delete Theme";
+            cell.textLabel.textAlignment = NSTextAlignmentCenter;
+            cell.textLabel.textColor = UIColor.systemRedColor;
             return cell;
         }
     }
@@ -633,7 +683,21 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
             break;
         case ESGenerate: [self generateOppositeMode]; break;
         case ESApply: [self applyTheme]; break;
+        case ESDelete: [self confirmDeleteFromEditor]; break;
     }
+}
+
+- (void)confirmDeleteFromEditor {
+    NSDictionary *theme = [[self store] themeWithID:self.editingThemeID];
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Delete Theme"
+                                                              message:[NSString stringWithFormat:@"Delete “%@”? This can’t be undone.", theme[@"name"] ?: @"this theme"]
+                                                       preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [a addAction:[UIAlertAction actionWithTitle:@"Delete" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *x) {
+        [self deleteThemeAndRefresh:self.editingThemeID];
+        [self.navigationController popViewControllerAnimated:YES];
+    }]];
+    [self presentViewController:a animated:YES completion:nil];
 }
 
 // ===========================================================================
@@ -953,6 +1017,7 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
                              message:ApolloThemeAIUnavailableMessage()];
         return;
     }
+    ApolloThemeAIPrewarm(); // session builds while the user types the prompt
     ApolloThemeGenerateSheetViewController *sheet = [[ApolloThemeGenerateSheetViewController alloc] init];
     sheet.accentColor = [self themeAccentColor];
     sheet.initialPrompt = initialPrompt;
@@ -1006,6 +1071,8 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
                              message:error.localizedDescription ?: fallbackMessage];
         return;
     }
+    UINotificationFeedbackGenerator *done = [[UINotificationFeedbackGenerator alloc] init];
+    [done notificationOccurred:UINotificationFeedbackTypeSuccess]; // themes are ready
     onSuccess(); // sheet slides up behind the colour field…
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{

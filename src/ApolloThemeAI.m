@@ -7,6 +7,7 @@
 + (instancetype)shared;
 - (NSInteger)availabilityStatus;
 - (void)cancelRequest:(NSString *)identifier;
+- (void)prewarmPlainSession:(NSString *)identifier;
 - (void)plainCompletion:(NSString *)prompt
              identifier:(NSString *)identifier
              onComplete:(void (^)(NSString *_Nullable text, NSError *_Nullable error))onComplete;
@@ -351,6 +352,13 @@ void ApolloThemeAIRefineThemeSet(NSDictionary *themeSet, NSString *selectedInten
         ApolloThemeAISeeds seeds = ATBRepairedSeeds(ATBSeedsSkippingEcho(rgbs, fallback), &fallback);
         if (completion) completion(ATBBuildThemeSet(originalPrompt, seeds, allowMonochrome, rawOutput), nil);
     });
+}
+
+void ApolloThemeAIPrewarm(void) {
+    ApolloFoundationModels *bridge = ATBBridge();
+    if ([bridge respondsToSelector:@selector(prewarmPlainSession:)]) {
+        [bridge prewarmPlainSession:kATBRequestID];
+    }
 }
 
 void ApolloThemeAICancel(void) {
