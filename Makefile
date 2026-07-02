@@ -101,6 +101,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloThemeAISheets.m \
     $(SRC_DIR)/ApolloThemeAIOverlay.m \
     $(SRC_DIR)/ApolloThemeManagerViewController.m \
+    $(SRC_DIR)/ApolloThemeGalleryViewController.m \
     $(SRC_DIR)/ApolloThemeManagerIntegration.xm \
     $(SRC_DIR)/ApolloThemeIntegrations.xm \
     $(SRC_DIR)/ApolloSearchInPlace.xm \
