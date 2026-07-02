@@ -127,7 +127,7 @@ static UIButton *ATBChipButton(NSString *title, UIColor *accent) {
     title.textColor = UIColor.labelColor;
 
     UILabel *desc = [UILabel new];
-    desc.text = @"Describe a vibe, colour palette, game, season, place, or style. Apollo AI creates a readable theme you can tweak.";
+    desc.text = @"Describe a vibe, colour palette, place, game, season, or style. Apollo will create a readable theme you can tweak.";
     desc.font = [UIFont systemFontOfSize:15];
     desc.textColor = UIColor.secondaryLabelColor;
     desc.numberOfLines = 0;
@@ -150,7 +150,7 @@ static UIButton *ATBChipButton(NSString *title, UIColor *accent) {
     _promptView.translatesAutoresizingMaskIntoConstraints = NO;
 
     _placeholder = [UILabel new];
-    _placeholder.text = @"Super Mario inspired theme with a playful dark mode";
+    _placeholder.text = @"Forest canopy";
     _placeholder.font = [UIFont systemFontOfSize:17];
     _placeholder.textColor = UIColor.placeholderTextColor;
     _placeholder.numberOfLines = 0;
@@ -163,8 +163,8 @@ static UIButton *ATBChipButton(NSString *title, UIColor *accent) {
 
     ApolloChipsView *chips = [ApolloChipsView new];
     chips.accent = accent;
-    chips.titles = @[@"Cozy autumn", @"OLED purple", @"Game Boy green",
-                     @"Dark synthwave", @"Rainy forest", @"Soft pastel"];
+    chips.titles = @[@"Forest canopy", @"Panda", @"Indian summer", @"OLED purple",
+                     @"Cozy autumn", @"Old terminal", @"Game Boy green", @"Rainy city"];
     __weak typeof(self) weakSelf = self;
     chips.onSelect = ^(NSString *t) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
@@ -181,7 +181,7 @@ static UIButton *ATBChipButton(NSString *title, UIColor *accent) {
     check.contentMode = UIViewContentModeScaleAspectFit;
     [check setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     UILabel *guard = [UILabel new];
-    guard.text = @"Built-in guardrails check generated colours for contrast and long-reading comfort.";
+    guard.text = @"Apollo asks the on-device model for your topic's three most iconic colours, then builds readable light and dark palettes from them on your device.";
     guard.font = [UIFont systemFontOfSize:13];
     guard.textColor = UIColor.secondaryLabelColor;
     guard.numberOfLines = 0;
@@ -292,9 +292,14 @@ static UIButton *ATBChipButton(NSString *title, UIColor *accent) {
 
 @end
 
-#pragma mark - Result sheet
+#pragma mark - Variant set sheet (Subtle / Balanced / Bold picker)
 
-@implementation ApolloThemeResultSheetViewController
+@interface ApolloThemeVariantSetSheetViewController ()
+@property (nonatomic, strong) NSMutableArray<UIView *> *cardViews;
+@property (nonatomic, copy) NSString *selectedIntensity;
+@end
+
+@implementation ApolloThemeVariantSetSheetViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -302,112 +307,91 @@ static UIButton *ATBChipButton(NSString *title, UIColor *accent) {
     UIColor *accent = self.accentColor ?: UIColor.systemBlueColor;
     self.view.tintColor = accent;
     ATBConfigureSheet(self, YES);
+    if (@available(iOS 15.0, *)) {
+        self.sheetPresentationController.selectedDetentIdentifier = UISheetPresentationControllerDetentIdentifierLarge;
+    }
 
-    NSDictionary *result = self.result ?: @{};
-    NSString *mode = self.mode.length ? self.mode : @"dark";
+    NSDictionary *set = self.themeSet ?: @{};
+    NSArray *variants = [set[@"variants"] isKindOfClass:NSArray.class] ? set[@"variants"] : @[];
+    // Default to Balanced, falling back to whatever's first if it's missing.
+    self.selectedIntensity = @"balanced";
+    if (![self variantNamed:self.selectedIntensity in:variants] && variants.count) {
+        self.selectedIntensity = variants.firstObject[@"intensity"];
+    }
+    self.cardViews = [NSMutableArray array];
 
     UILabel *title = [UILabel new];
-    title.text = [result[@"name"] length] ? result[@"name"] : @"Generated Theme";
+    title.text = [set[@"name"] isKindOfClass:NSString.class] && [set[@"name"] length] ? set[@"name"] : @"Generated Theme";
     title.font = [UIFont systemFontOfSize:24 weight:UIFontWeightBold];
     title.textColor = UIColor.labelColor;
     title.numberOfLines = 2;
 
     UILabel *desc = [UILabel new];
-    desc.text = [result[@"shortDescription"] isKindOfClass:NSString.class] ? result[@"shortDescription"] : @"Generated from your prompt.";
+    desc.text = [set[@"shortDescription"] isKindOfClass:NSString.class] && [set[@"shortDescription"] length] ? set[@"shortDescription"] : @"Generated from your prompt.";
     desc.font = [UIFont systemFontOfSize:15];
     desc.textColor = UIColor.secondaryLabelColor;
     desc.numberOfLines = 0;
 
     UIStackView *content = [[UIStackView alloc] init];
     content.axis = UILayoutConstraintAxisVertical;
-    content.spacing = 16.0;
+    content.spacing = 14.0;
     content.translatesAutoresizingMaskIntoConstraints = NO;
     [content addArrangedSubview:title];
-    [content setCustomSpacing:8 afterView:title];
+    [content setCustomSpacing:6 afterView:title];
     [content addArrangedSubview:desc];
+    [content setCustomSpacing:18 afterView:desc];
 
-    // Swatch row, in role order.
-    NSDictionary *colors = [result[@"colors"] isKindOfClass:NSDictionary.class] ? result[@"colors"] : @{};
-    NSArray *roleOrder = @[kApolloThemeInputAccent, kApolloThemeInputCard, kApolloThemeInputBackground,
-                           kApolloThemeInputRaised, kApolloThemeInputBars, kApolloThemeInputSeparator, kApolloThemeInputText];
-    UIStackView *swatches = [[UIStackView alloc] init];
-    swatches.axis = UILayoutConstraintAxisHorizontal;
-    swatches.spacing = 8.0;
-    swatches.distribution = UIStackViewDistributionFillEqually;
-    for (NSString *role in roleOrder) {
-        NSString *hex = colors[[NSString stringWithFormat:@"%@.%@", role, mode]];
-        UIView *swatch = [UIView new];
-        uint32_t rgb;
-        swatch.backgroundColor = ApolloThemeParseHex(hex, &rgb) ? ApolloThemeUIColorFromRGB(rgb) : UIColor.tertiarySystemFillColor;
-        swatch.layer.cornerRadius = 8.0;
-        swatch.layer.cornerCurve = kCACornerCurveContinuous;
-        swatch.layer.borderWidth = 1.0;
-        swatch.layer.borderColor = [UIColor.separatorColor colorWithAlphaComponent:0.5].CGColor;
-        [swatch.heightAnchor constraintEqualToConstant:36].active = YES;
-        [swatches addArrangedSubview:swatch];
-    }
-    [content addArrangedSubview:swatches];
-
-    // Quality line.
-    NSDictionary *validation = [result[@"validation"] isKindOfClass:NSDictionary.class] ? result[@"validation"] : @{};
-    BOOL passed = [validation[@"passed"] boolValue];
-    NSString *qualityLabel = [result[@"qualityLabel"] isKindOfClass:NSString.class] ? result[@"qualityLabel"] : @"Good";
-    NSString *qualitySummary = [result[@"qualitySummary"] isKindOfClass:NSString.class] ? result[@"qualitySummary"] : @"Readable and ready to tweak.";
-    UIImageView *qIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:(passed ? @"checkmark.seal.fill" : @"exclamationmark.triangle.fill")]];
-    qIcon.tintColor = passed ? UIColor.systemGreenColor : UIColor.systemOrangeColor;
-    qIcon.contentMode = UIViewContentModeScaleAspectFit;
-    [qIcon setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
-    UILabel *qLabel = [UILabel new];
-    qLabel.numberOfLines = 0;
-    NSMutableAttributedString *q = [[NSMutableAttributedString alloc]
-        initWithString:[NSString stringWithFormat:@"%@ — ", qualityLabel]
-            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold],
-                         NSForegroundColorAttributeName: UIColor.labelColor}];
-    [q appendAttributedString:[[NSAttributedString alloc] initWithString:qualitySummary
-        attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:14],
-                     NSForegroundColorAttributeName: UIColor.secondaryLabelColor}]];
-    qLabel.attributedText = q;
-    UIStackView *qRow = [[UIStackView alloc] initWithArrangedSubviews:@[qIcon, qLabel]];
-    qRow.axis = UILayoutConstraintAxisHorizontal;
-    qRow.spacing = 8.0;
-    qRow.alignment = UIStackViewAlignmentTop;
-    [content addArrangedSubview:qRow];
-
-    // Up to three suggested-tweak chips.
-    NSArray *tweaks = [result[@"suggestedTweaks"] isKindOfClass:NSArray.class] ? result[@"suggestedTweaks"] : @[];
-    NSMutableArray<NSString *> *tweakTitles = [NSMutableArray array];
-    NSMutableArray<NSString *> *tweakInstructions = [NSMutableArray array];
-    for (NSDictionary *tweak in tweaks) {
-        if (![tweak isKindOfClass:NSDictionary.class]) continue;
-        NSString *t = [tweak[@"title"] isKindOfClass:NSString.class] ? tweak[@"title"] : nil;
-        NSString *ins = [tweak[@"instruction"] isKindOfClass:NSString.class] ? tweak[@"instruction"] : nil;
-        if (!t.length || !ins.length) continue;
-        [tweakTitles addObject:t];
-        [tweakInstructions addObject:ins];
-        if (tweakTitles.count >= 3) break;
-    }
-    if (tweakTitles.count) {
-        ApolloChipsView *tweakChips = [ApolloChipsView new];
-        tweakChips.accent = accent;
-        tweakChips.titles = tweakTitles;
-        __weak typeof(self) weakSelf = self;
-        tweakChips.onSelect = ^(NSString *t) {
-            NSUInteger idx = [tweakTitles indexOfObject:t];
-            if (idx == NSNotFound) return;
-            NSString *ins = tweakInstructions[idx];
-            void (^cb)(NSString *) = weakSelf.onTweak;
-            [weakSelf dismissViewControllerAnimated:YES completion:^{ if (cb) cb(ins); }];
-        };
-        UILabel *tweakHeader = [UILabel new];
-        tweakHeader.text = @"Quick refinements";
-        tweakHeader.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-        tweakHeader.textColor = UIColor.secondaryLabelColor;
-        [content addArrangedSubview:tweakHeader];
-        [content setCustomSpacing:8 afterView:tweakHeader];
-        [content addArrangedSubview:tweakChips];
+    for (NSDictionary *variant in variants) {
+        UIView *card = [self cardForVariant:variant accent:accent];
+        [self.cardViews addObject:card];
+        [content addArrangedSubview:card];
     }
 
-    // Primary / secondary actions.
+    // Fixed, generic refinement chips — not model-suggested (model-generated
+    // suggestions were consistently irrelevant to the actual theme). Each
+    // chip's instruction is applied to the theme's three SEED colours
+    // (ApolloThemeAIRefineThemeSet) and all intensities are rebuilt
+    // deterministically from the adjusted seeds.
+    NSArray<NSString *> *chipTitles = @[@"More vivid", @"Softer palette", @"Warmer tones", @"Cooler tones"];
+    NSArray<NSString *> *chipInstructions = @[
+        @"Make the accent and surface colours more vivid and saturated.",
+        @"Make the palette softer and more muted overall.",
+        @"Shift the palette toward warmer tones.",
+        @"Shift the palette toward cooler tones.",
+    ];
+    UILabel *refineHeader = [UILabel new];
+    refineHeader.text = @"Refine";
+    refineHeader.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    refineHeader.textColor = UIColor.secondaryLabelColor;
+    [content addArrangedSubview:refineHeader];
+    [content setCustomSpacing:8 afterView:refineHeader];
+
+    ApolloChipsView *chips = [ApolloChipsView new];
+    chips.accent = accent;
+    chips.titles = chipTitles;
+    __weak typeof(self) weakSelf = self;
+    chips.onSelect = ^(NSString *t) {
+        NSUInteger idx = [chipTitles indexOfObject:t];
+        if (idx == NSNotFound) return;
+        NSString *ins = chipInstructions[idx];
+        void (^cb)(NSString *, NSString *) = weakSelf.onRefine;
+        [weakSelf dismissViewControllerAnimated:YES completion:^{ if (cb) cb(weakSelf.selectedIntensity, ins); }];
+    };
+    [content addArrangedSubview:chips];
+
+    // Debug-only affordance: shows exactly what the model returned (before
+    // any of our parsing/mapping), and our cleaned-up re-serialization of it,
+    // so colour-fidelity issues can be diagnosed from the device without
+    // pulling system logs.
+    UIButton *debugButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [debugButton setTitle:@"Debug Info" forState:UIControlStateNormal];
+    debugButton.titleLabel.font = [UIFont systemFontOfSize:13];
+    [debugButton setTitleColor:UIColor.tertiaryLabelColor forState:UIControlStateNormal];
+    [debugButton addTarget:self action:@selector(debugInfoTapped) forControlEvents:UIControlEventTouchUpInside];
+    UIStackView *debugRow = [[UIStackView alloc] initWithArrangedSubviews:@[debugButton]];
+    debugRow.axis = UILayoutConstraintAxisHorizontal;
+    [content addArrangedSubview:debugRow];
+
     UIButton *use = [self filledButton:@"Use Theme" accent:accent action:@selector(useTapped)];
     UIStackView *secondary = [[UIStackView alloc] initWithArrangedSubviews:@[
         [self tintedButton:@"Edit Manually" accent:accent action:@selector(editTapped)],
@@ -422,20 +406,123 @@ static UIButton *ATBChipButton(NSString *title, UIColor *accent) {
     actions.spacing = 12.0;
     actions.translatesAutoresizingMaskIntoConstraints = NO;
 
-    [self.view addSubview:content];
+    UIScrollView *scroll = [UIScrollView new];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    scroll.showsVerticalScrollIndicator = NO;
+    [self.view addSubview:scroll];
+    [scroll addSubview:content];
     [self.view addSubview:actions];
+
     UILayoutGuide *guide = self.view.safeAreaLayoutGuide;
+    UILayoutGuide *contentGuide = scroll.contentLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
-        [content.topAnchor constraintEqualToAnchor:guide.topAnchor constant:24],
+        [scroll.topAnchor constraintEqualToAnchor:guide.topAnchor],
+        [scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+
+        [content.topAnchor constraintEqualToAnchor:contentGuide.topAnchor constant:24],
+        [content.bottomAnchor constraintEqualToAnchor:contentGuide.bottomAnchor constant:-16],
         [content.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:20],
         [content.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-20],
 
         [actions.leadingAnchor constraintEqualToAnchor:guide.leadingAnchor constant:20],
         [actions.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor constant:-20],
         [actions.bottomAnchor constraintEqualToAnchor:guide.bottomAnchor constant:-12],
-        [actions.topAnchor constraintGreaterThanOrEqualToAnchor:content.bottomAnchor constant:16],
+        [scroll.bottomAnchor constraintEqualToAnchor:actions.topAnchor constant:-12],
         [use.heightAnchor constraintEqualToConstant:50],
     ]];
+    [self refreshCardSelection];
+}
+
+- (NSDictionary *)variantNamed:(NSString *)intensity in:(NSArray *)variants {
+    for (NSDictionary *v in variants) if ([v[@"intensity"] isEqualToString:intensity]) return v;
+    return nil;
+}
+
+// Swatch + name + description + two quality lines for one variant, tappable
+// to select it (accent-tinted border on the selected card).
+- (UIView *)cardForVariant:(NSDictionary *)variant accent:(UIColor *)accent {
+    NSString *intensity = variant[@"intensity"];
+    NSString *mode = self.mode.length ? self.mode : @"dark";
+    NSDictionary *colors = [variant[@"colors"] isKindOfClass:NSDictionary.class] ? variant[@"colors"] : @{};
+
+    UIView *card = [UIView new];
+    card.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
+    card.layer.cornerRadius = 16.0;
+    card.layer.cornerCurve = kCACornerCurveContinuous;
+    card.layer.borderWidth = 2.0;
+    card.tag = [@[@"subtle", @"balanced", @"bold"] indexOfObject:intensity ?: @""];
+
+    UILabel *name = [UILabel new];
+    NSString *nameText = [variant[@"name"] isKindOfClass:NSString.class] ? variant[@"name"] : intensity.capitalizedString;
+    NSArray *allVariants = [self.themeSet[@"variants"] isKindOfClass:NSArray.class] ? self.themeSet[@"variants"] : @[];
+    if (allVariants.count > 1 && [intensity isEqualToString:@"balanced"]) nameText = [nameText stringByAppendingString:@"  ·  Recommended"];
+    name.text = nameText;
+    name.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    name.textColor = UIColor.labelColor;
+
+    UILabel *desc = [UILabel new];
+    desc.text = [variant[@"shortDescription"] isKindOfClass:NSString.class] ? variant[@"shortDescription"] : @"";
+    desc.font = [UIFont systemFontOfSize:13];
+    desc.textColor = UIColor.secondaryLabelColor;
+    desc.numberOfLines = 2;
+
+    // No separator swatch — the AI doesn't produce one (see ApolloThemeAI.m),
+    // it's left for the Compiler to auto-derive like a manually-created theme.
+    NSArray *roleOrder = @[kApolloThemeInputAccent, kApolloThemeInputCard, kApolloThemeInputBackground,
+                           kApolloThemeInputRaised, kApolloThemeInputBars, kApolloThemeInputText, kApolloThemeInputMutedText];
+    UIStackView *swatches = [[UIStackView alloc] init];
+    swatches.axis = UILayoutConstraintAxisHorizontal;
+    swatches.spacing = 6.0;
+    swatches.distribution = UIStackViewDistributionFillEqually;
+    for (NSString *role in roleOrder) {
+        NSString *hex = colors[[NSString stringWithFormat:@"%@.%@", role, mode]];
+        UIView *swatch = [UIView new];
+        uint32_t rgb;
+        swatch.backgroundColor = ApolloThemeParseHex(hex, &rgb) ? ApolloThemeUIColorFromRGB(rgb) : UIColor.tertiarySystemFillColor;
+        swatch.layer.cornerRadius = 6.0;
+        swatch.layer.cornerCurve = kCACornerCurveContinuous;
+        [swatch.heightAnchor constraintEqualToConstant:28].active = YES;
+        [swatches addArrangedSubview:swatch];
+    }
+
+    // No Readability/Prompt-match labels — legibility is guaranteed by
+    // construction in the palette engine (contrast clamps on HCT tone), so
+    // there's nothing to score. Swatches speak for themselves.
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[name, desc, swatches]];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 8.0;
+    [stack setCustomSpacing:4 afterView:name];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:card.topAnchor constant:14],
+        [stack.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-14],
+        [stack.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:14],
+        [stack.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-14],
+    ]];
+
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(cardTapped:)];
+    [card addGestureRecognizer:tap];
+    card.userInteractionEnabled = YES;
+    return card;
+}
+
+- (void)cardTapped:(UITapGestureRecognizer *)tap {
+    NSArray *intensities = @[@"subtle", @"balanced", @"bold"];
+    NSInteger idx = tap.view.tag;
+    if (idx < 0 || (NSUInteger)idx >= intensities.count) return;
+    self.selectedIntensity = intensities[idx];
+    [self refreshCardSelection];
+}
+
+- (void)refreshCardSelection {
+    for (UIView *card in self.cardViews) {
+        NSArray *intensities = @[@"subtle", @"balanced", @"bold"];
+        BOOL selected = card.tag >= 0 && (NSUInteger)card.tag < intensities.count
+            && [intensities[card.tag] isEqualToString:self.selectedIntensity];
+        card.layer.borderColor = selected ? self.view.tintColor.CGColor : UIColor.clearColor.CGColor;
+    }
 }
 
 - (UIButton *)filledButton:(NSString *)t accent:(UIColor *)accent action:(SEL)action {
@@ -463,8 +550,28 @@ static UIButton *ATBChipButton(NSString *title, UIColor *accent) {
     return b;
 }
 
-- (void)useTapped { void (^cb)(void) = self.onUse; [self dismissViewControllerAnimated:YES completion:^{ if (cb) cb(); }]; }
-- (void)editTapped { void (^cb)(void) = self.onEdit; [self dismissViewControllerAnimated:YES completion:^{ if (cb) cb(); }]; }
+- (void)useTapped {
+    void (^cb)(NSString *) = self.onUse; NSString *intensity = self.selectedIntensity;
+    [self dismissViewControllerAnimated:YES completion:^{ if (cb) cb(intensity); }];
+}
+- (void)editTapped {
+    void (^cb)(NSString *) = self.onEdit; NSString *intensity = self.selectedIntensity;
+    [self dismissViewControllerAnimated:YES completion:^{ if (cb) cb(intensity); }];
+}
 - (void)regenerateTapped { void (^cb)(void) = self.onRegenerate; [self dismissViewControllerAnimated:YES completion:^{ if (cb) cb(); }]; }
+
+- (void)debugInfoTapped {
+    NSString *raw = [self.themeSet[@"rawModelOutput"] isKindOfClass:NSString.class] ? self.themeSet[@"rawModelOutput"] : @"(none)";
+    NSString *prompt = [self.themeSet[@"originalPrompt"] isKindOfClass:NSString.class] ? self.themeSet[@"originalPrompt"] : @"";
+    NSString *message = [NSString stringWithFormat:@"Prompt: %@\n\nRaw model output:\n%@", prompt, raw];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Debug Info"
+                                                                     message:message
+                                                              preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Copy" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        UIPasteboard.generalPasteboard.string = message;
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
 
 @end

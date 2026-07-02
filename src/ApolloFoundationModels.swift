@@ -28,74 +28,16 @@ import FoundationModels
 // log at `.debug` (not persisted in release unless debug logging is enabled).
 private let aiLog = Logger(subsystem: "apollofix", category: "AISummary")
 
-#if canImport(FoundationModels)
-// Guided-generation schema for Theme Manager. Declaring the output with
-// `@Generable` forces the on-device model to fill a structurally valid palette
-// instead of emitting free-form JSON we then regex-parse, and the per-field
-// `@Guide` hints keep each role on-purpose. This is the core fix for the model
-// wandering off-palette (e.g. a "Superman" request drifting to green/orange):
-// the shape is now schema-guaranteed and each color's intent is described.
-//
-// Field names match the v2 Theme Manager's input keys 1:1 (ApolloThemeTokens.h
-// kApolloThemeInput*) rather than v1's role names — v1 had a confusing
-// indirection where the Swift field `background` actually meant the card/row
-// colour and `secondaryBackground` meant the page background. The model never
-// sees these Swift identifiers (only the @Guide description strings), so this
-// rename is a pure clarity fix with no effect on generation quality.
-//
-// The ObjC side (ApolloThemeAI.m) still owns local contrast repair for the
-// preview sheet, validation/scoring, and saving via ApolloThemeStore — we
-// serialize this back into a flat "key.mode" -> hex dictionary that maps
-// directly onto the v2 input schema.
-@available(iOS 26.0, *)
-@Generable
-struct ApolloGeneratedPalette {
-    @Guide(description: "Accent as #RRGGBB. The vivid signature color that carries the theme's personality — links, the selected tab, buttons.")
-    var accent: String
-    @Guide(description: "Main page/content background as #RRGGBB, behind cards and grouped sections. A calm, lower-saturation large surface that text sits on.")
-    var background: String
-    @Guide(description: "Card/row background as #RRGGBB — list rows, setting cells, post cards, grouped panels. Slightly distinct from the main background.")
-    var card: String
-    @Guide(description: "Raised/elevated surface as #RRGGBB — inset controls, elevated panels. Distinct again from the card background.")
-    var raised: String
-    @Guide(description: "Separator/hairline color as #RRGGBB. Subtle but visible against the backgrounds.")
-    var separator: String
-    @Guide(description: "Navigation and tab bar background as #RRGGBB.")
-    var bars: String
-    @Guide(description: "Secondary text as #RRGGBB — usernames, timestamps, counts. Readable, not faint.")
-    var mutedText: String
-    @Guide(description: "Primary text as #RRGGBB. Must be clearly readable on every background above.")
-    var text: String
-}
-
-@available(iOS 26.0, *)
-@Generable
-struct ApolloGeneratedTweak {
-    @Guide(description: "Short button title for a one-tap refinement, e.g. \"Make darker\".")
-    var title: String
-    @Guide(description: "One-sentence instruction describing the refinement to apply.")
-    var instruction: String
-}
-
-@available(iOS 26.0, *)
-@Generable
-struct ApolloGeneratedTheme {
-    @Guide(description: "Short, original theme name (max 32 characters). Never reuse a trademarked or official name.")
-    var name: String
-    @Guide(description: "One concise sentence describing the look.")
-    var shortDescription: String
-    @Guide(description: "Three to five short aesthetic tags.")
-    var aestheticTags: [String]
-    @Guide(description: "The light mode palette.")
-    var lightMode: ApolloGeneratedPalette
-    @Guide(description: "The dark mode palette.")
-    var darkMode: ApolloGeneratedPalette
-    @Guide(description: "Up to three short readability notes.")
-    var accessibilityNotes: [String]
-    @Guide(description: "Two suggested one-tap refinements the user could apply next.")
-    var suggestedTweaks: [ApolloGeneratedTweak]
-}
-#endif
+// Theme generation asks the model for THREE SEED COLOURS only (plain text in,
+// "three hex codes" out — see ApolloThemeAI.m, which owns the prompt template
+// and parses defensively); a deterministic on-device engine
+// (ApolloThemePaletteEngine) derives the full palettes. Three earlier designs
+// asked the model for progressively less palette judgement — a structured
+// colour brief, a directly-typed hex-per-role schema, then unconstrained
+// per-role JSON — and all three produced unreliable palettes: the on-device
+// model is good at recalling a subject's iconic colours and bad at
+// composing a readable UI from them. So the bridge is now a single generic
+// plain-completion call with no theme-specific knowledge at all.
 
 @objc(ApolloFoundationModels)
 public final class ApolloFoundationModels: NSObject {
@@ -301,94 +243,34 @@ public final class ApolloFoundationModels: NSObject {
         #endif
     }
 
-    /// Generate a Theme Manager palette as JSON. This is intentionally a
-    /// one-shot completion API (no streaming UI): the Objective-C theme service
-    /// owns validation, repair, saving, and presentation.
-    @objc public func generateThemeJSON(withPrompt prompt: String,
-                                        identifier: String,
-                                        currentJSON: String,
-                                        instruction: String,
-                                        maximumResponseTokens: Int,
-                                        onComplete: @escaping (String?, NSError?) -> Void) {
+    /// One-shot plain completion: a fresh session with NO system instructions,
+    /// `prompt` in, the model's literal text out. This is the exact shape the
+    /// model handles most reliably (matches the system "Use On-Device model"
+    /// Shortcuts action, validated by hand) — the theme feature uses it to ask
+    /// for three iconic seed colours, but nothing here is theme-specific.
+    /// Temperature is modest but non-zero so "Regenerate" can land on a
+    /// different (still iconic) answer. Callbacks land on the main thread.
+    @objc public func plainCompletion(_ prompt: String,
+                                      identifier: String,
+                                      onComplete: @escaping (String?, NSError?) -> Void) {
         #if canImport(FoundationModels)
         guard #available(iOS 26.0, *) else {
             onComplete(nil, Self.makeError(code: 4, message: "Requires iOS 26 or later"))
             return
         }
-
-        let systemInstructions = """
-        You are Apollo Reborn's theme design assistant.
-
-        Turn a short natural-language theme idea into a polished, readable app theme for a Reddit client used for long reading sessions. Usability matters as much as personality.
-
-        Color intent — the single most important rule, and the one most often done badly:
-        - Build the WHOLE palette from the colors people associate with the request — backgrounds, bars, and separators included, not just the accent. If it names a subject with signature colors (a red-and-blue hero, an autumn forest, a Game Boy), those colors must appear across the surfaces too.
-        - background, card, raised, bars, and separator MUST be tinted toward the theme's color family. "Calm" / "low saturation" means a deep, desaturated version of the theme's hue (for example a near-navy for a blue theme) — it does NOT mean neutral grey. Do not output neutral grey or near-black surfaces unless the request is explicitly grey, monochrome, minimal, or OLED/true-black. A theme whose backgrounds are plain grey has FAILED the request.
-        - The accent is the most vivid color: the subject's boldest signature color.
-        - Only the theme NAME must be original — never reuse a trademarked or official name. The palette itself should clearly evoke the request.
-
-        Readability rules:
-        - Primary text (near-white in dark mode, near-black in light mode, optionally tinted slightly toward the theme) must be clearly readable against every background and bar.
-        - Secondary text must be clearly readable, not faint.
-        - Light and dark mode should feel related but not merely inverted: dark mode uses deep tinted surfaces, light mode uses pale tinted surfaces, both sharing the accent.
-        - Avoid muddy, chaotic, neon text, and low-contrast pastel-on-pastel palettes unless the user explicitly asks for chaos; contrast still matters.
-        - Every color is a six-digit hex with a leading # and no transparency.
-        - Do not use pure black unless the request explicitly asks for OLED, AMOLED, pure black, or true black.
-
-        Worked examples (match this approach; choose your own exact hexes):
-        - "Superman": dark mode = deep navy-blue backgrounds + a vivid red accent + near-white text; light mode = pale blue-white backgrounds + the same red accent. Recognizably red-and-blue, never grey.
-        - "Cozy autumn": warm brown/amber backgrounds + a burnt-orange accent + cream text.
-        - "Retro Game Boy": olive/pea-green surfaces + a deeper green accent, under a name like "Pocket Player".
-        """
-
-        let userPrompt: String
-        if !currentJSON.isEmpty || !instruction.isEmpty {
-            userPrompt = """
-            Improve this existing Apollo Reborn Theme Manager result.
-
-            User request:
-            "\(instruction.isEmpty ? "Refine this theme while preserving its identity." : instruction)"
-
-            Original idea:
-            "\(prompt)"
-
-            Existing theme JSON:
-            \(currentJSON)
-
-            Modify the existing theme rather than replacing it. Preserve the core identity unless the request asks for a major change. Return the full updated JSON object.
-            """
-        } else {
-            userPrompt = """
-            Create an Apollo Reborn theme from this user request:
-            "\(prompt)"
-
-            It should be usable immediately as a starting point in Theme Manager. Preserve the spirit of the request, but improve the palette where needed for readability, taste, and long-session comfort. Generate both light and dark mode palettes.
-            """
-        }
-
         let task = Task { @MainActor in
-            // A little temperature (vs the previous .greedy) gives bolder, more
-            // colourful palettes instead of the blandest safe default — greedy
-            // tended to leave surfaces neutral grey — and makes "Regenerate"
-            // actually produce a different theme each time.
-            let options = GenerationOptions(
-                temperature: 0.7,
-                maximumResponseTokens: maximumResponseTokens > 0 ? maximumResponseTokens : nil
-            )
             do {
-                let startedAt = ContinuousClock.now
-                let session = LanguageModelSession(model: Self.summarizationModel(), instructions: systemInstructions)
-                // Guided generation: the model fills the ApolloGeneratedTheme
-                // schema directly, so we never parse free-form text and the
-                // palette can't drift into an invalid or off-purpose shape.
-                let response = try await session.respond(to: userPrompt,
-                                                         generating: ApolloGeneratedTheme.self,
-                                                         options: options)
                 if Task.isCancelled { throw CancellationError() }
-                let json = Self.themeJSONString(from: response.content)
-                aiLog.debug("theme generation completed promptLength=\(prompt.count, privacy: .public) after \(String(describing: ContinuousClock.now - startedAt), privacy: .public)")
-                onComplete(json, nil)
+                let startedAt = ContinuousClock.now
+                let session = LanguageModelSession(model: Self.summarizationModel())
+                let options = GenerationOptions(temperature: 0.7)
+                aiLog.debug("plain completion REQUEST \(identifier, privacy: .public): \(prompt, privacy: .public)")
+                let response = try await session.respond(to: prompt, options: options)
+                aiLog.debug("plain completion RESPONSE \(identifier, privacy: .public) after \(String(describing: ContinuousClock.now - startedAt), privacy: .public): \(response.content, privacy: .public)")
+                if Task.isCancelled { throw CancellationError() }
+                onComplete(response.content, nil)
             } catch {
+                aiLog.debug("plain completion ERROR \(identifier, privacy: .public): \(String(describing: error), privacy: .public)")
                 if Task.isCancelled {
                     onComplete(nil, Self.makeError(code: 6, message: "Generation cancelled"))
                 } else {
@@ -409,41 +291,6 @@ public final class ApolloFoundationModels: NSObject {
                        code: code,
                        userInfo: [NSLocalizedDescriptionKey: message])
     }
-
-    #if canImport(FoundationModels)
-    /// Serialize a guided-generation result into a flat "key.mode" -> hex JSON
-    /// object matching the v2 Theme Manager's input keys, which
-    /// ApolloThemeAI.m's `ATBResultFromJSON` parses directly — no v1-style role
-    /// indirection needed since the struct fields already match 1:1.
-    @available(iOS 26.0, *)
-    private static func themeJSONString(from theme: ApolloGeneratedTheme) -> String? {
-        func palette(_ p: ApolloGeneratedPalette) -> [String: String] {
-            return [
-                "accent": p.accent,
-                "background": p.background,
-                "card": p.card,
-                "raised": p.raised,
-                "separator": p.separator,
-                "bars": p.bars,
-                "mutedText": p.mutedText,
-                "text": p.text,
-            ]
-        }
-        let root: [String: Any] = [
-            "name": theme.name,
-            "shortDescription": theme.shortDescription,
-            "aestheticTags": theme.aestheticTags,
-            "lightMode": palette(theme.lightMode),
-            "darkMode": palette(theme.darkMode),
-            "accessibilityNotes": theme.accessibilityNotes,
-            "suggestedTweaks": theme.suggestedTweaks.map {
-                ["title": $0.title, "instruction": $0.instruction]
-            },
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: root) else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
-    #endif
 
     /// Map a thrown FoundationModels error to a stable integer code the ObjC
     /// side branches on (see `ApolloAIFriendlyError` / the transient-retry path

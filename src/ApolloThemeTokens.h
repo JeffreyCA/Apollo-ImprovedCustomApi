@@ -1,4 +1,10 @@
+#import <Foundation/Foundation.h>
+// UIKit is guarded so the pure colour-math parts of this header (and the
+// Compiler/PaletteEngine that build on them) can compile into a plain macOS
+// test harness — see the AI palette engine's golden-vector verification.
+#if __has_include(<UIKit/UIKit.h>)
 #import <UIKit/UIKit.h>
+#endif
 
 // ApolloThemeTokens — shared types for the v2 Theme Manager.
 //
@@ -121,13 +127,28 @@ extern const NSInteger kApolloThemeSchemaVersion; // = 2
 // leading '#'); returns NO on any malformed string.
 BOOL ApolloThemeParseHex(NSString *hex, uint32_t *outRGB);
 NSString *ApolloThemeHexFromRGB(uint32_t rgb);
+#if __has_include(<UIKit/UIKit.h>)
 UIColor *ApolloThemeUIColorFromRGB(uint32_t rgb);
 uint32_t ApolloThemeRGBFromUIColor(UIColor *color);
+#endif
 // Pack 0..1 sRGB components to a 0xRRGGBB key (rounds each channel).
 uint32_t ApolloThemeRGBKeyFromComponents(CGFloat r, CGFloat g, CGFloat b);
 
 // Relative luminance (WCAG, 0..1) and contrast ratio (1..21) for repair logic.
 CGFloat ApolloThemeLuminance(uint32_t rgb);
 CGFloat ApolloThemeContrastRatio(uint32_t a, uint32_t b);
+
+#pragma mark - HSL colour math (shared by the Compiler and the AI palette engine)
+
+// hue: degrees [0, 360). saturation/lightness: 0..1.
+typedef struct { CGFloat hue; CGFloat saturation; CGFloat lightness; } ApolloThemeHSL;
+
+ApolloThemeHSL ApolloThemeHSLFromRGB(uint32_t rgb);
+uint32_t ApolloThemeRGBFromHSL(ApolloThemeHSL hsl);
+
+// Wrap an arbitrary integer hue (e.g. model output) into [0, 360).
+CGFloat ApolloThemeClampHueDegrees(NSInteger value);
+// Shortest angular distance between two hues, in degrees [0, 180].
+CGFloat ApolloThemeHueDistance(CGFloat a, CGFloat b);
 
 __END_DECLS

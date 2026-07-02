@@ -808,7 +808,9 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 // AI theme generation
 // ===========================================================================
 
-// ApolloThemeAI's result `colors` is a flat "key.mode" -> hex dict keyed on
+// ApolloThemeAI produces a "generation set": {originalPrompt, name,
+// shortDescription, themeJSON, variants:[{intensity, colors}, ...]}. A
+// variant's `colors` is a flat "key.mode" -> hex dict keyed on
 // ApolloThemeInputKeys() — the same shape the v2 Store persists, just nested
 // differently. Converts directly, no role-name translation needed.
 - (NSDictionary *)v2InputFromAIColors:(NSDictionary<NSString *, NSString *> *)colors {
@@ -822,6 +824,13 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
         input[mode] = modeInput;
     }
     return input;
+}
+
+- (nullable NSDictionary *)variantNamed:(NSString *)intensity inThemeSet:(NSDictionary *)themeSet {
+    for (NSDictionary *v in themeSet[@"variants"]) {
+        if ([v[@"intensity"] isEqualToString:intensity]) return v;
+    }
+    return nil;
 }
 
 - (void)presentAIThemePromptSheetWithInitialPrompt:(NSString *)initialPrompt {
@@ -846,52 +855,52 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
         return;
     }
     UIAlertController *loading =
-        [UIAlertController alertControllerWithTitle:@"Creating Theme…"
-                                            message:@"Choosing readable colours and checking contrast."
+        [UIAlertController alertControllerWithTitle:@"Creating Themes…"
+                                            message:@"Interpreting your prompt and building three readable variants."
                                      preferredStyle:UIAlertControllerStyleAlert];
     [loading addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel
                                               handler:^(UIAlertAction *action) {
         ApolloThemeAICancel();
     }]];
     [self presentViewController:loading animated:YES completion:nil];
-    ApolloThemeAIGenerateTheme(trimmed, ^(NSDictionary *result, NSError *error) {
+    ApolloThemeAIGenerateThemeSet(trimmed, ^(NSDictionary *themeSet, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [loading dismissViewControllerAnimated:YES completion:^{
-                if (error || !result) {
+                if (error || !themeSet) {
                     [self presentAlertWithTitle:@"Couldn’t Generate Theme"
                                          message:error.localizedDescription ?: @"Try a different description, or start from scratch."];
                     return;
                 }
-                [self presentGeneratedThemeResult:result];
+                [self presentThemeSet:themeSet];
             }];
         });
     });
 }
 
-- (void)presentGeneratedThemeResult:(NSDictionary *)result {
-    ApolloThemeResultSheetViewController *sheet = [[ApolloThemeResultSheetViewController alloc] init];
+- (void)presentThemeSet:(NSDictionary *)themeSet {
+    ApolloThemeVariantSetSheetViewController *sheet = [[ApolloThemeVariantSetSheetViewController alloc] init];
     sheet.accentColor = [self themeAccentColor];
-    sheet.result = result;
+    sheet.themeSet = themeSet;
     sheet.mode = ApolloThemeModeKey(CurrentAppearanceMode(self.traitCollection));
     __weak typeof(self) weakSelf = self;
-    sheet.onUse = ^{ [weakSelf saveGeneratedThemeResult:result apply:YES edit:NO]; };
-    sheet.onEdit = ^{ [weakSelf saveGeneratedThemeResult:result apply:NO edit:YES]; };
-    sheet.onRegenerate = ^{ [weakSelf generateAIThemeFromPrompt:result[@"originalPrompt"] ?: @""]; };
-    sheet.onTweak = ^(NSString *instruction) { [weakSelf modifyGeneratedThemeResult:result instruction:instruction]; };
+    sheet.onUse = ^(NSString *intensity) { [weakSelf saveThemeSet:themeSet selectedIntensity:intensity apply:YES edit:NO]; };
+    sheet.onEdit = ^(NSString *intensity) { [weakSelf saveThemeSet:themeSet selectedIntensity:intensity apply:NO edit:YES]; };
+    sheet.onRegenerate = ^{ [weakSelf generateAIThemeFromPrompt:themeSet[@"originalPrompt"] ?: @""]; };
+    sheet.onRefine = ^(NSString *intensity, NSString *instruction) { [weakSelf refineThemeSet:themeSet selectedIntensity:intensity instruction:instruction]; };
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
-- (void)modifyGeneratedThemeResult:(NSDictionary *)result instruction:(NSString *)instruction {
+- (void)refineThemeSet:(NSDictionary *)themeSet selectedIntensity:(NSString *)intensity instruction:(NSString *)instruction {
     UIAlertController *loading =
-        [UIAlertController alertControllerWithTitle:@"Updating Theme…"
-                                            message:@"Applying the tweak and checking contrast."
+        [UIAlertController alertControllerWithTitle:@"Updating Themes…"
+                                            message:@"Applying the tweak and rebuilding all three variants."
                                      preferredStyle:UIAlertControllerStyleAlert];
     [loading addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel
                                               handler:^(UIAlertAction *action) {
         ApolloThemeAICancel();
     }]];
     [self presentViewController:loading animated:YES completion:nil];
-    ApolloThemeAIModifyTheme(result, instruction, ^(NSDictionary *updated, NSError *error) {
+    ApolloThemeAIRefineThemeSet(themeSet, intensity, instruction, ^(NSDictionary *updated, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [loading dismissViewControllerAnimated:YES completion:^{
                 if (error || !updated) {
@@ -899,27 +908,36 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
                                          message:error.localizedDescription ?: @"Try a different tweak, or edit manually."];
                     return;
                 }
-                [self presentGeneratedThemeResult:updated];
+                [self presentThemeSet:updated];
             }];
         });
     });
 }
 
-- (void)saveGeneratedThemeResult:(NSDictionary *)result apply:(BOOL)apply edit:(BOOL)edit {
-    ApolloLog(@"ThemeUI: saving AI-generated theme '%@' apply=%d edit=%d", result[@"name"], apply, edit);
+- (void)saveThemeSet:(NSDictionary *)themeSet selectedIntensity:(NSString *)intensity apply:(BOOL)apply edit:(BOOL)edit {
+    NSDictionary *variant = [self variantNamed:intensity inThemeSet:themeSet] ?: [themeSet[@"variants"] firstObject];
+    if (!variant) return;
+    NSString *name = [themeSet[@"name"] isKindOfClass:NSString.class] && [themeSet[@"name"] length] ? themeSet[@"name"] : @"Generated Theme";
+    ApolloLog(@"ThemeUI: saving AI-generated theme '%@' apply=%d edit=%d", name, apply, edit);
     ApolloThemeStore *store = [self store];
-    NSDictionary *input = [self v2InputFromAIColors:result[@"colors"] ?: @{}];
-    // The AI always produces text/mutedText/separator (they're required fields
-    // in the guided-generation schema), so Advanced is on by default — these are
-    // deliberately art-directed, not auto-derived, values.
-    NSString *themeID = [store createThemeNamed:result[@"name"]
+    NSDictionary *input = [self v2InputFromAIColors:variant[@"colors"] ?: @{}];
+    // The palette engine always derives text/mutedText (contrast-guaranteed,
+    // tinted from the primary seed), so Advanced is on by default. It does
+    // NOT produce a separator colour, so that key is absent from `input` and
+    // the Compiler auto-derives it, same as a manually-created theme that
+    // leaves it unset.
+    // The store variant matches the chosen intensity so the Compiler's
+    // derived tokens (separator strength, fills) follow the tier's
+    // personality; the input colours themselves already bake the tier in.
+    NSString *themeID = [store createThemeNamed:name
                                           input:input
-                                        variant:ApolloThemeVariantBalanced
+                                        variant:ApolloThemeVariantFromKey(intensity)
                          advancedOptionsEnabled:YES
                                     generation:@{ @"source": @"ai",
-                                                  @"prompt": result[@"originalPrompt"] ?: @"",
-                                                  @"qualityLabel": result[@"qualityLabel"] ?: @"",
-                                                  @"validationScore": result[@"validationScore"] ?: @0 }];
+                                                  @"prompt": themeSet[@"originalPrompt"] ?: @"",
+                                                  @"seeds": [themeSet[@"seeds"] isKindOfClass:NSDictionary.class] ? themeSet[@"seeds"] : @{},
+                                                  @"intensity": intensity ?: @"balanced",
+                                                  @"themeJSON": themeSet[@"themeJSON"] ?: @"" }];
     if (apply) {
         store.activeThemeID = themeID;
         if ([store runtimeDisabledDueToCrash]) [store clearCrashDisable];

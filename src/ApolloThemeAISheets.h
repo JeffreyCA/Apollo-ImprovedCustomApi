@@ -16,16 +16,19 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, nullable) void (^onGenerate)(NSString *prompt);
 @end
 
-// Lean result preview: name, description, swatch row, quality summary, and
-// Use / Edit Manually / Regenerate plus up to three suggested-tweak buttons.
-@interface ApolloThemeResultSheetViewController : UIViewController
+// Result cards — one per intensity tier (Subtle / Balanced / Bold), each with
+// name, description, and a swatch row of the engine-derived palette. Below
+// them, a fixed set of generic refinement chips (applied to the theme's seed
+// colours) and Use / Edit Manually / Regenerate actions operate on whichever
+// card is currently selected.
+@interface ApolloThemeVariantSetSheetViewController : UIViewController
 @property (nonatomic, strong, nullable) UIColor *accentColor;
-@property (nonatomic, copy) NSDictionary *result; // ApolloThemeAI result dict
-@property (nonatomic, copy) NSString *mode;        // "light" / "dark"
-@property (nonatomic, copy, nullable) void (^onUse)(void);
-@property (nonatomic, copy, nullable) void (^onEdit)(void);
+@property (nonatomic, copy) NSDictionary *themeSet; // ApolloThemeAI generation-set dict
+@property (nonatomic, copy) NSString *mode;         // "light" / "dark" — which mode's swatches to preview
+@property (nonatomic, copy, nullable) void (^onUse)(NSString *selectedIntensity);
+@property (nonatomic, copy, nullable) void (^onEdit)(NSString *selectedIntensity);
 @property (nonatomic, copy, nullable) void (^onRegenerate)(void);
-@property (nonatomic, copy, nullable) void (^onTweak)(NSString *instruction);
+@property (nonatomic, copy, nullable) void (^onRefine)(NSString *selectedIntensity, NSString *instruction);
 @end
 
 NS_ASSUME_NONNULL_END

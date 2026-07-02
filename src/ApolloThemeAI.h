@@ -4,27 +4,53 @@ NS_ASSUME_NONNULL_BEGIN
 
 typedef void (^ApolloThemeAICompletion)(NSDictionary *_Nullable result, NSError *_Nullable error);
 
-// True when the Swift FoundationModels bridge is present and reports a model
-// ready to generate. UI can still call ApolloThemeAIUnavailableMessage() for
+// ApolloThemeAI — the AI half of theme generation. The model is asked exactly
+// ONE thing (the three colours most iconic to the prompt: accent + two surface
+// tones, as plain "three hex codes" text); everything else — surface
+// hierarchy, light/dark staging, intensity tiers, contrast guarantees — is
+// computed deterministically by ApolloThemePaletteEngine. This split exists
+// because the on-device model reliably recalls iconic colours but reliably
+// fails at composing readable UI palettes (three separate palette-generation
+// designs failed before this one).
+
+// True when the Swift FoundationModels bridge is present and the device is
+// capable of running the model (iOS 26+, eligible hardware). Deliberately
+// does NOT require the model to report ready: on iOS 27 the availability API
+// misreports "Apple Intelligence not enabled" to sideloaded apps even when
+// generation works, so the only trustworthy gate is attempting a request and
+// surfacing its real error. Use ApolloThemeAIUnavailableMessage() for
 // friendly copy when this is false.
 BOOL ApolloThemeAIIsAvailable(void);
 NSString *ApolloThemeAIUnavailableMessage(void);
 
-// Generates an app-safe theme dictionary:
+// Generates a theme GENERATION SET from a prompt:
 // {
-//   name, shortDescription, colors, qualityLabel, qualitySummary,
-//   notes, suggestedTweaks, validationScore, originalPrompt
+//   originalPrompt, name, shortDescription,
+//   seeds: { accent, primary, secondary },   // "RRGGBB" — the model's only output
+//   allowMonochrome: @YES/@NO,               // inferred from the prompt's wording
+//   rawModelOutput,                          // the model's literal reply, for debugging
+//   themeJSON,                               // serialized seeds (refine round-trips, storage)
+//   variants: [                              // one per intensity, engine-derived
+//     { intensity ("subtle"/"balanced"/"bold"), name, shortDescription,
+//       colors (flat "inputKey.mode" -> hex, both modes) },
+//   ]
 // }
-// `colors` is a flat "key.mode" -> hex dictionary keyed on the v2 Theme
-// Manager's input keys (ApolloThemeTokens.h ApolloThemeInputKeys()), e.g.
-// "accent.light", "card.dark" — directly convertible into a v2 theme's
-// nested {"light": {...}, "dark": {...}} input dict.
-void ApolloThemeAIGenerateTheme(NSString *prompt, ApolloThemeAICompletion completion);
-void ApolloThemeAIModifyTheme(NSDictionary *themeResult, NSString *instruction, ApolloThemeAICompletion completion);
-void ApolloThemeAICancel(void);
+//
+// The reply is parsed defensively (any three hex codes in order, with
+// deterministic repair when fewer parse) and retried once on a fully
+// unparseable reply before failing.
+void ApolloThemeAIGenerateThemeSet(NSString *prompt, ApolloThemeAICompletion completion);
 
-// Lightweight deterministic validation used by both AI output and the manual
-// editor. Returns {score, passed, issues, warnings, summary}.
-NSDictionary *ApolloThemeAIValidateColors(NSDictionary<NSString *, NSString *> *colors, NSString *_Nullable prompt);
+// Adjusts the SEEDS of an existing generation set with `instruction` (free
+// text, e.g. "shift the palette toward warmer tones"), then rebuilds all
+// variants through the engine. `selectedIntensity` is accepted for UI
+// symmetry but doesn't change the request — every intensity is rebuilt from
+// the refined seeds.
+void ApolloThemeAIRefineThemeSet(NSDictionary *themeSet,
+                                 NSString *_Nullable selectedIntensity,
+                                 NSString *instruction,
+                                 ApolloThemeAICompletion completion);
+
+void ApolloThemeAICancel(void);
 
 NS_ASSUME_NONNULL_END

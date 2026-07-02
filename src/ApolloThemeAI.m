@@ -1,32 +1,39 @@
 #import "ApolloThemeAI.h"
+#import "ApolloThemePaletteEngine.h"
 #import "ApolloThemeTokens.h"
 #import "ApolloCommon.h"
-#import <UIKit/UIKit.h>
-#import <math.h>
 
 @interface ApolloFoundationModels : NSObject
 + (instancetype)shared;
 - (NSInteger)availabilityStatus;
 - (void)cancelRequest:(NSString *)identifier;
-- (void)generateThemeJSONWithPrompt:(NSString *)prompt
-                          identifier:(NSString *)identifier
-                         currentJSON:(NSString *)currentJSON
-                         instruction:(NSString *)instruction
-               maximumResponseTokens:(NSInteger)maximumResponseTokens
-                          onComplete:(void (^)(NSString *_Nullable json, NSError *_Nullable error))onComplete;
+- (void)plainCompletion:(NSString *)prompt
+             identifier:(NSString *)identifier
+             onComplete:(void (^)(NSString *_Nullable text, NSError *_Nullable error))onComplete;
 @end
 
-typedef struct { CGFloat r, g, b; } ATBColor;
 static NSString * const kATBRequestID = @"theme-ai-generation";
+static NSString * const kATBErrorDomain = @"ApolloThemeAI";
 
 static ApolloFoundationModels *ATBBridge(void) {
     Class cls = NSClassFromString(@"ApolloFoundationModels");
     return [cls respondsToSelector:@selector(shared)] ? [cls shared] : nil;
 }
 
+static NSError *ATBError(NSInteger code, NSString *message) {
+    return [NSError errorWithDomain:kATBErrorDomain code:code userInfo:@{NSLocalizedDescriptionKey: message}];
+}
+
 BOOL ApolloThemeAIIsAvailable(void) {
     ApolloFoundationModels *bridge = ATBBridge();
-    return bridge && [bridge respondsToSelector:@selector(availabilityStatus)] && [bridge availabilityStatus] == 0;
+    if (!bridge || ![bridge respondsToSelector:@selector(availabilityStatus)]) return NO;
+    // 0 available / 1 not enabled / 2 not ready are all "worth attempting":
+    // 1 in particular is misreported to sideloaded apps on iOS 27 (see the
+    // summarize path in ApolloFoundationModels.swift). Only genuinely
+    // hopeless states — ineligible hardware (3) or no framework (4) — hide
+    // the feature.
+    NSInteger status = [bridge availabilityStatus];
+    return status == 0 || status == 1 || status == 2;
 }
 
 NSString *ApolloThemeAIUnavailableMessage(void) {
@@ -41,230 +48,50 @@ NSString *ApolloThemeAIUnavailableMessage(void) {
     }
 }
 
-// --- colour helpers built on the v2 shared primitives (ApolloThemeTokens.h) ---
+// ---------------------------------------------------------------------------
+// Prompts. The wording was tuned against the real on-device model:
+//  - "Name the three colors most iconic to X" is a recall task it does well,
+//    unlike palette design.
+//  - The reply must be NAME-ANCHORED ("color name: hex code" lines). Asked
+//    for bare hex codes the model maps topics to wildly wrong hues; asked to
+//    name the colour first it anchors the hex to the name and lands in the
+//    right hue family (spiderman -> Red/Blue, batman -> Black/Dark blue).
+//  - Never include a literal example reply: the model parrots example hex
+//    codes verbatim for EVERY prompt (observed with "#E23636, #0C4DA2, ...").
+// ---------------------------------------------------------------------------
 
-static BOOL ATBParseHex(NSString *hex, ATBColor *out) {
-    uint32_t rgb = 0;
-    if (![hex isKindOfClass:[NSString class]] || !ApolloThemeParseHex(hex, &rgb)) return NO;
-    if (out) *out = (ATBColor){ ((rgb >> 16) & 0xFF) / 255.0, ((rgb >> 8) & 0xFF) / 255.0, (rgb & 0xFF) / 255.0 };
-    return YES;
+static NSString * const kATBReplyContract =
+    @"Answer with three lines, each \"color name: hex code\". Nothing else.";
+
+static NSString *ATBGenerationPrompt(NSString *prompt) {
+    return [NSString stringWithFormat:
+        @"Name the three colors most iconic to: %@\n"
+        @"\n"
+        @"1. An accent/highlight color\n"
+        @"2. A primary surface color\n"
+        @"3. A secondary surface color\n"
+        @"\n"
+        @"The two surface colors should be dominant background/material tones "
+        @"from the topic's world, usually distinct from the accent.\n"
+        @"\n"
+        @"%@", prompt, kATBReplyContract];
 }
 
-static NSString *ATBHexFromColor(ATBColor c) {
-    CGFloat r = MAX(0, MIN(1, c.r)), g = MAX(0, MIN(1, c.g)), b = MAX(0, MIN(1, c.b));
-    return ApolloThemeHexFromRGB(ApolloThemeRGBKeyFromComponents(r, g, b));
-}
-
-static CGFloat ATBContrastColors(ATBColor a, ATBColor b) {
-    return ApolloThemeContrastRatio(ApolloThemeRGBKeyFromComponents(a.r, a.g, a.b),
-                                     ApolloThemeRGBKeyFromComponents(b.r, b.g, b.b));
-}
-
-static CGFloat ATBDistance(ATBColor a, ATBColor b) {
-    CGFloat dr = a.r - b.r, dg = a.g - b.g, db = a.b - b.b;
-    return sqrt(dr * dr + dg * dg + db * db);
-}
-
-static CGFloat ATBSaturation(ATBColor c) {
-    CGFloat maxv = MAX(c.r, MAX(c.g, c.b));
-    CGFloat minv = MIN(c.r, MIN(c.g, c.b));
-    return maxv <= 0.001 ? 0 : (maxv - minv) / maxv;
-}
-
-// Perceptual "intensity" for large surfaces: HSV saturation weighted by
-// brightness. A deep navy (high HSV saturation, low brightness) reads as calm,
-// so it scores low here; only colors that are both saturated AND bright — the
-// ones that actually fatigue the eye on big reading surfaces — score high. This
-// is what lets the AI tint backgrounds toward the theme (deep navy, warm brown)
-// without tripping the "may feel intense" warning that raw saturation did.
-static CGFloat ATBSurfaceIntensity(ATBColor c) {
-    return ATBSaturation(c) * MAX(c.r, MAX(c.g, c.b));
-}
-
-static ATBColor ATBBlend(ATBColor a, ATBColor b, CGFloat amount) {
-    amount = MAX(0, MIN(1, amount));
-    return (ATBColor){ a.r + (b.r - a.r) * amount, a.g + (b.g - a.g) * amount, a.b + (b.b - a.b) * amount };
-}
-
-// Worst (lowest) WCAG contrast of a candidate text colour across every surface
-// it has to sit on. The text repair targets this minimum so it's readable on the
-// hardest surface, not just one.
-static CGFloat ATBMinContrastVsSurfaces(ATBColor c, NSArray<NSString *> *surfaceHexes) {
-    CGFloat minC = INFINITY;
-    for (NSString *hex in surfaceHexes) {
-        ATBColor s;
-        if (!ATBParseHex(hex, &s)) continue;
-        minC = MIN(minC, ATBContrastColors(c, s));
-    }
-    return isinf(minC) ? 1.0 : minC;
-}
-
-// Deterministic readability guarantee. Returns a text colour that meets `minimum`
-// WCAG contrast against EVERY surface if achievable, preserving as much of the
-// model's chosen tint as possible. It tries blending the model's colour toward
-// both white and black and picks the direction that passes against all surfaces
-// with the least change (so theme tint survives where it can). If neither
-// direction can clear every surface — e.g. a palette that mixes very light and
-// very dark surfaces — it returns the pure black/white endpoint with the highest
-// minimum contrast, i.e. the most readable option available. Mode-agnostic: it
-// can never leave near-white text stranded on a light surface.
-static NSString *ATBReadableTextHex(NSString *textHex, NSArray<NSString *> *surfaceHexes, CGFloat minimum) {
-    ATBColor text;
-    if (!ATBParseHex(textHex, &text)) text = (ATBColor){0.5, 0.5, 0.5};
-    ATBColor targets[2] = {(ATBColor){1, 1, 1}, (ATBColor){0, 0, 0}};
-    BOOL passed[2] = {NO, NO};
-    ATBColor best[2];
-    CGFloat bestMin[2] = {0, 0};
-    NSInteger bestStep[2] = {21, 21};
-    for (int t = 0; t < 2; t++) {
-        // Smallest blend toward this endpoint that clears `minimum` everywhere.
-        for (NSInteger i = 0; i <= 20; i++) {
-            ATBColor cand = ATBBlend(text, targets[t], i / 20.0);
-            CGFloat m = ATBMinContrastVsSurfaces(cand, surfaceHexes);
-            if (m >= minimum) { passed[t] = YES; best[t] = cand; bestMin[t] = m; bestStep[t] = i; break; }
-        }
-        if (!passed[t]) { best[t] = targets[t]; bestMin[t] = ATBMinContrastVsSurfaces(targets[t], surfaceHexes); }
-    }
-    if (passed[0] && passed[1]) {
-        // Both endpoints work — keep whichever changed the model colour least.
-        return ATBHexFromColor(bestStep[0] <= bestStep[1] ? best[0] : best[1]);
-    }
-    if (passed[0]) return ATBHexFromColor(best[0]);
-    if (passed[1]) return ATBHexFromColor(best[1]);
-    return ATBHexFromColor(bestMin[0] >= bestMin[1] ? best[0] : best[1]);
-}
-
-// `colors` is a flat "key.mode" -> hex dict keyed on ApolloThemeInputKeys().
-NSDictionary *ApolloThemeAIValidateColors(NSDictionary<NSString *, NSString *> *colors, NSString *prompt) {
-    NSMutableArray *issues = [NSMutableArray array];
-    NSMutableArray *warnings = [NSMutableArray array];
-    NSArray *keys = ApolloThemeInputKeys();
-    for (NSString *mode in @[@"light", @"dark"]) {
-        for (NSString *key in keys) {
-            NSString *k = [NSString stringWithFormat:@"%@.%@", key, mode];
-            uint32_t rgb;
-            if (!ApolloThemeParseHex(colors[k], &rgb)) {
-                [issues addObject:[NSString stringWithFormat:@"%@ has an invalid color.", ApolloThemeInputDisplayName(key)]];
-            }
-        }
-        ATBColor background, card, raised, bars, text, mutedText, accent, separator;
-        if (!ATBParseHex(colors[[@"background." stringByAppendingString:mode]], &background) ||
-            !ATBParseHex(colors[[@"card." stringByAppendingString:mode]], &card) ||
-            !ATBParseHex(colors[[@"raised." stringByAppendingString:mode]], &raised) ||
-            !ATBParseHex(colors[[@"bars." stringByAppendingString:mode]], &bars) ||
-            !ATBParseHex(colors[[@"text." stringByAppendingString:mode]], &text) ||
-            !ATBParseHex(colors[[@"mutedText." stringByAppendingString:mode]], &mutedText) ||
-            !ATBParseHex(colors[[@"accent." stringByAppendingString:mode]], &accent) ||
-            !ATBParseHex(colors[[@"separator." stringByAppendingString:mode]], &separator)) {
-            continue;
-        }
-        NSDictionary *surfaces = @{@"background": [NSValue valueWithBytes:&background objCType:@encode(ATBColor)],
-                                   @"card background": [NSValue valueWithBytes:&card objCType:@encode(ATBColor)],
-                                   @"raised background": [NSValue valueWithBytes:&raised objCType:@encode(ATBColor)],
-                                   @"bars and chrome": [NSValue valueWithBytes:&bars objCType:@encode(ATBColor)]};
-        for (NSString *name in surfaces) {
-            ATBColor surface;
-            [surfaces[name] getValue:&surface];
-            if (ATBContrastColors(text, surface) < 4.5) {
-                [issues addObject:[NSString stringWithFormat:@"%@ mode text may be hard to read on %@.", mode.capitalizedString, name]];
-            }
-            CGFloat mutedContrast = ATBContrastColors(mutedText, surface);
-            if (mutedContrast < 2.5) {
-                [issues addObject:[NSString stringWithFormat:@"%@ mode secondary text is too faint on %@.", mode.capitalizedString, name]];
-            } else if (mutedContrast < 3.0) {
-                [warnings addObject:[NSString stringWithFormat:@"%@ mode secondary text is slightly faint.", mode.capitalizedString]];
-            }
-        }
-        CGFloat accentContrast = MIN(ATBContrastColors(accent, background), ATBContrastColors(accent, card));
-        if (accentContrast < 2.0) [warnings addObject:[NSString stringWithFormat:@"%@ mode accent may be faint on selected controls.", mode.capitalizedString]];
-        if (ATBDistance(background, card) < 0.035 || ATBDistance(card, raised) < 0.035) {
-            [warnings addObject:[NSString stringWithFormat:@"%@ mode surfaces are very similar.", mode.capitalizedString]];
-        }
-        if (ATBSurfaceIntensity(background) > 0.30 || ATBSurfaceIntensity(card) > 0.30 || ATBSurfaceIntensity(raised) > 0.30) {
-            [warnings addObject:[NSString stringWithFormat:@"%@ mode backgrounds may feel intense during long reading sessions.", mode.capitalizedString]];
-        }
-        NSString *lowerPrompt = prompt.lowercaseString ?: @"";
-        BOOL oledAllowed = [lowerPrompt containsString:@"oled"] || [lowerPrompt containsString:@"amoled"] ||
-                           [lowerPrompt containsString:@"pure black"] || [lowerPrompt containsString:@"true black"];
-        if (!oledAllowed && [colors[[@"background." stringByAppendingString:mode]] isEqualToString:@"000000"]) {
-            [warnings addObject:[NSString stringWithFormat:@"%@ mode uses pure black as the main background.", mode.capitalizedString]];
-        }
-        CGFloat sepDistance = MIN(ATBDistance(separator, background), ATBDistance(separator, card));
-        if (sepDistance < 0.018) [warnings addObject:[NSString stringWithFormat:@"%@ mode separators may be too subtle.", mode.capitalizedString]];
-    }
-    NSInteger score = MAX(0, MIN(100, 100 - ((NSInteger)issues.count * 30) - ((NSInteger)warnings.count * 10)));
-    NSString *label = score >= 90 ? @"Excellent" : (score >= 75 ? @"Good" : (score >= 60 ? @"Needs tweaks" : @"Hard to read"));
-    NSString *summary = issues.count ? @"This theme needed readability fixes." :
-        (warnings.count ? @"Readable, with a few suggested tweaks." : @"Readable and well balanced.");
-    return @{@"score": @(score), @"passed": @(issues.count == 0), @"issues": issues, @"warnings": warnings,
-             @"qualityLabel": label, @"summary": summary};
-}
-
-// Fallback for a key the model omitted or returned an unparsable hex for.
-// Genuinely rare (every field is a required, guided-generation property), so a
-// plain neutral is enough — this is a last-resort safety net, not a design
-// choice, unlike v1's per-role "donor" defaults.
-static NSString *const kATBFallbackHex = @"808080";
-
-static NSDictionary<NSString *, NSString *> *ATBLocallyRepairedColors(NSDictionary<NSString *, NSString *> *input, NSString *prompt) {
-    NSMutableDictionary *colors = [NSMutableDictionary dictionary];
-    for (NSString *mode in @[@"light", @"dark"]) {
-        for (NSString *key in ApolloThemeInputKeys()) {
-            NSString *k = [NSString stringWithFormat:@"%@.%@", key, mode];
-            uint32_t rgb;
-            colors[k] = ApolloThemeParseHex(input[k], &rgb) ? ApolloThemeHexFromRGB(rgb) : kATBFallbackHex;
-        }
-        BOOL dark = [mode isEqualToString:@"dark"];
-        NSString *backgroundKey = [@"background." stringByAppendingString:mode];
-        NSString *cardKey = [@"card." stringByAppendingString:mode];
-        NSString *raisedKey = [@"raised." stringByAppendingString:mode];
-        if ([colors[cardKey] isEqualToString:colors[backgroundKey]]) {
-            ATBColor bg; ATBParseHex(colors[backgroundKey], &bg);
-            colors[cardKey] = ATBHexFromColor(ATBBlend(bg, dark ? (ATBColor){1,1,1} : (ATBColor){0,0,0}, 0.06));
-        }
-        if ([colors[raisedKey] isEqualToString:colors[cardKey]]) {
-            ATBColor card; ATBParseHex(colors[cardKey], &card);
-            colors[raisedKey] = ATBHexFromColor(ATBBlend(card, dark ? (ATBColor){1,1,1} : (ATBColor){0,0,0}, 0.07));
-        }
-        // Force primary and secondary text to clear WCAG contrast against ALL
-        // four surfaces at once (not one at a time), trying both lighten/darken
-        // directions — guarantees readable text whatever the model returned.
-        NSArray<NSString *> *surfaceHexes = @[colors[backgroundKey], colors[cardKey], colors[raisedKey],
-                                              colors[[@"bars." stringByAppendingString:mode]]];
-        colors[[@"text." stringByAppendingString:mode]] =
-            ATBReadableTextHex(colors[[@"text." stringByAppendingString:mode]], surfaceHexes, 4.5);
-        colors[[@"mutedText." stringByAppendingString:mode]] =
-            ATBReadableTextHex(colors[[@"mutedText." stringByAppendingString:mode]], surfaceHexes, 3.0);
-    }
-    return colors;
-}
-
-static NSDictionary *ATBJSONObjectFromData(NSData *data) {
-    id obj = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
-    return [obj isKindOfClass:NSDictionary.class] ? obj : nil;
-}
-
-static NSString *ATBJSONString(NSDictionary *dict) {
-    NSData *data = dict ? [NSJSONSerialization dataWithJSONObject:dict options:NSJSONWritingSortedKeys error:NULL] : nil;
-    return data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"";
-}
-
-// The Swift bridge's guided-generation struct fields already match the v2
-// input keys 1:1 (ApolloFoundationModels.swift ApolloGeneratedPalette), so
-// this is a direct copy rather than a role-name translation.
-static NSDictionary<NSString *, NSString *> *ATBColorsFromGeneratedTheme(NSDictionary *root) {
-    NSMutableDictionary *colors = [NSMutableDictionary dictionary];
-    NSDictionary *modeMap = @{@"light": @"lightMode", @"dark": @"darkMode"};
-    for (NSString *mode in modeMap) {
-        NSDictionary *palette = [root[modeMap[mode]] isKindOfClass:NSDictionary.class] ? root[modeMap[mode]] : @{};
-        for (NSString *key in ApolloThemeInputKeys()) {
-            uint32_t rgb;
-            if (ApolloThemeParseHex(palette[key], &rgb)) {
-                colors[[NSString stringWithFormat:@"%@.%@", key, mode]] = ApolloThemeHexFromRGB(rgb);
-            }
-        }
-    }
-    return colors;
+static NSString *ATBRefinePrompt(NSString *originalPrompt, NSDictionary *seeds, NSString *instruction) {
+    return [NSString stringWithFormat:
+        @"These three hex colors are the palette seeds for a theme inspired by \"%@\":\n"
+        @"1. Accent/highlight: #%@\n"
+        @"2. Primary surface: #%@\n"
+        @"3. Secondary surface: #%@\n"
+        @"\n"
+        @"Adjust them to follow this instruction: %@\n"
+        @"\n"
+        @"Keep the same roles and order, and keep the theme recognizable unless the "
+        @"instruction asks for a bigger change.\n"
+        @"\n"
+        @"%@",
+        originalPrompt, seeds[@"accent"], seeds[@"primary"], seeds[@"secondary"],
+        instruction, kATBReplyContract];
 }
 
 static NSString *ATBClampedPrompt(NSString *prompt) {
@@ -273,80 +100,242 @@ static NSString *ATBClampedPrompt(NSString *prompt) {
     return [trimmed substringToIndex:[trimmed rangeOfComposedCharacterSequencesForRange:NSMakeRange(0, 300)].length];
 }
 
-static NSDictionary *ATBResultFromJSON(NSString *json, NSString *prompt, NSError **outError) {
-    NSRange start = [json rangeOfString:@"{"];
-    NSRange end = [json rangeOfString:@"}" options:NSBackwardsSearch];
-    if (start.location == NSNotFound || end.location == NSNotFound || end.location <= start.location) {
-        if (outError) *outError = [NSError errorWithDomain:@"ApolloThemeAI" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Model output was not JSON."}];
-        return nil;
+// The engine's seed-similarity rule rotates the secondary hue away from the
+// primary so bars can read as a second colour — right for most prompts, wrong
+// for ones that WANT a single-hue palette. Small bounded keyword check; a
+// false negative just means slightly more colour separation than asked for.
+static BOOL ATBPromptWantsMonochrome(NSString *prompt) {
+    NSString *lower = prompt.lowercaseString;
+    for (NSString *keyword in @[@"monochrom", @"grayscale", @"greyscale",
+                                @"black and white", @"black & white", @"black-and-white",
+                                @"single color", @"single colour", @"one color", @"one colour"]) {
+        if ([lower containsString:keyword]) return YES;
     }
-    NSString *clean = [json substringWithRange:NSMakeRange(start.location, end.location - start.location + 1)];
-    NSDictionary *root = ATBJSONObjectFromData([clean dataUsingEncoding:NSUTF8StringEncoding]);
-    if (!root) {
-        if (outError) *outError = [NSError errorWithDomain:@"ApolloThemeAI" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Model output could not be parsed."}];
-        return nil;
+    return NO;
+}
+
+// ---------------------------------------------------------------------------
+// Seed parsing + repair. The reply SHOULD be "#RRGGBB, #RRGGBB, #RRGGBB" but
+// small models drift (bare codes, 3-digit shorthand, wrapping prose, bullet
+// lists), so: pass 1 collects #-prefixed codes anywhere; pass 2 collects bare
+// 6-digit tokens, requiring at least one decimal digit so hex-only English
+// words ("decade", "efface") can't parse as colours.
+// ---------------------------------------------------------------------------
+
+static NSArray<NSString *> *ATBMatchesForPattern(NSString *pattern, NSString *text) {
+    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:NULL];
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    [regex enumerateMatchesInString:text options:0 range:NSMakeRange(0, text.length)
+                         usingBlock:^(NSTextCheckingResult *match, NSMatchingFlags flags, BOOL *stop) {
+        [out addObject:[text substringWithRange:[match rangeAtIndex:1]]];
+    }];
+    return out;
+}
+
+static NSString *ATBExpandShortHex(NSString *hex) {
+    if (hex.length != 3) return hex;
+    NSMutableString *expanded = [NSMutableString stringWithCapacity:6];
+    for (NSUInteger i = 0; i < 3; i++) {
+        NSString *ch = [hex substringWithRange:NSMakeRange(i, 1)];
+        [expanded appendString:ch];
+        [expanded appendString:ch];
     }
-    NSDictionary *repaired = ATBLocallyRepairedColors(ATBColorsFromGeneratedTheme(root), prompt);
-    NSDictionary *validation = ApolloThemeAIValidateColors(repaired, prompt);
-    NSString *name = [root[@"name"] isKindOfClass:NSString.class] && [root[@"name"] length] ? root[@"name"] : @"Generated Theme";
-    if (name.length > 32) name = [name substringToIndex:[name rangeOfComposedCharacterSequencesForRange:NSMakeRange(0, 32)].length];
-    NSArray *notes = [root[@"accessibilityNotes"] isKindOfClass:NSArray.class] ? root[@"accessibilityNotes"] : @[];
-    NSArray *warnings = validation[@"warnings"];
-    if (!notes.count && [warnings count]) notes = [warnings subarrayWithRange:NSMakeRange(0, MIN((NSUInteger)3, [warnings count]))];
+    return expanded;
+}
+
+static BOOL ATBContainsDecimalDigit(NSString *s) {
+    return [s rangeOfCharacterFromSet:NSCharacterSet.decimalDigitCharacterSet].location != NSNotFound;
+}
+
+// Up to the first three parseable colours, in reply order.
+static NSArray<NSNumber *> *ATBParseSeedRGBs(NSString *text) {
+    if (!text.length) return @[];
+    NSMutableArray<NSNumber *> *rgbs = [NSMutableArray array];
+    void (^add)(NSString *) = ^(NSString *hex) {
+        uint32_t rgb;
+        if (rgbs.count < 3 && ApolloThemeParseHex(ATBExpandShortHex(hex), &rgb)) {
+            [rgbs addObject:@(rgb)];
+        }
+    };
+    for (NSString *hex in ATBMatchesForPattern(@"#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{3})\\b", text)) add(hex);
+    if (rgbs.count < 3) {
+        for (NSString *hex in ATBMatchesForPattern(@"(?<![0-9A-Fa-f#])([0-9A-Fa-f]{6})(?![0-9A-Fa-f])", text)) {
+            if (ATBContainsDecimalDigit(hex)) add(hex);
+        }
+    }
+    return rgbs;
+}
+
+// Deterministic repair for partial replies (roles are positional, so a short
+// reply keeps its strongest signal — the accent — first):
+//   generation: reuse the last parsed colour for missing surfaces; the
+//     engine's similarity rule still guarantees a sane two-tone result.
+//   refine: keep the CURRENT seed for a missing role instead, so a terse
+//     reply adjusts what it named and preserves the rest of the theme.
+static ApolloThemeAISeeds ATBRepairedSeeds(NSArray<NSNumber *> *rgbs, const ApolloThemeAISeeds *_Nullable fallback) {
+    uint32_t accent = rgbs.count > 0 ? rgbs[0].unsignedIntValue : (fallback ? fallback->accent : 0);
+    uint32_t primary = rgbs.count > 1 ? rgbs[1].unsignedIntValue : (fallback ? fallback->primary : accent);
+    uint32_t secondary = rgbs.count > 2 ? rgbs[2].unsignedIntValue : (fallback ? fallback->secondary : primary);
+    return (ApolloThemeAISeeds){ .accent = accent, .primary = primary, .secondary = secondary };
+}
+
+// ---------------------------------------------------------------------------
+// Generation-set assembly. Every variant is derived on-device from the seeds,
+// so the whole set is reproducible from `seeds` + `allowMonochrome` alone —
+// that pair is what's worth persisting (and what refine round-trips).
+// ---------------------------------------------------------------------------
+
+static NSString *ATBSeedHex(uint32_t rgb) { return ApolloThemeHexFromRGB(rgb); }
+
+// A short display name from the prompt itself ("spiderman" -> "Spiderman").
+// First letter of each word is uppercased but existing capitals are kept
+// (so "OLED purple" -> "OLED Purple", not "Oled Purple").
+static NSString *ATBNameFromPrompt(NSString *prompt) {
+    NSArray<NSString *> *words = [prompt componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSMutableArray<NSString *> *kept = [NSMutableArray array];
+    NSUInteger length = 0;
+    for (NSString *word in words) {
+        if (!word.length) continue;
+        if (kept.count == 4 || length + word.length > 28) break;
+        NSString *first = [[word substringToIndex:1] uppercaseString];
+        [kept addObject:[first stringByAppendingString:[word substringFromIndex:1]]];
+        length += word.length + 1;
+    }
+    return kept.count ? [kept componentsJoinedByString:@" "] : @"Generated Theme";
+}
+
+static NSString *ATBVariantDescription(ApolloThemeAIIntensity intensity) {
+    switch (intensity) {
+        case ApolloThemeAIIntensitySubtle:   return @"Tinted — a gentle wash of the theme's colours.";
+        case ApolloThemeAIIntensityBold:     return @"Immersive — surfaces soaked in the theme's colours.";
+        case ApolloThemeAIIntensityBalanced:
+        default:                             return @"Themed — confident colour that stays easy to read.";
+    }
+}
+
+static NSDictionary *ATBBuildThemeSet(NSString *originalPrompt,
+                                      ApolloThemeAISeeds seeds,
+                                      BOOL allowMonochrome,
+                                      NSString *rawModelOutput) {
+    NSDictionary *seedDict = @{
+        @"accent": ATBSeedHex(seeds.accent),
+        @"primary": ATBSeedHex(seeds.primary),
+        @"secondary": ATBSeedHex(seeds.secondary),
+    };
+    NSMutableArray *variants = [NSMutableArray arrayWithCapacity:ApolloThemeAIIntensityCount];
+    for (ApolloThemeAIIntensity intensity = 0; intensity < ApolloThemeAIIntensityCount; intensity++) {
+        [variants addObject:@{
+            @"intensity": ApolloThemeAIIntensityKey(intensity),
+            @"name": ApolloThemeAIIntensityDisplayName(intensity),
+            @"shortDescription": ATBVariantDescription(intensity),
+            @"colors": ApolloThemePaletteEngineGenerate(seeds, allowMonochrome, 0, intensity),
+        }];
+    }
+    NSDictionary *seedJSONDict = @{ @"seeds": seedDict, @"allowMonochrome": @(allowMonochrome) };
+    NSData *seedJSONData = [NSJSONSerialization dataWithJSONObject:seedJSONDict options:NSJSONWritingSortedKeys error:NULL];
+    ApolloLog(@"ThemeAI: built set seeds=%@ mono=%d", seedDict, allowMonochrome);
     return @{
-        @"name": name,
-        @"shortDescription": [root[@"shortDescription"] isKindOfClass:NSString.class] ? root[@"shortDescription"] : @"Generated from your prompt.",
-        @"colors": repaired,
-        @"notes": notes,
-        @"suggestedTweaks": [root[@"suggestedTweaks"] isKindOfClass:NSArray.class] ? root[@"suggestedTweaks"] : @[],
-        @"validation": validation,
-        @"validationScore": validation[@"score"] ?: @0,
-        @"qualityLabel": validation[@"qualityLabel"] ?: @"Good",
-        @"qualitySummary": validation[@"summary"] ?: @"Readable and ready to tweak.",
-        @"originalPrompt": prompt ?: @"",
+        @"originalPrompt": originalPrompt ?: @"",
+        @"name": ATBNameFromPrompt(originalPrompt ?: @""),
+        @"shortDescription": [NSString stringWithFormat:@"Built from #%@, #%@ and #%@.",
+                              seedDict[@"accent"], seedDict[@"primary"], seedDict[@"secondary"]],
+        @"seeds": seedDict,
+        @"allowMonochrome": @(allowMonochrome),
+        @"rawModelOutput": rawModelOutput ?: @"",
+        @"themeJSON": seedJSONData ? [[NSString alloc] initWithData:seedJSONData encoding:NSUTF8StringEncoding] : @"",
+        @"variants": variants,
     };
 }
 
-static void ATBGenerate(NSString *prompt, NSDictionary *current, NSString *instruction, ApolloThemeAICompletion completion) {
-    NSString *cleanPrompt = ATBClampedPrompt(prompt);
-    if (!cleanPrompt.length) {
-        if (completion) completion(nil, [NSError errorWithDomain:@"ApolloThemeAI" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Describe the kind of theme you want first."}]);
+// ---------------------------------------------------------------------------
+// Requests. One retry on a colourless reply — a fresh sample usually fixes a
+// format drift; a second identical failure means the prompt itself confuses
+// the model and the user should rephrase.
+// ---------------------------------------------------------------------------
+
+static void ATBRequestSeedRGBs(NSString *modelPrompt,
+                               NSUInteger attempt,
+                               void (^completion)(NSArray<NSNumber *> *_Nullable rgbs, NSString *rawOutput, NSError *_Nullable error)) {
+    ApolloFoundationModels *bridge = ATBBridge();
+    if (!bridge) {
+        completion(nil, @"", ATBError(4, ApolloThemeAIUnavailableMessage()));
         return;
     }
-    if (!ApolloThemeAIIsAvailable()) {
-        if (completion) completion(nil, [NSError errorWithDomain:@"ApolloThemeAI" code:4 userInfo:@{NSLocalizedDescriptionKey: ApolloThemeAIUnavailableMessage()}]);
-        return;
-    }
-    NSString *currentJSON = current ? ATBJSONString(current) : @"";
-    ApolloLog(@"ThemeAI: starting generation promptLength=%lu modify=%d", (unsigned long)cleanPrompt.length, instruction.length > 0);
-    [ATBBridge() generateThemeJSONWithPrompt:cleanPrompt
-                                  identifier:kATBRequestID
-                                 currentJSON:currentJSON
-                                 instruction:instruction ?: @""
-                       maximumResponseTokens:1600
-                                  onComplete:^(NSString *json, NSError *error) {
-        if (error || !json.length) {
-            if (completion) completion(nil, error ?: [NSError errorWithDomain:@"ApolloThemeAI" code:5 userInfo:@{NSLocalizedDescriptionKey: @"Couldn’t generate a usable theme from that prompt."}]);
+    [bridge plainCompletion:modelPrompt identifier:kATBRequestID onComplete:^(NSString *text, NSError *error) {
+        if (error) {
+            completion(nil, text ?: @"", error);
             return;
         }
-        NSError *parseError = nil;
-        NSDictionary *result = ATBResultFromJSON(json, cleanPrompt, &parseError);
-        if (!result) {
-            if (completion) completion(nil, parseError);
-            return;
+        NSArray<NSNumber *> *rgbs = ATBParseSeedRGBs(text);
+        ApolloLog(@"ThemeAI: attempt %lu parsed %lu seed(s) from reply '%@'",
+                  (unsigned long)attempt, (unsigned long)rgbs.count, text);
+        if (rgbs.count) {
+            completion(rgbs, text ?: @"", nil);
+        } else if (attempt == 0) {
+            ATBRequestSeedRGBs(modelPrompt, 1, completion);
+        } else {
+            completion(nil, text ?: @"",
+                       ATBError(2, @"Couldn’t get usable colours for that prompt. Try rephrasing it."));
         }
-        ApolloLog(@"ThemeAI: generation succeeded score=%@", result[@"validationScore"]);
-        if (completion) completion(result, nil);
     }];
 }
 
-void ApolloThemeAIGenerateTheme(NSString *prompt, ApolloThemeAICompletion completion) {
-    ATBGenerate(prompt, nil, nil, completion);
+// ---------------------------------------------------------------------------
+// Public entry points
+// ---------------------------------------------------------------------------
+
+void ApolloThemeAIGenerateThemeSet(NSString *prompt, ApolloThemeAICompletion completion) {
+    NSString *cleanPrompt = ATBClampedPrompt(prompt);
+    if (!cleanPrompt.length) {
+        if (completion) completion(nil, ATBError(1, @"Describe the kind of theme you want first."));
+        return;
+    }
+    if (!ApolloThemeAIIsAvailable()) {
+        if (completion) completion(nil, ATBError(4, ApolloThemeAIUnavailableMessage()));
+        return;
+    }
+    ApolloLog(@"ThemeAI: generating seeds for prompt='%@'", cleanPrompt);
+    BOOL allowMonochrome = ATBPromptWantsMonochrome(cleanPrompt);
+    ATBRequestSeedRGBs(ATBGenerationPrompt(cleanPrompt), 0, ^(NSArray<NSNumber *> *rgbs, NSString *rawOutput, NSError *error) {
+        if (error) {
+            ApolloLog(@"ThemeAI: generation FAILED: %@", error);
+            if (completion) completion(nil, error);
+            return;
+        }
+        ApolloThemeAISeeds seeds = ATBRepairedSeeds(rgbs, NULL);
+        if (completion) completion(ATBBuildThemeSet(cleanPrompt, seeds, allowMonochrome, rawOutput), nil);
+    });
 }
 
-void ApolloThemeAIModifyTheme(NSDictionary *themeResult, NSString *instruction, ApolloThemeAICompletion completion) {
-    NSString *prompt = themeResult[@"originalPrompt"] ?: themeResult[@"name"] ?: @"custom theme";
-    ATBGenerate(prompt, themeResult, instruction, completion);
+void ApolloThemeAIRefineThemeSet(NSDictionary *themeSet, NSString *selectedIntensity, NSString *instruction, ApolloThemeAICompletion completion) {
+    NSString *originalPrompt = [themeSet[@"originalPrompt"] isKindOfClass:NSString.class] ? themeSet[@"originalPrompt"] : @"";
+    NSString *cleanInstruction = ATBClampedPrompt(instruction ?: @"");
+    NSDictionary *currentSeeds = [themeSet[@"seeds"] isKindOfClass:NSDictionary.class] ? themeSet[@"seeds"] : nil;
+    uint32_t accent, primary, secondary;
+    if (!cleanInstruction.length) {
+        if (completion) completion(nil, ATBError(1, @"Describe the change you want first."));
+        return;
+    }
+    if (!currentSeeds
+        || !ApolloThemeParseHex(currentSeeds[@"accent"], &accent)
+        || !ApolloThemeParseHex(currentSeeds[@"primary"], &primary)
+        || !ApolloThemeParseHex(currentSeeds[@"secondary"], &secondary)) {
+        if (completion) completion(nil, ATBError(3, @"This theme can’t be refined — regenerate it first."));
+        return;
+    }
+    BOOL allowMonochrome = [themeSet[@"allowMonochrome"] boolValue] || ATBPromptWantsMonochrome(cleanInstruction);
+    ApolloThemeAISeeds fallback = { .accent = accent, .primary = primary, .secondary = secondary };
+    ApolloLog(@"ThemeAI: refining seeds %@ with instruction='%@'", currentSeeds, cleanInstruction);
+    ATBRequestSeedRGBs(ATBRefinePrompt(originalPrompt, currentSeeds, cleanInstruction), 0,
+                       ^(NSArray<NSNumber *> *rgbs, NSString *rawOutput, NSError *error) {
+        if (error) {
+            ApolloLog(@"ThemeAI: refine FAILED: %@", error);
+            if (completion) completion(nil, error);
+            return;
+        }
+        ApolloThemeAISeeds seeds = ATBRepairedSeeds(rgbs, &fallback);
+        if (completion) completion(ATBBuildThemeSet(originalPrompt, seeds, allowMonochrome, rawOutput), nil);
+    });
 }
 
 void ApolloThemeAICancel(void) {
