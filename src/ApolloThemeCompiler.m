@@ -237,11 +237,12 @@ static uint32_t InputColor(NSDictionary *modeInput, NSString *key, ApolloThemeMo
     // --- separators (override-aware) ---
     uint32_t separator, opaqueSeparator;
     if (sepSet) {
-        // Ensure the user's separator is at least faintly visible on background.
+        // Trust an explicit Advanced override exactly, including a separator
+        // set equal to the background to hide dividers entirely — that's a
+        // deliberate choice, not something to second-guess with a contrast
+        // floor the way the derived (non-override) branch below does.
         separator = sepIn;
-        if (ApolloThemeContrastRatio(separator, background) < 1.15)
-            separator = Mix(separator, label, 0.10);
-        opaqueSeparator = Mix(separator, label, 0.06);
+        opaqueSeparator = separator;
     } else {
         separator       = Mix(background, label, tune.separatorMix);
         opaqueSeparator = Mix(background, label, tune.opaqueSepMix);
