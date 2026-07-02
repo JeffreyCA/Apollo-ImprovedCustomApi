@@ -15,6 +15,7 @@ NSString * const kApolloThemeInputSeparator  = @"separator";
 NSString * const kApolloRebornCustomThemeEnabledKey   = @"ApolloReborn.customThemeEnabled";
 NSString * const kApolloRebornCustomThemesKey         = @"ApolloReborn.customThemes";
 NSString * const kApolloRebornActiveCustomThemeIDKey  = @"ApolloReborn.activeCustomThemeID";
+NSString * const kApolloRebornActiveThemePointerKey   = @"ApolloReborn.activeThemePointer";
 NSString * const kApolloRebornPreviousApolloThemeKey  = @"ApolloReborn.previousApolloTheme";
 NSString * const kApolloRebornRuntimeDonorThemeKey    = @"ApolloReborn.runtimeDonorTheme";
 NSString * const kApolloRebornThemeSchemaVersionKey   = @"ApolloReborn.themeSchemaVersion";
@@ -22,8 +23,22 @@ NSString * const kApolloRebornThemeRuntimeDisabledKey = @"ApolloReborn.themeRunt
 NSString * const kApolloRebornThemeV1BackupKey        = @"ApolloReborn.themeV1Backup";
 NSString * const kApolloThemeAdvancedOptionsEnabledKey = @"advancedEnabled";
 NSString * const kApolloThemeFontKey                    = @"font";
+NSString * const kApolloThemeOriginKey                  = @"origin";
 
-const NSInteger kApolloThemeSchemaVersion = 2;
+NSString * const kApolloThemeOriginCreated   = @"created";
+NSString * const kApolloThemeOriginGenerated = @"generated";
+NSString * const kApolloThemeOriginImported  = @"imported";
+NSString * const kApolloThemeOriginGallery   = @"gallery";
+
+NSString *ApolloThemeOriginForTheme(NSDictionary *theme) {
+    id origin = [theme isKindOfClass:[NSDictionary class]] ? theme[kApolloThemeOriginKey] : nil;
+    if ([origin isEqual:kApolloThemeOriginGenerated] ||
+        [origin isEqual:kApolloThemeOriginImported] ||
+        [origin isEqual:kApolloThemeOriginGallery]) return origin;
+    return kApolloThemeOriginCreated; // absent/unknown (pre-v3 themes) = user-made
+}
+
+const NSInteger kApolloThemeSchemaVersion = 3;
 
 // Token <-> string key. Index-aligned with ApolloThemeToken; keys match the
 // compiled-table JSON in the spec (§5.3).

@@ -12,13 +12,55 @@ __BEGIN_DECLS
 
 NS_ASSUME_NONNULL_BEGIN
 
+// What kind of theme the active-selection pointer names. "Apollo" means the
+// custom runtime is inactive and Apollo's own theme system is in charge —
+// there is no separate enable flag; enablement is DERIVED from this.
+typedef NS_ENUM(NSUInteger, ApolloThemeSelectionKind) {
+    ApolloThemeSelectionApollo = 0,
+    ApolloThemeSelectionCustom,   // a stored theme (My Themes / Imported), by id
+    ApolloThemeSelectionGallery,  // a catalog preset, by slug (applied by reference)
+};
+
+// Resolves a gallery slug to a theme-shaped dict (name/input/variant/advanced/
+// font) or nil. Registered by the gallery catalog module at load; absent
+// resolver = every slug unresolvable (older build), which falls back to Apollo.
+typedef NSDictionary *_Nullable (^ApolloThemeGalleryResolver)(NSString *slug);
+
 @interface ApolloThemeStore : NSObject
 
 + (instancetype)shared;
 
-#pragma mark - Enable flag
+#pragma mark - Active selection (spec: hub IA)
 
-@property (nonatomic) BOOL customThemeEnabled;
+// Raw pointer kind, no fallback — what the user last chose, even if a gallery
+// slug no longer resolves. Recovery/summary UI wants this.
+- (ApolloThemeSelectionKind)storedSelectionKind;
+// Resolved kind: gallery pointer whose slug doesn't resolve reads as Apollo
+// (non-destructively — the pointer is left intact so a later build that knows
+// the slug brings the theme back, e.g. Backup/Restore across versions).
+- (ApolloThemeSelectionKind)activeSelectionKind;
+
+- (void)selectApolloTheme;                       // custom runtime off; keeps last id/slug as memory
+- (void)selectCustomTheme:(NSString *)themeID;   // stored theme active
+- (void)selectGalleryTheme:(NSString *)slug;     // catalog preset active, by reference
+// Flip an "apollo" pointer back to the remembered custom/gallery selection
+// (falling back to the first stored theme). NO when there is nothing to
+// restore; already-custom pointers are kept as-is.
+- (BOOL)restoreLastCustomSelection;
+
+// Stored slug when the pointer is (or remembers) a gallery selection.
+- (nullable NSString *)activeGallerySlug;
+
+// Derived: resolved kind != Apollo, and the crash kill-switch hasn't tripped.
+// Read-only — change it by selecting something.
+@property (nonatomic, readonly) BOOL customThemeEnabled;
+
+#pragma mark - Gallery catalog bridge
+
++ (void)registerGalleryResolver:(nullable ApolloThemeGalleryResolver)resolver;
+// Synthesized read-only theme dict for a catalog slug (id "gallery:<slug>",
+// origin "gallery") or nil when unknown. Never persisted into allThemes.
+- (nullable NSDictionary *)galleryThemeForSlug:(nullable NSString *)slug;
 
 #pragma mark - Themes
 
@@ -26,7 +68,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSArray<NSDictionary *> *)allThemes;
 - (nullable NSDictionary *)themeWithID:(NSString *)themeID;
 
+// The stored theme id when the pointer kind is Custom, else nil. The setter is
+// a selection shim: non-nil selects that custom theme, nil selects Apollo.
 @property (nonatomic, copy, nullable) NSString *activeThemeID;
+// Resolved theme dict for the pointer: stored theme for Custom, synthesized
+// catalog dict for Gallery, nil for Apollo.
 - (nullable NSDictionary *)activeTheme;
 
 #pragma mark - CRUD

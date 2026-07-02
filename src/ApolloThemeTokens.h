@@ -19,6 +19,8 @@
 
 __BEGIN_DECLS
 
+NS_ASSUME_NONNULL_BEGIN
+
 #pragma mark - Semantic tokens (spec §6)
 
 // The closed set of runtime tokens. Every runtime colour hook resolves to one
@@ -57,7 +59,7 @@ typedef NS_ENUM(NSUInteger, ApolloThemeToken) {
 
 // Stable string key for a token (for compiled-table JSON / debug logging).
 // Returns nil for out-of-range tokens.
-NSString *ApolloThemeTokenKey(ApolloThemeToken token);
+NSString *_Nullable ApolloThemeTokenKey(ApolloThemeToken token);
 // Inverse of ApolloThemeTokenKey; returns ApolloThemeTokenCount if unknown.
 ApolloThemeToken ApolloThemeTokenFromKey(NSString *key);
 
@@ -140,9 +142,13 @@ NSString *ApolloThemeModeKey(ApolloThemeMode mode);
 #pragma mark - Defaults keys (spec §5.1)
 
 // Stored in the Apollo app group so themes ride along with Backup/Restore.
-extern NSString * const kApolloRebornCustomThemeEnabledKey;     // BOOL
+extern NSString * const kApolloRebornCustomThemeEnabledKey;     // BOOL (legacy, pre-v3; migration input only)
 extern NSString * const kApolloRebornCustomThemesKey;           // [theme dict]
-extern NSString * const kApolloRebornActiveCustomThemeIDKey;    // NSString (UUID)
+extern NSString * const kApolloRebornActiveCustomThemeIDKey;    // NSString (legacy, pre-v3; migration input only)
+// v3 active-selection pointer: {kind: "apollo"|"custom"|"gallery", id?: UUID, slug?: gallery slug}.
+// `id`/`slug` double as the memory of the last custom/gallery selection while
+// kind is "apollo", so re-enabling custom theming restores what was active.
+extern NSString * const kApolloRebornActiveThemePointerKey;     // NSDictionary
 extern NSString * const kApolloRebornPreviousApolloThemeKey;    // NSString (AppColorTheme name)
 extern NSString * const kApolloRebornRuntimeDonorThemeKey;      // NSString ("outrun")
 extern NSString * const kApolloRebornThemeSchemaVersionKey;     // NSInteger
@@ -153,14 +159,27 @@ extern NSString * const kApolloThemeAdvancedOptionsEnabledKey;  // BOOL
 // Theme-dict key holding an ApolloThemeFontKey() string; absent = system font.
 extern NSString * const kApolloThemeFontKey;                    // NSString
 
+// Theme-dict key recording where a stored theme came from. Immutable once set:
+// editing an imported theme does NOT promote it (origin is provenance, not
+// ownership), and it drives which section a theme renders in. Not exported —
+// the receiving side stamps "imported" on import.
+extern NSString * const kApolloThemeOriginKey;                  // NSString
+extern NSString * const kApolloThemeOriginCreated;              // "created" (manual, gallery-forked, migrated)
+extern NSString * const kApolloThemeOriginGenerated;            // "generated" (AI)
+extern NSString * const kApolloThemeOriginImported;             // "imported" (theme files)
+extern NSString * const kApolloThemeOriginGallery;              // "gallery" (synthesized catalog dicts only, never stored)
+// Normalised origin for a theme dict; absent/unknown reads as "created" so
+// every pre-v3 theme lands in My Themes.
+NSString *ApolloThemeOriginForTheme(NSDictionary *_Nullable theme);
+
 // Current schema version.
-extern const NSInteger kApolloThemeSchemaVersion; // = 2
+extern const NSInteger kApolloThemeSchemaVersion; // = 3
 
 #pragma mark - RGB helpers
 
 // Packed 0x00RRGGBB. Hex parsing is strict (exactly 6 hex digits, optional
 // leading '#'); returns NO on any malformed string.
-BOOL ApolloThemeParseHex(NSString *hex, uint32_t *outRGB);
+BOOL ApolloThemeParseHex(NSString *hex, uint32_t *_Nullable outRGB);
 NSString *ApolloThemeHexFromRGB(uint32_t rgb);
 #if __has_include(<UIKit/UIKit.h>)
 UIColor *ApolloThemeUIColorFromRGB(uint32_t rgb);
@@ -185,5 +204,7 @@ uint32_t ApolloThemeRGBFromHSL(ApolloThemeHSL hsl);
 CGFloat ApolloThemeClampHueDegrees(NSInteger value);
 // Shortest angular distance between two hues, in degrees [0, 180].
 CGFloat ApolloThemeHueDistance(CGFloat a, CGFloat b);
+
+NS_ASSUME_NONNULL_END
 
 __END_DECLS

@@ -215,8 +215,12 @@ if [[ "$FRESH_APP" == 1 || ! -d "$APP_DIR" ]]; then
 
     write_patcher
     # Patch every Mach-O in the bundle (main binary + appex + frameworks).
-    mapfile -t MACHOS < <(find "$APP_DIR" -type f -print0 \
-        | while IFS= read -r -d '' f; do file "$f" 2>/dev/null | grep -q 'Mach-O' && printf '%s\n' "$f"; done)
+    MACHOS=()
+    while IFS= read -r -d '' f; do
+        if file "$f" 2>/dev/null | grep -q 'Mach-O'; then
+            MACHOS+=("$f")
+        fi
+    done < <(find "$APP_DIR" -type f -print0)
     log "Patching ${#MACHOS[@]} Mach-O files to iOS-Simulator platform"
     python3 "$PATCH_PY" "${MACHOS[@]}"
 

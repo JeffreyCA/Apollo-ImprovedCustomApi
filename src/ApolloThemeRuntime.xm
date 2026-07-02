@@ -768,7 +768,7 @@ void ApolloThemeRuntimeEnable(void) {
         store.previousApolloTheme = current;
     }
     [GroupDefaults() setObject:donor forKey:kAppColorThemeKey];
-    store.customThemeEnabled = YES;
+    [store restoreLastCustomSelection];
     ApolloThemeRuntimeReload();
     SetLiveAppColorThemeRaw(kDonorThemeRawValue);
     ApolloThemeRuntimeInvalidate();
@@ -777,7 +777,7 @@ void ApolloThemeRuntimeEnable(void) {
 
 void ApolloThemeRuntimeDisable(void) {
     ApolloThemeStore *store = [ApolloThemeStore shared];
-    store.customThemeEnabled = NO;
+    [store selectApolloTheme];
     os_unfair_lock_lock(&sLock);
     sEnabled = false;
     sEpoch++;

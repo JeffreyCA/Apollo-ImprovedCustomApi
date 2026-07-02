@@ -170,12 +170,116 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
     return s;
 }
 
-#pragma mark - Enable flag
+#pragma mark - Active selection
 
-- (BOOL)customThemeEnabled { return [GroupDefaults() boolForKey:kApolloRebornCustomThemeEnabledKey]; }
-- (void)setCustomThemeEnabled:(BOOL)enabled {
-    ApolloLog(@"ThemeStore: customThemeEnabled = %@", enabled ? @"YES" : @"NO");
-    [GroupDefaults() setBool:enabled forKey:kApolloRebornCustomThemeEnabledKey];
+// The pointer is the single source of truth for what's active. Kind strings
+// are persisted (unlike token enums) so they must stay stable.
+static NSString * const kPointerKindKey  = @"kind";
+static NSString * const kPointerIDKey    = @"id";
+static NSString * const kPointerSlugKey  = @"slug";
+static NSString * const kPointerApollo   = @"apollo";
+static NSString * const kPointerCustom   = @"custom";
+static NSString * const kPointerGallery  = @"gallery";
+
+static ApolloThemeGalleryResolver sGalleryResolver = nil;
+
++ (void)registerGalleryResolver:(ApolloThemeGalleryResolver)resolver {
+    sGalleryResolver = [resolver copy];
+    ApolloLog(@"ThemeStore: gallery resolver %@", resolver ? @"registered" : @"cleared");
+}
+
+- (NSDictionary *)galleryThemeForSlug:(NSString *)slug {
+    if (slug.length == 0 || !sGalleryResolver) return nil;
+    NSDictionary *preset = sGalleryResolver(slug);
+    if (![preset isKindOfClass:[NSDictionary class]]) return nil;
+    NSMutableDictionary *theme = [preset mutableCopy];
+    theme[@"id"] = [@"gallery:" stringByAppendingString:slug];
+    theme[@"gallerySlug"] = slug;
+    theme[kApolloThemeOriginKey] = kApolloThemeOriginGallery;
+    return theme;
+}
+
+- (NSDictionary *)activePointer {
+    NSDictionary *d = [GroupDefaults() dictionaryForKey:kApolloRebornActiveThemePointerKey];
+    return [d isKindOfClass:[NSDictionary class]] ? d : @{ kPointerKindKey: kPointerApollo };
+}
+
+- (void)setActivePointer:(NSDictionary *)pointer {
+    ApolloLog(@"ThemeStore: activePointer = %@", pointer);
+    [GroupDefaults() setObject:pointer forKey:kApolloRebornActiveThemePointerKey];
+}
+
+- (ApolloThemeSelectionKind)storedSelectionKind {
+    NSString *kind = [self activePointer][kPointerKindKey];
+    if ([kind isEqual:kPointerCustom])  return ApolloThemeSelectionCustom;
+    if ([kind isEqual:kPointerGallery]) return ApolloThemeSelectionGallery;
+    return ApolloThemeSelectionApollo;
+}
+
+- (ApolloThemeSelectionKind)activeSelectionKind {
+    NSDictionary *p = [self activePointer];
+    switch ([self storedSelectionKind]) {
+        case ApolloThemeSelectionGallery:
+            // Unknown slug (older build / renamed catalog entry): fall back to
+            // Apollo WITHOUT rewriting the pointer, so the theme comes back on
+            // a build that knows it.
+            if (![self galleryThemeForSlug:p[kPointerSlugKey]]) {
+                ApolloLog(@"ThemeStore: gallery slug '%@' unresolvable — resolving as Apollo", p[kPointerSlugKey]);
+                return ApolloThemeSelectionApollo;
+            }
+            return ApolloThemeSelectionGallery;
+        case ApolloThemeSelectionCustom:
+            // Dangling id with no themes at all resolves to Apollo; with themes
+            // present, activeTheme's firstObject fallback keeps Custom viable.
+            if (![self themeWithID:p[kPointerIDKey]] && [self allThemes].count == 0) {
+                return ApolloThemeSelectionApollo;
+            }
+            return ApolloThemeSelectionCustom;
+        case ApolloThemeSelectionApollo:
+            return ApolloThemeSelectionApollo;
+    }
+}
+
+- (void)selectApolloTheme {
+    // Keep id/slug as the memory of the last custom selection.
+    NSMutableDictionary *p = [[self activePointer] mutableCopy];
+    p[kPointerKindKey] = kPointerApollo;
+    [self setActivePointer:p];
+}
+
+- (void)selectCustomTheme:(NSString *)themeID {
+    if (themeID.length == 0) { [self selectApolloTheme]; return; }
+    [self setActivePointer:@{ kPointerKindKey: kPointerCustom, kPointerIDKey: themeID }];
+}
+
+- (void)selectGalleryTheme:(NSString *)slug {
+    if (slug.length == 0) { [self selectApolloTheme]; return; }
+    [self setActivePointer:@{ kPointerKindKey: kPointerGallery, kPointerSlugKey: slug }];
+}
+
+- (BOOL)restoreLastCustomSelection {
+    NSDictionary *p = [self activePointer];
+    ApolloThemeSelectionKind stored = [self storedSelectionKind];
+    // Already pointing at something custom that resolves: nothing to do.
+    if (stored == ApolloThemeSelectionGallery && [self galleryThemeForSlug:p[kPointerSlugKey]]) return YES;
+    if (stored == ApolloThemeSelectionCustom && [self themeWithID:p[kPointerIDKey]]) return YES;
+    // Restore from the remembered payload (only one of slug/id is ever kept).
+    if ([self galleryThemeForSlug:p[kPointerSlugKey]]) { [self selectGalleryTheme:p[kPointerSlugKey]]; return YES; }
+    if ([self themeWithID:p[kPointerIDKey]]) { [self selectCustomTheme:p[kPointerIDKey]]; return YES; }
+    NSString *firstID = [self allThemes].firstObject[@"id"];
+    if (firstID) { [self selectCustomTheme:firstID]; return YES; }
+    ApolloLog(@"ThemeStore: restoreLastCustomSelection — nothing restorable");
+    return NO;
+}
+
+- (NSString *)activeGallerySlug {
+    NSString *slug = [self activePointer][kPointerSlugKey];
+    return [slug isKindOfClass:[NSString class]] && slug.length ? slug : nil;
+}
+
+- (BOOL)customThemeEnabled {
+    return [self activeSelectionKind] != ApolloThemeSelectionApollo
+        && ![self runtimeDisabledDueToCrash];
 }
 
 #pragma mark - Themes
@@ -211,17 +315,31 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
     return nil;
 }
 
-- (NSString *)activeThemeID { return [GroupDefaults() stringForKey:kApolloRebornActiveCustomThemeIDKey]; }
+- (NSString *)activeThemeID {
+    if ([self storedSelectionKind] != ApolloThemeSelectionCustom) return nil;
+    NSString *themeID = [self activePointer][kPointerIDKey];
+    return [themeID isKindOfClass:[NSString class]] && themeID.length ? themeID : nil;
+}
 - (void)setActiveThemeID:(NSString *)activeThemeID {
     ApolloLog(@"ThemeStore: activeThemeID = %@", activeThemeID ?: @"(none)");
-    if (activeThemeID) [GroupDefaults() setObject:activeThemeID forKey:kApolloRebornActiveCustomThemeIDKey];
-    else [GroupDefaults() removeObjectForKey:kApolloRebornActiveCustomThemeIDKey];
+    if (activeThemeID) [self selectCustomTheme:activeThemeID];
+    else [self selectApolloTheme];
 }
 
 - (NSDictionary *)activeTheme {
-    NSDictionary *t = [self themeWithID:self.activeThemeID];
-    if (t) return t;
-    return [self allThemes].firstObject;
+    NSDictionary *p = [self activePointer];
+    switch ([self storedSelectionKind]) {
+        case ApolloThemeSelectionGallery:
+            return [self galleryThemeForSlug:p[kPointerSlugKey]];
+        case ApolloThemeSelectionCustom: {
+            // Defensive firstObject fallback: deleteTheme repoints, so a
+            // dangling id here means external state damage, not normal flow.
+            NSDictionary *t = [self themeWithID:p[kPointerIDKey]];
+            return t ?: [self allThemes].firstObject;
+        }
+        case ApolloThemeSelectionApollo:
+            return nil;
+    }
 }
 
 #pragma mark - CRUD
@@ -240,6 +358,11 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
     // re-imported theme keeps any dormant overrides intact and they reappear
     // correctly if Advanced is turned back on later.
     NSDictionary *normalizedInput = NormalizeInput(input ?: StarterInput());
+    // Origin is provenance, stamped once at creation: AI generation is the only
+    // path that isn't "created" here; imports stamp "imported" over this in
+    // importParsedTheme (an exported AI theme still arrives as imported).
+    NSString *origin = [generation[@"source"] isEqual:@"ai"]
+        ? kApolloThemeOriginGenerated : kApolloThemeOriginCreated;
     NSDictionary *theme = @{
         @"schemaVersion": @(kApolloThemeSchemaVersion),
         @"id": NewUUID(),
@@ -250,17 +373,19 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
         @"input": normalizedInput,
         kApolloThemeAdvancedOptionsEnabledKey: @(advancedOptionsEnabled),
         @"generation": generation ?: @{ @"source": @"manual" },
+        kApolloThemeOriginKey: origin,
     };
-    ApolloLog(@"ThemeStore: createThemeNamed '%@' -> id=%@ variant=%@ (now %lu themes)",
-              unique, theme[@"id"], ApolloThemeVariantKey(variant), (unsigned long)(themes.count + 1));
+    ApolloLog(@"ThemeStore: createThemeNamed '%@' -> id=%@ variant=%@ origin=%@ (now %lu themes)",
+              unique, theme[@"id"], ApolloThemeVariantKey(variant), origin, (unsigned long)(themes.count + 1));
     [themes addObject:theme];
     [self setAllThemes:themes];
-    // Only claim the active slot when nothing valid holds it. Creating or
-    // duplicating a theme must NOT silently re-point activeThemeID while
-    // another theme is active — the list would mark the new theme "Active"
-    // without the runtime ever recompiling (Apply/Use set it explicitly).
-    if (![self themeWithID:self.activeThemeID]) {
-        self.activeThemeID = theme[@"id"];
+    // Only repair a DANGLING custom pointer (its theme was externally lost).
+    // Creating a theme must never flip an Apollo/gallery selection to the new
+    // theme — enablement is derived from the pointer now, so that would turn
+    // custom theming ON as a side effect of "New Theme".
+    if ([self storedSelectionKind] == ApolloThemeSelectionCustom
+        && ![self themeWithID:[self activePointer][kPointerIDKey]]) {
+        [self selectCustomTheme:theme[@"id"]];
     }
     return theme[@"id"];
 }
@@ -308,8 +433,20 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
     if (themes.count == before) { ApolloLog(@"ThemeStore: deleteTheme %@ — not found", themeID); return NO; }
     ApolloLog(@"ThemeStore: deleteTheme %@ (now %lu themes)", themeID, (unsigned long)themes.count);
     [self setAllThemes:themes];
-    if ([self.activeThemeID isEqualToString:themeID]) {
-        self.activeThemeID = themes.firstObject[@"id"];
+    NSDictionary *p = [self activePointer];
+    if ([p[kPointerIDKey] isEqual:themeID]) {
+        if ([self storedSelectionKind] == ApolloThemeSelectionCustom) {
+            // Deleted the active theme: fall to the next stored theme, or all
+            // the way back to Apollo when the list is now empty.
+            NSString *nextID = themes.firstObject[@"id"];
+            if (nextID) [self selectCustomTheme:nextID];
+            else [self setActivePointer:@{ kPointerKindKey: kPointerApollo }];
+        } else {
+            // Only the remembered last-selection payload named it: forget it.
+            NSMutableDictionary *m = [p mutableCopy];
+            [m removeObjectForKey:kPointerIDKey];
+            [self setActivePointer:m];
+        }
     }
     return YES;
 }
@@ -411,30 +548,55 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
     }
     ApolloLog(@"ThemeStore: migrating schema %ld -> %ld", (long)schema, (long)kApolloThemeSchemaVersion);
 
-    NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
-    NSArray *v1Themes = [std arrayForKey:kV1ThemesKey];
-    if ([v1Themes isKindOfClass:[NSArray class]] && v1Themes.count > 0) {
-        ApolloLog(@"ThemeStore: migrating %lu v1 theme(s)", (unsigned long)v1Themes.count);
-        // Archive raw v1 for one release.
-        [GroupDefaults() setObject:@{ @"themes": v1Themes,
-                                      @"activeID": [std stringForKey:kV1ActiveIDKey2] ?: [std stringForKey:kV1ActiveIDKey] ?: @"",
-                                      @"enabled": @([std boolForKey:kV1EnabledKey]) }
-                            forKey:kApolloRebornThemeV1BackupKey];
+    if (schema < 2) {
+        // ---- v1 (standard defaults, role.mode colours) -> v2 themes ----
+        NSUserDefaults *std = [NSUserDefaults standardUserDefaults];
+        NSArray *v1Themes = [std arrayForKey:kV1ThemesKey];
+        if ([v1Themes isKindOfClass:[NSArray class]] && v1Themes.count > 0) {
+            ApolloLog(@"ThemeStore: migrating %lu v1 theme(s)", (unsigned long)v1Themes.count);
+            // Archive raw v1 for one release.
+            [GroupDefaults() setObject:@{ @"themes": v1Themes,
+                                          @"activeID": [std stringForKey:kV1ActiveIDKey2] ?: [std stringForKey:kV1ActiveIDKey] ?: @"",
+                                          @"enabled": @([std boolForKey:kV1EnabledKey]) }
+                                forKey:kApolloRebornThemeV1BackupKey];
 
-        NSMutableArray *converted = [NSMutableArray array];
-        NSString *oldActive = [std stringForKey:kV1ActiveIDKey2] ?: [std stringForKey:kV1ActiveIDKey];
-        NSString *newActive = nil;
-        for (NSDictionary *old in v1Themes) {
-            if (![old isKindOfClass:[NSDictionary class]]) continue;
-            NSDictionary *converted2 = [self v2ThemeFromV1:old];
-            [converted addObject:converted2];
-            if (oldActive && [old[@"id"] isEqualToString:oldActive]) newActive = converted2[@"id"];
+            NSMutableArray *converted = [NSMutableArray array];
+            NSString *oldActive = [std stringForKey:kV1ActiveIDKey2] ?: [std stringForKey:kV1ActiveIDKey];
+            NSString *newActive = nil;
+            for (NSDictionary *old in v1Themes) {
+                if (![old isKindOfClass:[NSDictionary class]]) continue;
+                NSDictionary *converted2 = [self v2ThemeFromV1:old];
+                [converted addObject:converted2];
+                if (oldActive && [old[@"id"] isEqualToString:oldActive]) newActive = converted2[@"id"];
+            }
+            [self setAllThemes:converted];
+            NSString *pointTo = newActive ?: converted.firstObject[@"id"];
+            // Enablement is derived from the pointer, so the v1 enabled flag
+            // decides the pointer KIND; either way the theme id is remembered.
+            if (pointTo && [std boolForKey:kV1EnabledKey]) [self selectCustomTheme:pointTo];
+            else if (pointTo) [self setActivePointer:@{ kPointerKindKey: kPointerApollo, kPointerIDKey: pointTo }];
         }
-        [self setAllThemes:converted];
-        if (newActive) self.activeThemeID = newActive;
-        else if (converted.count) self.activeThemeID = converted.firstObject[@"id"];
-        // Carry the enabled flag across.
-        if ([std boolForKey:kV1EnabledKey]) self.customThemeEnabled = YES;
+    } else if (schema == 2) {
+        // ---- v2 -> v3: stamp origins, synthesize the selection pointer ----
+        NSMutableArray *themes = [[self allThemes] mutableCopy];
+        for (NSUInteger i = 0; i < themes.count; i++) {
+            if (![themes[i] isKindOfClass:[NSDictionary class]] || themes[i][kApolloThemeOriginKey]) continue;
+            NSMutableDictionary *t = [themes[i] mutableCopy];
+            NSDictionary *gen = [t[@"generation"] isKindOfClass:[NSDictionary class]] ? t[@"generation"] : nil;
+            t[kApolloThemeOriginKey] = [gen[@"source"] isEqual:@"ai"]
+                ? kApolloThemeOriginGenerated : kApolloThemeOriginCreated;
+            themes[i] = t;
+        }
+        [self setAllThemes:themes];
+
+        NSString *lastID = [GroupDefaults() stringForKey:kApolloRebornActiveCustomThemeIDKey];
+        BOOL wasEnabled = [GroupDefaults() boolForKey:kApolloRebornCustomThemeEnabledKey];
+        BOOL resolves = [self themeWithID:lastID] != nil;
+        if (wasEnabled && resolves) [self selectCustomTheme:lastID];
+        else if (resolves) [self setActivePointer:@{ kPointerKindKey: kPointerApollo, kPointerIDKey: lastID }];
+        else [self setActivePointer:@{ kPointerKindKey: kPointerApollo }];
+        ApolloLog(@"ThemeStore: v3 pointer synthesized (wasEnabled=%d lastID=%@ resolves=%d)",
+                  wasEnabled, lastID ?: @"(none)", resolves);
     }
 
     [GroupDefaults() setInteger:kApolloThemeSchemaVersion forKey:kApolloRebornThemeSchemaVersionKey];
@@ -476,7 +638,8 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
               @"variant": ApolloThemeVariantKey(ApolloThemeVariantBalanced),
               @"input": input,
               kApolloThemeAdvancedOptionsEnabledKey: @(advancedEnabled),
-              @"generation": @{ @"source": @"migrated-v1" } };
+              @"generation": @{ @"source": @"migrated-v1" },
+              kApolloThemeOriginKey: kApolloThemeOriginCreated };
 }
 
 #pragma mark - Import / export
@@ -512,11 +675,12 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
     NSInteger schema = [obj[@"schemaVersion"] respondsToSelector:@selector(integerValue)] ? [obj[@"schemaVersion"] integerValue] : 0;
     NSDictionary *rawInput = obj[@"input"];
 
-    // Accept native v2; also accept a legacy v1 export ({name, colors}) so old
-    // shared files still import.
+    // Accept native v2/v3 (and anything older that already has an input dict);
+    // also accept a legacy v1 export ({name, colors}) so old shared files
+    // still import. Only files NEWER than this build are refused.
     NSDictionary *input;
     if ([rawInput isKindOfClass:[NSDictionary class]]) {
-        if (schema != kApolloThemeSchemaVersion && schema != 0) {
+        if (schema > kApolloThemeSchemaVersion) {
             FAIL([NSString stringWithFormat:@"Unsupported theme version (%ld).", (long)schema]);
         }
         input = NormalizeInput(rawInput);
@@ -555,6 +719,11 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
                                      variant:ApolloThemeVariantFromKey(parsed[@"variant"])
                       advancedOptionsEnabled:[parsed[kApolloThemeAdvancedOptionsEnabledKey] boolValue]
                                   generation:parsed[@"generation"]];
+    // Imported wins over whatever createThemeNamed inferred (an exported AI
+    // theme still arrives as an import).
+    [self updateTheme:newID mutations:^(NSMutableDictionary *t) {
+        t[kApolloThemeOriginKey] = kApolloThemeOriginImported;
+    }];
     [self setFont:ApolloThemeFontFromKey(parsed[kApolloThemeFontKey]) themeID:newID];
     return newID;
 }
@@ -577,8 +746,7 @@ static NSString * const kCrashCountKey    = @"ApolloReborn.themeRecentCrashCount
 
 - (void)beginLaunchAttempt {
     NSUserDefaults *g = GroupDefaults();
-    BOOL themeActive = [g boolForKey:kApolloRebornCustomThemeEnabledKey]
-                       && ![g boolForKey:kApolloRebornThemeRuntimeDisabledKey];
+    BOOL themeActive = self.customThemeEnabled;
     // If the previous launch armed the marker (theme was active) but never
     // reached the stable point, it almost certainly crashed during/after theme
     // activation. Trip the kill switch on the FIRST such launch — a bad theme
@@ -590,7 +758,8 @@ static NSString * const kCrashCountKey    = @"ApolloReborn.themeRecentCrashCount
         [g setInteger:count forKey:kCrashCountKey];
         ApolloLog(@"ThemeStore: previous theme launch did NOT complete (crashCount=%ld) — tripping kill switch", (long)count);
         [g setBool:YES forKey:kApolloRebornThemeRuntimeDisabledKey];
-        self.customThemeEnabled = NO;
+        // Leave the selection pointer intact. The crash flag alone gates the
+        // runtime so recovery UI can show and re-enable the last active theme.
         themeActive = NO;
     }
     // Only arm the marker when a theme is actually active this launch, so normal

@@ -266,7 +266,7 @@ static void InstallAppearanceHooks(void) {
         NSString *donor = [store runtimeDonorTheme];
         if (![(NSString *)value isEqualToString:donor] && store.customThemeEnabled) {
             ApolloLog(@"ThemeManager: user picked %@ — disabling custom theme", value);
-            store.customThemeEnabled = NO;
+            [store selectApolloTheme];
             store.previousApolloTheme = nil; // user explicitly chose this; drop stale memory
             ApolloThemeRuntimeReload();
             ApolloThemeRuntimeInvalidate();
