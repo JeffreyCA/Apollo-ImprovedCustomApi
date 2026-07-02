@@ -171,6 +171,7 @@ static UIButton *ATBChipButton(NSString *title, UIColor *accent) {
         if (!strongSelf) return;
         strongSelf->_promptView.text = t;
         strongSelf->_placeholder.hidden = YES;
+        [strongSelf updateGenerateEnabled]; // programmatic set skips textViewDidChange
         [strongSelf->_promptView becomeFirstResponder];
     };
     chips.translatesAutoresizingMaskIntoConstraints = NO;
@@ -214,6 +215,7 @@ static UIButton *ATBChipButton(NSString *title, UIColor *accent) {
     _generateButton.layer.cornerRadius = 14.0;
     _generateButton.layer.cornerCurve = kCACornerCurveContinuous;
     [_generateButton addTarget:self action:@selector(generateTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self updateGenerateEnabled];
 
     UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:@[cancel, _generateButton]];
     buttons.axis = UILayoutConstraintAxisHorizontal;
@@ -278,6 +280,16 @@ static UIButton *ATBChipButton(NSString *title, UIColor *accent) {
 
 - (void)textViewDidChange:(UITextView *)textView {
     _placeholder.hidden = textView.text.length > 0;
+    [self updateGenerateEnabled];
+}
+
+// Disabled (dimmed) until the prompt has content — beats dismissing the sheet
+// just to bounce back with a "describe a theme first" alert.
+- (void)updateGenerateEnabled {
+    BOOL hasText = [_promptView.text stringByTrimmingCharactersInSet:
+                    NSCharacterSet.whitespaceAndNewlineCharacterSet].length > 0;
+    _generateButton.enabled = hasText;
+    _generateButton.alpha = hasText ? 1.0 : 0.45;
 }
 
 - (void)cancelTapped {
@@ -313,8 +325,9 @@ static UIButton *ATBChipButton(NSString *title, UIColor *accent) {
 
     NSDictionary *set = self.themeSet ?: @{};
     NSArray *variants = [set[@"variants"] isKindOfClass:NSArray.class] ? set[@"variants"] : @[];
-    // Default to Balanced, falling back to whatever's first if it's missing.
-    self.selectedIntensity = @"balanced";
+    // Honour a passed-in selection (refine keeps the user's card), default to
+    // Balanced, falling back to whatever's first if it's missing.
+    self.selectedIntensity = self.initialSelectedIntensity.length ? self.initialSelectedIntensity : @"balanced";
     if (![self variantNamed:self.selectedIntensity in:variants] && variants.count) {
         self.selectedIntensity = variants.firstObject[@"intensity"];
     }

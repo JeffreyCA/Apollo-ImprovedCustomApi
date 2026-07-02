@@ -25,6 +25,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong, nullable) UIColor *accentColor;
 @property (nonatomic, copy) NSDictionary *themeSet; // ApolloThemeAI generation-set dict
 @property (nonatomic, copy) NSString *mode;         // "light" / "dark" — which mode's swatches to preview
+// Pre-selected card ("subtle"/"balanced"/"bold"); nil = balanced. Refine passes
+// the previous selection through so it survives the rebuild.
+@property (nonatomic, copy, nullable) NSString *initialSelectedIntensity;
 @property (nonatomic, copy, nullable) void (^onUse)(NSString *selectedIntensity);
 @property (nonatomic, copy, nullable) void (^onEdit)(NSString *selectedIntensity);
 @property (nonatomic, copy, nullable) void (^onRegenerate)(void);

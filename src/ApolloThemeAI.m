@@ -147,13 +147,15 @@ static BOOL ATBContainsDecimalDigit(NSString *s) {
     return [s rangeOfCharacterFromSet:NSCharacterSet.decimalDigitCharacterSet].location != NSNotFound;
 }
 
-// Up to the first three parseable colours, in reply order.
+// Up to the first nine parseable colours, in reply order. Nine (not three)
+// because a chatty reply can restate the input seeds before the answer —
+// the refine path needs to see past that echo (ATBSeedsSkippingEcho).
 static NSArray<NSNumber *> *ATBParseSeedRGBs(NSString *text) {
     if (!text.length) return @[];
     NSMutableArray<NSNumber *> *rgbs = [NSMutableArray array];
     void (^add)(NSString *) = ^(NSString *hex) {
         uint32_t rgb;
-        if (rgbs.count < 3 && ApolloThemeParseHex(ATBExpandShortHex(hex), &rgb)) {
+        if (rgbs.count < 9 && ApolloThemeParseHex(ATBExpandShortHex(hex), &rgb)) {
             [rgbs addObject:@(rgb)];
         }
     };
@@ -162,6 +164,19 @@ static NSArray<NSNumber *> *ATBParseSeedRGBs(NSString *text) {
         for (NSString *hex in ATBMatchesForPattern(@"(?<![0-9A-Fa-f#])([0-9A-Fa-f]{6})(?![0-9A-Fa-f])", text)) {
             if (ATBContainsDecimalDigit(hex)) add(hex);
         }
+    }
+    return rgbs;
+}
+
+// Refine replies sometimes parrot the prompt's "current seeds" block before
+// the adjusted colours. If the reply starts by restating the exact current
+// seeds AND has more colours after them, the real answer is what follows.
+static NSArray<NSNumber *> *ATBSeedsSkippingEcho(NSArray<NSNumber *> *rgbs, ApolloThemeAISeeds current) {
+    if (rgbs.count >= 6 &&
+        rgbs[0].unsignedIntValue == current.accent &&
+        rgbs[1].unsignedIntValue == current.primary &&
+        rgbs[2].unsignedIntValue == current.secondary) {
+        return [rgbs subarrayWithRange:NSMakeRange(3, rgbs.count - 3)];
     }
     return rgbs;
 }
@@ -333,11 +348,15 @@ void ApolloThemeAIRefineThemeSet(NSDictionary *themeSet, NSString *selectedInten
             if (completion) completion(nil, error);
             return;
         }
-        ApolloThemeAISeeds seeds = ATBRepairedSeeds(rgbs, &fallback);
+        ApolloThemeAISeeds seeds = ATBRepairedSeeds(ATBSeedsSkippingEcho(rgbs, fallback), &fallback);
         if (completion) completion(ATBBuildThemeSet(originalPrompt, seeds, allowMonochrome, rawOutput), nil);
     });
 }
 
 void ApolloThemeAICancel(void) {
     [ATBBridge() cancelRequest:kATBRequestID];
+}
+
+BOOL ApolloThemeAIErrorIsCancellation(NSError *error) {
+    return [error.domain isEqualToString:@"ApolloFoundationModels"] && error.code == 6;
 }

@@ -5,6 +5,7 @@
 #import "ApolloThemeRuntime.h"
 #import "ApolloThemeAI.h"
 #import "ApolloThemeAISheets.h"
+#import "ApolloThemeAIOverlay.h"
 #import "ApolloCommon.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
@@ -26,23 +27,32 @@ static UIImage *SwatchImage(UIColor *color, CGFloat side) {
     }];
 }
 
-// Two-swatch (light/dark) preview image for the theme list.
-static UIImage *DualSwatchImage(UIColor *light, UIColor *dark, CGFloat side) {
+// Theme preview for the list: light background top-left, dark background
+// bottom-right (diagonal split), the accent as a centred dot — one glance
+// shows both modes plus the theme's signature colour.
+static UIImage *ThemePreviewSwatch(UIColor *lightBG, UIColor *darkBG, UIColor *accent, CGFloat side) {
     UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat preferredFormat];
     fmt.opaque = NO;
     UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(side, side) format:fmt];
     return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
         UIBezierPath *clip = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0.5, 0.5, side - 1, side - 1) cornerRadius:7];
         [clip addClip];
-        [(light ?: UIColor.systemBackgroundColor) setFill];
+        [(lightBG ?: UIColor.systemBackgroundColor) setFill];
         UIRectFill(CGRectMake(0, 0, side, side));
         UIBezierPath *tri = [UIBezierPath bezierPath];
         [tri moveToPoint:CGPointMake(side, 0)];
         [tri addLineToPoint:CGPointMake(side, side)];
         [tri addLineToPoint:CGPointMake(0, side)];
         [tri closePath];
-        [(dark ?: UIColor.secondarySystemBackgroundColor) setFill];
+        [(darkBG ?: UIColor.secondarySystemBackgroundColor) setFill];
         [tri fill];
+        CGFloat dot = side * 0.48;
+        CGRect dotRect = CGRectMake((side - dot) / 2, (side - dot) / 2, dot, dot);
+        UIBezierPath *circle = [UIBezierPath bezierPathWithOvalInRect:dotRect];
+        [(accent ?: UIColor.systemBlueColor) setFill];
+        [circle fill];
+        [[UIColor.whiteColor colorWithAlphaComponent:0.85] setStroke];
+        circle.lineWidth = 1.5; [circle stroke];
         [[UIColor.separatorColor colorWithAlphaComponent:0.6] setStroke];
         clip.lineWidth = 1; [clip stroke];
     }];
@@ -164,9 +174,12 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 
     if (!self.editingThemeID && ip.section == LSThemes) {
         ApolloThemeStore *store = [self store];
-        NSDictionary *theme = [store allThemes][ip.row];
-        BOOL active = [theme[@"id"] isEqualToString:store.activeThemeID] && store.customThemeEnabled;
-        if (active) cell.detailTextLabel.textColor = accent;
+        NSArray *themes = [store allThemes];
+        if ((NSUInteger)ip.row < themes.count) { // skip the empty-state row
+            NSDictionary *theme = themes[ip.row];
+            BOOL active = [theme[@"id"] isEqualToString:store.activeThemeID] && store.customThemeEnabled;
+            if (active) cell.detailTextLabel.textColor = accent;
+        }
     }
     if ((!self.editingThemeID && ip.section == LSActions) ||
         (self.editingThemeID && (ip.section == ESGenerate || ip.section == ESApply))) {
@@ -242,10 +255,15 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
     }
     switch (section) {
         case LSEnable:  return 1;
-        case LSThemes:  return MAX((NSInteger)[[self store] allThemes].count, 0);
+        case LSThemes:  return MAX((NSInteger)[[self store] allThemes].count, 1); // 1 = empty-state row
         case LSActions: return (self.aiRowVisible ? 3 : 2); // [Generate with AI], New, Import
     }
     return 0;
+}
+
+// The Themes section keeps one placeholder row while the list is empty.
+- (BOOL)isEmptyStateRow:(NSIndexPath *)ip {
+    return !self.editingThemeID && ip.section == LSThemes && [[self store] allThemes].count == 0;
 }
 
 // Row 0 of LSActions is "Generate with AI", shown only when the on-device
@@ -322,20 +340,42 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
     }
     if (ip.section == LSThemes) {
         UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+        if ([self isEmptyStateRow:ip]) {
+            cell.textLabel.text = @"No themes yet";
+            cell.textLabel.textColor = UIColor.secondaryLabelColor;
+            cell.detailTextLabel.text = @"Create one below, or let AI build one from a prompt.";
+            cell.detailTextLabel.textColor = UIColor.tertiaryLabelColor;
+            cell.detailTextLabel.numberOfLines = 0;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            return cell;
+        }
         NSDictionary *theme = [store allThemes][ip.row];
         cell.textLabel.text = theme[@"name"];
         ApolloCompiledTheme *c = [ApolloCompiledTheme compiledThemeWithInput:theme[@"input"]
                                                                      variant:ApolloThemeVariantFromKey(theme[@"variant"])
                                                              advancedEnabled:[theme[kApolloThemeAdvancedOptionsEnabledKey] boolValue]];
-        UIColor *l = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenAccent mode:ApolloThemeModeLight]);
-        UIColor *d = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenBackground mode:ApolloThemeModeDark]);
-        cell.imageView.image = DualSwatchImage(l, d, 29);
-        // Whole row opens the editor (disclosure chevron). Active theme shown via
-        // a checkmark in the detail text when custom theming is on.
+        UIColor *lightBG = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenBackground mode:ApolloThemeModeLight]);
+        UIColor *darkBG = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenBackground mode:ApolloThemeModeDark]);
+        UIColor *accent = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenAccent
+                                                             mode:CurrentAppearanceMode(self.traitCollection)]);
+        cell.imageView.image = ThemePreviewSwatch(lightBG, darkBG, accent, 29);
+        // Tap APPLIES the theme (checkmark = active); the ⓘ button opens the
+        // editor. Long-press for the full menu (apply/edit/rename/…).
         BOOL active = [theme[@"id"] isEqualToString:store.activeThemeID] && store.customThemeEnabled;
-        cell.detailTextLabel.text = active ? @"✓ Active" : nil;
-        cell.detailTextLabel.textColor = self.view.tintColor;
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        NSDictionary *generation = [theme[@"generation"] isKindOfClass:NSDictionary.class] ? theme[@"generation"] : nil;
+        NSString *source;
+        if ([generation[@"source"] isEqualToString:@"ai"]) {
+            NSString *prompt = [generation[@"prompt"] isKindOfClass:NSString.class] ? generation[@"prompt"] : @"";
+            source = prompt.length ? [NSString stringWithFormat:@"AI · “%@”", prompt] : @"AI";
+        } else if ([generation[@"source"] isEqualToString:@"migrated-v1"]) {
+            source = @"Imported from v1";
+        } else {
+            source = @"Manual";
+        }
+        cell.detailTextLabel.text = active ? [@"Active · " stringByAppendingString:source] : source;
+        cell.detailTextLabel.textColor = active ? self.view.tintColor : UIColor.secondaryLabelColor;
+        cell.detailTextLabel.numberOfLines = 1;
+        cell.accessoryType = UITableViewCellAccessoryDetailButton; // ⓘ = edit, on every row
         return cell;
     }
     // Actions: [Generate with AI], New Theme, Import Theme…
@@ -496,9 +536,10 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 
 - (void)listDidSelect:(NSIndexPath *)ip {
     if (ip.section == LSThemes) {
-        // Whole row opens the editor (where Apply sets it active). No more 'i' button.
+        // Tapping a theme APPLIES it (the ⓘ accessory / context menu edit).
+        if ([self isEmptyStateRow:ip]) return;
         NSDictionary *theme = [[self store] allThemes][ip.row];
-        [self openEditorForThemeID:theme[@"id"]];
+        [self applyThemeID:theme[@"id"]];
         return;
     }
     if (ip.section == LSActions) {
@@ -510,6 +551,72 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
         if (row == 0) [self newThemeTapped];
         else [self importTapped];
     }
+}
+
+- (void)tableView:(UITableView *)tv accessoryButtonTappedForRowWithIndexPath:(NSIndexPath *)ip {
+    if (self.editingThemeID || ip.section != LSThemes || [self isEmptyStateRow:ip]) return;
+    NSDictionary *theme = [[self store] allThemes][ip.row];
+    [self openEditorForThemeID:theme[@"id"]];
+}
+
+// Select + enable in one step (list tap, context menu, editor Apply).
+- (void)applyThemeID:(NSString *)themeID {
+    ApolloLog(@"ThemeUI: applying theme %@", themeID);
+    ApolloThemeStore *store = [self store];
+    store.activeThemeID = themeID;
+    if ([store runtimeDisabledDueToCrash]) [store clearCrashDisable];
+    ApolloThemeRuntimeEnable();
+    UINotificationFeedbackGenerator *fb = [[UINotificationFeedbackGenerator alloc] init];
+    [fb notificationOccurred:UINotificationFeedbackTypeSuccess];
+    [self applyThemeTint];
+    [self.tableView reloadData];
+}
+
+// Long-press menu: everything you can do to a theme, in one place.
+- (UIContextMenuConfiguration *)tableView:(UITableView *)tv
+    contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)ip point:(CGPoint)point {
+    if (self.editingThemeID || ip.section != LSThemes || [self isEmptyStateRow:ip]) return nil;
+    NSDictionary *theme = [[self store] allThemes][ip.row];
+    NSString *themeID = theme[@"id"];
+    __weak typeof(self) weakSelf = self;
+    return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil
+        actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggested) {
+        UIAction *apply = [UIAction actionWithTitle:@"Apply" image:[UIImage systemImageNamed:@"checkmark.circle"]
+                                          identifier:nil handler:^(UIAction *a) { [weakSelf applyThemeID:themeID]; }];
+        UIAction *edit = [UIAction actionWithTitle:@"Edit" image:[UIImage systemImageNamed:@"slider.horizontal.3"]
+                                         identifier:nil handler:^(UIAction *a) { [weakSelf openEditorForThemeID:themeID]; }];
+        UIAction *rename = [UIAction actionWithTitle:@"Rename" image:[UIImage systemImageNamed:@"pencil"]
+                                           identifier:nil handler:^(UIAction *a) { [weakSelf renameThemeIDFromList:themeID]; }];
+        UIAction *dup = [UIAction actionWithTitle:@"Duplicate" image:[UIImage systemImageNamed:@"plus.square.on.square"]
+                                        identifier:nil handler:^(UIAction *a) {
+            [[weakSelf store] duplicateTheme:themeID];
+            [weakSelf.tableView reloadData];
+        }];
+        UIAction *export = [UIAction actionWithTitle:@"Export" image:[UIImage systemImageNamed:@"square.and.arrow.up"]
+                                           identifier:nil handler:^(UIAction *a) {
+            NSDictionary *fresh = [[weakSelf store] themeWithID:themeID];
+            if (fresh) [weakSelf exportTheme:fresh];
+        }];
+        UIAction *del = [UIAction actionWithTitle:@"Delete" image:[UIImage systemImageNamed:@"trash"]
+                                        identifier:nil handler:^(UIAction *a) { [weakSelf deleteThemeAndRefresh:themeID]; }];
+        del.attributes = UIMenuElementAttributesDestructive;
+        return [UIMenu menuWithTitle:@"" children:@[apply, edit, rename, dup, export, del]];
+    }];
+}
+
+- (void)renameThemeIDFromList:(NSString *)themeID {
+    NSDictionary *theme = [[self store] themeWithID:themeID];
+    if (!theme) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Rename Theme"
+                                                                 message:nil
+                                                          preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.text = theme[@"name"]; }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [[self store] renameTheme:themeID to:alert.textFields.firstObject.text];
+        [self.tableView reloadData];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)editorDidSelect:(NSIndexPath *)ip {
@@ -588,17 +695,18 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 
 - (void)tableView:(UITableView *)tv commitEditingStyle:(UITableViewCellEditingStyle)style forRowAtIndexPath:(NSIndexPath *)ip {
     if (self.editingThemeID || ip.section != LSThemes || style != UITableViewCellEditingStyleDelete) return;
+    if ([self isEmptyStateRow:ip]) return;
     NSDictionary *theme = [[self store] allThemes][ip.row];
     [self deleteThemeAndRefresh:theme[@"id"]];
 }
 
 - (BOOL)tableView:(UITableView *)tv canEditRowAtIndexPath:(NSIndexPath *)ip {
-    return !self.editingThemeID && ip.section == LSThemes;
+    return !self.editingThemeID && ip.section == LSThemes && ![self isEmptyStateRow:ip];
 }
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tv
     trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)ip {
-    if (self.editingThemeID || ip.section != LSThemes) return nil;
+    if (self.editingThemeID || ip.section != LSThemes || [self isEmptyStateRow:ip]) return nil;
     NSDictionary *theme = [[self store] allThemes][ip.row];
     UIContextualAction *dup = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
         title:@"Duplicate" handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
@@ -703,10 +811,7 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 
 - (void)applyTheme {
     ApolloLog(@"ThemeUI: Apply tapped for theme %@", self.editingThemeID);
-    ApolloThemeStore *store = [self store];
-    store.activeThemeID = self.editingThemeID;
-    if ([store runtimeDisabledDueToCrash]) [store clearCrashDisable];
-    ApolloThemeRuntimeEnable();
+    [self applyThemeID:self.editingThemeID];
     [self.navigationController popViewControllerAnimated:YES];
 }
 
@@ -726,6 +831,15 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 - (void)colorPickerViewControllerDidFinish:(UIColorPickerViewController *)picker {
     [self saveColor:picker.selectedColor forCurrentKey:NO];
     self.pickingInputKey = nil;
+}
+
+// Live-preview discrete picks (grid taps, hex entry) as they happen; skip the
+// continuous drag stream so the store/runtime aren't thrashed per-frame.
+// didFinish commits the final colour either way.
+- (void)colorPickerViewController:(UIColorPickerViewController *)picker
+                   didSelectColor:(UIColor *)color
+                     continuously:(BOOL)continuously API_AVAILABLE(ios(15.0)) {
+    if (!continuously) [self saveColor:color forCurrentKey:NO];
 }
 
 // ===========================================================================
@@ -847,6 +961,57 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
+// UIColors for a generation set's three seed hexes (tints the overlay orb so a
+// refine "thinks" in the colours of the theme being adjusted). nil when absent.
+- (NSArray<UIColor *> *)orbColorsFromThemeSet:(NSDictionary *)themeSet {
+    NSDictionary *seeds = [themeSet[@"seeds"] isKindOfClass:NSDictionary.class] ? themeSet[@"seeds"] : nil;
+    if (!seeds) return nil;
+    NSMutableArray<UIColor *> *colors = [NSMutableArray array];
+    for (NSString *key in @[@"accent", @"primary", @"secondary"]) {
+        uint32_t rgb;
+        if ([seeds[key] isKindOfClass:NSString.class] && ApolloThemeParseHex(seeds[key], &rgb)) {
+            [colors addObject:ApolloThemeUIColorFromRGB(rgb)];
+        }
+    }
+    return colors.count ? colors : nil;
+}
+
+- (ApolloThemeGenerationOverlayViewController *)presentGenerationOverlayWithHeadline:(NSString *)headline
+                                                                         statusLines:(NSArray<NSString *> *)lines
+                                                                           orbColors:(NSArray<UIColor *> *)orbColors {
+    ApolloThemeGenerationOverlayViewController *overlay = [[ApolloThemeGenerationOverlayViewController alloc] init];
+    overlay.headline = headline;
+    overlay.statusLines = lines;
+    overlay.orbColors = orbColors;
+    overlay.onCancel = ^{ ApolloThemeAICancel(); };
+    [self presentViewController:overlay animated:YES completion:nil];
+    return overlay;
+}
+
+// Shared completion plumbing: dismiss the overlay if it's still up (the user
+// may have cancelled it already), swallow the bridge's cancellation sentinel
+// silently, then show the result or the error.
+- (void)finishGenerationWithOverlay:(ApolloThemeGenerationOverlayViewController *)overlay
+                              error:(NSError *)error
+                         errorTitle:(NSString *)errorTitle
+                       errorMessage:(NSString *)fallbackMessage
+                          onSuccess:(void (^)(void))onSuccess {
+    void (^after)(void) = ^{
+        if (ApolloThemeAIErrorIsCancellation(error)) return; // user asked for this; stay quiet
+        if (error) {
+            [self presentAlertWithTitle:errorTitle
+                                 message:error.localizedDescription ?: fallbackMessage];
+            return;
+        }
+        onSuccess();
+    };
+    if (self.presentedViewController == overlay) {
+        [overlay dismissViewControllerAnimated:YES completion:after];
+    } else {
+        after();
+    }
+}
+
 - (void)generateAIThemeFromPrompt:(NSString *)prompt {
     NSString *trimmed = [prompt stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     if (!trimmed.length) {
@@ -854,34 +1019,34 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
                              message:@"Describe the kind of theme you want first."];
         return;
     }
-    UIAlertController *loading =
-        [UIAlertController alertControllerWithTitle:@"Creating Themes…"
-                                            message:@"Interpreting your prompt and building three readable variants."
-                                     preferredStyle:UIAlertControllerStyleAlert];
-    [loading addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel
-                                              handler:^(UIAlertAction *action) {
-        ApolloThemeAICancel();
-    }]];
-    [self presentViewController:loading animated:YES completion:nil];
+    ApolloThemeGenerationOverlayViewController *overlay =
+        [self presentGenerationOverlayWithHeadline:@"Creating Themes"
+                                       statusLines:@[@"Asking the on-device model…",
+                                                     @"Finding the iconic colours…",
+                                                     @"Building light & dark palettes…",
+                                                     @"Checking contrast & readability…"]
+                                         orbColors:nil];
     ApolloThemeAIGenerateThemeSet(trimmed, ^(NSDictionary *themeSet, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [loading dismissViewControllerAnimated:YES completion:^{
-                if (error || !themeSet) {
-                    [self presentAlertWithTitle:@"Couldn’t Generate Theme"
-                                         message:error.localizedDescription ?: @"Try a different description, or start from scratch."];
-                    return;
-                }
-                [self presentThemeSet:themeSet];
-            }];
+            NSError *effective = (!error && !themeSet)
+                ? [NSError errorWithDomain:@"ApolloThemeAI" code:5
+                                  userInfo:@{NSLocalizedDescriptionKey: @"Try a different description, or start from scratch."}]
+                : error;
+            [self finishGenerationWithOverlay:overlay
+                                        error:effective
+                                   errorTitle:@"Couldn’t Generate Theme"
+                                 errorMessage:@"Try a different description, or start from scratch."
+                                    onSuccess:^{ [self presentThemeSet:themeSet selectedIntensity:nil]; }];
         });
     });
 }
 
-- (void)presentThemeSet:(NSDictionary *)themeSet {
+- (void)presentThemeSet:(NSDictionary *)themeSet selectedIntensity:(NSString *)selectedIntensity {
     ApolloThemeVariantSetSheetViewController *sheet = [[ApolloThemeVariantSetSheetViewController alloc] init];
     sheet.accentColor = [self themeAccentColor];
     sheet.themeSet = themeSet;
     sheet.mode = ApolloThemeModeKey(CurrentAppearanceMode(self.traitCollection));
+    sheet.initialSelectedIntensity = selectedIntensity;
     __weak typeof(self) weakSelf = self;
     sheet.onUse = ^(NSString *intensity) { [weakSelf saveThemeSet:themeSet selectedIntensity:intensity apply:YES edit:NO]; };
     sheet.onEdit = ^(NSString *intensity) { [weakSelf saveThemeSet:themeSet selectedIntensity:intensity apply:NO edit:YES]; };
@@ -891,25 +1056,23 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 }
 
 - (void)refineThemeSet:(NSDictionary *)themeSet selectedIntensity:(NSString *)intensity instruction:(NSString *)instruction {
-    UIAlertController *loading =
-        [UIAlertController alertControllerWithTitle:@"Updating Themes…"
-                                            message:@"Applying the tweak and rebuilding all three variants."
-                                     preferredStyle:UIAlertControllerStyleAlert];
-    [loading addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel
-                                              handler:^(UIAlertAction *action) {
-        ApolloThemeAICancel();
-    }]];
-    [self presentViewController:loading animated:YES completion:nil];
+    ApolloThemeGenerationOverlayViewController *overlay =
+        [self presentGenerationOverlayWithHeadline:@"Updating Themes"
+                                       statusLines:@[@"Adjusting the seed colours…",
+                                                     @"Rebuilding all three variants…",
+                                                     @"Checking contrast & readability…"]
+                                         orbColors:[self orbColorsFromThemeSet:themeSet]];
     ApolloThemeAIRefineThemeSet(themeSet, intensity, instruction, ^(NSDictionary *updated, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [loading dismissViewControllerAnimated:YES completion:^{
-                if (error || !updated) {
-                    [self presentAlertWithTitle:@"Couldn’t Update Theme"
-                                         message:error.localizedDescription ?: @"Try a different tweak, or edit manually."];
-                    return;
-                }
-                [self presentThemeSet:updated];
-            }];
+            NSError *effective = (!error && !updated)
+                ? [NSError errorWithDomain:@"ApolloThemeAI" code:5
+                                  userInfo:@{NSLocalizedDescriptionKey: @"Try a different tweak, or edit manually."}]
+                : error;
+            [self finishGenerationWithOverlay:overlay
+                                        error:effective
+                                   errorTitle:@"Couldn’t Update Theme"
+                                 errorMessage:@"Try a different tweak, or edit manually."
+                                    onSuccess:^{ [self presentThemeSet:updated selectedIntensity:intensity]; }];
         });
     });
 }
@@ -938,11 +1101,7 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
                                                   @"seeds": [themeSet[@"seeds"] isKindOfClass:NSDictionary.class] ? themeSet[@"seeds"] : @{},
                                                   @"intensity": intensity ?: @"balanced",
                                                   @"themeJSON": themeSet[@"themeJSON"] ?: @"" }];
-    if (apply) {
-        store.activeThemeID = themeID;
-        if ([store runtimeDisabledDueToCrash]) [store clearCrashDisable];
-        ApolloThemeRuntimeEnable();
-    }
+    if (apply) [self applyThemeID:themeID];
     [self.tableView reloadData];
     if (edit) [self openEditorForThemeID:themeID];
 }

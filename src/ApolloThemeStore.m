@@ -119,6 +119,34 @@ static NSDictionary *StripAdvancedOverrides(NSDictionary *input) {
     return result;
 }
 
+// Recursively strip anything NSUserDefaults can't store. NSJSONSerialization
+// happily produces NSNull for JSON `null`s; if one slipped into a stored theme
+// (e.g. inside an imported file's `generation` dict), setAllThemes' plist
+// validation would refuse to persist the WHOLE themes array and the import
+// would silently vanish. Sanitise at the boundary instead.
+static id PlistSanitized(id value) {
+    if ([value isKindOfClass:[NSString class]] || [value isKindOfClass:[NSNumber class]] ||
+        [value isKindOfClass:[NSData class]] || [value isKindOfClass:[NSDate class]]) return value;
+    if ([value isKindOfClass:[NSArray class]]) {
+        NSMutableArray *out = [NSMutableArray array];
+        for (id v in (NSArray *)value) {
+            id clean = PlistSanitized(v);
+            if (clean) [out addObject:clean];
+        }
+        return out;
+    }
+    if ([value isKindOfClass:[NSDictionary class]]) {
+        NSMutableDictionary *out = [NSMutableDictionary dictionary];
+        [(NSDictionary *)value enumerateKeysAndObjectsUsingBlock:^(id key, id v, BOOL *stop) {
+            if (![key isKindOfClass:[NSString class]]) return;
+            id clean = PlistSanitized(v);
+            if (clean) out[key] = clean;
+        }];
+        return out;
+    }
+    return nil; // NSNull and anything else non-plist: drop
+}
+
 static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
     if (![input isKindOfClass:[NSDictionary class]]) return NO;
     for (NSString *mode in @[@"light", @"dark"]) {
@@ -227,7 +255,13 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
               unique, theme[@"id"], ApolloThemeVariantKey(variant), (unsigned long)(themes.count + 1));
     [themes addObject:theme];
     [self setAllThemes:themes];
-    self.activeThemeID = theme[@"id"];
+    // Only claim the active slot when nothing valid holds it. Creating or
+    // duplicating a theme must NOT silently re-point activeThemeID while
+    // another theme is active — the list would mark the new theme "Active"
+    // without the runtime ever recompiling (Apply/Use set it explicitly).
+    if (![self themeWithID:self.activeThemeID]) {
+        self.activeThemeID = theme[@"id"];
+    }
     return theme[@"id"];
 }
 
@@ -486,7 +520,9 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
         ? [obj[kApolloThemeAdvancedOptionsEnabledKey] boolValue]
         : InputHasAnyAdvancedOverrides(input);
     parsed[kApolloThemeAdvancedOptionsEnabledKey] = @(enabled);
-    if ([obj[@"generation"] isKindOfClass:[NSDictionary class]]) parsed[@"generation"] = obj[@"generation"];
+    if ([obj[@"generation"] isKindOfClass:[NSDictionary class]]) {
+        parsed[@"generation"] = PlistSanitized(obj[@"generation"]); // JSON null -> NSNull would poison defaults
+    }
     parsed[@"schemaVersion"] = @(schema ?: kApolloThemeSchemaVersion);
     return parsed;
 }

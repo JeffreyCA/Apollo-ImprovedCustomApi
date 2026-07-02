@@ -53,4 +53,9 @@ void ApolloThemeAIRefineThemeSet(NSDictionary *themeSet,
 
 void ApolloThemeAICancel(void);
 
+// YES when `error` is the bridge's user-cancellation sentinel (fires after
+// ApolloThemeAICancel). Callers must swallow it silently — the user asked for
+// the cancel; an error alert on top of it is noise.
+BOOL ApolloThemeAIErrorIsCancellation(NSError *_Nullable error);
+
 NS_ASSUME_NONNULL_END
