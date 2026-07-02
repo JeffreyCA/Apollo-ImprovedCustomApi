@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Kanagawa Dragon",
+  "slug": "kanagawa-dragon",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "4D699B",
+      "card": "F5F0CB",
+      "background": "ECE8C4",
+      "raised": "F1ECC8",
+      "bars": "F0EBC7",
+      "mutedText": "545464",
+      "text": "4E4E5D",
+      "separator": "D5D1B1"
+    },
+    "dark": {
+      "accent": "8BA4B0",
+      "card": "171515",
+      "background": "141212",
+      "raised": "2D2B2B",
+      "bars": "161414",
+      "mutedText": "8E8B88",
+      "text": "A3A19F",
+      "separator": "424040"
+    }
+  }
+}

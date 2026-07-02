@@ -1,6 +1,7 @@
 #import "ApolloThemeRuntime.h"
 #import "ApolloThemeStore.h"
 #import "ApolloThemeCompiler.h"
+#import "ApolloThemeGalleryCatalog.h"
 #import "ApolloCommon.h"
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
@@ -1122,6 +1123,7 @@ void ApolloThemeRuntimeInvalidate(void) {
         ApolloLog(@"ThemeRuntime: ctor — UIColor hooks installed, ThemeManager hook=%d", haveTM);
         // Crash kill-switch bookkeeping + initial compile.
         ApolloThemeStore *store = [ApolloThemeStore shared];
+        ApolloThemeGalleryRegisterWithStore();
         [store migrateIfNeeded];
         [store beginLaunchAttempt];
         if (store.runtimeDisabledDueToCrash)

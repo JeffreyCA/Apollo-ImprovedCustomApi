@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Night Owl",
+  "slug": "night-owl",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "4876D6",
+      "card": "FCFCFA",
+      "background": "F3F3F1",
+      "raised": "F8F8F6",
+      "bars": "F7F7F5",
+      "mutedText": "5F6A7D",
+      "text": "4E5767",
+      "separator": "DBDBDA"
+    },
+    "dark": {
+      "accent": "82AAFF",
+      "card": "011525",
+      "background": "011220",
+      "raised": "182B3A",
+      "bars": "011423",
+      "mutedText": "8F9D9D",
+      "text": "95A2A2",
+      "separator": "2F404E"
+    }
+  }
+}

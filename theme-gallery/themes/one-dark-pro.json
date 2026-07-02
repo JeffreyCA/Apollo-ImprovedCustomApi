@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "One Dark Pro",
+  "slug": "one-dark-pro",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "4078F2",
+      "card": "FBFBFA",
+      "background": "F2F2F1",
+      "raised": "F7F7F6",
+      "bars": "F6F6F5",
+      "mutedText": "696C77",
+      "text": "54565F",
+      "separator": "DADADA"
+    },
+    "dark": {
+      "accent": "61AFEF",
+      "card": "262A32",
+      "background": "21242B",
+      "raised": "3B3F46",
+      "bars": "24282F",
+      "mutedText": "8A8F98",
+      "text": "B2B5BB",
+      "separator": "4F5259"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "LaserWave",
+  "slug": "laserwave",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "CF3D95",
+      "card": "FFF7FB",
+      "background": "F4ECF0",
+      "raised": "F9F1F5",
+      "bars": "FFF8FC",
+      "mutedText": "52606D",
+      "text": "4B5763",
+      "separator": "E6DEE2"
+    },
+    "dark": {
+      "accent": "EB64B9",
+      "card": "27212E",
+      "background": "1E1A24",
+      "raised": "36313D",
+      "bars": "231E2A",
+      "mutedText": "C8B3D0",
+      "text": "C8B3D0",
+      "separator": "4A454F"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Kanagawa Wave",
+  "slug": "kanagawa-wave",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "4D699B",
+      "card": "F5F0CB",
+      "background": "ECE8C4",
+      "raised": "F1ECC8",
+      "bars": "F0EBC7",
+      "mutedText": "545464",
+      "text": "4E4E5D",
+      "separator": "D5D1B1"
+    },
+    "dark": {
+      "accent": "7E9CD8",
+      "card": "1E1E26",
+      "background": "191921",
+      "raised": "33333B",
+      "bars": "1C1C24",
+      "mutedText": "999993",
+      "text": "A9A9A4",
+      "separator": "47474F"
+    }
+  }
+}

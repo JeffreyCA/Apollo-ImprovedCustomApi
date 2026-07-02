@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Material Palenight",
+  "slug": "material-palenight",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "7E57C2",
+      "card": "FEFDFC",
+      "background": "F5F4F3",
+      "raised": "FAF9F8",
+      "bars": "F9F8F7",
+      "mutedText": "546E7A",
+      "text": "465B65",
+      "separator": "DDDCDB"
+    },
+    "dark": {
+      "accent": "C792EA",
+      "card": "272B3C",
+      "background": "222533",
+      "raised": "3C404F",
+      "bars": "252838",
+      "mutedText": "9297B3",
+      "text": "B4B7CB",
+      "separator": "505361"
+    }
+  }
+}

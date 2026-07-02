@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Material Darker",
+  "slug": "material-darker",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "009688",
+      "card": "FBFBFA",
+      "background": "F2F2F1",
+      "raised": "F7F7F6",
+      "bars": "F6F6F5",
+      "mutedText": "546E7A",
+      "text": "445963",
+      "separator": "DADADA"
+    },
+    "dark": {
+      "accent": "80CBC4",
+      "card": "202020",
+      "background": "1B1B1B",
+      "raised": "353535",
+      "bars": "1E1E1E",
+      "mutedText": "8D8D8D",
+      "text": "AAAAAA",
+      "separator": "494949"
+    }
+  }
+}

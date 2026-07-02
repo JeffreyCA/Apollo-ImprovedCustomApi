@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "City Lights",
+  "slug": "city-lights",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "276EAF",
+      "card": "F6F8FA",
+      "background": "EBEDEF",
+      "raised": "F0F2F4",
+      "bars": "F8F9FB",
+      "mutedText": "52606D",
+      "text": "4A5662",
+      "separator": "DDDFE1"
+    },
+    "dark": {
+      "accent": "5EC4FF",
+      "card": "1D252C",
+      "background": "171D22",
+      "raised": "2D343B",
+      "bars": "1A2128",
+      "mutedText": "8899A9",
+      "text": "A3B0BD",
+      "separator": "41484E"
+    }
+  }
+}

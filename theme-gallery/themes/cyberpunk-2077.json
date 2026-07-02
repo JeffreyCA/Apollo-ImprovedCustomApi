@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Cyberpunk 2077",
+  "slug": "cyberpunk-2077",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "D6BE00",
+      "card": "FFFDE7",
+      "background": "F4F2DD",
+      "raised": "F9F7E1",
+      "bars": "FFFDEB",
+      "mutedText": "8E879A",
+      "text": "595561",
+      "separator": "E6E4D0"
+    },
+    "dark": {
+      "accent": "FCEE0A",
+      "card": "0D0221",
+      "background": "0A021A",
+      "raised": "1E1431",
+      "bars": "0C021E",
+      "mutedText": "02C5D7",
+      "text": "02C5D7",
+      "separator": "342A45"
+    }
+  }
+}

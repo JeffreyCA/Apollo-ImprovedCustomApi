@@ -14,6 +14,9 @@ MODULES_DIR := modules
 SSZIPARCHIVE_DIR := $(MODULES_DIR)/ZipArchive/SSZipArchive
 FFMPEG_KIT_DIR := $(MODULES_DIR)/ffmpeg-kit
 FLEXING_DIR := $(MODULES_DIR)/FLEXing
+THEME_GALLERY_DIR := theme-gallery
+THEME_GALLERY_GEN_H := $(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/generated/ApolloThemeGalleryCatalog.gen.h
+THEME_GALLERY_GEN_M := $(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/generated/ApolloThemeGalleryCatalog.gen.m
 
 SSZIPARCHIVE_FILES = $(wildcard $(SSZIPARCHIVE_DIR)/*.m) \
     $(wildcard $(SSZIPARCHIVE_DIR)/minizip/*.c) \
@@ -89,6 +92,8 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloThemeTokens.m \
     $(SRC_DIR)/ApolloThemeCompiler.m \
     $(SRC_DIR)/ApolloThemeStore.m \
+    $(SRC_DIR)/ApolloThemeGalleryCatalog.m \
+    $(THEME_GALLERY_GEN_M) \
     $(SRC_DIR)/ApolloThemeRuntime.xm \
     $(SRC_DIR)/ApolloThemeHCT.c \
     $(SRC_DIR)/ApolloThemePaletteEngine.m \
@@ -168,7 +173,7 @@ endif
 # ApolloAppleTranslation.swift) only exists on iOS 18.0+. Weak-link it so the tweak still
 # loads on older iOS, where the Apple provider is gated off at runtime.
 ApolloReborn_LDFLAGS += -weak_framework Translation
-ApolloReborn_CFLAGS = -fobjc-arc -Wno-error=unguarded-availability-new -Wno-error=deprecated-declarations -Wno-module-import-in-extern-c -I$(THEOS_PROJECT_DIR)/$(SRC_DIR) -I$(THEOS_PROJECT_DIR)/liquid-glass/generated -I$(THEOS_PROJECT_DIR)/$(MODULES_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR)/minizip -DHAVE_ARC4RANDOM_BUF -DHAVE_ICONV -DHAVE_INTTYPES_H -DHAVE_PKCRYPT -DHAVE_STDINT_H -DHAVE_WZAES -DHAVE_ZLIB -DZLIB_COMPAT
+ApolloReborn_CFLAGS = -fobjc-arc -Wno-error=unguarded-availability-new -Wno-error=deprecated-declarations -Wno-module-import-in-extern-c -I$(THEOS_PROJECT_DIR)/$(SRC_DIR) -I$(THEOS_PROJECT_DIR)/liquid-glass/generated -I$(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/generated -I$(THEOS_PROJECT_DIR)/$(MODULES_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR)/minizip -DHAVE_ARC4RANDOM_BUF -DHAVE_ICONV -DHAVE_INTTYPES_H -DHAVE_PKCRYPT -DHAVE_STDINT_H -DHAVE_WZAES -DHAVE_ZLIB -DZLIB_COMPAT
 
 ApolloReborn_BUNDLE_RESOURCE_DIRS = resources
 
@@ -211,14 +216,24 @@ endif
 
 CONTROL_FILE = $(THEOS_PROJECT_DIR)/control
 
-# Generate Version.h
-before-all:: generate_version_h
+# Generate Version.h and the theme gallery catalog.
+before-all:: generate_version_h generate_theme_gallery_catalog
 
 generate_version_h:
 	@echo "Generating Version.h from control file"
 	@version=$$(grep '^Version:' $(CONTROL_FILE) | cut -d' ' -f2); \
 	mkdir -p $(THEOS_PROJECT_DIR)/$(SRC_DIR); \
 	echo "#define TWEAK_VERSION \"v$${version}\"" > $(THEOS_PROJECT_DIR)/$(SRC_DIR)/Version.h
+
+THEME_GALLERY_SOURCES := $(wildcard $(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/themes/*.json)
+
+generate_theme_gallery_catalog: $(THEME_GALLERY_GEN_H) $(THEME_GALLERY_GEN_M)
+
+$(THEME_GALLERY_GEN_H) $(THEME_GALLERY_GEN_M): $(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/scripts/generate_catalog.py $(THEME_GALLERY_SOURCES)
+	@python3 $(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/scripts/generate_catalog.py \
+		$(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/themes \
+		$(THEME_GALLERY_GEN_H) \
+		$(THEME_GALLERY_GEN_M)
 
 # Liquid Glass icon metadata header is generated explicitly by running 'make lg-previews'
 LG_DIR = $(THEOS_PROJECT_DIR)/liquid-glass
