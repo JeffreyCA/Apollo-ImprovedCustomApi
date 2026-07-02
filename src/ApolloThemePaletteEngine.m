@@ -86,6 +86,11 @@ static const double kSurfaceMinChroma[ApolloThemeAIIntensityCount] = {
 };
 static const double kSurfaceToneShiftCap = 12;
 
+// Gentle wash used when an achromatic primary seed is rescued by the accent
+// hue (white/black canvas seeds next to a vivid accent read as "vibrant
+// theme, neutral surfaces by accident", not as a deliberate grey).
+static const double kCanvasRescueChroma = 20;
+
 // Text is tinted with the primary seed's hue but stays near the tone extremes;
 // the contrast clamp against the worst surface is a safety net, not the
 // normal path (the tone tables above already clear it with margin).
@@ -133,9 +138,8 @@ static ATPNormalizedSeeds ATPNormalizeSeeds(ApolloThemeAISeeds seeds, BOOL allow
     n.secondary = ApolloHCTFromRGB(seeds.secondary);
 
     // Seed-similarity rule: two chromatic surface seeds sitting on the same
-    // hue get the secondary rotated so bars read as a second colour. Near-
-    // achromatic seeds are honored, not rescued — a black secondary must
-    // produce black bars ("spiderman"); a grey theme is a valid theme.
+    // hue get the secondary rotated so bars read as a second colour. A black
+    // SECONDARY is honored, not rescued — black bars are legit ("spiderman").
     BOOL bothChromatic = n.primary.chroma >= 12 && n.secondary.chroma >= 12;
     if (!allowMonochrome && bothChromatic && ATPHueDistance(n.primary.hue, n.secondary.hue) < 14) {
         // Re-solving (not just overwriting the number) matches MCU Hct's
@@ -143,8 +147,30 @@ static ATPNormalizedSeeds ATPNormalizeSeeds(ApolloThemeAISeeds seeds, BOOL allow
         // coordinates replace the requested ones.
         n.secondary = ApolloHCTSolved(ATPMod360(n.primary.hue + 42), n.secondary.chroma, n.secondary.tone);
     }
-    if (n.accent.chroma < kAccentMinChroma) {
+
+    // Accent identity rescue: an achromatic accent seed (black/white/grey)
+    // can't just have its chroma boosted — the boost realizes ~0 at extreme
+    // tones and a grey's hue is meaningless. Borrow the hue of the most
+    // chromatic other seed instead (batman: black accent -> yellow), staged
+    // at a tone where chroma can actually realize. If nothing is chromatic
+    // the theme is honestly grey: keep the accent achromatic.
+    if (n.accent.chroma < 12) {
+        ApolloHCT donor = (n.primary.chroma >= n.secondary.chroma) ? n.primary : n.secondary;
+        if (donor.chroma >= 12) {
+            n.accent = ApolloHCTSolved(donor.hue, kAccentMinChroma, ATPClamp(n.accent.tone, 30, 70));
+        }
+    } else if (n.accent.chroma < kAccentMinChroma) {
         n.accent = ApolloHCTSolved(n.accent.hue, kAccentMinChroma, n.accent.tone);
+    }
+
+    // Canvas rescue: a white/black primary next to a vivid accent tints the
+    // canvas with the accent's hue (barbie: white primary + pink accent ->
+    // pink-washed surfaces), EXCEPT when the user explicitly asked for a
+    // monochrome theme.
+    if (!allowMonochrome && n.primary.chroma < 8 && n.accent.chroma >= 12) {
+        // Mid-tone 50: the chroma must REALIZE (at the seed's own tone 0/100
+        // it solves to ~0); canvas tones come from the spec tables anyway.
+        n.primary = ApolloHCTSolved(n.accent.hue, kCanvasRescueChroma, 50);
     }
     return n;
 }

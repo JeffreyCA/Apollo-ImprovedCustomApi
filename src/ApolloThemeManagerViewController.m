@@ -976,40 +976,41 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
     return colors.count ? colors : nil;
 }
 
-- (ApolloThemeGenerationOverlayViewController *)presentGenerationOverlayWithHeadline:(NSString *)headline
-                                                                         statusLines:(NSArray<NSString *> *)lines
-                                                                           orbColors:(NSArray<UIColor *> *)orbColors {
-    ApolloThemeGenerationOverlayViewController *overlay = [[ApolloThemeGenerationOverlayViewController alloc] init];
-    overlay.headline = headline;
-    overlay.statusLines = lines;
-    overlay.orbColors = orbColors;
-    overlay.onCancel = ^{ ApolloThemeAICancel(); };
-    [self presentViewController:overlay animated:YES completion:nil];
+- (ApolloThemeGenerationOverlayView *)presentGenerationOverlayWithHeadline:(NSString *)headline
+                                                               statusLines:(NSArray<NSString *> *)lines
+                                                                 orbColors:(NSArray<UIColor *> *)orbColors {
+    ApolloThemeGenerationOverlayView *overlay =
+        [ApolloThemeGenerationOverlayView overlayWithHeadline:headline
+                                                  statusLines:lines
+                                                    orbColors:orbColors
+                                                     onCancel:^{ ApolloThemeAICancel(); }];
+    // Window-level (covers nav + tab bars) so the results sheet can be
+    // presented UNDERNEATH it and revealed by the overlay's fade-away.
+    [overlay presentInView:self.view.window ?: self.navigationController.view ?: self.view];
     return overlay;
 }
 
-// Shared completion plumbing: dismiss the overlay if it's still up (the user
-// may have cancelled it already), swallow the bridge's cancellation sentinel
-// silently, then show the result or the error.
-- (void)finishGenerationWithOverlay:(ApolloThemeGenerationOverlayViewController *)overlay
+// Shared completion plumbing. On success the results sheet is presented
+// FIRST, underneath the still-running shader, and the overlay then fades/
+// zooms away to reveal it. Cancellation stays silent (the user asked for it);
+// errors fade the shader out before alerting.
+- (void)finishGenerationWithOverlay:(ApolloThemeGenerationOverlayView *)overlay
                               error:(NSError *)error
                          errorTitle:(NSString *)errorTitle
                        errorMessage:(NSString *)fallbackMessage
                           onSuccess:(void (^)(void))onSuccess {
-    void (^after)(void) = ^{
-        if (ApolloThemeAIErrorIsCancellation(error)) return; // user asked for this; stay quiet
-        if (error) {
-            [self presentAlertWithTitle:errorTitle
-                                 message:error.localizedDescription ?: fallbackMessage];
-            return;
-        }
-        onSuccess();
-    };
-    if (self.presentedViewController == overlay) {
-        [overlay dismissViewControllerAnimated:YES completion:after];
-    } else {
-        after();
+    if (ApolloThemeAIErrorIsCancellation(error)) return; // overlay already dismissed itself
+    if (error) {
+        [overlay dismissAnimated];
+        [self presentAlertWithTitle:errorTitle
+                             message:error.localizedDescription ?: fallbackMessage];
+        return;
     }
+    onSuccess(); // sheet slides up behind the colour field…
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [overlay dismissAnimated]; // …and the field melts away to reveal it
+    });
 }
 
 - (void)generateAIThemeFromPrompt:(NSString *)prompt {
@@ -1019,12 +1020,15 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
                              message:@"Describe the kind of theme you want first."];
         return;
     }
-    ApolloThemeGenerationOverlayViewController *overlay =
+    ApolloThemeGenerationOverlayView *overlay =
         [self presentGenerationOverlayWithHeadline:@"Creating Themes"
                                        statusLines:@[@"Asking the on-device model…",
                                                      @"Finding the iconic colours…",
-                                                     @"Building light & dark palettes…",
-                                                     @"Checking contrast & readability…"]
+                                                     @"Reading the colour wheel…",
+                                                     @"Staging light & dark surfaces…",
+                                                     @"Shaping subtle, balanced & bold…",
+                                                     @"Checking contrast & readability…",
+                                                     @"Polishing the details…"]
                                          orbColors:nil];
     ApolloThemeAIGenerateThemeSet(trimmed, ^(NSDictionary *themeSet, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1056,11 +1060,13 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 }
 
 - (void)refineThemeSet:(NSDictionary *)themeSet selectedIntensity:(NSString *)intensity instruction:(NSString *)instruction {
-    ApolloThemeGenerationOverlayViewController *overlay =
+    ApolloThemeGenerationOverlayView *overlay =
         [self presentGenerationOverlayWithHeadline:@"Updating Themes"
-                                       statusLines:@[@"Adjusting the seed colours…",
+                                       statusLines:@[@"Rethinking the seed colours…",
+                                                     @"Applying your tweak…",
                                                      @"Rebuilding all three variants…",
-                                                     @"Checking contrast & readability…"]
+                                                     @"Checking contrast & readability…",
+                                                     @"Almost there…"]
                                          orbColors:[self orbColorsFromThemeSet:themeSet]];
     ApolloThemeAIRefineThemeSet(themeSet, intensity, instruction, ^(NSDictionary *updated, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{

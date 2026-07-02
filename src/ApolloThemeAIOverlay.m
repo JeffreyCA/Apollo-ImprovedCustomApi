@@ -4,14 +4,16 @@
 #import <QuartzCore/CAMetalLayer.h>
 
 // ===========================================================================
-// Shader orb
+// Shader blob — a large luminous Siri-style orb, composited over a live blur
 // ===========================================================================
 
-// Runtime-compiled MSL: a fullscreen triangle whose fragment blends four
-// slowly-orbiting colour blobs through a domain warp, masked by a breathing
-// radial rim so it reads as a luminous liquid disc. Output is premultiplied
-// alpha so the layer composites over any background.
-static NSString * const kOrbShaderSource = @""
+// Runtime-compiled MSL. The fragment draws one big organic blob:
+//   - four flowing colour fields inside (domain-warped, slowly orbiting)
+//   - an irregular breathing rim (angular sine wobble — the "alive" shape)
+//   - a bright rim light + soft outer halo (the Siri-ish glow)
+// Output is premultiplied alpha and deliberately slightly translucent so the
+// blurred app beneath shimmers through.
+static NSString * const kBlobShaderSource = @""
 "#include <metal_stdlib>\n"
 "using namespace metal;\n"
 "struct VSOut { float4 pos [[position]]; float2 uv; };\n"
@@ -24,24 +26,47 @@ static NSString * const kOrbShaderSource = @""
 "    float2 p = (in.uv - 0.5) * 2.0;\n"
 "    p.x *= u.aspect;\n"
 "    float t = u.time;\n"
-"    p += 0.18 * float2(sin(p.y * 2.7 + t * 0.9), cos(p.x * 2.3 - t * 0.7));\n"
+"    float r = length(p);\n"
+"    float theta = atan2(p.y, p.x);\n"
+"    // Organic breathing rim: layered angular wobble.\n"
+"    float wobble = 0.055 * sin(theta * 3.0 + t * 1.15)\n"
+"                 + 0.035 * sin(theta * 5.0 - t * 0.85)\n"
+"                 + 0.020 * sin(theta * 8.0 + t * 1.65);\n"
+"    float R = 0.66 + wobble + 0.025 * sin(t * 1.05);\n"
+"    // Interior colour field: swirled + warped drifting blobs of the palette.\n"
+"    float swirl = 0.45 * sin(t * 0.5) * r;\n"
+"    float cs = cos(swirl), sn = sin(swirl);\n"
+"    float2 q = float2(p.x * cs - p.y * sn, p.x * sn + p.y * cs);\n"
+"    q += 0.24 * float2(sin(q.y * 2.6 + t * 0.8), cos(q.x * 2.4 - t * 0.65));\n"
 "    float3 cols[4] = { u.c0.rgb, u.c1.rgb, u.c2.rgb, u.c3.rgb };\n"
 "    float2 centers[4];\n"
-"    centers[0] = 0.55 * float2(cos(t * 0.61), sin(t * 0.53));\n"
-"    centers[1] = 0.55 * float2(cos(t * 0.47 + 2.1), sin(t * 0.71 + 1.3));\n"
-"    centers[2] = 0.55 * float2(cos(t * 0.83 + 4.2), sin(t * 0.39 + 3.7));\n"
-"    centers[3] = 0.35 * float2(cos(t * 0.29 + 5.4), sin(t * 0.91 + 0.6));\n"
+"    centers[0] = 0.45 * float2(cos(t * 0.61),       sin(t * 0.53));\n"
+"    centers[1] = 0.45 * float2(cos(t * 0.47 + 2.1), sin(t * 0.71 + 1.3));\n"
+"    centers[2] = 0.45 * float2(cos(t * 0.83 + 4.2), sin(t * 0.39 + 3.7));\n"
+"    centers[3] = 0.30 * float2(cos(t * 0.29 + 5.4), sin(t * 0.91 + 0.6));\n"
 "    float3 acc = float3(0.0); float wsum = 0.0;\n"
 "    for (int i = 0; i < 4; i++) {\n"
-"        float d = length(p - centers[i]);\n"
-"        float w = exp(-d * d * 3.2);\n"
+"        float d = length(q - centers[i]);\n"
+"        float w = exp(-d * d * 3.4);\n" // sharper falloff: colours stay distinct instead of averaging to mush
 "        acc += cols[i] * w; wsum += w;\n"
 "    }\n"
 "    float3 color = acc / max(wsum, 1e-4);\n"
-"    float r = length(p);\n"
-"    float rim = 0.82 + 0.04 * sin(t * 1.4);\n" // rim + warp must stay < 1.0 or the disc clips square at the view edge
-"    float alpha = 1.0 - smoothstep(rim - 0.32, rim, r);\n"
-"    color += float3(0.10) * pow(saturate(1.0 - r), 2.0);\n"
+"    // Vibrancy: saturation boost + gamma lift so it reads luminous, not pastel.\n"
+"    float lum = dot(color, float3(0.299, 0.587, 0.114));\n"
+"    color = clamp(mix(float3(lum), color, 1.5), 0.0, 1.6);\n"
+"    color = pow(color, float3(0.85));\n"
+"    // Luminosity shaping: inner glow, coloured pulsing rim light, soft halo.\n"
+"    color *= 1.0 + 0.45 * exp(-r * 1.6);\n"
+"    float rimBand = 1.0 - saturate(abs(r - R * 0.92) / 0.10);\n"
+"    float rimPulse = 0.6 + 0.4 * sin(theta * 2.0 - t * 1.8);\n"
+"    color += (color * 0.8 + float3(0.55)) * pow(rimBand, 2.5) * 0.55 * rimPulse;\n"
+"    float core = 1.0 - smoothstep(R * 0.66, R, r);\n"
+"    float halo = (1.0 - core) * exp(-max(0.0, r - R * 0.75) * 2.6) * 0.7;\n"
+"    // The halo must reach EXACTLY zero inside the view, or its cutoff draws a\n"
+"    // visible square seam at the layer edge (the clipping band).\n"
+"    halo *= saturate((0.97 - r) * 5.0);\n"
+"    float alpha = saturate(core + halo) * 0.95;\n" // slightly translucent overall
+"    alpha *= saturate((1.0 - r) * 8.0);\n"          // absolute edge guard
 "    return float4(color * alpha, alpha);\n"
 "}\n";
 
@@ -50,10 +75,10 @@ typedef struct {
     float aspect;
     float pad[2];
     float c0[4], c1[4], c2[4], c3[4];
-} ATGOrbUniforms;
+} ATGBlobUniforms;
 
 // Default iridescent palette (generation, before any seeds exist).
-static NSArray<UIColor *> *ATGDefaultOrbPalette(void) {
+static NSArray<UIColor *> *ATGDefaultPalette(void) {
     return @[
         [UIColor colorWithRed:1.00 green:0.37 blue:0.64 alpha:1], // pink
         [UIColor colorWithRed:0.54 green:0.36 blue:1.00 alpha:1], // purple
@@ -62,7 +87,7 @@ static NSArray<UIColor *> *ATGDefaultOrbPalette(void) {
     ];
 }
 
-@implementation ApolloThemeShaderOrbView {
+@implementation ApolloThemeShaderFieldView {
     id<MTLDevice> _device;
     id<MTLCommandQueue> _queue;
     id<MTLRenderPipelineState> _pipeline;
@@ -90,10 +115,10 @@ static NSArray<UIColor *> *ATGDefaultOrbPalette(void) {
 
 - (void)setUpMetal {
     _device = MTLCreateSystemDefaultDevice();
-    if (!_device) { ApolloLog(@"ThemeOrb: no Metal device — gradient fallback"); return; }
+    if (!_device) { ApolloLog(@"ThemeBlob: no Metal device — gradient fallback"); return; }
     NSError *error = nil;
-    id<MTLLibrary> library = [_device newLibraryWithSource:kOrbShaderSource options:nil error:&error];
-    if (!library) { ApolloLog(@"ThemeOrb: shader compile FAILED: %@", error); return; }
+    id<MTLLibrary> library = [_device newLibraryWithSource:kBlobShaderSource options:nil error:&error];
+    if (!library) { ApolloLog(@"ThemeBlob: shader compile FAILED: %@", error); return; }
     MTLRenderPipelineDescriptor *desc = [MTLRenderPipelineDescriptor new];
     desc.vertexFunction = [library newFunctionWithName:@"atg_vert"];
     desc.fragmentFunction = [library newFunctionWithName:@"atg_frag"];
@@ -105,7 +130,7 @@ static NSArray<UIColor *> *ATGDefaultOrbPalette(void) {
     att.sourceAlphaBlendFactor = MTLBlendFactorOne;
     att.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
     _pipeline = [_device newRenderPipelineStateWithDescriptor:desc error:&error];
-    if (!_pipeline) { ApolloLog(@"ThemeOrb: pipeline FAILED: %@", error); return; }
+    if (!_pipeline) { ApolloLog(@"ThemeBlob: pipeline FAILED: %@", error); return; }
     _queue = [_device newCommandQueue];
 
     CAMetalLayer *layer = (CAMetalLayer *)self.layer;
@@ -117,15 +142,15 @@ static NSArray<UIColor *> *ATGDefaultOrbPalette(void) {
     _metalReady = YES;
 }
 
-// CAGradientLayer stand-in: same palette, slow hue drift + rotation, circular
-// mask. Never as fluid as the shader but never broken either.
+// CAGradientLayer stand-in: same palette, slow spin, circular mask. Never as
+// fluid as the shader but never broken either.
 - (void)setUpGradientFallback {
     _fallbackGradient = [CAGradientLayer layer];
     _fallbackGradient.type = kCAGradientLayerConic;
     _fallbackGradient.startPoint = CGPointMake(0.5, 0.5);
     _fallbackGradient.endPoint = CGPointMake(1.0, 0.5);
     NSMutableArray *cgColors = [NSMutableArray array];
-    for (UIColor *c in ATGDefaultOrbPalette()) [cgColors addObject:(id)c.CGColor];
+    for (UIColor *c in ATGDefaultPalette()) [cgColors addObject:(id)c.CGColor];
     [cgColors addObject:cgColors.firstObject];
     _fallbackGradient.colors = cgColors;
     [self.layer addSublayer:_fallbackGradient];
@@ -136,7 +161,7 @@ static NSArray<UIColor *> *ATGDefaultOrbPalette(void) {
 }
 
 - (void)setPaletteColors:(NSArray<UIColor *> *)colors {
-    NSArray<UIColor *> *source = colors.count ? colors : ATGDefaultOrbPalette();
+    NSArray<UIColor *> *source = colors.count ? colors : ATGDefaultPalette();
     for (NSUInteger i = 0; i < 4; i++) {
         UIColor *c = source[i % source.count];
         CGFloat r = 0, g = 0, b = 0, a = 1;
@@ -183,7 +208,7 @@ static NSArray<UIColor *> *ATGDefaultOrbPalette(void) {
     if (_fallbackGradient) {
         _fallbackGradient.frame = self.bounds;
         CAShapeLayer *mask = [CAShapeLayer layer];
-        mask.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(self.bounds, 2, 2)].CGPath;
+        mask.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(self.bounds, 4, 4)].CGPath;
         _fallbackGradient.mask = mask;
     }
 }
@@ -194,7 +219,7 @@ static NSArray<UIColor *> *ATGDefaultOrbPalette(void) {
     id<CAMetalDrawable> drawable = [layer nextDrawable];
     if (!drawable) return;
 
-    ATGOrbUniforms uniforms;
+    ATGBlobUniforms uniforms;
     memset(&uniforms, 0, sizeof(uniforms));
     uniforms.time = (float)(CACurrentMediaTime() - _startTime);
     uniforms.aspect = (float)(self.bounds.size.width / MAX(self.bounds.size.height, 1.0));
@@ -226,126 +251,180 @@ static NSArray<UIColor *> *ATGDefaultOrbPalette(void) {
 @end
 
 // ===========================================================================
-// Overlay view controller
+// Overlay view
 // ===========================================================================
 
-@implementation ApolloThemeGenerationOverlayViewController {
-    ApolloThemeShaderOrbView *_orb;
+@implementation ApolloThemeGenerationOverlayView {
+    ApolloThemeShaderFieldView *_blob;
     UILabel *_statusLabel;
+    NSArray<NSString *> *_statusLines;
     NSTimer *_statusTimer;
     NSUInteger _statusIndex;
+    void (^_onCancel)(void);
+    BOOL _dismissing;
 }
 
-- (instancetype)init {
-    self = [super initWithNibName:nil bundle:nil];
-    if (self) {
-        self.modalPresentationStyle = UIModalPresentationOverFullScreen;
-        self.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
-    }
-    return self;
++ (instancetype)overlayWithHeadline:(NSString *)headline
+                        statusLines:(NSArray<NSString *> *)statusLines
+                          orbColors:(NSArray<UIColor *> *)orbColors
+                           onCancel:(void (^)(void))onCancel {
+    ApolloThemeGenerationOverlayView *overlay = [[self alloc] initWithFrame:CGRectZero];
+    [overlay configureWithHeadline:headline statusLines:statusLines orbColors:orbColors onCancel:onCancel];
+    return overlay;
 }
 
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.view.backgroundColor = UIColor.clearColor;
+- (void)configureWithHeadline:(NSString *)headline
+                  statusLines:(NSArray<NSString *> *)statusLines
+                    orbColors:(NSArray<UIColor *> *)orbColors
+                     onCancel:(void (^)(void))onCancel {
+    _statusLines = [statusLines copy];
+    _onCancel = [onCancel copy];
+    self.backgroundColor = UIColor.clearColor;
 
-    UIVisualEffectView *scrim = [[UIVisualEffectView alloc]
+    // Live blur of the app beneath — the whole overlay reads as a translucent
+    // layer floating over the UI, not a separate screen.
+    UIVisualEffectView *blur = [[UIVisualEffectView alloc]
         initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterialDark]];
-    scrim.frame = self.view.bounds;
-    scrim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [self.view addSubview:scrim];
+    blur.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:blur];
 
-    UIVisualEffectView *card = [[UIVisualEffectView alloc]
-        initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
-    card.layer.cornerRadius = 28.0;
-    card.layer.cornerCurve = kCACornerCurveContinuous;
-    card.clipsToBounds = YES;
-    card.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:card];
+    // The big luminous blob, floating above centre.
+    _blob = [[ApolloThemeShaderFieldView alloc] initWithFrame:CGRectZero];
+    [_blob setPaletteColors:orbColors];
+    _blob.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:_blob];
 
-    _orb = [[ApolloThemeShaderOrbView alloc] initWithFrame:CGRectZero];
-    [_orb setPaletteColors:self.orbColors];
-    _orb.translatesAutoresizingMaskIntoConstraints = NO;
-    // Slow breathing scale so the orb feels alive even between shader phases.
-    [UIView animateWithDuration:2.2 delay:0
-                        options:UIViewAnimationOptionAutoreverse | UIViewAnimationOptionRepeat |
-                                UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction
-                     animations:^{ self->_orb.transform = CGAffineTransformMakeScale(1.07, 1.07); }
-                     completion:nil];
-
-    UILabel *headline = [UILabel new];
-    headline.text = self.headline.length ? self.headline : @"Creating Themes";
-    headline.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
-    headline.textColor = UIColor.labelColor;
-    headline.textAlignment = NSTextAlignmentCenter;
+    UILabel *headlineLabel = [UILabel new];
+    headlineLabel.text = headline.length ? headline : @"Creating Themes";
+    headlineLabel.font = [UIFont systemFontOfSize:28 weight:UIFontWeightBold];
+    headlineLabel.textColor = UIColor.whiteColor;
+    headlineLabel.textAlignment = NSTextAlignmentCenter;
+    headlineLabel.numberOfLines = 2;
+    headlineLabel.layer.shadowColor = UIColor.blackColor.CGColor;
+    headlineLabel.layer.shadowOpacity = 0.4;
+    headlineLabel.layer.shadowRadius = 10;
+    headlineLabel.layer.shadowOffset = CGSizeZero;
 
     _statusLabel = [UILabel new];
-    _statusLabel.font = [UIFont systemFontOfSize:15];
-    _statusLabel.textColor = UIColor.secondaryLabelColor;
+    _statusLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightMedium];
+    _statusLabel.textColor = [UIColor colorWithWhite:1 alpha:0.85];
     _statusLabel.textAlignment = NSTextAlignmentCenter;
     _statusLabel.numberOfLines = 2;
-    _statusLabel.text = self.statusLines.firstObject ?: @"Working on it…";
+    _statusLabel.text = _statusLines.firstObject ?: @"Working on it…";
+    _statusLabel.layer.shadowColor = UIColor.blackColor.CGColor;
+    _statusLabel.layer.shadowOpacity = 0.4;
+    _statusLabel.layer.shadowRadius = 8;
+    _statusLabel.layer.shadowOffset = CGSizeZero;
+
+    UIStackView *text = [[UIStackView alloc] initWithArrangedSubviews:@[headlineLabel, _statusLabel]];
+    text.axis = UILayoutConstraintAxisVertical;
+    text.alignment = UIStackViewAlignmentCenter;
+    text.spacing = 8.0;
+    text.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:text];
 
     UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
     [cancel setTitle:@"Cancel" forState:UIControlStateNormal];
     cancel.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    [cancel setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    cancel.backgroundColor = [UIColor colorWithWhite:1 alpha:0.18];
+    cancel.layer.cornerRadius = 22.0;
+    cancel.layer.cornerCurve = kCACornerCurveContinuous;
+    cancel.contentEdgeInsets = UIEdgeInsetsMake(0, 28, 0, 28);
     [cancel addTarget:self action:@selector(cancelTapped) forControlEvents:UIControlEventTouchUpInside];
-
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[_orb, headline, _statusLabel, cancel]];
-    stack.axis = UILayoutConstraintAxisVertical;
-    stack.alignment = UIStackViewAlignmentCenter;
-    stack.spacing = 14.0;
-    [stack setCustomSpacing:22 afterView:_orb];
-    [stack setCustomSpacing:6 afterView:headline];
-    [stack setCustomSpacing:18 afterView:_statusLabel];
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [card.contentView addSubview:stack];
+    cancel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:cancel];
 
     [NSLayoutConstraint activateConstraints:@[
-        [card.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [card.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor constant:-20],
-        [card.widthAnchor constraintEqualToConstant:300],
+        [blur.topAnchor constraintEqualToAnchor:self.topAnchor],
+        [blur.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+        [blur.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [blur.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
 
-        [stack.topAnchor constraintEqualToAnchor:card.contentView.topAnchor constant:30],
-        [stack.bottomAnchor constraintEqualToAnchor:card.contentView.bottomAnchor constant:-18],
-        [stack.leadingAnchor constraintEqualToAnchor:card.contentView.leadingAnchor constant:20],
-        [stack.trailingAnchor constraintEqualToAnchor:card.contentView.trailingAnchor constant:-20],
+        // Big: ~95% of the screen width (the halo needs headroom in the view).
+        [_blob.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
+        [_blob.centerYAnchor constraintEqualToAnchor:self.centerYAnchor constant:-90],
+        [_blob.widthAnchor constraintEqualToAnchor:self.widthAnchor multiplier:0.95],
+        [_blob.heightAnchor constraintEqualToAnchor:_blob.widthAnchor],
 
-        [_orb.widthAnchor constraintEqualToConstant:150],
-        [_orb.heightAnchor constraintEqualToConstant:150],
-        [_statusLabel.widthAnchor constraintEqualToAnchor:stack.widthAnchor],
+        [text.topAnchor constraintEqualToAnchor:_blob.bottomAnchor constant:-6],
+        [text.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:32],
+        [text.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-32],
+
+        [cancel.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
+        [cancel.bottomAnchor constraintEqualToAnchor:self.safeAreaLayoutGuide.bottomAnchor constant:-24],
+        [cancel.heightAnchor constraintEqualToConstant:44],
     ]];
 
-    if (self.statusLines.count > 1) {
+    if (_statusLines.count > 1) {
         __weak typeof(self) weakSelf = self;
-        _statusTimer = [NSTimer scheduledTimerWithTimeInterval:2.6 repeats:YES block:^(NSTimer *timer) {
+        _statusTimer = [NSTimer scheduledTimerWithTimeInterval:2.1 repeats:YES block:^(NSTimer *timer) {
             [weakSelf advanceStatus];
         }];
     }
 }
 
+- (BOOL)isPresented { return self.superview != nil && !_dismissing; }
+
+- (void)presentInView:(UIView *)container {
+    if (!container) return;
+    self.frame = container.bounds;
+    self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.alpha = 0;
+    [container addSubview:self];
+    // The blob swells into place while the blur fades up; the slow breathing
+    // loop starts only AFTER the spring settles (starting both at once would
+    // cancel one of the transform animations).
+    self->_blob.transform = CGAffineTransformMakeScale(0.6, 0.6);
+    [UIView animateWithDuration:0.5 delay:0
+         usingSpringWithDamping:0.8 initialSpringVelocity:0.4
+                        options:UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        self.alpha = 1;
+        self->_blob.transform = CGAffineTransformIdentity;
+    } completion:^(BOOL finished) {
+        [UIView animateWithDuration:2.4 delay:0
+                            options:UIViewAnimationOptionAutoreverse | UIViewAnimationOptionRepeat |
+                                    UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionAllowUserInteraction
+                         animations:^{ self->_blob.transform = CGAffineTransformMakeScale(1.05, 1.05); }
+                         completion:nil];
+    }];
+}
+
+// Fade + gentle zoom so the freshly presented results underneath appear to
+// "develop" out of the light.
+- (void)dismissAnimated {
+    if (_dismissing) return;
+    _dismissing = YES;
+    [_statusTimer invalidate];
+    _statusTimer = nil;
+    [UIView animateWithDuration:0.55
+                          delay:0
+                        options:UIViewAnimationOptionCurveEaseIn
+                     animations:^{
+        self.alpha = 0;
+        self.transform = CGAffineTransformMakeScale(1.08, 1.08);
+    } completion:^(BOOL finished) {
+        [self removeFromSuperview];
+    }];
+}
+
 - (void)advanceStatus {
-    if (!self.statusLines.count) return;
+    if (!_statusLines.count) return;
     // Advance to the next line, holding on the last (it reads as "almost done").
-    if (_statusIndex + 1 >= self.statusLines.count) return;
+    if (_statusIndex + 1 >= _statusLines.count) return;
     _statusIndex++;
     [UIView transitionWithView:_statusLabel
                       duration:0.35
                        options:UIViewAnimationOptionTransitionCrossDissolve
-                    animations:^{ self->_statusLabel.text = self.statusLines[self->_statusIndex]; }
+                    animations:^{ self->_statusLabel.text = self->_statusLines[self->_statusIndex]; }
                     completion:nil];
 }
 
 - (void)cancelTapped {
-    void (^cb)(void) = self.onCancel;
+    void (^cb)(void) = _onCancel;
     if (cb) cb();
-    [self dismissViewControllerAnimated:YES completion:nil];
-}
-
-- (void)viewWillDisappear:(BOOL)animated {
-    [super viewWillDisappear:animated];
-    [_statusTimer invalidate];
-    _statusTimer = nil;
+    [self dismissAnimated];
 }
 
 @end
