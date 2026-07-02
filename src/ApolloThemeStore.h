@@ -52,6 +52,7 @@ NS_ASSUME_NONNULL_BEGIN
                mode:(ApolloThemeMode)mode
             themeID:(NSString *)themeID;
 - (void)setVariant:(ApolloThemeVariant)variant themeID:(NSString *)themeID;
+- (void)setFont:(ApolloThemeFont)font themeID:(NSString *)themeID;
 // Fill the opposite mode from the given source mode (spec §4.3).
 - (void)generateMode:(ApolloThemeMode)destMode
             fromMode:(ApolloThemeMode)srcMode

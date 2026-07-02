@@ -21,6 +21,7 @@ NSString * const kApolloRebornThemeSchemaVersionKey   = @"ApolloReborn.themeSche
 NSString * const kApolloRebornThemeRuntimeDisabledKey = @"ApolloReborn.themeRuntimeDisabled";
 NSString * const kApolloRebornThemeV1BackupKey        = @"ApolloReborn.themeV1Backup";
 NSString * const kApolloThemeAdvancedOptionsEnabledKey = @"advancedEnabled";
+NSString * const kApolloThemeFontKey                    = @"font";
 
 const NSInteger kApolloThemeSchemaVersion = 2;
 
@@ -79,6 +80,69 @@ ApolloThemeVariant ApolloThemeVariantFromKey(NSString *key) {
     if ([key isEqualToString:@"bold"])   return ApolloThemeVariantBold;
     return ApolloThemeVariantBalanced;
 }
+
+#pragma mark - Font
+
+NSString *ApolloThemeFontKey(ApolloThemeFont font) {
+    switch (font) {
+        case ApolloThemeFontRounded: return @"rounded";
+        case ApolloThemeFontSerif:   return @"serif";
+        case ApolloThemeFontMono:    return @"mono";
+        case ApolloThemeFontSystem:
+        default:                     return @"system";
+    }
+}
+
+ApolloThemeFont ApolloThemeFontFromKey(NSString *key) {
+    if ([key isEqualToString:@"rounded"]) return ApolloThemeFontRounded;
+    if ([key isEqualToString:@"serif"])   return ApolloThemeFontSerif;
+    if ([key isEqualToString:@"mono"])    return ApolloThemeFontMono;
+    return ApolloThemeFontSystem;
+}
+
+NSString *ApolloThemeFontDisplayName(ApolloThemeFont font) {
+    switch (font) {
+        case ApolloThemeFontRounded: return @"SF Pro Rounded";
+        case ApolloThemeFontSerif:   return @"New York";
+        case ApolloThemeFontMono:    return @"SF Mono";
+        case ApolloThemeFontSystem:
+        default:                     return @"SF Pro";
+    }
+}
+
+NSString *ApolloThemeFontDetailName(ApolloThemeFont font) {
+    switch (font) {
+        case ApolloThemeFontRounded: return @"Rounded";
+        case ApolloThemeFontSerif:   return @"Serif";
+        case ApolloThemeFontMono:    return @"Monospaced";
+        case ApolloThemeFontSystem:
+        default:                     return @"Default";
+    }
+}
+
+#if __has_include(<UIKit/UIKit.h>)
+UIFont *ApolloThemeFontApply(ApolloThemeFont font, UIFont *base) {
+    if (!base) return base;
+    // System applies the Default design rather than returning base as-is: the
+    // editor renders its font rows from fonts that may ALREADY carry the live
+    // theme's design (the tweak's own UIFont calls pass the runtime hook), so
+    // the SF Pro row must normalise back explicitly.
+    UIFontDescriptorSystemDesign design;
+    switch (font) {
+        case ApolloThemeFontRounded: design = UIFontDescriptorSystemDesignRounded;    break;
+        case ApolloThemeFontSerif:   design = UIFontDescriptorSystemDesignSerif;      break;
+        case ApolloThemeFontMono:    design = UIFontDescriptorSystemDesignMonospaced; break;
+        case ApolloThemeFontSystem:
+        default:                     design = UIFontDescriptorSystemDesignDefault;    break;
+    }
+    UIFontDescriptor *descriptor = [base.fontDescriptor fontDescriptorWithDesign:design];
+    if (!descriptor) return base;
+    // Size 0 keeps the descriptor's point size (i.e. base's, including any
+    // Dynamic Type scaling already applied to it).
+    UIFont *derived = [UIFont fontWithDescriptor:descriptor size:0];
+    return derived ?: base;
+}
+#endif // __has_include(<UIKit/UIKit.h>)
 
 #pragma mark - Input keys
 

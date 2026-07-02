@@ -284,11 +284,13 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
     NSDictionary *src = [self themeWithID:themeID];
     if (!src) return nil;
     BOOL advanced = [src[kApolloThemeAdvancedOptionsEnabledKey] boolValue];
-    return [self createThemeNamed:[src[@"name"] stringByAppendingString:@" Copy"]
-                            input:src[@"input"]
-                          variant:ApolloThemeVariantFromKey(src[@"variant"])
-            advancedOptionsEnabled:advanced
-                       generation:src[@"generation"]];
+    NSString *newID = [self createThemeNamed:[src[@"name"] stringByAppendingString:@" Copy"]
+                                       input:src[@"input"]
+                                     variant:ApolloThemeVariantFromKey(src[@"variant"])
+                       advancedOptionsEnabled:advanced
+                                  generation:src[@"generation"]];
+    [self setFont:ApolloThemeFontFromKey(src[kApolloThemeFontKey]) themeID:newID];
+    return newID;
 }
 
 - (void)renameTheme:(NSString *)themeID to:(NSString *)name {
@@ -335,6 +337,17 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
 - (void)setVariant:(ApolloThemeVariant)variant themeID:(NSString *)themeID {
     [self updateTheme:themeID mutations:^(NSMutableDictionary *t) {
         t[@"variant"] = ApolloThemeVariantKey(variant);
+    }];
+}
+
+// System is stored as an ABSENT key (matching every pre-font theme), so this
+// no-ops rather than bumping updatedAt when nothing actually changes.
+- (void)setFont:(ApolloThemeFont)font themeID:(NSString *)themeID {
+    if (font == ApolloThemeFontFromKey([self themeWithID:themeID][kApolloThemeFontKey])) return;
+    ApolloLog(@"ThemeStore: setFont %@ theme=%@", ApolloThemeFontKey(font), themeID);
+    [self updateTheme:themeID mutations:^(NSMutableDictionary *t) {
+        if (font == ApolloThemeFontSystem) [t removeObjectForKey:kApolloThemeFontKey];
+        else t[kApolloThemeFontKey] = ApolloThemeFontKey(font);
     }];
 }
 
@@ -480,6 +493,8 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
     NSDictionary *normalizedInput = NormalizeInput(theme[@"input"]);
     portable[@"input"] = advancedEnabled ? normalizedInput : StripAdvancedOverrides(normalizedInput);
     portable[kApolloThemeAdvancedOptionsEnabledKey] = @(advancedEnabled);
+    ApolloThemeFont font = ApolloThemeFontFromKey(theme[kApolloThemeFontKey]);
+    if (font != ApolloThemeFontSystem) portable[kApolloThemeFontKey] = ApolloThemeFontKey(font);
     if ([theme[@"generation"] isKindOfClass:[NSDictionary class]]) portable[@"generation"] = theme[@"generation"];
     return [NSJSONSerialization dataWithJSONObject:portable
                                            options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys
@@ -520,6 +535,11 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
         ? [obj[kApolloThemeAdvancedOptionsEnabledKey] boolValue]
         : InputHasAnyAdvancedOverrides(input);
     parsed[kApolloThemeAdvancedOptionsEnabledKey] = @(enabled);
+    // Unknown/missing font keys normalise to System (key omitted).
+    if ([obj[kApolloThemeFontKey] isKindOfClass:[NSString class]]) {
+        ApolloThemeFont font = ApolloThemeFontFromKey(obj[kApolloThemeFontKey]);
+        if (font != ApolloThemeFontSystem) parsed[kApolloThemeFontKey] = ApolloThemeFontKey(font);
+    }
     if ([obj[@"generation"] isKindOfClass:[NSDictionary class]]) {
         parsed[@"generation"] = PlistSanitized(obj[@"generation"]); // JSON null -> NSNull would poison defaults
     }
@@ -530,11 +550,13 @@ static BOOL InputHasAnyAdvancedOverrides(NSDictionary *input) {
 - (NSString *)importParsedTheme:(NSDictionary *)parsed {
     // Always mints a fresh id; never overwrites (spec §14.2).
     ApolloLog(@"ThemeStore: importParsedTheme '%@' (schema %@)", parsed[@"name"], parsed[@"schemaVersion"]);
-    return [self createThemeNamed:parsed[@"name"]
-                            input:parsed[@"input"]
-                          variant:ApolloThemeVariantFromKey(parsed[@"variant"])
-             advancedOptionsEnabled:[parsed[kApolloThemeAdvancedOptionsEnabledKey] boolValue]
-                       generation:parsed[@"generation"]];
+    NSString *newID = [self createThemeNamed:parsed[@"name"]
+                                       input:parsed[@"input"]
+                                     variant:ApolloThemeVariantFromKey(parsed[@"variant"])
+                      advancedOptionsEnabled:[parsed[kApolloThemeAdvancedOptionsEnabledKey] boolValue]
+                                  generation:parsed[@"generation"]];
+    [self setFont:ApolloThemeFontFromKey(parsed[kApolloThemeFontKey]) themeID:newID];
+    return newID;
 }
 
 - (NSString *)exportFilenameForName:(NSString *)name {

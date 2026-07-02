@@ -27,11 +27,18 @@
 - (void)setTitle:(NSString *)title withFont:(UIFont *)font withColor:(UIColor *)color withShadowColor:(UIColor *)shadowColor withShadowOffset:(CGSize)shadowOffset forState:(NSUInteger)state;
 @end
 
+@interface _UINavigationBarTitleControl : UIControl
+@end
+
 // ===========================================================================
 // Runtime state
 // ===========================================================================
 
 static volatile bool sEnabled = false;
+// Active theme's app-wide font. Read from any thread (Texture builds
+// attributed strings off-main); a single enum-width store is atomic on arm64,
+// matching the sEnabled convention.
+static volatile ApolloThemeFont sFontChoice = ApolloThemeFontSystem;
 static uint32_t sTokens[ApolloThemeModeCount][ApolloThemeTokenCount];
 static uint64_t sEpoch = 0; // bumped whenever sTokens or sEnabled changes
 static os_unfair_lock sLock = OS_UNFAIR_LOCK_INIT;
@@ -114,6 +121,65 @@ static bool sPostNativeNotifications = true;
 // Re-entrancy guard: while a dynamic-colour provider is building a concrete
 // colour for a token, the UIColor constructor hook must not re-map it.
 static __thread int sBypassHook = 0;
+
+// ---------------------------------------------------------------------------
+// Theme font (per-theme app-wide font, spec: 4 system designs only)
+// ---------------------------------------------------------------------------
+
+// Guard against UIKit re-entering a hooked UIFont factory while we re-derive
+// a font through fontWithDescriptor:size:.
+static __thread int sFontBypass = 0;
+
+static BOOL ClassNameLooksApolloOwned(const char *name);
+static BOOL TextSinkMayUseTheme(id object, uintptr_t caller);
+
+// Re-derive a system font in the active theme's design. Caller-gated like the
+// colour hooks: only Apollo's own code (and the tweak) get themed fonts, so
+// UIKit-built chrome (system alerts, share sheet, keyboard) keeps SF Pro —
+// which also keeps the wide SF Mono design out of fixed-width system chrome.
+static UIFont *ThemedFont(UIFont *font, uintptr_t caller) {
+    if (!sEnabled || sFontChoice == ApolloThemeFontSystem || !font) return font;
+    if (sFontBypass) return font;
+    if (!CallerMayUseThemeRuntime(caller)) return font;
+    sFontBypass++;
+    UIFont *themed = ApolloThemeFontApply(sFontChoice, font);
+    sFontBypass--;
+    return themed;
+}
+
+static BOOL FontLooksLikeAppleSystemDesign(UIFont *font) {
+    if (![font isKindOfClass:[UIFont class]]) return NO;
+    NSString *fontName = font.fontName ?: @"";
+    NSString *familyName = font.familyName ?: @"";
+
+    // System-design fonts use private/postscript names rather than normal
+    // bundled font names. Keep the predicate conservative so explicit app
+    // fonts such as markdown code faces survive sink-level rewriting.
+    if ([fontName hasPrefix:@".SF"] ||
+        [fontName hasPrefix:@".NewYork"] ||
+        [fontName hasPrefix:@".AppleSystem"]) {
+        return YES;
+    }
+    if ([familyName hasPrefix:@"SF "] ||
+        [familyName hasPrefix:@"SF-"] ||
+        [familyName isEqualToString:@"New York"] ||
+        [familyName hasPrefix:@"New York"] ||
+        [familyName isEqualToString:@".AppleSystemUIFont"]) {
+        return YES;
+    }
+    return NO;
+}
+
+static UIFont *ThemedTextSinkFont(UIFont *font, id owner, uintptr_t caller) {
+    if (!sEnabled || !font || sFontBypass) return font;
+    if (!TextSinkMayUseTheme(owner, caller)) return font;
+    if (!FontLooksLikeAppleSystemDesign(font)) return font;
+
+    sFontBypass++;
+    UIFont *themed = ApolloThemeFontApply(sFontChoice, font);
+    sFontBypass--;
+    return themed;
+}
 
 // ---------------------------------------------------------------------------
 // Donor + exact Apollo palette lookup tables (spec §8.1, §11.2)
@@ -288,10 +354,55 @@ static BOOL ObjectChainLooksApolloOwned(id object) {
                 next = nil;
             }
         }
+        if (!next && [current respondsToSelector:@selector(nextResponder)]) {
+            @try {
+                next = ((id (*)(id, SEL))objc_msgSend)(current, @selector(nextResponder));
+            } @catch (__unused NSException *e) {
+                next = nil;
+            }
+        }
         if (next == current) break;
         current = next;
     }
     return NO;
+}
+
+static UINavigationBar *NavigationBarForDescendant(UIView *view) {
+    for (UIView *v = view; v != nil; v = v.superview) {
+        if ([v isKindOfClass:[UINavigationBar class]]) return (UINavigationBar *)v;
+    }
+    return nil;
+}
+
+static BOOL NavigationBarLooksApolloOwned(UINavigationBar *bar) {
+    if (![bar isKindOfClass:[UINavigationBar class]]) return NO;
+    if (ObjectChainLooksApolloOwned(bar)) return YES;
+    id delegate = bar.delegate;
+    if (delegate && ClassNameLooksApolloOwned(class_getName(object_getClass(delegate)))) return YES;
+    return NO;
+}
+
+static void ApplyThemeFontToNavigationTitleControl(UIView *titleControl) {
+    if (!sEnabled || ![titleControl isKindOfClass:[UIView class]]) return;
+    UINavigationBar *bar = NavigationBarForDescendant(titleControl);
+    if (!NavigationBarLooksApolloOwned(bar)) return;
+
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:titleControl];
+    while (queue.count > 0) {
+        UIView *view = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if ([view isKindOfClass:[UILabel class]]) {
+            UILabel *label = (UILabel *)view;
+            UIFont *font = label.font;
+            if ([font isKindOfClass:[UIFont class]] && FontLooksLikeAppleSystemDesign(font)) {
+                sFontBypass++;
+                UIFont *themed = ApolloThemeFontApply(sFontChoice, font);
+                sFontBypass--;
+                if (themed && ![themed.fontName isEqualToString:font.fontName]) label.font = themed;
+            }
+        }
+        for (UIView *child in view.subviews) [queue addObject:child];
+    }
 }
 
 static BOOL TextSinkMayUseTheme(id object, uintptr_t caller) {
@@ -334,6 +445,14 @@ UIColor *ApolloThemeRuntimeColor(ApolloThemeToken token) {
     return ApolloThemeMakeDynamicColor(token);
 }
 
+UIFont *ApolloThemeRuntimeFont(UIFont *base) {
+    if (!sEnabled || sFontChoice == ApolloThemeFontSystem || !base) return base;
+    sFontBypass++;
+    UIFont *themed = ApolloThemeFontApply(sFontChoice, base);
+    sFontBypass--;
+    return themed ?: base;
+}
+
 uint64_t ApolloThemeRuntimeEpoch(void) {
     os_unfair_lock_lock(&sLock);
     uint64_t e = sEpoch;
@@ -364,6 +483,16 @@ static NSAttributedString *ThemedAttributedText(NSAttributedString *text, id own
 
     __block NSMutableAttributedString *rewritten = nil;
     NSRange full = NSMakeRange(0, text.length);
+    [text enumerateAttribute:NSFontAttributeName
+                     inRange:full
+                     options:0
+                  usingBlock:^(id value, NSRange range, BOOL *stop) {
+        if (![value isKindOfClass:[UIFont class]]) return;
+        UIFont *replacement = ThemedTextSinkFont(value, owner, caller);
+        if (replacement == value) return;
+        if (!rewritten) rewritten = [text mutableCopy];
+        [rewritten addAttribute:NSFontAttributeName value:replacement range:range];
+    }];
     [text enumerateAttribute:NSForegroundColorAttributeName
                      inRange:full
                      options:0
@@ -375,6 +504,29 @@ static NSAttributedString *ThemedAttributedText(NSAttributedString *text, id own
         [rewritten addAttribute:NSForegroundColorAttributeName value:replacement range:range];
     }];
     return rewritten ?: text;
+}
+
+static NSAttributedString *ThemedPlaceholderText(UITextField *field, NSAttributedString *placeholder, uintptr_t caller) {
+    if (![field isKindOfClass:[UITextField class]]) return placeholder;
+    if (!TextSinkMayUseTheme(field, caller)) return placeholder;
+
+    NSMutableAttributedString *working = nil;
+    if ([placeholder isKindOfClass:[NSAttributedString class]] && placeholder.length > 0) {
+        working = [placeholder mutableCopy];
+    } else if (field.placeholder.length > 0) {
+        working = [[NSMutableAttributedString alloc] initWithString:field.placeholder];
+    }
+    if (!working.length) return placeholder;
+
+    NSRange full = NSMakeRange(0, working.length);
+    __block BOOL hasFont = NO;
+    [working enumerateAttribute:NSFontAttributeName inRange:full options:0 usingBlock:^(id value, NSRange range, BOOL *stop) {
+        if ([value isKindOfClass:[UIFont class]]) { hasFont = YES; *stop = YES; }
+    }];
+    if (!hasFont && [field.font isKindOfClass:[UIFont class]]) {
+        [working addAttribute:NSFontAttributeName value:field.font range:full];
+    }
+    return ThemedAttributedText(working, field, caller);
 }
 
 // Resolve a token's static RGB components (0..1) for a mode. The value-
@@ -417,6 +569,7 @@ void ApolloThemeRuntimeReload(void) {
     if (!theme) {
         os_unfair_lock_lock(&sLock);
         sEnabled = false;
+        sFontChoice = ApolloThemeFontSystem;
         sEpoch++;
         os_unfair_lock_unlock(&sLock);
         ApolloLog(@"ThemeRuntime: reload -> INACTIVE (enabledFlag=%d crashKill=%d activeTheme=%@)",
@@ -442,16 +595,30 @@ void ApolloThemeRuntimeReload(void) {
             sTokens[m][t] = [compiled rgbForToken:(ApolloThemeToken)t mode:(ApolloThemeMode)m];
         }
     }
+    sFontChoice = ApolloThemeFontFromKey(theme[kApolloThemeFontKey]);
     sEnabled = true;
     sEpoch++;
     os_unfair_lock_unlock(&sLock);
 
-    ApolloLog(@"ThemeRuntime: reload -> ACTIVE theme='%@' variant=%@ | light bg=#%06X card=#%06X accent=#%06X label=#%06X | dark bg=#%06X card=#%06X accent=#%06X",
-              theme[@"name"], theme[@"variant"],
+    ApolloLog(@"ThemeRuntime: reload -> ACTIVE theme='%@' variant=%@ font=%@ | light bg=#%06X card=#%06X accent=#%06X label=#%06X | dark bg=#%06X card=#%06X accent=#%06X",
+              theme[@"name"], theme[@"variant"], ApolloThemeFontKey(sFontChoice),
               sTokens[0][ApolloThemeTokenBackground], sTokens[0][ApolloThemeTokenSecondaryBackground],
               sTokens[0][ApolloThemeTokenAccent], sTokens[0][ApolloThemeTokenLabel],
               sTokens[1][ApolloThemeTokenBackground], sTokens[1][ApolloThemeTokenSecondaryBackground],
               sTokens[1][ApolloThemeTokenAccent]);
+
+    sFontBypass++;
+    UIFont *base = [UIFont systemFontOfSize:17.0 weight:UIFontWeightRegular];
+    sFontBypass--;
+    UIFont *resolved = ApolloThemeFontApply(sFontChoice, base);
+    ApolloLog(@"ThemeRuntime: font sample key=%@ base='%@' family='%@' -> resolved='%@' family='%@'",
+              ApolloThemeFontKey(sFontChoice), base.fontName, base.familyName, resolved.fontName, resolved.familyName);
+    UIFont *defaultSample = ApolloThemeFontApply(ApolloThemeFontSystem, base);
+    UIFont *roundedSample = ApolloThemeFontApply(ApolloThemeFontRounded, base);
+    UIFont *serifSample = ApolloThemeFontApply(ApolloThemeFontSerif, base);
+    UIFont *monoSample = ApolloThemeFontApply(ApolloThemeFontMono, base);
+    ApolloLog(@"ThemeRuntime: font designs default='%@' rounded='%@' serif='%@' mono='%@'",
+              defaultSample.fontName, roundedSample.fontName, serifSample.fontName, monoSample.fontName);
 }
 
 // ===========================================================================
@@ -682,6 +849,45 @@ void ApolloThemeRuntimeInvalidate(void) {
 
 %end
 
+// --- theme font (per-theme app-wide font) ---
+// Every hooked entry is a UIFont FACTORY: we let %orig build the exact font
+// Apollo asked for, then re-derive it through the descriptor design axis
+// (ApolloThemeFontApply), preserving size/weight/traits/Dynamic Type. Apollo
+// is Swift, but UIFont.systemFont(ofSize:)/preferredFont(forTextStyle:)
+// compile down to these class methods, so Texture attributed strings are
+// covered. fontWithDescriptor:size: (our own re-derive path) and
+// fontWithName: (Apollo's markdown code blocks) are deliberately NOT hooked.
+// monospacedDigitSystemFontOfSize:weight: is also left alone — those callers
+// want column-aligned counters, which every design already honours there.
+
+%hook UIFont
+
++ (UIFont *)systemFontOfSize:(CGFloat)size {
+    return ThemedFont(%orig, (uintptr_t)__builtin_return_address(0));
+}
+
++ (UIFont *)systemFontOfSize:(CGFloat)size weight:(UIFontWeight)weight {
+    return ThemedFont(%orig, (uintptr_t)__builtin_return_address(0));
+}
+
++ (UIFont *)boldSystemFontOfSize:(CGFloat)size {
+    return ThemedFont(%orig, (uintptr_t)__builtin_return_address(0));
+}
+
++ (UIFont *)italicSystemFontOfSize:(CGFloat)size {
+    return ThemedFont(%orig, (uintptr_t)__builtin_return_address(0));
+}
+
++ (UIFont *)preferredFontForTextStyle:(UIFontTextStyle)style {
+    return ThemedFont(%orig, (uintptr_t)__builtin_return_address(0));
+}
+
++ (UIFont *)preferredFontForTextStyle:(UIFontTextStyle)style compatibleWithTraitCollection:(UITraitCollection *)traitCollection {
+    return ThemedFont(%orig, (uintptr_t)__builtin_return_address(0));
+}
+
+%end
+
 %hook ASTextNode
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
@@ -709,21 +915,86 @@ void ApolloThemeRuntimeInvalidate(void) {
 
 - (void)setTitle:(NSString *)title withFont:(UIFont *)font withColor:(UIColor *)color forState:(NSUInteger)state {
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
-    %orig(title, font, ThemedTextColorForSourceColor(color, (id)self, caller), state);
+    %orig(title, ThemedTextSinkFont(font, (id)self, caller), ThemedTextColorForSourceColor(color, (id)self, caller), state);
 }
 
 - (void)setTitle:(NSString *)title withFont:(UIFont *)font withColor:(UIColor *)color withShadowColor:(UIColor *)shadowColor withShadowOffset:(CGSize)shadowOffset forState:(NSUInteger)state {
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
-    %orig(title, font, ThemedTextColorForSourceColor(color, (id)self, caller), shadowColor, shadowOffset, state);
+    %orig(title, ThemedTextSinkFont(font, (id)self, caller), ThemedTextColorForSourceColor(color, (id)self, caller), shadowColor, shadowOffset, state);
 }
 
 %end
 
 %hook UILabel
 
+- (void)setFont:(UIFont *)font {
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    %orig(ThemedTextSinkFont(font, (id)self, caller));
+}
+
 - (void)setTextColor:(UIColor *)textColor {
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
     %orig(ThemedTextColorForSourceColor(textColor, (id)self, caller));
+}
+
+- (void)setAttributedText:(NSAttributedString *)attributedText {
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    %orig(ThemedAttributedText(attributedText, (id)self, caller));
+}
+
+%end
+
+%hook UIButton
+
+- (void)setAttributedTitle:(NSAttributedString *)title forState:(UIControlState)state {
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    %orig(ThemedAttributedText(title, (id)self, caller), state);
+}
+
+%end
+
+%hook _UINavigationBarTitleControl
+
+- (void)layoutSubviews {
+    %orig;
+    ApplyThemeFontToNavigationTitleControl((UIView *)self);
+}
+
+%end
+
+%hook UITextField
+
+- (void)setFont:(UIFont *)font {
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    %orig(ThemedTextSinkFont(font, (id)self, caller));
+}
+
+- (void)setPlaceholder:(NSString *)placeholder {
+    %orig;
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    NSAttributedString *themed = ThemedPlaceholderText((UITextField *)self, self.attributedPlaceholder, caller);
+    if (themed && themed != self.attributedPlaceholder) {
+        self.attributedPlaceholder = themed;
+    }
+}
+
+- (void)setAttributedPlaceholder:(NSAttributedString *)attributedPlaceholder {
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    %orig(ThemedPlaceholderText((UITextField *)self, attributedPlaceholder, caller));
+}
+
+- (void)setAttributedText:(NSAttributedString *)attributedText {
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    %orig(ThemedAttributedText(attributedText, (id)self, caller));
+}
+
+%end
+
+%hook UITextView
+
+- (void)setFont:(UIFont *)font {
+    uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+    %orig(ThemedTextSinkFont(font, (id)self, caller));
 }
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {

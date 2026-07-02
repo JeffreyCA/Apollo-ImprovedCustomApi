@@ -93,6 +93,210 @@ static NSString *ThemeInputDescription(NSString *key) {
     return nil;
 }
 
+static UIFont *ThemeFontPreviewFont(ApolloThemeFont font, CGFloat size, UIFontWeight weight) {
+    UIFont *base = ApolloThemeFontApply(ApolloThemeFontSystem, [UIFont systemFontOfSize:size weight:weight]);
+    return ApolloThemeFontApply(font, base);
+}
+
+static void ThemeManagerRefreshWindowFonts(void) {
+    for (UIWindow *window in ApolloAllWindows()) {
+        [window setNeedsLayout];
+        [window layoutIfNeeded];
+        [window.rootViewController.view setNeedsLayout];
+        [window.rootViewController.view layoutIfNeeded];
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+@interface ApolloThemeFontTile : UIControl
+@property (nonatomic, strong) UILabel *sampleLabel;
+@property (nonatomic, strong) UILabel *nameLabel;
+@property (nonatomic, strong) UILabel *detailLabel;
+@property (nonatomic, strong) UIImageView *checkView;
+- (void)configureFont:(ApolloThemeFont)font
+             selected:(BOOL)selected
+                label:(UIColor *)label
+            secondary:(UIColor *)secondary
+               accent:(UIColor *)accent
+                 fill:(UIColor *)fill;
+@end
+
+@implementation ApolloThemeFontTile
+
+- (instancetype)init {
+    self = [super initWithFrame:CGRectZero];
+    if (self) {
+        self.layer.cornerRadius = 8.0;
+        self.layer.cornerCurve = kCACornerCurveContinuous;
+        self.layer.borderWidth = 1.0;
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+
+        _sampleLabel = [[UILabel alloc] init];
+        _sampleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _sampleLabel.text = @"Aa";
+        _sampleLabel.adjustsFontSizeToFitWidth = YES;
+        _sampleLabel.minimumScaleFactor = 0.75;
+
+        _nameLabel = [[UILabel alloc] init];
+        _nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _nameLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightSemibold];
+        _nameLabel.adjustsFontSizeToFitWidth = YES;
+        _nameLabel.minimumScaleFactor = 0.75;
+
+        _detailLabel = [[UILabel alloc] init];
+        _detailLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _detailLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightRegular];
+        _detailLabel.adjustsFontSizeToFitWidth = YES;
+        _detailLabel.minimumScaleFactor = 0.75;
+
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:14 weight:UIImageSymbolWeightSemibold];
+        _checkView = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark.circle.fill" withConfiguration:cfg]];
+        _checkView.translatesAutoresizingMaskIntoConstraints = NO;
+
+        [self addSubview:_sampleLabel];
+        [self addSubview:_nameLabel];
+        [self addSubview:_detailLabel];
+        [self addSubview:_checkView];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [_sampleLabel.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:10.0],
+            [_sampleLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:8.0],
+            [_sampleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_checkView.leadingAnchor constant:-6.0],
+
+            [_checkView.topAnchor constraintEqualToAnchor:self.topAnchor constant:8.0],
+            [_checkView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-8.0],
+            [_checkView.widthAnchor constraintEqualToConstant:16.0],
+            [_checkView.heightAnchor constraintEqualToConstant:16.0],
+
+            [_nameLabel.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:10.0],
+            [_nameLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-10.0],
+            [_nameLabel.topAnchor constraintEqualToAnchor:_sampleLabel.bottomAnchor constant:4.0],
+
+            [_detailLabel.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:10.0],
+            [_detailLabel.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-10.0],
+            [_detailLabel.topAnchor constraintEqualToAnchor:_nameLabel.bottomAnchor constant:1.0],
+            [_detailLabel.bottomAnchor constraintLessThanOrEqualToAnchor:self.bottomAnchor constant:-8.0],
+            [self.heightAnchor constraintGreaterThanOrEqualToConstant:72.0],
+        ]];
+    }
+    return self;
+}
+
+- (void)setHighlighted:(BOOL)highlighted {
+    [super setHighlighted:highlighted];
+    self.alpha = highlighted ? 0.72 : 1.0;
+}
+
+- (void)configureFont:(ApolloThemeFont)font
+             selected:(BOOL)selected
+                label:(UIColor *)label
+            secondary:(UIColor *)secondary
+               accent:(UIColor *)accent
+                 fill:(UIColor *)fill {
+    self.tag = (NSInteger)font;
+    self.backgroundColor = fill ?: UIColor.secondarySystemGroupedBackgroundColor;
+    self.layer.borderColor = (selected ? (accent ?: UIColor.systemBlueColor) : [UIColor.separatorColor colorWithAlphaComponent:0.45]).CGColor;
+    self.layer.borderWidth = selected ? 1.25 : 1.0;
+
+    UIColor *primary = label ?: UIColor.labelColor;
+    UIColor *muted = secondary ?: UIColor.secondaryLabelColor;
+    UIColor *active = accent ?: UIColor.systemBlueColor;
+
+    self.sampleLabel.textColor = selected ? active : primary;
+    self.sampleLabel.font = ThemeFontPreviewFont(font, 25.0, UIFontWeightBold);
+    self.nameLabel.text = ApolloThemeFontDisplayName(font);
+    self.nameLabel.textColor = primary;
+    self.nameLabel.font = ThemeFontPreviewFont(font, 13.0, UIFontWeightSemibold);
+    self.detailLabel.text = ApolloThemeFontDetailName(font);
+    self.detailLabel.textColor = muted;
+    self.detailLabel.font = ThemeFontPreviewFont(font, 11.0, UIFontWeightRegular);
+    self.checkView.hidden = !selected;
+    self.checkView.tintColor = active;
+    self.accessibilityLabel = [NSString stringWithFormat:@"%@, %@", self.nameLabel.text, self.detailLabel.text];
+    self.accessibilityTraits = selected ? (UIAccessibilityTraitButton | UIAccessibilityTraitSelected) : UIAccessibilityTraitButton;
+}
+
+@end
+
+typedef void (^ApolloThemeFontSelectionHandler)(ApolloThemeFont font);
+
+@interface ApolloThemeFontGridCell : UITableViewCell
+@property (nonatomic, copy) ApolloThemeFontSelectionHandler selectionHandler;
+@property (nonatomic, strong) NSArray<ApolloThemeFontTile *> *tiles;
+- (void)configureCurrent:(ApolloThemeFont)current
+                   label:(UIColor *)label
+               secondary:(UIColor *)secondary
+                  accent:(UIColor *)accent
+                    fill:(UIColor *)fill;
+@end
+
+@implementation ApolloThemeFontGridCell
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+    if (self) {
+        self.selectionStyle = UITableViewCellSelectionStyleNone;
+        self.preservesSuperviewLayoutMargins = YES;
+
+        NSMutableArray *tiles = [NSMutableArray arrayWithCapacity:ApolloThemeFontCount];
+        for (NSUInteger i = 0; i < ApolloThemeFontCount; i++) {
+            ApolloThemeFontTile *tile = [[ApolloThemeFontTile alloc] init];
+            tile.tag = (NSInteger)i;
+            [tile addTarget:self action:@selector(tileTapped:) forControlEvents:UIControlEventTouchUpInside];
+            [tiles addObject:tile];
+        }
+        _tiles = [tiles copy];
+
+        UIStackView *row1 = [[UIStackView alloc] initWithArrangedSubviews:@[_tiles[0], _tiles[1]]];
+        row1.axis = UILayoutConstraintAxisHorizontal;
+        row1.spacing = 10.0;
+        row1.distribution = UIStackViewDistributionFillEqually;
+
+        UIStackView *row2 = [[UIStackView alloc] initWithArrangedSubviews:@[_tiles[2], _tiles[3]]];
+        row2.axis = UILayoutConstraintAxisHorizontal;
+        row2.spacing = 10.0;
+        row2.distribution = UIStackViewDistributionFillEqually;
+
+        UIStackView *grid = [[UIStackView alloc] initWithArrangedSubviews:@[row1, row2]];
+        grid.translatesAutoresizingMaskIntoConstraints = NO;
+        grid.axis = UILayoutConstraintAxisVertical;
+        grid.spacing = 8.0;
+        grid.distribution = UIStackViewDistributionFillEqually;
+        [self.contentView addSubview:grid];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [grid.leadingAnchor constraintEqualToAnchor:self.contentView.layoutMarginsGuide.leadingAnchor],
+            [grid.trailingAnchor constraintEqualToAnchor:self.contentView.layoutMarginsGuide.trailingAnchor],
+            [grid.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:8.0],
+            [grid.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-8.0],
+        ]];
+    }
+    return self;
+}
+
+- (void)tileTapped:(ApolloThemeFontTile *)tile {
+    if (self.selectionHandler) self.selectionHandler((ApolloThemeFont)tile.tag);
+}
+
+- (void)configureCurrent:(ApolloThemeFont)current
+                   label:(UIColor *)label
+               secondary:(UIColor *)secondary
+                  accent:(UIColor *)accent
+                    fill:(UIColor *)fill {
+    for (ApolloThemeFontTile *tile in self.tiles) {
+        ApolloThemeFont font = (ApolloThemeFont)tile.tag;
+        [tile configureFont:font
+                   selected:(font == current)
+                      label:label
+                  secondary:secondary
+                     accent:accent
+                       fill:fill];
+    }
+}
+
+@end
+
 // ---------------------------------------------------------------------------
 
 @interface ApolloThemeManagerViewController () <UIColorPickerViewControllerDelegate, UIDocumentPickerDelegate>
@@ -108,10 +312,10 @@ static NSString *ThemeInputDescription(NSString *key) {
 
 // List mode:   0 Enable | 1 New/Import (actions first — a long theme list must
 //              never push Generate/New/Import off-screen) | 2 Themes
-// Editor mode: 0 Name | 1 Variant+Mode | 2 Colours | 3 Advanced | 4 Generate
-//              5 Preview | 6 Apply | 7 Delete
+// Editor mode: 0 Name | 1 Variant+Mode | 2 Colours | 3 Advanced | 4 Font
+//              5 Generate | 6 Preview | 7 Apply | 8 Delete
 enum { LSEnable, LSActions, LSThemes, LSCount };
-enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, ESDelete, ESCount };
+enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, ESApply, ESDelete, ESCount };
 
 @implementation ApolloThemeManagerViewController
 
@@ -290,6 +494,7 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
             case ESVariant:  return 1;  // appearance mode (Light/Dark) only — variant is AI-only
             case ESColors:   return ApolloThemeDefaultInputKeys().count;
             case ESAdvanced: return 1 + (advancedEnabled ? ApolloThemeAdvancedInputKeys().count : 0);
+            case ESFont:     return 1;
             case ESGenerate: return 1;
             case ESPreview:  return 4;
             case ESApply:    return 1;
@@ -320,6 +525,7 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
         switch (section) {
             case ESColors:   return @"Colours";
             case ESAdvanced: return @"Advanced (optional)";
+            case ESFont:     return @"Font";
             case ESPreview:  return @"Preview";
         }
         return nil;
@@ -331,6 +537,8 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
     if (self.editingThemeID && section == ESAdvanced)
         return @"Turn on advanced options to override text and separator colours.";
+    if (self.editingThemeID && section == ESFont)
+        return @"Used across the app while this theme is active. Some screens pick up a font change after scrolling away or relaunching.";
     if (self.editingThemeID && section == ESApply)
         return @"Applying selects this theme and enables custom theming.";
     if (!self.editingThemeID && section == LSEnable && [[self store] runtimeDisabledDueToCrash])
@@ -504,6 +712,21 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             return cell;
         }
+        case ESFont: {
+            ApolloThemeFontGridCell *cell = [[ApolloThemeFontGridCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+            ApolloThemeFont current = ApolloThemeFontFromKey(theme[kApolloThemeFontKey]);
+            UIColor *label = [self previewColorForToken:ApolloThemeTokenLabel] ?: UIColor.labelColor;
+            UIColor *secondary = [self previewColorForToken:ApolloThemeTokenSecondaryLabel] ?: UIColor.secondaryLabelColor;
+            UIColor *accent = [self previewColorForToken:ApolloThemeTokenAccent] ?: self.view.tintColor;
+            UIColor *fillBase = [self previewColorForToken:ApolloThemeTokenTertiaryBackground] ?: UIColor.tertiarySystemGroupedBackgroundColor;
+            UIColor *fill = [fillBase colorWithAlphaComponent:0.55];
+            [cell configureCurrent:current label:label secondary:secondary accent:accent fill:fill];
+            __weak typeof(self) weakSelf = self;
+            cell.selectionHandler = ^(ApolloThemeFont font) {
+                [weakSelf setThemeFont:font];
+            };
+            return cell;
+        }
         case ESGenerate: {
             UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
             ApolloThemeMode other = (self.editingMode == ApolloThemeModeLight) ? ApolloThemeModeDark : ApolloThemeModeLight;
@@ -536,6 +759,11 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 - (UITableViewCell *)previewCellForRow:(NSInteger)row {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    // Preview in the EDITING theme's font (Apply normalises even if the live
+    // runtime already restyled the cell's default fonts to another design).
+    ApolloThemeFont font = ApolloThemeFontFromKey([[self store] themeWithID:self.editingThemeID][kApolloThemeFontKey]);
+    cell.textLabel.font = ApolloThemeFontApply(font, cell.textLabel.font);
+    cell.detailTextLabel.font = ApolloThemeFontApply(font, cell.detailTextLabel.font);
     UIColor *card = [self previewColorForToken:ApolloThemeTokenSecondaryBackground];
     UIColor *label = [self previewColorForToken:ApolloThemeTokenLabel];
     UIColor *secondary = [self previewColorForToken:ApolloThemeTokenSecondaryLabel];
@@ -681,6 +909,7 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
                 [self beginPickingInputKey:ApolloThemeAdvancedInputKeys()[ip.row - 1]];
             }
             break;
+        case ESFont: break;
         case ESGenerate: [self generateOppositeMode]; break;
         case ESApply: [self applyTheme]; break;
         case ESDelete: [self confirmDeleteFromEditor]; break;
@@ -851,6 +1080,18 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESGenerate, ESPreview, ESApply, 
 - (void)advancedOptionsSwitchChanged:(UISwitch *)sw {
     if (!sw) return;
     [self setAdvancedOptionsEnabled:sw.on];
+}
+
+- (void)setThemeFont:(ApolloThemeFont)font {
+    [[self store] setFont:font themeID:self.editingThemeID];
+    // Colours are untouched, so no recompilePreview — but the live runtime
+    // must re-read sFontChoice, the current chrome needs a layout pass, and
+    // the preview rows re-render in the font.
+    [self maybeLiveReload];
+    ThemeManagerRefreshWindowFonts();
+    self.navigationItem.title = self.navigationItem.title;
+    NSIndexSet *fontSection = [NSIndexSet indexSetWithIndex:ESFont];
+    [self.tableView reloadSections:fontSection withRowAnimation:UITableViewRowAnimationNone];
 }
 
 - (void)saveColor:(UIColor *)color forCurrentKey:(BOOL)clear {

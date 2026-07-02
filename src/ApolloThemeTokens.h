@@ -73,6 +73,38 @@ typedef NS_ENUM(NSUInteger, ApolloThemeVariant) {
 NSString *ApolloThemeVariantKey(ApolloThemeVariant variant);
 ApolloThemeVariant ApolloThemeVariantFromKey(NSString *key); // defaults to Balanced
 
+#pragma mark - Font
+
+// Per-theme app-wide font. All four are the SYSTEM font family reached through
+// UIFontDescriptor's design axis (never fontWithName:), so Dynamic Type,
+// weights, and italics carry over untouched — the runtime only re-derives the
+// font Apollo already asked for.
+typedef NS_ENUM(NSUInteger, ApolloThemeFont) {
+    ApolloThemeFontSystem = 0, // SF Pro (no hook work at all)
+    ApolloThemeFontRounded,    // SF Pro Rounded
+    ApolloThemeFontSerif,      // New York
+    ApolloThemeFontMono,       // SF Mono
+    ApolloThemeFontCount
+};
+
+// "system" / "rounded" / "serif" / "mono" <-> enum, for persistence/UI.
+// Unknown keys default to System, so themes without the key are untouched.
+NSString *ApolloThemeFontKey(ApolloThemeFont font);
+ApolloThemeFont ApolloThemeFontFromKey(NSString *key);
+// Human-readable name ("SF Pro", "New York", …) and a short descriptor
+// ("Default", "Serif", …) for the editor rows.
+NSString *ApolloThemeFontDisplayName(ApolloThemeFont font);
+NSString *ApolloThemeFontDetailName(ApolloThemeFont font);
+
+#if __has_include(<UIKit/UIKit.h>)
+// Re-derive `base` in the theme font's design, preserving size, weight,
+// traits, and Dynamic Type. System applies the Default design (normalising a
+// base that already carries another design); returns `base` unchanged only
+// for a nil base or when the design descriptor can't be built. Shared by the
+// Runtime's UIFont hooks and the editor's font/preview rows.
+UIFont *ApolloThemeFontApply(ApolloThemeFont font, UIFont *base);
+#endif
+
 #pragma mark - Appearance mode index
 
 // Compiled tables are indexed [mode][token] with mode 0 = light, 1 = dark.
@@ -117,6 +149,8 @@ extern NSString * const kApolloRebornThemeRuntimeDisabledKey;   // BOOL (crash k
 // v1 data archived here for one release during migration.
 extern NSString * const kApolloRebornThemeV1BackupKey;
 extern NSString * const kApolloThemeAdvancedOptionsEnabledKey;  // BOOL
+// Theme-dict key holding an ApolloThemeFontKey() string; absent = system font.
+extern NSString * const kApolloThemeFontKey;                    // NSString
 
 // Current schema version.
 extern const NSInteger kApolloThemeSchemaVersion; // = 2

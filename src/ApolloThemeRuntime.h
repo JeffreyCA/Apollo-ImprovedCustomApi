@@ -24,6 +24,11 @@ BOOL ApolloThemeRuntimeIsActive(void);
 // Cached dynamic colour for a token, or nil if inactive / out of range.
 UIColor *ApolloThemeRuntimeColor(ApolloThemeToken token);
 
+// Re-derive a caller-provided system font in the active theme's system design.
+// Returns `base` unchanged when the theme runtime is inactive or the active
+// theme uses the default system font.
+UIFont *ApolloThemeRuntimeFont(UIFont *base);
+
 // Monotonic counter bumped whenever the compiled token table or the
 // enabled/disabled state changes (reload/enable/disable). ApolloThemeRuntimeColor
 // itself always allocates a fresh dynamic-provider colour (a shared/cached
