@@ -93,18 +93,11 @@ static NSString *ThemeInputDescription(NSString *key) {
     return nil;
 }
 
+// The systemFontOfSize: base may come back already themed (the runtime's
+// UIFont factory hooks treat the tweak as Apollo code) — harmless, since
+// ApolloThemeFontApply rebuilds from a pristine descriptor either way.
 static UIFont *ThemeFontPreviewFont(ApolloThemeFont font, CGFloat size, UIFontWeight weight) {
-    UIFont *base = ApolloThemeFontApply(ApolloThemeFontSystem, [UIFont systemFontOfSize:size weight:weight]);
-    return ApolloThemeFontApply(font, base);
-}
-
-static void ThemeManagerRefreshWindowFonts(void) {
-    for (UIWindow *window in ApolloAllWindows()) {
-        [window setNeedsLayout];
-        [window layoutIfNeeded];
-        [window.rootViewController.view setNeedsLayout];
-        [window.rootViewController.view layoutIfNeeded];
-    }
+    return ApolloThemeFontApply(font, [UIFont systemFontOfSize:size weight:weight]);
 }
 
 // ---------------------------------------------------------------------------
@@ -138,17 +131,24 @@ static void ThemeManagerRefreshWindowFonts(void) {
         _sampleLabel.adjustsFontSizeToFitWidth = YES;
         _sampleLabel.minimumScaleFactor = 0.75;
 
+        // Each tile renders ITS OWN design — without the pin, the runtime's
+        // UILabel setFont: sink hook rewrites every tile into the active
+        // theme's design (all four tiles showed the selected font).
+        ApolloThemeRuntimeSetFontPinned(_sampleLabel, YES);
+
         _nameLabel = [[UILabel alloc] init];
         _nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
         _nameLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightSemibold];
         _nameLabel.adjustsFontSizeToFitWidth = YES;
         _nameLabel.minimumScaleFactor = 0.75;
+        ApolloThemeRuntimeSetFontPinned(_nameLabel, YES);
 
         _detailLabel = [[UILabel alloc] init];
         _detailLabel.translatesAutoresizingMaskIntoConstraints = NO;
         _detailLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightRegular];
         _detailLabel.adjustsFontSizeToFitWidth = YES;
         _detailLabel.minimumScaleFactor = 0.75;
+        ApolloThemeRuntimeSetFontPinned(_detailLabel, YES);
 
         UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:14 weight:UIImageSymbolWeightSemibold];
         _checkView = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark.circle.fill" withConfiguration:cfg]];
@@ -538,7 +538,7 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, E
     if (self.editingThemeID && section == ESAdvanced)
         return @"Turn on advanced options to override text and separator colours.";
     if (self.editingThemeID && section == ESFont)
-        return @"Used across the app while this theme is active. Some screens pick up a font change after scrolling away or relaunching.";
+        return @"Used across the app while this theme is active. Applies immediately; the odd view catches up after scrolling or reopening.";
     if (self.editingThemeID && section == ESApply)
         return @"Applying selects this theme and enables custom theming.";
     if (!self.editingThemeID && section == LSEnable && [[self store] runtimeDisabledDueToCrash])
@@ -759,8 +759,11 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, E
 - (UITableViewCell *)previewCellForRow:(NSInteger)row {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    // Preview in the EDITING theme's font (Apply normalises even if the live
-    // runtime already restyled the cell's default fonts to another design).
+    // Preview in the EDITING theme's font. Pin first: without it the runtime's
+    // setFont: sink hook (and the invalidate-time refresh walk) would rewrite
+    // these into the ACTIVE theme's design, which may be a different theme.
+    ApolloThemeRuntimeSetFontPinned(cell.textLabel, YES);
+    ApolloThemeRuntimeSetFontPinned(cell.detailTextLabel, YES);
     ApolloThemeFont font = ApolloThemeFontFromKey([[self store] themeWithID:self.editingThemeID][kApolloThemeFontKey]);
     cell.textLabel.font = ApolloThemeFontApply(font, cell.textLabel.font);
     cell.detailTextLabel.font = ApolloThemeFontApply(font, cell.detailTextLabel.font);
@@ -1084,14 +1087,13 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, E
 
 - (void)setThemeFont:(ApolloThemeFont)font {
     [[self store] setFont:font themeID:self.editingThemeID];
-    // Colours are untouched, so no recompilePreview — but the live runtime
-    // must re-read sFontChoice, the current chrome needs a layout pass, and
-    // the preview rows re-render in the font.
+    // Colours are untouched, so no recompilePreview. If this theme is the live
+    // one, maybeLiveReload makes the runtime re-read the font and Invalidate's
+    // font-refresh walk re-derives everything already on screen.
     [self maybeLiveReload];
-    ThemeManagerRefreshWindowFonts();
-    self.navigationItem.title = self.navigationItem.title;
-    NSIndexSet *fontSection = [NSIndexSet indexSetWithIndex:ESFont];
-    [self.tableView reloadSections:fontSection withRowAnimation:UITableViewRowAnimationNone];
+    NSMutableIndexSet *sections = [NSMutableIndexSet indexSetWithIndex:ESFont];
+    [sections addIndex:ESPreview];
+    [self.tableView reloadSections:sections withRowAnimation:UITableViewRowAnimationNone];
 }
 
 - (void)saveColor:(UIColor *)color forCurrentKey:(BOOL)clear {

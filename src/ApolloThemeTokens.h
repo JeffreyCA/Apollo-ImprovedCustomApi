@@ -97,11 +97,12 @@ NSString *ApolloThemeFontDisplayName(ApolloThemeFont font);
 NSString *ApolloThemeFontDetailName(ApolloThemeFont font);
 
 #if __has_include(<UIKit/UIKit.h>)
-// Re-derive `base` in the theme font's design, preserving size, weight,
-// traits, and Dynamic Type. System applies the Default design (normalising a
-// base that already carries another design); returns `base` unchanged only
-// for a nil base or when the design descriptor can't be built. Shared by the
-// Runtime's UIFont hooks and the editor's font/preview rows.
+// Re-derive `base` in the theme font's design, preserving size, weight, and
+// italic. Rebuilds from a pristine system descriptor, so it works from ANY
+// base — including one already carrying a different design (System normalises
+// such a base back to SF Pro). Returns `base` only when nil or when the font
+// can't be built. Shared by the Runtime's UIFont hooks and the editor's
+// font/preview rows.
 UIFont *ApolloThemeFontApply(ApolloThemeFont font, UIFont *base);
 #endif
 

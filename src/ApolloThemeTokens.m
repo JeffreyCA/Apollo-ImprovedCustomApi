@@ -121,12 +121,31 @@ NSString *ApolloThemeFontDetailName(ApolloThemeFont font) {
 }
 
 #if __has_include(<UIKit/UIKit.h>)
+#import <CoreText/CoreText.h>
+
+// Derived fonts recur heavily (a handful of sizes/weights across thousands of
+// label sets), and the sink hooks run on scroll-hot paths — cache by
+// (target design, size, source postscript name). The postscript name encodes
+// design, weight, and italic, so it is a complete key. NSCache is thread-safe
+// (Texture builds attributed strings off-main).
+static NSCache<NSString *, UIFont *> *FontApplyCache(void) {
+    static NSCache<NSString *, UIFont *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [[NSCache alloc] init];
+        cache.countLimit = 256;
+    });
+    return cache;
+}
+
 UIFont *ApolloThemeFontApply(ApolloThemeFont font, UIFont *base) {
     if (!base) return base;
-    // System applies the Default design rather than returning base as-is: the
-    // editor renders its font rows from fonts that may ALREADY carry the live
-    // theme's design (the tweak's own UIFont calls pass the runtime hook), so
-    // the SF Pro row must normalise back explicitly.
+
+    NSString *cacheKey = [NSString stringWithFormat:@"%lu|%.3f|%@",
+                          (unsigned long)font, base.pointSize, base.fontName];
+    UIFont *cached = [FontApplyCache() objectForKey:cacheKey];
+    if (cached) return cached;
+
     UIFontDescriptorSystemDesign design;
     switch (font) {
         case ApolloThemeFontRounded: design = UIFontDescriptorSystemDesignRounded;    break;
@@ -135,12 +154,44 @@ UIFont *ApolloThemeFontApply(ApolloThemeFont font, UIFont *base) {
         case ApolloThemeFontSystem:
         default:                     design = UIFontDescriptorSystemDesignDefault;    break;
     }
-    UIFontDescriptor *descriptor = [base.fontDescriptor fontDescriptorWithDesign:design];
-    if (!descriptor) return base;
-    // Size 0 keeps the descriptor's point size (i.e. base's, including any
-    // Dynamic Type scaling already applied to it).
-    UIFont *derived = [UIFont fontWithDescriptor:descriptor size:0];
-    return derived ?: base;
+
+    // Weight and italic come from CoreText (UIFont is toll-free bridged to
+    // CTFont); a UIFont's own descriptor doesn't reliably expose either as
+    // attributes. CoreText's normalised weight scale matches UIFontWeight.
+    CGFloat weight = UIFontWeightRegular;
+    BOOL italic = NO;
+    NSDictionary *ctTraits = CFBridgingRelease(CTFontCopyTraits((__bridge CTFontRef)base));
+    NSNumber *weightValue = ctTraits[(__bridge NSString *)kCTFontWeightTrait];
+    if ([weightValue isKindOfClass:[NSNumber class]]) weight = weightValue.doubleValue;
+    NSNumber *symbolic = ctTraits[(__bridge NSString *)kCTFontSymbolicTrait];
+    if ([symbolic isKindOfClass:[NSNumber class]]) italic = (symbolic.unsignedIntValue & kCTFontTraitItalic) != 0;
+
+    // Rebuild from a PRISTINE system descriptor instead of deriving from
+    // base.fontDescriptor: once a font carries a concrete non-default design
+    // (.NewYork, rounded, …), fontDescriptorWithDesign: cannot move it to a
+    // different design — the concrete family wins. Deriving from base broke
+    // both the SF Pro normalisation and serif→rounded switches (every editor
+    // tile rendered in the live theme's design). The text-style descriptor is
+    // the one public route to a system-family descriptor that does not pass
+    // through the (runtime-hooked) UIFont factories.
+    UIFontDescriptor *descriptor = [UIFontDescriptor preferredFontDescriptorWithTextStyle:UIFontTextStyleBody];
+    if (font != ApolloThemeFontSystem) {
+        descriptor = [descriptor fontDescriptorWithDesign:design] ?: descriptor;
+    }
+    descriptor = [descriptor fontDescriptorByAddingAttributes:@{
+        UIFontDescriptorTraitsAttribute: @{ UIFontWeightTrait: @(weight) },
+    }];
+    if (italic) {
+        UIFontDescriptor *italicDescriptor =
+            [descriptor fontDescriptorWithSymbolicTraits:descriptor.symbolicTraits | UIFontDescriptorTraitItalic];
+        if (italicDescriptor) descriptor = italicDescriptor;
+    }
+    // Explicit size wins over the descriptor's text-style size, preserving any
+    // Dynamic Type scaling already applied to base.
+    UIFont *derived = [UIFont fontWithDescriptor:descriptor size:base.pointSize];
+    if (!derived) return base;
+    [FontApplyCache() setObject:derived forKey:cacheKey];
+    return derived;
 }
 #endif // __has_include(<UIKit/UIKit.h>)
 

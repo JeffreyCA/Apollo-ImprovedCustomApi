@@ -29,6 +29,17 @@ UIColor *ApolloThemeRuntimeColor(ApolloThemeToken token);
 // theme uses the default system font.
 UIFont *ApolloThemeRuntimeFont(UIFont *base);
 
+// Mark a text control whose font the tweak sets DELIBERATELY in a specific
+// design (the theme editor's font-picker tiles and preview rows): the font
+// sink hooks and the live font-refresh walk leave pinned views untouched.
+void ApolloThemeRuntimeSetFontPinned(id view, BOOL pinned);
+
+// Walk the app's windows and re-derive system-design fonts on Apollo-owned
+// labels / text fields / text views (plus vetted nav/tab-bar chrome) into the
+// active theme's font — the live-update path after a font change. Also runs
+// as part of ApolloThemeRuntimeInvalidate. Main thread only.
+void ApolloThemeRuntimeRefreshFonts(void);
+
 // Monotonic counter bumped whenever the compiled token table or the
 // enabled/disabled state changes (reload/enable/disable). ApolloThemeRuntimeColor
 // itself always allocates a fresh dynamic-provider colour (a shared/cached

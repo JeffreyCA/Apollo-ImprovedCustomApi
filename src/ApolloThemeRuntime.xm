@@ -133,6 +133,22 @@ static __thread int sFontBypass = 0;
 static BOOL ClassNameLooksApolloOwned(const char *name);
 static BOOL TextSinkMayUseTheme(id object, uintptr_t caller);
 
+// Pinned views carry a font the tweak chose deliberately in a SPECIFIC design
+// (the editor's font-picker tiles and preview rows must each render their own
+// design, not the active theme's). Both the sink hooks and the refresh walk
+// skip them.
+static const void *kApolloThemeFontPinnedKey = &kApolloThemeFontPinnedKey;
+
+void ApolloThemeRuntimeSetFontPinned(id view, BOOL pinned) {
+    if (!view) return;
+    objc_setAssociatedObject(view, kApolloThemeFontPinnedKey,
+                             pinned ? @YES : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static BOOL FontPinned(id view) {
+    return view && [objc_getAssociatedObject(view, kApolloThemeFontPinnedKey) boolValue];
+}
+
 // Re-derive a system font in the active theme's design. Caller-gated like the
 // colour hooks: only Apollo's own code (and the tweak) get themed fonts, so
 // UIKit-built chrome (system alerts, share sheet, keyboard) keeps SF Pro —
@@ -172,12 +188,16 @@ static BOOL FontLooksLikeAppleSystemDesign(UIFont *font) {
 
 static UIFont *ThemedTextSinkFont(UIFont *font, id owner, uintptr_t caller) {
     if (!sEnabled || !font || sFontBypass) return font;
+    if (FontPinned(owner)) return font;
     if (!TextSinkMayUseTheme(owner, caller)) return font;
     if (!FontLooksLikeAppleSystemDesign(font)) return font;
 
     sFontBypass++;
     UIFont *themed = ApolloThemeFontApply(sFontChoice, font);
     sFontBypass--;
+    // Preserve identity when the design didn't change, so attributed-string
+    // rewrites can skip the copy.
+    if (!themed || [themed.fontName isEqualToString:font.fontName]) return font;
     return themed;
 }
 
@@ -334,9 +354,16 @@ static BOOL ClassNameLooksApolloOwned(const char *name) {
            strstr(name, ".Apollo") != NULL;
 }
 
+// Walk supernode (Texture), then the RESPONDER chain, then superview.
+// nextResponder must outrank superview: the responder chain interleaves each
+// view's managing view controller, so a label inside an Apollo controller is
+// vetted in a few hops. The old superview-first walk had to climb the entire
+// UIKit view stack and then window→scene→application→AppDelegate — 10-13 hops
+// depending on presentation depth, which straddled the budget and made the
+// gate (and therefore all font/text theming) fail on deeper screens.
 static BOOL ObjectChainLooksApolloOwned(id object) {
     id current = object;
-    for (NSUInteger i = 0; current && i < 12; i++) {
+    for (NSUInteger i = 0; current && i < 16; i++) {
         if (ClassNameLooksApolloOwned(class_getName(object_getClass(current)))) return YES;
 
         id next = nil;
@@ -347,16 +374,16 @@ static BOOL ObjectChainLooksApolloOwned(id object) {
                 next = nil;
             }
         }
-        if (!next && [current respondsToSelector:@selector(superview)]) {
+        if (!next && [current respondsToSelector:@selector(nextResponder)]) {
             @try {
-                next = ((id (*)(id, SEL))objc_msgSend)(current, @selector(superview));
+                next = ((id (*)(id, SEL))objc_msgSend)(current, @selector(nextResponder));
             } @catch (__unused NSException *e) {
                 next = nil;
             }
         }
-        if (!next && [current respondsToSelector:@selector(nextResponder)]) {
+        if (!next && [current respondsToSelector:@selector(superview)]) {
             @try {
-                next = ((id (*)(id, SEL))objc_msgSend)(current, @selector(nextResponder));
+                next = ((id (*)(id, SEL))objc_msgSend)(current, @selector(superview));
             } @catch (__unused NSException *e) {
                 next = nil;
             }
@@ -374,35 +401,92 @@ static UINavigationBar *NavigationBarForDescendant(UIView *view) {
     return nil;
 }
 
-static BOOL NavigationBarLooksApolloOwned(UINavigationBar *bar) {
-    if (![bar isKindOfClass:[UINavigationBar class]]) return NO;
+// Nav/tab bars host their labels outside Apollo's view/responder chain, so
+// ownership is vetted at the bar: either the chain reaches an Apollo class,
+// or the bar's delegate is one (Apollo's own controllers).
+static BOOL ChromeBarLooksApolloOwned(UIView *bar) {
+    if (!([bar isKindOfClass:[UINavigationBar class]] || [bar isKindOfClass:[UITabBar class]])) return NO;
     if (ObjectChainLooksApolloOwned(bar)) return YES;
-    id delegate = bar.delegate;
+    id delegate = ((id (*)(id, SEL))objc_msgSend)(bar, @selector(delegate));
     if (delegate && ClassNameLooksApolloOwned(class_getName(object_getClass(delegate)))) return YES;
     return NO;
 }
 
+// Re-derive one live text control's font into `target`'s design. Only touches
+// fonts that are Apple system designs (explicit app fonts like markdown code
+// faces survive) and skips pinned views (the editor's picker tiles).
+static void RefreshFontOnTextControl(UIView *view, ApolloThemeFont target) {
+    if (FontPinned(view)) return;
+    UIFont *font = ((UILabel *)view).font; // UILabel/UITextField/UITextView all expose `font`
+    if (![font isKindOfClass:[UIFont class]] || !FontLooksLikeAppleSystemDesign(font)) return;
+    sFontBypass++;
+    UIFont *themed = ApolloThemeFontApply(target, font);
+    if (themed && ![themed.fontName isEqualToString:font.fontName]) {
+        // Set inside the bypass: the font is already derived, the sink hook
+        // must not re-derive it (and must not fight a target of System).
+        ((void (*)(id, SEL, id))objc_msgSend)(view, @selector(setFont:), themed);
+    }
+    sFontBypass--;
+}
+
+static BOOL ViewIsFontRefreshable(UIView *view) {
+    return [view isKindOfClass:[UILabel class]] ||
+           [view isKindOfClass:[UITextField class]] ||
+           [view isKindOfClass:[UITextView class]];
+}
+
+// `vetted` propagates a one-time ownership decision down a subtree (a vetted
+// bar's labels never chain back to Apollo classes individually). Outside a
+// vetted subtree, each text control is gated exactly like the sink hooks.
+static void RefreshFontsInViewTree(UIView *view, ApolloThemeFont target, BOOL vetted) {
+    if (!vetted && ([view isKindOfClass:[UINavigationBar class]] || [view isKindOfClass:[UITabBar class]])) {
+        if (!ChromeBarLooksApolloOwned(view)) return; // foreign chrome: leave the whole subtree alone
+        vetted = YES;
+    }
+    if (ViewIsFontRefreshable(view) && (vetted || ObjectChainLooksApolloOwned(view))) {
+        RefreshFontOnTextControl(view, target);
+    }
+    for (UIView *subview in view.subviews) {
+        RefreshFontsInViewTree(subview, target, vetted);
+    }
+}
+
+void ApolloThemeRuntimeRefreshFonts(void) {
+    // Runs even when the runtime is INACTIVE: disabling theming (or switching
+    // to the System font) must walk existing labels back to SF Pro — nothing
+    // else re-derives a font until the view happens to be recreated.
+    ApolloThemeFont target = sEnabled ? sFontChoice : ApolloThemeFontSystem;
+    for (UIWindow *window in ApolloAllWindows()) {
+        RefreshFontsInViewTree(window, target, NO);
+    }
+}
+
+// Attach-time repair: UIKit configures table/collection cell labels while the
+// cell is DETACHED (cellForRow… runs before the cell joins the table), so the
+// set-time sink gate has no superview/responder chain to vet and those fonts
+// stay SF Pro — the manager's own rows rendered unthemed while its (attached)
+// headers/footers themed fine. The moment a text control joins a window the
+// chain exists, so re-derive from didMoveToWindow. Ordering matters for the
+// hot path (every cell recycle): bail on font identity (Apply is cached)
+// BEFORE paying for the ownership walk.
+static void RethemeFontOnAttach(UIView *view) {
+    if (!sEnabled || sFontBypass) return;
+    if (!view.window) return;
+    if (FontPinned(view)) return;
+    UIFont *font = ((UILabel *)view).font; // UILabel/UITextField/UITextView all expose `font`
+    if (![font isKindOfClass:[UIFont class]] || !FontLooksLikeAppleSystemDesign(font)) return;
+    sFontBypass++;
+    UIFont *themed = ApolloThemeFontApply(sFontChoice, font);
+    if (themed && ![themed.fontName isEqualToString:font.fontName] && ObjectChainLooksApolloOwned(view)) {
+        ((void (*)(id, SEL, id))objc_msgSend)(view, @selector(setFont:), themed);
+    }
+    sFontBypass--;
+}
+
 static void ApplyThemeFontToNavigationTitleControl(UIView *titleControl) {
     if (!sEnabled || ![titleControl isKindOfClass:[UIView class]]) return;
-    UINavigationBar *bar = NavigationBarForDescendant(titleControl);
-    if (!NavigationBarLooksApolloOwned(bar)) return;
-
-    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:titleControl];
-    while (queue.count > 0) {
-        UIView *view = queue.firstObject;
-        [queue removeObjectAtIndex:0];
-        if ([view isKindOfClass:[UILabel class]]) {
-            UILabel *label = (UILabel *)view;
-            UIFont *font = label.font;
-            if ([font isKindOfClass:[UIFont class]] && FontLooksLikeAppleSystemDesign(font)) {
-                sFontBypass++;
-                UIFont *themed = ApolloThemeFontApply(sFontChoice, font);
-                sFontBypass--;
-                if (themed && ![themed.fontName isEqualToString:font.fontName]) label.font = themed;
-            }
-        }
-        for (UIView *child in view.subviews) [queue addObject:child];
-    }
+    if (!ChromeBarLooksApolloOwned(NavigationBarForDescendant(titleControl))) return;
+    RefreshFontsInViewTree(titleControl, sFontChoice, YES);
 }
 
 static BOOL TextSinkMayUseTheme(id object, uintptr_t caller) {
@@ -745,6 +829,9 @@ void ApolloThemeRuntimeInvalidate(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (sPostNativeNotifications) PostThemeNotifications();
         if (sLegacyRepaint) LegacyFlipRepaint();
+        // Colours re-resolve via the trait cascade, but fonts on existing
+        // views only change if something re-derives them — walk the windows.
+        ApolloThemeRuntimeRefreshFonts();
         ApolloLog(@"ThemeRuntime: invalidate applied");
     });
 }
@@ -942,6 +1029,11 @@ void ApolloThemeRuntimeInvalidate(void) {
     %orig(ThemedAttributedText(attributedText, (id)self, caller));
 }
 
+- (void)didMoveToWindow {
+    %orig;
+    RethemeFontOnAttach((UIView *)self);
+}
+
 %end
 
 %hook UIButton
@@ -988,6 +1080,11 @@ void ApolloThemeRuntimeInvalidate(void) {
     %orig(ThemedAttributedText(attributedText, (id)self, caller));
 }
 
+- (void)didMoveToWindow {
+    %orig;
+    RethemeFontOnAttach((UIView *)self);
+}
+
 %end
 
 %hook UITextView
@@ -1000,6 +1097,11 @@ void ApolloThemeRuntimeInvalidate(void) {
 - (void)setAttributedText:(NSAttributedString *)attributedText {
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
     %orig(ThemedAttributedText(attributedText, (id)self, caller));
+}
+
+- (void)didMoveToWindow {
+    %orig;
+    RethemeFontOnAttach((UIView *)self);
 }
 
 %end
