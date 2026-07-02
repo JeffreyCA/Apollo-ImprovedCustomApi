@@ -1,9 +1,10 @@
-// ApolloThemeManagerIntegration.xm — settings entry point for the v2 Themes
-// hub. Repoints Apollo's native Appearance > Themes row to
+// ApolloThemeManagerIntegration.xm — settings entry point for the v2 Theme
+// Manager. Repoints Apollo's native Appearance > Themes row to
 // ApolloThemeManagerViewController, while the hub itself pushes Apollo's native
 // picker when the user chooses "Apollo Themes".
 
 #import <UIKit/UIKit.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 #import "ApolloThemeTokens.h"
 #import "ApolloThemeStore.h"
@@ -37,13 +38,39 @@ static UISwipeActionsConfiguration *(*sTrailingSwipeOrig)(id, SEL, UITableView *
 
 static inline BOOL IsThemesRow(NSIndexPath *ip) { return ip.section == 0 && ip.row == 0; }
 
+extern "C" BOOL ApolloThemeOpenNativeThemePickerFromHub(UIViewController *hub) {
+    if (!sSelectOrig || !hub.navigationController) return NO;
+    Class appearanceClass = objc_getClass("_TtC6Apollo32SettingsAppearanceViewController");
+    if (!appearanceClass) return NO;
+    for (UIViewController *vc in hub.navigationController.viewControllers.reverseObjectEnumerator) {
+        if (![vc isKindOfClass:appearanceClass]) continue;
+        UITableView *tableView = nil;
+        if ([vc respondsToSelector:@selector(tableView)]) {
+            tableView = ((UITableView *(*)(id, SEL))objc_msgSend)(vc, @selector(tableView));
+        }
+        if (!tableView) return NO;
+        NSIndexPath *themes = [NSIndexPath indexPathForRow:0 inSection:0];
+        sSelectOrig(vc, @selector(tableView:didSelectRowAtIndexPath:), tableView, themes);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIViewController *top = hub.navigationController.topViewController;
+            if (top && top != hub) top.title = @"Apollo Themes";
+        });
+        return YES;
+    }
+    return NO;
+}
+
 static NSInteger Rows(id self, SEL _cmd, UITableView *tv, NSInteger section) {
     return sRowsOrig ? sRowsOrig(self, _cmd, tv, section) : 0;
 }
 
 static UITableViewCell *Cell(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
-    return sCellOrig ? sCellOrig(self, _cmd, tv, ip)
-                     : [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    UITableViewCell *cell = sCellOrig ? sCellOrig(self, _cmd, tv, ip)
+                                      : [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    if (IsThemesRow(ip)) {
+        cell.textLabel.text = @"Theme Manager";
+    }
+    return cell;
 }
 
 static CGFloat Height(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
@@ -211,8 +238,14 @@ static UIImage *CustomPickerSwatch(void) {
         UITableViewCell *cell = %orig(tv, [NSIndexPath indexPathForRow:0 inSection:0]);
         cell.accessoryView = nil;
         cell.textLabel.text = @"Custom";
-        if ([cell.detailTextLabel respondsToSelector:@selector(setText:)])
-            cell.detailTextLabel.text = @"Your own colours, built in Themes.";
+        if ([cell.detailTextLabel respondsToSelector:@selector(setText:)]) {
+            ApolloThemeStore *store = [ApolloThemeStore shared];
+            NSDictionary *active = [store activeTheme];
+            NSString *name = [active[@"name"] isKindOfClass:NSString.class] ? active[@"name"] : nil;
+            cell.detailTextLabel.text = (enabled && name.length)
+                ? [NSString stringWithFormat:@"%@ active from Theme Manager", name]
+                : @"Selected from Theme Manager";
+        }
         cell.imageView.image = CustomPickerSwatch();
         cell.accessoryType = enabled ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
         cell.accessibilityLabel = @"Custom";

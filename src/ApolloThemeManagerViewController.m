@@ -11,6 +11,8 @@
 #import "ApolloCommon.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+extern BOOL ApolloThemeOpenNativeThemePickerFromHub(UIViewController *hub);
+
 // ---------------------------------------------------------------------------
 // Small swatch helper
 // ---------------------------------------------------------------------------
@@ -29,38 +31,21 @@ static UIImage *SwatchImage(UIColor *color, CGFloat side) {
     }];
 }
 
-// Leading image for a theme row: an unmistakable selection radio on the left
-// (filled check = active, hollow ring = not), then a colour indicator beside
-// it — a circle split light/dark down the middle with the accent as a ring.
-static UIImage *ThemeRowImage(UIColor *lightBG, UIColor *darkBG, UIColor *accent,
-                              BOOL active, UIColor *radioOnColor) {
-    const CGFloat radio = 24, gap = 8, swatch = 26;
-    const CGFloat height = swatch;
+static UIImage *ThemeSwatchImage(UIColor *lightBG, UIColor *darkBG, UIColor *accent) {
+    const CGFloat swatch = 26;
     UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat preferredFormat];
     fmt.opaque = NO;
-    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc]
-        initWithSize:CGSizeMake(radio + gap + swatch, height) format:fmt];
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(swatch, swatch) format:fmt];
     return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        // Selection radio (Mail-edit style).
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:20 weight:UIImageSymbolWeightRegular];
-        UIImage *symbol = [[UIImage systemImageNamed:(active ? @"checkmark.circle.fill" : @"circle")
-                                    withConfiguration:cfg]
-                           imageWithTintColor:(active ? (radioOnColor ?: UIColor.systemBlueColor)
-                                                      : UIColor.tertiaryLabelColor)
-                                renderingMode:UIImageRenderingModeAlwaysOriginal];
-        [symbol drawAtPoint:CGPointMake((radio - symbol.size.width) / 2,
-                                        (height - symbol.size.height) / 2)];
-        // Colour indicator: light | dark halves inside an accent border — a
-        // rounded SQUARE so it can't be mistaken for a second radio.
-        CGRect swatchRect = CGRectMake(radio + gap, 0, swatch, swatch);
+        CGRect swatchRect = CGRectMake(0, 0, swatch, swatch);
         CGRect innerRect = CGRectInset(swatchRect, 3, 3);
         UIBezierPath *inner = [UIBezierPath bezierPathWithRoundedRect:innerRect cornerRadius:5];
         CGContextSaveGState(ctx.CGContext);
         [inner addClip];
         [(lightBG ?: UIColor.systemBackgroundColor) setFill];
-        UIRectFill(CGRectMake(swatchRect.origin.x, 0, swatch / 2, swatch));
+        UIRectFill(CGRectMake(0, 0, swatch / 2, swatch));
         [(darkBG ?: UIColor.secondarySystemBackgroundColor) setFill];
-        UIRectFill(CGRectMake(swatchRect.origin.x + swatch / 2, 0, swatch / 2, swatch));
+        UIRectFill(CGRectMake(swatch / 2, 0, swatch / 2, swatch));
         CGContextRestoreGState(ctx.CGContext);
         UIBezierPath *ring = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(swatchRect, 1, 1)
                                                         cornerRadius:7];
@@ -312,10 +297,10 @@ typedef void (^ApolloThemeFontSelectionHandler)(ApolloThemeFont font);
 @property (nonatomic, strong) NSMutableDictionary<NSString *, ApolloCompiledTheme *> *compileCache;
 @end
 
-// List mode:   hub IA: Current | Apollo Themes | My Themes | Imported | Gallery
+// List mode:   hub IA: Current | Create | Browse | My Themes | Imported
 // Editor mode: 0 Name | 1 Variant+Mode | 2 Colours | 3 Advanced | 4 Font
 //              5 Generate | 6 Preview | 7 Apply | 8 Delete
-enum { HSCurrent, HSApollo, HSMyThemes, HSImported, HSGallery, HSCount };
+enum { HSCurrent, HSCreate, HSBrowse, HSMyThemes, HSImported, HSCount };
 enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, ESApply, ESDelete, ESCount };
 
 @implementation ApolloThemeManagerViewController
@@ -397,11 +382,47 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, E
 }
 
 - (NSString *)apolloThemeDetail {
+    if ([self store].activeSelectionKind != ApolloThemeSelectionApollo) return @"Not Active";
     NSString *raw = [[NSUserDefaults standardUserDefaults] stringForKey:@"AppColorTheme"];
     if (!raw.length) raw = [[[NSUserDefaults alloc] initWithSuiteName:@"group.com.christianselig.apollo"] stringForKey:@"AppColorTheme"];
+    NSString *donor = [[self store] runtimeDonorTheme];
+    if ([raw isEqualToString:donor]) raw = [self store].previousApolloTheme;
     if (!raw.length) return @"Default";
     NSString *spaced = [raw stringByReplacingOccurrencesOfString:@"_" withString:@" "];
     return spaced.capitalizedString ?: raw;
+}
+
+- (NSString *)apolloBrowseDetail {
+    switch ([self store].activeSelectionKind) {
+        case ApolloThemeSelectionGallery:
+        case ApolloThemeSelectionCustom:
+            return @"Custom active";
+        case ApolloThemeSelectionApollo:
+        default:
+            return [self apolloThemeDetail];
+    }
+}
+
+- (NSString *)currentActionTitle {
+    switch ([self store].activeSelectionKind) {
+        case ApolloThemeSelectionGallery:
+            return @"Copy & Edit";
+        case ApolloThemeSelectionCustom:
+            return @"Edit";
+        case ApolloThemeSelectionApollo:
+        default:
+            return @"Change";
+    }
+}
+
+- (NSString *)galleryBrowseDetail {
+    ApolloThemeStore *store = [self store];
+    if (store.activeSelectionKind == ApolloThemeSelectionGallery) {
+        NSDictionary *active = [store activeTheme];
+        NSString *name = [active[@"name"] isKindOfClass:NSString.class] ? active[@"name"] : @"Gallery Theme";
+        return [NSString stringWithFormat:@"%@ active", name];
+    }
+    return nil;
 }
 
 - (NSString *)originDetailForTheme:(NSDictionary *)theme {
@@ -409,7 +430,7 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, E
     if ([origin isEqualToString:kApolloThemeOriginImported]) return @"Imported";
     if ([origin isEqualToString:kApolloThemeOriginGenerated]) return @"Generated";
     NSDictionary *generation = [theme[@"generation"] isKindOfClass:NSDictionary.class] ? theme[@"generation"] : nil;
-    if ([generation[@"source"] isEqualToString:@"gallery"]) return @"Gallery Fork";
+    if ([generation[@"source"] isEqualToString:@"gallery"]) return @"From Gallery";
     if ([generation[@"source"] isEqualToString:@"migrated-v1"]) return @"Imported from v1";
     return @"Created";
 }
@@ -441,25 +462,30 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, E
 }
 
 - (BOOL)isMyThemesPlaceholder:(NSIndexPath *)ip {
-    return !self.editingThemeID && ip.section == HSMyThemes && ip.row == 0 && [self myThemes].count == 0;
+    return !self.editingThemeID && ip.section == HSMyThemes
+        && ip.row == 0 && [self myThemes].count == 0;
 }
 
-- (NSInteger)myThemeActionStart {
-    return MAX((NSInteger)[self myThemes].count, 1);
+- (NSInteger)createActionCount {
+    return (self.aiRowVisible ? 1 : 0) + 2; // Generate (when available), New, Import
+}
+
+- (NSInteger)currentActionCount {
+    return 0;
 }
 
 - (BOOL)isThemeIndexPath:(NSIndexPath *)ip themeOut:(NSDictionary **)themeOut {
     NSArray *themes = nil;
+    NSInteger themeRow = ip.row;
     if (ip.section == HSMyThemes) {
-        if ([self isMyThemesPlaceholder:ip]) return NO;
         themes = [self myThemes];
     } else if (ip.section == HSImported) {
         themes = [self importedThemes];
     } else {
         return NO;
     }
-    if (ip.row < 0 || (NSUInteger)ip.row >= themes.count) return NO;
-    if (themeOut) *themeOut = themes[ip.row];
+    if (themeRow < 0 || (NSUInteger)themeRow >= themes.count) return NO;
+    if (themeOut) *themeOut = themes[themeRow];
     return YES;
 }
 
@@ -505,9 +531,7 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, E
             if (active) cell.detailTextLabel.textColor = accent;
         }
     }
-    if ((!self.editingThemeID && ((ip.section == HSMyThemes && ip.row >= [self myThemeActionStart]) ||
-                                  (ip.section == HSImported && ip.row >= (NSInteger)[self importedThemes].count) ||
-                                  (ip.section == HSCurrent && ip.row > 0))) ||
+    if ((!self.editingThemeID && (ip.section == HSCreate || (ip.section == HSCurrent && ip.row > 0))) ||
         (self.editingThemeID && (ip.section == ESGenerate || ip.section == ESApply))) {
         cell.textLabel.textColor = accent;
     }
@@ -531,10 +555,8 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, E
         self.editingMode = CurrentAppearanceMode(self.traitCollection);
         [self recompilePreview];
     } else {
-        self.title = @"Themes";
-        self.navigationItem.rightBarButtonItem =
-            [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
-                                                          target:self action:@selector(newThemeTapped)];
+        self.title = @"Theme Manager";
+        self.navigationItem.rightBarButtonItem = nil;
     }
 }
 
@@ -592,11 +614,11 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, E
         return 0;
     }
     switch (section) {
-        case HSCurrent:  return [self isRecoveryState] ? 3 : 1;
-        case HSApollo:   return 1;
-        case HSMyThemes: return [self myThemeActionStart] + 1 + (self.aiRowVisible ? 1 : 0) + ([self hasImportedThemes] ? 0 : 1);
-        case HSImported: return [self hasImportedThemes] ? (NSInteger)[self importedThemes].count + 1 : 0;
-        case HSGallery:  return 1;
+        case HSCurrent:  return [self isRecoveryState] ? 3 : 1 + [self currentActionCount];
+        case HSCreate:   return [self createActionCount];
+        case HSBrowse:   return 2;
+        case HSMyThemes: return MAX((NSInteger)[self myThemes].count, 1);
+        case HSImported: return [self hasImportedThemes] ? (NSInteger)[self importedThemes].count : 0;
     }
     return 0;
 }
@@ -623,10 +645,10 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, E
     }
     switch (section) {
         case HSCurrent:  return @"Current";
-        case HSApollo:   return @"Apollo Themes";
+        case HSCreate:   return @"Create";
+        case HSBrowse:   return @"Browse";
         case HSMyThemes: return @"My Themes";
         case HSImported: return [self hasImportedThemes] ? @"Imported" : nil;
-        case HSGallery:  return @"Gallery";
     }
     return nil;
 }
@@ -694,14 +716,66 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, E
         }
         cell.textLabel.text = [self activeThemeTitle];
         cell.detailTextLabel.text = [self activeThemeDetail];
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        NSDictionary *active = [store activeTheme];
+        if (active) {
+            ApolloCompiledTheme *c = [self compiledForTheme:active];
+            UIColor *lightBG = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenBackground mode:ApolloThemeModeLight]);
+            UIColor *darkBG = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenBackground mode:ApolloThemeModeDark]);
+            UIColor *accent = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenAccent
+                                                                 mode:CurrentAppearanceMode(self.traitCollection)]);
+            cell.imageView.image = ThemeSwatchImage(lightBG, darkBG, accent);
+        } else {
+            cell.imageView.image = [UIImage systemImageNamed:@"paintpalette"];
+        }
+        UILabel *action = [[UILabel alloc] init];
+        action.text = [self currentActionTitle];
+        action.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
+        action.textColor = self.view.tintColor;
+        [action setContentCompressionResistancePriority:UILayoutPriorityRequired
+                                                forAxis:UILayoutConstraintAxisHorizontal];
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:14 weight:UIImageSymbolWeightSemibold];
+        UIImageView *chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.right" withConfiguration:cfg]];
+        chevron.tintColor = self.view.tintColor;
+        [chevron.widthAnchor constraintEqualToConstant:10.0].active = YES;
+        UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[action, chevron]];
+        stack.axis = UILayoutConstraintAxisHorizontal;
+        stack.alignment = UIStackViewAlignmentCenter;
+        stack.spacing = 6.0;
+        cell.accessoryView = stack;
         return cell;
     }
-    if (ip.section == HSApollo) {
+    if (ip.section == HSCreate) {
+        UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+        NSInteger row = ip.row;
+        if (self.aiRowVisible) {
+            if (row == 0) {
+                cell.textLabel.text = @"Generate with AI…";
+                cell.detailTextLabel.text = @"Describe a theme and let Apollo build it.";
+                cell.imageView.image = [UIImage systemImageNamed:@"sparkles"];
+                return cell;
+            }
+            row -= 1;
+        }
+        if (row == 0) {
+            cell.textLabel.text = @"New Blank Theme…";
+            cell.imageView.image = [UIImage systemImageNamed:@"plus.circle"];
+            return cell;
+        }
+        cell.textLabel.text = @"Import Theme…";
+        cell.imageView.image = [UIImage systemImageNamed:@"square.and.arrow.down"];
+        return cell;
+    }
+    if (ip.section == HSBrowse) {
         UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
-        cell.textLabel.text = @"Apollo Themes";
-        cell.detailTextLabel.text = [self apolloThemeDetail];
-        cell.imageView.image = [UIImage systemImageNamed:@"paintpalette"];
+        if (ip.row == 0) {
+            cell.textLabel.text = @"Theme Gallery";
+            cell.detailTextLabel.text = [self galleryBrowseDetail];
+            cell.imageView.image = [UIImage systemImageNamed:@"square.grid.2x2"];
+        } else {
+            cell.textLabel.text = @"Apollo Themes";
+            cell.detailTextLabel.text = [self apolloBrowseDetail];
+            cell.imageView.image = [UIImage systemImageNamed:@"paintpalette"];
+        }
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;
     }
@@ -726,39 +800,36 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, E
             UIColor *accent = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenAccent
                                                                  mode:CurrentAppearanceMode(self.traitCollection)]);
             BOOL active = [theme[@"id"] isEqualToString:store.activeThemeID] && store.customThemeEnabled;
-            cell.imageView.image = ThemeRowImage(lightBG, darkBG, accent, active, self.view.tintColor);
+            cell.imageView.image = ThemeSwatchImage(lightBG, darkBG, accent);
             cell.detailTextLabel.text = [self originDetailForTheme:theme];
             cell.detailTextLabel.textColor = active ? self.view.tintColor : UIColor.secondaryLabelColor;
             cell.accessibilityValue = active ? @"Active" : nil;
-            cell.accessoryType = UITableViewCellAccessoryDetailButton;
-            return cell;
-        }
-
-        NSInteger actionRow = ip.section == HSMyThemes ? ip.row - [self myThemeActionStart]
-                                                       : ip.row - (NSInteger)[self importedThemes].count;
-        if (ip.section == HSMyThemes && self.aiRowVisible) {
-            if (actionRow == 0) {
-                cell.textLabel.text = @"Generate with AI…";
-                cell.imageView.image = [UIImage systemImageNamed:@"sparkles"];
-                return cell;
+            NSString *themeID = [theme[@"id"] copy];
+            UIButton *info = [UIButton buttonWithType:UIButtonTypeSystem];
+            UIImageSymbolConfiguration *infoCfg = [UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIImageSymbolWeightRegular];
+            [info setImage:[UIImage systemImageNamed:@"info.circle" withConfiguration:infoCfg] forState:UIControlStateNormal];
+            info.tintColor = self.view.tintColor;
+            info.frame = CGRectMake(0, 0, 32, 32);
+            info.accessibilityLabel = @"Edit Theme";
+            __weak typeof(self) weakSelf = self;
+            [info addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
+                [weakSelf openEditorForThemeID:themeID];
+            }] forControlEvents:UIControlEventTouchUpInside];
+            if (active) {
+                UIImageSymbolConfiguration *checkCfg = [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightSemibold];
+                UIImageView *check = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark" withConfiguration:checkCfg]];
+                check.tintColor = self.view.tintColor;
+                [check.widthAnchor constraintEqualToConstant:18.0].active = YES;
+                UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[info, check]];
+                stack.axis = UILayoutConstraintAxisHorizontal;
+                stack.alignment = UIStackViewAlignmentCenter;
+                stack.spacing = 8.0;
+                cell.accessoryView = stack;
+            } else {
+                cell.accessoryView = info;
             }
-            actionRow -= 1;
-        }
-        if (ip.section == HSMyThemes && actionRow == 0) {
-            cell.textLabel.text = @"New Theme…";
-            cell.imageView.image = [UIImage systemImageNamed:@"plus.circle"];
             return cell;
         }
-        cell.textLabel.text = @"Import Theme…";
-        cell.imageView.image = [UIImage systemImageNamed:@"square.and.arrow.down"];
-        return cell;
-    }
-    if (ip.section == HSGallery) {
-        UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
-        cell.textLabel.text = @"Theme Gallery";
-        cell.detailTextLabel.text = [NSString stringWithFormat:@"%lu themes", (unsigned long)ApolloThemeGalleryAllSlugs().count];
-        cell.imageView.image = [UIImage systemImageNamed:@"square.grid.2x2"];
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;
     }
     return [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
@@ -929,42 +1000,45 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, E
 
 - (void)listDidSelect:(NSIndexPath *)ip {
     if (ip.section == HSCurrent) {
-        if (![self isRecoveryState]) return;
-        if (ip.row == 1) {
+        if ([self isRecoveryState] && ip.row == 1) {
             [[self store] clearCrashDisable];
             ApolloThemeRuntimeEnable();
             [self.tableView reloadData];
-        } else if (ip.row == 2) {
+        } else if ([self isRecoveryState] && ip.row == 2) {
             ApolloThemeRuntimeDisable();
             [self.tableView reloadData];
+        } else if (![self isRecoveryState] && ip.row == 0) {
+            [self currentThemeActionTapped];
         }
         return;
     }
-    if (ip.section == HSApollo) {
-        [self openApolloThemePicker];
+    if (ip.section == HSCreate) {
+        NSInteger row = ip.row;
+        if (self.aiRowVisible) {
+            if (row == 0) { [self presentAIThemePromptSheetWithInitialPrompt:nil]; return; }
+            row -= 1;
+        }
+        if (row == 0) [self newThemeTapped];
+        else [self importTapped];
+        return;
+    }
+    if (ip.section == HSBrowse) {
+        if (ip.row == 0) {
+            ApolloThemeGalleryViewController *gallery = [[ApolloThemeGalleryViewController alloc] init];
+            [self.navigationController pushViewController:gallery animated:YES];
+        } else {
+            [self openApolloThemePicker];
+        }
         return;
     }
     if (ip.section == HSMyThemes || ip.section == HSImported) {
-        // Tapping a theme APPLIES it (the ⓘ accessory / context menu edit).
         if ([self isEmptyStateRow:ip]) return;
         NSDictionary *theme = nil;
         if ([self isThemeIndexPath:ip themeOut:&theme]) {
             [self applyThemeID:theme[@"id"]];
             return;
         }
-        NSInteger actionRow = ip.section == HSMyThemes ? ip.row - [self myThemeActionStart]
-                                                       : ip.row - (NSInteger)[self importedThemes].count;
-        if (ip.section == HSMyThemes && self.aiRowVisible) {
-            if (actionRow == 0) { [self presentAIThemePromptSheetWithInitialPrompt:nil]; return; }
-            actionRow -= 1;
-        }
-        if (ip.section == HSMyThemes && actionRow == 0) [self newThemeTapped];
-        else [self importTapped];
         return;
-    }
-    if (ip.section == HSGallery) {
-        ApolloThemeGalleryViewController *gallery = [[ApolloThemeGalleryViewController alloc] init];
-        [self.navigationController pushViewController:gallery animated:YES];
     }
 }
 
@@ -1094,11 +1168,54 @@ enum { ESName, ESVariant, ESColors, ESAdvanced, ESFont, ESGenerate, ESPreview, E
 }
 
 - (void)openApolloThemePicker {
-    Class cls = objc_getClass("_TtC6Apollo27SettingsThemeViewController");
-    if (!cls) { [self showError:@"Apollo's theme picker isn't available."]; return; }
-    UIViewController *vc = [[cls alloc] init];
-    vc.title = @"Apollo Themes";
-    [self.navigationController pushViewController:vc animated:YES];
+    if (!ApolloThemeOpenNativeThemePickerFromHub(self)) {
+        [self showError:@"Apollo's theme picker isn't available from here. Go back and reopen Appearance."];
+    }
+}
+
+- (void)currentThemeActionTapped {
+    ApolloThemeStore *store = [self store];
+    switch (store.activeSelectionKind) {
+        case ApolloThemeSelectionGallery:
+            [self customizeActiveTheme];
+            break;
+        case ApolloThemeSelectionCustom:
+            if (store.activeThemeID.length) [self openEditorForThemeID:store.activeThemeID];
+            break;
+        case ApolloThemeSelectionApollo:
+        default:
+            [self openApolloThemePicker];
+            break;
+    }
+}
+
+- (void)customizeActiveTheme {
+    ApolloThemeStore *store = [self store];
+    if (store.activeSelectionKind == ApolloThemeSelectionCustom) {
+        NSString *themeID = store.activeThemeID;
+        if (themeID.length) [self openEditorForThemeID:themeID];
+        return;
+    }
+    if (store.activeSelectionKind != ApolloThemeSelectionGallery) return;
+
+    NSString *slug = store.activeGallerySlug;
+    NSDictionary *theme = [store activeTheme];
+    if (!theme) return;
+
+    NSDictionary *generation = slug.length ? @{ @"source": @"gallery", @"slug": slug }
+                                           : @{ @"source": @"gallery" };
+    NSString *themeID = [store createThemeNamed:theme[@"name"]
+                                          input:theme[@"input"]
+                                        variant:ApolloThemeVariantFromKey(theme[@"variant"])
+                         advancedOptionsEnabled:[theme[kApolloThemeAdvancedOptionsEnabledKey] boolValue]
+                                     generation:generation];
+    [store selectCustomTheme:themeID];
+    if (store.runtimeDisabledDueToCrash) [store clearCrashDisable];
+    ApolloThemeRuntimeEnable();
+    UINotificationFeedbackGenerator *fb = [[UINotificationFeedbackGenerator alloc] init];
+    [fb notificationOccurred:UINotificationFeedbackTypeSuccess];
+    [self.tableView reloadData];
+    [self openEditorForThemeID:themeID];
 }
 
 - (void)newThemeTapped {

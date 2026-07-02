@@ -12,26 +12,20 @@ static UIColor *GalleryColor(ApolloCompiledTheme *compiled, ApolloThemeToken tok
     return ApolloThemeUIColorFromRGB([compiled rgbForToken:token mode:mode]);
 }
 
-static UIImage *GalleryRowImage(ApolloCompiledTheme *compiled, BOOL active, UIColor *radioOnColor, ApolloThemeMode accentMode) {
-    const CGFloat radio = 24, gap = 8, swatch = 26;
+static UIImage *GalleryRowImage(ApolloCompiledTheme *compiled, ApolloThemeMode accentMode) {
+    const CGFloat swatch = 26;
     UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat preferredFormat];
     fmt.opaque = NO;
-    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(radio + gap + swatch, swatch) format:fmt];
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(swatch, swatch) format:fmt];
     return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:20 weight:UIImageSymbolWeightRegular];
-        UIImage *symbol = [[UIImage systemImageNamed:(active ? @"checkmark.circle.fill" : @"circle") withConfiguration:cfg]
-            imageWithTintColor:(active ? (radioOnColor ?: UIColor.systemBlueColor) : UIColor.tertiaryLabelColor)
-                 renderingMode:UIImageRenderingModeAlwaysOriginal];
-        [symbol drawAtPoint:CGPointMake((radio - symbol.size.width) / 2, (swatch - symbol.size.height) / 2)];
-
-        CGRect swatchRect = CGRectMake(radio + gap, 0, swatch, swatch);
+        CGRect swatchRect = CGRectMake(0, 0, swatch, swatch);
         UIBezierPath *clip = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(swatchRect, 3, 3) cornerRadius:5];
         CGContextSaveGState(ctx.CGContext);
         [clip addClip];
         [GalleryColor(compiled, ApolloThemeTokenBackground, ApolloThemeModeLight) setFill];
-        UIRectFill(CGRectMake(swatchRect.origin.x, 0, swatch / 2, swatch));
+        UIRectFill(CGRectMake(0, 0, swatch / 2, swatch));
         [GalleryColor(compiled, ApolloThemeTokenBackground, ApolloThemeModeDark) setFill];
-        UIRectFill(CGRectMake(swatchRect.origin.x + swatch / 2, 0, swatch / 2, swatch));
+        UIRectFill(CGRectMake(swatch / 2, 0, swatch / 2, swatch));
         CGContextRestoreGState(ctx.CGContext);
 
         UIBezierPath *ring = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(swatchRect, 1, 1) cornerRadius:7];
@@ -151,7 +145,7 @@ typedef void (^ApolloThemeGalleryAction)(NSString *slug);
 
     UIButton *customize = [UIButton buttonWithType:UIButtonTypeSystem];
     customize.translatesAutoresizingMaskIntoConstraints = NO;
-    [customize setTitle:@"Customize" forState:UIControlStateNormal];
+    [customize setTitle:@"Copy & Edit" forState:UIControlStateNormal];
     customize.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightRegular];
     [customize addTarget:self action:@selector(customizeTapped) forControlEvents:UIControlEventTouchUpInside];
 
@@ -335,9 +329,10 @@ typedef void (^ApolloThemeGalleryAction)(NSString *slug);
         && [[ApolloThemeStore shared].activeGallerySlug isEqualToString:slug];
 
     cell.textLabel.text = theme[@"name"] ?: slug;
-    cell.detailTextLabel.text = @"Gallery Theme";
-    cell.imageView.image = GalleryRowImage(compiled, active, self.view.tintColor, mode);
-    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    cell.detailTextLabel.text = active ? @"Active Gallery Theme" : nil;
+    cell.detailTextLabel.textColor = active ? self.view.tintColor : UIColor.secondaryLabelColor;
+    cell.imageView.image = GalleryRowImage(compiled, mode);
+    cell.accessoryType = active ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryDisclosureIndicator;
     cell.tintColor = self.view.tintColor;
     cell.accessibilityValue = active ? @"Active" : nil;
     return cell;
