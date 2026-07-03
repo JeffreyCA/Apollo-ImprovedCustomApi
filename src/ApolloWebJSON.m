@@ -11,6 +11,57 @@
 NSString *const ApolloWebJSONSessionExpiredNotification = @"ApolloWebJSONSessionExpiredNotification";
 NSString *const ApolloWebJSONSyntheticBearerToken = @"apollo-webjson-cookie-session";
 
+#pragma mark - Synthetic bearer helpers + bearer-ownership registry
+
+BOOL ApolloWebJSONBearerIsSynthetic(NSString *token) {
+    return [token isKindOfClass:[NSString class]] && [token hasPrefix:ApolloWebJSONSyntheticBearerToken];
+}
+
+NSString *ApolloWebJSONSyntheticBearerTokenForUsername(NSString *username) {
+    NSString *lower = [[username stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+    if (lower.length == 0) return ApolloWebJSONSyntheticBearerToken;
+    return [NSString stringWithFormat:@"%@:%@", ApolloWebJSONSyntheticBearerToken, lower];
+}
+
+NSString *ApolloWebJSONUsernameFromSyntheticBearer(NSString *token) {
+    if (!ApolloWebJSONBearerIsSynthetic(token)) return nil;
+    if (token.length <= ApolloWebJSONSyntheticBearerToken.length + 1) return nil; // bare legacy sentinel
+    if ([token characterAtIndex:ApolloWebJSONSyntheticBearerToken.length] != ':') return nil;
+    NSString *username = [token substringFromIndex:ApolloWebJSONSyntheticBearerToken.length + 1];
+    return username.length > 0 ? username.lowercaseString : nil;
+}
+
+// token -> lowercased owning username. Real OAuth tokens only — the chokepoint
+// uses this to recognize a request issued by an account OTHER than the one the
+// cookie transport would otherwise hijack it for.
+static NSMutableDictionary<NSString *, NSString *> *sBearerOwnerByToken;
+
+static NSObject *ApolloWebJSONBearerRegistryLock(void) {
+    static NSObject *lock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
+void ApolloWebJSONRegisterAccountBearer(NSString *username, NSString *token) {
+    NSString *lower = [[username stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+    if (lower.length == 0 || token.length == 0 || ApolloWebJSONBearerIsSynthetic(token)) return;
+    @synchronized (ApolloWebJSONBearerRegistryLock()) {
+        if (!sBearerOwnerByToken) sBearerOwnerByToken = [NSMutableDictionary new];
+        if ([sBearerOwnerByToken[token] isEqualToString:lower]) return;
+        sBearerOwnerByToken[token] = lower;
+        ApolloLog(@"[WebJSON] Registered bearer (%lu chars) -> u/%@ (%lu known)",
+                  (unsigned long)token.length, lower, (unsigned long)sBearerOwnerByToken.count);
+    }
+}
+
+NSString *ApolloWebJSONUsernameForRegisteredBearer(NSString *token) {
+    if (token.length == 0) return nil;
+    @synchronized (ApolloWebJSONBearerRegistryLock()) {
+        return sBearerOwnerByToken[token];
+    }
+}
+
 // Both markers below ride on the request's URL fragment ("#..."), which is
 // stripped by NSURLSession before ever forming the actual request line, so
 // it is never transmitted over the wire.
@@ -273,19 +324,62 @@ NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request) {
     // cookie set; leave it untouched so we don't recurse through the rewrite.
     if (ApolloWebJSONURLIsProbe(request.URL)) return nil;
 
-    // Resolve by the ACTIVE account, not a single global cookie. This is what
-    // lets a cookie account and a real OAuth account coexist: when the active
-    // account is OAuth, ApolloActiveWebSession() is nil, this function returns
-    // nil, and the request proceeds on the untouched oauth path with its real
-    // bearer. Only when the active account itself is a web-session account does
-    // the cookie transport kick in.
-    NSString *activeUsername = ApolloActiveWebSessionUsername();
-    ApolloWebSessionEntry *session = activeUsername.length > 0 ? ApolloWebSessionFor(activeUsername) : nil;
-    if (session.cookieHeader.length == 0) return nil;
-
     NSURL *url = request.URL;
     NSString *host = url.host.lowercaseString;
     if (![host isEqualToString:@"oauth.reddit.com"] && ![host isEqualToString:@"www.reddit.com"]) return nil;
+
+    // Resolve the owning account PER REQUEST from the Authorization bearer, not
+    // just from whichever account is globally active. Apollo runs background
+    // polls (inbox, /api/v1/me) for EVERY signed-in account concurrently;
+    // keying the transport purely off the active account hijacked those — an
+    // OAuth account's identity refresh went out with the web-session account's
+    // cookie, came back as the WRONG user, got installed as that account's
+    // currentUser, and persistInformationToDisk wrote the poison to disk
+    // (user-visible as "switched back to my API-key account but it's still
+    // running keyless"). The bearer tells us whose request this really is:
+    //   • synthetic bearer            -> a web-session client; the embedded
+    //     username (per-account mint) picks the session, bare legacy sentinel
+    //     falls back to the active account;
+    //   • real bearer, registered to a web-session user -> that user (the
+    //     restored "Reddit killed our keys" account, whose stale-but-real
+    //     token never rotates because its refresh is short-circuited);
+    //   • any other real bearer       -> an OAuth account's request; leave it
+    //     on the oauth path untouched;
+    //   • no bearer                   -> not account-scoped; use the active
+    //     account, matching the old behavior.
+    NSString *authorization = [request valueForHTTPHeaderField:@"Authorization"];
+    NSString *bearer = nil;
+    if ([authorization isKindOfClass:[NSString class]]) {
+        NSRange r = [authorization rangeOfString:@"Bearer " options:NSCaseInsensitiveSearch | NSAnchoredSearch];
+        if (r.location != NSNotFound) {
+            bearer = [[authorization substringFromIndex:NSMaxRange(r)]
+                      stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        }
+    }
+    NSString *sessionUsername = nil;
+    if (bearer.length == 0) {
+        sessionUsername = ApolloActiveWebSessionUsername();
+    } else if (ApolloWebJSONBearerIsSynthetic(bearer)) {
+        sessionUsername = ApolloWebJSONUsernameFromSyntheticBearer(bearer) ?: ApolloActiveWebSessionUsername();
+    } else {
+        NSString *owner = ApolloWebJSONUsernameForRegisteredBearer(bearer);
+        if (owner.length > 0 && ApolloWebSessionFor(owner) != nil) {
+            sessionUsername = owner;
+        } else {
+            // A real OAuth bearer that doesn't belong to a web-session account:
+            // this request must stay on the oauth path with its own credential.
+            // Only log when the cookie transport would previously have hijacked
+            // it (an active web session exists) — otherwise this is just the
+            // normal OAuth path and logging would fire for every request.
+            if (ApolloActiveWebSession() != nil) {
+                ApolloLog(@"[WebJSON] Foreign real bearer (u/%@) on %@ %@ — leaving on oauth path",
+                          owner ?: @"unknown", request.HTTPMethod ?: @"GET", url.path);
+            }
+            return nil;
+        }
+    }
+    ApolloWebSessionEntry *session = sessionUsername.length > 0 ? ApolloWebSessionFor(sessionUsername) : nil;
+    if (session.cookieHeader.length == 0) return nil;
 
     NSString *method = request.HTTPMethod.uppercaseString ?: @"GET";
     NSString *path = url.path ?: @"/";
@@ -303,7 +397,7 @@ NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request) {
         NSURL *modURL = modComponents.URL;
         if (!modURL) return nil;
         modURL = ApolloWebJSONURLWithFragment(modURL, [kApolloWebJSONAccountMarkerPrefix stringByAppendingString:
-            [activeUsername stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLFragmentAllowedCharacterSet]] ?: @""]);
+            [sessionUsername stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLFragmentAllowedCharacterSet]] ?: @""]);
 
         NSMutableURLRequest *modMutable = [request mutableCopy];
         modMutable.URL = modURL;
@@ -311,7 +405,7 @@ NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request) {
         [modMutable setValue:session.cookieHeader forHTTPHeaderField:@"Cookie"];
         modMutable.HTTPShouldHandleCookies = NO;
         [modMutable setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
-        ApolloLog(@"[WebJSON] Rewrote moderators GET %@ -> %@ for u/%@", url.absoluteString, modURL.absoluteString, activeUsername);
+        ApolloLog(@"[WebJSON] Rewrote moderators GET %@ -> %@ for u/%@", url.absoluteString, modURL.absoluteString, sessionUsername);
         return modMutable;
     }
 
@@ -352,7 +446,7 @@ NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request) {
     if (!rewrittenURL) return nil;
     // Account marker goes on the URL fragment
     NSString *accountFragment = [kApolloWebJSONAccountMarkerPrefix stringByAppendingString:
-        [activeUsername stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLFragmentAllowedCharacterSet]] ?: @""];
+        [sessionUsername stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLFragmentAllowedCharacterSet]] ?: @""];
     rewrittenURL = ApolloWebJSONURLWithFragment(rewrittenURL, accountFragment);
 
     NSMutableURLRequest *mutable = [request mutableCopy];
@@ -390,7 +484,7 @@ NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request) {
     [mutable setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
 
     ApolloLog(@"[WebJSON] Rewrote %@ %@ -> %@ for u/%@ (%@%@)",
-              method, url.absoluteString, rewrittenURL.absoluteString, activeUsername,
+              method, url.absoluteString, rewrittenURL.absoluteString, sessionUsername,
               isWrite ? @"write" : @"read",
               (isWrite && session.modhash.length > 0) ? @", modhash" : @"");
     return mutable;
@@ -785,24 +879,119 @@ static NSDictionary *ApolloWebJSONFetchModernThingData(NSString *fullname) {
     return result;
 }
 
+// Extracts the permalink, subreddit, and link id36 from an old-reddit content
+// blob's data-permalink attribute ("/r/<sub>/comments/<id36>/slug/[<cid36>/]").
+static BOOL ApolloWebJSONPermalinkPartsFromLegacyContent(NSString *html, NSString **outPermalink,
+                                                         NSString **outSubreddit, NSString **outLinkId36) {
+    if (html.length == 0) return NO;
+    static NSRegularExpression *re;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:@"data-permalink=\"(/r/([^/\"]+)/comments/([0-9a-z]+)/[^\"]*)\""
+                                                       options:NSRegularExpressionCaseInsensitive error:NULL];
+    });
+    NSTextCheckingResult *m = [re firstMatchInString:html options:0 range:NSMakeRange(0, html.length)];
+    if (!m || m.numberOfRanges < 4) return NO;
+    if (outPermalink) *outPermalink = [html substringWithRange:[m rangeAtIndex:1]];
+    if (outSubreddit) *outSubreddit = [html substringWithRange:[m rangeAtIndex:2]];
+    if (outLinkId36) *outLinkId36 = [html substringWithRange:[m rangeAtIndex:3]];
+    return YES;
+}
+
+// Minimal HTML-escape for synthesizing a body_html when the legacy response
+// carries no contentHTML. Reddit's own body_html wraps in <div class="md">.
+static NSString *ApolloWebJSONEscapedBodyHTML(NSString *body) {
+    NSMutableString *escaped = [body mutableCopy] ?: [NSMutableString string];
+    [escaped replaceOccurrencesOfString:@"&" withString:@"&amp;" options:0 range:NSMakeRange(0, escaped.length)];
+    [escaped replaceOccurrencesOfString:@"<" withString:@"&lt;" options:0 range:NSMakeRange(0, escaped.length)];
+    [escaped replaceOccurrencesOfString:@">" withString:@"&gt;" options:0 range:NSMakeRange(0, escaped.length)];
+    return [NSString stringWithFormat:@"<div class=\"md\"><p>%@</p></div>", escaped];
+}
+
+// Builds a modern comment `data` dict directly from the legacy old-reddit
+// response thing — no network, so it works when the serializer runs on the
+// main thread (where the sync refetch is forbidden) and when info.json hasn't
+// caught up with a seconds-old comment yet. The legacy dict carries the
+// submitted markdown (contentText), the rendered body (contentHTML), the
+// parent fullname (parent), and the link fullname (link); the author is the
+// web-session account that issued the write (comment posting always happens
+// as the foreground account). Optimistic fields (score 1, fresh timestamp)
+// self-correct on the next thread refresh.
+static NSDictionary *ApolloWebJSONSynthesizeModernThingData(NSString *fullname, NSDictionary *legacy, BOOL isEdit) {
+    if (fullname.length == 0 || ![fullname hasPrefix:@"t1_"]) return nil;
+
+    NSString *content = [legacy[@"content"] isKindOfClass:[NSString class]] ? legacy[@"content"] : nil;
+    NSString *body = [legacy[@"contentText"] isKindOfClass:[NSString class]] ? legacy[@"contentText"] : nil;
+    NSString *bodyHTML = [legacy[@"contentHTML"] isKindOfClass:[NSString class]] ? legacy[@"contentHTML"] : nil;
+    if (body.length == 0 && bodyHTML.length == 0) return nil; // nothing renderable to show
+
+    // ApolloActiveWebSessionUsername() preserves the stored capitalization,
+    // which matters because Apollo gates the Edit affordance on
+    // comment.author == currentUser.username.
+    NSString *author = ApolloActiveWebSessionUsername();
+    if (author.length == 0) return nil;
+
+    NSMutableDictionary *modern = [NSMutableDictionary dictionary];
+    modern[@"id"] = [fullname substringFromIndex:3];
+    modern[@"name"] = fullname;
+    modern[@"author"] = author;
+    modern[@"body"] = body.length > 0 ? body : @"";
+    modern[@"body_html"] = bodyHTML.length > 0 ? bodyHTML : ApolloWebJSONEscapedBodyHTML(body ?: @"");
+    if ([legacy[@"parent"] isKindOfClass:[NSString class]]) modern[@"parent_id"] = legacy[@"parent"];
+    if ([legacy[@"link"] isKindOfClass:[NSString class]]) modern[@"link_id"] = legacy[@"link"];
+
+    NSString *permalink = nil, *subreddit = nil, *linkId36 = nil;
+    ApolloWebJSONPermalinkPartsFromLegacyContent(content, &permalink, &subreddit, &linkId36);
+    if (permalink.length > 0) modern[@"permalink"] = permalink;
+    if (subreddit.length > 0) modern[@"subreddit"] = subreddit;
+    if (!modern[@"link_id"] && linkId36.length > 0) modern[@"link_id"] = [@"t3_" stringByAppendingString:linkId36];
+
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    modern[@"created"] = @(now);
+    modern[@"created_utc"] = @(now);
+    modern[@"edited"] = isEdit ? @(now) : @NO;
+    modern[@"score"] = @1;
+    modern[@"ups"] = @1;
+    modern[@"downs"] = @0;
+    modern[@"likes"] = @YES;
+    modern[@"score_hidden"] = @NO;
+    modern[@"replies"] = @"";
+    modern[@"gilded"] = @0;
+    modern[@"all_awardings"] = @[];
+    modern[@"total_awards_received"] = @0;
+    modern[@"saved"] = @NO;
+    modern[@"archived"] = @NO;
+    modern[@"stickied"] = @NO;
+    modern[@"locked"] = @NO;
+    modern[@"collapsed"] = @NO;
+    modern[@"controversiality"] = @0;
+    modern[@"send_replies"] = @YES;
+    return modern;
+}
+
 // www.reddit.com's old-reddit /api/editusertext and /api/comment responses return
 // each thing's `data` in the legacy shape {parent, content:"<html>"} instead of
 // the modern comment JSON ({body, body_html, score, author, …}) that
 // oauth.reddit.com returns. Apollo parses things[0].data into an RDKComment, finds
-// no body/score, and re-renders the just-edited/posted comment empty with 0
-// upvotes (the write itself succeeded; only the display object is wrong). We
-// detect the legacy shape and swap in the modern object, re-fetched via info.json,
-// so the in-place re-render is correct. No-op outside Web JSON mode, on errors, on
-// the modern shape, or if the refetch fails (degrades to today's behavior).
+// no body/score, and re-renders the just-edited comment empty — or, for a fresh
+// /api/comment post, inserts nothing at all (the new comment only appears after a
+// manual refresh). We detect the legacy shape and swap in the modern object:
+// primary source is an info.json refetch (authoritative fields); when that isn't
+// possible (serializer on the main thread — no sync network allowed) or comes up
+// empty (info.json can lag a seconds-old comment), we synthesize the modern dict
+// locally from the legacy fields, which always carry the submitted text. No-op
+// outside Web JSON mode, on API errors, or on the modern shape.
 id ApolloWebJSONFixupWriteResponseObject(NSURLResponse *response, id responseObject) {
     if (!ApolloWebJSONHasUsableSession()) return responseObject;
     if (![response isKindOfClass:[NSHTTPURLResponse class]]) return responseObject;
-    // Synchronous refetch below — never block the main thread (the serializer
-    // normally runs on a background processing queue, so this is rarely hit).
-    if ([NSThread isMainThread]) return responseObject;
 
     NSString *path = [((NSHTTPURLResponse *)response).URL.path lowercaseString] ?: @"";
     if (!([path hasSuffix:@"/api/editusertext"] || [path hasSuffix:@"/api/comment"])) return responseObject;
+    BOOL isEdit = [path hasSuffix:@"/api/editusertext"];
+
+    // The synchronous info.json refetch must never block the main thread; the
+    // synthesis fallback below is network-free, so the repair itself still runs.
+    BOOL allowNetwork = ![NSThread isMainThread];
 
     // The serializer may hand us the parsed dict or the raw JSON data; handle both
     // and return the same form so we never change the contract for the modern path.
@@ -817,12 +1006,19 @@ id ApolloWebJSONFixupWriteResponseObject(NSURLResponse *response, id responseObj
     }
 
     NSDictionary *json = root[@"json"];
-    if (![json isKindOfClass:[NSDictionary class]]) return responseObject;
+    if (![json isKindOfClass:[NSDictionary class]]) {
+        ApolloLog(@"[WebJSON] %@ response has no json envelope (top-level keys: %@) — skipping write fixup",
+                  path, [[(NSDictionary *)root allKeys] componentsJoinedByString:@","]);
+        return responseObject;
+    }
     NSArray *errors = json[@"errors"];
     if ([errors isKindOfClass:[NSArray class]] && errors.count > 0) return responseObject; // surface the error
     NSDictionary *dataDict = json[@"data"];
     NSArray *things = [dataDict isKindOfClass:[NSDictionary class]] ? dataDict[@"things"] : nil;
-    if (![things isKindOfClass:[NSArray class]] || things.count == 0) return responseObject;
+    if (![things isKindOfClass:[NSArray class]] || things.count == 0) {
+        ApolloLog(@"[WebJSON] %@ response json.data.things missing/empty — skipping write fixup", path);
+        return responseObject;
+    }
 
     NSMutableArray *newThings = [things mutableCopy];
     BOOL changed = NO;
@@ -834,14 +1030,48 @@ id ApolloWebJSONFixupWriteResponseObject(NSURLResponse *response, id responseObj
         if (td[@"body"] != nil || ![td[@"content"] isKindOfClass:[NSString class]]) continue; // already modern
 
         NSString *fullname = ApolloWebJSONFullnameFromLegacyContent(td[@"content"]);
-        NSDictionary *modern = ApolloWebJSONFetchModernThingData(fullname);
-        if (![modern isKindOfClass:[NSDictionary class]]) continue;
+        // The legacy dict's own "id" field is the fullname too — use it when the
+        // content HTML doesn't carry a data-fullname attribute.
+        if (fullname.length == 0 && [td[@"id"] isKindOfClass:[NSString class]]
+            && [(NSString *)td[@"id"] hasPrefix:@"t"]
+            && [(NSString *)td[@"id"] rangeOfString:@"_"].location != NSNotFound) {
+            fullname = td[@"id"];
+        }
+        if (fullname.length == 0) {
+            ApolloLog(@"[WebJSON] %@ legacy thing %lu has no extractable fullname — cannot repair", path, (unsigned long)i);
+            continue;
+        }
+
+        // Fresh /api/comment: synthesize first — we know everything about a
+        // comment the user just wrote, it's instant (the sync info.json refetch
+        // can block the insert for many seconds when Reddit lags a brand-new
+        // fullname), and the optimistic fields are exact for a new comment.
+        // /api/editusertext: refetch first — the comment already exists with a
+        // real score/flair that synthesis would clobber with placeholders.
+        NSDictionary *modern = nil;
+        NSString *source = nil;
+        if (!isEdit) {
+            modern = ApolloWebJSONSynthesizeModernThingData(fullname, td, isEdit);
+            source = @"local synthesis";
+        }
+        if (![modern isKindOfClass:[NSDictionary class]] && allowNetwork) {
+            modern = ApolloWebJSONFetchModernThingData(fullname);
+            source = @"info.json";
+        }
+        if (![modern isKindOfClass:[NSDictionary class]] && isEdit) {
+            modern = ApolloWebJSONSynthesizeModernThingData(fullname, td, isEdit);
+            source = allowNetwork ? @"local synthesis (refetch failed)" : @"local synthesis (main thread)";
+        }
+        if (![modern isKindOfClass:[NSDictionary class]]) {
+            ApolloLog(@"[WebJSON] %@ thing %@ unrepairable (refetch and synthesis both failed)", path, fullname);
+            continue;
+        }
 
         NSString *kind = [thing[@"kind"] isKindOfClass:[NSString class]] ? thing[@"kind"]
                        : ([fullname hasPrefix:@"t1_"] ? @"t1" : @"t3");
         newThings[i] = @{ @"kind": kind, @"data": modern };
         changed = YES;
-        ApolloLog(@"[WebJSON] Rebuilt %@ response thing %@ from info.json for correct in-place render", path, fullname);
+        ApolloLog(@"[WebJSON] Rebuilt %@ response thing %@ via %@ for correct in-place render", path, fullname, source);
     }
     if (!changed) return responseObject;
 

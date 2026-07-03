@@ -121,7 +121,53 @@ extern NSString *const ApolloWebJSONSessionExpiredNotification;
 // without real API keys. It's never sent to Reddit (the chokepoint strips
 // Authorization), but it rides outgoing Authorization headers — so the bearer
 // capture path must ignore it to avoid poisoning sLatestRedditBearerToken.
+// Synthetic tokens are now minted per-account ("<sentinel>:<username>", see
+// ApolloWebJSONSyntheticBearerTokenForUsername) so the chokepoint can tell
+// WHICH web-session account a request belongs to; this constant remains the
+// bare prefix, and every "is this synthetic?" check must go through
+// ApolloWebJSONBearerIsSynthetic (prefix match) rather than string equality,
+// so persisted bare-sentinel credentials from older installs keep matching.
 extern NSString *const ApolloWebJSONSyntheticBearerToken;
+
+// YES if `token` is a synthetic placeholder bearer (bare legacy sentinel or a
+// per-account "<sentinel>:<username>" variant). Never YES for a real OAuth token.
+BOOL ApolloWebJSONBearerIsSynthetic(NSString *token);
+
+// The per-account synthetic bearer for `username` ("<sentinel>:<lowercased
+// username>"), or the bare sentinel when `username` is empty/nil.
+NSString *ApolloWebJSONSyntheticBearerTokenForUsername(NSString *username);
+
+// The lowercased username embedded in a per-account synthetic bearer, or nil
+// for the bare legacy sentinel / a non-synthetic token.
+NSString *ApolloWebJSONUsernameFromSyntheticBearer(NSString *token);
+
+// Bearer-ownership registry: maps REAL OAuth access tokens to the (lowercased)
+// account that owns them, so the transport chokepoint can tell whose request
+// it is looking at instead of assuming everything belongs to the active
+// account. Registration ignores empty and synthetic tokens. Seeded at launch
+// from the on-disk account blobs (ApolloWebJSONSeedBearerRegistryFromDisk) and
+// kept fresh by the identity hooks whenever a client's credential is observed.
+void ApolloWebJSONRegisterAccountBearer(NSString *username, NSString *token);
+NSString *ApolloWebJSONUsernameForRegisteredBearer(NSString *token);
+
+// Seeds the bearer registry from the persisted RedditAccounts2 / Valet account
+// blobs (each index's username + real access token). Call once from %ctor
+// after the SecItem fishhooks are installed (the Valet read needs them in the
+// simulator). Implemented in ApolloWebJSONIdentity.xm.
+void ApolloWebJSONSeedBearerRegistryFromDisk(void);
+
+// One-shot launch repair for installs poisoned by the pre-fix cross-account
+// identity leak: a cookie-rewritten /api/v1/me answered with the WEB-SESSION
+// user's identity while an OAuth account issued it, Apollo installed that as
+// the OAuth account's currentUser, and persistInformationToDisk wrote it out —
+// leaving two RedditAccounts2 indexes claiming the same (web-session) username,
+// so the OAuth account resolves as keyless forever. Detects the duplicate-
+// username signature, identifies the true web-session account by its synthetic
+// Valet token, and clears the poisoned duplicates' currentUser so Apollo
+// re-fetches their real identity on next selection. No-op on healthy blobs.
+// Implemented in ApolloWebJSONIdentity.xm; call from %ctor before account
+// synthesis.
+void ApolloWebJSONRepairPoisonedAccountBlobs(void);
 
 // Returns a copy of `url` with the internal probe fragment applied. The
 // fragment is stripped by NSURLSession before transmission so it never reaches

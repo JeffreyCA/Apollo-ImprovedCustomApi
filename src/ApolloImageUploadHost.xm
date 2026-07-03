@@ -290,7 +290,7 @@ void ApolloRedditCaptureBearerTokenFromAuthorization(NSString *authorization, NS
     // requests without real keys; it's a placeholder, not a usable oauth token,
     // so don't let it overwrite a real captured token (the chokepoint replaces
     // it with the cookie before it reaches Reddit anyway).
-    if ([token isEqualToString:ApolloWebJSONSyntheticBearerToken]) return;
+    if (ApolloWebJSONBearerIsSynthetic(token)) return;
 
     sLatestRedditBearerToken = [token copy];
     ApolloLog(@"[RedditUpload] Captured Reddit bearer token from %@", source ?: @"unknown source");
@@ -2702,7 +2702,7 @@ static NSString *ApolloRedditUploadBearerToken(void) {
     NSString *composeToken = ApolloMediaComposerActivePostingBearerToken();
     if (composeToken.length > 0) return composeToken;
     if (sLatestRedditBearerToken.length > 0) return [sLatestRedditBearerToken copy];
-    if (ApolloWebJSONHasUsableSession()) return ApolloWebJSONSyntheticBearerToken;
+    if (ApolloWebJSONHasUsableSession()) return ApolloWebJSONSyntheticBearerTokenForUsername(ApolloActiveWebSessionUsername());
     return nil;
 }
 
@@ -2716,7 +2716,7 @@ static NSString *ApolloRedditUploadBearerToken(void) {
 // when a video upload context is/was in flight. Videos keep falling back to Imgur.
 static BOOL ApolloShouldUseCookieRedditUpload(NSURLRequest *request) {
     if (!ApolloIsImgurImageUploadRequest(request)) return NO;
-    if (![ApolloRedditUploadBearerToken() isEqualToString:ApolloWebJSONSyntheticBearerToken]) return NO;
+    if (!ApolloWebJSONBearerIsSynthetic(ApolloRedditUploadBearerToken())) return NO;
     if (!ApolloWebJSONHasUsableSession()) return NO;
     // Per-account session (#505) — the legacy sWebSessionModhash global is
     // migration scratch and stays empty for post-refactor logins.
@@ -2741,10 +2741,10 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
     NSString *token = ApolloRedditUploadBearerToken();
     // Keyless Web JSON: no real bearer (just the synthetic placeholder), so the
     // lease goes to the old-reddit web endpoint with cookie + modhash instead.
-    BOOL cookieMode = [token isEqualToString:ApolloWebJSONSyntheticBearerToken];
+    BOOL cookieMode = ApolloWebJSONBearerIsSynthetic(token);
     if (composeToken.length > 0 && ![composeToken isEqualToString:sLatestRedditBearerToken]) {
         ApolloLog(@"[RedditUpload] Using temporary posting account token for upload (differs from last captured Reddit token)");
-    } else if ([token isEqualToString:ApolloWebJSONSyntheticBearerToken]) {
+    } else if (ApolloWebJSONBearerIsSynthetic(token)) {
         ApolloLog(@"[RedditUpload] No real bearer token; routing media lease through the Web JSON cookie session");
     }
     NSString *userAgent = sUserAgent.length > 0 ? sUserAgent : defaultUserAgent;
@@ -2929,7 +2929,7 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
     // back to Apollo's Imgur path and warn once if no Imgur key is set either.
     BOOL cookieUpload = ApolloShouldUseCookieRedditUpload(request);
     if (ApolloIsImgurImageUploadRequest(request)
-        && [ApolloRedditUploadBearerToken() isEqualToString:ApolloWebJSONSyntheticBearerToken]
+        && ApolloWebJSONBearerIsSynthetic(ApolloRedditUploadBearerToken())
         && !cookieUpload) {
         if (sImgurClientId.length == 0) ApolloWarnKeylessUploadUnavailableOnce();
         return %orig;
@@ -3057,7 +3057,7 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
     // Imgur key). ImgChest with its own key already returned above.
     BOOL cookieUpload = ApolloShouldUseCookieRedditUpload(request);
     if (ApolloIsImgurImageUploadRequest(request)
-        && [ApolloRedditUploadBearerToken() isEqualToString:ApolloWebJSONSyntheticBearerToken]
+        && ApolloWebJSONBearerIsSynthetic(ApolloRedditUploadBearerToken())
         && !cookieUpload) {
         if (sImgurClientId.length == 0) ApolloWarnKeylessUploadUnavailableOnce();
         return %orig;

@@ -1859,6 +1859,17 @@ static void initializeRandomSources() {
         NSArray<NSString *> *webSessionUsers = ApolloWebSessionUsernames().allObjects;
         ApolloLog(@"[WebJSON] enabled at launch, %lu web-session account(s): %@",
                   (unsigned long)webSessionUsers.count, webSessionUsers);
+        // Poison repair + bearer attribution, both before AccountManager loads
+        // the account blobs. Repair MUST run first: on a poisoned blob the
+        // victim index still carries the web-session username, so seeding
+        // first would register the victim's REAL token under that username —
+        // and the chokepoint would then cookie-rewrite the victim's post-
+        // repair identity refresh as the wrong user, re-poisoning the account
+        // the moment it's selected. Repair clears the victim's currentUser, so
+        // the seed skips it and its requests stay on the oauth path.
+        @try { ApolloWebJSONRepairPoisonedAccountBlobs(); }
+        @catch (NSException *e) { ApolloLog(@"[WebJSON][repair] launch repair threw: %@", e); }
+        ApolloWebJSONSeedBearerRegistryFromDisk();
     }
 
     // Cold-start identity: synthesize a signed-in account for every stored
