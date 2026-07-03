@@ -20,7 +20,7 @@ All notable changes to this project will be documented in this file.
 - Fix the **Reddit account** being silently wiped seconds after sign-in on devices where iCloud Keychain sync is active (#579: @ostechgit)
 - Fix **Bluesky link-preview cards** whose long title or body text overflowed past the card background in the feed (#577: @icpryde)
 
-## [v3.4.0] - 2026-07-03
+## [v3.4.0] - 2026-07-??
 
 ### Features
 
