@@ -18,6 +18,12 @@ BOOL ApolloShouldAutoplayInlineGIFCached(void);
 /// Current inline-GIF autoplay mode as a normalized string (never / only-on-wifi / always).
 NSString *ApolloAutoplayGIFModeString(void);
 
+/// YES when Apollo's NATIVE Autoplay GIFs/Videos setting is effectively off
+/// right now: "never", or "only-on-wifi" while on cellular. Matches Apollo's
+/// own runtime decision (see the implementation for the verified semantics);
+/// independent of the tweak's Autoplay Inline GIFs setting.
+BOOL ApolloNativeAutoplayEffectivelyOff(void);
+
 /// YES for URLs that are typically animated GIFs (not static JPEG/PNG/WebP).
 BOOL ApolloURLLooksLikeAnimatedGIF(NSURL *url);
 

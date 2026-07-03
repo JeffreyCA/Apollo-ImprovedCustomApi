@@ -525,6 +525,123 @@ static BOOL ApolloBoolFromFormValue(NSString *value, BOOL defaultValue) {
     return defaultValue;
 }
 
+// MARK: - Comment Link Host (plain-link comment uploads)
+
+// URLs uploaded via the Comment Link Host this session (Imgur/ImgChest links that
+// landed in a comment editor; window armed in ApolloMarkdownToolbarGif.xm). Apollo
+// inserts a freshly-uploaded image into the editor wrapped in a markdown embed
+// (`![img](<link>)`), and Reddit renders a media embed around an EXTERNAL URL in a
+// comment as literal markdown — so at send time (/api/comment, /api/editusertext)
+// any embed wrapping one of THESE URLs is unwrapped back to the bare link. The
+// registry scoping means user-typed embeds, giphy tokens, and staged Reddit
+// uploads are never touched.
+static NSMutableSet<NSString *> *sCommentLinkUploadedURLs = nil;
+
+static NSObject *ApolloCommentLinkUploadedURLsLock(void) {
+    static NSObject *lock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
+static void ApolloCommentLinkRecordUploadedURL(NSString *urlString) {
+    NSString *trimmed = ApolloTrimmedString(urlString);
+    if (trimmed.length == 0) return;
+    @synchronized(ApolloCommentLinkUploadedURLsLock()) {
+        if (!sCommentLinkUploadedURLs) sCommentLinkUploadedURLs = [NSMutableSet new];
+        // Session-scoped; the cap only guards a pathological session.
+        if (sCommentLinkUploadedURLs.count >= 200) [sCommentLinkUploadedURLs removeAllObjects];
+        [sCommentLinkUploadedURLs addObject:trimmed];
+    }
+    ApolloLog(@"[CommentLinkHost] Recorded plain-link upload host=%@", [NSURL URLWithString:trimmed].host ?: @"(unparsed)");
+}
+
+static BOOL ApolloCommentLinkHasUploadedURLs(void) {
+    @synchronized(ApolloCommentLinkUploadedURLsLock()) {
+        return sCommentLinkUploadedURLs.count > 0;
+    }
+}
+
+static BOOL ApolloCommentLinkURLWasUploaded(NSString *urlString) {
+    if (urlString.length == 0) return NO;
+    @synchronized(ApolloCommentLinkUploadedURLsLock()) {
+        return [sCommentLinkUploadedURLs containsObject:urlString];
+    }
+}
+
+// Records `data.link` from a REAL Imgur upload response (the Comment Link Host =
+// Imgur path lets Apollo's own upload proceed untouched). Returns YES if a link
+// was found and recorded.
+static BOOL ApolloCommentLinkRecordUploadedURLFromImgurResponse(NSData *data) {
+    if (data.length == 0) return NO;
+    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSDictionary *payload = [json isKindOfClass:[NSDictionary class]] && [json[@"data"] isKindOfClass:[NSDictionary class]] ? json[@"data"] : nil;
+    NSString *link = [payload[@"link"] isKindOfClass:[NSString class]] ? payload[@"link"] : nil;
+    if (ApolloTrimmedString(link).length == 0) return NO;
+    ApolloCommentLinkRecordUploadedURL(link);
+    return YES;
+}
+
+// Matches markdown IMAGE embeds `![alt](inner)` only; group 1 = inner. Plain
+// `[title](url)` links are left alone — a link is what the feature wants, and
+// the user may have added the title deliberately via "Add Title To Link".
+static NSRegularExpression *ApolloCommentLinkMarkdownEmbedRegex(void) {
+    static NSRegularExpression *regex;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        regex = [[NSRegularExpression alloc] initWithPattern:@"!\\[[^\\]\\n]*\\]\\(([^)\\s]+)\\)" options:0 error:nil];
+    });
+    return regex;
+}
+
+// Unwraps embeds whose inner URL is a recorded link-host upload. nil if unchanged.
+static NSString *ApolloCommentLinkTextByUnwrappingUploadedEmbeds(NSString *text) {
+    if (text.length == 0 || [text rangeOfString:@"]("].location == NSNotFound) return nil;
+    NSRegularExpression *regex = ApolloCommentLinkMarkdownEmbedRegex();
+    NSArray<NSTextCheckingResult *> *matches = regex ? [regex matchesInString:text options:0 range:NSMakeRange(0, text.length)] : nil;
+    if (matches.count == 0) return nil;
+
+    NSMutableString *rewritten = [text mutableCopy];
+    BOOL changed = NO;
+    for (NSTextCheckingResult *match in [matches reverseObjectEnumerator]) {
+        NSString *inner = ApolloTrimmedString([text substringWithRange:[match rangeAtIndex:1]]);
+        if (!ApolloCommentLinkURLWasUploaded(inner)) continue;
+        [rewritten replaceCharactersInRange:match.range withString:inner];
+        changed = YES;
+    }
+    return changed ? rewritten : nil;
+}
+
+// Form-encoded-body pass over the `text` pair(s). nil if unchanged.
+static NSString *ApolloCommentLinkFormBodyByUnwrappingUploadedEmbeds(NSString *body) {
+    if (body.length == 0 || !ApolloCommentLinkHasUploadedURLs()) return nil;
+    NSArray<NSString *> *pairs = [body componentsSeparatedByString:@"&"];
+    NSMutableArray<NSString *> *outPairs = [NSMutableArray arrayWithCapacity:pairs.count];
+    BOOL changed = NO;
+    for (NSString *pair in pairs) {
+        NSRange equals = [pair rangeOfString:@"="];
+        NSString *key = ApolloFormDecodeComponent(equals.location == NSNotFound ? pair : [pair substringToIndex:equals.location]);
+        NSString *value = ApolloFormDecodeComponent(equals.location == NSNotFound ? @"" : [pair substringFromIndex:equals.location + 1]);
+        if ([key isEqualToString:@"text"]) {
+            NSString *unwrapped = ApolloCommentLinkTextByUnwrappingUploadedEmbeds(value);
+            if (unwrapped) {
+                value = unwrapped;
+                changed = YES;
+            }
+        }
+        [outPairs addObject:[NSString stringWithFormat:@"%@=%@", ApolloFormEncodeComponent(key), ApolloFormEncodeComponent(value)]];
+    }
+    return changed ? [outPairs componentsJoinedByString:@"&"] : nil;
+}
+
+static NSURLRequest *ApolloCommentLinkRequestWithFormBody(NSURLRequest *request, NSString *body) {
+    NSMutableURLRequest *modifiedRequest = [request mutableCopy];
+    NSData *newBody = [body dataUsingEncoding:NSUTF8StringEncoding];
+    [modifiedRequest setHTTPBody:newBody];
+    [modifiedRequest setValue:[NSString stringWithFormat:@"%lu", (unsigned long)newBody.length] forHTTPHeaderField:@"Content-Length"];
+    return modifiedRequest;
+}
+
 static BOOL ApolloSubmitURLStringLooksLikeHostedMedia(NSString *urlString) {
     if (![urlString isKindOfClass:[NSString class]] || urlString.length == 0) return NO;
     if (ApolloStringContainsRedditUploadedMedia(urlString)) return YES;
@@ -1581,6 +1698,14 @@ NSURLRequest *ApolloRedditMaybeRewriteCommentRequest(NSURLRequest *request) {
     if (bodyData.length == 0) return nil;
     NSString *body = [[NSString alloc] initWithData:bodyData encoding:NSUTF8StringEncoding];
 
+    // Comment Link Host: unwrap markdown embeds around link-host uploads FIRST so
+    // both rewrite paths below (and the no-rewrite exits) see the plain-link body.
+    NSString *linkUnwrappedBody = ApolloCommentLinkFormBodyByUnwrappingUploadedEmbeds(body);
+    if (linkUnwrappedBody) {
+        ApolloLog(@"[CommentLinkHost] Unwrapped link-host embed(s) in %@ body", request.URL.path);
+        body = linkUnwrappedBody;
+    }
+
     // Native-Giphy fast path: when `text` contains `![gif](giphy|<id>)` tokens
     // (emitted by ApolloMarkdownToolbarGif), build a proper Reddit RTJSON
     // document with `{e:gif,id:giphy|<id>}` blocks and replace any existing
@@ -1656,7 +1781,7 @@ NSURLRequest *ApolloRedditMaybeRewriteCommentRequest(NSURLRequest *request) {
 
         if (giphyRichTextJSONString.length == 0) {
             ApolloLog(@"[RedditUpload] Native giphy detected but no RTJSON built (text pair missing?) — leaving %@ submit untouched", request.URL.path);
-            return nil;
+            return linkUnwrappedBody ? ApolloCommentLinkRequestWithFormBody(request, body) : nil;
         }
 
         if (!replacedRichTextJSON) {
@@ -1680,7 +1805,9 @@ NSURLRequest *ApolloRedditMaybeRewriteCommentRequest(NSURLRequest *request) {
         return giphyModified;
     }
 
-    if (!ApolloStringContainsRedditUploadedMedia(body)) return nil;
+    if (!ApolloStringContainsRedditUploadedMedia(body)) {
+        return linkUnwrappedBody ? ApolloCommentLinkRequestWithFormBody(request, body) : nil;
+    }
 
     NSArray<NSString *> *pairs = [body componentsSeparatedByString:@"&"];
     NSMutableArray<NSString *> *rewrittenPairs = [NSMutableArray arrayWithCapacity:pairs.count + 2];
@@ -1750,7 +1877,9 @@ NSURLRequest *ApolloRedditMaybeRewriteCommentRequest(NSURLRequest *request) {
         [rewrittenPairs addObject:[NSString stringWithFormat:@"%@=%@", ApolloFormEncodeComponent(@"return_rtjson"), ApolloFormEncodeComponent(@"true")]];
     }
 
-    if (!changed) return nil;
+    // The rewritten pairs were built from the (possibly link-unwrapped) body, so a
+    // link-host unwrap alone still warrants delivering the modified request.
+    if (!changed && !linkUnwrappedBody) return nil;
 
     NSMutableURLRequest *modifiedRequest = [request mutableCopy];
     NSData *newBody = [[rewrittenPairs componentsJoinedByString:@"&"] dataUsingEncoding:NSUTF8StringEncoding];
@@ -2924,13 +3053,43 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
 - (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromData:(NSData *)bodyData completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
     ApolloRedditCaptureBearerTokenFromRequest(request, @"NSURLSession uploadTaskWithRequest:fromData:");
 
+    // Comment Link Host: an upload initiated from the comment/reply editor (window
+    // armed by the photo-button hook in ApolloMarkdownToolbarGif.xm) routes to the
+    // chosen link host and gets posted as a plain link — subreddits can disallow
+    // native image/GIF comments, but a link always posts. Consulted ahead of the
+    // provider branches so it overrides Reddit/cookie routing; a pending CHAT
+    // upload keeps precedence (it clears its own window on consumption below).
+    BOOL commentLinkImgChest = NO;
+    BOOL commentLinkImgur = NO;
+    if (completionHandler && ApolloIsImgurImageUploadRequest(request) &&
+        !ApolloChatImageUploadPending() && ApolloCommentLinkUploadPending()) {
+        NSString *linkMIMEType = ApolloMediaMIMETypeForFilename(nil, [request valueForHTTPHeaderField:@"Content-Type"]);
+        // ImgChest can't host video and needs its API key; Imgur needs an Imgur
+        // client id (the request chokepoints sign uploads with it — a keyless
+        // Imgur upload just 401s). When the chosen leg is unusable fall through
+        // to the other; when NEITHER is usable leave both flags NO so the upload
+        // takes the normal provider routing — a native upload that works beats a
+        // doomed keyless one.
+        commentLinkImgChest = (sCommentLinkHost == CommentLinkHostImgChest &&
+                               ApolloImgChestUploadAvailable() &&
+                               !ApolloMediaMIMETypeIsVideo(linkMIMEType));
+        commentLinkImgur = (!commentLinkImgChest && sImgurClientId.length > 0);
+        if (commentLinkImgChest || commentLinkImgur) {
+            ApolloLog(@"[CommentLinkHost] Routing comment-editor upload to %@ (fromData)", commentLinkImgChest ? @"ImgChest" : @"Imgur");
+        } else {
+            ApolloLog(@"[CommentLinkHost] No usable link host (missing key or video) — using normal upload routing (fromData)");
+        }
+    }
+
     // ImgChest host: divert Apollo's Imgur image upload to the ImgChest API
     // and answer with a synthetic Imgur response carrying the ImgChest link.
     // ImgChest uses its own API key (not Reddit's bearer), so this runs ahead of
     // the keyless Web JSON fallback below and always returns when it applies.
-    if ((sImageUploadProvider == ImageUploadProviderImgChest || ApolloChatImageUploadPending()) && completionHandler && ApolloIsImgurImageUploadRequest(request)) {
+    if ((sImageUploadProvider == ImageUploadProviderImgChest || ApolloChatImageUploadPending() || commentLinkImgChest) &&
+        !commentLinkImgur && completionHandler && ApolloIsImgurImageUploadRequest(request)) {
         BOOL chestForChat = ApolloChatImageUploadPending();   // capture now; the upload completes asynchronously
         if (chestForChat) ApolloChatClearImageUpload();        // window consumed: don't let it leak to a later non-chat upload
+        BOOL chestForCommentLink = commentLinkImgChest;
         NSString *chestMIMEType = ApolloMediaMIMETypeForFilename(nil, [request valueForHTTPHeaderField:@"Content-Type"]);
         if (!ApolloImgChestUploadAvailable() || ApolloMediaMIMETypeIsVideo(chestMIMEType)) {
             ApolloLog(@"[ImgChestUpload] %@ — falling back to Imgur (fromData)",
@@ -2951,6 +3110,12 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
                 // For a chat send, swap the long CDN file URL for the short imgchest.com/p/<id> post URL
                 // (the chat renderer resolves it back to the image inline via ApolloImageChestResolver).
                 NSURL *sendLink = (chestForChat ? (ApolloImgChestPostURLForUploadedLink(link) ?: link) : link);
+                if (chestForCommentLink) {
+                    // The comment-body rewrite unwraps Apollo's `![img](...)` embed
+                    // around this exact URL back to a plain link at send time.
+                    ApolloCommentLinkRecordUploadedURL(link.absoluteString);
+                    ApolloCommentLinkShowUploadedToast(@"Img Chest");
+                }
                 NSData *synthetic = ApolloSyntheticImgurUploadResponseData(sendLink, chestMIMEType);
                 NSHTTPURLResponse *fake = [[NSHTTPURLResponse alloc] initWithURL:requestURL
                                                                       statusCode:200
@@ -2960,6 +3125,21 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
             });
         };
         return %orig(ApolloRedditUploadFastFailRequest(), bodyData ?: [NSData data], chestWrapped);
+    }
+
+    // Comment Link Host = Imgur (or Img Chest unavailable / video, with an Imgur
+    // client id configured): let Apollo's own Imgur upload run untouched — even
+    // when the Media Upload Host is Reddit or the keyless cookie path would
+    // normally claim it — and record the returned link so the comment-body
+    // rewrite can unwrap Apollo's markdown embed into a plain link.
+    if (commentLinkImgur) {
+        void (^linkRecordingHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+            if (!error && ApolloCommentLinkRecordUploadedURLFromImgurResponse(data)) {
+                ApolloCommentLinkShowUploadedToast(@"Imgur");
+            }
+            completionHandler(data, response, error);
+        };
+        return %orig(request, bodyData, linkRecordingHandler);
     }
 
     // Keyless Web JSON session (no real OAuth bearer, just the synthetic
@@ -3056,12 +3236,35 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
 - (NSURLSessionUploadTask *)uploadTaskWithRequest:(NSURLRequest *)request fromFile:(NSURL *)fileURL completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
     ApolloRedditCaptureBearerTokenFromRequest(request, @"NSURLSession uploadTaskWithRequest:fromFile:");
 
+    // Comment Link Host (see the fromData: hook): comment/reply-editor uploads go
+    // to the chosen link host and are posted as a plain link; chat keeps precedence.
+    BOOL commentLinkImgChest = NO;
+    BOOL commentLinkImgur = NO;
+    if (completionHandler && ApolloIsImgurImageUploadRequest(request) &&
+        !ApolloChatImageUploadPending() && ApolloCommentLinkUploadPending()) {
+        NSString *linkFilename = fileURL.lastPathComponent.length > 0 ? fileURL.lastPathComponent : @"apollo-upload.jpg";
+        NSString *linkMIMEType = ApolloMediaMIMETypeForFilename(linkFilename, [request valueForHTTPHeaderField:@"Content-Type"]);
+        // See the fromData: hook — fall through to normal routing when neither
+        // link-host leg is usable (missing key / video).
+        commentLinkImgChest = (sCommentLinkHost == CommentLinkHostImgChest &&
+                               ApolloImgChestUploadAvailable() &&
+                               !ApolloMediaMIMETypeIsVideo(linkMIMEType));
+        commentLinkImgur = (!commentLinkImgChest && sImgurClientId.length > 0);
+        if (commentLinkImgChest || commentLinkImgur) {
+            ApolloLog(@"[CommentLinkHost] Routing comment-editor upload to %@ (fromFile)", commentLinkImgChest ? @"ImgChest" : @"Imgur");
+        } else {
+            ApolloLog(@"[CommentLinkHost] No usable link host (missing key or video) — using normal upload routing (fromFile)");
+        }
+    }
+
     // ImgChest host (see the fromData: hook) — runs ahead of the keyless Web JSON
     // fallback since it authenticates with its own API key, and always returns when
     // ImgChest is the selected provider for an Imgur upload request.
-    if ((sImageUploadProvider == ImageUploadProviderImgChest || ApolloChatImageUploadPending()) && completionHandler && ApolloIsImgurImageUploadRequest(request)) {
+    if ((sImageUploadProvider == ImageUploadProviderImgChest || ApolloChatImageUploadPending() || commentLinkImgChest) &&
+        !commentLinkImgur && completionHandler && ApolloIsImgurImageUploadRequest(request)) {
         BOOL chestForChat = ApolloChatImageUploadPending();   // capture now; the upload completes asynchronously
         if (chestForChat) ApolloChatClearImageUpload();        // window consumed: don't let it leak to a later non-chat upload
+        BOOL chestForCommentLink = commentLinkImgChest;
         NSString *chestFilename = fileURL.lastPathComponent.length > 0 ? fileURL.lastPathComponent : @"apollo-upload.jpg";
         NSString *chestMIMEType = ApolloMediaMIMETypeForFilename(chestFilename, [request valueForHTTPHeaderField:@"Content-Type"]);
         NSData *chestData = [NSData dataWithContentsOfURL:fileURL];
@@ -3082,6 +3285,12 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
                 // For a chat send, swap the long CDN file URL for the short imgchest.com/p/<id> post URL
                 // (the chat renderer resolves it back to the image inline via ApolloImageChestResolver).
                 NSURL *sendLink = (chestForChat ? (ApolloImgChestPostURLForUploadedLink(link) ?: link) : link);
+                if (chestForCommentLink) {
+                    // The comment-body rewrite unwraps Apollo's `![img](...)` embed
+                    // around this exact URL back to a plain link at send time.
+                    ApolloCommentLinkRecordUploadedURL(link.absoluteString);
+                    ApolloCommentLinkShowUploadedToast(@"Img Chest");
+                }
                 NSData *synthetic = ApolloSyntheticImgurUploadResponseData(sendLink, chestMIMEType);
                 NSHTTPURLResponse *fake = [[NSHTTPURLResponse alloc] initWithURL:requestURL
                                                                       statusCode:200
@@ -3091,6 +3300,20 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
             });
         };
         return %orig(ApolloRedditUploadFastFailRequest(), fileURL, chestWrapped);
+    }
+
+    // Comment Link Host = Imgur (or Img Chest unavailable / video, with an Imgur
+    // client id configured): see the fromData: hook — pass the upload through to
+    // Apollo's own Imgur path and record the returned link for the plain-link
+    // comment-body rewrite.
+    if (commentLinkImgur) {
+        void (^linkRecordingHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+            if (!error && ApolloCommentLinkRecordUploadedURLFromImgurResponse(data)) {
+                ApolloCommentLinkShowUploadedToast(@"Imgur");
+            }
+            completionHandler(data, response, error);
+        };
+        return %orig(request, fileURL, linkRecordingHandler);
     }
 
     // See the fromData: hook. Keyless Web JSON image uploads go to Reddit via the
