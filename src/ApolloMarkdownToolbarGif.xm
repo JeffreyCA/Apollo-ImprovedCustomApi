@@ -1,9 +1,11 @@
 #import "ApolloMarkdownToolbarGif.h"
 #import "ApolloCommon.h"
 #import "ApolloGiphyClient.h"
+#import "ApolloState.h"
 #import "ApolloSubredditInfoCache.h"
 #import "CustomAPIViewController.h"
 #import "GiphyPickerViewController.h"
+#import "UserDefaultConstants.h"
 
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -1289,9 +1291,14 @@ static void ApolloMarkdownGifApplyMediaGating(UIViewController *composeControlle
 
     ApolloSubredditInfoCache *cache = [ApolloSubredditInfoCache sharedCache];
     ApolloSubredditInfo *cached = [cache cachedInfoForSubreddit:subreddit];
+    // With a Comment Link Host set, photo uploads from the comment editor post as
+    // a plain link (always allowed) instead of native Reddit media, so the image
+    // button stays enabled even where the subreddit disallows image comments. The
+    // GIF (Giphy) button still submits native gif RTJSON, so its gate stays.
+    BOOL imagesPostAsLinks = (sCommentLinkHost != CommentLinkHostOff);
     if (cached && cached.commentMediaInfoAvailable) {
         ApolloMarkdownGifApplyGatingStates(imageControl, gifButton, subreddit,
-                                           cached.allowsImageComments, cached.allowsGifComments);
+                                           cached.allowsImageComments || imagesPostAsLinks, cached.allowsGifComments);
         return;
     }
 
@@ -1413,6 +1420,60 @@ static void ApolloMarkdownGifSetActiveComposeController(UIViewController *contro
     sApolloMarkdownGifActiveComposeController = controller;
 }
 
+#pragma mark - Comment Link Host (plain-link comment uploads)
+
+// When a Comment Link Host is set (sCommentLinkHost != Off), a photo picked from
+// the COMMENT/REPLY editor should upload to that host and land in the comment as
+// a plain link rather than a native Reddit media upload (which some subreddits
+// disallow). The upload interception lives at the network layer
+// (ApolloImageUploadHost.xm) where no editor context exists, so — like the chat
+// photo flag in ApolloChatComposer.xm — we arm a window when the markdown
+// toolbar's photo button is tapped in a comment-kind composer.
+//
+// Unlike the chat flag, the window is NOT cleared when an upload consumes it: one
+// picker session can upload several images. Its real scope is the arming
+// composer's LIFETIME — the weak ref zeroes on dealloc, so the window dies with
+// the composer no matter how it was torn down — plus an explicit clear on
+// teardown (below) and on a non-comment photo tap. The wall-clock deadline is
+// only a long backstop: a short one quietly expired mid photo-pick and reverted
+// the upload to native media routing, exactly in the gated subreddits where the
+// image button was enabled on the promise of a link.
+static double sApolloCommentLinkUploadUntil = 0.0;
+static __weak UIViewController *sApolloCommentLinkArmedComposer = nil;
+static char kApolloCommentLinkToastShownKey;
+
+static void ApolloCommentLinkMarkUpload(UIViewController *composer) {
+    sApolloCommentLinkUploadUntil = [NSDate timeIntervalSinceReferenceDate] + 1800.0;   // backstop only; scope = composer lifetime
+    sApolloCommentLinkArmedComposer = composer;
+}
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+BOOL ApolloCommentLinkUploadPending(void) {
+    return sCommentLinkHost != CommentLinkHostOff &&
+           sApolloCommentLinkArmedComposer != nil &&   // weak: dies with the arming composer
+           [NSDate timeIntervalSinceReferenceDate] < sApolloCommentLinkUploadUntil;
+}
+void ApolloCommentLinkClearUpload(void) {
+    sApolloCommentLinkUploadUntil = 0.0;
+    sApolloCommentLinkArmedComposer = nil;
+}
+void ApolloCommentLinkShowUploadedToast(NSString *hostName) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *composer = sApolloCommentLinkArmedComposer ?: ApolloMarkdownGifActiveComposeController();
+        if (!composer) return;
+        if (objc_getAssociatedObject(composer, &kApolloCommentLinkToastShownKey)) return;   // once per compose session
+        objc_setAssociatedObject(composer, &kApolloCommentLinkToastShownKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        NSString *message = [NSString stringWithFormat:@"Uploaded to %@ — this will post as a plain link, not a Reddit image upload.",
+                             hostName.length > 0 ? hostName : @"the link host"];
+        ApolloMarkdownGifShowGatingToast(composer, message);
+    });
+}
+#ifdef __cplusplus
+}
+#endif
+
 static void ApolloMarkdownGifScheduleInjection(UIViewController *composeController, NSString *reason) {
     if (composeController && ApolloMarkdownGifComposeSessionHasGif(composeController)) return;
 
@@ -1505,6 +1566,46 @@ void ApolloMarkdownGifInstall(void) {
     ApolloMarkdownGifThrottledTryInject((UIViewController *)self, @"compose-layout");
 }
 
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    // A torn-down comment editor takes its comment-link upload window with it, so
+    // the plain-link routing can't leak onto uploads from a later composer. Only
+    // on real teardown — a fullscreen picker presented OVER the editor also
+    // triggers viewDidDisappear, and the upload it produces still needs the
+    // window. Apollo presents the composer wrapped in a UINavigationController,
+    // and UIKit sets the dismissal flag on the presented CONTAINER, not its
+    // children — so walk the ancestor chain rather than checking only self.
+    UIViewController *controller = (UIViewController *)self;
+    if (controller != sApolloCommentLinkArmedComposer) return;
+    for (UIViewController *ancestor = controller; ancestor; ancestor = ancestor.parentViewController) {
+        if (ancestor.isBeingDismissed || ancestor.isMovingFromParentViewController) {
+            ApolloCommentLinkClearUpload();
+            return;
+        }
+    }
+}
+
+%end
+
+// The markdown toolbar's photo button ("Add photos"). Arm the comment-link window
+// BEFORE Apollo opens the picker when the active composer is genuinely composing
+// a comment/reply; clear any stale window otherwise (the post composer's body
+// editor and the fullscreen chat editor share this toolbar).
+%hook _TtC6Apollo20QuickBarKeyboardView
+
+- (void)cameraButtonTapped:(id)sender {
+    if (sCommentLinkHost != CommentLinkHostOff) {
+        UIViewController *composer = ApolloMarkdownGifActiveComposeController();
+        if (ApolloMarkdownGifResolveCommentSubreddit(composer).length > 0) {
+            ApolloCommentLinkMarkUpload(composer);
+            ApolloLog(@"[CommentLinkHost] Armed comment-editor upload window (host=%ld)", (long)sCommentLinkHost);
+        } else {
+            ApolloCommentLinkClearUpload();
+        }
+    }
+    %orig;
+}
+
 %end
 
 %hook _TtC6Apollo25ComposePostViewController
@@ -1590,5 +1691,12 @@ void ApolloMarkdownGifInstall(void) {
     }];
     [[NSNotificationCenter defaultCenter] addObserverForName:UIKeyboardDidHideNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) {
         ApolloMarkdownGifKeyboardHidden(note);
+    }];
+    // Comment Link Host toggled while a composer is open (e.g. iPad multitasking):
+    // re-apply the media gating so the image button's blocked/enabled state
+    // reflects the new setting immediately instead of after the next appearance.
+    [[NSNotificationCenter defaultCenter] addObserverForName:ApolloCommentLinkHostChangedNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *note) {
+        UIViewController *composer = ApolloMarkdownGifActiveComposeController();
+        if (composer) ApolloMarkdownGifApplyMediaGating(composer);
     }];
 }
