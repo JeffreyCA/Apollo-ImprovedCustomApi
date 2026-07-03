@@ -1,0 +1,1324 @@
+// ApolloStatsRowTouch
+//
+// Makes the little "info row" under a post/comment (score · comments · age …)
+// easier to use. Two pieces:
+//
+//   1. Tap-comments-to-jump (always on — tapping the bubble is an unambiguous
+//      "take me to the comments"; tapping anywhere else on the post still opens
+//      the thread at the top as normal)
+//      Tapping the comment-count bubble in a *feed* post already opens the post,
+//      but it lands at the very top (title + media). Here we detect that the tap
+//      landed on the comment bubble and, once the pushed CommentsViewController
+//      appears, scroll it so the post's action bar (up/down/reply/share) sits just
+//      under the nav bar — the "Discussion so far" summary and the comments follow
+//      right below it. The bubble also gets a comfortable tap target.
+//
+//   2. Press-and-hold magnifier (sIconRowMagnifier) — added in a later section.
+//
+// Design notes:
+//   * The info-row buttons (pointsButtonNode / commentsInfoNode / ageButtonNode)
+//     live on PostInfoNode, which the feed cells embed as `postInfoNode`. They are
+//     layer-backed and rasterized, so we can't rely on per-node targets; instead
+//     we install ONE gesture on the cell's own (always view-backed) view and
+//     hit-test the embedded node's CALayer — the same proven approach as
+//     ApolloCreatedAtAlert (which owns the *age* tap).
+//   * ApolloCreatedAtAlert already defines -gestureRecognizer:shouldReceiveTouch:
+//     on these same cell classes, so we must NOT add a second one (Logos %new
+//     collision). We route our gesture through a shared singleton delegate object
+//     instead, keeping the two modules independent and their hit regions disjoint
+//     (age owns the rightmost node; we own the comment bubble to its left).
+//   * The comment gesture is deliberately NON-consuming (cancelsTouchesInView=NO):
+//     Apollo's native tableView:didSelectRowAtIndexPath: still fires and opens the
+//     post; we only set a short-lived "jump pending" flag that the comments view
+//     consumes on appear.
+
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+#import <objc/message.h>
+
+#import "ApolloCommon.h"
+#import "ApolloState.h"
+#import "UIWindow+Apollo.h"
+
+// MARK: - Minimal AsyncDisplayKit forward declarations
+
+@interface ApolloSRTNode : UIResponder
+@property (nonatomic, readonly) CALayer *layer;
+@property (nonatomic, readonly, nullable) UIView *view;
+@property (nonatomic, getter=isHidden) BOOL hidden;
+@end
+
+// RDKLink / RDKComment expose a `createdUTC` NSDate (used for the "Posted … Ago"
+// alert); declared informally so we can message any post model.
+@interface NSObject (ApolloSRTCreatedAt)
+- (NSDate *)createdUTC;
+@end
+
+// MARK: - Runtime ivar helpers
+
+static id SRTIvar(id obj, const char *name) {
+    Class cls = obj ? object_getClass(obj) : Nil;
+    while (cls) {
+        Ivar iv = class_getInstanceVariable(cls, name);
+        if (iv) return object_getIvar(obj, iv);
+        cls = class_getSuperclass(cls);
+    }
+    return nil;
+}
+
+static NSTimeInterval SRTNow(void) {
+    return [NSDate date].timeIntervalSinceReferenceDate;
+}
+
+// The comment-count node for a feed cell: cell.postInfoNode.commentsInfoNode.
+static ApolloSRTNode *SRTCommentsNodeForCell(id cell) {
+    id postInfoNode = SRTIvar(cell, "postInfoNode");
+    if (!postInfoNode) return nil;
+    return (ApolloSRTNode *)SRTIvar(postInfoNode, "commentsInfoNode");
+}
+
+// YES if `touch` falls inside `node`'s layer (in cellView coords), expanded by
+// `insets` (top,left,bottom,right; negative = grow). Works for layer-backed nodes.
+static BOOL SRTTouchHitsNode(ApolloSRTNode *node, UIView *cellView, UITouch *touch, UIEdgeInsets insets) {
+    if (!node || node.isHidden || !cellView) return NO;
+    CALayer *layer = nil;
+    @try { layer = node.layer; } @catch (__unused id e) {}
+    if (!layer || !cellView.layer) return NO;
+    CGRect rect = [layer convertRect:layer.bounds toLayer:cellView.layer];
+    if (CGRectIsEmpty(rect) || CGRectIsNull(rect) || CGRectIsInfinite(rect)) return NO;
+    rect = UIEdgeInsetsInsetRect(rect, insets);
+    CGPoint pt = [touch locationInView:cellView];
+    return CGRectContainsPoint(rect, pt);
+}
+
+// MARK: - "Jump to comments" pending flag (set on bubble tap, consumed on appear)
+
+// A feed tap → push is near-instant; the comments view's viewDidAppear fires a
+// few hundred ms later. A short deadline covers that window and self-expires so a
+// stray tap never mis-fires on the next post you open normally.
+static const NSTimeInterval kSRTJumpTTL = 2.5;
+static NSTimeInterval gSRTJumpPendingDeadline = 0;
+
+static void SRTArmJumpPending(void) {
+    gSRTJumpPendingDeadline = SRTNow() + kSRTJumpTTL;
+}
+
+// Consume: returns YES at most once per arm, and only while fresh.
+static BOOL SRTConsumeJumpPending(void) {
+    BOOL pending = (gSRTJumpPendingDeadline > SRTNow());
+    gSRTJumpPendingDeadline = 0;
+    return pending;
+}
+
+// MARK: - Magnifier loupe: stat-target model
+
+typedef NS_ENUM(NSInteger, SRTStatKind) {
+    SRTStatKindScore = 0,     // release = upvote (the ↑ icon)
+    SRTStatKindPercentage,    // release = "% Upvoted" info alert
+    SRTStatKindComments,      // release = open post at the comment section
+    SRTStatKindAge,           // release = "Posted … Ago" alert
+    SRTStatKindTranslation,   // release = toggle title translated ⇄ original
+};
+
+@interface ApolloSRTTarget : NSObject
+@property (nonatomic, assign) SRTStatKind kind;
+@property (nonatomic, assign) CGRect rect;      // in cellView coords
+@property (nonatomic, copy) NSString *caption;
+@property (nonatomic, weak) UILabel *markerLabel;   // translation targets only
+@end
+@implementation ApolloSRTTarget
+@end
+
+// The translation module (ApolloTranslation.xm — actively developed in its own
+// workstream, so we only *look at* its artifacts, never call its internals
+// directly) overlays a compact "🌐 PT" UILabel inside the PostInfoNode subtree
+// (a child of the age node's view, or of the PostInfoNode view as fallback).
+// Find it structurally: Apollo renders all of its own stats through Texture
+// text layers — never UILabels — so a short, visible UILabel in this subtree IS
+// the marker. Do NOT match on the "🌐" character: the globe is an
+// NSTextAttachment image, not text. Returns nil when the post has no marker.
+static UILabel *SRTTranslationMarkerLabel(id postInfoNode) {
+    UIView *piView = nil;
+    @try { piView = [(ApolloSRTNode *)postInfoNode view]; } @catch (__unused id e) {}
+    if (!piView) return nil;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:piView];
+    while (queue.count) {
+        UIView *v = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UILabel class]]) {
+            UILabel *l = (UILabel *)v;
+            NSUInteger len = l.attributedText.length ?: l.text.length;
+            if (!l.hidden && l.alpha > 0.01 && len > 0 && len <= 8) return l;
+        }
+        [queue addObjectsFromArray:v.subviews];
+    }
+    return nil;
+}
+
+// Enumerate the visible info-row stat targets on a cell, ordered left-to-right.
+// Feed cells carry score/comments/age (+ optional 🌐 translation marker); the
+// comments header carries score/%/age (+ marker).
+static NSArray<ApolloSRTTarget *> *SRTTargetsForCell(id cell, UIView *cellView) {
+    id postInfoNode = SRTIvar(cell, "postInfoNode");
+    if (!postInfoNode || !cellView || !cellView.layer) return @[];
+    const struct { const char *ivar; SRTStatKind kind; __unsafe_unretained NSString *caption; } specs[] = {
+        {"pointsButtonNode",           SRTStatKindScore,      @"Upvote"},
+        {"percentageLikedButtonNode",  SRTStatKindPercentage, @"% Upvoted"},
+        {"commentsInfoNode",           SRTStatKindComments,   @"Comments"},
+        {"ageButtonNode",              SRTStatKindAge,        @"Posted"},
+    };
+    NSMutableArray<ApolloSRTTarget *> *out = [NSMutableArray array];
+    for (int i = 0; i < 4; i++) {
+        ApolloSRTNode *node = (ApolloSRTNode *)SRTIvar(postInfoNode, specs[i].ivar);
+        if (!node || node.isHidden) continue;
+        CALayer *layer = nil; @try { layer = node.layer; } @catch (__unused id e) {}
+        if (!layer) continue;
+        CGRect rect = [layer convertRect:layer.bounds toLayer:cellView.layer];
+        if (CGRectIsEmpty(rect) || CGRectIsNull(rect) || CGRectIsInfinite(rect)) continue;
+        if (rect.size.width < 1.0 || rect.size.height < 1.0) continue;
+        ApolloSRTTarget *t = [ApolloSRTTarget new];
+        t.kind = specs[i].kind; t.rect = rect; t.caption = specs[i].caption;
+        [out addObject:t];
+    }
+    // Optional 🌐 translation marker (a UILabel overlaid by the translation module).
+    UILabel *marker = SRTTranslationMarkerLabel(postInfoNode);
+    if (marker && marker.layer && cellView.layer) {
+        CGRect rect = [marker.layer convertRect:marker.layer.bounds toLayer:cellView.layer];
+        if (!CGRectIsEmpty(rect) && !CGRectIsNull(rect) && !CGRectIsInfinite(rect) && rect.size.width >= 1.0) {
+            ApolloSRTTarget *t = [ApolloSRTTarget new];
+            t.kind = SRTStatKindTranslation; t.rect = rect; t.caption = @"Translate"; t.markerLabel = marker;
+            [out addObject:t];
+        }
+    }
+    [out sortUsingComparator:^NSComparisonResult(ApolloSRTTarget *a, ApolloSRTTarget *b) {
+        return a.rect.origin.x < b.rect.origin.x ? NSOrderedAscending : NSOrderedDescending;
+    }];
+    return out;
+}
+
+// The strip = union of the visible target rects, padded, in cellView coords.
+// (Used for the loupe snapshot — what gets magnified.)
+static CGRect SRTStripRect(NSArray<ApolloSRTTarget *> *targets) {
+    if (targets.count == 0) return CGRectNull;
+    CGRect u = targets.firstObject.rect;
+    for (ApolloSRTTarget *t in targets) u = CGRectUnion(u, t.rect);
+    return CGRectInset(u, -8.0, -9.0);
+}
+
+// The claim = where a press-and-hold belongs to the magnifier (and the context
+// menu is suppressed). Deliberately MUCH fatter than the strip — a thumb press
+// anywhere along the row band must activate:
+//   * horizontally: from the cell's left edge (the ↑ hugs the screen edge)
+//     to well past the last icon (room for the +N chip / 🌐 marker growing);
+//   * vertically: a fat band around the icons, at least 56pt tall, and on feed
+//     cells all the way down to the cell's bottom (the info row is the last
+//     line — the padding under it reads as "that corner" to a thumb).
+static CGRect SRTClaimRect(id cell, UIView *cellView, NSArray<ApolloSRTTarget *> *targets) {
+    if (targets.count == 0) return CGRectNull;
+    CGRect u = targets.firstObject.rect;
+    for (ApolloSRTTarget *t in targets) u = CGRectUnion(u, t.rect);
+
+    CGFloat left = 0.0;                                   // reach the screen edge
+    CGFloat right = CGRectGetMaxX(u) + 32.0;
+    CGFloat top = CGRectGetMinY(u) - 20.0;
+    CGFloat bottom = CGRectGetMaxY(u) + 20.0;
+
+    // Feed cells: the row is the cell's last line — claim the trailing padding.
+    static Class headerClass;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ headerClass = NSClassFromString(@"_TtC6Apollo22CommentsHeaderCellNode"); });
+    BOOL isHeader = headerClass && [cell isKindOfClass:headerClass];
+    CGFloat cellBottom = CGRectGetHeight(cellView.bounds);
+    if (!isHeader && cellBottom - CGRectGetMaxY(u) < 44.0) bottom = cellBottom;
+
+    // Comfortable minimum height, centered on the row.
+    if (bottom - top < 56.0) {
+        CGFloat mid = CGRectGetMidY(u);
+        top = mid - 28.0;
+        bottom = MAX(bottom, mid + 28.0);
+    }
+    return CGRectMake(left, top, right - left, bottom - top);
+}
+
+// Nearest target to a point's X (Voronoi on centers). Fills the gaps so every
+// spot in the strip picks exactly one icon.
+static NSInteger SRTNearestTargetIndex(NSArray<ApolloSRTTarget *> *targets, CGFloat x) {
+    NSInteger best = 0; CGFloat bestDist = CGFLOAT_MAX;
+    for (NSInteger i = 0; i < (NSInteger)targets.count; i++) {
+        CGFloat cx = CGRectGetMidX(targets[i].rect);
+        CGFloat d = fabs(cx - x);
+        if (d < bestDist) { bestDist = d; best = i; }
+    }
+    return best;
+}
+
+// MARK: - Magnifier loupe: view
+
+// The "glass slider" loupe: a floating Liquid Glass card showing the icon row
+// zoomed, with an accent pill that springs from icon to icon as the finger
+// slides. Uses UIGlassEffect when the app runs with Liquid Glass, otherwise a
+// system blur — same layout either way. Dragging well away from the row dims
+// the card into "Release to Cancel" (releasing there activates nothing);
+// sliding back re-engages.
+@interface ApolloSRTLoupeView : UIView
+@property (nonatomic, strong) UIVisualEffectView *card;
+@property (nonatomic, strong) UIImageView *stripImageView;
+@property (nonatomic, strong) UIView *highlightView;
+@property (nonatomic, strong) UILabel *captionLabel;
+@property (nonatomic, assign) CGFloat zoom;
+@property (nonatomic, assign) CGSize stripPointSize;   // strip size in points
+@property (nonatomic, assign) BOOL hasSelection;       // NO until the first selectRect
+@property (nonatomic, assign) CGFloat lockedCenterY;   // 0 until first placement, then fixed
+- (instancetype)initWithImage:(UIImage *)img stripSize:(CGSize)stripSize zoom:(CGFloat)zoom;
+- (void)selectRect:(CGRect)rectInStrip caption:(NSString *)caption tint:(UIColor *)tint;
+- (void)positionAboveScreenPoint:(CGPoint)p inHost:(UIView *)host;
+- (void)setCancelledAppearance:(BOOL)cancelled;
+@end
+
+@implementation ApolloSRTLoupeView
+
+- (instancetype)initWithImage:(UIImage *)img stripSize:(CGSize)stripSize zoom:(CGFloat)zoom {
+    CGFloat pad = 10.0, captionH = 16.0, gap = 4.0;
+    CGFloat imgW = stripSize.width * zoom;
+    CGFloat imgH = stripSize.height * zoom;
+    CGSize cardSize = CGSizeMake(imgW + pad * 2.0, imgH + pad * 2.0 + gap + captionH);
+    if ((self = [super initWithFrame:CGRectMake(0, 0, cardSize.width, cardSize.height)])) {
+        self.zoom = zoom;
+        self.stripPointSize = stripSize;
+        self.userInteractionEnabled = NO;
+
+        // Material: real glass on iOS 26 (matches the nav-bar look), blur fallback.
+        UIVisualEffect *effect = nil;
+        Class glassCls = NSClassFromString(@"UIGlassEffect");
+        if (IsLiquidGlass() && glassCls) {
+            effect = [[glassCls alloc] init];
+        } else {
+            effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial];
+        }
+        _card = [[UIVisualEffectView alloc] initWithEffect:effect];
+        _card.frame = self.bounds;
+        _card.layer.cornerRadius = cardSize.height / 2.0 > 26.0 ? 22.0 : cardSize.height / 2.0;
+        _card.layer.cornerCurve = kCACornerCurveContinuous;
+        _card.clipsToBounds = YES;
+        [self addSubview:_card];
+
+        // Soft drop shadow lives on the wrapper (the card clips its own bounds).
+        self.layer.shadowColor = [UIColor blackColor].CGColor;
+        self.layer.shadowOpacity = 0.35;
+        self.layer.shadowRadius = 16.0;
+        self.layer.shadowOffset = CGSizeMake(0, 8);
+        self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.bounds
+                                                           cornerRadius:_card.layer.cornerRadius].CGPath;
+
+        // Rounded clip container for the zoomed strip.
+        UIView *clip = [[UIView alloc] initWithFrame:CGRectMake(pad, pad, imgW, imgH)];
+        clip.layer.cornerRadius = 10.0;
+        clip.layer.cornerCurve = kCACornerCurveContinuous;
+        clip.clipsToBounds = YES;
+        [_card.contentView addSubview:clip];
+
+        // Selection pill UNDER the strip pixels: tints the icon without washing it out.
+        _highlightView = [[UIView alloc] initWithFrame:CGRectZero];
+        _highlightView.layer.cornerRadius = 8.0;
+        _highlightView.layer.cornerCurve = kCACornerCurveContinuous;
+        _highlightView.layer.borderWidth = 1.5;
+        [clip addSubview:_highlightView];
+
+        _stripImageView = [[UIImageView alloc] initWithFrame:clip.bounds];
+        _stripImageView.image = img;
+        _stripImageView.contentMode = UIViewContentModeScaleToFill;
+        [clip addSubview:_stripImageView];
+
+        // Pill border redrawn ABOVE the strip so the outline stays crisp.
+        UIView *ring = [[UIView alloc] initWithFrame:CGRectZero];
+        ring.layer.cornerRadius = 8.0;
+        ring.layer.cornerCurve = kCACornerCurveContinuous;
+        ring.layer.borderWidth = 1.5;
+        ring.backgroundColor = [UIColor clearColor];
+        ring.tag = 0x5254;   // 'RT' — looked up in selectRect
+        [clip addSubview:ring];
+
+        _captionLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, imgH + pad + gap, imgW, captionH)];
+        _captionLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
+        _captionLabel.textColor = [UIColor labelColor];
+        _captionLabel.textAlignment = NSTextAlignmentCenter;
+        [_card.contentView addSubview:_captionLabel];
+    }
+    return self;
+}
+
+// rectInStrip is in strip-local point coords; tint is the accent color. The pill
+// springs to the new icon; the first call places it without animation.
+- (void)selectRect:(CGRect)rectInStrip caption:(NSString *)caption tint:(UIColor *)tint {
+    CGRect scaled = CGRectMake(rectInStrip.origin.x * self.zoom, rectInStrip.origin.y * self.zoom,
+                               rectInStrip.size.width * self.zoom, rectInStrip.size.height * self.zoom);
+    // Comfortable pill around the icon.
+    scaled = CGRectInset(scaled, -7.0, -5.0);
+    UIView *ring = [self.highlightView.superview viewWithTag:0x5254];
+    void (^apply)(void) = ^{
+        self.highlightView.frame = scaled;
+        ring.frame = scaled;
+    };
+    self.highlightView.backgroundColor = [tint colorWithAlphaComponent:0.28];
+    self.highlightView.layer.borderColor = [UIColor clearColor].CGColor;
+    ring.layer.borderColor = [tint colorWithAlphaComponent:0.9].CGColor;
+    // The strip snapshot is opaque, so the under-fill can't show through — give the
+    // ring itself a soft tint wash so the selected icon reads as "lit up".
+    ring.backgroundColor = [tint colorWithAlphaComponent:0.16];
+    if (!self.hasSelection) {
+        self.hasSelection = YES;
+        apply();
+    } else {
+        // Springy glass-slider glide between icons.
+        [UIView animateWithDuration:0.28 delay:0
+             usingSpringWithDamping:0.75 initialSpringVelocity:0.4
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                         animations:apply completion:nil];
+    }
+    self.captionLabel.text = caption;
+}
+
+// Drag-away-to-cancel state: dim + shrink the card, hide the selection pill, and
+// caption the escape hatch. Fully reversible — sliding back re-engages (selectRect
+// restores the caption and the pill springs back to the nearest icon).
+- (void)setCancelledAppearance:(BOOL)cancelled {
+    UIView *ring = [self.highlightView.superview viewWithTag:0x5254];
+    if (cancelled) self.captionLabel.text = @"Release to Cancel";
+    [UIView animateWithDuration:0.18 delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        self.alpha = cancelled ? 0.45 : 1.0;
+        self.transform = cancelled ? CGAffineTransformMakeScale(0.9, 0.9) : CGAffineTransformIdentity;
+        self.highlightView.alpha = cancelled ? 0.0 : 1.0;
+        ring.alpha = cancelled ? 0.0 : 1.0;
+    } completion:nil];
+}
+
+// Center horizontally on p.x (clamped). The VERTICAL position is anchored above
+// the initial press and then LOCKED — following the finger's y while sliding
+// across the row made the card bob up and down (jittery). Uses center (not
+// frame) so it stays correct while the show/hide scale transform is applied.
+- (void)positionAboveScreenPoint:(CGPoint)p inHost:(UIView *)host {
+    CGFloat margin = 10.0;
+    CGFloat w = self.bounds.size.width, h = self.bounds.size.height;
+    CGFloat cx = MAX(margin + w / 2.0, MIN(p.x, host.bounds.size.width - margin - w / 2.0));
+    if (self.lockedCenterY == 0.0) {            // first placement: anchor, then lock
+        CGFloat topInset = host.safeAreaInsets.top + 6.0;
+        CGFloat top = p.y - h - 44.0;           // clear of the finger/cursor
+        if (top < topInset) top = p.y + 44.0;   // not enough room above -> below the finger
+        self.lockedCenterY = top + h / 2.0;
+    }
+    self.center = CGPointMake(cx, self.lockedCenterY);
+}
+
+@end
+
+// MARK: - Magnifier: activation (open post / created-at alert)
+
+static NSDateFormatter *SRTAbsDateFormatter(void) {
+    static NSDateFormatter *f; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        f = [[NSDateFormatter alloc] init];
+        f.dateStyle = NSDateFormatterLongStyle;
+        f.timeStyle = NSDateFormatterShortStyle;
+    });
+    return f;
+}
+
+static NSString *SRTRelativeAgo(NSDate *date) {
+    NSTimeInterval t = fabs([date timeIntervalSinceNow]);
+    if (t < 5.0)        return @"Just now";
+    if (t < 60.0)       return [NSString stringWithFormat:@"%lds",  (long)t];
+    if (t < 3600.0)     return [NSString stringWithFormat:@"%ldm",  (long)(t / 60.0)];
+    if (t < 86400.0)    return [NSString stringWithFormat:@"%ldh",  (long)(t / 3600.0)];
+    if (t < 2592000.0)  return [NSString stringWithFormat:@"%ldd",  (long)(t / 86400.0)];
+    if (t < 31536000.0) return [NSString stringWithFormat:@"%ldmo", (long)(t / 2592000.0)];
+    return [NSString stringWithFormat:@"%.1fy", t / 31556736.0];
+}
+
+static UIViewController *SRTVisibleVCForView(UIView *view) {
+    UIResponder *r = view;
+    while (r) {
+        if ([r isKindOfClass:[UIViewController class]]) return (UIViewController *)r;
+        r = r.nextResponder;
+    }
+    return nil;
+}
+
+// Present the same "Posted … Ago" alert as ApolloCreatedAtAlert (feed post).
+static void SRTPresentCreatedAtAlert(id cell, UIView *cellView) {
+    id link = SRTIvar(cell, "link");
+    NSDate *date = nil;
+    if ([link respondsToSelector:@selector(createdUTC)]) {
+        @try { date = [link createdUTC]; } @catch (__unused id e) {}
+    }
+    if (![date isKindOfClass:[NSDate class]]) return;
+    UIViewController *presenter = SRTVisibleVCForView(cellView);
+    if (!presenter) return;
+
+    NSString *rel = SRTRelativeAgo(date);
+    NSString *title = [rel isEqualToString:@"Just now"] ? @"Posted Just now"
+                                                        : [NSString stringWithFormat:@"Posted %@ Ago", rel];
+    NSString *msg = (fabs([date timeIntervalSinceNow]) >= 5.0)
+        ? [NSString stringWithFormat:@"Posted on %@", [SRTAbsDateFormatter() stringFromDate:date]] : nil;
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:msg
+                                                       preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+    [presenter presentViewController:a animated:YES completion:nil];
+}
+
+// Open the post the same way a tap would: replay Apollo's own row selection. When
+// `jump` is set, arm the jump-to-comments flag first so it lands on the comments.
+static void SRTOpenPostForCell(id cell, UIView *cellView, BOOL jump) {
+    if (!cellView) return;
+    UITableView *tv = nil;
+    for (UIView *v = cellView; v; v = v.superview) {
+        if ([v isKindOfClass:[UITableView class]]) { tv = (UITableView *)v; break; }
+    }
+    if (!tv) return;
+    NSIndexPath *ip = nil;
+    for (UIView *v = cellView; v && v != tv; v = v.superview) {
+        if ([v isKindOfClass:[UITableViewCell class]]) { ip = [tv indexPathForCell:(UITableViewCell *)v]; break; }
+    }
+    if (!ip) {
+        CGPoint c = [cellView convertPoint:CGPointMake(CGRectGetMidX(cellView.bounds), CGRectGetMidY(cellView.bounds)) toView:tv];
+        ip = [tv indexPathForRowAtPoint:c];
+    }
+    if (!ip) return;
+    if (jump) SRTArmJumpPending();
+    SEL sel = @selector(tableView:didSelectRowAtIndexPath:);
+    id delegate = tv.delegate;
+    if ([delegate respondsToSelector:sel]) {
+        ((void (*)(id, SEL, id, id))objc_msgSend)(delegate, sel, tv, ip);
+        return;
+    }
+    UIViewController *vc = SRTVisibleVCForView(cellView);
+    if ([vc respondsToSelector:sel]) {
+        ((void (*)(id, SEL, id, id))objc_msgSend)(vc, sel, tv, ip);
+    }
+}
+
+// The cell's real upvote control, wherever this cell type keeps it:
+//   LargePostCellNode:      optionButtonsNode.upvoteButton
+//   CompactPostCellNode:    upvoteButtonNode (directly on the cell)
+//   CommentsHeaderCellNode: quickBarNode.upvoteButton
+static id SRTUpvoteButtonForCell(id cell) {
+    id direct = SRTIvar(cell, "upvoteButtonNode");
+    if (direct) return direct;
+    id optionButtons = SRTIvar(cell, "optionButtonsNode");
+    id fromOptions = optionButtons ? SRTIvar(optionButtons, "upvoteButton") : nil;
+    if (fromOptions) return fromOptions;
+    id quickBar = SRTIvar(cell, "quickBarNode");
+    return quickBar ? SRTIvar(quickBar, "upvoteButton") : nil;
+}
+
+// Fire the button's own action exactly like a tap: ASControlNode event
+// TouchUpInside (1 << 4). Goes through Apollo's real vote path (state, API,
+// arrow color), so it stays correct across app versions.
+static BOOL SRTSendTouchUpInside(id controlNode) {
+    SEL sel = NSSelectorFromString(@"sendActionsForControlEvents:withEvent:");
+    if (!controlNode || ![controlNode respondsToSelector:sel]) return NO;
+    ((void (*)(id, SEL, NSUInteger, id))objc_msgSend)(controlNode, sel, (NSUInteger)(1 << 4), nil);
+    return YES;
+}
+
+static void SRTPresentSimpleAlert(UIView *cellView, NSString *title, NSString *message) {
+    UIViewController *presenter = SRTVisibleVCForView(cellView);
+    if (!presenter) return;
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:message
+                                                       preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+    [presenter presentViewController:a animated:YES completion:nil];
+}
+
+// "94% Upvoted" info for the smiley — mirrors what the row displays.
+static void SRTPresentUpvoteRatioAlert(id cell, UIView *cellView) {
+    id link = SRTIvar(cell, "link");
+    SEL ratioSel = NSSelectorFromString(@"upvoteRatio");
+    if (!link || ![link respondsToSelector:ratioSel]) return;
+    double ratio = ((double (*)(id, SEL))objc_msgSend)(link, ratioSel);
+    if (ratio <= 0.0 || ratio > 1.0) return;
+    long pct = lround(ratio * 100.0);
+    SRTPresentSimpleAlert(cellView, [NSString stringWithFormat:@"%ld%% Upvoted", pct],
+                          [NSString stringWithFormat:@"%ld%% of voters upvoted this post.", pct]);
+}
+
+// Toggle the post title translated ⇄ original through the translation module's
+// own tap target (ApolloTranslation.xm). Runtime-bridged so this module never
+// links against that one: shared.pendingLabel = marker; handleCellTap:nil.
+static BOOL SRTToggleTranslationForMarker(UILabel *marker) {
+    if (!marker) return NO;
+    Class cls = NSClassFromString(@"ApolloFeedMarkerTapTarget");
+    if (!cls || ![cls respondsToSelector:@selector(shared)]) return NO;
+    id shared = ((id (*)(id, SEL))objc_msgSend)(cls, @selector(shared));
+    SEL setSel = NSSelectorFromString(@"setPendingLabel:");
+    SEL tapSel = NSSelectorFromString(@"handleCellTap:");
+    if (![shared respondsToSelector:setSel] || ![shared respondsToSelector:tapSel]) return NO;
+    ((void (*)(id, SEL, id))objc_msgSend)(shared, setSel, marker);
+    ((void (*)(id, SEL, id))objc_msgSend)(shared, tapSel, nil);
+    return YES;
+}
+
+static void SRTActivateTarget(id cell, UIView *cellView, ApolloSRTTarget *target) {
+    if (!target) return;
+    switch (target.kind) {
+        case SRTStatKindScore: {
+            if (!SRTSendTouchUpInside(SRTUpvoteButtonForCell(cell))) {
+                // No reachable vote control on this cell type — open the post instead.
+                SRTOpenPostForCell(cell, cellView, /*jump=*/NO);
+            }
+            break;
+        }
+        case SRTStatKindComments:
+            SRTOpenPostForCell(cell, cellView, /*jump=*/YES);
+            break;
+        case SRTStatKindAge:
+            SRTPresentCreatedAtAlert(cell, cellView);
+            break;
+        case SRTStatKindPercentage:
+            SRTPresentUpvoteRatioAlert(cell, cellView);
+            break;
+        case SRTStatKindTranslation:
+            SRTToggleTranslationForMarker(target.markerLabel);
+            break;
+    }
+}
+
+// MARK: - Shared gesture delegate (comment bubble + magnifier)
+
+// Marker/back-ref keys stored on the gesture recognizer.
+static const void *kSRTCommentGestureCellKey = &kSRTCommentGestureCellKey;   // ASSIGN: owning cell node
+static const void *kSRTCommentGestureInstalledKey = &kSRTCommentGestureInstalledKey; // RETAIN on cell: idempotency
+static const void *kSRTGestureTypeKey = &kSRTGestureTypeKey;   // NSNumber: 1=comment tap, 2=loupe long-press
+// Per-loupe-gesture live state.
+static const void *kSRTLoupeViewKey = &kSRTLoupeViewKey;       // RETAIN: current ApolloSRTLoupeView
+static const void *kSRTLoupeTargetsKey = &kSRTLoupeTargetsKey; // RETAIN: NSArray<ApolloSRTTarget*>
+static const void *kSRTLoupeStripOriginKey = &kSRTLoupeStripOriginKey; // NSValue CGPoint: strip origin in cell coords
+static const void *kSRTLoupeSelKey = &kSRTLoupeSelKey;         // NSNumber: selected index
+static const void *kSRTLoupeScrollLockKey = &kSRTLoupeScrollLockKey; // RETAIN: UIScrollView we disabled while the loupe is up
+static const void *kSRTLoupeCancelKey = &kSRTLoupeCancelKey;   // NSNumber BOOL: finger dragged away — release cancels
+
+enum { kSRTGestureTypeCommentTap = 1, kSRTGestureTypeLoupe = 2 };
+
+// Comfortable hit region for the comment bubble. Asymmetric: a touch more room
+// toward the age node on the right (where taps are meant to distinguish the two)
+// and vertically (the row is thin), a little less toward the score on the left.
+static const UIEdgeInsets kSRTCommentInsets = (UIEdgeInsets){ -11.0, -7.0, -11.0, -9.0 };
+
+@interface ApolloSRTGestureDelegate : NSObject <UIGestureRecognizerDelegate>
+@end
+
+// Snapshot the strip region of the (rasterized) cell into an image for the loupe.
+static UIImage *SRTSnapshotStrip(UIView *cellView, CGRect stripRect) {
+    if (stripRect.size.width < 1.0 || stripRect.size.height < 1.0) return nil;
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat preferredFormat];
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:stripRect.size format:fmt];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGContextTranslateCTM(ctx.CGContext, -stripRect.origin.x, -stripRect.origin.y);
+        [cellView drawViewHierarchyInRect:cellView.bounds afterScreenUpdates:NO];
+    }];
+}
+
+static UIColor *SRTAccentTint(UIView *cellView) {
+    UIColor *t = cellView.window.tintColor ?: cellView.tintColor;
+    return t ?: [UIColor systemBlueColor];
+}
+
+// Pans we force-disabled while the loupe is up (edge-swipe back, parallax
+// transition pans). Restored in SRTDismissLoupe.
+static const void *kSRTLoupeDisabledPansKey = &kSRTLoupeDisabledPansKey;
+
+// Sliding along the row near the screen edge must NOT trigger the interactive
+// swipe-back (or any transition pan) — the finger belongs to the loupe. Disable
+// them for the duration of the hold and remember what we touched.
+static void SRTDisableCompetingPans(UIGestureRecognizer *gr, UIView *cellView) {
+    NSMutableArray<UIGestureRecognizer *> *disabled = [NSMutableArray array];
+    UIGestureRecognizer *pop = SRTVisibleVCForView(cellView).navigationController.interactivePopGestureRecognizer;
+    if (pop && pop.isEnabled) { pop.enabled = NO; [disabled addObject:pop]; }
+    for (UIView *v = cellView; v; v = v.superview) {
+        UIGestureRecognizer *scrollPan =
+            [v isKindOfClass:[UIScrollView class]] ? ((UIScrollView *)v).panGestureRecognizer : nil;
+        for (UIGestureRecognizer *g in v.gestureRecognizers) {
+            if (g == gr || g == scrollPan || objc_getAssociatedObject(g, kSRTGestureTypeKey)) continue;
+            NSString *cls = NSStringFromClass([g class]);
+            BOOL panLike = [g isKindOfClass:[UIPanGestureRecognizer class]]
+                || [cls containsString:@"ParallaxTransition"];
+            if (panLike && g.isEnabled) { g.enabled = NO; [disabled addObject:g]; }
+        }
+    }
+    objc_setAssociatedObject(gr, kSRTLoupeDisabledPansKey, disabled, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void SRTDismissLoupe(UIGestureRecognizer *gr, BOOL animated) {
+    ApolloSRTLoupeView *loupe = objc_getAssociatedObject(gr, kSRTLoupeViewKey);
+    if (loupe) {
+        if (animated) {
+            [UIView animateWithDuration:0.12 animations:^{
+                loupe.alpha = 0.0;
+                loupe.transform = CGAffineTransformMakeScale(0.9, 0.9);
+            } completion:^(BOOL f) { [loupe removeFromSuperview]; }];
+        } else {
+            [loupe removeFromSuperview];
+        }
+    }
+    UIScrollView *locked = objc_getAssociatedObject(gr, kSRTLoupeScrollLockKey);
+    if (locked) locked.scrollEnabled = YES;   // restore the feed scroll we disabled on begin
+    for (UIGestureRecognizer *g in objc_getAssociatedObject(gr, kSRTLoupeDisabledPansKey)) {
+        g.enabled = YES;                      // restore swipe-back / transition pans
+    }
+    objc_setAssociatedObject(gr, kSRTLoupeViewKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(gr, kSRTLoupeTargetsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(gr, kSRTLoupeSelKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(gr, kSRTLoupeStripOriginKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(gr, kSRTLoupeScrollLockKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(gr, kSRTLoupeDisabledPansKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(gr, kSRTLoupeCancelKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+@implementation ApolloSRTGestureDelegate
+
+// A touch that starts inside the claim belongs to the magnifier, full stop.
+// Enforced with UIKit's own priority primitive: every competing press/pan on
+// the ancestor chain is wired (once, permanently) to REQUIRE THE LOUPE TO FAIL
+// before it may begin. Outside the claim the loupe never tracks the touch, so
+// it counts as failed and everything behaves stock; inside the claim the loupe
+// begins at 0.3s, the requirement is never satisfied, and the context menu /
+// swipe-back / swipe actions simply cannot start. Deterministic — no
+// enable/disable churn, no delivery-order races. (A hard disable is NOT usable
+// here: a disabled recognizer wedges UIKit's arbitration and the loupe itself
+// never leaves Possible; a momentary off/on flick is racy against delivery
+// order. Both were tried.) Two families are wired:
+//   * press-like (context menu / preview drivers);
+//   * pan-like (interactive pop, Apollo's full-width swipe-back pans on the nav
+//     container, edge/parallax pans, swipe actions).
+// The enclosing scroll views' own pans are spared so scrolling from the corner
+// keeps its native feel (a real drag moves >allowableMovement fast, failing the
+// loupe naturally; once the loupe begins, the scroll-lock takes over anyway).
+static const void *kSRTWiredRequirementsKey = &kSRTWiredRequirementsKey;
+
+static void SRTWireCornerFailureRequirements(UIGestureRecognizer *loupe, UIView *cellView) {
+    NSHashTable *wired = objc_getAssociatedObject(loupe, kSRTWiredRequirementsKey);
+    if (!wired) {
+        wired = [NSHashTable weakObjectsHashTable];
+        objc_setAssociatedObject(loupe, kSRTWiredRequirementsKey, wired, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    UIGestureRecognizer *pop = SRTVisibleVCForView(cellView).navigationController.interactivePopGestureRecognizer;
+    if (pop && ![wired containsObject:pop]) {
+        [pop requireGestureRecognizerToFail:loupe];
+        [wired addObject:pop];
+    }
+    for (UIView *v = cellView; v; v = v.superview) {
+        UIGestureRecognizer *scrollPan =
+            [v isKindOfClass:[UIScrollView class]] ? ((UIScrollView *)v).panGestureRecognizer : nil;
+        for (UIGestureRecognizer *g in v.gestureRecognizers) {
+            if (objc_getAssociatedObject(g, kSRTGestureTypeKey)) continue;   // ours
+            if (g == scrollPan || g == pop || [wired containsObject:g]) continue;
+            NSString *cls = NSStringFromClass([g class]);
+            BOOL pressLike = [g isKindOfClass:[UILongPressGestureRecognizer class]]
+                || [cls containsString:@"Press"]
+                || [cls containsString:@"ContextMenu"]
+                || [cls containsString:@"Preview"];
+            BOOL panLike = [g isKindOfClass:[UIPanGestureRecognizer class]];
+            if (!pressLike && !panLike) continue;
+            [g requireGestureRecognizerToFail:loupe];
+            [wired addObject:g];
+        }
+    }
+}
+
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr shouldReceiveTouch:(UITouch *)touch {
+    id cell = objc_getAssociatedObject(gr, kSRTCommentGestureCellKey);
+    NSNumber *type = objc_getAssociatedObject(gr, kSRTGestureTypeKey);
+    if (!cell) return NO;
+    if (type.integerValue == kSRTGestureTypeLoupe) {
+        if (!sIconRowMagnifier) return NO;
+        // Claim + clear the field ONLY when the touch starts on the icon strip:
+        // the system press recognizers are reset there (they'd otherwise stall us
+        // and pop the context menu); outside the strip we take no touches and the
+        // context menu behaves stock.
+        UIView *cellView = nil;
+        @try { cellView = [(ApolloSRTNode *)cell view]; } @catch (__unused id e) {}
+        if (!cellView) return NO;
+        NSArray<ApolloSRTTarget *> *targets = SRTTargetsForCell(cell, cellView);
+        if (targets.count == 0) return NO;
+        // A hold anywhere along the row band belongs to the magnifier — the
+        // context menu never fires there while the toggle is on; outside the
+        // band everything behaves stock.
+        CGRect claim = SRTClaimRect(cell, cellView, targets);
+        CGPoint pt = [touch locationInView:cellView];
+        BOOL inside = CGRectContainsPoint(claim, pt);
+        if (inside) SRTWireCornerFailureRequirements(gr, cellView);
+        return inside;
+    }
+    // The comment tap only cares about the comment-bubble region.
+    UIView *cellView = nil;
+    @try { cellView = [(ApolloSRTNode *)cell view]; } @catch (__unused id e) {}
+    ApolloSRTNode *commentsNode = SRTCommentsNodeForCell(cell);
+    return SRTTouchHitsNode(commentsNode, cellView, touch, kSRTCommentInsets);
+}
+
+// Touch delivery already gated to the strip in shouldReceiveTouch; re-check the
+// flag and cell wiring at transition time.
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gr {
+    NSNumber *type = objc_getAssociatedObject(gr, kSRTGestureTypeKey);
+    if (type.integerValue != kSRTGestureTypeLoupe) return YES;
+    BOOL ok = sIconRowMagnifier && objc_getAssociatedObject(gr, kSRTCommentGestureCellKey) != nil;
+    return ok;
+}
+
+// Always allow simultaneous recognition. Exclusivity CANNOT be used here: if any
+// other recognizer happens to be active on the touch (hover, focus observers,
+// scroll internals — racy across devices), an exclusive loupe silently never
+// leaves Possible ("hold does nothing"). The hijack risks are each handled
+// directly instead: cancelsTouchesInView kills row selection, the scroll-lock
+// kills scrolling, and SRTDisableCompetingPans kills the edge-swipe back /
+// transition pans while the loupe is up.
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr
+        shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    return YES;
+}
+
+// Never wait on anyone: refuse failure requirements in OUR direction. (The system
+// press being made to wait on US is fine and handled by the neutralizer above.)
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr
+        shouldRequireFailureOfGestureRecognizer:(UIGestureRecognizer *)other {
+    return NO;
+}
+
+// Belt-and-braces: anything press-like we did not neutralize still has to wait
+// for the loupe to fail (which it does instantly outside the strip).
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr
+        shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)other {
+    if (!sIconRowMagnifier) return NO;   // feature off -> never touch the context menu
+    NSNumber *type = objc_getAssociatedObject(gr, kSRTGestureTypeKey);
+    if (type.integerValue != kSRTGestureTypeLoupe) return NO;
+    if (objc_getAssociatedObject(other, kSRTGestureTypeKey)) return NO;   // our own gestures
+    NSString *cls = NSStringFromClass([other class]);
+    BOOL yes = [cls containsString:@"ContextMenu"] || [cls containsString:@"Preview"]
+        || [cls containsString:@"Menu"] || [cls containsString:@"Press"]
+        || [other isKindOfClass:[UILongPressGestureRecognizer class]];
+    return yes;
+}
+
+// The tap itself: arm the jump. The native row selection (not cancelled) opens the
+// post; the pushed CommentsViewController consumes the flag on appear.
+- (void)srtCommentTapFired:(UITapGestureRecognizer *)tap {
+    if (tap.state != UIGestureRecognizerStateRecognized) return;
+    SRTArmJumpPending();
+    // Match the vote buttons' native feedback: a light tick acknowledging the tap.
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    ApolloLog(@"[StatsRow] comment bubble tapped — arming jump-to-comments");
+}
+
+// How far past the interactive band (claim ∪ strip) the finger may wander before
+// the hold flips into "release to cancel". Generous enough that normal sliding
+// (which drifts vertically) never trips it; small enough that a deliberate
+// drag-away reads instantly. Fully reversible until the finger lifts.
+static const CGFloat kSRTCancelSlopX = 48.0;
+static const CGFloat kSRTCancelSlopY = 64.0;
+
+// Refresh the loupe's selection + position from the current finger location.
+- (void)srtSyncLoupeForGesture:(UIGestureRecognizer *)gr cell:(id)cell cellView:(UIView *)cellView {
+    ApolloSRTLoupeView *loupe = objc_getAssociatedObject(gr, kSRTLoupeViewKey);
+    NSArray<ApolloSRTTarget *> *targets = objc_getAssociatedObject(gr, kSRTLoupeTargetsKey);
+    UIView *host = cellView.window;
+    if (!loupe || targets.count == 0 || !host) return;
+    CGPoint pCell = [gr locationInView:cellView];
+
+    // Drag-away-to-cancel: outside the escape band the loupe dims into a
+    // "Release to Cancel" state and releasing activates nothing; sliding back
+    // re-engages. The band is the whole interactive area a hold can start in
+    // (claim ∪ strip) plus slop, so the loupe can never SPAWN cancelled.
+    CGRect band = CGRectUnion(SRTStripRect(targets), SRTClaimRect(cell, cellView, targets));
+    BOOL cancelled = !CGRectContainsPoint(CGRectInset(band, -kSRTCancelSlopX, -kSRTCancelSlopY), pCell);
+    BOOL wasCancelled = [objc_getAssociatedObject(gr, kSRTLoupeCancelKey) boolValue];
+    if (cancelled != wasCancelled) {
+        objc_setAssociatedObject(gr, kSRTLoupeCancelKey, @(cancelled), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [loupe setCancelledAppearance:cancelled];
+        [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
+        ApolloLog(@"[StatsRow] loupe %@", cancelled ? @"dragged away — release to cancel" : @"re-engaged");
+    }
+    if (cancelled) {   // keep tracking the finger (dimmed) but hold the last selection
+        [loupe positionAboveScreenPoint:[gr locationInView:host] inHost:host];
+        return;
+    }
+
+    NSInteger sel = SRTNearestTargetIndex(targets, pCell.x);
+    NSNumber *prev = objc_getAssociatedObject(gr, kSRTLoupeSelKey);
+    objc_setAssociatedObject(gr, kSRTLoupeSelKey, @(sel), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloSRTTarget *t = targets[sel];
+    CGPoint stripOrigin = [(NSValue *)objc_getAssociatedObject(gr, kSRTLoupeStripOriginKey) CGPointValue];
+    CGRect rectInStrip = CGRectOffset(t.rect, -stripOrigin.x, -stripOrigin.y);
+    [loupe selectRect:rectInStrip caption:t.caption tint:SRTAccentTint(cellView)];
+    [loupe positionAboveScreenPoint:[gr locationInView:host] inHost:host];
+    if (prev && prev.integerValue != sel) {
+        [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
+    }
+}
+
+- (void)srtLoupeLongPress:(UILongPressGestureRecognizer *)gr {
+    id cell = objc_getAssociatedObject(gr, kSRTCommentGestureCellKey);
+    if (!cell) return;
+    UIView *cellView = nil;
+    @try { cellView = [(ApolloSRTNode *)cell view]; } @catch (__unused id e) {}
+    if (!cellView) return;
+
+    switch (gr.state) {
+        case UIGestureRecognizerStateBegan: {
+            if (!sIconRowMagnifier) return;
+            NSArray<ApolloSRTTarget *> *targets = SRTTargetsForCell(cell, cellView);
+            UIView *host = cellView.window;
+            if (targets.count == 0 || !host) return;
+            CGRect stripRect = SRTStripRect(targets);
+            UIImage *img = SRTSnapshotStrip(cellView, stripRect);
+            if (!img) return;
+            CGFloat zoom = (host.bounds.size.width - 40.0) / MAX(stripRect.size.width, 1.0);
+            zoom = MAX(1.4, MIN(zoom, 2.4));
+            ApolloSRTLoupeView *loupe = [[ApolloSRTLoupeView alloc] initWithImage:img stripSize:stripRect.size zoom:zoom];
+            loupe.alpha = 0.0;
+            loupe.transform = CGAffineTransformMakeScale(0.85, 0.85);
+            [host addSubview:loupe];
+            // The stat button under the finger is still in its pressed (dimmed)
+            // state in this first snapshot — our cancelsTouchesInView cancellation
+            // un-highlights it only after this action returns, and the layer-backed
+            // node redraws a frame later. Re-snapshot shortly after and swap the
+            // strip image so every icon shows at full brightness.
+            {
+                __weak ApolloSRTLoupeView *weakLoupe = loupe;
+                CGRect snapRect = stripRect;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.09 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    ApolloSRTLoupeView *l = weakLoupe;
+                    if (!l || !l.superview) return;
+                    UIImage *fresh = SRTSnapshotStrip(cellView, snapRect);
+                    if (fresh) l.stripImageView.image = fresh;
+                });
+            }
+            objc_setAssociatedObject(gr, kSRTLoupeViewKey, loupe, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(gr, kSRTLoupeTargetsKey, targets, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(gr, kSRTLoupeStripOriginKey, [NSValue valueWithCGPoint:stripRect.origin], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(gr, kSRTLoupeCancelKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);   // fresh hold, fresh escape state
+            // Lock the feed's scroll while the loupe is up so sliding to pick an icon
+            // never scrolls the list; restored in SRTDismissLoupe.
+            for (UIView *v = cellView; v; v = v.superview) {
+                if ([v isKindOfClass:[UIScrollView class]]) {
+                    UIScrollView *sv = (UIScrollView *)v;
+                    if (sv.isScrollEnabled) {
+                        sv.scrollEnabled = NO;
+                        objc_setAssociatedObject(gr, kSRTLoupeScrollLockKey, sv, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    }
+                    break;
+                }
+            }
+            // And the horizontal escape hatches (edge-swipe back / transition pans):
+            // sliding across the row near the screen edge must move the pill, not
+            // pop the page. Restored in SRTDismissLoupe.
+            SRTDisableCompetingPans(gr, cellView);
+            [self srtSyncLoupeForGesture:gr cell:cell cellView:cellView];
+            [UIView animateWithDuration:0.14 animations:^{
+                loupe.alpha = 1.0;
+                loupe.transform = CGAffineTransformIdentity;
+            }];
+            [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+            break;
+        }
+        case UIGestureRecognizerStateChanged:
+            [self srtSyncLoupeForGesture:gr cell:cell cellView:cellView];
+            break;
+        case UIGestureRecognizerStateEnded: {
+            NSArray<ApolloSRTTarget *> *targets = objc_getAssociatedObject(gr, kSRTLoupeTargetsKey);
+            NSInteger sel = [objc_getAssociatedObject(gr, kSRTLoupeSelKey) integerValue];
+            BOOL cancelled = [objc_getAssociatedObject(gr, kSRTLoupeCancelKey) boolValue];
+            ApolloSRTTarget *t = (!cancelled && sel >= 0 && sel < (NSInteger)targets.count) ? targets[sel] : nil;
+            SRTDismissLoupe(gr, YES);
+            if (t) {
+                ApolloLog(@"[StatsRow] loupe released on %@", t.caption);
+                SRTActivateTarget(cell, cellView, t);
+            } else if (cancelled) {
+                ApolloLog(@"[StatsRow] loupe released in cancel zone — dismissed, no action");
+            }
+            break;
+        }
+        default:
+            SRTDismissLoupe(gr, YES);
+            break;
+    }
+}
+
+@end
+
+static ApolloSRTGestureDelegate *SRTDelegate(void) {
+    static ApolloSRTGestureDelegate *d;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ d = [ApolloSRTGestureDelegate new]; });
+    return d;
+}
+
+static void SRTInstallInfoRowGestures(id cell) {
+    if (!cell) return;
+    if (objc_getAssociatedObject(cell, kSRTCommentGestureInstalledKey)) return;
+    UIView *cellView = nil;
+    @try { cellView = [(ApolloSRTNode *)cell view]; } @catch (__unused id e) {}
+    if (!cellView) return;
+
+    // 1) Non-consuming tap on the comment bubble -> arm jump-to-comments.
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:SRTDelegate()
+                                                                          action:@selector(srtCommentTapFired:)];
+    tap.cancelsTouchesInView = NO;      // let native selection open the post
+    tap.delaysTouchesBegan = NO;        // don't interfere with scrolling
+    tap.delaysTouchesEnded = NO;        // don't delay the row selection
+    tap.delegate = SRTDelegate();
+    // Unsafe-unretained back-ref: the gesture lives inside the cell's view, so it
+    // never outlives the cell — no retain cycle, always valid while the gr exists.
+    objc_setAssociatedObject(tap, kSRTCommentGestureCellKey, cell, OBJC_ASSOCIATION_ASSIGN);
+    objc_setAssociatedObject(tap, kSRTGestureTypeKey, @(kSRTGestureTypeCommentTap), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [cellView addGestureRecognizer:tap];
+
+    // 2) Press-and-hold loupe over the whole info-row strip.
+    UILongPressGestureRecognizer *loupe = [[UILongPressGestureRecognizer alloc] initWithTarget:SRTDelegate()
+                                                                                        action:@selector(srtLoupeLongPress:)];
+    loupe.minimumPressDuration = 0.3;
+    // Default allowableMovement is a strict 10pt — a thumb wobbles more than
+    // that in 0.3s, silently failing the press (and with the context menu
+    // neutralized in the band, "nothing happens"). Real scroll intent still
+    // wins: the scroll pan recognizes long before this threshold matters and
+    // the loupe is exclusive, so it can't begin once a pan is active.
+    loupe.allowableMovement = 60.0;
+    loupe.cancelsTouchesInView = YES;   // own the touch while the loupe is up
+    loupe.delegate = SRTDelegate();
+    objc_setAssociatedObject(loupe, kSRTCommentGestureCellKey, cell, OBJC_ASSOCIATION_ASSIGN);
+    objc_setAssociatedObject(loupe, kSRTGestureTypeKey, @(kSRTGestureTypeLoupe), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [cellView addGestureRecognizer:loupe];
+
+    objc_setAssociatedObject(cell, kSRTCommentGestureInstalledKey, @[tap, loupe], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+// MARK: - CommentsViewController: scroll to the first comment when jump is pending
+//
+// Mirrors ApolloInboxCommentScroll's settle-then-pin approach but targets the
+// first CommentCellNode and is gated on our jump-pending flag (a *normal*
+// full-comments view, never an isolated thread). The two never fight: ICS only
+// acts on isolated threads, we only act when a jump is pending.
+
+static const NSTimeInterval kSRTInterval = 0.10;
+static const NSTimeInterval kSRTDeadline = 6.0;    // let the comment tree load over the network
+static const CGFloat kSRTDrift = 4.0;
+static const int kSRTHeldToFinish = 4;
+
+static const void *kSRTGenKey   = &kSRTGenKey;   // NSNumber long
+static const void *kSRTUserKey  = &kSRTUserKey;  // NSNumber bool: user dragged -> stop
+static const void *kSRTDoneKey  = &kSRTDoneKey;  // NSNumber bool
+static const void *kSRTReadyKey = &kSRTReadyKey; // NSNumber bool: content settled -> ok to pin
+static const void *kSRTLastHKey = &kSRTLastHKey; // NSNumber double: last contentSize.height
+static const void *kSRTHeldKey  = &kSRTHeldKey;  // NSNumber int
+
+static long gSRTGen = 0;
+
+static NSNumber *SRTNum(id vc, const void *key) { return objc_getAssociatedObject(vc, key); }
+static void SRTSet(id vc, const void *key, id val) {
+    objc_setAssociatedObject(vc, key, val, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static UITableView *SRTFindTable(UIView *v) {
+    if (!v) return nil;
+    if ([v isKindOfClass:[UITableView class]]) return (UITableView *)v;
+    for (UIView *s in v.subviews) {
+        UITableView *t = SRTFindTable(s);
+        if (t) return t;
+    }
+    return nil;
+}
+
+static UITableView *SRTTableForVC(UIViewController *vc) {
+    id tableNode = SRTIvar(vc, "tableNode");
+    if (tableNode) {
+        SEL viewSel = NSSelectorFromString(@"view");
+        if ([tableNode respondsToSelector:viewSel]) {
+            UIView *tv = ((id (*)(id, SEL))objc_msgSend)(tableNode, viewSel);
+            if ([tv isKindOfClass:[UITableView class]]) return (UITableView *)tv;
+        }
+    }
+    return SRTFindTable(vc.viewIfLoaded);
+}
+
+// First row whose node is a CommentCellNode (the start of the comment section,
+// after the post header / media / summary / action rows).
+static NSIndexPath *SRTFirstCommentIndexPath(id tableNode, UITableView *tableView) {
+    Class commentCellClass = NSClassFromString(@"_TtC6Apollo15CommentCellNode");
+    if (!commentCellClass) return nil;
+    SEL nodeSel = NSSelectorFromString(@"nodeForRowAtIndexPath:");
+    if (!tableNode || ![tableNode respondsToSelector:nodeSel]) return nil;
+    NSInteger sections = [tableView numberOfSections];
+    for (NSInteger s = 0; s < sections; s++) {
+        NSInteger rows = [tableView numberOfRowsInSection:s];
+        for (NSInteger r = 0; r < rows; r++) {
+            NSIndexPath *ip = [NSIndexPath indexPathForRow:r inSection:s];
+            id node = ((id (*)(id, SEL, id))objc_msgSend)(tableNode, nodeSel, ip);
+            if (node && [node isKindOfClass:commentCellClass]) return ip;
+        }
+    }
+    return nil;
+}
+
+// Small gap left above the action bar so its separator/hairline shows (not flush-cut).
+static const CGFloat kSRTLandingMargin = 8.0;
+
+// Content-space Y of the post's quick action bar (up/down/save/reply/share). It's a
+// subnode (quickBarNode) at the bottom of the CommentsHeaderCellNode, not its own row.
+// Returns NAN if not resolvable. A UITableView's layer bounds.origin == contentOffset,
+// so converting a descendant layer into it yields content coordinates directly.
+static CGFloat SRTQuickBarTopContentY(id tableNode, UITableView *tableView) {
+    Class headerClass = NSClassFromString(@"_TtC6Apollo22CommentsHeaderCellNode");
+    SEL nodeSel = NSSelectorFromString(@"nodeForRowAtIndexPath:");
+    if (!headerClass || !tableNode || ![tableNode respondsToSelector:nodeSel] || !tableView.layer) return NAN;
+    NSInteger sections = [tableView numberOfSections];
+    for (NSInteger s = 0; s < sections; s++) {
+        NSInteger rows = [tableView numberOfRowsInSection:s];
+        for (NSInteger r = 0; r < rows; r++) {
+            NSIndexPath *ip = [NSIndexPath indexPathForRow:r inSection:s];
+            id node = ((id (*)(id, SEL, id))objc_msgSend)(tableNode, nodeSel, ip);
+            if (!node || ![node isKindOfClass:headerClass]) continue;
+            id quickBar = SRTIvar(node, "quickBarNode");
+            CALayer *qbLayer = nil;
+            @try { qbLayer = [(ApolloSRTNode *)quickBar layer]; } @catch (__unused id e) {}
+            if (!qbLayer) return NAN;
+            CGRect rq = [qbLayer convertRect:qbLayer.bounds toLayer:tableView.layer];
+            if (CGRectIsNull(rq) || CGRectIsEmpty(rq) || CGRectIsInfinite(rq)) return NAN;
+            return rq.origin.y;
+        }
+    }
+    return NAN;
+}
+
+// Where to land: the action bar top (preferred, so the up/down/reply row + summary
+// stay visible), else the first comment as a fallback.
+static CGFloat SRTLandingOffset(id tableNode, UITableView *tv, NSIndexPath *firstCommentIP) {
+    CGFloat insetTop = tv.adjustedContentInset.top;
+    CGFloat insetBottom = tv.adjustedContentInset.bottom;
+    CGFloat viewportH = tv.bounds.size.height;
+    CGFloat maxOff = MAX(-insetTop, tv.contentSize.height - viewportH + insetBottom);
+    CGFloat targetTop;
+    CGFloat qbTop = SRTQuickBarTopContentY(tableNode, tv);
+    if (!isnan(qbTop)) {
+        targetTop = qbTop - kSRTLandingMargin;
+    } else if (firstCommentIP) {
+        targetTop = [tv rectForRowAtIndexPath:firstCommentIP].origin.y;
+    } else {
+        return tv.contentOffset.y;
+    }
+    return MIN(MAX(targetTop - insetTop, -insetTop), maxOff);
+}
+
+// -1 not ready, 0 corrected (was off), 1 already on target.
+static int SRTPinLanding(UIViewController *vc) {
+    id tableNode = SRTIvar(vc, "tableNode");
+    UITableView *tv = SRTTableForVC(vc);
+    if (!tv) return -1;
+
+    CGFloat h = tv.contentSize.height;
+    CGFloat insetTop = tv.adjustedContentInset.top;
+    CGFloat insetBottom = tv.adjustedContentInset.bottom;
+    CGFloat viewportH = tv.bounds.size.height;
+    if ((h + insetTop + insetBottom) <= viewportH + 1.0) return -1;   // whole thread fits — nothing to do
+
+    // Readiness: comments have loaded (first comment exists). Offset is the action bar.
+    NSIndexPath *first = SRTFirstCommentIndexPath(tableNode, tv);
+    if (!first || first.section >= [tv numberOfSections]) return -1;
+
+    CGFloat desired = SRTLandingOffset(tableNode, tv, first);
+    CGFloat cur = tv.contentOffset.y;
+    if (fabs(cur - desired) > kSRTDrift) {
+        [tv setContentOffset:CGPointMake(tv.contentOffset.x, desired) animated:NO];
+        return 0;
+    }
+    return 1;
+}
+
+static void SRTScheduleTick(__weak UIViewController *weakVC, long gen, NSDate *deadline);
+
+static void SRTTick(__weak UIViewController *weakVC, long gen, NSDate *deadline) {
+    UIViewController *vc = weakVC;
+    if (!vc) return;
+    NSNumber *curGen = SRTNum(vc, kSRTGenKey);
+    if (!curGen || curGen.longValue != gen) return;   // superseded
+    if ([SRTNum(vc, kSRTUserKey) boolValue]) return;   // user took over
+    if ([SRTNum(vc, kSRTDoneKey) boolValue]) return;
+
+    BOOL pastDeadline = ([deadline timeIntervalSinceNow] <= 0);
+
+    id tableNode = SRTIvar(vc, "tableNode");
+    UITableView *tableView = SRTTableForVC(vc);
+    if (!tableView) {
+        if (!pastDeadline) SRTScheduleTick(weakVC, gen, deadline);
+        return;
+    }
+
+    // Wait for the comment tree + header to finish measuring, so the target
+    // offset is computed against the *final* layout (single clean placement).
+    CGFloat h = tableView.contentSize.height;
+    NSNumber *lastHN = SRTNum(vc, kSRTLastHKey);
+    BOOL hStable = (lastHN != nil) && (fabs(h - lastHN.doubleValue) < 0.5);
+    SRTSet(vc, kSRTLastHKey, @(h));
+
+    NSIndexPath *first = SRTFirstCommentIndexPath(tableNode, tableView);
+
+    if (first && hStable) {
+        SRTSet(vc, kSRTReadyKey, @YES);   // viewDidLayoutSubviews may now pin (flash-free)
+        int r = SRTPinLanding(vc);
+        if (r == 1) {
+            int held = [SRTNum(vc, kSRTHeldKey) intValue] + 1;
+            SRTSet(vc, kSRTHeldKey, @(held));
+            if (held >= kSRTHeldToFinish) {
+                SRTSet(vc, kSRTDoneKey, @YES);
+                ApolloLog(@"[StatsRow] landed (action bar at top) — done (gen=%ld)", gen);
+                return;
+            }
+        } else if (r == 0) {
+            SRTSet(vc, kSRTHeldKey, @(0));
+            ApolloLog(@"[StatsRow] pinned landing (action bar) row %@ (gen=%ld)", first, gen);
+        }
+        SRTScheduleTick(weakVC, gen, deadline);
+        return;
+    }
+
+    if (pastDeadline) {
+        if (first) SRTPinLanding(vc);   // best effort even if height never fully settled
+        return;
+    }
+    SRTScheduleTick(weakVC, gen, deadline);
+}
+
+static void SRTScheduleTick(__weak UIViewController *weakVC, long gen, NSDate *deadline) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kSRTInterval * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        SRTTick(weakVC, gen, deadline);
+    });
+}
+
+// MARK: - Context-menu suppression in the icon corner (deterministic)
+//
+// Fighting the context menu's press recognizer via gesture arbitration proved
+// racy (see the loupe gesture notes). This is the airtight approach: Apollo's
+// long-press menu is a real UIContextMenuInteraction whose delegate
+// (PostCellActionTaker for feed posts, CommentsHeaderSectionController for the
+// comments header) is asked for a configuration WHEN the press is recognized.
+// Return nil there and no menu appears — no timing, no arbitration. We return
+// nil only when the press lands in the icon-row claim and the magnifier is on;
+// everywhere else %orig runs and the menu behaves exactly as stock.
+static BOOL SRTShouldSuppressMenu(id interaction, CGPoint location) {
+    if (!sIconRowMagnifier) return NO;
+    UIView *iview = nil;
+    @try { if ([interaction respondsToSelector:@selector(view)]) iview = [interaction view]; } @catch (__unused id e) {}
+    if (![iview isKindOfClass:[UIView class]]) return NO;
+    // Recover the cell + its cellView by finding our loupe gesture on the
+    // interaction's view (or an ancestor). That gesture carries the cell node.
+    id cell = nil; UIView *cellView = nil;
+    for (UIView *v = iview; v && !cell; v = v.superview) {
+        for (UIGestureRecognizer *g in v.gestureRecognizers) {
+            if ([objc_getAssociatedObject(g, kSRTGestureTypeKey) integerValue] == kSRTGestureTypeLoupe) {
+                cell = objc_getAssociatedObject(g, kSRTCommentGestureCellKey);
+                cellView = v;
+                break;
+            }
+        }
+    }
+    if (!cell || !cellView) return NO;
+    NSArray<ApolloSRTTarget *> *targets = SRTTargetsForCell(cell, cellView);
+    if (targets.count == 0) return NO;
+    CGRect claim = SRTClaimRect(cell, cellView, targets);
+    CGPoint p = (iview == cellView) ? location : [iview convertPoint:location toView:cellView];
+    return CGRectContainsPoint(claim, p);
+}
+
+%hook _TtC6Apollo19PostCellActionTaker
+- (id)contextMenuInteraction:(id)interaction configurationForMenuAtLocation:(CGPoint)location {
+    if (SRTShouldSuppressMenu(interaction, location)) {
+        ApolloLog(@"[StatsRow] suppressed post context menu (icon corner)");
+        return nil;
+    }
+    return %orig;
+}
+%end
+
+%hook _TtC6Apollo31CommentsHeaderSectionController
+- (id)contextMenuInteraction:(id)interaction configurationForMenuAtLocation:(CGPoint)location {
+    if (SRTShouldSuppressMenu(interaction, location)) {
+        ApolloLog(@"[StatsRow] suppressed header context menu (icon corner)");
+        return nil;
+    }
+    return %orig;
+}
+%end
+
+// MARK: - Hooks: cells with an info row install the tap + loupe gestures
+
+%hook _TtC6Apollo17LargePostCellNode
+- (void)didLoad {
+    %orig;
+    SRTInstallInfoRowGestures(self);
+}
+%end
+
+%hook _TtC6Apollo19CompactPostCellNode
+- (void)didLoad {
+    %orig;
+    SRTInstallInfoRowGestures(self);
+}
+%end
+
+// The post header inside comments (score · % upvoted · age · 🌐) gets the loupe
+// too; its comment bubble is absent so the jump tap simply never claims a touch.
+%hook _TtC6Apollo22CommentsHeaderCellNode
+- (void)didLoad {
+    %orig;
+    SRTInstallInfoRowGestures(self);
+}
+%end
+
+// MARK: - Hook: CommentsViewController consumes the pending jump
+
+%hook _TtC6Apollo22CommentsViewController
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    if (!SRTConsumeJumpPending()) return;   // only when a bubble tap armed us
+
+    long gen = ++gSRTGen;
+    SRTSet(self, kSRTGenKey, @(gen));
+    SRTSet(self, kSRTUserKey, @NO);
+    SRTSet(self, kSRTDoneKey, @NO);
+    SRTSet(self, kSRTReadyKey, @NO);
+    SRTSet(self, kSRTHeldKey, @(0));
+    objc_setAssociatedObject(self, kSRTLastHKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:kSRTDeadline];
+    SRTScheduleTick((UIViewController *)self, gen, deadline);
+    ApolloLog(@"[StatsRow] comments appeared with jump pending — arming scroll (gen=%ld)", gen);
+}
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    if (![NSThread isMainThread]) return;
+    if (![SRTNum(self, kSRTReadyKey) boolValue]) return;
+    if ([SRTNum(self, kSRTDoneKey) boolValue]) return;
+    if ([SRTNum(self, kSRTUserKey) boolValue]) return;
+    SRTPinLanding((UIViewController *)self);
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    SRTSet(self, kSRTGenKey, @(++gSRTGen));   // supersede any in-flight loop
+    SRTSet(self, kSRTUserKey, @YES);
+    SRTSet(self, kSRTDoneKey, @YES);
+}
+
+- (void)scrollViewWillBeginDragging:(id)scrollView {
+    %orig;
+    if ([SRTNum(self, kSRTGenKey) longValue] != 0) {   // a jump loop is/was active for us
+        SRTSet(self, kSRTUserKey, @YES);               // a manual drag cancels the jump for good
+        SRTSet(self, kSRTDoneKey, @YES);
+    }
+}
+
+%end

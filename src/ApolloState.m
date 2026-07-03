@@ -35,6 +35,7 @@ BOOL sCommunityHighlightsWeb = NO;
 BOOL sAutoHideTabBarShowOnIdle = NO;
 BOOL sIPadTabBarBottom = NO;   // opt-in (default OFF via registerDefaults, UDKeyIPadTabBarBottom); iPad-gated in the module
 BOOL sKeepSearchBarInPlace = NO;
+BOOL sIconRowMagnifier = YES;   // effective default ON via registerDefaults (UDKeyIconRowMagnifier)
 BOOL sModernSubredditDividers = YES;
 BOOL sSubredditListEnhancements = YES;
 BOOL sEnableFlairColors = NO;
@@ -45,6 +46,7 @@ BOOL sLiveCommentsFollow = YES;   // effective default ON via registerDefaults (
 BOOL sEnableAIPostSummaries = YES;
 BOOL sEnableAICommentSummaries = YES;
 BOOL sEnableTapToSummarize = NO;
+BOOL sEnableAIAutoExpandSummaries = NO;
 NSInteger sInlineImageAlignment = ApolloInlineImageAlignmentCenter;
 NSInteger sAutoplayInlineGIFMode = ApolloAutoplayInlineGIFModeDefault;
 NSInteger sLinkPreviewBodyMode = ApolloLinkPreviewModeOff;
@@ -53,6 +55,7 @@ NSInteger sLinkPreviewCardColor = ApolloLinkPreviewCardColorNeutral;
 NSString *sLinkPreviewCardColorHex = nil;
 volatile uint32_t sLinkPreviewCardColorPacked = 0;
 NSInteger sImageUploadProvider = ImageUploadProviderImgur;
+NSInteger sCommentLinkHost = CommentLinkHostOff;
 
 NSString *sLatestRedditBearerToken = nil;
 

@@ -132,10 +132,13 @@ static ApolloFoundationModels *ApolloAIBridge(void) {
 
 // Keep prompts well within the on-device model's context window.
 static const NSUInteger kApolloAIMaxPostChars = 1400;
-// Below this many words a post body isn't worth summarizing: the 2-sentence
-// summary would be nearly as long as the post itself. Gates the post summary so
-// one- or two-sentence posts get no card at all.
-static const NSUInteger kApolloAIMinPostWords = 50;
+// Below this many words a post body isn't worth summarizing: the generated
+// summary (capped at kApolloAIPostResponseTokens, ~60 words) would be nearly as
+// long as the post itself, defeating the purpose. Gating well above the summary
+// length means a post summary is only offered when it actually condenses the
+// post (~300 words -> roughly a fifth the length). Short posts and boilerplate
+// megathreads get no card at all.
+static const NSUInteger kApolloAIMinPostWords = 300;
 static const NSUInteger kApolloAIMinComments = 5;
 static const NSUInteger kApolloAIMinCommentChars = 500;
 // The discussion summary is generated ONCE per page open, so we can afford to
@@ -162,7 +165,9 @@ static const NSTimeInterval kApolloAIGenerationTimeout = 90.0;
 #else
 static const NSTimeInterval kApolloAIGenerationTimeout = 30.0;
 #endif
-static NSString *const kApolloAICacheVersion = @"2";
+// Bumped to 3 for the cache-entry timestamp format (age-based expiry). Older
+// caches lack timestamps and are simply dropped on first launch (regenerable).
+static NSString *const kApolloAICacheVersion = @"3";
 
 static NSString *const kApolloAIPostInstructions =
     @"Summarize this Reddit post in 2 short plain sentences. State the main point "
@@ -199,6 +204,16 @@ static NSString *const kApolloAIBothInstructions =
 // fullName -> generated summary text. Survives re-opening the same thread.
 static NSMutableDictionary<NSString *, NSString *> *sPostSummaryCache;
 static NSMutableDictionary<NSString *, NSString *> *sCommentSummaryCache;
+// fullName -> unix time (seconds) the post/comment summary was last generated.
+// Drives age-based cache expiry so old (and stale-discussion) summaries are
+// dropped rather than kept forever. One stamp per thread (refreshed when either
+// of its summaries is regenerated).
+static NSMutableDictionary<NSString *, NSNumber *> *sSummaryTimestamps;
+// "post|fullName" / "comment|fullName" -> @(expanded). Remembers the open/closed
+// state the user left each summary card in, so reopening a thread restores it
+// rather than resetting to collapsed. In-memory (per app session); the cached
+// summary itself persists to disk, the lightweight UI state does not.
+static NSMutableDictionary<NSString *, NSNumber *> *sCardExpanded;
 // Link/article summaries reuse the post box. sLinkSummaryPosts marks which posts
 // are currently showing a LINK summary (vs a self-text post summary) so the title
 // and layout position differ. sArticleTextCache memoises fetched+extracted
@@ -251,6 +266,14 @@ static NSMutableSet<NSString *> *sCommentFailed;
 // it is cleared in viewDidDisappear, so each reopen gets a fresh attempt
 // (a content-less page just re-hides; a transient failure recovers).
 static NSMutableSet<NSString *> *sPostSuppressed;
+// fullNames whose link/article post box shows a terminal "Nothing to summarize"
+// card. The Tap-to-Summarize counterpart of sPostSuppressed: when the user
+// explicitly TAPS an idle link card and the page turns out to have no usable
+// prose, vanishing reads as a glitch, so we keep the card and say so instead of
+// hiding it. (Automatic mode still uses sPostSuppressed and hides silently — the
+// card was never requested there.) Like sPostSuppressed it is per-view and
+// cleared in viewDidDisappear, so a reopen offers a fresh "Tap to summarize".
+static NSMutableSet<NSString *> *sPostEmpty;
 static NSMutableSet<NSString *> *sTimedOutRequests;
 // "post|fullName" / "comment|fullName" keys for boxes the user TAPPED to generate
 // while Tap-to-Summarize is on. The generation pass consumes the marker and
@@ -265,6 +288,11 @@ static NSMutableSet<NSString *> *sTapRequested;
 // Caches (regenerable; the OS may purge it under storage pressure, which simply
 // means those threads re-summarize once).
 static const NSUInteger kApolloAIPersistMaxEntries = 600;
+// Cached summaries older than this are dropped on launch. A discussion summary
+// goes stale as a thread keeps getting replies, and a forever-cache only grows;
+// a week keeps "reopen a thread I read recently" instant while bounding both.
+// (Manual "Clear AI Cache" in settings still wipes everything immediately.)
+static const NSTimeInterval kApolloAICacheMaxAge = 7 * 24 * 60 * 60;  // 7 days
 
 static NSString *ApolloAISummariesCachePath(void) {
     NSString *caches = [NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) firstObject];
@@ -281,6 +309,78 @@ static dispatch_queue_t ApolloAIPersistQueue(void) {
     return queue;
 }
 
+// Stamp a thread as freshly summarized (for age-based expiry). Called wherever a
+// post or comment summary is written into the in-memory cache.
+static void ApolloAIStampSummary(NSString *fullName) {
+    if (fullName.length == 0 || !sSummaryTimestamps) return;
+    sSummaryTimestamps[fullName] = @([[NSDate date] timeIntervalSince1970]);
+}
+
+// Remember / recall the open-closed state the user left a card in, so reopening a
+// thread restores it. Keyed per thread and per card type (post vs comment).
+static NSString *ApolloAICardExpandedKey(NSString *fullName, BOOL isPost) {
+    if (fullName.length == 0) return nil;
+    return [NSString stringWithFormat:@"%@|%@", isPost ? @"post" : @"comment", fullName];
+}
+
+static void ApolloAIRememberCardExpanded(NSString *fullName, BOOL isPost, BOOL expanded) {
+    NSString *key = ApolloAICardExpandedKey(fullName, isPost);
+    if (key && sCardExpanded) sCardExpanded[key] = @(expanded);
+}
+
+// @(YES)/@(NO) if the user has a remembered choice for this card, else nil.
+static NSNumber *ApolloAIRememberedCardExpanded(NSString *fullName, BOOL isPost) {
+    NSString *key = ApolloAICardExpandedKey(fullName, isPost);
+    return (key && sCardExpanded) ? sCardExpanded[key] : nil;
+}
+
+// Drop in-memory cache entries whose summary is older than kApolloAICacheMaxAge
+// (or has no timestamp). Operates on the live dictionaries; run once after load.
+static void ApolloAIPruneExpiredSummaries(void) {
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    NSMutableSet<NSString *> *names = [NSMutableSet setWithArray:sPostSummaryCache.allKeys];
+    [names addObjectsFromArray:sCommentSummaryCache.allKeys];
+    NSUInteger pruned = 0;
+    for (NSString *name in names) {
+        NSNumber *ts = sSummaryTimestamps[name];
+        if (ts && (now - ts.doubleValue) <= kApolloAICacheMaxAge) continue;
+        [sPostSummaryCache removeObjectForKey:name];
+        [sCommentSummaryCache removeObjectForKey:name];
+        [sPostSummaryMode removeObjectForKey:name];
+        [sCommentSummarySourceCounts removeObjectForKey:name];
+        [sCommentSummarySignatures removeObjectForKey:name];
+        [sSummaryTimestamps removeObjectForKey:name];
+        // Drop the per-thread side state for the same thread so these maps don't
+        // accumulate stale entries for summaries that no longer exist:
+        // sArticleTextCache (bare fullName, kilobytes each) and the remembered
+        // card open/closed state (prefixed keys).
+        [sArticleTextCache removeObjectForKey:name];
+        [sCardExpanded removeObjectForKey:[@"post|" stringByAppendingString:name]];
+        [sCardExpanded removeObjectForKey:[@"comment|" stringByAppendingString:name]];
+        pruned++;
+    }
+    if (pruned > 0) {
+        ApolloLog(@"[AISummary] pruned %lu summaries older than %.0f days",
+                  (unsigned long)pruned, kApolloAICacheMaxAge / 86400.0);
+    }
+}
+
+// Drop the oldest entries (by sSummaryTimestamps; missing = oldest) from `cache`
+// until it is within `cap`. Replaces arbitrary allKeys.firstObject eviction.
+static void ApolloAIEvictOldestEntries(NSMutableDictionary *cache, NSDictionary *timestamps, NSUInteger cap) {
+    if (cache.count <= cap) return;
+    NSArray<NSString *> *oldestFirst = [cache.allKeys sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        double ta = [timestamps[a] doubleValue], tb = [timestamps[b] doubleValue];
+        if (ta < tb) return NSOrderedAscending;
+        if (ta > tb) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+    NSUInteger toRemove = cache.count - cap;
+    for (NSUInteger i = 0; i < toRemove && i < oldestFirst.count; i++) {
+        [cache removeObjectForKey:oldestFirst[i]];
+    }
+}
+
 // Reads the persisted summaries into the in-memory caches. Caller must hold the
 // once-guard (we only ever populate these dictionaries on the main thread).
 static void ApolloAILoadPersistedSummaries(void) {
@@ -295,11 +395,15 @@ static void ApolloAILoadPersistedSummaries(void) {
     NSDictionary *sourceCounts = root[@"commentSourceCounts"];
     NSDictionary *signatures = root[@"commentSignatures"];
     NSDictionary *postModes = root[@"postModes"];
+    NSDictionary *timestamps = root[@"timestamps"];
     if ([post isKindOfClass:[NSDictionary class]]) [sPostSummaryCache addEntriesFromDictionary:post];
     if ([comment isKindOfClass:[NSDictionary class]]) [sCommentSummaryCache addEntriesFromDictionary:comment];
     if ([postModes isKindOfClass:[NSDictionary class]]) [sPostSummaryMode addEntriesFromDictionary:postModes];
     if ([sourceCounts isKindOfClass:[NSDictionary class]]) [sCommentSummarySourceCounts addEntriesFromDictionary:sourceCounts];
     if ([signatures isKindOfClass:[NSDictionary class]]) [sCommentSummarySignatures addEntriesFromDictionary:signatures];
+    if ([timestamps isKindOfClass:[NSDictionary class]]) [sSummaryTimestamps addEntriesFromDictionary:timestamps];
+    // Drop anything past its expiry before it's ever shown.
+    ApolloAIPruneExpiredSummaries();
     ApolloLog(@"[AISummary] loaded %lu post / %lu comment summaries from disk",
               (unsigned long)sPostSummaryCache.count, (unsigned long)sCommentSummaryCache.count);
 }
@@ -312,12 +416,21 @@ static void ApolloAIPersistSummaries(void) {
     NSDictionary *sourceCountSnapshot = [sCommentSummarySourceCounts copy];
     NSDictionary *signatureSnapshot = [sCommentSummarySignatures copy];
     NSDictionary *postModeSnapshot = [sPostSummaryMode copy];
+    NSDictionary *timestampSnapshot = [sSummaryTimestamps copy];
     dispatch_async(ApolloAIPersistQueue(), ^{
         NSMutableDictionary *post = [postSnapshot mutableCopy];
         NSMutableDictionary *comment = [commentSnapshot mutableCopy];
-        // Bound pathological growth; summaries are ~a few hundred bytes each.
-        while (post.count > kApolloAIPersistMaxEntries) [post removeObjectForKey:post.allKeys.firstObject];
-        while (comment.count > kApolloAIPersistMaxEntries) [comment removeObjectForKey:comment.allKeys.firstObject];
+        NSMutableDictionary *timestamps = [timestampSnapshot mutableCopy];
+        // Bound pathological growth, dropping the OLDEST summaries first (summaries
+        // are ~a few hundred bytes each).
+        ApolloAIEvictOldestEntries(post, timestamps, kApolloAIPersistMaxEntries);
+        ApolloAIEvictOldestEntries(comment, timestamps, kApolloAIPersistMaxEntries);
+        // Don't persist timestamps for threads no longer in either cache.
+        NSMutableSet<NSString *> *live = [NSMutableSet setWithArray:post.allKeys];
+        [live addObjectsFromArray:comment.allKeys];
+        for (NSString *k in timestamps.allKeys) {
+            if (![live containsObject:k]) [timestamps removeObjectForKey:k];
+        }
         NSDictionary *root = @{
             @"version": kApolloAICacheVersion,
             @"post": post,
@@ -325,6 +438,7 @@ static void ApolloAIPersistSummaries(void) {
             @"commentSourceCounts": sourceCountSnapshot,
             @"commentSignatures": signatureSnapshot,
             @"postModes": postModeSnapshot ?: @{},
+            @"timestamps": timestamps,
         };
         [root writeToFile:ApolloAISummariesCachePath() atomically:YES];
     });
@@ -335,6 +449,8 @@ static void ApolloAIEnsureState(void) {
     dispatch_once(&once, ^{
         sPostSummaryCache = [NSMutableDictionary dictionary];
         sCommentSummaryCache = [NSMutableDictionary dictionary];
+        sSummaryTimestamps = [NSMutableDictionary dictionary];
+        sCardExpanded = [NSMutableDictionary dictionary];
         sLinkSummaryPosts = [NSMutableSet set];
         sBothSummaryPosts = [NSMutableSet set];
         sPostSummaryMode = [NSMutableDictionary dictionary];
@@ -354,6 +470,7 @@ static void ApolloAIEnsureState(void) {
         sPostFailed = [NSMutableSet set];
         sCommentFailed = [NSMutableSet set];
         sPostSuppressed = [NSMutableSet set];
+        sPostEmpty = [NSMutableSet set];
         sTimedOutRequests = [NSMutableSet set];
         sTapRequested = [NSMutableSet set];
         ApolloAILoadPersistedSummaries();
@@ -374,6 +491,8 @@ NSUInteger ApolloAIClearSummaryCache(void) {
 
     [sPostSummaryCache removeAllObjects];
     [sCommentSummaryCache removeAllObjects];
+    [sSummaryTimestamps removeAllObjects];
+    [sCardExpanded removeAllObjects];
     [sPostSummaryMode removeAllObjects];
     [sArticleTextCache removeAllObjects];
     [sCommentSummarySourceCounts removeAllObjects];
@@ -389,6 +508,7 @@ NSUInteger ApolloAIClearSummaryCache(void) {
     [sPostFailed removeAllObjects];
     [sCommentFailed removeAllObjects];
     [sPostSuppressed removeAllObjects];
+    [sPostEmpty removeAllObjects];
     [sTimedOutRequests removeAllObjects];
     [sTapRequested removeAllObjects];
     [sLinkSummaryPosts removeAllObjects];
@@ -1324,14 +1444,25 @@ static NSString *ApolloAIExtractArticleText(NSString *html) {
     return text;
 }
 
+// A real browser UA — some publishers serve a stub to non-browser agents.
+static NSString *const kApolloAIBrowserUA =
+    @"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+// Search-crawler UA. Many JavaScript single-page sites (live scoreboards and
+// standings, some news SPAs) serve an empty shell to browsers but a fully
+// server-rendered page to SEO crawlers. We use this ONLY as a fallback, when the
+// normal browser fetch came back with no usable prose, so well-behaved sites are
+// always tried as a browser first and a crawler-blocking site is no worse off.
+static NSString *const kApolloAICrawlerUA =
+    @"Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
+
 // Core single-URL fetch + extract. Calls back on URLSession's own queue (NOT the
 // main thread) with the extracted prose, the raw html (for AMP discovery), and
-// any error. The public wrapper below hops to main and adds the AMP fallback.
-static void ApolloAIFetchAndExtract(NSURL *url, void (^done)(NSString *text, NSString *html, NSError *error)) {
+// any error. The public wrapper below hops to main and adds the AMP / crawler
+// fallbacks. Pass nil userAgent to use the default browser UA.
+static void ApolloAIFetchAndExtract(NSURL *url, NSString *userAgent, void (^done)(NSString *text, NSString *html, NSError *error)) {
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
         cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:kApolloAIArticleFetchTimeout];
-    // A real browser UA — some publishers serve a stub to non-browser agents.
-    [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    [req setValue:(userAgent.length > 0 ? userAgent : kApolloAIBrowserUA)
         forHTTPHeaderField:@"User-Agent"];
     [req setValue:@"text/html,application/xhtml+xml,*/*;q=0.8" forHTTPHeaderField:@"Accept"];
     [req setValue:@"en-US,en;q=0.9" forHTTPHeaderField:@"Accept-Language"];
@@ -1355,9 +1486,11 @@ static void ApolloAIFetchAndExtract(NSURL *url, void (^done)(NSString *text, NSS
 }
 
 // Fetch the article URL off-thread and hand extracted prose back on the MAIN
-// thread. When the canonical page yields little prose (SPA / paywall stub) but
-// advertises an AMP version, refetch that once — it's usually clean, un-paywalled
-// reader content. At most two network requests; AMP pages aren't re-followed.
+// thread. When the canonical page yields little prose, fall back in order:
+//   1. its advertised AMP version (usually clean, un-paywalled reader content), then
+//   2. a refetch as a search crawler (SPA sites prerender full content for SEO bots,
+//      e.g. fifa.com scoreboards/standings serve an empty shell to browsers).
+// At most three network requests; neither fallback is re-followed.
 static void ApolloAIFetchArticleText(NSString *urlString, void (^completion)(NSString *text, NSError *error)) {
     NSURL *url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
     if (!url) {
@@ -1372,17 +1505,43 @@ static void ApolloAIFetchArticleText(NSString *urlString, void (^completion)(NSS
                 : (err ?: [NSError errorWithDomain:@"ApolloAIArticle" code:204 userInfo:nil]));
         });
     };
-    ApolloAIFetchAndExtract(url, ^(NSString *text, NSString *html, NSError *err) {
-        // Good enough, or nothing to fall back to → deliver as-is.
-        if (text.length >= 200 || html.length == 0) { deliver(text, err); return; }
-        NSString *amp = ApolloAIFindAMPURL(html, url);
+    ApolloAIFetchAndExtract(url, kApolloAIBrowserUA, ^(NSString *text, NSString *html, NSError *err) {
+        // Good enough as a normal browser fetch → done.
+        if (text.length >= 200) { deliver(text, err); return; }
+
+        // A genuine transport failure (no response at all — offline, DNS, timeout)
+        // won't be helped by refetching and would just double the wasted work, so
+        // bail. A non-2xx HTTP status (our "ApolloAIArticle" domain) is different:
+        // some sites 403 a browser UA but serve crawlers fine, so let it fall through
+        // to the crawler retry below.
+        if (html.length == 0 && err && ![err.domain isEqualToString:@"ApolloAIArticle"]) {
+            deliver(text, err);
+            return;
+        }
+
+        // Last-resort crawler-UA refetch of the ORIGINAL url: keeps the best result
+        // seen so far, since a fake-Googlebot may be blocked (then we're no worse off).
+        void (^crawlerRetry)(NSString *) = ^(NSString *bestSoFar) {
+            ApolloLog(@"[AISummary] thin extract (%lu chars) — retrying as crawler %@",
+                      (unsigned long)bestSoFar.length, url.absoluteString);
+            ApolloAIFetchAndExtract(url, kApolloAICrawlerUA, ^(NSString *botText, NSString *botHtml, NSError *botErr) {
+                NSString *best = botText.length > bestSoFar.length ? botText : bestSoFar;
+                deliver(best, best.length > 0 ? nil : (err ?: botErr));
+            });
+        };
+
+        // Prefer an AMP version first if the (thin) page advertises one.
+        NSString *amp = html.length > 0 ? ApolloAIFindAMPURL(html, url) : nil;
         NSURL *ampURL = amp.length > 0 ? [NSURL URLWithString:amp] : nil;
-        if (!ampURL || [ampURL.absoluteString isEqualToString:url.absoluteString]) { deliver(text, err); return; }
-        ApolloLog(@"[AISummary] thin extract (%lu chars) — retrying via AMP %@", (unsigned long)text.length, amp);
-        ApolloAIFetchAndExtract(ampURL, ^(NSString *ampText, NSString *ampHtml, NSError *ampErr) {
-            NSString *best = ampText.length > text.length ? ampText : text;
-            deliver(best, best.length > 0 ? nil : (err ?: ampErr));
-        });
+        if (ampURL && ![ampURL.absoluteString isEqualToString:url.absoluteString]) {
+            ApolloLog(@"[AISummary] thin extract (%lu chars) — retrying via AMP %@", (unsigned long)text.length, amp);
+            ApolloAIFetchAndExtract(ampURL, kApolloAIBrowserUA, ^(NSString *ampText, NSString *ampHtml, NSError *ampErr) {
+                if (ampText.length >= 200) { deliver(ampText, nil); return; }
+                crawlerRetry(ampText.length > text.length ? ampText : text);
+            });
+            return;
+        }
+        crawlerRetry(text);
     });
 }
 
@@ -1397,6 +1556,7 @@ typedef NS_ENUM(NSInteger, ApolloAIBoxState) {
     ApolloAIBoxStateReady,           // box visible, final summary shown
     ApolloAIBoxStateError,           // box visible, error message shown
     ApolloAIBoxStateTapToSummarize,  // box visible, idle — waiting for the user to tap to generate
+    ApolloAIBoxStateEmpty,           // box visible, terminal — a tapped link had nothing to summarize
 };
 
 static char kApolloAIPostSummaryKey;        // ready/streamed summary text (post)
@@ -1412,6 +1572,16 @@ static char kApolloAIPostSummaryBackgroundNodeKey;
 static char kApolloAICommentSummaryBackgroundNodeKey;
 static char kApolloAIPostExpandedKey;
 static char kApolloAICommentExpandedKey;
+// Set once the user has explicitly expanded/collapsed a box, so the "Open
+// summaries automatically" setting never overrides a manual choice on a header.
+static char kApolloAIPostExpandChoiceKey;
+static char kApolloAICommentExpandChoiceKey;
+// Set when the user taps an idle "Tap to summarize" card: the box stays collapsed
+// while it generates (showing "· Summarizing…") and then opens itself once ready,
+// even if the global "Open summaries automatically" setting is off — tapping is an
+// explicit request to read this summary. Cleared like a one-shot by the expand.
+static char kApolloAIPostExpandOnReadyKey;
+static char kApolloAICommentExpandOnReadyKey;
 static char kApolloAISummaryOwnerKey;
 static char kApolloAISummaryIsPostKey;
 
@@ -1513,6 +1683,13 @@ static NSAttributedString *ApolloAISummaryAttributedText(NSString *title,
         [result appendAttributedString:[[NSAttributedString alloc] initWithString:glyph attributes:titleAttributes]];
     }
     [result appendAttributedString:[[NSAttributedString alloc] initWithString:title attributes:titleAttributes]];
+    if (state == ApolloAIBoxStateEmpty) {
+        // Terminal "Nothing to summarize" card (a tapped link with no usable
+        // prose). One muted line, no disclosure chevron, nothing to expand.
+        [result appendAttributedString:[[NSAttributedString alloc] initWithString:@"  ·  Nothing to summarize"
+                                                                       attributes:chevronAttributes]];
+        return result;
+    }
     if (!expanded && state == ApolloAIBoxStateLoading) {
         [result appendAttributedString:[[NSAttributedString alloc] initWithString:@"  ·  Summarizing…"
                                                                        attributes:chevronAttributes]];
@@ -1521,15 +1698,22 @@ static NSAttributedString *ApolloAISummaryAttributedText(NSString *title,
                                                                        attributes:chevronAttributes]];
     }
 
-    // Trailing disclosure chevron.
-    NSAttributedString *chevronAttachment =
-        ApolloAISymbolAttachment(expanded ? @"chevron.down" : @"chevron.right", chevronFont, secondary);
-    [result appendAttributedString:[[NSAttributedString alloc] initWithString:@"  " attributes:chevronAttributes]];
-    if (chevronAttachment) {
-        [result appendAttributedString:chevronAttachment];
-    } else {
-        [result appendAttributedString:[[NSAttributedString alloc] initWithString:expanded ? @"▾" : @"▸"
-                                                                       attributes:chevronAttributes]];
+    // Trailing disclosure chevron — only when there's something to expand or
+    // collapse: an expanded card, or a collapsed ready/error card. Collapsed
+    // idle/loading cards rely on their "· Tap to summarize" / "· Summarizing…"
+    // subtitle instead, which keeps the longest title (e.g. "Post & link summary")
+    // on one line rather than wrapping the chevron onto a second row.
+    BOOL showChevron = expanded || state == ApolloAIBoxStateReady || state == ApolloAIBoxStateError;
+    if (showChevron) {
+        NSAttributedString *chevronAttachment =
+            ApolloAISymbolAttachment(expanded ? @"chevron.down" : @"chevron.right", chevronFont, secondary);
+        [result appendAttributedString:[[NSAttributedString alloc] initWithString:@"  " attributes:chevronAttributes]];
+        if (chevronAttachment) {
+            [result appendAttributedString:chevronAttachment];
+        } else {
+            [result appendAttributedString:[[NSAttributedString alloc] initWithString:expanded ? @"▾" : @"▸"
+                                                                           attributes:chevronAttributes]];
+        }
     }
 
     if (!expanded) return result;
@@ -1635,7 +1819,7 @@ static void ApolloAIRenderSummaryNode(id headerNode, BOOL isPost) {
         // The post box shows one of three titles depending on what was summarized:
         // the post body, an external article, or both together.
         if (fullName.length > 0 && [sBothSummaryPosts containsObject:fullName]) {
-            title = @"Post & link summary";
+            title = @"Post/Link summary";
         } else if (fullName.length > 0 && [sLinkSummaryPosts containsObject:fullName]) {
             title = @"Link summary";
         } else {
@@ -1646,18 +1830,32 @@ static void ApolloAIRenderSummaryNode(id headerNode, BOOL isPost) {
     }
     textNode.attributedText = ApolloAISummaryAttributedText(
         title, state, body, expanded, isPost, sourceCount, ApolloAISummaryThemeAccent(headerNode));
+    // Clamp the chevron-less collapsed states (idle / loading / empty) to a single
+    // line so a long title + "· Tap to summarize" subtitle can't wrap. Ready/Error
+    // collapsed cards KEEP their trailing chevron, so leave them unclamped — at large
+    // Dynamic Type they may wrap rather than tail-truncate (and clip) the chevron.
+    // Expanded cards need the full body, so they're unclamped too.
+    BOOL clampToOneLine = !expanded && state != ApolloAIBoxStateReady && state != ApolloAIBoxStateError;
+    textNode.maximumNumberOfLines = clampToOneLine ? 1 : 0;
 
     // VoiceOver: read the title + current body (summary / status / error) and
     // announce the collapsed/expanded state. Setting the label on the view
     // overrides the text node default, which would read only the title glyphs.
     UIView *nodeView = textNode.view;
     if (nodeView) {
-        nodeView.accessibilityTraits |= UIAccessibilityTraitButton;
-        NSString *spoken = body.length ? body : (state == ApolloAIBoxStateLoading ? @"Summarizing" : @"");
-        nodeView.accessibilityLabel = expanded
-            ? [NSString stringWithFormat:@"%@. %@", title, spoken]
-            : [NSString stringWithFormat:@"%@, collapsed", title];
-        nodeView.accessibilityHint = @"Double tap to expand or collapse";
+        if (state == ApolloAIBoxStateEmpty) {
+            // Terminal, non-interactive card: don't announce it as an expandable button.
+            nodeView.accessibilityTraits &= ~UIAccessibilityTraitButton;
+            nodeView.accessibilityLabel = [NSString stringWithFormat:@"%@. Nothing to summarize.", title];
+            nodeView.accessibilityHint = nil;
+        } else {
+            nodeView.accessibilityTraits |= UIAccessibilityTraitButton;
+            NSString *spoken = body.length ? body : (state == ApolloAIBoxStateLoading ? @"Summarizing" : @"");
+            nodeView.accessibilityLabel = expanded
+                ? [NSString stringWithFormat:@"%@. %@", title, spoken]
+                : [NSString stringWithFormat:@"%@, collapsed", title];
+            nodeView.accessibilityHint = @"Double tap to expand or collapse";
+        }
     }
 }
 
@@ -1686,6 +1884,51 @@ static BOOL ApolloAISetBoxState(id headerNode, BOOL isPost, ApolloAIBoxState sta
     if (!objc_getAssociatedObject(headerNode, expandedKey)) {
         objc_setAssociatedObject(headerNode, expandedKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+    // Decide whether a (re)appearing READY card should open itself — only on a
+    // fresh header the user hasn't toggled yet, and never during loading (so text
+    // doesn't visibly stream into an already-open card). Precedence:
+    //   1. A remembered open/closed choice for this thread's card (sCardExpanded),
+    //      so a card reopens in exactly the state the user left it in.
+    //   2. Otherwise the auto defaults: "Open Summaries Automatically" (when not in
+    //      tap mode) or the per-header expand-on-ready intent set when the user
+    //      tapped this idle card to generate it. (The two are mutually exclusive in
+    //      settings; the tap-mode guard keeps tap winning regardless.)
+    // We set the real expanded flag here (not lazily) so existing readers — incl.
+    // the ApolloAIAnyHeaderExpanded guard the ready call sites use to remeasure —
+    // stay correct and the row visibly opens.
+    const void *choiceKey = isPost ? &kApolloAIPostExpandChoiceKey : &kApolloAICommentExpandChoiceKey;
+    const void *expandOnReadyKey = isPost ? &kApolloAIPostExpandOnReadyKey : &kApolloAICommentExpandOnReadyKey;
+    NSString *boxFullName = objc_getAssociatedObject(headerNode, &kApolloAIHeaderFullNameKey);
+    BOOL autoExpandedNow = NO;
+    if (state == ApolloAIBoxStateReady &&
+        ![objc_getAssociatedObject(headerNode, choiceKey) boolValue] &&
+        ![objc_getAssociatedObject(headerNode, expandedKey) boolValue]) {
+        NSNumber *remembered = ApolloAIRememberedCardExpanded(boxFullName, isPost);
+        BOOL wantAutoOpen = (sEnableAIAutoExpandSummaries && !sEnableTapToSummarize) ||
+            [objc_getAssociatedObject(headerNode, expandOnReadyKey) boolValue];
+        if (remembered != nil) {
+            // Restore exactly how the user left this card; their choice wins over
+            // the auto defaults, so mark it as an explicit choice on this header.
+            objc_setAssociatedObject(headerNode, choiceKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(headerNode, expandOnReadyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            if (remembered.boolValue) {
+                objc_setAssociatedObject(headerNode, expandedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                autoExpandedNow = YES;
+            }
+        } else if (wantAutoOpen) {
+            objc_setAssociatedObject(headerNode, expandedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(headerNode, expandOnReadyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            autoExpandedNow = YES;
+        }
+        // Remember an auto/tap open so it reopens the same way next time.
+        if (autoExpandedNow) ApolloAIRememberCardExpanded(boxFullName, isPost, YES);
+    } else if (state == ApolloAIBoxStateError || state == ApolloAIBoxStateEmpty ||
+               state == ApolloAIBoxStateNone) {
+        // The "open when ready" intent is moot once the box reaches a terminal
+        // non-ready state — consume the one-shot so a leftover flag can never
+        // silently re-open a later success on this header.
+        objc_setAssociatedObject(headerNode, expandOnReadyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
     objc_setAssociatedObject(headerNode, stateKey, @(state), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(headerNode, textKey, text, OBJC_ASSOCIATION_COPY_NONATOMIC);
     ApolloAIEnsureSummaryNode(headerNode, isPost);
@@ -1693,6 +1936,16 @@ static BOOL ApolloAISetBoxState(id headerNode, BOOL isPost, ApolloAIBoxState sta
     ApolloAIRenderSummaryNode(headerNode, isPost);
     [headerNode invalidateCalculatedLayout];
     [headerNode setNeedsLayout];
+    // If auto-expand just opened a card whose row was already measured at the
+    // collapsed height (a cached/restored summary reaching Ready via a caller that
+    // has no remeasure guard of its own — e.g. ApolloAIRestoreStateForHeader or the
+    // cache-hit branches in ApolloAIGenerateForController), the table still holds
+    // the old row height. Re-query it so the card visibly grows; node invalidation
+    // alone does not re-measure an already-laid-out row (see ApolloAIForceHeaderRemeasure).
+    if (autoExpandedNow) {
+        NSString *remeasureFullName = objc_getAssociatedObject(headerNode, &kApolloAIHeaderFullNameKey);
+        if (remeasureFullName.length > 0) ApolloAIForceHeaderRemeasure(remeasureFullName);
+    }
     return YES;
 }
 
@@ -1742,6 +1995,10 @@ static void ApolloAIApplyRestoredState(id headerNode, NSString *fullName) {
         // checked BEFORE sPostFailed, or a recycled header would surface the
         // error triangle for a post we deliberately hid.
         if (ApolloAISetBoxState(headerNode, YES, ApolloAIBoxStateNone, nil)) changed = YES;
+    } else if ([sPostEmpty containsObject:fullName]) {
+        // Tapped link with nothing to summarize — keep the "Nothing to summarize"
+        // card on recycle (Tap-to-Summarize counterpart of sPostSuppressed).
+        if (ApolloAISetBoxState(headerNode, YES, ApolloAIBoxStateEmpty, nil)) changed = YES;
     } else if (sPostSummaryCache[fullName].length > 0) {
         if (ApolloAISetBoxState(headerNode, YES, ApolloAIBoxStateReady, sPostSummaryCache[fullName])) changed = YES;
     } else if ([sPostFailed containsObject:fullName]) {
@@ -1803,11 +2060,22 @@ static void ApolloAISuppressLinkSummary(NSString *fullName) {
     [sPostInFlight removeObject:fullName];
     [sPostRequestIDs removeObjectForKey:fullName];
     [sPostFailed removeObject:fullName];        // NOT an error — don't show the triangle
-    [sLinkSummaryPosts removeObject:fullName];
     [sBothSummaryPosts removeObject:fullName];
-    [sPostSuppressed addObject:fullName];
-    ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateNone, nil);
-    ApolloAIForceHeaderRemeasure(fullName);     // drop the box from the layout now
+    if (sEnableTapToSummarize) {
+        // Tap-to-Summarize: the user explicitly tapped this card, so silently
+        // vanishing reads as a glitch (they asked for a summary and got nothing).
+        // Keep the card and show a terminal "Nothing to summarize" instead. We
+        // leave it in sLinkSummaryPosts so the card still reads "Link summary".
+        [sPostEmpty addObject:fullName];
+        ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateEmpty, nil);
+    } else {
+        // Automatic mode: the card was never requested, so hide it entirely (the
+        // original behaviour — no error triangle, no re-fetch while on screen).
+        [sLinkSummaryPosts removeObject:fullName];
+        [sPostSuppressed addObject:fullName];
+        ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateNone, nil);
+    }
+    ApolloAIForceHeaderRemeasure(fullName);     // re-lay-out the box now
 }
 
 // Short, user-facing message for a generation error shown inside the box. The
@@ -2348,6 +2616,7 @@ maximumResponseTokens:responseTokens
                 }
                 sPostSummaryCache[fullName] = final;
                 sPostSummaryMode[fullName] = @(ApolloAIDesiredPostMode(fullName));
+                ApolloAIStampSummary(fullName);
                 ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateReady, final);
                 if (ApolloAIAnyHeaderExpanded(fullName, YES)) {
                     ApolloAIForceHeaderRemeasure(fullName);
@@ -2516,6 +2785,11 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
         // summarizes normally on a different post that happens to share nothing
         // here.)
         ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateNone, nil);
+    } else if ([sPostEmpty containsObject:fullName]) {
+        // Tapped (in Tap-to-Summarize mode) and found to have nothing to
+        // summarize: keep the terminal "Nothing to summarize" card and don't
+        // re-fetch or re-offer the tap prompt while it's on screen.
+        ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateEmpty, nil);
     } else if (cacheValid) {
         // Cache HIT on re-entry: set Ready, then remeasure the row height if it
         // actually changed. Without this the row keeps the stale boxless height
@@ -2598,6 +2872,7 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
                         }
                         sPostSummaryCache[fullName] = final;
                         sPostSummaryMode[fullName] = @(ApolloAIDesiredPostMode(fullName));
+                        ApolloAIStampSummary(fullName);
                         ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateReady, final);
                         if (ApolloAIAnyHeaderExpanded(fullName, YES)) {
                             ApolloAIForceHeaderRemeasure(fullName);
@@ -2711,6 +2986,7 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
                             return;
                         }
                         sCommentSummaryCache[fullName] = final;
+                        ApolloAIStampSummary(fullName);
                         sCommentSummarySourceCounts[fullName] = @(commentCount);
                         if (commentSignature.length > 0) {
                             sCommentSummarySignatures[fullName] = commentSignature;
@@ -2834,6 +3110,7 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
         // transient failure recovers on reopen instead of staying hidden for the
         // whole session.
         [sPostSuppressed removeObject:fullName];
+        [sPostEmpty removeObject:fullName];     // per-view, like sPostSuppressed
         if (sPostSummaryCache[fullName].length == 0) {
             ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateNone, nil);
         }
@@ -2926,8 +3203,15 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
 %new
 - (void)apollo_togglePostSummary {
     NSString *fullName = objc_getAssociatedObject((id)self, &kApolloAIHeaderFullNameKey);
+    ApolloAIBoxState state = ApolloAIGetBoxState((id)self, YES);
+    // The terminal "Nothing to summarize" card is informational only — non-interactive.
+    if (state == ApolloAIBoxStateEmpty) return;
     // Tap-to-Summarize: an idle card generates on tap instead of expanding.
-    if (ApolloAIGetBoxState((id)self, YES) == ApolloAIBoxStateTapToSummarize) {
+    if (state == ApolloAIBoxStateTapToSummarize) {
+        // Keep the card collapsed while it generates (the title shows "· Summarizing…")
+        // and open it automatically once the summary is fully ready — opening on tap
+        // would make the text visibly stream into an already-expanded card.
+        objc_setAssociatedObject((id)self, &kApolloAIPostExpandOnReadyKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if (fullName.length > 0) [sTapRequested addObject:[@"post|" stringByAppendingString:fullName]];
         ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateLoading, nil);
         ApolloAIForceHeaderRemeasure(fullName);
@@ -2937,6 +3221,11 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
     }
     BOOL expanded = [objc_getAssociatedObject((id)self, &kApolloAIPostExpandedKey) boolValue];
     objc_setAssociatedObject((id)self, &kApolloAIPostExpandedKey, @(!expanded), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject((id)self, &kApolloAIPostExpandChoiceKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // A manual expand/collapse supersedes any pending open-on-ready intent.
+    objc_setAssociatedObject((id)self, &kApolloAIPostExpandOnReadyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // Remember this so the card reopens in the same state next time.
+    ApolloAIRememberCardExpanded(fullName, YES, !expanded);
     ApolloAIRenderSummaryNode((id)self, YES);
     [(ASDisplayNode *)(id)self invalidateCalculatedLayout];
     [(ASDisplayNode *)(id)self setNeedsLayout];
@@ -2946,7 +3235,14 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
 %new
 - (void)apollo_toggleDiscussionSummary {
     NSString *fullName = objc_getAssociatedObject((id)self, &kApolloAIHeaderFullNameKey);
-    if (ApolloAIGetBoxState((id)self, NO) == ApolloAIBoxStateTapToSummarize) {
+    ApolloAIBoxState state = ApolloAIGetBoxState((id)self, NO);
+    // The terminal "Nothing to summarize" card is informational only — non-interactive.
+    if (state == ApolloAIBoxStateEmpty) return;
+    if (state == ApolloAIBoxStateTapToSummarize) {
+        // Keep the card collapsed while it generates (the title shows "· Summarizing…")
+        // and open it automatically once the summary is fully ready — opening on tap
+        // would make the text visibly stream into an already-expanded card.
+        objc_setAssociatedObject((id)self, &kApolloAICommentExpandOnReadyKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if (fullName.length > 0) [sTapRequested addObject:[@"comment|" stringByAppendingString:fullName]];
         ApolloAISetBoxStateOnMatchingHeaders(fullName, NO, ApolloAIBoxStateLoading, nil);
         ApolloAIForceHeaderRemeasure(fullName);
@@ -2956,6 +3252,11 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
     }
     BOOL expanded = [objc_getAssociatedObject((id)self, &kApolloAICommentExpandedKey) boolValue];
     objc_setAssociatedObject((id)self, &kApolloAICommentExpandedKey, @(!expanded), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject((id)self, &kApolloAICommentExpandChoiceKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // A manual expand/collapse supersedes any pending open-on-ready intent.
+    objc_setAssociatedObject((id)self, &kApolloAICommentExpandOnReadyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // Remember this so the card reopens in the same state next time.
+    ApolloAIRememberCardExpanded(fullName, NO, !expanded);
     ApolloAIRenderSummaryNode((id)self, NO);
     [(ASDisplayNode *)(id)self invalidateCalculatedLayout];
     [(ASDisplayNode *)(id)self setNeedsLayout];

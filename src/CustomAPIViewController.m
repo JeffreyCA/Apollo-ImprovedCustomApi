@@ -9,6 +9,7 @@
 #import "ApolloUserProfileCache.h"
 #import "ApolloLinkPreviewCache.h"
 #import "ApolloLinkPreviewSettingsViewController.h"
+#import "ApolloOpenInAppViewController.h"
 #import "ApolloSubredditCustomBannerCache.h"
 #import "ApolloSubredditCustomIconCache.h"
 #import "ApolloSubredditInfoCache.h"
@@ -41,7 +42,7 @@ typedef NS_ENUM(NSInteger, SectionIndex) {
 // Alignment + Autoplay Inline GIFs) when Inline Media Previews is off. These helpers
 // centralize the physical<->logical row mapping so the index math stays consistent.
 static const NSInteger kApolloMediaInlineDependentRows = 2;
-static const NSInteger kApolloMediaFirstInlineDependentRow = 5;
+static const NSInteger kApolloMediaFirstInlineDependentRow = 6;
 
 // Map a physical (visible) Media row to its logical row.
 static NSInteger ApolloMediaLogicalRow(NSInteger physicalRow) {
@@ -423,6 +424,70 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
+- (NSString *)commentLinkHostText {
+    switch (sCommentLinkHost) {
+        case CommentLinkHostImgur:    return @"Imgur";
+        case CommentLinkHostImgChest: return @"Img Chest";
+        case CommentLinkHostOff:
+        default:                      return @"Off";
+    }
+}
+
+- (void)setCommentLinkHost:(NSInteger)host {
+    sCommentLinkHost = host;
+    [[NSUserDefaults standardUserDefaults] setInteger:sCommentLinkHost forKey:UDKeyCommentLinkHost];
+    // An open comment composer's image-button gate depends on this (the button
+    // un-blocks while a link host is set) — let it re-apply immediately.
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloCommentLinkHostChangedNotification object:nil];
+
+    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:3 inSection:SectionMedia];
+    if ([[self.tableView indexPathsForVisibleRows] containsObject:indexPath]) {
+        [self.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+    }
+}
+
+- (void)presentCommentLinkHostSheetFromSourceView:(UIView *)sourceView {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Comment Link Host"
+                                                                   message:@"Images added to a comment or reply upload to this host and are inserted as a plain link instead of a native Reddit image — so they still work in subreddits that don't allow images or GIFs in comments. Apollo shows the linked image inline; other apps and the website show a tappable link. Posts keep using the Media Upload Host."
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+
+    NSString *offTitle = (sCommentLinkHost == CommentLinkHostOff) ? @"Off (Current)" : @"Off";
+    NSString *imgurTitle = (sCommentLinkHost == CommentLinkHostImgur) ? @"Imgur (Current)" : @"Imgur";
+    NSString *imgChestTitle = (sCommentLinkHost == CommentLinkHostImgChest) ? @"Img Chest (Current)" : @"Img Chest";
+
+    [sheet addAction:[UIAlertAction actionWithTitle:offTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [self setCommentLinkHost:CommentLinkHostOff];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:imgurTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        // Uploads are signed with the Imgur client id at the request chokepoint;
+        // keyless ones just 401 — refuse the host rather than fail silently later.
+        if (sImgurClientId.length == 0) {
+            [self showAlertWithTitle:@"Imgur API Key Required"
+                             message:@"Add your Imgur API key in the API Keys section first, then select Imgur as the comment link host."];
+            return;
+        }
+        [self setCommentLinkHost:CommentLinkHostImgur];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:imgChestTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        // Same gate as the Media Upload Host picker: uploading needs an API token.
+        if (sImageChestAPIToken.length == 0) {
+            [self showAlertWithTitle:@"Img Chest API Key Required"
+                             message:@"Add your Img Chest API key in the API Keys section first, then select Img Chest as the comment link host."];
+            return;
+        }
+        [self setCommentLinkHost:CommentLinkHostImgChest];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+
+    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
+    if (popover && sourceView) {
+        popover.sourceView = sourceView;
+        popover.sourceRect = sourceView.bounds;
+    }
+
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
 - (NSString *)linkPreviewModeTextForMode:(NSInteger)mode {
     switch (mode) {
         case ApolloLinkPreviewModeOff:     return @"Off";
@@ -460,6 +525,18 @@ typedef NS_ENUM(NSInteger, Tag) {
     vc.settingsDidChange = ^(NSString *area) {
         [weakSelf noteLinkPreviewChangeForArea:area];
     };
+    if (self.navigationController) {
+        [self.navigationController pushViewController:vc animated:YES];
+    } else {
+        UINavigationController *navigation =
+            [[UINavigationController alloc] initWithRootViewController:vc];
+        [self presentViewController:navigation animated:YES completion:nil];
+    }
+}
+
+- (void)openOpenInAppSettings {
+    ApolloOpenInAppViewController *vc =
+        [[ApolloOpenInAppViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
     if (self.navigationController) {
         [self.navigationController pushViewController:vc animated:YES];
     } else {
@@ -553,17 +630,18 @@ typedef NS_ENUM(NSInteger, Tag) {
         // the mode is off.
         case SectionAPIKeys: return kAPIKeyRowWidgetSetupCode + (sWebJSONEnabled ? 1 : 0);
         // General base rows + the search-in-place (effectiveRow 11),
-        // follow-live-comments (effectiveRow 12) and iPad-tab-bar-bottom
-        // (effectiveRow 13) toggles, minus the conditional "Tap to Show Deleted
-        // Comments" row.
-        case SectionGeneral: return sShowDeletedComments ? 14 : 13;
+        // follow-live-comments (effectiveRow 12), iPad-tab-bar-bottom
+        // (effectiveRow 13) and icon-row-magnifier (effectiveRow 14) toggles,
+        // minus the conditional "Tap to Show Deleted Comments" row.
+        case SectionGeneral: return sShowDeletedComments ? 15 : 14;
         case SectionApolloAI: return 1;
         case SectionLinkPreviews: return 1;
         // Media base rows (the three "Rich Link Previews" rows moved out to their
-        // own SectionLinkPreviews) plus the chat inline-media toggle and the
-        // "Hold for Video Speed" toggle, minus the two inline-dependent rows when
-        // off, plus the hold-speed picker (logical row 13) when that toggle is on.
-        case SectionMedia: return 13 + (sEnableInlineImages ? 0 : -kApolloMediaInlineDependentRows) + (sVideoHoldSpeedEnabled ? 1 : 0);
+        // own SectionLinkPreviews) plus the "Comment Link Host" picker, the chat
+        // inline-media toggle and the "Hold for Video Speed" toggle, minus the two
+        // inline-dependent rows when off, plus the hold-speed picker (logical row
+        // 14) when that toggle is on.
+        case SectionMedia: return 14 + (sEnableInlineImages ? 0 : -kApolloMediaInlineDependentRows) + (sVideoHoldSpeedEnabled ? 1 : 0);
         case SectionSubreddits: return 10 - (sSubredditListEnhancements ? 0 : 1) - (sCommunityHighlights ? 0 : 1);
         case SectionNotificationBackend: return 3; // URL + Registration Token + Test Connection
         case SectionAbout: return 5; // GitHub + Reddit + Thanks To + Export Logs + Version
@@ -992,11 +1070,24 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Hide NSFW in Recently Read"
                                                on:[defaults boolForKey:UDKeyFilterNSFWRecentlyRead]
                                            action:@selector(filterNSFWRecentlyReadSwitchToggled:)];
-        case 8:
-            return [self switchCellWithIdentifier:@"Cell_Gen_SteamApp"
-                                            label:@"Open Steam Links in App"
-                                               on:[defaults boolForKey:UDKeyOpenLinksInSteamApp]
-                                           action:@selector(steamAppSwitchToggled:)];
+        case 8: {
+            // "Open in App" disclosure row — pushes ApolloOpenInAppViewController,
+            // which gathers the Steam / YouTube / Twitter / Default Browser
+            // "open in app" settings that used to be scattered between here and
+            // Apollo's native settings. (The Steam toggle used to live on this row.)
+            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Gen_OpenInApp"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                              reuseIdentifier:@"Cell_Gen_OpenInApp"];
+                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            }
+            cell.textLabel.text = @"Open in App";
+            cell.detailTextLabel.text = @"Open Bluesky, GitHub, Steam and YouTube links in their apps, and pick your default browser.";
+            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+            cell.detailTextLabel.numberOfLines = 0;
+            return cell;
+        }
         case 9: {
             BOOL idleSupported = [self apollo_supportsAutoHideTabBarIdleSetting];
             UITableViewCell *cell = [self switchCellWithIdentifier:@"Cell_Gen_TabBarIdle"
@@ -1049,6 +1140,12 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.detailTextLabel.enabled = supported;
             return cell;
         }
+        case 14:
+            return [self switchCellWithIdentifier:@"Cell_Gen_IconRowMagnifier"
+                                            label:@"Magnify Info Row on Hold"
+                                           detail:@"Press and hold a post's info row (score, comments, time…) to magnify the icons and slide to the one you want."
+                                               on:[defaults boolForKey:UDKeyIconRowMagnifier]
+                                           action:@selector(iconRowMagnifierSwitchToggled:)];
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -1113,17 +1210,29 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             return cell;
         }
-        case 3:
+        case 3: {
+            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_CommentLinkHost"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_CommentLinkHost"];
+                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            }
+            cell.textLabel.text = @"Comment Link Host";
+            cell.detailTextLabel.text = [self commentLinkHostText];
+            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+            return cell;
+        }
+        case 4:
             return [self switchCellWithIdentifier:@"Cell_Media_ProxyImgur"
                                             label:@"Proxy Imgur via DuckDuckGo"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProxyImgurDDG]
                                            action:@selector(proxyImgurDDGSwitchToggled:)];
-        case 4:
+        case 5:
             return [self switchCellWithIdentifier:@"Cell_Media_InlineImages"
                                             label:@"Inline Media Previews"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableInlineImages]
                                            action:@selector(inlineImagesSwitchToggled:)];
-        case 5: {
+        case 6: {
             UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_InlineImageAlignment"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_InlineImageAlignment"];
@@ -1135,7 +1244,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             return cell;
         }
-        case 6: {
+        case 7: {
             UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_AutoplayInlineGIFs"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_AutoplayInlineGIFs"];
@@ -1147,22 +1256,22 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             return cell;
         }
-        case 7:
+        case 8:
             return [self switchCellWithIdentifier:@"Cell_Media_TextPostThumbnails"
                                             label:@"Text Post Thumbnails"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFeedTextPostThumbnails]
                                            action:@selector(textPostThumbnailsSwitchToggled:)];
-        case 8:
+        case 9:
             return [self switchCellWithIdentifier:@"Cell_Media_UserAvatars"
                                             label:@"Show User Profile Pictures"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars]
                                            action:@selector(userAvatarsSwitchToggled:)];
-        case 9:
+        case 10:
             return [self switchCellWithIdentifier:@"Cell_Media_ProfileTabAvatar"
                                             label:@"Profile Picture Tab Icon"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon]
                                            action:@selector(profileTabAvatarSwitchToggled:)];
-        case 10:
+        case 11:
             // Single toggle for Reborn's detailed profile page: banner, large
             // avatar/snoovatar, display name, bio, and the Social Links band (all of
             // which live in the custom header). Off → Apollo's compact stock profile.
@@ -1170,14 +1279,14 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Show Detailed Profiles"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowDetailedProfiles]
                                            action:@selector(showDetailedProfilesSwitchToggled:)];
-        case 11:
+        case 12:
             return [self switchCellWithIdentifier:@"Cell_Media_ChatMedia"
                                             label:@"Inline Media in Chat"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableChatMedia]
                                            action:@selector(chatMediaSwitchToggled:)];
-        case 12:
+        case 13:
             // Master toggle for "Hold for Video Speed". When on, the hold-speed
-            // picker (logical row 13) is shown below; when off, the right side of a
+            // picker (logical row 14) is shown below; when off, the right side of a
             // fullscreen video keeps Apollo's normal long-press menu. The gesture is
             // explained in the section footer, matching the sibling Media toggles
             // (which are plain switches with no inline subtitle).
@@ -1185,7 +1294,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Hold for Video Speed"
                                                on:sVideoHoldSpeedEnabled
                                            action:@selector(videoHoldSpeedSwitchToggled:)];
-        case 13: {
+        case 14: {
             UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_HoldSpeedValue"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_HoldSpeedValue"];
@@ -1513,7 +1622,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             attributes:plainAttrs]];
     } else if (section == SectionMedia) {
         text = [[NSMutableAttributedString alloc]
-            initWithString:@"Media Upload Host selects where Apollo uploads media attached to posts and comments.\n\nProxying routes Imgur image requests through DuckDuckGo to bypass regional blocks; albums and uploads are unsupported by the proxy."
+            initWithString:@"Media Upload Host selects where Apollo uploads media attached to posts and comments.\n\nComment Link Host uploads images added to a comment or reply to Imgur or Img Chest and inserts a plain link instead of a native Reddit image, so they work even in subreddits that don't allow images in comments. Apollo still shows the linked image inline.\n\nProxying routes Imgur image requests through DuckDuckGo to bypass regional blocks; albums and uploads are unsupported by the proxy."
             attributes:plainAttrs];
     } else if (section == SectionNotificationBackend) {
         text = [[NSMutableAttributedString alloc]
@@ -1597,6 +1706,17 @@ typedef NS_ENUM(NSInteger, Tag) {
         return;
     }
 
+    if (indexPath.section == SectionGeneral) {
+        // Mirror generalCellForRow's physical->effective row mapping so the
+        // "Open in App" disclosure row is recognized regardless of whether the
+        // conditional "Tap to Show Deleted Comments" row is present.
+        NSInteger effectiveRow = (!sShowDeletedComments && indexPath.row >= 4) ? indexPath.row + 1 : indexPath.row;
+        if (effectiveRow == 8) {
+            [self openOpenInAppSettings];
+        }
+        return;
+    }
+
     if (indexPath.section == SectionBackupRestore) {
         UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
         if (indexPath.row == 0) {
@@ -1645,11 +1765,13 @@ typedef NS_ENUM(NSInteger, Tag) {
             [self presentUnmuteCommentsVideosModeSheetFromSourceView:cell];
         } else if (row == 2) {
             [self presentImageUploadProviderSheetFromSourceView:cell];
-        } else if (row == 5) {
-            [self presentInlineImageAlignmentSheetFromSourceView:cell];
+        } else if (row == 3) {
+            [self presentCommentLinkHostSheetFromSourceView:cell];
         } else if (row == 6) {
+            [self presentInlineImageAlignmentSheetFromSourceView:cell];
+        } else if (row == 7) {
             [self presentAutoplayInlineGIFModeSheetFromSourceView:cell];
-        } else if (row == 13) {
+        } else if (row == 14) {
             [self presentVideoHoldSpeedSheetFromSourceView:cell];
         }
     } else if (indexPath.section == SectionNotificationBackend && indexPath.row == 2) {
@@ -1724,9 +1846,14 @@ typedef NS_ENUM(NSInteger, Tag) {
     }
     if (indexPath.section == SectionApolloAI) return YES;
     if (indexPath.section == SectionLinkPreviews) return YES;
+    if (indexPath.section == SectionGeneral) {
+        // Only the "Open in App" disclosure row is tappable; the rest are switches/fields.
+        NSInteger effectiveRow = (!sShowDeletedComments && indexPath.row >= 4) ? indexPath.row + 1 : indexPath.row;
+        return effectiveRow == 8;
+    }
     if (indexPath.section == SectionMedia) {
         NSInteger row = ApolloMediaLogicalRow(indexPath.row);
-        return (row == 0 || row == 1 || row == 2 || row == 5 || row == 6 || row == 13);
+        return (row == 0 || row == 1 || row == 2 || row == 3 || row == 6 || row == 7 || row == 14);
     }
     if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 || indexPath.row == 3)) return YES;
     if (indexPath.section == SectionNotificationBackend && indexPath.row == 2) return YES;
@@ -2136,10 +2263,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSUserDefaults standardUserDefaults] setBool:sShowRecentlyReadThumbnails forKey:UDKeyShowRecentlyReadThumbnails];
 }
 
-- (void)steamAppSwitchToggled:(UISwitch *)sender {
-    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyOpenLinksInSteamApp];
-}
-
 - (void)collapsePinnedCommentsSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyCollapsePinnedComments];
 }
@@ -2234,6 +2357,11 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSUserDefaults standardUserDefaults] setBool:sKeepSearchBarInPlace forKey:UDKeyKeepSearchBarInPlace];
 }
 
+- (void)iconRowMagnifierSwitchToggled:(UISwitch *)sender {
+    sIconRowMagnifier = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sIconRowMagnifier forKey:UDKeyIconRowMagnifier];
+}
+
 - (void)liveCommentsFollowSwitchToggled:(UISwitch *)sender {
     sLiveCommentsFollow = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sLiveCommentsFollow forKey:UDKeyLiveCommentsFollow];
@@ -2299,11 +2427,11 @@ typedef NS_ENUM(NSInteger, Tag) {
     sEnableInlineImages = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sEnableInlineImages forKey:UDKeyEnableInlineImages];
     if (sEnableInlineImages == wasOn) return;
-    // Two adjacent rows are gated on this toggle: Inline Media Alignment (logical 5)
-    // and Autoplay Inline GIFs (logical 6). Insert/delete both to keep row counts consistent.
+    // Two adjacent rows are gated on this toggle: Inline Media Alignment (logical 6)
+    // and Autoplay Inline GIFs (logical 7). Insert/delete both to keep row counts consistent.
     NSArray<NSIndexPath *> *paths = @[
-        [NSIndexPath indexPathForRow:5 inSection:SectionMedia],
         [NSIndexPath indexPathForRow:6 inSection:SectionMedia],
+        [NSIndexPath indexPathForRow:7 inSection:SectionMedia],
     ];
     if (sEnableInlineImages) {
         [self.tableView insertRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationFade];
@@ -2352,7 +2480,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)setInlineImageAlignment:(ApolloInlineImageAlignment)alignment {
     sInlineImageAlignment = alignment;
     [[NSUserDefaults standardUserDefaults] setInteger:sInlineImageAlignment forKey:UDKeyInlineImageAlignment];
-    NSIndexPath *alignmentRow = [NSIndexPath indexPathForRow:5 inSection:SectionMedia];
+    NSIndexPath *alignmentRow = [NSIndexPath indexPathForRow:6 inSection:SectionMedia];
     [self.tableView reloadRowsAtIndexPaths:@[alignmentRow] withRowAnimation:UITableViewRowAnimationNone];
 }
 
@@ -2403,7 +2531,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     sAutoplayInlineGIFMode = mode;
     // The autoplay module observes this key via KVO and re-evaluates visible inline GIFs.
     [[NSUserDefaults standardUserDefaults] setInteger:sAutoplayInlineGIFMode forKey:UDKeyAutoplayInlineGIFs];
-    NSIndexPath *autoplayRow = [NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(6) inSection:SectionMedia];
+    NSIndexPath *autoplayRow = [NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(7) inSection:SectionMedia];
     [self.tableView reloadRowsAtIndexPaths:@[autoplayRow] withRowAnimation:UITableViewRowAnimationNone];
 }
 
@@ -2414,10 +2542,10 @@ typedef NS_ENUM(NSInteger, Tag) {
     sVideoHoldSpeedEnabled = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sVideoHoldSpeedEnabled forKey:UDKeyVideoHoldSpeedEnabled];
     if (sVideoHoldSpeedEnabled == wasOn) return;
-    // The "Hold Speed" picker (logical row 13) is the last Media row and is shown
+    // The "Hold Speed" picker (logical row 14) is the last Media row and is shown
     // only while this toggle is on. Insert/delete it so the row counts stay
-    // consistent. ApolloMediaPhysicalRow(13) accounts for the inline-dependent gap.
-    NSIndexPath *pickerPath = [NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(13) inSection:SectionMedia];
+    // consistent. ApolloMediaPhysicalRow(14) accounts for the inline-dependent gap.
+    NSIndexPath *pickerPath = [NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(14) inSection:SectionMedia];
     if (sVideoHoldSpeedEnabled) {
         [self.tableView insertRowsAtIndexPaths:@[pickerPath] withRowAnimation:UITableViewRowAnimationFade];
     } else {
@@ -2432,7 +2560,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)setVideoHoldSpeed:(float)speed {
     sVideoHoldSpeed = ApolloSanitizedHoldSpeed(speed);
     [[NSUserDefaults standardUserDefaults] setFloat:sVideoHoldSpeed forKey:UDKeyVideoHoldSpeed];
-    NSIndexPath *pickerPath = [NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(13) inSection:SectionMedia];
+    NSIndexPath *pickerPath = [NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(14) inSection:SectionMedia];
     if ([[self.tableView indexPathsForVisibleRows] containsObject:pickerPath]) {
         [self.tableView reloadRowsAtIndexPaths:@[pickerPath] withRowAnimation:UITableViewRowAnimationNone];
     }
@@ -2758,6 +2886,8 @@ static void ApolloReplayValetKeychainItems(NSArray<NSDictionary *> *items) {
     sVideoHoldSpeedEnabled = [defaults boolForKey:UDKeyVideoHoldSpeedEnabled];
     sVideoHoldSpeed = ApolloSanitizedHoldSpeed([defaults floatForKey:UDKeyVideoHoldSpeed]);
     sImageUploadProvider = [defaults integerForKey:UDKeyImageUploadProvider];
+    sCommentLinkHost = [defaults integerForKey:UDKeyCommentLinkHost];
+    if (sCommentLinkHost < CommentLinkHostOff || sCommentLinkHost > CommentLinkHostImgChest) sCommentLinkHost = CommentLinkHostOff;
     sLinkPreviewCardColor = [defaults integerForKey:UDKeyLinkPreviewCardColor];
     if (sLinkPreviewCardColor < ApolloLinkPreviewCardColorNeutral || sLinkPreviewCardColor > ApolloLinkPreviewCardColorSlate) {
         sLinkPreviewCardColor = ApolloLinkPreviewCardColorNeutral;

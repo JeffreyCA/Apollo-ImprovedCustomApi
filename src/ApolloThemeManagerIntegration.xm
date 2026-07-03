@@ -89,11 +89,19 @@ static BOOL NativeScreenSectionVisibleWithTitle(id vc, long long section, NSStri
         case ApolloNativeThemeScreenPicker:
             return section == 0;
         case ApolloNativeThemeScreenOptions:
-            return section != 0 &&
-                   [title rangeOfString:@"comment" options:NSCaseInsensitiveSearch].location == NSNotFound;
-        case ApolloNativeThemeScreenComments:
-            return section != 0 &&
-                   [title rangeOfString:@"comment" options:NSCaseInsensitiveSearch].location != NSNotFound;
+        case ApolloNativeThemeScreenComments: {
+            // A section can legitimately have no header title, and
+            // NativeScreenRawHeaderTitle returns nil for those. Sending
+            // rangeOfString: to nil yields a zeroed NSRange (location 0, not
+            // NSNotFound), which would misclassify a titleless section — hiding
+            // it from Light/Dark and surfacing it under Comments. Treat a
+            // nil/empty title as explicitly not-a-comments-section so both modes
+            // agree.
+            BOOL isComments = title.length &&
+                [title rangeOfString:@"comment" options:NSCaseInsensitiveSearch].location != NSNotFound;
+            BOOL wantComments = (NativeScreenModeFor(vc) == ApolloNativeThemeScreenComments);
+            return section != 0 && (isComments == wantComments);
+        }
     }
     return YES;
 }
@@ -156,34 +164,12 @@ static NSInteger Rows(id self, SEL _cmd, UITableView *tv, NSInteger section) {
     return sRowsOrig ? sRowsOrig(self, _cmd, tv, section) : 0;
 }
 
-// Apollo's Appearance screen builds this row with a UIListContentConfiguration
-// (iOS 14+ cell content API) — the cell renders from that, not from
-// .textLabel, so setting .textLabel.text alone silently no-ops on it and
-// only the legacy label (invisible) changes. Rewrite the content
-// configuration's text when present, and set .textLabel too for the
-// legacy-cell fallback case.
-//
-// Cell-time isn't the only place this needs to run: UIKit's cell state
-// machine (automaticallyUpdatesContentConfiguration, on by default) can
-// reapply the cell's ORIGINAL base configuration — Apollo's, not ours —
-// whenever the cell's configuration state changes, which fires again on
-// scroll, selection, or simply the row scrolling back into view after a
-// push/pop. Observed as the label reverting once you leave and return to
-// this screen. Re-assert from willDisplay too, which fires on every one of
-// those passes, not just the initial dequeue.
-static void RewriteThemesRowLabel(UITableViewCell *cell) {
-    if ([cell.contentConfiguration isKindOfClass:[UIListContentConfiguration class]]) {
-        UIListContentConfiguration *config = [(UIListContentConfiguration *)cell.contentConfiguration copy];
-        config.text = @"Theme Manager";
-        cell.contentConfiguration = config;
-    }
-    cell.textLabel.text = @"Theme Manager";
-}
-
 static UITableViewCell *Cell(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
     UITableViewCell *cell = sCellOrig ? sCellOrig(self, _cmd, tv, ip)
                                       : [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-    if (IsThemesRow(ip)) RewriteThemesRowLabel(cell);
+    if (IsThemesRow(ip)) {
+        cell.textLabel.text = @"Theme Manager";
+    }
     return cell;
 }
 
@@ -206,7 +192,6 @@ static void Select(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
 
 static void WillDisplay(id self, SEL _cmd, UITableView *tv, UITableViewCell *cell, NSIndexPath *ip) {
     if (sWillDisplayOrig) sWillDisplayOrig(self, _cmd, tv, cell, ip);
-    if (IsThemesRow(ip)) RewriteThemesRowLabel(cell);
 }
 
 static void DidEndDisplaying(id self, SEL _cmd, UITableView *tv, UITableViewCell *cell, NSIndexPath *ip) {
