@@ -3,13 +3,31 @@
 // Apollo's only comment-sort memory is per-SUBREDDIT ("Remember Subreddit Sort" under
 // Settings > Comments): change one post's comment sort and every post in that subreddit
 // now opens with it. This module adds an opt-in per-POST memory: change the sort inside
-// a post and reopening that same post restores it; every other post keeps Apollo's
-// native chain (suggested sort unless "Ignore Suggested Sort" > per-subreddit remembered
-// when "Remember Subreddit Sort" is on > default comment sort). Purely additive: nothing
-// is written to Apollo's own sort keys, and with the toggle off both hooks are inert.
-// The "Remember Post Sort" toggle row is injected into Apollo's native Settings >
-// General > Comments section, right under its sibling "Remember Subreddit Sort"
-// (see the SettingsGeneralViewController hooks at the bottom of this file).
+// a post and reopening that same post restores it.
+//
+// PRECEDENCE over "Remember Subreddit Sort" (issue #555; fixes the PR #570 report that
+// changing one post's sort still leaked onto every post in the subreddit): while
+// "Remember Post Sort" is on it is the SOLE authority for comment sort and Apollo's
+// native per-subreddit remember is not applied. A post you set individually reopens on
+// its own saved sort; a post you have NOT set individually opens on Apollo's default/
+// suggested sort (suggested unless "Ignore Suggested Sort", else the default comment
+// sort) — never on some sibling post's sort. This is deliberate and necessary: BOTH
+// memories are fed by the exact same "change the sort" gesture, so with both toggles on
+// a single change would otherwise also be written into Apollo's subreddit-wide store and
+// leak onto every sibling post (the reported bug). We keep per-post authoritative with
+// two NSUserDefaults hooks, active ONLY while the toggle is on and keyed strictly on
+// Apollo's own "RedditCommentsSortMapping" default (see the NSUserDefaults hooks below):
+//   (a) suppress the native per-subreddit sort WRITE, so a per-post change never pollutes
+//       the subreddit-wide store, and
+//   (b) hide that store from Apollo's apply-side reader, so untouched posts fall through
+//       to the default/suggested sort instead of a stale/leaked subreddit value.
+// The stored subreddit mapping itself is left intact (we suppress the write, we don't
+// clear it), so turning the toggle back off cleanly restores Apollo's native behavior.
+// Nothing is ever written to Apollo's own sort keys. With the toggle off every hook here
+// is inert and Apollo's native chain (suggested > per-subreddit remembered > default) is
+// untouched. The "Remember Post Sort" toggle row is injected into Apollo's native
+// Settings > General > Comments section, right under its sibling "Remember Subreddit
+// Sort" (see the SettingsGeneralViewController hooks at the bottom of this file).
 //
 // How Apollo does it (RE'd from the current binary):
 // - _TtC6Apollo22CommentsViewController holds `currentSort`, a Swift
@@ -62,6 +80,17 @@
 static NSString *const kPPCSSortKey = @"s";
 static NSString *const kPPCSTimestampKey = @"t";
 static const NSUInteger kPPCSMaxEntries = 500;
+
+// Apollo's own standardUserDefaults key for its per-SUBREDDIT comment-sort store — a dict
+// keyed by lowercased subreddit. RE'd from the current binary: the apply-side reader
+// (sub_10044395c) does dictionaryForKey: on this key, and the sort-change writer
+// (sub_100718ef8 -> sub_100443af0, gated on boolForKey:"RememberRedditCommentsSort")
+// does setObject:forKey: on it. This is intentionally NOT our own mapping key
+// (UDKeyPerPostCommentSortMapping = "PerPostCommentSortMapping"); the NSUserDefaults
+// hooks below match on this exact string so our own storage is never touched. The
+// "Remember Subreddit Sort" TOGGLE lives under a different (bool) key, so intercepting
+// this dictionary does not affect that switch's displayed state.
+static NSString *const kPPCSNativeSubredditSortKey = @"RedditCommentsSortMapping";
 
 // MARK: - runtime helpers (superclass-chain ivar access, matches ApolloLiveCommentsFollow)
 
@@ -262,6 +291,46 @@ static void PPCSDisarm(void) {
             }
             PPCSDisarm();
         }
+    }
+    return %orig;
+}
+
+%end
+
+// MARK: - per-post takes precedence over native "Remember Subreddit Sort"
+//
+// While the toggle is on these two hooks make per-post memory the sole comment-sort
+// authority (see the PRECEDENCE section in the file header). Both are gated on
+// sPerPostCommentSort and match strictly on Apollo's own "RedditCommentsSortMapping"
+// default, so when the feature is off they are pure pass-through and Apollo's native
+// per-subreddit remember behaves exactly as before. Our own store lives under a
+// different key and is never affected.
+
+%hook NSUserDefaults
+
+// (a) Suppress the native per-subreddit sort WRITE. Apollo persists the subreddit's sort
+// here on every user sort change when "Remember Subreddit Sort" is on; letting that write
+// through is exactly what leaked one post's sort onto its siblings. Dropping it leaves any
+// previously stored mapping intact (we don't clear it), so disabling "Remember Post Sort"
+// cleanly hands control back to Apollo's native behavior.
+- (void)setObject:(id)value forKey:(NSString *)key {
+    if (sPerPostCommentSort && [key isKindOfClass:[NSString class]] &&
+        [key isEqualToString:kPPCSNativeSubredditSortKey]) {
+        ApolloLog(@"[PerPostSort] suppressed native per-subreddit sort write (post-sort has precedence)");
+        return;
+    }
+    %orig;
+}
+
+// (b) Hide the native per-subreddit mapping from Apollo's apply-side reader, so a post the
+// user never set individually opens on Apollo's default/suggested sort rather than a
+// stale/leaked subreddit value. Returning nil is what the subreddit lookup sees; the
+// "Remember Subreddit Sort" switch reads a separate bool key, so its state is unchanged.
+- (NSDictionary *)dictionaryForKey:(NSString *)key {
+    if (sPerPostCommentSort && [key isKindOfClass:[NSString class]] &&
+        [key isEqualToString:kPPCSNativeSubredditSortKey]) {
+        ApolloLog(@"[PerPostSort] hid native per-subreddit sort mapping from apply path (post-sort has precedence)");
+        return nil;
     }
     return %orig;
 }
