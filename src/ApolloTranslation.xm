@@ -309,8 +309,13 @@ static const void *kApolloPostInfoMarkerSizeKey = &kApolloPostInfoMarkerSizeKey;
 static NSHashTable *sPostInfoMarkerLabels = nil;
 // The title text node whose translation the marker toggles when tapped (feed only).
 static const void *kApolloMarkerTitleNodeKey = &kApolloMarkerTitleNodeKey;
+// The sourceCode the marker was last SHOWN with, replayed by the post-mount
+// re-anchor pass (cleared whenever the updater deliberately hides the marker,
+// so a re-anchor can never resurrect a hidden one).
+static const void *kApolloPostInfoMarkerCodeKey = &kApolloPostInfoMarkerCodeKey;
 static void ApolloUpdatePostInfoMarkerForNode(id anyNode, NSString *sourceCode, BOOL show, id toggleNode);
 static void ApolloReserveMarkerSlotInCompactRow(UILabel *label, id postInfoNode, BOOL show);
+static void ApolloReanchorPostInfoMarkerIfFallback(id postInfoNode, BOOL allowRetry);
 static void ApolloToggleTranslationForTitleNode(id titleTextNode);
 
 // YES on a cell view once we've installed the marker tap gesture on it.
@@ -4656,6 +4661,16 @@ static void ApolloUpdatePostInfoMarkerForNode(id anyNode, NSString *sourceCode, 
         [NSLayoutConstraint activateConstraints:fresh];
         objc_setAssociatedObject(label, kApolloPostInfoMarkerConstraintsKey, fresh, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+    // Record whether the label ACTUALLY ended up as a child of the age view (vs
+    // the piView fallback). A pre-mount install (cached translations complete
+    // synchronously while the cell is still in ASDK's offscreen preload/display
+    // range, so ageView.superview is nil) can only take the fallback — the
+    // PostInfoNode didEnterVisibleState hook reads this flag to re-run the
+    // updater once the row is genuinely on screen, which re-hosts the label the
+    // same way a marker tap does.
+    objc_setAssociatedObject(label, kApolloPostInfoMarkerAnchoredKey,
+                             @(ageView != nil && label.superview == ageView),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     // Make the marker a per-post translate toggle when a feed title node was
     // supplied. Tapping it flips that post between translated and original (the
@@ -4692,13 +4707,57 @@ static void ApolloUpdatePostInfoMarkerForNode(id anyNode, NSString *sourceCode, 
     if (!content) {
         label.attributedText = nil;
         label.hidden = YES;
+        objc_setAssociatedObject(label, kApolloPostInfoMarkerCodeKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
         ApolloReserveMarkerSlotInCompactRow(label, postInfoNode, NO);
         return;
     }
     label.attributedText = content;
     label.hidden = NO;
+    objc_setAssociatedObject(label, kApolloPostInfoMarkerCodeKey, [sourceCode copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(label, kApolloPostInfoMarkerSizeKey, @(markerFont.pointSize), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloReserveMarkerSlotInCompactRow(label, postInfoNode, YES);
+}
+
+// Post-mount repair for a marker that installed on the piView FALLBACK pin.
+// While a feed cell is still in ASDK's preload/display range its subnode views
+// aren't mounted yet (ageView.superview == nil), so a marker applied from a
+// synchronously-completing cached translation lands on the fallback constraints
+// (trailing/centerY of the whole info row — visually "floating under the author
+// line") and nothing re-evaluates the host afterwards: the owned-and-translated
+// early return in ApolloMaybeTranslatePostTitleNode never reaches the updater
+// again. Tapping the marker happened to repair it because the toggle re-runs the
+// updater on the now-mounted cell. This runs that exact repair automatically
+// when the row enters the VISIBLE range (mounted by definition).
+static void ApolloReanchorPostInfoMarkerIfFallback(id postInfoNode, BOOL allowRetry) {
+    if (!postInfoNode) return;
+    BOOL loaded = NO;
+    @try { loaded = ((BOOL (*)(id, SEL))objc_msgSend)(postInfoNode, @selector(isNodeLoaded)); } @catch (__unused NSException *e) {}
+    if (!loaded) return;
+    UIView *piView = nil;
+    @try { piView = ((UIView *(*)(id, SEL))objc_msgSend)(postInfoNode, @selector(view)); } @catch (__unused NSException *e) {}
+    if (![piView isKindOfClass:[UIView class]]) return;
+    UILabel *label = objc_getAssociatedObject(piView, kApolloPostInfoMarkerLabelKey);
+    if (![label isKindOfClass:[UILabel class]] || label.hidden) return;
+    BOOL anchored = [objc_getAssociatedObject(label, kApolloPostInfoMarkerAnchoredKey) boolValue];
+    // Anchored AND actually attached to a window: nothing to repair. (A nil
+    // window with anchored==YES means the age view was re-mounted out from under
+    // the label during cell re-processing — re-host onto the live one.)
+    if (anchored && label.window) return;
+    NSString *code = objc_getAssociatedObject(label, kApolloPostInfoMarkerCodeKey);
+    if (![code isKindOfClass:[NSString class]] || code.length == 0) return;
+    id toggle = objc_getAssociatedObject(label, kApolloMarkerTitleNodeKey);
+    ApolloLog(@"[Translation] marker re-anchor (%@) code=%@", anchored ? @"detached" : @"fallback-pin", code);
+    ApolloUpdatePostInfoMarkerForNode(postInfoNode, code, YES, toggle);
+    // If the subnode mount still hadn't landed when we re-ran (same-runloop
+    // race with the range update), give it one short delayed retry; otherwise
+    // the marker would stay on the fallback until the cell re-enters the
+    // visible range.
+    if (allowRetry && ![objc_getAssociatedObject(label, kApolloPostInfoMarkerAnchoredKey) boolValue]) {
+        __weak id weakNode = postInfoNode;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            ApolloReanchorPostInfoMarkerIfFallback(weakNode, NO);
+        });
+    }
 }
 
 // Reserve (or release) the marker's slot in the COMPACT stats row. The compact
@@ -6592,6 +6651,21 @@ static void ApolloMaybeTranslateFeedPostBodyNode(id feedCellNode, id excludeTitl
     if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
     __weak id weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{ ApolloMaybeTranslatePostTitleNode(weakSelf); });
+}
+
+%end
+
+// Visible-state = the row is genuinely on screen, so the age view is mounted —
+// the one guaranteed post-mount event to repair a marker stuck on the piView
+// fallback pin (see ApolloReanchorPostInfoMarkerIfFallback). The async hop
+// mirrors the title-node hooks above and lets ASDK finish the mount pass first.
+%hook _TtC6Apollo12PostInfoNode
+
+- (void)didEnterVisibleState {
+    %orig;
+    if (!sPostInfoMarkerLabels) return;   // no marker has ever been created
+    __weak id weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{ ApolloReanchorPostInfoMarkerIfFallback(weakSelf, YES); });
 }
 
 %end
