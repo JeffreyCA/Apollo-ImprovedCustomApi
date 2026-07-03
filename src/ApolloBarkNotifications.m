@@ -392,6 +392,13 @@ void ApolloBarkDeleteBackendDevice(NSString *tokenHex) {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.HTTPMethod = @"DELETE";
     request.timeoutInterval = 10;
+    // The backend's REGISTRATION_SECRET middleware only gates the POST
+    // registration routes today, but send the token here too so cleanup keeps
+    // working if DELETE is ever brought under the same gate.
+    NSString *registrationToken = ApolloNotificationBackendRegistrationToken();
+    if (registrationToken.length > 0) {
+        [request setValue:registrationToken forHTTPHeaderField:@"X-Registration-Token"];
+    }
 
     ApolloLog(@"[Bark] Deleting backend device registration %@…", [tokenHex substringToIndex:MIN((NSUInteger)8, tokenHex.length)]);
     [[[NSURLSession sharedSession] dataTaskWithRequest:request
