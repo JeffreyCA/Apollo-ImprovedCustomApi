@@ -1,4 +1,8 @@
 #import <UIKit/UIKit.h>
+#import "ApolloSettingsTableViewController.h"
 
-@interface ApolloThemeGalleryViewController : UITableViewController
+// Subclasses ApolloSettingsTableViewController so the gallery inherits the
+// ambient Apollo theme (stock themes included) the same way the Apollo Reborn
+// settings screen does — see ApolloThemeManagerViewController.h.
+@interface ApolloThemeGalleryViewController : ApolloSettingsTableViewController
 @end

@@ -13,7 +13,7 @@ static UIColor *GalleryColor(ApolloCompiledTheme *compiled, ApolloThemeToken tok
 }
 
 static UIImage *GalleryRowImage(ApolloCompiledTheme *compiled, ApolloThemeMode accentMode) {
-    const CGFloat swatch = 26;
+    const CGFloat swatch = 34;
     UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat preferredFormat];
     fmt.opaque = NO;
     UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(swatch, swatch) format:fmt];
@@ -263,11 +263,129 @@ typedef void (^ApolloThemeGalleryAction)(NSString *slug);
     self.navigationItem.searchController = search;
     self.navigationItem.hidesSearchBarWhenScrolling = NO;
     self.definesPresentationContext = YES;
+
+    [self applyThemeTint];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    [self applyThemeTint];
     [self.tableView reloadData];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    [self applyThemeTint];
+    [self.tableView reloadData];
+}
+
+// Mirrors ApolloThemeManagerViewController's applyThemeTint/applyThemeToCell:
+// so the gallery browser reads as part of the same app the active theme is
+// painting, rather than a plain system-styled list dropped on top of it.
+// When no Apollo-Reborn custom theme is running, inherit the ambient Apollo
+// theme (stock themes like Solarized/Outrun included) by sampling the
+// presenting settings table — the same approach as the base
+// ApolloSettingsTableViewController / the Apollo Reborn settings screen —
+// instead of dropping to plain grey/black system colours.
+- (UIColor *)galleryThemeColorForToken:(ApolloThemeToken)token fallback:(UIColor *)fallback {
+    UIColor *runtimeColor = ApolloThemeRuntimeColor(token);
+    if (runtimeColor) return runtimeColor;
+
+    switch (token) {
+        case ApolloThemeTokenBackground: {
+            UITableView *source = ApolloInheritedSettingsThemeSourceTableView(self);
+            return source.backgroundColor ?: fallback;
+        }
+        case ApolloThemeTokenSecondaryBackground:
+        case ApolloThemeTokenTertiaryBackground:
+        case ApolloThemeTokenElevatedBackground:
+            return [self apollo_themeCellBackgroundColor];
+        case ApolloThemeTokenSeparator:
+        case ApolloThemeTokenOpaqueSeparator: {
+            UITableView *source = ApolloInheritedSettingsThemeSourceTableView(self);
+            return source.separatorColor ?: fallback;
+        }
+        case ApolloThemeTokenAccent:
+        case ApolloThemeTokenLink:
+            return [self apollo_themeAccentColor];
+        default:
+            return fallback;
+    }
+}
+
+// Base-class hook — redirect to our own tinting so we control per-cell theming
+// in willDisplayCell: (the base loop would otherwise re-fill cell backgrounds).
+- (void)apollo_applyTheme {
+    [self applyThemeTint];
+}
+
+- (void)applyThemeTint {
+    UIColor *accent = [self galleryThemeColorForToken:ApolloThemeTokenAccent
+                                              fallback:self.navigationController.view.tintColor ?: UIColor.systemBlueColor];
+    UIColor *background = [self galleryThemeColorForToken:ApolloThemeTokenBackground
+                                                  fallback:UIColor.systemGroupedBackgroundColor];
+    UIColor *separator = [self galleryThemeColorForToken:ApolloThemeTokenSeparator
+                                                 fallback:UIColor.separatorColor];
+    self.view.tintColor = accent;
+    self.tableView.tintColor = accent;
+    self.navigationController.navigationBar.tintColor = accent;
+    self.view.backgroundColor = background;
+    self.tableView.backgroundColor = background;
+    self.tableView.separatorColor = separator;
+}
+
+- (void)applyThemeToCell:(UITableViewCell *)cell {
+    UIColor *card = [self galleryThemeColorForToken:ApolloThemeTokenSecondaryBackground
+                                            fallback:UIColor.secondarySystemGroupedBackgroundColor];
+    UIColor *label = [self galleryThemeColorForToken:ApolloThemeTokenLabel fallback:UIColor.labelColor];
+    UIColor *secondary = [self galleryThemeColorForToken:ApolloThemeTokenSecondaryLabel fallback:UIColor.secondaryLabelColor];
+    UIColor *accent = [self galleryThemeColorForToken:ApolloThemeTokenAccent
+                                              fallback:self.navigationController.view.tintColor ?: UIColor.systemBlueColor];
+    cell.backgroundColor = card;
+    cell.contentView.backgroundColor = card;
+    cell.tintColor = accent;
+    cell.textLabel.textColor = label;
+    cell.detailTextLabel.textColor = secondary;
+}
+
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (self.filteredSlugs.count == 0) {
+        cell.backgroundColor = [self galleryThemeColorForToken:ApolloThemeTokenSecondaryBackground
+                                                       fallback:UIColor.secondarySystemGroupedBackgroundColor];
+        cell.contentView.backgroundColor = cell.backgroundColor;
+        return;
+    }
+    [self applyThemeToCell:cell];
+}
+
+// A plain titleForFooterInSection: string sits flush against the InsetGrouped
+// section card above it (see the same fix in ApolloThemeManagerViewController)
+// — build the footer as a padded view instead.
+- (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
+    if (self.filteredSlugs.count == 0) return nil;
+    NSString *text = [NSString stringWithFormat:@"%lu theme%@", (unsigned long)self.filteredSlugs.count,
+                                                 self.filteredSlugs.count == 1 ? @"" : @"s"];
+
+    UILabel *label = [UILabel new];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.text = text;
+    label.numberOfLines = 0;
+    label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    label.textColor = [self galleryThemeColorForToken:ApolloThemeTokenSecondaryLabel fallback:UIColor.secondaryLabelColor];
+
+    UIView *container = [UIView new];
+    [container addSubview:label];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:20.0],
+        [label.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-20.0],
+        [label.topAnchor constraintEqualToAnchor:container.topAnchor constant:12.0],
+        [label.bottomAnchor constraintEqualToAnchor:container.bottomAnchor constant:-8.0],
+    ]];
+    return container;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    return self.filteredSlugs.count == 0 ? CGFLOAT_MIN : UITableViewAutomaticDimension;
 }
 
 - (NSDictionary *)themeForSlug:(NSString *)slug {
@@ -329,10 +447,10 @@ typedef void (^ApolloThemeGalleryAction)(NSString *slug);
         && [[ApolloThemeStore shared].activeGallerySlug isEqualToString:slug];
 
     cell.textLabel.text = theme[@"name"] ?: slug;
-    cell.detailTextLabel.text = nil;
+    cell.detailTextLabel.text = [ApolloThemeVariantKey(ApolloThemeVariantFromKey(theme[@"variant"])) capitalizedString];
     cell.imageView.image = GalleryRowImage(compiled, mode);
     cell.accessoryType = active ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryDisclosureIndicator;
-    cell.tintColor = self.view.tintColor;
+    [self applyThemeToCell:cell];
     cell.accessibilityValue = active ? @"Active" : nil;
     return cell;
 }

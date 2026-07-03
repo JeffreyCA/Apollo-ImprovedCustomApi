@@ -158,6 +158,11 @@ extern NSString * const kApolloRebornThemeV1BackupKey;
 extern NSString * const kApolloThemeAdvancedOptionsEnabledKey;  // BOOL
 // Theme-dict key holding an ApolloThemeFontKey() string; absent = system font.
 extern NSString * const kApolloThemeFontKey;                    // NSString
+// Theme-dict key: BOOL. When YES, the vote arrows' active-state colour
+// (Apollo's own fixed green/blue-violet, keyed on DualStateButtonNode's
+// `type` ivar — see ApolloThemeRuntime.xm) is replaced with the theme's
+// accent colour. Absent/NO leaves Apollo's stock vote colours untouched.
+extern NSString * const kApolloThemeVoteArrowsAccentKey;        // NSNumber (BOOL)
 
 // Theme-dict key recording where a stored theme came from. Immutable once set:
 // editing an imported theme does NOT promote it (origin is provenance, not
