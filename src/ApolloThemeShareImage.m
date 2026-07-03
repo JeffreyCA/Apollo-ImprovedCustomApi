@@ -459,12 +459,15 @@ UIImage *ApolloThemeShareRenderCard(NSDictionary *theme, ApolloThemeMode mode) {
                     NSTextAlignmentLeft, NSLineBreakByTruncatingTail);
         divider(cy + 264);
 
-        // comment row
+        // comment row — the byline names the theme's font (the whole card is
+        // already drawn in it, but this labels which one it is).
         ATSDrawSymbol(@"bubble.left", CGRectMake(cx + in, cy + 288, 44, 44), gray, 30);
         ATSDrawText(@"A comment with body text", CGRectMake(tx0, cy + 282, tw, 36),
                     tfont([UIFont systemFontOfSize:30 weight:UIFontWeightRegular]), primaryText,
                     NSTextAlignmentLeft, NSLineBreakByTruncatingTail);
-        ATSDrawText(@"username · reply", CGRectMake(tx0, cy + 322, tw, 28),
+        NSString *commentMeta = [NSString stringWithFormat:@"username · %@ font",
+                                 ApolloThemeFontDisplayName(themeFont)];
+        ATSDrawText(commentMeta, CGRectMake(tx0, cy + 322, tw, 28),
                     tfont([UIFont systemFontOfSize:23 weight:UIFontWeightRegular]), gray,
                     NSTextAlignmentLeft, NSLineBreakByTruncatingTail);
         divider(cy + 368);
@@ -496,10 +499,10 @@ UIImage *ApolloThemeShareRenderCard(NSDictionary *theme, ApolloThemeMode mode) {
         ATSDrawText(@"PALETTE", CGRectMake(52, 696, 300, 24),
                     [UIFont systemFontOfSize:20 weight:UIFontWeightSemibold], muted,
                     NSTextAlignmentLeft, NSLineBreakByClipping);
-        // Name the theme's font on the right of the same row, drawn IN that font
-        // so it doubles as a specimen (e.g. "Aa  New York").
-        NSString *fontSpec = [NSString stringWithFormat:@"Aa  %@", ApolloThemeFontDisplayName(themeFont)];
-        ATSDrawText(fontSpec, CGRectMake(W / 2.0, 693, W / 2.0 - 48, 28),
+        // A small "Aa" letterform sample of the theme's font on the right of the
+        // same row (the font is named under the comment above, so keep this
+        // wordless to avoid repeating the name).
+        ATSDrawText(@"Aa", CGRectMake(W / 2.0, 693, W / 2.0 - 48, 28),
                     tfont([UIFont systemFontOfSize:22 weight:UIFontWeightSemibold]), muted,
                     NSTextAlignmentRight, NSLineBreakByTruncatingTail);
         NSUInteger count = MAX(swatchRGBs.count, (NSUInteger)1);
