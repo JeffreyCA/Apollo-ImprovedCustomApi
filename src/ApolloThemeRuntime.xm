@@ -224,6 +224,7 @@ typedef struct { uint32_t rgb; ApolloThemeToken token; uint8_t mode; } RGBTokenE
 //   separator   -> Separator           (B5B9C7 / 06214D)
 //   bar         -> BarBackground        (C5CAD9 / 031229)
 //   gray        -> SecondaryLabel       (ABABAB / 484E5B)
+//   unread      -> Selection            (95C0EE / 034388)
 static const RGBTokenEntry kDonorEntries[] = {
     { 0xC400A6, ApolloThemeTokenAccent,              ApolloThemeModeLight },
     { 0xFF00D8, ApolloThemeTokenAccent,              ApolloThemeModeDark  },
@@ -239,6 +240,15 @@ static const RGBTokenEntry kDonorEntries[] = {
     { 0x031229, ApolloThemeTokenBarBackground,       ApolloThemeModeDark  },
     { 0xABABAB, ApolloThemeTokenSecondaryLabel,      ApolloThemeModeLight },
     { 0x484E5B, ApolloThemeTokenSecondaryLabel,      ApolloThemeModeDark  },
+    // Inbox unread-message tint. Outrun's UNREAD row background comes from a
+    // dedicated per-theme getter (sub_10068ee00), not the shared role palette —
+    // these two constants are exclusive to InboxCellNode and unique in the
+    // whole binary, so swapping them here can't hit anything else. There is no
+    // "unread" token, so route it to Selection — the theme's highlight family.
+    // Apollo derives the pressed state for unread rows by darkening whatever
+    // this returns, so the pressed variant follows the theme automatically.
+    { 0x95C0EE, ApolloThemeTokenSelection,           ApolloThemeModeLight },
+    { 0x034388, ApolloThemeTokenSelection,           ApolloThemeModeDark  },
 };
 
 // Apollo's separator constants are emitted outside the donor slot and outside
