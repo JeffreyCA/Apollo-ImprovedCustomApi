@@ -24,6 +24,7 @@ typedef struct { CGSize min; CGSize max; } ApolloASSizeRange;
 static char kAppliedSourceImageKey;
 static char kAppliedTemplateImageKey;
 static char kAppliedColorStateKey;
+static char kSelectionViewOwnedKey;
 
 // ApolloThemeRuntimeColor/the Accent/Selection/Card token helpers below always
 // allocate a FRESH dynamic-provider colour on every call (see ApolloThemeRuntime.h
@@ -67,7 +68,7 @@ static NSString *ListCellOwner(UITableViewCell *cell) {
     NSString *owner = NSStringFromClass([delegate class]);
     BOOL inScope = [owner containsString:@"ViewController"]
         && ([owner containsString:@"Settings"] || [owner containsString:@"Search"]
-            || [owner containsString:@"Friends"]);
+            || [owner containsString:@"Friends"] || [owner containsString:@"Inbox"]);
     return inScope ? owner : nil;
 }
 
@@ -78,19 +79,39 @@ static void ColorListCell(UITableViewCell *cell) {
     UIColor *sel = SelectionToken();
     if (!sel) return;
 
-    BOOL highlighted = cell.highlighted;
-    uint64_t state = (ApolloThemeRuntimeEpoch() << 1) | (highlighted ? 1 : 0);
-    if (ApolloThemeStateUnchanged(cell, &kAppliedColorStateKey, state)) return;
-    // Eureka cells highlight via selectedBackgroundView — idiomatic + self-restoring.
-    UIView *bg = [[UIView alloc] init];
-    bg.backgroundColor = sel;
-    cell.selectedBackgroundView = bg;
+    BOOL pressed = cell.highlighted || cell.selected;
+    uint64_t state = (ApolloThemeRuntimeEpoch() << 1) | (pressed ? 1 : 0);
+    BOOL stateChanged = !ApolloThemeStateUnchanged(cell, &kAppliedColorStateKey, state);
+
+    // Eureka cells highlight via selectedBackgroundView — but Eureka's own
+    // defaultCellUpdate closures REINSTALL a donor-coloured view (which the seam
+    // collapses onto a background token) on every row update, so an install-once
+    // replacement loses the race. Recolour whatever view is present IN PLACE —
+    // that wins regardless of install order and even repaints a press already in
+    // flight — and mark it ours so untouched passes stay cheap.
+    UIView *selView = cell.selectedBackgroundView;
+    if (!selView) {
+        selView = [[UIView alloc] init];
+        cell.selectedBackgroundView = selView;
+    }
+    if (stateChanged || !objc_getAssociatedObject(selView, &kSelectionViewOwnedKey)) {
+        selView.backgroundColor = sel;
+        objc_setAssociatedObject(selView, &kSelectionViewOwnedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    if (!stateChanged) return;
     // Apollo's OWN cells ignore selectedBackgroundView and swap backgroundColor,
-    // which the seam collapses onto the card — paint the selection directly while
-    // pressed and restore the card token on release. Skip Appearance (owns its bg).
-    BOOL isApolloCell = [NSStringFromClass([cell class]) containsString:@"Apollo"];
-    if (isApolloCell && ![owner containsString:@"Appearance"]) {
-        UIColor *want = highlighted ? sel : CardToken();
+    // which the seam collapses onto a background token — paint the selection
+    // directly while pressed/selected and restore the card token on release.
+    // (Historical note: Appearance used to be excluded because v1's own
+    // willDisplay hook painted those cells; v2 has no such hook, so the
+    // exclusion just left Appearance with no visible highlight. The injected
+    // Theme Manager row still manages its own chrome — skip only that.)
+    NSString *cellClass = NSStringFromClass([cell class]);
+    BOOL isApolloCell = [cellClass containsString:@"Apollo"]
+        && ![cellClass containsString:@"ThemeManagerRowCell"];
+    if (isApolloCell) {
+        UIColor *want = pressed ? sel : CardToken();
         if (want) {
             cell.backgroundColor = want;
             cell.contentView.backgroundColor = want;
@@ -103,6 +124,28 @@ static void ColorListCell(UITableViewCell *cell) {
 - (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated {
     %orig;
     if (ApolloThemeRuntimeIsActive() && ListCellOwner(self)) [self setNeedsLayout];
+}
+// Apollo's cells paint the same donor "selected" constant from setSelected: too
+// (a tapped row stays selected while the pushed screen is up) — without this the
+// pressed repaint flashes back to the collapsed colour the moment selection
+// replaces highlight.
+- (void)setSelected:(BOOL)selected animated:(BOOL)animated {
+    %orig;
+    if (ApolloThemeRuntimeIsActive() && ListCellOwner(self)) [self setNeedsLayout];
+}
+// Eureka re-runs its cellUpdate closure AT HIGHLIGHT TIME (didHighlightRowAt →
+// updateCell), reinstalling its donor-coloured selection view after any earlier
+// repair pass — so recolour foreign views at the setter itself, whenever the
+// install happens. Marked (already-ours) views pass through untouched.
+- (void)setSelectedBackgroundView:(UIView *)view {
+    %orig;
+    if (!view || !ApolloThemeRuntimeIsActive()) return;
+    if (objc_getAssociatedObject(view, &kSelectionViewOwnedKey)) return;
+    if (!ListCellOwner(self)) return;
+    UIColor *sel = SelectionToken();
+    if (!sel) return;
+    view.backgroundColor = sel;
+    objc_setAssociatedObject(view, &kSelectionViewOwnedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 %end
 
@@ -137,13 +180,19 @@ static void ApplyAccentImageView(id cell) {
     icon.tintColor = accent;
 }
 
+// Also the Boxes/Inbox rows (InboxListViewController) — this cell overrides
+// layoutSubviews/setSelected: itself, so route selection colouring through here
+// rather than relying on the base-class hooks firing.
 %hook _TtC6Apollo21IconTextTableViewCell
-- (void)layoutSubviews { %orig; ApplyAccentImageView(self); }
+- (void)layoutSubviews { %orig; ApplyAccentImageView(self); ColorListCell((UITableViewCell *)self); }
 - (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated {
     %orig; ApplyAccentImageView(self);
     if (ApolloThemeRuntimeIsActive()) [(UITableViewCell *)self setNeedsLayout];
 }
-- (void)setSelected:(BOOL)selected animated:(BOOL)animated { %orig; ApplyAccentImageView(self); }
+- (void)setSelected:(BOOL)selected animated:(BOOL)animated {
+    %orig; ApplyAccentImageView(self);
+    if (ApolloThemeRuntimeIsActive()) [(UITableViewCell *)self setNeedsLayout];
+}
 %end
 
 %hook _TtC6Apollo23IconActionTableViewCell
