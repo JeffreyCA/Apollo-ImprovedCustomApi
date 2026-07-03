@@ -89,11 +89,19 @@ static BOOL NativeScreenSectionVisibleWithTitle(id vc, long long section, NSStri
         case ApolloNativeThemeScreenPicker:
             return section == 0;
         case ApolloNativeThemeScreenOptions:
-            return section != 0 &&
-                   [title rangeOfString:@"comment" options:NSCaseInsensitiveSearch].location == NSNotFound;
-        case ApolloNativeThemeScreenComments:
-            return section != 0 &&
-                   [title rangeOfString:@"comment" options:NSCaseInsensitiveSearch].location != NSNotFound;
+        case ApolloNativeThemeScreenComments: {
+            // A section can legitimately have no header title, and
+            // NativeScreenRawHeaderTitle returns nil for those. Sending
+            // rangeOfString: to nil yields a zeroed NSRange (location 0, not
+            // NSNotFound), which would misclassify a titleless section — hiding
+            // it from Light/Dark and surfacing it under Comments. Treat a
+            // nil/empty title as explicitly not-a-comments-section so both modes
+            // agree.
+            BOOL isComments = title.length &&
+                [title rangeOfString:@"comment" options:NSCaseInsensitiveSearch].location != NSNotFound;
+            BOOL wantComments = (NativeScreenModeFor(vc) == ApolloNativeThemeScreenComments);
+            return section != 0 && (isComments == wantComments);
+        }
     }
     return YES;
 }
