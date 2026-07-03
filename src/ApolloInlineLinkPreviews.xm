@@ -2211,6 +2211,17 @@ static id ApolloLPBuildBlueskyPostCardSpec(ASDisplayNode *hostNode, NSURL *url, 
     // No line cap: let the card grow to fit the whole post, like the native
     // tweet card does.
     descriptionNode.maximumNumberOfLines = 0;
+    // …but stay inside the height the feed cell actually allots the card. With
+    // every card child unshrinkable, a finite max height (the media budget
+    // shrinks as the post title takes more lines) made Texture CLAMP the card
+    // background to the constraint while the description's frame kept its full
+    // unbounded height — the text painted past the card over the info row.
+    // Marking the description shrinkable lets the flex pass re-measure it under
+    // the reduced height instead, so it tail-truncates inside an intact card;
+    // when the card fits (the normal case) shrink never engages and nothing
+    // changes. Re-asserted every build: the bundle's text-node styles persist
+    // across passes.
+    [[descriptionNode style] setValue:@1.0 forKey:@"flexShrink"];
     ApolloLPSetTextNodeAttributedTextIfChanged(titleNode, ApolloLPAttributedString(displayName, [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold], [UIColor labelColor]));
     ApolloLPSetTextNodeAttributedTextIfChanged(siteNode, ApolloLPAttributedString(handleText, [UIFont systemFontOfSize:13.0 weight:UIFontWeightRegular], [UIColor secondaryLabelColor]));
     ApolloLPSetTextNodeAttributedTextIfChanged(descriptionNode, ApolloLPAttributedString(postText, [UIFont systemFontOfSize:15.0 weight:UIFontWeightRegular], [UIColor labelColor]));
@@ -2227,7 +2238,9 @@ static id ApolloLPBuildBlueskyPostCardSpec(ASDisplayNode *hostNode, NSURL *url, 
                                                              justifyContent:ApolloLinkPreviewStackJustifyContentStart
                                                                  alignItems:ApolloLinkPreviewStackAlignItemsCenter
                                                                    children:@[avatarNode, authorTextStack]];
-    [[authorRow style] setValue:@1.0 forKey:@"flexShrink"];
+    // In the vertical contentStack this flexShrink is a HEIGHT shrink — leave
+    // the avatar/name row fixed (default 0) so a height shortfall is absorbed
+    // entirely by the description's line count, never by crushing the header.
 
     NSMutableArray *contentChildren = [NSMutableArray arrayWithObject:authorRow];
     if (descriptionNode.attributedText.length > 0) {
@@ -2250,7 +2263,15 @@ static id ApolloLPBuildBlueskyPostCardSpec(ASDisplayNode *hostNode, NSURL *url, 
         }
         [cardChildren addObject:[ratioClass ratioLayoutSpecWithRatio:ratio child:imageNode]];
     }
-    [cardChildren addObject:[insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(11.0, 12.0, 12.0, 12.0) child:contentStack]];
+    ASInsetLayoutSpec *contentInset = [insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(11.0, 12.0, 12.0, 12.0) child:contentStack];
+    // Shrinkable so a card-level height violation propagates down through
+    // contentStack to the description, instead of being clamped at the stack
+    // boundary (a clamp reports the short height to Apollo's cell while the
+    // sublayout frames keep their full size — the overflow-paint bug). The
+    // image ratio spec stays fixed: the post image keeps its aspect, text
+    // gives up lines.
+    [[contentInset style] setValue:@1.0 forKey:@"flexShrink"];
+    [cardChildren addObject:contentInset];
 
     ASStackLayoutSpec *cardStack = [stackClass stackLayoutSpecWithDirection:ApolloLinkPreviewStackDirectionVertical
                                                                     spacing:0.0
@@ -3604,6 +3625,16 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
     }
     NSString *finalVariant = ApolloLPVariant(area, selectedMode, context, NO);
     ApolloLPMarkRenderSignatureIfChanged((ASDisplayNode *)self, finalVariant, ApolloLPRenderSignature(url, displayPreview, finalVariant), host);
+    if (isBlueskyPost) {
+        // Diagnostic for the card-clamp fix: record the height budget the cell
+        // hands the card. A finite max.height here is the clamp scenario the
+        // description's flexShrink now absorbs (text truncates instead of
+        // painting past the card background).
+        ApolloLPLogOncePerHost(host, [NSString stringWithFormat:@"V20-bsky-constraint min=%.0fx%.0f max=%.0fx%.0f area=%lu",
+                                      constrainedSize.min.width, constrainedSize.min.height,
+                                      constrainedSize.max.width, constrainedSize.max.height,
+                                      (unsigned long)area]);
+    }
     id richSpec = isBlueskyPost
         ? ApolloLPBuildBlueskyPostCardSpec((ASDisplayNode *)self, url, displayPreview, finalVariant)
         : isRedditUser
