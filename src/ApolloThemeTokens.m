@@ -23,6 +23,7 @@ NSString * const kApolloRebornThemeRuntimeDisabledKey = @"ApolloReborn.themeRunt
 NSString * const kApolloRebornThemeV1BackupKey        = @"ApolloReborn.themeV1Backup";
 NSString * const kApolloThemeAdvancedOptionsEnabledKey = @"advancedEnabled";
 NSString * const kApolloThemeFontKey                    = @"font";
+NSString * const kApolloThemeVoteArrowsAccentKey        = @"voteArrowsAccent";
 NSString * const kApolloThemeOriginKey                  = @"origin";
 
 NSString * const kApolloThemeOriginCreated   = @"created";
@@ -153,6 +154,12 @@ static NSCache<NSString *, UIFont *> *FontApplyCache(void) {
     return cache;
 }
 
+// Optical-size correction applied to the SF Mono design so its wider glyphs
+// don't read larger than the proportional faces at the same nominal size.
+// ~0.94 shaves roughly one point off body text (14 -> ~13.2) — enough to match
+// SF Pro's density without shrinking legibility.
+static const CGFloat kApolloThemeMonoSizeScale = 0.94;
+
 UIFont *ApolloThemeFontApply(ApolloThemeFont font, UIFont *base) {
     if (!base) return base;
 
@@ -201,9 +208,20 @@ UIFont *ApolloThemeFontApply(ApolloThemeFont font, UIFont *base) {
             [descriptor fontDescriptorWithSymbolicTraits:descriptor.symbolicTraits | UIFontDescriptorTraitItalic];
         if (italicDescriptor) descriptor = italicDescriptor;
     }
+    // SF Mono's fixed-width glyphs are visibly wider than the proportional
+    // system faces, so at an identical point size a monospaced theme reads as
+    // "bigger" and eats more horizontal room. Nudge the effective size down a
+    // touch for the mono design only to bring its optical size back in line
+    // with SF Pro / New York / Rounded. Everything else keeps base.pointSize
+    // (and any Dynamic Type scaling already baked into it).
+    CGFloat effectiveSize = base.pointSize;
+    if (font == ApolloThemeFontMono) {
+        effectiveSize = base.pointSize * kApolloThemeMonoSizeScale;
+    }
+
     // Explicit size wins over the descriptor's text-style size, preserving any
     // Dynamic Type scaling already applied to base.
-    UIFont *derived = [UIFont fontWithDescriptor:descriptor size:base.pointSize];
+    UIFont *derived = [UIFont fontWithDescriptor:descriptor size:effectiveSize];
     if (!derived) return base;
     [FontApplyCache() setObject:derived forKey:cacheKey];
     return derived;

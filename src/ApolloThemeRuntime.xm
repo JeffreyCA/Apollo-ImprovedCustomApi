@@ -5,6 +5,7 @@
 #import "ApolloCommon.h"
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
+#import <dlfcn.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <os/lock.h>
@@ -28,7 +29,23 @@
 - (void)setTitle:(NSString *)title withFont:(UIFont *)font withColor:(UIColor *)color withShadowColor:(UIColor *)shadowColor withShadowOffset:(CGSize)shadowOffset forState:(NSUInteger)state;
 @end
 
+@interface ASImageNode : ASDisplayNode
+- (void)setImageModificationBlock:(id)block;
+@end
+
 @interface _UINavigationBarTitleControl : UIControl
+@end
+
+// Apollo's feed/subreddit search-field pill. A plain UITextField whose
+// background Apollo builds from the SAME literal RGB constant it uses for
+// hairline row separators (0xC7C7CC light / 0x646466 dark — see
+// docs/theme-builder-RE.md's "separator" role: "row separators + search/input
+// field fills"). kSeparatorEntries below intentionally remaps that constant
+// globally so the Advanced "Separators" override reaches real divider lines,
+// but that means it also recolors this field's fill, since both draw from the
+// identical constant and can't be told apart by RGB alone. Given its own sink
+// (below) so it lands on "Raised" (inset controls/elevated panels) instead.
+@interface _TtC6Apollo24ApolloSearchBarTextField : UITextField
 @end
 
 // ===========================================================================
@@ -40,6 +57,9 @@ static volatile bool sEnabled = false;
 // attributed strings off-main); a single enum-width store is atomic on arm64,
 // matching the sEnabled convention.
 static volatile ApolloThemeFont sFontChoice = ApolloThemeFontSystem;
+// Mirrors kApolloThemeVoteArrowsAccentKey on the active theme — see the
+// DualStateButtonNode sink below for what this actually recolors.
+static volatile bool sVoteArrowsAccent = false;
 static uint32_t sTokens[ApolloThemeModeCount][ApolloThemeTokenCount];
 static uint64_t sEpoch = 0; // bumped whenever sTokens or sEnabled changes
 static os_unfair_lock sLock = OS_UNFAIR_LOCK_INIT;
@@ -655,6 +675,7 @@ void ApolloThemeRuntimeReload(void) {
         os_unfair_lock_lock(&sLock);
         sEnabled = false;
         sFontChoice = ApolloThemeFontSystem;
+        sVoteArrowsAccent = false;
         sEpoch++;
         os_unfair_lock_unlock(&sLock);
         ApolloLog(@"ThemeRuntime: reload -> INACTIVE (enabledFlag=%d crashKill=%d activeTheme=%@)",
@@ -681,6 +702,7 @@ void ApolloThemeRuntimeReload(void) {
         }
     }
     sFontChoice = ApolloThemeFontFromKey(theme[kApolloThemeFontKey]);
+    sVoteArrowsAccent = [theme[kApolloThemeVoteArrowsAccentKey] boolValue];
     sEnabled = true;
     sEpoch++;
     os_unfair_lock_unlock(&sLock);
@@ -1046,6 +1068,71 @@ void ApolloThemeRuntimeInvalidate(void) {
 
 %end
 
+// --- vote arrows: accent-color option (spec: kApolloThemeVoteArrowsAccentKey) ---
+//
+// DualStateButtonNode (the up/down vote arrow widget — Apollo.swift /
+// DualStateButtonNode.swift) recolors its iconNode (an ASImageNode) on every
+// appearance update via `[iconNode setImageModificationBlock:
+// ASImageNodeTintColorModificationBlock(color)]` — RE'd in sub_10044bc94
+// (Apollo 1.15.11): `color` is plain white while the vote is active
+// (isActive==1, drawn over a separate green/blue-violet backgroundNode pill
+// keyed on the `type` ivar) and a neutral gray (Apollo's shared
+// tertiary-label palette helper) while inactive. We only retint the inactive
+// case — swapping the idle gray for the theme's accent — and leave the
+// active white-on-green/blue-violet pill alone, since that pairing is the
+// actual "you voted this way" signal and forcing both directions to the same
+// accent would erase it. Since ASImageNodeTintColorModificationBlock is
+// AsyncDisplayKit's own public C entry point (not an Apollo-private
+// address), we intercept the ObjC sink that consumes its result —
+// setImageModificationBlock: — rather than the private colour-selection
+// helper itself. Scoped to DualStateButtonNode's iconNode via supernode,
+// since ASImageNode.setImageModificationBlock: is otherwise used for
+// arbitrary icon tinting app-wide.
+static Class DualStateButtonNodeClass(void) {
+    static Class cls;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cls = objc_getClass("_TtC6Apollo19DualStateButtonNode"); });
+    return cls;
+}
+
+// AsyncDisplayKit is loaded into the host process by Apollo itself, but the
+// tweak dylib doesn't link against it — resolve this public C entry point at
+// runtime (like the rest of this file resolves Apollo/Texture classes via
+// objc_getClass) rather than linking the framework in just for one symbol.
+typedef id (*ASImageNodeTintColorModificationBlockFn)(UIColor *color);
+static ASImageNodeTintColorModificationBlockFn ASImageNodeTintColorModificationBlockPtr(void) {
+    static ASImageNodeTintColorModificationBlockFn fn;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        fn = (ASImageNodeTintColorModificationBlockFn)dlsym(RTLD_DEFAULT, "ASImageNodeTintColorModificationBlock");
+    });
+    return fn;
+}
+
+%hook ASImageNode
+
+- (void)setImageModificationBlock:(id)block {
+    if (sEnabled && sVoteArrowsAccent) {
+        Class dualStateCls = DualStateButtonNodeClass();
+        id supernode = dualStateCls ? [(ASDisplayNode *)self supernode] : nil;
+        // isActive==YES is Apollo's own "this is the cast vote" state (white
+        // icon over its green/blue-violet backgroundNode pill) — leave that
+        // alone so the pill's own colour still reads as feedback. Only the
+        // idle/neutral-gray icon (isActive==NO) gets the accent tint.
+        if (supernode && [supernode isKindOfClass:dualStateCls] && !MSHookIvar<BOOL>(supernode, "isActive")) {
+            ASImageNodeTintColorModificationBlockFn tintFn = ASImageNodeTintColorModificationBlockPtr();
+            UIColor *accent = tintFn ? ApolloThemeRuntimeColor(ApolloThemeTokenAccent) : nil;
+            if (accent) {
+                id accentBlock = tintFn(accent);
+                if (accentBlock) { %orig(accentBlock); return; }
+            }
+        }
+    }
+    %orig;
+}
+
+%end
+
 %hook _UINavigationBarTitleControl
 
 - (void)layoutSubviews {
@@ -1084,6 +1171,21 @@ void ApolloThemeRuntimeInvalidate(void) {
 - (void)didMoveToWindow {
     %orig;
     RethemeFontOnAttach((UIView *)self);
+}
+
+%end
+
+// See the forward-declaration comment above for why this needs its own sink:
+// Apollo fills this field's background from the same constant as real
+// separator hairlines, so the blanket kSeparatorEntries remap would otherwise
+// paint the search pill in the Advanced "Separators" color. Route it to
+// "Raised" instead, matching how that token is already described in the
+// editor ("inset controls and elevated panels").
+%hook _TtC6Apollo24ApolloSearchBarTextField
+
+- (void)setBackgroundColor:(UIColor *)color {
+    UIColor *raised = ApolloThemeRuntimeColor(ApolloThemeTokenTertiaryBackground);
+    %orig(raised ?: color);
 }
 
 %end
