@@ -293,6 +293,7 @@ Thank you to these wonderful people:
     </tr>
     <tr>
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/federgilad"><img src="https://avatars.githubusercontent.com/u/38831140?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="federgilad"/></a><br /><sub><b>federgilad</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/commits?author=federgilad" title="Code">Code</a></td>
+      <td align="center" valign="top" width="14.29%"><a href="https://github.com/ostechgit"><img src="https://avatars.githubusercontent.com/u/50818622?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="ostechgit"/></a><br /><sub><b>ostechgit</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/commits?author=ostechgit" title="Code">Code</a></td>
     </tr>
   </tbody>
 </table>
@@ -307,6 +308,10 @@ Thank you to these wonderful people:
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/bajader"><img src="https://avatars.githubusercontent.com/u/98495831?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="bajader"/></a><br /><sub><b>bajader</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/metalnakls"><img src="https://avatars.githubusercontent.com/u/15786688?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="metalnakls"/></a><br /><sub><b>metalnakls</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/paulo1manso"><img src="https://avatars.githubusercontent.com/u/77062284?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="paulo1manso"/></a><br /><sub><b>paulo1manso</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
+      <td align="center" valign="top" width="14.29%"><a href="https://github.com/lilacvibes"><img src="https://avatars.githubusercontent.com/u/61892971?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="lilacvibes"/></a><br /><sub><b>lilacvibes</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
+      <td align="center" valign="top" width="14.29%"><a href="https://github.com/harshb16"><img src="https://avatars.githubusercontent.com/u/49092079?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="harshb16"/></a><br /><sub><b>harshb16</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
+    </tr>
+    <tr>
       <td align="center" valign="top" width="14.29%"><a href="https://www.reddit.com/user/harunatsu91202024/"><img src="https://i.redd.it/snoovatar/avatars/ef90ed21-4a24-4a78-b535-848d4efc6378.png?s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="harumatsu"/></a><br /><sub><b>harumatsu</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
     </tr>
   </tbody>
