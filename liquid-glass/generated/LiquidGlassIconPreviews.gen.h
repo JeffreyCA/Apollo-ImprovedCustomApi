@@ -82,12 +82,16 @@ static const LGIconRowEntry kLGGroupEntries_custom[] = {
     { "bajader-glitched", "Glitched", "bajader" },
     { "paulo1manso-modern", "Modern", "paulo1manso" },
     { "paulo1manso-modern-alt", "Modern Alt", "paulo1manso" },
+    { "IllIIllIllIllII-helios", "Helios", "IllIIllIllIllII" },
+    { "IllIIllIllIllII-helios-alt", "Helios Alt", "IllIIllIllIllII" },
+    { "IllIIllIllIllII-helios-ultra", "Helios Ultra", "IllIIllIllIllII" },
+    { "IllIIllIllIllII-helios-ultra-alt", "Helios Ultra Alt", "IllIIllIllIllII" },
 };
 
 static const LGIconGroupDef kLGIconGroups[] = {
     { "community", "Liquid Glass", LGGroupPresentationInline, kLGGroupEntries_community, 4 },
     { "new-variants", "New Variants", LGGroupPresentationPush, kLGGroupEntries_new_variants, 45 },
-    { "custom", "Custom", LGGroupPresentationPush, kLGGroupEntries_custom, 5 },
+    { "custom", "Custom", LGGroupPresentationPush, kLGGroupEntries_custom, 9 },
 };
 
 static const size_t kLGIconGroupCount = 3;
