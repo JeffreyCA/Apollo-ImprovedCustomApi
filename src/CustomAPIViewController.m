@@ -35,6 +35,7 @@ typedef NS_ENUM(NSInteger, SectionIndex) {
     SectionMedia,
     SectionSubreddits,
     SectionNotificationBackend,
+    SectionPrivacy,
     SectionAbout,
     SectionCount
 };
@@ -670,7 +671,8 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionMedia: return 14 + (sEnableInlineImages ? 0 : -kApolloMediaInlineDependentRows) + (sVideoHoldSpeedEnabled ? 1 : 0);
         case SectionSubreddits: return 10 - (sSubredditListEnhancements ? 0 : 1) - (sCommunityHighlights ? 0 : 1);
         case SectionNotificationBackend: return 3; // URL + Registration Token + Test Connection
-        case SectionAbout: return 5; // GitHub + Reddit + Thanks To + Export Logs + Version
+        case SectionPrivacy: return 1; // Anonymous Install Count toggle
+        case SectionAbout: return 6; // GitHub + Reddit + Thanks To + Export Logs + Privacy Policy + Version
         default: return 0;
     }
 }
@@ -685,6 +687,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionMedia: return @"Media";
         case SectionSubreddits: return @"Subreddits";
         case SectionNotificationBackend: return @"Notification Backend";
+        case SectionPrivacy: return @"Privacy";
         case SectionAbout: return @"About";
         default: return nil;
     }
@@ -701,6 +704,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionMedia: cell = [self mediaCellForRow:indexPath.row tableView:tableView]; break;
         case SectionSubreddits: cell = [self subredditCellForRow:indexPath.row tableView:tableView]; break;
         case SectionNotificationBackend: cell = [self notificationBackendCellForRow:indexPath.row tableView:tableView]; break;
+        case SectionPrivacy: cell = [self privacyCellForRow:indexPath.row tableView:tableView]; break;
         case SectionAbout: cell = [self aboutCellForRow:indexPath.row tableView:tableView]; break;
         default: cell = [[UITableViewCell alloc] init]; break;
     }
@@ -1472,6 +1476,18 @@ typedef NS_ENUM(NSInteger, Tag) {
     return cell;
 }
 
+- (UITableViewCell *)privacyCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
+    // Single row: the anonymous usage heartbeat opt-out. The stored flag is a
+    // *disable* flag (default NO = enabled), so the switch shows the inverse.
+    // The explanatory text (with the tappable privacy-policy link) is the
+    // section footer — see footerAttributedTextForSection:.
+    BOOL enabled = ![[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDisableUsageHeartbeat];
+    return [self switchCellWithIdentifier:@"Cell_Privacy_Heartbeat"
+                                    label:@"Anonymous Install Count"
+                                       on:enabled
+                                   action:@selector(usageHeartbeatSwitchToggled:)];
+}
+
 - (UITableViewCell *)aboutCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
     switch (row) {
         case 0: return [self subtitleCellWithIdentifier:@"Cell_About_GitHub"
@@ -1510,6 +1526,17 @@ typedef NS_ENUM(NSInteger, Tag) {
             return cell;
         }
         case 4: {
+            UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_About_Privacy"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_About_Privacy"];
+            }
+            cell.textLabel.text = @"Privacy Policy";
+            cell.imageView.image = [self iconImageFromEmoji:@"🔒" size:32];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            return cell;
+        }
+        case 5: {
             UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_About_Version"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_About_Version"];
@@ -1649,6 +1676,14 @@ typedef NS_ENUM(NSInteger, Tag) {
             attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/nickclyde/apollo-backend"]}]];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@" instance. Requires a paid Apple Developer account on the signing side for APNs to function. Leave empty to disable."
             attributes:plainAttrs]];
+    } else if (section == SectionPrivacy) {
+        text = [[NSMutableAttributedString alloc]
+            initWithString:@"Sends one anonymous heartbeat so we can estimate active Apollo Reborn installs. No Reddit activity, account details, or feature usage is collected. More details can be found in our "
+            attributes:plainAttrs];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"privacy policy"
+            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [self apollo_themeAccentColor], NSLinkAttributeName: [NSURL URLWithString:@"https://apolloreborn.app/privacy"]}]];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"."
+            attributes:plainAttrs]];
     } else {
         return nil;
     }
@@ -1772,6 +1807,8 @@ typedef NS_ENUM(NSInteger, Tag) {
             [self pushThanksToViewController];
         } else if (indexPath.row == 3) {
             [self exportLogs];
+        } else if (indexPath.row == 4) {
+            [self presentURLInApolloBrowser:[NSURL URLWithString:@"https://apolloreborn.app/privacy"]];
         }
     } else if (indexPath.section == SectionMedia) {
         UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
@@ -1872,7 +1909,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         NSInteger row = ApolloMediaLogicalRow(indexPath.row);
         return (row == 0 || row == 1 || row == 2 || row == 3 || row == 6 || row == 7 || row == 14);
     }
-    if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 || indexPath.row == 3)) return YES;
+    if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 || indexPath.row == 3 || indexPath.row == 4)) return YES;
     if (indexPath.section == SectionNotificationBackend && indexPath.row == 2) return YES;
     return NO;
 }
@@ -2153,6 +2190,11 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)blockAnnouncementsSwitchToggled:(UISwitch *)sender {
     sBlockAnnouncements = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sBlockAnnouncements forKey:UDKeyBlockAnnouncements];
+}
+
+- (void)usageHeartbeatSwitchToggled:(UISwitch *)sender {
+    // Stored flag is a *disable* flag (default NO = enabled), so on = NOT disabled.
+    [[NSUserDefaults standardUserDefaults] setBool:!sender.isOn forKey:UDKeyDisableUsageHeartbeat];
 }
 
 - (void)flexSwitchToggled:(UISwitch *)sender {

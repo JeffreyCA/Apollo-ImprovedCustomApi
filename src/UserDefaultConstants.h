@@ -242,6 +242,15 @@ static NSString *const UDKeyNotificationBackendURL = @"NotificationBackendURL";
 // endpoints (/v1/device, /v1/device/{apns}/account[s]).
 static NSString *const UDKeyNotificationBackendRegistrationToken = @"NotificationBackendRegistrationToken";
 
+// Anonymous MAU heartbeat (beat.apolloreborn.app). ON by default; this is the
+// opt-OUT, mirroring the DisableApollonouncements pattern (a disable flag that
+// defaults to NO gives us on-by-default). See ApolloUsageHeartbeat.{h,m}.
+static NSString *const UDKeyDisableUsageHeartbeat = @"DisableUsageHeartbeat";
+// Internal bookkeeping for the heartbeat (not user-facing).
+static NSString *const UDKeyHeartbeatMonth   = @"UsageHeartbeatMonth";   // "2026-07"
+static NSString *const UDKeyHeartbeatToken   = @"UsageHeartbeatToken";   // monthly UUID
+static NSString *const UDKeyHeartbeatLastDay = @"UsageHeartbeatLastDay"; // "2026-07-05"
+
 // Feed thumbnails for text posts with embedded images (off = native behavior).
 static NSString *const UDKeyFeedTextPostThumbnails = @"FeedTextPostThumbnails";
 

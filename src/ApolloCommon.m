@@ -498,6 +498,22 @@ NSString *ApolloBundledResourcePath(NSString *baseName, NSString *extension) {
     return nil;
 }
 
+NSString *ApolloBuildVariant(void) {
+    // 1. IPA variants: stamped into Info.plist by build_release_variants.sh.
+    NSString *stamped = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"ARBuildVariant"];
+    if ([stamped isKindOfClass:NSString.class] && stamped.length) return stamped;
+
+    // 2. Jailbroken .deb installs (no repackaged Info.plist): read a bundled
+    //    marker dropped by the deb build, resolved across install layouts.
+    NSString *markerPath = ApolloBundledResourcePath(@"ARVariant", @"txt");
+    if (markerPath) {
+        NSString *m = [[NSString stringWithContentsOfFile:markerPath encoding:NSUTF8StringEncoding error:NULL]
+                       stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (m.length) return m;
+    }
+    return @"unknown";
+}
+
 static UIImage *ApolloCachedBundledPNGNamed(NSString *resourceName) {
     static NSMutableDictionary<NSString *, UIImage *> *cache = nil;
     static dispatch_once_t onceToken;

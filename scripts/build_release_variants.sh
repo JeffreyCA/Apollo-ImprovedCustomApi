@@ -225,7 +225,8 @@ apply_patches_in_place "$STANDARD_IPA" \
     --module fix-openin-extension \
     --module "$VERSIONS_MODULE" \
     --module "$SCHEMES_MODULE" \
-    --module inject-widgets
+    --module inject-widgets \
+    --module stamp-build-variant:ipa
 
 echo ""
 echo "[2/6] Building no-extensions injected IPA..."
@@ -236,33 +237,38 @@ cyan -i "$IPA_PATH" -f "$DEB_PATH" -o "$NOEXT_IPA" -e
 apply_patches_in_place "$NOEXT_IPA" \
     --module strip-substrate-arm64e \
     --module "$VERSIONS_MODULE" \
-    --module "$SCHEMES_MODULE"
+    --module "$SCHEMES_MODULE" \
+    --module stamp-build-variant:ipa-noext
 
 echo ""
 echo "[3/6] Applying Liquid Glass patch to standard IPA..."
 bash "$APPLY_PATCHES" --ipa "$STANDARD_IPA" -o "$GLASS_IPA" \
     --module liquid-glass-binary \
     --module liquid-glass-assets \
-    --module "$VERSIONS_MODULE"
+    --module "$VERSIONS_MODULE" \
+    --module stamp-build-variant:glass
 
 echo ""
 echo "[4/6] Applying Liquid Glass patch to no-extensions IPA..."
 bash "$APPLY_PATCHES" --ipa "$NOEXT_IPA" -o "$NOEXT_GLASS_IPA" \
     --module liquid-glass-binary \
     --module liquid-glass-assets \
-    --module "$VERSIONS_MODULE"
+    --module "$VERSIONS_MODULE" \
+    --module stamp-build-variant:glass-noext
 
 echo ""
 echo "[5/6] Applying Liquid Glass icons-only patch to standard IPA..."
 bash "$APPLY_PATCHES" --ipa "$STANDARD_IPA" -o "$GLASS_ICONS_IPA" \
     --module liquid-glass-assets \
-    --module "$VERSIONS_MODULE"
+    --module "$VERSIONS_MODULE" \
+    --module stamp-build-variant:glassicons
 
 echo ""
 echo "[6/6] Applying Liquid Glass icons-only patch to no-extensions IPA..."
 bash "$APPLY_PATCHES" --ipa "$NOEXT_IPA" -o "$NOEXT_GLASS_ICONS_IPA" \
     --module liquid-glass-assets \
-    --module "$VERSIONS_MODULE"
+    --module "$VERSIONS_MODULE" \
+    --module stamp-build-variant:glassicons-noext
 
 echo ""
 echo "Created:"
