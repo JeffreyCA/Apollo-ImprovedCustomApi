@@ -83,9 +83,9 @@ static const LGIconRowEntry kLGGroupEntries_custom[] = {
     { "paulo1manso-modern", "Modern", "paulo1manso" },
     { "paulo1manso-modern-alt", "Modern Alt", "paulo1manso" },
     { "IllIIllIllIllII-helios", "Helios", "IllIIllIllIllII" },
-    { "IllIIllIllIllII-helios-alt", "Helios Alt", "IllIIllIllIllII" },
+    { "IllIIllIllIllII-helios-alt", "Helios Halo", "IllIIllIllIllII" },
     { "IllIIllIllIllII-helios-ultra", "Helios Ultra", "IllIIllIllIllII" },
-    { "IllIIllIllIllII-helios-ultra-alt", "Helios Ultra Alt", "IllIIllIllIllII" },
+    { "IllIIllIllIllII-helios-ultra-alt", "Helios Ultra Halo", "IllIIllIllIllII" },
 };
 
 static const LGIconGroupDef kLGIconGroups[] = {
