@@ -67,8 +67,10 @@
     { "id": "bajader-glitched",          "displayName": "Glitched",             "designer": "bajader", "group": "custom" },
     { "id": "paulo1manso-modern",       "displayName": "Modern",              "designer": "paulo1manso", "group": "custom" },
     { "id": "paulo1manso-modern-alt",   "displayName": "Modern Alt",          "designer": "paulo1manso", "group": "custom" },
-    { "id": "IllIIllIllIllII-helios",           "displayName": "Helios",              "designer": "IllIIllIllIllII", "group": "custom" },
-    { "id": "IllIIllIllIllII-helios-alt",       "displayName": "Helios Halo",        "designer": "IllIIllIllIllII", "group": "custom" },
-    { "id": "IllIIllIllIllII-helios-ultra",     "displayName": "Helios Ultra",       "designer": "IllIIllIllIllII", "group": "custom" },
-    { "id": "IllIIllIllIllII-helios-ultra-alt", "displayName": "Helios Ultra Halo",  "designer": "IllIIllIllIllII", "group": "custom" }  ]
+    { "id": "IllIIllIllIllII-helios",             "displayName": "Helios",             "designer": "IllIIllIllIllII", "group": "custom" },
+    { "id": "IllIIllIllIllII-helios-alt",         "displayName": "Helios Halo",        "designer": "IllIIllIllIllII", "group": "custom" },
+    { "id": "IllIIllIllIllII-helios-cryo",        "displayName": "Helios Cryo",        "designer": "IllIIllIllIllII", "group": "custom" },
+    { "id": "IllIIllIllIllII-helios-cryo-halo",   "displayName": "Helios Cryo Halo",   "designer": "IllIIllIllIllII", "group": "custom" },
+    { "id": "IllIIllIllIllII-helios-ultra",       "displayName": "Helios Ultra",       "designer": "IllIIllIllIllII", "group": "custom" },
+    { "id": "IllIIllIllIllII-helios-ultra-alt",   "displayName": "Helios Ultra Halo",  "designer": "IllIIllIllIllII", "group": "custom" }]
 }
