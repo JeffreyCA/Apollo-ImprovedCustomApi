@@ -118,6 +118,13 @@ static NSString *const UDKeyLiveCommentsFollow = @"LiveCommentsFollow";
 static NSString *const UDKeyPerPostCommentSort = @"PerPostCommentSort";
 // Backing store for the above: { bare post id : { "s": sort raw, "t": last-use unix time } }.
 static NSString *const UDKeyPerPostCommentSortMapping = @"PerPostCommentSortMapping";
+// APOLLO'S OWN key (not ours) for the native Comments > "Remember Subreddit Sort"
+// toggle. Named here because "Remember Post Sort" and that toggle are mutually
+// exclusive (one sort-change gesture can't both pin a single post and move the
+// subreddit-wide sort, so both-on is a trap state): enabling either turns the other
+// off, and launch/restore normalize a stale both-on to per-post. This toggle key is
+// the ONLY native default the feature ever writes. See ApolloPerPostCommentSort.xm.
+static NSString *const UDKeyApolloRememberSubredditCommentsSort = @"RememberRedditCommentsSort";
 // Render image URLs (i.redd.it, preview.redd.it, i.imgur.com, generic .png/.jpg/.jpeg/.webp)
 // inline within post selftext and comments instead of leaving them as plain text links.
 static NSString *const UDKeyEnableInlineImages = @"EnableInlineImages";

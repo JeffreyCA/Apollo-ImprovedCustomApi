@@ -2877,6 +2877,11 @@ static void ApolloReplayValetKeychainItems(NSArray<NSDictionary *> *items) {
     sTapToRevealDeletedComments = [defaults boolForKey:UDKeyTapToRevealDeletedComments];
     sPassiveDeletedComments = [defaults boolForKey:UDKeyPassiveDeletedComments];
     sPerPostCommentSort = [defaults boolForKey:UDKeyPerPostCommentSort];
+    // A restored backup can carry both sort memories on (older build); they are
+    // mutually exclusive (see ApolloPerPostCommentSort.xm) and per-post wins.
+    if (sPerPostCommentSort && [defaults boolForKey:UDKeyApolloRememberSubredditCommentsSort]) {
+        [defaults setBool:NO forKey:UDKeyApolloRememberSubredditCommentsSort];
+    }
     sShowRecentlyReadThumbnails = [defaults boolForKey:UDKeyShowRecentlyReadThumbnails];
     sEnableFlairColors = [defaults boolForKey:UDKeyEnableFlairColors];
     sPreferredGIFFallbackFormat = ([defaults integerForKey:UDKeyPreferredGIFFallbackFormat] == 0) ? 0 : 1;

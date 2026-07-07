@@ -5,24 +5,31 @@
 // now opens with it. This module adds an opt-in per-POST memory: change the sort inside
 // a post and reopening that same post restores it.
 //
-// LAYERING with "Remember Subreddit Sort" (semantics agreed in PR #570 with MSGuzy):
-// the two memories COEXIST, per-post being the more specific layer. At post open:
-//   1. per-post saved sort (if this post has one)  — wins over everything, including
-//      the suggested sort and the per-subreddit remembered sort;
-//   2. otherwise Apollo's native chain, untouched: suggested sort (unless "Ignore
-//      Suggested Sort") > per-subreddit remembered sort (if "Remember Subreddit Sort"
-//      is on) > "Default Sort".
-// On a user sort change, BOTH layers observe the same gesture: this module records the
-// pick per-post, and Apollo's native per-subreddit remember (when its toggle is on)
-// keeps recording it subreddit-wide exactly as stock — so sibling posts follow the
-// latest pick per its native contract, while a post with its own memory keeps it.
-// (An earlier revision made per-post fully SUPERSEDE the native store via NSUserDefaults
-// interception; user feedback preferred the layered chain above, so nothing native is
-// suppressed anymore.) Purely additive: nothing is written to Apollo's own sort keys,
-// and with the toggle off every hook here is inert. The "Remember Post Sort" toggle row
-// is injected into Apollo's native Settings > General > Comments section, right under
-// its sibling "Remember Subreddit Sort" (see the SettingsGeneralViewController hooks at
-// the bottom of this file).
+// MUTUAL EXCLUSIVITY with "Remember Subreddit Sort" (final semantics from PR #570's
+// UX discussion with MSGuzy): both memories are fed by the exact same gesture — the
+// sort menu inside a post — so with both toggles on a single pick cannot express
+// whether the user meant "pin just this post" or "move the whole subreddit's sort";
+// both-on is an inherent trap state. The two toggles are therefore an either/or:
+//   - "Remember Post Sort" ON: a post whose sort you changed reopens on that sort
+//     (the pre-viewDidLoad ivar write beats everything, suggested sort included);
+//     every other post keeps Apollo's default chain (suggested > Default Sort —
+//     the per-subreddit remember is off in this state, by exclusivity).
+//   - Comments > "Remember Subreddit Sort" ON: stock Apollo behavior, untouched.
+//   - Neither: stock default chain.
+// Enforcement: enabling either toggle turns the other off (switch flip is animated
+// on-screen — both rows sit adjacent in the same section), a %hook on NSUserDefaults
+// setBool:forKey: catches the native switch being enabled, and launch/backup-restore
+// normalize a stale both-on (from an older build's state) to per-post-wins. Apollo's
+// native toggle key (UDKeyApolloRememberSubredditCommentsSort) is the ONLY native
+// default this feature ever writes, and only in direct response to an explicit user
+// toggle (or the both-on normalization). Earlier revisions tried per-post fully
+// superseding the native store (read+write interception — read as "nothing remembers
+// anymore") and then silent layering (both stores co-recording — read as "one post's
+// change still leaks subreddit-wide"); the either/or is what makes every state
+// self-explanatory. The "Remember Post Sort" toggle row is injected into Apollo's
+// native Settings > General > Comments section, right under its sibling "Remember
+// Subreddit Sort" (see the SettingsGeneralViewController hooks at the bottom of this
+// file).
 //
 // How Apollo does it (RE'd from the current binary):
 // - _TtC6Apollo22CommentsViewController holds `currentSort`, a Swift
@@ -318,6 +325,7 @@ static void PPCSDisarm(void) {
 
 static const void *kPPCSAnchorKey = &kPPCSAnchorKey;   // NSIndexPath: native path of "Remember Subreddit Sort" (Comments)
 static BOOL sPPCSScanning = NO;                        // while YES, the table hooks below are pass-through
+static __weak UIViewController *sPPCSSettingsVC = nil; // last-seen General screen, for the exclusivity cross-flip
 
 static NSIndexPath *PPCSSettingsAnchor(id vc) {
     return objc_getAssociatedObject(vc, kPPCSAnchorKey);
@@ -334,6 +342,21 @@ static UITableView *PPCSSettingsTable(id vc) {
         for (UIView *sub in v.subviews) [stack addObject:sub];
     }
     return nil;
+}
+
+// MARK: mutual exclusivity cross-flip (see the file header)
+//
+// Defaults are the source of truth; the visible UISwitch flip is a courtesy animation
+// so the user sees the either/or happen (the two rows are adjacent in the section). If
+// the row is off screen — or the screen is gone — the next form build re-reads
+// defaults, and Eureka's stale cached row value self-corrects on the next user toggle
+// because that toggle re-fires the write our setBool: hook (or handler) reacts to.
+static void PPCSSetRowSwitchOff(UIViewController *vc, NSIndexPath *displayPath) {
+    if (!vc || !displayPath || !vc.viewIfLoaded.window) return;
+    UITableViewCell *cell = [PPCSSettingsTable(vc) cellForRowAtIndexPath:displayPath];
+    if ([cell.accessoryView isKindOfClass:[UISwitch class]]) {
+        [(UISwitch *)cell.accessoryView setOn:NO animated:YES];
+    }
 }
 
 static void PPCSDiscoverSettingsAnchor(id vc, UITableView *tv) {
@@ -428,6 +451,7 @@ static BOOL PPCSIsHiddenLabelCell(UITableViewCell *cell) {
 
 - (void)viewDidLoad {
     %orig;
+    sPPCSSettingsVC = self;
     PPCSDiscoverSettingsAnchor(self, PPCSSettingsTable(self));
 }
 
@@ -877,6 +901,58 @@ static BOOL PPCSIsHiddenLabelCell(UITableViewCell *cell) {
     sPerPostCommentSort = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyPerPostCommentSort];
     ApolloLog(@"[PerPostSort] toggle -> %d", sender.isOn);
+    // Exclusivity: enabling per-post turns the native per-subreddit remember off. The
+    // anchor row is directly above this one, so the flip animates in plain sight.
+    if (sender.isOn &&
+        [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyApolloRememberSubredditCommentsSort]) {
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyApolloRememberSubredditCommentsSort];
+        PPCSSetRowSwitchOff(self, PPCSSettingsAnchor(self));
+        ApolloLog(@"[PerPostSort] exclusivity: native Remember Subreddit Sort turned OFF");
+    }
+}
+
+%end
+
+// MARK: - exclusivity: the native switch being enabled turns per-post off
+//
+// The native Comments > "Remember Subreddit Sort" row is Apollo's own Eureka SwitchRow;
+// its defaults write is the one reliable signal that the user enabled it. Swift's
+// UserDefaults bindings box the Bool through setObject:forKey: (verified: the row's
+// enable never reaches setBool:forKey:), but both entry points are covered in case a
+// future binary changes the write path. Keyed strictly on Apollo's toggle key
+// transitioning to YES while per-post is on — every write this file itself performs is
+// either a different key or NO/false, so there is no recursion.
+
+static void PPCSNativeRememberSubredditSortEnabled(NSUserDefaults *defaults) {
+    sPerPostCommentSort = NO;
+    [defaults setBool:NO forKey:UDKeyPerPostCommentSort];
+    ApolloLog(@"[PerPostSort] exclusivity: native Remember Subreddit Sort enabled -> per-post OFF");
+    UIViewController *vc = sPPCSSettingsVC;
+    if (vc) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSIndexPath *a = PPCSSettingsAnchor(vc);
+            if (a) PPCSSetRowSwitchOff(vc, [NSIndexPath indexPathForRow:a.row + 1 inSection:a.section]);
+        });
+    }
+}
+
+%hook NSUserDefaults
+
+- (void)setBool:(BOOL)value forKey:(NSString *)key {
+    %orig;
+    if (value && sPerPostCommentSort && [key isKindOfClass:[NSString class]] &&
+        [key isEqualToString:UDKeyApolloRememberSubredditCommentsSort]) {
+        PPCSNativeRememberSubredditSortEnabled(self);
+    }
+}
+
+- (void)setObject:(id)value forKey:(NSString *)key {
+    %orig;
+    if (sPerPostCommentSort && [key isKindOfClass:[NSString class]] &&
+        [key isEqualToString:UDKeyApolloRememberSubredditCommentsSort] &&
+        [value isKindOfClass:[NSNumber class]] && [(NSNumber *)value boolValue]) {
+        PPCSNativeRememberSubredditSortEnabled(self);
+    }
 }
 
 %end
