@@ -88,12 +88,14 @@ static const LGIconRowEntry kLGGroupEntries_custom[] = {
     { "helios-cryo-halo", "Helios Cryo Halo", "IllIIllIllIllII" },
     { "helios-ultra", "Helios Ultra", "IllIIllIllIllII" },
     { "helios-ultra-halo", "Helios Ultra Halo", "IllIIllIllIllII" },
+    { "helios-parallax", "Helios Parallax", "IllIIllIllIllII" },
+    { "helios-parallax-halo", "Helios Parallax Halo", "IllIIllIllIllII" },
 };
 
 static const LGIconGroupDef kLGIconGroups[] = {
     { "community", "Liquid Glass", LGGroupPresentationInline, kLGGroupEntries_community, 4 },
     { "new-variants", "New Variants", LGGroupPresentationPush, kLGGroupEntries_new_variants, 45 },
-    { "custom", "Custom", LGGroupPresentationPush, kLGGroupEntries_custom, 11 },
+    { "custom", "Custom", LGGroupPresentationPush, kLGGroupEntries_custom, 13 },
 };
 
 static const size_t kLGIconGroupCount = 3;
