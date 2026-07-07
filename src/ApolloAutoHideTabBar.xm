@@ -214,6 +214,17 @@ static BOOL ApolloTabBarLooksHidden(UITabBar *tabBar) {
     return NO;
 }
 
+// Monotonically increasing token per tab bar controller; a Hide whose fade is
+// still in flight abandons its completion work when a Show (or newer Hide)
+// has started since.
+static char kApolloTabBarMirrorGenerationKey;
+
+static NSInteger ApolloBumpTabBarMirrorGeneration(UITabBarController *tbc) {
+    NSInteger generation = [objc_getAssociatedObject(tbc, &kApolloTabBarMirrorGenerationKey) integerValue] + 1;
+    objc_setAssociatedObject(tbc, &kApolloTabBarMirrorGenerationKey, @(generation), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return generation;
+}
+
 static void ApolloShowTabBar(UITabBarController *tbc, BOOL animated) {
     if (!tbc) return;
     UITabBar *tabBar = tbc.tabBar;
@@ -222,6 +233,7 @@ static void ApolloShowTabBar(UITabBarController *tbc, BOOL animated) {
     ApolloLog(@"[AutoHideTabBarFix] Show (hidden=%d alpha=%.2f tx=%.1f ty=%.1f y=%.1f)",
               tabBar.hidden, tabBar.alpha,
               tabBar.transform.tx, tabBar.transform.ty, tabBar.frame.origin.y);
+    ApolloBumpTabBarMirrorGeneration(tbc);
 
     if ([tbc respondsToSelector:@selector(setTabBarHidden:animated:)]) {
         [tbc setTabBarHidden:NO animated:animated];
@@ -249,45 +261,43 @@ static void ApolloHideTabBar(UITabBarController *tbc, BOOL animated) {
 
     ApolloLog(@"[AutoHideTabBarFix] Hide (animated=%d)", animated);
 
-    // Prefer the system path: it slides the tab bar AND recomputes safe-area
-    // insets in one coordinated animation, so floating views anchored to the
-    // safe area (e.g. the blue jump-to-bottom button in CommentsVC) reflow
-    // smoothly alongside the fade instead of jumping after it completes.
-    if ([tbc respondsToSelector:@selector(setTabBarHidden:animated:)]) {
-        // Keep alpha at 1 so the system's slide/fade reads naturally; reset
-        // any leftover transform that the broken native path may have left.
-        tabBar.alpha = 1.0;
-        tabBar.transform = CGAffineTransformIdentity;
-        [tbc setTabBarHidden:YES animated:animated];
-        // Force the floating overlay (jump-to-bottom button etc) to reflow
-        // during the same animation tick by pumping a layout pass on the
-        // tab bar controller's view inside the animation block.
-        if (animated) {
-            [UIView animateWithDuration:0.25
-                                  delay:0.0
-                                options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseInOut
-                             animations:^{
-                [tbc.view setNeedsLayout];
-                [tbc.view layoutIfNeeded];
-            } completion:nil];
+    NSInteger generation = ApolloBumpTabBarMirrorGeneration(tbc);
+    BOOL canSystemHide = [tbc respondsToSelector:@selector(setTabBarHidden:animated:)];
+    tabBar.transform = CGAffineTransformIdentity;
+
+    void (^commitHidden)(void) = ^{
+        if (canSystemHide) {
+            [tbc setTabBarHidden:YES animated:NO];
+        } else {
+            tabBar.hidden = YES;
         }
+        // Leave alpha at 1 so the flag alone controls visibility from here on.
+        tabBar.alpha = 1.0;
+    };
+
+    if (!animated) {
+        commitHidden();
         return;
     }
 
-    // Fallback (shouldn't happen on iOS): plain alpha+hidden.
-    void (^apply)(void) = ^{ tabBar.alpha = 0.0; };
-    if (animated) {
-        [UIView animateWithDuration:0.25
-                              delay:0.0
-                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseIn
-                         animations:apply
-                         completion:^(BOOL finished) {
-            if (finished) tabBar.hidden = YES;
-        }];
-    } else {
-        apply();
-        tabBar.hidden = YES;
-    }
+    // Fade the bar out ourselves. Do NOT use setTabBarHidden:YES animated:YES:
+    // on iOS 26 with a legacy-linked (pre-26 SDK) app, that animation never
+    // moves the bar's model position — it stacks additive position animations
+    // that net out to a visible up-and-back "bounce" and only actually hides
+    // the bar by flipping .hidden at completion (issue #382's tab-bar pop).
+    // A plain alpha fade matches Apollo's own hide-on-swipe fade (its gesture
+    // handler animates the same property in the same direction, so the two
+    // compose instead of fighting), then the system flag is flipped
+    // non-animated at the end for safe-area/state correctness.
+    [UIView animateWithDuration:0.25
+                          delay:0.0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseIn
+                     animations:^{ tabBar.alpha = 0.0; }
+                     completion:^(__unused BOOL finished) {
+        NSInteger current = [objc_getAssociatedObject(tbc, &kApolloTabBarMirrorGenerationKey) integerValue];
+        if (current != generation) return; // a Show/newer Hide took over mid-fade
+        commitHidden();
+    }];
 }
 
 static void ApolloScheduleIdleRevealTimer(UITabBarController *tbc) {
