@@ -386,8 +386,8 @@ static void ApolloForEachVisibleTabBarController(void (^block)(UITabBarControlle
 }
 
 // Mirror nav-bar visibility onto the tab bar. Called from every nav-bar
-// hide/show entry point, including the gesture-driven path. iOS <26 only —
-// on iOS 26 we use the native UITabBarController.tabBarMinimizeBehavior path.
+// hide/show entry point. iOS <26 only — on iOS 26 we use the native
+// UITabBarController.tabBarMinimizeBehavior path.
 static void ApolloMirrorNavBarStateToTabBar(UINavigationController *nav, BOOL navHidden, BOOL animated) {
     if (ApolloSupportsNativeTabBarMinimize()) return;
     UITabBarController *tbc = ApolloLocateTabBarController(nav);
@@ -399,17 +399,35 @@ static void ApolloMirrorNavBarStateToTabBar(UINavigationController *nav, BOOL na
     }
 }
 
+// hidesBarsOnSwipe drives the nav bar through a percent-driven interactive
+// transition: UIKit calls setNavigationBarHidden:animated: the moment the pan
+// crosses the hide threshold (via _gestureRecognizedInteractiveHide:), then
+// scrubs that animation with the finger. Mirroring the tab bar from inside
+// that call kicks off setTabBarHidden: + a layout pass while UIKit's
+// transition is still in flight, which clobbers it — the nav bar (and the tab
+// bar with it) visibly snaps back to fully visible before hiding again
+// (issue #382, "legacy navigation bar stutters before collapsing"). Skip the
+// mirror while the swipe gesture is actively panning; _apolloBarHideSwipeFired:
+// mirrors the settled state once the gesture ends.
+static BOOL ApolloBarSwipeGestureActive(UINavigationController *nav) {
+    if (!nav.hidesBarsOnSwipe) return NO;
+    UIGestureRecognizerState state = nav.barHideOnSwipeGestureRecognizer.state;
+    return state == UIGestureRecognizerStateBegan || state == UIGestureRecognizerStateChanged;
+}
+
 %hook UINavigationController
 
 - (void)setNavigationBarHidden:(BOOL)hidden {
     %orig;
     if (ApolloSupportsNativeTabBarMinimize()) return;
+    if (ApolloBarSwipeGestureActive(self)) return;
     ApolloMirrorNavBarStateToTabBar(self, hidden, NO);
 }
 
 - (void)setNavigationBarHidden:(BOOL)hidden animated:(BOOL)animated {
     %orig;
     if (ApolloSupportsNativeTabBarMinimize()) return;
+    if (ApolloBarSwipeGestureActive(self)) return;
     ApolloMirrorNavBarStateToTabBar(self, hidden, animated);
 }
 

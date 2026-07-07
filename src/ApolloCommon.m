@@ -89,7 +89,19 @@ NSString *ApolloCollectAILogs(void) {
 // Get the SDK version from the main binary's LC_BUILD_VERSION load command
 // Returns 0 if not found, otherwise packed version (major << 16 | minor << 8 | patch)
 static uint32_t GetLinkedSDKVersion(void) {
-    const struct mach_header_64 *header = (const struct mach_header_64 *)_dyld_get_image_header(0);
+    // Find the main executable by filetype instead of assuming image index 0.
+    // In the simulator the injected tweak dylib can occupy index 0, which made
+    // IsLiquidGlass() read the dylib's own SDK (always current) instead of
+    // Apollo's — masking every legacy (non-glass) code path during sim testing.
+    const struct mach_header_64 *header = NULL;
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const struct mach_header *h = _dyld_get_image_header(i);
+        if (h && h->filetype == MH_EXECUTE) {
+            header = (const struct mach_header_64 *)h;
+            break;
+        }
+    }
+    if (!header) header = (const struct mach_header_64 *)_dyld_get_image_header(0);
     if (!header) return 0;
 
     uintptr_t cursor = (uintptr_t)header + sizeof(struct mach_header_64);
