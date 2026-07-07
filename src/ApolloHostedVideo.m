@@ -11,6 +11,7 @@
 
 #import "ApolloHostedVideo.h"
 #import "ApolloCommon.h"
+#import "ApolloSportsClipResolver.h"
 
 #pragma mark - Host classification + id extraction
 
@@ -21,6 +22,10 @@ ApolloHostedVideoKind ApolloHostedVideoKindForURL(NSURL *url) {
         return ApolloHostedVideoStreamable;
     if ([host isEqualToString:@"redgifs.com"] || [host hasSuffix:@".redgifs.com"])
         return ApolloHostedVideoRedgifs;
+    // Sports-clip hosts ride the same share pipeline, but only while their
+    // inline-playback toggle is on — off must restore stock behavior everywhere.
+    if (ApolloSportsClipsEnabled() && ApolloSportsClipsIsSportsHostURL(url))
+        return ApolloHostedVideoSportsClip;
     return ApolloHostedVideoNone;
 }
 
@@ -201,6 +206,14 @@ void ApolloHostedVideoResolve(NSURL *pageURL,
     switch (ApolloHostedVideoKindForURL(pageURL)) {
         case ApolloHostedVideoStreamable: AHVResolveStreamable(AHVStreamableShortcode(pageURL), done); return;
         case ApolloHostedVideoRedgifs:    AHVResolveRedgifs(AHVRedgifsID(pageURL), done);              return;
+        case ApolloHostedVideoSportsClip: {
+            // All supported sports hosts serve a single progressive mp4 with
+            // embedded AAC audio (a silent clip just has a silent track).
+            ApolloSportsClipsResolvePageURL(pageURL, ^(NSURL *mp4, NSURL *poster, CGSize size) {
+                done(mp4, poster, size, mp4 != nil);
+            });
+            return;
+        }
         case ApolloHostedVideoNone:
         default:                          done(nil, nil, CGSizeZero, NO);                              return;
     }

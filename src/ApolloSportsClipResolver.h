@@ -29,6 +29,7 @@
 // duration from the media itself.
 
 #import <Foundation/Foundation.h>
+#import <CoreGraphics/CoreGraphics.h>
 
 // This file is plain Objective-C but its callers are Logos .xm files compiled
 // as Objective-C++; keep C linkage so the symbols resolve.
@@ -60,6 +61,20 @@ BOOL ApolloSportsClipsHasID(NSString *clipID);
 // dictionary (nil on failure: dead clip, takedown placeholder, scrape miss).
 // Results are cached (short TTL). Completion may fire on any queue.
 void ApolloSportsClipsResolveID(NSString *clipID, void (^completion)(NSDictionary *streamableJSON));
+
+// YES when `url` belongs to a supported sports-clip host (toggle-independent;
+// callers gate on ApolloSportsClipsEnabled themselves).
+BOOL ApolloSportsClipsIsSportsHostURL(NSURL *url);
+
+// Resolves a sports-clip page URL straight to its playable media, for the
+// ApolloHostedVideo share paths (Share as Video / Share as Image gallery).
+// Unlike ApolloSportsClipsResolveID this needs no prior side-table
+// registration — kind and id are re-derived from the URL — so it works even
+// for posts whose feed cell never classified (e.g. shared from a search
+// result). mp4URL nil on failure; posterURL nil when the host exposes no real
+// poster; pixelSize CGSizeZero when unknown. Completion may fire on any queue.
+void ApolloSportsClipsResolvePageURL(NSURL *pageURL,
+                                     void (^completion)(NSURL *mp4URL, NSURL *posterURL, CGSize pixelSize));
 
 #ifdef __cplusplus
 }

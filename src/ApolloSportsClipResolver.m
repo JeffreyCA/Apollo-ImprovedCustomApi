@@ -282,6 +282,7 @@ static NSString *SCMetaContent(NSString *html, NSString *property) {
 // poster image just stays blank).
 static NSDictionary *SCStreamableJSON(NSURL *mp4, NSURL *poster, double width, double height, double duration) {
     if (!mp4) return nil;
+    BOOL estimatedSize = (width <= 0 || height <= 0);
     if (width <= 0) width = 1280;
     if (height <= 0) height = 720;
     if (duration <= 0) duration = 30.0;
@@ -297,6 +298,10 @@ static NSDictionary *SCStreamableJSON(NSURL *mp4, NSURL *poster, double width, d
         @"width": @(width),
         @"height": @(height),
         @"title": @"",
+        // Tweak-private marker (Apollo ignores unknown keys): the dimensions
+        // above are placeholder defaults, not the clip's real size. The share
+        // paths read this to report "size unknown" instead of a fake 16:9.
+        @"_sc_estimated_size": @(estimatedSize),
     };
 }
 
@@ -420,19 +425,20 @@ static void SCResolveMLBDirect(NSString *originalURL, void (^completion)(NSDicti
 
 // Short-TTL cache of synthesized JSON. Apollo's VideoClient memoizes per launch
 // anyway; this mainly dedupes the paired /videos/<id> + /videos/<id>.json
-// fetches and spares re-resolution when a cell recycles early in a session.
+// fetches and spares re-resolution when a cell recycles early in a session
+// (and when a share follows inline playback of the same clip).
 static const NSTimeInterval kSCCacheTTL = 600.0;
 
-void ApolloSportsClipsResolveID(NSString *clipID, void (^completion)(NSDictionary *streamableJSON)) {
-    if (!completion) return;
-    NSDictionary *entry = SCEntryForID(clipID);
-    if (!entry) { completion(nil); return; }
-
+// Shared dispatch + cache behind both public entry points. The cache key
+// carries the kind so a same-spelled id on two hosts can't collide.
+static void SCResolveKindAndID(SCHostKind kind, NSString *clipID, NSString *originalURL,
+                               void (^completion)(NSDictionary *)) {
     static NSCache<NSString *, NSDictionary *> *cache;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ cache = [NSCache new]; });
 
-    NSDictionary *cached = [cache objectForKey:clipID];
+    NSString *cacheKey = [NSString stringWithFormat:@"%ld|%@", (long)kind, clipID];
+    NSDictionary *cached = [cache objectForKey:cacheKey];
     if (cached && [NSDate date].timeIntervalSinceReferenceDate - [cached[@"ts"] doubleValue] < kSCCacheTTL) {
         completion(cached[@"json"]);
         return;
@@ -441,13 +447,11 @@ void ApolloSportsClipsResolveID(NSString *clipID, void (^completion)(NSDictionar
     void (^cacheAndComplete)(NSDictionary *) = ^(NSDictionary *json) {
         if (json) {
             [cache setObject:@{ @"json": json, @"ts": @([NSDate date].timeIntervalSinceReferenceDate) }
-                      forKey:clipID];
+                      forKey:cacheKey];
         }
         completion(json);
     };
 
-    SCHostKind kind = (SCHostKind)[entry[@"kind"] integerValue];
-    NSString *originalURL = entry[@"url"];
     ApolloLog(@"[SportsClips] resolving id=%@ kind=%ld", clipID, (long)kind);
     switch (kind) {
         case SCHostStreamin:  SCResolveStreamin(clipID, cacheAndComplete); break;
@@ -460,4 +464,78 @@ void ApolloSportsClipsResolveID(NSString *clipID, void (^completion)(NSDictionar
         case SCHostNone:
         default:              completion(nil); break;
     }
+}
+
+void ApolloSportsClipsResolveID(NSString *clipID, void (^completion)(NSDictionary *streamableJSON)) {
+    if (!completion) return;
+    NSDictionary *entry = SCEntryForID(clipID);
+    if (!entry) { completion(nil); return; }
+    SCResolveKindAndID((SCHostKind)[entry[@"kind"] integerValue], clipID, entry[@"url"], completion);
+}
+
+#pragma mark - Page-URL entry (Share as Video / Share as Image)
+
+// Derives (kind, clipID) straight from a page URL — the NSURL mirror of the
+// widened recognition regex's per-host id extraction, for callers that never
+// went through feed classification.
+static SCHostKind SCKindAndIDForURL(NSURL *url, NSString **outID) {
+    if (![url isKindOfClass:[NSURL class]]) return SCHostNone;
+    NSString *host = url.host.lowercaseString;
+    if ([host hasPrefix:@"www."]) host = [host substringFromIndex:4];
+    SCHostKind kind = SCKindForHost(host);
+    if (kind == SCHostNone) return SCHostNone;
+
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSString *c in url.pathComponents) {
+        if (c.length && ![c isEqualToString:@"/"]) [parts addObject:c];
+    }
+    NSString *clipID = nil;
+    if (kind == SCHostStreamain) {
+        // /<id>/watch or /en/<id>/watch — the id precedes the "watch" segment.
+        NSUInteger watchIdx = [parts indexOfObject:@"watch"];
+        clipID = (watchIdx != NSNotFound && watchIdx > 0) ? parts[watchIdx - 1] : parts.lastObject;
+    } else {
+        // /v/<id>, /c/<id>, or a bare /<file>.mp4 (MLB) — last component,
+        // extension stripped.
+        clipID = [parts.lastObject stringByDeletingPathExtension];
+    }
+    if (clipID.length == 0) return SCHostNone;
+    if (outID) *outID = clipID;
+    return kind;
+}
+
+BOOL ApolloSportsClipsIsSportsHostURL(NSURL *url) {
+    NSString *clipID = nil;
+    return SCKindAndIDForURL(url, &clipID) != SCHostNone;
+}
+
+void ApolloSportsClipsResolvePageURL(NSURL *pageURL,
+                                     void (^completion)(NSURL *mp4URL, NSURL *posterURL, CGSize pixelSize)) {
+    if (!completion) return;
+    NSString *clipID = nil;
+    SCHostKind kind = SCKindAndIDForURL(pageURL, &clipID);
+    if (kind == SCHostNone) { completion(nil, nil, CGSizeZero); return; }
+
+    SCResolveKindAndID(kind, clipID, pageURL.absoluteString, ^(NSDictionary *json) {
+        NSDictionary *files = [json[@"files"] isKindOfClass:[NSDictionary class]] ? json[@"files"] : nil;
+        NSDictionary *mp4Entry = [files[@"mp4"] isKindOfClass:[NSDictionary class]] ? files[@"mp4"] : nil;
+        NSURL *mp4 = SCURLFromString([mp4Entry[@"url"] isKindOfClass:[NSString class]] ? mp4Entry[@"url"] : nil);
+
+        // The synthesized thumbnail_url falls back to the mp4 URL itself when a
+        // host exposes no poster (Apollo's decoder requires the key); the share
+        // gallery must see "no poster" there so it leaves the native card alone.
+        NSString *thumb = [json[@"thumbnail_url"] isKindOfClass:[NSString class]] ? json[@"thumbnail_url"] : nil;
+        NSURL *poster = (thumb.length && ![thumb isEqualToString:mp4.absoluteString]) ? SCURLFromString(thumb) : nil;
+
+        // Placeholder 16:9 defaults are marked _sc_estimated_size — report
+        // CGSizeZero ("unknown") so share layout falls back to real sources
+        // (reddit's scraped preview aspect, the poster image, the AVAsset).
+        CGSize size = CGSizeZero;
+        if (![json[@"_sc_estimated_size"] boolValue]) {
+            double w = [mp4Entry[@"width"] isKindOfClass:[NSNumber class]] ? [mp4Entry[@"width"] doubleValue] : 0;
+            double h = [mp4Entry[@"height"] isKindOfClass:[NSNumber class]] ? [mp4Entry[@"height"] doubleValue] : 0;
+            if (w > 0 && h > 0) size = CGSizeMake(w, h);
+        }
+        completion(mp4, poster, size);
+    });
 }
