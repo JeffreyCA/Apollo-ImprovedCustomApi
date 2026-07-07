@@ -5,29 +5,24 @@
 // now opens with it. This module adds an opt-in per-POST memory: change the sort inside
 // a post and reopening that same post restores it.
 //
-// PRECEDENCE over "Remember Subreddit Sort" (issue #555; fixes the PR #570 report that
-// changing one post's sort still leaked onto every post in the subreddit): while
-// "Remember Post Sort" is on it is the SOLE authority for comment sort and Apollo's
-// native per-subreddit remember is not applied. A post you set individually reopens on
-// its own saved sort; a post you have NOT set individually opens on Apollo's default/
-// suggested sort (suggested unless "Ignore Suggested Sort", else the default comment
-// sort) — never on some sibling post's sort. This is deliberate and necessary: BOTH
-// memories are fed by the exact same "change the sort" gesture, so with both toggles on
-// a single change would otherwise also be written into Apollo's subreddit-wide store and
-// leak onto every sibling post (the reported bug). We keep per-post authoritative with
-// two NSUserDefaults hooks, active ONLY while the toggle is on and keyed strictly on
-// Apollo's own "RedditCommentsSortMapping" default (see the NSUserDefaults hooks below):
-//   (a) suppress the native per-subreddit sort WRITE, so a per-post change never pollutes
-//       the subreddit-wide store, and
-//   (b) hide that store from Apollo's apply-side reader, so untouched posts fall through
-//       to the default/suggested sort instead of a stale/leaked subreddit value.
-// The stored subreddit mapping itself is left intact (we suppress the write, we don't
-// clear it), so turning the toggle back off cleanly restores Apollo's native behavior.
-// Nothing is ever written to Apollo's own sort keys. With the toggle off every hook here
-// is inert and Apollo's native chain (suggested > per-subreddit remembered > default) is
-// untouched. The "Remember Post Sort" toggle row is injected into Apollo's native
-// Settings > General > Comments section, right under its sibling "Remember Subreddit
-// Sort" (see the SettingsGeneralViewController hooks at the bottom of this file).
+// LAYERING with "Remember Subreddit Sort" (semantics agreed in PR #570 with MSGuzy):
+// the two memories COEXIST, per-post being the more specific layer. At post open:
+//   1. per-post saved sort (if this post has one)  — wins over everything, including
+//      the suggested sort and the per-subreddit remembered sort;
+//   2. otherwise Apollo's native chain, untouched: suggested sort (unless "Ignore
+//      Suggested Sort") > per-subreddit remembered sort (if "Remember Subreddit Sort"
+//      is on) > "Default Sort".
+// On a user sort change, BOTH layers observe the same gesture: this module records the
+// pick per-post, and Apollo's native per-subreddit remember (when its toggle is on)
+// keeps recording it subreddit-wide exactly as stock — so sibling posts follow the
+// latest pick per its native contract, while a post with its own memory keeps it.
+// (An earlier revision made per-post fully SUPERSEDE the native store via NSUserDefaults
+// interception; user feedback preferred the layered chain above, so nothing native is
+// suppressed anymore.) Purely additive: nothing is written to Apollo's own sort keys,
+// and with the toggle off every hook here is inert. The "Remember Post Sort" toggle row
+// is injected into Apollo's native Settings > General > Comments section, right under
+// its sibling "Remember Subreddit Sort" (see the SettingsGeneralViewController hooks at
+// the bottom of this file).
 //
 // How Apollo does it (RE'd from the current binary):
 // - _TtC6Apollo22CommentsViewController holds `currentSort`, a Swift
@@ -80,17 +75,6 @@
 static NSString *const kPPCSSortKey = @"s";
 static NSString *const kPPCSTimestampKey = @"t";
 static const NSUInteger kPPCSMaxEntries = 500;
-
-// Apollo's own standardUserDefaults key for its per-SUBREDDIT comment-sort store — a dict
-// keyed by lowercased subreddit. RE'd from the current binary: the apply-side reader
-// (sub_10044395c) does dictionaryForKey: on this key, and the sort-change writer
-// (sub_100718ef8 -> sub_100443af0, gated on boolForKey:"RememberRedditCommentsSort")
-// does setObject:forKey: on it. This is intentionally NOT our own mapping key
-// (UDKeyPerPostCommentSortMapping = "PerPostCommentSortMapping"); the NSUserDefaults
-// hooks below match on this exact string so our own storage is never touched. The
-// "Remember Subreddit Sort" TOGGLE lives under a different (bool) key, so intercepting
-// this dictionary does not affect that switch's displayed state.
-static NSString *const kPPCSNativeSubredditSortKey = @"RedditCommentsSortMapping";
 
 // MARK: - runtime helpers (superclass-chain ivar access, matches ApolloLiveCommentsFollow)
 
@@ -297,46 +281,6 @@ static void PPCSDisarm(void) {
 
 %end
 
-// MARK: - per-post takes precedence over native "Remember Subreddit Sort"
-//
-// While the toggle is on these two hooks make per-post memory the sole comment-sort
-// authority (see the PRECEDENCE section in the file header). Both are gated on
-// sPerPostCommentSort and match strictly on Apollo's own "RedditCommentsSortMapping"
-// default, so when the feature is off they are pure pass-through and Apollo's native
-// per-subreddit remember behaves exactly as before. Our own store lives under a
-// different key and is never affected.
-
-%hook NSUserDefaults
-
-// (a) Suppress the native per-subreddit sort WRITE. Apollo persists the subreddit's sort
-// here on every user sort change when "Remember Subreddit Sort" is on; letting that write
-// through is exactly what leaked one post's sort onto its siblings. Dropping it leaves any
-// previously stored mapping intact (we don't clear it), so disabling "Remember Post Sort"
-// cleanly hands control back to Apollo's native behavior.
-- (void)setObject:(id)value forKey:(NSString *)key {
-    if (sPerPostCommentSort && [key isKindOfClass:[NSString class]] &&
-        [key isEqualToString:kPPCSNativeSubredditSortKey]) {
-        ApolloLog(@"[PerPostSort] suppressed native per-subreddit sort write (post-sort has precedence)");
-        return;
-    }
-    %orig;
-}
-
-// (b) Hide the native per-subreddit mapping from Apollo's apply-side reader, so a post the
-// user never set individually opens on Apollo's default/suggested sort rather than a
-// stale/leaked subreddit value. Returning nil is what the subreddit lookup sees; the
-// "Remember Subreddit Sort" switch reads a separate bool key, so its state is unchanged.
-- (NSDictionary *)dictionaryForKey:(NSString *)key {
-    if (sPerPostCommentSort && [key isKindOfClass:[NSString class]] &&
-        [key isEqualToString:kPPCSNativeSubredditSortKey]) {
-        ApolloLog(@"[PerPostSort] hid native per-subreddit sort mapping from apply path (post-sort has precedence)");
-        return nil;
-    }
-    return %orig;
-}
-
-%end
-
 // MARK: - Settings row (native Settings > General > Comments section)
 //
 // The toggle lives with its siblings (Default Sort / Remember Subreddit Sort /
@@ -446,6 +390,40 @@ static NSIndexPath *PPCSDisplayPath(id vc, NSIndexPath *native) {
     return [NSIndexPath indexPathForRow:native.row + 1 inSection:native.section];
 }
 
+// MARK: "Always Offer Translate" row hiding (single-owner, moved from ApolloSettings.xm)
+//
+// Apollo's native General > Other section contains an "Always Offer Translate" row that
+// is redundant now that the tweak ships its own Translation feature; it is hidden by
+// collapsing its height to 0 and skipping selection (the underlying Apollo setting is
+// untouched). This used to be a second, independent %hook SettingsGeneralViewController
+// in ApolloSettings.xm — but stacking two remappers on the same delegate methods is
+// order-fragile (PR #570 review): Logos %ctor ordering across translation units decides
+// which hook is outermost, the inner hook then receives index paths this module has
+// already shifted to NATIVE space while its own bookkeeping assumes display space, and
+// its height hook's [self tableView:cellForRowAtIndexPath:] peek re-enters the TOP of
+// the chain where that native-space path gets interpreted as display space and shifted
+// a second time. Owning both features in this one remapper keeps every path in DISPLAY
+// space, so the set membership and the (still top-of-chain) peek stay consistent.
+// This hiding is independent of the "Remember Post Sort" toggle and of whether the
+// anchor row was discovered (with no anchor, display space == native space).
+static NSString *const kPPCSAlwaysOfferTranslateLabel = @"Always Offer Translate";
+static const void *kPPCSHiddenRowsKey = &kPPCSHiddenRowsKey;
+
+// Display-space index paths of native rows this module hides on the General screen.
+static NSMutableSet<NSIndexPath *> *PPCSHiddenRowsForTableView(UITableView *tableView) {
+    NSMutableSet *set = objc_getAssociatedObject(tableView, kPPCSHiddenRowsKey);
+    if (!set) {
+        set = [NSMutableSet set];
+        objc_setAssociatedObject(tableView, kPPCSHiddenRowsKey, set, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return set;
+}
+
+static BOOL PPCSIsHiddenLabelCell(UITableViewCell *cell) {
+    NSString *text = cell.textLabel.text;
+    return text != nil && [text isEqualToString:kPPCSAlwaysOfferTranslateLabel];
+}
+
 %hook SettingsGeneralViewController
 
 - (void)viewDidLoad {
@@ -464,14 +442,16 @@ static NSIndexPath *PPCSDisplayPath(id vc, NSIndexPath *native) {
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     NSIndexPath *native = nil;
+    UITableViewCell *cell = nil;
     switch (PPCSClassifyRow(self, indexPath, &native)) {
         case PPCSRowOurs: {
             // Borrow the anchor row for its theming (background, label font/color,
             // switch tint), but return our OWN cell with a distinct reuse identifier
-            // so Eureka's dequeues can never recycle it into a native row.
+            // so Eureka's dequeues can never recycle it into a native row. It can
+            // never be a hidden native row, so skip the bookkeeping below.
             NSIndexPath *a = PPCSSettingsAnchor(self);
             UITableViewCell *donor = %orig(tableView, a);
-            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"ApolloPerPostSortRow"];
+            cell = [tableView dequeueReusableCellWithIdentifier:@"ApolloPerPostSortRow"];
             if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
                                                      reuseIdentifier:@"ApolloPerPostSortRow"];
             cell.backgroundColor = donor.backgroundColor;
@@ -489,9 +469,23 @@ static NSIndexPath *PPCSDisplayPath(id vc, NSIndexPath *native) {
             cell.accessoryView = sw;
             return cell;
         }
-        case PPCSRowShifted: return %orig(tableView, native);
-        default: return %orig;
+        case PPCSRowShifted: cell = %orig(tableView, native); break;
+        default: cell = %orig; break;
     }
+    // Hidden-row bookkeeping in display space. Skipped during the anchor scan: its
+    // pass-through paths stop matching display space the moment the row is injected,
+    // and a stale native-space entry would hide whichever row later shifts onto it.
+    if (!sPPCSScanning) {
+        NSMutableSet *hidden = PPCSHiddenRowsForTableView(tableView);
+        if (PPCSIsHiddenLabelCell(cell)) {
+            [hidden addObject:indexPath];
+            cell.hidden = YES;
+            cell.contentView.hidden = YES;
+        } else {
+            [hidden removeObject:indexPath];
+        }
+    }
+    return cell;
 }
 
 - (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -533,6 +527,18 @@ static NSIndexPath *PPCSDisplayPath(id vc, NSIndexPath *native) {
 // MARK: heights
 
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (!sPPCSScanning) {
+        NSMutableSet *hidden = PPCSHiddenRowsForTableView(tableView);
+        if ([hidden containsObject:indexPath]) return 0.0;
+        // Peek at the cell to catch a to-be-hidden row before its first real height is
+        // used (same approach the old ApolloSettings.xm hook took). The re-entrancy is
+        // safe precisely because this module is the screen's ONLY remapper now: the
+        // message dispatches to the top-of-chain cellForRowAtIndexPath: — the hook
+        // above — which reads this same display-space path and does the hidden-set
+        // bookkeeping itself.
+        UITableViewCell *peek = [self tableView:tableView cellForRowAtIndexPath:indexPath];
+        if (PPCSIsHiddenLabelCell(peek)) return 0.0;
+    }
     NSIndexPath *native = nil;
     switch (PPCSClassifyRow(self, indexPath, &native)) {
         case PPCSRowOurs: return %orig(tableView, PPCSSettingsAnchor(self));   // same as the anchor switch row
@@ -565,8 +571,12 @@ static NSIndexPath *PPCSDisplayPath(id vc, NSIndexPath *native) {
     NSIndexPath *native = nil;
     switch (PPCSClassifyRow(self, indexPath, &native)) {
         case PPCSRowOurs: return;   // our cell: fully styled from the donor already
-        case PPCSRowShifted: %orig(tableView, cell, native); return;
-        default: %orig; return;
+        case PPCSRowShifted: %orig(tableView, cell, native); break;
+        default: %orig; break;
+    }
+    if (PPCSIsHiddenLabelCell(cell)) {   // defensive re-hide after cell reuse
+        cell.hidden = YES;
+        cell.contentView.hidden = YES;
     }
 }
 
@@ -627,6 +637,10 @@ static NSIndexPath *PPCSDisplayPath(id vc, NSIndexPath *native) {
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (!sPPCSScanning && [PPCSHiddenRowsForTableView(tableView) containsObject:indexPath]) {
+        [tableView deselectRowAtIndexPath:indexPath animated:NO];   // hidden row: swallow the tap
+        return;
+    }
     NSIndexPath *native = nil;
     switch (PPCSClassifyRow(self, indexPath, &native)) {
         case PPCSRowOurs: [tableView deselectRowAtIndexPath:indexPath animated:YES]; return;
