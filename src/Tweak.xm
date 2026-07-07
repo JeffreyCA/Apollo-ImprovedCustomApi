@@ -160,6 +160,48 @@ static OSStatus SimKeychainServe(NSDictionary *q, NSData *data, CFTypeRef *resul
 }
 #endif
 
+// Fix for a report of the signed-in account getting silently wiped within
+// ~1-2ms of a successful sign-in or cold launch -- no relaunch or network
+// round-trip involved (confirmed via temporary request logging that no
+// access_token call ever happened in that window) -- also independently
+// reported by another user on the same Signulous + shared-"dystopia"-key
+// setup (apollo-reborn#567), so this isn't specific to one device.
+//
+// Root cause: Valet's read of its own account-secrets keychain item (service
+// contains "com.christianselig.Apollo", account "2RedditAccounts2") comes
+// back errSecItemNotFound, but the very next SecItemAdd for the SAME item
+// fails errSecDuplicateItem. Apollo's AccountManager doesn't retry the add
+// with an update on that failure; it just wipes the signed-in account on the
+// spot. The classic cause for exactly this "not found on read, duplicate on
+// add" pattern is an item that's iCloud-Keychain-synced
+// (kSecAttrSynchronizable): a plain read without that attribute only
+// searches non-synced items, but a synced item still collides as a duplicate
+// on add.
+//
+// Two complementary fixes: broaden every Valet read to explicitly include
+// synced items (prevents the false "not found" to begin with), and self-heal
+// a duplicate-add by deleting the stale conflicting item (whatever its actual
+// attributes are) and retrying, so Apollo always sees the successful add path
+// it expects.
+static NSDictionary *ApolloQueryByBroadeningSynchronizable(NSDictionary *query) {
+    if (query[(__bridge id)kSecAttrSynchronizable]) return query;
+    NSMutableDictionary *broadened = [query mutableCopy];
+    broadened[(__bridge id)kSecAttrSynchronizable] = (__bridge id)kSecAttrSynchronizableAny;
+    return broadened;
+}
+
+static void ApolloDeleteStaleKeychainItem(NSDictionary *query) {
+    NSMutableDictionary *deleteQuery = [NSMutableDictionary dictionary];
+    deleteQuery[(__bridge id)kSecClass] = query[(__bridge id)kSecClass] ?: (__bridge id)kSecClassGenericPassword;
+    for (id key in @[(__bridge id)kSecAttrService, (__bridge id)kSecAttrAccount, (__bridge id)kSecAttrAccessGroup]) {
+        if (query[key]) deleteQuery[key] = query[key];
+    }
+    deleteQuery[(__bridge id)kSecAttrSynchronizable] = (__bridge id)kSecAttrSynchronizableAny;
+    OSStatus status = SecItemDelete((__bridge CFDictionaryRef)deleteQuery);
+    ApolloLog(@"[KeychainSelfHeal] deleted stale duplicate item service=%@ account=%@ status=%d",
+              query[(__bridge id)kSecAttrService], query[(__bridge id)kSecAttrAccount], (int)status);
+}
+
 static void *SecItemAdd_orig;
 static OSStatus SecItemAdd_replacement(CFDictionaryRef query, CFTypeRef *result) {
     NSDictionary *strippedQuery = stripGroupAccessAttr(query);
@@ -174,7 +216,12 @@ static OSStatus SecItemAdd_replacement(CFDictionaryRef query, CFTypeRef *result)
         return errSecSuccess;
     }
 #endif
-    return ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemAdd_orig)((__bridge CFDictionaryRef)strippedQuery, result);
+    OSStatus status = ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemAdd_orig)((__bridge CFDictionaryRef)strippedQuery, result);
+    if (status == errSecDuplicateItem && IsValetQuery(strippedQuery)) {
+        ApolloDeleteStaleKeychainItem(strippedQuery);
+        status = ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemAdd_orig)((__bridge CFDictionaryRef)strippedQuery, result);
+    }
+    return status;
 }
 
 static void *SecItemCopyMatching_orig;
@@ -206,6 +253,11 @@ static OSStatus SecItemCopyMatching_replacement(CFDictionaryRef query, CFTypeRef
     }
 #endif
 
+    if (IsValetQuery(strippedQuery)) {
+        // Broaden the read to include iCloud-synced items too -- see the fix
+        // comment above SecItemAdd_replacement.
+        strippedQuery = ApolloQueryByBroadeningSynchronizable(strippedQuery);
+    }
     return ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemCopyMatching_orig)((__bridge CFDictionaryRef)strippedQuery, result);
 }
 
@@ -1455,7 +1507,6 @@ static void initializeRandomSources() {
                                     UDKeyModernSubredditDividers: @YES,
                                     UDKeyShowDeletedComments: @NO,
                                     UDKeyTapToRevealDeletedComments: @NO,
-                                    UDKeyPassiveDeletedComments: @NO,
                                     UDKeyEnableFlairColors: @NO,
                                     UDKeyShowRecentlyReadThumbnails: @YES,
                                     UDKeyFeedTextPostThumbnails: @YES,
@@ -1475,7 +1526,6 @@ static void initializeRandomSources() {
                                     UDKeyLinkPreviewCommentsMode: @(ApolloLinkPreviewModeFull),
                                     UDKeyLinkPreviewCardColor: @(ApolloLinkPreviewCardColorNeutral),
                                     UDKeyImageUploadProvider: @(ImageUploadProviderImgur),
-                                    UDKeyCommentLinkHost: @(CommentLinkHostOff),
                                     UDKeyShowUserAvatars: @NO,
                                     UDKeyUseProfileAvatarTabIcon: @NO,
                                     UDKeyShowDetailedProfiles: @YES,
@@ -1484,8 +1534,6 @@ static void initializeRandomSources() {
                                     UDKeyCommunityHighlightsWeb: @NO,
                                     UDKeyAutoHideTabBarShowOnIdle: @NO,
                                     UDKeyKeepSearchBarInPlace: @NO,
-                                    UDKeyIPadTabBarBottom: @NO,
-                                    UDKeyIconRowMagnifier: @YES,
                                     UDKeyLiveCommentsFollow: @YES,
                                     UDKeyEnableBulkTranslation: @NO,
                                     UDKeyAutoTranslateOnAppear: @YES,
@@ -1499,7 +1547,6 @@ static void initializeRandomSources() {
                                     UDKeyEnableAIPostSummaries: @YES,
                                     UDKeyEnableAICommentSummaries: @YES,
                                     UDKeyEnableTapToSummarize: @NO,
-                                    UDKeyEnableAIAutoExpandSummaries: @NO,
                                     UDKeyPictureInPictureEnabled: @NO,
                                     UDKeyPictureInPictureActivation: @(ApolloPiPActivationModeUnmutedOnly),
                                     UDKeyPictureInPictureStartPosition: @(ApolloPiPStartPositionTopRight),
@@ -1534,14 +1581,6 @@ static void initializeRandomSources() {
     sBlockAnnouncements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBlockAnnouncements];
     sShowDeletedComments = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowDeletedComments];
     sTapToRevealDeletedComments = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyTapToRevealDeletedComments];
-    sPassiveDeletedComments = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPassiveDeletedComments];
-    // Always Show and Passive are one-or-the-other (the settings screen
-    // enforces it on toggle); normalize any stale both-on state — Always
-    // Show wins, matching the comments-menu logic.
-    if (sShowDeletedComments && sPassiveDeletedComments) {
-        sPassiveDeletedComments = NO;
-        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyPassiveDeletedComments];
-    }
     sShowRecentlyReadThumbnails = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowRecentlyReadThumbnails];
     sFeedTextPostThumbnails = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFeedTextPostThumbnails];
     sPreferredGIFFallbackFormat = ([[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPreferredGIFFallbackFormat] == 0) ? 0 : 1;
@@ -1556,15 +1595,6 @@ static void initializeRandomSources() {
     sEnableAIPostSummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAIPostSummaries];
     sEnableAICommentSummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAICommentSummaries];
     sEnableTapToSummarize = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableTapToSummarize];
-    sEnableAIAutoExpandSummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAIAutoExpandSummaries];
-    // "Tap to Summarize" and "Open Summaries Automatically" are mutually exclusive in
-    // settings, but an interim build let both be enabled independently. Reconcile a
-    // leftover both-on state once at launch (tap wins, matching the runtime gate),
-    // so the settings rows can't end up both greyed and unrecoverable.
-    if (sEnableTapToSummarize && sEnableAIAutoExpandSummaries) {
-        sEnableAIAutoExpandSummaries = NO;
-        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyEnableAIAutoExpandSummaries];
-    }
     sInlineImageAlignment = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyInlineImageAlignment];
     if (sInlineImageAlignment < ApolloInlineImageAlignmentCenter || sInlineImageAlignment > ApolloInlineImageAlignmentRight) {
         sInlineImageAlignment = ApolloInlineImageAlignmentCenter;
@@ -1603,8 +1633,6 @@ static void initializeRandomSources() {
     ApolloSetLinkPreviewCardColorHex(cardColorHex);
     ApolloLog(@"[LinkPreviews] settings loaded bodyMode=%ld commentsMode=%ld cardColor=%ld cardColorHex=%@", (long)sLinkPreviewBodyMode, (long)sLinkPreviewCommentsMode, (long)sLinkPreviewCardColor, sLinkPreviewCardColorHex ?: @"(default)");
     sImageUploadProvider = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyImageUploadProvider];
-    sCommentLinkHost = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyCommentLinkHost];
-    if (sCommentLinkHost < CommentLinkHostOff || sCommentLinkHost > CommentLinkHostImgChest) sCommentLinkHost = CommentLinkHostOff;
     sShowUserAvatars = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars];
     sUseProfileAvatarTabIcon = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon];
     sShowDetailedProfiles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowDetailedProfiles];
@@ -1613,8 +1641,6 @@ static void initializeRandomSources() {
     sCommunityHighlightsWeb = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlightsWeb];
     sAutoHideTabBarShowOnIdle = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoHideTabBarShowOnIdle];
     sKeepSearchBarInPlace = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyKeepSearchBarInPlace];
-    sIPadTabBarBottom = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIPadTabBarBottom];
-    sIconRowMagnifier = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIconRowMagnifier];
     sLiveCommentsFollow = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyLiveCommentsFollow];
     sModernSubredditDividers = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers];
     sSubredditListEnhancements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditListEnhancements];
@@ -1885,17 +1911,6 @@ static void initializeRandomSources() {
         NSArray<NSString *> *webSessionUsers = ApolloWebSessionUsernames().allObjects;
         ApolloLog(@"[WebJSON] enabled at launch, %lu web-session account(s): %@",
                   (unsigned long)webSessionUsers.count, webSessionUsers);
-        // Poison repair + bearer attribution, both before AccountManager loads
-        // the account blobs. Repair MUST run first: on a poisoned blob the
-        // victim index still carries the web-session username, so seeding
-        // first would register the victim's REAL token under that username —
-        // and the chokepoint would then cookie-rewrite the victim's post-
-        // repair identity refresh as the wrong user, re-poisoning the account
-        // the moment it's selected. Repair clears the victim's currentUser, so
-        // the seed skips it and its requests stay on the oauth path.
-        @try { ApolloWebJSONRepairPoisonedAccountBlobs(); }
-        @catch (NSException *e) { ApolloLog(@"[WebJSON][repair] launch repair threw: %@", e); }
-        ApolloWebJSONSeedBearerRegistryFromDisk();
     }
 
     // Cold-start identity: synthesize a signed-in account for every stored
