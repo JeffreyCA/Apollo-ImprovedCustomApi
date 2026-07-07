@@ -109,7 +109,7 @@ Finally, **don't copy these examples verbatim**. If everyone adopts the same "sa
 - **Inline Media Previews**: Render images, GIFs, videos, and Imgur albums inline within posts and comments (Settings > Custom API > Media > Inline Media Previews)
 - **Rich Link Previews**: Render metadata-rich link cards in post bodies and comments (Settings > Custom API > Media)
 - **User Profile Pictures**: Show Reddit user avatars next to usernames in feeds, comments, and user profiles (Settings > Custom API > Media > Show User Profile Pictures)
-- **Self-hosted Notifications** (advanced): Optionally route push registrations, watchers, and inbox checks through your own forked [apollo-backend](https://github.com/nickclyde/apollo-backend) instance instead of having those requests silently dropped (Settings > Custom API > Notification Backend)
+- **Self-hosted Notifications** (advanced): Optionally route push registrations, watchers, and inbox checks through your own [apollo-backend](https://github.com/Apollo-Reborn/apollo-backend) instance instead of having those requests silently dropped — delivered over native APNs (paid Apple Developer account) or the free [Bark](https://apps.apple.com/us/app/bark-custom-notifications/id1403753865) app, which works even on free-Apple-ID sideloads (Settings > Custom API > Notification Backend)
 
 ### Not seeing thumbnails or inline previews?
 
@@ -123,10 +123,15 @@ Finally, **don't copy these examples verbatim**. If everyone adopts the same "sa
 
 ### Self-hosted notifications (advanced)
 
-The legacy Apollo push backends went dark in June 2023 and are otherwise blocked by the tweak. If you run your own instance of [nickclyde/apollo-backend](https://github.com/nickclyde/apollo-backend) (with your own Reddit OAuth `CLIENT_ID` / `CLIENT_SECRET` baked into its env vars), you can set the URL under **Settings > Custom API > Notification Backend** and the tweak will route all `apollopushserver.xyz`, `beta.apollonotifications.com`, and `apolloreq.com` traffic to that host instead. Leave the field empty to keep the current "silently dropped" behavior.
+The legacy Apollo push backends went dark in June 2023 and are otherwise blocked by the tweak. If you run your own instance of [apollo-backend](https://github.com/Apollo-Reborn/apollo-backend), you can set the URL under **Settings > Custom API > Notification Backend** and the tweak will route all `apollopushserver.xyz`, `beta.apollonotifications.com`, and `apolloreq.com` traffic to that host instead. Leave the field empty to keep the current "silently dropped" behavior.
+
+Notifications can be delivered two ways — pick the one that matches your Apple account:
+
+- **Native push (APNs) — requires a paid Apple Developer account ($99/year).** Real APNs delivery needs an `aps-environment` entitlement, which Apple only grants to paid teams, plus an explicit App ID with Push Notifications enabled (not the wildcard profile most sideloading tools create). This path supports everything, including Live Activities. Follow the backend's [Getting Started guide](https://github.com/Apollo-Reborn/apollo-backend/blob/main/GETTING_STARTED.md).
+- **Bark — free, no Apple Developer account.** Enable **Bark Delivery** under the same Notification Backend settings and notifications are relayed through the free [Bark](https://apps.apple.com/us/app/bark-custom-notifications/id1403753865) App Store app instead of APNs. This is the path for free-Apple-ID sideloads, which can never receive APNs pushes. Apollo's native notification and watcher UI works unmodified, taps deep-link back into Apollo, and Apollo's icons and notification sounds carry over. Follow the backend's [Bark Getting Started guide](https://github.com/Apollo-Reborn/apollo-backend/blob/main/GETTING_STARTED_BARK.md). Trade-offs: Live Activities remain APNs-only, and notification content transits the Bark relay (self-host `bark-server` — bundled with the backend — to keep it off Bark's hosted `api.day.app`).
 
 > [!IMPORTANT]
-> APNs delivery requires a real `aps-environment` entitlement, which Apple only grants under a paid Apple Developer team. Free-account sideloads can still register and exercise the watcher CRUD, but push notifications will never actually arrive. (On a free-account sideload the tweak detects the missing entitlement and replaces the Notifications settings with a clear "Notifications Unavailable" explanation instead of the misleading "Error Loading Notifications — contact developer" alert.)
+> A free-account sideload has no push entitlement, so native APNs pushes can never arrive on it no matter how the backend is configured — **Bark is the supported path there** (the tweak detects the missing entitlement and explains this in the Notifications settings). Paid-certificate installs can use either delivery method and switch between them in place.
 
 ## Known Issues
 
