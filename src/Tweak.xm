@@ -1459,6 +1459,7 @@ static void initializeRandomSources() {
                                     UDKeyEnableFlairColors: @NO,
                                     UDKeyShowRecentlyReadThumbnails: @YES,
                                     UDKeyFeedTextPostThumbnails: @YES,
+                                    UDKeySportsClipsInlineVideo: @YES,
                                     UDKeyPreferredGIFFallbackFormat: @1,
                                     UDKeyUnmuteCommentsVideos: @0,
                                     UDKeyVideoHoldSpeedEnabled: @YES,

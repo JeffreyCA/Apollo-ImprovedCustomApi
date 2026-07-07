@@ -664,10 +664,10 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionLinkPreviews: return 1;
         // Media base rows (the three "Rich Link Previews" rows moved out to their
         // own SectionLinkPreviews) plus the "Comment Link Host" picker, the chat
-        // inline-media toggle and the "Hold for Video Speed" toggle, minus the two
-        // inline-dependent rows when off, plus the hold-speed picker (logical row
-        // 14) when that toggle is on.
-        case SectionMedia: return 14 + (sEnableInlineImages ? 0 : -kApolloMediaInlineDependentRows) + (sVideoHoldSpeedEnabled ? 1 : 0);
+        // inline-media toggle, the "Sports Clip Links Play Inline" toggle and the
+        // "Hold for Video Speed" toggle, minus the two inline-dependent rows when
+        // off, plus the hold-speed picker (logical row 15) when that toggle is on.
+        case SectionMedia: return 15 + (sEnableInlineImages ? 0 : -kApolloMediaInlineDependentRows) + (sVideoHoldSpeedEnabled ? 1 : 0);
         case SectionSubreddits: return 10 - (sSubredditListEnhancements ? 0 : 1) - (sCommunityHighlights ? 0 : 1);
         case SectionNotificationBackend: return 3; // URL + Registration Token + Test Connection
         case SectionAbout: return 5; // GitHub + Reddit + Thanks To + Export Logs + Version
@@ -1302,8 +1302,16 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableChatMedia]
                                            action:@selector(chatMediaSwitchToggled:)];
         case 13:
+            // Sports-clip host links (streamff/streamin/streamain/…) play inline
+            // as native video instead of a link-preview card; explained in the
+            // section footer.
+            return [self switchCellWithIdentifier:@"Cell_Media_SportsClips"
+                                            label:@"Sports Clip Links Play Inline"
+                                               on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeySportsClipsInlineVideo]
+                                           action:@selector(sportsClipsSwitchToggled:)];
+        case 14:
             // Master toggle for "Hold for Video Speed". When on, the hold-speed
-            // picker (logical row 14) is shown below; when off, the right side of a
+            // picker (logical row 15) is shown below; when off, the right side of a
             // fullscreen video keeps Apollo's normal long-press menu. The gesture is
             // explained in the section footer, matching the sibling Media toggles
             // (which are plain switches with no inline subtitle).
@@ -1311,7 +1319,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Hold for Video Speed"
                                                on:sVideoHoldSpeedEnabled
                                            action:@selector(videoHoldSpeedSwitchToggled:)];
-        case 14: {
+        case 15: {
             UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_HoldSpeedValue"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_HoldSpeedValue"];
@@ -1639,7 +1647,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             attributes:plainAttrs]];
     } else if (section == SectionMedia) {
         text = [[NSMutableAttributedString alloc]
-            initWithString:@"Media Upload Host selects where Apollo uploads media attached to posts and comments.\n\nComment Link Host uploads images added to a comment or reply to Imgur or Img Chest and inserts a plain link instead of a native Reddit image, so they work even in subreddits that don't allow images in comments. Apollo still shows the linked image inline.\n\nProxying routes Imgur image requests through DuckDuckGo to bypass regional blocks; albums and uploads are unsupported by the proxy."
+            initWithString:@"Media Upload Host selects where Apollo uploads media attached to posts and comments.\n\nComment Link Host uploads images added to a comment or reply to Imgur or Img Chest and inserts a plain link instead of a native Reddit image, so they work even in subreddits that don't allow images in comments. Apollo still shows the linked image inline.\n\nProxying routes Imgur image requests through DuckDuckGo to bypass regional blocks; albums and uploads are unsupported by the proxy.\n\nSports Clip Links Play Inline makes highlight-clip links (streamff, streamin, streamain, bangr, dubz, dropr, MLB clips) play as inline videos like Streamable, instead of a link card. Clips removed from those sites show a video error."
             attributes:plainAttrs];
     } else if (section == SectionNotificationBackend) {
         text = [[NSMutableAttributedString alloc]
@@ -1788,7 +1796,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             [self presentInlineImageAlignmentSheetFromSourceView:cell];
         } else if (row == 7) {
             [self presentAutoplayInlineGIFModeSheetFromSourceView:cell];
-        } else if (row == 14) {
+        } else if (row == 15) {
             [self presentVideoHoldSpeedSheetFromSourceView:cell];
         }
     } else if (indexPath.section == SectionNotificationBackend && indexPath.row == 2) {
@@ -1870,7 +1878,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     }
     if (indexPath.section == SectionMedia) {
         NSInteger row = ApolloMediaLogicalRow(indexPath.row);
-        return (row == 0 || row == 1 || row == 2 || row == 3 || row == 6 || row == 7 || row == 14);
+        return (row == 0 || row == 1 || row == 2 || row == 3 || row == 6 || row == 7 || row == 15);
     }
     if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 || indexPath.row == 3)) return YES;
     if (indexPath.section == SectionNotificationBackend && indexPath.row == 2) return YES;
@@ -2531,6 +2539,12 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self.tableView reloadRowsAtIndexPaths:@[autoplayRow] withRowAnimation:UITableViewRowAnimationNone];
 }
 
+#pragma mark - Sports Clip Links
+
+- (void)sportsClipsSwitchToggled:(UISwitch *)sender {
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeySportsClipsInlineVideo];
+}
+
 #pragma mark - Hold for Video Speed
 
 - (void)videoHoldSpeedSwitchToggled:(UISwitch *)sender {
@@ -2538,10 +2552,10 @@ typedef NS_ENUM(NSInteger, Tag) {
     sVideoHoldSpeedEnabled = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sVideoHoldSpeedEnabled forKey:UDKeyVideoHoldSpeedEnabled];
     if (sVideoHoldSpeedEnabled == wasOn) return;
-    // The "Hold Speed" picker (logical row 14) is the last Media row and is shown
+    // The "Hold Speed" picker (logical row 15) is the last Media row and is shown
     // only while this toggle is on. Insert/delete it so the row counts stay
-    // consistent. ApolloMediaPhysicalRow(14) accounts for the inline-dependent gap.
-    NSIndexPath *pickerPath = [NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(14) inSection:SectionMedia];
+    // consistent. ApolloMediaPhysicalRow(15) accounts for the inline-dependent gap.
+    NSIndexPath *pickerPath = [NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(15) inSection:SectionMedia];
     if (sVideoHoldSpeedEnabled) {
         [self.tableView insertRowsAtIndexPaths:@[pickerPath] withRowAnimation:UITableViewRowAnimationFade];
     } else {
@@ -2556,7 +2570,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)setVideoHoldSpeed:(float)speed {
     sVideoHoldSpeed = ApolloSanitizedHoldSpeed(speed);
     [[NSUserDefaults standardUserDefaults] setFloat:sVideoHoldSpeed forKey:UDKeyVideoHoldSpeed];
-    NSIndexPath *pickerPath = [NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(14) inSection:SectionMedia];
+    NSIndexPath *pickerPath = [NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(15) inSection:SectionMedia];
     if ([[self.tableView indexPathsForVisibleRows] containsObject:pickerPath]) {
         [self.tableView reloadRowsAtIndexPaths:@[pickerPath] withRowAnimation:UITableViewRowAnimationNone];
     }

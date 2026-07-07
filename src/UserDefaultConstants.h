@@ -245,6 +245,10 @@ static NSString *const UDKeyNotificationBackendRegistrationToken = @"Notificatio
 // Feed thumbnails for text posts with embedded images (off = native behavior).
 static NSString *const UDKeyFeedTextPostThumbnails = @"FeedTextPostThumbnails";
 
+// Sports-clip host links (streamff/streamin/streamain/…) play inline as native
+// video via the Streamable pipeline (off = link-preview card, stock behavior).
+static NSString *const UDKeySportsClipsInlineVideo = @"SportsClipsInlineVideo";
+
 // Rich link preview cards: 0 = Off, 1 = Compact, 2 = Full.
 static NSString *const UDKeyLinkPreviewBodyMode = @"LinkPreviewBodyMode";
 static NSString *const UDKeyLinkPreviewCommentsMode = @"LinkPreviewCommentsMode";
