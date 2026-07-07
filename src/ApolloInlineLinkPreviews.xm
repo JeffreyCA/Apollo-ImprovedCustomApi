@@ -15,6 +15,7 @@
 #import "ApolloUserProfileCache.h"
 #import "UserDefaultConstants.h"
 
+#import <CoreImage/CoreImage.h>
 #import <Foundation/Foundation.h>
 #import <math.h>
 #import <QuartzCore/QuartzCore.h>
@@ -52,6 +53,7 @@ typedef NS_ENUM(unsigned char, ApolloLinkPreviewStackAlignItems) {
 - (id)style;
 - (UIView *)view;
 - (BOOL)isNodeLoaded;
+- (void)setNeedsDisplay;
 - (void)onDidLoad:(void(^)(__kindof ASDisplayNode *node))body;
 @property (nullable, nonatomic, copy) UIColor *backgroundColor;
 @property (nonatomic) CGFloat cornerRadius;
@@ -77,6 +79,10 @@ typedef NS_ENUM(unsigned char, ApolloLinkPreviewStackAlignItems) {
 @property (nullable, nonatomic, strong) UIImage *image;
 @property (nullable, nonatomic, strong) UIImage *defaultImage;
 @property (nonatomic) UIViewContentMode contentMode;
+// Texture ASImageNode: with a zero-size cropRect, only the origin is used —
+// it's the unit-space anchor of the aspect-fill crop window measured from the
+// image's top-left (y=0 features the top, 0.5 centers, 1 the bottom).
+@property (nonatomic) CGRect cropRect;
 @property (nonatomic) BOOL clipsToBounds;
 @property (nonatomic) CGFloat cornerRadius;
 @property (nonatomic) BOOL placeholderEnabled;
@@ -129,6 +135,7 @@ static char kApolloLinkPreviewImageFallbackInFlightKey;
 static char kApolloLinkPreviewImageFallbackAppliedURLKey;
 static char kApolloLinkPreviewRenderSignaturesKey;
 static char kApolloLinkPreviewV17LogCountKey;
+static char kApolloLinkPreviewCropContextKey;
 
 static NSHashTable<id> *sApolloLPRegisteredLinkNodes = nil;
 static dispatch_queue_t sApolloLPRegisteredLinkNodesQueue = NULL;
@@ -147,6 +154,8 @@ static NSString *ApolloLPRedditUsernameFromProfileURL(NSURL *url);
 static BOOL ApolloLPIsRedditSubredditURL(NSURL *url);
 static NSString *ApolloLPRedditSubredditFromURL(NSURL *url);
 static NSString *ApolloLPCleanDisplayText(NSString *text);
+static void ApolloLPMaybeKickFaceScanForNode(ASNetworkImageNode *imageNode, NSURL *imageURL, UIImage *image);
+static BOOL ApolloLPNodeImageBelongsToURL(ASNetworkImageNode *imageNode, NSString *key);
 
 static Class ApolloLPClass(NSString *name) {
     return NSClassFromString(name);
@@ -854,6 +863,7 @@ static void ApolloLPRememberRenderedImageForURL(ASNetworkImageNode *imageNode, N
     UIImage *image = imageNode.image;
     NSUInteger cost = (NSUInteger)(image.size.width * image.size.height * image.scale * image.scale * 4.0);
     [ApolloLPFallbackImageCache() setObject:image forKey:imageURL.absoluteString cost:cost];
+    ApolloLPMaybeKickFaceScanForNode(imageNode, imageURL, image);
 }
 
 static void ApolloLPSetNetworkImageURLPreservingImage(ASNetworkImageNode *imageNode, NSURL *imageURL) {
@@ -961,6 +971,7 @@ static void ApolloLPApplyFallbackImage(ASNetworkImageNode *imageNode, NSURL *ima
     }
     imageNode.backgroundColor = nil;
     objc_setAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackAppliedURLKey, imageURL.absoluteString, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    ApolloLPMaybeKickFaceScanForNode(imageNode, imageURL, image);
     ApolloLPLogOncePerHost(host ?: ApolloLPHost(imageURL), @"fallback-image-applied");
 }
 
@@ -1069,9 +1080,365 @@ static void ApolloLPScheduleImageFallbackIfNeeded(ASNetworkImageNode *imageNode,
         if (!strongImageNode) return;
         NSURL *currentURL = objc_getAssociatedObject(strongImageNode, &kApolloLinkPreviewImageFallbackURLKey);
         if (![currentURL.absoluteString isEqualToString:imageURLCopy.absoluteString]) return;
-        if (ApolloLPNetworkImageNodeHasImage(strongImageNode)) return;
+        if (ApolloLPNetworkImageNodeHasImage(strongImageNode)) {
+            // Texture's own loader won the race. Remember the image instead of
+            // just bailing — that feeds the fallback cache and, for tall
+            // cropped cards, the V22 face scan. Gated so a stale previous-URL
+            // image preserved as defaultImage across a URL switch is never
+            // stored/scanned under the new URL.
+            if (ApolloLPNodeImageBelongsToURL(strongImageNode, imageURLCopy.absoluteString)) {
+                ApolloLPRememberRenderedImageForURL(strongImageNode, imageURLCopy);
+            }
+            return;
+        }
         ApolloLPStartFallbackImageFetch(strongImageNode, imageURLCopy, hostCopy);
+        // One bounded late re-check: if Texture's loader lands the image after
+        // the 900ms window (slow CDN) and no further layout pass happens, the
+        // card would stay on the default anchor with no face scan. Not broken,
+        // but a mid-frame face wouldn't get re-centered while the card sits
+        // on screen — so look once more.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2500 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+            ASNetworkImageNode *lateNode = weakImageNode;
+            if (!lateNode) return;
+            NSURL *lateURL = objc_getAssociatedObject(lateNode, &kApolloLinkPreviewImageFallbackURLKey);
+            if (![lateURL.absoluteString isEqualToString:imageURLCopy.absoluteString]) return;
+            if (ApolloLPNodeImageBelongsToURL(lateNode, imageURLCopy.absoluteString)) {
+                ApolloLPRememberRenderedImageForURL(lateNode, imageURLCopy);
+            }
+        });
     });
+}
+
+// ---------------------------------------------------------------------------
+// V22: crop anchoring for tall preview images.
+//
+// The hero and bluesky cards clamp portrait images into a shorter
+// ASRatioLayoutSpec box (0.6 / 0.75 h:w) and the compact card fills a fixed
+// 84x84 square, all under UIViewContentModeScaleAspectFill. Texture's default
+// cropRect of (0.5, 0.5, 0, 0) centers that crop vertically, which routinely
+// decapitates portrait shots (user report: transfer-news cards showing a
+// torso with no head). A zero-size cropRect's origin is a pure alignment
+// anchor: origin.y = 0 features the TOP of the image, 1 the bottom. Tall
+// images now anchor to the top by default — where faces, headlines and
+// screenshot titles live — and a one-shot CIDetector face scan refines the
+// anchor asynchronously so a face that is NOT near the top (news photo with a
+// banner above the subject, etc.) still ends up inside the visible window.
+//
+// The scan runs at most once per image URL (results cached, including "no
+// faces"), off-main at utility QoS, and only for images that are actually
+// vertically cropped. ASImageNode's cropRect accessors are mutex-guarded and
+// the setter bounces its conditional setNeedsDisplay to the main thread, so
+// the card builders can set anchors from Texture's background layout threads;
+// an anchor set before the network image arrives applies when it lands,
+// because setImage: redisplays with the then-current cropRect.
+
+// Union of detected face rects per image URL, in top-down unit coordinates.
+// CGRectNull = scanned (or unscannable), no faces.
+static NSCache<NSString *, NSValue *> *ApolloLPFaceRegionCache(void) {
+    static NSCache *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [NSCache new];
+        cache.countLimit = 512;
+    });
+    return cache;
+}
+
+static NSMutableSet<NSString *> *ApolloLPFaceScanPending(void) {
+    static NSMutableSet *set;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ set = [NSMutableSet set]; });
+    return set;
+}
+
+static dispatch_queue_t ApolloLPFaceScanQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("com.apolloreborn.linkpreview.facescan",
+                                      dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+    });
+    return queue;
+}
+
+static CIDetector *ApolloLPFaceDetector(void) {
+    static CIDetector *detector;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        detector = [CIDetector detectorOfType:CIDetectorTypeFace
+                                      context:nil
+                                      options:@{ CIDetectorAccuracy : CIDetectorAccuracyLow }];
+    });
+    return detector;
+}
+
+// Nodes whose crop anchor should be re-refined when a face scan lands, keyed
+// by image URL. Values are weak hash tables — dead nodes just drop out.
+static NSMapTable<NSString *, NSHashTable<ASNetworkImageNode *> *> *ApolloLPCropRefinementNodes(void) {
+    static NSMapTable *table;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ table = [NSMapTable strongToStrongObjectsMapTable]; });
+    return table;
+}
+
+// YES when the node's current .image is genuinely the bitmap for `key`, and
+// not the PREVIOUS URL's image that ApolloLPSetNetworkImageURLPreservingImage
+// deliberately keeps as defaultImage across a URL switch (to avoid a gray
+// flash). Scanning that stale bitmap would poison the face-region cache under
+// the new URL for the whole session.
+static BOOL ApolloLPNodeImageBelongsToURL(ASNetworkImageNode *imageNode, NSString *key) {
+    if (key.length == 0 || !ApolloLPNetworkImageNodeHasImage(imageNode)) return NO;
+    UIImage *image = imageNode.image;
+    UIImage *defaultImage = [imageNode respondsToSelector:@selector(defaultImage)] ? imageNode.defaultImage : nil;
+    // Distinct from defaultImage = Texture's own download for the current URL.
+    if (image != defaultImage) return YES;
+    // Equal to defaultImage = either our fallback apply for THIS url (stamped
+    // below) or a preserved previous-URL bitmap (stamp cleared on switch).
+    NSString *appliedURL = objc_getAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackAppliedURLKey);
+    return [appliedURL isEqualToString:key];
+}
+
+static void ApolloLPRegisterCropRefinementNode(NSString *key, ASNetworkImageNode *imageNode) {
+    if (key.length == 0 || !imageNode) return;
+    NSMapTable *table = ApolloLPCropRefinementNodes();
+    @synchronized (table) {
+        // Keys are never removed on the hot path (their nodes just die out of
+        // the weak tables), so sweep empty entries periodically to keep the
+        // table from growing one entry per unique image URL for the session.
+        static NSUInteger registrations = 0;
+        if ((++registrations % 64) == 0) {
+            NSMutableArray *deadKeys = [NSMutableArray array];
+            for (NSString *existingKey in table) {
+                NSHashTable *set = [table objectForKey:existingKey];
+                if (set.allObjects.count == 0) [deadKeys addObject:existingKey];
+            }
+            for (NSString *deadKey in deadKeys) [table removeObjectForKey:deadKey];
+        }
+        NSHashTable *nodes = [table objectForKey:key];
+        if (!nodes) {
+            nodes = [NSHashTable weakObjectsHashTable];
+            [table setObject:nodes forKey:key];
+        }
+        [nodes addObject:imageNode];
+    }
+}
+
+static void ApolloLPSetCropAnchorY(ASNetworkImageNode *imageNode, CGFloat anchorY, BOOL redisplayIfLoaded) {
+    if (![imageNode respondsToSelector:@selector(setCropRect:)]
+        || ![imageNode respondsToSelector:@selector(cropRect)]) return;
+    CGRect target = CGRectMake(0.5, anchorY, 0.0, 0.0);
+    if (CGRectEqualToRect(imageNode.cropRect, target)) return;
+    imageNode.cropRect = target;
+    // The setter self-redisplays only when the node is loaded AND the image is
+    // larger than the bounds in points; small upscaled images miss that check,
+    // so the async refinement pass forces the redraw (display is deduped).
+    if (redisplayIfLoaded && ApolloLPNetworkImageNodeHasImage(imageNode)) {
+        [imageNode setNeedsDisplay];
+    }
+}
+
+// The faceless default: top for genuinely portrait images (that's where
+// heads, headlines and screenshot titles live), center for landscape-ish
+// images that only crop because their box is even wider (YouTube hqdefault
+// 4:3 thumbs are 16:9 frames LETTERBOXED with black bars — a centered crop
+// removes the bars symmetrically, a top crop would feature the top bar).
+static CGFloat ApolloLPDefaultCropAnchorY(CGFloat naturalRatio) {
+    return naturalRatio > 1.0 ? 0.0 : 0.5;
+}
+
+// Where inside the image the crop window should sit, as the cropRect origin.y
+// anchor (0 = window at the image top, 1 = at the bottom). visibleFrac is the
+// fraction of the image's height the box shows.
+static CGFloat ApolloLPCropAnchorYForFaceRegion(CGRect region, CGFloat visibleFrac, CGFloat defaultAnchorY) {
+    if (visibleFrac <= 0.0 || visibleFrac >= 0.999) return defaultAnchorY;
+    if (CGRectIsNull(region) || CGRectIsEmpty(region)) return defaultAnchorY;
+    CGFloat hidden = 1.0 - visibleFrac;
+    // Feature the topmost face, keeping ~15% of the window as headroom above
+    // it so hair/foreheads don't kiss the card edge.
+    CGFloat windowTop = region.origin.y - 0.15 * visibleFrac;
+    if (windowTop < 0.0) windowTop = 0.0;
+    if (windowTop > hidden) windowTop = hidden;
+    return windowTop / hidden;
+}
+
+// Main thread. Re-anchor every live node still showing `key` once its scan
+// result is in.
+static void ApolloLPRefineCropAnchorsForKey(NSString *key) {
+    NSValue *region = [ApolloLPFaceRegionCache() objectForKey:key];
+    if (!region) return;
+    NSArray *nodes = nil;
+    NSMapTable *table = ApolloLPCropRefinementNodes();
+    @synchronized (table) {
+        NSHashTable *set = [table objectForKey:key];
+        nodes = set.allObjects;
+        if (set && set.count == 0) [table removeObjectForKey:key];
+    }
+    for (ASNetworkImageNode *node in nodes) {
+        NSDictionary *context = objc_getAssociatedObject(node, &kApolloLinkPreviewCropContextKey);
+        if (![context[@"url"] isEqualToString:key]) continue;
+        CGFloat visibleFrac = [context[@"frac"] doubleValue];
+        if (visibleFrac <= 0.0) continue; // geometry unknown — keep the default anchor
+        CGFloat defaultAnchorY = [context[@"default"] doubleValue];
+        ApolloLPSetCropAnchorY(node, ApolloLPCropAnchorYForFaceRegion([region CGRectValue], visibleFrac, defaultAnchorY), YES);
+    }
+}
+
+static void ApolloLPStartFaceScanIfNeeded(NSString *key, UIImage *image, NSString *host) {
+    if (key.length == 0 || !image) return;
+    if ([ApolloLPFaceRegionCache() objectForKey:key]) return;
+    // CGImage-less (CIImage/vector-backed), animated, rotated, or absurdly
+    // large images would need coordinate gymnastics the detector can't repay —
+    // settle on the top-crop default and don't rescan.
+    CGImageRef cgImage = image.CGImage;
+    if (!cgImage || image.images.count > 1 || image.imageOrientation != UIImageOrientationUp
+        || (CGFloat)CGImageGetWidth(cgImage) * (CGFloat)CGImageGetHeight(cgImage) > 12000000.0) {
+        [ApolloLPFaceRegionCache() setObject:[NSValue valueWithCGRect:CGRectNull] forKey:key];
+        return;
+    }
+    NSMutableSet *pending = ApolloLPFaceScanPending();
+    @synchronized (pending) {
+        if ([pending containsObject:key]) return;
+        [pending addObject:key];
+    }
+    NSString *hostCopy = [host copy];
+    // Deliberately do NOT capture the UIImage: a fast scroll can queue many
+    // scans, and blocks pinning full decoded bitmaps would hold megabytes
+    // NSCache couldn't evict under pressure. Re-fetch from the fallback cache
+    // at scan time instead — every kick path stores the image there first. If
+    // it got evicted meanwhile, drop without caching a verdict so a later
+    // arrival can re-kick.
+    dispatch_async(ApolloLPFaceScanQueue(), ^{
+        CFTimeInterval started = CACurrentMediaTime();
+        UIImage *scanUIImage = [ApolloLPFallbackImageCache() objectForKey:key];
+        CGImageRef scanImage = scanUIImage.CGImage;
+        if (!scanImage) {
+            @synchronized (ApolloLPFaceScanPending()) { [ApolloLPFaceScanPending() removeObject:key]; }
+            return;
+        }
+        // The cached object is normally the exact image the kick guards saw,
+        // but re-check the unscannable cases in case it was replaced.
+        if (scanUIImage.images.count > 1 || scanUIImage.imageOrientation != UIImageOrientationUp) {
+            [ApolloLPFaceRegionCache() setObject:[NSValue valueWithCGRect:CGRectNull] forKey:key];
+            @synchronized (ApolloLPFaceScanPending()) { [ApolloLPFaceScanPending() removeObject:key]; }
+            return;
+        }
+        CGRect region = CGRectNull;
+        NSUInteger faceCount = 0;
+        @try {
+            CGFloat width = (CGFloat)CGImageGetWidth(scanImage);
+            CGFloat height = (CGFloat)CGImageGetHeight(scanImage);
+            CIDetector *detector = ApolloLPFaceDetector();
+            if (width >= 1.0 && height >= 1.0 && detector) {
+                NSArray<CIFeature *> *features = [detector featuresInImage:[CIImage imageWithCGImage:scanImage]];
+                for (CIFeature *feature in features) {
+                    // CIDetector reports bottom-left-origin pixel rects;
+                    // normalize into top-down unit coordinates.
+                    CGRect bounds = feature.bounds;
+                    CGRect normalized = CGRectMake(bounds.origin.x / width,
+                                                   1.0 - (bounds.origin.y + bounds.size.height) / height,
+                                                   bounds.size.width / width,
+                                                   bounds.size.height / height);
+                    region = CGRectIsNull(region) ? normalized : CGRectUnion(region, normalized);
+                    faceCount++;
+                }
+            }
+        } @catch (NSException *exception) {
+            region = CGRectNull;
+        }
+        [ApolloLPFaceRegionCache() setObject:[NSValue valueWithCGRect:region] forKey:key];
+        @synchronized (pending) { [pending removeObject:key]; }
+        ApolloLog(@"[LinkPreviews] V22-face-scan host=%@ faces=%lu top=%.2f ms=%.0f",
+                  hostCopy ?: @"?", (unsigned long)faceCount,
+                  CGRectIsNull(region) ? -1.0 : region.origin.y,
+                  (CACurrentMediaTime() - started) * 1000.0);
+        dispatch_async(dispatch_get_main_queue(), ^{ ApolloLPRefineCropAnchorsForKey(key); });
+    });
+}
+
+// Tap on every point where a real UIImage becomes observable for a node
+// (Texture load noticed on a layout pass / 900ms recheck, fallback fetch
+// applied). Only nodes a card builder marked as vertically cropped carry the
+// context, so avatars and wide images never reach the detector.
+static void ApolloLPMaybeKickFaceScanForNode(ASNetworkImageNode *imageNode, NSURL *imageURL, UIImage *image) {
+    NSString *key = imageURL.absoluteString;
+    if (key.length == 0) return;
+    NSDictionary *context = objc_getAssociatedObject(imageNode, &kApolloLinkPreviewCropContextKey);
+    if (![context[@"url"] isEqualToString:key]) return;
+    // Only scan images with KNOWN tall geometry: with frac == 0 (size unknown)
+    // a face region couldn't be applied anyway, and the pass that learns the
+    // real size re-kicks with the image already in the fallback cache.
+    if ([context[@"frac"] doubleValue] <= 0.0) return;
+    // Never scan a stale previous-URL bitmap under this URL's cache key.
+    if (!ApolloLPNodeImageBelongsToURL(imageNode, key)) return;
+    ApolloLPStartFaceScanIfNeeded(key, image, ApolloLPHost(imageURL));
+}
+
+// Card-builder entry point (Texture background layout threads). boxRatio is
+// the h:w ratio of the box the image aspect-fills. Decides whether the image
+// is vertically cropped, sets the anchor (top, or face-refined when the scan
+// already ran), registers the node for async refinement, and kicks the scan
+// when a decoded image is already at hand.
+static void ApolloLPApplyVerticalCropAnchor(ASNetworkImageNode *imageNode, ApolloLinkPreview *preview, CGFloat boxRatio, NSString *host) {
+    if (!imageNode || boxRatio <= 0.0) return;
+    if (![imageNode respondsToSelector:@selector(setCropRect:)]) return;
+    NSString *key = imageNode.URL.absoluteString;
+    if (key.length == 0) return;
+
+    // Natural h:w — prefer the fetcher's metadata, fall back to any decoded
+    // image we already hold (covers previews whose metadata lacks a size).
+    CGFloat naturalRatio = 0.0;
+    CGSize metaSize = preview.imageSize;
+    if (metaSize.width > 1.0 && metaSize.height > 1.0) {
+        naturalRatio = metaSize.height / metaSize.width;
+    }
+    UIImage *availableImage = ApolloLPNodeImageBelongsToURL(imageNode, key)
+        ? imageNode.image
+        : [ApolloLPFallbackImageCache() objectForKey:key];
+    if (naturalRatio <= 0.0 && availableImage.size.width > 1.0 && availableImage.size.height > 1.0) {
+        naturalRatio = availableImage.size.height / availableImage.size.width;
+    }
+
+    // Known geometry, no vertical crop (wide/matching images): keep Texture's
+    // default centered crop and stop tracking the node for refinement.
+    // (Atomic association: written here on Texture layout threads, read on
+    // main by the refine/recheck paths — the nonatomic getter wouldn't retain
+    // under the runtime's lock and could return a just-released dict.)
+    if (naturalRatio > 0.0 && naturalRatio <= boxRatio * 1.02) {
+        objc_setAssociatedObject(imageNode, &kApolloLinkPreviewCropContextKey, nil, OBJC_ASSOCIATION_COPY);
+        ApolloLPSetCropAnchorY(imageNode, 0.5, NO);
+        return;
+    }
+
+    // Vertically cropped image (or size still unknown — visibleFrac == 0,
+    // where the centered default keeps the pre-V22 behavior until a real
+    // size shows up on a later pass).
+    CGFloat visibleFrac = naturalRatio > 0.0 ? boxRatio / naturalRatio : 0.0;
+    CGFloat defaultAnchorY = naturalRatio > 0.0 ? ApolloLPDefaultCropAnchorY(naturalRatio) : 0.5;
+    NSDictionary *context = @{ @"url": key, @"frac": @(visibleFrac), @"default": @(defaultAnchorY) };
+    objc_setAssociatedObject(imageNode, &kApolloLinkPreviewCropContextKey, context, OBJC_ASSOCIATION_COPY);
+    ApolloLPRegisterCropRefinementNode(key, imageNode);
+
+    CGFloat anchorY = defaultAnchorY;
+    NSValue *region = [ApolloLPFaceRegionCache() objectForKey:key];
+    // A cache hit that is pointer-identical to this node's preserved
+    // defaultImage during an A->B URL switch is A's bitmap filed under B
+    // (the preserve-and-remember flow) — never feed that to the one-shot
+    // face scan.
+    BOOL imageTrusted = availableImage
+        && (ApolloLPNodeImageBelongsToURL(imageNode, key) || availableImage != imageNode.defaultImage);
+    if (region && visibleFrac > 0.0) {
+        anchorY = ApolloLPCropAnchorYForFaceRegion([region CGRectValue], visibleFrac, defaultAnchorY);
+    } else if (!region && imageTrusted && visibleFrac > 0.0) {
+        ApolloLPStartFaceScanIfNeeded(key, availableImage, host);
+    }
+    ApolloLPSetCropAnchorY(imageNode, anchorY, NO);
+    // Stable dedup key (no per-image numbers — those would degrade the
+    // once-per-host set to once-per-geometry). Numeric detail lives in the
+    // per-scan V22-face-scan log line.
+    NSString *kind = region
+        ? (CGRectIsNull([region CGRectValue]) ? (defaultAnchorY <= 0.0 ? @"top" : @"center") : @"face")
+        : (visibleFrac <= 0.0 ? @"unknown-size" : (defaultAnchorY <= 0.0 ? @"top" : @"center"));
+    ApolloLPLogOncePerHost(host, [NSString stringWithFormat:@"V22-crop-anchor kind=%@", kind]);
 }
 
 static UIColor *ApolloLPBlendColor(UIColor *foreground, UIColor *background, CGFloat foregroundAlpha, UITraitCollection *traitCollection) {
@@ -2014,6 +2381,9 @@ static id ApolloLPBuildCompactCardSpec(ASDisplayNode *hostNode, NSURL *url, Apol
         imageNode.contentMode = UIViewContentModeScaleAspectFill;
         imageNode.cornerRadius = 8.0;
         ApolloLPApplyStyleSize([imageNode style], CGSizeMake(84.0, 84.0));
+        // V22: the square thumb shows h:w = 1.0 of the image; anchor tall
+        // images to the top / detected face instead of the centered crop.
+        ApolloLPApplyVerticalCropAnchor(imageNode, preview, 1.0, ApolloLPHost(url));
         [rowChildren addObject:imageNode];
     }
     [rowChildren addObject:textStack];
@@ -2100,6 +2470,11 @@ static id ApolloLPBuildHeroCardSpec(ASDisplayNode *hostNode, NSURL *url, ApolloL
             }
         }
 
+        if (!isPosterPreview) {
+            // V22: poster hosts render aspect-fit (no crop); everything else
+            // aspect-fills, so anchor tall images to the top / detected face.
+            ApolloLPApplyVerticalCropAnchor(imageNode, preview, ratio, ApolloLPHost(url));
+        }
         [cardChildren addObject:[ratioClass ratioLayoutSpecWithRatio:ratio child:imageNode]];
     }
 
@@ -2261,6 +2636,9 @@ static id ApolloLPBuildBlueskyPostCardSpec(ASDisplayNode *hostNode, NSURL *url, 
         if (imageSize.width > 1.0 && imageSize.height > 1.0) {
             ratio = MAX(MIN(imageSize.height / imageSize.width, 0.75), 0.45);
         }
+        // V22: anchor tall post images to the top / detected face so portrait
+        // shots keep the head inside the clamped box.
+        ApolloLPApplyVerticalCropAnchor(imageNode, preview, ratio, ApolloLPHost(url));
         [cardChildren addObject:[ratioClass ratioLayoutSpecWithRatio:ratio child:imageNode]];
     }
     ASInsetLayoutSpec *contentInset = [insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(11.0, 12.0, 12.0, 12.0) child:contentStack];
