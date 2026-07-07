@@ -1,6 +1,7 @@
 #import "CustomAPIViewController.h"
 #import "ApolloCommon.h"
 #import "ApolloNotificationBackend.h"
+#import "ApolloUsageHeartbeat.h"
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloAISettingsViewController.h"
 #import "ApolloWebSessionStore.h"
@@ -1481,7 +1482,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     // *disable* flag (default NO = enabled), so the switch shows the inverse.
     // The explanatory text (with the tappable privacy-policy link) is the
     // section footer — see footerAttributedTextForSection:.
-    BOOL enabled = ![[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDisableUsageHeartbeat];
+    BOOL enabled = !ApolloUsageHeartbeatIsDisabled();
     return [self switchCellWithIdentifier:@"Cell_Privacy_Heartbeat"
                                     label:@"Anonymous Install Count"
                                        on:enabled
@@ -2193,8 +2194,9 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (void)usageHeartbeatSwitchToggled:(UISwitch *)sender {
-    // Stored flag is a *disable* flag (default NO = enabled), so on = NOT disabled.
-    [[NSUserDefaults standardUserDefaults] setBool:!sender.isOn forKey:UDKeyDisableUsageHeartbeat];
+    // Mirror the opt-out into both NSUserDefaults and the durable heartbeat plist
+    // so a sign-in / settings restore can't silently re-enable it. on = NOT disabled.
+    ApolloSetUsageHeartbeatDisabled(!sender.isOn);
 }
 
 - (void)flexSwitchToggled:(UISwitch *)sender {

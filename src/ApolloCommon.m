@@ -503,8 +503,11 @@ NSString *ApolloBuildVariant(void) {
     NSString *stamped = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"ARBuildVariant"];
     if ([stamped isKindOfClass:NSString.class] && stamped.length) return stamped;
 
-    // 2. Jailbroken .deb installs (no repackaged Info.plist): read a bundled
-    //    marker dropped by the deb build, resolved across install layouts.
+    // 2. Jailbroken .deb installs (no repackaged Info.plist to carry
+    //    ARBuildVariant): read the ARVariant.txt marker stamped into
+    //    ApolloReborn.bundle by the Makefile's before-package hook — "deb-rootful"
+    //    or "deb-rootless" per THEOS_PACKAGE_SCHEME — resolved across the rootful
+    //    (/Library/...) and rootless (/var/jb/...) install layouts.
     NSString *markerPath = ApolloBundledResourcePath(@"ARVariant", @"txt");
     if (markerPath) {
         NSString *m = [[NSString stringWithContentsOfFile:markerPath encoding:NSUTF8StringEncoding error:NULL]

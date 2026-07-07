@@ -254,11 +254,27 @@ lg-previews:
 	@echo "Regenerating $(notdir $(LG_PREVIEW_HEADER)) from liquid-glass/icons.json"
 	@python3 $(LG_DIR)/scripts/generate_previews_header.py $(LG_PREVIEW_HEADER)
 
-# Move libflex into bundle for rootless deb builds
-#   Remove libflex.plist for all packages since it's not needed
+# Staged jailbreak resource bundle (holds libflex, PNGs, and the ARVariant
+# marker). Space in "Application Support" — always reference it quoted in recipes.
+STAGED_APOLLO_BUNDLE = $(THEOS_STAGING_DIR)/Library/Application Support/ApolloReborn/ApolloReborn.bundle
+
+# before-package runs after the bundle is staged but before the .deb is built.
+# Three things happen here:
+#   - libflex.dylib is moved into the bundle for rootless (its DynamicLibraries
+#     home doesn't exist rootless);
+#   - libflex.plist is dropped for every scheme (unused);
+#   - the usage-heartbeat build variant is stamped so jailbreak installs report a
+#     channel to beat.apolloreborn.app instead of "unknown". ApolloBuildVariant()
+#     reads this ARVariant.txt marker for .deb installs (there's no repackaged
+#     Info.plist to carry ARBuildVariant the way injected IPAs do). Injected IPAs
+#     stamp Info.plist at packaging time and check it first, so this file being
+#     copied into an IPA's bundle is harmless — the plist key wins.
 before-package::
 ifeq ($(THEOS_PACKAGE_SCHEME),rootless)
-	@mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/libflex.dylib $(THEOS_STAGING_DIR)/Library/Application\ Support/ApolloReborn/ApolloReborn.bundle/libflex.dylib
+	@mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/libflex.dylib "$(STAGED_APOLLO_BUNDLE)/libflex.dylib"
+	@printf 'deb-rootless\n' > "$(STAGED_APOLLO_BUNDLE)/ARVariant.txt"
+else
+	@printf 'deb-rootful\n' > "$(STAGED_APOLLO_BUNDLE)/ARVariant.txt"
 endif
 	@rm $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/libflex.plist
 

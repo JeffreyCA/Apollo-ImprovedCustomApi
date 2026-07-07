@@ -25,9 +25,10 @@ static NSString *const kBeatURL = @"https://beat.apolloreborn.app/beat";
 // write is durable the instant it returns (kill-safe), and a settings restore
 // (which only overwrites Library/Preferences + Library/Caches plists) never
 // touches it. NSHomeDirectory() resolves to Apollo's own data container.
-static NSString *const kStateMonthKey   = @"month";   // "2026-07"
-static NSString *const kStateTokenKey   = @"token";   // monthly UUID
-static NSString *const kStateLastDayKey = @"lastDay"; // "2026-07-05"
+static NSString *const kStateMonthKey    = @"month";    // "2026-07"
+static NSString *const kStateTokenKey     = @"token";    // monthly UUID
+static NSString *const kStateLastDayKey   = @"lastDay";  // "2026-07-05"
+static NSString *const kStateDisabledKey  = @"disabled"; // durable opt-out mirror
 
 static NSString *ApolloHeartbeatStatePath(void) {
     static NSString *path;
@@ -90,11 +91,34 @@ static NSString *ApolloMonthlyToken(NSMutableDictionary *state, NSString *month,
     return token;
 }
 
+// Opt-out is stored in two places that must agree: NSUserDefaults (so the stock
+// settings/backups see it) and the durable heartbeat plist (so it survives the
+// sign-in / settings-restore wipe that clobbers Apollo's preferences plist —
+// exactly the failure mode the token file already guards against). If we only
+// kept it in NSUserDefaults, a user who opted out would silently start beating
+// again after their next sign-in. Read "disabled" as the OR of both stores so a
+// wiped default can't re-enable them.
+BOOL ApolloUsageHeartbeatIsDisabled(void) {
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDisableUsageHeartbeat]) return YES;
+    return [ApolloHeartbeatReadState()[kStateDisabledKey] boolValue];
+}
+
+void ApolloSetUsageHeartbeatDisabled(BOOL disabled) {
+    [[NSUserDefaults standardUserDefaults] setBool:disabled forKey:UDKeyDisableUsageHeartbeat];
+    NSMutableDictionary *state = ApolloHeartbeatReadState();
+    state[kStateDisabledKey] = @(disabled);
+    ApolloHeartbeatWriteState(state);
+}
+
 void ApolloSendUsageHeartbeatIfNeeded(void) {
-    // Opt-out stays in NSUserDefaults (it's a user setting; losing it just means
-    // the default, enabled, which is intended). On by default, so only bail when
-    // the disable flag is explicitly set.
-    if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDisableUsageHeartbeat]) return;
+#if APOLLO_SIM_BUILD
+    // Never beat from a simulator dev build: it's unstamped (c=unknown) and every
+    // reinstall wipes the container, minting a fresh token that would pollute real
+    // MAU. Compiled out entirely so no request can escape the sim.
+    return;
+#endif
+
+    if (ApolloUsageHeartbeatIsDisabled()) return;
 
     NSMutableDictionary *state = ApolloHeartbeatReadState();
 
