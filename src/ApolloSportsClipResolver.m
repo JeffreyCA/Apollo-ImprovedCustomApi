@@ -90,6 +90,12 @@ static NSString *const kSCStreamablePatternWithQuery =
 // (streamain), trailing slash, and query string round out the shapes observed
 // on real reddit posts. The query tail preserves ApolloMedia.xm's fix even
 // when our replacement is the one that lands.
+//
+// MLB note: bdata-producedclips URLs are a single "<uuid>.mp4" segment off the
+// host root (verified against live r/baseball posts), so the one-segment shape
+// here is deliberate. MLB's OTHER clip CDN (mlb-cuts-diamond.mlb.com) uses deep
+// /FORGE/<date>/… paths that can't ride through the single shortcode capture
+// group, so it's intentionally unsupported (also absent from SCKindForHost).
 static NSString *const kSCWidenedStreamablePattern =
     @"^(?:(?:https?:)?//)?(?:www\\.)?(?:"
     @"streamable\\.com/(?:edit/)?"
@@ -308,6 +314,9 @@ static NSDictionary *SCStreamableJSON(NSURL *mp4, NSURL *poster, double width, d
 #pragma mark - Per-host resolvers
 
 // Probe the candidate, then synthesize. Every resolver funnels through here.
+// Pass width/height ONLY when actually known (e.g. og:video:width metas) —
+// pass 0 for unknowns so SCStreamableJSON's defaults stay flagged as
+// estimated and the share paths never trust a guessed aspect ratio.
 static void SCFinishWithCandidate(NSString *tag, NSURL *mp4, NSURL *poster,
                                   double width, double height, double duration,
                                   void (^completion)(NSDictionary *)) {
@@ -322,14 +331,14 @@ static void SCFinishWithCandidate(NSString *tag, NSURL *mp4, NSURL *poster,
 static void SCResolveStreamin(NSString *clipID, void (^completion)(NSDictionary *)) {
     NSURL *mp4 = [NSURL URLWithString:[NSString stringWithFormat:@"https://w-cdn.streamin.top/uploads/%@.mp4", clipID]];
     NSURL *poster = [NSURL URLWithString:[NSString stringWithFormat:@"https://b-cdn.streamin.top/images/%@.jpg", clipID]];
-    SCFinishWithCandidate(@"streamin", mp4, poster, 1920, 1080, 0, completion);
+    SCFinishWithCandidate(@"streamin", mp4, poster, 0, 0, 0, completion);
 }
 
 // dubz: predictable; CDN is squeelab.com.
 static void SCResolveDubz(NSString *clipID, void (^completion)(NSDictionary *)) {
     NSURL *mp4 = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.squeelab.com/guest/videos/%@.mp4", clipID]];
     NSURL *poster = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.squeelab.com/guest/thumbnails/%@.jpg", clipID]];
-    SCFinishWithCandidate(@"dubz", mp4, poster, 1280, 720, 0, completion);
+    SCFinishWithCandidate(@"dubz", mp4, poster, 0, 0, 0, completion);
 }
 
 // streamff: the share API is authoritative (also the dead-clip signal); the
@@ -353,9 +362,9 @@ static void SCResolveStreamff(NSString *clipID, void (^completion)(NSDictionary 
         NSURL *fallback = SCURLFromString([info[@"external_url"] isKindOfClass:[NSString class]] ? info[@"external_url"] : nil);
         SCProbeVideoURL(primary, ^(BOOL ok) {
             if (ok) {
-                completion(SCStreamableJSON(primary, poster, 1280, 720, 0));
+                completion(SCStreamableJSON(primary, poster, 0, 0, 0));
             } else if (fallback) {
-                SCFinishWithCandidate(@"streamff(external_url)", fallback, poster, 1280, 720, 0, completion);
+                SCFinishWithCandidate(@"streamff(external_url)", fallback, poster, 0, 0, 0, completion);
             } else {
                 completion(nil);
             }
@@ -377,7 +386,8 @@ static void SCResolveStreamain(NSString *clipID, void (^completion)(NSDictionary
             return;
         }
         NSURL *poster = SCURLFromString(SCFirstCapture(html, @"poster=[\"']([^\"']+)[\"']"));
-        SCFinishWithCandidate(@"streamain", mp4, poster, 1280, 720, 0, completion);
+        // streamain frequently serves vertical clips — never guess dimensions.
+        SCFinishWithCandidate(@"streamain", mp4, poster, 0, 0, 0, completion);
     });
 }
 
@@ -418,7 +428,7 @@ static void SCResolveDropr(NSString *clipID, NSString *originalURL, void (^compl
 // MLB clip CDNs: the reddit post URL is already the mp4.
 static void SCResolveMLBDirect(NSString *originalURL, void (^completion)(NSDictionary *)) {
     NSURL *mp4 = SCURLFromString(originalURL);
-    SCFinishWithCandidate(@"mlb", mp4, nil, 1280, 720, 0, completion);
+    SCFinishWithCandidate(@"mlb", mp4, nil, 0, 0, 0, completion);
 }
 
 #pragma mark - Public entry
