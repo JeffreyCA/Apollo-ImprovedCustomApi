@@ -141,7 +141,12 @@ static BOOL ApolloTouchHitsNode(ApolloASDisplayNode *targetNode, UIView *contain
     CGRect rect = [targetLayer convertRect:targetLayer.bounds toLayer:containerView.layer];
     if (CGRectIsEmpty(rect) || CGRectIsNull(rect) || CGRectIsInfinite(rect)) return NO;
 
-    rect = CGRectInset(rect, -10.0, -8.0);
+    // The age node is the *rightmost* stat, so its left edge borders a neighbor
+    // (the comment bubble in a feed post, the "% liked" in the comments header).
+    // Keep a small left pad so the timestamp stops stealing taps meant for that
+    // neighbor, while still expanding generously into the empty space on the right
+    // and vertically (the row is thin). asymmetric = {top, left, bottom, right}.
+    rect = UIEdgeInsetsInsetRect(rect, UIEdgeInsetsMake(-8.0, -4.0, -8.0, -10.0));
     CGPoint pt = [touch locationInView:containerView];
     return CGRectContainsPoint(rect, pt);
 }
@@ -210,6 +215,8 @@ static void ApolloAgeTapFired(id cell, UITapGestureRecognizer *tap) {
     }
     if (!date) return;
 
+    // Match the vote buttons' native feedback: a light tick acknowledging the tap.
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     ApolloPresentCreatedAtAlert(date, (ApolloASDisplayNode *)cell, isComment);
 }
 

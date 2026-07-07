@@ -5,6 +5,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloThemeRuntime.h"
 #import "ApolloUserProfileCache.h"
 #import "ApolloSubredditInfoCache.h"
 #import "ApolloBannedProfile.h"
@@ -210,16 +211,7 @@ static void ApolloProfileScheduleTabAvatarRefresh(NSString *reason);
 }
 
 - (UIColor *)apollo_themeAccentColor {
-    NSMutableArray<UIColor *> *candidates = [NSMutableArray array];
-    if (self.hostViewController.tabBarController.tabBar.tintColor) [candidates addObject:self.hostViewController.tabBarController.tabBar.tintColor];
-    if (self.hostViewController.navigationController.navigationBar.tintColor) [candidates addObject:self.hostViewController.navigationController.navigationBar.tintColor];
-    if (self.hostViewController.view.tintColor) [candidates addObject:self.hostViewController.view.tintColor];
-    if (self.window.tintColor) [candidates addObject:self.window.tintColor];
-    if (self.tintColor) [candidates addObject:self.tintColor];
-    for (UIColor *color in candidates) {
-        if ([color isKindOfClass:[UIColor class]]) return color;
-    }
-    return [UIColor systemBlueColor];
+    return ApolloThemeAccentColor() ?: self.tintColor ?: [UIColor systemBlueColor];
 }
 
 - (void)apollo_updateEditProfileButtonColors {

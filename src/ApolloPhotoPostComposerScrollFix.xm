@@ -7,6 +7,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloThemeRuntime.h"
 #import "fishhook.h"
 
 @class PHAssetCollection;
@@ -2829,15 +2830,7 @@ static BOOL ApolloPhotoComposerTextEqualsPost(NSString *text) {
 }
 
 static UIColor *ApolloPhotoComposerAccentColor(UIViewController *controller) {
-    NSMutableArray<UIColor *> *candidates = [NSMutableArray array];
-    if (controller.tabBarController.tabBar.tintColor) [candidates addObject:controller.tabBarController.tabBar.tintColor];
-    if (controller.navigationController.navigationBar.tintColor) [candidates addObject:controller.navigationController.navigationBar.tintColor];
-    if (controller.view.tintColor) [candidates addObject:controller.view.tintColor];
-    if (controller.view.window.tintColor) [candidates addObject:controller.view.window.tintColor];
-    for (UIColor *color in candidates) {
-        if ([color isKindOfClass:[UIColor class]]) return color;
-    }
-    return nil;
+    return ApolloThemeAccentColor() ?: controller.view.tintColor;
 }
 
 static BOOL ApolloPhotoComposerApplyAccentToPostButton(UIButton *button, UIColor *accentColor) {

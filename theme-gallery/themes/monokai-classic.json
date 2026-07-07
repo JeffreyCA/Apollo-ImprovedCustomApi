@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Monokai Classic",
+  "slug": "monokai-classic",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "D33682",
+      "card": "FAF9F4",
+      "background": "F1F0EB",
+      "raised": "F6F5F0",
+      "bars": "F5F4EF",
+      "mutedText": "75715E",
+      "text": "585546",
+      "separator": "DAD9D4"
+    },
+    "dark": {
+      "accent": "F92672",
+      "card": "252621",
+      "background": "20211C",
+      "raised": "3A3B36",
+      "bars": "23241F",
+      "mutedText": "9C998B",
+      "text": "B3B0A6",
+      "separator": "4E4F4A"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Gruvbox Material",
+  "slug": "gruvbox-material",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "7DAEA3",
+      "card": "FEF8E8",
+      "background": "F5EFE0",
+      "raised": "FAF4E5",
+      "bars": "F9F3E3",
+      "mutedText": "7C6F64",
+      "text": "5D534B",
+      "separator": "DDD8CA"
+    },
+    "dark": {
+      "accent": "A9B665",
+      "card": "262626",
+      "background": "212121",
+      "raised": "3B3B3B",
+      "bars": "242424",
+      "mutedText": "B1A69B",
+      "text": "B9AFA5",
+      "separator": "4F4F4F"
+    }
+  }
+}

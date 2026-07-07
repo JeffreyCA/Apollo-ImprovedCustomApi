@@ -288,6 +288,85 @@ static BOOL ApolloTryOpenInSteamApp(NSURL *url, void (^fallbackHandler)(void)) {
     return YES;
 }
 
+// ---------------------------------------------------------------------------
+// Generic "open this link in its dedicated app" support (GitHub / X / Bluesky).
+// Each of these apps registers Universal Links for its web domain, so the same
+// mechanism Steam uses works uniformly: hand iOS the https URL with
+// UniversalLinksOnly:YES and it opens the app when installed (and the Universal
+// Link is enabled), otherwise the completion handler reports failure and we fall
+// back to Apollo's normal in-app handling. Adding another service later is just a
+// host check + a defaults key wired into ApolloTryOpenInDedicatedApp below.
+// ---------------------------------------------------------------------------
+
+// Case-insensitive host match against a set of registrable domains, also matching
+// any subdomain (e.g. "gist.github.com" matches "github.com").
+static BOOL ApolloHostMatchesDomains(NSString *host, NSArray<NSString *> *domains) {
+    if (![host isKindOfClass:[NSString class]] || host.length == 0) return NO;
+    NSString *lowerHost = [host lowercaseString];
+    for (NSString *domain in domains) {
+        if ([lowerHost isEqualToString:domain] ||
+            [lowerHost hasSuffix:[@"." stringByAppendingString:domain]]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL ApolloIsGitHubHost(NSString *host) {
+    return ApolloHostMatchesDomains(host, @[@"github.com"]);
+}
+
+static BOOL ApolloIsBlueskyHost(NSString *host) {
+    return ApolloHostMatchesDomains(host, @[@"bsky.app"]);
+}
+
+// Open `url` in its dedicated app via Universal Links when `enabledKey` is on.
+// Returns YES if an open was attempted (caller should return early).
+static BOOL ApolloTryOpenViaUniversalLink(NSURL *url, NSString *serviceName, NSString *enabledKey, void (^fallbackHandler)(void)) {
+    if (![url isKindOfClass:[NSURL class]]) return NO;
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:enabledKey]) return NO;
+
+    NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    components.scheme = @"https";
+    NSURL *httpsURL = components.URL;
+    if (!httpsURL) return NO;
+
+    ApolloLog(@"[ShareLinks] Opening %@ via Universal Links: %@", serviceName, httpsURL);
+    void (^fallback)(void) = [fallbackHandler copy];
+    [[UIApplication sharedApplication] openURL:httpsURL
+                                       options:@{UIApplicationOpenURLOptionUniversalLinksOnly: @YES}
+                             completionHandler:^(BOOL success) {
+        if (success) {
+            ApolloLog(@"[ShareLinks] Opened %@ via Universal Links: %@", serviceName, httpsURL);
+        } else {
+            ApolloLog(@"[ShareLinks] %@ Universal Links failed, falling back: %@", serviceName, httpsURL);
+            if (fallback) {
+                dispatch_async(dispatch_get_main_queue(), fallback);
+            }
+        }
+    }];
+    return YES;
+}
+
+// Unified entry point used by every tappable-link handler: route the link to its
+// dedicated app if the matching "Open ... in App" toggle is on. Steam keeps its
+// own helper (it normalizes the host first); GitHub / Bluesky use the generic
+// Universal Links opener. Keys here must match UserDefaultConstants.h.
+//
+// X/Twitter is intentionally absent: Apollo already ships a native "Open Tweets
+// in" picker (key OpenTwitterLinksIn) that even supports third-party clients
+// (Tweetbot/Twitterrific/etc.), so a Reborn toggle would only duplicate it.
+static BOOL ApolloTryOpenInDedicatedApp(NSURL *url, void (^fallbackHandler)(void)) {
+    if (![url isKindOfClass:[NSURL class]]) return NO;
+    if (ApolloTryOpenInSteamApp(url, fallbackHandler)) return YES;
+    NSString *host = url.host;
+    if (ApolloIsGitHubHost(host) &&
+        ApolloTryOpenViaUniversalLink(url, @"GitHub", @"OpenLinksInGitHubApp", fallbackHandler)) return YES;
+    if (ApolloIsBlueskyHost(host) &&
+        ApolloTryOpenViaUniversalLink(url, @"Bluesky", @"OpenLinksInBlueskyApp", fallbackHandler)) return YES;
+    return NO;
+}
+
 // Normalize known problematic URL patterns. Returns nil if no normalization needed.
 // Currently handles:
 //   - reddit.com/media?url=<encoded> -> decoded inner URL (e.g. i.redd.it/...)
@@ -476,7 +555,7 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
         val = normalizedURL;
     }
     // Steam store links: deep link to Steam app if enabled, fall back to normal handling
-    if (ApolloTryOpenInSteamApp((NSURL *)val, ^{ %orig(textNode, attr, val, point, range); })) {
+    if (ApolloTryOpenInDedicatedApp((NSURL *)val, ^{ %orig(textNode, attr, val, point, range); })) {
         return;
     }
     void (^ignoreHandler)(void) = ^{
@@ -502,7 +581,7 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
         val = normalizedURL;
     }
     // Steam store links: deep link to Steam app if enabled, fall back to normal handling
-    if (ApolloTryOpenInSteamApp((NSURL *)val, ^{ %orig(textNode, attr, val, point, range); })) {
+    if (ApolloTryOpenInDedicatedApp((NSURL *)val, ^{ %orig(textNode, attr, val, point, range); })) {
         return;
     }
     void (^ignoreHandler)(void) = ^{
@@ -535,7 +614,7 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
         urlString = [rdkLinkURL absoluteString];
     }
 
-    if (ApolloTryOpenInSteamApp([NSURL URLWithString:urlString], ^{ %orig; })) {
+    if (ApolloTryOpenInDedicatedApp([NSURL URLWithString:urlString], ^{ %orig; })) {
         return;
     }
 
@@ -586,7 +665,7 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
         val = normalizedURL;
     }
     // Steam store links: deep link to Steam app if enabled, fall back to normal handling
-    if (ApolloTryOpenInSteamApp((NSURL *)val, ^{ %orig(textNode, attr, val, point, range); })) {
+    if (ApolloTryOpenInDedicatedApp((NSURL *)val, ^{ %orig(textNode, attr, val, point, range); })) {
         return;
     }
     void (^ignoreHandler)(void) = ^{
@@ -627,7 +706,7 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
         }
     }
 
-    if (ApolloTryOpenInSteamApp([NSURL URLWithString:urlString], ^{ %orig; })) {
+    if (ApolloTryOpenInDedicatedApp([NSURL URLWithString:urlString], ^{ %orig; })) {
         return;
     }
 
@@ -690,7 +769,7 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
         urlString = [rdkLinkURL absoluteString];
     }
 
-    if (ApolloTryOpenInSteamApp([NSURL URLWithString:urlString], ^{ %orig; })) {
+    if (ApolloTryOpenInDedicatedApp([NSURL URLWithString:urlString], ^{ %orig; })) {
         return;
     }
 

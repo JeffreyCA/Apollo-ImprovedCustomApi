@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Moonlight",
+  "slug": "moonlight",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "4B73D9",
+      "card": "F8F8FF",
+      "background": "EDEDF4",
+      "raised": "F2F2F9",
+      "bars": "F9F9FF",
+      "mutedText": "8C8DA0",
+      "text": "53535E",
+      "separator": "DFDFE6"
+    },
+    "dark": {
+      "accent": "82AAFF",
+      "card": "212337",
+      "background": "1A1B2B",
+      "raised": "313245",
+      "bars": "1E1F32",
+      "mutedText": "AAB3D3",
+      "text": "AAB3D3",
+      "separator": "454657"
+    }
+  }
+}

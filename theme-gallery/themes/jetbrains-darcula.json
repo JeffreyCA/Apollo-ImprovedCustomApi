@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "JetBrains Darcula",
+  "slug": "jetbrains-darcula",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "3574F0",
+      "card": "F7F7F7",
+      "background": "ECECEC",
+      "raised": "F1F1F1",
+      "bars": "F8F8F8",
+      "mutedText": "8B8C8D",
+      "text": "535455",
+      "separator": "DEDEDE"
+    },
+    "dark": {
+      "accent": "6897BB",
+      "card": "2B2B2B",
+      "background": "222222",
+      "raised": "3A3A3A",
+      "bars": "272727",
+      "mutedText": "929EAA",
+      "text": "AFB8C1",
+      "separator": "4D4D4D"
+    }
+  }
+}

@@ -1,5 +1,6 @@
 #import "ApolloManualSignInViewController.h"
 #import "ApolloCommon.h"
+#import "ApolloThemeRuntime.h"
 
 // Raw userscript URL. Opening a *.user.js link in a Gecko browser triggers
 // Tampermonkey/Violentmonkey's one-tap install prompt — far better UX than
@@ -297,7 +298,10 @@ static NSString *ARExtractParam(NSString *urlString, NSString *name) {
 
 - (UIButton *)_button:(NSString *)title filled:(BOOL)filled action:(SEL)action {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-    
+    UIColor *tint = ApolloThemeAccentColor() ?: self.view.tintColor ?: [UIColor systemBlueColor];
+    b.tintColor = tint;   // themes both branches (UIButtonConfiguration derives from tintColor)
+    BOOL lightAccent = ApolloColorIsLight([tint resolvedColorWithTraitCollection:self.traitCollection]);
+
     // UIButtonConfiguration is iOS 15+. Apollo Reborn still loads on iOS 14
     // (jailbreak), so fall back to manual styling there.
     if (@available(iOS 15.0, *)) {
@@ -307,6 +311,8 @@ static NSString *ARExtractParam(NSString *urlString, NSString *name) {
         cfg.title = title;
         cfg.cornerStyle = UIButtonConfigurationCornerStyleLarge;
         cfg.contentInsets = NSDirectionalEdgeInsetsMake(12, 16, 12, 16);
+        // Near-white accents (stock chumbus/monochromatic) need dark text on a fill.
+        if (filled && lightAccent) cfg.baseForegroundColor = [UIColor blackColor];
         b.configuration = cfg;
     } else {
         [b setTitle:title forState:UIControlStateNormal];
@@ -314,10 +320,10 @@ static NSString *ARExtractParam(NSString *urlString, NSString *name) {
         b.contentEdgeInsets = UIEdgeInsetsMake(12, 16, 12, 16); // iOS 14 fallback; ignored under UIButtonConfiguration
         b.layer.cornerRadius = 12;
         b.clipsToBounds = YES;
-        UIColor *tint = self.view.tintColor ?: [UIColor systemBlueColor];
         if (filled) {
             b.backgroundColor = tint;
-            [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+            [b setTitleColor:(lightAccent ? [UIColor blackColor] : [UIColor whiteColor])
+                    forState:UIControlStateNormal];
         } else {
             b.backgroundColor = [tint colorWithAlphaComponent:0.15];
             [b setTitleColor:tint forState:UIControlStateNormal];

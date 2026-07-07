@@ -1,6 +1,7 @@
 #import "GiphyPickerViewController.h"
 #import "ApolloGiphyClient.h"
 #import "ApolloCommon.h"
+#import "ApolloThemeRuntime.h"
 
 #import <ImageIO/ImageIO.h>
 
@@ -65,18 +66,7 @@ static UIImage *ApolloGiphyAnimatedImageFromGIFData(NSData *data) {
 }
 
 static UIColor *ApolloGiphyAccentColorFromController(UIViewController *controller) {
-    if (!controller) return nil;
-
-    NSMutableArray<UIColor *> *candidates = [NSMutableArray array];
-    if (controller.tabBarController.tabBar.tintColor) [candidates addObject:controller.tabBarController.tabBar.tintColor];
-    if (controller.navigationController.navigationBar.tintColor) [candidates addObject:controller.navigationController.navigationBar.tintColor];
-    if (controller.view.tintColor) [candidates addObject:controller.view.tintColor];
-    if (controller.view.window.tintColor) [candidates addObject:controller.view.window.tintColor];
-
-    for (UIColor *color in candidates) {
-        if ([color isKindOfClass:[UIColor class]]) return color;
-    }
-    return nil;
+    return ApolloThemeAccentColor() ?: controller.view.tintColor;
 }
 
 static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *controller) {

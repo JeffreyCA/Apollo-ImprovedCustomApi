@@ -1,5 +1,6 @@
 #import "ApolloBannedProfile.h"
 #import "ApolloCommon.h"
+#import "ApolloThemeRuntime.h"
 #import "ApolloUserProfileCache.h"
 #import <objc/message.h>
 #import <dlfcn.h>
@@ -674,20 +675,9 @@ NSString *ApolloBannedProfileBannedDescriptionText(void) {
 @end
 
 // Resolves the active Apollo theme's accent color from the host profile's chrome.
-// Apollo themes its nav/tab bars with the accent color, so prefer those over the
-// UIKit-default view tint (which stays system blue when untouched).
+// Theme accent (custom or stock Apollo theme); view tint as a last resort.
 static UIColor *ApolloBannedProfileResolveAccentColor(UIViewController *viewController) {
-    NSMutableArray<UIColor *> *candidates = [NSMutableArray array];
-    UITabBar *tabBar = viewController.tabBarController.tabBar;
-    if (tabBar.tintColor) [candidates addObject:tabBar.tintColor];
-    UINavigationBar *navBar = viewController.navigationController.navigationBar;
-    if (navBar.tintColor) [candidates addObject:navBar.tintColor];
-    if (viewController.view.window.tintColor) [candidates addObject:viewController.view.window.tintColor];
-    if (viewController.view.tintColor) [candidates addObject:viewController.view.tintColor];
-    for (UIColor *color in candidates) {
-        if ([color isKindOfClass:[UIColor class]]) return color;
-    }
-    return viewController.view.tintColor ?: [UIColor systemBlueColor];
+    return ApolloThemeAccentColor() ?: viewController.view.tintColor ?: [UIColor systemBlueColor];
 }
 
 NSString *ApolloBannedProfileMessageForUsername(NSString *username) {

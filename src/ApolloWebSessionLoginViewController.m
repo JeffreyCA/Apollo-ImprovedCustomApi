@@ -39,7 +39,39 @@ static const NSTimeInterval kFarFutureCookieInterval = 10000.0 * 24 * 60 * 60;
 // and for re-authenticating a known-expired session (already dead, so there's
 // nothing worth preserving).
 @property (nonatomic) BOOL clearsExistingSessionBeforeLoad;
+// Consecutive harvest attempts that found an incomplete session (see the
+// completeness gate in _harvestAndFinishForUser:).
+@property (nonatomic) NSUInteger harvestAttempts;
 @end
+
+// How many times the harvest may defer back to the 2s auth poll while waiting
+// for a complete session (missing token_v2/reddit_session/modhash) before
+// proceeding with whatever is there — ~10s total, bounded so flows that never
+// produce a given cookie (e.g. old.reddit logins on iOS < 16, or sessions
+// whose /api/me.json omits the modhash) still finish.
+static const NSUInteger kMaxIncompleteHarvestAttempts = 5;
+
+// Off-screen WKWebView that refreshes a stale stored session from the shared
+// persistent data store. See +attemptSilentReharvestForUsername:completion:.
+// Implementation at the bottom of this file (it reuses the shared probe/harvest
+// helpers defined alongside the login VC's own auth-state machinery).
+@interface ApolloWebSessionSilentReharvester : NSObject <WKNavigationDelegate>
+@property (nonatomic, strong) WKWebView *webView;
+@property (nonatomic, copy) NSString *username;      // lowercased target
+@property (nonatomic, copy) void (^completion)(BOOL);
+@property (nonatomic) BOOL done;
+- (void)_finish:(BOOL)success;
+@end
+
+// In-flight attempts, keyed by lowercased username. Retains the reharvester
+// (and thereby its WKWebView) for the duration of the attempt. Main-thread only.
+static NSMutableDictionary<NSString *, ApolloWebSessionSilentReharvester *> *sReharvestsInFlight;
+// Last time a silent re-harvest reported success, per lowercased username —
+// the cooldown that stops a silent hot loop when re-harvests "succeed" but the
+// transport keeps getting blocked anyway (e.g. an IP-level block).
+static NSMutableDictionary<NSString *, NSDate *> *sLastReharvestSuccess;
+static const NSTimeInterval kReharvestSuccessCooldown = 600.0;
+static const NSTimeInterval kReharvestTimeout = 25.0;
 
 @implementation ApolloWebSessionLoginViewController
 
@@ -180,26 +212,64 @@ static const NSTimeInterval kFarFutureCookieInterval = 10000.0 * 24 * 60 * 60;
     self.authPollTimer = nil;
 }
 
-#pragma mark - Auth state (source of truth: /api/me.json)
+#pragma mark - Shared probe/harvest helpers (login VC + silent re-harvester)
 
-// Asks Reddit, from the page's own origin (so httpOnly cookies are sent), who
-// is logged in. Returns the username, or @"" if anonymous / the request fails.
-- (void)_probeLoggedInUserWithCompletion:(void (^)(NSString *username))completion {
-    if (!self.pageLoaded) { completion(@""); return; }
-    NSString *js =
+// Fetches a field of /api/me.json from the page's own origin (so httpOnly
+// cookies are sent) in `webView`. Returns @"" if anonymous / the request fails.
+static void ApolloWebSessionProbeMeField(WKWebView *webView, NSString *field, void (^completion)(NSString *value)) {
+    NSString *js = [NSString stringWithFormat:
         @"try {"
         @"  const r = await fetch('/api/me.json', {credentials: 'include'});"
         @"  if (!r.ok) return '';"
         @"  const j = await r.json();"
-        @"  return (j && j.data && j.data.name) ? j.data.name : '';"
-        @"} catch (e) { return ''; }";
-    [self.webView callAsyncJavaScript:js
-                            arguments:nil
-                              inFrame:nil
-                       inContentWorld:WKContentWorld.pageWorld
-                    completionHandler:^(id result, NSError *error) {
+        @"  return (j && j.data && j.data.%@) ? j.data.%@ : '';"
+        @"} catch (e) { return ''; }", field, field];
+    [webView callAsyncJavaScript:js
+                       arguments:nil
+                         inFrame:nil
+                  inContentWorld:WKContentWorld.pageWorld
+               completionHandler:^(id result, NSError *error) {
         completion([result isKindOfClass:[NSString class]] ? (NSString *)result : @"");
     }];
+}
+
+// Sweeps every .reddit.com cookie in `cookieStore` into a "name=value; …"
+// header, rewrites session-only cookies to a far-future expiry so the
+// persistent data store keeps them across launches (Hydra's trick), and
+// persists cookie + modhash under `username` via ApolloWebSessionSet.
+static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStore, NSString *username, NSString *modhash,
+                                                   void (^completion)(NSUInteger cookieCount)) {
+    [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+        NSDate *farFuture = [NSDate dateWithTimeIntervalSinceNow:kFarFutureCookieInterval];
+        NSMutableArray<NSString *> *pairs = [NSMutableArray array];
+        for (NSHTTPCookie *cookie in cookies) {
+            if (![cookie.domain.lowercaseString hasSuffix:@"reddit.com"]) continue;
+            [pairs addObject:[NSString stringWithFormat:@"%@=%@", cookie.name, cookie.value]];
+            if (cookie.sessionOnly || !cookie.expiresDate) {
+                NSMutableDictionary *props = [cookie.properties mutableCopy];
+                [props removeObjectForKey:NSHTTPCookieDiscard];
+                [props removeObjectForKey:NSHTTPCookieMaximumAge];
+                props[NSHTTPCookieExpires] = farFuture;
+                NSHTTPCookie *persistent = [NSHTTPCookie cookieWithProperties:props];
+                if (persistent) [cookieStore setCookie:persistent completionHandler:nil];
+            }
+        }
+        if (pairs.count > 0) {
+            ApolloWebSessionSet(username, [pairs componentsJoinedByString:@"; "], modhash);
+            // A fresh harvest supersedes any expiry verdict this launch reached
+            // for the account — re-arm detection for the NEW session.
+            ApolloWebJSONNoteSessionReauthenticated(username);
+        }
+        completion(pairs.count);
+    }];
+}
+
+#pragma mark - Auth state (source of truth: /api/me.json)
+
+// Asks Reddit who is logged in. Returns @"" if anonymous / the request fails.
+- (void)_probeLoggedInUserWithCompletion:(void (^)(NSString *username))completion {
+    if (!self.pageLoaded) { completion(@""); return; }
+    ApolloWebSessionProbeMeField(self.webView, @"name", completion);
 }
 
 // Reads the session modhash from /api/me.json (data.modhash). The modhash is
@@ -208,20 +278,7 @@ static const NSTimeInterval kFarFutureCookieInterval = 10000.0 * 24 * 60 * 60;
 // Returns @"" when absent (some anonymous/limited sessions omit it).
 - (void)_probeModhashWithCompletion:(void (^)(NSString *modhash))completion {
     if (!self.pageLoaded) { completion(@""); return; }
-    NSString *js =
-        @"try {"
-        @"  const r = await fetch('/api/me.json', {credentials: 'include'});"
-        @"  if (!r.ok) return '';"
-        @"  const j = await r.json();"
-        @"  return (j && j.data && j.data.modhash) ? j.data.modhash : '';"
-        @"} catch (e) { return ''; }";
-    [self.webView callAsyncJavaScript:js
-                            arguments:nil
-                              inFrame:nil
-                       inContentWorld:WKContentWorld.pageWorld
-                    completionHandler:^(id result, NSError *error) {
-        completion([result isKindOfClass:[NSString class]] ? (NSString *)result : @"");
-    }];
+    ApolloWebSessionProbeMeField(self.webView, @"modhash", completion);
 }
 
 - (void)_evaluateAuthState {
@@ -315,8 +372,6 @@ static const NSTimeInterval kFarFutureCookieInterval = 10000.0 * 24 * 60 * 60;
 - (void)_harvestAndFinishForUser:(NSString *)username {
     if (self.finished) return;
     self.finished = YES; // guard against the poll firing again mid-harvest
-    [self.authPollTimer invalidate];
-    self.authPollTimer = nil;
 
     WKHTTPCookieStore *cookieStore = self.webView.configuration.websiteDataStore.httpCookieStore;
     __weak typeof(self) weakSelf = self;
@@ -326,34 +381,50 @@ static const NSTimeInterval kFarFutureCookieInterval = 10000.0 * 24 * 60 * 60;
         typeof(self) s = weakSelf;
         if (!s) return;
         [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
-            // Rewrite session cookies to a far-future expiry so the persistent
-            // data store keeps them across launches (instead of discarding on quit).
-            NSDate *farFuture = [NSDate dateWithTimeIntervalSinceNow:kFarFutureCookieInterval];
-            NSMutableArray<NSString *> *pairs = [NSMutableArray array];
-            for (NSHTTPCookie *cookie in cookies) {
-                if (![cookie.domain.lowercaseString hasSuffix:@"reddit.com"]) continue;
-                [pairs addObject:[NSString stringWithFormat:@"%@=%@", cookie.name, cookie.value]];
-                if (cookie.sessionOnly || !cookie.expiresDate) {
-                    NSMutableDictionary *props = [cookie.properties mutableCopy];
-                    [props removeObjectForKey:NSHTTPCookieDiscard];
-                    [props removeObjectForKey:NSHTTPCookieMaximumAge];
-                    props[NSHTTPCookieExpires] = farFuture;
-                    NSHTTPCookie *persistent = [NSHTTPCookie cookieWithProperties:props];
-                    if (persistent) [cookieStore setCookie:persistent completionHandler:nil];
-                }
+            typeof(self) s2 = weakSelf;
+            if (!s2) return;
+            // Completeness gate: in the instant after the fetch-based login
+            // completes, the jar can briefly lack token_v2 (and /api/me.json
+            // can still omit the modhash). Harvesting that partial state ships
+            // a session that "works" for a moment then dies — the "takes a few
+            // tries to log in" loop. Defer to the 2s auth poll (bounded) until
+            // the session is complete.
+            BOOL hasTokenV2 = NO, hasRedditSession = NO;
+            for (NSHTTPCookie *c in cookies) {
+                if (![c.domain.lowercaseString hasSuffix:@"reddit.com"]) continue;
+                if ([c.name isEqualToString:@"token_v2"]) hasTokenV2 = YES;
+                else if ([c.name isEqualToString:@"reddit_session"]) hasRedditSession = YES;
             }
+            BOOL complete = hasTokenV2 && hasRedditSession && modhash.length > 0;
+            if (!complete && s2.harvestAttempts < kMaxIncompleteHarvestAttempts && s2.authPollTimer) {
+                s2.harvestAttempts += 1;
+                ApolloLog(@"[WebJSON] Incomplete session for u/%@ (token_v2=%d reddit_session=%d modhash=%d) — waiting for a complete one (attempt %lu/%lu)",
+                          username, hasTokenV2, hasRedditSession, modhash.length > 0,
+                          (unsigned long)s2.harvestAttempts, (unsigned long)kMaxIncompleteHarvestAttempts);
+                s2.finished = NO;      // let the auth poll call us again…
+                s2.awaitingLogin = YES; // …including when we got here via "Keep Current Session"
+                return;
+            }
+            if (!complete) {
+                ApolloLog(@"[WebJSON] Proceeding with an incomplete session for u/%@ after %lu attempts (token_v2=%d reddit_session=%d modhash=%d) — some flows (old.reddit) never produce every field",
+                          username, (unsigned long)s2.harvestAttempts, hasTokenV2, hasRedditSession, modhash.length > 0);
+            }
+            [s2.authPollTimer invalidate];
+            s2.authPollTimer = nil;
+
             // Persist the cookie + write token under THIS username (not a single
             // global) — ApolloWebSessionStore, keychain-backed — so it coexists
             // with any other web-session or OAuth accounts already configured.
-            ApolloWebSessionSet(username, [pairs componentsJoinedByString:@"; "], modhash);
-            ApolloLog(@"[WebJSON] Harvested session for u/%@, %lu cookies, modhash %@",
-                      username, (unsigned long)pairs.count, modhash.length > 0 ? @"captured" : @"absent");
+            ApolloWebSessionHarvestFromCookieStore(cookieStore, username, modhash, ^(NSUInteger cookieCount) {
+                ApolloLog(@"[WebJSON] Harvested session for u/%@, %lu cookies, modhash %@",
+                          username, (unsigned long)cookieCount, modhash.length > 0 ? @"captured" : @"absent");
 
-            // Synthesize a signed-in account so the account tab + write actions
-            // (vote/comment) work — they gate on AccountManager having a current
-            // account, which only loads at launch, so a restart is required.
-            BOOL synthesized = ApolloWebJSONSynthesizeSignedInAccount(username);
-            [s _finishWithUser:username accountSynthesized:synthesized];
+                // Synthesize a signed-in account so the account tab + write actions
+                // (vote/comment) work — they gate on AccountManager having a current
+                // account, which only loads at launch, so a restart is required.
+                BOOL synthesized = ApolloWebJSONSynthesizeSignedInAccount(username);
+                [s2 _finishWithUser:username accountSynthesized:synthesized];
+            });
         }];
     }];
 }
@@ -440,6 +511,56 @@ static const NSTimeInterval kFarFutureCookieInterval = 10000.0 * 24 * 60 * 60;
     [self.navigationController dismissViewControllerAnimated:YES completion:nil];
 }
 
+#pragma mark - Silent re-harvest entry point
+
++ (void)attemptSilentReharvestForUsername:(NSString *)username completion:(void (^)(BOOL success))completion {
+    completion = [completion copy];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *key = [[username ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+        if (key.length == 0) { if (completion) completion(NO); return; }
+
+        // Repeated expiry verdicts right after a "successful" silent re-harvest
+        // mean the problem isn't snapshot staleness (the one thing this can
+        // fix) — don't loop silently, let the visible prompt take over.
+        NSDate *last = sLastReharvestSuccess[key];
+        if (last && -last.timeIntervalSinceNow < kReharvestSuccessCooldown) {
+            ApolloLog(@"[WebJSON] Silent re-harvest for u/%@ already succeeded %.0fs ago and the session died again — not retrying silently", key, -last.timeIntervalSinceNow);
+            if (completion) completion(NO);
+            return;
+        }
+        // Coalesce concurrent attempts: the first one's outcome stands; later
+        // callers are dropped (documented in the header).
+        if (sReharvestsInFlight[key]) return;
+
+        ApolloLog(@"[WebJSON] Attempting silent re-harvest for u/%@ from the persistent webview jar", key);
+        ApolloWebSessionSilentReharvester *r = [ApolloWebSessionSilentReharvester new];
+        r.username = key;
+        r.completion = completion;
+
+        WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
+        config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
+        r.webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:config];
+        r.webView.navigationDelegate = r;
+
+        if (!sReharvestsInFlight) sReharvestsInFlight = [NSMutableDictionary dictionary];
+        sReharvestsInFlight[key] = r;
+
+        // Load the real homepage (not /api/me.json directly): that's the load
+        // that makes Reddit's edge refresh a stale token_v2 via Set-Cookie,
+        // exactly like the visible login flow does.
+        [r.webView loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:@"https://www.reddit.com/"]]];
+
+        __weak ApolloWebSessionSilentReharvester *weakR = r;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kReharvestTimeout * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            ApolloWebSessionSilentReharvester *sr = weakR;
+            if (sr && !sr.done) {
+                ApolloLog(@"[WebJSON] Silent re-harvest for u/%@ timed out after %.0fs", sr.username, kReharvestTimeout);
+                [sr _finish:NO];
+            }
+        });
+    });
+}
+
 #pragma mark - WKNavigationDelegate
 
 - (void)webView:(WKWebView *)webView
@@ -488,6 +609,66 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     ApolloLog(@"[WebJSON] Navigation failed: %@", error);
 }
 
+@end
+
+#pragma mark - Silent re-harvest (expiry recovery without UI)
+
+@implementation ApolloWebSessionSilentReharvester
+
+- (void)_finish:(BOOL)success {
+    if (self.done) return;
+    self.done = YES;
+    self.webView.navigationDelegate = nil;
+    [self.webView stopLoading];
+    if (success) {
+        if (!sLastReharvestSuccess) sLastReharvestSuccess = [NSMutableDictionary dictionary];
+        sLastReharvestSuccess[self.username] = [NSDate date];
+    }
+    [sReharvestsInFlight removeObjectForKey:self.username];
+    if (self.completion) self.completion(success);
+}
+
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    if (self.done) return;
+    __weak typeof(self) weakSelf = self;
+    ApolloWebSessionProbeMeField(webView, @"name", ^(NSString *user) {
+        typeof(self) s = weakSelf;
+        if (!s || s.done) return;
+        // The persistent jar is shared across every web-session account: only
+        // harvest when it holds a live login for the SAME user whose snapshot
+        // died — anything else (logged out, different account) is a real
+        // expiry for our target and must go to the visible prompt.
+        if (![user.lowercaseString isEqualToString:s.username]) {
+            ApolloLog(@"[WebJSON] Silent re-harvest for u/%@ found %@ in the webview jar — falling through to the expiry prompt",
+                      s.username, user.length > 0 ? [NSString stringWithFormat:@"u/%@", user] : @"no login");
+            [s _finish:NO];
+            return;
+        }
+        ApolloWebSessionProbeMeField(webView, @"modhash", ^(NSString *modhash) {
+            typeof(self) s2 = weakSelf;
+            if (!s2 || s2.done) return;
+            WKHTTPCookieStore *store = webView.configuration.websiteDataStore.httpCookieStore;
+            ApolloWebSessionHarvestFromCookieStore(store, s2.username, modhash, ^(NSUInteger cookieCount) {
+                ApolloLog(@"[WebJSON] Silently re-harvested session for u/%@ (%lu cookies, modhash %@) — expiry prompt suppressed",
+                          s2.username, (unsigned long)cookieCount, modhash.length > 0 ? @"captured" : @"absent");
+                [s2 _finish:cookieCount > 0];
+            });
+        });
+    });
+}
+
+- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    ApolloLog(@"[WebJSON] Silent re-harvest navigation failed for u/%@: %@", self.username, error.localizedDescription);
+    [self _finish:NO];
+}
+
+- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    ApolloLog(@"[WebJSON] Silent re-harvest navigation failed for u/%@: %@", self.username, error.localizedDescription);
+    [self _finish:NO];
+}
+
+@end
+
 #pragma mark - Shared sign-in chooser (reused by the empty-state splash and the account switcher)
 
 void ApolloWebSessionPresentSignInChooser(UIViewController *host, void (^apiKeyHandler)(void)) {
@@ -524,5 +705,3 @@ void ApolloWebSessionPresentSignInChooser(UIViewController *host, void (^apiKeyH
     sheet.popoverPresentationController.sourceRect = host.view.bounds;
     [host presentViewController:sheet animated:YES completion:nil];
 }
-
-@end

@@ -6,7 +6,7 @@
 #import "SavedCategoriesViewController.h"
 #import "TranslationSettingsViewController.h"
 #import "TagFiltersViewController.h"
-#import "ApolloThemeBuilderViewController.h"
+#import "ApolloThemeManagerViewController.h"
 #import "PictureInPictureViewController.h"
 
 // MARK: - Settings View Controller (Custom API row injection)

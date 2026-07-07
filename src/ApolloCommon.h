@@ -28,6 +28,12 @@ UIImage *ApolloRebornOptionsSettingsIcon(CGFloat size);
 // inject-deb-local.sh). Returns nil if no layout has the file.
 NSString *ApolloBundledResourcePath(NSString *baseName, NSString *extension);
 
+// The build variant string sent with the anonymous usage heartbeat, e.g.
+// "glass", "deb-rootless". The source of truth is stamped at package time (IPA
+// variants set Info.plist "ARBuildVariant"; .deb installs drop an "ARVariant.txt"
+// resource). Falls back to "unknown" when no marker is present (dev builds).
+NSString *ApolloBuildVariant(void);
+
 // Returns YES when a link-card title is a numeric-ID-style junk string —
 // contains at least one digit but no letters at all (e.g. the scraped
 // "285023 289273 400021448" title from a single-page-app page). Used to decide
@@ -101,4 +107,12 @@ void ApolloSetLinkPreviewCardColorHex(NSString *hex);
 // `children` (an NSMutableArray<UIMenuElement *>). No-op for any other menu.
 // Called from ApolloNativeActionMenuBuildMenu as it converts the action sheet.
 void ApolloInjectPublicStickyAsSubredditIfNeeded(NSMutableArray *children, NSString *menuTitle);
+
+// ApolloDeletedCommentsMenu: when the comments view's "..." menu is being
+// built, append a "Show/Hide Deleted Comments" UIAction to `children`
+// (an NSMutableArray<UIMenuElement *>). No-op for any other menu. Called from
+// ApolloNativeActionMenuBuildMenu as it converts the action sheet; the
+// ActionController is tagged on first build so re-builds re-inject and other
+// menus can't claim the item.
+void ApolloInjectDeletedCommentsMenuItemIfNeeded(NSMutableArray *children, NSString *menuTitle, id actionController);
 __END_DECLS

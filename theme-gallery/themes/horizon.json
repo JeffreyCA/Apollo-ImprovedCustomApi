@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Horizon",
+  "slug": "horizon",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "D64569",
+      "card": "FEF3F0",
+      "background": "F5EAE8",
+      "raised": "FAEFEC",
+      "bars": "F9EEEB",
+      "mutedText": "6C6F93",
+      "text": "4F516B",
+      "separator": "DDD3D1"
+    },
+    "dark": {
+      "accent": "E95678",
+      "card": "1B1D24",
+      "background": "17191F",
+      "raised": "30323A",
+      "bars": "191B22",
+      "mutedText": "9597B1",
+      "text": "A4A6BC",
+      "separator": "45464D"
+    }
+  }
+}

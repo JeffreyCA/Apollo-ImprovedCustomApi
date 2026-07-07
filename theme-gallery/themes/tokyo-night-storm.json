@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Tokyo Night Storm",
+  "slug": "tokyo-night-storm",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "3760BF",
+      "card": "E8E9EB",
+      "background": "E0E1E3",
+      "raised": "E5E6E7",
+      "bars": "E3E4E6",
+      "mutedText": "6172B0",
+      "text": "3F4A72",
+      "separator": "CACBCC"
+    },
+    "dark": {
+      "accent": "7AA2F7",
+      "card": "232639",
+      "background": "1E2130",
+      "raised": "383B4D",
+      "bars": "202435",
+      "mutedText": "858CAA",
+      "text": "ADB2C6",
+      "separator": "4B4F5E"
+    }
+  }
+}

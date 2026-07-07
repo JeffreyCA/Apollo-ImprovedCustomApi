@@ -43,6 +43,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloThemeRuntime.h"
 
 @interface _TtC6Apollo22CommentsViewController : UIViewController
 @end
@@ -370,16 +371,7 @@ static CGFloat LCFToolbarBottom(UIViewController *vc) {
 // MARK: - theming (ported from ApolloAISummary)
 
 static UIColor *LCFThemeAccent(UIViewController *vc) {
-    NSArray<UIColor *> *candidates = @[
-        vc.navigationController.navigationBar.tintColor ?: UIColor.clearColor,
-        vc.tabBarController.tabBar.tintColor ?: UIColor.clearColor,
-        vc.view.tintColor ?: UIColor.clearColor,
-        vc.view.window.tintColor ?: UIColor.clearColor,
-    ];
-    for (UIColor *c in candidates) {
-        if (c && c != UIColor.clearColor) return c;
-    }
-    return UIColor.systemBlueColor;
+    return ApolloThemeAccentColor() ?: vc.view.tintColor ?: UIColor.systemBlueColor;
 }
 
 static NSAttributedString *LCFSymbolAttachment(NSString *symbolName, UIFont *font, UIColor *tint) {
@@ -436,16 +428,20 @@ static void LCFEnsurePill(UIViewController *vc) {
 static void LCFSetPillContent(UIViewController *vc, NSString *text) {
     UIButton *btn = LCFButton(vc);
     if (!btn) return;
-    btn.backgroundColor = LCFThemeAccent(vc);
+    UIColor *accent = LCFThemeAccent(vc);
+    btn.backgroundColor = accent;
+    // Near-white accents (stock chumbus light / monochromatic dark) need dark text.
+    UIColor *fg = ApolloColorIsLight([accent resolvedColorWithTraitCollection:btn.traitCollection])
+        ? UIColor.blackColor : UIColor.whiteColor;
 
     NSMutableAttributedString *title = [[NSMutableAttributedString alloc] init];
-    NSAttributedString *chevron = LCFSymbolAttachment(@"chevron.up", btn.titleLabel.font, UIColor.whiteColor);
+    NSAttributedString *chevron = LCFSymbolAttachment(@"chevron.up", btn.titleLabel.font, fg);
     if (chevron) {
         [title appendAttributedString:chevron];
         [title appendAttributedString:[[NSAttributedString alloc] initWithString:@"  "]];
     }
     [title appendAttributedString:[[NSAttributedString alloc] initWithString:text attributes:@{
-        NSForegroundColorAttributeName: UIColor.whiteColor,
+        NSForegroundColorAttributeName: fg,
         NSFontAttributeName: btn.titleLabel.font,
     }]];
     [btn setAttributedTitle:title forState:UIControlStateNormal];

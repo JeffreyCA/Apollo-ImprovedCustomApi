@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Nord",
+  "slug": "nord",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "5E81AC",
+      "card": "F1F2F5",
+      "background": "E9EAEC",
+      "raised": "EDEEF1",
+      "bars": "ECEDF0",
+      "mutedText": "4C566A",
+      "text": "485265",
+      "separator": "D2D3D5"
+    },
+    "dark": {
+      "accent": "88C0D0",
+      "card": "2C323D",
+      "background": "262B34",
+      "raised": "414651",
+      "bars": "292F3A",
+      "mutedText": "8D97A9",
+      "text": "B9C0CB",
+      "separator": "545962"
+    }
+  }
+}

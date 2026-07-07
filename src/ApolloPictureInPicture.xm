@@ -5,6 +5,7 @@
 #import <objc/message.h>
 
 #import "ApolloCommon.h"
+#import "ApolloMediaAutoplay.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
 
@@ -45,6 +46,11 @@
 // audio — Streamable and similar external hosts — gated by PiPIsEligibleVideo.
 // Silent GIFs (also inline ASVideoNodes, but no audio track) and feed-initiated
 // card takeover are intentionally out of scope (see docs/pip-design.md §3).
+//
+// Second entry point (issue #528): a PiP button in the fullscreen media
+// viewer, available ONLY while Apollo's native autoplay is effectively off
+// (never / wifi-only on cellular) and the viewer owns its player — see the
+// "Fullscreen → PiP entry point" section.
 //
 // =============================================================================
 
@@ -192,6 +198,35 @@ static BOOL PiPIsEligibleForInlineNativePiP(id videoNode, AVPlayer *player) {
     return PiPIsEligibleVideo(videoNode, player);
 }
 
+// Mixable, active Playback session for the System-PiP handoff. Callers must
+// gate on "no other audio playing": ANY Ambient→Playback transition interrupts
+// other apps' audio (device-confirmed, even mixable/category-only), and Apollo
+// never hands the session back for a muted player — the interruption would be
+// permanent (issue #560).
+static void PiPClaimMixablePlaybackSession(void) {
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    [session setCategory:AVAudioSessionCategoryPlayback
+                    mode:AVAudioSessionModeDefault
+                 options:AVAudioSessionCategoryOptionMixWithOthers error:nil];
+    [session setActive:YES withOptions:0 error:nil];
+}
+
+// Did the user turn this player's sound on? player.muted alone can't answer:
+// Apollo's fresh comments/fullscreen players keep AVPlayer's default
+// muted == NO (silenced by the Ambient session), so a muted-sounding video can
+// read unmuted forever. But every real unmute path (native muteUnmuteTapped
+// sub_100341894, fullscreen unmute, UnmuteRichMediaNode, card muteTapped)
+// synchronously claims a NON-mixable Playback session, and that claim survives
+// navigation (sub_10058cb30 skips the mute dance for the activeAudioPlayer) —
+// so "unmuted + exclusively-held Playback session" is the reliable signal
+// (issue #560).
+static BOOL PiPPlayerIsDeliberatelyAudible(AVPlayer *player) {
+    if (!player || player.muted) return NO;
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    return [session.category isEqualToString:AVAudioSessionCategoryPlayback]
+        && !(session.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers);
+}
+
 // Midpoint visibility test mirroring Apollo's sub_1002063d8 (and the fork's
 // -[ASVideoNode isVisibleInProperRect]): the video view's center, in window
 // coordinates, must lie between the bottom of the nav bar and the top of the
@@ -245,6 +280,83 @@ static const void *kPiPPrevVisibleKey = &kPiPPrevVisibleKey;
 // Dedupe flag for the inline native-PiP arm retry chain (the player often
 // does not exist yet at the cell's first visibility event).
 static const void *kPiPArmRetryPendingKey = &kPiPArmRetryPendingKey;
+
+// Dedupe flag for the same-link stale-card recheck (a compact comments header
+// creates its fresh player asynchronously, with no visibility event when it
+// attaches — the recheck closes the card once that player really plays).
+static const void *kPiPSameLinkRecheckKey = &kPiPSameLinkRecheckKey;
+
+// =============================================================================
+// MARK: Fullscreen → PiP entry point state (issue #528)
+// =============================================================================
+//
+// A "PiP" button in the fullscreen media viewer dismisses it and hands the
+// video to the in-app card. The button exists ONLY when both hold:
+//   1. Apollo's native Autoplay GIFs/Videos is effectively off right now
+//      ("never", or wifi-only on cellular) — with autoplay on, scroll-away
+//      takeover already covers PiP entry.
+//   2. The viewer OWNS its player (the `player` ivar — nil when a shared
+//      layer was adopted). An owned player has no inline home, so the card
+//      is always the sole renderer.
+
+// Pending request captured at button-tap time, resolved after the dismissal
+// completes (MediaPageViewController.viewDidDisappear). The player is held
+// STRONGLY so a fullscreen-owned (non-shareable) player survives its view
+// controller's dealloc until the card adopts it.
+static BOOL sFSPiPPending = NO;
+static AVPlayer *sFSPiPPlayer = nil;
+static BOOL sFSPiPWasMuted = NO;
+static BOOL sFSPiPWasPlaying = NO;
+static id sFSPiPLink = nil;
+static NSUInteger sFSPiPRequestToken = 0; // keys each request's expiry failsafe
+
+// Resolution timestamp — guards PiPHandleFeedViewControllerAppeared against
+// closing a card that a fullscreen dismissal is creating at this very moment
+// (a modal dismissal fires the presenting feed VC's viewDidAppear, whose
+// ordering against MediaPageViewController.viewDidDisappear is undefined).
+static CFAbsoluteTime sFSPiPResolvedAt = 0;
+
+// Mirrors the native closeButton's alpha/hidden (the chrome fade toggles each
+// chrome view individually inside a UIView animation — KVO fires within the
+// animation block, so the mirrored writes inherit the same animation). Holds
+// the observed button strongly: associated objects are released AFTER
+// .cxx_destruct during dealloc, so a weak/unretained ref could dangle by the
+// time this observer needs removing.
+@interface ApolloPiPFullscreenButtonMirror : NSObject
+@property (nonatomic, strong) UIButton *sourceButton;
+@property (nonatomic, strong) UIButton *pipButton;
+@end
+
+@implementation ApolloPiPFullscreenButtonMirror
+
+- (instancetype)initWithSource:(UIButton *)source pipButton:(UIButton *)pipButton {
+    if ((self = [super init])) {
+        _sourceButton = source;
+        _pipButton = pipButton;
+        [source addObserver:self forKeyPath:@"alpha" options:0 context:NULL];
+        [source addObserver:self forKeyPath:@"hidden" options:0 context:NULL];
+    }
+    return self;
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object
+                        change:(NSDictionary *)change context:(void *)context {
+    self.pipButton.alpha = self.sourceButton.alpha;
+    if (self.sourceButton.hidden) self.pipButton.hidden = YES;
+    // Un-hiding is owned by the visibility refresh (autoplay gate + owned-
+    // player check), not mirrored — an image page (or a gated video page)
+    // must keep the button hidden while the X shows.
+}
+
+- (void)dealloc {
+    [_sourceButton removeObserver:self forKeyPath:@"alpha"];
+    [_sourceButton removeObserver:self forKeyPath:@"hidden"];
+}
+
+@end
+
+static const void *kPiPFullscreenButtonKey = &kPiPFullscreenButtonKey;
+static const void *kPiPFullscreenMirrorKey = &kPiPFullscreenMirrorKey;
 
 // A loop-suppressed video parks at its end (rate 0, currentTime == duration).
 // Calling play() on an at-end item is a no-op and never re-fires the end
@@ -457,6 +569,36 @@ static const NSTimeInterval kPiPControlsAutoHideDelay = 3.0;
 // An inline player we paused on backgrounding because System PiP never
 // started (avoids a background-audio leak); resumed on foreground.
 @property (nonatomic, weak) AVPlayer *backgroundPausedInlinePlayer;
+// Whether that player was DELIBERATELY audible when the failsafe paused it —
+// captured before the handback resets the session (the live session read in
+// PiPPlayerIsDeliberatelyAudible is meaningless afterwards). Gates the
+// foreground re-claim: only a deliberately-audible video may retake exclusive
+// (non-mixable) audio focus on resume; a silent fresh player reads muted == NO
+// and must not (issue #560).
+@property (nonatomic, assign) BOOL backgroundPausedInlineWasAudible;
+// Set by claimHandoffSessionIfNeeded (resign-time claim); released — with the
+// resume cue for any music it paused — once it no longer serves a handoff:
+// PiP never started, X-closed from the home screen, or back in the foreground.
+// Mutually exclusive with a deliberate-unmute claim (those leave the category
+// at Playback, so the handoff claim is skipped).
+@property (nonatomic, assign) BOOL handoffSessionClaimed;
+// Did the app actually background since the last resign? A Control-Center/
+// alert bounce never fires willEnterForeground, so didBecomeActive uses this
+// to downgrade a stale handoff flag to an ordinary standing claim.
+@property (nonatomic, assign) BOOL enteredBackground;
+// Was the session category Playback at controller creation? AVKit latches
+// auto-start eligibility at birth: Ambient-born controllers never auto-start
+// and must be recreated under a claim (the heals); Playback-born ones stay
+// viable even if the session later dips to Ambient, so the resign-time
+// recreate must not destroy them (a resign-born replacement gets no warm-up
+// time — possible=0).
+@property (nonatomic, assign) BOOL nativePiPBornUnderPlayback;
+@property (nonatomic, assign) BOOL inlineNativePiPBornUnderPlayback;
+
+// YES for a card created from the fullscreen viewer's PiP button. Such a card
+// has no inline video-node identity (owned players only) — it floats until
+// closed, and the feed back-pop walk must not misread it as stranded.
+@property (nonatomic, assign) BOOL cardFromFullscreen;
 
 @end
 
@@ -465,6 +607,13 @@ static const NSTimeInterval kPiPControlsAutoHideDelay = 3.0;
 // Returns the singleton WITHOUT creating it — used by the hot-path predicates
 // so an untouched feature costs one nil check.
 static ApolloPiPController *sPiPSharedController = nil;
+
+// Set while PiP itself hands the audio session back (Ambient + deactivate):
+// ApolloPiP_ShouldBlockAudioSessionDowngrade consults this, and without the
+// bypass the ApolloVideoUnmute blocking hooks would swallow our own downgrade
+// — e.g. the card background failsafe hands back while the card is still
+// active, which the predicate's first clause would otherwise block.
+static BOOL sPiPSessionHandbackInProgress = NO;
 
 + (instancetype)sharedController {
     static dispatch_once_t once;
@@ -480,6 +629,10 @@ static ApolloPiPController *sPiPSharedController = nil;
 
         NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
         __weak __typeof(self) weakSelf = self;
+        [center addObserverForName:UIApplicationWillResignActiveNotification object:nil
+                             queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+            [weakSelf claimHandoffSessionIfNeeded];
+        }];
         [center addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil
                              queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
             [weakSelf handleDidEnterBackground];
@@ -557,11 +710,27 @@ static ApolloPiPController *sPiPSharedController = nil;
             // player, or the shared layer was released while we were away):
             // identity checks fail but the content is ours. Close the stale
             // PiP — otherwise the video displays (and can play audio) twice.
+            // Only when the cell actually HAS a player: a home with no player
+            // (autoplay off — the header shows a static poster) can't double-
+            // display anything, and a fullscreen-initiated card legitimately
+            // floats over exactly that cell.
             id cellLink = PiPGetIvar(richMediaNode, "link");
-            if (self.link && cellLink
-                && (cellLink == self.link || [cellLink isEqual:self.link])) {
+            BOOL sameLink = self.link && cellLink
+                         && (cellLink == self.link || [cellLink isEqual:self.link]);
+            // Fullscreen-origin cards legitimately float over their own post's
+            // static poster (autoplay off) — for THEM a playerless same-link
+            // cell is fine, and the deferred recheck below covers the fresh
+            // player attaching asynchronously. Every other card keeps the
+            // shipped behavior: close on any same-link sighting (the fresh
+            // player often attaches ~500ms after the event, with no event of
+            // its own — waiting for it would double-play).
+            if (sameLink && (player || !self.cardFromFullscreen)) {
                 ApolloLog(@"[PiP] Same post re-entered with a new player — closing stale PiP");
                 [self teardownKeepPlaying:NO];
+            } else if (sameLink) {
+                [self scheduleSameLinkRecheckForCell:cellNode
+                                       richMediaNode:richMediaNode
+                                           videoNode:videoNode];
             }
             return NO;
         }
@@ -641,8 +810,13 @@ static ApolloPiPController *sPiPSharedController = nil;
     // screen, keep a system PiP controller armed on Apollo's own inline player
     // layer so backgrounding hands it off.
     if (sPiPNativeEnabled && visible) {
+        // Unmuted-Only keys on a deliberate unmute, NOT raw player.muted — a
+        // fresh comments player reads muted == NO while the user hears silence
+        // (Ambient session), and gating on it armed (and session-claimed) videos
+        // the user never unmuted (issue #560).
         if (player && player.rate != 0
-            && !(sPiPActivationMode == ApolloPiPActivationModeUnmutedOnly && player.muted)
+            && !(sPiPActivationMode == ApolloPiPActivationModeUnmutedOnly
+                 && !PiPPlayerIsDeliberatelyAudible(player))
             && PiPIsEligibleForInlineNativePiP(videoNode, player)) {
             [self armInlineNativePiPForVideoNode:videoNode player:player];
         } else if (!player || player.rate == 0) {
@@ -691,14 +865,66 @@ static ApolloPiPController *sPiPSharedController = nil;
             AVPlayerItem *item = player.currentItem;
             if (!item || item.status != AVPlayerItemStatusReadyToPlay) return NO;
         }
-    } else if (sPiPActivationMode == ApolloPiPActivationModeUnmutedOnly && player.muted) {
-        // Unmuted-Only governs audio-bearing videos.
+    } else if (sPiPActivationMode == ApolloPiPActivationModeUnmutedOnly
+               && !PiPPlayerIsDeliberatelyAudible(player)) {
+        // Unmuted-Only governs audio-bearing videos — keyed on a deliberate
+        // unmute (see PiPPlayerIsDeliberatelyAudible), not raw player.muted.
         return NO;
     }
     if ([self isInlineNativePiPActive]) return NO; // system PiP owns rendering right now
 
     [self takeOverFromCell:cellNode richMediaNode:richMediaNode videoNode:videoNode player:player];
     return YES;
+}
+
+// Deferred arm of the same-link stale-card guard above: the cell's fresh
+// player attaches asynchronously (no visibility event fires for it), so poll
+// a few times and close the card if a DIFFERENT live player starts rendering
+// our post. The video node is re-derived from the rich media node at fire
+// time — the node itself can be recreated rather than given a player.
+- (void)sameLinkRecheckWithRichMediaNode:(__weak id)weakRich attempts:(NSUInteger)attempts
+                              generation:(NSUInteger)generation cell:(__weak id)weakCell {
+    __weak __typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        __typeof(self) strongSelf = weakSelf;
+        BOOL done = YES;
+        if (strongSelf && strongSelf.active && strongSelf.generation == generation) {
+            // Re-verify against CURRENT content — cell reuse can swap the post.
+            id cellLink = PiPGetIvar(weakRich, "link");
+            BOOL sameLink = strongSelf.link && cellLink
+                         && (cellLink == strongSelf.link || [cellLink isEqual:strongSelf.link]);
+            if (sameLink) {
+                id videoNode = PiPVideoNodeFromRichMedia(weakRich);
+                AVPlayer *fresh = videoNode ? ApolloVideoUnmute_GetPlayerFromVideoNode(videoNode) : nil;
+                if (fresh && fresh != strongSelf.player && fresh.rate != 0) {
+                    ApolloLog(@"[PiP] Same post's fresh player materialized — closing stale PiP");
+                    [strongSelf teardownKeepPlaying:NO];
+                } else if (attempts > 1) {
+                    done = NO;
+                    [strongSelf sameLinkRecheckWithRichMediaNode:weakRich attempts:attempts - 1
+                                                      generation:generation cell:weakCell];
+                }
+            }
+        }
+        if (done) {
+            id cell = weakCell;
+            if (cell) {
+                objc_setAssociatedObject(cell, kPiPSameLinkRecheckKey, nil,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+        }
+    });
+}
+
+- (void)scheduleSameLinkRecheckForCell:(id)cellNode
+                         richMediaNode:(id)richMediaNode
+                             videoNode:(id)videoNode {
+    if (!cellNode || objc_getAssociatedObject(cellNode, kPiPSameLinkRecheckKey)) return;
+    objc_setAssociatedObject(cellNode, kPiPSameLinkRecheckKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [self sameLinkRecheckWithRichMediaNode:richMediaNode attempts:3
+                                generation:self.generation cell:cellNode];
 }
 
 // =============================================================================
@@ -724,10 +950,14 @@ static ApolloPiPController *sPiPSharedController = nil;
     // track and would otherwise read as a video — or a non-strictly-eligible
     // silent inline video. v.redd.it/Streamable real videos stay non-GIF.
     self.cardIsGifContent = PiPNodeIsGifContent(videoNode, player);
+    self.cardFromFullscreen = NO; // fullscreen resolution flips it after takeover
     self.active = YES;
     self.restoring = NO;
     self.resumeOnForeground = NO;
-    self.sessionClaimedAudibly = !player.muted && !self.cardIsGifContent;
+    // Keyed on a deliberate unmute, not raw player.muted: a silent fresh player
+    // reads muted == NO, and marking it "claimed audibly" would make teardown
+    // downgrade a session the card never really owned.
+    self.sessionClaimedAudibly = PiPPlayerIsDeliberatelyAudible(player) && !self.cardIsGifContent;
 
     UIView *videoView = PiPViewForNode(videoNode);
     CGSize videoViewSize = videoView ? videoView.bounds.size : CGSizeZero;
@@ -2027,16 +2257,21 @@ static ApolloPiPController *sPiPSharedController = nil;
             return;
         }
 
-        // PiP requires a Playback audio session active BEFORE controller init.
-        // For muted videos — and silent GIFs, which never produce sound — use
-        // mixWithOthers so we don't interrupt the user's music just to enable
-        // the handoff.
+        // Audible card (sessionClaimedAudibly, race-proof unlike raw
+        // player.muted): re-assert the exclusive claim its unmute already
+        // holds — a no-op re-set, never a fresh interruption. Muted/GIF cards:
+        // mixable claim, only when no other audio is playing (music wins;
+        // mirrors the inline arm). Must precede controller creation — AVKit
+        // never auto-starts an Ambient-born controller.
         AVAudioSession *session = [AVAudioSession sharedInstance];
-        AVAudioSessionCategoryOptions options = (self.player.muted || self.cardIsGifContent)
-            ? AVAudioSessionCategoryOptionMixWithOthers : 0;
-        [session setCategory:AVAudioSessionCategoryPlayback
-                        mode:AVAudioSessionModeDefault options:options error:nil];
-        [session setActive:YES withOptions:0 error:nil];
+        if (self.sessionClaimedAudibly) {
+            [session setCategory:AVAudioSessionCategoryPlayback
+                            mode:AVAudioSessionModeDefault options:0 error:nil];
+            [session setActive:YES withOptions:0 error:nil];
+        } else if (![session.category isEqualToString:AVAudioSessionCategoryPlayback]
+                   && !session.isOtherAudioPlaying) {
+            PiPClaimMixablePlaybackSession();
+        }
 
         AVPictureInPictureControllerContentSource *source =
             [[AVPictureInPictureControllerContentSource alloc] initWithPlayerLayer:self.playerView.playerLayer];
@@ -2045,7 +2280,10 @@ static ApolloPiPController *sPiPSharedController = nil;
         controller.delegate = (id<AVPictureInPictureControllerDelegate>)self;
         controller.canStartPictureInPictureAutomaticallyFromInline = YES;
         self.nativePiP = controller;
-        ApolloLog(@"[PiP] Native PiP controller armed (auto-start on background)");
+        self.nativePiPBornUnderPlayback =
+            [[AVAudioSession sharedInstance].category isEqualToString:AVAudioSessionCategoryPlayback];
+        ApolloLog(@"[PiP] Native PiP controller armed (auto-start on background, playbackBorn=%d)",
+                  (int)self.nativePiPBornUnderPlayback);
     }
 }
 
@@ -2093,10 +2331,23 @@ static ApolloPiPController *sPiPSharedController = nil;
                 // (which compares against inlineNativeVideoNode) no longer
                 // disarms it out from under the feed.
                 self.inlineNativeVideoNode = videoNode;
-                return;
+                // Heal an Ambient-born controller (music was playing at arm
+                // time, so the claim was skipped and AVKit will never
+                // auto-start it): if the audio has gone idle since — this
+                // re-runs on every visibility tick — fall through to recreate
+                // it under a proper claim.
+                AVAudioSession *session = [AVAudioSession sharedInstance];
+                if ([session.category isEqualToString:AVAudioSessionCategoryPlayback]
+                    || session.isOtherAudioPlaying
+                    || self.inlineNativePiP.pictureInPictureActive) {
+                    return;
+                }
+                ApolloLog(@"[PiP] Audio idle now — recreating Ambient-born inline controller");
+                [self disarmInlineNativePiPIfIdle];
+            } else {
+                if (self.inlineNativePiP.pictureInPictureActive) return; // never retarget mid-PiP
+                [self disarmInlineNativePiPIfIdle];
             }
-            if (self.inlineNativePiP.pictureInPictureActive) return; // never retarget mid-PiP
-            [self disarmInlineNativePiPIfIdle];
         }
         if (![AVPictureInPictureController isPictureInPictureSupported]) return;
 
@@ -2105,18 +2356,18 @@ static ApolloPiPController *sPiPSharedController = nil;
         id layer = ((id (*)(id, SEL))objc_msgSend)(videoNode, playerLayerSel);
         if (![layer isKindOfClass:[AVPlayerLayer class]]) return;
 
-        // System PiP needs a Playback session active before controller init.
-        // Best effort for muted videos — and silent GIFs, which never produce
-        // sound — use mixWithOthers so the handoff doesn't interrupt the user's
-        // music; unmuted real videos already hold a Playback session via the
-        // unmute paths. Mirrors the card's setupNativePiP GIF handling.
+        // Claim BEFORE creating the controller — AVKit never auto-starts an
+        // Ambient-born controller (device-confirmed: deferring the claim to
+        // willResignActive/didEnterBackground produced no PiP). Only when no
+        // other audio is playing: with music on, the muted video's System PiP
+        // yields (the heals and claimHandoffSessionIfNeeded re-check once the
+        // music stops).
         AVAudioSession *session = [AVAudioSession sharedInstance];
-        if (![session.category isEqualToString:AVAudioSessionCategoryPlayback]) {
-            AVAudioSessionCategoryOptions options = (player.muted || PiPNodeURLIsGif(videoNode, player))
-                ? AVAudioSessionCategoryOptionMixWithOthers : 0;
-            [session setCategory:AVAudioSessionCategoryPlayback
-                            mode:AVAudioSessionModeDefault options:options error:nil];
-            [session setActive:YES withOptions:0 error:nil];
+        if (![session.category isEqualToString:AVAudioSessionCategoryPlayback]
+            && !session.isOtherAudioPlaying) {
+            ApolloLog(@"[PiP] Inline arm: claiming Playback+Mix session (idle audio, was=%@)",
+                      session.category);
+            PiPClaimMixablePlaybackSession();
         }
 
         AVPictureInPictureControllerContentSource *source =
@@ -2128,7 +2379,10 @@ static ApolloPiPController *sPiPSharedController = nil;
         self.inlineNativePiP = controller;
         self.inlineNativePlayer = player;
         self.inlineNativeVideoNode = videoNode;
-        ApolloLog(@"[PiP] Inline native PiP armed on player %p", player);
+        self.inlineNativePiPBornUnderPlayback =
+            [[AVAudioSession sharedInstance].category isEqualToString:AVAudioSessionCategoryPlayback];
+        ApolloLog(@"[PiP] Inline native PiP armed on player %p (playbackBorn=%d)",
+                  player, (int)self.inlineNativePiPBornUnderPlayback);
     }
 }
 
@@ -2156,7 +2410,11 @@ static ApolloPiPController *sPiPSharedController = nil;
         }
         AVPlayer *player = ApolloVideoUnmute_GetPlayerFromVideoNode(video);
         if (player && player.rate != 0) {
-            if (!(sPiPActivationMode == ApolloPiPActivationModeUnmutedOnly && player.muted)
+            // Deliberate-unmute gate, not raw player.muted — see the visibility
+            // handler; the retry window (fresh player, +0.5–2s) is exactly when
+            // muted reads NO for silent videos (issue #560).
+            if (!(sPiPActivationMode == ApolloPiPActivationModeUnmutedOnly
+                  && !PiPPlayerIsDeliberatelyAudible(player))
                 && PiPIsEligibleForInlineNativePiP(video, player)
                 && PiPIsVideoMidpointVisible(video, cell)) {
                 ApolloLog(@"[PiP] Inline arm retry: player ready — arming");
@@ -2194,6 +2452,19 @@ static ApolloPiPController *sPiPSharedController = nil;
 
 - (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)controller {
     ApolloLog(@"[PiP] Native PiP stopped");
+    // X-closed from the home screen (app still backgrounded): the handoff is
+    // over and the player is stopped — release the handoff claim so music we
+    // paused gets its resume cue now. A stop that restores into the app runs
+    // after willEnterForeground already released it (no-op here).
+    if ([UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
+        [self releaseHandoffSessionClaim];
+    } else {
+        // PiP collapsed back into the running app: the foreground release and
+        // the didBecomeActive heal both ran while PiP was still active (the
+        // heal skips then), leaving an armed controller on an Ambient session
+        // — heal now that it's idle, or the next home-swipe gets no PiP.
+        [self healAmbientBornControllersIfAudioIdle];
+    }
     if (self.active && self.cardRevealed) self.card.hidden = NO;
     // Inline system PiP dismissed with the clip parked at its end (Loop off,
     // e.g. X-closed from the home screen — handleDidBecomeActive's rewind
@@ -2221,7 +2492,96 @@ restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:(void (^)(BOOL)
 // MARK: App lifecycle
 // =============================================================================
 
+// Resign-time re-check of the handoff session (issue #560). Auto-start needs
+// an ACTIVE Playback session when iOS evaluates the handoff (between
+// willResignActive and didEnterBackground — the latter is too late,
+// device-confirmed), but a claim must interrupt nobody:
+//   • exclusive Playback held (deliberate unmute): already active — skip.
+//   • mixable Playback standing (our earlier claim): re-activate — harmless
+//     on an already-Playback session (device-confirmed).
+//   • Ambient + no other audio: flip + activate — interrupts no one.
+//   • Ambient + other audio: SKIP — the muted video's PiP yields to the
+//     user's music (the OS won't allow both; unmuted videos still PiP via
+//     their unmute's own claim).
+- (void)claimHandoffSessionIfNeeded {
+    if (@available(iOS 15.0, *)) {
+        BOOL inlineCandidate = self.inlineNativePiP != nil
+            && self.inlineNativePlayer != nil && self.inlineNativePlayer.rate != 0;
+        BOOL cardCandidate = self.active && sPiPNativeEnabled && self.nativePiP != nil
+            && self.player != nil && self.player.rate != 0;
+        if (!inlineCandidate && !cardCandidate) return;
+
+        AVAudioSession *session = [AVAudioSession sharedInstance];
+        if ([session.category isEqualToString:AVAudioSessionCategoryPlayback]) {
+            if (!(session.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers)) {
+                return; // exclusive claim held by a deliberate unmute — already active
+            }
+            ApolloLog(@"[PiP] Resign with %@ handoff candidate — re-activating standing Playback+Mix session",
+                      inlineCandidate ? @"inline" : @"card");
+            [session setActive:YES withOptions:0 error:nil];
+            self.handoffSessionClaimed = YES;
+            return;
+        }
+        if (session.isOtherAudioPlaying) {
+            ApolloLog(@"[PiP] Resign with %@ handoff candidate — other audio playing, NOT claiming (muted-video PiP yields to the user's audio)",
+                      inlineCandidate ? @"inline" : @"card");
+            return;
+        }
+        ApolloLog(@"[PiP] Resign with %@ handoff candidate — claiming Playback+Mix session (no other audio, was=%@)",
+                  inlineCandidate ? @"inline" : @"card", session.category);
+        PiPClaimMixablePlaybackSession();
+        self.handoffSessionClaimed = YES;
+
+        // Recreate an AMBIENT-born controller under the fresh claim.
+        // Best-effort only: AVKit needs runloop time after birth to allow
+        // auto-start (a resign-time rebuild logged possible=0), so the heals
+        // are the real fix — this catches audio that went idle in the final
+        // moments. A PLAYBACK-born controller whose session merely dipped
+        // (mute dance after a re-mute) stays viable: the claim above suffices,
+        // and destroying it would swap a working controller for a doomed one.
+        if (inlineCandidate && !self.inlineNativePiPBornUnderPlayback) {
+            id videoNode = self.inlineNativeVideoNode;
+            AVPlayer *player = self.inlineNativePlayer;
+            [self disarmInlineNativePiPIfIdle];
+            [self armInlineNativePiPForVideoNode:videoNode player:player];
+            ApolloLog(@"[PiP] Recreated Ambient-born inline controller after late claim (possible=%d)",
+                      (int)self.inlineNativePiP.isPictureInPicturePossible);
+        } else if (cardCandidate && !self.nativePiPBornUnderPlayback) {
+            [self destroyNativePiP];
+            [self setupNativePiP];
+            ApolloLog(@"[PiP] Recreated Ambient-born card controller after late claim (possible=%d)",
+                      (int)self.nativePiP.isPictureInPicturePossible);
+        }
+    }
+}
+
+// Hand back a handoff claim that no longer serves anything (System PiP never
+// started, or was closed from the home screen): the fresh activation can have
+// paused the user's music (see claimHandoffSessionIfNeeded), and only a
+// deactivation with NotifyOthersOnDeactivation gives it the resume cue.
+- (void)releaseHandoffSessionClaim {
+    if (!self.handoffSessionClaimed) return;
+    self.handoffSessionClaimed = NO;
+    // Only ours to release: a deliberate unmute may have claimed the session
+    // exclusively since we activated (its lifecycle belongs to Apollo's mute
+    // dance, not to us) — never downgrade a non-mixable Playback session.
+    AVAudioSession *current = [AVAudioSession sharedInstance];
+    if (![current.category isEqualToString:AVAudioSessionCategoryPlayback]
+        || !(current.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers)) {
+        return;
+    }
+    sPiPSessionHandbackInProgress = YES;
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    [session setCategory:AVAudioSessionCategoryAmbient error:nil];
+    [session setActive:NO
+           withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                 error:nil];
+    sPiPSessionHandbackInProgress = NO;
+    ApolloLog(@"[PiP] Handoff session claim released");
+}
+
 - (void)handleDidEnterBackground {
+    self.enteredBackground = YES;
     // Inline-only System PiP (no card): nothing pauses the inline player here —
     // we rely on iOS auto-starting system PiP. If it doesn't (the user's "Start
     // PiP Automatically" is off, low power, iOS declines, etc.) the inline
@@ -2243,6 +2603,7 @@ restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:(void (^)(BOOL)
                 if (inlinePlayer.rate == 0) return;
                 ApolloLog(@"[PiP] Inline System PiP never started on background — pausing to avoid background audio");
                 strongSelf.backgroundPausedInlinePlayer = inlinePlayer;
+                strongSelf.backgroundPausedInlineWasAudible = PiPPlayerIsDeliberatelyAudible(inlinePlayer);
                 [inlinePlayer pause];
                 // The handoff has definitively failed: drop the shield and —
                 // for an audible video — hand the Playback session back so
@@ -2252,7 +2613,11 @@ restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:(void (^)(BOOL)
                 // resume re-claims the session (handleWillEnterForeground);
                 // the controller re-arms on the next visibility tick/unmute.
                 [strongSelf disarmInlineNativePiPIfIdle];
-                if (!inlinePlayer.muted) {
+                // Keyed on the captured deliberate-audibility, not raw
+                // player.muted — a silent fresh player reads muted == NO but
+                // never held exclusive focus, so there is nothing to hand back
+                // (its claim was mixable).
+                if (strongSelf.backgroundPausedInlineWasAudible) {
                     ApolloVideoUnmute_ClearProtectionIfPlayer(inlinePlayer);
                     AVAudioSession *session = [AVAudioSession sharedInstance];
                     [session setCategory:AVAudioSessionCategoryAmbient error:nil];
@@ -2260,6 +2625,9 @@ restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:(void (^)(BOOL)
                            withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
                                  error:nil];
                 }
+                // Muted counterpart (mutually exclusive with the audible
+                // handback above).
+                [strongSelf releaseHandoffSessionClaim];
             });
         }
     }
@@ -2291,6 +2659,26 @@ restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:(void (^)(BOOL)
                 ApolloLog(@"[PiP] Card System PiP never started on background — pausing to avoid background audio");
                 strongSelf.resumeOnForeground = YES;
                 [cardPlayer pause];
+                // Handoff failed and the card just went silent: if it held
+                // audio focus, hand the session back now so interrupted music
+                // gets its resume cue (mirrors the inline failsafe).
+                // sessionClaimedAudibly stays set — the foreground path
+                // re-claims, and teardown's later handback is a no-op.
+                if (strongSelf.sessionClaimedAudibly) {
+                    ApolloVideoUnmute_ClearProtectionIfPlayer(cardPlayer);
+                    // Bypass our own downgrade-blocking predicate (card still active).
+                    sPiPSessionHandbackInProgress = YES;
+                    AVAudioSession *session = [AVAudioSession sharedInstance];
+                    [session setCategory:AVAudioSessionCategoryAmbient error:nil];
+                    [session setActive:NO
+                           withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                                 error:nil];
+                    sPiPSessionHandbackInProgress = NO;
+                    ApolloLog(@"[PiP] Card handoff failed — audio session handed back");
+                }
+                // Muted/GIF card counterpart (mutually exclusive with the
+                // audible handback above).
+                [strongSelf releaseHandoffSessionClaim];
             });
         }
         return;
@@ -2303,9 +2691,42 @@ restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:(void (^)(BOOL)
 }
 
 - (void)handleWillEnterForeground {
+    // Back in the app: a handoff claim no longer serves anything (whether PiP
+    // ran and is collapsing back in, or the background trip was too brief for
+    // the failsafe) — release it so paused music resumes. The deactivation can
+    // raise an async media-services interruption that pauses the still-playing
+    // inline player (same hazard muteTapped documents), so nudge it back.
+    if (self.handoffSessionClaimed) {
+        AVPlayer *armedPlayer = self.inlineNativePlayer ?: self.player;
+        BOOL wasPlaying = armedPlayer.rate != 0;
+        [self releaseHandoffSessionClaim];
+        if (armedPlayer && wasPlaying) {
+            __weak AVPlayer *weakArmed = armedPlayer;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                AVPlayer *p = weakArmed;
+                if (p && p.rate == 0) {
+                    ApolloLog(@"[PiP] Handoff release paused the inline player — resuming");
+                    [p play];
+                }
+            });
+        }
+    }
     if (self.active && self.resumeOnForeground) {
         ApolloLog(@"[PiP] App foregrounded — resuming");
         self.resumeOnForeground = NO;
+        // The background failsafe handed an audible card's session back —
+        // re-claim before resuming or the card comes back silent (Ambient
+        // silences AVPlayer audio even unmuted). !muted guards the re-muted
+        // card: it keeps sessionClaimedAudibly by design, but an exclusive
+        // re-claim for a silent card would re-pause the just-resumed music
+        // (muted == YES is the reliable direction of that flag).
+        if (self.sessionClaimedAudibly && !self.player.muted) {
+            AVAudioSession *session = [AVAudioSession sharedInstance];
+            [session setCategory:AVAudioSessionCategoryPlayback
+                            mode:AVAudioSessionModeDefault options:0 error:nil];
+            [session setActive:YES withOptions:0 error:nil];
+        }
         [self.player play];
     }
     // Resume an inline player we paused because System PiP didn't start. The
@@ -2314,9 +2735,15 @@ restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:(void (^)(BOOL)
     // audible video comes back audible.
     AVPlayer *pausedInline = self.backgroundPausedInlinePlayer;
     if (pausedInline) {
+        BOOL wasAudible = self.backgroundPausedInlineWasAudible;
         self.backgroundPausedInlinePlayer = nil;
+        self.backgroundPausedInlineWasAudible = NO;
         if (pausedInline.rate == 0) {
-            if (!pausedInline.muted) {
+            // Exclusive re-claim only if the video deliberately held audio
+            // focus before the failed handoff (captured flag — a silent fresh
+            // player reads muted == NO and must not interrupt the user's
+            // music; issue #560).
+            if (wasAudible) {
                 AVAudioSession *session = [AVAudioSession sharedInstance];
                 [session setCategory:AVAudioSessionCategoryPlayback
                                 mode:AVAudioSessionModeDefault options:0 error:nil];
@@ -2334,7 +2761,46 @@ restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:(void (^)(BOOL)
 // layer simply resumes rendering. (When the user DID use the restore button,
 // PiP is already stopping by the time this fires and the extra stop is a
 // no-op.)
+// Recreate an Ambient-born controller (claim skipped because music was
+// playing; AVKit will never auto-start it) once the audio goes idle.
+// Visibility ticks cover scrolling; this covers the no-scroll paths — called
+// from didBecomeActive (pausing music via Control Center bounces
+// resign→active) and from a PiP stop while the app is active.
+- (void)healAmbientBornControllersIfAudioIdle {
+    if (@available(iOS 15.0, *)) {
+        AVAudioSession *session = [AVAudioSession sharedInstance];
+        if ([session.category isEqualToString:AVAudioSessionCategoryPlayback]) return;
+        if (session.isOtherAudioPlaying) return;
+
+        if (self.inlineNativePiP && !self.inlineNativePiP.pictureInPictureActive
+            && self.inlineNativePlayer && self.inlineNativePlayer.rate != 0
+            && self.inlineNativeVideoNode) {
+            ApolloLog(@"[PiP] Audio idle on activate — recreating Ambient-born inline controller");
+            id videoNode = self.inlineNativeVideoNode;
+            AVPlayer *player = self.inlineNativePlayer;
+            [self disarmInlineNativePiPIfIdle];
+            [self armInlineNativePiPForVideoNode:videoNode player:player];
+        } else if (self.active && sPiPNativeEnabled && self.nativePiP
+                   && !self.nativePiP.pictureInPictureActive
+                   && self.player && self.player.rate != 0) {
+            ApolloLog(@"[PiP] Audio idle on activate — recreating Ambient-born card controller");
+            [self destroyNativePiP];
+            [self setupNativePiP];
+        }
+    }
+}
+
 - (void)handleDidBecomeActive {
+    // A resign→active bounce (Control Center, alert) never fires
+    // willEnterForeground, so its claim's flag would linger and make a LATER
+    // real background cycle spuriously release the session. Downgrade to an
+    // ordinary standing claim (mixable, harmless).
+    if (self.handoffSessionClaimed && !self.enteredBackground) {
+        ApolloLog(@"[PiP] Resign bounce without backgrounding — keeping session, clearing handoff flag");
+        self.handoffSessionClaimed = NO;
+    }
+    self.enteredBackground = NO;
+    [self healAmbientBornControllersIfAudioIdle];
     if (@available(iOS 15.0, *)) {
         if (self.nativePiP.pictureInPictureActive) {
             ApolloLog(@"[PiP] App active with card system PiP still running — dismissing into app");
@@ -2424,6 +2890,7 @@ static BOOL PiPInlineShieldEngaged(AVPlayer *player) {
 }
 
 BOOL ApolloPiP_ShouldBlockAudioSessionDowngrade(void) {
+    if (sPiPSessionHandbackInProgress) return NO;
     ApolloPiPController *controller = sPiPSharedController;
     if (!controller) return NO;
     // A silent GIF card produces no sound, so there is no audio session worth
@@ -2480,20 +2947,13 @@ void ApolloPiP_NoteInlinePlayerMuted(AVPlayer *player) {
         return;
     }
 
-    // "All Videos" / "All Videos & GIFs": a muted PLAYING video stays eligible, so
-    // keep the arm. Apollo's mute runs the mute dance, which just set the session
-    // to Ambient and deactivated it — that would stop System PiP from auto-starting
-    // on background, so re-assert a Playback session. mixWithOthers since the video
-    // is now silent (won't interrupt the user's audio), matching the muted-video
-    // inline arm.
-    if (@available(iOS 15.0, *)) {
-        AVAudioSession *session = [AVAudioSession sharedInstance];
-        [session setCategory:AVAudioSessionCategoryPlayback
-                        mode:AVAudioSessionModeDefault
-                     options:AVAudioSessionCategoryOptionMixWithOthers error:nil];
-        [session setActive:YES withOptions:0 error:nil];
-        ApolloLog(@"[PiP] Inline-armed player muted (All Videos) — kept armed, re-asserted Playback for handoff");
-    }
+    // "All Videos" / "All Videos & GIFs": a muted PLAYING video stays eligible,
+    // so keep the arm. Apollo's mute just ran the mute dance (session back to
+    // Ambient + deactivated) — no synchronous re-assert HERE: with the user's
+    // music playing a Playback claim would pause it (issue #560). The
+    // visibility-tick / didBecomeActive heals reclaim and rebuild the arm once
+    // the audio is idle; while music plays, the muted video's handoff yields.
+    ApolloLog(@"[PiP] Inline-armed player muted (All Videos) — kept armed, session heal deferred");
 }
 
 // Audio arbitration: a DIFFERENT video is about to play audibly (the user
@@ -2561,7 +3021,11 @@ static void PiPManageInlineNativeForFeedCell(id cellNode) {
     if (!videoNode) return;
 
     AVPlayer *player = ApolloVideoUnmute_GetPlayerFromVideoNode(videoNode);
-    BOOL eligible = player && player.rate != 0 && !player.muted
+    // Deliberate-unmute gate, not raw !player.muted: a freshly created feed
+    // player can read muted == NO while silent (issue #560), and the feed must
+    // only arm for a video the user actually turned on.
+    BOOL eligible = player && player.rate != 0
+                 && PiPPlayerIsDeliberatelyAudible(player)
                  && PiPIsEligibleForInlineNativePiP(videoNode, player)
                  && PiPIsVideoMidpointVisible(videoNode, cellNode);
     if (eligible) {
@@ -2571,7 +3035,7 @@ static void PiPManageInlineNativeForFeedCell(id cellNode) {
     }
 }
 
-static BOOL PiPHandleFeedVisibilityEvent(id cellNode) {
+static BOOL PiPHandleFeedVisibilityEvent(id cellNode, unsigned long long event) {
     ApolloPiPController *controller = sPiPSharedController;
     if (!controller) return NO;
     if (!controller.active) {
@@ -2585,7 +3049,25 @@ static BOOL PiPHandleFeedVisibilityEvent(id cellNode) {
     if (!videoNode) return NO;
 
     AVPlayer *player = ApolloVideoUnmute_GetPlayerFromVideoNode(videoNode);
-    if (!player || player != controller.player) return NO;
+    if (!player || player != controller.player) {
+        // Same-post dedupe: a feed cell playing a DIFFERENT live player for the
+        // post our card holds would double-render — close the card, the inline
+        // cell wins. Scoped to fullscreen-origin cards (the only cards that
+        // float over feeds with no identity home; comments-origin cards defer
+        // to the appeared-walk on back-pop) and deferred through interactive
+        // back-swipes — these events fire mid-gesture even when the gesture is
+        // cancelled, mirroring the owned path's deferral below.
+        if (player && player.rate != 0
+            && controller.cardFromFullscreen && !controller.restoring
+            && controller.link && !ApolloVideoUnmute_IsNavigatingBack()) {
+            id cellLink = PiPGetIvar(richMediaNode, "link");
+            if (cellLink && (cellLink == controller.link || [cellLink isEqual:controller.link])) {
+                ApolloLog(@"[PiP] Feed cell playing our post with a different player — closing card");
+                [controller teardownKeepPlaying:NO];
+            }
+        }
+        return NO;
+    }
 
     if (PiPIsVideoMidpointVisible(videoNode, cellNode)) {
         // The video's feed cell is on screen — never double-display; hand back.
@@ -2633,6 +3115,19 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
     // appearing VC's own flag avoids the cross-VC race an interactive swipe-pop has
     // with sIsNavigatingBack (CommentsVC.viewDidDisappear can clear it first).
     if (controller.active && [feedVC isMovingToParentViewController]) return;
+
+    // Fullscreen-origin cards are homeless BY DESIGN (no inline identity —
+    // autoplay off / compact feed / fullscreen-owned player): the dismiss
+    // branches below would misread one as a stranded back-pop card. Also skip
+    // while a fullscreen→PiP resolution from the same dismissal is in flight —
+    // the modal dismissal fires this feed VC's viewDidAppear, whose ordering
+    // against MediaPageViewController.viewDidDisappear is undefined.
+    if (controller.active
+        && (controller.cardFromFullscreen
+            || sFSPiPPending
+            || CFAbsoluteTimeGetCurrent() - sFSPiPResolvedAt < 1.5)) {
+        return;
+    }
 
     // A non-shareable (compact-mode) card's video is never reclaimed into a feed
     // cell — the compact feed shows a thumbnail, not the shared player — so on a
@@ -2684,6 +3179,186 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
         ApolloLog(@"[PiP] Back-pop to feed, our video's cell not on screen — dismissing card");
         [controller closeTapped];
     }
+}
+
+// =============================================================================
+// MARK: - Fullscreen → PiP entry point (issue #528)
+// =============================================================================
+
+// Set in %ctor. The fullscreen pager (MediaPageViewController) hosts one child
+// viewer per media item; only MediaViewerController children can hold a player.
+static Class sPiPMediaViewerClass = Nil;
+static Class sPiPMediaPageVCClass = Nil;
+
+// The fullscreen pager a child viewer belongs to, via the UIKit containment
+// chain. (The parentMediaPageViewController ivar is a Swift weak box — reading
+// it raw through object_getIvar would be unsafe.)
+static UIViewController *PiPMediaPageVCForChild(UIViewController *child) {
+    UIViewController *parent = child.parentViewController;
+    while (parent && (!sPiPMediaPageVCClass || ![parent isKindOfClass:sPiPMediaPageVCClass])) {
+        parent = parent.parentViewController;
+    }
+    return parent;
+}
+
+// The current page's OWNED player: MediaViewerController's `player` ivar, set
+// only when the viewer created the player itself (Apollo's togglePlayPause
+// treats it and the adopted playerLayerContainerView layer as disjoint). nil
+// for image pages AND adopted shared-layer pages — a shared player has a live
+// inline home the card would double-render.
+static AVPlayer *PiPOwnedPlayerFromMediaPageVC(id pageVC) {
+    if (!pageVC || ![pageVC respondsToSelector:@selector(viewControllers)]) return nil;
+    id mediaVC = [[(UIPageViewController *)pageVC viewControllers] firstObject];
+    if (!mediaVC || (sPiPMediaViewerClass && ![mediaVC isKindOfClass:sPiPMediaViewerClass])) return nil;
+    return PiPGetIvar(mediaVC, "player");
+}
+
+// Restore the user's fullscreen playback state on the card after the native
+// dismissal's mute dance settles (T+0 force-mute, T+50ms Ambient downgrade,
+// T+100ms setMuted:YES — relative to viewDidDisappear).
+static void PiPScheduleFullscreenFixup(AVPlayer *player, BOOL wasMuted, BOOL wasPlaying,
+                                       ApolloPiPController *cardController) {
+    __weak AVPlayer *weakPlayer = player;
+    __weak ApolloPiPController *weakController = cardController;
+    NSUInteger generation = cardController.generation;
+    // fullRestore = YES only on the first run (+250ms, dance settled): it may
+    // touch mute/session state. The second run (+700ms) is a rate-only net for
+    // stragglers (a trailing unpause/interruption can re-pause a beat later)
+    // and must never override a mute the user may have set since.
+    void (^fixup)(BOOL) = ^(BOOL fullRestore) {
+        AVPlayer *fixupPlayer = weakPlayer;
+        if (!fixupPlayer) return;
+        ApolloPiPController *card = weakController;
+        if (!card || !card.active || card.generation != generation
+            || card.player != fixupPlayer) {
+            return; // the card this fixup was scheduled for is gone
+        }
+        // wasPlaying gates the audible restore too: an unmuted-but-PAUSED video
+        // must not claim the exclusive Playback session (it would stop other
+        // apps' audio behind a card playing nothing).
+        if (fullRestore && !wasMuted && !card.cardIsGifContent && wasPlaying) {
+            // Mirror the card's own unmute path (muteTapped): exclusive
+            // Playback first — Apollo's Ambient silences an unmuted player.
+            if (fixupPlayer.muted) {
+                AVAudioSession *session = [AVAudioSession sharedInstance];
+                [session setCategory:AVAudioSessionCategoryPlayback
+                                mode:AVAudioSessionModeDefault options:0 error:nil];
+                [session setActive:YES withOptions:0 error:nil];
+                [fixupPlayer setMuted:NO];
+            }
+            card.sessionClaimedAudibly = YES;
+        }
+        if (wasPlaying && fixupPlayer.rate == 0) {
+            PiPRewindIfStoppedAtEnd(fixupPlayer);
+            [fixupPlayer play];
+        }
+    };
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ fixup(YES); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ fixup(NO); });
+}
+
+// Runs after the dismissal completes (MediaPageViewController.viewDidDisappear).
+// One landing shape: the button only offers fullscreen-OWNED players, which
+// have no inline home — the card takes the captured player directly.
+static void PiPResolveFullscreenPiPRequest(void) {
+    if (!sFSPiPPending) return;
+    AVPlayer *player = sFSPiPPlayer;
+    BOOL wasMuted = sFSPiPWasMuted;
+    BOOL wasPlaying = sFSPiPWasPlaying;
+    id link = sFSPiPLink;
+    // Consume on the next runloop turn: ApolloVideoUnmute's own
+    // viewDidDisappear hook (order against ours is undefined) must still see
+    // the pending flag and skip its "Remember from Full Screen" re-unmute.
+    // Token-guarded so the deferred clear can never clobber a NEWER request.
+    NSUInteger token = sFSPiPRequestToken;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (sFSPiPRequestToken != token) return;
+        sFSPiPPending = NO;
+        sFSPiPPlayer = nil;
+        sFSPiPLink = nil;
+    });
+    if (!player) return;
+    sFSPiPResolvedAt = CFAbsoluteTimeGetCurrent();
+
+    ApolloPiPController *controller = [ApolloPiPController sharedController];
+    ApolloLog(@"[PiP] Fullscreen PiP: card takeover on owned player");
+    [controller takeOverFromCell:nil richMediaNode:nil videoNode:nil player:player];
+    if (controller.active) {
+        // No richMediaNode lent a link, so backfill it from the pager's — the
+        // same-post dedupe guards key on controller.link, and without it
+        // re-opening this post would double-render against the card.
+        controller.cardFromFullscreen = YES;
+        if (!controller.link && link) controller.link = link;
+    }
+    PiPScheduleFullscreenFixup(player, wasMuted, wasPlaying, controller);
+}
+
+// Build/refresh the fullscreen "enter PiP" button. Called from the pager's
+// viewDidLayoutSubviews (page swipes, rotation) and the child viewer's (the
+// player can materialize without a parent re-layout). Mirrors the native
+// closeButton: frame reflected onto the trailing edge (native layout already
+// resolves notch vs legacy insets) and alpha KVO-mirrored for the chrome fade.
+static void PiPRefreshFullscreenPiPButton(id pageVC) {
+    if (!pageVC) return;
+    UIViewController *pageViewController = (UIViewController *)pageVC;
+    UIButton *closeButton = PiPGetIvar(pageVC, "closeButton");
+    UIButton *pipButton = objc_getAssociatedObject(pageVC, kPiPFullscreenButtonKey);
+    if (!closeButton || !closeButton.superview || !pageViewController.isViewLoaded) {
+        pipButton.hidden = YES;
+        return;
+    }
+    if (!sPiPEnabled) {
+        pipButton.hidden = YES;
+        return;
+    }
+    if (!pipButton) {
+        UIImageSymbolConfiguration *config =
+            [UIImageSymbolConfiguration configurationWithPointSize:18
+                                                            weight:UIImageSymbolWeightMedium];
+        UIImage *icon = [UIImage systemImageNamed:@"pip.enter" withConfiguration:config];
+        if (!icon) return;
+        pipButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        [pipButton setImage:icon forState:UIControlStateNormal];
+        pipButton.tintColor = [UIColor whiteColor];
+        pipButton.accessibilityLabel = @"Picture in Picture";
+        [pipButton addTarget:pageVC action:NSSelectorFromString(@"apolloPiP_enterTapped:")
+            forControlEvents:UIControlEventTouchUpInside];
+        if (@available(iOS 13.4, *)) {
+            pipButton.pointerInteractionEnabled = YES;
+        }
+        objc_setAssociatedObject(pageVC, kPiPFullscreenButtonKey, pipButton,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloPiPFullscreenButtonMirror *mirror =
+            [[ApolloPiPFullscreenButtonMirror alloc] initWithSource:closeButton
+                                                          pipButton:pipButton];
+        objc_setAssociatedObject(pageVC, kPiPFullscreenMirrorKey, mirror,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (pipButton.superview != closeButton.superview) {
+        [closeButton.superview addSubview:pipButton];
+    }
+    CGRect closeFrame = closeButton.frame;
+    CGFloat width = closeButton.superview.bounds.size.width;
+    pipButton.frame = CGRectMake(width - closeFrame.origin.x - closeFrame.size.width,
+                                 closeFrame.origin.y,
+                                 closeFrame.size.width, closeFrame.size.height);
+    pipButton.alpha = closeButton.alpha;
+    // Only when autoplay is effectively off AND the page has a fullscreen-
+    // OWNED player (image pages and adopted shared-layer pages keep the X
+    // alone). Live checks — every layout/page-swipe pass re-evaluates.
+    pipButton.hidden = closeButton.hidden
+        || !ApolloNativeAutoplayEffectivelyOff()
+        || (PiPOwnedPlayerFromMediaPageVC(pageVC) == nil);
+}
+
+// Consulted by ApolloVideoUnmute.xm's MediaPageViewController.viewDidDisappear
+// hook: while a fullscreen→PiP request is in flight, the PiP side owns the
+// post-dismissal mute state — "Remember/Always from Full Screen" must not
+// fight it.
+BOOL ApolloPiP_WillHandleFullscreenDismiss(void) {
+    return sFSPiPPending;
 }
 
 // =============================================================================
@@ -2784,7 +3459,7 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
 - (void)cellNodeVisibilityEvent:(unsigned long long)event
                    inScrollView:(id)scrollView
                   withCellFrame:(CGRect)frame {
-    if (PiPHandleFeedVisibilityEvent(self)) {
+    if (PiPHandleFeedVisibilityEvent(self, event)) {
         return;
     }
     %orig;
@@ -2804,6 +3479,14 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
 - (void)viewDidLayoutSubviews {
     %orig;
 
+    // The child's layout pass is where the player materializes (shared-layer
+    // adoption or own-player creation) without any parent re-layout — refresh
+    // the parent's PiP button visibility from here too.
+    if (sPiPEnabled) {
+        UIViewController *pager = PiPMediaPageVCForChild((UIViewController *)self);
+        if (pager) PiPRefreshFullscreenPiPButton(pager);
+    }
+
     ApolloPiPController *controller = sPiPSharedController;
     if (!controller) return;
     if (!controller.active && !controller.inlineNativePiP) return;
@@ -2821,12 +3504,105 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
     if (controller.active && fullscreenPlayer == controller.player) {
         ApolloLog(@"[PiP] Fullscreen viewer adopted our player — yielding");
         [controller teardownKeepPlaying:YES];
+    } else if (controller.active && controller.link) {
+        // Same post re-opened in fullscreen with a DIFFERENT player (a
+        // fullscreen-origin card's player was never adopted by an inline
+        // node, so re-tapping the post media creates a fresh one). Two live
+        // players of the same content — close the card, fullscreen wins.
+        UIViewController *pager = PiPMediaPageVCForChild((UIViewController *)self);
+        id pageLink = pager ? PiPGetIvar(pager, "link") : nil;
+        if (pageLink && (pageLink == controller.link || [pageLink isEqual:controller.link])) {
+            ApolloLog(@"[PiP] Fullscreen re-opened our post with a new player — closing card");
+            // Clear sessionClaimedAudibly FIRST (mirrors
+            // ApolloPiP_YieldAudioToPlayer): fullscreen owns the session now —
+            // its native Unmute-When-Opened claim carries no sAutoUnmutedPlayer
+            // protection, so the teardown's Ambient + setActive:NO handback
+            // would land on top of it, interrupting the fresh player (opens
+            // stopped) and leaving it muted==NO-but-silent (#560 signature).
+            // The music resume cue is merely deferred to the fullscreen's own
+            // dismissal mute dance.
+            controller.sessionClaimedAudibly = NO;
+            [controller teardownKeepPlaying:NO];
+        }
     }
     // Fullscreen creates its own (dormant) AVPictureInPictureController on the
     // shared layer — retire our inline one to avoid two controllers on it.
     if (fullscreenPlayer == controller.inlineNativePlayer) {
         [controller disarmInlineNativePiPIfIdle];
     }
+}
+
+%end
+
+// ---------------------------------------------------------------------------
+// MediaPageViewController (the fullscreen pager, hosts the chrome): the "enter
+// PiP" button + the dismissal that resolves a pending PiP request. See the
+// "Fullscreen → PiP entry point" section above.
+// ---------------------------------------------------------------------------
+%hook MediaPageViewController
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    PiPRefreshFullscreenPiPButton(self);
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig; // native force-mute + mute dance scheduling happen in here
+    PiPResolveFullscreenPiPRequest();
+}
+
+// Album page swipes: viewControllers (and so the current page's player) only
+// updates when the transition completes — no reliable layout pass follows, so
+// refresh the button's visibility here too.
+- (void)pageViewController:(id)pageViewController didFinishAnimating:(BOOL)finished
+   previousViewControllers:(id)previousViewControllers transitionCompleted:(BOOL)completed {
+    %orig;
+    if (completed) PiPRefreshFullscreenPiPButton(self);
+}
+
+%new
+- (void)apolloPiP_enterTapped:(id)sender {
+    if (![self respondsToSelector:NSSelectorFromString(@"close")]) return;
+    // Re-check the gate at tap time: visibility only re-evaluates on layout
+    // passes, so a reachability flip while the viewer sits open can leave the
+    // button stale-visible. Hide and stand down instead of acting.
+    if (!ApolloNativeAutoplayEffectivelyOff()) {
+        ApolloLog(@"[PiP] Fullscreen PiP tapped but autoplay is on now — hiding button");
+        PiPRefreshFullscreenPiPButton(self);
+        return;
+    }
+    AVPlayer *player = PiPOwnedPlayerFromMediaPageVC(self);
+    if (!player) {
+        PiPRefreshFullscreenPiPButton(self); // same stale-visible recovery
+        return;
+    }
+    sFSPiPPending = YES;
+    sFSPiPPlayer = player; // strong — must outlive the viewer (it owns the player)
+    // Deliberate audibility, NOT raw player.muted: a preference-muted
+    // fullscreen player reads muted == NO under an Ambient session, and
+    // restoring "unmuted" from that would claim the exclusive Playback session
+    // for content the user never audibly played (issue #560).
+    sFSPiPWasMuted = !PiPPlayerIsDeliberatelyAudible(player);
+    sFSPiPWasPlaying = player.rate != 0;
+    sFSPiPLink = PiPGetIvar(self, "link");
+    NSUInteger token = ++sFSPiPRequestToken;
+    ApolloLog(@"[PiP] Fullscreen PiP button tapped (muted=%d, playing=%d) — dismissing viewer",
+              sFSPiPWasMuted, sFSPiPWasPlaying);
+    // Failsafe: if the dismissal never completes, drop the request so stale
+    // state can't hijack a later dismissal. Token-keyed — a second request can
+    // legitimately start within this window, which the first request's expiry
+    // must not clobber.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (sFSPiPPending && sFSPiPRequestToken == token) {
+            ApolloLog(@"[PiP] Fullscreen PiP request expired unresolved — dropping");
+            sFSPiPPending = NO;
+            sFSPiPPlayer = nil;
+            sFSPiPLink = nil;
+        }
+    });
+    // The native X path: haptic + closeMethod=0 + dismissViewControllerAnimated.
+    ((void (*)(id, SEL))objc_msgSend)(self, NSSelectorFromString(@"close"));
 }
 
 %end
@@ -2903,6 +3679,7 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
     Class richMediaNodeClass = objc_getClass("_TtC6Apollo13RichMediaNode");
     Class largePostCellClass = objc_getClass("_TtC6Apollo17LargePostCellNode");
     Class mediaViewerClass = objc_getClass("_TtC6Apollo21MediaViewerController");
+    Class mediaPageVCClass = objc_getClass("_TtC6Apollo23MediaPageViewController");
     Class postsVCClass = objc_getClass("_TtC6Apollo19PostsViewController");
     Class savedPostsVCClass = objc_getClass("_TtC6Apollo32SavedPostsCommentsViewController");
     Class profileVCClass = objc_getClass("_TtC6Apollo21ProfileViewController");
@@ -2919,16 +3696,20 @@ static void PiPHandleFeedViewControllerAppeared(UIViewController *feedVC) {
               (void *)asVideoNodeClass);
 
     if (!touchHintVideoNodeClass || !richMediaNodeClass || !largePostCellClass
-        || !mediaViewerClass || !postsVCClass || !asVideoNodeClass) {
+        || !mediaViewerClass || !mediaPageVCClass || !postsVCClass || !asVideoNodeClass) {
         ApolloLog(@"[PiP] ctor: FATAL — required classes not found, PiP disabled");
         return;
     }
+
+    sPiPMediaViewerClass = mediaViewerClass;
+    sPiPMediaPageVCClass = mediaPageVCClass;
 
     %init(
         TouchHintVideoNode = touchHintVideoNodeClass,
         RichMediaNode = richMediaNodeClass,
         LargePostCellNode = largePostCellClass,
         MediaViewerController = mediaViewerClass,
+        MediaPageViewController = mediaPageVCClass,
         PostsViewController = postsVCClass,
         SavedPostsCommentsViewController = savedPostsVCClass ?: postsVCClass,
         ProfileViewController = profileVCClass ?: postsVCClass,

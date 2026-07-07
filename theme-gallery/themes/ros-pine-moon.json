@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Ros\u00e9 Pine Moon",
+  "slug": "ros-pine-moon",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "907AA9",
+      "card": "FBF6F0",
+      "background": "F2EDE8",
+      "raised": "F7F2EC",
+      "bars": "F6F1EB",
+      "mutedText": "9893A5",
+      "text": "55525C",
+      "separator": "DAD6D1"
+    },
+    "dark": {
+      "accent": "C4A7E7",
+      "card": "222034",
+      "background": "1D1B2C",
+      "raised": "373548",
+      "bars": "201E31",
+      "mutedText": "9794A8",
+      "text": "AEACBB",
+      "separator": "4B495A"
+    }
+  }
+}

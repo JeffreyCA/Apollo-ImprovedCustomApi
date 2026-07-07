@@ -578,6 +578,13 @@ static char kASTableViewHasSearchToolbarKey;
 @end
 
 static void FixScrollEdgeEffectInversion(UIScrollView *scrollView) {
+    // Only counter-invert when the collection ITSELF is inverted (scaleY=-1). When
+    // it isn't (e.g. modmail / DM conversations in Apollo 3.3.0, where the collection
+    // is upright), flipping the effect host pushes the *top* scroll-edge blur down to
+    // the bottom, leaving the nav-bar edge unmasked — chat content then bleeds up
+    // through the (image-less, Liquid Glass) nav bar background. See issue #525.
+    BOOL collectionInverted = scrollView.transform.d < 0;
+
     for (UIView *subview in scrollView.subviews) {
         if (![NSStringFromClass([subview class]) containsString:@"TouchPassthroughView"]) continue;
 
@@ -590,12 +597,19 @@ static void FixScrollEdgeEffectInversion(UIScrollView *scrollView) {
         }
         if (!hasEffectChild) continue;
 
-        // The collection view has transform scaleY=-1 (inverted for chat UI).
-        // Counter-invert the effect container so the blur gradient renders correctly.
         CGAffineTransform current = subview.transform;
-        if (current.d > 0) {
-            // Not yet counter-inverted — apply scaleY=-1
-            subview.transform = CGAffineTransformMakeScale(1, -1);
+        if (collectionInverted) {
+            // Inverted collection: counter-invert the effect container so the blur
+            // gradient renders the right way up at the nav-bar edge.
+            if (current.d > 0) {
+                subview.transform = CGAffineTransformMakeScale(1, -1);
+            }
+        } else {
+            // Upright collection: the effect host must stay upright. Undo any flip a
+            // prior pass applied so the top scroll-edge blur masks content correctly.
+            if (current.d < 0) {
+                subview.transform = CGAffineTransformIdentity;
+            }
         }
     }
 }

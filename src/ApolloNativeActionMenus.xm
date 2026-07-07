@@ -1,5 +1,6 @@
 #import "ApolloCommon.h"
 #import "ApolloNativeActionMetadata.h"
+#import "ApolloThemeRuntime.h"
 
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
@@ -144,14 +145,22 @@ static UIImage *ApolloNativeActionMenuTintedImage(UIImage *image, UIColor *tintC
 }
 
 static void ApolloNativeActionMenuStyleElementTitle(UIMenuElement *element, UIColor *tintColor) {
-    if (!element || !tintColor || ![element respondsToSelector:@selector(setAttributedTitle:)]) return;
+    if (!element || ![element respondsToSelector:@selector(setAttributedTitle:)]) return;
 
     NSString *title = element.title;
     if (title.length == 0) return;
 
-    NSAttributedString *attributedTitle = [[NSAttributedString alloc] initWithString:title attributes:@{
-        NSForegroundColorAttributeName: tintColor
-    }];
+    NSMutableDictionary *attributes = [NSMutableDictionary dictionary];
+    if (tintColor) attributes[NSForegroundColorAttributeName] = tintColor;
+
+    UIFont *baseFont = [UIFont systemFontOfSize:17.0 weight:UIFontWeightRegular];
+    UIFont *themeFont = ApolloThemeRuntimeFont(baseFont);
+    if (themeFont && ![themeFont.fontName isEqualToString:baseFont.fontName]) {
+        attributes[NSFontAttributeName] = themeFont;
+    }
+    if (attributes.count == 0) return;
+
+    NSAttributedString *attributedTitle = [[NSAttributedString alloc] initWithString:title attributes:attributes];
     ((void (*)(id, SEL, id))objc_msgSend)(element, @selector(setAttributedTitle:), attributedTitle);
 }
 
@@ -243,10 +252,8 @@ static void ApolloNativeActionMenuStyleElement(UIMenuElement *element, BOOL mode
     UIColor *moderatorTintColor = ApolloNativeActionMenuModeratorColor();
     UIColor *elementTintColor = (!destructive && (moderatorStyle || opensModeratorMenu)) ? moderatorTintColor : nil;
 
-    if (elementTintColor) {
-        ApolloNativeActionMenuStyleElementTitle(element, elementTintColor);
-        ApolloNativeActionMenuStyleElementImage(element, elementTintColor);
-    }
+    ApolloNativeActionMenuStyleElementTitle(element, elementTintColor);
+    if (elementTintColor) ApolloNativeActionMenuStyleElementImage(element, elementTintColor);
 
     if ([element isKindOfClass:[UIAction class]]) {
         UIAction *action = (UIAction *)element;
@@ -549,9 +556,7 @@ static UIAction *ApolloNativeActionMenuAction(NSString *title, NSString *subtitl
         ApolloNativeActionMenuSelectRow(actionController, row);
     }];
 
-    if (tintColor) {
-        ApolloNativeActionMenuStyleElementTitle(action, tintColor);
-    }
+    ApolloNativeActionMenuStyleElementTitle(action, tintColor);
 
     if (subtitle.length > 0 && [action respondsToSelector:@selector(setSubtitle:)]) {
         ((void (*)(id, SEL, id))objc_msgSend)(action, @selector(setSubtitle:), subtitle);
@@ -780,6 +785,9 @@ static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderat
     // Issue #515: append "Public Sticky from Subreddit" when this is the removal
     // "Notify user via…" menu (no-op otherwise).
     ApolloInjectPublicStickyAsSubredditIfNeeded(children, title);
+    // Append "Show/Hide Deleted Comments" when this is a comments view's "..."
+    // menu (no-op otherwise; see ApolloDeletedCommentsMenu.xm).
+    ApolloInjectDeletedCommentsMenuItemIfNeeded(children, title, actionController);
     return [UIMenu menuWithTitle:title children:children];
 }
 

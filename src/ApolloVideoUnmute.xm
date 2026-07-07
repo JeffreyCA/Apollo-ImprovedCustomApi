@@ -61,6 +61,10 @@ extern BOOL ApolloPiP_ShouldBlockMuteOfPlayer(AVPlayer *player);
 extern void ApolloPiP_YieldAudioToPlayer(AVPlayer *newAudiblePlayer);
 extern void ApolloPiP_NoteInlineVideoAudible(id videoNode, AVPlayer *player);
 extern void ApolloPiP_NoteInlinePlayerMuted(AVPlayer *player);
+// YES while a fullscreen→PiP button dismissal is in flight: the PiP side owns
+// the post-dismissal mute/session state, so the "Remember/Always from Full
+// Screen" re-unmute below must stand down for that one dismissal.
+extern BOOL ApolloPiP_WillHandleFullscreenDismiss(void);
 
 // =============================================================================
 // MARK: - State Variables
@@ -781,6 +785,15 @@ static void HandleCommentsRichMediaVisibilityEvent(id visibilityOwner,
     AVPlayer *fullscreenPlayer = GetPlayerFromMediaPageVC(self);
     if (!fullscreenPlayer) {
         ApolloLog(@"[VideoUnmute] MediaPageVC disappearing — no video player (image viewer), skipping");
+        %orig;
+        return;
+    }
+
+    // The fullscreen PiP button owns this dismissal: it restores the user's
+    // fullscreen mute state onto the card itself. Mode 2 ("Always") would
+    // otherwise force-unmute a video the user muted before pressing PiP.
+    if (ApolloPiP_WillHandleFullscreenDismiss()) {
+        ApolloLog(@"[VideoUnmute] MediaPageVC disappearing — fullscreen PiP handoff owns mute state, skipping re-unmute");
         %orig;
         return;
     }

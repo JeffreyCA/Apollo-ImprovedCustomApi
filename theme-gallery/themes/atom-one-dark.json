@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Atom One Dark",
+  "slug": "atom-one-dark",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "4078F2",
+      "card": "FAFAFA",
+      "background": "EFEFEF",
+      "raised": "F4F4F4",
+      "bars": "FBFBFB",
+      "mutedText": "898B8F",
+      "text": "555659",
+      "separator": "E1E1E1"
+    },
+    "dark": {
+      "accent": "61AFEF",
+      "card": "282C34",
+      "background": "1F2229",
+      "raised": "373B42",
+      "bars": "24282F",
+      "mutedText": "939AA6",
+      "text": "B3B8C1",
+      "separator": "4A4E54"
+    }
+  }
+}
