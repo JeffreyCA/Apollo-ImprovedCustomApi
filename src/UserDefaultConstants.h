@@ -46,13 +46,36 @@ static NSString *const UDKeyUnmuteCommentsVideos = @"UnmuteCommentsVideos";
 static NSString *const UDKeyVideoHoldSpeedEnabled = @"VideoHoldSpeedEnabled";
 static NSString *const UDKeyVideoHoldSpeed = @"VideoHoldSpeed";
 static NSString *const UDKeyOpenLinksInSteamApp = @"OpenLinksInSteamApp";
+// Apollo NATIVE key, mirrored by Reborn's "Open in App" settings screen
+// (ApolloOpenInAppViewController) so the scattered native "open in app" rows can
+// be gathered in one place and hidden from Apollo's own General settings. We
+// read/write the same key Apollo uses, so the two stay in sync.
+static NSString *const UDKeyOpenVideosInYouTubeApp = @"OpenVideosInYouTubeApp";
+// Reborn "Open in App" deep-link toggles — open these services' links in their
+// app via Universal Links (see ApolloShareLinks.xm). Default OFF (opt-in). The
+// key string literals are duplicated in ApolloShareLinks.xm; keep them in sync.
+static NSString *const UDKeyOpenLinksInGitHubApp  = @"OpenLinksInGitHubApp";
+static NSString *const UDKeyOpenLinksInBlueskyApp = @"OpenLinksInBlueskyApp";
 static NSString *const UDKeyCollapsePinnedComments = @"CollapsePinnedComments";
 static NSString *const UDKeyShowDeletedComments = @"ShowDeletedComments";
 static NSString *const UDKeyTapToRevealDeletedComments = @"TapToRevealDeletedComments";
+// Passive mode: deleted comments stay off globally, but can be turned on for a
+// single comment thread from the comments "..." menu; the per-thread switch
+// resets when that thread is left. See ApolloDeletedCommentsMenu.xm.
+static NSString *const UDKeyPassiveDeletedComments = @"PassiveDeletedComments";
 static NSString *const UDKeyLegacyRevealDeletedComments = @"RevealDeletedComments";
 static NSString *const UDKeyFilterNSFWRecentlyRead = @"FilterNSFWRecentlyRead";
 static NSString *const UDKeyProxyImgurDDG = @"ProxyImgurDDG";
 static NSString *const UDKeyImageUploadProvider = @"ImageUploadProvider";
+// Secondary host for images added in the COMMENT/REPLY editor (CommentLinkHost
+// enum). Off (default) keeps comment uploads on the Media Upload Host above;
+// Imgur/Img Chest route comment-editor uploads there and post the result as a
+// plain link (no native Reddit media) so they work in subreddits that disallow
+// image/GIF comments. See ApolloMarkdownToolbarGif.xm + ApolloImageUploadHost.xm.
+static NSString *const UDKeyCommentLinkHost = @"CommentLinkHost";
+// Posted after sCommentLinkHost changes so open composers re-apply the comment
+// media-permission gating (the image button un-blocks while a link host is set).
+static NSString *const ApolloCommentLinkHostChangedNotification = @"ApolloCommentLinkHostChangedNotification";
 static NSString *const UDKeyShowUserAvatars = @"ShowUserAvatars";
 static NSString *const UDKeyUseProfileAvatarTabIcon = @"UseProfileAvatarTabIcon";
 // When ON (default), profile pages show Reborn's detailed profile — the banner,
@@ -78,6 +101,14 @@ static NSString *const UDKeyKeepSearchBarInPlace = @"KeepSearchBarInPlace";
 // real iPad build lands. Opt-in; default OFF via registerDefaults. See ApolloIPadTabBarBottom.xm.
 static NSString *const UDKeyIPadTabBarBottom = @"IPadTabBarBottom";
 static NSString *const ApolloIPadTabBarBottomChangedNotification = @"ApolloIPadTabBarBottomChangedNotification";
+// When ON, press-and-hold anywhere on a post info row (score, comments,
+// timestamp, 🌐 translation marker…) shows the glass-slider magnifier loupe: the
+// row is zoomed in a Liquid Glass card, sliding moves the selection pill
+// icon-to-icon, releasing activates it (score = upvote, comments = open at the
+// comment section, timestamp = posted-ago alert, % = upvote-ratio alert,
+// 🌐 = toggle title translation). Default ON via registerDefaults.
+// See ApolloStatsRowTouch.xm.
+static NSString *const UDKeyIconRowMagnifier = @"IconRowMagnifier";
 static NSString *const UDKeyLiveCommentsFollow = @"LiveCommentsFollow";
 // Per-POST comment sort memory (issue #555). When ON, changing a post's comment sort
 // is remembered for that post (capped LRU mapping below) and restored when its
@@ -124,6 +155,11 @@ static NSString *const UDKeyEnableAICommentSummaries = @"EnableAICommentSummarie
 // When on, summaries are generated only when the user taps the card (rather than
 // automatically on open). Off by default. Cached summaries still show instantly.
 static NSString *const UDKeyEnableTapToSummarize = @"EnableTapToSummarize";
+// When on, a summary card opens (expands) by itself as soon as its summary is
+// ready, instead of staying collapsed until the user taps it. Off by default
+// (current behaviour: cards open on tap). Tapping an idle "Tap to summarize"
+// card always opens it once loaded, regardless of this setting.
+static NSString *const UDKeyEnableAIAutoExpandSummaries = @"EnableAIAutoExpandSummaries";
 
 // Picture-in-Picture: floating in-app mini-player for comments-page videos.
 static NSString *const UDKeyPictureInPictureEnabled = @"PictureInPictureEnabled";       // master switch

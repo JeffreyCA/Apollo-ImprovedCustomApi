@@ -28,6 +28,17 @@ import FoundationModels
 // log at `.debug` (not persisted in release unless debug logging is enabled).
 private let aiLog = Logger(subsystem: "apollofix", category: "AISummary")
 
+// Theme generation asks the model for THREE SEED COLOURS only (plain text in,
+// "three hex codes" out — see ApolloThemeAI.m, which owns the prompt template
+// and parses defensively); a deterministic on-device engine
+// (ApolloThemePaletteEngine) derives the full palettes. Three earlier designs
+// asked the model for progressively less palette judgement — a structured
+// colour brief, a directly-typed hex-per-role schema, then unconstrained
+// per-role JSON — and all three produced unreliable palettes: the on-device
+// model is good at recalling a subject's iconic colours and bad at
+// composing a readable UI from them. So the bridge is now a single generic
+// plain-completion call with no theme-specific knowledge at all.
+
 @objc(ApolloFoundationModels)
 public final class ApolloFoundationModels: NSObject {
 
@@ -217,6 +228,70 @@ public final class ApolloFoundationModels: NSObject {
             } catch {
                 preparedSessions.removeValue(forKey: identifier)
                 preparedInstructions.removeValue(forKey: identifier)
+                if Task.isCancelled {
+                    onComplete(nil, Self.makeError(code: 6, message: "Generation cancelled"))
+                } else {
+                    onComplete(nil, Self.classify(error))
+                }
+            }
+            activeTasks.removeValue(forKey: identifier)
+        }
+        activeTasks[identifier]?.cancel()
+        activeTasks[identifier] = task
+        #else
+        onComplete(nil, Self.makeError(code: 4, message: "FoundationModels not available in this build"))
+        #endif
+    }
+
+    /// Pre-build (and prewarm) the plain no-instructions session the next
+    /// `plainCompletion` for `identifier` will use. Session construction +
+    /// guardrail preparation cost real time on older devices; calling this
+    /// when the prompt UI OPENS hides that entirely behind the user's typing.
+    @objc public func prewarmPlainSession(_ identifier: String) {
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *) {
+            guard !identifier.isEmpty, preparedSessions[identifier] == nil else { return }
+            let session = LanguageModelSession(model: Self.summarizationModel())
+            preparedSessions[identifier] = session
+            preparedInstructions[identifier] = "" // sentinel: plain (no instructions)
+            session.prewarm()
+        }
+        #endif
+    }
+
+    /// One-shot plain completion: a fresh session with NO system instructions,
+    /// `prompt` in, the model's literal text out. This is the exact shape the
+    /// model handles most reliably (matches the system "Use On-Device model"
+    /// Shortcuts action, validated by hand) — the theme feature uses it to ask
+    /// for three iconic seed colours, but nothing here is theme-specific.
+    /// Temperature is modest but non-zero so "Regenerate" can land on a
+    /// different (still iconic) answer. Callbacks land on the main thread.
+    @objc public func plainCompletion(_ prompt: String,
+                                      identifier: String,
+                                      onComplete: @escaping (String?, NSError?) -> Void) {
+        #if canImport(FoundationModels)
+        guard #available(iOS 26.0, *) else {
+            onComplete(nil, Self.makeError(code: 4, message: "Requires iOS 26 or later"))
+            return
+        }
+        // Consume a prewarmed plain session if one was staged for this id
+        // (empty-string instructions sentinel — never an instructed one).
+        let prepared = preparedSessions.removeValue(forKey: identifier) as? LanguageModelSession
+        let preparedIsPlain = preparedInstructions.removeValue(forKey: identifier) == ""
+        let task = Task { @MainActor in
+            do {
+                if Task.isCancelled { throw CancellationError() }
+                let startedAt = ContinuousClock.now
+                let session = (preparedIsPlain ? prepared : nil)
+                    ?? LanguageModelSession(model: Self.summarizationModel())
+                let options = GenerationOptions(temperature: 0.7)
+                aiLog.debug("plain completion REQUEST \(identifier, privacy: .public): \(prompt, privacy: .public)")
+                let response = try await session.respond(to: prompt, options: options)
+                aiLog.debug("plain completion RESPONSE \(identifier, privacy: .public) after \(String(describing: ContinuousClock.now - startedAt), privacy: .public): \(response.content, privacy: .public)")
+                if Task.isCancelled { throw CancellationError() }
+                onComplete(response.content, nil)
+            } catch {
+                aiLog.debug("plain completion ERROR \(identifier, privacy: .public): \(String(describing: error), privacy: .public)")
                 if Task.isCancelled {
                     onComplete(nil, Self.makeError(code: 6, message: "Generation cancelled"))
                 } else {

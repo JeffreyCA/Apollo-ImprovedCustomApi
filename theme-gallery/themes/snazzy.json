@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Snazzy",
+  "slug": "snazzy",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "E64747",
+      "card": "FFFFFF",
+      "background": "F4F4F4",
+      "raised": "F9F9F9",
+      "bars": "FFFFFF",
+      "mutedText": "52606D",
+      "text": "4D5A66",
+      "separator": "E6E6E6"
+    },
+    "dark": {
+      "accent": "FF5C57",
+      "card": "282A36",
+      "background": "1F212A",
+      "raised": "373944",
+      "bars": "242631",
+      "mutedText": "CBCCCA",
+      "text": "CBCCCA",
+      "separator": "4A4C56"
+    }
+  }
+}

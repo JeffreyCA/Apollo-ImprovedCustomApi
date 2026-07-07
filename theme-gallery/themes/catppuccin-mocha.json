@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Catppuccin Mocha",
+  "slug": "catppuccin-mocha",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "8839EF",
+      "card": "F3F4F6",
+      "background": "EAEBED",
+      "raised": "EFF0F2",
+      "bars": "EEEFF1",
+      "mutedText": "6C6F85",
+      "text": "505262",
+      "separator": "D3D4D6"
+    },
+    "dark": {
+      "accent": "CBA6F7",
+      "card": "1D1D2C",
+      "background": "191926",
+      "raised": "323241",
+      "bars": "1B1B29",
+      "mutedText": "9598A8",
+      "text": "A6A8B6",
+      "separator": "464654"
+    }
+  }
+}

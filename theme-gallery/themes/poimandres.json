@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Poimandres",
+  "slug": "poimandres",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "1A8A7A",
+      "card": "FFFEFD",
+      "background": "F6F5F4",
+      "raised": "FBFAF9",
+      "bars": "FAF9F8",
+      "mutedText": "5E6687",
+      "text": "505773",
+      "separator": "DEDDDC"
+    },
+    "dark": {
+      "accent": "5DE4C7",
+      "card": "1A1D26",
+      "background": "161921",
+      "raised": "30323B",
+      "bars": "181B24",
+      "mutedText": "BFC3DB",
+      "text": "BFC3DB",
+      "separator": "44464F"
+    }
+  }
+}

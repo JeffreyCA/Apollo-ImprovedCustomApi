@@ -131,7 +131,11 @@ PYEOF
 # ----------------------------------------------------------------------------
 if [[ "$DO_BUILD" == 1 ]]; then
     log "Building tweak for the simulator SDK (internal generator, APOLLO_SIM_BUILD=1)"
+    # Theos's simulator target defaults TARGET_CODESIGN_FLAGS to a real
+    # 'Apple Development' identity, which not every machine's keychain has.
+    # Ad-hoc is all the sim needs — we re-sign ad-hoc after copying anyway.
     make TARGET="simulator:clang:latest:${DEPLOY_MIN}" \
+         TARGET_CODESIGN_FLAGS="--sign -" \
          LOGOS_DEFAULT_GENERATOR=internal \
          APOLLO_SIM_BUILD=1 -j"$(sysctl -n hw.ncpu)"
 fi
@@ -199,10 +203,24 @@ if [[ "$FRESH_APP" == 1 || ! -d "$APP_DIR" ]]; then
     unzip -q "$SRC_IPA" 'Payload/*' -d "$WORK_DIR"
     [[ -d "$APP_DIR" ]] || die "extracted IPA has no Payload/Apollo.app"
 
+    # apollo-base.ipa is the "already-injected" device-build shell: it carries a
+    # prior device-targeted ApolloReborn build (as ApolloImprovedCustomApi.dylib)
+    # that hard-links CydiaSubstrate via jailbreak rootless paths. That's
+    # irrelevant here — the sim flow injects its own ApolloReborn.dylib via
+    # DYLD_INSERT_LIBRARIES — and CydiaSubstrate uses LC_VERSION_MIN_IPHONEOS
+    # (not LC_BUILD_VERSION), so the platform patcher below can't flip it to
+    # Simulator; dyld_sim hard-fails resolving its rootless-path dependency and
+    # SIGABRTs the whole app at launch. Strip both before patching.
+    rm -rf "$APP_DIR/Frameworks/ApolloImprovedCustomApi.dylib" "$APP_DIR/Frameworks/CydiaSubstrate.framework"
+
     write_patcher
     # Patch every Mach-O in the bundle (main binary + appex + frameworks).
-    mapfile -t MACHOS < <(find "$APP_DIR" -type f -print0 \
-        | while IFS= read -r -d '' f; do file "$f" 2>/dev/null | grep -q 'Mach-O' && printf '%s\n' "$f"; done)
+    MACHOS=()
+    while IFS= read -r -d '' f; do
+        if file "$f" 2>/dev/null | grep -q 'Mach-O'; then
+            MACHOS+=("$f")
+        fi
+    done < <(find "$APP_DIR" -type f -print0)
     log "Patching ${#MACHOS[@]} Mach-O files to iOS-Simulator platform"
     python3 "$PATCH_PY" "${MACHOS[@]}"
 
@@ -232,7 +250,7 @@ if [[ "$FRESH_APP" == 1 || ! -d "$APP_DIR" ]]; then
     # Re-sign ad-hoc inside-out (frameworks, then plugins, then the app).
     log "Re-signing ad-hoc"
     if [[ -d "$APP_DIR/Frameworks" ]]; then
-        find "$APP_DIR/Frameworks" -maxdepth 1 -name '*.framework' -print0 \
+        find "$APP_DIR/Frameworks" -maxdepth 1 \( -name '*.framework' -o -name '*.dylib' \) -print0 \
             | while IFS= read -r -d '' fw; do codesign -f -s - "$fw" >/dev/null 2>&1; done
     fi
     if [[ -d "$APP_DIR/PlugIns" ]]; then

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Radical",
+  "slug": "radical",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "E5439B",
+      "card": "FFF9FE",
+      "background": "F4EEF3",
+      "raised": "F9F3F8",
+      "bars": "FFFAFE",
+      "mutedText": "52606D",
+      "text": "4B5864",
+      "separator": "E6E0E5"
+    },
+    "dark": {
+      "accent": "FF6AC1",
+      "card": "141322",
+      "background": "100F1B",
+      "raised": "242431",
+      "bars": "12111F",
+      "mutedText": "B6B5D7",
+      "text": "B6B5D7",
+      "separator": "3A3945"
+    }
+  }
+}

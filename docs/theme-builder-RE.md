@@ -98,8 +98,11 @@ Accents (light / dark):
 | magentasplosion | FF00B2 | E800A2 |
 | sniffingWalnut | A74E00 | A74E00 |
 | fisherKing | 808286 | 76787D |
+| chumbus | F8F8F8 | 20242B* |
 | dracula | 9760FF | AD81FF |
-| mint | 37BB98 | (n/c) |
+| mint | 37BB98 | 62DFA7 |
+
+*chumbus dark becomes 000000 with UsePureBlackDarkMode (050505 with PureBlackModeReduceSmearing on top).
 
 Tinted-theme palettes (primary/secondary/tertiary bg, separator, bar, gray):
 

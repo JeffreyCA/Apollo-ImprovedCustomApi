@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Ayu Mirage",
+  "slug": "ayu-mirage",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "FF9940",
+      "card": "FBFBFA",
+      "background": "F2F2F1",
+      "raised": "F7F7F6",
+      "bars": "F6F6F5",
+      "mutedText": "828C99",
+      "text": "51575F",
+      "separator": "DADADA"
+    },
+    "dark": {
+      "accent": "FFB454",
+      "card": "1E232E",
+      "background": "191E27",
+      "raised": "333843",
+      "bars": "1C202B",
+      "mutedText": "989FAC",
+      "text": "A8AEB9",
+      "separator": "474B55"
+    }
+  }
+}

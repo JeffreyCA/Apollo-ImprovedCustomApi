@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Sublime Mariana",
+  "slug": "sublime-mariana",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "0F7B6C",
+      "card": "FFFFFF",
+      "background": "F4F4F4",
+      "raised": "F9F9F9",
+      "bars": "FFFFFF",
+      "mutedText": "898D92",
+      "text": "56595C",
+      "separator": "E6E6E6"
+    },
+    "dark": {
+      "accent": "4EC9B0",
+      "card": "303841",
+      "background": "252C33",
+      "raised": "3E464E",
+      "bars": "2B333B",
+      "mutedText": "ABB3BA",
+      "text": "C2C8CD",
+      "separator": "51585F"
+    }
+  }
+}

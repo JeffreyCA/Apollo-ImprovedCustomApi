@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Dracula",
+  "slug": "dracula",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "A3144D",
+      "card": "FFFCEE",
+      "background": "F6F3E6",
+      "raised": "FBF8EA",
+      "bars": "FAF7E9",
+      "mutedText": "6C664B",
+      "text": "5C5740",
+      "separator": "DEDBCF"
+    },
+    "dark": {
+      "accent": "BD93F9",
+      "card": "262834",
+      "background": "21222C",
+      "raised": "3B3D48",
+      "bars": "242631",
+      "mutedText": "8E99BD",
+      "text": "ABB4CE",
+      "separator": "4F505A"
+    }
+  }
+}

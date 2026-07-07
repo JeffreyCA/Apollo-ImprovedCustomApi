@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Solarized Light",
+  "slug": "solarized-light",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "268BD2",
+      "card": "FEF8E8",
+      "background": "F5EFE0",
+      "raised": "FAF4E5",
+      "bars": "F9F3E3",
+      "mutedText": "839496",
+      "text": "4D5759",
+      "separator": "DDD8CA"
+    },
+    "dark": {
+      "accent": "268BD2",
+      "card": "002934",
+      "background": "00232C",
+      "raised": "173E48",
+      "bars": "002731",
+      "mutedText": "90A0A6",
+      "text": "A5B2B7",
+      "separator": "2E515A"
+    }
+  }
+}

@@ -5,6 +5,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloThemeRuntime.h"
 #import "UserDefaultConstants.h"
 
 static char kApolloSubredditIndexTableKey;
@@ -88,22 +89,7 @@ static UIViewController *ApolloSubredditIndexOwningViewController(UIView *view) 
 }
 
 static UIColor *ApolloSubredditIndexThemeAccentColor(UITableView *tableView, UIView *fallbackView) {
-    UIViewController *viewController = ApolloSubredditIndexOwningViewController(tableView ?: fallbackView);
-    NSMutableArray<UIColor *> *candidates = [NSMutableArray array];
-
-    if (viewController.tabBarController.tabBar.tintColor) [candidates addObject:viewController.tabBarController.tabBar.tintColor];
-    if (viewController.navigationController.navigationBar.tintColor) [candidates addObject:viewController.navigationController.navigationBar.tintColor];
-    if (viewController.view.tintColor) [candidates addObject:viewController.view.tintColor];
-    if (tableView.tintColor) [candidates addObject:tableView.tintColor];
-    if (fallbackView.tintColor) [candidates addObject:fallbackView.tintColor];
-    if (tableView.window.tintColor) [candidates addObject:tableView.window.tintColor];
-    if (fallbackView.window.tintColor) [candidates addObject:fallbackView.window.tintColor];
-
-    for (UIColor *color in candidates) {
-        if ([color isKindOfClass:[UIColor class]]) return color;
-    }
-
-    return fallbackView.tintColor ?: tableView.tintColor ?: [UIColor systemBlueColor];
+    return ApolloThemeAccentColor() ?: fallbackView.tintColor ?: tableView.tintColor ?: [UIColor systemBlueColor];
 }
 
 static BOOL ApolloSubredditIndexColorIsVisible(UIColor *color) {

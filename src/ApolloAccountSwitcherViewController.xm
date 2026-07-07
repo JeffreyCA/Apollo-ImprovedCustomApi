@@ -3,6 +3,7 @@
 #import "ApolloWebSessionStore.h"
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloState.h"
+#import "ApolloThemeRuntime.h"
 #import "ApolloCommon.h"
 #import "UserDefaultConstants.h"
 #import "ApolloUserProfileCache.h"
@@ -384,7 +385,7 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
     if (indexPath.section == 1) {
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"AddRow" forIndexPath:indexPath];
         cell.textLabel.text = @"Add Account…";
-        cell.textLabel.textColor = self.view.tintColor;
+        cell.textLabel.textColor = ApolloThemeAccentColor() ?: self.view.tintColor;
         cell.accessoryType = UITableViewCellAccessoryNone;
         return cell;
     }
@@ -413,7 +414,7 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
     // hidden arranged subview's width to zero, which shifted the info button
     // left on every non-active row instead of leaving its slot reserved.
     UIImageView *checkmark = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark"]];
-    checkmark.tintColor = self.view.tintColor;
+    checkmark.tintColor = ApolloThemeAccentColor() ?: self.view.tintColor;
     checkmark.alpha = row.isActive ? 1.0 : 0.0;
     checkmark.contentMode = UIViewContentModeCenter;
     checkmark.frame = CGRectMake(0, 0, 20, 24);

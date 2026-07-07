@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Everforest Light",
+  "slug": "everforest-light",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "35A77C",
+      "card": "FEF8E8",
+      "background": "F5EFE0",
+      "raised": "FAF4E5",
+      "bars": "F9F3E3",
+      "mutedText": "5C6A72",
+      "text": "4B575D",
+      "separator": "DDD8CA"
+    },
+    "dark": {
+      "accent": "A7C080",
+      "card": "2B3339",
+      "background": "252B30",
+      "raised": "40474D",
+      "bars": "283035",
+      "mutedText": "A7B1AA",
+      "text": "BAC2BD",
+      "separator": "53595E"
+    }
+  }
+}

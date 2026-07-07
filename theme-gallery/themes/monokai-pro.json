@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Monokai Pro",
+  "slug": "monokai-pro",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "E14775",
+      "card": "FDFCFA",
+      "background": "F4F3F1",
+      "raised": "F9F8F6",
+      "bars": "F8F7F5",
+      "mutedText": "72706F",
+      "text": "595757",
+      "separator": "DCDBDA"
+    },
+    "dark": {
+      "accent": "FF6188",
+      "card": "2B282C",
+      "background": "252226",
+      "raised": "403D41",
+      "bars": "282629",
+      "mutedText": "B1B1B1",
+      "text": "B4B4B4",
+      "separator": "535054"
+    }
+  }
+}

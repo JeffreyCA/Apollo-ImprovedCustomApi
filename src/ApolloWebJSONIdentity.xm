@@ -46,13 +46,16 @@
 //      web-session username (before AccountManager loads, so it takes effect
 //      same-launch).
 //
-// Per-account resolution (ApolloWebJSONHasUsableSession() / ApolloActiveWebSession()
-// in ApolloWebSessionStore.h) is what lets a web-session account and a real OAuth
-// account coexist: everything here is gated on the ACTIVE account specifically
-// being a web-session account, so an OAuth account's own request/auth path is
-// untouched even while a different account in the switcher uses cookies. The mint
-// short-circuit additionally requires the client to have no live credential (or
-// our own synthetic one), so a real, working OAuth credential is never bypassed.
+// Per-CLIENT resolution (ApolloWebJSONShouldActForClient, below) is what lets a
+// web-session account and a real OAuth account coexist: every hook here acts
+// only on the client whose own currentUser.username has a stored web session
+// (plus the anonymous app-only bootstrap client, which stays on the global
+// active-account gate). A named OAuth account's request/auth path is untouched
+// in every foreground/background combination — the earlier active-account-only
+// gate suppressed background OAuth clients' real token refreshes and let the
+// transport hijack their requests, which is how switch-back poisoning happened.
+// A real (even stale) credential is never clobbered, so a working OAuth
+// credential is never bypassed and disabling Web JSON Mode restores it.
 //
 // Verified end-to-end in the iOS 26 simulator with a harvested u/<user> cookie:
 // account tab shows the user, personalized reads (subscriptions/profile/inbox/
@@ -92,11 +95,6 @@
 - (id)refreshAccessTokenWithCompletion:(id)completion;
 @end
 
-// Sentinel access-token string (shared so the bearer-capture path can ignore
-// it). Never sent to Reddit — the chokepoint strips Authorization and
-// substitutes the cookie — it only has to be non-empty for Apollo's "do I have a
-// token?" checks to pass.
-#define kApolloWebJSONSyntheticToken ApolloWebJSONSyntheticBearerToken
 // ~100 years, so Apollo never considers the token expired and never tries to
 // refresh it.
 static const unsigned long long kApolloWebJSONSyntheticDuration = 100ULL * 365 * 24 * 60 * 60;
@@ -111,16 +109,12 @@ static NSString *ApolloWebJSONCredentialTokenString(id credential) {
     return [tokenString isKindOfClass:[NSString class]] ? (NSString *)tokenString : nil;
 }
 
-// Returns YES if `credential` already carries a non-empty access token. Used
-// only to decide whether to install the synthetic credential (we never clobber
-// an existing one, real or stale, so it survives turning Web JSON Mode off).
-static BOOL ApolloWebJSONCredentialIsLive(id credential) {
-    return ApolloWebJSONCredentialTokenString(credential).length > 0;
-}
-
 // Builds an RDKOAuthCredential wrapping a synthetic RDKAccessToken via KVC, so
-// no link-time dependency on the private classes is needed.
-static id ApolloWebJSONMakeSyntheticCredential(void) {
+// no link-time dependency on the private classes is needed. The token embeds
+// `username` (per-account variant) so the transport chokepoint can tell WHICH
+// web-session account's cookie a request needs; an empty username mints the
+// bare sentinel, which the chokepoint resolves as "the active account".
+static id ApolloWebJSONMakeSyntheticCredential(NSString *username) {
     Class accessTokenClass = objc_getClass("RDKAccessToken");
     Class credentialClass = objc_getClass("RDKOAuthCredential");
     if (!accessTokenClass || !credentialClass) {
@@ -128,13 +122,14 @@ static id ApolloWebJSONMakeSyntheticCredential(void) {
         return nil;
     }
 
+    NSString *token = ApolloWebJSONSyntheticBearerTokenForUsername(username);
     id accessToken = [[accessTokenClass alloc] init];
     @try {
-        [accessToken setValue:kApolloWebJSONSyntheticToken forKey:@"accessToken"];
+        [accessToken setValue:token forKey:@"accessToken"];
         [accessToken setValue:@"bearer" forKey:@"tokenType"];
         [accessToken setValue:@(kApolloWebJSONSyntheticDuration) forKey:@"duration"];
         // A non-nil refresh token keeps any "can this be refreshed?" branch happy.
-        [accessToken setValue:kApolloWebJSONSyntheticToken forKey:@"refreshToken"];
+        [accessToken setValue:token forKey:@"refreshToken"];
     } @catch (NSException *e) {
         ApolloLog(@"[WebJSON][identity] Failed to populate synthetic access token: %@", e);
         return nil;
@@ -150,19 +145,111 @@ static id ApolloWebJSONMakeSyntheticCredential(void) {
     return credential;
 }
 
+// The client's own identity (currentUser.username), lowercased — nil/empty for
+// an anonymous client (app-only bootstrap, or an account whose identity never
+// resolved). KVC + @try so an unexpected object shape degrades to anonymous.
+static NSString *ApolloWebJSONClientUsername(RDKClient *client) {
+    if (!client) return nil;
+    id user = nil;
+    @try { user = [(id)client valueForKey:@"currentUser"]; }
+    @catch (__unused NSException *e) { return nil; }
+    if (!user) return nil;
+    NSString *username = nil;
+    @try { username = [user valueForKey:@"username"]; }
+    @catch (__unused NSException *e) { return nil; }
+    return [username isKindOfClass:[NSString class]] && username.length > 0 ? username.lowercaseString : nil;
+}
+
+static BOOL ApolloWebJSONClientIsAppOnly(RDKClient *client) {
+    if (!client) return NO;
+    @try { return [[(id)client valueForKey:@"usesApplicationOnlyOAuth"] boolValue]; }
+    @catch (__unused NSException *e) { return NO; }
+}
+
 // Backfills a missing username onto a live currentUser (defined below).
 static void ApolloWebJSONBackfillUsernameOnUser(id user);
 
-// Installs a synthetic credential on `client` if Web JSON has a usable session
-// and the client has no live credential. Idempotent and cheap; safe to call from
-// several entry points.
+// YES when the identity layer should act on THIS client — fake its auth state,
+// short-circuit its token mints/refreshes, install a synthetic credential.
+//
+// The old gate was purely global ("a usable cookie session exists"), but the
+// RDKClient hooks fire on EVERY client instance, including other signed-in
+// accounts' clients running background polls. Acting on those suppressed a
+// real OAuth account's token refreshes whenever a web-session account was
+// merely foreground — one half of the "switched back to my API-key account but
+// it's still keyless" report. The gate is now per-client:
+//   • named client (currentUser.username resolved): act iff THAT username has
+//     a stored web session — a named OAuth account is never touched, in any
+//     foreground/background combination. This also keeps the primary "Reddit
+//     killed our keys" restored account working: its username has a session,
+//     so its doomed stale-token refresh is still short-circuited.
+//   • anonymous app-only client: old global gate. This is the logged-out
+//     bootstrap client; substituting its mint is what lets a keyless cold
+//     start proceed to the cookie-authed reads.
+//   • anonymous NON-app-only client: never act. It's some account whose
+//     identity hasn't resolved — if it were a web-session account it would
+//     have been synthesized/backfilled with a username; assuming it's ours and
+//     suppressing its refresh is exactly the cross-account damage we're fixing.
+// When the flag is off this is NO everywhere and the real OAuth path is
+// byte-for-byte untouched.
+static BOOL ApolloWebJSONShouldActForClient(RDKClient *client) {
+    if (!client || !sWebJSONEnabled) return NO;
+    NSString *username = ApolloWebJSONClientUsername(client);
+    if (username.length > 0) return ApolloWebSessionFor(username) != nil;
+    if (ApolloWebJSONClientIsAppOnly(client)) return ApolloWebJSONHasUsableSession();
+    return NO;
+}
+
+// Feeds the bearer-ownership registry (ApolloWebJSON.m) so the transport
+// chokepoint can attribute requests to accounts. A named client's REAL token
+// registers under its own username; an app-only client's real token registers
+// under the ACTIVE web-session username, preserving the old behavior where
+// app-only reads ride the active account's cookie in the dead-keys case (the
+// app-only account lives outside RedditAccounts2, so this cannot poison an
+// account blob). Anonymous user-account clients are never registered — guessing
+// their owner is how cross-account contamination started.
+static void ApolloWebJSONRegisterClientBearer(RDKClient *client) {
+    if (!client || !sWebJSONEnabled) return;
+    id credential = [client respondsToSelector:@selector(authorizationCredential)] ? [client authorizationCredential] : nil;
+    NSString *token = ApolloWebJSONCredentialTokenString(credential);
+    if (token.length == 0 || ApolloWebJSONBearerIsSynthetic(token)) return;
+    NSString *username = ApolloWebJSONClientUsername(client);
+    if (username.length == 0 && ApolloWebJSONClientIsAppOnly(client)) {
+        username = ApolloWebSessionFor(ApolloActiveWebSessionUsername()) != nil ? ApolloActiveWebSessionUsername() : nil;
+    }
+    if (username.length > 0) ApolloWebJSONRegisterAccountBearer(username, token);
+}
+
+// Installs a synthetic credential on `client` when the identity layer is
+// acting for it and the client has no REAL credential. Idempotent and cheap;
+// safe to call from several entry points. A real (even stale) credential is
+// never clobbered — it's what lets the restored dead-keys account go back to
+// OAuth if Web JSON Mode is turned off — but an older synthetic credential IS
+// upgraded in place when the desired per-account variant differs (bare legacy
+// sentinel -> per-account token once the username is known).
 static void ApolloWebJSONInstallSyntheticCredentialIfNeeded(RDKClient *client) {
-    if (!client || !ApolloWebJSONHasUsableSession()) return;
+    if (!client || !ApolloWebJSONShouldActForClient(client)) return;
+
+    // Named web-session client mints its own per-account token; the anonymous
+    // app-only bootstrap client mints the bare sentinel, which the chokepoint
+    // resolves as "the active account" (correct across account switches).
+    NSString *clientUsername = ApolloWebJSONClientUsername(client);
+    NSString *desiredToken = ApolloWebJSONSyntheticBearerTokenForUsername(clientUsername);
 
     id existing = [client respondsToSelector:@selector(authorizationCredential)] ? [client authorizationCredential] : nil;
-    if (ApolloWebJSONCredentialIsLive(existing)) return; // real OAuth (or already synthetic) — leave it
+    NSString *existingToken = ApolloWebJSONCredentialTokenString(existing);
+    if (existingToken.length > 0) {
+        if (!ApolloWebJSONBearerIsSynthetic(existingToken)) {
+            // Real (possibly stale) credential — leave it, but make sure the
+            // chokepoint knows whose it is so its requests get THIS account's
+            // cookie instead of falling through to oauth with a dead token.
+            ApolloWebJSONRegisterClientBearer(client);
+            return;
+        }
+        if ([existingToken isEqualToString:desiredToken]) return; // already correct
+    }
 
-    id synthetic = ApolloWebJSONMakeSyntheticCredential();
+    id synthetic = ApolloWebJSONMakeSyntheticCredential(clientUsername);
     if (!synthetic) return;
 
     if ([client respondsToSelector:@selector(setAuthorizationCredential:)]) {
@@ -178,21 +265,8 @@ static void ApolloWebJSONInstallSyntheticCredentialIfNeeded(RDKClient *client) {
     if ([client respondsToSelector:@selector(currentUser)]) {
         ApolloWebJSONBackfillUsernameOnUser([client currentUser]);
     }
-    ApolloLog(@"[WebJSON][identity] Installed synthetic credential for cookie session (user %@)",
-              ApolloActiveWebSessionUsername() ?: @"(unknown)");
-}
-
-// YES when a token mint/refresh should be replaced by an instant synthetic
-// success. The gate is simply "a usable cookie session exists": enabling Web
-// JSON Mode + harvesting a cookie is an explicit opt-in to cookie transport, so
-// the OAuth token path is moot. Crucially this must NOT depend on whether a
-// credential looks "live" — the primary "Reddit killed our keys" case restores
-// an account whose access token is present but stale/unrefreshable, and letting
-// that doomed refresh run is exactly the cold-start stall we're removing. When
-// the flag is off (or no cookie), this is NO and the real OAuth path is
-// byte-for-byte untouched.
-static BOOL ApolloWebJSONShouldSubstituteTokenMint(RDKClient *client) {
-    return client != nil && ApolloWebJSONHasUsableSession();
+    ApolloLog(@"[WebJSON][identity] Installed synthetic credential (%@) for cookie session",
+              clientUsername.length > 0 ? [@"u/" stringByAppendingString:clientUsername] : @"app-only/bootstrap");
 }
 
 // Invokes a token-method completion as success. Signature verified in Hopper:
@@ -395,7 +469,7 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username) {
             [user setValue:username forKey:@"username"];
             [client setValue:user forKey:@"currentUser"];
         }
-        id cred = ApolloWebJSONMakeSyntheticCredential();
+        id cred = ApolloWebJSONMakeSyntheticCredential(username);
         if (cred) [client setValue:cred forKey:@"authorizationCredential"];
     } @catch (NSException *ex) {
         ApolloLog(@"[WebJSON][identity] account configuration failed: %@", ex);
@@ -416,9 +490,12 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username) {
     }
 
     // Sensitive dict mirrors the app-only format ({accessToken, clientIdentifier});
-    // a dummy token is fine — the cookie authenticates at the chokepoint.
+    // a dummy token is fine — the cookie authenticates at the chokepoint. The
+    // per-account synthetic variant marks WHICH username this synthesized
+    // account belongs to, which the poisoned-blob repair uses to tell the true
+    // web-session account apart from a poisoned OAuth duplicate.
     NSDictionary *sensitive = @{
-        @"accessToken":      ApolloWebJSONSyntheticBearerToken,
+        @"accessToken":      ApolloWebJSONSyntheticBearerTokenForUsername(username),
         @"refreshToken":     @"",
         @"clientIdentifier": @"",
         @"authorizationCode": @"",
@@ -452,6 +529,137 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username) {
     return YES;
 }
 
+#pragma mark - Bearer-registry disk seed + poisoned-blob repair (launch)
+
+// Seeds the transport's bearer-ownership registry from the persisted account
+// blobs: each RedditAccounts2 index's username paired with the Valet sensitive
+// dict's real accessToken at the same index. This is what guarantees the
+// chokepoint can attribute every persisted account's requests from the very
+// first one — before any RDKClient hook has observed a live credential. The
+// restored "Reddit killed our keys" account depends on this: its stale-but-real
+// token never rotates (its refresh is short-circuited), so the disk value IS
+// its live bearer.
+void ApolloWebJSONSeedBearerRegistryFromDisk(void) {
+    if (!sWebJSONEnabled) return;
+    NSUserDefaults *group = [[NSUserDefaults alloc] initWithSuiteName:kApolloGroupSuite];
+    id accountsObj = ApolloWebJSONUnarchive([group objectForKey:@"RedditAccounts2"]);
+    NSArray *accounts = [accountsObj isKindOfClass:[NSArray class]] ? accountsObj : @[];
+    if (accounts.count == 0) return;
+    NSArray<NSDictionary *> *valet = ApolloWebJSONReadValetAccountsArray(NULL) ?: @[];
+
+    NSUInteger seeded = 0;
+    for (NSUInteger i = 0; i < accounts.count && i < valet.count; i++) {
+        NSString *username = ApolloWebJSONUsernameAtIndex(accounts, i);
+        NSDictionary *sensitive = [valet[i] isKindOfClass:[NSDictionary class]] ? valet[i] : nil;
+        NSString *token = [sensitive[@"accessToken"] isKindOfClass:[NSString class]] ? sensitive[@"accessToken"] : nil;
+        if (username.length == 0 || token.length == 0 || ApolloWebJSONBearerIsSynthetic(token)) continue;
+        ApolloWebJSONRegisterAccountBearer(username, token);
+        seeded++;
+    }
+    if (seeded > 0) ApolloLog(@"[WebJSON][identity] Seeded bearer registry from disk (%lu account(s))", (unsigned long)seeded);
+}
+
+// One-shot launch repair for installs poisoned by the pre-fix cross-account
+// identity leak (see ApolloWebJSONRewriteRequest's bearer-attribution comment):
+// a cookie-rewritten /api/v1/me answered an OAuth account's identity refresh
+// with the WEB-SESSION user's identity, Apollo installed it as that account's
+// currentUser, and persistInformationToDisk archived it — so two (or more)
+// RedditAccounts2 indexes now claim the same web-session username, and the
+// OAuth account resolves as keyless forever (ApolloActiveAccountUsername ->
+// ApolloWebSessionFor match at ITS index).
+//
+// Poison signature: one lowercased username with a stored web session
+// appearing at MORE THAN ONE index. Legitimate blobs never duplicate a
+// username (ApolloWebJSONSynthesizeSignedInAccount skips existing usernames).
+// The true web-session account is the index whose Valet accessToken is our
+// synthetic sentinel (per-account variant or legacy bare); every OTHER
+// duplicate is a poisoned victim whose currentUser we clear. A cleared
+// currentUser makes ApolloActiveAccountUsername() return nil at that index, so
+// keyless mode disengages and Apollo's own post-selection /api/v1/me — now
+// carrying the account's real bearer thanks to the per-request transport
+// attribution — restores the real identity and persists the healed blob.
+//
+// If NO duplicate carries a synthetic token (a restored real-token web-session
+// account was itself duplicated) the victim can't be told apart safely; log
+// loudly and leave the blob alone rather than risk damaging the restored
+// account. currentUser is only ever CLEARED, never rewritten — RDKMe's MTLModel
+// re-archive drops a re-set username (verified; see the backfill notes above),
+// but nil-ing survives archiving fine.
+void ApolloWebJSONRepairPoisonedAccountBlobs(void) {
+    if (!sWebJSONEnabled) return;
+    NSUserDefaults *group = [[NSUserDefaults alloc] initWithSuiteName:kApolloGroupSuite];
+    id accountsObj = ApolloWebJSONUnarchive([group objectForKey:@"RedditAccounts2"]);
+    NSArray *accounts = [accountsObj isKindOfClass:[NSArray class]] ? accountsObj : @[];
+    if (accounts.count < 2) return;
+
+    // Group indexes by username; only web-session usernames can be poison.
+    NSMutableDictionary<NSString *, NSMutableArray<NSNumber *> *> *indexesByUsername = [NSMutableDictionary dictionary];
+    for (NSUInteger i = 0; i < accounts.count; i++) {
+        NSString *username = ApolloWebJSONUsernameAtIndex(accounts, i);
+        if (username.length == 0) continue;
+        NSMutableArray *list = indexesByUsername[username] ?: (indexesByUsername[username] = [NSMutableArray array]);
+        [list addObject:@(i)];
+    }
+
+    BOOL valetReadFailed = NO;
+    NSArray<NSDictionary *> *valet = nil; // read lazily — only needed when a duplicate exists
+    NSMutableIndexSet *victims = [NSMutableIndexSet indexSet];
+    for (NSString *username in indexesByUsername) {
+        NSArray<NSNumber *> *indexes = indexesByUsername[username];
+        if (indexes.count < 2) continue;
+        if (ApolloWebSessionFor(username) == nil) continue; // duplicate but not keyless-related; not ours to touch
+
+        if (!valet && !valetReadFailed) valet = ApolloWebJSONReadValetAccountsArray(&valetReadFailed);
+        if (valetReadFailed) {
+            ApolloLog(@"[WebJSON][repair] Valet read failed — skipping poisoned-blob repair this launch");
+            return;
+        }
+
+        NSMutableArray<NSNumber *> *syntheticIndexes = [NSMutableArray array];
+        for (NSNumber *idx in indexes) {
+            NSUInteger i = idx.unsignedIntegerValue;
+            NSDictionary *sensitive = (i < valet.count && [valet[i] isKindOfClass:[NSDictionary class]]) ? valet[i] : nil;
+            NSString *token = [sensitive[@"accessToken"] isKindOfClass:[NSString class]] ? sensitive[@"accessToken"] : nil;
+            if (ApolloWebJSONBearerIsSynthetic(token)) [syntheticIndexes addObject:idx];
+        }
+        if (syntheticIndexes.count == 0) {
+            ApolloLog(@"[WebJSON][repair] u/%@ appears at %lu account indexes but none is our synthesized account — "
+                      @"cannot identify the poisoned one safely; leaving as-is (removing and re-adding the API-key "
+                      @"account clears this)", username, (unsigned long)indexes.count);
+            continue;
+        }
+        // Keep the first synthetic index (the real synthesized web-session
+        // account); every other duplicate — real-token victim or stray extra
+        // synthetic — gets its currentUser cleared.
+        NSNumber *keeper = syntheticIndexes.firstObject;
+        for (NSNumber *idx in indexes) {
+            if ([idx isEqualToNumber:keeper]) continue;
+            [victims addIndex:idx.unsignedIntegerValue];
+        }
+        ApolloLog(@"[WebJSON][repair] u/%@ duplicated at indexes %@ — keeping synthesized index %@, clearing the other(s)",
+                  username, [indexes componentsJoinedByString:@","], keeper);
+    }
+    if (victims.count == 0) return;
+
+    NSUInteger repaired = 0;
+    [victims enumerateIndexesUsingBlock:^(NSUInteger i, BOOL *stop __unused) {
+        @try { [accounts[i] setValue:nil forKey:@"currentUser"]; }
+        @catch (NSException *e) { ApolloLog(@"[WebJSON][repair] clearing currentUser at index %lu failed: %@", (unsigned long)i, e); }
+    }];
+    for (NSUInteger i = 0; i < accounts.count; i++) repaired += [victims containsIndex:i] ? 1 : 0;
+
+    NSError *err = nil;
+    NSData *accountsData = [NSKeyedArchiver archivedDataWithRootObject:accounts requiringSecureCoding:NO error:&err];
+    if (![accountsData isKindOfClass:[NSData class]]) {
+        ApolloLog(@"[WebJSON][repair] failed to re-archive repaired accounts array: %@ — leaving blob unchanged", err);
+        return;
+    }
+    [group setObject:accountsData forKey:@"RedditAccounts2"];
+    [group synchronize];
+    ApolloLog(@"[WebJSON][repair] Cleared poisoned currentUser on %lu account(s); their real identity reloads on next selection",
+              (unsigned long)repaired);
+}
+
 %hook RDKClient
 
 // When the loaded account installs its currentUser (RDKMe) without a username,
@@ -464,20 +672,27 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username) {
     %orig;
 }
 
-// Make the rest of the app treat a cookie-only session as authenticated.
+// Make the rest of the app treat a cookie-only session as authenticated —
+// but only for the client that actually IS a web-session account (or the
+// app-only bootstrap); an OAuth account's client answers with its real state.
+// The %orig path doubles as the bearer-registry capture point: it observes
+// every OAuth client's current token so the transport chokepoint can
+// attribute that client's requests and leave them on the oauth path.
 - (BOOL)isAuthenticated {
-    if (ApolloWebJSONHasUsableSession()) {
+    if (ApolloWebJSONShouldActForClient(self)) {
         ApolloWebJSONInstallSyntheticCredentialIfNeeded(self);
         return YES;
     }
+    ApolloWebJSONRegisterClientBearer(self);
     return %orig;
 }
 
 - (BOOL)isAuthenticatedWithOAuth {
-    if (ApolloWebJSONHasUsableSession()) {
+    if (ApolloWebJSONShouldActForClient(self)) {
         ApolloWebJSONInstallSyntheticCredentialIfNeeded(self);
         return YES;
     }
+    ApolloWebJSONRegisterClientBearer(self);
     return %orig;
 }
 
@@ -492,7 +707,7 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username) {
 // is inert and the real OAuth token path runs untouched. (We never clobber an
 // existing credential, so disabling Web JSON Mode restores normal OAuth.)
 - (id)retrieveAccessTokenForApplicationOnlyWithCompletion:(id)completion {
-    if (ApolloWebJSONShouldSubstituteTokenMint(self)) {
+    if (ApolloWebJSONShouldActForClient(self)) {
         ApolloWebJSONInstallSyntheticCredentialIfNeeded(self);
         ApolloLog(@"[WebJSON][identity] Short-circuited app-only token mint (cookie session)");
         ApolloWebJSONFulfillTokenCompletion(completion);
@@ -502,9 +717,10 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username) {
 }
 
 - (id)retrieveAccessTokenWithCompletion:(id)completion {
-    if (ApolloWebJSONShouldSubstituteTokenMint(self)) {
+    if (ApolloWebJSONShouldActForClient(self)) {
         ApolloWebJSONInstallSyntheticCredentialIfNeeded(self);
-        ApolloLog(@"[WebJSON][identity] Short-circuited token retrieval (cookie session)");
+        ApolloLog(@"[WebJSON][identity] Short-circuited token retrieval (cookie session) for u/%@",
+                  ApolloWebJSONClientUsername(self) ?: @"(anonymous)");
         ApolloWebJSONFulfillTokenCompletion(completion);
         return nil;
     }
@@ -512,9 +728,10 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username) {
 }
 
 - (id)refreshAccessTokenWithCompletion:(id)completion {
-    if (ApolloWebJSONShouldSubstituteTokenMint(self)) {
+    if (ApolloWebJSONShouldActForClient(self)) {
         ApolloWebJSONInstallSyntheticCredentialIfNeeded(self);
-        ApolloLog(@"[WebJSON][identity] Short-circuited token refresh (cookie session)");
+        ApolloLog(@"[WebJSON][identity] Short-circuited token refresh (cookie session) for u/%@",
+                  ApolloWebJSONClientUsername(self) ?: @"(anonymous)");
         ApolloWebJSONFulfillTokenCompletion(completion);
         return nil;
     }
@@ -547,6 +764,16 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username) {
                 ApolloLog(@"[WebJSON] Stubbed empty invited-moderators list (no cookie-compatible endpoint)");
             }
         } @catch (NSException *e) { ApolloLog(@"[WebJSON] invited-moderators stub failed: %@", e); }
+        // Flair-template lists are OAuth-only (www 404s for cookie auth) — see
+        // ApolloWebJSONShouldStubFlairList. Empty list = no flair options in
+        // the composer, instead of a hung Submit drawer.
+        @try {
+            if (ApolloWebJSONShouldStubFlairList(response)) {
+                obj = @[];
+                if (error) *error = nil;
+                ApolloLog(@"[WebJSON] Stubbed empty flair list for %@ (OAuth-only endpoint)", ((NSHTTPURLResponse *)response).URL.path);
+            }
+        } @catch (NSException *e) { ApolloLog(@"[WebJSON] flair-list stub failed: %@", e); }
     }
     return obj;
 }

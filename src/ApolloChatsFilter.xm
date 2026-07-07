@@ -17,6 +17,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloWebJSON.h" // ApolloWebJSONHasUsableSession — Direct Chat row hidden in keyless mode
 #import "ApolloUserProfileCache.h"
 #import "ApolloSubredditInfoCache.h"
 #import "ApolloSubredditCustomIconCache.h"
@@ -34,6 +35,17 @@ static NSInteger sMessagesRow = -1;         // detected row index of "Messages" 
 static const BOOL sDirectChatRowEnabled = YES;
 static BOOL sNextInboxIsChatFilter = NO;    // armed when the Direct Chat row is tapped
 static char kChatFilterKey;                 // on InboxViewController: this list is chat-filtered
+
+// Whether the Direct Chat row should exist for the ACTIVE account right now.
+// Reddit's web JSON API omits the chat-bridge t4 messages entirely under
+// cookie auth (verified live: /message/messages.json returns zero children on
+// a session whose OAuth counterpart has chats), so in API-Key-Free mode the
+// row would only ever open an empty list. Hide it for cookie accounts; OAuth
+// accounts keep it. Re-evaluated per table callback, so it tracks account
+// switches whenever the Boxes list reloads.
+static BOOL ApolloDirectChatRowActive(void) {
+    return sDirectChatRowEnabled && !ApolloWebJSONHasUsableSession();
+}
 
 #pragma mark - helpers
 
@@ -115,9 +127,9 @@ static void ApolloWarnIfUnhandledRowDelegates(id vc) {
 %hook _TtC6Apollo23InboxListViewController
 
 - (long long)tableView:(UITableView *)tableView numberOfRowsInSection:(long long)section {
-    if (sDirectChatRowEnabled) ApolloWarnIfUnhandledRowDelegates(self);   // one-shot future-proofing canary
+    if (ApolloDirectChatRowActive()) ApolloWarnIfUnhandledRowDelegates(self);   // one-shot future-proofing canary
     long long n = %orig;
-    if (sDirectChatRowEnabled && sMessagesSection >= 0 && section == sMessagesSection) {
+    if (ApolloDirectChatRowActive() && sMessagesSection >= 0 && section == sMessagesSection) {
         n += 1;   // + our Direct Chat row
     }
     return n;
@@ -133,7 +145,7 @@ static NSInteger ApolloRealMessagesRow(NSInteger displayedRow) {
 }
 
 - (id)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (!sDirectChatRowEnabled) return %orig;   // Direct Chat row disabled — leave Boxes untouched
+    if (!ApolloDirectChatRowActive()) return %orig;   // Direct Chat row disabled / keyless — leave Boxes untouched
     // Detection pass: until we know which section/row holds "Messages", just observe.
     if (sMessagesSection < 0) {
         UITableViewCell *cell = %orig;
@@ -169,7 +181,7 @@ static NSInteger ApolloRealMessagesRow(NSInteger displayedRow) {
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (sDirectChatRowEnabled && sMessagesSection >= 0 && indexPath.section == sMessagesSection) {
+    if (ApolloDirectChatRowActive() && sMessagesSection >= 0 && indexPath.section == sMessagesSection) {
         NSInteger realRow = ApolloRealMessagesRow(indexPath.row);
         if (realRow < 0) {
             ChatsFilterLog(@"Direct Chat tapped -> opening filtered messages list");
@@ -197,7 +209,7 @@ static NSInteger ApolloRealMessagesRow(NSInteger displayedRow) {
 // one. Map our displayed index path back to Apollo's real row; the Direct Chat row borrows the
 // Messages row's height. (Raised by @nickclyde in review.)
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (sDirectChatRowEnabled && sMessagesSection >= 0 && indexPath.section == sMessagesSection) {
+    if (ApolloDirectChatRowActive() && sMessagesSection >= 0 && indexPath.section == sMessagesSection) {
         NSInteger realRow = ApolloRealMessagesRow(indexPath.row);
         if (realRow < 0) realRow = sMessagesRow;   // Direct Chat row -> same height as the Messages row
         return %orig(tableView, [NSIndexPath indexPathForRow:realRow inSection:sMessagesSection]);

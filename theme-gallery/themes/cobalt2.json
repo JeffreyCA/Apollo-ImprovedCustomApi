@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Cobalt2",
+  "slug": "cobalt2",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "005CC5",
+      "card": "FFFEFD",
+      "background": "F6F5F4",
+      "raised": "FBFAF9",
+      "bars": "FAF9F8",
+      "mutedText": "607D8B",
+      "text": "465B65",
+      "separator": "DEDDDC"
+    },
+    "dark": {
+      "accent": "FFC600",
+      "card": "183346",
+      "background": "142B3C",
+      "raised": "2E4759",
+      "bars": "163042",
+      "mutedText": "A9B6BF",
+      "text": "B4BFC7",
+      "separator": "42596A"
+    }
+  }
+}

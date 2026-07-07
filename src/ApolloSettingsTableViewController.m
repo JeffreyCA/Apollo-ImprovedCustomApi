@@ -1,6 +1,7 @@
 #import "ApolloSettingsTableViewController.h"
 
 #import "ApolloCommon.h"
+#import "ApolloThemeRuntime.h"
 #import <objc/runtime.h>
 
 static char kApolloAccentActionCellKey;
@@ -36,16 +37,7 @@ static char kApolloAccentActionCellKey;
 }
 
 - (UIColor *)apollo_themeAccentColor {
-    NSMutableArray<UIColor *> *candidates = [NSMutableArray array];
-    if (self.tabBarController.tabBar.tintColor) [candidates addObject:self.tabBarController.tabBar.tintColor];
-    if (self.navigationController.navigationBar.tintColor) [candidates addObject:self.navigationController.navigationBar.tintColor];
-    if (self.view.tintColor) [candidates addObject:self.view.tintColor];
-    if (self.tableView.tintColor) [candidates addObject:self.tableView.tintColor];
-    if (self.view.window.tintColor) [candidates addObject:self.view.window.tintColor];
-    for (UIColor *color in candidates) {
-        if ([color isKindOfClass:[UIColor class]]) return color;
-    }
-    return self.view.tintColor ?: [UIColor systemBlueColor];
+    return ApolloThemeAccentColor() ?: self.view.tintColor ?: [UIColor systemBlueColor];
 }
 
 - (void)apollo_applyAccentActionTextColorToCell:(UITableViewCell *)cell {

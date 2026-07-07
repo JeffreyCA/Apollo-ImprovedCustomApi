@@ -5,6 +5,7 @@
 #import "UserDefaultConstants.h"
 
 #import <SystemConfiguration/SystemConfiguration.h>
+#import <netinet/in.h>
 #import <objc/runtime.h>
 
 // Apollo's native General > Autoplay GIFs/Videos preference. Followed only when the
@@ -187,6 +188,43 @@ NSString *ApolloAutoplayGIFModeString(void) {
         case ApolloAutoplayInlineGIFModeDefault:
         default:                                  return ApolloNativeAutoplayGIFModeString();
     }
+}
+
+// Zero-address (default-route) reachability, the exact predicate behind Apollo's
+// [Reachability reachabilityForInternetConnection]. Unlike the hostname-based
+// sReachability above, zero-address flags resolve synchronously from the routing
+// table (no DNS), so the first query is already accurate.
+static SCNetworkReachabilityRef ApolloZeroAddressReachability(void) {
+    static SCNetworkReachabilityRef ref = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        struct sockaddr_in zeroAddress;
+        memset(&zeroAddress, 0, sizeof(zeroAddress));
+        zeroAddress.sin_len = sizeof(zeroAddress);
+        zeroAddress.sin_family = AF_INET;
+        ref = SCNetworkReachabilityCreateWithAddress(NULL, (const struct sockaddr *)&zeroAddress);
+    });
+    return ref;
+}
+
+// Mirrors Apollo's decision in RichMediaNode's video setup (sub_10057c93c) and
+// the preload-adopt helper (sub_100582a0c): both read AutoplayGIFs from STANDARD
+// defaults only, treat nil as "always", switch over always/never/only-on-wifi
+// (anything else falls through to the wifi-only check), and for wifi-only show
+// the static poster iff currentReachabilityStatus == ReachableViaWWAN (2).
+BOOL ApolloNativeAutoplayEffectivelyOff(void) {
+    id value = [[NSUserDefaults standardUserDefaults] objectForKey:kApolloNativeAutoplayGIFsKey];
+    NSString *mode = [value isKindOfClass:[NSString class]] ? [(NSString *)value lowercaseString] : nil;
+    if (mode.length == 0) return NO;                    // unset: Apollo autoplays
+    if ([mode isEqualToString:@"always"]) return NO;
+    if ([mode isEqualToString:@"never"]) return YES;
+    // "only-on-wifi" (or unrecognized): off only on cellular. Reachable-but-WWAN
+    // is Apollo's ReachableViaWWAN; not-reachable takes Apollo's autoplay path.
+    SCNetworkReachabilityRef reachability = ApolloZeroAddressReachability();
+    if (!reachability) return NO;
+    SCNetworkReachabilityFlags flags = 0;
+    if (!SCNetworkReachabilityGetFlags(reachability, &flags)) return NO;
+    return (flags & kSCNetworkReachabilityFlagsReachable) && (flags & kSCNetworkReachabilityFlagsIsWWAN);
 }
 
 static void ApolloLogAutoplayDecision(NSString *mode, BOOL shouldPlay) {

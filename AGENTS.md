@@ -143,6 +143,13 @@ xcrun simctl spawn "$(cat .sim/device.txt)" log show --last 2m --predicate 'subs
 - **Logging**: Use `ApolloLog` for privacy-friendly diagnostics
 - When iterating on a feature, if something isn't working, prefer outright replacing the implementation over adding fallback codepaths. Use generous amount of comments and diagnostic/debug logging.
 
+## Theme Accent in Tweak-Drawn UI
+
+- Any accent color in tweak-drawn UI comes from `ApolloThemeAccentColor()` (`ApolloThemeRuntime.h`): the custom theme's accent when one is active, else the stock Apollo theme's (all 18 themes; `kStockThemes` table in `ApolloThemeRuntime.xm`, values recovered from the binary — see docs/theme-builder-RE.md). Chain as `ApolloThemeAccentColor() ?: someView.tintColor ?: systemBlue`; never hand-roll nav/tab-bar tintColor walks (they only ever approximated the accent).
+- `UIView.tintColor` never returns nil for a real view (it inherits, bottoming out at system blue) — a fallback arm after a guaranteed-non-nil tint read is dead code. Nil only arrives via messaging a nil view, which is what the `?: systemBlue` tail covers.
+- The returned accent is a dynamic provider color. Before any `.CGColor` use (layer borders, ASDK background-thread layout), resolve it with `resolvedColorWithTraitCollection:` against an in-hierarchy view's traits — ambient resolution can pick the wrong light/dark variant when Apollo overrides the window style.
+- Text drawn on an accent fill needs `ApolloColorIsLight()` (ApolloCommon) to choose black vs white — stock monochromatic (dark) and chumbus (light) accents are near-white.
+
 ## Testing
 
 No automated test suite, must be validated manually.

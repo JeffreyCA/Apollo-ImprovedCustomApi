@@ -8,6 +8,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloThemeRuntime.h"
 #import "ApolloTranslation.h"
 #import "Tweak.h"
 
@@ -3446,62 +3447,6 @@ static BOOL ApolloRefreshFeedTitleTranslationAppliedForController(UIViewControll
     return YES;
 }
 
-static UIColor *ApolloResolvedTintColor(UIColor *color, UITraitCollection *traitCollection) {
-    if (!color) return nil;
-    if (traitCollection && [color respondsToSelector:@selector(resolvedColorWithTraitCollection:)]) {
-        return [color resolvedColorWithTraitCollection:traitCollection];
-    }
-    return color;
-}
-
-static BOOL ApolloTintColorLooksLikeSystemBlue(UIColor *color, UITraitCollection *traitCollection) {
-    UIColor *resolvedColor = ApolloResolvedTintColor(color, traitCollection);
-    UIColor *resolvedBlue = ApolloResolvedTintColor([UIColor systemBlueColor], traitCollection);
-    CGFloat red = 0.0, green = 0.0, blue = 0.0, alpha = 0.0;
-    CGFloat blueRed = 0.0, blueGreen = 0.0, blueBlue = 0.0, blueAlpha = 0.0;
-    if (![resolvedColor getRed:&red green:&green blue:&blue alpha:&alpha]) return NO;
-    if (![resolvedBlue getRed:&blueRed green:&blueGreen blue:&blueBlue alpha:&blueAlpha]) return NO;
-
-    return fabs(red - blueRed) < 0.02 && fabs(green - blueGreen) < 0.02 && fabs(blue - blueBlue) < 0.02 && fabs(alpha - blueAlpha) < 0.02;
-}
-
-static UIColor *ApolloThemeTintCandidate(UIColor *color, UITraitCollection *traitCollection) {
-    if (!color || ApolloTintColorLooksLikeSystemBlue(color, traitCollection)) return nil;
-
-    CGFloat red = 0.0, green = 0.0, blue = 0.0, alpha = 1.0;
-    UIColor *resolvedColor = ApolloResolvedTintColor(color, traitCollection);
-    if ([resolvedColor getRed:&red green:&green blue:&blue alpha:&alpha] && alpha < 0.05) return nil;
-    return color;
-}
-
-static UIColor *ApolloThemeTintColorFromView(UIView *view, UITraitCollection *traitCollection, NSInteger depth) {
-    if (!view || depth < 0) return nil;
-
-    UIColor *candidate = ApolloThemeTintCandidate(view.tintColor, traitCollection);
-    if (candidate) return candidate;
-
-    for (UIView *subview in view.subviews) {
-        candidate = ApolloThemeTintColorFromView(subview, traitCollection, depth - 1);
-        if (candidate) return candidate;
-    }
-
-    return nil;
-}
-
-static UIColor *ApolloThemeTintColorFromNavigationItems(NSArray<UIBarButtonItem *> *items, UIBarButtonItem *translationItem, UITraitCollection *traitCollection) {
-    for (UIBarButtonItem *item in items) {
-        if (item == translationItem) continue;
-
-        UIColor *candidate = ApolloThemeTintCandidate(item.tintColor, traitCollection);
-        if (candidate) return candidate;
-
-        candidate = ApolloThemeTintColorFromView(item.customView, traitCollection, 4);
-        if (candidate) return candidate;
-    }
-
-    return nil;
-}
-
 // MARK: - Liquid Glass globe-merge helpers
 //
 // On iOS 26, each custom-view UIBarButtonItem is hosted in its own
@@ -3751,19 +3696,7 @@ static void ApolloUpdateTranslationUIForController(id controller) {
     }
     [globeButton setImage:globeImage forState:UIControlStateNormal];
 
-    UIColor *themeTintColor = ApolloThemeTintColorFromNavigationItems(items, translationItem, vc.traitCollection);
-    if (!themeTintColor) {
-        themeTintColor = ApolloThemeTintCandidate(vc.view.tintColor, vc.traitCollection);
-    }
-    if (!themeTintColor) {
-        themeTintColor = ApolloThemeTintCandidate(vc.navigationController.navigationBar.tintColor, vc.traitCollection);
-    }
-    if (!themeTintColor) {
-        themeTintColor = vc.view.tintColor ?: vc.navigationController.navigationBar.tintColor;
-    }
-    if (!themeTintColor) {
-        themeTintColor = [UIColor systemBlueColor];
-    }
+    UIColor *themeTintColor = ApolloThemeAccentColor() ?: vc.view.tintColor ?: [UIColor systemBlueColor];
     UIColor *resolvedTint = visibleTranslationApplied ? [UIColor systemGreenColor] : themeTintColor;
     globeButton.tintColor = resolvedTint;
     globeButton.accessibilityLabel = translatedMode

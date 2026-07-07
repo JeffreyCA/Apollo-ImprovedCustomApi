@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "GitHub Dark",
+  "slug": "github-dark",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "0969DA",
+      "card": "FFFEFD",
+      "background": "F6F5F4",
+      "raised": "FBFAF9",
+      "bars": "FAF9F8",
+      "mutedText": "57606A",
+      "text": "515963",
+      "separator": "DEDDDC"
+    },
+    "dark": {
+      "accent": "58A6FF",
+      "card": "0C1016",
+      "background": "0B0E13",
+      "raised": "23262C",
+      "bars": "0C0F15",
+      "mutedText": "ABB2B9",
+      "text": "ABB2B9",
+      "separator": "393C41"
+    }
+  }
+}

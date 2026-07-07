@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Halcyon",
+  "slug": "halcyon",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "0B7FA8",
+      "card": "FFFFFF",
+      "background": "F4F4F4",
+      "raised": "F9F9F9",
+      "bars": "FFFFFF",
+      "mutedText": "868D96",
+      "text": "54595E",
+      "separator": "E6E6E6"
+    },
+    "dark": {
+      "accent": "5CCFE6",
+      "card": "171C28",
+      "background": "12161F",
+      "raised": "272C37",
+      "bars": "151924",
+      "mutedText": "B4B9C1",
+      "text": "B4B9C1",
+      "separator": "3C404A"
+    }
+  }
+}
