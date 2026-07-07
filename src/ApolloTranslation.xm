@@ -164,7 +164,9 @@ static NSMutableSet<NSString *> *sRichPreviewTranslationInFlightKeys = nil;
 // URLs of link posts the user pinned back to ORIGINAL via the feed marker tap —
 // their rich-preview card text renders untranslated until toggled again. Keys are
 // normalized (host+path, no www/scheme/query) so the RDKLink URL and the card's
-// scrape URL match even when their strings differ superficially.
+// scrape URL match even when their strings differ superficially. Read from ASDK
+// background layout threads while mutated on main — access it only through the
+// ApolloRichPreviewPinnedOriginal* helpers (ApolloTapModeSetsLock).
 static NSMutableSet<NSString *> *sRichPreviewPinnedOriginalURLKeys = nil;
 static NSString *ApolloRichPreviewPinKeyForURL(NSURL *url) {
     if (![url isKindOfClass:[NSURL class]]) return nil;
@@ -230,9 +232,9 @@ static NSMutableSet<NSString *> *sTapModeTranslatedURLKeys = nil;
 // ApolloRestoreAllOwnedTextNodes so globe-off / settings changes clean them up
 // even though they never take translation ownership.
 static NSHashTable *sTapTouchedNodes = nil;
-// Both tap-mode sets are read from ASDK background layout passes (the rich
-// link-preview gate) while mutated on main — all access goes through these
-// synchronized helpers.
+// The tap-mode sets AND the rich-preview pin set are read from ASDK background
+// layout passes (the rich link-preview gate) while mutated on main — all access
+// goes through these synchronized helpers.
 static NSObject *ApolloTapModeSetsLock(void) {
     static NSObject *lock; static dispatch_once_t once;
     dispatch_once(&once, ^{ lock = [NSObject new]; });
@@ -277,6 +279,20 @@ static void ApolloTapModeRegisterTouchedNode(id node) {
     @synchronized (ApolloTapModeSetsLock()) {
         if (!sTapTouchedNodes) sTapTouchedNodes = [NSHashTable weakObjectsHashTable];
         [sTapTouchedNodes addObject:node];
+    }
+}
+static BOOL ApolloRichPreviewPinnedOriginalContainsKey(NSString *key) {
+    if (key.length == 0) return NO;
+    @synchronized (ApolloTapModeSetsLock()) {
+        return sRichPreviewPinnedOriginalURLKeys && [sRichPreviewPinnedOriginalURLKeys containsObject:key];
+    }
+}
+static void ApolloRichPreviewSetKeyPinnedOriginal(NSString *key, BOOL pinned) {
+    if (key.length == 0) return;
+    @synchronized (ApolloTapModeSetsLock()) {
+        if (!sRichPreviewPinnedOriginalURLKeys) sRichPreviewPinnedOriginalURLKeys = [NSMutableSet set];
+        if (pinned) [sRichPreviewPinnedOriginalURLKeys addObject:key];
+        else [sRichPreviewPinnedOriginalURLKeys removeObject:key];
     }
 }
 // A pin set automatically by tap-to-translate mode (@2) is only meaningful while
@@ -2970,17 +2986,14 @@ NSString *ApolloRichPreviewTranslatedTextIfAvailable(NSURL *url, NSString *field
     if (trimmed.length < 3) return nil;
     // Per-post pin: the user tapped this post's feed marker to see the original,
     // so its card must render untranslated too (toggled back off by another tap).
-    if (sRichPreviewPinnedOriginalURLKeys.count > 0) {
-        NSString *pinKey = ApolloRichPreviewPinKeyForURL(url);
-        if (pinKey.length > 0 && [sRichPreviewPinnedOriginalURLKeys containsObject:pinKey]) return nil;
-    }
+    NSString *pinKey = ApolloRichPreviewPinKeyForURL(url);
+    if (ApolloRichPreviewPinnedOriginalContainsKey(pinKey)) return nil;
     // TAP-TO-TRANSLATE: card text stays original until the post's marker is
     // tapped — but the translation still PREFETCHES below (return nil at the
     // cache-hit exit instead of skipping the pipeline) so the tap is instant.
     BOOL tapHeld = NO;
     if (sTapToTranslate) {
-        NSString *tapKey = ApolloRichPreviewPinKeyForURL(url);
-        tapHeld = !ApolloTapModeURLKeyIsTranslated(tapKey);
+        tapHeld = !ApolloTapModeURLKeyIsTranslated(pinKey);
     }
     if (!ApolloRichPreviewTranslationShouldTranslateForNode(ownerNode)) return nil;
 
@@ -4285,16 +4298,13 @@ static void ApolloToggleTranslationForTitleNode(id textNode) {
     }
     NSString *pinKey = ApolloRichPreviewPinKeyForURL(linkURL);
     if (pinKey.length > 0) {
-        if (!sRichPreviewPinnedOriginalURLKeys) sRichPreviewPinnedOriginalURLKeys = [NSMutableSet set];
         if (sTapToTranslate) {
             // Tap mode: opt the card IN on translate, OUT on revert. Also drop
             // any lingering normal-mode pin so it can't shadow the opt-in.
             ApolloTapModeSetURLKeyTranslated(pinKey, pinnedOriginal);
-            if (pinnedOriginal) [sRichPreviewPinnedOriginalURLKeys removeObject:pinKey];
-        } else if (pinnedOriginal) {
-            [sRichPreviewPinnedOriginalURLKeys removeObject:pinKey];
+            if (pinnedOriginal) ApolloRichPreviewSetKeyPinnedOriginal(pinKey, NO);
         } else {
-            [sRichPreviewPinnedOriginalURLKeys addObject:pinKey];
+            ApolloRichPreviewSetKeyPinnedOriginal(pinKey, !pinnedOriginal);
         }
         // Nudge the CELL's own LinkButtonNode directly — its layoutSpecThatFits:
         // re-runs the rich-preview translation gate, which now honours the pin.
