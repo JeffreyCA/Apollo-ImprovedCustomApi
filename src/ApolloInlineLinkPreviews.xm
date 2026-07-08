@@ -1768,6 +1768,26 @@ static BOOL ApolloLPSetTextNodeAttributedTextIfChanged(ASTextNode *textNode, NSA
     return YES;
 }
 
+// These display-text cleaners run from ApolloLPDisplayTitle/DescriptionForPreview,
+// which the card builders call several times per LinkButtonNode measurement — a
+// scroll-hot path. NSRegularExpression compilation is ~0.1–1ms of ICU work each,
+// and every pattern here is a compile-time constant, so compile each exactly
+// once and reuse the immutable, thread-safe instance instead of rebuilding it
+// per call (was 2–3 fresh compiles per invocation).
+static NSRegularExpression *ApolloLPCachedRegex(NSString *pattern) {
+    static NSMutableDictionary<NSString *, NSRegularExpression *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
+    @synchronized (cache) {
+        NSRegularExpression *re = cache[pattern];
+        if (!re) {
+            re = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+            if (re) cache[pattern] = re;
+        }
+        return re;
+    }
+}
+
 static NSString *ApolloLPCleanDisplayText(NSString *text) {
     if (![text isKindOfClass:[NSString class]] || text.length == 0) return text;
     // Decode HTML entities FIRST (named + numeric, incl. « » ° €) — the fetcher
@@ -1775,9 +1795,9 @@ static NSString *ApolloLPCleanDisplayText(NSString *text) {
     // this render choke point raw and would otherwise show literal "&laquo;".
     // Decoding before tag-stripping also lets an encoded "&lt;b&gt;" collapse out.
     NSString *clean = ApolloLinkPreviewDecodeEntities(text) ?: text;
-    NSRegularExpression *tagRegex = [NSRegularExpression regularExpressionWithPattern:@"<[^>]+>" options:0 error:nil];
+    NSRegularExpression *tagRegex = ApolloLPCachedRegex(@"<[^>]+>");
     clean = [tagRegex stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@" "];
-    NSRegularExpression *whitespace = [NSRegularExpression regularExpressionWithPattern:@"\\s+" options:0 error:nil];
+    NSRegularExpression *whitespace = ApolloLPCachedRegex(@"\\s+");
     clean = [whitespace stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@" "];
     clean = [clean stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     return clean.length > 0 ? clean : text;
@@ -1792,14 +1812,14 @@ static NSString *ApolloLPCleanMultilineDisplayText(NSString *text) {
     // Decode entities first (see ApolloLPCleanDisplayText) — keeps numeric/named
     // entities out of cached/translated multiline bodies (e.g. Bluesky posts).
     NSString *clean = ApolloLinkPreviewDecodeEntities(text) ?: text;
-    NSRegularExpression *tagRegex = [NSRegularExpression regularExpressionWithPattern:@"<[^>]+>" options:0 error:nil];
+    NSRegularExpression *tagRegex = ApolloLPCachedRegex(@"<[^>]+>");
     clean = [tagRegex stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@" "];
     // \x0B (vertical tab), NOT \v: in ICU regex \v is a class shorthand for
     // ALL vertical whitespace including \n — it silently ate the very line
     // breaks this function exists to preserve.
-    NSRegularExpression *inlineWhitespace = [NSRegularExpression regularExpressionWithPattern:@"[\\t\\f\\x0B ]+" options:0 error:nil];
+    NSRegularExpression *inlineWhitespace = ApolloLPCachedRegex(@"[\\t\\f\\x0B ]+");
     clean = [inlineWhitespace stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@" "];
-    NSRegularExpression *blankRuns = [NSRegularExpression regularExpressionWithPattern:@"\\n{3,}" options:0 error:nil];
+    NSRegularExpression *blankRuns = ApolloLPCachedRegex(@"\\n{3,}");
     clean = [blankRuns stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@"\n\n"];
     clean = [clean stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     return clean.length > 0 ? clean : text;
