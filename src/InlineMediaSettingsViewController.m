@@ -222,6 +222,91 @@ static NSInteger ApolloIMSnapPercentHysteretic(float raw, NSInteger current) {
     return kApolloIMStops[idx];
 }
 
+// MARK: - Swipe-back suppression while dragging the slider
+
+// Nearest view controller for a view, via the responder chain.
+static UIViewController *ApolloIMVCForView(UIView *view) {
+    UIResponder *r = view;
+    while (r) {
+        if ([r isKindOfClass:[UIViewController class]]) return (UIViewController *)r;
+        r = r.nextResponder;
+    }
+    return nil;
+}
+
+// A zero-slop gesture recognizer that latches to Began the instant a touch lands
+// on the slider, purely to act as a FAILURE ANCHOR. Every competing swipe-back /
+// transition pan is wired (once) to `requireGestureRecognizerToFail:` this
+// recognizer, so a drag that STARTS on the slider can never pop the page.
+//
+// Why this is needed: the 50% detent's thumb sits at the far-left of the track —
+// right inside the screen-edge interactive-pop zone. Dragging from there toward
+// 75/100 was being stolen by Apollo's full-width swipe-back pan, which either
+// popped back a screen or cancelled the slider's UIControl tracking mid-drag so
+// the thumb "froze" at a detent. (The scroll-lock added earlier only stops the
+// *vertical* scroll steal; the horizontal pop pan is a separate competitor that
+// an earlier round wrongly assumed UIKit already excluded for controls.)
+//
+// This mirrors the proven requireGestureRecognizerToFail wiring in
+// ApolloStatsRowTouch's magnifier loupe — UIKit's own priority primitive, so it's
+// fully stateless: nothing is disabled/restored, meaning a drag that never
+// delivers a clean touch-up (which happens) can't wedge swipe-back the way a
+// per-drag enable/disable could. It never cancels the slider's own UIControl
+// tracking (cancelsTouchesInView = NO), so scrubbing is unaffected. Because the
+// anchor lives on the slider, only touches that hit the slider ever hold up the
+// pop pan — swipe-back is untouched everywhere else on the screen.
+@interface ApolloIMSliderClaimGesture : UIGestureRecognizer
+// The single touch this anchor is bound to for the current sequence. Tracked so a
+// second finger landing on the slider can't invalidly re-latch us (Changed->Began)
+// or, when it lifts first, end the anchor while the scrubbing finger is still down
+// — either of which would momentarily satisfy the pop pan's failure requirement
+// and re-open swipe-back mid-drag. UILongPressGestureRecognizer gives the loupe
+// reference this bookkeeping for free; hand-rolled here, we do it explicitly.
+@property (nonatomic, weak) UITouch *claimedTouch;
+@end
+
+@implementation ApolloIMSliderClaimGesture
+- (instancetype)initWithTarget:(id)target action:(SEL)action {
+    if ((self = [super initWithTarget:target action:action])) {
+        self.cancelsTouchesInView = NO;   // never cancel the slider's UIControl tracking
+        self.delaysTouchesBegan = NO;
+        self.delaysTouchesEnded = NO;
+    }
+    return self;
+}
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.state != UIGestureRecognizerStatePossible) return;   // already bound — ignore extra fingers
+    // A disabled (dimmed) slider must let a normal swipe-back through — only claim
+    // the touch when the slider is actually interactive.
+    UISlider *slider = [self.view isKindOfClass:[UISlider class]] ? (UISlider *)self.view : nil;
+    if (slider && !slider.isEnabled) { self.state = UIGestureRecognizerStateFailed; return; }
+    self.claimedTouch = touches.anyObject;
+    self.state = UIGestureRecognizerStateBegan;   // latched — can no longer fail this touch
+}
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.claimedTouch && ![touches containsObject:self.claimedTouch]) return;
+    if (self.state == UIGestureRecognizerStateBegan || self.state == UIGestureRecognizerStateChanged) {
+        self.state = UIGestureRecognizerStateChanged;
+    }
+}
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    // Keep anchoring until OUR touch lifts — a different finger ending must not
+    // release the pop-pan gate while the scrubbing finger is still down.
+    if (self.claimedTouch && ![touches containsObject:self.claimedTouch]) return;
+    if (self.state == UIGestureRecognizerStateBegan || self.state == UIGestureRecognizerStateChanged) {
+        self.state = UIGestureRecognizerStateEnded;
+    }
+}
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.claimedTouch && ![touches containsObject:self.claimedTouch]) return;
+    self.state = UIGestureRecognizerStateCancelled;
+}
+- (void)reset {
+    [super reset];
+    self.claimedTouch = nil;   // ready for the next sequence
+}
+@end
+
 // UISlider with exactly three stops. Unlike a stock slider, tracking begins
 // from a touch anywhere on the bar (not just on the thumb), and the thumb
 // snaps between the detents while dragging — with a selection tick on each
@@ -247,6 +332,11 @@ static NSInteger ApolloIMSnapPercentHysteretic(float raw, NSInteger current) {
 // Deliberate detent crossings are >150ms apart, so both fire; any residual rapid
 // oscillation the streak guard misses is hard-capped to <1 tick per lockout.
 @property (nonatomic) CFTimeInterval lastFireTime;
+// Swipe-back suppression: the anchor gesture (added in init, lives on the slider)
+// plus the weak set of pop/transition pans already wired to require it to fail, so
+// re-wiring is idempotent.
+@property (nonatomic, strong) ApolloIMSliderClaimGesture *claimGesture;
+@property (nonatomic, strong) NSHashTable<UIGestureRecognizer *> *wiredBackGestures;
 @end
 
 @implementation ApolloIMDetentSlider
@@ -266,8 +356,55 @@ static NSInteger ApolloIMSnapPercentHysteretic(float raw, NSInteger current) {
         }
         _tickViews = ticks;
         _feedback = [[UISelectionFeedbackGenerator alloc] init];
+
+        // Failure anchor for swipe-back suppression. nil target/action on purpose:
+        // the recognizer only needs to change state (not run a callback), and a
+        // self-target would retain-cycle with the view that retains it.
+        _wiredBackGestures = [NSHashTable weakObjectsHashTable];
+        _claimGesture = [[ApolloIMSliderClaimGesture alloc] initWithTarget:nil action:NULL];
+        [self addGestureRecognizer:_claimGesture];
     }
     return self;
+}
+
+// Wire every competing swipe-back / transition pan on the ancestor chain (plus the
+// nav controller's interactive pop gesture) to require the claim gesture to fail
+// before it may begin. Idempotent via the weak set, so it's safe to call as the
+// view enters the window AND as a drag starts — the pop pans live on the nav
+// container above the settings table, which isn't reachable until we're in the
+// hierarchy, and Apollo's full-width pan may be (re)installed after the push
+// settles. The enclosing scroll view's own pan is spared (that steal is already
+// handled by ApolloIMSettingsTableView's touchesShouldCancelInContentView:).
+- (void)apollo_wireSwipeBackFailureRequirements {
+    if (!self.claimGesture) return;
+    NSUInteger before = self.wiredBackGestures.count;
+    UIGestureRecognizer *pop = ApolloIMVCForView(self).navigationController.interactivePopGestureRecognizer;
+    if (pop && ![self.wiredBackGestures containsObject:pop]) {
+        [pop requireGestureRecognizerToFail:self.claimGesture];
+        [self.wiredBackGestures addObject:pop];
+    }
+    // Walk all the way up through the window (window.superview is nil, so this
+    // stops there) — a pop/transition pan can sit on the window itself, and the
+    // device-proven reference wires those too. Only touches that hit the slider
+    // ever hold any of these up, so wiring more is strictly safe.
+    for (UIView *v = self.superview; v; v = v.superview) {
+        UIGestureRecognizer *scrollPan =
+            [v isKindOfClass:[UIScrollView class]] ? ((UIScrollView *)v).panGestureRecognizer : nil;
+        for (UIGestureRecognizer *g in v.gestureRecognizers) {
+            if (g == self.claimGesture || g == scrollPan || g == pop) continue;
+            if ([self.wiredBackGestures containsObject:g]) continue;
+            NSString *cls = NSStringFromClass([g class]);
+            BOOL panLike = [g isKindOfClass:[UIPanGestureRecognizer class]]
+                || [cls containsString:@"ParallaxTransition"];
+            if (!panLike) continue;
+            [g requireGestureRecognizerToFail:self.claimGesture];
+            [self.wiredBackGestures addObject:g];
+        }
+    }
+    if (self.wiredBackGestures.count != before) {
+        ApolloLog(@"[IMSlider] wired swipe-back suppression: %lu pan(s) now require the slider claim to fail (pop=%d)",
+                  (unsigned long)self.wiredBackGestures.count, pop != nil);
+    }
 }
 
 // iOS 26 attaches a private _UIFluidSliderInteraction to every UISlider. Its
@@ -305,6 +442,9 @@ static NSInteger ApolloIMSnapPercentHysteretic(float raw, NSInteger current) {
             #pragma clang diagnostic pop
         }
     }
+    // Now that we're in the hierarchy, the nav container's swipe-back pans are
+    // reachable — make them wait on our claim gesture.
+    [self apollo_wireSwipeBackFailureRequirements];
 }
 
 - (void)layoutSubviews {
@@ -352,6 +492,9 @@ static NSInteger ApolloIMSnapPercentHysteretic(float raw, NSInteger current) {
 }
 
 - (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    // Catch any pop pan installed after we entered the window (e.g. re-added when
+    // the push transition settled); wiring is idempotent.
+    [self apollo_wireSwipeBackFailureRequirements];
     // Sync to the settled value before the drag; self.value isn't animating yet.
     self.lastSnappedPercent = (NSInteger)lroundf(self.value);
     self.pendingPercent = self.lastSnappedPercent;
