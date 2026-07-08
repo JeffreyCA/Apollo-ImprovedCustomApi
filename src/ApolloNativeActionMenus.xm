@@ -831,7 +831,9 @@ static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderat
 // UIKit uses +[_UIContextMenuStyle defaultStyle] (layout 100, overlap NO) and
 // the presentation degrades to the legacy fade. Mirror what UIKit's own
 // button-menu path builds in _UIControlMenuSupportDefaultMenuStyle().
-- (id)_contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction styleForMenuWithConfiguration:(__unused UIContextMenuConfiguration *)configuration {
+// NOTE: layout 3 swaps the presentation to the actions-only controller, so
+// this style is only correct for menus that have NO preview platter.
+static id ApolloNativeActionMenuCompactMenuStyle(void) {
     Class styleClass = objc_getClass("_UIContextMenuStyle");
     SEL defaultStyleSelector = NSSelectorFromString(@"defaultStyle");
     if (!styleClass || ![styleClass respondsToSelector:defaultStyleSelector]) return nil;
@@ -848,6 +850,10 @@ static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderat
         ((void (*)(id, SEL, BOOL))objc_msgSend)(style, setOverlapSelector, ApolloNativeActionMenuMagicMorphEnabled());
     }
     return style;
+}
+
+- (id)_contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction styleForMenuWithConfiguration:(__unused UIContextMenuConfiguration *)configuration {
+    return ApolloNativeActionMenuCompactMenuStyle();
 }
 
 - (UITargetedPreview *)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction previewForHighlightingMenuWithConfiguration:(__unused UIContextMenuConfiguration *)configuration {
@@ -983,6 +989,20 @@ typedef UIMenu * (^ApolloNativeActionMenuProvider)(NSArray<UIMenuElement *> *sug
     UIContextMenuConfiguration *configuration = %orig;
     sApolloNativeActionMenuConfigurationSourceView = previousSourceView;
     return configuration;
+}
+
+// Issue #249 follow-up: the media viewer's long-press menu has no preview
+// platter (the media is already fullscreen), so it can adopt the compact
+// glass style and grow in liquid-style like a button menu instead of
+// popping in. Previewed menus keep the native rich style — layout 3 would
+// drop their preview platter.
+%new
+- (id)_contextMenuInteraction:(UIContextMenuInteraction *)interaction styleForMenuWithConfiguration:(UIContextMenuConfiguration *)configuration {
+    if (!ApolloNativeActionMenusEnabled()) return nil;
+    id previewProvider = nil;
+    @try { previewProvider = [configuration valueForKey:@"previewProvider"]; } @catch (__unused NSException *exception) {}
+    if (previewProvider) return nil;
+    return ApolloNativeActionMenuCompactMenuStyle();
 }
 %end
 
