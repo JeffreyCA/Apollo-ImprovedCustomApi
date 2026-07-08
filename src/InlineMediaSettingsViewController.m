@@ -193,6 +193,11 @@ static NSInteger ApolloIMSnapPercent(float value) {
 // pop edge gesture) suspended for the duration of a drag — they otherwise
 // steal the horizontal drag mid-track and pop the screen.
 @property (nonatomic, strong) NSHashTable<UIGestureRecognizer *> *suspendedPans;
+// The detent the selection haptic last fired for. Change-detection keys off
+// THIS, not self.value: setValue:animated:YES leaves self.value reporting the
+// mid-animation thumb position, so reading it back each continueTracking frame
+// would re-trip the guard every frame and turn one tap into a continuous buzz.
+@property (nonatomic) NSInteger lastSnappedPercent;
 @end
 
 @implementation ApolloIMDetentSlider
@@ -232,9 +237,10 @@ static NSInteger ApolloIMSnapPercent(float value) {
     CGFloat fraction = ([touch locationInView:self].x - CGRectGetMinX(track)) / width;
     fraction = MIN(1.0, MAX(0.0, fraction));
     float raw = self.minimumValue + fraction * (self.maximumValue - self.minimumValue);
-    float snapped = (float)ApolloIMSnapPercent(raw);
-    if ((NSInteger)lroundf(self.value) != (NSInteger)snapped) {
-        [self setValue:snapped animated:YES];
+    NSInteger snapped = ApolloIMSnapPercent(raw);
+    if (snapped != self.lastSnappedPercent) {
+        self.lastSnappedPercent = snapped;      // one haptic per detent crossing
+        [self setValue:(float)snapped animated:YES];
         [self.feedback selectionChanged];
         [self sendActionsForControlEvents:UIControlEventValueChanged];
     }
@@ -260,8 +266,6 @@ static NSInteger ApolloIMSnapPercent(float value) {
     if (pop && pop.isEnabled) {
         pop.enabled = NO;
         [suspended addObject:pop];
-        ApolloLog(@"[InlineMedia] slider suspend pop=%@ on=%@",
-                  NSStringFromClass([pop class]), NSStringFromClass([pop.view class]));
     }
 
     for (UIView *view = self.superview; view; view = view.superview) {
@@ -277,8 +281,6 @@ static NSInteger ApolloIMSnapPercent(float value) {
             if (!panLike) continue;
             gesture.enabled = NO;   // also cancels any in-flight recognition
             [suspended addObject:gesture];
-            ApolloLog(@"[InlineMedia] slider suspend pan=%@ on=%@",
-                      cls, NSStringFromClass([view class]));
         }
     }
     self.suspendedPans = suspended;
@@ -292,7 +294,8 @@ static NSInteger ApolloIMSnapPercent(float value) {
 }
 
 - (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
-    ApolloLog(@"[InlineMedia] slider beginTracking x=%.0f", [touch locationInView:self].x);
+    // Sync to the settled value before the drag; self.value isn't animating yet.
+    self.lastSnappedPercent = (NSInteger)lroundf(self.value);
     [self apollo_suspendCompetingPans];
     [self.feedback prepare];
     [self apollo_applyTouch:touch];
@@ -305,13 +308,11 @@ static NSInteger ApolloIMSnapPercent(float value) {
 }
 
 - (void)endTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
-    ApolloLog(@"[InlineMedia] slider endTracking value=%.0f", self.value);
     [super endTrackingWithTouch:touch withEvent:event];
     [self apollo_resumeCompetingPans];
 }
 
 - (void)cancelTrackingWithEvent:(UIEvent *)event {
-    ApolloLog(@"[InlineMedia] slider cancelTracking value=%.0f", self.value);
     [super cancelTrackingWithEvent:event];
     [self apollo_resumeCompetingPans];
 }
