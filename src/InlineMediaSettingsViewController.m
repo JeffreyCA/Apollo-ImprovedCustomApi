@@ -3,6 +3,8 @@
 #import "ApolloMediaAutoplay.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
+#import <QuartzCore/QuartzCore.h>
+#import <objc/runtime.h>
 
 // MARK: - Live preview (fake comments)
 //
@@ -228,15 +230,23 @@ static NSInteger ApolloIMSnapPercentHysteretic(float raw, NSInteger current) {
 @interface ApolloIMDetentSlider : UISlider
 @property (nonatomic, strong) NSArray<UIView *> *tickViews;
 @property (nonatomic, strong) UISelectionFeedbackGenerator *feedback;
-// Pan recognizers up the view chain (Apollo's swipe-anywhere-back, the nav
-// pop edge gesture) suspended for the duration of a drag — they otherwise
-// steal the horizontal drag mid-track and pop the screen.
-@property (nonatomic, strong) NSHashTable<UIGestureRecognizer *> *suspendedPans;
 // The detent the selection haptic last fired for. Change-detection keys off
 // THIS, not self.value: setValue:animated:YES leaves self.value reporting the
 // mid-animation thumb position, so reading it back each continueTracking frame
 // would re-trip the guard every frame and turn one tap into a continuous buzz.
 @property (nonatomic) NSInteger lastSnappedPercent;
+// Confirmation guard: a new detent must be seen on N consecutive tracking
+// frames before it commits + fires. A single-frame (or alternating) flip — the
+// signature of jitter — never accumulates the streak, so it can NEVER produce a
+// haptic, whatever the underlying input pattern. Belt-and-suspenders on top of
+// the hysteresis dead-band. A deliberate crossing holds the new detent for many
+// frames, so it confirms in ~2 frames (imperceptible).
+@property (nonatomic) NSInteger pendingPercent;
+@property (nonatomic) NSInteger pendingStreak;
+// Post-fire lockout: after a haptic, ignore further changes for a short window.
+// Deliberate detent crossings are >150ms apart, so both fire; any residual rapid
+// oscillation the streak guard misses is hard-capped to <1 tick per lockout.
+@property (nonatomic) CFTimeInterval lastFireTime;
 @end
 
 @implementation ApolloIMDetentSlider
@@ -260,6 +270,43 @@ static NSInteger ApolloIMSnapPercentHysteretic(float raw, NSInteger current) {
     return self;
 }
 
+// iOS 26 attaches a private _UIFluidSliderInteraction to every UISlider. Its
+// feedback conductor plays a CONTINUOUS "fluid" scrub haptic as the value
+// modulates — a separate system from our one-tap-per-detent selectionChanged,
+// and the real source of the "constant vibration while dragging" reports (our
+// haptic tracer never saw it because it isn't a public UIFeedbackGenerator).
+// We do our own detent tracking (UIControl beginTracking/continueTracking) and
+// our own single tap, so we refuse the fluid interaction outright — this leaves
+// classic UIControl tracking (still fired on device, per the logs) untouched.
+- (void)addInteraction:(id<UIInteraction>)interaction {
+    if ([NSStringFromClass([interaction class]) containsString:@"FluidSliderInteraction"]) {
+        return;
+    }
+    [super addInteraction:interaction];
+}
+
+// Belt-and-suspenders: if a fluid interaction was already attached (added before
+// we could refuse it, or via a path that bypasses addInteraction:), strip it and
+// nil the private edge/modulation feedback generators when we enter a window.
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (!self.window) return;
+    for (id<UIInteraction> ix in [self.interactions copy]) {
+        if ([NSStringFromClass([ix class]) containsString:@"FluidSliderInteraction"]) {
+            [self removeInteraction:ix];
+        }
+    }
+    for (NSString *sel in @[@"_setModulationFeedbackGenerator:", @"_setEdgeFeedbackGenerator:"]) {
+        SEL s = NSSelectorFromString(sel);
+        if ([self respondsToSelector:s]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [self performSelector:s withObject:nil];
+            #pragma clang diagnostic pop
+        }
+    }
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGRect track = [self trackRectForBounds:self.bounds];
@@ -279,65 +326,36 @@ static NSInteger ApolloIMSnapPercentHysteretic(float raw, NSInteger current) {
     // Hysteretic snap keyed off the current detent — a held finger's jitter
     // can't flip it across a boundary, so the haptic fires once per crossing.
     NSInteger snapped = ApolloIMSnapPercentHysteretic(raw, self.lastSnappedPercent);
-    if (snapped != self.lastSnappedPercent) {
-        self.lastSnappedPercent = snapped;      // one haptic per detent crossing
+
+    // Confirmation streak: count consecutive frames the candidate detent differs
+    // from the committed one. Only a sustained change (deliberate crossing) fires.
+    if (snapped == self.lastSnappedPercent) {
+        self.pendingStreak = 0;
+    } else if (snapped == self.pendingPercent) {
+        self.pendingStreak++;
+    } else {
+        self.pendingPercent = snapped;
+        self.pendingStreak = 1;
+    }
+    CFTimeInterval now = CACurrentMediaTime();
+    BOOL lockedOut = (now - self.lastFireTime) < 0.15;   // 150ms post-fire window
+    BOOL confirmed = (snapped != self.lastSnappedPercent) && (self.pendingStreak >= 2) && !lockedOut;
+
+    if (confirmed) {
+        self.lastSnappedPercent = snapped;      // one haptic per confirmed crossing
+        self.pendingStreak = 0;
+        self.lastFireTime = now;
         [self setValue:(float)snapped animated:YES];
         [self.feedback selectionChanged];
         [self sendActionsForControlEvents:UIControlEventValueChanged];
     }
 }
 
-// Same recipe as the stats-row loupe (SRTDisableCompetingPans): the
-// interactive pop recognizer must be fetched from the navigation controller
-// explicitly — it is not reliably reachable by walking the touched view's
-// superview chain — and Apollo's full-width back-swipe / parallax transition
-// pans match by class name, not only by UIPanGestureRecognizer ancestry.
-- (void)apollo_suspendCompetingPans {
-    NSHashTable<UIGestureRecognizer *> *suspended = [NSHashTable weakObjectsHashTable];
-
-    UINavigationController *nav = nil;
-    for (UIResponder *r = self.nextResponder; r && !nav; r = r.nextResponder) {
-        if ([r isKindOfClass:[UINavigationController class]]) {
-            nav = (UINavigationController *)r;
-        } else if ([r isKindOfClass:[UIViewController class]]) {
-            nav = ((UIViewController *)r).navigationController;
-        }
-    }
-    UIGestureRecognizer *pop = nav.interactivePopGestureRecognizer;
-    if (pop && pop.isEnabled) {
-        pop.enabled = NO;
-        [suspended addObject:pop];
-    }
-
-    for (UIView *view = self.superview; view; view = view.superview) {
-        for (UIGestureRecognizer *gesture in view.gestureRecognizers) {
-            if (gesture == pop || !gesture.enabled) continue;
-            // Leave the enclosing scroll view's own pan alone — UIControl
-            // tracking already defers vertical scrolling correctly.
-            if ([view isKindOfClass:[UIScrollView class]] &&
-                gesture == ((UIScrollView *)view).panGestureRecognizer) continue;
-            NSString *cls = NSStringFromClass([gesture class]);
-            BOOL panLike = [gesture isKindOfClass:[UIPanGestureRecognizer class]]
-                || [cls containsString:@"ParallaxTransition"];
-            if (!panLike) continue;
-            gesture.enabled = NO;   // also cancels any in-flight recognition
-            [suspended addObject:gesture];
-        }
-    }
-    self.suspendedPans = suspended;
-}
-
-- (void)apollo_resumeCompetingPans {
-    for (UIGestureRecognizer *gesture in self.suspendedPans) {
-        gesture.enabled = YES;
-    }
-    self.suspendedPans = nil;
-}
-
 - (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
     // Sync to the settled value before the drag; self.value isn't animating yet.
     self.lastSnappedPercent = (NSInteger)lroundf(self.value);
-    [self apollo_suspendCompetingPans];
+    self.pendingPercent = self.lastSnappedPercent;
+    self.pendingStreak = 0;
     [self.feedback prepare];
     [self apollo_applyTouch:touch];
     return YES;
@@ -348,16 +366,39 @@ static NSInteger ApolloIMSnapPercentHysteretic(float raw, NSInteger current) {
     return YES;
 }
 
-- (void)endTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
-    [super endTrackingWithTouch:touch withEvent:event];
-    [self apollo_resumeCompetingPans];
-}
+@end
 
-- (void)cancelTrackingWithEvent:(UIEvent *)event {
-    [super cancelTrackingWithEvent:event];
-    [self apollo_resumeCompetingPans];
-}
+// MARK: - Table view (keeps the slider drag from scrolling the screen)
 
+// The settings table is isa-swizzled to this class in viewDidLoad. It overrides
+// two UIScrollView touch-arbitration hooks, scoped to the size slider only, so
+// the screen never scrolls out from under a slider drag — WITHOUT any per-drag
+// state to enable/restore (the earlier scrollEnabled / canCancelContentTouches
+// / pan-disabling approaches either collapsed the layout or left the table
+// stuck when UIControl end-tracking didn't fire).
+@interface ApolloIMSettingsTableView : UITableView
+@end
+@implementation ApolloIMSettingsTableView
+static BOOL ApolloIMViewIsInSlider(UIView *view) {
+    for (UIView *v = view; v; v = v.superview) {
+        if ([v isKindOfClass:[ApolloIMDetentSlider class]]) return YES;
+    }
+    return NO;
+}
+// A touch on the slider must reach it immediately (not after the scroll-detection
+// delay), or a mostly-vertical drag is claimed by the table before the slider
+// ever begins tracking.
+- (BOOL)touchesShouldBegin:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event inContentView:(UIView *)view {
+    if (ApolloIMViewIsInSlider(view)) return YES;
+    return [super touchesShouldBegin:touches withEvent:event inContentView:view];
+}
+// Once the slider is tracking, never cancel it to scroll — this is what stops
+// the screen moving up/down during a drag. Other rows keep the default (YES),
+// so normal scrolling by dragging from a row is unaffected.
+- (BOOL)touchesShouldCancelInContentView:(UIView *)view {
+    if (ApolloIMViewIsInSlider(view)) return NO;
+    return [super touchesShouldCancelInContentView:view];
+}
 @end
 
 // MARK: - Controller
@@ -392,6 +433,16 @@ typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Inline Media";
+    // Route slider-drag touch arbitration through ApolloIMSettingsTableView so a
+    // drag on the size slider scrubs it instead of scrolling the screen. The
+    // subclass adds no ivars, so isa-swizzling the existing table view is safe.
+    if (![self.tableView isKindOfClass:[ApolloIMSettingsTableView class]]) {
+        object_setClass(self.tableView, [ApolloIMSettingsTableView class]);
+    }
+    // Deliver slider touches immediately (the subclass's touchesShouldBegin only
+    // applies while content touches are delayed; NO makes tracking begin at once
+    // for a vertical drag too).
+    self.tableView.delaysContentTouches = NO;
 }
 
 - (void)viewWillAppear:(BOOL)animated {
