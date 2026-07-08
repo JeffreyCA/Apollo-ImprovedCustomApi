@@ -269,13 +269,32 @@ static ApolloWebJSONPathKind ApolloWebJSONClassifyReadPath(NSString *path) {
     return ApolloWebJSONPathUnsupported;
 }
 
-// Whitelist a write (POST/PUT/DELETE). Apollo's write actions all POST to
-// oauth.reddit.com/api/<action>; the web mirror at www.reddit.com/api/<action>
-// accepts the same body with cookie + modhash auth. We allow the whole /api/
+// Whitelist a write (POST/PUT/DELETE). Apollo's write actions POST to two
+// shapes: a TOP-LEVEL endpoint (oauth.reddit.com/api/<action> — vote, comment,
+// submit, subscribe, …) and a SUBREDDIT-SCOPED one
+// (oauth.reddit.com/r/<sub>/api/<action> — flairselector, selectflair,
+// setflairenabled, …). Both mirror to www.reddit.com with cookie + modhash, so
+// both must be routed. This originally matched only the top-level form, so
+// subreddit-scoped writes fell through to oauth.reddit.com carrying the
+// synthetic dummy bearer and 401'd — most visibly the user-flair selector's
+// POST /r/<sub>/api/flairselector, which returned no options and left the flair
+// picker BLANK on every subreddit for keyless accounts. (The READ classifier
+// already routes /r/<sub>/api/* GETs like link_flair for the same reason — see
+// ApolloWebJSONClassifyReadPath; this is the write-side counterpart, and it also
+// ends the same 401→refresh→retry loop for POSTs.) We allow the whole /api/
 // surface but exclude the OAuth token endpoints (those are the identity layer's
 // job, not a content write) and media uploads (multipart, handled elsewhere).
 static BOOL ApolloWebJSONWritePathIsRoutable(NSString *path) {
-    if (![path hasPrefix:@"/api/"]) return NO;
+    BOOL topLevelAPI = [path hasPrefix:@"/api/"];
+    BOOL subredditAPI = NO;
+    if ([path hasPrefix:@"/r/"]) {
+        // /r/<sub>/api/<action> — seg == ["r", "<sub>", "api", "<action>", ...]
+        NSArray<NSString *> *seg = [[path substringFromIndex:1] componentsSeparatedByString:@"/"];
+        subredditAPI = (seg.count >= 4 && [seg[2] isEqualToString:@"api"]);
+    }
+    if (!topLevelAPI && !subredditAPI) return NO;
+    // The exclusions below are all top-level /api/ paths (token + media
+    // endpoints); no subreddit-scoped /r/<sub>/api/* path matches them.
     if ([path hasPrefix:@"/api/v1/access_token"]) return NO;
     if ([path hasPrefix:@"/api/v1/revoke_token"]) return NO;
     if ([path hasPrefix:@"/api/v1/authorize"]) return NO;
