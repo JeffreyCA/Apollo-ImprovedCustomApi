@@ -312,6 +312,7 @@ Thank you to these wonderful people:
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/harshb16"><img src="https://avatars.githubusercontent.com/u/49092079?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="harshb16"/></a><br /><sub><b>harshb16</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
     </tr>
     <tr>
+      <td align="center" valign="top" width="14.29%"><a href="https://github.com/IllIIllIllIllII"><img src="https://avatars.githubusercontent.com/u/132845378?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="IllIIllIllIllII"/></a><br /><sub><b>IllIIllIllIllII</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
       <td align="center" valign="top" width="14.29%"><a href="https://www.reddit.com/user/harunatsu91202024/"><img src="https://i.redd.it/snoovatar/avatars/ef90ed21-4a24-4a78-b535-848d4efc6378.png?s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="harumatsu"/></a><br /><sub><b>harumatsu</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
     </tr>
   </tbody>
