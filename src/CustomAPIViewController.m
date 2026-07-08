@@ -715,6 +715,11 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                  name:ApolloWebJSONEnabledDidChangeNotification
                                                object:nil];
 
+    // The initial data-source pass builds SectionAPIKeys from current state, so
+    // seed the baseline with it — the first -viewWillAppear then sees "no
+    // change" and skips the redundant (flash-inducing) section reload.
+    _apollo_lastAPIKeysSignature = [self apollo_currentAPIKeysSignature];
+
     [[ApolloSubredditInfoCache sharedCache] requestInfoForSubreddit:kApolloRebornSubredditName completion:^(ApolloSubredditInfo *info) {
         (void)info;
     }];
@@ -722,6 +727,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)apollo_webJSONEnabledDidChangeExternally {
     [self.tableView reloadData];
+    _apollo_lastAPIKeysSignature = [self apollo_currentAPIKeysSignature];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -733,8 +739,11 @@ typedef NS_ENUM(NSInteger, Tag) {
     // conversion), and the Web Session Login row's existence tracks
     // sWebJSONEnabled, which a keyless sign-in can flip on from outside this
     // screen. Reload the whole section so row count and contents re-derive
-    // from current state.
-    [self apollo_reloadAPIKeysSection];
+    // from current state — but ONLY when that state actually changed, since
+    // reloading it here (mid-push) flashes the inset-grouped card full-width.
+    if (![[self apollo_currentAPIKeysSignature] isEqualToString:(_apollo_lastAPIKeysSignature ?: @"")]) {
+        [self apollo_reloadAPIKeysSection];
+    }
     // Refresh the Apollo AI and Rich Link Previews status subtitles after returning
     // from their subviews.
     [self.tableView reloadSections:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(SectionApolloAI, 2)]
@@ -2534,9 +2543,38 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self _applyWebJSONEnabled:sender.isOn];
 }
 
+// Everything SectionAPIKeys renders that can change while this screen is off
+// the top of the stack, folded into one comparable string. If it's identical
+// to what the section was last built from, a reload would only re-render the
+// same content — and doing that inside -viewWillAppear makes the inset-grouped
+// card briefly re-lay-out at the wrong width mid-push (the visible full-width
+// flash the reload guard exists to avoid). The inputs:
+//   - active username           → the credential rows, switch state, footer
+//   - sWebJSONEnabled           → whether the Web Session Login row exists (row count)
+//   - active-account keyless    → switch on/off + credential-row dimming
+//   - active-account custom     → which Reddit credential triple is shown
+//   - web-session count         → the Web Session Login row's summary subtitle
+//   - pending-restart (+ user)  → its "quit & reopen to activate" nudge
+// The global Imgur/Giphy/ImgChest/User-Agent fields only change from this
+// screen's own text fields, so they need no entry here.
+- (NSString *)apollo_currentAPIKeysSignature {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    return [NSString stringWithFormat:@"%@|%d|%d|%d|%lu|%d|%@",
+            [self apollo_activeUsername] ?: @"",
+            sWebJSONEnabled ? 1 : 0,
+            [self apollo_activeAccountIsKeyless] ? 1 : 0,
+            [self apollo_activeAccountUsesCustomCredentials] ? 1 : 0,
+            (unsigned long)ApolloWebSessionUsernames().count,
+            [defaults boolForKey:UDKeyWebJSONPendingRestart] ? 1 : 0,
+            [defaults stringForKey:UDKeyWebJSONPendingRestartUsername] ?: @""];
+}
+
 - (void)apollo_reloadAPIKeysSection {
     [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:SectionAPIKeys]
                   withRowAnimation:UITableViewRowAnimationNone];
+    // The section now reflects current state — re-baseline so the next
+    // -viewWillAppear doesn't reload again for a state it already shows.
+    _apollo_lastAPIKeysSignature = [self apollo_currentAPIKeysSignature];
 }
 
 - (void)_applyWebJSONEnabled:(BOOL)enabled {
@@ -2550,6 +2588,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     // enforcement), so a targeted insert/delete against a possibly-stale
     // committed row count is exception bait. reloadData is unconditional.
     [self.tableView reloadData];
+    _apollo_lastAPIKeysSignature = [self apollo_currentAPIKeysSignature];
 }
 
 // This row is "manage/refresh my web login", NOT "add another account", so it
