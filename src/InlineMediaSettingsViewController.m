@@ -181,6 +181,45 @@ static NSInteger ApolloIMSnapPercent(float value) {
     return 100;
 }
 
+// The three stops and the midpoint boundaries between them (62.5, 87.5).
+static const NSInteger kApolloIMStops[] = {50, 75, 100};
+static const int kApolloIMStopCount = 3;
+
+// Detent selection WITH hysteresis. The plain nearest-stop snap above flips
+// the instant `raw` crosses a boundary — fine for a tap, fatal for a drag:
+// a real fingertip held near a boundary jitters a pixel or two every frame
+// (120Hz on ProMotion), so `raw` oscillates across the boundary and the
+// caller re-fires the selection haptic each flip, producing a *continuous
+// rumble* instead of one tick. (The Simulator's synthetic drags are perfectly
+// smooth, so this only reproduces on device — which is why it slipped through.)
+//
+// Hysteresis adds a dead-band: once parked on a detent, the finger must cross
+// the boundary by kApolloIMHysteresis before the detent changes. The band is
+// far wider than any jitter, so a held finger stays put and the haptic fires
+// exactly once per deliberate crossing. Multi-step fast drags still work — the
+// loops walk as many stops as `raw` clears.
+static const float kApolloIMHysteresis = 6.0f;  // percent units (range is 50)
+
+static NSInteger ApolloIMSnapPercentHysteretic(float raw, NSInteger current) {
+    int idx = 0;
+    BOOL found = NO;
+    for (int i = 0; i < kApolloIMStopCount; i++) {
+        if (kApolloIMStops[i] == current) { idx = i; found = YES; break; }
+    }
+    if (!found) return ApolloIMSnapPercent(raw);   // current off-grid: hard snap
+    // Move up while the finger is clearly past the upper boundary…
+    while (idx < kApolloIMStopCount - 1) {
+        float boundary = (kApolloIMStops[idx] + kApolloIMStops[idx + 1]) / 2.0f;
+        if (raw > boundary + kApolloIMHysteresis) idx++; else break;
+    }
+    // …and down while clearly below the lower boundary.
+    while (idx > 0) {
+        float boundary = (kApolloIMStops[idx - 1] + kApolloIMStops[idx]) / 2.0f;
+        if (raw < boundary - kApolloIMHysteresis) idx--; else break;
+    }
+    return kApolloIMStops[idx];
+}
+
 // UISlider with exactly three stops. Unlike a stock slider, tracking begins
 // from a touch anywhere on the bar (not just on the thumb), and the thumb
 // snaps between the detents while dragging — with a selection tick on each
@@ -237,7 +276,9 @@ static NSInteger ApolloIMSnapPercent(float value) {
     CGFloat fraction = ([touch locationInView:self].x - CGRectGetMinX(track)) / width;
     fraction = MIN(1.0, MAX(0.0, fraction));
     float raw = self.minimumValue + fraction * (self.maximumValue - self.minimumValue);
-    NSInteger snapped = ApolloIMSnapPercent(raw);
+    // Hysteretic snap keyed off the current detent — a held finger's jitter
+    // can't flip it across a boundary, so the haptic fires once per crossing.
+    NSInteger snapped = ApolloIMSnapPercentHysteretic(raw, self.lastSnappedPercent);
     if (snapped != self.lastSnappedPercent) {
         self.lastSnappedPercent = snapped;      // one haptic per detent crossing
         [self setValue:(float)snapped animated:YES];
@@ -326,6 +367,12 @@ typedef NS_ENUM(NSInteger, ApolloIMSection) {
     ApolloIMSectionMaster,
     ApolloIMSectionOptions,
     ApolloIMSectionCount,
+};
+
+typedef NS_ENUM(NSInteger, ApolloIMMasterRow) {
+    ApolloIMMasterRowPreviews = 0,   // inline media in posts + comments
+    ApolloIMMasterRowChat,           // inline media in Chat / DMs
+    ApolloIMMasterRowCount,
 };
 
 typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
@@ -478,7 +525,7 @@ typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
         case ApolloIMSectionPreview:  return 1;
-        case ApolloIMSectionMaster:   return 1;
+        case ApolloIMSectionMaster:   return ApolloIMMasterRowCount;
         case ApolloIMSectionOptions:  return ApolloIMOptionsRowCount;
         default:                      return 0;
     }
@@ -496,7 +543,7 @@ typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     switch (section) {
         case ApolloIMSectionMaster:
-            return @"Render image, GIF, and video links inside post text and comments instead of leaving them as plain links.";
+            return @"Inline Media Previews renders image, GIF, and video links inside post text and comments instead of leaving them as plain links. Inline Media in Chat does the same for direct messages.";
         case ApolloIMSectionOptions:
             return @"Tap to Play shows a paused GIF with a play button in the bottom corner — it plays that one GIF inline and becomes a pause button, and tapping the rest of the GIF opens the fullscreen viewer as usual. Never shows a static preview (tap opens the viewer). WiFi Only autoplays on WiFi and behaves like Tap to Play on cellular.";
         default:
@@ -518,6 +565,12 @@ typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
             return cell;
         }
         case ApolloIMSectionMaster:
+            if (indexPath.row == ApolloIMMasterRowChat) {
+                return [self switchCellLabel:@"Inline Media in Chat"
+                                          on:sEnableChatMedia
+                                     enabled:YES
+                                      action:@selector(chatMediaSwitchToggled:)];
+            }
             return [self switchCellLabel:@"Inline Media Previews"
                                       on:sEnableInlineImages
                                  enabled:YES
@@ -576,6 +629,15 @@ typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
     [[NSUserDefaults standardUserDefaults] setBool:sEnableInlineImages forKey:UDKeyEnableInlineImages];
     [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:ApolloIMSectionOptions]
                   withRowAnimation:UITableViewRowAnimationNone];
+}
+
+// Master toggle for chat media (inline images/GIFs/emoji/snoomoji + working
+// media sends + tap-to-fullscreen). Open chats re-render their cells on next
+// display/scroll, so no immediate-refresh notification is needed. Independent
+// of the posts/comments inline toggle and of Show User Profile Pictures.
+- (void)chatMediaSwitchToggled:(UISwitch *)sw {
+    sEnableChatMedia = sw.on;
+    [[NSUserDefaults standardUserDefaults] setBool:sEnableChatMedia forKey:UDKeyEnableChatMedia];
 }
 
 - (void)mediaSizeSliderChanged:(UISlider *)slider {
