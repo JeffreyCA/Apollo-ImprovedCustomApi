@@ -133,7 +133,9 @@ static NSArray<ApolloSwitcherAccountRow *> *ApolloSwitcherLoadAccountRows(void) 
         // presence test, with no OAuth divergence logic to run for these rows.
         if (ApolloWebSessionFor(username) != nil) {
             row.isWebSession = YES;
-            row.keyStatusText = @"Web session";
+            // Deliberately short — the subtitle shares the row with the
+            // checkmark + ellipsis accessories and truncates past ~20 chars.
+            row.keyStatusText = @"API-key-free";
             [rows addObject:row];
             return;
         }
@@ -151,11 +153,11 @@ static NSArray<ApolloSwitcherAccountRow *> *ApolloSwitcherLoadAccountRows(void) 
             || ![ (entry.redirectURI ?: @"") isEqualToString:(sRedirectURI ?: @"") ]
         );
         if (divergesFromDefault) {
-            row.keyStatusText = @"Custom key";
+            row.keyStatusText = @"API key · custom";
         } else if (sRedditClientId.length > 0) {
-            row.keyStatusText = @"Default key";
+            row.keyStatusText = @"API key · default";
         } else {
-            row.keyStatusText = @"No key set";
+            row.keyStatusText = @"No API key set";
         }
         [rows addObject:row];
     }];
@@ -624,31 +626,13 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
     });
 }
 
-// Blocks starting (or re-starting) a web-session login while the master
-// "API-Key-Free Mode" switch is off. Without this, a session could be
-// harvested and stored for an account that ApolloWebJSONHasUsableSession()
-// (gated on sWebJSONEnabled) will never actually treat as usable — the
-// account would have no working OAuth key (none configured) AND no working
-// cookie transport (flag off), so every request just hangs forever with no
-// visible error. Settings already hides its own "Web Session Accounts" row
-// the same way; this is the switcher's equivalent gate.
-- (BOOL)presentWebJSONDisabledAlertIfNeeded {
-    if (sWebJSONEnabled) return NO;
-    UIAlertController *alert = [UIAlertController
-        alertControllerWithTitle:@"API-Key-Free Mode Is Off"
-                          message:@"Turn on \"API-Key-Free Mode\" in Settings → API Keys first — otherwise a web-session account has no working way to authenticate and every request will hang."
-                   preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-    return YES;
-}
-
 // Web-session ("API-Key-Free") sign-in: presents the WKWebView login flow. If a
 // web-session account already exists, the shared persistent cookie jar needs
 // clearing first so the login form actually shows instead of silently reusing
-// the existing web user (see ApolloWebSessionLoginViewController.h).
+// the existing web user (see ApolloWebSessionLoginViewController.h). No master-
+// flag gate: the mode is chosen per account at sign-in, and a successful
+// harvest enables the transport flag itself.
 - (void)presentWebSessionAddAccount {
-    if ([self presentWebJSONDisabledAlertIfNeeded]) return;
     BOOL hasExistingWebSession = ApolloWebSessionUsernames().count > 0;
     ApolloWebSessionLoginViewController *vc = hasExistingWebSession
         ? [ApolloWebSessionLoginViewController loginControllerForAdditionalAccount]
@@ -658,21 +642,28 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
 }
 
 // Tapping a web-session row's edit button: there's no API key to edit, so
-// offer re-sign-in instead (the same flow as adding an additional account —
-// clears the cookie jar first, since whatever's there belongs to THIS account
-// and the user is explicitly choosing to replace it).
+// offer re-sign-in (the same flow as adding an additional account — clears the
+// cookie jar first, since whatever's there belongs to THIS account and the
+// user is explicitly choosing to replace it) or switching the account over to
+// API-key sign-in (removes the web session; see ApolloPresentSwitchToAPIKeyFlow).
 - (void)presentWebSessionActionsForUsername:(NSString *)username {
     UIAlertController *sheet = [UIAlertController
         alertControllerWithTitle:[NSString stringWithFormat:@"u/%@", username]
-                          message:@"Signed in via web session (no API key needed)."
+                          message:@"Signed in without an API key (web session)."
                    preferredStyle:UIAlertControllerStyleActionSheet];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Re-Sign In"
                                               style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *a) {
-        if ([self presentWebJSONDisabledAlertIfNeeded]) return;
         ApolloWebSessionLoginViewController *vc = [ApolloWebSessionLoginViewController loginControllerForAdditionalAccount];
         UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
         [self presentViewController:nav animated:YES completion:nil];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Use API Key Instead…"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        ApolloPresentSwitchToAPIKeyFlow(self, username, ^(BOOL switched) {
+            if (switched) [self reloadRows];
+        });
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     sheet.popoverPresentationController.sourceView = self.view;

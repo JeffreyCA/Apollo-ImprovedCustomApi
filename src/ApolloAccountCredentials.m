@@ -195,3 +195,87 @@ NSString *ApolloEffectiveRedirectURI(void) {
     }
     return sRedirectURI.length > 0 ? sRedirectURI : defaultRedirectURI;
 }
+
+#pragma mark - Interactive OAuth sign-in tracking
+
+// Arm/consume with a TTL, bound to the signed-in identity. The consume site
+// (the RDKClient user-install hooks in ApolloUserAvatars.xm) fires far more
+// often than "a sign-in just completed": -setCurrentUser: is invoked by
+// NSKeyedUnarchiver's KVC decode of RedditAccounts2 — which
+// ApolloActiveAccountUsername() above performs on every call, including for
+// the sign-in's own token-exchange request — and
+// -updateCurrentUserWithNewUser: fires for every background identity refresh
+// of every stored account. A naive "first install after arming consumes"
+// design therefore spends the flag on whatever stored account decodes first
+// (and, catastrophically, would remove THAT account's web session).
+//
+// Instead, arming snapshots the usernames already present in the account
+// blobs; only an install for a username NOT in that snapshot — the genuinely
+// new sign-in — consumes. Installs for pre-existing usernames pass through
+// WITHOUT disarming, so decode/refresh traffic can't spend the flag. The
+// trade-off is that re-authenticating an already-present username via OAuth
+// doesn't auto-remove its stale web session — that case is served by the
+// explicit "Use API Key Instead…" flow (switcher ellipsis / settings toggle).
+static os_unfair_lock sOAuthSignInLock = OS_UNFAIR_LOCK_INIT;
+static CFAbsoluteTime sOAuthSignInArmedAt = 0;
+static NSSet<NSString *> *sOAuthSignInPreexisting = nil; // lowercased usernames at arm time
+
+// All lowercased usernames currently in the persisted RedditAccounts2 blob.
+static NSSet<NSString *> *ApolloAllPersistedAccountUsernames(void) {
+    NSMutableSet<NSString *> *names = [NSMutableSet set];
+    NSUserDefaults *group = [[NSUserDefaults alloc] initWithSuiteName:kApolloAccountCredsGroupSuite];
+    id accounts = ApolloAccountCredsUnarchive([group objectForKey:@"RedditAccounts2"]);
+    if (![accounts isKindOfClass:[NSArray class]]) return names;
+    for (id client in (NSArray *)accounts) {
+        NSString *username = nil;
+        @try { username = [[client valueForKey:@"currentUser"] valueForKey:@"username"]; }
+        @catch (__unused NSException *e) { continue; }
+        if ([username isKindOfClass:[NSString class]] && username.length > 0) {
+            [names addObject:ApolloNormalizeUsername(username)];
+        }
+    }
+    return names;
+}
+
+void ApolloNoteInteractiveOAuthSignIn(void) {
+    // Snapshot BEFORE arming: the decode below fires the hooked setters
+    // itself, and they must observe the flag as still disarmed.
+    NSSet<NSString *> *preexisting = ApolloAllPersistedAccountUsernames();
+    os_unfair_lock_lock(&sOAuthSignInLock);
+    sOAuthSignInPreexisting = preexisting;
+    sOAuthSignInArmedAt = CFAbsoluteTimeGetCurrent();
+    os_unfair_lock_unlock(&sOAuthSignInLock);
+    ApolloLog(@"[AccountCredentials] Interactive OAuth sign-in callback received — armed web-session cleanup (%lu pre-existing account(s))",
+              (unsigned long)preexisting.count);
+}
+
+void ApolloCancelInteractiveOAuthSignIn(void) {
+    os_unfair_lock_lock(&sOAuthSignInLock);
+    sOAuthSignInArmedAt = 0;
+    sOAuthSignInPreexisting = nil;
+    os_unfair_lock_unlock(&sOAuthSignInLock);
+}
+
+BOOL ApolloTakeInteractiveOAuthSignInForNewUsername(NSString *username) {
+    NSString *key = ApolloNormalizeUsername(username);
+    if (key.length == 0) return NO;
+    BOOL consumed = NO;
+    os_unfair_lock_lock(&sOAuthSignInLock);
+    if (sOAuthSignInArmedAt > 0) {
+        if ((CFAbsoluteTimeGetCurrent() - sOAuthSignInArmedAt) >= 120.0) {
+            // Expired (e.g. the code->token exchange failed after the
+            // callback) — disarm lazily so nothing later can consume it.
+            sOAuthSignInArmedAt = 0;
+            sOAuthSignInPreexisting = nil;
+        } else if (![sOAuthSignInPreexisting containsObject:key]) {
+            // A username that wasn't in the blobs at arm time: this IS the
+            // new sign-in. Consume. Pre-existing usernames fall through
+            // WITHOUT disarming (decode/background-refresh traffic).
+            consumed = YES;
+            sOAuthSignInArmedAt = 0;
+            sOAuthSignInPreexisting = nil;
+        }
+    }
+    os_unfair_lock_unlock(&sOAuthSignInLock);
+    return consumed;
+}

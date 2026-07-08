@@ -7,6 +7,7 @@
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloAISettingsViewController.h"
 #import "ApolloWebSessionStore.h"
+#import "ApolloWebJSON.h"
 #import "ApolloAccountCredentials.h"
 #import "ApolloState.h"
 #import "ApolloUserProfileCache.h"
@@ -212,6 +213,102 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (BOOL)apollo_usesCustomOAuthSignIn {
     return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseCustomOAuthSignIn];
+}
+
+#pragma mark - Active-account awareness
+
+// The Reddit credential rows and the API-Key-Free switch reflect the ACTIVE
+// account: each account signs in either with an API key (its per-account
+// entry, falling back to the global default) or without one (a stored web
+// session) — see ApolloAccountCredentials.h / ApolloWebSessionStore.h. The
+// other fields (Imgur/Giphy/ImgChest/User Agent) stay global.
+
+- (NSString *)apollo_activeUsername {
+    return ApolloActiveAccountUsername();
+}
+
+- (BOOL)apollo_activeAccountIsKeyless {
+    NSString *active = [self apollo_activeUsername];
+    return active.length > 0 && ApolloWebSessionFor(active) != nil;
+}
+
+// The three Reddit fields form ONE credential (a client id, ITS secret, ITS
+// redirect URI) — an installed-app client id requires an EMPTY secret, so
+// mixing entry and global values per FIELD could pair a custom client id with
+// the default's secret and corrupt a working setup on the next save. Decide
+// custom-vs-default once per ACCOUNT (same divergence rule as the account
+// switcher's badge) and resolve the whole triple from that source.
+- (BOOL)apollo_activeAccountUsesCustomCredentials {
+    NSString *active = [self apollo_activeUsername];
+    if (active.length == 0) return NO;
+    ApolloAccountCredentialEntry *entry = ApolloAccountCredentialsFor(active);
+    if (!entry) return NO;
+    return ![(entry.clientId ?: @"") isEqualToString:(sRedditClientId ?: @"")]
+        || ![(entry.clientSecret ?: @"") isEqualToString:(sRedditClientSecret ?: @"")]
+        || ![(entry.redirectURI ?: @"") isEqualToString:(sRedirectURI ?: @"")];
+}
+
+- (NSString *)apollo_activeAccountFieldForTag:(NSInteger)tag {
+    if ([self apollo_activeAccountUsesCustomCredentials]) {
+        ApolloAccountCredentialEntry *entry = ApolloAccountCredentialsFor([self apollo_activeUsername]);
+        if (tag == TagRedditClientId)     return entry.clientId ?: @"";
+        if (tag == TagRedditClientSecret) return entry.clientSecret ?: @"";
+        if (tag == TagRedirectURI)        return entry.redirectURI ?: @"";
+        return @"";
+    }
+    if (tag == TagRedditClientId)     return sRedditClientId ?: @"";
+    if (tag == TagRedditClientSecret) return sRedditClientSecret ?: @"";
+    if (tag == TagRedirectURI)        return sRedirectURI ?: @"";
+    return @"";
+}
+
+// Persists an edited Reddit credential field, keeping the triple coherent:
+// - Custom-key account active: the edit goes to ITS entry only (the other two
+//   fields keep the entry's values verbatim); the global default is untouched.
+// - Default-following account active: the edit goes to the global default,
+//   and the account is re-pinned to the updated default as a whole triple so
+//   it keeps following it (display, pin, and runtime resolution stay in
+//   agreement — note that changing the client id invalidates the account's
+//   refresh token either way; Apollo re-prompts for sign-in when that bites).
+// - Nobody signed in: edits write the global default as before.
+- (void)apollo_saveRedditCredentialField:(NSInteger)tag value:(NSString *)value {
+    value = value ?: @"";
+    NSString *active = [self apollo_activeUsername];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+
+    if (active.length > 0 && ![self apollo_activeAccountIsKeyless]
+        && [self apollo_activeAccountUsesCustomCredentials]) {
+        ApolloAccountCredentialEntry *entry = ApolloAccountCredentialsFor(active) ?: [ApolloAccountCredentialEntry new];
+        NSString *clientId    = tag == TagRedditClientId     ? value : (entry.clientId ?: @"");
+        NSString *secret      = tag == TagRedditClientSecret ? value : (entry.clientSecret ?: @"");
+        NSString *redirectURI = tag == TagRedirectURI        ? value : (entry.redirectURI ?: @"");
+        ApolloAccountCredentialsSet(active, clientId, secret, redirectURI);
+        return;
+    }
+
+    if (tag == TagRedditClientId) {
+        sRedditClientId = value;
+        [defaults setValue:value forKey:UDKeyRedditClientId];
+    } else if (tag == TagRedditClientSecret) {
+        sRedditClientSecret = value;
+        [defaults setValue:value forKey:UDKeyRedditClientSecret];
+    } else if (tag == TagRedirectURI) {
+        sRedirectURI = value;
+        [defaults setValue:value forKey:UDKeyRedirectURI];
+    }
+
+    if (active.length > 0 && ![self apollo_activeAccountIsKeyless]) {
+        ApolloAccountCredentialsSet(active, sRedditClientId, sRedditClientSecret, sRedirectURI);
+    }
+}
+
+// Dim + disable a Reddit credential row while the active account is keyless —
+// the values don't apply to it (footer explains). Re-enabled when an API-key
+// account (or no account) is active.
+- (void)apollo_applyKeylessAppearanceToCell:(UITableViewCell *)cell {
+    BOOL keyless = [self apollo_activeAccountIsKeyless];
+    cell.userInteractionEnabled = !keyless;
+    cell.contentView.alpha = keyless ? 0.4 : 1.0;
 }
 
 - (NSString *)apollo_redirectURIDetailText {
@@ -608,20 +705,36 @@ typedef NS_ENUM(NSInteger, Tag) {
     self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
     [self apollo_disableAutoHideTabBarIdleIfUnsupported];
 
+    // sWebJSONEnabled can flip outside this screen while it's on the stack —
+    // a keyless harvest auto-enables it behind the login page sheet, and
+    // page-sheet dismissal fires no viewWillAppear here. The SectionAPIKeys
+    // row count depends on the flag, so a stale committed count would make
+    // the next row-level update throw. reloadData resyncs unconditionally.
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(apollo_webJSONEnabledDidChangeExternally)
+                                                 name:ApolloWebJSONEnabledDidChangeNotification
+                                               object:nil];
+
     [[ApolloSubredditInfoCache sharedCache] requestInfoForSubreddit:kApolloRebornSubredditName completion:^(ApolloSubredditInfo *info) {
         (void)info;
     }];
 }
 
+- (void)apollo_webJSONEnabledDidChangeExternally {
+    [self.tableView reloadData];
+}
+
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self apollo_applyTheme];
-    // Refresh the Web Session Login status line after returning from the login
-    // flow (signed-in user / write-token availability may have just changed).
-    if (sWebJSONEnabled && [self.tableView numberOfRowsInSection:SectionAPIKeys] > kAPIKeyRowWebSessionLogin) {
-        [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:kAPIKeyRowWebSessionLogin inSection:SectionAPIKeys]]
-                              withRowAnimation:UITableViewRowAnimationNone];
-    }
+    // The Reddit credential rows, the API-Key-Free switch, and the section
+    // footer all reflect the ACTIVE account (which may have changed while this
+    // screen was off-screen — account switch, keyless sign-in completing, a
+    // conversion), and the Web Session Login row's existence tracks
+    // sWebJSONEnabled, which a keyless sign-in can flip on from outside this
+    // screen. Reload the whole section so row count and contents re-derive
+    // from current state.
+    [self apollo_reloadAPIKeysSection];
     // Refresh the Apollo AI and Rich Link Previews status subtitles after returning
     // from their subviews.
     [self.tableView reloadSections:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(SectionApolloAI, 2)]
@@ -937,20 +1050,26 @@ typedef NS_ENUM(NSInteger, Tag) {
         // inline label-left/field-right layout — "Reddit API Key (Default)"
         // and "Reddit API Secret (Default)" are long enough to crowd the
         // field at the inline layout's fixed 0.55 width.
-        case 0:
+        case 0: {
+            BOOL keyless = [self apollo_activeAccountIsKeyless];
             cell = [self stackedTextFieldCellWithIdentifier:@"Cell_API_Reddit"
                                                        label:@"Reddit API Key"
-                                                 placeholder:@"Reddit API Key"
-                                                        text:sRedditClientId
+                                                 placeholder:(keyless ? @"Not used — account is API-key-free" : @"Reddit API Key")
+                                                        text:(keyless ? @"" : [self apollo_activeAccountFieldForTag:TagRedditClientId])
                                                          tag:TagRedditClientId];
+            [self apollo_applyKeylessAppearanceToCell:cell];
             break;
-        case 1:
+        }
+        case 1: {
+            BOOL keyless = [self apollo_activeAccountIsKeyless];
             cell = [self stackedTextFieldCellWithIdentifier:@"Cell_API_RedditSecret"
                                                        label:@"Reddit API Secret"
-                                                 placeholder:@"Required for \"Web app\" clients; empty otherwise"
-                                                        text:sRedditClientSecret
+                                                 placeholder:(keyless ? @"Not used — account is API-key-free" : @"Required for \"Web app\" clients; empty otherwise")
+                                                        text:(keyless ? @"" : [self apollo_activeAccountFieldForTag:TagRedditClientSecret])
                                                          tag:TagRedditClientSecret];
+            [self apollo_applyKeylessAppearanceToCell:cell];
             break;
+        }
         case 2:
             cell = [self stackedTextFieldCellWithIdentifier:@"Cell_API_Imgur"
                                                        label:@"Imgur API Key"
@@ -974,13 +1093,15 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                      detail:@"Required for GIF picker. Get one at developers.giphy.com"];
             break;
         case 5: {
+            BOOL keyless = [self apollo_activeAccountIsKeyless];
             UITableViewCell *cell = [self stackedTextFieldCellWithIdentifier:@"Cell_API_Redirect"
                                                                       label:@"Redirect URI"
-                                                                placeholder:defaultRedirectURI
-                                                                       text:sRedirectURI
+                                                                placeholder:(keyless ? @"Not used — account is API-key-free" : defaultRedirectURI)
+                                                                       text:(keyless ? @"" : [self apollo_activeAccountFieldForTag:TagRedirectURI])
                                                                         tag:TagRedirectURI
                                                                       detail:[self apollo_redirectURIDetailText]];
             [self apollo_applyRedirectURITextColorToCell:cell];
+            [self apollo_applyKeylessAppearanceToCell:cell];
             return cell;
         }
         case 6:
@@ -1014,12 +1135,28 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.textLabel.text = @"Giphy & ImgChest API Key Setup";
             return cell;
         }
-        case kAPIKeyRowWebJSONSwitch:
+        case kAPIKeyRowWebJSONSwitch: {
+            // Reflects the ACTIVE account's sign-in mode, not a global master:
+            // ON = the current account signs in without an API key (it has a
+            // stored web session), OFF = it uses an API key. Toggling converts
+            // THAT account (webJSONSwitchToggled). With nobody signed in it
+            // falls back to the internal transport flag.
+            NSString *active = [self apollo_activeUsername];
+            BOOL on = active.length > 0 ? [self apollo_activeAccountIsKeyless] : sWebJSONEnabled;
+            NSString *detail;
+            if (active.length > 0 && on) {
+                detail = [NSString stringWithFormat:@"u/%@ signs in to reddit.com without an API key (web session). Turn off to switch it back to its API key. Each account has its own setting.", active];
+            } else if (active.length > 0) {
+                detail = [NSString stringWithFormat:@"u/%@ signs in with an API key. Turn on to sign it in to reddit.com without one (web session). Each account has its own setting.", active];
+            } else {
+                detail = @"Lets accounts sign in to reddit.com instead of using API keys (OAuth). Each account chooses its mode when it's added — from the account switcher or the sign-in screen.";
+            }
             return [self switchCellWithIdentifier:@"Cell_API_WebJSON"
                                             label:@"API-Key-Free Mode (Experimental)"
-                                           detail:@"Master switch: lets accounts sign in to reddit.com instead of using API keys (OAuth). Add or manage individual web-session accounts from the account switcher."
-                                               on:sWebJSONEnabled
+                                           detail:detail
+                                               on:on
                                            action:@selector(webJSONSwitchToggled:)];
+        }
         case kAPIKeyRowWebSessionLogin: {
             // Subtitle style so we can surface the harvested account / status.
             UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_API_WebSessionLogin"];
@@ -1707,8 +1844,16 @@ typedef NS_ENUM(NSInteger, Tag) {
             attributes:plainAttrs];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"more info"
             attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [self apollo_themeAccentColor], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/Apollo-Reborn/Apollo-Reborn?tab=readme-ov-file#dont-have-an-api-key"]}]];
-        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"). The Reddit API Key/Secret/Redirect URI above are the default, used by any signed-in account that doesn't have its own key — set a different key per account from the account switcher."
-            attributes:plainAttrs]];
+        NSString *perAccountNote;
+        NSString *activeUsername = [self apollo_activeUsername];
+        if (activeUsername.length > 0 && [self apollo_activeAccountIsKeyless]) {
+            perAccountNote = [NSString stringWithFormat:@"). u/%@ signs in without an API key (web session), so the Reddit fields above don't apply to it — they remain the default for accounts that do use a key. Manage each account's sign-in from the account switcher.", activeUsername];
+        } else if (activeUsername.length > 0) {
+            perAccountNote = [NSString stringWithFormat:@"). The Reddit API Key/Secret/Redirect URI above are the ones u/%@ signs in with. Other accounts keep their own keys — manage them from the account switcher (tap the ellipsis next to an account).", activeUsername];
+        } else {
+            perAccountNote = @"). The Reddit API Key/Secret/Redirect URI above are the default, used by any signed-in account that doesn't have its own key — set a different key per account from the account switcher.";
+        }
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:perAccountNote attributes:plainAttrs]];
     } else if (section == SectionSubreddits) {
         text = [[NSMutableAttributedString alloc]
             initWithString:@"Configure custom subreddit sources by providing a URL to a plaintext file with line-separated subreddit names (without /r/). "
@@ -2224,12 +2369,10 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)textFieldDidEndEditing:(UITextField *)textField {
     if (textField.tag == TagRedditClientId) {
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        sRedditClientId = textField.text;
-        [[NSUserDefaults standardUserDefaults] setValue:sRedditClientId forKey:UDKeyRedditClientId];
+        [self apollo_saveRedditCredentialField:TagRedditClientId value:textField.text];
     } else if (textField.tag == TagRedditClientSecret) {
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        sRedditClientSecret = textField.text;
-        [[NSUserDefaults standardUserDefaults] setValue:sRedditClientSecret forKey:UDKeyRedditClientSecret];
+        [self apollo_saveRedditCredentialField:TagRedditClientSecret value:textField.text];
     } else if (textField.tag == TagImgurClientId) {
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         sImgurClientId = textField.text;
@@ -2243,8 +2386,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         [[NSUserDefaults standardUserDefaults] setValue:textField.text ?: @"" forKey:UDKeyGiphyAPIKey];
     } else if (textField.tag == TagRedirectURI) {
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        sRedirectURI = textField.text;
-        [[NSUserDefaults standardUserDefaults] setValue:sRedirectURI forKey:UDKeyRedirectURI];
+        [self apollo_saveRedditCredentialField:TagRedirectURI value:textField.text];
         textField.textColor = ([self apollo_usesCustomOAuthSignIn] || [self isRedirectURISchemeValid:textField.text]) ? [UIColor labelColor] : [UIColor systemRedColor];
     } else if (textField.tag == TagUserAgent) {
         textField.text = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
@@ -2359,30 +2501,42 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (void)webJSONSwitchToggled:(UISwitch *)sender {
-    // Turning this OFF while ANY account has a stored web session leaves that
-    // account with no working transport: no OAuth key is configured (it never
-    // needed one) and cookie auth just got disabled by this flag — every
-    // request for it would hang forever with no visible error. Confirm before
-    // applying so that's a deliberate choice, not a surprise.
-    NSUInteger webSessionCount = ApolloWebSessionUsernames().count;
-    if (sender.isOn == NO && sWebJSONEnabled && webSessionCount > 0) {
-        [sender setOn:YES animated:YES]; // revert the visual toggle pending confirmation
-        NSString *who = webSessionCount == 1 ? @"An account" : [NSString stringWithFormat:@"%lu accounts", (unsigned long)webSessionCount];
-        UIAlertController *alert = [UIAlertController
-            alertControllerWithTitle:@"Turn Off API-Key-Free Mode?"
-                             message:[NSString stringWithFormat:
-                                 @"%@ signed in via a web session, not an API key. Turning this off will make every request for it hang. Remove or re-sign-in that account first, or turn it back on if you change your mind.", who]
-                      preferredStyle:UIAlertControllerStyleAlert];
+    // Per-account semantics: the switch shows (and changes) the ACTIVE
+    // account's sign-in mode. Toggling ON converts the current API-key account
+    // to a web-session sign-in; toggling OFF removes the current account's web
+    // session so it goes back to its API key. Both flows confirm first and are
+    // owned by ApolloWebSessionLoginViewController.m; the switch snaps back
+    // visually and the row re-renders from actual state afterward.
+    NSString *active = [self apollo_activeUsername];
+    if (active.length > 0) {
+        BOOL keylessNow = [self apollo_activeAccountIsKeyless];
         __weak typeof(self) weakSelf = self;
-        [alert addAction:[UIAlertAction actionWithTitle:@"Turn Off Anyway" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
-            [sender setOn:NO animated:YES];
-            [weakSelf _applyWebJSONEnabled:NO];
-        }]];
-        [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-        [self presentViewController:alert animated:YES completion:nil];
+        if (sender.isOn && !keylessNow) {
+            [sender setOn:NO animated:YES]; // pending the sign-in actually completing
+            ApolloPresentSwitchToKeylessFlow(self, active);
+        } else if (!sender.isOn && keylessNow) {
+            [sender setOn:YES animated:YES]; // pending confirmation
+            ApolloPresentSwitchToAPIKeyFlow(self, active, ^(BOOL switched) {
+                if (switched) [weakSelf apollo_reloadAPIKeysSection];
+            });
+        } else {
+            // Visual state drifted from the account's actual mode (e.g. the
+            // account changed underneath a stale render) — resync the section.
+            [self apollo_reloadAPIKeysSection];
+        }
         return;
     }
+
+    // Nobody signed in: fall back to the internal transport flag (it also
+    // gates the missing-API-key launch nag). Turning it off with stored web
+    // sessions can't happen here — sessions imply a signed-in account, which
+    // takes the per-account path above.
     [self _applyWebJSONEnabled:sender.isOn];
+}
+
+- (void)apollo_reloadAPIKeysSection {
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:SectionAPIKeys]
+                  withRowAnimation:UITableViewRowAnimationNone];
 }
 
 - (void)_applyWebJSONEnabled:(BOOL)enabled {
@@ -2391,13 +2545,11 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSUserDefaults standardUserDefaults] setBool:sWebJSONEnabled forKey:UDKeyWebJSONEnabled];
     if (sWebJSONEnabled == wasOn) return;
 
-    // The Web Session Login row only exists while the mode is on.
-    NSArray<NSIndexPath *> *loginPaths = @[[NSIndexPath indexPathForRow:kAPIKeyRowWebSessionLogin inSection:SectionAPIKeys]];
-    if (sWebJSONEnabled) {
-        [self.tableView insertRowsAtIndexPaths:loginPaths withRowAnimation:UITableViewRowAnimationFade];
-    } else {
-        [self.tableView deleteRowsAtIndexPaths:loginPaths withRowAnimation:UITableViewRowAnimationFade];
-    }
+    // The Web Session Login row only exists while the mode is on — and the
+    // flag can also be flipped from OUTSIDE this screen (harvest, launch
+    // enforcement), so a targeted insert/delete against a possibly-stale
+    // committed row count is exception bait. reloadData is unconditional.
+    [self.tableView reloadData];
 }
 
 // This row is "manage/refresh my web login", NOT "add another account", so it

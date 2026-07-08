@@ -9,6 +9,7 @@
 #import <Security/Security.h>
 
 NSString *const ApolloWebJSONSessionExpiredNotification = @"ApolloWebJSONSessionExpiredNotification";
+NSString *const ApolloWebJSONEnabledDidChangeNotification = @"ApolloWebJSONEnabledDidChangeNotification";
 NSString *const ApolloWebJSONSyntheticBearerToken = @"apollo-webjson-cookie-session";
 
 #pragma mark - Synthetic bearer helpers + bearer-ownership registry
@@ -1281,6 +1282,19 @@ void ApolloWebJSONLoadPersistedCredentials(void) {
         && ApolloWebSessionFor(sWebSessionUsername) == nil) {
         ApolloWebSessionSet(sWebSessionUsername, sWebSessionCookieHeader, sWebSessionModhash);
         ApolloLog(@"[WebJSON] Migrated legacy global web session to per-account store for u/%@", sWebSessionUsername);
+        // When that username ALSO has a real OAuth credential on disk this
+        // migration makes the web session win (entry presence == keyless), so
+        // the account's API key goes unused. That's deliberate: a real-but-
+        // REVOKED token (the "Reddit killed our keys" restore population,
+        // whose harvested session is their only working login) is
+        // indistinguishable offline from a live one, and dropping the session
+        // for them would brick the account outright. The switcher now labels
+        // the state truthfully ("API-key-free") and offers a one-tap "Use API
+        // Key Instead…" for accounts whose key actually works — warn so the
+        // state is at least visible in the log.
+        if (ApolloWebJSONDiskAccountHasRealCredential(sWebSessionUsername)) {
+            ApolloLog(@"[WebJSON] Note: u/%@ also has a real OAuth credential on disk — the migrated web session takes precedence; switch it back via the account switcher (ellipsis → Use API Key Instead) if the key is still valid", sWebSessionUsername);
+        }
         // Clear the now-redundant legacy keychain items so the session isn't
         // duplicated indefinitely. The in-memory sWebSession* globals are left
         // populated for the remainder of THIS launch — a few cosmetic call
