@@ -89,7 +89,8 @@ extern BOOL sIconRowMagnifier;
 // See ApolloStatsRowTouch.xm, ApolloCreatedAtAlert.xm, ApolloTranslation.xm.
 extern BOOL sInfoRowTapUpvote;
 extern BOOL sInfoRowTapComments;
-extern BOOL sInfoRowTapTimestamp;
+extern BOOL sInfoRowTapTimestamp;          // timestamp tap → dismissable popup alert
+extern BOOL sInfoRowTapTimestampOverlay;   // timestamp tap → transient auto-fading overlay (mutually exclusive with the popup)
 extern BOOL sInfoRowTapTranslation;
 // When ON (default), Live Update comment sort keeps the newest comments visible at the top
 // while you're at the top, and shows a "N new comments" jump pill when you've scrolled down

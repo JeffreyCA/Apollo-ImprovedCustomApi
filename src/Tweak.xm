@@ -1583,6 +1583,7 @@ static void initializeRandomSources() {
                                     UDKeyInfoRowTapUpvote: @YES,
                                     UDKeyInfoRowTapComments: @YES,
                                     UDKeyInfoRowTapTimestamp: @YES,
+                                    UDKeyInfoRowTapTimestampOverlay: @NO,
                                     UDKeyInfoRowTapTranslation: @YES,
                                     UDKeyLiveCommentsFollow: @YES,
                                     UDKeyEnableBulkTranslation: @NO,
@@ -1728,6 +1729,12 @@ static void initializeRandomSources() {
     sInfoRowTapUpvote = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyInfoRowTapUpvote];
     sInfoRowTapComments = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyInfoRowTapComments];
     sInfoRowTapTimestamp = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyInfoRowTapTimestamp];
+    sInfoRowTapTimestampOverlay = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyInfoRowTapTimestampOverlay];
+    // The two timestamp modes are mutually exclusive. The settings UI enforces
+    // this, but normalize on load too so a corrupt/migrated both-on state can't
+    // soft-lock those rows (both would render disabled). Overlay wins — the
+    // runtime prefers it (ApolloAgeTapFired / SRTActivateTarget check it first).
+    if (sInfoRowTapTimestamp && sInfoRowTapTimestampOverlay) sInfoRowTapTimestamp = NO;
     sInfoRowTapTranslation = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyInfoRowTapTranslation];
     sLiveCommentsFollow = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyLiveCommentsFollow];
     sModernSubredditDividers = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers];

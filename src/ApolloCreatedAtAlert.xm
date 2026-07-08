@@ -18,7 +18,9 @@
 #import <objc/message.h>
 
 #import "ApolloCommon.h"
+#import "ApolloCreatedAtAlert.h"
 #import "ApolloState.h"
+#import "ApolloThemeRuntime.h"
 #import "Tweak.h"
 #import "UIWindow+Apollo.h"
 
@@ -130,6 +132,107 @@ static void ApolloPresentCreatedAtAlert(NSDate *createdAt, ApolloASDisplayNode *
     [presenter presentViewController:alert animated:YES completion:nil];
 }
 
+// MARK: - Transient time overlay (Info Row "Timestamp Overlay" mode)
+
+// Tag so only one overlay is ever on screen (rapid taps replace, not stack).
+static const NSInteger kApolloTimeOverlayTag = 0x54494D45;  // 'TIME'
+
+void ApolloPresentTimeOverlay(NSDate *createdAt, CGRect anchorRectInWindow, UIWindow *window, BOOL isComment) {
+    if (![createdAt isKindOfClass:[NSDate class]] || !window) return;
+
+    for (UIView *v in [window.subviews copy]) {
+        if (v.tag == kApolloTimeOverlayTag) [v removeFromSuperview];
+    }
+
+    NSString *verb = isComment ? @"Commented" : @"Posted";
+    NSString *relative = ApolloRelativeAgoString(createdAt) ?: @"Just now";
+    NSString *line1 = [relative isEqualToString:@"Just now"]
+        ? [NSString stringWithFormat:@"%@ Just now", verb]
+        : [NSString stringWithFormat:@"%@ %@ Ago", verb, relative];
+    NSString *line2 = (fabs([createdAt timeIntervalSinceNow]) >= 5.0)
+        ? [ApolloAbsoluteDateFormatter() stringFromDate:createdAt] : nil;
+
+    NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
+    para.alignment = NSTextAlignmentCenter;
+    para.lineSpacing = 2.0;
+    NSMutableAttributedString *text = [[NSMutableAttributedString alloc] initWithString:line1 attributes:@{
+        NSFontAttributeName: [UIFont systemFontOfSize:13.0 weight:UIFontWeightSemibold],
+        NSForegroundColorAttributeName: [UIColor whiteColor],
+        NSParagraphStyleAttributeName: para,
+    }];
+    if (line2) {
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:[@"\n" stringByAppendingString:line2] attributes:@{
+            NSFontAttributeName: [UIFont systemFontOfSize:12.0 weight:UIFontWeightRegular],
+            NSForegroundColorAttributeName: [[UIColor whiteColor] colorWithAlphaComponent:0.72],
+            NSParagraphStyleAttributeName: para,
+        }]];
+    }
+
+    UILabel *label = [[UILabel alloc] init];
+    label.numberOfLines = 0;
+    label.attributedText = text;
+    CGFloat maxTextW = MIN(300.0, window.bounds.size.width - 32.0);
+    CGSize textSize = [label sizeThatFits:CGSizeMake(maxTextW, CGFLOAT_MAX)];
+
+    CGFloat padH = 12.0, padV = 8.0;
+    CGFloat cardW = ceil(textSize.width) + padH * 2.0;
+    CGFloat cardH = ceil(textSize.height) + padV * 2.0;
+    CGFloat corner = MIN(14.0, cardH / 2.0);
+
+    // Border + a faint fill both tint with the theme accent ("undercolour"); the
+    // card itself is a dark material so the text stays readable over any feed image.
+    UIColor *accent = ApolloThemeAccentColor() ?: window.tintColor ?: [UIColor systemBlueColor];
+    accent = [accent resolvedColorWithTraitCollection:window.traitCollection];
+
+    UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, cardW, cardH)];
+    container.tag = kApolloTimeOverlayTag;
+    container.userInteractionEnabled = NO;
+    container.layer.shadowColor = [UIColor blackColor].CGColor;
+    container.layer.shadowOpacity = 0.35;
+    container.layer.shadowRadius = 10.0;
+    container.layer.shadowOffset = CGSizeMake(0, 4);
+    container.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:container.bounds cornerRadius:corner].CGPath;
+
+    UIVisualEffectView *card = [[UIVisualEffectView alloc] initWithEffect:
+                                [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThickMaterialDark]];
+    card.frame = container.bounds;
+    card.layer.cornerRadius = corner;
+    card.layer.cornerCurve = kCACornerCurveContinuous;
+    card.clipsToBounds = YES;
+    card.layer.borderWidth = 1.5;
+    card.layer.borderColor = [accent colorWithAlphaComponent:0.9].CGColor;
+    card.contentView.backgroundColor = [accent colorWithAlphaComponent:0.16];
+    [container addSubview:card];
+    label.frame = CGRectMake(padH, padV, cardW - padH * 2.0, cardH - padV * 2.0);
+    [card.contentView addSubview:label];
+
+    // Centered over the anchor, sitting just above it; drop below if there's no
+    // room above (top of screen), and clamp inside the window's horizontal margins.
+    CGFloat originX = CGRectGetMidX(anchorRectInWindow) - cardW / 2.0;
+    CGFloat minX = 8.0, maxX = window.bounds.size.width - cardW - 8.0;
+    originX = MAX(minX, MIN(originX, MAX(minX, maxX)));
+    CGFloat originY = CGRectGetMinY(anchorRectInWindow) - 8.0 - cardH;
+    if (originY < window.safeAreaInsets.top + 8.0) {
+        originY = CGRectGetMaxY(anchorRectInWindow) + 8.0;
+    }
+    container.frame = CGRectMake(round(originX), round(originY), cardW, cardH);
+
+    container.alpha = 0.0;
+    container.transform = CGAffineTransformMakeTranslation(0, 6);
+    [window addSubview:container];
+    [UIView animateWithDuration:0.22 delay:0 usingSpringWithDamping:0.82 initialSpringVelocity:0.4
+                        options:UIViewAnimationOptionCurveEaseOut animations:^{
+        container.alpha = 1.0;
+        container.transform = CGAffineTransformIdentity;
+    } completion:nil];
+    [UIView animateWithDuration:0.35 delay:1.6 options:UIViewAnimationOptionCurveEaseIn animations:^{
+        container.alpha = 0.0;
+        container.transform = CGAffineTransformMakeTranslation(0, -4);
+    } completion:^(BOOL finished) {
+        [container removeFromSuperview];
+    }];
+}
+
 // YES if `touch` falls inside `targetNode`'s layer (in containerView coords),
 // padded for comfortable touch targets. Works for layer-backed nodes too.
 static BOOL ApolloTouchHitsNode(ApolloASDisplayNode *targetNode, UIView *containerView, UITouch *touch) {
@@ -197,11 +300,11 @@ static BOOL ApolloAgeTapShouldReceiveTouch(id cell, UIGestureRecognizer *gr, UIT
 
 static void ApolloAgeTapFired(id cell, UITapGestureRecognizer *tap) {
     if (tap.state != UIGestureRecognizerStateRecognized) return;
-    // Info Row switch OFF: the timestamp is inert. The gesture still recognizes
-    // (cancelsTouchesInView == YES), so the tap is swallowed and nothing happens
-    // — no alert, and no fall-through post-open (this region never opened the
-    // post to begin with).
-    if (!sInfoRowTapTimestamp) return;
+    // Both Info Row timestamp modes OFF: the age is inert. The gesture still
+    // recognizes (cancelsTouchesInView == YES), so the tap is swallowed and
+    // nothing happens — no popup/overlay, and no fall-through post-open (this
+    // region never opened the post to begin with).
+    if (!sInfoRowTapTimestamp && !sInfoRowTapTimestampOverlay) return;
 
     // Comment cells carry an RDKComment; everything else is a post (RDKLink).
     RDKComment *comment = ApolloIvarValueByName(cell, "comment");
@@ -223,6 +326,24 @@ static void ApolloAgeTapFired(id cell, UITapGestureRecognizer *tap) {
 
     // Match the vote buttons' native feedback: a light tick acknowledging the tap.
     [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+
+    if (sInfoRowTapTimestampOverlay) {
+        // Transient overlay just above the age node.
+        UIView *cellView = nil;
+        @try { cellView = [(ApolloASDisplayNode *)cell view]; } @catch (__unused id e) {}
+        ApolloASDisplayNode *ageNode = ApolloAgeDisplayNodeForCell(cell);
+        UIWindow *window = cellView.window;
+        CGRect anchor = CGRectZero;
+        if (ageNode && ageNode.layer && window) {
+            @try { anchor = [ageNode.layer convertRect:ageNode.layer.bounds toLayer:window.layer]; }
+            @catch (__unused id e) {}
+        }
+        if (window && !CGRectIsEmpty(anchor) && !CGRectIsNull(anchor)) {
+            ApolloPresentTimeOverlay(date, anchor, window, isComment);
+            return;
+        }
+        // Fall back to the popup if we can't resolve an anchor, so the tap isn't lost.
+    }
     ApolloPresentCreatedAtAlert(date, (ApolloASDisplayNode *)cell, isComment);
 }
 

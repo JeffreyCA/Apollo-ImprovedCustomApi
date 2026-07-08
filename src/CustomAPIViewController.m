@@ -586,7 +586,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     NSMutableArray<NSString *> *off = [NSMutableArray array];
     if (!sInfoRowTapUpvote) [off addObject:@"Upvote"];
     if (!sInfoRowTapComments) [off addObject:@"Comments"];
-    if (!sInfoRowTapTimestamp) [off addObject:@"Timestamp"];
+    if (!sInfoRowTapTimestamp && !sInfoRowTapTimestampOverlay) [off addObject:@"Timestamp"];
     BOOL translationAvailable = sTapToTranslate || sShowTranslationTitleDetails || sShowTranslationDetails;
     if (translationAvailable && !sInfoRowTapTranslation) [off addObject:@"Translation"];
     NSString *taps = off.count == 0 ? @"all taps on"

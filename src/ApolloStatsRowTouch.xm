@@ -38,6 +38,7 @@
 #import <objc/message.h>
 
 #import "ApolloCommon.h"
+#import "ApolloCreatedAtAlert.h"
 #import "ApolloState.h"
 #import "ApolloThemeRuntime.h"
 #import "UIWindow+Apollo.h"
@@ -131,17 +132,16 @@ typedef NS_ENUM(NSInteger, SRTStatKind) {
 @implementation ApolloSRTTarget
 @end
 
-// Per-icon enable check (Info Row settings sub-screen). Percentage ("% Upvoted")
-// is a harmless comments-header-only info alert and is left ungated; the four
-// user-facing icons follow their switches. A disabled kind is dropped from the
-// target list below, so the loupe can neither magnify nor activate it — and,
-// since the same list backs the touch-gating and the claim rect, a press that
-// lands only on a disabled icon won't raise the loupe at all.
+// Per-icon activation check (Info Row settings sub-screen). Disabled icons STILL
+// appear in the loupe (see SRTTargetsForCell) — this only gates what happens on
+// RELEASE: a disabled kind does nothing. Percentage ("% Upvoted") is a harmless
+// comments-header-only info alert and is left ungated. Age is "enabled" if either
+// timestamp mode (popup alert or transient overlay) is on.
 static BOOL SRTKindTapEnabled(SRTStatKind kind) {
     switch (kind) {
         case SRTStatKindScore:       return sInfoRowTapUpvote;
         case SRTStatKindComments:    return sInfoRowTapComments;
-        case SRTStatKindAge:         return sInfoRowTapTimestamp;
+        case SRTStatKindAge:         return sInfoRowTapTimestamp || sInfoRowTapTimestampOverlay;
         case SRTStatKindTranslation: return sInfoRowTapTranslation;
         case SRTStatKindPercentage:  return YES;
     }
@@ -188,7 +188,8 @@ static NSArray<ApolloSRTTarget *> *SRTTargetsForCell(id cell, UIView *cellView) 
     };
     NSMutableArray<ApolloSRTTarget *> *out = [NSMutableArray array];
     for (int i = 0; i < 4; i++) {
-        if (!SRTKindTapEnabled(specs[i].kind)) continue;   // Info Row switch is OFF
+        // Disabled icons still APPEAR in the loupe (the user can slide over them);
+        // releasing on one just does nothing — gated in SRTActivateTarget, not here.
         ApolloSRTNode *node = (ApolloSRTNode *)SRTIvar(postInfoNode, specs[i].ivar);
         if (!node || node.isHidden) continue;
         CALayer *layer = nil; @try { layer = node.layer; } @catch (__unused id e) {}
@@ -201,7 +202,8 @@ static NSArray<ApolloSRTTarget *> *SRTTargetsForCell(id cell, UIView *cellView) 
         [out addObject:t];
     }
     // Optional 🌐 translation marker (a UILabel overlaid by the translation module).
-    UILabel *marker = SRTKindTapEnabled(SRTStatKindTranslation) ? SRTTranslationMarkerLabel(postInfoNode) : nil;
+    // Always shown in the loupe when present; activation is gated in SRTActivateTarget.
+    UILabel *marker = SRTTranslationMarkerLabel(postInfoNode);
     if (marker && marker.layer && cellView.layer) {
         CGRect rect = [marker.layer convertRect:marker.layer.bounds toLayer:cellView.layer];
         if (!CGRectIsEmpty(rect) && !CGRectIsNull(rect) && !CGRectIsInfinite(rect) && rect.size.width >= 1.0) {
@@ -537,6 +539,21 @@ static void SRTPresentCreatedAtAlert(id cell, UIView *cellView) {
     [presenter presentViewController:a animated:YES completion:nil];
 }
 
+// Transient time overlay above the age target (Info Row "Timestamp Overlay" mode);
+// shares ApolloCreatedAtAlert's presenter so it matches the direct-tap overlay.
+static void SRTPresentCreatedAtOverlay(id cell, UIView *cellView, ApolloSRTTarget *target) {
+    id link = SRTIvar(cell, "link");
+    NSDate *date = nil;
+    if ([link respondsToSelector:@selector(createdUTC)]) {
+        @try { date = [link createdUTC]; } @catch (__unused id e) {}
+    }
+    if (![date isKindOfClass:[NSDate class]]) return;
+    UIWindow *window = cellView.window;
+    if (!window) return;
+    CGRect anchor = [cellView convertRect:target.rect toView:nil];   // → window coords
+    ApolloPresentTimeOverlay(date, anchor, window, /*isComment=*/NO);
+}
+
 // Open the post the same way a tap would: replay Apollo's own row selection. When
 // `jump` is set, arm the jump-to-comments flag first so it lands on the comments.
 static void SRTOpenPostForCell(id cell, UIView *cellView, BOOL jump) {
@@ -644,7 +661,8 @@ static void SRTActivateTarget(id cell, UIView *cellView, ApolloSRTTarget *target
             SRTOpenPostForCell(cell, cellView, /*jump=*/YES);
             break;
         case SRTStatKindAge:
-            SRTPresentCreatedAtAlert(cell, cellView);
+            if (sInfoRowTapTimestampOverlay) SRTPresentCreatedAtOverlay(cell, cellView, target);
+            else SRTPresentCreatedAtAlert(cell, cellView);
             break;
         case SRTStatKindPercentage:
             SRTPresentUpvoteRatioAlert(cell, cellView);
