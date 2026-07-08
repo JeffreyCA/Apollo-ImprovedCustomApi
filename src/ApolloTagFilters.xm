@@ -202,31 +202,47 @@ static BOOL ApolloTagMediaIsVideo(id richMediaNode) {
 // Captured Reddit account pref "Blur mature (18+) images and media": Apollo
 // parses pref_no_profanity from /me.json (self /about.json too) into
 // RDKUser.noProfanity via Mantle — only self responses carry the field, so
-// the setter hook below fires only for the signed-in account. Apollo's own
-// blur decision is noProfanity && isNSFW, defaulting to blur while its user
-// object hasn't loaded yet (launch window) — so unknown (-1) counts as
-// "blurring" here too.
+// the setter hook below fires only for the signed-in account. -1 until the
+// first parse. Some sessions never parse it at all (web-JSON/cookie identity
+// synthesizes the account without a /me fetch), leaving Apollo's own
+// noProfanity NO — so unknown must NOT suppress our cover (see below).
 static NSInteger sTagRedditNoProfanity = -1;
 
 // Predicts Apollo's native NSFW obscuring for a link, so the tweak's overlay
 // can stay out of the way from the FIRST layout pass (the native overlay node
-// materializes late — waiting for it flashes our overlay first).
+// materializes late — waiting for it flashes our overlay first). Requires a
+// captured YES: treating unknown as "will blur" would drop BOTH covers in
+// sessions where the pref never parses (web-JSON identity) — Apollo's user
+// object exists with noProfanity NO, so no native overlay ever appears. The
+// conservative default costs only a brief launch-window double-blur.
 static BOOL ApolloTagNativeWillBlurNSFW(BOOL isNSFW) {
-    return isNSFW && sTagRedditNoProfanity != 0;
+    return isNSFW && sTagRedditNoProfanity == 1;
 }
 
 // Apollo's native obscured overlay ("NSFW / Spoiler — tap to view") lives on
 // RichMediaNode.obscuredContentInfoOverlayNode, created iff the node was
-// configured obscured — link tag AND the account's "Blur mature (18+) images
-// and media" pref (RDKUser.noProfanity; blurs by default when logged out).
-// LATCHED per cell+link: the native reveal reconfigures the node with the
-// ivar nil, and re-adding our overlay right after the user tapped through
-// Apollo's own gate would gate them twice.
-static BOOL ApolloTagMediaNativelyObscured(id cell, id richMediaNode) {
-    NSNumber *latched = objc_getAssociatedObject(cell, kApolloTagNativeObscuredKey);
-    if ([latched boolValue]) return YES;
+// configured obscured — spoilers always, NSFW per the blur-mature pref (with
+// a default-blur while Apollo's user object hasn't loaded). LATCHED per
+// cell+link: the native reveal reconfigures the node with the ivar nil, and
+// re-adding our overlay right after the user tapped through Apollo's own
+// gate would gate them twice.
+//
+// latchTrusted=NO for NSFW-only links once the pref is known OFF: any native
+// overlay seen then was launch-window default-blur residue, and when Apollo
+// reconfigures the cell un-obscured the latch would otherwise strand the
+// media with NEITHER gate. (Spoiler-tagged links keep the latch — their
+// native blur is pref-independent, so a vanished overlay there is a real
+// user reveal.)
+static BOOL ApolloTagMediaNativelyObscured(id cell, id richMediaNode, BOOL latchTrusted) {
     id overlay = richMediaNode
         ? ApolloTagIvarValueByName(richMediaNode, "obscuredContentInfoOverlayNode") : nil;
+    if (!latchTrusted) {
+        objc_setAssociatedObject(cell, kApolloTagNativeObscuredKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return overlay != nil;
+    }
+    NSNumber *latched = objc_getAssociatedObject(cell, kApolloTagNativeObscuredKey);
+    if ([latched boolValue]) return YES;
     if (!overlay) return NO;
     objc_setAssociatedObject(cell, kApolloTagNativeObscuredKey, @YES,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -306,7 +322,8 @@ static NSArray<NSDictionary *> *ApolloTagBlurEntriesForCell(id cell, RDKLink *li
     // heuristic for configurations where the ivar isn't observable yet.
     // Square corners — the media area runs edge-to-edge and any rounding
     // leaves a sliver of the underlying image visible in the corners.
-    BOOL skipMedia = ApolloTagMediaNativelyObscured(cell, richMediaNode)
+    BOOL latchTrusted = isSpoiler || sTagRedditNoProfanity != 0;
+    BOOL skipMedia = ApolloTagMediaNativelyObscured(cell, richMediaNode, latchTrusted)
         || (richMediaNode && ApolloTagNativeWillBlurNSFW(isNSFW))
         || (!isNSFW && isSpoiler && ApolloTagMediaIsVideo(richMediaNode));
     if (!skipMedia && mediaView) {
@@ -590,7 +607,10 @@ static void ApolloTagRefreshAllVisibleCells(void) {
 
 // Captures the account's blur-mature pref as Apollo parses it from /me.json
 // (Mantle key path data.pref_no_profanity → this setter). A pref change made
-// on Reddit's side flows in on the next /me refresh.
+// on Reddit's side flows in on the next /me refresh. On any change, visible
+// cells are re-evaluated — a statically-visible feed gets no layout pass of
+// its own when /me lands, so overlays computed under the unknown/-1 default
+// would otherwise stay wrong until the user scrolls.
 %hook RDKUser
 
 - (void)setNoProfanity:(BOOL)value {
@@ -598,6 +618,7 @@ static void ApolloTagRefreshAllVisibleCells(void) {
     if (sTagRedditNoProfanity != (value ? 1 : 0)) {
         sTagRedditNoProfanity = value ? 1 : 0;
         ApolloLog(@"[TagFilters] Captured pref_no_profanity=%d (blur mature media)", value);
+        ApolloTagRefreshAllVisibleCells();
     }
 }
 
