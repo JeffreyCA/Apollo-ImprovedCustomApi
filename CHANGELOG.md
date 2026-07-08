@@ -17,7 +17,7 @@ All notable changes to this project will be documented in this file.
 - Fix converted **native menus** on Liquid Glass builds using the old fade animation instead of the iOS 26 glass morph that blooms the menu out of the tapped button (#600: @icpryde)
 - Fix **Tag Filters** double-blurring media on top of Apollo's own "tap to view" overlay when **Blur mature (18+) images and media** is enabled, including compact NSFW thumbnails (#585: @JeffreyCA)
 
-## [v3.4.0] - 2026-07-??
+## [v3.4.0] - 2026-07-08
 
 ### Features
 
