@@ -6,24 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
-- Add **theme image sharing** to the Theme Manager — export any custom theme as a shareable QR card (a mock post preview of its colours and font) and import it back via Camera, Photo Library, or Files (#581: @jordanearle, original work by @icpryde)
-- Add a **Colourize Vote Arrows** option to the Theme Manager so idle up/down arrows take the accent colour while a cast vote keeps Apollo's native green/blue-violet indicator (#580: @jordanearle)
-- Extend the **theme accent colour** to all tweak-drawn UI — settings screens, the GIF picker, sign-in buttons, AI summaries, the follow pill, and more now follow the active theme's accent (or the stock theme's) instead of defaulting to blue, with legibility guards for near-white accents (#586: @JeffreyCA)
-- Add a **Deleted Comments** settings sub-screen, a Show/Hide shortcut at the bottom of the comments ⋯ menu, and a new **Passive** mode that recovers deleted comments for a single thread on demand — switching back off when you leave — without touching the global toggle (#572: @icpryde)
 - Add a **Remember Post Sort** toggle in **Settings > General > Comments** that restores the comment sort you last picked for a post when you reopen it (#570: @icpryde)
-- Add per-item **translation language markers** — tap a marker to toggle just that comment, post body, or feed title between translated and original, and enable a new **Tap to Translate** mode to translate only the items you tap (#564: @icpryde)
-- Add **Bark Notifications** for free Apple ID sideloads — relay push notifications through the free Bark app, configured in **Settings > Apollo Reborn > Custom API**, on builds without a push entitlement (#578: @nickclyde)
-- Show the **Picture-in-Picture button** in the fullscreen player for spoiler- and NSFW-tagged videos, which never autoplay inline and so were previously missing the button even with autoplay off (#584: @JeffreyCA)
-- Add **Helios Liquid Glass icon variants** — eight new app icons (Helios, plus Halo, Cryo, Parallax, and Ultra combinations) for the Liquid Glass icon picker (#590: @IllIIllIllIllII)
-- Add an **Anonymous Install Count** heartbeat with a new **Settings > Privacy** section — an opt-out, once-a-day beacon that reports only a monthly-rotating random token, app version, build variant, and iOS version so the project can gauge real active-user numbers without tracking anyone (#589: @jordanearle)
 
 ### Fixes
 
-- Fix **Theme Manager** display glitches — ambient theming now applies in the Manager and Gallery, the search field no longer inherits the Separators override, SF Mono text is scaled to match other fonts, legacy theme names show proper spacing, and the cell label no longer reverts to "Theme" after navigating back (#580: @jordanearle)
-- Fix the **Magnify Info Row loupe** popping when holding the username/subreddit line or starting a scroll near the stats row — activation now hugs the stats row and ignores swipe-like gestures (#586: @JeffreyCA)
-- Fix **search result rows** staying stuck at full hero height when a link preview resolves to a compact card, leaving the small card atop a large blank gap until you scrolled away and back (#597: @icpryde)
-- Fix **Bluesky link-preview cards** whose long title or body text overflowed past the card background in the feed (#577: @icpryde)
-- Fix several **API-Key-Free (Web JSON) mode** reliability issues — auth cookies stay current across Reddit's rotations, stale sessions are re-harvested silently, native image uploads and the Submit Post drawer work again, and rate-limit responses are no longer mistaken for session expiry (#562: @nickclyde)
 - Fix the **Reddit account** being silently wiped seconds after sign-in on devices where iCloud Keychain sync is active (#579: @ostechgit)
 
 ## [v3.4.0] - 2026-07-??
@@ -49,6 +35,15 @@ All notable changes to this project will be documented in this file.
 - Add a **Show Detailed Profiles** toggle in **Settings > Apollo Reborn > Media** (on by default) to revert profile pages to Apollo's compact stock layout, folding in the former "Social Links in Profile" switch (#536: @icpryde)
 - Add a **Public Sticky from Subreddit** option to the moderator removal **Notify user via…** menu that posts the removal comment under the subreddit's mod-team identity instead of your own account (#537: @icpryde)
 - Improve **subreddit feed search** with **Keep Search Bar in Place** on — results appear directly below the search field, the nav bar stays visible after opening a result and returning, and the subreddit header hides while searching to prevent Liquid Glass bleed-through (#534: @icpryde)
+- Add **theme image sharing** to the Theme Manager — export any custom theme as a shareable QR card (a mock post preview of its colours and font) and import it back via Camera, Photo Library, or Files (#581: @jordanearle, original work by @icpryde)
+- Add a **Colourize Vote Arrows** option to the Theme Manager so idle up/down arrows take the accent colour while a cast vote keeps Apollo's native green/blue-violet indicator (#580: @jordanearle)
+- Extend the **theme accent colour** to all tweak-drawn UI — settings screens, the GIF picker, sign-in buttons, AI summaries, the follow pill, and more now follow the active theme's accent (or the stock theme's) instead of defaulting to blue, with legibility guards for near-white accents (#586: @JeffreyCA)
+- Add a **Deleted Comments** settings sub-screen, a Show/Hide shortcut at the bottom of the comments ⋯ menu, and a new **Passive** mode that recovers deleted comments for a single thread on demand — switching back off when you leave — without touching the global toggle (#572: @icpryde)
+- Add per-item **translation language markers** — tap a marker to toggle just that comment, post body, or feed title between translated and original, and enable a new **Tap to Translate** mode to translate only the items you tap (#564: @icpryde)
+- Add **Bark Notifications** for free Apple ID sideloads — relay push notifications through the free Bark app, configured in **Settings > Apollo Reborn > Custom API**, on builds without a push entitlement (#578: @nickclyde)
+- Show the **Picture-in-Picture button** in the fullscreen player for spoiler- and NSFW-tagged videos, which never autoplay inline and so were previously missing the button even with autoplay off (#584: @JeffreyCA)
+- Add **Helios Liquid Glass icon variants** — eight new app icons (Helios, plus Halo, Cryo, Parallax, and Ultra combinations) for the Liquid Glass icon picker (#590: @IllIIllIllIllII)
+- Add an **Anonymous Install Count** heartbeat with a new **Settings > Privacy** section — an opt-out, once-a-day beacon that reports only a monthly-rotating random token, app version, build variant, and iOS version so the project can gauge real active-user numbers without tracking anyone (#589: @jordanearle)
 
 ### Fixes
 
@@ -65,6 +60,11 @@ All notable changes to this project will be documented in this file.
 - Fix **subreddit list rows** not showing a tap highlight when **Modern Subreddit Dividers** or **Subreddit List Enhancements** was off (#556: @icpryde)
 - Fix the **user flair emoji counter** always showing `/10` instead of the subreddit's real per-template limit (#533: @icpryde)
 - Improve the **Show Deleted Comments** enable warning to lead with a plain performance caution instead of implementation details (#565: @icpryde)
+- Fix **Theme Manager** display glitches — ambient theming now applies in the Manager and Gallery, the search field no longer inherits the Separators override, SF Mono text is scaled to match other fonts, legacy theme names show proper spacing, and the cell label no longer reverts to "Theme" after navigating back (#580: @jordanearle)
+- Fix the **Magnify Info Row loupe** popping when holding the username/subreddit line or starting a scroll near the stats row — activation now hugs the stats row and ignores swipe-like gestures (#586: @JeffreyCA)
+- Fix **search result rows** staying stuck at full hero height when a link preview resolves to a compact card, leaving the small card atop a large blank gap until you scrolled away and back (#597: @icpryde)
+- Fix **Bluesky link-preview cards** whose long title or body text overflowed past the card background in the feed (#577: @icpryde)
+- Fix several **API-Key-Free (Web JSON) mode** reliability issues — auth cookies stay current across Reddit's rotations, stale sessions are re-harvested silently, native image uploads and the Submit Post drawer work again, and rate-limit responses are no longer mistaken for session expiry (#562: @nickclyde)
 
 ## [v3.3.0] - 2026-06-26
 
