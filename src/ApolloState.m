@@ -97,6 +97,7 @@ NSString *sLinkPreviewCardColorHex = nil;
 volatile uint32_t sLinkPreviewCardColorPacked = 0;
 NSInteger sImageUploadProvider = ImageUploadProviderImgur;
 NSInteger sCommentLinkHost = CommentLinkHostOff;
+NSInteger sShareLinkHost = ShareLinkHostDefault;
 
 NSString *sLatestRedditBearerToken = nil;
 

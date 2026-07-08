@@ -42,6 +42,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "ApolloCommon.h"
+#import "ApolloState.h"
 
 // Persisted preference: whether "Include Link" is on. Default NO.
 static NSString *const kApolloShareIncludeLinkKey = @"ApolloShareAsImageIncludeLink";
@@ -123,6 +124,79 @@ static NSURL *ApolloShareLinkURLForVC(id vc) {
     }
 
     return nil;
+}
+
+#pragma mark - Outgoing share host rewrite
+
+static BOOL ApolloShareLinkIsRedditWebHost(NSString *host) {
+    NSString *lower = host.lowercaseString;
+    if (lower.length == 0) return NO;
+    return [lower isEqualToString:@"reddit.com"] ||
+           [lower isEqualToString:@"www.reddit.com"] ||
+           [lower isEqualToString:@"old.reddit.com"] ||
+           [lower isEqualToString:@"new.reddit.com"] ||
+           [lower isEqualToString:@"np.reddit.com"];
+}
+
+static NSURL *ApolloShareLinkURLWithHost(NSURL *url, NSString *host) {
+    if (![url isKindOfClass:[NSURL class]] || host.length == 0) return url;
+    NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    if (!components || !ApolloShareLinkIsRedditWebHost(components.host)) return url;
+    components.scheme = @"https";
+    components.host = host;
+    return components.URL ?: url;
+}
+
+static NSURL *ApolloShareLinkRewriteURLForCurrentHost(NSURL *url) {
+    switch (sShareLinkHost) {
+        case ShareLinkHostOldReddit:
+            return ApolloShareLinkURLWithHost(url, @"old.reddit.com");
+        case ShareLinkHostVXReddit:
+            return ApolloShareLinkURLWithHost(url, @"vxreddit.com");
+        case ShareLinkHostDefault:
+        default:
+            return url;
+    }
+}
+
+static NSString *ApolloShareLinkRewriteStringForCurrentHost(NSString *string) {
+    if (![string isKindOfClass:[NSString class]] || string.length == 0) return string;
+    NSURL *url = [NSURL URLWithString:string];
+    if (![url isKindOfClass:[NSURL class]] || url.scheme.length == 0 || url.host.length == 0) return string;
+    NSURL *rewritten = ApolloShareLinkRewriteURLForCurrentHost(url);
+    if (rewritten == url) return string;
+    return rewritten.absoluteString ?: string;
+}
+
+static id ApolloShareLinkRewriteActivityItemForCurrentHost(id item) {
+    if ([item isKindOfClass:[NSURL class]]) {
+        return ApolloShareLinkRewriteURLForCurrentHost((NSURL *)item) ?: item;
+    }
+    if ([item isKindOfClass:[NSString class]]) {
+        return ApolloShareLinkRewriteStringForCurrentHost((NSString *)item) ?: item;
+    }
+    return item;
+}
+
+static NSArray *ApolloShareLinkRewriteActivityItemsForCurrentHost(NSArray *items) {
+    if (sShareLinkHost == ShareLinkHostDefault || ![items isKindOfClass:[NSArray class]]) return items;
+
+    NSMutableArray *rewrittenItems = [NSMutableArray arrayWithCapacity:items.count];
+    BOOL changed = NO;
+    for (id item in items) {
+        id rewritten = ApolloShareLinkRewriteActivityItemForCurrentHost(item);
+        id itemToAdd = rewritten ?: item;
+        [rewrittenItems addObject:itemToAdd];
+
+        if (![itemToAdd isEqual:item]) {
+            changed = YES;
+        }
+    }
+    if (changed) {
+        ApolloLog(@"[ShareLink] rewrote outgoing share item host=%ld", (long)sShareLinkHost);
+        return rewrittenItems;
+    }
+    return items;
 }
 
 #pragma mark - Activity item source
@@ -330,27 +404,28 @@ static BOOL ApolloShareLinkAlreadyHasLinkSource(NSArray *items) {
 
 - (instancetype)initWithActivityItems:(NSArray *)activityItems
                 applicationActivities:(NSArray *)applicationActivities {
+    NSArray *rewrittenActivityItems = ApolloShareLinkRewriteActivityItemsForCurrentHost(activityItems);
     // This hook fires for EVERY UIActivityViewController in the app; the
     // sActiveShareVC handshake (set only by the share-as-image Share tap) scopes it,
     // and the link-source check keeps us from double-appending onto the video path's
     // own sheet.
     id vc = sActiveShareVC;
-    if (vc && sActiveShareIncludeLink && !ApolloShareLinkAlreadyHasLinkSource(activityItems)) {
+    if (vc && sActiveShareIncludeLink && !ApolloShareLinkAlreadyHasLinkSource(rewrittenActivityItems)) {
         NSURL *url = ApolloShareLinkURLForVC(vc);
         if ([url isKindOfClass:[NSURL class]]) {
             sActiveShareVC = nil;          // consume the handshake so we only append once
             sActiveShareIncludeLink = NO;  // reset too, so the flag is never left latched
             ApolloShareLinkItemSource *source = [[ApolloShareLinkItemSource alloc] init];
-            source.url = url;
-            NSMutableArray *items = [activityItems isKindOfClass:[NSArray class]]
-                ? [activityItems mutableCopy] : [NSMutableArray array];
+            source.url = ApolloShareLinkRewriteURLForCurrentHost(url);
+            NSMutableArray *items = [rewrittenActivityItems isKindOfClass:[NSArray class]]
+                ? [rewrittenActivityItems mutableCopy] : [NSMutableArray array];
             [items addObject:source];
-            ApolloLog(@"[ShareLink] appended link to share sheet: %@", url.absoluteString);
+            ApolloLog(@"[ShareLink] appended link to share sheet: %@", source.url.absoluteString);
             return %orig(items, applicationActivities);
         }
         ApolloLog(@"[ShareLink] share active but no link resolved — leaving items unchanged");
     }
-    return %orig;
+    return %orig(rewrittenActivityItems, applicationActivities);
 }
 
 %end
