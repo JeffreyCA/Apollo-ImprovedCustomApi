@@ -346,16 +346,40 @@ static UITableView *PPCSSettingsTable(id vc) {
 
 // MARK: mutual exclusivity cross-flip (see the file header)
 //
-// Defaults are the source of truth; the visible UISwitch flip is a courtesy animation
-// so the user sees the either/or happen (the two rows are adjacent in the section). If
-// the row is off screen — or the screen is gone — the next form build re-reads
-// defaults, and Eureka's stale cached row value self-corrects on the next user toggle
-// because that toggle re-fires the write our setBool: hook (or handler) reacts to.
+// Flips OUR row's switch off. Ours is a plain UITableViewCell + UISwitch whose state is
+// re-read from defaults on every dequeue, so an animated setOn: is all it needs (the
+// defaults write happens at the call site). Used when the native toggle gets enabled.
 static void PPCSSetRowSwitchOff(UIViewController *vc, NSIndexPath *displayPath) {
     if (!vc || !displayPath || !vc.viewIfLoaded.window) return;
     UITableViewCell *cell = [PPCSSettingsTable(vc) cellForRowAtIndexPath:displayPath];
     if ([cell.accessoryView isKindOfClass:[UISwitch class]]) {
         [(UISwitch *)cell.accessoryView setOn:NO animated:YES];
+    }
+}
+
+// Turns the NATIVE "Remember Subreddit Sort" row off — and it must do so the way a user
+// tap would: set the visible switch off, then fire its valueChanged action so Eureka
+// processes a real value change (row.value -> false, Apollo's own onChange persists it).
+// Writing the defaults key alone is NOT enough for this row: Eureka caches the value on
+// its Row object and only fires onChange (and thus the defaults write our exclusivity
+// hook listens for) when a toggle CHANGES that cached value. Force-writing defaults
+// under it leaves the cache stuck at true, so the user's next enable tap compares
+// true -> true, writes nothing, and the cross-flip silently stops working — exactly the
+// "toggle them a few times and it stops switching the other off" report on PR #570.
+// The direct defaults write stays as the authoritative fallback for when the row is off
+// screen or the screen is gone (its next form build re-reads defaults anyway; a fresh
+// build starts with a fresh cache, so no staleness survives the screen).
+static void PPCSTurnNativeRememberSubredditSortOff(UIViewController *vc) {
+    [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyApolloRememberSubredditCommentsSort];
+    NSIndexPath *anchor = PPCSSettingsAnchor(vc);
+    if (!vc || !anchor || !vc.viewIfLoaded.window) return;
+    UITableViewCell *cell = [PPCSSettingsTable(vc) cellForRowAtIndexPath:anchor];
+    if ([cell.accessoryView isKindOfClass:[UISwitch class]]) {
+        UISwitch *sw = (UISwitch *)cell.accessoryView;
+        if (sw.isOn) {
+            [sw setOn:NO animated:YES];
+            [sw sendActionsForControlEvents:UIControlEventValueChanged];   // let Eureka see the change
+        }
     }
 }
 
@@ -905,8 +929,7 @@ static BOOL PPCSIsHiddenLabelCell(UITableViewCell *cell) {
     // anchor row is directly above this one, so the flip animates in plain sight.
     if (sender.isOn &&
         [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyApolloRememberSubredditCommentsSort]) {
-        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyApolloRememberSubredditCommentsSort];
-        PPCSSetRowSwitchOff(self, PPCSSettingsAnchor(self));
+        PPCSTurnNativeRememberSubredditSortOff(self);
         ApolloLog(@"[PerPostSort] exclusivity: native Remember Subreddit Sort turned OFF");
     }
 }
