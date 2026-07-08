@@ -2051,10 +2051,8 @@ static void initializeRandomSources() {
     }
 
     // Anonymous MAU heartbeat: fire on every foreground; the once-a-day throttle
-    // (and the opt-out flag) inside ApolloSendUsageHeartbeatIfNeeded handle the
-    // rest. Registering the observer here avoids hunting for an app-lifecycle
-    // hook. beat.apolloreborn.app is our own first-party, opt-out-able endpoint
-    // and is deliberately NOT in the blockedUrls telemetry list.
+    // and opt-out flag inside ApolloSendUsageHeartbeatIfNeeded handle the rest.
+    // Registering the observer here avoids hunting for an app-lifecycle hook.
     [[NSNotificationCenter defaultCenter]
         addObserverForName:UIApplicationDidBecomeActiveNotification
                     object:nil

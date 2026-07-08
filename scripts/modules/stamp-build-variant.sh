@@ -2,9 +2,8 @@
 # stamp_build_variant_in_app <app_bundle> <variant>
 #
 # Sets ARBuildVariant in the main app's Info.plist so the anonymous usage
-# heartbeat (ApolloUsageHeartbeat.m) can report which build variant this install
-# came from (its "c" field), read back at runtime via ApolloBuildVariant().
-# Keep the <variant> strings in sync with the beat Worker's CHANNELS allowlist.
+# heartbeat (ApolloUsageHeartbeat.m) can include release-channel metadata, read
+# back at runtime via ApolloBuildVariant().
 
 stamp_build_variant_in_app() {
     local app_bundle="$1"

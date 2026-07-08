@@ -2342,8 +2342,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (void)usageHeartbeatSwitchToggled:(UISwitch *)sender {
-    // Mirror the opt-out into both NSUserDefaults and the durable heartbeat plist
-    // so a sign-in / settings restore can't silently re-enable it. on = NOT disabled.
+    // Mirror the opt-out into durable storage. on = NOT disabled.
     ApolloSetUsageHeartbeatDisabled(!sender.isOn);
 }
 

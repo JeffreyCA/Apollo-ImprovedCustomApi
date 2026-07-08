@@ -287,9 +287,9 @@ static NSString *const UDKeyLastDeviceTokenHex = @"BarkLastDeviceTokenHex";
 // hosted icon on Bark notifications via the push URL's ?icon= parameter.
 static NSString *const UDKeyBarkSelectedIconName = @"BarkSelectedIconName";
 
-// Anonymous MAU heartbeat (beat.apolloreborn.app). ON by default; this is the
-// opt-OUT, mirroring the DisableApollonouncements pattern (a disable flag that
-// defaults to NO gives us on-by-default). See ApolloUsageHeartbeat.{h,m}.
+// Anonymous MAU heartbeat. ON by default; this is the opt-OUT, mirroring the
+// DisableApollonouncements pattern (a disable flag that defaults to NO gives us
+// on-by-default). See ApolloUsageHeartbeat.{h,m}.
 static NSString *const UDKeyDisableUsageHeartbeat = @"DisableUsageHeartbeat";
 // Internal bookkeeping for the heartbeat (not user-facing).
 static NSString *const UDKeyHeartbeatMonth   = @"UsageHeartbeatMonth";   // "2026-07"

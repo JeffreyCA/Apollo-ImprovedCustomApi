@@ -268,12 +268,11 @@ STAGED_APOLLO_BUNDLE = $(THEOS_STAGING_DIR)/Library/Application Support/ApolloRe
 #   - libflex.dylib is moved into the bundle for rootless (its DynamicLibraries
 #     home doesn't exist rootless);
 #   - libflex.plist is dropped for every scheme (unused);
-#   - the usage-heartbeat build variant is stamped so jailbreak installs report a
-#     channel to beat.apolloreborn.app instead of "unknown". ApolloBuildVariant()
-#     reads this ARVariant.txt marker for .deb installs (there's no repackaged
-#     Info.plist to carry ARBuildVariant the way injected IPAs do). Injected IPAs
-#     stamp Info.plist at packaging time and check it first, so this file being
-#     copied into an IPA's bundle is harmless — the plist key wins.
+#   - the usage-heartbeat build variant marker is stamped for jailbreak installs.
+#     ApolloBuildVariant() reads ARVariant.txt for .deb installs (there's no
+#     repackaged Info.plist to carry ARBuildVariant the way injected IPAs do).
+#     Injected IPAs stamp Info.plist at packaging time and check it first, so
+#     this file being copied into an IPA's bundle is harmless — the plist key wins.
 before-package::
 ifeq ($(THEOS_PACKAGE_SCHEME),rootless)
 	@mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/libflex.dylib "$(STAGED_APOLLO_BUNDLE)/libflex.dylib"
