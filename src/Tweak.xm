@@ -1580,6 +1580,10 @@ static void initializeRandomSources() {
                                     UDKeyKeepSearchBarInPlace: @NO,
                                     UDKeyIPadTabBarBottom: @NO,
                                     UDKeyIconRowMagnifier: @YES,
+                                    UDKeyInfoRowTapUpvote: @YES,
+                                    UDKeyInfoRowTapComments: @YES,
+                                    UDKeyInfoRowTapTimestamp: @YES,
+                                    UDKeyInfoRowTapTranslation: @YES,
                                     UDKeyLiveCommentsFollow: @YES,
                                     UDKeyEnableBulkTranslation: @NO,
                                     UDKeyAutoTranslateOnAppear: @YES,
@@ -1721,6 +1725,10 @@ static void initializeRandomSources() {
     sKeepSearchBarInPlace = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyKeepSearchBarInPlace];
     sIPadTabBarBottom = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIPadTabBarBottom];
     sIconRowMagnifier = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIconRowMagnifier];
+    sInfoRowTapUpvote = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyInfoRowTapUpvote];
+    sInfoRowTapComments = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyInfoRowTapComments];
+    sInfoRowTapTimestamp = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyInfoRowTapTimestamp];
+    sInfoRowTapTranslation = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyInfoRowTapTranslation];
     sLiveCommentsFollow = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyLiveCommentsFollow];
     sModernSubredditDividers = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers];
     sSubredditListEnhancements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditListEnhancements];

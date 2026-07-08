@@ -131,6 +131,23 @@ typedef NS_ENUM(NSInteger, SRTStatKind) {
 @implementation ApolloSRTTarget
 @end
 
+// Per-icon enable check (Info Row settings sub-screen). Percentage ("% Upvoted")
+// is a harmless comments-header-only info alert and is left ungated; the four
+// user-facing icons follow their switches. A disabled kind is dropped from the
+// target list below, so the loupe can neither magnify nor activate it — and,
+// since the same list backs the touch-gating and the claim rect, a press that
+// lands only on a disabled icon won't raise the loupe at all.
+static BOOL SRTKindTapEnabled(SRTStatKind kind) {
+    switch (kind) {
+        case SRTStatKindScore:       return sInfoRowTapUpvote;
+        case SRTStatKindComments:    return sInfoRowTapComments;
+        case SRTStatKindAge:         return sInfoRowTapTimestamp;
+        case SRTStatKindTranslation: return sInfoRowTapTranslation;
+        case SRTStatKindPercentage:  return YES;
+    }
+    return YES;
+}
+
 // The translation module (ApolloTranslation.xm — actively developed in its own
 // workstream, so we only *look at* its artifacts, never call its internals
 // directly) overlays a compact "🌐 PT" UILabel inside the PostInfoNode subtree
@@ -171,6 +188,7 @@ static NSArray<ApolloSRTTarget *> *SRTTargetsForCell(id cell, UIView *cellView) 
     };
     NSMutableArray<ApolloSRTTarget *> *out = [NSMutableArray array];
     for (int i = 0; i < 4; i++) {
+        if (!SRTKindTapEnabled(specs[i].kind)) continue;   // Info Row switch is OFF
         ApolloSRTNode *node = (ApolloSRTNode *)SRTIvar(postInfoNode, specs[i].ivar);
         if (!node || node.isHidden) continue;
         CALayer *layer = nil; @try { layer = node.layer; } @catch (__unused id e) {}
@@ -183,7 +201,7 @@ static NSArray<ApolloSRTTarget *> *SRTTargetsForCell(id cell, UIView *cellView) 
         [out addObject:t];
     }
     // Optional 🌐 translation marker (a UILabel overlaid by the translation module).
-    UILabel *marker = SRTTranslationMarkerLabel(postInfoNode);
+    UILabel *marker = SRTKindTapEnabled(SRTStatKindTranslation) ? SRTTranslationMarkerLabel(postInfoNode) : nil;
     if (marker && marker.layer && cellView.layer) {
         CGRect rect = [marker.layer convertRect:marker.layer.bounds toLayer:cellView.layer];
         if (!CGRectIsEmpty(rect) && !CGRectIsNull(rect) && !CGRectIsInfinite(rect) && rect.size.width >= 1.0) {
@@ -613,6 +631,7 @@ static BOOL SRTToggleTranslationForMarker(UILabel *marker) {
 
 static void SRTActivateTarget(id cell, UIView *cellView, ApolloSRTTarget *target) {
     if (!target) return;
+    if (!SRTKindTapEnabled(target.kind)) return;   // defensive: disabled kinds never reach here
     switch (target.kind) {
         case SRTStatKindScore: {
             if (!SRTSendTouchUpInside(SRTUpvoteButtonForCell(cell))) {
@@ -814,6 +833,7 @@ static void SRTWireCornerFailureRequirements(UIGestureRecognizer *loupe, UIView 
         return inside;
     }
     // The comment tap only cares about the comment-bubble region.
+    if (!sInfoRowTapComments) return NO;   // Info Row switch OFF: stock tap (opens post at top)
     UIView *cellView = nil;
     @try { cellView = [(ApolloSRTNode *)cell view]; } @catch (__unused id e) {}
     ApolloSRTNode *commentsNode = SRTCommentsNodeForCell(cell);

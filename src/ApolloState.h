@@ -79,6 +79,18 @@ extern BOOL sKeepSearchBarInPlace;
 // magnifier loupe: slide to pick an icon, release to activate it (upvote /
 // comments / posted / % upvoted / translation). See ApolloStatsRowTouch.xm.
 extern BOOL sIconRowMagnifier;
+// Per-icon info-row tap switches (Info Row settings sub-screen). Each defaults
+// ON. OFF makes that icon inert on a direct tap and excludes it from the
+// magnifier loupe. sInfoRowTapTranslation governs the 🌐 marker beside a post's
+// stats (feed title + comments header) and takes priority over Tap to Translate
+// / title Details: with those on, OFF still suppresses that marker's tap. It
+// does NOT touch the inline "Translate" affordance under comment/self-post body
+// text (that stays governed by Translation settings).
+// See ApolloStatsRowTouch.xm, ApolloCreatedAtAlert.xm, ApolloTranslation.xm.
+extern BOOL sInfoRowTapUpvote;
+extern BOOL sInfoRowTapComments;
+extern BOOL sInfoRowTapTimestamp;
+extern BOOL sInfoRowTapTranslation;
 // When ON (default), Live Update comment sort keeps the newest comments visible at the top
 // while you're at the top, and shows a "N new comments" jump pill when you've scrolled down
 // to read/reply. See ApolloLiveCommentsFollow.xm. Default ON via registerDefaults.

@@ -18,6 +18,7 @@
 #import <objc/message.h>
 
 #import "ApolloCommon.h"
+#import "ApolloState.h"
 #import "Tweak.h"
 #import "UIWindow+Apollo.h"
 
@@ -196,6 +197,11 @@ static BOOL ApolloAgeTapShouldReceiveTouch(id cell, UIGestureRecognizer *gr, UIT
 
 static void ApolloAgeTapFired(id cell, UITapGestureRecognizer *tap) {
     if (tap.state != UIGestureRecognizerStateRecognized) return;
+    // Info Row switch OFF: the timestamp is inert. The gesture still recognizes
+    // (cancelsTouchesInView == YES), so the tap is swallowed and nothing happens
+    // — no alert, and no fall-through post-open (this region never opened the
+    // post to begin with).
+    if (!sInfoRowTapTimestamp) return;
 
     // Comment cells carry an RDKComment; everything else is a post (RDKLink).
     RDKComment *comment = ApolloIvarValueByName(cell, "comment");

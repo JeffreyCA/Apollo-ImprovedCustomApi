@@ -373,6 +373,11 @@ static const void *kApolloMarkerCellGestureKey = &kApolloMarkerCellGestureKey;
 - (void)handleCellTap:(UITapGestureRecognizer *)gr {
     UILabel *label = self.pendingLabel;
     self.pendingLabel = nil;
+    // Info Row "Translation" switch OFF overrides Tap to Translate / Details:
+    // the marker stays visible but its tap does nothing (the touch was already
+    // claimed in shouldReceiveTouch, so it's swallowed rather than opening the
+    // post). See UDKeyInfoRowTapTranslation.
+    if (!sInfoRowTapTranslation) return;
     if (![label isKindOfClass:[UILabel class]]) return;
     id titleNode = objc_getAssociatedObject(label, kApolloMarkerTitleNodeKey);
     if (titleNode) {
