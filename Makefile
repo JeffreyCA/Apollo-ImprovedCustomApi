@@ -136,6 +136,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloAccountCredentials.m \
     $(SRC_DIR)/ApolloAccountSwitcherViewController.xm \
     $(SRC_DIR)/ApolloSignInSplash.xm \
+    $(SRC_DIR)/ApolloHideSubscribePrompt.xm \
     $(SRC_DIR)/CustomAPIViewController.m \
     $(SRC_DIR)/ApolloAISettingsViewController.m \
     $(SRC_DIR)/ApolloDeletedCommentsSettingsViewController.m \
