@@ -11,6 +11,7 @@
 #import "ApolloThemeRuntime.h"
 #import "ApolloTranslation.h"
 #import "Tweak.h"
+#import "settings/ApolloSettingsGeneralTable.h"
 
 // Generated umbrella header for the Swift compilation unit (ApolloAppleTranslation.swift),
 // which vends the @objc ApolloAppleTranslator used by the on-device "apple" provider.
@@ -7456,6 +7457,15 @@ static void ApolloDbgOpenFirstPost(CFNotificationCenterRef c, void *o, CFStringR
 // ==============================================================================
 
 %ctor {
+    // Apollo's native General > Other section has an "Always Offer Translate" row
+    // that is redundant (and confusing) next to this module's own Translation
+    // feature; hide it. The underlying Apollo setting is untouched, and the table
+    // geometry is owned by settings/ApolloSettingsGeneralTable.xm — this only
+    // registers the matcher.
+    ApolloGeneralTableHideRows(^BOOL(UITableViewCell *cell) {
+        return ApolloGeneralTableCellHasTitle(cell, @"Always Offer Translate");
+    });
+
     sTranslationCache = [NSCache new];
     sCommentTranslationByFullName = [NSCache new];
     sCommentTranslationByFullName.countLimit = 2048;

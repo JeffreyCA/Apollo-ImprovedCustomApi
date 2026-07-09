@@ -3,7 +3,7 @@
 #import <objc/message.h>
 
 #import "ApolloCommon.h"
-#import "ApolloSettingsTableViewController.h"
+#import "settings/ApolloSettingsTableViewController.h"
 #import "ApolloState.h"
 #import "Tweak.h"
 #import "UserDefaultConstants.h"

@@ -1,4 +1,4 @@
-#import "ApolloSettingsTableViewController.h"
+#import "settings/ApolloSettingsTableViewController.h"
 
 @interface TagFiltersViewController : ApolloSettingsTableViewController
 @end

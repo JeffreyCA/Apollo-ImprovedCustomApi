@@ -27,7 +27,12 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloAISummary.xm \
     $(SRC_DIR)/Tweak.xm \
     $(SRC_DIR)/ApolloCommon.m \
-    $(SRC_DIR)/ApolloSettingsTableViewController.m \
+    $(SRC_DIR)/settings/ApolloSettingsTableViewController.m \
+    $(SRC_DIR)/settings/ApolloSettingsForm.m \
+    $(SRC_DIR)/settings/ApolloContributors.m \
+    $(SRC_DIR)/settings/ApolloBackupRestore.m \
+    $(SRC_DIR)/settings/ApolloThanksToViewController.m \
+    $(SRC_DIR)/settings/ApolloBuyUsACoffeeViewController.m \
     $(SRC_DIR)/ApolloRedditMediaUpload.m \
     $(SRC_DIR)/ApolloNotificationBackend.m \
     $(SRC_DIR)/ApolloUsageHeartbeat.m \
@@ -64,13 +69,14 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloInboxCommentScroll.xm \
     $(SRC_DIR)/ApolloStatsRowTouch.xm \
     $(SRC_DIR)/ApolloLiveCommentsFollow.xm \
+    $(SRC_DIR)/settings/ApolloSettingsGeneralTable.xm \
     $(SRC_DIR)/ApolloPerPostCommentSort.xm \
     $(SRC_DIR)/ApolloLiquidGlass.xm \
     $(SRC_DIR)/ApolloLiquidGlassIconPicker.xm \
     $(SRC_DIR)/ApolloModmailLayout.xm \
     $(SRC_DIR)/ApolloAutoHideTabBar.xm \
     $(SRC_DIR)/ApolloIPadTabBarBottom.xm \
-    $(SRC_DIR)/ApolloSettings.xm \
+    $(SRC_DIR)/settings/ApolloSettings.xm \
     $(SRC_DIR)/ApolloRecentlyRead.xm \
     $(SRC_DIR)/ApolloSavedCategories.xm \
     $(SRC_DIR)/ApolloUserFlair.xm \
@@ -138,15 +144,15 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloAccountSwitcherViewController.xm \
     $(SRC_DIR)/ApolloSignInSplash.xm \
     $(SRC_DIR)/ApolloHideSubscribePrompt.xm \
-    $(SRC_DIR)/CustomAPIViewController.m \
-    $(SRC_DIR)/ApolloAISettingsViewController.m \
-    $(SRC_DIR)/ApolloDeletedCommentsSettingsViewController.m \
-    $(SRC_DIR)/ApolloLinkPreviewSettingsViewController.m \
-    $(SRC_DIR)/InlineMediaSettingsViewController.m \
-    $(SRC_DIR)/ApolloOpenInAppViewController.m \
-    $(SRC_DIR)/ApolloHideNativeOpenInAppRows.xm \
-    $(SRC_DIR)/TranslationSettingsViewController.m \
-    $(SRC_DIR)/SavedCategoriesViewController.m \
+    $(SRC_DIR)/settings/CustomAPIViewController.m \
+    $(SRC_DIR)/settings/ApolloAISettingsViewController.m \
+    $(SRC_DIR)/settings/ApolloDeletedCommentsSettingsViewController.m \
+    $(SRC_DIR)/settings/ApolloLinkPreviewSettingsViewController.m \
+    $(SRC_DIR)/settings/InlineMediaSettingsViewController.m \
+    $(SRC_DIR)/settings/ApolloOpenInAppViewController.m \
+    $(SRC_DIR)/settings/ApolloHideNativeOpenInAppRows.xm \
+    $(SRC_DIR)/settings/TranslationSettingsViewController.m \
+    $(SRC_DIR)/settings/SavedCategoriesViewController.m \
     $(SRC_DIR)/TagFiltersViewController.m \
     $(SRC_DIR)/ApolloPostFilterStore.m \
     $(SRC_DIR)/ApolloPostFilters.xm \

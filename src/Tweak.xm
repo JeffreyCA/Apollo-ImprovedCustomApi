@@ -20,7 +20,7 @@
 #import "ApolloBarkNotifications.h"
 #import "ApolloState.h"
 #import "Tweak.h"
-#import "CustomAPIViewController.h"
+#import "settings/CustomAPIViewController.h"
 #import "UserDefaultConstants.h"
 #import "ApolloPostFilterStore.h"
 #import "Defaults.h"
