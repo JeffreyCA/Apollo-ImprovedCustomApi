@@ -3,6 +3,7 @@
 
 #import "ApolloCommon.h"
 #import "CustomAPIViewController.h"
+#import "ApolloBuyUsACoffeeViewController.h"
 #import "SavedCategoriesViewController.h"
 #import "TranslationSettingsViewController.h"
 #import "TagFiltersViewController.h"
@@ -193,11 +194,16 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
 
 %end
 
-// NOTE: the SettingsGeneralViewController hooks (hiding the native "Always Offer
-// Translate" row) moved to ApolloPerPostCommentSort.xm, which owns the single
-// table remapper for that screen — two independent %hook stacks on the same
-// delegate methods disagree about index-path spaces once one of them shifts rows
-// (review finding on PR #570). Keep any future General-screen row work there.
+// NOTE: this module no longer touches the General screen. Its table geometry
+// (row hiding / injection / index remapping) has a single neutral owner —
+// src/settings/ApolloSettingsGeneralTable.{h,xm} — because two independent
+// %hook stacks on the same delegate methods disagree about index-path spaces
+// once one of them shifts rows (review finding on PR #570). Features register
+// what they need: the "Always Offer Translate" hiding registers from
+// ApolloTranslation.xm, the Open-in-App row hiding from
+// src/settings/ApolloHideNativeOpenInAppRows.xm, and the "Remember Post Sort"
+// row from ApolloPerPostCommentSort.xm. Register any future General-screen row
+// work there too; never %hook that screen's table methods directly.
 
 // MARK: - About View Controller (Tip Jar injection)
 //

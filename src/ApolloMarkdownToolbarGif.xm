@@ -4,7 +4,7 @@
 #import "ApolloGiphyClient.h"
 #import "ApolloState.h"
 #import "ApolloSubredditInfoCache.h"
-#import "CustomAPIViewController.h"
+#import "settings/CustomAPIViewController.h"
 #import "GiphyPickerViewController.h"
 #import "UserDefaultConstants.h"
 
