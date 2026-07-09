@@ -5,6 +5,7 @@
 // metadata. Falls back to Apollo's native card when metadata is missing.
 
 #import "ApolloCommon.h"
+#import "ApolloDeletedCommentsData.h"
 #import "ApolloLinkPreviewCache.h"
 #import "ApolloLinkPreviewFetcher.h"
 #import "ApolloBannedProfile.h"
@@ -3108,6 +3109,20 @@ static ASDisplayNode *ApolloLPFindOwningCellNode(ASDisplayNode *node) {
 }
 
 static BOOL ApolloLPInvokeScrollViewHeightRefresh(ASDisplayNode *node) {
+    // A comment collapse/expand animation is running: an empty begin/endUpdates
+    // now re-queries every row height mid-animation and restarts the native row
+    // animations (ghosting / rows sliding the wrong way — #630). Re-run the
+    // refresh once the collapse settles instead.
+    NSTimeInterval settleDelay = ApolloDeletedCommentsCollapseSettleDelayRemaining();
+    if (settleDelay > 0) {
+        __weak ASDisplayNode *weakNode = node;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((settleDelay + 0.03) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            ASDisplayNode *strongNode = weakNode;
+            if (strongNode) ApolloLPInvokeScrollViewHeightRefresh(strongNode);
+        });
+        return YES;
+    }
+
     UIView *view = ApolloLPViewForNode(node);
     for (UIView *current = view; current; current = current.superview) {
         if ([current isKindOfClass:[UITableView class]]) {

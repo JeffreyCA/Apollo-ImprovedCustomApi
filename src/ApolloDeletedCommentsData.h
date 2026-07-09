@@ -20,6 +20,13 @@ BOOL ApolloDeletedCommentsHasThreadOverride(NSString *linkFullName);
 // Global toggle OR an override for this specific post (t3_xxx or bare id).
 BOOL ApolloDeletedCommentsActiveForLink(NSString *linkFullName);
 void ApolloDeletedCommentsHandleRequestObservation(NSURLRequest *request, NSString *source);
+// Collapse-animation window, stamped by the RDKComment setCollapsed: hook (UI.xm).
+// Modules that re-measure list rows (deleted-comments height fixup, inline link
+// previews) must defer table begin/endUpdates while this returns > 0: an empty
+// update mid-collapse re-queries every row height and restarts the native row
+// animations (the "comments collapse weirdly" glitches in #620/#630).
+void ApolloDeletedCommentsNoteCollapseEvent(void);
+NSTimeInterval ApolloDeletedCommentsCollapseSettleDelayRemaining(void);
 ApolloDeletedCommentsURLSessionCompletion ApolloDeletedCommentsMaybeWrapCompletion(NSURLRequest *request, ApolloDeletedCommentsURLSessionCompletion completion);
 void ApolloDeletedCommentsInstallDelegateTransformerIfNeeded(NSURLSession *session, NSURLRequest *request);
 void ApolloDeletedCommentsRegisterRecoveredComment(NSString *fullName, NSString *reason);

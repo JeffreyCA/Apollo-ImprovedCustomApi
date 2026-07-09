@@ -828,6 +828,21 @@ static id ApolloDeletedCommentsKnownBodyTextNode(id commentCellNode) {
 }
 
 static void ApolloDeletedCommentsRelayoutCellAndTextNode(id cellNode, id textNode) {
+    // Invalidating node layout mid-collapse resizes rows while the native
+    // delete/insert animation is running — visible as ghosting/misdirected row
+    // motion (#630 rounds 2-3). Defer the whole relayout until it settles. Reveal
+    // taps never stamp the window, so they stay instant.
+    NSTimeInterval settleDelay = ApolloDeletedCommentsCollapseSettleDelayRemaining();
+    if (settleDelay > 0) {
+        __weak id weakCellNode = cellNode;
+        __weak id weakTextNode = textNode;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((settleDelay + 0.03) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            id strongCellNode = weakCellNode;
+            if (strongCellNode) ApolloDeletedCommentsRelayoutCellAndTextNode(strongCellNode, weakTextNode);
+        });
+        return;
+    }
+
     SEL selectors[] = {
         @selector(invalidateCalculatedLayout),
         @selector(setNeedsLayout),
@@ -1232,6 +1247,43 @@ static NSAttributedString *ApolloDeletedCommentsAttributedStringFromMarkdown(NSS
         if (!linkURL) continue;
         [attr addAttribute:NSLinkAttributeName value:linkURL range:m.range];
         if (linkColor) [attr addAttribute:NSForegroundColorAttributeName value:linkColor range:m.range];
+    }
+
+    // 6b) Superscript: ^(grouped text) and ^word. Runs AFTER links because citation
+    //     markup like [^(\[8\])](url) leaves ^(…) inside the link's visible text —
+    //     without this pass those show as literal "^([8])" fragments ("superscripts
+    //     make the renderer freak out", #630 round 3). Scale each existing font run
+    //     (preserves bold/italic/link fonts) and raise the baseline.
+    void (^applySuperscript)(NSRange) = ^(NSRange r) {
+        if (r.length == 0) return;
+        [attr enumerateAttribute:NSFontAttributeName inRange:r options:0
+                      usingBlock:^(UIFont *font, NSRange runRange, __unused BOOL *stop) {
+            UIFont *runFont = [font isKindOfClass:[UIFont class]] ? font : baseFont;
+            [attr addAttribute:NSFontAttributeName value:[runFont fontWithSize:MAX(8.0, runFont.pointSize * 0.72)] range:runRange];
+        }];
+        [attr addAttribute:NSBaselineOffsetAttributeName value:@(baseFont.pointSize * 0.30) range:r];
+    };
+    // Grouped form first; loop a few times for adjacent/nested markers.
+    NSRegularExpression *superGroupRe = [NSRegularExpression regularExpressionWithPattern:@"\\^\\(([^()\\n]*)\\)" options:0 error:nil];
+    for (int pass = 0; pass < 3; pass++) {
+        NSArray<NSTextCheckingResult *> *ms = [superGroupRe matchesInString:attr.string options:0 range:NSMakeRange(0, attr.string.length)];
+        if (ms.count == 0) break;
+        for (NSInteger i = (NSInteger)ms.count - 1; i >= 0; i--) {
+            NSTextCheckingResult *m = ms[i];
+            NSString *inner = substr([m rangeAtIndex:1]) ?: @"";
+            [attr replaceCharactersInRange:m.range withString:inner];
+            applySuperscript(NSMakeRange(m.range.location, inner.length));
+        }
+    }
+    // Bare form: ^word (no parens). Reddit superscripts a single token.
+    NSRegularExpression *superBareRe = [NSRegularExpression regularExpressionWithPattern:@"\\^([^\\s^()\\[\\]]+)" options:0 error:nil];
+    NSArray<NSTextCheckingResult *> *bareSupers = [superBareRe matchesInString:attr.string options:0 range:NSMakeRange(0, attr.string.length)];
+    for (NSInteger i = (NSInteger)bareSupers.count - 1; i >= 0; i--) {
+        NSTextCheckingResult *m = bareSupers[i];
+        NSString *inner = substr([m rangeAtIndex:1]) ?: @"";
+        if (inner.length == 0) continue;
+        [attr replaceCharactersInRange:m.range withString:inner];
+        applySuperscript(NSMakeRange(m.range.location, inner.length));
     }
 
     // 7) Restore backslash-escaped characters to their literals.
@@ -2289,6 +2341,129 @@ static void ApolloDeletedCommentsInstallRevealTapGestureOnCell(id cellNode) {
     objc_setAssociatedObject(cellNode, kApolloDeletedCommentsRevealTapGestureKey, gesture, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+#pragma mark - Link taps in recovered bodies
+
+// Resolve the NSLink URL under a tap on the cell, if any. The recovered body is our
+// own replacement ASTextNode (attached to the captured MarkdownNode), so we convert
+// the touch into that node's coordinate space and ask ASTextNode's own link hit-test.
+// Works whether or not the node has a loaded view (rasterized cells included) because
+// the conversion goes through the node hierarchy, not the view hierarchy.
+static NSURL *ApolloDeletedCommentsLinkURLAtCellPoint(id cellNode, CGPoint pointInCellView) {
+    if (!cellNode) return nil;
+    id markdownNode = objc_getAssociatedObject(cellNode, kApolloDeletedCommentsCellMarkdownNodeKey);
+    id replacement = markdownNode ? objc_getAssociatedObject(markdownNode, kApolloDeletedCommentsBodyReplacementTextNodeKey) : nil;
+
+    // A recovered body has two shapes: our single replacement ASTextNode (late/tap-to-
+    // reveal renders) or Apollo's native MarkdownNode with one ASTextNode PER PARAGRAPH
+    // (inline-patched comments). Hit-test every text node under the markdown node so a
+    // tap on any paragraph resolves its link.
+    NSMutableArray *candidates = [NSMutableArray array];
+    if (replacement) [candidates addObject:replacement];
+    NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:16];
+    ApolloDeletedCommentsCollectAttributedTextNodes(markdownNode ?: cellNode, 6, visited, candidates);
+    id knownText = ApolloDeletedCommentsKnownBodyTextNode(cellNode);
+    if (knownText && ![candidates containsObject:knownText]) [candidates addObject:knownText];
+
+    SEL convertSel = @selector(convertPoint:toNode:);
+    SEL linkSel = NSSelectorFromString(@"linkAttributeValueAtPoint:attributeName:range:");
+    for (id textNode in candidates) {
+        if (![cellNode respondsToSelector:convertSel] || ![textNode respondsToSelector:linkSel]) continue;
+        @try {
+            CGPoint nodePoint = ((CGPoint (*)(id, SEL, CGPoint, id))objc_msgSend)(cellNode, convertSel, pointInCellView, textNode);
+            NSString *attributeName = nil;
+            NSRange linkRange = NSMakeRange(NSNotFound, 0);
+            id value = ((id (*)(id, SEL, CGPoint, NSString **, NSRange *))objc_msgSend)(textNode, linkSel, nodePoint, &attributeName, &linkRange);
+            if ([value isKindOfClass:[NSURL class]]) return (NSURL *)value;
+            if ([value isKindOfClass:[NSString class]]) return [NSURL URLWithString:(NSString *)value];
+        } @catch (__unused NSException *e) {}
+    }
+    return nil;
+}
+
+static const void *kApolloDeletedCommentsLinkTapGestureKey = &kApolloDeletedCommentsLinkTapGestureKey;
+
+@interface ApolloDeletedCommentsLinkTapHandler : NSObject <UIGestureRecognizerDelegate>
+@property (nonatomic, weak) id cellNode;
+@end
+
+@implementation ApolloDeletedCommentsLinkTapHandler
+
+- (void)apolloLinkTap:(UITapGestureRecognizer *)recognizer {
+    if (recognizer.state != UIGestureRecognizerStateEnded) return;
+    id cellNode = self.cellNode;
+    if (!cellNode) return;
+    NSURL *url = ApolloDeletedCommentsLinkURLAtCellPoint(cellNode, [recognizer locationInView:recognizer.view]);
+    if (!url) return;
+
+    UIViewController *presenter = nil;
+    for (UIResponder *responder = recognizer.view; responder; responder = responder.nextResponder) {
+        if ([responder isKindOfClass:[UIViewController class]]) { presenter = (UIViewController *)responder; break; }
+    }
+    if (!presenter) return;
+    ApolloLog(@"[DeletedComments] Opening recovered-body link %@", url.absoluteString);
+    ApolloPresentWebURLFromViewController(presenter, url);
+}
+
+// Claim the tap only when a link is actually under the finger; every other tap
+// (collapse, expand, reveal chip, buttons) passes through untouched.
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    id cellNode = self.cellNode;
+    if (!cellNode || !ApolloDeletedCommentsFeatureActive()) return NO;
+    return ApolloDeletedCommentsLinkURLAtCellPoint(cellNode, [touch locationInView:gestureRecognizer.view]) != nil;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return YES;
+}
+
+// Same arbitration as the reveal tap: Apollo's single-tap collapse must wait for —
+// and be cancelled by — a successful link tap, so tapping a link never collapses.
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    if (![otherGestureRecognizer isKindOfClass:[UITapGestureRecognizer class]]) return NO;
+    if (((UITapGestureRecognizer *)otherGestureRecognizer).numberOfTapsRequired > 1) return NO;
+    id cellNode = self.cellNode;
+    if (!cellNode) return NO;
+    CGPoint p = [otherGestureRecognizer locationInView:gestureRecognizer.view];
+    return ApolloDeletedCommentsLinkURLAtCellPoint(cellNode, p) != nil;
+}
+@end
+
+// One persistent recognizer per cell view (mirrors the reveal-tap install; the
+// delegate gates per-tap so it is inert on cells without recovered links).
+static void ApolloDeletedCommentsInstallLinkTapGestureOnCell(id cellNode) {
+    if (!cellNode || ![cellNode respondsToSelector:@selector(view)]) return;
+    UIView *view = nil;
+    @try {
+        view = ((UIView *(*)(id, SEL))objc_msgSend)(cellNode, @selector(view));
+    } @catch (__unused NSException *e) {
+        return;
+    }
+    if (![view isKindOfClass:[UIView class]]) return;
+
+    UITapGestureRecognizer *existing = objc_getAssociatedObject(cellNode, kApolloDeletedCommentsLinkTapGestureKey);
+    if ([existing isKindOfClass:[UITapGestureRecognizer class]]) {
+        if (existing.view == view) return;
+        @try { [existing.view removeGestureRecognizer:existing]; } @catch (__unused NSException *e) {}
+        objc_setAssociatedObject(cellNode, kApolloDeletedCommentsLinkTapGestureKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    ApolloDeletedCommentsLinkTapHandler *handler = [ApolloDeletedCommentsLinkTapHandler new];
+    handler.cellNode = cellNode;
+
+    UITapGestureRecognizer *gesture = [[UITapGestureRecognizer alloc] initWithTarget:handler
+                                                                              action:@selector(apolloLinkTap:)];
+    gesture.delegate = handler;
+    gesture.cancelsTouchesInView = YES;   // a link tap must not also collapse the row
+    gesture.delaysTouchesBegan = NO;
+    gesture.delaysTouchesEnded = NO;
+    objc_setAssociatedObject(gesture, kApolloDeletedCommentsLinkTapGestureKey, handler, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    @try { [view addGestureRecognizer:gesture]; } @catch (__unused NSException *e) { return; }
+    objc_setAssociatedObject(cellNode, kApolloDeletedCommentsLinkTapGestureKey, gesture, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 static void __attribute__((unused)) ApolloDeletedCommentsApplyTapToRevealIfNeeded(id cellNode) {
     RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
@@ -2692,15 +2867,17 @@ static UIView *ApolloDeletedCommentsHostListViewForCell(id cellNode) {
 }
 
 // Native comment collapse/expand animations run ~0.3-0.5s; give them a little headroom.
+// Exported (ApolloDeletedCommentsData.h) so other row-measuring modules — inline link
+// previews in particular — can defer their own table updates during the window.
 static const NSTimeInterval kApolloDeletedCommentsCollapseSettleWindow = 0.65;
 static NSTimeInterval sApolloDeletedCommentsLastCollapseEventUptime = 0;
 
-static void ApolloDeletedCommentsNoteCollapseEvent(void) {
+void ApolloDeletedCommentsNoteCollapseEvent(void) {
     sApolloDeletedCommentsLastCollapseEventUptime = CACurrentMediaTime();
 }
 
 // Seconds until the current collapse animation (if any) has settled; 0 when idle.
-static NSTimeInterval ApolloDeletedCommentsCollapseSettleDelayRemaining(void) {
+NSTimeInterval ApolloDeletedCommentsCollapseSettleDelayRemaining(void) {
     if (sApolloDeletedCommentsLastCollapseEventUptime <= 0) return 0;
     NSTimeInterval elapsed = CACurrentMediaTime() - sApolloDeletedCommentsLastCollapseEventUptime;
     if (elapsed >= kApolloDeletedCommentsCollapseSettleWindow) return 0;
@@ -2885,6 +3062,11 @@ static id ApolloDeletedCommentsBodyReplacementTextNode(id markdownNode, id cellN
     if (!textNode || !textNodeClass || ![textNode isKindOfClass:textNodeClass]) {
         textNode = [[textNodeClass alloc] init];
         if (!textNode) return nil;
+        // Advertise NSLink ranges so -linkAttributeValueAtPoint: (used by the cell-level
+        // link-tap gesture) can resolve the URL under a touch.
+        @try {
+            ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setLinkAttributeNames:), @[NSLinkAttributeName]);
+        } @catch (__unused NSException *e) {}
         objc_setAssociatedObject(markdownNode, kApolloDeletedCommentsBodyReplacementTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         @try {
             ((void (*)(id, SEL, id))objc_msgSend)(markdownNode, @selector(addSubnode:), textNode);
@@ -3256,6 +3438,11 @@ static void ApolloDeletedCommentsUpdateCell(id cellNode) {
     ApolloDeletedCommentsApplyCellHighlight(cellNode);
     if (ApolloDeletedCommentsFeatureActive() && sTapToRevealDeletedComments) {
         ApolloDeletedCommentsInstallRevealTapGestureOnCell(cellNode);
+    }
+    if (ApolloDeletedCommentsFeatureActive() && ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(cellNode)) {
+        // Links inside recovered bodies open on tap (delegate-gated: only claims the
+        // tap when a link is under the finger, so collapse/expand stay native).
+        ApolloDeletedCommentsInstallLinkTapGestureOnCell(cellNode);
     }
 }
 

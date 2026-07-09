@@ -432,6 +432,11 @@ static BOOL ApolloDeletedCommentsBodyLooksDeleted(NSString *body) {
     if ([trimmed isEqualToString:@"user deleted comment"]) return YES;
     if ([trimmed rangeOfString:@"removed by moderator"].location != NSNotFound && trimmed.length < 80) return YES;
     if ([trimmed rangeOfString:@"user deleted comment"].location != NSNotFound && trimmed.length < 80) return YES;
+    // Newer Reddit placeholder for comments removed as part of a whole-thread removal.
+    // Served as an italic markdown body like "*Moderator removed thread* 🧨", so match
+    // by substring (the wrapper asterisks/emoji vary) with the same short-body guard.
+    if ([trimmed rangeOfString:@"moderator removed thread"].location != NSNotFound && trimmed.length < 80) return YES;
+    if ([trimmed rangeOfString:@"moderators removed"].location != NSNotFound && trimmed.length < 80) return YES;
     return NO;
 }
 
