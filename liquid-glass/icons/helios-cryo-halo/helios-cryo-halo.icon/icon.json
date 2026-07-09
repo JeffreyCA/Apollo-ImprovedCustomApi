@@ -184,6 +184,12 @@
           "glass" : true,
           "image-name" : "Apollo Helmet.svg",
           "name" : "Apollo Helmet",
+          "opacity-specializations" : [
+            {
+              "appearance" : "tinted",
+              "value" : 1
+            }
+          ],
           "position" : {
             "scale" : 1.46,
             "translation-in-points" : [
@@ -217,10 +223,14 @@
             {
               "appearance" : "dark",
               "value" : 0
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0
             }
           ],
           "position" : {
-            "scale" : 0.67,
+            "scale" : 0.63,
             "translation-in-points" : [
               -0.017993374452316857,
               -379.7038005709613
@@ -252,10 +262,14 @@
             {
               "appearance" : "dark",
               "value" : 0
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0
             }
           ],
           "position" : {
-            "scale" : 0.69,
+            "scale" : 0.67,
             "translation-in-points" : [
               -0.017993374452316857,
               -379.7038005709613
@@ -276,10 +290,14 @@
             {
               "appearance" : "dark",
               "value" : 0
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0
             }
           ],
           "position" : {
-            "scale" : 1.4,
+            "scale" : 1.49,
             "translation-in-points" : [
               0.003170664460867556,
               -447.28017222797814
@@ -300,29 +318,20 @@
             {
               "appearance" : "dark",
               "value" : 0
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0
             }
           ],
           "position" : {
-            "scale" : 1.42,
+            "scale" : 1.53,
             "translation-in-points" : [
               0.003170664460867556,
               -447.28017222797814
             ]
           }
         }
-      ],
-      "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 0.5
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.5
-      }
-    },
-    {
-      "layers" : [
-
       ],
       "shadow" : {
         "kind" : "neutral",
