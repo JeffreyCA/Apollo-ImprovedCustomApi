@@ -34,6 +34,9 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/settings/ApolloBackupRestore.m \
     $(SRC_DIR)/settings/ApolloThanksToViewController.m \
     $(SRC_DIR)/settings/ApolloBuyUsACoffeeViewController.m \
+    $(SRC_DIR)/settings/ApolloSettingsRouter.m \
+    $(SRC_DIR)/settings/ApolloGetStartedCard.m \
+    $(SRC_DIR)/ApolloToast.m \
     $(SRC_DIR)/ApolloRedditMediaUpload.m \
     $(SRC_DIR)/ApolloNotificationBackend.m \
     $(SRC_DIR)/ApolloUsageHeartbeat.m \

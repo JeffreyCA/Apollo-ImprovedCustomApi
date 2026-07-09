@@ -19,6 +19,18 @@ typedef NS_ENUM(NSInteger, TranslationTextFieldTag) {
 
 static NSString *const kDefaultLibreTranslateURL = @"https://libretranslate.de/translate";
 
+// The three mutually-exclusive translation modes, derived from and persisted to
+// the sTapToTranslate / sAutoTranslateOnAppear defaults (no migration needed):
+//   Automatic        -> tap = NO,  auto = YES  (opens everything translated)
+//   Tap to Translate -> tap = YES              (keep original, tappable Translate)
+//   Manual           -> tap = NO,  auto = NO   (tap the globe per feed/thread)
+typedef NS_ENUM(NSInteger, TranslationMode) {
+    TranslationModeAutomatic = 0,
+    TranslationModeTapToTranslate,
+    TranslationModeManual,
+    TranslationModeCount,
+};
+
 static NSDictionary *ApolloRichPreviewSettingsChangeUserInfo(void) {
     return @{@"reason": @"settings-change"};
 }
@@ -92,22 +104,24 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
                                       isOn:^BOOL { return sEnableBulkTranslation; }
                                   onToggle:^(UISwitch *sender) { [weakSelf enableBulkTranslationSwitchToggled:sender]; }];
 
-    // Auto Translate is meaningless in Tap to Translate mode (tap mode drives the
-    // pipeline itself), so it greys out there. Disabled = superseded — the thumb
-    // shows OFF so it doesn't read as active; the stored value is kept.
-    ApolloSettingsRow *autoTranslate =
-        [ApolloSettingsRow switchRowWithID:@"autoTranslate"
-                                     title:@"Auto Translate by Default"
-                                      isOn:^BOOL { return sAutoTranslateOnAppear && sEnableBulkTranslation && !sTapToTranslate; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf autoTranslateSwitchToggled:sender]; }];
-    autoTranslate.enabled = ^BOOL { return sEnableBulkTranslation && !sTapToTranslate; };
-
-    ApolloSettingsRow *tapToTranslate =
-        [ApolloSettingsRow switchRowWithID:@"tapToTranslate"
-                                     title:@"Tap to Translate"
-                                      isOn:^BOOL { return sTapToTranslate && sEnableBulkTranslation; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf tapToTranslateSwitchToggled:sender]; }];
-    tapToTranslate.enabled = ^BOOL { return sEnableBulkTranslation; };
+    // The old "Auto Translate by Default" / "Tap to Translate" switch pair
+    // (mutually exclusive, with a non-obvious "neither" state) is now a single
+    // three-way picker; see -currentTranslationMode. Greyed while the master
+    // switch is off (valueRow has no .enabled, so configure + onSelect guard).
+    ApolloSettingsRow *translationMode =
+        [ApolloSettingsRow valueRowWithID:@"translationMode"
+                                    title:@"Translation Mode"
+                                   detail:^NSString * { return [weakSelf titleForTranslationMode:[weakSelf currentTranslationMode]]; }
+                                 onSelect:^{
+            if (!sEnableBulkTranslation) return;
+            [weakSelf presentTranslationModePicker];
+        }];
+    translationMode.configure = ^(UITableViewCell *cell) {
+        cell.textLabel.enabled = sEnableBulkTranslation;
+        cell.detailTextLabel.textColor = sEnableBulkTranslation ? [UIColor secondaryLabelColor] : [UIColor tertiaryLabelColor];
+        cell.accessoryType = sEnableBulkTranslation ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+        cell.selectionStyle = sEnableBulkTranslation ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
+    };
 
     ApolloSettingsRow *translateTitles =
         [ApolloSettingsRow switchRowWithID:@"translateTitles"
@@ -235,8 +249,8 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
 
     return @[
         [ApolloSettingsSection sectionWithTitle:@"General"
-                                         footer:@"Translates comments in place, and optionally post titles. Auto Translate opens everything already translated — when off, tap the globe per feed or thread.\n\nTap to Translate keeps the original language and shows a tappable \"Translate\" line under comments plus a language marker next to post stats. Tap to translate that item, tap again to switch back.\n\nThe Details toggles control the \"Translated from …\" lines and language markers. Match App Colour tints them with your theme's accent instead of green."
-                                           rows:@[ enableBulk, autoTranslate, tapToTranslate, translateTitles, showDetails, titleDetails, markerColor, targetLanguage, provider ]],
+                                         footer:@"Translates comments in place, and optionally post titles. Translation Mode sets how it kicks in:\n\n• Automatic — opens everything already translated.\n• Tap to Translate — keeps the original language and shows a tappable \"Translate\" line under comments plus a language marker next to post stats; tap to translate that item, tap again to switch back.\n• Manual (Globe) — nothing is translated until you tap the globe per feed or thread.\n\nThe Details toggles control the \"Translated from …\" lines and language markers. Match App Colour tints them with your theme's accent instead of green."
+                                           rows:@[ enableBulk, translationMode, translateTitles, showDetails, titleDetails, markerColor, targetLanguage, provider ]],
         [ApolloSettingsSection sectionWithTitle:@"Don't Translate"
                                          footer:@"Posts and comments detected as one of these languages will be left in their original form. Mixed-language text is still translated so embedded foreign words come through."
                                            rows:skipRows],
@@ -507,6 +521,50 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
+#pragma mark - Translation mode
+
+- (TranslationMode)currentTranslationMode {
+    if (sTapToTranslate) return TranslationModeTapToTranslate;
+    if (sAutoTranslateOnAppear) return TranslationModeAutomatic;
+    return TranslationModeManual;
+}
+
+- (NSString *)titleForTranslationMode:(TranslationMode)mode {
+    switch (mode) {
+        case TranslationModeAutomatic:      return @"Automatic";
+        case TranslationModeTapToTranslate: return @"Tap to Translate";
+        default:                            return @"Manual (Globe)";
+    }
+}
+
+- (void)applyTranslationMode:(TranslationMode)mode {
+    sTapToTranslate = (mode == TranslationModeTapToTranslate);
+    sAutoTranslateOnAppear = (mode == TranslationModeAutomatic);
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setBool:sTapToTranslate forKey:UDKeyTapToTranslate];
+    [defaults setBool:sAutoTranslateOnAppear forKey:UDKeyAutoTranslateOnAppear];
+
+    // Tap mode changes the enabled state of the two Details rows, plus this
+    // row's own detail text.
+    [self reloadRowWithID:@"translationMode"];
+    [self reloadRowWithID:@"showDetails"];
+    [self reloadRowWithID:@"titleDetails"];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloShowTranslationDetailsChanged" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification object:nil userInfo:ApolloRichPreviewSettingsChangeUserInfo()];
+}
+
+- (void)presentTranslationModePicker {
+    NSMutableArray<NSString *> *titles = [NSMutableArray arrayWithCapacity:TranslationModeCount];
+    for (TranslationMode mode = 0; mode < TranslationModeCount; mode++) {
+        [titles addObject:[self titleForTranslationMode:mode]];
+    }
+    __weak __typeof(self) weakSelf = self;
+    ApolloSettingsPresentPicker(self, [self cellForRowID:@"translationMode"], @"Translation Mode",
+                                titles, [self currentTranslationMode], ^(NSInteger pickedIndex) {
+        [weakSelf applyTranslationMode:(TranslationMode)pickedIndex];
+    });
+}
+
 #pragma mark - Pickers
 
 // Target options to offer for the active provider. Apple covers only ~20 languages,
@@ -680,29 +738,11 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     [[NSUserDefaults standardUserDefaults] setBool:sEnableBulkTranslation forKey:UDKeyEnableBulkTranslation];
 
     // Re-read every dependent row's enabled/on state.
-    [self reloadRowWithID:@"autoTranslate"];
-    [self reloadRowWithID:@"tapToTranslate"];
+    [self reloadRowWithID:@"translationMode"];
     [self reloadRowWithID:@"translateTitles"];
     [self reloadRowWithID:@"showDetails"];
     [self reloadRowWithID:@"titleDetails"];
     [self reloadRowWithID:@"markerColor"];
-    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification object:nil userInfo:ApolloRichPreviewSettingsChangeUserInfo()];
-}
-
-- (void)autoTranslateSwitchToggled:(UISwitch *)sender {
-    sAutoTranslateOnAppear = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sAutoTranslateOnAppear forKey:UDKeyAutoTranslateOnAppear];
-    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification object:nil userInfo:ApolloRichPreviewSettingsChangeUserInfo()];
-}
-
-- (void)tapToTranslateSwitchToggled:(UISwitch *)sender {
-    sTapToTranslate = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sTapToTranslate forKey:UDKeyTapToTranslate];
-    // Auto Translate + the two Details rows change enabled state with this toggle.
-    [self reloadRowWithID:@"autoTranslate"];
-    [self reloadRowWithID:@"showDetails"];
-    [self reloadRowWithID:@"titleDetails"];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloShowTranslationDetailsChanged" object:nil];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification object:nil userInfo:ApolloRichPreviewSettingsChangeUserInfo()];
 }
 

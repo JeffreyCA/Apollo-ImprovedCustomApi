@@ -3,7 +3,21 @@
 #import "ApolloAISummary.h"
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloToast.h"
 #import "UserDefaultConstants.h"
+
+// The three mutually-exclusive ways summaries can appear when a thread opens,
+// derived from and persisted to the sEnableTapToSummarize /
+// sEnableAIAutoExpandSummaries defaults (no migration needed):
+//   Generate on Open   -> tap = NO,  autoExpand = NO  (generate, wait collapsed)
+//   Open Automatically -> tap = NO,  autoExpand = YES (generate and expand)
+//   Tap to Summarize   -> tap = YES, autoExpand = NO  (nothing until tapped)
+typedef NS_ENUM(NSInteger, ApolloAISummaryMode) {
+    ApolloAISummaryModeGenerateOnOpen = 0,
+    ApolloAISummaryModeOpenAutomatically,
+    ApolloAISummaryModeTapToSummarize,
+    ApolloAISummaryModeCount,
+};
 
 // ObjC surface exported by ApolloFoundationModels.swift. Resolve it dynamically
 // so this settings screen remains loadable when the build SDK does not contain
@@ -58,22 +72,24 @@
         }];
     commentSummaries.enabled = ^BOOL { return sEnableAISummaries; };
 
-    // Mutually exclusive with Open Summaries Automatically: one is "tap to
-    // generate (and open)", the other is "auto-generate and auto-open" —
-    // they're alternatives, so each greys the other out.
-    ApolloSettingsRow *tapToSummarize =
-        [ApolloSettingsRow switchRowWithID:@"tapToSummarize"
-                                     title:@"Tap to Summarize"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableTapToSummarize]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf tapToSummarizeToggled:sender]; }];
-    tapToSummarize.enabled = ^BOOL { return sEnableAISummaries && !sEnableAIAutoExpandSummaries; };
-
-    ApolloSettingsRow *autoExpand =
-        [ApolloSettingsRow switchRowWithID:@"autoExpand"
-                                     title:@"Open Summaries Automatically"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAIAutoExpandSummaries]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf autoExpandToggled:sender]; }];
-    autoExpand.enabled = ^BOOL { return sEnableAISummaries && !sEnableTapToSummarize; };
+    // The old "Tap to Summarize" / "Open Summaries Automatically" switch pair
+    // (mutually exclusive, with a non-obvious "neither" state) is now a single
+    // three-way picker; see -currentSummaryMode. Greyed while the master switch
+    // is off (valueRow has no .enabled, so configure + onSelect guard).
+    ApolloSettingsRow *summaryMode =
+        [ApolloSettingsRow valueRowWithID:@"summaryMode"
+                                    title:@"When Opening a Thread"
+                                   detail:^NSString * { return [weakSelf titleForSummaryMode:[weakSelf currentSummaryMode]]; }
+                                 onSelect:^{
+            if (!sEnableAISummaries) return;
+            [weakSelf presentSummaryModePicker];
+        }];
+    summaryMode.configure = ^(UITableViewCell *cell) {
+        cell.textLabel.enabled = sEnableAISummaries;
+        cell.detailTextLabel.textColor = sEnableAISummaries ? [UIColor secondaryLabelColor] : [UIColor tertiaryLabelColor];
+        cell.accessoryType = sEnableAISummaries ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+        cell.selectionStyle = sEnableAISummaries ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
+    };
 
     ApolloSettingsRow *availability =
         [ApolloSettingsRow valueRowWithID:@"availability"
@@ -104,8 +120,8 @@
                                          footer:@"Summaries are generated entirely on-device using Apple Intelligence — no post or comment text is sent to an external AI service. Summarizing a linked article does fetch that page from its source website, which happens automatically when you open a thread unless Tap to Summarize is on."
                                            rows:@[ master ]],
         [ApolloSettingsSection sectionWithTitle:@"Summaries"
-                                         footer:@"Tap to Summarize generates only the card you tap, and opens it once it's ready. Open Summaries Automatically instead generates enabled summaries when you open a thread and expands them on their own. These two are alternatives, so turning one on turns the other off."
-                                           rows:@[ postSummaries, commentSummaries, tapToSummarize, autoExpand ]],
+                                         footer:@"When Opening a Thread controls how enabled summaries appear:\n\n• Generate on Open — summaries generate as you open a thread and wait, collapsed, until you tap them.\n• Open Automatically — summaries generate and expand on their own.\n• Tap to Summarize — nothing generates until you tap a summary card, which then opens once it's ready."
+                                           rows:@[ postSummaries, commentSummaries, summaryMode ]],
         [ApolloSettingsSection sectionWithTitle:@"Availability"
                                          footer:@"Availability is diagnostic. On some iOS versions, sideloaded apps may report Apple Intelligence as disabled even when generation still works."
                                            rows:@[ availability ]],
@@ -137,13 +153,49 @@
     }
 }
 
-// Every Summaries switch's on/enabled state depends on the shared globals, so
-// re-read all four after any of them changes.
+// Every Summaries row's on/enabled state depends on the shared globals, so
+// re-read all three after any of them changes.
 - (void)reloadSummaryControls {
     [self reloadRowWithID:@"postSummaries"];
     [self reloadRowWithID:@"commentSummaries"];
-    [self reloadRowWithID:@"tapToSummarize"];
-    [self reloadRowWithID:@"autoExpand"];
+    [self reloadRowWithID:@"summaryMode"];
+}
+
+#pragma mark - Summary mode
+
+- (ApolloAISummaryMode)currentSummaryMode {
+    if (sEnableTapToSummarize) return ApolloAISummaryModeTapToSummarize;
+    if (sEnableAIAutoExpandSummaries) return ApolloAISummaryModeOpenAutomatically;
+    return ApolloAISummaryModeGenerateOnOpen;
+}
+
+- (NSString *)titleForSummaryMode:(ApolloAISummaryMode)mode {
+    switch (mode) {
+        case ApolloAISummaryModeOpenAutomatically: return @"Open Automatically";
+        case ApolloAISummaryModeTapToSummarize:    return @"Tap to Summarize";
+        default:                                   return @"Generate on Open";
+    }
+}
+
+- (void)applySummaryMode:(ApolloAISummaryMode)mode {
+    sEnableTapToSummarize = (mode == ApolloAISummaryModeTapToSummarize);
+    sEnableAIAutoExpandSummaries = (mode == ApolloAISummaryModeOpenAutomatically);
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setBool:sEnableTapToSummarize forKey:UDKeyEnableTapToSummarize];
+    [defaults setBool:sEnableAIAutoExpandSummaries forKey:UDKeyEnableAIAutoExpandSummaries];
+    [self reloadRowWithID:@"summaryMode"];
+}
+
+- (void)presentSummaryModePicker {
+    NSMutableArray<NSString *> *titles = [NSMutableArray arrayWithCapacity:ApolloAISummaryModeCount];
+    for (ApolloAISummaryMode mode = 0; mode < ApolloAISummaryModeCount; mode++) {
+        [titles addObject:[self titleForSummaryMode:mode]];
+    }
+    __weak __typeof(self) weakSelf = self;
+    ApolloSettingsPresentPicker(self, [self cellForRowID:@"summaryMode"], @"When Opening a Thread",
+                                titles, [self currentSummaryMode], ^(NSInteger pickedIndex) {
+        [weakSelf applySummaryMode:(ApolloAISummaryMode)pickedIndex];
+    });
 }
 
 #pragma mark - Actions
@@ -151,29 +203,6 @@
 - (void)masterToggled:(UISwitch *)sender {
     sEnableAISummaries = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sEnableAISummaries forKey:UDKeyEnableAISummaries];
-    [self reloadSummaryControls];
-}
-
-- (void)tapToSummarizeToggled:(UISwitch *)sender {
-    sEnableTapToSummarize = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sEnableTapToSummarize forKey:UDKeyEnableTapToSummarize];
-    // Mutually exclusive with Open Summaries Automatically — turning this on turns
-    // that off, then reload so the other row greys/ungreys to match.
-    if (sEnableTapToSummarize && sEnableAIAutoExpandSummaries) {
-        sEnableAIAutoExpandSummaries = NO;
-        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyEnableAIAutoExpandSummaries];
-    }
-    [self reloadSummaryControls];
-}
-
-- (void)autoExpandToggled:(UISwitch *)sender {
-    sEnableAIAutoExpandSummaries = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sEnableAIAutoExpandSummaries forKey:UDKeyEnableAIAutoExpandSummaries];
-    // Mutually exclusive with Tap to Summarize (see above).
-    if (sEnableAIAutoExpandSummaries && sEnableTapToSummarize) {
-        sEnableTapToSummarize = NO;
-        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyEnableTapToSummarize];
-    }
     [self reloadSummaryControls];
 }
 
@@ -187,15 +216,12 @@
                                              style:UIAlertActionStyleDestructive
                                            handler:^(__unused UIAlertAction *action) {
         NSUInteger removed = ApolloAIClearSummaryCache();
-        NSString *message = removed == 1
-            ? @"Removed 1 cached summary."
-            : [NSString stringWithFormat:@"Removed %lu cached summaries.", (unsigned long)removed];
-        UIAlertController *done =
-            [UIAlertController alertControllerWithTitle:@"AI Cache Cleared"
-                                                message:message
-                                         preferredStyle:UIAlertControllerStyleAlert];
-        [done addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:done animated:YES completion:nil];
+        NSString *detail = removed == 1
+            ? @"Removed 1 cached summary"
+            : [NSString stringWithFormat:@"Removed %lu cached summaries", (unsigned long)removed];
+        // Pure success confirmation — a toast doesn't demand a second tap the
+        // way the old OK alert did.
+        ApolloShowToastWithStyle(@"AI Cache Cleared", detail, ApolloToastStyleSuccess, nil);
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     alert.popoverPresentationController.sourceView = cell ?: self.view;

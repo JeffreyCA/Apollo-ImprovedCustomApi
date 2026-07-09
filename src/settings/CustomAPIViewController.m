@@ -1,5 +1,6 @@
 #import "settings/CustomAPIViewController.h"
 #import "ApolloCommon.h"
+#import "settings/ApolloGetStartedCard.h"
 #import "ApolloNotificationBackend.h"
 #import "ApolloBarkNotifications.h"
 #import "ApolloPushNotifications.h"
@@ -453,10 +454,119 @@ typedef NS_ENUM(NSInteger, Tag) {
     self.title = @"Apollo Reborn";
     self.tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
     [self apollo_disableAutoHideTabBarIdleIfUnsupported];
+    [self updateGetStartedCard];
 
     [[ApolloSubredditInfoCache sharedCache] requestInfoForSubreddit:kApolloRebornSubredditName completion:^(ApolloSubredditInfo *info) {
         (void)info;
     }];
+}
+
+#pragma mark - Get Started card
+
+// A status-driven onboarding card at the top of the hub. It lists the required
+// setup steps (Reddit API key + signed-in account) plus an optional-keys nudge,
+// and collapses entirely once the required steps are done. It rides the
+// tableHeaderView, so it adds zero rows/sections to the form's index space.
+- (void)updateGetStartedCard {
+    BOOL redditKeySet = sRedditClientId.length > 0;
+    BOOL signedIn = ApolloActiveAccountUsername().length > 0;
+
+    // Collapse the card the moment the essentials are in place.
+    if (redditKeySet && signedIn) {
+        if (self.tableView.tableHeaderView) self.tableView.tableHeaderView = nil;
+        return;
+    }
+
+    NSInteger remaining = (redditKeySet ? 0 : 1) + (signedIn ? 0 : 1);
+    NSString *subtitle = (remaining == 1)
+        ? @"One step to go — you're almost set."
+        : @"A couple of quick steps to get Apollo working.";
+
+    __weak typeof(self) weakSelf = self;
+    NSMutableArray<ApolloGetStartedStep *> *steps = [NSMutableArray array];
+
+    [steps addObject:[ApolloGetStartedStep stepWithTitle:@"Add your Reddit API key"
+                                                subtitle:(redditKeySet ? nil : @"Tap to jump to the API Keys field.")
+                                                    done:redditKeySet
+                                              actionable:!redditKeySet
+                                                  action:^{ [weakSelf getStartedFocusRedditKey]; }]];
+
+    BOOL canReachAccount = !signedIn
+        && [ApolloMainTabBarController() respondsToSelector:@selector(goToProfileTab)];
+    [steps addObject:[ApolloGetStartedStep stepWithTitle:@"Sign in to Reddit"
+                                                subtitle:(signedIn ? nil : @"Sign in from the Account tab using your key.")
+                                                    done:signedIn
+                                              actionable:canReachAccount
+                                                  action:^{ [weakSelf getStartedGoToAccountTab]; }]];
+
+    // Optional keys: never blocks completion, only shown during onboarding.
+    BOOL giphySet = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyGiphyAPIKey].length > 0;
+    BOOL optionalDone = sImgurClientId.length > 0 && sImageChestAPIToken.length > 0 && giphySet;
+    ApolloGetStartedStep *optional =
+        [ApolloGetStartedStep stepWithTitle:@"Optional upload keys"
+                                   subtitle:@"Imgur / Img Chest images and Giphy GIFs."
+                                       done:optionalDone
+                                 actionable:YES
+                                     action:^{ [weakSelf getStartedFocusRedditKey]; }];
+    optional.badge = @"Optional";
+    [steps addObject:optional];
+
+    ApolloGetStartedCardView *card =
+        [[ApolloGetStartedCardView alloc] initWithTitle:@"Get Started"
+                                               subtitle:subtitle
+                                                  steps:steps
+                                            accentColor:[self apollo_themeAccentColor]
+                                          cardBackground:[self apollo_themeCellBackgroundColor]];
+
+    CGFloat width = self.tableView.bounds.size.width;
+    if (width <= 0) width = UIScreen.mainScreen.bounds.size.width;
+    CGFloat height = [card heightForWidth:width];
+    card.frame = CGRectMake(0, 0, width, height);
+    self.tableView.tableHeaderView = card;
+}
+
+- (void)getStartedFocusRedditKey {
+    // By identity, not index math — the form layer owns the geometry.
+    NSIndexPath *ip = [self indexPathForRowID:@"api.redditKey"];
+    if (!ip) return;
+    [self.tableView scrollToRowAtIndexPath:ip atScrollPosition:UITableViewScrollPositionTop animated:YES];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UITableViewCell *cell = [self cellForRowID:@"api.redditKey"];
+        UITextField *field = [self apollo_firstTextFieldInView:cell.contentView];
+        [field becomeFirstResponder];
+    });
+}
+
+- (UITextField *)apollo_firstTextFieldInView:(UIView *)view {
+    for (UIView *sub in view.subviews) {
+        if ([sub isKindOfClass:[UITextField class]]) return (UITextField *)sub;
+        UITextField *nested = [self apollo_firstTextFieldInView:sub];
+        if (nested) return nested;
+    }
+    return nil;
+}
+
+- (void)getStartedGoToAccountTab {
+    UIViewController *tab = ApolloMainTabBarController();
+    if ([tab respondsToSelector:@selector(goToProfileTab)]) {
+        ((void (*)(id, SEL))objc_msgSend)(tab, @selector(goToProfileTab));
+    }
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    // tableHeaderView isn't auto-sized: keep its height in sync with the current
+    // width (first real layout, rotation, split-view resize). Only re-assign when
+    // the size actually changed so this doesn't loop.
+    UIView *header = self.tableView.tableHeaderView;
+    if (![header isKindOfClass:[ApolloGetStartedCardView class]]) return;
+    CGFloat width = self.tableView.bounds.size.width;
+    if (width <= 0) return;
+    CGFloat height = [(ApolloGetStartedCardView *)header heightForWidth:width];
+    if (fabs(header.frame.size.width - width) > 0.5 || fabs(header.frame.size.height - height) > 0.5) {
+        header.frame = CGRectMake(0, 0, width, height);
+        self.tableView.tableHeaderView = header;
+    }
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -471,6 +581,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self reloadRowWithID:@"ai.settings"];
     [self reloadRowWithID:@"inlineMedia.settings"];
     [self reloadRowWithID:@"linkPreviews.settings"];
+    // Sign-in state may have changed while we were on the Account tab.
+    [self updateGetStartedCard];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -2234,6 +2346,13 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     if ([self apollo_isMaskedAPIKeyTag:textField.tag]) {
         textField.secureTextEntry = YES;
+    }
+
+    // The Reddit key or an optional key may have just changed — refresh the
+    // Get Started card's checklist (and collapse it if setup is now complete).
+    if (textField.tag == TagRedditClientId || textField.tag == TagImgurClientId ||
+        textField.tag == TagImageChestAPIToken || textField.tag == TagGiphyAPIKey) {
+        [self updateGetStartedCard];
     }
 }
 
