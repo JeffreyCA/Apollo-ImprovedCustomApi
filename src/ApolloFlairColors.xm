@@ -74,6 +74,9 @@ static char kApolloFlairTextNodeForegroundKey;
 // hash color and the flair drifts to a wrong shade (e.g. purple -> teal).
 static char kApolloFlairNodeResolvedBackgroundKey;
 static char kApolloFlairNodeResolvedTextKey;
+// Guards the re-tag/recolor pass inside the setBackgroundColor: chokepoint so a
+// nested background/text write can't re-enter it.
+static char kApolloFlairReentrancyKey;
 
 #pragma mark - Fallback cache (text -> colors)
 
@@ -589,18 +592,71 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
 
 - (void)didEnterVisibleState {
     %orig;
-    // THIS is the callback that fires when the app returns from the background.
-    // On app background, Texture clears the node's Visible interface state while
-    // typically RETAINING the Display state, so didEnterDisplayState does NOT
-    // re-fire on foreground — only didEnterVisibleState does. Apollo re-themes the
-    // flair to its default grey during its own %orig here, so we reapply our
-    // colors AFTER %orig to win the race. Idempotent (no-op if already colored).
+    // Fires when the app returns from the background. This reapply is a best-effort
+    // reapply, but it is NOT the guarantee: Apollo's v3.4.0 Theme-Manager repaint
+    // re-themes the flair pill grey as part of a trait-change cascade that runs
+    // independently of — and can land AFTER — this callback, so a lifecycle-timed
+    // reapply cannot reliably win the race. The real guarantee is the write-time
+    // setBackgroundColor: chokepoint below (mirroring the text chokepoint). We keep
+    // this reapply because it's cheap and idempotent and covers the non-race paths.
     static NSUInteger sVisibleLogCount = 0;
     if (sVisibleLogCount < 20) {
         sVisibleLogCount++;
         ApolloLog(@"[FlairColors] FlairNode.didEnterVisibleState enabled=%d reapplying", (int)sEnableFlairColors);
     }
     ApolloFlairApply(self, YES);
+}
+
+// Write-time chokepoint for the flair PILL BACKGROUND — the missing half of the
+// #391 fix. #391 hardened the flair TEXT color with a setAttributedText:
+// chokepoint (below) but left the pill background protected only by the
+// lifecycle-callback reapply above (ApolloFlairSetBackground, run only from
+// ApolloFlairApply). That reapply is a race with no last-writer guarantee: on app
+// foreground Apollo re-themes the flair pill to its default grey as part of a
+// trait-change / Theme-Manager repaint that runs independently of — and can land
+// after — didEnterVisibleState, so the grey write is the final writer and the
+// pill stays grey until the next scroll (didEnterDisplayState re-runs
+// ApolloFlairApply). We close that race the same way the text color is protected:
+// re-impose our memoized background for any FlairNode we've colored, regardless of
+// which path issued the grey write. Strict no-op for any flair we never colored
+// and when the feature is off.
+- (void)setBackgroundColor:(UIColor *)color {
+    if (!sEnableFlairColors) { %orig; return; }
+
+    UIColor *memo = objc_getAssociatedObject(self, &kApolloFlairNodeResolvedBackgroundKey);
+    // Never-colored flair (feature was off when it rendered, or we chose not to
+    // color it): pass straight through, behaves exactly like stock.
+    if (!memo) { %orig; return; }
+    // Our own write (ApolloFlairSetBackground sets exactly this color): pass it
+    // through unchanged — no substitution, so there is no write loop. (%orig is the
+    // raw setter IMP and never re-enters this hook; this branch just avoids the
+    // redundant corner-radius/text work below on our own writes.)
+    if ([color isEqual:memo]) { %orig; return; }
+
+    static NSUInteger sBGChokeLog = 0;
+    if (sBGChokeLog < 20) {
+        sBGChokeLog++;
+        ApolloLog(@"[FlairColors] setBackgroundColor: re-imposing memoized flair color over %@", color);
+    }
+
+    // Apollo tried to paint grey — re-impose our color and restore the pill
+    // geometry ApolloFlairSetBackground normally sets.
+    %orig(memo);
+    ((void (*)(id, SEL, double))objc_msgSend)(self, @selector(setCornerRadius:), 4.0);
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(self, @selector(setClipsToBounds:), YES);
+
+    // Apollo rebuilds the content text nodes on the same re-theme; the rebuilt
+    // nodes are fresh and untagged, so the setAttributedText: chokepoint no-ops on
+    // them until ApolloFlairApply runs again (a scroll). Re-tag and recolor the
+    // CURRENT content nodes here so the text survives the re-theme too, without
+    // waiting for a scroll. Idempotent; reentrancy-guarded.
+    if (!objc_getAssociatedObject(self, &kApolloFlairReentrancyKey)) {
+        objc_setAssociatedObject(self, &kApolloFlairReentrancyKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        NSArray *contentNodes = ApolloFlairSwiftArrayIvar(self, "contentNodes");
+        UIColor *memoText = objc_getAssociatedObject(self, &kApolloFlairNodeResolvedTextKey);
+        ApolloFlairRecolorTextNodes(contentNodes, memoText);
+        objc_setAssociatedObject(self, &kApolloFlairReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
 }
 
 %end
