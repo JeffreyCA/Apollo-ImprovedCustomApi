@@ -1079,20 +1079,103 @@ static UIColor *ApolloDeletedCommentsBodyLinkColor(void) {
 // here (they need Apollo's native image nodes and media_metadata the archive rarely carries),
 // but the far more common text markdown now renders. Each pass rewrites matches right-to-left
 // so ranges stay valid as the string shrinks.
+// Markdown-escapable punctuation is temporarily swapped to private-use placeholders so
+// the inline regex passes can't see it; restored to the literal characters at the end.
+static NSString *const kApolloDeletedCommentsEscapables = @"\\`*_{}[]()#+-.!~>|";
+static unichar ApolloDeletedCommentsEscapePlaceholderFor(NSUInteger idx) { return (unichar)(0xE100 + idx); }
+
 static NSAttributedString *ApolloDeletedCommentsAttributedStringFromMarkdown(NSString *markdown, NSDictionary *baseAttributes) {
     NSDictionary *base = [baseAttributes isKindOfClass:[NSDictionary class]] ? baseAttributes : @{};
-    NSMutableAttributedString *attr = [[NSMutableAttributedString alloc] initWithString:(markdown ?: @"") attributes:base];
-    if (attr.length == 0) return attr;
+    if (markdown.length == 0) return [[NSAttributedString alloc] initWithString:@"" attributes:base];
 
     UIFont *baseFont = base[NSFontAttributeName];
     if (![baseFont isKindOfClass:[UIFont class]]) baseFont = [UIFont systemFontOfSize:15.0];
+    UIColor *baseColor = base[NSForegroundColorAttributeName];
+
+    // 0) Backslash escapes (\* \_ \[ ...) — swap the escaped char to a placeholder so no
+    //    later pass treats it as syntax (fixes stray "\*" showing in recovered bodies).
+    NSMutableString *source = [markdown mutableCopy];
+    for (NSUInteger i = 0; i + 1 < source.length; i++) {
+        if ([source characterAtIndex:i] != '\\') continue;
+        unichar next = [source characterAtIndex:i + 1];
+        NSUInteger idx = [kApolloDeletedCommentsEscapables rangeOfString:[NSString stringWithCharacters:&next length:1]].location;
+        if (idx == NSNotFound) continue;
+        [source replaceCharactersInRange:NSMakeRange(i, 2)
+                              withString:[NSString stringWithCharacters:(unichar[]){ApolloDeletedCommentsEscapePlaceholderFor(idx)} length:1]];
+    }
+
+    // 1) Line-level markdown: blockquotes, bullet/numbered lists, headers. Markers are
+    //    stripped here and the line is styled via paragraph indents, so the inline passes
+    //    below never see them (fixes "> quote" and "* bullet" showing literally).
+    NSMutableAttributedString *attr = [[NSMutableAttributedString alloc] init];
+    NSParagraphStyle *baseParagraph = base[NSParagraphStyleAttributeName];
+    NSArray<NSString *> *lines = [source componentsSeparatedByString:@"\n"];
+    [lines enumerateObjectsUsingBlock:^(NSString *line, NSUInteger lineIdx, __unused BOOL *stop) {
+        NSString *content = line;
+        NSMutableDictionary *lineAttrs = [base mutableCopy];
+        NSMutableParagraphStyle *paragraph = nil;
+
+        // Blockquote: one or more leading "> " markers.
+        NSUInteger quoteLevel = 0;
+        while (YES) {
+            NSString *trimmedHead = [content stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            if (![trimmedHead hasPrefix:@">"]) break;
+            NSRange gt = [content rangeOfString:@">"];
+            content = [content substringFromIndex:NSMaxRange(gt)];
+            if ([content hasPrefix:@" "]) content = [content substringFromIndex:1];
+            quoteLevel++;
+        }
+        if (quoteLevel > 0) {
+            paragraph = [(baseParagraph ?: [NSParagraphStyle defaultParagraphStyle]) mutableCopy];
+            paragraph.firstLineHeadIndent += 14.0 * quoteLevel;
+            paragraph.headIndent += 14.0 * quoteLevel;
+            if ([baseColor isKindOfClass:[UIColor class]]) {
+                lineAttrs[NSForegroundColorAttributeName] = [baseColor colorWithAlphaComponent:0.72];
+            }
+            lineAttrs[NSFontAttributeName] = ApolloDeletedCommentsFontByAddingTraits(baseFont, UIFontDescriptorTraitItalic);
+        } else {
+            // Header: 1-6 leading #'s.
+            NSRegularExpression *headerRe = [NSRegularExpression regularExpressionWithPattern:@"^(#{1,6})\\s+(.*)$" options:0 error:nil];
+            NSTextCheckingResult *header = [headerRe firstMatchInString:content options:0 range:NSMakeRange(0, content.length)];
+            if (header) {
+                NSUInteger level = [header rangeAtIndex:1].length;
+                content = [content substringWithRange:[header rangeAtIndex:2]];
+                CGFloat bump = level <= 2 ? 3.0 : 1.5;
+                UIFont *headerFont = ApolloDeletedCommentsFontByAddingTraits([baseFont fontWithSize:baseFont.pointSize + bump], UIFontDescriptorTraitBold);
+                lineAttrs[NSFontAttributeName] = headerFont;
+            } else {
+                // Bullet / numbered list item.
+                NSRegularExpression *bulletRe = [NSRegularExpression regularExpressionWithPattern:@"^(\\s*)[*+-]\\s+(.*)$" options:0 error:nil];
+                NSTextCheckingResult *bullet = [bulletRe firstMatchInString:content options:0 range:NSMakeRange(0, content.length)];
+                NSRegularExpression *numberRe = [NSRegularExpression regularExpressionWithPattern:@"^(\\s*)(\\d{1,3})[.)]\\s+(.*)$" options:0 error:nil];
+                NSTextCheckingResult *number = bullet ? nil : [numberRe firstMatchInString:content options:0 range:NSMakeRange(0, content.length)];
+                if (bullet || number) {
+                    NSString *marker = bullet ? @"•" : [NSString stringWithFormat:@"%@.", [content substringWithRange:[number rangeAtIndex:2]]];
+                    NSString *item = [content substringWithRange:[(bullet ?: number) rangeAtIndex:bullet ? 2 : 3]];
+                    content = [NSString stringWithFormat:@"%@ %@", marker, item];
+                    paragraph = [(baseParagraph ?: [NSParagraphStyle defaultParagraphStyle]) mutableCopy];
+                    paragraph.firstLineHeadIndent += 6.0;
+                    paragraph.headIndent += 20.0;
+                }
+            }
+        }
+
+        if (paragraph) lineAttrs[NSParagraphStyleAttributeName] = paragraph;
+        if (lineIdx > 0) {
+            // The newline carries the PREVIOUS line's paragraph style ending; give it the
+            // new line's attrs so indents apply from the line start.
+            [attr appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n" attributes:lineAttrs]];
+        }
+        [attr appendAttributedString:[[NSAttributedString alloc] initWithString:content attributes:lineAttrs]];
+    }];
+    if (attr.length == 0) return [[NSAttributedString alloc] initWithString:@"" attributes:base];
 
     NSString *(^substr)(NSRange) = ^NSString *(NSRange r) {
         if (r.location == NSNotFound || NSMaxRange(r) > attr.string.length) return nil;
         return [attr.string substringWithRange:r];
     };
 
-    // 1) Links [text](http(s)://url) — capture url before the replace, keep the visible text.
+    // 2) Links [text](http(s)://url) — capture url before the replace, keep the visible text.
     NSRegularExpression *linkRe = [NSRegularExpression regularExpressionWithPattern:@"\\[([^\\]\\n]+?)\\]\\((https?://[^\\s)]+)\\)" options:0 error:nil];
     UIColor *linkColor = ApolloDeletedCommentsBodyLinkColor();
     NSArray<NSTextCheckingResult *> *linkMatches = [linkRe matchesInString:attr.string options:0 range:NSMakeRange(0, attr.string.length)];
@@ -1138,6 +1221,31 @@ static NSAttributedString *ApolloDeletedCommentsAttributedStringFromMarkdown(NSS
     inlinePass(@"(?<![\\*_])[\\*_]([^\\*_\\n]+?)[\\*_](?![\\*_])", ^(NSRange r) {
         [attr addAttribute:NSFontAttributeName value:ApolloDeletedCommentsFontByAddingTraits(baseFont, UIFontDescriptorTraitItalic) range:r];
     });
+
+    // 6) Bare URLs (Reddit autolinks these) — only where no link attribute exists yet.
+    NSRegularExpression *bareURLRe = [NSRegularExpression regularExpressionWithPattern:@"https?://[^\\s<>\"\\)\\]]+" options:0 error:nil];
+    NSArray<NSTextCheckingResult *> *bareMatches = [bareURLRe matchesInString:attr.string options:0 range:NSMakeRange(0, attr.string.length)];
+    for (NSInteger i = (NSInteger)bareMatches.count - 1; i >= 0; i--) {
+        NSTextCheckingResult *m = bareMatches[i];
+        if ([attr attribute:NSLinkAttributeName atIndex:m.range.location effectiveRange:NULL]) continue;
+        NSURL *linkURL = [NSURL URLWithString:substr(m.range) ?: @""];
+        if (!linkURL) continue;
+        [attr addAttribute:NSLinkAttributeName value:linkURL range:m.range];
+        if (linkColor) [attr addAttribute:NSForegroundColorAttributeName value:linkColor range:m.range];
+    }
+
+    // 7) Restore backslash-escaped characters to their literals.
+    for (NSUInteger idx = 0; idx < kApolloDeletedCommentsEscapables.length; idx++) {
+        unichar placeholder = ApolloDeletedCommentsEscapePlaceholderFor(idx);
+        NSString *needle = [NSString stringWithCharacters:&placeholder length:1];
+        unichar literal = [kApolloDeletedCommentsEscapables characterAtIndex:idx];
+        NSString *replacement = [NSString stringWithCharacters:&literal length:1];
+        NSRange search = [attr.string rangeOfString:needle];
+        while (search.location != NSNotFound) {
+            [attr replaceCharactersInRange:search withString:replacement];
+            search = [attr.string rangeOfString:needle];
+        }
+    }
 
     return attr;
 }
@@ -2583,6 +2691,22 @@ static UIView *ApolloDeletedCommentsHostListViewForCell(id cellNode) {
     return nil;
 }
 
+// Native comment collapse/expand animations run ~0.3-0.5s; give them a little headroom.
+static const NSTimeInterval kApolloDeletedCommentsCollapseSettleWindow = 0.65;
+static NSTimeInterval sApolloDeletedCommentsLastCollapseEventUptime = 0;
+
+static void ApolloDeletedCommentsNoteCollapseEvent(void) {
+    sApolloDeletedCommentsLastCollapseEventUptime = CACurrentMediaTime();
+}
+
+// Seconds until the current collapse animation (if any) has settled; 0 when idle.
+static NSTimeInterval ApolloDeletedCommentsCollapseSettleDelayRemaining(void) {
+    if (sApolloDeletedCommentsLastCollapseEventUptime <= 0) return 0;
+    NSTimeInterval elapsed = CACurrentMediaTime() - sApolloDeletedCommentsLastCollapseEventUptime;
+    if (elapsed >= kApolloDeletedCommentsCollapseSettleWindow) return 0;
+    return kApolloDeletedCommentsCollapseSettleWindow - elapsed;
+}
+
 static void ApolloDeletedCommentsScheduleHostLayoutRefresh(id cellNode) {
     if (!cellNode || !ApolloDeletedCommentsFeatureActive() || !ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(cellNode)) return;
 
@@ -2594,12 +2718,28 @@ static void ApolloDeletedCommentsScheduleHostLayoutRefresh(id cellNode) {
     objc_setAssociatedObject(hostView, kApolloDeletedCommentsHostLayoutRefreshScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     __weak UIView *weakHostView = hostView;
     __weak UIView *weakCellView = cellView;
+    __weak id weakCellNode = cellNode;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UIView *strongHostView = weakHostView;
         UIView *strongCellView = weakCellView;
         if (![strongHostView isKindOfClass:[UIView class]]) return;
 
         objc_setAssociatedObject(strongHostView, kApolloDeletedCommentsHostLayoutRefreshScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        // A collapse/expand animation is in flight: even a non-animated empty
+        // begin/endUpdates here re-queries every row height and restarts the native
+        // delete/insert animations mid-flight (rows visibly jump/glide the wrong
+        // way — issue #620 round 2). Re-arm the refresh for after the animation
+        // settles instead of fighting it.
+        NSTimeInterval settleDelay = ApolloDeletedCommentsCollapseSettleDelayRemaining();
+        if (settleDelay > 0) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((settleDelay + 0.03) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                id strongCellNode = weakCellNode;
+                if (strongCellNode) ApolloDeletedCommentsScheduleHostLayoutRefresh(strongCellNode);
+            });
+            return;
+        }
+
         for (UIView *view = strongCellView; view && view != strongHostView.superview; view = view.superview) {
             [view setNeedsLayout];
             [view setNeedsDisplay];
@@ -2953,7 +3093,24 @@ static void ApolloDeletedCommentsApplyRecoveredArchiveToVisibleCell(id cellNode,
     if (!ApolloDeletedCommentsVisibleCommentNeedsRecoveredArchive(comment, archivedBody)) return;
 
     NSString *reason = ApolloDeletedCommentsDeletedPlaceholderReason(fullName) ?: ApolloDeletedCommentsRecoveredReasonForComment(fullName);
+    BOOL wasCollapsedBeforeApply = ApolloDeletedCommentsCommentIsCollapsed(comment);
     if (!ApolloDeletedCommentsApplyRecoveredArchivedCommentToObject((id)comment, archived, reason)) return;
+
+    // Reddit's server marks removed comments collapsed, and the inline JSON patch
+    // clears that flag (data[@"collapsed"] = @NO) — but when the archive loses the
+    // race and arrives here, after the model was already parsed, the comment stays
+    // collapsed and shows as a bare [deleted] header the user must expand by hand
+    // (regression noted in #620 round 2: bigger Arctic payloads lose the race more
+    // often). We only reach this line for a comment whose body still looked deleted
+    // (VisibleCommentNeedsRecoveredArchive above), so a collapsed state here is the
+    // server's removal-collapse, not a user choice — expand it natively.
+    if (wasCollapsedBeforeApply && [(id)comment respondsToSelector:@selector(setCollapsed:)]) {
+        @try {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)((id)comment, @selector(setCollapsed:), NO);
+            ApolloLog(@"[DeletedComments] Un-collapsed late-recovered comment %@", fullName);
+        } @catch (__unused NSException *e) {}
+    }
+
     objc_setAssociatedObject((id)comment, kApolloDeletedCommentsOriginalBodyKey, [archivedBody copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject((id)comment, kApolloDeletedCommentsOriginalBodyHTMLKey, ApolloDeletedCommentsPlainBodyHTML(archivedBody), OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(cellNode, kApolloDeletedCommentsHiddenTextNodesKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -3474,6 +3631,15 @@ static void ApolloDeletedCommentsRevealCommentInsteadOfCollapsing(RDKComment *co
         objc_setAssociatedObject((id)self, kApolloDeletedCommentsSuppressNextCollapseKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return;
     }
+
+    // Stamp the collapse/expand moment. The host-wide height fixup
+    // (ScheduleHostLayoutRefresh) defers itself while a collapse animation is in
+    // flight: an empty beginUpdates/endUpdates mid-animation re-queries every row
+    // height and restarts the native delete/insert animations, which is what made
+    // sibling rows glide the wrong way during a collapse (issue #620, round 2).
+    // Parse-time setCollapsed: storms also stamp this, but that only delays the
+    // initial height fixup by <=0.65s, which is harmless.
+    ApolloDeletedCommentsNoteCollapseEvent();
 
     // Collapse/expand stays fully native here and never reveals: revealing is a
     // separate chip-region tap handled by the cell's reveal recognizer. (Earlier

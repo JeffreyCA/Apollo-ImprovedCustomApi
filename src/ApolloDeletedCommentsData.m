@@ -605,11 +605,36 @@ NSString *ApolloDeletedCommentsRedditBodyHTML(NSString *body) {
 // unescapes a comment's body_html exactly once before parsing, so we escape it a single time
 // here to match Reddit's own body_html wire format. Falls back to the regex converter when the
 // archive has no usable HTML.
+// Arctic's md2html percent-encodes hrefs a second time when the source URL was already
+// encoded (e.g. wiki/Malgr%C3%A9-elles becomes href="...Malgr%25C3%25A9-elles"), which
+// breaks the link target and the tweak's link previews. Repair each href containing %25
+// by decoding it once — but only when the decoded URL literally appears in the raw
+// markdown body, so URLs that genuinely contain %25 are left alone.
+static NSString *ApolloDeletedCommentsRepairDoubleEncodedHrefs(NSString *html, NSString *rawBody) {
+    if (html.length == 0 || rawBody.length == 0) return html;
+    if ([html rangeOfString:@"%25"].location == NSNotFound) return html;
+
+    NSRegularExpression *hrefRe = [NSRegularExpression regularExpressionWithPattern:@"href=\"([^\"]+)\"" options:0 error:nil];
+    NSMutableString *repaired = [html mutableCopy];
+    NSArray<NSTextCheckingResult *> *matches = [hrefRe matchesInString:html options:0 range:NSMakeRange(0, html.length)];
+    for (NSInteger i = (NSInteger)matches.count - 1; i >= 0; i--) {
+        NSRange urlRange = [matches[i] rangeAtIndex:1];
+        NSString *url = [html substringWithRange:urlRange];
+        if ([url rangeOfString:@"%25"].location == NSNotFound) continue;
+        NSString *decoded = [url stringByReplacingOccurrencesOfString:@"%25" withString:@"%"];
+        if (![rawBody containsString:decoded]) continue;
+        [repaired replaceCharactersInRange:urlRange withString:decoded];
+    }
+    return repaired;
+}
+
 static NSString *ApolloDeletedCommentsModelBodyHTMLForArchive(NSDictionary *archived, NSString *fallbackBody) {
     NSString *archivedHTML = [archived[@"body_html"] isKindOfClass:[NSString class]] ? archived[@"body_html"] : nil;
     if (archivedHTML.length > 0) {
         NSString *archivedText = ApolloDeletedCommentsUnescapedHTMLText(archivedHTML);
         if (!ApolloDeletedCommentsBodyLooksDeleted(archivedText)) {
+            NSString *rawBody = [archived[@"body"] isKindOfClass:[NSString class]] ? archived[@"body"] : fallbackBody;
+            archivedHTML = ApolloDeletedCommentsRepairDoubleEncodedHrefs(archivedHTML, rawBody);
             return ApolloDeletedCommentsEscapeHTML(archivedHTML);
         }
     }
@@ -1108,6 +1133,21 @@ static NSUInteger ApolloDeletedCommentsPatchRedditJSONNode(id node, NSDictionary
             NSString *currentBodyHTML = [data[@"body_html"] isKindOfClass:[NSString class]] ? data[@"body_html"] : nil;
             BOOL currentLooksDeleted = ApolloDeletedCommentsCommentDataLooksDeleted(data);
             if (currentLooksDeleted && stats) stats->deletedLookingCount++;
+            if (currentLooksDeleted) {
+                // Reddit's server marks removed comments collapsed. Clear that up
+                // front for EVERY deleted-looking comment — not just ones whose
+                // archive already answered — so the row always renders expanded with
+                // its placeholder/reason chip, and a late-arriving archive only has
+                // to fill the body in. Before this, a slow Arctic response (bigger
+                // md2html payloads) left these as bare collapsed [deleted] stubs the
+                // user had to expand by hand (#620 round 2 regression). Collapse
+                // state is only ever server-removal here: user collapses happen
+                // in-app after parse, never in the wire JSON.
+                data[@"collapsed"] = @NO;
+                data[@"collapsed_because_crowd_control"] = @NO;
+                data[@"collapsed_reason"] = [NSNull null];
+                data[@"collapsed_reason_code"] = [NSNull null];
+            }
             if (currentLooksDeleted && archivedBody.length > 0 && !ApolloDeletedCommentsBodyLooksDeleted(archivedBody)) {
                 if (stats) stats->recoverableCount++;
                 NSString *author = [archived[@"author"] isKindOfClass:[NSString class]] ? archived[@"author"] : nil;

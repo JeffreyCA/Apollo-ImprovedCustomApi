@@ -1002,6 +1002,14 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
     ApolloRedditCaptureBearerTokenFromRequest(request, @"__NSCFLocalSessionTask _originalRequest");
     ApolloRedditCaptureBearerTokenFromRequest(currentRequest, @"__NSCFLocalSessionTask _currentRequest");
 
+    // Observe comments requests at RESUME time as well as at task creation. Once the
+    // app has been running for a while, Apollo can hand us tasks whose creation never
+    // passed through the hooked dataTaskWith… selectors (seen with single-comment
+    // permalink views: only the resume fired, so the Arctic warm never started and the
+    // deleted comment rendered as a bare chip — issue #620 round 2). Observation is
+    // cheap (parses reddit-host comments URLs only) and warming is deduped downstream.
+    ApolloDeletedCommentsHandleRequestObservation(request ?: currentRequest, @"onqueue_resume");
+
     NSURLRequest *redditMediaRequest = ApolloRedditMaybeRewriteSubmitRequest(request) ?: ApolloRedditMaybeRewriteSubmitRequest(currentRequest);
     if (!redditMediaRequest) {
         redditMediaRequest = ApolloRedditMaybeRewriteCommentRequest(request) ?: ApolloRedditMaybeRewriteCommentRequest(currentRequest);
