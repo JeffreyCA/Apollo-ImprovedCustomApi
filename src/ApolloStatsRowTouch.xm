@@ -599,7 +599,7 @@ static void SRTActivateTarget(id cell, UIView *cellView, ApolloSRTTarget *target
             id comment = SRTIvar(cell, "comment");
             UIWindow *window = cellView.window;
             CGRect anchor = window ? [cellView convertRect:target.rect toView:nil] : CGRectNull;
-            ApolloPresentInfoDetail(ik, link, comment, anchor, window);
+            ApolloPresentInfoDetail(ik, link, comment, cellView, anchor, window);
             break;
         }
         case SRTStatKindTranslation:

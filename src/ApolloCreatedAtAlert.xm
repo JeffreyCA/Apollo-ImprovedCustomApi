@@ -60,6 +60,18 @@ static NSDateFormatter *ApolloAbsoluteDateFormatter(void) {
     return fmt;
 }
 
+// Shorter "Jul 8, 2026 at 12:26 PM" form for the compact overlay card.
+static NSDateFormatter *ApolloCompactDateFormatter(void) {
+    static NSDateFormatter *fmt;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        fmt = [[NSDateFormatter alloc] init];
+        fmt.dateStyle = NSDateFormatterMediumStyle;
+        fmt.timeStyle = NSDateFormatterShortStyle;
+    });
+    return fmt;
+}
+
 static id ApolloIvarValueByName(id obj, const char *name) {
     if (!obj || !name) return nil;
     Class cls = object_getClass(obj);
@@ -97,11 +109,14 @@ static NSString *ApolloRelativeAgoString(NSDate *date) {
 @property (nonatomic, readonly) NSDate *edited;
 @end
 
-// Build the two text lines for an info kind. line1 = the bold headline (also the
-// popup title), line2 = the detail (also the popup message); line2 may be nil.
-// Returns NO when there's no data to show (e.g. never edited, no ratio).
-static BOOL ApolloInfoLinesForKind(ApolloInfoKind kind, id link, id comment,
+// Build the two text lines for an info kind. line1 = the bold headline, line2 =
+// the detail (may be nil). `condensed` (the overlay) trims the phrasing and uses
+// a shorter date so the little card stays small; the full form (the popup) keeps
+// Apollo's alert wording. Returns NO when there's no data to show.
+static BOOL ApolloInfoLinesForKind(ApolloInfoKind kind, id link, id comment, BOOL condensed,
                                    NSString **outLine1, NSString **outLine2) {
+    NSDateFormatter *dateFmt = condensed ? ApolloCompactDateFormatter() : ApolloAbsoluteDateFormatter();
+    *outLine2 = nil;
     switch (kind) {
         case ApolloInfoKindAge: {
             BOOL isComment = (comment != nil);
@@ -111,8 +126,9 @@ static BOOL ApolloInfoLinesForKind(ApolloInfoKind kind, id link, id comment,
             NSString *rel = ApolloRelativeAgoString(date) ?: @"Just now";
             *outLine1 = [rel isEqualToString:@"Just now"] ? [NSString stringWithFormat:@"%@ %@", verb, rel]
                                                           : [NSString stringWithFormat:@"%@ %@ Ago", verb, rel];
-            *outLine2 = (fabs([date timeIntervalSinceNow]) >= 5.0)
-                ? [NSString stringWithFormat:@"%@ on %@", verb, [ApolloAbsoluteDateFormatter() stringFromDate:date]] : nil;
+            if (fabs([date timeIntervalSinceNow]) < 5.0) return YES;
+            *outLine2 = condensed ? [dateFmt stringFromDate:date]
+                                  : [NSString stringWithFormat:@"%@ on %@", verb, [dateFmt stringFromDate:date]];
             return YES;
         }
         case ApolloInfoKindPercentage: {
@@ -121,7 +137,7 @@ static BOOL ApolloInfoLinesForKind(ApolloInfoKind kind, id link, id comment,
             if (ratio <= 0.0 || ratio > 1.0) return NO;
             long pct = lround(ratio * 100.0);
             *outLine1 = [NSString stringWithFormat:@"%ld%% Upvoted", pct];
-            *outLine2 = [NSString stringWithFormat:@"%ld%% of voters upvoted this post.", pct];
+            *outLine2 = condensed ? nil : [NSString stringWithFormat:@"%ld%% of voters upvoted this post.", pct];
             return YES;
         }
         case ApolloInfoKindEdited: {
@@ -130,21 +146,24 @@ static BOOL ApolloInfoLinesForKind(ApolloInfoKind kind, id link, id comment,
             NSString *rel = ApolloRelativeAgoString(date) ?: @"Just now";
             *outLine1 = [rel isEqualToString:@"Just now"] ? @"Edited Just now"
                                                           : [NSString stringWithFormat:@"Edited %@ Ago", rel];
-            *outLine2 = (fabs([date timeIntervalSinceNow]) >= 5.0)
-                ? [NSString stringWithFormat:@"Last edited on %@", [ApolloAbsoluteDateFormatter() stringFromDate:date]] : nil;
+            if (fabs([date timeIntervalSinceNow]) < 5.0) return YES;
+            *outLine2 = condensed ? [dateFmt stringFromDate:date]
+                                  : [NSString stringWithFormat:@"Last edited on %@", [dateFmt stringFromDate:date]];
             return YES;
         }
     }
     return NO;
 }
 
-BOOL ApolloPresentInfoDetail(ApolloInfoKind kind, id link, id comment, CGRect anchorRectInWindow, UIWindow *window) {
+BOOL ApolloPresentInfoDetail(ApolloInfoKind kind, id link, id comment, UIView *anchorView,
+                             CGRect anchorRectInWindow, UIWindow *window) {
     if (!sInfoRowPopupMode && !sInfoRowOverlayMode) return NO;   // both off: inert
+    BOOL overlay = sInfoRowOverlayMode && window && !CGRectIsEmpty(anchorRectInWindow) && !CGRectIsNull(anchorRectInWindow);
     NSString *line1 = nil, *line2 = nil;
-    if (!ApolloInfoLinesForKind(kind, link, comment, &line1, &line2) || line1.length == 0) return NO;
+    if (!ApolloInfoLinesForKind(kind, link, comment, /*condensed=*/overlay, &line1, &line2) || line1.length == 0) return NO;
 
-    if (sInfoRowOverlayMode && window && !CGRectIsEmpty(anchorRectInWindow) && !CGRectIsNull(anchorRectInWindow)) {
-        ApolloPresentInfoOverlay(line1, line2, anchorRectInWindow, window);
+    if (overlay) {
+        ApolloPresentInfoOverlay(line1, line2, anchorView, anchorRectInWindow);
         return YES;
     }
     // Popup mode (or overlay with no resolvable anchor → fall back to the popup so
@@ -160,15 +179,21 @@ BOOL ApolloPresentInfoDetail(ApolloInfoKind kind, id link, id comment, CGRect an
 
 // MARK: - Transient info overlay (Info Row "Overlay" mode)
 
-// Tag so only one overlay is ever on screen (rapid taps replace, not stack).
+// Only one overlay on screen at a time (rapid taps replace, not stack).
 static const NSInteger kApolloTimeOverlayTag = 0x54494D45;  // 'TIME'
+static __weak UIView *sApolloTimeOverlay = nil;
 
-void ApolloPresentInfoOverlay(NSString *line1, NSString *line2, CGRect anchorRectInWindow, UIWindow *window) {
-    if (line1.length == 0 || !window) return;
+void ApolloPresentInfoOverlay(NSString *line1, NSString *line2, UIView *anchorView, CGRect anchorRectInWindow) {
+    if (line1.length == 0 || !anchorView) return;
 
-    for (UIView *v in [window.subviews copy]) {
-        if (v.tag == kApolloTimeOverlayTag) [v removeFromSuperview];
-    }
+    // Parent to the cell itself so the card is "glued" to the row: it rides on top
+    // of the cell's own content, scrolls with it, and clips away as the cell leaves
+    // the screen — instead of hovering at a fixed spot on the window while the list
+    // scrolls underneath. (Parenting to the scroll view hid it behind the cells.)
+    UIView *host = anchorView;
+
+    [sApolloTimeOverlay removeFromSuperview];
+    sApolloTimeOverlay = nil;
 
     NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
     para.alignment = NSTextAlignmentCenter;
@@ -189,7 +214,7 @@ void ApolloPresentInfoOverlay(NSString *line1, NSString *line2, CGRect anchorRec
     UILabel *label = [[UILabel alloc] init];
     label.numberOfLines = 0;
     label.attributedText = text;
-    CGFloat maxTextW = MIN(300.0, window.bounds.size.width - 32.0);
+    CGFloat maxTextW = MIN(300.0, host.bounds.size.width - 32.0);
     CGSize textSize = [label sizeThatFits:CGSizeMake(maxTextW, CGFLOAT_MAX)];
 
     CGFloat padH = 12.0, padV = 8.0;
@@ -199,8 +224,8 @@ void ApolloPresentInfoOverlay(NSString *line1, NSString *line2, CGRect anchorRec
 
     // Border + a faint fill both tint with the theme accent ("undercolour"); the
     // card itself is a dark material so the text stays readable over any feed image.
-    UIColor *accent = ApolloThemeAccentColor() ?: window.tintColor ?: [UIColor systemBlueColor];
-    accent = [accent resolvedColorWithTraitCollection:window.traitCollection];
+    UIColor *accent = ApolloThemeAccentColor() ?: host.tintColor ?: [UIColor systemBlueColor];
+    accent = [accent resolvedColorWithTraitCollection:host.traitCollection];
 
     UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, cardW, cardH)];
     container.tag = kApolloTimeOverlayTag;
@@ -224,20 +249,30 @@ void ApolloPresentInfoOverlay(NSString *line1, NSString *line2, CGRect anchorRec
     label.frame = CGRectMake(padH, padV, cardW - padH * 2.0, cardH - padV * 2.0);
     [card.contentView addSubview:label];
 
-    // Centered over the anchor, sitting just above it; drop below if there's no
-    // room above (top of screen), and clamp inside the window's horizontal margins.
-    CGFloat originX = CGRectGetMidX(anchorRectInWindow) - cardW / 2.0;
-    CGFloat minX = 8.0, maxX = window.bounds.size.width - cardW - 8.0;
+    // In the cell's coordinate space (so the card moves with the row). Centered
+    // over the anchor, just above it; drop below if there's no room above (top of
+    // the cell); clamp horizontally to the cell's width.
+    CGRect anchor = [host convertRect:anchorRectInWindow fromView:nil];
+    CGRect bounds = host.bounds;
+    CGFloat originX = CGRectGetMidX(anchor) - cardW / 2.0;
+    CGFloat minX = CGRectGetMinX(bounds) + 8.0, maxX = CGRectGetMaxX(bounds) - cardW - 8.0;
     originX = MAX(minX, MIN(originX, MAX(minX, maxX)));
-    CGFloat originY = CGRectGetMinY(anchorRectInWindow) - 8.0 - cardH;
-    if (originY < window.safeAreaInsets.top + 8.0) {
-        originY = CGRectGetMaxY(anchorRectInWindow) + 8.0;
-    }
+    // Prefer just above the row; drop below if there's no room above. Then keep the
+    // whole card INSIDE the cell so a short cell (e.g. a one-line comment) can't push
+    // it past the cell's frame, where the neighbouring cell would clip/cover the date.
+    CGFloat topLimit = CGRectGetMinY(bounds) + 8.0;
+    CGFloat botLimit = CGRectGetMaxY(bounds) - cardH - 8.0;
+    CGFloat originY = CGRectGetMinY(anchor) - 8.0 - cardH;
+    if (originY < topLimit) originY = CGRectGetMaxY(anchor) + 8.0;
+    originY = MAX(topLimit, MIN(originY, MAX(topLimit, botLimit)));
     container.frame = CGRectMake(round(originX), round(originY), cardW, cardH);
+    // Ride above the cell's own content regardless of subview/subnode order.
+    container.layer.zPosition = 1000.0;
 
     container.alpha = 0.0;
     container.transform = CGAffineTransformMakeTranslation(0, 6);
-    [window addSubview:container];
+    [host addSubview:container];
+    sApolloTimeOverlay = container;
     [UIView animateWithDuration:0.22 delay:0 usingSpringWithDamping:0.82 initialSpringVelocity:0.4
                         options:UIViewAnimationOptionCurveEaseOut animations:^{
         container.alpha = 1.0;
@@ -248,6 +283,7 @@ void ApolloPresentInfoOverlay(NSString *line1, NSString *line2, CGRect anchorRec
         container.transform = CGAffineTransformMakeTranslation(0, -4);
     } completion:^(BOOL finished) {
         [container removeFromSuperview];
+        if (sApolloTimeOverlay == container) sApolloTimeOverlay = nil;
     }];
 }
 
@@ -365,7 +401,7 @@ static void ApolloInfoTapFired(id cell, UITapGestureRecognizer *tap) {
 
     id link = ApolloIvarValueByName(cell, "link");
     id comment = ApolloIvarValueByName(cell, "comment");
-    if (ApolloPresentInfoDetail(kind, link, comment, anchor, window)) {
+    if (ApolloPresentInfoDetail(kind, link, comment, cellView, anchor, window)) {
         // Match the vote buttons' native feedback: a light tick on the tap.
         [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     }

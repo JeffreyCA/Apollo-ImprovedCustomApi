@@ -14,10 +14,14 @@ typedef NS_ENUM(NSInteger, ApolloInfoKind) {
 //   Popup mode   → a dismissable alert (presented from the window's visible VC).
 //   Both off     → nothing.
 // Pass the cell's RDKLink as `link` and/or RDKComment as `comment` (whichever the
-// cell has); the function reads the ratio/date it needs. Returns NO if nothing was
-// shown (mode off, or the data is missing). Shared by the direct taps
-// (ApolloCreatedAtAlert.xm) and the magnifier loupe (ApolloStatsRowTouch.xm).
-BOOL ApolloPresentInfoDetail(ApolloInfoKind kind, id link, id comment, CGRect anchorRectInWindow, UIWindow *window);
+// cell has); the function reads the ratio/date it needs. `anchorView` is the cell
+// view — the overlay is parented directly to it (as a subview) so the card rides on
+// top of the row and scrolls with it. Returns NO if nothing was shown (mode off, or
+// the data is missing). Shared by the direct taps (ApolloCreatedAtAlert.xm) and the
+// loupe (ApolloStatsRowTouch.xm).
+BOOL ApolloPresentInfoDetail(ApolloInfoKind kind, id link, id comment, UIView *anchorView,
+                             CGRect anchorRectInWindow, UIWindow *window);
 
-// Low-level transient overlay used by the above (two prebuilt text lines).
-void ApolloPresentInfoOverlay(NSString *line1, NSString *line2, CGRect anchorRectInWindow, UIWindow *window);
+// Low-level transient overlay used by the above (two prebuilt text lines); added as
+// a subview of anchorView (the cell) so it stays glued to the row and scrolls with it.
+void ApolloPresentInfoOverlay(NSString *line1, NSString *line2, UIView *anchorView, CGRect anchorRectInWindow);
