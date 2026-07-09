@@ -321,6 +321,10 @@ static const void *kApolloPostInfoMarkerAnchoredKey = &kApolloPostInfoMarkerAnch
 static const void *kApolloPostInfoMarkerConstraintsKey = &kApolloPostInfoMarkerConstraintsKey;
 // The point size the marker was last built at, so we only rebuild content on change.
 static const void *kApolloPostInfoMarkerSizeKey = &kApolloPostInfoMarkerSizeKey;
+// The age-view baseline constraint, kept so its constant (== stat font ascender)
+// can be recomputed when the marker font changes without a re-parent — e.g. when
+// the post-mount heal resizes a marker that first built at a fallback size.
+static const void *kApolloPostInfoMarkerBaselineKey = &kApolloPostInfoMarkerBaselineKey;
 // Weak set of all live PostInfoNode marker labels, so a globe toggle-to-original
 // can hide them all at once (they're separate UILabels, not owned text nodes).
 static NSHashTable *sPostInfoMarkerLabels = nil;
@@ -4541,6 +4545,31 @@ static UIFont *ApolloStatFontFromNode(id node, int depth) {
     return nil;
 }
 
+// Read Apollo's real metadata-stat font from a PostInfoNode, trying more than one
+// stat node so we almost never have to guess. The age node's attributed title is
+// usually bound by the time we apply a marker, but on media-forward cells its
+// layout/bind can lag behind the translation apply — in which case reading only
+// the age node returns nil and the caller falls back to a guessed size that then
+// sticks (the "🌐 PT" is bigger on some posts" bug). pointsButtonNode and
+// ageButtonNode are BOTH non-optional stat nodes that share the exact stat font,
+// so falling through to the points node recovers the real size when age isn't
+// readable yet. Returns nil only if no stat node is readable at all.
+static UIFont *ApolloStatFontFromPostInfoNode(id postInfoNode, id ageNode) {
+    UIFont *f = ApolloStatFontFromNode(ageNode, 3);
+    if ([f isKindOfClass:[UIFont class]]) return f;
+    // Same-row siblings (all ApolloButtonNode, same stat font), in order of how
+    // reliably they're present/bound.
+    const char *siblings[] = { "pointsButtonNode", "editedButtonNode", "percentageLikedButtonNode" };
+    for (size_t i = 0; i < sizeof(siblings) / sizeof(siblings[0]); i++) {
+        id sib = GetIvarObjectQuiet(postInfoNode, siblings[i]);
+        if (sib && sib != ageNode) {
+            f = ApolloStatFontFromNode(sib, 3);
+            if ([f isKindOfClass:[UIFont class]]) return f;
+        }
+    }
+    return nil;
+}
+
 // Show/hide the compact "🌐 PT" marker overlaid on the metadata-row PostInfoNode
 // reachable from `anyNode` (a header cell node, a title node, etc.). The label
 // is pinned to the PostInfoNode's OWN view (bottom-trailing), so it tracks the
@@ -4582,17 +4611,21 @@ static void ApolloUpdatePostInfoMarkerForNode(id anyNode, NSString *sourceCode, 
             } @catch (__unused NSException *e) {}
         }
     }
-    // Match the metadata stat font EXACTLY by reading Apollo's real stat font off
-    // the age node's attributed string. This is the ground truth (set at bind
-    // time, before layout) — no guessing from frame height, which was unreliable
-    // and made the marker fall back to a wrong hardcoded size on unsettled cells.
-    UIFont *markerFont = ApolloStatFontFromNode(ageNode, 3);
+    // Match the metadata stat font EXACTLY by reading Apollo's real stat font off a
+    // stat node's attributed string (age, then points as a sibling — see
+    // ApolloStatFontFromPostInfoNode). This is the ground truth, set at bind time
+    // before layout. Reading only the age node occasionally returned nil on
+    // media-forward cells whose age button hadn't bound at apply time, which used
+    // to trigger a frame-height GUESS (up to 16pt) that then stuck — so the
+    // "🌐 PT" showed up bigger on some posts than others.
+    UIFont *markerFont = ApolloStatFontFromPostInfoNode(postInfoNode, ageNode);
     if (![markerFont isKindOfClass:[UIFont class]]) {
-        // Last-resort fallback (age text not readable yet): derive from frame
-        // height, else a sane default. A later call self-corrects once readable.
-        CGFloat ageH = ([ageView isKindOfClass:[UIView class]]) ? ageView.frame.size.height : 0.0;
-        CGFloat markerSize = ageH > 6.0 ? MAX(10.0, MIN(16.0, ageH / 1.2)) : 12.0;
-        markerFont = [UIFont systemFontOfSize:markerSize weight:UIFontWeightRegular];
+        // No stat node readable yet (rare — the whole info row is still binding).
+        // Use a fixed stat-sized placeholder rather than guessing from a frame
+        // height (an unsettled frame can be tall → oversized marker that never
+        // corrected). The didEnterVisibleState heal re-reads the real stat font
+        // once the row is on screen and resizes to match the stats exactly.
+        markerFont = [UIFont systemFontOfSize:13.0 weight:UIFontWeightRegular];
     }
 
     // Parent the marker DIRECTLY UNDER the age view (as its child), pinned to the
@@ -4659,18 +4692,32 @@ static void ApolloUpdatePostInfoMarkerForNode(id anyNode, NSString *sourceCode, 
                     }
                 }
             }
+            NSLayoutConstraint *baseline = [label.firstBaselineAnchor constraintEqualToAnchor:ageView.topAnchor constant:markerFont.ascender];
             fresh = @[
                 [label.leadingAnchor constraintEqualToAnchor:ageView.trailingAnchor constant:markerLead],
-                [label.firstBaselineAnchor constraintEqualToAnchor:ageView.topAnchor constant:markerFont.ascender],
+                baseline,
             ];
+            // Keep a handle on the baseline constraint so a later resize (the heal
+            // path) can re-point its constant to the new font's ascender without a
+            // full re-parent.
+            objc_setAssociatedObject(label, kApolloPostInfoMarkerBaselineKey, baseline, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         } else {
             fresh = @[
                 [label.trailingAnchor constraintEqualToAnchor:piView.trailingAnchor constant:-2.0],
                 [label.centerYAnchor constraintEqualToAnchor:piView.centerYAnchor constant:0.0],
             ];
+            objc_setAssociatedObject(label, kApolloPostInfoMarkerBaselineKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         [NSLayoutConstraint activateConstraints:fresh];
         objc_setAssociatedObject(label, kApolloPostInfoMarkerConstraintsKey, fresh, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    // Whether or not we re-parented this call, keep the age-view baseline aligned
+    // to the CURRENT font: a heal that resizes the marker (fallback size → real
+    // stat size) changes the ascender, and without this the resized "PT" would sit
+    // at the old font's baseline.
+    if (host == ageView) {
+        NSLayoutConstraint *bl = objc_getAssociatedObject(label, kApolloPostInfoMarkerBaselineKey);
+        if ([bl isKindOfClass:[NSLayoutConstraint class]]) bl.constant = markerFont.ascender;
     }
     // Record whether the label ACTUALLY ended up as a child of the age view (vs
     // the piView fallback). A pre-mount install (cached translations complete
@@ -4750,14 +4797,26 @@ static void ApolloReanchorPostInfoMarkerIfFallback(id postInfoNode, BOOL allowRe
     UILabel *label = objc_getAssociatedObject(piView, kApolloPostInfoMarkerLabelKey);
     if (![label isKindOfClass:[UILabel class]] || label.hidden) return;
     BOOL anchored = [objc_getAssociatedObject(label, kApolloPostInfoMarkerAnchoredKey) boolValue];
-    // Anchored AND actually attached to a window: nothing to repair. (A nil
-    // window with anchored==YES means the age view was re-mounted out from under
-    // the label during cell re-processing — re-host onto the live one.)
-    if (anchored && label.window) return;
+    // Anchored AND on a window usually means nothing to repair — BUT the marker
+    // may still carry a WRONG font size if its first pass fell back to a
+    // placeholder before any stat node had bound (common on media-forward cells,
+    // which is exactly when the "🌐 PT" showed up oversized). Now that the row is
+    // on screen the stats are bound, so re-read the real stat font: if it differs
+    // from the size the marker was last built at, fall through and re-run the
+    // updater to resize it to match the stats. Only when the anchor is fine AND
+    // the size already matches (or the real font still isn't readable) do we bail.
+    NSString *reason = anchored ? @"detached" : @"fallback-pin";
+    if (anchored && label.window) {
+        id ageNode = GetIvarObjectQuiet(postInfoNode, "ageButtonNode");
+        UIFont *realFont = ApolloStatFontFromPostInfoNode(postInfoNode, ageNode);
+        CGFloat builtAt = [objc_getAssociatedObject(label, kApolloPostInfoMarkerSizeKey) doubleValue];
+        if (![realFont isKindOfClass:[UIFont class]] || fabs(realFont.pointSize - builtAt) < 0.5) return;
+        reason = [NSString stringWithFormat:@"resize %.1f→%.1f", builtAt, realFont.pointSize];
+    }
     NSString *code = objc_getAssociatedObject(label, kApolloPostInfoMarkerCodeKey);
     if (![code isKindOfClass:[NSString class]] || code.length == 0) return;
     id toggle = objc_getAssociatedObject(label, kApolloMarkerTitleNodeKey);
-    ApolloLog(@"[Translation] marker re-anchor (%@) code=%@", anchored ? @"detached" : @"fallback-pin", code);
+    ApolloLog(@"[Translation] marker re-anchor (%@) code=%@", reason, code);
     ApolloUpdatePostInfoMarkerForNode(postInfoNode, code, YES, toggle);
     // If the subnode mount still hadn't landed when we re-ran (same-runloop
     // race with the range update), give it one short delayed retry; otherwise
