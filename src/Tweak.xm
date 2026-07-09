@@ -13,8 +13,11 @@
 #import "ApolloDeletedCommentsData.h"
 #import "ApolloImageUploadHost.h"
 #import "ApolloImgChestUpload.h"
+#import "ApolloMediaAutoplay.h"
 #import "ApolloNotificationBackend.h"
+#import "ApolloUsageHeartbeat.h"
 #import "ApolloPushNotifications.h"
+#import "ApolloBarkNotifications.h"
 #import "ApolloState.h"
 #import "Tweak.h"
 #import "CustomAPIViewController.h"
@@ -1323,23 +1326,106 @@ static BOOL ApolloPixelPalsBlockedByModal(UIWindow *window) {
 // Loading Notifications — contact developer" alert — telling users to contact a
 // developer about something no developer can fix at runtime.
 //
-// Push, watchers, and inbox alerts genuinely can't be delivered without the
-// entitlement, so faking a successful registration would only mislead users
-// into thinking notifications work. Instead we (1) swallow *only* this specific,
-// unfixable error here so the scary alert never appears, and (2) replace the
-// Notifications settings screen with a clear explanation (see the
-// NotificationsViewController hook below). Genuine, transient failures (offline,
-// rate limiting, …) fall through to %orig and keep their original error so real
-// problems still surface.
+// APNs genuinely can't deliver without the entitlement, so by default we
+// (1) swallow *only* this specific, unfixable error here so the scary alert
+// never appears, and (2) replace the Notifications settings screen with a
+// clear explanation (see the NotificationsViewController hook below).
+// Genuine, transient failures (offline, rate limiting, …) fall through to
+// %orig and keep their original error so real problems still surface.
+//
+// With Bark mode active (see ApolloBarkNotifications.h) the failure instead
+// becomes the trigger for the synthetic registration: Apollo attempted a real
+// registration (so its token-fetch completions are queued and this callback
+// arrives on the main thread), and we answer it with the persistent synthetic
+// token. Apollo then runs its ENTIRE native registration/notification-
+// settings/watcher flow unmodified — POST /v1/device and friends fire at the
+// legacy hosts and are rewritten to the self-hosted backend, where the device
+// registers with transport=bark and delivery happens via the Bark app.
 %hook _TtC6Apollo11AppDelegate
 - (void)application:(UIApplication *)application didFailToRegisterForRemoteNotificationsWithError:(NSError *)error {
     if (ApolloErrorIsMissingPushEntitlement(error)) {
+        if (ApolloBarkModeActive()) {
+            NSData *token = ApolloBarkSyntheticTokenData();
+            if (token) {
+                ApolloLog(@"[Bark] No aps-environment entitlement but Bark mode is active — answering the failed registration with the synthetic device token so Apollo's native notification flow proceeds.");
+                // _TtC6Apollo11AppDelegate is only forward-declared; the
+                // protocol cast gives clang the selector signature.
+                [(id<UIApplicationDelegate>)self application:application didRegisterForRemoteNotificationsWithDeviceToken:token];
+                return;
+            }
+        }
         ApolloLog(@"[Push] Missing aps-environment entitlement (free-account sideload) — push can never be delivered on this build. Suppressing the misleading registration error; the Notifications screen explains why instead.");
         return;
     }
     %orig;
 }
+
+// If a REAL APNs token ever arrives (the user re-signed with a paid dev
+// account), the synthetic Bark device row on the backend becomes a stale
+// duplicate: Bark send failures deliberately never delete device rows, so
+// without this the user would get every notification twice (Bark + APNs).
+// Delete the synthetic registration before letting Apollo register the real
+// token.
+- (void)application:(UIApplication *)application didRegisterForRemoteNotificationsWithDeviceToken:(NSData *)deviceToken {
+    if (deviceToken.length > 0) {
+        NSMutableString *hex = [NSMutableString stringWithCapacity:deviceToken.length * 2];
+        const uint8_t *bytes = (const uint8_t *)deviceToken.bytes;
+        for (NSUInteger i = 0; i < deviceToken.length; i++) {
+            [hex appendFormat:@"%02x", bytes[i]];
+        }
+        // Stash the device's backend identity so the settings UI can flip the
+        // row's transport directly (ApolloBarkSyncBackendDeviceTransport) —
+        // Apollo itself only re-registers on launch.
+        [[NSUserDefaults standardUserDefaults] setObject:hex forKey:UDKeyLastDeviceTokenHex];
+        NSString *synthetic = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyBarkSyntheticDeviceToken];
+        if (synthetic.length > 0 && ![hex isEqualToString:synthetic]) {
+            ApolloLog(@"[Bark] Real APNs token arrived; retiring the synthetic Bark device registration.");
+            ApolloBarkDeleteBackendDevice(synthetic);
+            // One-shot: drop the stored token so this doesn't refire every
+            // launch. A later free re-sign just generates a fresh one.
+            [[NSUserDefaults standardUserDefaults] removeObjectForKey:UDKeyBarkSyntheticDeviceToken];
+        }
+    }
+    %orig;
+}
 %end
+
+// Bark notifications carry the user's selected Apollo app icon via an
+// ?icon= parameter on the push URL (see ApolloBarkEffectivePushURL). The
+// selection lives in UIApplication.alternateIconName, which is main-thread
+// UI state — mirror it into defaults so the URL builders can read it from
+// the URLSession rewrite queue, and re-sync the backend device row the
+// moment the user picks a new icon so the very next notification wears it.
+%hook UIApplication
+- (void)setAlternateIconName:(NSString *)name completionHandler:(void (^)(NSError *error))completionHandler {
+    void (^wrapped)(NSError *) = ^(NSError *error) {
+        if (!error) {
+            BOOL changed = ApolloBarkNoteSelectedIconName(name);
+            if (changed && ApolloBarkModeActive()) {
+                ApolloBarkSyncBackendDeviceTransport();
+            }
+        }
+        if (completionHandler) {
+            completionHandler(error);
+        }
+    };
+    %orig(name, wrapped);
+}
+%end
+
+// Launch-time capture of the icon selection: covers the first run after the
+// tweak update (nothing mirrored yet) and any change that didn't go through
+// the hook above. Runs on the main queue because alternateIconName is UI
+// state; a same-launch registration racing ahead of this simply uses the
+// previous launch's mirrored value, which the sync below then corrects.
+static void ApolloBarkCaptureInitialIconSelection(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        BOOL changed = ApolloBarkNoteSelectedIconName([UIApplication sharedApplication].alternateIconName);
+        if (changed && ApolloBarkModeActive()) {
+            ApolloBarkSyncBackendDeviceTransport();
+        }
+    });
+}
 
 // On a build that can never receive push (a free-account sideload with no
 // `aps-environment` entitlement), Apollo's Notifications settings are a dead end:
@@ -1354,6 +1440,13 @@ static BOOL ApolloPixelPalsBlockedByModal(UIWindow *window) {
 // the install logic lives in a C helper taking a plain UIViewController*.
 static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *controller) {
     if (ApolloPushNotificationsSupported()) {
+        return;
+    }
+    // Bark mode makes the stock Notifications screen fully functional (the
+    // synthetic registration above answers Apollo's token fetch), so leave it
+    // alone. The overlay's copy points users at the Bark setup when this
+    // returns NO.
+    if (ApolloBarkModeActive()) {
         return;
     }
     // 'APNU' — unique enough to find our overlay again without a second add.
@@ -1472,6 +1565,7 @@ static void initializeRandomSources() {
                                     UDKeyEnableChatMedia: @YES,
                                     UDKeyInlineImageAlignment: @(ApolloInlineImageAlignmentCenter),
                                     UDKeyAutoplayInlineGIFs: @(ApolloAutoplayInlineGIFModeDefault),
+                                    UDKeyInlineMediaSizePercent: @100,
                                     UDKeyLinkPreviewBodyMode: @(ApolloLinkPreviewModeFull),
                                     UDKeyLinkPreviewCommentsMode: @(ApolloLinkPreviewModeFull),
                                     UDKeyLinkPreviewCardColor: @(ApolloLinkPreviewCardColorNeutral),
@@ -1488,8 +1582,13 @@ static void initializeRandomSources() {
                                     UDKeyIPadTabBarBottom: @NO,
                                     UDKeyIconRowMagnifier: @YES,
                                     UDKeyLiveCommentsFollow: @YES,
+                                    UDKeyPerPostCommentSort: @NO,
                                     UDKeyEnableBulkTranslation: @NO,
                                     UDKeyAutoTranslateOnAppear: @YES,
+                                    UDKeyTapToTranslate: @NO,
+                                    UDKeyShowTranslationDetails: @YES,
+                                    UDKeyShowTranslationTitleDetails: @YES,
+                                    UDKeyTranslationMarkerUseThemeColor: @NO,
                                     UDKeyTranslatePostTitles: @NO,
                                     UDKeyTranslationTargetLanguage: @"",
                                     UDKeyTranslationProviderUserSelected: @NO,
@@ -1572,9 +1671,17 @@ static void initializeRandomSources() {
         [standardDefaults setInteger:sInlineImageAlignment forKey:UDKeyInlineImageAlignment];
     }
     sAutoplayInlineGIFMode = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyAutoplayInlineGIFs];
-    if (sAutoplayInlineGIFMode < ApolloAutoplayInlineGIFModeDefault || sAutoplayInlineGIFMode > ApolloAutoplayInlineGIFModeAlways) {
-        sAutoplayInlineGIFMode = ApolloAutoplayInlineGIFModeDefault;
+    if (sAutoplayInlineGIFMode < ApolloAutoplayInlineGIFModeNever || sAutoplayInlineGIFMode > ApolloAutoplayInlineGIFModeTapToPlay) {
+        // Legacy "Default (Follow Apollo)" (0) / invalid values: resolve
+        // Apollo's native Autoplay GIFs/Videos setting once so behavior is
+        // unchanged, then own the setting explicitly from here on.
+        sAutoplayInlineGIFMode = ApolloResolveLegacyDefaultAutoplayGIFMode();
         [standardDefaults setInteger:sAutoplayInlineGIFMode forKey:UDKeyAutoplayInlineGIFs];
+    }
+    sInlineMediaSizePercent = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyInlineMediaSizePercent];
+    if (sInlineMediaSizePercent != 50 && sInlineMediaSizePercent != 75 && sInlineMediaSizePercent != 100) {
+        sInlineMediaSizePercent = 100;
+        [standardDefaults setInteger:sInlineMediaSizePercent forKey:UDKeyInlineMediaSizePercent];
     }
     sLinkPreviewBodyMode = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyLinkPreviewBodyMode];
     if (sLinkPreviewBodyMode < ApolloLinkPreviewModeOff || sLinkPreviewBodyMode > ApolloLinkPreviewModeFull) {
@@ -1617,11 +1724,23 @@ static void initializeRandomSources() {
     sIPadTabBarBottom = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIPadTabBarBottom];
     sIconRowMagnifier = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIconRowMagnifier];
     sLiveCommentsFollow = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyLiveCommentsFollow];
+    sPerPostCommentSort = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPerPostCommentSort];
+    // Both sort memories on = stale state from an older build or a restored backup;
+    // they are mutually exclusive (see ApolloPerPostCommentSort.xm) and per-post wins.
+    if (sPerPostCommentSort &&
+        [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyApolloRememberSubredditCommentsSort]) {
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyApolloRememberSubredditCommentsSort];
+        ApolloLog(@"[PerPostSort] exclusivity: normalized stale both-on at launch (native Remember Subreddit Sort -> OFF)");
+    }
     sModernSubredditDividers = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers];
     sSubredditListEnhancements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditListEnhancements];
     sEnableFlairColors = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFlairColors];
     sEnableBulkTranslation = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableBulkTranslation];
     sAutoTranslateOnAppear = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoTranslateOnAppear];
+    sTapToTranslate = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyTapToTranslate];
+    sShowTranslationDetails = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowTranslationDetails];
+    sShowTranslationTitleDetails = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowTranslationTitleDetails];
+    sTranslationMarkerUseThemeColor = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyTranslationMarkerUseThemeColor];
     sTranslatePostTitles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyTranslatePostTitles];
 
     NSString *targetLanguage = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTranslationTargetLanguage];
@@ -1920,6 +2039,9 @@ static void initializeRandomSources() {
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:UDKeyWebJSONPendingRestart];
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:UDKeyWebJSONPendingRestartUsername];
 
+    // Mirror the selected app icon for Bark notification icon passthrough.
+    ApolloBarkCaptureInitialIconSelection();
+
     // Redirect user to Custom API settings if no API credentials are set — but not
     // when at least one web-session account is configured (no API key is expected
     // for those). Checked by configured-account count, not the active account, so
@@ -1937,4 +2059,17 @@ static void initializeRandomSources() {
             [settingsNavController pushViewController:vc animated:YES];
         });
     }
+
+    // Anonymous MAU heartbeat: fire on every foreground; the once-a-day throttle
+    // (and the opt-out flag) inside ApolloSendUsageHeartbeatIfNeeded handle the
+    // rest. Registering the observer here avoids hunting for an app-lifecycle
+    // hook. beat.apolloreborn.app is our own first-party, opt-out-able endpoint
+    // and is deliberately NOT in the blockedUrls telemetry list.
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:UIApplicationDidBecomeActiveNotification
+                    object:nil
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *note) {
+        ApolloSendUsageHeartbeatIfNeeded();
+    }];
 }

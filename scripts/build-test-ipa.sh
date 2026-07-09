@@ -109,6 +109,19 @@ else
     echo "Warning: xcodegen not found — test IPA will NOT include Reborn widgets."
 fi
 
+# Stamp the usage-heartbeat build variant (ARBuildVariant in Info.plist) so this
+# test install reports a channel to beat.apolloreborn.app. Without it
+# ApolloBuildVariant() falls back to "unknown", which the server stores as
+# c=null. Default to a dedicated "dev" channel so local test-device beats stay
+# out of the real release-variant counts (glass/ipa/…). NOTE: "dev" must be in
+# the Worker's CHANNELS allowlist, otherwise the server stores it as null too.
+# Override with BUILD_VARIANT=glass to simulate a specific release channel.
+BUILD_VARIANT="${BUILD_VARIANT:-dev}"
+echo "Stamping build variant: $BUILD_VARIANT"
+"$BUILD_DIR/scripts/apply-patches.sh" --ipa "$OUTPUT_IPA" -o "$OUTPUT_IPA.bv" \
+    --module "stamp-build-variant:$BUILD_VARIANT"
+mv "$OUTPUT_IPA.bv" "$OUTPUT_IPA"
+
 echo "Verifying CydiaSubstrate linkage..."
 VERIFY_DIR="$(mktemp -d /tmp/apollo-ipa-verify-XXXXXX)"
 unzip -q "$OUTPUT_IPA" -d "$VERIFY_DIR"

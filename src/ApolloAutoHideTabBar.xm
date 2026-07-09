@@ -204,14 +204,48 @@ static void ApolloReapplyNativeMinimizeBehavior(UITabBarController *tbc, NSStrin
               anyWantsMinimize, sAutoHideTabBarShowOnIdle, reason ?: @"unknown");
 }
 
+static NSString *const ApolloTabBarSlideDownAnimationKey = @"apolloTabBarSlideDown";
+static NSString *const ApolloTabBarSlideUpAnimationKey = @"apolloTabBarSlideUp";
+// KVC key stamped on each slide-down animation with its owning generation.
+static NSString *const ApolloTabBarSlideGenerationKey = @"apolloTabBarSlideGeneration";
+
 static BOOL ApolloTabBarLooksHidden(UITabBar *tabBar) {
     if (!tabBar) return NO;
     if (tabBar.hidden) return YES;
     if (tabBar.alpha < 0.95) return YES;
     if (tabBar.transform.ty != 0.0 || tabBar.transform.tx != 0.0) return YES;
+    // An in-flight hide slide keeps the model pristine (explicit layer
+    // animation); it still counts as hidden so a reveal can take over.
+    if ([tabBar.layer animationForKey:ApolloTabBarSlideDownAnimationKey]) return YES;
     UIView *parent = tabBar.superview;
     if (parent && tabBar.frame.origin.y >= parent.bounds.size.height - 1.0) return YES;
     return NO;
+}
+
+// Monotonically increasing token per tab bar controller; a Hide whose slide is
+// still in flight abandons its completion work when a Show (or newer Hide)
+// has started since.
+static char kApolloTabBarMirrorGenerationKey;
+// Non-nil while an animated hide-slide is in flight (holds that slide's
+// generation). Repeat Hide calls during the slide — the gesture-end mirror and
+// UIKit's transition-completion setNavigationBarHidden: both fire — must be
+// no-ops, or the second call restarts the slide from the resting position and
+// the bar visibly snaps back.
+static char kApolloTabBarHideInFlightKey;
+
+static NSInteger ApolloBumpTabBarMirrorGeneration(UITabBarController *tbc) {
+    NSInteger generation = [objc_getAssociatedObject(tbc, &kApolloTabBarMirrorGenerationKey) integerValue] + 1;
+    objc_setAssociatedObject(tbc, &kApolloTabBarMirrorGenerationKey, @(generation), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return generation;
+}
+
+// How far the bar must translate to be fully off the bottom of the screen
+// (bar height plus anything below it, e.g. the home-indicator area).
+static CGFloat ApolloTabBarSlideDistance(UITabBar *tabBar) {
+    UIView *parent = tabBar.superview;
+    CGFloat below = parent ? MAX(0.0, parent.bounds.size.height - CGRectGetMaxY(tabBar.frame)) : 0.0;
+    CGFloat distance = CGRectGetHeight(tabBar.frame) + below;
+    return distance > 1.0 ? distance : 120.0;
 }
 
 static void ApolloShowTabBar(UITabBarController *tbc, BOOL animated) {
@@ -222,23 +256,46 @@ static void ApolloShowTabBar(UITabBarController *tbc, BOOL animated) {
     ApolloLog(@"[AutoHideTabBarFix] Show (hidden=%d alpha=%.2f tx=%.1f ty=%.1f y=%.1f)",
               tabBar.hidden, tabBar.alpha,
               tabBar.transform.tx, tabBar.transform.ty, tabBar.frame.origin.y);
+    ApolloBumpTabBarMirrorGeneration(tbc);
+    objc_setAssociatedObject(tbc, &kApolloTabBarHideInFlightKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    if ([tbc respondsToSelector:@selector(setTabBarHidden:animated:)]) {
-        [tbc setTabBarHidden:NO animated:animated];
+    // Where the bar currently appears, so the reveal slides up from there:
+    // fully parked below the screen when hidden, or mid-flight if a hide
+    // slide is still running.
+    CGFloat startTy = 0.0;
+    if ([tabBar.layer animationForKey:ApolloTabBarSlideDownAnimationKey]) {
+        CALayer *presentation = tabBar.layer.presentationLayer;
+        startTy = presentation ? [[presentation valueForKeyPath:@"transform.translation.y"] doubleValue] : 0.0;
+        [tabBar.layer removeAnimationForKey:ApolloTabBarSlideDownAnimationKey];
+    } else if (tabBar.hidden) {
+        startTy = ApolloTabBarSlideDistance(tabBar);
+    } else if (tabBar.transform.ty > 0.0) {
+        startTy = tabBar.transform.ty;
     }
-    void (^apply)(void) = ^{
-        tabBar.hidden = NO;
-        tabBar.alpha = 1.0;
-        tabBar.transform = CGAffineTransformIdentity;
-    };
-    if (animated) {
-        [UIView animateWithDuration:0.25
-                              delay:0.0
-                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseOut
-                         animations:apply
-                         completion:nil];
-    } else {
-        apply();
+
+    // Restore the model state outright (non-animated so the safe area updates
+    // once); the explicit layer animation below renders the slide-up. A UIView
+    // block animation on view.transform is NOT safe here — Apollo's own
+    // gesture-end handler writes the bar's model state right after us, which
+    // cancels or re-anchors it (see the hide path).
+    if (tabBar.hidden) {
+        if ([tbc respondsToSelector:@selector(setTabBarHidden:animated:)]) {
+            [tbc setTabBarHidden:NO animated:NO];
+        } else {
+            tabBar.hidden = NO;
+        }
+    }
+    tabBar.hidden = NO;
+    tabBar.alpha = 1.0;
+    tabBar.transform = CGAffineTransformIdentity;
+
+    if (animated && startTy > 0.5) {
+        CABasicAnimation *slideUp = [CABasicAnimation animationWithKeyPath:@"transform.translation.y"];
+        slideUp.fromValue = @(startTy);
+        slideUp.toValue = @0;
+        slideUp.duration = 0.25;
+        slideUp.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+        [tabBar.layer addAnimation:slideUp forKey:ApolloTabBarSlideUpAnimationKey];
     }
 }
 
@@ -249,45 +306,108 @@ static void ApolloHideTabBar(UITabBarController *tbc, BOOL animated) {
 
     ApolloLog(@"[AutoHideTabBarFix] Hide (animated=%d)", animated);
 
-    // Prefer the system path: it slides the tab bar AND recomputes safe-area
-    // insets in one coordinated animation, so floating views anchored to the
-    // safe area (e.g. the blue jump-to-bottom button in CommentsVC) reflow
-    // smoothly alongside the fade instead of jumping after it completes.
-    if ([tbc respondsToSelector:@selector(setTabBarHidden:animated:)]) {
-        // Keep alpha at 1 so the system's slide/fade reads naturally; reset
-        // any leftover transform that the broken native path may have left.
-        tabBar.alpha = 1.0;
-        tabBar.transform = CGAffineTransformIdentity;
-        [tbc setTabBarHidden:YES animated:animated];
-        // Force the floating overlay (jump-to-bottom button etc) to reflow
-        // during the same animation tick by pumping a layout pass on the
-        // tab bar controller's view inside the animation block.
-        if (animated) {
-            [UIView animateWithDuration:0.25
-                                  delay:0.0
-                                options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseInOut
-                             animations:^{
-                [tbc.view setNeedsLayout];
-                [tbc.view layoutIfNeeded];
-            } completion:nil];
+    BOOL canSystemHide = [tbc respondsToSelector:@selector(setTabBarHidden:animated:)];
+
+    void (^commitHidden)(void) = ^{
+        if (canSystemHide) {
+            [tbc setTabBarHidden:YES animated:NO];
+        } else {
+            tabBar.hidden = YES;
         }
+        // Leave alpha at 1 so the flag alone controls visibility from here on.
+        tabBar.alpha = 1.0;
+    };
+
+    if (!animated) {
+        objc_setAssociatedObject(tbc, &kApolloTabBarHideInFlightKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        tabBar.transform = CGAffineTransformIdentity;
+        commitHidden();
         return;
     }
 
-    // Fallback (shouldn't happen on iOS): plain alpha+hidden.
-    void (^apply)(void) = ^{ tabBar.alpha = 0.0; };
-    if (animated) {
-        [UIView animateWithDuration:0.25
-                              delay:0.0
-                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseIn
-                         animations:apply
-                         completion:^(BOOL finished) {
-            if (finished) tabBar.hidden = YES;
-        }];
-    } else {
-        apply();
-        tabBar.hidden = YES;
+    // A slide is already running — the gesture-end mirror and UIKit's
+    // transition-completion setNavigationBarHidden: both land here. Restarting
+    // would snap the bar back to its resting position for a frame.
+    if (objc_getAssociatedObject(tbc, &kApolloTabBarHideInFlightKey)) return;
+
+    NSInteger generation = ApolloBumpTabBarMirrorGeneration(tbc);
+    objc_setAssociatedObject(tbc, &kApolloTabBarHideInFlightKey, @(generation), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    tabBar.transform = CGAffineTransformIdentity;
+    // Take over from an in-flight reveal slide, starting the hide from where
+    // the bar currently appears instead of snapping it to rest first.
+    CGFloat slideFromTy = 0.0;
+    if ([tabBar.layer animationForKey:ApolloTabBarSlideUpAnimationKey]) {
+        CALayer *presentation = tabBar.layer.presentationLayer;
+        slideFromTy = presentation ? [[presentation valueForKeyPath:@"transform.translation.y"] doubleValue] : 0.0;
+        [tabBar.layer removeAnimationForKey:ApolloTabBarSlideUpAnimationKey];
     }
+
+    // Slide the bar off the bottom ourselves. Two traps here:
+    //  - Do NOT use setTabBarHidden:YES animated:YES: on iOS 26 with a
+    //    legacy-linked (pre-26 SDK) app, that animation never moves the bar's
+    //    model position — it stacks additive position animations that net out
+    //    to a visible up-and-back "bounce" and only actually hides the bar by
+    //    flipping .hidden at completion (issue #382's tab-bar pop).
+    //  - Do NOT animate view.transform with a UIView block animation: Apollo's
+    //    own gesture-end handler writes the bar's model state right after us,
+    //    which re-anchors the additive animation and plays the slide from
+    //    ABOVE the bar's resting position instead of down off-screen.
+    // An explicit layer animation on transform.translation.y is immune to
+    // both — model writes by other actors don't remove or re-anchor it. The
+    // system flag is then flipped non-animated at completion for
+    // safe-area/state correctness.
+    CABasicAnimation *slide = [CABasicAnimation animationWithKeyPath:@"transform.translation.y"];
+    slide.fromValue = @(slideFromTy);
+    slide.toValue = @(ApolloTabBarSlideDistance(tabBar));
+    slide.duration = 0.25;
+    slide.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseIn];
+    slide.fillMode = kCAFillModeForwards;
+    slide.removedOnCompletion = NO;
+    // Stamp the slide with its generation so a stale completion can tell
+    // whether the key still holds ITS animation. A rapid Hide→Show→Hide
+    // within the slide duration re-uses the key for the newer hide; the old
+    // completion must not tear that live animation down (the bar would snap
+    // back to its resting position — the very pop this module exists to fix).
+    [slide setValue:@(generation) forKey:ApolloTabBarSlideGenerationKey];
+
+    [CATransaction begin];
+    [CATransaction setCompletionBlock:^{
+        NSNumber *inFlight = objc_getAssociatedObject(tbc, &kApolloTabBarHideInFlightKey);
+        if (inFlight.integerValue == generation) {
+            objc_setAssociatedObject(tbc, &kApolloTabBarHideInFlightKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        CAAnimation *active = [tabBar.layer animationForKey:ApolloTabBarSlideDownAnimationKey];
+        BOOL keyStillOurs = [[active valueForKey:ApolloTabBarSlideGenerationKey] integerValue] == generation;
+        NSInteger current = [objc_getAssociatedObject(tbc, &kApolloTabBarMirrorGenerationKey) integerValue];
+        if (current != generation) {
+            // A Show or newer Hide took over mid-slide; only clean up the
+            // filled-forward animation if it is still ours.
+            if (keyStillOurs) {
+                [tabBar.layer removeAnimationForKey:ApolloTabBarSlideDownAnimationKey];
+            }
+            return;
+        }
+        // Same runloop tick — the fill removal and the hidden flip commit in
+        // one transaction, so no intermediate frame renders.
+        if (keyStillOurs) {
+            [tabBar.layer removeAnimationForKey:ApolloTabBarSlideDownAnimationKey];
+        }
+        commitHidden();
+        // The hidden flip just changed the bottom safe-area inset; animate the
+        // resulting layout so floating safe-area-anchored views (e.g. the
+        // jump-to-bottom button in comments) glide into the freed space
+        // instead of jumping. The swipe gesture and UIKit's interactive
+        // transition are long finished here, so this cannot clobber them.
+        [UIView animateWithDuration:0.15
+                              delay:0.0
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseOut
+                         animations:^{
+            [tbc.view setNeedsLayout];
+            [tbc.view layoutIfNeeded];
+        } completion:nil];
+    }];
+    [tabBar.layer addAnimation:slide forKey:ApolloTabBarSlideDownAnimationKey];
+    [CATransaction commit];
 }
 
 static void ApolloScheduleIdleRevealTimer(UITabBarController *tbc) {
@@ -386,8 +506,8 @@ static void ApolloForEachVisibleTabBarController(void (^block)(UITabBarControlle
 }
 
 // Mirror nav-bar visibility onto the tab bar. Called from every nav-bar
-// hide/show entry point, including the gesture-driven path. iOS <26 only —
-// on iOS 26 we use the native UITabBarController.tabBarMinimizeBehavior path.
+// hide/show entry point. iOS <26 only — on iOS 26 we use the native
+// UITabBarController.tabBarMinimizeBehavior path.
 static void ApolloMirrorNavBarStateToTabBar(UINavigationController *nav, BOOL navHidden, BOOL animated) {
     if (ApolloSupportsNativeTabBarMinimize()) return;
     UITabBarController *tbc = ApolloLocateTabBarController(nav);
@@ -399,21 +519,83 @@ static void ApolloMirrorNavBarStateToTabBar(UINavigationController *nav, BOOL na
     }
 }
 
+// hidesBarsOnSwipe drives the nav bar through a percent-driven interactive
+// transition: UIKit calls setNavigationBarHidden:animated: the moment the pan
+// crosses the hide threshold (via _gestureRecognizedInteractiveHide:), then
+// scrubs that animation with the finger. Mirroring the tab bar from inside
+// that call kicks off setTabBarHidden: + a layout pass while UIKit's
+// transition is still in flight, which clobbers it — the nav bar (and the tab
+// bar with it) visibly snaps back to fully visible before hiding again
+// (issue #382, "legacy navigation bar stutters before collapsing"). Skip the
+// mirror while the swipe gesture is actively panning; _apolloBarHideSwipeFired:
+// mirrors the settled state once the gesture ends.
+static BOOL ApolloBarSwipeGestureActive(UINavigationController *nav) {
+    if (!nav.hidesBarsOnSwipe) return NO;
+    UIGestureRecognizerState state = nav.barHideOnSwipeGestureRecognizer.state;
+    return state == UIGestureRecognizerStateBegan || state == UIGestureRecognizerStateChanged;
+}
+
 %hook UINavigationController
 
 - (void)setNavigationBarHidden:(BOOL)hidden {
     %orig;
     if (ApolloSupportsNativeTabBarMinimize()) return;
+    if (ApolloBarSwipeGestureActive(self)) return;
     ApolloMirrorNavBarStateToTabBar(self, hidden, NO);
 }
 
 - (void)setNavigationBarHidden:(BOOL)hidden animated:(BOOL)animated {
     %orig;
     if (ApolloSupportsNativeTabBarMinimize()) return;
+    if (ApolloBarSwipeGestureActive(self)) return;
     ApolloMirrorNavBarStateToTabBar(self, hidden, animated);
 }
 
 %end
+
+// Apollo's own barHideOnSwipeGesturePanned: (a manually-added second target on
+// UIKit's swipe gesture) animates the tab bar itself at gesture end — a fade
+// in comment threads, a direct hide in the feed — which fights the slide this
+// module drives and reads as a stutter. Every tab-bar touch in that handler
+// is guarded by `if (self.tabBarController != nil)`, so returning nil from
+// that getter for exactly the duration of the handler makes Apollo skip its
+// tab-bar work while keeping its statusBarBackgroundView and contentInset
+// bookkeeping intact. The mirror in this module is then the only thing
+// animating the tab bar.
+static BOOL sApolloInBarHideSwipeHandler = NO;
+
+%hook _TtC6Apollo26ApolloNavigationController
+
+- (void)barHideOnSwipeGesturePanned:(UIPanGestureRecognizer *)gr {
+    if (ApolloSupportsNativeTabBarMinimize()) {
+        %orig;
+        return;
+    }
+    sApolloInBarHideSwipeHandler = YES;
+    @try {
+        %orig;
+    } @finally {
+        // If the handler ever raises, the flag must not stick — a stuck YES
+        // would make tabBarController return nil app-wide for Apollo's nav
+        // controllers.
+        sApolloInBarHideSwipeHandler = NO;
+    }
+}
+
+%end
+
+%hook UIViewController
+
+- (UITabBarController *)tabBarController {
+    if (sApolloInBarHideSwipeHandler &&
+        [self isKindOfClass:objc_getClass("_TtC6Apollo26ApolloNavigationController")]) {
+        return nil;
+    }
+    return %orig;
+}
+
+%end
+
 
 // hidesBarsOnSwipe entry point. Two modes:
 //   iOS 26+: hijack the toggle — instead of letting the nav bar hide on

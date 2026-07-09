@@ -1,4 +1,5 @@
 #import "ApolloNotificationBackend.h"
+#import "ApolloBarkNotifications.h"
 #import "ApolloCommon.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
@@ -86,10 +87,16 @@ NSURL *ApolloNotificationBackendBaseURL(void) {
     return sCachedBaseURL;
 }
 
+NSString *ApolloNotificationBackendRegistrationToken(void) {
+    ApolloEnsureBackendCacheValid();
+    return sCachedRegistrationToken;
+}
+
 // MARK: - Path classification
 
-// Match `/v1/device` exactly (device registration — header-gated, no body
-// augmentation needed since Apollo's body only carries the APNs token).
+// Match `/v1/device` exactly (device registration — header-gated; the body is
+// augmented with the delivery transport, see
+// ApolloAugmentDeviceRegistrationBody below).
 static BOOL ApolloPathIsDeviceRegistration(NSString *path) {
     return [path isEqualToString:@"/v1/device"];
 }
@@ -213,6 +220,40 @@ static NSData *ApolloAugmentAccountUpsertBody(NSData *originalBody, BOOL bulk) {
     return out;
 }
 
+// Inject the delivery transport into Apollo's `POST /v1/device` body (which
+// natively carries only the APNs token + sandbox flag). With Bark mode active
+// the device registers as transport=bark with its Bark push URL; otherwise
+// transport=apns is set EXPLICITLY rather than omitted, so the backend's
+// upsert self-heals a row that previously registered as bark (Bark disabled,
+// entitlement state changed, …). Returns nil when augmentation isn't possible
+// (no body, parse error, unexpected shape) — the caller falls through to
+// Apollo's original body and the backend defaults the transport to apns.
+static NSData *ApolloAugmentDeviceRegistrationBody(NSData *originalBody) {
+    if (originalBody.length == 0) return nil;
+
+    NSError *err = nil;
+    id parsed = [NSJSONSerialization JSONObjectWithData:originalBody options:NSJSONReadingMutableContainers error:&err];
+    if (err || ![parsed isKindOfClass:[NSDictionary class]]) {
+        ApolloLog(@"[NotifBackend] Could not parse device-registration body as a JSON object: %@", err);
+        return nil;
+    }
+
+    NSMutableDictionary *augmented = [(NSDictionary *)parsed mutableCopy];
+    if (ApolloBarkModeActive()) {
+        augmented[@"transport"] = @"bark";
+        augmented[@"transport_endpoint"] = ApolloBarkEffectivePushURL().absoluteString;
+    } else {
+        augmented[@"transport"] = @"apns";
+    }
+
+    NSData *out = [NSJSONSerialization dataWithJSONObject:augmented options:0 error:&err];
+    if (err) {
+        ApolloLog(@"[NotifBackend] Could not re-serialize augmented device body: %@", err);
+        return nil;
+    }
+    return out;
+}
+
 // MARK: - Request rewrite
 
 NSURLRequest *ApolloRewriteRequestForNotificationBackend(NSURLRequest *request) {
@@ -272,6 +313,31 @@ NSURLRequest *ApolloRewriteRequestForNotificationBackend(NSURLRequest *request) 
                           singular ? @"account" : @"accounts",
                           (unsigned long)augmented.length);
             }
+        } else if (ApolloPathIsDeviceRegistration(path)) {
+            // Headers are the authoritative channel: Apollo posts /v1/device
+            // as an upload task whose body data is attached outside the
+            // request object, so the body rewrite below doesn't always reach
+            // the wire — headers set on _originalRequest/_currentRequest
+            // reliably do (proven by X-Registration-Token above). The backend
+            // prefers these headers over body fields.
+            BOOL bark = ApolloBarkModeActive();
+            [mutable setValue:(bark ? @"bark" : @"apns") forHTTPHeaderField:@"X-Apollo-Transport"];
+            if (bark) {
+                // Effective URL = push URL + ?icon= pin for the user's
+                // selected app icon (see ApolloBarkEffectivePushURL).
+                [mutable setValue:ApolloBarkEffectivePushURL().absoluteString forHTTPHeaderField:@"X-Apollo-Transport-Endpoint"];
+            }
+            NSData *augmented = ApolloAugmentDeviceRegistrationBody(mutable.HTTPBody);
+            if (augmented) {
+                mutable.HTTPBody = augmented;
+                [mutable setValue:[NSString stringWithFormat:@"%lu", (unsigned long)augmented.length] forHTTPHeaderField:@"Content-Length"];
+                if ([mutable valueForHTTPHeaderField:@"Content-Type"] == nil) {
+                    [mutable setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+                }
+            }
+            ApolloLog(@"[NotifBackend] Tagged /v1/device registration (transport=%@%@)",
+                      bark ? @"bark" : @"apns",
+                      augmented ? @", body augmented" : @", header-only");
         }
     }
 

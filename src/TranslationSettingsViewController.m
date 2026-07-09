@@ -172,7 +172,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
         [[NSUserDefaults standardUserDefaults] setObject:sTranslationTargetLanguage forKey:UDKeyTranslationTargetLanguage];
     }
 
-    NSIndexPath *path = [NSIndexPath indexPathForRow:3 inSection:TranslationSettingsSectionGeneral];
+    NSIndexPath *path = [NSIndexPath indexPathForRow:7 inSection:TranslationSettingsSectionGeneral];
     [self.tableView reloadRowsAtIndexPaths:@[path] withRowAnimation:UITableViewRowAnimationNone];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification object:nil userInfo:ApolloRichPreviewSettingsChangeUserInfo()];
 }
@@ -189,8 +189,8 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     [[NSUserDefaults standardUserDefaults] setObject:sTranslationProvider forKey:UDKeyTranslationProvider];
     [[NSUserDefaults standardUserDefaults] setBool:YES forKey:UDKeyTranslationProviderUserSelected];
 
-    NSIndexPath *providerPath = [NSIndexPath indexPathForRow:4 inSection:TranslationSettingsSectionGeneral];
-    NSIndexPath *langPath = [NSIndexPath indexPathForRow:3 inSection:TranslationSettingsSectionGeneral];
+    NSIndexPath *providerPath = [NSIndexPath indexPathForRow:8 inSection:TranslationSettingsSectionGeneral];
+    NSIndexPath *langPath = [NSIndexPath indexPathForRow:7 inSection:TranslationSettingsSectionGeneral];
     [self.tableView reloadRowsAtIndexPaths:@[langPath, providerPath] withRowAnimation:UITableViewRowAnimationNone];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification object:nil userInfo:ApolloRichPreviewSettingsChangeUserInfo()];
 }
@@ -500,7 +500,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
-        case TranslationSettingsSectionGeneral: return 5;
+        case TranslationSettingsSectionGeneral: return 9;
         case TranslationSettingsSectionSkip: return (NSInteger)[self skipLanguageCodes].count + 1; // entries + "Add Language…"
         case TranslationSettingsSectionLibre: return 2;
         default: return 0;
@@ -519,7 +519,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     switch (section) {
         case TranslationSettingsSectionGeneral:
-            return @"When enabled, loaded comments are translated in-place. You can optionally translate post titles in feeds and thread headers. The native per-comment Translate action is hidden to avoid duplicate flows.\n\nAuto Translate by Default controls whether feeds and threads open already translated. When off, the globe button is still shown but content stays in its original language until you tap it.";
+            return @"Translates comments in place, and optionally post titles. Auto Translate opens everything already translated — when off, tap the globe per feed or thread.\n\nTap to Translate keeps the original language and shows a tappable \"Translate\" line under comments plus a language marker next to post stats. Tap to translate that item, tap again to switch back.\n\nThe Details toggles control the \"Translated from …\" lines and language markers. Match App Colour tints them with your theme's accent instead of green.";
         case TranslationSettingsSectionSkip:
             return @"Posts and comments detected as one of these languages will be left in their original form. Mixed-language text is still translated so embedded foreign words come through.";
         case TranslationSettingsSectionLibre:
@@ -538,28 +538,74 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
                                                    on:sEnableBulkTranslation
                                                action:@selector(enableBulkTranslationSwitchToggled:)];
             case 1: {
+                // Auto Translate is meaningless in Tap to Translate mode (tap
+                // mode drives the pipeline itself), so grey it out there.
+                BOOL autoEnabled = sEnableBulkTranslation && !sTapToTranslate;
+                // Disabled = superseded (tap mode drives the pipeline) — show the
+                // thumb OFF so it doesn't read as active; the stored value is kept.
                 UITableViewCell *cell = [self switchCellWithIdentifier:@"Cell_Translation_Auto"
                                                                  label:@"Auto Translate by Default"
-                                                                    on:sAutoTranslateOnAppear
+                                                                    on:(sAutoTranslateOnAppear && autoEnabled)
                                                                 action:@selector(autoTranslateSwitchToggled:)];
+                cell.textLabel.enabled = autoEnabled;
+                ((UISwitch *)cell.accessoryView).enabled = autoEnabled;
+                return cell;
+            }
+            case 2: {
+                UITableViewCell *cell = [self switchCellWithIdentifier:@"Cell_Translation_TapToTranslate"
+                                                                 label:@"Tap to Translate"
+                                                                    on:(sTapToTranslate && sEnableBulkTranslation)
+                                                                action:@selector(tapToTranslateSwitchToggled:)];
                 cell.textLabel.enabled = sEnableBulkTranslation;
                 ((UISwitch *)cell.accessoryView).enabled = sEnableBulkTranslation;
                 return cell;
             }
-            case 2: {
+            case 3: {
                 UITableViewCell *cell = [self switchCellWithIdentifier:@"Cell_Translation_Titles"
                                                                  label:@"Translate Post Titles"
-                                                                    on:sTranslatePostTitles
+                                                                    on:(sTranslatePostTitles && sEnableBulkTranslation)
                                                                 action:@selector(translatePostTitlesSwitchToggled:)];
                 cell.textLabel.enabled = sEnableBulkTranslation;
                 ((UISwitch *)cell.accessoryView).enabled = sEnableBulkTranslation;
                 return cell;
             }
-            case 3:
+            case 4: {
+                // In Tap to Translate mode the markers/affordances ARE the
+                // controls, so they're always shown — these two toggles have
+                // no effect and grey out.
+                BOOL detailsEnabled = sEnableBulkTranslation && !sTapToTranslate;
+                UITableViewCell *cell = [self switchCellWithIdentifier:@"Cell_Translation_Details"
+                                                                 label:@"Details on Comments & Posts"
+                                                                    on:(sShowTranslationDetails && detailsEnabled)
+                                                                action:@selector(showTranslationDetailsSwitchToggled:)];
+                cell.textLabel.enabled = detailsEnabled;
+                ((UISwitch *)cell.accessoryView).enabled = detailsEnabled;
+                return cell;
+            }
+            case 5: {
+                BOOL titleDetailsEnabled = sEnableBulkTranslation && !sTapToTranslate;
+                UITableViewCell *cell = [self switchCellWithIdentifier:@"Cell_Translation_TitleDetails"
+                                                                 label:@"Details on Titles"
+                                                                    on:(sShowTranslationTitleDetails && titleDetailsEnabled)
+                                                                action:@selector(showTranslationTitleDetailsSwitchToggled:)];
+                cell.textLabel.enabled = titleDetailsEnabled;
+                ((UISwitch *)cell.accessoryView).enabled = titleDetailsEnabled;
+                return cell;
+            }
+            case 6: {
+                UITableViewCell *cell = [self switchCellWithIdentifier:@"Cell_Translation_MarkerColor"
+                                                                 label:@"Match App Colour"
+                                                                    on:(sTranslationMarkerUseThemeColor && sEnableBulkTranslation)
+                                                                action:@selector(markerColorSwitchToggled:)];
+                cell.textLabel.enabled = sEnableBulkTranslation;
+                ((UISwitch *)cell.accessoryView).enabled = sEnableBulkTranslation;
+                return cell;
+            }
+            case 7:
                 return [self valueCellWithIdentifier:@"Cell_Translation_TargetLanguage"
                                                label:@"Target Language"
                                               detail:[self currentTargetLanguageDetailText]];
-            case 4:
+            case 8:
                 return [self valueCellWithIdentifier:@"Cell_Translation_Provider"
                                                label:@"Primary Provider"
                                               detail:[self providerDetailText]];
@@ -634,7 +680,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
 
 - (BOOL)tableView:(UITableView *)tableView shouldHighlightRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == TranslationSettingsSectionGeneral) {
-        return indexPath.row == 3 || indexPath.row == 4;
+        return indexPath.row == 7 || indexPath.row == 8;
     }
     if (indexPath.section == TranslationSettingsSectionSkip) {
         return YES; // both "Add" row and existing-language rows tappable
@@ -659,9 +705,9 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     if (indexPath.section != TranslationSettingsSectionGeneral) return;
 
     UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-    if (indexPath.row == 3) {
+    if (indexPath.row == 7) {
         [self presentTargetLanguageSheetFromSourceView:cell];
-    } else if (indexPath.row == 4) {
+    } else if (indexPath.row == 8) {
         [self presentProviderSheetFromSourceView:cell];
     }
 }
@@ -734,8 +780,12 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     [[NSUserDefaults standardUserDefaults] setBool:sEnableBulkTranslation forKey:UDKeyEnableBulkTranslation];
 
     NSIndexPath *autoPath = [NSIndexPath indexPathForRow:1 inSection:TranslationSettingsSectionGeneral];
-    NSIndexPath *titlesPath = [NSIndexPath indexPathForRow:2 inSection:TranslationSettingsSectionGeneral];
-    [self.tableView reloadRowsAtIndexPaths:@[autoPath, titlesPath] withRowAnimation:UITableViewRowAnimationNone];
+    NSIndexPath *tapPath = [NSIndexPath indexPathForRow:2 inSection:TranslationSettingsSectionGeneral];
+    NSIndexPath *titlesPath = [NSIndexPath indexPathForRow:3 inSection:TranslationSettingsSectionGeneral];
+    NSIndexPath *detailsPath = [NSIndexPath indexPathForRow:4 inSection:TranslationSettingsSectionGeneral];
+    NSIndexPath *titleDetailsPath = [NSIndexPath indexPathForRow:5 inSection:TranslationSettingsSectionGeneral];
+    NSIndexPath *colorPath = [NSIndexPath indexPathForRow:6 inSection:TranslationSettingsSectionGeneral];
+    [self.tableView reloadRowsAtIndexPaths:@[autoPath, tapPath, titlesPath, detailsPath, titleDetailsPath, colorPath] withRowAnimation:UITableViewRowAnimationNone];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification object:nil userInfo:ApolloRichPreviewSettingsChangeUserInfo()];
 }
 
@@ -745,12 +795,47 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification object:nil userInfo:ApolloRichPreviewSettingsChangeUserInfo()];
 }
 
+- (void)tapToTranslateSwitchToggled:(UISwitch *)sender {
+    sTapToTranslate = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sTapToTranslate forKey:UDKeyTapToTranslate];
+    // Auto Translate + the two Details rows change enabled state with this toggle.
+    NSIndexPath *autoPath = [NSIndexPath indexPathForRow:1 inSection:TranslationSettingsSectionGeneral];
+    NSIndexPath *detailsPath = [NSIndexPath indexPathForRow:4 inSection:TranslationSettingsSectionGeneral];
+    NSIndexPath *titleDetailsPath = [NSIndexPath indexPathForRow:5 inSection:TranslationSettingsSectionGeneral];
+    [self.tableView reloadRowsAtIndexPaths:@[autoPath, detailsPath, titleDetailsPath] withRowAnimation:UITableViewRowAnimationNone];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloShowTranslationDetailsChanged" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification object:nil userInfo:ApolloRichPreviewSettingsChangeUserInfo()];
+}
+
 - (void)translatePostTitlesSwitchToggled:(UISwitch *)sender {
     sTranslatePostTitles = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sTranslatePostTitles forKey:UDKeyTranslatePostTitles];
     // Notify ApolloTranslation.xm so the feed-VC globe is added/removed live
     // and any currently-translated title nodes get restored when this is OFF.
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloTranslatePostTitlesChanged" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification object:nil userInfo:ApolloRichPreviewSettingsChangeUserInfo()];
+}
+
+- (void)showTranslationDetailsSwitchToggled:(UISwitch *)sender {
+    sShowTranslationDetails = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sShowTranslationDetails forKey:UDKeyShowTranslationDetails];
+    // Notify ApolloTranslation.xm so already-open threads add/remove the
+    // per-item "Translated from …" marker without needing a relaunch.
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloShowTranslationDetailsChanged" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification object:nil userInfo:ApolloRichPreviewSettingsChangeUserInfo()];
+}
+
+- (void)showTranslationTitleDetailsSwitchToggled:(UISwitch *)sender {
+    sShowTranslationTitleDetails = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sShowTranslationTitleDetails forKey:UDKeyShowTranslationTitleDetails];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloShowTranslationDetailsChanged" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification object:nil userInfo:ApolloRichPreviewSettingsChangeUserInfo()];
+}
+
+- (void)markerColorSwitchToggled:(UISwitch *)sender {
+    sTranslationMarkerUseThemeColor = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sTranslationMarkerUseThemeColor forKey:UDKeyTranslationMarkerUseThemeColor];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloShowTranslationDetailsChanged" object:nil];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification object:nil userInfo:ApolloRichPreviewSettingsChangeUserInfo()];
 }
 

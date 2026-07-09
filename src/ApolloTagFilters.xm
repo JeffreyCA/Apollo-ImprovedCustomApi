@@ -30,6 +30,9 @@
 
 extern NSString *const ApolloTagFiltersChangedNotification;
 
+@interface RDKUser : NSObject
+@end
+
 // MARK: - Minimal AsyncDisplayKit forward declarations
 
 @interface ApolloTagDisplayNode : UIResponder
@@ -50,6 +53,7 @@ static const void *kApolloTagOverlaysKey = &kApolloTagOverlaysKey;        // NSA
 static const void *kApolloTagRevealedKindsKey = &kApolloTagRevealedKindsKey; // NSMutableSet<NSString *> of revealed kinds (@"title", @"media")
 static const void *kApolloTagAppliedLinkKey = &kApolloTagAppliedLinkKey;  // NSValue (non-retained pointer to current link, used to detect cell reuse)
 static const void *kApolloTagOverlayKindKey = &kApolloTagOverlayKindKey;  // NSString on overlay: @"title" or @"media"
+static const void *kApolloTagNativeObscuredKey = &kApolloTagNativeObscuredKey; // NSNumber BOOL: Apollo's native obscured overlay was seen for this cell+link
 
 static id ApolloTagIvarValueByName(id obj, const char *name) {
     if (!obj || !name) return nil;
@@ -133,17 +137,20 @@ static UIView *ApolloTagViewForNode(id node) {
 // MARK: - Blur target geometry
 //
 // Compact cells: blur thumbnailNode + titleNode separately (these are already
-//   the only on-screen content above the action row, and Apollo natively blurs
-//   spoiler video thumbnails so a harmless extra blur on top is fine).
+//   the only on-screen content above the action row). The thumbnail overlay
+//   is skipped when Apollo natively blurs it: spoilers always, NSFW per the
+//   captured blur-mature pref.
 //
 // Large cells: build TWO overlays — one over the title area, one over the
 //   media area — so users can tap-reveal either independently. Each overlay
 //   gets its own "kind" (@"title" / @"media"); tapping reveals only that part.
 //
-//   For SPOILER-only posts whose media is a video, Apollo already shows its
-//   own native "Spoiler — Contains spoiler – tap to watch" overlay on the
-//   video, so the media overlay is suppressed (only the title is covered).
-//   For NSFW posts, we always cover both regardless of media type.
+//   The media overlay is suppressed whenever Apollo is (or will be) natively
+//   obscuring the media, so the two blurs never stack: observed via
+//   RichMediaNode.obscuredContentInfoOverlayNode (latched), predicted via the
+//   captured blur-mature pref for NSFW (the native overlay materializes late,
+//   and waiting for it flashes ours first), plus the legacy spoiler-video
+//   heuristic. The title overlay still applies — Apollo never covers titles.
 //
 //   Coverage uses the actual subnode frames (richMediaNode / thumbnailNode /
 //   crosspostNode→richMediaNode) extended horizontally to the cell width so
@@ -192,6 +199,56 @@ static BOOL ApolloTagMediaIsVideo(id richMediaNode) {
     return vn != nil;
 }
 
+// Captured Reddit account pref "Blur mature (18+) images and media": Apollo
+// parses pref_no_profanity from /me.json (self /about.json too) into
+// RDKUser.noProfanity via Mantle — only self responses carry the field, so
+// the setter hook below fires only for the signed-in account. -1 until the
+// first parse. Some sessions never parse it at all (web-JSON/cookie identity
+// synthesizes the account without a /me fetch), leaving Apollo's own
+// noProfanity NO — so unknown must NOT suppress our cover (see below).
+static NSInteger sTagRedditNoProfanity = -1;
+
+// Predicts Apollo's native NSFW obscuring for a link, so the tweak's overlay
+// can stay out of the way from the FIRST layout pass (the native overlay node
+// materializes late — waiting for it flashes our overlay first). Requires a
+// captured YES: treating unknown as "will blur" would drop BOTH covers in
+// sessions where the pref never parses (web-JSON identity) — Apollo's user
+// object exists with noProfanity NO, so no native overlay ever appears. The
+// conservative default costs only a brief launch-window double-blur.
+static BOOL ApolloTagNativeWillBlurNSFW(BOOL isNSFW) {
+    return isNSFW && sTagRedditNoProfanity == 1;
+}
+
+// Apollo's native obscured overlay ("NSFW / Spoiler — tap to view") lives on
+// RichMediaNode.obscuredContentInfoOverlayNode, created iff the node was
+// configured obscured — spoilers always, NSFW per the blur-mature pref (with
+// a default-blur while Apollo's user object hasn't loaded). LATCHED per
+// cell+link: the native reveal reconfigures the node with the ivar nil, and
+// re-adding our overlay right after the user tapped through Apollo's own
+// gate would gate them twice.
+//
+// latchTrusted=NO for NSFW-only links once the pref is known OFF: any native
+// overlay seen then was launch-window default-blur residue, and when Apollo
+// reconfigures the cell un-obscured the latch would otherwise strand the
+// media with NEITHER gate. (Spoiler-tagged links keep the latch — their
+// native blur is pref-independent, so a vanished overlay there is a real
+// user reveal.)
+static BOOL ApolloTagMediaNativelyObscured(id cell, id richMediaNode, BOOL latchTrusted) {
+    id overlay = richMediaNode
+        ? ApolloTagIvarValueByName(richMediaNode, "obscuredContentInfoOverlayNode") : nil;
+    if (!latchTrusted) {
+        objc_setAssociatedObject(cell, kApolloTagNativeObscuredKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return overlay != nil;
+    }
+    NSNumber *latched = objc_getAssociatedObject(cell, kApolloTagNativeObscuredKey);
+    if ([latched boolValue]) return YES;
+    if (!overlay) return NO;
+    objc_setAssociatedObject(cell, kApolloTagNativeObscuredKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return YES;
+}
+
 // Returns an array of NSDictionary entries: @{ @"rect": NSValue<CGRect>, @"kind": NSString }.
 // Rects are in cellView coordinates. `kind` is one of @"title" or @"media".
 static NSArray<NSDictionary *> *ApolloTagBlurEntriesForCell(id cell, RDKLink *link) {
@@ -206,14 +263,14 @@ static NSArray<NSDictionary *> *ApolloTagBlurEntriesForCell(id cell, RDKLink *li
     if (isCompact) {
         // Compact: blur titleNode + (usually) thumbnailNode at their actual
         // frames. Pill only on the title (the thumbnail is too small to wear
-        // it). For SPOILER-only posts the thumbnail is suppressed because
-        // Apollo already natively blurs spoiler thumbnails in compact mode;
-        // covering it again would just stack two grey rectangles. NSFW posts
-        // always get both.
+        // it). The thumbnail overlay is skipped when Apollo already blurs it
+        // natively — spoilers always, NSFW per the predicted blur-mature pref
+        // (compact cells have no richMediaNode overlay ivar to observe).
         BOOL compactIsNSFW = NO, compactIsSpoiler = NO;
         @try { compactIsNSFW = link.isNSFW; } @catch (__unused id e) {}
         @try { compactIsSpoiler = link.isSpoiler; } @catch (__unused id e) {}
-        BOOL skipCompactThumb = (!compactIsNSFW && compactIsSpoiler);
+        BOOL skipCompactThumb = (!compactIsNSFW && compactIsSpoiler)
+            || ApolloTagNativeWillBlurNSFW(compactIsNSFW);
         for (NSString *name in @[@"thumbnailNode", @"titleNode"]) {
             BOOL isTitle = [name isEqualToString:@"titleNode"];
             if (!isTitle && skipCompactThumb) continue;
@@ -258,11 +315,17 @@ static NSArray<NSDictionary *> *ApolloTagBlurEntriesForCell(id cell, RDKLink *li
         }
     }
 
-    // Media overlay: only build it unless this is a SPOILER-only video post
-    // (Apollo's native spoiler overlay already covers the player). Square
-    // corners — the media area runs edge-to-edge and any rounding leaves a
-    // sliver of the underlying image visible in the corners.
-    BOOL skipMedia = (!isNSFW && isSpoiler && ApolloTagMediaIsVideo(richMediaNode));
+    // Media overlay: skipped when Apollo is already natively obscuring this
+    // media (obscuredContentInfoOverlayNode present — covers NSFW under the
+    // account's blur-mature pref and spoilers alike; latched so the native
+    // reveal isn't followed by our overlay), plus the legacy spoiler-video
+    // heuristic for configurations where the ivar isn't observable yet.
+    // Square corners — the media area runs edge-to-edge and any rounding
+    // leaves a sliver of the underlying image visible in the corners.
+    BOOL latchTrusted = isSpoiler || sTagRedditNoProfanity != 0;
+    BOOL skipMedia = ApolloTagMediaNativelyObscured(cell, richMediaNode, latchTrusted)
+        || (richMediaNode && ApolloTagNativeWillBlurNSFW(isNSFW))
+        || (!isNSFW && isSpoiler && ApolloTagMediaIsVideo(richMediaNode));
     if (!skipMedia && mediaView) {
         CGRect mf = [mediaView.superview convertRect:mediaView.frame toView:cellView];
         // Stretch horizontally to full cell width so a horizontally-scrollable
@@ -425,6 +488,7 @@ static void ApolloTagApplyDecisionToCell(id cell) {
     void *prevPtr = prevValue ? [prevValue pointerValue] : NULL;
     if (prevPtr != appliedLinkPtr) {
         objc_setAssociatedObject(cell, kApolloTagRevealedKindsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(cell, kApolloTagNativeObscuredKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(cell, kApolloTagAppliedLinkKey,
                                  [NSValue valueWithPointer:appliedLinkPtr],
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -540,6 +604,25 @@ static void ApolloTagRefreshAllVisibleCells(void) {
 }
 
 // MARK: - Cell hooks
+
+// Captures the account's blur-mature pref as Apollo parses it from /me.json
+// (Mantle key path data.pref_no_profanity → this setter). A pref change made
+// on Reddit's side flows in on the next /me refresh. On any change, visible
+// cells are re-evaluated — a statically-visible feed gets no layout pass of
+// its own when /me lands, so overlays computed under the unknown/-1 default
+// would otherwise stay wrong until the user scrolls.
+%hook RDKUser
+
+- (void)setNoProfanity:(BOOL)value {
+    %orig;
+    if (sTagRedditNoProfanity != (value ? 1 : 0)) {
+        sTagRedditNoProfanity = value ? 1 : 0;
+        ApolloLog(@"[TagFilters] Captured pref_no_profanity=%d (blur mature media)", value);
+        ApolloTagRefreshAllVisibleCells();
+    }
+}
+
+%end
 
 %hook _TtC6Apollo17LargePostCellNode
 

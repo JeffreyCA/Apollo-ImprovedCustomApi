@@ -83,6 +83,10 @@ extern BOOL sIconRowMagnifier;
 // while you're at the top, and shows a "N new comments" jump pill when you've scrolled down
 // to read/reply. See ApolloLiveCommentsFollow.xm. Default ON via registerDefaults.
 extern BOOL sLiveCommentsFollow;
+// Per-post comment sort memory (issue #555): reopening a post restores the comment
+// sort last picked inside it; other posts keep Apollo's native sort chain. Opt-in;
+// default OFF via registerDefaults. See ApolloPerPostCommentSort.xm.
+extern BOOL sPerPostCommentSort;
 extern BOOL sModernSubredditDividers;
 // Master toggle for subreddit list enhancements (see UDKeySubredditListEnhancements).
 extern BOOL sSubredditListEnhancements;
@@ -126,12 +130,25 @@ extern NSInteger sInlineImageAlignment;
 // Defaults to Default. Only takes effect when Inline Media Previews
 // (sEnableInlineImages) is on. See ApolloMediaAutoplay.m.
 typedef NS_ENUM(NSInteger, ApolloAutoplayInlineGIFMode) {
-    ApolloAutoplayInlineGIFModeDefault  = 0, // follow Apollo's Autoplay GIFs/Videos
-    ApolloAutoplayInlineGIFModeNever    = 1,
-    ApolloAutoplayInlineGIFModeWiFiOnly = 2,
-    ApolloAutoplayInlineGIFModeAlways   = 3,
+    // Legacy value: "follow Apollo's native Autoplay GIFs/Videos setting".
+    // No longer offered in the UI — resolved once at load into the explicit
+    // equivalent (see ApolloResolveLegacyDefaultAutoplayGIFMode) so persisted
+    // settings keep their behavior.
+    ApolloAutoplayInlineGIFModeDefault   = 0,
+    ApolloAutoplayInlineGIFModeNever     = 1, // static cover, no play overlay (tap opens viewer)
+    ApolloAutoplayInlineGIFModeWiFiOnly  = 2, // autoplay on WiFi; Tap to Play on cellular
+    ApolloAutoplayInlineGIFModeAlways    = 3,
+    ApolloAutoplayInlineGIFModeTapToPlay = 4, // static cover + play button; tap toggles play/pause inline
+    // 4 appended so persisted values keep meaning; display order is
+    // Always, WiFi Only, Tap to Play, Never.
 };
 extern NSInteger sAutoplayInlineGIFMode;
+
+// Display width of inline media (images/GIFs) in comments/selftext as a
+// percentage of the row width (50/75/100, default 100). Plain scalar — read
+// from Texture background layout threads (layoutSpecThatFits:), so keep it a
+// simple aligned integer, never an object.
+extern NSInteger sInlineMediaSizePercent;
 
 typedef NS_ENUM(NSInteger, ApolloLinkPreviewMode) {
     ApolloLinkPreviewModeOff = 0,
@@ -209,6 +226,10 @@ extern NSString *sLatestRedditBearerToken;
 
 extern BOOL sEnableBulkTranslation;
 extern BOOL sAutoTranslateOnAppear;
+extern BOOL sTapToTranslate;
+extern BOOL sShowTranslationDetails;
+extern BOOL sShowTranslationTitleDetails;
+extern BOOL sTranslationMarkerUseThemeColor;
 extern BOOL sTranslatePostTitles;
 extern NSString *sTranslationTargetLanguage;
 extern NSString *sTranslationProvider; // @"google", @"libre", or @"apple"

@@ -48,9 +48,9 @@
 // card takeover are intentionally out of scope (see docs/pip-design.md §3).
 //
 // Second entry point (issue #528): a PiP button in the fullscreen media
-// viewer, available ONLY while Apollo's native autoplay is effectively off
-// (never / wifi-only on cellular) and the viewer owns its player — see the
-// "Fullscreen → PiP entry point" section.
+// viewer, available ONLY while the video can't be autoplaying inline (setting
+// effectively off, or a spoiler/NSFW post) and the viewer owns its player —
+// see the "Fullscreen → PiP entry point" section.
 //
 // =============================================================================
 
@@ -292,9 +292,10 @@ static const void *kPiPSameLinkRecheckKey = &kPiPSameLinkRecheckKey;
 //
 // A "PiP" button in the fullscreen media viewer dismisses it and hands the
 // video to the in-app card. The button exists ONLY when both hold:
-//   1. Apollo's native Autoplay GIFs/Videos is effectively off right now
-//      ("never", or wifi-only on cellular) — with autoplay on, scroll-away
-//      takeover already covers PiP entry.
+//   1. The video can't be autoplaying inline: Autoplay GIFs/Videos is
+//      effectively off ("never", or wifi-only on cellular), OR the post is
+//      spoiler/NSFW-tagged (obscured posts never autoplay regardless of the
+//      setting). With inline autoplay, scroll-away takeover covers PiP entry.
 //   2. The viewer OWNS its player (the `player` ivar — nil when a shared
 //      layer was adopted). An owned player has no inline home, so the card
 //      is always the sole renderer.
@@ -897,7 +898,10 @@ static BOOL sPiPSessionHandbackInProgress = NO;
             if (sameLink) {
                 id videoNode = PiPVideoNodeFromRichMedia(weakRich);
                 AVPlayer *fresh = videoNode ? ApolloVideoUnmute_GetPlayerFromVideoNode(videoNode) : nil;
-                if (fresh && fresh != strongSelf.player && fresh.rate != 0) {
+                // Not while a back-swipe is in flight (a fire mid-gesture must
+                // not close a card a cancelled gesture would keep) — retry.
+                if (fresh && fresh != strongSelf.player && fresh.rate != 0
+                    && !ApolloVideoUnmute_IsNavigatingBack()) {
                     ApolloLog(@"[PiP] Same post's fresh player materialized — closing stale PiP");
                     [strongSelf teardownKeepPlaying:NO];
                 } else if (attempts > 1) {
@@ -3054,16 +3058,25 @@ static BOOL PiPHandleFeedVisibilityEvent(id cellNode, unsigned long long event) 
         // post our card holds would double-render — close the card, the inline
         // cell wins. Scoped to fullscreen-origin cards (the only cards that
         // float over feeds with no identity home; comments-origin cards defer
-        // to the appeared-walk on back-pop) and deferred through interactive
-        // back-swipes — these events fire mid-gesture even when the gesture is
-        // cancelled, mirroring the owned path's deferral below.
-        if (player && player.rate != 0
-            && controller.cardFromFullscreen && !controller.restoring
-            && controller.link && !ApolloVideoUnmute_IsNavigatingBack()) {
+        // to the appeared-walk on back-pop). The immediate teardown defers
+        // through interactive back-swipes — these events fire mid-gesture even
+        // when the gesture is cancelled, mirroring the owned path's deferral
+        // below.
+        if (controller.cardFromFullscreen && !controller.restoring && controller.link) {
             id cellLink = PiPGetIvar(richMediaNode, "link");
-            if (cellLink && (cellLink == controller.link || [cellLink isEqual:controller.link])) {
+            BOOL sameLink = cellLink
+                && (cellLink == controller.link || [cellLink isEqual:controller.link]);
+            if (sameLink && player && player.rate != 0
+                && !ApolloVideoUnmute_IsNavigatingBack()) {
                 ApolloLog(@"[PiP] Feed cell playing our post with a different player — closing card");
                 [controller teardownKeepPlaying:NO];
+            } else if (sameLink) {
+                // Playerless/paused at event time (async attach, or the mute
+                // dance's pause window) — poll like the comments path does, or
+                // the double-render lasts until the next scroll tick.
+                [controller scheduleSameLinkRecheckForCell:cellNode
+                                             richMediaNode:richMediaNode
+                                                 videoNode:videoNode];
             }
         }
         return NO;
@@ -3213,6 +3226,25 @@ static AVPlayer *PiPOwnedPlayerFromMediaPageVC(id pageVC) {
     return PiPGetIvar(mediaVC, "player");
 }
 
+// Spoiler/NSFW-tagged posts never autoplay inline: RichMediaNode's video setup
+// (sub_10057c93c) evaluates AutoplayGIFs only when obscuredType is nil, so
+// obscured posts take the blurred-poster path unconditionally — their
+// fullscreen is as PiP-safe as autoplay-off. If the user disabled blurring
+// (the post then autoplays like any other), the owned-player check still
+// hides the button for adopted shared layers.
+static BOOL PiPPagerLinkNeverAutoplays(id pageVC) {
+    id link = PiPGetIvar(pageVC, "link"); // RDKLink
+    if (!link) return NO;
+    // getter=isSpoiler / getter=isNSFW — the binary has no plain `spoiler`
+    // getter (verified: only -[RDKLink isSpoiler] / -[RDKLink isNSFW] exist).
+    SEL spoilerSel = NSSelectorFromString(@"isSpoiler");
+    if ([link respondsToSelector:spoilerSel]
+        && ((BOOL (*)(id, SEL))objc_msgSend)(link, spoilerSel)) return YES;
+    SEL nsfwSel = NSSelectorFromString(@"isNSFW");
+    return [link respondsToSelector:nsfwSel]
+        && ((BOOL (*)(id, SEL))objc_msgSend)(link, nsfwSel);
+}
+
 // Restore the user's fullscreen playback state on the card after the native
 // dismissal's mute dance settles (T+0 force-mute, T+50ms Ambient downgrade,
 // T+100ms setMuted:YES — relative to viewDidDisappear).
@@ -3345,12 +3377,13 @@ static void PiPRefreshFullscreenPiPButton(id pageVC) {
                                  closeFrame.origin.y,
                                  closeFrame.size.width, closeFrame.size.height);
     pipButton.alpha = closeButton.alpha;
-    // Only when autoplay is effectively off AND the page has a fullscreen-
+    // Only when the video can't be autoplaying inline (setting off, or a
+    // spoiler/NSFW post — those never autoplay) AND the page has a fullscreen-
     // OWNED player (image pages and adopted shared-layer pages keep the X
     // alone). Live checks — every layout/page-swipe pass re-evaluates.
     pipButton.hidden = closeButton.hidden
-        || !ApolloNativeAutoplayEffectivelyOff()
-        || (PiPOwnedPlayerFromMediaPageVC(pageVC) == nil);
+        || (PiPOwnedPlayerFromMediaPageVC(pageVC) == nil)
+        || !(ApolloNativeAutoplayEffectivelyOff() || PiPPagerLinkNeverAutoplays(pageVC));
 }
 
 // Consulted by ApolloVideoUnmute.xm's MediaPageViewController.viewDidDisappear
@@ -3566,8 +3599,8 @@ BOOL ApolloPiP_WillHandleFullscreenDismiss(void) {
     // Re-check the gate at tap time: visibility only re-evaluates on layout
     // passes, so a reachability flip while the viewer sits open can leave the
     // button stale-visible. Hide and stand down instead of acting.
-    if (!ApolloNativeAutoplayEffectivelyOff()) {
-        ApolloLog(@"[PiP] Fullscreen PiP tapped but autoplay is on now — hiding button");
+    if (!ApolloNativeAutoplayEffectivelyOff() && !PiPPagerLinkNeverAutoplays(self)) {
+        ApolloLog(@"[PiP] Fullscreen PiP tapped but the gate closed — hiding button");
         PiPRefreshFullscreenPiPButton(self);
         return;
     }

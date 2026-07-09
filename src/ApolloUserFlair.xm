@@ -1,5 +1,6 @@
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloWebSessionStore.h"
 #import <objc/message.h>
 #import <objc/runtime.h>
 
@@ -1934,7 +1935,60 @@ static BOOL ApolloUserFlairPresenterHasFlairSelector(UIViewController *presenter
 
 %end
 
+// On an API-key-free (Web JSON / keyless) account, Reddit's user-flair endpoints
+// are OAuth-only — user_flair_v2 and flairselector 404 for cookie auth (see
+// ApolloWebJSONShouldStubFlairList; device-confirmed live). So the selector's
+// option list comes back empty and the screen is just blank, with no hint as to
+// why. Rather than leave that mystery, show a short explanation. Gated strictly on
+// the ACTIVE account being a web-session account (ApolloActiveWebSession() != nil),
+// so OAuth / API-key accounts are completely untouched, and only while the option
+// list is actually empty (so it vanishes the moment options ever do load).
+static char kApolloUserFlairKeylessNoticeKey;
+
+static void ApolloUserFlairUpdateKeylessNotice(UIViewController *vc) {
+    if (![vc isViewLoaded]) return;
+    BOOL keyless = (ApolloActiveWebSession() != nil);
+    NSArray *options = ApolloUserFlairControllerOptions(vc);
+    BOOL emptyOptions = (options.count == 0);
+
+    UILabel *notice = objc_getAssociatedObject(vc, &kApolloUserFlairKeylessNoticeKey);
+    if (keyless && emptyOptions) {
+        if (!notice) {
+            notice = [[UILabel alloc] init];
+            notice.numberOfLines = 0;
+            notice.textAlignment = NSTextAlignmentCenter;
+            notice.adjustsFontForContentSizeCategory = YES;
+            notice.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+            notice.textColor = [UIColor secondaryLabelColor];
+            notice.text = @"User flair isn’t available on API-key-free accounts.\n\nReddit only lets you view and set your flair with a Reddit API key. Add one for this account to use flair.";
+            notice.translatesAutoresizingMaskIntoConstraints = NO;
+            [vc.view addSubview:notice];
+            [NSLayoutConstraint activateConstraints:@[
+                [notice.leadingAnchor constraintEqualToAnchor:vc.view.leadingAnchor constant:32.0],
+                [notice.trailingAnchor constraintEqualToAnchor:vc.view.trailingAnchor constant:-32.0],
+                [notice.centerYAnchor constraintEqualToAnchor:vc.view.centerYAnchor constant:-44.0],
+            ]];
+            objc_setAssociatedObject(vc, &kApolloUserFlairKeylessNoticeKey, notice, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            ApolloLog(@"[UserFlair] API-key-free account — showing 'flair needs an API key' notice");
+        }
+        notice.hidden = NO;
+        [vc.view bringSubviewToFront:notice];
+    } else if (notice) {
+        notice.hidden = YES;
+    }
+}
+
 %hook _TtC6Apollo27FlairSelectorViewController
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    ApolloUserFlairUpdateKeylessNotice((UIViewController *)self);
+}
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    ApolloUserFlairUpdateKeylessNotice((UIViewController *)self);
+}
 
 - (NSInteger)tableNode:(id)tableNode numberOfRowsInSection:(NSInteger)section {
     if (section == kApolloUserFlairOptionsSection) {

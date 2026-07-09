@@ -44,12 +44,14 @@ BOOL sEnableInlineImages = NO;
 BOOL sEnableChatMedia = NO;   // effective default YES via registerDefaults (UDKeyEnableChatMedia)
 BOOL sEnableAISummaries = NO;
 BOOL sLiveCommentsFollow = YES;   // effective default ON via registerDefaults (UDKeyLiveCommentsFollow)
+BOOL sPerPostCommentSort = NO;    // opt-in; default OFF via registerDefaults (UDKeyPerPostCommentSort)
 BOOL sEnableAIPostSummaries = YES;
 BOOL sEnableAICommentSummaries = YES;
 BOOL sEnableTapToSummarize = NO;
 BOOL sEnableAIAutoExpandSummaries = NO;
 NSInteger sInlineImageAlignment = ApolloInlineImageAlignmentCenter;
 NSInteger sAutoplayInlineGIFMode = ApolloAutoplayInlineGIFModeDefault;
+NSInteger sInlineMediaSizePercent = 100;
 NSInteger sLinkPreviewBodyMode = ApolloLinkPreviewModeOff;
 NSInteger sLinkPreviewCommentsMode = ApolloLinkPreviewModeOff;
 NSInteger sLinkPreviewCardColor = ApolloLinkPreviewCardColorNeutral;
@@ -62,6 +64,10 @@ NSString *sLatestRedditBearerToken = nil;
 
 BOOL sEnableBulkTranslation = NO;
 BOOL sAutoTranslateOnAppear = YES;
+BOOL sTapToTranslate = NO;   // per-item "tap to translate" mode; overrides auto-translate display
+BOOL sShowTranslationDetails = YES;   // comments + post-header marker; default ON via registerDefaults
+BOOL sShowTranslationTitleDetails = YES;   // feed-title compact marker; default ON via registerDefaults
+BOOL sTranslationMarkerUseThemeColor = NO;   // NO = green marker; YES = follow app/theme tint
 BOOL sTranslatePostTitles = NO;
 NSString *sTranslationTargetLanguage = nil;
 NSString *sTranslationProvider = nil;

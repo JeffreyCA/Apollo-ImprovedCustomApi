@@ -109,7 +109,7 @@ Finally, **don't copy these examples verbatim**. If everyone adopts the same "sa
 - **Inline Media Previews**: Render images, GIFs, videos, and Imgur albums inline within posts and comments (Settings > Custom API > Media > Inline Media Previews)
 - **Rich Link Previews**: Render metadata-rich link cards in post bodies and comments (Settings > Custom API > Media)
 - **User Profile Pictures**: Show Reddit user avatars next to usernames in feeds, comments, and user profiles (Settings > Custom API > Media > Show User Profile Pictures)
-- **Self-hosted Notifications** (advanced): Optionally route push registrations, watchers, and inbox checks through your own forked [apollo-backend](https://github.com/nickclyde/apollo-backend) instance instead of having those requests silently dropped (Settings > Custom API > Notification Backend)
+- **Self-hosted Notifications** (advanced): Optionally route push registrations, watchers, and inbox checks through your own [apollo-backend](https://github.com/Apollo-Reborn/apollo-backend) instance instead of having those requests silently dropped — delivered over native APNs (paid Apple Developer account) or the free [Bark](https://apps.apple.com/us/app/bark-custom-notifications/id1403753865) app, which works even on free-Apple-ID sideloads (Settings > Custom API > Notification Backend)
 
 ### Not seeing thumbnails or inline previews?
 
@@ -123,10 +123,15 @@ Finally, **don't copy these examples verbatim**. If everyone adopts the same "sa
 
 ### Self-hosted notifications (advanced)
 
-The legacy Apollo push backends went dark in June 2023 and are otherwise blocked by the tweak. If you run your own instance of [nickclyde/apollo-backend](https://github.com/nickclyde/apollo-backend) (with your own Reddit OAuth `CLIENT_ID` / `CLIENT_SECRET` baked into its env vars), you can set the URL under **Settings > Custom API > Notification Backend** and the tweak will route all `apollopushserver.xyz`, `beta.apollonotifications.com`, and `apolloreq.com` traffic to that host instead. Leave the field empty to keep the current "silently dropped" behavior.
+The legacy Apollo push backends went dark in June 2023 and are otherwise blocked by the tweak. If you run your own instance of [apollo-backend](https://github.com/Apollo-Reborn/apollo-backend), you can set the URL under **Settings > Custom API > Notification Backend** and the tweak will route all `apollopushserver.xyz`, `beta.apollonotifications.com`, and `apolloreq.com` traffic to that host instead. Leave the field empty to keep the current "silently dropped" behavior.
+
+Notifications can be delivered two ways — pick the one that matches your Apple account:
+
+- **Native push (APNs) — requires a paid Apple Developer account ($99/year).** Real APNs delivery needs an `aps-environment` entitlement, which Apple only grants to paid teams, plus an explicit App ID with Push Notifications enabled (not the wildcard profile most sideloading tools create). This path supports everything, including Live Activities. Follow the backend's [Getting Started guide](https://github.com/Apollo-Reborn/apollo-backend/blob/main/GETTING_STARTED.md).
+- **Bark — free, no Apple Developer account.** Enable **Bark Delivery** under the same Notification Backend settings and notifications are relayed through the free [Bark](https://apps.apple.com/us/app/bark-custom-notifications/id1403753865) App Store app instead of APNs. This is the path for free-Apple-ID sideloads, which can never receive APNs pushes. Apollo's native notification and watcher UI works unmodified, taps deep-link back into Apollo, and Apollo's icons and notification sounds carry over. Follow the backend's [Bark Getting Started guide](https://github.com/Apollo-Reborn/apollo-backend/blob/main/GETTING_STARTED_BARK.md). Trade-offs: Live Activities remain APNs-only, and notification content transits the Bark relay (self-host `bark-server` — bundled with the backend — to keep it off Bark's hosted `api.day.app`).
 
 > [!IMPORTANT]
-> APNs delivery requires a real `aps-environment` entitlement, which Apple only grants under a paid Apple Developer team. Free-account sideloads can still register and exercise the watcher CRUD, but push notifications will never actually arrive. (On a free-account sideload the tweak detects the missing entitlement and replaces the Notifications settings with a clear "Notifications Unavailable" explanation instead of the misleading "Error Loading Notifications — contact developer" alert.)
+> A free-account sideload has no push entitlement, so native APNs pushes can never arrive on it no matter how the backend is configured — **Bark is the supported path there** (the tweak detects the missing entitlement and explains this in the Notifications settings). Paid-certificate installs can use either delivery method and switch between them in place.
 
 ## Known Issues
 
@@ -293,6 +298,7 @@ Thank you to these wonderful people:
     </tr>
     <tr>
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/federgilad"><img src="https://avatars.githubusercontent.com/u/38831140?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="federgilad"/></a><br /><sub><b>federgilad</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/commits?author=federgilad" title="Code">Code</a></td>
+      <td align="center" valign="top" width="14.29%"><a href="https://github.com/ostechgit"><img src="https://avatars.githubusercontent.com/u/50818622?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="ostechgit"/></a><br /><sub><b>ostechgit</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/commits?author=ostechgit" title="Code">Code</a></td>
     </tr>
   </tbody>
 </table>
@@ -307,6 +313,11 @@ Thank you to these wonderful people:
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/bajader"><img src="https://avatars.githubusercontent.com/u/98495831?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="bajader"/></a><br /><sub><b>bajader</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/metalnakls"><img src="https://avatars.githubusercontent.com/u/15786688?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="metalnakls"/></a><br /><sub><b>metalnakls</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/paulo1manso"><img src="https://avatars.githubusercontent.com/u/77062284?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="paulo1manso"/></a><br /><sub><b>paulo1manso</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
+      <td align="center" valign="top" width="14.29%"><a href="https://github.com/lilacvibes"><img src="https://avatars.githubusercontent.com/u/61892971?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="lilacvibes"/></a><br /><sub><b>lilacvibes</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
+      <td align="center" valign="top" width="14.29%"><a href="https://github.com/harshb16"><img src="https://avatars.githubusercontent.com/u/49092079?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="harshb16"/></a><br /><sub><b>harshb16</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.29%"><a href="https://github.com/IllIIllIllIllII"><img src="https://avatars.githubusercontent.com/u/132845378?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="IllIIllIllIllII"/></a><br /><sub><b>IllIIllIllIllII</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
       <td align="center" valign="top" width="14.29%"><a href="https://www.reddit.com/user/harunatsu91202024/"><img src="https://i.redd.it/snoovatar/avatars/ef90ed21-4a24-4a78-b535-848d4efc6378.png?s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="harumatsu"/></a><br /><sub><b>harumatsu</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
     </tr>
   </tbody>

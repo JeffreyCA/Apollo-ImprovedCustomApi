@@ -154,7 +154,7 @@ jobs:
           # trailing dpkg packaging revision in control (e.g. 2.14.0-33 -> 2.14.0).
           TWEAK_VERSION=$(sed -n 's/^Version: //p' control | sed 's/~/-/g' | sed -E 's/-[0-9]+$//')
           TAG_NAME="v${APOLLO_VERSION}_${TWEAK_VERSION}"
-          RELEASE_NAME="Apollo v${APOLLO_VERSION} with Apollo-Reborn v${TWEAK_VERSION}"
+          RELEASE_NAME="v${TWEAK_VERSION} -"
           echo "apollo_version=${APOLLO_VERSION}" >> "$GITHUB_OUTPUT"
           echo "tweak_version=${TWEAK_VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"

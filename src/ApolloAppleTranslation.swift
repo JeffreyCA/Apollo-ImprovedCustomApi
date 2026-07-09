@@ -146,9 +146,20 @@ final class ApolloAppleTranslationCoordinator: ObservableObject {
                     self.installHostIfNeeded()
                     self.sources.append(src)
                 } else {
+                    #if APOLLO_SIM_BUILD
+                    // SIMULATOR: the iOS Translation engine does not exist in sim
+                    // runtimes (status is .unsupported for every pair), but the
+                    // identical engine runs on the host Mac. Route through the
+                    // local test bridge (scripts/apple-translate-bridge.swift,
+                    // 127.0.0.1:8765) so the Apple provider is fully exercisable
+                    // in the sim. Dev-only: compiled out of device builds.
+                    appleTranslateLog.log("sim: bridging \(src, privacy: .public)->\(tgt, privacy: .public) to host Apple engine")
+                    await self.drainViaHostBridge(src: src, tgt: tgt)
+                    #else
                     // .unsupported, or already declined this session -> skip silently.
                     appleTranslateLog.log("skip \(src, privacy: .public)->\(tgt, privacy: .public) (status=\(String(describing: status), privacy: .public), declined=\(self.declinedSources.contains(src)))")
                     await self.drainFail(src: src, message: "\(src) not available")
+                    #endif
                 }
                 return
             }
@@ -195,6 +206,40 @@ final class ApolloAppleTranslationCoordinator: ObservableObject {
                 }
             }
         }
+    }
+    #endif
+
+    #if APOLLO_SIM_BUILD
+    // Simulator-only: drain a source's jobs through the host Mac's Apple
+    // translation engine (scripts/apple-translate-bridge.swift). The sim shares
+    // the host's loopback, so 127.0.0.1 reaches the Mac directly.
+    private func drainViaHostBridge(src: String, tgt: String) async {
+        guard let stream = streams[src] else { return }
+        for await job in stream {
+            do {
+                let translated = try await Self.hostBridgeTranslate(text: job.text, source: src, target: tgt)
+                job.completion(translated, nil)
+            } catch {
+                appleTranslateLog.error("sim bridge failed (\(src, privacy: .public)): \(error.localizedDescription, privacy: .public)")
+                job.completion(nil, Self.makeError(code: 305,
+                    "Apple sim bridge: \(error.localizedDescription). Run scripts/apple-bridge.sh on the Mac."))
+            }
+        }
+    }
+
+    private static func hostBridgeTranslate(text: String, source: String, target: String) async throws -> String {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:8765/translate")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 30
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["q": text, "source": source, "target": target])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              let translated = obj?["translatedText"] as? String, !translated.isEmpty else {
+            throw makeError(code: 306, (obj?["error"] as? String) ?? "bridge returned no translation")
+        }
+        return translated
     }
     #endif
 

@@ -110,6 +110,21 @@ static NSString *const ApolloIPadTabBarBottomChangedNotification = @"ApolloIPadT
 // See ApolloStatsRowTouch.xm.
 static NSString *const UDKeyIconRowMagnifier = @"IconRowMagnifier";
 static NSString *const UDKeyLiveCommentsFollow = @"LiveCommentsFollow";
+// Per-POST comment sort memory (issue #555). When ON, changing a post's comment sort
+// is remembered for that post (capped LRU mapping below) and restored when its
+// comments are reopened; every other post keeps Apollo's native chain (suggested
+// sort > per-subreddit remembered > default). Opt-in; default NO via registerDefaults.
+// See ApolloPerPostCommentSort.xm.
+static NSString *const UDKeyPerPostCommentSort = @"PerPostCommentSort";
+// Backing store for the above: { bare post id : { "s": sort raw, "t": last-use unix time } }.
+static NSString *const UDKeyPerPostCommentSortMapping = @"PerPostCommentSortMapping";
+// APOLLO'S OWN key (not ours) for the native Comments > "Remember Subreddit Sort"
+// toggle. Named here because "Remember Post Sort" and that toggle are mutually
+// exclusive (one sort-change gesture can't both pin a single post and move the
+// subreddit-wide sort, so both-on is a trap state): enabling either turns the other
+// off, and launch/restore normalize a stale both-on to per-post. This toggle key is
+// the ONLY native default the feature ever writes. See ApolloPerPostCommentSort.xm.
+static NSString *const UDKeyApolloRememberSubredditCommentsSort = @"RememberRedditCommentsSort";
 // Render image URLs (i.redd.it, preview.redd.it, i.imgur.com, generic .png/.jpg/.jpeg/.webp)
 // inline within post selftext and comments instead of leaving them as plain text links.
 static NSString *const UDKeyEnableInlineImages = @"EnableInlineImages";
@@ -121,14 +136,30 @@ static NSString *const UDKeyEnableChatMedia = @"EnableChatMedia";
 // Horizontal alignment for inline media that is narrower than the row (e.g. tall portrait images).
 // 0 = Center (default), 1 = Left, 2 = Right.
 static NSString *const UDKeyInlineImageAlignment = @"InlineImageAlignment";
-// Autoplay for inline GIF/animated media previews. 0 = Default (follow Apollo's
-// native "Autoplay GIFs/Videos"), 1 = Never, 2 = WiFi Only, 3 = Always. Only
-// meaningful when Inline Media Previews (UDKeyEnableInlineImages) is on.
+// Autoplay for inline GIF/animated media previews. 0 = legacy Default (follow
+// Apollo's native "Autoplay GIFs/Videos", migrated at load), 1 = Never,
+// 2 = WiFi Only, 3 = Always, 4 = Tap to Play (static cover + play button;
+// tap toggles play/pause inline). Only meaningful when Inline Media Previews
+// (UDKeyEnableInlineImages) is on.
 static NSString *const UDKeyAutoplayInlineGIFs = @"AutoplayInlineGIFs";
+// Display width of inline media (images/GIFs) in comments and selftext as a
+// percentage of the row width: 50, 75, or 100 (default).
+static NSString *const UDKeyInlineMediaSizePercent = @"InlineMediaSizePercent";
 
 // Bulk translation feature
 static NSString *const UDKeyEnableBulkTranslation = @"EnableBulkTranslation";
 static NSString *const UDKeyAutoTranslateOnAppear = @"AutoTranslateOnAppear";
+// Tap to Translate: everything stays in its original language with per-item tap
+// affordances ("Translate" under comments, a language marker next to post
+// stats); tapping translates just that item. Default OFF via registerDefaults.
+static NSString *const UDKeyTapToTranslate = @"TapToTranslate";
+// Per-item translation details: "Translated from ..." lines under comments/the
+// post header, and the compact language marker on feed post stats. Both default
+// ON via registerDefaults. Match App Colour tints the markers with the app
+// accent instead of green (default OFF).
+static NSString *const UDKeyShowTranslationDetails = @"ShowTranslationDetails";
+static NSString *const UDKeyShowTranslationTitleDetails = @"ShowTranslationTitleDetails";
+static NSString *const UDKeyTranslationMarkerUseThemeColor = @"TranslationMarkerUseThemeColor";
 static NSString *const UDKeyTranslatePostTitles = @"TranslatePostTitles";
 static NSString *const UDKeyTranslationTargetLanguage = @"TranslationTargetLanguage";
 static NSString *const UDKeyTranslationProvider = @"TranslationProvider"; // google | libre | apple
@@ -242,6 +273,44 @@ static NSString *const UDKeyNotificationBackendURL = @"NotificationBackendURL";
 // endpoints (/v1/device, /v1/device/{apns}/account[s]).
 static NSString *const UDKeyNotificationBackendRegistrationToken = @"NotificationBackendRegistrationToken";
 
+// Bark delivery for free-account sideloads (no aps-environment entitlement).
+// When enabled AND a valid Bark push URL is set AND the backend above is
+// configured, the tweak feeds Apollo a synthetic device token so its native
+// notification/watcher registration runs, and the backend delivers via an
+// HTTP POST to the Bark push URL instead of APNs. On builds with a real push
+// entitlement this instead flips the existing (real-token) backend device row
+// between transport=apns and transport=bark.
+static NSString *const UDKeyBarkNotificationsEnabled = @"BarkNotificationsEnabled";
+// Full Bark push URL: https://api.day.app/<device_key> or a self-hosted
+// bark-server equivalent. The device key is a bearer capability — treat it
+// like a password.
+static NSString *const UDKeyBarkPushURL = @"BarkPushURL";
+// The synthetic 64-hex device token registered with the backend in place of
+// an APNs token. Generated once (SecRandomCopyBytes) and persisted so the
+// backend device row stays stable across launches; travels in settings
+// backups automatically (whole-plist backup).
+static NSString *const UDKeyBarkSyntheticDeviceToken = @"BarkSyntheticDeviceToken";
+// Lowercase hex of the device token from the most recent registration Apollo
+// completed (the real APNs token on entitled builds, the synthetic one on
+// free sideloads). Stashed by the didRegister hook so the settings UI can
+// address the backend device row directly when flipping transports.
+static NSString *const UDKeyLastDeviceTokenHex = @"BarkLastDeviceTokenHex";
+// The CFBundleAlternateIcons key of the app icon the user selected in
+// Apollo's settings (absent = stock icon). Mirrored from
+// UIApplication.alternateIconName by the setAlternateIconName hook so Bark
+// URL construction can read it from any thread; used to pin the matching
+// hosted icon on Bark notifications via the push URL's ?icon= parameter.
+static NSString *const UDKeyBarkSelectedIconName = @"BarkSelectedIconName";
+
+// Anonymous MAU heartbeat (beat.apolloreborn.app). ON by default; this is the
+// opt-OUT, mirroring the DisableApollonouncements pattern (a disable flag that
+// defaults to NO gives us on-by-default). See ApolloUsageHeartbeat.{h,m}.
+static NSString *const UDKeyDisableUsageHeartbeat = @"DisableUsageHeartbeat";
+// Internal bookkeeping for the heartbeat (not user-facing).
+static NSString *const UDKeyHeartbeatMonth   = @"UsageHeartbeatMonth";   // "2026-07"
+static NSString *const UDKeyHeartbeatToken   = @"UsageHeartbeatToken";   // monthly UUID
+static NSString *const UDKeyHeartbeatLastDay = @"UsageHeartbeatLastDay"; // "2026-07-05"
+
 // Feed thumbnails for text posts with embedded images (off = native behavior).
 static NSString *const UDKeyFeedTextPostThumbnails = @"FeedTextPostThumbnails";
 
@@ -260,3 +329,6 @@ static NSString *const UDKeyLinkPreviewCardColor = @"LinkPreviewCardColor";
 // hex paints the whole card that exact color, with auto-contrasted text.
 static NSString *const UDKeyLinkPreviewCardColorHex = @"LinkPreviewCardColorHex";
 static NSString *const ApolloLinkPreviewModeDidChangeNotification = @"ApolloLinkPreviewModeDidChangeNotification";
+// Posted by the Inline Media settings screen when size/alignment changes so
+// visible comments re-measure their inline media immediately.
+static NSString *const ApolloInlineMediaLayoutDidChangeNotification = @"ApolloInlineMediaLayoutDidChangeNotification";

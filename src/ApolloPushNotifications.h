@@ -21,10 +21,14 @@ extern "C" {
 // string found for application"), which Apollo resurfaces as an alarming
 // "Error Loading Notifications — contact developer" alert.
 //
-// Rather than fake a working registration (which would mislead users into
-// thinking push could work), the tweak detects this signing-time limitation up
-// front, replaces the Notifications screen with a clear explanation, and
-// suppresses the misleading error. The helpers below back that behavior.
+// By default the tweak detects this signing-time limitation up front,
+// replaces the Notifications screen with a clear explanation, and suppresses
+// the misleading error — faking a working registration with no delivery path
+// would only mislead users. The one exception is Bark mode (see
+// ApolloBarkNotifications.h): when the user has configured delivery through
+// the Bark app, a synthetic registration is genuinely backed by a working
+// delivery path, so the failed registration is answered with a synthetic
+// token instead and the stock Notifications screen is left alone.
 
 // YES when the running build carries an `aps-environment` entitlement, i.e. push
 // registration can actually succeed (an App Store build, or a sideload signed
@@ -34,6 +38,13 @@ extern "C" {
 // entitlement state can't be read it conservatively returns YES, leaving the
 // stock behavior untouched.
 BOOL ApolloPushNotificationsSupported(void);
+
+// YES when the `aps-environment` entitlement value is "development" (a paid
+// *developer*-profile sideload, whose tokens belong to Apple's sandbox APNs
+// gateway); NO for "production" or when the entitlement is absent/unreadable.
+// Used to report a truthful sandbox flag when the tweak registers a device
+// row itself (the backend's APPLE_APNS_SANDBOX can still override it).
+BOOL ApolloAPSEnvironmentIsDevelopment(void);
 
 // YES only when `error` is the missing-`aps-environment`-entitlement failure
 // described above. This is a signing-time condition that can never be resolved

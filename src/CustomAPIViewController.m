@@ -1,6 +1,9 @@
 #import "CustomAPIViewController.h"
 #import "ApolloCommon.h"
 #import "ApolloNotificationBackend.h"
+#import "ApolloBarkNotifications.h"
+#import "ApolloPushNotifications.h"
+#import "ApolloUsageHeartbeat.h"
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloAISettingsViewController.h"
 #import "ApolloWebSessionStore.h"
@@ -10,6 +13,7 @@
 #import "ApolloLinkPreviewCache.h"
 #import "ApolloDeletedCommentsSettingsViewController.h"
 #import "ApolloLinkPreviewSettingsViewController.h"
+#import "InlineMediaSettingsViewController.h"
 #import "ApolloOpenInAppViewController.h"
 #import "ApolloSubredditCustomBannerCache.h"
 #import "ApolloSubredditCustomIconCache.h"
@@ -31,35 +35,29 @@ typedef NS_ENUM(NSInteger, SectionIndex) {
     SectionAPIKeys,
     SectionGeneral,
     SectionApolloAI,
+    SectionInlineMedia,   // single row -> InlineMediaSettingsViewController
     SectionLinkPreviews,
     SectionMedia,
     SectionSubreddits,
     SectionNotificationBackend,
+    SectionPrivacy,
     SectionAbout,
     SectionCount
 };
 
-// The Media section hides two adjacent inline-media-dependent rows (Inline Media
-// Alignment + Autoplay Inline GIFs) when Inline Media Previews is off. These helpers
-// centralize the physical<->logical row mapping so the index math stays consistent.
-static const NSInteger kApolloMediaInlineDependentRows = 2;
-static const NSInteger kApolloMediaFirstInlineDependentRow = 6;
-
-// Map a physical (visible) Media row to its logical row.
-static NSInteger ApolloMediaLogicalRow(NSInteger physicalRow) {
-    if (!sEnableInlineImages && physicalRow >= kApolloMediaFirstInlineDependentRow) {
-        return physicalRow + kApolloMediaInlineDependentRows;
-    }
-    return physicalRow;
-}
-
-// Map a logical Media row to its physical (visible) row.
-static NSInteger ApolloMediaPhysicalRow(NSInteger logicalRow) {
-    if (!sEnableInlineImages && logicalRow >= kApolloMediaFirstInlineDependentRow + kApolloMediaInlineDependentRows) {
-        return logicalRow - kApolloMediaInlineDependentRows;
-    }
-    return logicalRow;
-}
+// Row indices within SectionNotificationBackend. The Bark rows are always
+// visible: on builds without a push entitlement Bark is the only delivery
+// path, and on entitled builds it's an optional alternative transport (the
+// backend flips the device row between apns and bark on re-registration).
+typedef NS_ENUM(NSInteger, ApolloNotifBackendRow) {
+    kNotifBackendRowURL = 0,
+    kNotifBackendRowToken,
+    kNotifBackendRowBarkSwitch,
+    kNotifBackendRowBarkURL,
+    kNotifBackendRowTestConnection,
+    kNotifBackendRowTestBark,
+    kNotifBackendRowCount
+};
 
 // The six speeds the "Hold for Video Speed" picker offers, in display order. They
 // mirror the video player's own speed menu minus 1.0× (holding at normal speed
@@ -132,6 +130,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     TagReadPostMaxCount,
     TagNotificationBackendURL,
     TagNotificationBackendRegistrationToken,
+    TagBarkPushURL,
 };
 
 #pragma mark - Helpers
@@ -535,6 +534,48 @@ typedef NS_ENUM(NSInteger, Tag) {
     }
 }
 
+- (UITableViewCell *)inlineMediaCellForTableView:(UITableView *)tableView {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_InlineMedia"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"Cell_InlineMedia"];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    }
+    cell.textLabel.text = @"Inline Media Settings";
+    NSString *detail;
+    if (!sEnableInlineImages) {
+        detail = @"Off";
+    } else {
+        NSString *autoplay;
+        switch (sAutoplayInlineGIFMode) {
+            case ApolloAutoplayInlineGIFModeTapToPlay: autoplay = @"Tap to Play"; break;
+            case ApolloAutoplayInlineGIFModeWiFiOnly:  autoplay = @"WiFi Only"; break;
+            case ApolloAutoplayInlineGIFModeAlways:    autoplay = @"Always"; break;
+            case ApolloAutoplayInlineGIFModeNever:
+            default:                                   autoplay = @"Never"; break;
+        }
+        detail = [NSString stringWithFormat:@"On \u00b7 Autoplay %@ \u00b7 Size %ld%%",
+                  autoplay, (long)sInlineMediaSizePercent];
+    }
+    cell.detailTextLabel.text = detail;
+    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    cell.detailTextLabel.numberOfLines = 0;
+    cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    return cell;
+}
+
+- (void)openInlineMediaSettings {
+    InlineMediaSettingsViewController *vc =
+        [[InlineMediaSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    if (self.navigationController) {
+        [self.navigationController pushViewController:vc animated:YES];
+    } else {
+        UINavigationController *navigation =
+            [[UINavigationController alloc] initWithRootViewController:vc];
+        [self presentViewController:navigation animated:YES completion:nil];
+    }
+}
+
 - (UITableViewCell *)deletedCommentsCellForTableView:(UITableView *)tableView {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Gen_DeletedComments"];
     if (!cell) {
@@ -605,7 +646,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     }
     // Refresh the Apollo AI and Rich Link Previews status subtitles after returning
     // from their subviews.
-    [self.tableView reloadSections:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(SectionApolloAI, 2)]
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(SectionApolloAI, 3)]
                   withRowAnimation:UITableViewRowAnimationNone];
 }
 
@@ -661,16 +702,18 @@ typedef NS_ENUM(NSInteger, Tag) {
         // toggles. No conditional rows remain, so the count is constant.
         case SectionGeneral: return 14;
         case SectionApolloAI: return 1;
+        case SectionInlineMedia: return 1;
         case SectionLinkPreviews: return 1;
-        // Media base rows (the three "Rich Link Previews" rows moved out to their
-        // own SectionLinkPreviews) plus the "Comment Link Host" picker, the chat
-        // inline-media toggle, the "Sports Clip Links Play Inline" toggle and the
-        // "Hold for Video Speed" toggle, minus the two inline-dependent rows when
-        // off, plus the hold-speed picker (logical row 15) when that toggle is on.
-        case SectionMedia: return 15 + (sEnableInlineImages ? 0 : -kApolloMediaInlineDependentRows) + (sVideoHoldSpeedEnabled ? 1 : 0);
+        // Media base rows. The inline-media rows (Previews toggle, Alignment,
+        // Autoplay Inline GIFs) and "Inline Media in Chat" moved to the Inline
+        // Media sub-screen (SectionInlineMedia). Row 9 is the "Sports Clip Links
+        // Play Inline" toggle. The hold-speed picker (row 11) shows only while its
+        // toggle is on.
+        case SectionMedia: return 11 + (sVideoHoldSpeedEnabled ? 1 : 0);
         case SectionSubreddits: return 10 - (sSubredditListEnhancements ? 0 : 1) - (sCommunityHighlights ? 0 : 1);
-        case SectionNotificationBackend: return 3; // URL + Registration Token + Test Connection
-        case SectionAbout: return 5; // GitHub + Reddit + Thanks To + Export Logs + Version
+        case SectionNotificationBackend: return kNotifBackendRowCount;
+        case SectionPrivacy: return 1; // Anonymous Install Count toggle
+        case SectionAbout: return 6; // GitHub + Reddit + Thanks To + Export Logs + Privacy Policy + Version
         default: return 0;
     }
 }
@@ -681,10 +724,12 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionAPIKeys: return @"API Keys";
         case SectionGeneral: return @"General";
         case SectionApolloAI: return @"Apollo AI";
+        case SectionInlineMedia: return @"Inline Media";
         case SectionLinkPreviews: return @"Rich Link Previews";
         case SectionMedia: return @"Media";
         case SectionSubreddits: return @"Subreddits";
         case SectionNotificationBackend: return @"Notification Backend";
+        case SectionPrivacy: return @"Privacy";
         case SectionAbout: return @"About";
         default: return nil;
     }
@@ -697,10 +742,12 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionAPIKeys: cell = [self apiKeyCellForRow:indexPath.row tableView:tableView]; break;
         case SectionGeneral: cell = [self generalCellForRow:indexPath.row tableView:tableView]; break;
         case SectionApolloAI: cell = [self apolloAICellForTableView:tableView]; break;
+        case SectionInlineMedia: cell = [self inlineMediaCellForTableView:tableView]; break;
         case SectionLinkPreviews: cell = [self linkPreviewsCellForTableView:tableView]; break;
         case SectionMedia: cell = [self mediaCellForRow:indexPath.row tableView:tableView]; break;
         case SectionSubreddits: cell = [self subredditCellForRow:indexPath.row tableView:tableView]; break;
         case SectionNotificationBackend: cell = [self notificationBackendCellForRow:indexPath.row tableView:tableView]; break;
+        case SectionPrivacy: cell = [self privacyCellForRow:indexPath.row tableView:tableView]; break;
         case SectionAbout: cell = [self aboutCellForRow:indexPath.row tableView:tableView]; break;
         default: cell = [[UITableViewCell alloc] init]; break;
     }
@@ -1188,8 +1235,6 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (UITableViewCell *)mediaCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
-    // When the inline-dependent rows are hidden, physical rows map to later logical rows.
-    row = ApolloMediaLogicalRow(row);
     switch (row) {
         case 0: {
             UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_GIFFallbackFormat"];
@@ -1244,51 +1289,24 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Proxy Imgur via DuckDuckGo"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProxyImgurDDG]
                                            action:@selector(proxyImgurDDGSwitchToggled:)];
+        // Inline Media Previews / Alignment / Autoplay Inline GIFs moved to the
+        // Inline Media Settings sub-screen (SectionInlineMedia).
         case 5:
-            return [self switchCellWithIdentifier:@"Cell_Media_InlineImages"
-                                            label:@"Inline Media Previews"
-                                               on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableInlineImages]
-                                           action:@selector(inlineImagesSwitchToggled:)];
-        case 6: {
-            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_InlineImageAlignment"];
-            if (!cell) {
-                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_InlineImageAlignment"];
-                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            }
-            cell.textLabel.text = @"Inline Media Alignment";
-            cell.detailTextLabel.text = [self inlineImageAlignmentText];
-            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-            return cell;
-        }
-        case 7: {
-            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_AutoplayInlineGIFs"];
-            if (!cell) {
-                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_AutoplayInlineGIFs"];
-                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            }
-            cell.textLabel.text = @"Autoplay Inline GIFs";
-            cell.detailTextLabel.text = [self autoplayInlineGIFModeText];
-            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-            return cell;
-        }
-        case 8:
             return [self switchCellWithIdentifier:@"Cell_Media_TextPostThumbnails"
                                             label:@"Text Post Thumbnails"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFeedTextPostThumbnails]
                                            action:@selector(textPostThumbnailsSwitchToggled:)];
-        case 9:
+        case 6:
             return [self switchCellWithIdentifier:@"Cell_Media_UserAvatars"
                                             label:@"Show User Profile Pictures"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars]
                                            action:@selector(userAvatarsSwitchToggled:)];
-        case 10:
+        case 7:
             return [self switchCellWithIdentifier:@"Cell_Media_ProfileTabAvatar"
                                             label:@"Profile Picture Tab Icon"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon]
                                            action:@selector(profileTabAvatarSwitchToggled:)];
-        case 11:
+        case 8:
             // Single toggle for Reborn's detailed profile page: banner, large
             // avatar/snoovatar, display name, bio, and the Social Links band (all of
             // which live in the custom header). Off → Apollo's compact stock profile.
@@ -1296,12 +1314,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Show Detailed Profiles"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowDetailedProfiles]
                                            action:@selector(showDetailedProfilesSwitchToggled:)];
-        case 12:
-            return [self switchCellWithIdentifier:@"Cell_Media_ChatMedia"
-                                            label:@"Inline Media in Chat"
-                                               on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableChatMedia]
-                                           action:@selector(chatMediaSwitchToggled:)];
-        case 13:
+        case 9:
             // Sports-clip host links (streamff/streamin/streamain/…) play inline
             // as native video instead of a link-preview card; explained in the
             // section footer.
@@ -1309,9 +1322,11 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Sports Clip Links Play Inline"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeySportsClipsInlineVideo]
                                            action:@selector(sportsClipsSwitchToggled:)];
-        case 14:
+        // "Inline Media in Chat" moved to the Inline Media Settings sub-screen
+        // (SectionInlineMedia), alongside Inline Media Previews.
+        case 10:
             // Master toggle for "Hold for Video Speed". When on, the hold-speed
-            // picker (logical row 15) is shown below; when off, the right side of a
+            // picker (row 11) is shown below; when off, the right side of a
             // fullscreen video keeps Apollo's normal long-press menu. The gesture is
             // explained in the section footer, matching the sibling Media toggles
             // (which are plain switches with no inline subtitle).
@@ -1319,7 +1334,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Hold for Video Speed"
                                                on:sVideoHoldSpeedEnabled
                                            action:@selector(videoHoldSpeedSwitchToggled:)];
-        case 15: {
+        case 11: {
             UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_HoldSpeedValue"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_HoldSpeedValue"];
@@ -1408,7 +1423,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (UITableViewCell *)notificationBackendCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
-    if (row == 0) {
+    if (row == kNotifBackendRowURL) {
         NSString *currentURL = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendURL] ?: @"";
         UITableViewCell *cell = [self stackedTextFieldCellWithIdentifier:@"Cell_NotifBackend_URL"
                                                                    label:@"Backend URL"
@@ -1427,7 +1442,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         return cell;
     }
 
-    if (row == 1) {
+    if (row == kNotifBackendRowToken) {
         NSString *currentToken = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyNotificationBackendRegistrationToken] ?: @"";
         return [self stackedTextFieldCellWithIdentifier:@"Cell_NotifBackend_Token"
                                                   label:@"Registration Token"
@@ -1435,6 +1450,45 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                    text:currentToken
                                                     tag:TagNotificationBackendRegistrationToken
                                                  detail:@"Required only if the backend has REGISTRATION_SECRET set."];
+    }
+
+    if (row == kNotifBackendRowBarkSwitch) {
+        return [self switchCellWithIdentifier:@"Cell_NotifBackend_BarkSwitch"
+                                        label:@"Bark Delivery"
+                                       detail:@"Deliver notifications through the free Bark app instead of native push. Works without a push entitlement."
+                                           on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBarkNotificationsEnabled]
+                                       action:@selector(barkNotificationsSwitchToggled:)];
+    }
+
+    if (row == kNotifBackendRowBarkURL) {
+        NSString *currentURL = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyBarkPushURL] ?: @"";
+        UITableViewCell *cell = [self stackedTextFieldCellWithIdentifier:@"Cell_NotifBackend_BarkURL"
+                                                                   label:@"Bark Push URL"
+                                                             placeholder:@"https://api.day.app/yourdevicekey"
+                                                                    text:currentURL
+                                                                     tag:TagBarkPushURL
+                                                                  detail:@"From the Bark app's server list. Treat the key like a password."];
+        for (UIView *subview in cell.contentView.subviews) {
+            if ([subview isKindOfClass:[UITextField class]]) {
+                UITextField *tf = (UITextField *)subview;
+                tf.keyboardType = UIKeyboardTypeURL;
+                tf.textColor = [self isNotificationBackendURLValid:currentURL] ? [UIColor labelColor] : [UIColor systemRedColor];
+                break;
+            }
+        }
+        return cell;
+    }
+
+    if (row == kNotifBackendRowTestBark) {
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_NotifBackend_TestBark"];
+        if (!cell) {
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_NotifBackend_TestBark"];
+            cell.textLabel.textAlignment = NSTextAlignmentCenter;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        }
+        cell.textLabel.text = @"Test Bark Notification";
+        [self apollo_applyAccentActionTextColorToCell:cell];
+        return cell;
     }
 
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_NotifBackend_Test"];
@@ -1480,6 +1534,18 @@ typedef NS_ENUM(NSInteger, Tag) {
     return cell;
 }
 
+- (UITableViewCell *)privacyCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
+    // Single row: the anonymous usage heartbeat opt-out. The stored flag is a
+    // *disable* flag (default NO = enabled), so the switch shows the inverse.
+    // The explanatory text (with the tappable privacy-policy link) is the
+    // section footer — see footerAttributedTextForSection:.
+    BOOL enabled = !ApolloUsageHeartbeatIsDisabled();
+    return [self switchCellWithIdentifier:@"Cell_Privacy_Heartbeat"
+                                    label:@"Anonymous Install Count"
+                                       on:enabled
+                                   action:@selector(usageHeartbeatSwitchToggled:)];
+}
+
 - (UITableViewCell *)aboutCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
     switch (row) {
         case 0: return [self subtitleCellWithIdentifier:@"Cell_About_GitHub"
@@ -1518,6 +1584,17 @@ typedef NS_ENUM(NSInteger, Tag) {
             return cell;
         }
         case 4: {
+            UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_About_Privacy"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_About_Privacy"];
+            }
+            cell.textLabel.text = @"Privacy Policy";
+            cell.imageView.image = [self iconImageFromEmoji:@"🔒" size:32];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            return cell;
+        }
+        case 5: {
             UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_About_Version"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_About_Version"];
@@ -1655,7 +1732,26 @@ typedef NS_ENUM(NSInteger, Tag) {
             attributes:plainAttrs];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"forked apollo-backend"
             attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/nickclyde/apollo-backend"]}]];
-        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@" instance. Requires a paid Apple Developer account on the signing side for APNs to function. Leave empty to disable."
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@" instance. APNs delivery requires a paid Apple Developer account on the signing side. Leave empty to disable."
+            attributes:plainAttrs]];
+        NSString *barkLead = ApolloPushNotificationsSupported()
+            ? @"\n\nThis build has working native push, but Bark Delivery can reroute notifications through the free "
+            : @"\n\nThis build has no push entitlement, so APNs can never deliver — Bark Delivery works around that: install the free ";
+        NSString *barkTail = ApolloPushNotificationsSupported()
+            ? @" instead; toggling flips the delivery transport immediately, and native push resumes when turned off. Note: notification content passes through the Bark relay unencrypted."
+            : @", copy its push URL, and notifications arrive via Bark with a tap-through back into Apollo (after setup, open Apollo's Notifications settings once to finish registering). Note: notification content passes through the Bark relay unencrypted.";
+        barkTail = [barkTail stringByAppendingString:@" Notifications show your selected app icon automatically; to also hear Apollo's notification sounds, import the matching .caf from the project's assets/bark-sounds via the Bark app's Service tab → Alert Sound → view all sounds → Upload Sound."];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:barkLead attributes:plainAttrs]];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"Bark app"
+            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://apps.apple.com/us/app/bark-custom-notifications/id1403753865"]}]];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:barkTail attributes:plainAttrs]];
+    } else if (section == SectionPrivacy) {
+        text = [[NSMutableAttributedString alloc]
+            initWithString:@"Sends one anonymous heartbeat so we can estimate active Apollo Reborn installs. No Reddit activity, account details, or feature usage is collected. More details can be found in our "
+            attributes:plainAttrs];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"privacy policy"
+            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [self apollo_themeAccentColor], NSLinkAttributeName: [NSURL URLWithString:@"https://apolloreborn.app/privacy"]}]];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"."
             attributes:plainAttrs]];
     } else {
         return nil;
@@ -1726,6 +1822,11 @@ typedef NS_ENUM(NSInteger, Tag) {
         return;
     }
 
+    if (indexPath.section == SectionInlineMedia) {
+        [self openInlineMediaSettings];
+        return;
+    }
+
     if (indexPath.section == SectionLinkPreviews) {
         [self openLinkPreviewSettings];
         return;
@@ -1780,27 +1881,29 @@ typedef NS_ENUM(NSInteger, Tag) {
             [self pushThanksToViewController];
         } else if (indexPath.row == 3) {
             [self exportLogs];
+        } else if (indexPath.row == 4) {
+            [self presentURLInApolloBrowser:[NSURL URLWithString:@"https://apolloreborn.app/privacy"]];
         }
     } else if (indexPath.section == SectionMedia) {
         UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-        NSInteger row = ApolloMediaLogicalRow(indexPath.row);
-        if (row == 0) {
+        if (indexPath.row == 0) {
             [self presentPreferredGIFFallbackFormatSheetFromSourceView:cell];
-        } else if (row == 1) {
+        } else if (indexPath.row == 1) {
             [self presentUnmuteCommentsVideosModeSheetFromSourceView:cell];
-        } else if (row == 2) {
+        } else if (indexPath.row == 2) {
             [self presentImageUploadProviderSheetFromSourceView:cell];
-        } else if (row == 3) {
+        } else if (indexPath.row == 3) {
             [self presentCommentLinkHostSheetFromSourceView:cell];
-        } else if (row == 6) {
-            [self presentInlineImageAlignmentSheetFromSourceView:cell];
-        } else if (row == 7) {
-            [self presentAutoplayInlineGIFModeSheetFromSourceView:cell];
-        } else if (row == 15) {
+        } else if (indexPath.row == 11) {
             [self presentVideoHoldSpeedSheetFromSourceView:cell];
         }
-    } else if (indexPath.section == SectionNotificationBackend && indexPath.row == 2) {
-        [self testNotificationBackendConnection];
+    } else if (indexPath.section == SectionNotificationBackend) {
+        NSInteger row = indexPath.row;
+        if (row == kNotifBackendRowTestConnection) {
+            [self testNotificationBackendConnection];
+        } else if (row == kNotifBackendRowTestBark) {
+            [self testBarkNotification];
+        }
     }
 }
 
@@ -1833,6 +1936,41 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     [self showAlertWithTitle:@"Copied"
                      message:@"Setup code copied. On your Home Screen, add the Apollo “Showerthoughts” widget, long-press it → Edit Widget, and paste this code into Setup Code."];
+}
+
+- (void)testBarkNotification {
+    if (!ApolloBarkConfigured()) {
+        NSString *why = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBarkNotificationsEnabled]
+            ? @"Enter a valid Bark push URL (from the Bark app's server list) before testing."
+            : @"Turn on Bark Delivery and enter your Bark push URL before testing.";
+        [self showAlertWithTitle:@"Bark Not Configured" message:why];
+        return;
+    }
+
+    UIAlertController *spinner = [UIAlertController alertControllerWithTitle:@"Sending test notification…"
+                                                                     message:@"\n"
+                                                              preferredStyle:UIAlertControllerStyleAlert];
+    UIActivityIndicatorView *indicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    indicator.translatesAutoresizingMaskIntoConstraints = NO;
+    [indicator startAnimating];
+    [spinner.view addSubview:indicator];
+    [NSLayoutConstraint activateConstraints:@[
+        [indicator.centerXAnchor constraintEqualToAnchor:spinner.view.centerXAnchor],
+        [indicator.bottomAnchor constraintEqualToAnchor:spinner.view.bottomAnchor constant:-20],
+    ]];
+
+    [self presentViewController:spinner animated:YES completion:^{
+        ApolloBarkSendTestNotification(^(BOOL ok, NSString *message) {
+            [spinner dismissViewControllerAnimated:YES completion:^{
+                NSString *finalMessage = message;
+                if (ok && !ApolloIsNotificationBackendConfigured()) {
+                    finalMessage = [message stringByAppendingString:
+                        @"\n\nNote: Bark delivery also needs a Backend URL above — without one there is no server watching your Reddit account."];
+                }
+                [self showAlertWithTitle:ok ? @"Success" : @"Failed" message:finalMessage];
+            }];
+        });
+    }];
 }
 
 - (void)testNotificationBackendConnection {
@@ -1870,6 +2008,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             row == kAPIKeyRowWebSessionLogin || row == kAPIKeyRowWidgetSetupCode) return YES;
     }
     if (indexPath.section == SectionApolloAI) return YES;
+    if (indexPath.section == SectionInlineMedia) return YES;
     if (indexPath.section == SectionLinkPreviews) return YES;
     if (indexPath.section == SectionGeneral) {
         // Only the "Deleted Comments" (row 3) and "Open in App" (row 7)
@@ -1877,11 +2016,13 @@ typedef NS_ENUM(NSInteger, Tag) {
         return indexPath.row == 3 || indexPath.row == 7;
     }
     if (indexPath.section == SectionMedia) {
-        NSInteger row = ApolloMediaLogicalRow(indexPath.row);
-        return (row == 0 || row == 1 || row == 2 || row == 3 || row == 6 || row == 7 || row == 15);
+        return (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 ||
+                indexPath.row == 3 || indexPath.row == 11);
     }
-    if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 || indexPath.row == 3)) return YES;
-    if (indexPath.section == SectionNotificationBackend && indexPath.row == 2) return YES;
+    if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 || indexPath.row == 3 || indexPath.row == 4)) return YES;
+    if (indexPath.section == SectionNotificationBackend) {
+        return (indexPath.row == kNotifBackendRowTestConnection || indexPath.row == kNotifBackendRowTestBark);
+    }
     return NO;
 }
 
@@ -2149,6 +2290,21 @@ typedef NS_ENUM(NSInteger, Tag) {
         NSString *trimmed = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
         textField.text = trimmed;
         [[NSUserDefaults standardUserDefaults] setValue:trimmed forKey:UDKeyNotificationBackendRegistrationToken];
+    } else if (textField.tag == TagBarkPushURL) {
+        NSString *trimmed = [textField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        while ([trimmed hasSuffix:@"/"]) {
+            trimmed = [trimmed substringToIndex:trimmed.length - 1];
+        }
+        textField.text = trimmed;
+        [[NSUserDefaults standardUserDefaults] setValue:trimmed forKey:UDKeyBarkPushURL];
+        textField.textColor = [self isNotificationBackendURLValid:trimmed] ? [UIColor labelColor] : [UIColor systemRedColor];
+        if (ApolloBarkModeActive()) {
+            // Bark is on and the URL is usable — sync the backend device row
+            // so the (new) endpoint applies immediately. Covers both
+            // first-time setup (toggle flipped before the URL existed) and
+            // endpoint edits on an already-registered device.
+            ApolloBarkSyncBackendDeviceTransport();
+        }
     }
 
     if ([self apollo_isMaskedAPIKeyTag:textField.tag]) {
@@ -2158,9 +2314,46 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 #pragma mark - Switch Actions
 
+- (void)barkNotificationsSwitchToggled:(UISwitch *)sender {
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyBarkNotificationsEnabled];
+
+    if (sender.isOn) {
+        // Flip the backend device row to transport=bark right away. With no
+        // valid Bark URL yet, Bark mode is inactive and this would register
+        // an undeliverable row — skip; saving the URL syncs instead.
+        if (ApolloBarkModeActive()) {
+            ApolloBarkSyncBackendDeviceTransport();
+        }
+        return;
+    }
+
+    if (ApolloPushNotificationsSupported()) {
+        // Entitled build turning Bark off: same device row (the real APNs
+        // token), flip it back to transport=apns — native push resumes
+        // immediately.
+        ApolloBarkSyncBackendDeviceTransport();
+        return;
+    }
+
+    // Unentitled build turning Bark off: nothing can deliver to this build
+    // anymore, and Bark send failures never delete device rows server-side
+    // (by design), so retiring the synthetic registration explicitly is the
+    // only way to stop the backend pushing to the Bark app forever.
+    NSString *synthetic = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyBarkSyntheticDeviceToken];
+    if (synthetic.length > 0 && ApolloIsNotificationBackendConfigured()) {
+        ApolloBarkDeleteBackendDevice(synthetic);
+    }
+}
+
 - (void)blockAnnouncementsSwitchToggled:(UISwitch *)sender {
     sBlockAnnouncements = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sBlockAnnouncements forKey:UDKeyBlockAnnouncements];
+}
+
+- (void)usageHeartbeatSwitchToggled:(UISwitch *)sender {
+    // Mirror the opt-out into both NSUserDefaults and the durable heartbeat plist
+    // so a sign-in / settings restore can't silently re-enable it. on = NOT disabled.
+    ApolloSetUsageHeartbeatDisabled(!sender.isOn);
 }
 
 - (void)flexSwitchToggled:(UISwitch *)sender {
@@ -2395,14 +2588,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloSocialLinksToggleChangedNotification object:nil];
 }
 
-- (void)chatMediaSwitchToggled:(UISwitch *)sender {
-    // Master toggle for chat media (inline images/GIFs/emoji/snoomoji + working media sends +
-    // tap-to-fullscreen). Open chats re-render their cells on next display/scroll, so no
-    // immediate-refresh notification is needed. Independent of Show User Profile Pictures.
-    sEnableChatMedia = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sEnableChatMedia forKey:UDKeyEnableChatMedia];
-}
-
 - (void)promptClearAllCachesFromSourceView:(UIView *)sourceView {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Clear Tweak Caches?"
                                                                    message:@"This removes cached profile pictures, banners, link previews, and remembered banned-profile dismissals."
@@ -2426,118 +2611,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)inlineImagesSwitchToggled:(UISwitch *)sender {
-    BOOL wasOn = sEnableInlineImages;
-    sEnableInlineImages = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sEnableInlineImages forKey:UDKeyEnableInlineImages];
-    if (sEnableInlineImages == wasOn) return;
-    // Two adjacent rows are gated on this toggle: Inline Media Alignment (logical 6)
-    // and Autoplay Inline GIFs (logical 7). Insert/delete both to keep row counts consistent.
-    NSArray<NSIndexPath *> *paths = @[
-        [NSIndexPath indexPathForRow:6 inSection:SectionMedia],
-        [NSIndexPath indexPathForRow:7 inSection:SectionMedia],
-    ];
-    if (sEnableInlineImages) {
-        [self.tableView insertRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationFade];
-    } else {
-        [self.tableView deleteRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationFade];
-    }
-}
-
-- (NSString *)inlineImageAlignmentText {
-    switch (sInlineImageAlignment) {
-        case ApolloInlineImageAlignmentLeft:  return @"Left";
-        case ApolloInlineImageAlignmentRight: return @"Right";
-        default:                              return @"Center";
-    }
-}
-
-- (void)presentInlineImageAlignmentSheetFromSourceView:(UIView *)sourceView {
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Inline Media Alignment"
-                                                                   message:@"Choose how inline media is positioned"
-                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-
-    NSString *centerTitle = (sInlineImageAlignment == ApolloInlineImageAlignmentCenter) ? @"Center (Current)" : @"Center";
-    NSString *leftTitle   = (sInlineImageAlignment == ApolloInlineImageAlignmentLeft)   ? @"Left (Current)"   : @"Left";
-    NSString *rightTitle  = (sInlineImageAlignment == ApolloInlineImageAlignmentRight)  ? @"Right (Current)"  : @"Right";
-
-    [sheet addAction:[UIAlertAction actionWithTitle:centerTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        [self setInlineImageAlignment:ApolloInlineImageAlignmentCenter];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:leftTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        [self setInlineImageAlignment:ApolloInlineImageAlignmentLeft];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:rightTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        [self setInlineImageAlignment:ApolloInlineImageAlignmentRight];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-
-    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
-    if (popover && sourceView) {
-        popover.sourceView = sourceView;
-        popover.sourceRect = sourceView.bounds;
-    }
-
-    [self presentViewController:sheet animated:YES completion:nil];
-}
-
-- (void)setInlineImageAlignment:(ApolloInlineImageAlignment)alignment {
-    sInlineImageAlignment = alignment;
-    [[NSUserDefaults standardUserDefaults] setInteger:sInlineImageAlignment forKey:UDKeyInlineImageAlignment];
-    NSIndexPath *alignmentRow = [NSIndexPath indexPathForRow:6 inSection:SectionMedia];
-    [self.tableView reloadRowsAtIndexPaths:@[alignmentRow] withRowAnimation:UITableViewRowAnimationNone];
-}
-
-- (NSString *)autoplayInlineGIFModeText {
-    switch (sAutoplayInlineGIFMode) {
-        case ApolloAutoplayInlineGIFModeNever:    return @"Never";
-        case ApolloAutoplayInlineGIFModeWiFiOnly: return @"WiFi Only";
-        case ApolloAutoplayInlineGIFModeAlways:   return @"Always";
-        case ApolloAutoplayInlineGIFModeDefault:
-        default:                                  return @"Default";
-    }
-}
-
-- (void)presentAutoplayInlineGIFModeSheetFromSourceView:(UIView *)sourceView {
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Autoplay Inline GIFs"
-                                                                   message:@"Default follows Apollo's Autoplay GIFs/Videos setting in General."
-                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-
-    NSString *defaultTitle = (sAutoplayInlineGIFMode == ApolloAutoplayInlineGIFModeDefault)  ? @"Default (Current)"   : @"Default";
-    NSString *alwaysTitle  = (sAutoplayInlineGIFMode == ApolloAutoplayInlineGIFModeAlways)   ? @"Always (Current)"    : @"Always";
-    NSString *wifiTitle    = (sAutoplayInlineGIFMode == ApolloAutoplayInlineGIFModeWiFiOnly) ? @"WiFi Only (Current)" : @"WiFi Only";
-    NSString *neverTitle   = (sAutoplayInlineGIFMode == ApolloAutoplayInlineGIFModeNever)    ? @"Never (Current)"     : @"Never";
-
-    [sheet addAction:[UIAlertAction actionWithTitle:defaultTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        [self setAutoplayInlineGIFMode:ApolloAutoplayInlineGIFModeDefault];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:alwaysTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        [self setAutoplayInlineGIFMode:ApolloAutoplayInlineGIFModeAlways];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:wifiTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        [self setAutoplayInlineGIFMode:ApolloAutoplayInlineGIFModeWiFiOnly];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:neverTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        [self setAutoplayInlineGIFMode:ApolloAutoplayInlineGIFModeNever];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-
-    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
-    if (popover && sourceView) {
-        popover.sourceView = sourceView;
-        popover.sourceRect = sourceView.bounds;
-    }
-
-    [self presentViewController:sheet animated:YES completion:nil];
-}
-
-- (void)setAutoplayInlineGIFMode:(ApolloAutoplayInlineGIFMode)mode {
-    sAutoplayInlineGIFMode = mode;
-    // The autoplay module observes this key via KVO and re-evaluates visible inline GIFs.
-    [[NSUserDefaults standardUserDefaults] setInteger:sAutoplayInlineGIFMode forKey:UDKeyAutoplayInlineGIFs];
-    NSIndexPath *autoplayRow = [NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(7) inSection:SectionMedia];
-    [self.tableView reloadRowsAtIndexPaths:@[autoplayRow] withRowAnimation:UITableViewRowAnimationNone];
-}
+// Inline Media Previews / Alignment / Autoplay Inline GIFs UI moved to
+// InlineMediaSettingsViewController (SectionInlineMedia row).
 
 #pragma mark - Sports Clip Links
 
@@ -2552,10 +2627,10 @@ typedef NS_ENUM(NSInteger, Tag) {
     sVideoHoldSpeedEnabled = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sVideoHoldSpeedEnabled forKey:UDKeyVideoHoldSpeedEnabled];
     if (sVideoHoldSpeedEnabled == wasOn) return;
-    // The "Hold Speed" picker (logical row 15) is the last Media row and is shown
+    // The "Hold Speed" picker (row 11) is the last Media row and is shown
     // only while this toggle is on. Insert/delete it so the row counts stay
-    // consistent. ApolloMediaPhysicalRow(15) accounts for the inline-dependent gap.
-    NSIndexPath *pickerPath = [NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(15) inSection:SectionMedia];
+    // consistent.
+    NSIndexPath *pickerPath = [NSIndexPath indexPathForRow:11 inSection:SectionMedia];
     if (sVideoHoldSpeedEnabled) {
         [self.tableView insertRowsAtIndexPaths:@[pickerPath] withRowAnimation:UITableViewRowAnimationFade];
     } else {
@@ -2570,7 +2645,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)setVideoHoldSpeed:(float)speed {
     sVideoHoldSpeed = ApolloSanitizedHoldSpeed(speed);
     [[NSUserDefaults standardUserDefaults] setFloat:sVideoHoldSpeed forKey:UDKeyVideoHoldSpeed];
-    NSIndexPath *pickerPath = [NSIndexPath indexPathForRow:ApolloMediaPhysicalRow(15) inSection:SectionMedia];
+    NSIndexPath *pickerPath = [NSIndexPath indexPathForRow:11 inSection:SectionMedia];
     if ([[self.tableView indexPathsForVisibleRows] containsObject:pickerPath]) {
         [self.tableView reloadRowsAtIndexPaths:@[pickerPath] withRowAnimation:UITableViewRowAnimationNone];
     }
@@ -2890,6 +2965,12 @@ static void ApolloReplayValetKeychainItems(NSArray<NSDictionary *> *items) {
     sShowDeletedComments = [defaults boolForKey:UDKeyShowDeletedComments];
     sTapToRevealDeletedComments = [defaults boolForKey:UDKeyTapToRevealDeletedComments];
     sPassiveDeletedComments = [defaults boolForKey:UDKeyPassiveDeletedComments];
+    sPerPostCommentSort = [defaults boolForKey:UDKeyPerPostCommentSort];
+    // A restored backup can carry both sort memories on (older build); they are
+    // mutually exclusive (see ApolloPerPostCommentSort.xm) and per-post wins.
+    if (sPerPostCommentSort && [defaults boolForKey:UDKeyApolloRememberSubredditCommentsSort]) {
+        [defaults setBool:NO forKey:UDKeyApolloRememberSubredditCommentsSort];
+    }
     sShowRecentlyReadThumbnails = [defaults boolForKey:UDKeyShowRecentlyReadThumbnails];
     sEnableFlairColors = [defaults boolForKey:UDKeyEnableFlairColors];
     sPreferredGIFFallbackFormat = ([defaults integerForKey:UDKeyPreferredGIFFallbackFormat] == 0) ? 0 : 1;
@@ -2915,6 +2996,10 @@ static void ApolloReplayValetKeychainItems(NSArray<NSDictionary *> *items) {
     ApolloSetLinkPreviewCardColorHex(restoredCardColorHex);
     sEnableBulkTranslation = [defaults boolForKey:UDKeyEnableBulkTranslation];
     sAutoTranslateOnAppear = [defaults boolForKey:UDKeyAutoTranslateOnAppear];
+    sTapToTranslate = [defaults boolForKey:UDKeyTapToTranslate];
+    sShowTranslationDetails = [defaults boolForKey:UDKeyShowTranslationDetails];
+    sShowTranslationTitleDetails = [defaults boolForKey:UDKeyShowTranslationTitleDetails];
+    sTranslationMarkerUseThemeColor = [defaults boolForKey:UDKeyTranslationMarkerUseThemeColor];
 
     NSString *targetLanguage = [defaults stringForKey:UDKeyTranslationTargetLanguage];
     sTranslationTargetLanguage = targetLanguage.length > 0 ? targetLanguage : nil;

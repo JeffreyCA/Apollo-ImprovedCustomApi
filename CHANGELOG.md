@@ -4,6 +4,73 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- Add a **Remember Post Sort** toggle in **Settings > General > Comments** that restores the comment sort you last picked for a post when you reopen it (#570: @icpryde)
+- Add a **Tap to Play** mode for inline GIFs and a new **Inline Media** settings sub-screen that gathers the Inline Media Previews, Alignment, and Autoplay controls plus a new **Inline Media Size** slider (#602: @icpryde)
+- Play short-clip host links — **streamff, streamin, streamain, dubz, dropr, bangr, and MLB** clips — inline as real videos with autoplay, fullscreen, mute, and PiP, just like Streamable posts (#596: @icpryde)
+
+### Fixes
+
+- Fix the **Reddit account** being silently wiped seconds after sign-in on devices where iCloud Keychain sync is active (#579: @ostechgit)
+- Fix **inline GIF autoplay** not being honored under Never / WiFi Only for GIFs on slow hosts, and paused GIFs losing their play overlay and opening the media viewer when tapped (#602: @icpryde)
+- Fix converted **native menus** on Liquid Glass builds using the old fade animation instead of the iOS 26 glass morph that blooms the menu out of the tapped button (#600: @icpryde)
+- Fix **Tag Filters** double-blurring media on top of Apollo's own "tap to view" overlay when **Blur mature (18+) images and media** is enabled, including compact NSFW thumbnails (#585: @JeffreyCA)
+
+## [v3.4.0] - 2026-07-08
+
+### Features
+
+- Replace **Theme Builder** with a redesigned **Theme Manager** in **Settings > Appearance > Theme Manager** — a unified hub with a 50-preset **Theme Gallery** (Dracula, Catppuccin, Gruvbox, Nord, Tokyo Night, and more), plus AI-generated, imported, and your own saved themes; gallery presets apply by reference and can be forked into editable copies, and a crash kill-switch preserves your last theme with one-tap re-enable (#558, #576: @jordanearle, theme presets by @harshb16)
+- Add **Follow New Live Comments** for the Live Update sort — new comments pin to the top while you're at the live edge, and a floating **"N new comments"** pill lets you jump back to the newest without losing your reading position; toggle in **Settings > General** (#535: @icpryde)
+- Add a **Magnify Info Row** loupe to the post stats strip — press and hold to pop up a card, then slide to pick an action (upvote, open comments, timestamp, upvote %, translate) and release to fire it; toggle in **Settings > General** (#566: @icpryde)
+- Add an **Open in App** screen in **Settings > General** that consolidates all per-app deep-link toggles (Bluesky, GitHub, Steam, YouTube) and a **Default Browser** picker in one place (#547: @icpryde)
+- Add a **Comment Link Host** picker in **Settings > Apollo Reborn > Media Upload Host** to post comment images as plain Imgur or Img Chest links instead of native Reddit uploads, so you can add images in subreddits that disallow media comments (#573: @icpryde)
+- Improve **Apollo AI Summaries** (#532: @icpryde)
+  - Tapping an idle summary card now opens it automatically once the summary is ready
+  - New **Open Summaries Automatically** toggle expands cards on completion (off by default)
+  - Cards reopen in the state you last left them, tracked per thread
+  - JavaScript-heavy pages are retried so they summarize instead of failing, and tapping a page with nothing to summarize now shows a **"Nothing to summarize"** card
+  - Cached summaries now expire after 7 days
+- Extend **Share as Video** to Streamable and Redgifs link posts, showing the correct full-width poster at the true aspect ratio and including audio in exported clips (#540: @icpryde)
+- Make the **Hold for Video Speed** gesture configurable in **Settings > Media** — pick any speed from 0.25× to 2× to engage while holding, or turn the gesture off, with a haptic tick the instant it engages (#545, #531: @icpryde)
+- Add a **Picture-in-Picture entry button** to the fullscreen video player so you can send a video to the in-app miniplayer directly when autoplay is off (#569: @JeffreyCA)
+- Add three **LGBTQ+ Liquid Glass app icons** (Pride, Progress, Trans) to the icon picker (#529: @lilacvibes)
+- Add **Move Tab Bar to Bottom** for iPad in **Settings > General** to dock the iPadOS 26 floating tab bar at the bottom instead of overlapping the search bar (#557: @icpryde)
+- Add a **Show Detailed Profiles** toggle in **Settings > Apollo Reborn > Media** (on by default) to revert profile pages to Apollo's compact stock layout, folding in the former "Social Links in Profile" switch (#536: @icpryde)
+- Add a **Public Sticky from Subreddit** option to the moderator removal **Notify user via…** menu that posts the removal comment under the subreddit's mod-team identity instead of your own account (#537: @icpryde)
+- Improve **subreddit feed search** with **Keep Search Bar in Place** on — results appear directly below the search field, the nav bar stays visible after opening a result and returning, and the subreddit header hides while searching to prevent Liquid Glass bleed-through (#534: @icpryde)
+- Add **theme image sharing** to the Theme Manager — export any custom theme as a shareable QR card (a mock post preview of its colours and font) and import it back via Camera, Photo Library, or Files (#581: @icpryde)
+- Add a **Colourize Vote Arrows** option to the Theme Manager so idle up/down arrows take the accent colour while a cast vote keeps Apollo's native green/blue-violet indicator (#580: @jordanearle)
+- Extend the **theme accent colour** to all tweak-drawn UI — settings screens, the GIF picker, sign-in buttons, AI summaries, the follow pill, and more now follow the active theme's accent (or the stock theme's) instead of defaulting to blue, with legibility guards for near-white accents (#586: @JeffreyCA)
+- Add a **Deleted Comments** settings sub-screen, a Show/Hide shortcut at the bottom of the comments ⋯ menu, and a new **Passive** mode that recovers deleted comments for a single thread on demand — switching back off when you leave — without touching the global toggle (#572: @icpryde)
+- Add per-item **translation language markers** — tap a marker to toggle just that comment, post body, or feed title between translated and original, and enable a new **Tap to Translate** mode to translate only the items you tap (#564: @icpryde)
+- Add **Bark Notifications** for free Apple ID sideloads — relay push notifications through the free Bark app, configured in **Settings > Apollo Reborn > Custom API**, on builds without a push entitlement (#578: @nickclyde)
+- Show the **Picture-in-Picture button** in the fullscreen player for spoiler- and NSFW-tagged videos, which never autoplay inline and so were previously missing the button even with autoplay off (#584: @JeffreyCA)
+- Add **Helios Liquid Glass icon variants** — eight new app icons (Helios, plus Halo, Cryo, Parallax, and Ultra combinations) for the Liquid Glass icon picker (#590: @IllIIllIllIllII)
+- Add an **Anonymous Install Count** heartbeat with a new **Settings > Privacy** section — an opt-out, once-a-day beacon that reports only a monthly-rotating random token, app version, build variant, and iOS version so the project can gauge real active-user numbers without tracking anyone (#589: @jordanearle)
+
+### Fixes
+
+- Fix muted **Picture-in-Picture** videos pausing background music when **Enable PiP When Leaving App** is on — PiP now only claims the audio session for deliberately unmuted playback and hands it back when dismissed (#569: @JeffreyCA)
+- Fix the **modmail conversation** layout under iOS 26 Liquid Glass so text no longer bleeds behind the status bar and the tab bar no longer overlaps the compose bar (#543: @icpryde)
+- Fix **Redgifs posts** on the modern `v3.redgifs.com` host showing a dead link card instead of an inline video player (#568: @icpryde)
+- Fix **multi-image Img Chest album posts** producing a dead `imgur.com/a/…` link instead of an Img Chest album, and render the album cover inline in the feed (#554: @icpryde)
+- Fix **Show Deleted Comments** freezing the app on heavily-moderated threads, and deleted comment text rendering larger than regular comments (#541: @icpryde)
+- Fix an intermittent **crash in Show Deleted Comments** caused by two comment bodies rendering on different threads at once (#563: @nickclyde)
+- Fix spurious **"REMOVED BY MOD" chips** on subreddit sidebar stats and on post and comment bylines in subreddits with author flair when Show Deleted Comments was enabled (#516: @icpryde)
+- Fix **AI summary cards** rendering as a tall empty gap when reopening a thread by tapping it a second time (#544: @icpryde)
+- Fix **comment avatars** intermittently failing to load — transient failures now retry with backoff, and avatars are cached to disk so revisiting a thread needs no re-downloads (#530: @icpryde)
+- Fix **Share as Image** pushing the Share button off-screen on small phones when **Include Post Details** was on, and gallery posts showing as a link card instead of the image collage in that mode (#553: @icpryde)
+- Fix **subreddit list rows** not showing a tap highlight when **Modern Subreddit Dividers** or **Subreddit List Enhancements** was off (#556: @icpryde)
+- Fix the **user flair emoji counter** always showing `/10` instead of the subreddit's real per-template limit (#533: @icpryde)
+- Improve the **Show Deleted Comments** enable warning to lead with a plain performance caution instead of implementation details (#565: @icpryde)
+- Fix **Theme Manager** display glitches — ambient theming now applies in the Manager and Gallery, the search field no longer inherits the Separators override, SF Mono text is scaled to match other fonts, legacy theme names show proper spacing, and the cell label no longer reverts to "Theme" after navigating back (#580: @jordanearle)
+- Fix the **Magnify Info Row loupe** popping when holding the username/subreddit line or starting a scroll near the stats row — activation now hugs the stats row and ignores swipe-like gestures (#586: @JeffreyCA)
+- Fix **search result rows** staying stuck at full hero height when a link preview resolves to a compact card, leaving the small card atop a large blank gap until you scrolled away and back (#597: @icpryde)
+- Fix **Bluesky link-preview cards** whose long title or body text overflowed past the card background in the feed (#577: @icpryde)
+- Fix several **API-Key-Free (Web JSON) mode** reliability issues — auth cookies stay current across Reddit's rotations, stale sessions are re-harvested silently, native image uploads and the Submit Post drawer work again, and rate-limit responses are no longer mistaken for session expiry (#562: @nickclyde)
+
 ## [v3.3.0] - 2026-06-26
 
 ### Features
@@ -582,6 +649,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v3.4.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.3.0...v1.15.11_3.4.0
 [v3.3.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.2.0...v1.15.11_3.3.0
 [v3.2.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.1.1...v1.15.11_3.2.0
 [v3.1.1]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.1.0...v1.15.11_3.1.1

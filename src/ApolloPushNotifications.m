@@ -50,9 +50,11 @@ extern CFTypeRef SecTaskCopyValueForEntitlement(ApolloSecTaskRef task,
                                                 CFStringRef entitlement,
                                                 CFErrorRef *error);
 
-BOOL ApolloPushNotificationsSupported(void) {
+static BOOL sPushSupported = YES;
+static NSString *sAPSEnvironment = nil;
+
+static void ApolloReadPushEntitlementOnce(void) {
     // The answer is fixed at signing time, so compute it once.
-    static BOOL supported = YES;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         ApolloSecTaskRef task = SecTaskCreateFromSelf(NULL);
@@ -64,13 +66,25 @@ BOOL ApolloPushNotificationsSupported(void) {
         CFTypeRef value = SecTaskCopyValueForEntitlement(task, CFSTR("aps-environment"), NULL);
         // Any non-null `aps-environment` value ("development" / "production")
         // means Apple granted the push entitlement and registration can succeed.
-        supported = (value != NULL);
+        sPushSupported = (value != NULL);
         if (value) {
-            CFRelease(value);
+            id obj = (__bridge_transfer id)value;
+            if ([obj isKindOfClass:[NSString class]]) {
+                sAPSEnvironment = obj;
+            }
         }
         CFRelease(task);
     });
-    return supported;
+}
+
+BOOL ApolloPushNotificationsSupported(void) {
+    ApolloReadPushEntitlementOnce();
+    return sPushSupported;
+}
+
+BOOL ApolloAPSEnvironmentIsDevelopment(void) {
+    ApolloReadPushEntitlementOnce();
+    return [sAPSEnvironment isEqualToString:@"development"];
 }
 
 // MARK: - "Notifications unavailable" screen
@@ -117,7 +131,7 @@ UIView *ApolloMakeNotificationsUnavailableView(void) {
         [UIColor secondaryLabelColor]);
 
     UILabel *footnote = ApolloUnavailableLabel(
-        @"To use notifications, install a build signed with a paid Apple Developer account. Everything else in Apollo keeps working as normal.",
+        @"To get notifications on this build anyway, install the free Bark app from the App Store, copy its push URL (Server > right-click the key), and enable Bark Delivery in Settings > General > Custom API alongside your notification backend. Or install a build signed with a paid Apple Developer account.",
         [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote],
         [UIColor secondaryLabelColor]);
 

@@ -15,7 +15,8 @@ BOOL ApolloShouldAutoplayInlineGIF(void);
 /// Invalidated when settings, reachability, or Low Power Mode changes.
 BOOL ApolloShouldAutoplayInlineGIFCached(void);
 
-/// Current inline-GIF autoplay mode as a normalized string (never / only-on-wifi / always).
+/// Current inline-GIF autoplay mode as a normalized string
+/// (never / tap-to-play / only-on-wifi / always).
 NSString *ApolloAutoplayGIFModeString(void);
 
 /// YES when Apollo's NATIVE Autoplay GIFs/Videos setting is effectively off
@@ -23,6 +24,16 @@ NSString *ApolloAutoplayGIFModeString(void);
 /// own runtime decision (see the implementation for the verified semantics);
 /// independent of the tweak's Autoplay Inline GIFs setting.
 BOOL ApolloNativeAutoplayEffectivelyOff(void);
+
+/// One-time migration for the legacy "Default (Follow Apollo)" mode (0):
+/// resolves Apollo's native Autoplay GIFs/Videos setting to the equivalent
+/// explicit mode so existing users keep their current behavior.
+NSInteger ApolloResolveLegacyDefaultAutoplayGIFMode(void);
+
+/// YES when a paused inline GIF should show the play-button overlay for
+/// inline tap-to-play (Tap to Play mode, or WiFi Only while blocked).
+/// Never mode shows a pure static cover with no overlay.
+BOOL ApolloPausedInlineGIFWantsPlayOverlay(void);
 
 /// YES for URLs that are typically animated GIFs (not static JPEG/PNG/WebP).
 BOOL ApolloURLLooksLikeAnimatedGIF(NSURL *url);
@@ -56,6 +67,19 @@ void ApolloUnregisterInlineGIFNode(id imageNode);
 
 /// YES when object is a live ASNetworkImageNode suitable for the inline GIF registry.
 BOOL ApolloInlineGIFNodeIsRegistryEligible(id imageNode);
+
+/// Flag an Apollo-native inline animated node (giphy-picker embeds, native
+/// ![gif](...) tokens, animated snoomoji) so the registry gates it too. These
+/// nodes are paused/resumed in place (no cover/overlay/URL reload machinery).
+void ApolloFlagNativeInlineGIFNode(id imageNode);
+
+/// YES when the node was flagged via ApolloFlagNativeInlineGIFNode.
+BOOL ApolloNodeIsNativeInlineGIF(id imageNode);
+
+/// Apply the current autoplay decision to a native inline animated node:
+/// stops/starts its FLAnimatedImageView subview and toggles Texture's
+/// animatedImagePaused. Returns YES when a live node was updated.
+BOOL ApolloApplyNativeInlineGIFAutoplayGate(id imageNode);
 
 /// Re-evaluate autoplay for all registered inline GIF nodes.
 void ApolloRefreshVisibleInlineGIFAutoplay(void);

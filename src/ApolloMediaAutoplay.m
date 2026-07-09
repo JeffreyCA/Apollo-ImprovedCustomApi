@@ -6,6 +6,7 @@
 
 #import <SystemConfiguration/SystemConfiguration.h>
 #import <netinet/in.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 
 // Apollo's native General > Autoplay GIFs/Videos preference. Followed only when the
@@ -15,6 +16,7 @@ static NSString *const kApolloGroupSuiteName = @"group.com.christianselig.apollo
 
 static const void *kApolloInlineAnimatedGIFViewKey = &kApolloInlineAnimatedGIFViewKey;
 static const void *kApolloInlineGIFUserForcedPlayViewKey = &kApolloInlineGIFUserForcedPlayViewKey;
+static const void *kApolloNativeInlineGIFNodeKey = &kApolloNativeInlineGIFNodeKey;
 
 static SCNetworkReachabilityRef sReachability = NULL;
 static NSHashTable *sInlineGIFNodes = nil;
@@ -35,6 +37,7 @@ static BOOL ApolloNetworkIsOnWiFi(void);
 static BOOL ApolloNetworkIsOnCellular(void);
 static void ApolloLogAutoplayDecision(NSString *mode, BOOL shouldPlay);
 static void ApolloReloadAutoplayInlineGIFModeFromDefaults(void);
+static NSString *ApolloNativeAutoplayGIFModeString(void);
 
 static Class ApolloASNetworkImageNodeClass(void) {
     static Class cls = Nil;
@@ -47,13 +50,65 @@ static Class ApolloASNetworkImageNodeClass(void) {
 
 BOOL ApolloInlineGIFNodeIsRegistryEligible(id imageNode) {
     if (!imageNode || imageNode == (id)[NSNull null]) return NO;
+    // Native inline animated nodes (giphy-picker embeds, snoomoji) are gated in
+    // place — they only need liveness introspection, not the URL-reload API.
+    if (ApolloNodeIsNativeInlineGIF(imageNode)) {
+        return [imageNode respondsToSelector:@selector(isNodeLoaded)] &&
+               [imageNode respondsToSelector:@selector(supernode)];
+    }
     Class cls = ApolloASNetworkImageNodeClass();
     if (!cls || ![imageNode isKindOfClass:cls]) return NO;
-    if (![imageNode respondsToSelector:@selector(clearImage)]) return NO;
+    // Deliberately no -clearImage requirement: Apollo's AsyncDisplayKit build
+    // doesn't implement it, and requiring it left this registry permanently
+    // empty — settings changes never paused or resumed any on-screen GIF.
     if (![imageNode respondsToSelector:@selector(setURL:)]) return NO;
     if (![imageNode respondsToSelector:@selector(URL)]) return NO;
     if (![imageNode respondsToSelector:@selector(isNodeLoaded)]) return NO;
     if (![imageNode respondsToSelector:@selector(supernode)]) return NO;
+    return YES;
+}
+
+void ApolloFlagNativeInlineGIFNode(id imageNode) {
+    if (!imageNode) return;
+    objc_setAssociatedObject(imageNode, kApolloNativeInlineGIFNodeKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+BOOL ApolloNodeIsNativeInlineGIF(id imageNode) {
+    if (!imageNode) return NO;
+    return [objc_getAssociatedObject(imageNode, kApolloNativeInlineGIFNodeKey) boolValue];
+}
+
+// Stops/starts a native inline animated node in place. Covers both Texture
+// animation pipelines: an FLAnimatedImageView subview (gated through the
+// FLAnimatedImageView hooks once the node view is marked) and Texture's own
+// animated-image display (toggled via animatedImagePaused).
+BOOL ApolloApplyNativeInlineGIFAutoplayGate(id imageNode) {
+    if (!ApolloNodeIsNativeInlineGIF(imageNode)) return NO;
+    if (![imageNode respondsToSelector:@selector(isNodeLoaded)] ||
+        !((BOOL (*)(id, SEL))objc_msgSend)(imageNode, @selector(isNodeLoaded))) {
+        return NO;
+    }
+    BOOL shouldPlay = ApolloShouldAutoplayInlineGIFCached();
+    @try {
+        UIView *view = nil;
+        if ([imageNode respondsToSelector:@selector(view)]) {
+            view = ((UIView *(*)(id, SEL))objc_msgSend)(imageNode, @selector(view));
+        }
+        if (!view) return NO;
+        ApolloMarkViewAsInlineGIF(view);
+        UIView *animView = ApolloFindFLAnimatedImageViewInView(view);
+        if (animView) {
+            ApolloApplyFLAnimatedImageViewAutoplayGate(animView);
+        }
+        if ([imageNode respondsToSelector:@selector(setAnimatedImagePaused:)]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(imageNode, @selector(setAnimatedImagePaused:), !shouldPlay);
+        }
+    } @catch (NSException *exception) {
+        ApolloLog(@"[AutoplayGIF] native gate failed node=%p class=%@ reason=%@",
+                  imageNode, NSStringFromClass([imageNode class]), exception.reason);
+        ApolloUnregisterInlineGIFNode(imageNode);
+        return NO;
+    }
     return YES;
 }
 
@@ -109,7 +164,7 @@ static BOOL ApolloComputeShouldAutoplayInlineGIF(NSString **outMode) {
     NSString *mode = ApolloAutoplayGIFModeString();
     BOOL shouldPlay = NO;
 
-    if ([mode isEqualToString:@"never"]) {
+    if ([mode isEqualToString:@"never"] || [mode isEqualToString:@"tap-to-play"]) {
         shouldPlay = NO;
     } else if ([mode isEqualToString:@"only-on-wifi"]) {
         shouldPlay = ApolloNetworkIsOnWiFi();
@@ -156,13 +211,28 @@ static void ApolloStartReachabilityMonitor(void) {
     });
 }
 
+NSInteger ApolloResolveLegacyDefaultAutoplayGIFMode(void) {
+    NSString *native = ApolloNativeAutoplayGIFModeString();
+    if ([native isEqualToString:@"always"]) return ApolloAutoplayInlineGIFModeAlways;
+    if ([native isEqualToString:@"only-on-wifi"] || [native containsString:@"wifi"]) {
+        return ApolloAutoplayInlineGIFModeWiFiOnly;
+    }
+    return ApolloAutoplayInlineGIFModeNever;
+}
+
 // Reloads and validates the inline-GIF autoplay mode from user defaults into the
 // shared sAutoplayInlineGIFMode global. Called on KVO changes so external/defaults-
-// driven edits are reflected even when the settings UI isn't the writer.
+// driven edits are reflected even when the settings UI isn't the writer. Legacy
+// Default (0) / out-of-range values (e.g. a restored old backup) resolve to the
+// explicit equivalent of Apollo's native setting and are persisted so the
+// migration happens once.
 static void ApolloReloadAutoplayInlineGIFModeFromDefaults(void) {
     NSInteger mode = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyAutoplayInlineGIFs];
-    if (mode < ApolloAutoplayInlineGIFModeDefault || mode > ApolloAutoplayInlineGIFModeAlways) {
-        mode = ApolloAutoplayInlineGIFModeDefault;
+    if (mode < ApolloAutoplayInlineGIFModeNever || mode > ApolloAutoplayInlineGIFModeTapToPlay) {
+        mode = ApolloResolveLegacyDefaultAutoplayGIFMode();
+        // Persisting re-fires this KVO handler once; the stored value is
+        // valid on the second pass so it terminates immediately.
+        [[NSUserDefaults standardUserDefaults] setInteger:mode forKey:UDKeyAutoplayInlineGIFs];
     }
     sAutoplayInlineGIFMode = mode;
 }
@@ -182,11 +252,12 @@ static NSString *ApolloNativeAutoplayGIFModeString(void) {
 
 NSString *ApolloAutoplayGIFModeString(void) {
     switch (sAutoplayInlineGIFMode) {
-        case ApolloAutoplayInlineGIFModeNever:    return @"never";
-        case ApolloAutoplayInlineGIFModeWiFiOnly: return @"only-on-wifi";
-        case ApolloAutoplayInlineGIFModeAlways:   return @"always";
+        case ApolloAutoplayInlineGIFModeNever:     return @"never";
+        case ApolloAutoplayInlineGIFModeTapToPlay: return @"tap-to-play";
+        case ApolloAutoplayInlineGIFModeWiFiOnly:  return @"only-on-wifi";
+        case ApolloAutoplayInlineGIFModeAlways:    return @"always";
         case ApolloAutoplayInlineGIFModeDefault:
-        default:                                  return ApolloNativeAutoplayGIFModeString();
+        default:                                   return ApolloNativeAutoplayGIFModeString();
     }
 }
 
@@ -225,6 +296,17 @@ BOOL ApolloNativeAutoplayEffectivelyOff(void) {
     SCNetworkReachabilityFlags flags = 0;
     if (!SCNetworkReachabilityGetFlags(reachability, &flags)) return NO;
     return (flags & kSCNetworkReachabilityFlagsReachable) && (flags & kSCNetworkReachabilityFlagsIsWWAN);
+}
+
+// Whether a paused inline GIF should carry a play-button overlay for inline
+// tap-to-play. Tap to Play mode always wants it; WiFi Only wants it while
+// blocked (cellular). Never mode is a pure static cover — tapping falls
+// through to the normal image tap (media viewer).
+BOOL ApolloPausedInlineGIFWantsPlayOverlay(void) {
+    NSString *mode = ApolloAutoplayGIFModeString();
+    if ([mode isEqualToString:@"tap-to-play"]) return YES;
+    if ([mode isEqualToString:@"only-on-wifi"]) return !ApolloShouldAutoplayInlineGIFCached();
+    return NO;
 }
 
 static void ApolloLogAutoplayDecision(NSString *mode, BOOL shouldPlay) {
@@ -505,6 +587,14 @@ void ApolloRefreshVisibleInlineGIFAutoplay(void) {
             if (!ApolloInlineGIFNodeIsRegistryEligible(node)) {
                 ApolloUnregisterInlineGIFNode(node);
                 prunedCount++;
+                continue;
+            }
+            if (ApolloNodeIsNativeInlineGIF(node)) {
+                if (ApolloApplyNativeInlineGIFAutoplayGate(node)) {
+                    if (shouldPlay) reloadCount++; else pauseCount++;
+                } else {
+                    skipCount++;
+                }
                 continue;
             }
             if (shouldPlay) {

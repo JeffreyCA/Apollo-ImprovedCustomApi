@@ -81,8 +81,6 @@ static const CGFloat kApolloGlobeMergeSlotWidth = 34.0;
 static const CGFloat kApolloGlobeMergeGlyphNudge = 3.0;
 static const void *kApolloFeedSettledTitleRefreshScheduledKey = &kApolloFeedSettledTitleRefreshScheduledKey;
 static const void *kApolloReapplyScheduledKey = &kApolloReapplyScheduledKey;
-// Phase B — status banner above comments.
-static const void *kApolloTranslationBannerKey = &kApolloTranslationBannerKey;
 // Phase C — post selftext translation.
 static const void *kApolloAppliedHeaderTranslationFullNameKey = &kApolloAppliedHeaderTranslationFullNameKey;
 static const void *kApolloHeaderTranslatedTextNodeKey = &kApolloHeaderTranslatedTextNodeKey;
@@ -164,6 +162,22 @@ static BOOL sLastFeedTitleModeKnown = NO;
 static BOOL sLastFeedTitleTranslatedMode = YES;
 NSString * const ApolloRichPreviewTranslationDidUpdateNotification = @"ApolloRichPreviewTranslationDidUpdateNotification";
 static NSMutableSet<NSString *> *sRichPreviewTranslationInFlightKeys = nil;
+// URLs of link posts the user pinned back to ORIGINAL via the feed marker tap —
+// their rich-preview card text renders untranslated until toggled again. Keys are
+// normalized (host+path, no www/scheme/query) so the RDKLink URL and the card's
+// scrape URL match even when their strings differ superficially. Read from ASDK
+// background layout threads while mutated on main — access it only through the
+// ApolloRichPreviewPinnedOriginal* helpers (ApolloTapModeSetsLock).
+static NSMutableSet<NSString *> *sRichPreviewPinnedOriginalURLKeys = nil;
+static NSString *ApolloRichPreviewPinKeyForURL(NSURL *url) {
+    if (![url isKindOfClass:[NSURL class]]) return nil;
+    NSString *host = url.host.lowercaseString ?: @"";
+    if ([host hasPrefix:@"www."]) host = [host substringFromIndex:4];
+    NSString *path = url.path ?: @"";
+    while (path.length > 1 && [path hasSuffix:@"/"]) path = [path substringToIndex:path.length - 1];
+    if (host.length == 0) return url.absoluteString;
+    return [host stringByAppendingString:path];
+}
 static __weak UIViewController *sLastInstalledFeedViewController = nil;
 
 static void ApolloUpdateTranslationUIForController(id controller);
@@ -178,6 +192,198 @@ static BOOL ApolloFeedTitlesShouldShowTranslated(UIViewController *feedVC);
 static BOOL ApolloControllerIsInTranslatedMode(UIViewController *vc);
 static BOOL ApolloRefreshVisibleTranslationAppliedForController(UIViewController *vc);
 static BOOL ApolloRefreshFeedTitleTranslationAppliedForController(UIViewController *vc);
+static NSString *ApolloDetectDominantLanguage(NSString *text);
+static NSAttributedString *ApolloAttributedStringByAppendingTranslationMarker(NSAttributedString *translatedAttr, NSString *sourceText);
+static BOOL ApolloShouldShowTranslationMarkerForSource(NSString *sourceText, NSString **outCode);
+static void ApolloToggleTranslationForCommentTextNode(id textNode);
+static void ApolloEnsureMarkerTappableOnNode(id textNode);
+static void ApolloEnsureCommentsTableBreathingRoom(void);
+static void ApolloAppendTranslateAffordanceForCellNode(id cellNode, RDKComment *comment);
+static BOOL ApolloAttributedStringEndsWithMarker(NSAttributedString *attr);
+static void ApolloApplyTranslationToTitleNode(id titleNode, id textNode, NSString *sourceText, NSString *translatedText);
+// A feed post title the user tapped to pin back to ORIGINAL; gates the title
+// apply path so a re-translation pass won't swap it back until they toggle again.
+static const void *kApolloTitlePinnedOriginalKey = &kApolloTitlePinnedOriginalKey;
+// The source title text that was pinned, so a cell reused for a DIFFERENT post
+// (different title) doesn't inherit the pin and wrongly stay untranslated.
+static const void *kApolloTitlePinnedSourceKey = &kApolloTitlePinnedSourceKey;
+
+// Attribute tagging the per-item "Translated from …" marker run appended under
+// translated content, so it can be identified (and, later, made tappable) and
+// distinguished from the real body text.
+static NSString *const ApolloTranslationMarkerAttributeName = @"ApolloTranslationMarkerAttribute";
+// Link attribute + sentinel value that make the marker line tappable (routed
+// through the ASTextNode link-tap delegate, intercepted in our MarkdownNode
+// hook so it toggles instead of opening a URL).
+static NSString *const ApolloTranslationMarkerLinkAttributeName = @"ApolloTranslationMarkerLink";
+static NSString *const ApolloTranslationMarkerLinkValue = @"apollo-translation://toggle";
+// fullNames the user tapped to pin back to their ORIGINAL language; the comment
+// apply path skips (re)translating these so the pin survives reapply/vote.
+static NSMutableSet<NSString *> *sUserPinnedOriginalFullNames = nil;
+// TAP-TO-TRANSLATE mode (sTapToTranslate): everything shows its ORIGINAL text by
+// default with a tap affordance; these sets hold the items the user has tapped
+// to translate. Keys: comment fullNames AND title/body source texts (both unique
+// enough per session; a reused cell can't leak state because applies re-consult
+// the set against the item's own key).
+static NSMutableSet<NSString *> *sTapModeTranslatedKeys = nil;
+// Link-post URLs (normalized pin keys) the user tap-translated, so the rich
+// link-preview card translates only after the tap in tap-to-translate mode.
+static NSMutableSet<NSString *> *sTapModeTranslatedURLKeys = nil;
+// Nodes the tap-to-translate mode has decorated or auto-pinned (weak). Swept by
+// ApolloRestoreAllOwnedTextNodes so globe-off / settings changes clean them up
+// even though they never take translation ownership.
+static NSHashTable *sTapTouchedNodes = nil;
+// The tap-mode sets AND the rich-preview pin set are read from ASDK background
+// layout passes (the rich link-preview gate) while mutated on main — all access
+// goes through these synchronized helpers.
+static NSObject *ApolloTapModeSetsLock(void) {
+    static NSObject *lock; static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [NSObject new]; });
+    return lock;
+}
+static BOOL ApolloTapModeIsTranslatedKey(NSString *key) {
+    if (key.length == 0) return NO;
+    @synchronized (ApolloTapModeSetsLock()) {
+        return sTapModeTranslatedKeys && [sTapModeTranslatedKeys containsObject:key];
+    }
+}
+static void ApolloTapModeSetKeyTranslated(NSString *key, BOOL translated) {
+    if (key.length == 0) return;
+    @synchronized (ApolloTapModeSetsLock()) {
+        if (!sTapModeTranslatedKeys) sTapModeTranslatedKeys = [NSMutableSet set];
+        if (translated) [sTapModeTranslatedKeys addObject:key];
+        else [sTapModeTranslatedKeys removeObject:key];
+    }
+}
+static BOOL ApolloTapModeURLKeyIsTranslated(NSString *key) {
+    if (key.length == 0) return NO;
+    @synchronized (ApolloTapModeSetsLock()) {
+        return sTapModeTranslatedURLKeys && [sTapModeTranslatedURLKeys containsObject:key];
+    }
+}
+static void ApolloTapModeSetURLKeyTranslated(NSString *key, BOOL translated) {
+    if (key.length == 0) return;
+    @synchronized (ApolloTapModeSetsLock()) {
+        if (!sTapModeTranslatedURLKeys) sTapModeTranslatedURLKeys = [NSMutableSet set];
+        if (translated) [sTapModeTranslatedURLKeys addObject:key];
+        else [sTapModeTranslatedURLKeys removeObject:key];
+    }
+}
+static void ApolloTapModeClearSessionSets(void) {
+    @synchronized (ApolloTapModeSetsLock()) {
+        [sTapModeTranslatedKeys removeAllObjects];
+        [sTapModeTranslatedURLKeys removeAllObjects];
+    }
+}
+static void ApolloTapModeRegisterTouchedNode(id node) {
+    if (!node) return;
+    @synchronized (ApolloTapModeSetsLock()) {
+        if (!sTapTouchedNodes) sTapTouchedNodes = [NSHashTable weakObjectsHashTable];
+        [sTapTouchedNodes addObject:node];
+    }
+}
+static BOOL ApolloRichPreviewPinnedOriginalContainsKey(NSString *key) {
+    if (key.length == 0) return NO;
+    @synchronized (ApolloTapModeSetsLock()) {
+        return sRichPreviewPinnedOriginalURLKeys && [sRichPreviewPinnedOriginalURLKeys containsObject:key];
+    }
+}
+static void ApolloRichPreviewSetKeyPinnedOriginal(NSString *key, BOOL pinned) {
+    if (key.length == 0) return;
+    @synchronized (ApolloTapModeSetsLock()) {
+        if (!sRichPreviewPinnedOriginalURLKeys) sRichPreviewPinnedOriginalURLKeys = [NSMutableSet set];
+        if (pinned) [sRichPreviewPinnedOriginalURLKeys addObject:key];
+        else [sRichPreviewPinnedOriginalURLKeys removeObject:key];
+    }
+}
+// A pin set automatically by tap-to-translate mode (@2) is only meaningful while
+// the mode is ON; a manual pin (user marker tap, @YES) is always honoured. A
+// stale auto-pin (mode now OFF) is cleared on sight so re-enabling the mode
+// later can't resurrect a hold on a node that has since been translated.
+static BOOL ApolloPinActiveOnNode(id node) {
+    id pin = objc_getAssociatedObject(node, kApolloTitlePinnedOriginalKey);
+    if (![pin respondsToSelector:@selector(boolValue)] || ![pin boolValue]) return NO;
+    BOOL isAutoPin = [pin isKindOfClass:[NSNumber class]] && [(NSNumber *)pin integerValue] == 2;
+    if (isAutoPin && !sTapToTranslate) {
+        objc_setAssociatedObject(node, kApolloTitlePinnedOriginalKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(node, kApolloTitlePinnedSourceKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        return NO;
+    }
+    return YES;
+}
+// Compact "🌐 PT" marker label overlaid on a PostInfoNode's view (metadata row).
+static const void *kApolloPostInfoMarkerLabelKey = &kApolloPostInfoMarkerLabelKey;
+// YES once the marker label is anchored after the age node (vs the piView fallback).
+static const void *kApolloPostInfoMarkerAnchoredKey = &kApolloPostInfoMarkerAnchoredKey;
+// The label's current positioning constraints, kept so they can be deactivated
+// and re-pointed to the CURRENT age view each call (the age node re-mounts its
+// view on cell re-processing, which would otherwise orphan a one-time constraint).
+static const void *kApolloPostInfoMarkerConstraintsKey = &kApolloPostInfoMarkerConstraintsKey;
+// The point size the marker was last built at, so we only rebuild content on change.
+static const void *kApolloPostInfoMarkerSizeKey = &kApolloPostInfoMarkerSizeKey;
+// Weak set of all live PostInfoNode marker labels, so a globe toggle-to-original
+// can hide them all at once (they're separate UILabels, not owned text nodes).
+static NSHashTable *sPostInfoMarkerLabels = nil;
+// The title text node whose translation the marker toggles when tapped (feed only).
+static const void *kApolloMarkerTitleNodeKey = &kApolloMarkerTitleNodeKey;
+// The sourceCode the marker was last SHOWN with, replayed by the post-mount
+// re-anchor pass (cleared whenever the updater deliberately hides the marker,
+// so a re-anchor can never resurrect a hidden one).
+static const void *kApolloPostInfoMarkerCodeKey = &kApolloPostInfoMarkerCodeKey;
+static void ApolloUpdatePostInfoMarkerForNode(id anyNode, NSString *sourceCode, BOOL show, id toggleNode);
+static void ApolloReserveMarkerSlotInCompactRow(UILabel *label, id postInfoNode, BOOL show);
+static void ApolloReanchorPostInfoMarkerIfFallback(id postInfoNode, BOOL allowRetry);
+static void ApolloToggleTranslationForTitleNode(id titleTextNode);
+
+// YES on a cell view once we've installed the marker tap gesture on it.
+static const void *kApolloMarkerCellGestureKey = &kApolloMarkerCellGestureKey;
+
+// Tap handling for the compact feed marker. The marker label sits just PAST the
+// age node's bounds, so a gesture on the label itself never hit-tests (its ASDK
+// host clips hit-testing to its own bounds). Instead we install ONE tap gesture
+// on the enclosing TABLE view (which receives touches for every cell) and, via
+// the delegate, only claim the touch when it lands on a marker's frame —
+// otherwise the tap falls through to Apollo's normal "open post" behaviour.
+// (Per-cell installs proved fragile: any cell layout variant that missed the
+// install silently lost the toggle.) Same proven approach as ApolloCreatedAtAlert
+// / ApolloStatsRowTouch (gesture on an ancestor, hit-test the node frame).
+@interface ApolloFeedMarkerTapTarget : NSObject <UIGestureRecognizerDelegate>
+@property (nonatomic, weak) UILabel *pendingLabel;
++ (instancetype)shared;
+- (void)handleCellTap:(UITapGestureRecognizer *)gr;
+@end
+@implementation ApolloFeedMarkerTapTarget
++ (instancetype)shared { static ApolloFeedMarkerTapTarget *s; static dispatch_once_t o; dispatch_once(&o, ^{ s = [ApolloFeedMarkerTapTarget new]; }); return s; }
+// Find a visible marker label whose (padded) frame contains the window point.
+- (UILabel *)markerLabelAtWindowPoint:(CGPoint)p {
+    if (!sPostInfoMarkerLabels) return nil;
+    for (UILabel *label in [sPostInfoMarkerLabels allObjects]) {
+        if (![label isKindOfClass:[UILabel class]] || label.hidden || !label.window) continue;
+        if (!objc_getAssociatedObject(label, kApolloMarkerTitleNodeKey)) continue;
+        CGRect wf = [label convertRect:label.bounds toView:nil];
+        if (CGRectContainsPoint(CGRectInset(wf, -12.0, -10.0), p)) return label;   // padded for an easy tap target
+    }
+    return nil;
+}
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr shouldReceiveTouch:(UITouch *)touch {
+    UILabel *hit = [self markerLabelAtWindowPoint:[touch locationInView:nil]];
+    self.pendingLabel = hit;
+    return hit != nil;   // only claim the touch when it's on a marker
+}
+- (void)handleCellTap:(UITapGestureRecognizer *)gr {
+    UILabel *label = self.pendingLabel;
+    self.pendingLabel = nil;
+    if (![label isKindOfClass:[UILabel class]]) return;
+    id titleNode = objc_getAssociatedObject(label, kApolloMarkerTitleNodeKey);
+    if (titleNode) {
+        // Match the info-row taps (comment bubble / timestamp): a light tick
+        // acknowledging the tap before the title text swaps.
+        [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+        ApolloToggleTranslationForTitleNode(titleNode);
+    }
+}
+@end
+static void ApolloHideAllPostInfoMarkers(void);
 
 // Returns the Reddit fullName ("t1_xxxxx") for a comment. Falls back to a
 // stable derived key when the runtime doesn't expose `name` / `fullName`.
@@ -729,6 +935,161 @@ static NSString *ApolloRestoreTranslationLinks(NSString *translatedText, NSDicti
     return [restoredText copy];
 }
 
+static NSString *ApolloTranslationNameToken(NSUInteger index) {
+    // Same sentinel shape as ApolloTranslationLinkToken — an all-caps single token with no
+    // spaces/punctuation. That exact form is already proven to survive Google/Libre/Apple
+    // translation intact for links, so protected names ride the identical mechanism.
+    return [NSString stringWithFormat:@"APOLLOTRANSLATIONNAME%luTOKEN", (unsigned long)index];
+}
+
+// Detect proper nouns (people, places, organizations) with NLTagger's on-device name-type
+// model and swap each span for a sentinel token BEFORE translation, restoring afterward.
+// This stops the translator from "translating" a name that also happens to be a common
+// word in some language — the canonical failure being a short title like "Dua Lipa" getting
+// fingerprinted as Malay/Indonesian ("dua" = "two") and coming back as "Two Lips", or a
+// tennis title where "Sabalenka"/"Tjen" get rendered as "Third"/"Serve". Structurally this
+// mirrors ApolloProtectTranslationLinks exactly.
+//
+// Best-effort, NOT a guarantee: NLTagger's statistical NER has poor recall on mononym/stage
+// names and on names that ARE common nouns, so some still slip through. It never makes a
+// non-name case worse, and combined with the all-names skip in ApolloRequestTranslation it
+// removes the most common and most jarring mistranslations.
+static NSString *ApolloProtectTranslationNames(NSString *sourceText, NSDictionary<NSString *, NSString *> **protectedNamesOut) {
+    if (protectedNamesOut) *protectedNamesOut = @{};
+    if (![sourceText isKindOfClass:[NSString class]] || sourceText.length == 0) return sourceText;
+
+    if (@available(iOS 12.0, *)) {
+        NLTagger *tagger = [[NLTagger alloc] initWithTagSchemes:@[NLTagSchemeNameType]];
+        tagger.string = sourceText;
+        NLTaggerOptions options = NLTaggerOmitWhitespace | NLTaggerOmitPunctuation | NLTaggerJoinNames;
+
+        // Collect every personal/place/organization span first, then replace in reverse
+        // location order so earlier replacements can't invalidate later ranges.
+        NSMutableArray<NSValue *> *nameRanges = [NSMutableArray array];
+        [tagger enumerateTagsInRange:NSMakeRange(0, sourceText.length)
+                                unit:NLTokenUnitWord
+                              scheme:NLTagSchemeNameType
+                             options:options
+                          usingBlock:^(NLTag tag, NSRange tokenRange, __unused BOOL *stop) {
+            if ([tag isEqualToString:NLTagPersonalName] ||
+                [tag isEqualToString:NLTagPlaceName] ||
+                [tag isEqualToString:NLTagOrganizationName]) {
+                if (tokenRange.length > 0 && NSMaxRange(tokenRange) <= sourceText.length) {
+                    [nameRanges addObject:[NSValue valueWithRange:tokenRange]];
+                }
+            }
+        }];
+
+        if (nameRanges.count == 0) return sourceText;
+
+        // Highest location first.
+        [nameRanges sortUsingComparator:^NSComparisonResult(NSValue *a, NSValue *b) {
+            NSUInteger la = a.rangeValue.location, lb = b.rangeValue.location;
+            if (la < lb) return NSOrderedDescending;
+            if (la > lb) return NSOrderedAscending;
+            return NSOrderedSame;
+        }];
+
+        NSMutableString *protectedText = [sourceText mutableCopy];
+        NSMutableDictionary<NSString *, NSString *> *protectedNames = [NSMutableDictionary dictionary];
+        NSUInteger nextTokenIndex = 0;
+        for (NSValue *value in nameRanges) {
+            NSRange range = value.rangeValue;
+            if (range.length == 0 || NSMaxRange(range) > protectedText.length) continue;
+            NSString *originalName = [protectedText substringWithRange:range];
+            NSString *token = ApolloTranslationNameToken(nextTokenIndex++);
+            protectedNames[token] = originalName;
+            [protectedText replaceCharactersInRange:range withString:token];
+        }
+
+        if (protectedNames.count == 0) return sourceText;
+        if (protectedNamesOut) *protectedNamesOut = [protectedNames copy];
+        return [protectedText copy];
+    }
+    return sourceText;
+}
+
+static NSString *ApolloRestoreTranslationNames(NSString *translatedText, NSDictionary<NSString *, NSString *> *protectedNames) {
+    if (![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return translatedText;
+    if (![protectedNames isKindOfClass:[NSDictionary class]] || protectedNames.count == 0) return translatedText;
+
+    NSMutableString *restoredText = [translatedText mutableCopy];
+    [protectedNames enumerateKeysAndObjectsUsingBlock:^(NSString *token, NSString *originalName, __unused BOOL *stop) {
+        if (![token isKindOfClass:[NSString class]] || token.length == 0) return;
+        if (![originalName isKindOfClass:[NSString class]]) return;
+        // Case-insensitive: some engines lowercase an injected token. The sentinel shape is
+        // unique enough that this can't match anything else (e.g. "...NAME1TOKEN" is not a
+        // substring of "...NAME10TOKEN").
+        [restoredText replaceOccurrencesOfString:token
+                                      withString:originalName
+                                         options:NSCaseInsensitiveSearch
+                                           range:NSMakeRange(0, restoredText.length)];
+    }];
+    return [restoredText copy];
+}
+
+// After link+name protection, is there any actual translatable text left? If a title is
+// nothing but a name (e.g. "Dua Lipa"), every letter is inside a sentinel token and there's
+// nothing to translate — so we can skip the round-trip entirely.
+static BOOL ApolloProtectedTextIsOnlyProtectedTokens(NSString *protectedText,
+                                                     NSDictionary<NSString *, NSString *> *protectedNames,
+                                                     NSDictionary<NSString *, NSString *> *protectedLinks) {
+    if (![protectedText isKindOfClass:[NSString class]] || protectedText.length == 0) return NO;
+    NSMutableString *residual = [protectedText mutableCopy];
+    for (NSString *token in protectedNames) {
+        [residual replaceOccurrencesOfString:token withString:@" " options:NSCaseInsensitiveSearch range:NSMakeRange(0, residual.length)];
+    }
+    for (NSString *token in protectedLinks) {
+        [residual replaceOccurrencesOfString:token withString:@" " options:NSCaseInsensitiveSearch range:NSMakeRange(0, residual.length)];
+    }
+    return [residual rangeOfCharacterFromSet:[NSCharacterSet letterCharacterSet]].location == NSNotFound;
+}
+
+// The real driver of the #549 mistranslations is source-language MISdetection on short,
+// title-cased strings: a 2-3 word title like "Dua Lipa" ("dua" = "two" in Malay/Indonesian)
+// or "Sabalenka def. Kostovic" gives the language identifier almost no signal, so it
+// confidently guesses a wrong foreign language and the translator dutifully "translates" the
+// names. Apple's on-device NER (NLTagger) does NOT recognize these bare-title names —
+// verified in the sim, it only tags names that sit inside a fuller sentence — so name
+// protection alone can't catch them.
+//
+// This heuristic does: a SHORT title (2-4 real words) whose every word is either Capitalized
+// or a tiny (<=3 char) lowercase connector/abbreviation ("de"/"van"/"def.") is almost
+// certainly a name or headline, not a sentence worth translating. A genuine short foreign
+// sentence almost always carries a longer lowercase word ("voy a casa", "che bella giornata")
+// and so is left to translate normally. Single words (e.g. "Bonjour") are also left alone to
+// translate, since one capitalized token is too ambiguous to suppress. Erring toward "don't
+// translate a short title-cased string" also addresses the "green globe appears too often"
+// over-translation complaint in the same issue.
+static BOOL ApolloTitleLooksLikeProperNouns(NSString *text) {
+    if (![text isKindOfClass:[NSString class]]) return NO;
+    NSString *trimmed = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length == 0) return NO;
+
+    NSCharacterSet *letters = [NSCharacterSet letterCharacterSet];
+    NSCharacterSet *nonLetters = [letters invertedSet];
+    NSCharacterSet *uppercase = [NSCharacterSet uppercaseLetterCharacterSet];
+    NSArray<NSString *> *rawTokens = [trimmed componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+    NSUInteger alphaTokens = 0;
+    NSUInteger nameShapedTokens = 0;
+    for (NSString *raw in rawTokens) {
+        // Strip surrounding punctuation so "def." -> "def", "(Wimbledon)" -> "Wimbledon".
+        NSString *token = [raw stringByTrimmingCharactersInSet:nonLetters];
+        if (token.length == 0) continue;                                  // punctuation / digits only
+        if ([token rangeOfCharacterFromSet:letters].location == NSNotFound) continue;
+        alphaTokens++;
+        BOOL startsUpper = [uppercase characterIsMember:[token characterAtIndex:0]];
+        BOOL shortLowerConnector = (token.length <= 3) && !startsUpper;   // de / van / def / vs
+        if (startsUpper || shortLowerConnector) nameShapedTokens++;
+    }
+
+    // Need >=2 real words (single greetings like "Bonjour" still translate), <=4 (longer
+    // text carries enough signal to trust detection), and EVERY real word name-shaped.
+    if (alphaTokens < 2 || alphaTokens > 4) return NO;
+    return nameShapedTokens == alphaTokens;
+}
+
 static NSDictionary *ApolloAttributesWithoutLinkAttribute(NSDictionary *attributes) {
     if (![attributes isKindOfClass:[NSDictionary class]] || attributes.count == 0) return @{};
     NSMutableDictionary *filteredAttributes = [attributes mutableCopy];
@@ -903,7 +1264,9 @@ static BOOL ApolloThreadTranslationModeEnabledForVisibleCommentsVC(void) {
 static BOOL ApolloControllerIsInTranslatedMode(UIViewController *vc) {
     if (!vc) return NO;
     if ([objc_getAssociatedObject(vc, kApolloThreadTranslatedModeKey) boolValue]) return YES;
-    if (sAutoTranslateOnAppear &&
+    // Tap-to-translate keeps the pipeline live (translations prefetch, markers
+    // and affordances show) — the per-item gates hold each swap until tapped.
+    if ((sAutoTranslateOnAppear || sTapToTranslate) &&
         ![objc_getAssociatedObject(vc, kApolloThreadOriginalModeKey) boolValue]) {
         return YES;
     }
@@ -1260,6 +1623,26 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     if (!commentCellNode || ![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return;
     if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
 
+    // Respect a per-item pin: if the user tapped this comment's marker to show
+    // its original language, don't (re)translate it (this also blocks the
+    // vote-resilience reapply, which routes back through here).
+    NSString *pinName = ApolloCommentFullName(comment);
+    if (sTapToTranslate) {
+        // Tap-to-translate: hold every swap until the user taps the affordance.
+        // The translation is already fetched+cached by the time we're called, so
+        // the tap is instant. Show "🌐 Translate" under the original body — but
+        // only when the translation actually differs (no dead affordances on
+        // same-language / provider-no-op comments).
+        if (!ApolloTapModeIsTranslatedKey(pinName)) {
+            if (ApolloTranslatedTextDiffersFromSource(comment.body, translatedText)) {
+                ApolloAppendTranslateAffordanceForCellNode(commentCellNode, comment);
+            }
+            return;
+        }
+    } else if (pinName.length > 0 && sUserPinnedOriginalFullNames && [sUserPinnedOriginalFullNames containsObject:pinName]) {
+        return;
+    }
+
     id textNode = ApolloBestCommentTextNode(commentCellNode, comment);
     if (!textNode) return;
 
@@ -1297,6 +1680,12 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
 
     NSAttributedString *translatedAttr = ApolloTranslatedAttributedStringPreservingVisualLinks(current, translatedText);
 
+    // Optional per-item "Translated from <Language>" marker line (gated on the
+    // Show Translation Details setting). Only the DISPLAY string carries it; the
+    // owned-node cache below keeps the clean translated text so the vote-
+    // resilience comparisons (which are containment-based) still match.
+    NSAttributedString *displayAttr = ApolloAttributedStringByAppendingTranslationMarker(translatedAttr, comment.body);
+
     // Phase D — vote resilience. Mark this text node as ours BEFORE the
     // setAttributedText: write below, so the global setter hook sees the
     // marker and the swap-to-translated logic can trigger if Apollo later
@@ -1307,7 +1696,7 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     ApolloRegisterOwnedTextNode(textNode);
 
     @try {
-        ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), translatedAttr);
+        ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), displayAttr);
     } @catch (__unused NSException *e) {
         return;
     }
@@ -1319,6 +1708,10 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
         ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsDisplay));
     }
     ApolloForceRelayoutForTextNodeAndOwner(commentCellNode, textNode);
+    if (displayAttr != translatedAttr) {
+        ApolloEnsureMarkerTappableOnNode(textNode);
+        ApolloEnsureCommentsTableBreathingRoom();
+    }
 
     objc_setAssociatedObject(commentCellNode, kApolloTranslatedTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
@@ -1745,6 +2138,30 @@ static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *l
     id textNode = ApolloBestPostBodyTextNode(headerCellNode, link, body);
     if (!textNode) return;
 
+    // The user tapped the header marker to pin this post back to its original
+    // language — don't re-apply the translation (reopen/vote/visibility passes
+    // all route through here). Keep the marker showing the TARGET code while
+    // pinned so it reads as "tap for English". A different post's body on a
+    // reused node clears the stale pin and translates normally.
+    if (ApolloPinActiveOnNode(textNode)) {
+        NSString *pinnedSrc = objc_getAssociatedObject(textNode, kApolloTitlePinnedSourceKey);
+        id pinVal = objc_getAssociatedObject(textNode, kApolloTitlePinnedOriginalKey);
+        BOOL isHeld = sTapToTranslate && [pinVal isKindOfClass:[NSNumber class]] && [(NSNumber *)pinVal integerValue] == 2;
+        BOOL pinnedSrcMatches = [pinnedSrc isKindOfClass:[NSString class]] && [pinnedSrc isEqualToString:body];
+        if (isHeld && pinnedSrcMatches) {
+            // Held: fall through (pin KEPT) so the tap gate below stashes the arrival.
+        } else if (pinnedSrcMatches) {
+            NSString *targetCode = ApolloResolvedTargetLanguageCode();
+            if (targetCode.length > 0) {
+                ApolloUpdatePostInfoMarkerForNode(headerCellNode, targetCode, sShowTranslationDetails || sTapToTranslate, textNode);
+            }
+            return;
+        } else {
+            objc_setAssociatedObject(textNode, kApolloTitlePinnedOriginalKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(textNode, kApolloTitlePinnedSourceKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        }
+    }
+
     NSAttributedString *current = nil;
     @try { current = ((id (*)(id, SEL))objc_msgSend)(textNode, @selector(attributedText)); }
     @catch (__unused NSException *e) { return; }
@@ -1762,11 +2179,44 @@ static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *l
          [currentNorm containsString:translatedNorm] ||
          [translatedNorm containsString:currentNorm]);
     if (!textMatchesBody && !textMatchesTranslation) return;
+
+    // Update the post's metadata-row banner ("🌐 Translated from <Language>")
+    // whenever the post is (or is about to be) showing its translation. This
+    // MUST run before the no-op return below, because on reopen the header body
+    // already shows the cached translation and the write is skipped.
+    if (textMatchesTranslation || textMatchesBody) {
+        NSString *postSourceCode = nil;
+        BOOL shouldShowMarker = (sShowTranslationDetails || sTapToTranslate) && ApolloShouldShowTranslationMarkerForSource(body, &postSourceCode);
+        // Compact "🌐 PT" marker on the post's metadata row (PostInfoNode). Always
+        // call so the marker is hidden when the flag is off or source==target.
+        // The body text node is the tap-toggle handle: tapping the marker flips
+        // the header (title + body + card) translated⇄original, like the feed.
+        ApolloUpdatePostInfoMarkerForNode(headerCellNode, postSourceCode, shouldShowMarker, textNode);
+    }
+
     if (textMatchesTranslation && !textMatchesBody) return;
 
     NSAttributedString *originalSaved = objc_getAssociatedObject(textNode, kApolloOriginalAttributedTextKey);
     if (![originalSaved isKindOfClass:[NSAttributedString class]]) {
         objc_setAssociatedObject(textNode, kApolloOriginalAttributedTextKey, [current copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    // TAP-TO-TRANSLATE: hold the header swap until the marker is tapped. Stash
+    // the tap's inputs (content assocs, auto-pin, the link + body-node handles
+    // the toggle routes through) and show the TARGET-code marker.
+    if (sTapToTranslate && !ApolloTapModeIsTranslatedKey(body)) {
+        objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [body copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+        objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+        objc_setAssociatedObject(textNode, kApolloTitlePinnedOriginalKey, @2, OBJC_ASSOCIATION_RETAIN_NONATOMIC);   // @2 = tap-mode auto-pin
+        objc_setAssociatedObject(textNode, kApolloTitlePinnedSourceKey, [body copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+        ApolloTapModeRegisterTouchedNode(textNode);
+        objc_setAssociatedObject(headerCellNode, kApolloHeaderTranslatedTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (link) objc_setAssociatedObject(headerCellNode, kApolloAppliedHeaderLinkKey, link, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        NSString *targetCode = ApolloResolvedTargetLanguageCode();
+        if (targetCode.length > 0) {
+            ApolloUpdatePostInfoMarkerForNode(headerCellNode, targetCode, YES, textNode);
+        }
+        return;
     }
 
     NSAttributedString *translatedAttr = ApolloTranslatedAttributedStringPreservingVisualLinks(current, translatedText);
@@ -1823,6 +2273,30 @@ static void ApolloApplyTranslationToPostTextNode(id owner, id textNode, NSString
     if (![sourceText isKindOfClass:[NSString class]] || sourceText.length == 0) return;
     if (![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return;
     if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
+    // Marker-tap pin: this post is pinned to its original language; don't re-apply.
+    if (ApolloPinActiveOnNode(textNode)) {
+        NSString *pinnedSrc = objc_getAssociatedObject(textNode, kApolloTitlePinnedSourceKey);
+        BOOL pinnedSrcMatches = [pinnedSrc isKindOfClass:[NSString class]] && [pinnedSrc isEqualToString:sourceText];
+        id pinVal = objc_getAssociatedObject(textNode, kApolloTitlePinnedOriginalKey);
+        BOOL isHeld = sTapToTranslate && [pinVal isKindOfClass:[NSNumber class]] && [(NSNumber *)pinVal integerValue] == 2;
+        if (isHeld && pinnedSrcMatches) {
+            // Held: fall through so the tap gate below stashes the arrival.
+        } else if (pinnedSrcMatches) {
+            return;
+        } else {
+            objc_setAssociatedObject(textNode, kApolloTitlePinnedOriginalKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(textNode, kApolloTitlePinnedSourceKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        }
+    }
+    // TAP-TO-TRANSLATE: hold the swap; stash + auto-pin so the marker tap works.
+    if (sTapToTranslate && !ApolloTapModeIsTranslatedKey(sourceText)) {
+        objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [sourceText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+        objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+        objc_setAssociatedObject(textNode, kApolloTitlePinnedOriginalKey, @2, OBJC_ASSOCIATION_RETAIN_NONATOMIC);   // @2 = tap-mode auto-pin
+        objc_setAssociatedObject(textNode, kApolloTitlePinnedSourceKey, [sourceText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+        ApolloTapModeRegisterTouchedNode(textNode);
+        return;
+    }
 
     NSAttributedString *current = nil;
     @try { current = ((id (*)(id, SEL))objc_msgSend)(textNode, @selector(attributedText)); }
@@ -2188,7 +2662,11 @@ static BOOL ApolloTextIsOverwhelminglyLatin(NSString *text) {
     return (bucket == ApolloScriptLatin && frac >= 0.85 && scriptChars >= 12);
 }
 
-static NSString *ApolloDetectDominantLanguage(NSString *text) {
+// Dominant-language detection that also reports the recognizer's confidence in the
+// top hypothesis (0..1). `outConfidence` is filled even when the return is nil
+// (below the 0.55 acceptance floor), so callers can make their own threshold call.
+static NSString *ApolloDominantLanguageWithConfidence(NSString *text, double *outConfidence) {
+    if (outConfidence) *outConfidence = 0.0;
     if (![text isKindOfClass:[NSString class]]) return nil;
     NSString *trimmed = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     // Short strings produce unreliable detections ("lol", "wow", etc.). Skip them.
@@ -2207,11 +2685,16 @@ static NSString *ApolloDetectDominantLanguage(NSString *text) {
             double p = hyps[lang].doubleValue;
             if (p > bestProb) { bestProb = p; dominant = (NSString *)lang; }
         }
+        if (outConfidence) *outConfidence = bestProb;
         // Require reasonable confidence so we don't accidentally skip ambiguous text.
         if (bestProb < 0.55 || dominant.length == 0) return nil;
         return ApolloNormalizeLanguageCode(dominant);
     }
     return nil;
+}
+
+static NSString *ApolloDetectDominantLanguage(NSString *text) {
+    return ApolloDominantLanguageWithConfidence(text, NULL);
 }
 
 // Returns YES if the user has asked us not to translate text in `detectedLang`.
@@ -2410,11 +2893,18 @@ static void ApolloRequestTranslation(NSString *cacheKey,
 
     if (!shouldStartRequest) return;
 
-    NSDictionary<NSString *, NSString *> *protectedLinks = nil;
-    NSString *requestText = ApolloProtectTranslationLinks(sourceText, &protectedLinks);
+    // Protect proper nouns (names/places/orgs) and links from the translator, then translate
+    // only what's left. Names are detected first so NLTagger sees clean text (not the link
+    // sentinels); restore order is irrelevant since the two token shapes are distinct.
+    NSDictionary<NSString *, NSString *> *protectedNames = nil;
+    NSString *nameProtected = ApolloProtectTranslationNames(sourceText, &protectedNames);
 
-    ApolloTranslateTextWithFallback(requestText, targetLanguage, ^(NSString *translated, NSError *error) {
+    NSDictionary<NSString *, NSString *> *protectedLinks = nil;
+    NSString *requestText = ApolloProtectTranslationLinks(nameProtected, &protectedLinks);
+
+    void (^deliverTranslation)(NSString *, NSError *) = ^(NSString *translated, NSError *error) {
         NSString *restoredTranslation = ApolloRestoreTranslationLinks(translated, protectedLinks);
+        restoredTranslation = ApolloRestoreTranslationNames(restoredTranslation, protectedNames);
         NSArray *callbacks = nil;
         @synchronized (sPendingTranslationCallbacks) {
             callbacks = [sPendingTranslationCallbacks[cacheKey] copy] ?: @[];
@@ -2429,7 +2919,37 @@ static void ApolloRequestTranslation(NSString *cacheKey,
             void (^callback)(NSString *, NSError *) = callbackObj;
             callback(restoredTranslation, error);
         }
-    });
+    };
+
+    // Skip the round-trip and hand back the original when the text is just name(s): either a
+    // short title-cased proper-noun string the language detector would misread (the main
+    // #549 case, e.g. "Dua Lipa"/"Sabalenka def. Kostovic"), or a string that's nothing but
+    // NER-detected names after protection. Caching source==translation makes future hits an
+    // instant no-op and keeps the translated-globe from lighting up on a post we never
+    // actually translated (the "globe appears too often" complaint in the same issue).
+    BOOL properNounTitle = ApolloTitleLooksLikeProperNouns(sourceText);
+    // The proper-noun skip exists ONLY for short, title-cased strings that MISLEAD
+    // language detection (e.g. "Dua Lipa"). A genuinely foreign title that happens
+    // to be Title Case ("Bicampeões de Futsal Masculino") is detected with high
+    // confidence — so if the recognizer is very sure of a specific language, trust
+    // it and translate. This fixes real titles the word-count-only heuristic wrongly
+    // suppressed, while still protecting the truly-ambiguous short name strings
+    // (which score well below this bar).
+    if (properNounTitle) {
+        double conf = 0.0;
+        NSString *detLang = ApolloDominantLanguageWithConfidence(sourceText, &conf);
+        if (detLang.length > 0 && conf >= 0.90) properNounTitle = NO;
+    }
+    BOOL onlyDetectedNames = protectedNames.count > 0 &&
+        ApolloProtectedTextIsOnlyProtectedTokens(requestText, protectedNames, protectedLinks);
+    if (properNounTitle || onlyDetectedNames) {
+        ApolloTranslationVerboseLog(@"[Translation] Skipping proper-noun text (titleHeuristic=%d nerOnly=%d): \"%@\"",
+                                    properNounTitle, onlyDetectedNames, sourceText);
+        deliverTranslation(sourceText, nil);
+        return;
+    }
+
+    ApolloTranslateTextWithFallback(requestText, targetLanguage, deliverTranslation);
 }
 
 BOOL ApolloRichPreviewTranslationShouldTranslateForNode(id node) {
@@ -2465,6 +2985,17 @@ static NSString *ApolloRichPreviewTranslationCacheKey(NSURL *url, NSString *fiel
 NSString *ApolloRichPreviewTranslatedTextIfAvailable(NSURL *url, NSString *field, NSString *sourceText, id ownerNode) {
     NSString *trimmed = ApolloTrimmedString(sourceText);
     if (trimmed.length < 3) return nil;
+    // Per-post pin: the user tapped this post's feed marker to see the original,
+    // so its card must render untranslated too (toggled back off by another tap).
+    NSString *pinKey = ApolloRichPreviewPinKeyForURL(url);
+    if (ApolloRichPreviewPinnedOriginalContainsKey(pinKey)) return nil;
+    // TAP-TO-TRANSLATE: card text stays original until the post's marker is
+    // tapped — but the translation still PREFETCHES below (return nil at the
+    // cache-hit exit instead of skipping the pipeline) so the tap is instant.
+    BOOL tapHeld = NO;
+    if (sTapToTranslate) {
+        tapHeld = !ApolloTapModeURLKeyIsTranslated(pinKey);
+    }
     if (!ApolloRichPreviewTranslationShouldTranslateForNode(ownerNode)) return nil;
 
     NSString *targetLanguage = ApolloResolvedTargetLanguageCode();
@@ -2476,7 +3007,7 @@ NSString *ApolloRichPreviewTranslatedTextIfAvailable(NSURL *url, NSString *field
 
     NSString *cacheKey = ApolloRichPreviewTranslationCacheKey(url, field, trimmed, targetLanguage);
     NSString *cached = [sTranslationCache objectForKey:cacheKey];
-    if (ApolloTranslatedTextDiffersFromSource(trimmed, cached)) return cached;
+    if (ApolloTranslatedTextDiffersFromSource(trimmed, cached)) return tapHeld ? nil : cached;
 
     @synchronized (sRichPreviewTranslationInFlightKeys) {
         if (!sRichPreviewTranslationInFlightKeys) sRichPreviewTranslationInFlightKeys = [NSMutableSet set];
@@ -2567,6 +3098,14 @@ static void ApolloMaybeTranslateCommentCellNode(id commentCellNode, BOOL forceTr
         // generic and skip translation.
         NSString *detectionText = ApolloProtectTranslationLinks(sourceText, NULL);
         NSString *detected = ApolloDetectDominantLanguage(detectionText);
+        // TAP-TO-TRANSLATE: the affordance is driven by DETECTION, not by the
+        // prefetch having landed — a slow or failing provider must never hide
+        // the control. The request below still prefetches so the tap is
+        // instant when it succeeded; on a miss the tap fetches on demand.
+        if (sTapToTranslate && detected.length > 0 && ![detected isEqualToString:targetLanguage] &&
+            fullName.length > 0 && !ApolloTapModeIsTranslatedKey(fullName)) {
+            ApolloAppendTranslateAffordanceForCellNode(commentCellNode, comment);
+        }
         if ([detected isEqualToString:targetLanguage]) {
             // Log only once per fullName per session — this path is hit on
             // every visibility / scroll tick for the same cell otherwise.
@@ -2849,6 +3388,32 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *f
         // Strip links so URLs don't pollute language detection.
         NSString *detectionText = ApolloProtectTranslationLinks(trimmed, NULL);
         NSString *detected = ApolloDetectDominantLanguage(detectionText);
+        // TAP-TO-TRANSLATE: hold + marker as soon as the body is detectably
+        // foreign — don't wait for the prefetch (a failing provider must not
+        // hide the control). The request below still prefetches.
+        if (sTapToTranslate && detected.length > 0 && ![detected isEqualToString:targetLanguage] &&
+            !ApolloTapModeIsTranslatedKey(trimmed)) {
+            id heldNode = ApolloBestPostBodyTextNode(headerCellNode, link, trimmed);
+            if (heldNode) {
+                @try {
+                    NSAttributedString *cur = ((id (*)(id, SEL))objc_msgSend)(heldNode, @selector(attributedText));
+                    if ([cur isKindOfClass:[NSAttributedString class]] && cur.length > 0 &&
+                        !objc_getAssociatedObject(heldNode, kApolloOriginalAttributedTextKey)) {
+                        objc_setAssociatedObject(heldNode, kApolloOriginalAttributedTextKey, [cur copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    }
+                } @catch (__unused NSException *e) {}
+                objc_setAssociatedObject(heldNode, kApolloOwnedNodeOriginalBodyKey, [trimmed copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+                objc_setAssociatedObject(heldNode, kApolloTitlePinnedOriginalKey, @2, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                objc_setAssociatedObject(heldNode, kApolloTitlePinnedSourceKey, [trimmed copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+                ApolloTapModeRegisterTouchedNode(heldNode);
+                objc_setAssociatedObject(headerCellNode, kApolloHeaderTranslatedTextNodeKey, heldNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                if (link) objc_setAssociatedObject(headerCellNode, kApolloAppliedHeaderLinkKey, link, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                NSString *heldTarget = ApolloResolvedTargetLanguageCode();
+                if (heldTarget.length > 0) {
+                    ApolloUpdatePostInfoMarkerForNode(headerCellNode, heldTarget, YES, heldNode);
+                }
+            }
+        }
         if ([detected isEqualToString:targetLanguage]) return;
     }
 
@@ -2907,6 +3472,24 @@ static void ApolloMaybeTranslateVisiblePostBodyForController(UIViewController *v
         // Strip links so URLs don't pollute language detection.
         NSString *detectionText = ApolloProtectTranslationLinks(sourceText, NULL);
         NSString *detected = ApolloDetectDominantLanguage(detectionText);
+        // TAP-TO-TRANSLATE: hold + marker on detection (this path covers the
+        // post-body layouts the header-cell walk misses) — don't wait for the
+        // prefetch below.
+        if (sTapToTranslate && detected.length > 0 && ![detected isEqualToString:targetLanguage] &&
+            !ApolloTapModeIsTranslatedKey(sourceText)) {
+            @try {
+                NSAttributedString *cur = ((id (*)(id, SEL))objc_msgSend)(textNode, @selector(attributedText));
+                if ([cur isKindOfClass:[NSAttributedString class]] && cur.length > 0 &&
+                    !objc_getAssociatedObject(textNode, kApolloOriginalAttributedTextKey)) {
+                    objc_setAssociatedObject(textNode, kApolloOriginalAttributedTextKey, [cur copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
+            } @catch (__unused NSException *e) {}
+            objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [sourceText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+            objc_setAssociatedObject(textNode, kApolloTitlePinnedOriginalKey, @2, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(textNode, kApolloTitlePinnedSourceKey, [sourceText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+            ApolloTapModeRegisterTouchedNode(textNode);
+            ApolloUpdatePostInfoMarkerForNode(textNode, targetLanguage, YES, textNode);
+        }
         if ([detected isEqualToString:targetLanguage]) return;
     }
 
@@ -3270,65 +3853,993 @@ static NSString *ApolloLocalizedTargetLanguageName(void) {
     return [[name substringToIndex:1].localizedUppercaseString stringByAppendingString:[name substringFromIndex:1]];
 }
 
+// Localized human name for an arbitrary source-language code (e.g. "es" →
+// "Spanish"), localized to the user's own locale. Falls back to the uppercased
+// code. Mirrors ApolloLocalizedTargetLanguageName but takes an explicit code.
+static NSString *ApolloLocalizedSourceLanguageName(NSString *code) {
+    NSString *norm = ApolloNormalizeLanguageCode(code);
+    if (norm.length == 0) return nil;
+    NSString *name = [[NSLocale currentLocale] localizedStringForLanguageCode:norm];
+    if (name.length == 0) return [norm uppercaseString];
+    return [[name substringToIndex:1].localizedUppercaseString stringByAppendingString:[name substringFromIndex:1]];
+}
+
+// Color used for the globe + language name in the per-item "Translated from …"
+// marker. systemGreen visually rhymes with the nav-bar globe's translated
+// state, and being a dynamic system color it stays legible in light and dark
+// (and across custom nav tints). Single chokepoint so this is trivial to swap
+// to a theme-tint resolution later.
+// Theme tint captured on the MAIN thread (see ApolloUpdatePostInfoMarkerForNode),
+// so the marker builders — which run on ASDK background layout threads where
+// UIView/UIWindow tint access is unreliable — can read it safely.
+static UIColor *sCachedThemeTint = nil;
+
+static UIColor *ApolloTranslationMarkerTintColor(void) {
+    // "Match app colour" option: follow the app/theme accent so the marker blends
+    // with any theme (captured on the main thread into sCachedThemeTint).
+    if (sTranslationMarkerUseThemeColor && [sCachedThemeTint isKindOfClass:[UIColor class]]) {
+        return sCachedThemeTint;
+    }
+    // Default: dimmed systemGreen — rhymes with the nav-bar globe, subtle in light/dark.
+    return [[UIColor systemGreenColor] colorWithAlphaComponent:0.7];
+}
+
+// Shared marker content: "🌐 Translated from <Language>" (includePrefix=YES) or
+// the compact "🌐 <Language>" (NO). Globe + language take the (dimmed) marker
+// tint; "Translated from" is tertiary. Italic, sized to markerSize. Returns nil
+// if the language can't be named. Used by the comment/body append, the post
+// header banner, and the compact feed-title marker so they stay in sync.
+static NSAttributedString *ApolloTranslationMarkerContentAttributedString(NSString *sourceCode, CGFloat markerSize, BOOL includePrefix) {
+    NSString *languageName = ApolloLocalizedSourceLanguageName(sourceCode);
+    if (languageName.length == 0) return nil;
+
+    UIFont *markerFont = [UIFont italicSystemFontOfSize:markerSize];
+    UIColor *tint = ApolloTranslationMarkerTintColor();
+    UIColor *secondary = [UIColor tertiaryLabelColor];
+
+    NSMutableAttributedString *out = [[NSMutableAttributedString alloc] init];
+
+    // Globe SF Symbol, tinted + sized to the marker font, as an inline attachment.
+    UIImage *globe = [UIImage systemImageNamed:@"globe"];
+    if (globe) {
+        // Globe a touch larger than the text (user asked) — text stays markerSize.
+        CGFloat glyph = markerFont.pointSize + 2.0;
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:glyph
+                                                                                          weight:UIImageSymbolWeightRegular];
+        globe = [globe imageByApplyingSymbolConfiguration:cfg];
+        globe = [globe imageWithTintColor:tint renderingMode:UIImageRenderingModeAlwaysOriginal];
+        NSTextAttachment *att = [[NSTextAttachment alloc] init];
+        att.image = globe;
+        // Lower by 1pt as it grows so it stays vertically centered on the text.
+        att.bounds = CGRectMake(0.0, roundf(markerFont.descender - 1.0), glyph, glyph);
+        [out appendAttributedString:[NSAttributedString attributedStringWithAttachment:att]];
+        [out appendAttributedString:[[NSAttributedString alloc] initWithString:@" "
+                                                                    attributes:@{NSFontAttributeName: markerFont}]];
+    }
+    if (includePrefix) {
+        [out appendAttributedString:[[NSAttributedString alloc] initWithString:@"Translated from "
+                                                                    attributes:@{NSFontAttributeName: markerFont,
+                                                                                 NSForegroundColorAttributeName: secondary}]];
+    }
+    [out appendAttributedString:[[NSAttributedString alloc] initWithString:languageName
+                                                                attributes:@{NSFontAttributeName: markerFont,
+                                                                             NSForegroundColorAttributeName: tint}]];
+    return out;
+}
+
+// True when we can confidently name the source language of `sourceText` (differs
+// from the target). Writes the detected code to *outCode when non-NULL. Does NOT
+// check the visibility toggles — each surface gates on its own flag
+// (sShowTranslationDetails for comments/posts, sShowTranslationTitleDetails for titles).
+static BOOL ApolloShouldShowTranslationMarkerForSource(NSString *sourceText, NSString **outCode) {
+    NSString *sourceCode = ApolloDetectDominantLanguage(sourceText);
+    if (sourceCode.length == 0) return NO;
+    NSString *targetCode = ApolloResolvedTargetLanguageCode();
+    if (targetCode.length > 0 && [sourceCode isEqualToString:targetCode]) return NO;
+    if (ApolloLocalizedSourceLanguageName(sourceCode).length == 0) return NO;
+    if (outCode) *outCode = sourceCode;
+    return YES;
+}
+
+// Appends a small "🌐 Translated from <Language>" line under a translated
+// attributed string (comment body). Returns the input unchanged when the
+// feature is off or the source language can't be confidently named. The marker
+// range is tagged with ApolloTranslationMarkerAttributeName. Callers keep the
+// CLEAN translated text in the owned-node cache; only the DISPLAY string carries
+// the marker, so the containment-based body/translation comparisons still match.
+static NSAttributedString *ApolloAttributedStringByAppendingTranslationMarker(NSAttributedString *translatedAttr, NSString *sourceText) {
+    if (!sShowTranslationDetails && !sTapToTranslate) return translatedAttr;
+    if (![translatedAttr isKindOfClass:[NSAttributedString class]] || translatedAttr.length == 0) return translatedAttr;
+    NSString *sourceCode = nil;
+    if (!ApolloShouldShowTranslationMarkerForSource(sourceText, &sourceCode)) return translatedAttr;
+
+    // Marker font: one step below the body font (falls back to subheadline).
+    NSDictionary *baseAttributes = ApolloVisualBaseAttributesFromAttributedString(translatedAttr);
+    UIFont *bodyFont = baseAttributes[NSFontAttributeName];
+    if (![bodyFont isKindOfClass:[UIFont class]]) bodyFont = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+    CGFloat markerSize = MAX(10.0, bodyFont.pointSize - 1.0);
+
+    NSAttributedString *content = ApolloTranslationMarkerContentAttributedString(sourceCode, markerSize, YES);
+    if (!content) return translatedAttr;
+
+    NSMutableParagraphStyle *para = [NSMutableParagraphStyle new];
+    para.paragraphSpacingBefore = 3.0;
+
+    // Leading newline ends the body's last line and opens the marker line.
+    NSMutableAttributedString *marker = [[NSMutableAttributedString alloc] initWithString:@"\n"
+                                                                              attributes:@{NSFontAttributeName: [UIFont italicSystemFontOfSize:markerSize]}];
+    [marker appendAttributedString:content];
+    [marker addAttribute:NSParagraphStyleAttributeName value:para range:NSMakeRange(0, marker.length)];
+    [marker addAttribute:ApolloTranslationMarkerAttributeName value:@YES range:NSMakeRange(0, marker.length)];
+    // Make the visible content (past the leading newline) tappable → toggles.
+    if (marker.length > 1) {
+        [marker addAttribute:ApolloTranslationMarkerLinkAttributeName value:ApolloTranslationMarkerLinkValue range:NSMakeRange(1, marker.length - 1)];
+    }
+
+    NSMutableAttributedString *result = [translatedAttr mutableCopy];
+    [result appendAttributedString:marker];
+    return [result copy];
+}
+
+// Add our marker link attribute to the text node's linkAttributeNames so a tap
+// on the marker fires the ASTextNode link-tap delegate (idempotent; re-run each
+// apply since Apollo may reset the list on re-render).
+static void ApolloEnsureMarkerTappableOnNode(id textNode) {
+    if (!textNode || ![textNode respondsToSelector:@selector(linkAttributeNames)]) return;
+    if (![textNode respondsToSelector:@selector(setLinkAttributeNames:)]) return;
+    @try {
+        NSArray *names = ((NSArray *(*)(id, SEL))objc_msgSend)(textNode, @selector(linkAttributeNames));
+        if (![names isKindOfClass:[NSArray class]]) names = @[];
+        if ([names containsObject:ApolloTranslationMarkerLinkAttributeName]) return;
+        NSArray *updated = [names arrayByAddingObject:ApolloTranslationMarkerLinkAttributeName];
+        ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setLinkAttributeNames:), updated);
+    } @catch (__unused NSException *e) {}
+}
+
+// Walk up from a text node to its enclosing *CommentCellNode (ASDK).
+static id ApolloCommentCellNodeForTextNode(id textNode) {
+    if (!textNode) return nil;
+    SEL supernodeSel = NSSelectorFromString(@"supernode");
+    id current = textNode;
+    for (int hops = 0; current && hops < 12; hops++) {
+        const char *cn = class_getName([current class]);
+        if (cn && strstr(cn, "CommentCellNode")) return current;
+        if (![current respondsToSelector:supernodeSel]) break;
+        @try { current = ((id (*)(id, SEL))objc_msgSend)(current, supernodeSel); }
+        @catch (__unused NSException *e) { break; }
+    }
+    return nil;
+}
+
+// Compact "🌐 Show translation" affordance appended under the ORIGINAL text when
+// the user has pinned a comment back to its source language — the same line then
+// toggles the translation back on.
+static NSAttributedString *ApolloAttributedStringByAppendingRetranslateAffordance(NSAttributedString *originalAttr) {
+    if (![originalAttr isKindOfClass:[NSAttributedString class]] || originalAttr.length == 0) return originalAttr;
+
+    NSDictionary *baseAttributes = ApolloVisualBaseAttributesFromAttributedString(originalAttr);
+    UIFont *bodyFont = baseAttributes[NSFontAttributeName];
+    if (![bodyFont isKindOfClass:[UIFont class]]) bodyFont = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+    CGFloat markerSize = MAX(10.0, bodyFont.pointSize - 1.0);
+    UIFont *markerFont = [UIFont italicSystemFontOfSize:markerSize];
+    UIColor *tint = ApolloTranslationMarkerTintColor();
+
+    NSMutableParagraphStyle *para = [NSMutableParagraphStyle new];
+    para.paragraphSpacingBefore = 3.0;
+
+    NSMutableAttributedString *marker = [[NSMutableAttributedString alloc] initWithString:@"\n"
+                                                                              attributes:@{NSFontAttributeName: markerFont}];
+    UIImage *globe = [UIImage systemImageNamed:@"globe"];
+    if (globe) {
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:markerSize weight:UIImageSymbolWeightRegular];
+        globe = [globe imageByApplyingSymbolConfiguration:cfg];
+        globe = [globe imageWithTintColor:tint renderingMode:UIImageRenderingModeAlwaysOriginal];
+        NSTextAttachment *att = [[NSTextAttachment alloc] init];
+        att.image = globe;
+        CGFloat glyph = markerFont.pointSize;
+        att.bounds = CGRectMake(0.0, roundf(markerFont.descender), glyph, glyph);
+        [marker appendAttributedString:[NSAttributedString attributedStringWithAttachment:att]];
+        [marker appendAttributedString:[[NSAttributedString alloc] initWithString:@" " attributes:@{NSFontAttributeName: markerFont}]];
+    }
+    // In tap-to-translate mode the affordance IS the primary control, so use the
+    // action verb the user asked for; in normal mode it's the revert affordance.
+    NSString *affordanceLabel = sTapToTranslate ? @"Translate" : @"Show translation";
+    [marker appendAttributedString:[[NSAttributedString alloc] initWithString:affordanceLabel
+                                                                   attributes:@{NSFontAttributeName: markerFont,
+                                                                                NSForegroundColorAttributeName: tint}]];
+
+    [marker addAttribute:NSParagraphStyleAttributeName value:para range:NSMakeRange(0, marker.length)];
+    [marker addAttribute:ApolloTranslationMarkerAttributeName value:@YES range:NSMakeRange(0, marker.length)];
+    if (marker.length > 1) {
+        [marker addAttribute:ApolloTranslationMarkerLinkAttributeName value:ApolloTranslationMarkerLinkValue range:NSMakeRange(1, marker.length - 1)];
+    }
+
+    NSMutableAttributedString *result = [originalAttr mutableCopy];
+    [result appendAttributedString:marker];
+    return [result copy];
+}
+
+// Show the comment's ORIGINAL text with a "🌐 Show translation" affordance, and
+// drop ownership so the vote-resilience hook won't swap the translation back.
+static void ApolloShowOriginalWithRetranslateAffordanceForCellNode(id cellNode, RDKComment *comment, id textNode) {
+    if (!textNode) return;
+    NSAttributedString *original = objc_getAssociatedObject(textNode, kApolloOriginalAttributedTextKey);
+    NSAttributedString *cur = nil;
+    @try { cur = ((id (*)(id, SEL))objc_msgSend)(textNode, @selector(attributedText)); } @catch (__unused NSException *e) {}
+    // Reuse-safety: a saved original from a PREVIOUS comment on this recycled
+    // node must not be restored over the current one — verify it is actually
+    // this comment's body, else rebuild from the comment model below.
+    if ([original isKindOfClass:[NSAttributedString class]] &&
+        !ApolloTextQualifiesAsBodyCandidate(original.string, comment.body)) {
+        original = nil;
+    }
+    if (![original isKindOfClass:[NSAttributedString class]]) {
+        NSString *body = [comment.body stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (body.length == 0 || ![cur isKindOfClass:[NSAttributedString class]]) return;
+        original = ApolloTranslatedAttributedStringPreservingVisualLinks(cur, body);
+    }
+    if (![original isKindOfClass:[NSAttributedString class]]) return;
+
+    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+
+    NSAttributedString *display = ApolloAttributedStringByAppendingRetranslateAffordance(original);
+    @try { ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), display); }
+    @catch (__unused NSException *e) { return; }
+    ApolloEnsureMarkerTappableOnNode(textNode);
+    ApolloForceRelayoutForTextNodeAndOwner(cellNode, textNode);
+    ApolloEnsureCommentsTableBreathingRoom();
+}
+
+// The per-item marker/affordance adds a final line to comment cells; on the
+// LAST comment that line ends exactly at the table's content end, which under
+// the Liquid Glass floating tab bar sits right at the pill's top edge (Apollo's
+// 83pt bottom inset matches the classic docked bar, not the pill + its blur
+// halo). Give the table a small transparent footer so max-scroll lifts the last
+// marker clear of the glass. Idempotent; never clobbers an existing footer.
+static NSInteger const kApolloMarkerFooterTag = 0x41504d46;   // 'APMF'
+static void ApolloEnsureCommentsTableBreathingRoom(void) {
+    UITableView *table = GetCommentsTableView(sVisibleCommentsViewController);
+    if (!table) return;
+    UIView *footer = table.tableFooterView;
+    if (footer.tag == kApolloMarkerFooterTag) return;          // already ours
+    if (footer && footer.frame.size.height > 0.5) return;      // Apollo's own footer — leave it
+    UIView *pad = [[UIView alloc] initWithFrame:CGRectMake(0, 0, table.bounds.size.width, 24.0)];
+    pad.backgroundColor = [UIColor clearColor];
+    pad.tag = kApolloMarkerFooterTag;
+    table.tableFooterView = pad;
+}
+
+// YES if the attributed string already ends with one of our marker/affordance runs.
+static BOOL ApolloAttributedStringEndsWithMarker(NSAttributedString *attr) {
+    if (![attr isKindOfClass:[NSAttributedString class]] || attr.length == 0) return NO;
+    return [attr attribute:ApolloTranslationMarkerAttributeName atIndex:attr.length - 1 effectiveRange:NULL] != nil;
+}
+
+// Tap-to-translate: append the "🌐 Translate" affordance under a comment that is
+// still showing its ORIGINAL text (a translation exists and is cached; the swap
+// is held until the user taps). No ownership is taken — the text stays original.
+static void ApolloAppendTranslateAffordanceForCellNode(id cellNode, RDKComment *comment) {
+    id textNode = ApolloBestCommentTextNode(cellNode, comment);
+    if (!textNode) return;
+    NSAttributedString *current = nil;
+    @try { current = ((id (*)(id, SEL))objc_msgSend)(textNode, @selector(attributedText)); }
+    @catch (__unused NSException *e) { return; }
+    if (![current isKindOfClass:[NSAttributedString class]] || current.length == 0) return;
+    if (ApolloAttributedStringEndsWithMarker(current)) return;   // already shown
+    // Only decorate the actual body node (never a byline/score label).
+    if (!ApolloTextQualifiesAsBodyCandidate(current.string, comment.body)) return;
+
+    // Save the CLEAN original before decorating, so a later tap-translate →
+    // tap-revert cycle restores the body without a stacked affordance.
+    // OVERWRITE unconditionally: on cell reuse an old comment's saved original
+    // would otherwise survive and a later revert would show the WRONG comment.
+    // `current` just passed the body-candidate check for THIS comment, so it's
+    // always the correct fresh original here.
+    objc_setAssociatedObject(textNode, kApolloOriginalAttributedTextKey, [current copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloTapModeRegisterTouchedNode(textNode);
+
+    NSAttributedString *display = ApolloAttributedStringByAppendingRetranslateAffordance(current);
+    if (display == current) return;
+    @try { ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), display); }
+    @catch (__unused NSException *e) { return; }
+    ApolloEnsureMarkerTappableOnNode(textNode);
+    ApolloForceRelayoutForTextNodeAndOwner(cellNode, textNode);
+    ApolloEnsureCommentsTableBreathingRoom();
+}
+
+// Toggle a single comment between translated (with "Translated from X" marker)
+// and original (with "Show translation" marker), driven by taps on the marker.
+static void ApolloToggleTranslationForCommentTextNode(id textNode) {
+    if (!textNode) return;
+    id cellNode = ApolloCommentCellNodeForTextNode(textNode);
+    RDKComment *comment = cellNode ? ApolloCommentFromCellNode(cellNode) : nil;
+    if (!comment) return;
+    NSString *fullName = ApolloCommentFullName(comment);
+    if (fullName.length == 0) return;
+    if (!sUserPinnedOriginalFullNames) sUserPinnedOriginalFullNames = [NSMutableSet set];
+
+    if (sTapToTranslate) {
+        // Tap-to-translate: the affordance opts a comment IN to translation
+        // (inverse of the normal pin — default is original). Inert while the
+        // thread globe is toggled to original mode.
+        if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
+        // Branch on the DISPLAYED state, not set membership — a comment that
+        // was already translated when the mode flipped on mid-session must
+        // revert on its FIRST tap, not silently join the set.
+        BOOL showingTranslation = [objc_getAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey) boolValue];
+        if (showingTranslation) {
+            ApolloTapModeSetKeyTranslated(fullName, NO);             // → back to original + "Translate"
+            ApolloShowOriginalWithRetranslateAffordanceForCellNode(cellNode, comment, textNode);
+        } else {
+            ApolloTapModeSetKeyTranslated(fullName, YES);            // → translate now
+            NSString *cached = [sCommentTranslationByFullName objectForKey:fullName];
+            if (cached.length > 0) {
+                ApolloApplyTranslationToCellNode(cellNode, comment, cached);
+            } else {
+                // Cache miss (prefetch hadn't landed): force-fetch; the
+                // completion routes back through the apply, which now passes
+                // the tap gate since the fullName was just opted in.
+                ApolloMaybeTranslateCommentCellNode(cellNode, YES);
+            }
+        }
+        return;
+    }
+
+    if ([sUserPinnedOriginalFullNames containsObject:fullName]) {
+        [sUserPinnedOriginalFullNames removeObject:fullName];        // → re-translate
+        NSString *cached = [sCommentTranslationByFullName objectForKey:fullName];
+        if (cached.length > 0) ApolloApplyTranslationToCellNode(cellNode, comment, cached);
+    } else {
+        [sUserPinnedOriginalFullNames addObject:fullName];           // → show original
+        ApolloShowOriginalWithRetranslateAffordanceForCellNode(cellNode, comment, textNode);
+    }
+}
+
+// Collect every translation-owned text node in a node subtree — i.e. every text
+// node the translation module has swapped and stashed originals on (title text,
+// grey feed body preview, link-card scraped title). Used so a marker tap toggles
+// the whole cell, not just the title.
+static void ApolloCollectOwnedTextNodesInNodeSubtree(id node, int depth, NSMutableArray *out, NSHashTable *visited) {
+    if (!node || depth < 0 || [visited containsObject:node]) return;
+    [visited addObject:node];
+    @try {
+        if ([node respondsToSelector:@selector(attributedText)]) {
+            NSString *src = objc_getAssociatedObject(node, kApolloOwnedNodeOriginalBodyKey);
+            if ([src isKindOfClass:[NSString class]] && src.length > 0 && ![out containsObject:node]) [out addObject:node];
+        }
+    } @catch (__unused NSException *e) {}
+    @try {
+        SEL subnodesSel = NSSelectorFromString(@"subnodes");
+        if ([node respondsToSelector:subnodesSel]) {
+            NSArray *subs = ((NSArray *(*)(id, SEL))objc_msgSend)(node, subnodesSel);
+            if ([subs isKindOfClass:[NSArray class]]) {
+                for (id sub in subs) ApolloCollectOwnedTextNodesInNodeSubtree(sub, depth - 1, out, visited);
+            }
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+// Collect every node of `cls` in a node subtree (e.g. the cell's LinkButtonNode).
+static void ApolloCollectNodesOfClassInSubtree(id node, Class cls, int depth, NSMutableArray *out, NSHashTable *visited) {
+    if (!node || depth < 0 || [visited containsObject:node]) return;
+    [visited addObject:node];
+    if ([node isKindOfClass:cls] && ![out containsObject:node]) [out addObject:node];
+    @try {
+        SEL subnodesSel = NSSelectorFromString(@"subnodes");
+        if ([node respondsToSelector:subnodesSel]) {
+            NSArray *subs = ((NSArray *(*)(id, SEL))objc_msgSend)(node, subnodesSel);
+            if ([subs isKindOfClass:[NSArray class]]) {
+                for (id sub in subs) ApolloCollectNodesOfClassInSubtree(sub, cls, depth - 1, out, visited);
+            }
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+// Toggle a single FEED POST TITLE between translated and original, driven by taps
+// on the compact "🌐 PT" metadata-row marker. The marker label stays put and
+// tappable in both states, acting as a per-post translate switch. State is pinned
+// on the title text node (kApolloTitlePinnedOriginalKey), which also gates the
+// title apply path so a re-translation pass won't undo the user's choice.
+static void ApolloToggleTranslationForTitleNode(id textNode) {
+    if (!textNode) return;
+    // Only real translated title nodes qualify (the marker is also used by the
+    // comments header, whose node isn't a feed title text node).
+    NSString *sourceText = objc_getAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey);
+    if (![sourceText isKindOfClass:[NSString class]] || sourceText.length == 0) return;
+
+    BOOL pinnedOriginal = [objc_getAssociatedObject(textNode, kApolloTitlePinnedOriginalKey) boolValue];
+
+    // Toggle the WHOLE POST's translated text, not just the title: the grey body
+    // preview under the title and a link card's scraped title are separate owned
+    // text nodes in the same cell — collect them all so one marker tap flips the
+    // entire cell together.
+    NSMutableArray *targets = [NSMutableArray array];
+    id cellNode = nil;
+    {
+        id current = textNode;
+        SEL supernodeSel = NSSelectorFromString(@"supernode");
+        for (int hops = 0; current && hops < 12; hops++) {
+            const char *cn = class_getName([current class]);
+            if (cn && strstr(cn, "CellNode")) { cellNode = current; break; }
+            if (![current respondsToSelector:supernodeSel]) break;
+            @try { current = ((id (*)(id, SEL))objc_msgSend)(current, supernodeSel); }
+            @catch (__unused NSException *e) { break; }
+        }
+    }
+    if (cellNode) {
+        NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:64];
+        ApolloCollectOwnedTextNodesInNodeSubtree(cellNode, 10, targets, visited);
+    }
+    if (![targets containsObject:textNode]) [targets addObject:textNode];
+
+    // Link posts: the rich-preview CARD (scraped site/title/description) renders
+    // through ApolloRichPreviewTranslatedTextIfAvailable keyed by the post's URL,
+    // not through owned text nodes — pin/unpin that URL and nudge the card to
+    // re-render so it flips together with the title.
+    NSURL *linkURL = nil;
+    id rdkLink = nil;
+    if (cellNode) {
+        Ivar linkIvar = NULL;
+        for (Class c = [cellNode class]; c && c != [NSObject class] && !linkIvar; c = class_getSuperclass(c)) {
+            linkIvar = class_getInstanceVariable(c, "link");
+        }
+        if (linkIvar) {
+            @try { rdkLink = object_getIvar(cellNode, linkIvar); } @catch (__unused NSException *e) {}
+        }
+        // Comments-header cells don't expose a `link` ivar; the header apply
+        // stashes the RDKLink on the cell instead.
+        if (!rdkLink) rdkLink = objc_getAssociatedObject(cellNode, kApolloAppliedHeaderLinkKey);
+        if ([rdkLink respondsToSelector:@selector(URL)]) {
+            @try {
+                id u = ((id (*)(id, SEL))objc_msgSend)(rdkLink, @selector(URL));
+                if ([u isKindOfClass:[NSURL class]]) linkURL = u;
+            } @catch (__unused NSException *e) {}
+        }
+    }
+    NSString *pinKey = ApolloRichPreviewPinKeyForURL(linkURL);
+    if (pinKey.length > 0) {
+        if (sTapToTranslate) {
+            // Tap mode: opt the card IN on translate, OUT on revert. Also drop
+            // any lingering normal-mode pin so it can't shadow the opt-in.
+            ApolloTapModeSetURLKeyTranslated(pinKey, pinnedOriginal);
+            if (pinnedOriginal) ApolloRichPreviewSetKeyPinnedOriginal(pinKey, NO);
+        } else {
+            ApolloRichPreviewSetKeyPinnedOriginal(pinKey, !pinnedOriginal);
+        }
+        // Nudge the CELL's own LinkButtonNode directly — its layoutSpecThatFits:
+        // re-runs the rich-preview translation gate, which now honours the pin.
+        // (The URL-keyed registry refresh can miss feed hero cards, so don't rely
+        // on the notification alone.)
+        if (cellNode) {
+            NSMutableArray *cardNodes = [NSMutableArray array];
+            Class lbnCls = objc_getClass("_TtC6Apollo14LinkButtonNode");
+            if (lbnCls) {
+                NSHashTable *seen = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:64];
+                ApolloCollectNodesOfClassInSubtree(cellNode, lbnCls, 10, cardNodes, seen);
+            }
+            for (id card in cardNodes) ApolloForceRelayoutForTextNodeAndOwner(nil, card);
+        }
+        [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification
+                                                            object:nil
+                                                          userInfo:@{@"url": (id)linkURL, @"reason": @"marker-toggle"}];
+    }
+    // Flip the marker's language code to the language a tap now switches TO:
+    // showing the translation → the source code ("PT"); showing the original →
+    // the target code ("EN"). Keeps the marker honest about the current state.
+    NSString *markerCode = nil;
+    if (pinnedOriginal) {
+        // Just unpinned → showing the translation again → source language.
+        ApolloShouldShowTranslationMarkerForSource(sourceText, &markerCode);
+    } else {
+        markerCode = ApolloResolvedTargetLanguageCode();
+    }
+    // The comments-header marker is gated by the Comments&Posts flag; feed
+    // markers by the Titles flag.
+    const char *cellClsName = cellNode ? class_getName([cellNode class]) : NULL;
+    BOOL isHeaderCell = cellClsName && strstr(cellClsName, "Header") != NULL;
+    if (markerCode.length > 0 && cellNode) {
+        ApolloUpdatePostInfoMarkerForNode(cellNode, markerCode, (isHeaderCell ? sShowTranslationDetails : sShowTranslationTitleDetails) || sTapToTranslate, textNode);
+    }
+
+    ApolloLog(@"[Translation] marker toggle: pinned=%d targets=%lu linkURL=%d header=%d", pinnedOriginal, (unsigned long)targets.count, linkURL != nil, isHeaderCell);
+
+    // The comments-header BODY re-applies through the header path (it carries its
+    // own vote-resilience/link-recovery machinery), not the title path.
+    id headerBodyNode = cellNode ? objc_getAssociatedObject(cellNode, kApolloHeaderTranslatedTextNodeKey) : nil;
+
+    for (id node in targets) {
+        NSString *nodeSource = objc_getAssociatedObject(node, kApolloOwnedNodeOriginalBodyKey);
+        NSString *nodeTranslated = objc_getAssociatedObject(node, kApolloOwnedNodeTranslatedTextKey);
+        if (![nodeSource isKindOfClass:[NSString class]] || nodeSource.length == 0) continue;
+        if (pinnedOriginal) {
+            // → re-translate: clear the pin and re-apply the stored translation.
+            // In tap mode also record the opt-in so scroll-back keeps it translated.
+            if (sTapToTranslate) ApolloTapModeSetKeyTranslated(nodeSource, YES);
+            objc_setAssociatedObject(node, kApolloTitlePinnedOriginalKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(node, kApolloTitlePinnedSourceKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+            if ([nodeTranslated isKindOfClass:[NSString class]] && nodeTranslated.length > 0) {
+                if (node == headerBodyNode) {
+                    ApolloApplyTranslationToHeaderCellNode(cellNode, (RDKLink *)rdkLink, nodeSource, nodeTranslated);
+                } else {
+                    ApolloApplyTranslationToTitleNode(node, node, nodeSource, nodeTranslated);
+                }
+            }
+        } else {
+            // → show original: pin, drop ownership (so the vote-resilience swap hook
+            // won't put the translation back), and restore the saved original text.
+            if (sTapToTranslate) ApolloTapModeSetKeyTranslated(nodeSource, NO);
+            // In tap mode a revert is just the default held state — stamp the
+            // AUTO pin (@2) so turning the mode off later releases it; a
+            // normal-mode revert is an explicit user choice (manual @YES).
+            objc_setAssociatedObject(node, kApolloTitlePinnedOriginalKey, sTapToTranslate ? @2 : (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(node, kApolloTitlePinnedSourceKey, [nodeSource copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+            objc_setAssociatedObject(node, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            NSAttributedString *original = objc_getAssociatedObject(node, kApolloOriginalAttributedTextKey);
+            if ([original isKindOfClass:[NSAttributedString class]]) {
+                @try { ((void (*)(id, SEL, id))objc_msgSend)(node, @selector(setAttributedText:), original); }
+                @catch (__unused NSException *e) {}
+            }
+        }
+        ApolloForceRelayoutForTextNodeAndOwner(nil, node);
+    }
+}
+
 // Lazily install our small status caption inside the POST HEADER cell view
 // (the cell that shows the post title / author / score / age). Pinned to
 // the bottom-trailing edge of the cell so it sits on the same row as the
 // "100% 2h" metadata — exactly where the user wants it. Returns the label
 // (creating it if necessary) or nil if the header cell view isn't loaded.
-static UILabel *ApolloEnsureBannerInHeaderCellView(UIView *headerCellView) {
-    if (!headerCellView) return nil;
-    UILabel *banner = objc_getAssociatedObject(headerCellView, kApolloTranslationBannerKey);
-    if (banner && banner.superview == headerCellView) return banner;
+// Compact "🌐 PT" marker (globe + uppercased 2-letter code) for the metadata row.
+// Uses the passed font (matched to the metadata stats so it sits level) and the
+// marker tint. The globe is sized to the text cap-height and centered on it, like
+// the native stat icons. Returns nil if the code can't be resolved.
+static NSAttributedString *ApolloTranslationCompactCodeMarkerAttributedString(NSString *sourceCode, UIFont *markerFont) {
+    NSString *code = ApolloNormalizeLanguageCode(sourceCode);
+    if (code.length == 0) return nil;
+    code = [code uppercaseString];
+    if (![markerFont isKindOfClass:[UIFont class]]) markerFont = [UIFont systemFontOfSize:12.0];
 
-    banner = [[UILabel alloc] init];
-    banner.translatesAutoresizingMaskIntoConstraints = NO;
-    banner.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
-    banner.textAlignment = NSTextAlignmentRight;
-    banner.backgroundColor = [UIColor clearColor];
-    banner.numberOfLines = 1;
-    banner.adjustsFontSizeToFitWidth = YES;
-    banner.minimumScaleFactor = 0.85;
-    banner.userInteractionEnabled = NO;
-    banner.hidden = YES;
-    [headerCellView addSubview:banner];
+    UIColor *tint = ApolloTranslationMarkerTintColor();
+    NSMutableAttributedString *out = [[NSMutableAttributedString alloc] init];
 
-    // Pin trailing/bottom inside the header cell. Bottom is anchored a bit up
-    // from the divider so it visually aligns with the metadata row baseline.
-    [NSLayoutConstraint activateConstraints:@[
-        [banner.trailingAnchor constraintEqualToAnchor:headerCellView.trailingAnchor constant:-14.0],
-        [banner.bottomAnchor constraintEqualToAnchor:headerCellView.bottomAnchor constant:-44.0],
-        [banner.heightAnchor constraintEqualToConstant:14.0],
-        [banner.widthAnchor constraintLessThanOrEqualToAnchor:headerCellView.widthAnchor multiplier:0.6],
-    ]];
-    objc_setAssociatedObject(headerCellView, kApolloTranslationBannerKey, banner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return banner;
+    UIImage *globe = [UIImage systemImageNamed:@"globe"];
+    if (globe) {
+        // Size the globe to match the metadata-row stat ICONS (↑ 💬 🕐), which are
+        // larger than the text — roughly the font's line height, not its cap-height.
+        CGFloat glyph = roundf(markerFont.pointSize + 2.0);
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:glyph weight:UIImageSymbolWeightRegular];
+        globe = [globe imageByApplyingSymbolConfiguration:cfg];
+        globe = [globe imageWithTintColor:tint renderingMode:UIImageRenderingModeAlwaysOriginal];
+        NSTextAttachment *att = [[NSTextAttachment alloc] init];
+        att.image = globe;
+        // Center the glyph on the text's cap-height midline (bounds.y is the
+        // offset of the glyph's bottom from the baseline).
+        att.bounds = CGRectMake(0.0, (markerFont.capHeight - glyph) / 2.0, glyph, glyph);
+        [out appendAttributedString:[NSAttributedString attributedStringWithAttachment:att]];
+        [out appendAttributedString:[[NSAttributedString alloc] initWithString:@" " attributes:@{NSFontAttributeName: markerFont}]];
+    }
+    [out appendAttributedString:[[NSAttributedString alloc] initWithString:code
+                                                                attributes:@{NSFontAttributeName: markerFont,
+                                                                             NSForegroundColorAttributeName: tint}]];
+    return out;
 }
 
-// Finds the post header cell's view (if visible), returns nil otherwise.
-static UIView *ApolloFindPostHeaderCellViewForController(UIViewController *vc) {
-    UITableView *tableView = GetCommentsTableView(vc);
-    if (!tableView) return nil;
-    RDKLink *controllerLink = ApolloLinkFromController(vc);
-    for (UITableViewCell *cell in [tableView visibleCells]) {
-        SEL nodeSelector = NSSelectorFromString(@"node");
-        if (![cell respondsToSelector:nodeSelector]) continue;
-        id cellNode = ((id (*)(id, SEL))objc_msgSend)(cell, nodeSelector);
-        if (ApolloLinkFromHeaderCellNode(cellNode) || (!ApolloCommentFromCellNode(cellNode) && controllerLink)) {
-            return cell.contentView ?: cell;
+// Locate the Apollo.PostInfoNode inside a node's subtree/hierarchy: scan the
+// node's own @-typed ivars for a PostInfoNode, else walk up the supernode chain
+// and scan each ancestor (the title node lives beside the postInfoNode in the
+// feed cell; the header cell node holds it directly).
+static id ApolloPostInfoNodeFromContainerNode(id node) {
+    Class piCls = objc_getClass("_TtC6Apollo12PostInfoNode");
+    if (!node || !piCls) return nil;
+    if ([node isKindOfClass:piCls]) return node;
+    for (Class cls = [node class]; cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
+        unsigned int n = 0;
+        Ivar *ivars = class_copyIvarList(cls, &n);
+        for (unsigned int i = 0; i < n; i++) {
+            const char *type = ivar_getTypeEncoding(ivars[i]);
+            if (!type || type[0] != '@') continue;
+            @try {
+                id v = object_getIvar(node, ivars[i]);
+                if ([v isKindOfClass:piCls]) { free(ivars); return v; }
+            } @catch (__unused NSException *e) {}
         }
+        free(ivars);
     }
     return nil;
 }
 
-static void ApolloUpdateBannerForController(UIViewController *vc) {
-    if (!vc) return;
-    UIView *headerView = ApolloFindPostHeaderCellViewForController(vc);
-    if (!headerView) return;  // header off-screen, nothing to do
-
-    UILabel *banner = ApolloEnsureBannerInHeaderCellView(headerView);
-    if (!banner) return;
-    banner.hidden = YES;
+// Recursively scan a node's subnode subtree for a PostInfoNode (depth-limited).
+static id ApolloFindPostInfoNodeInSubtree(id node, Class piCls, int depth) {
+    if (!node || depth < 0) return nil;
+    if ([node isKindOfClass:piCls]) return node;
+    @try {
+        SEL subnodesSel = NSSelectorFromString(@"subnodes");
+        if ([node respondsToSelector:subnodesSel]) {
+            NSArray *subs = ((id (*)(id, SEL))objc_msgSend)(node, subnodesSel);
+            if ([subs isKindOfClass:[NSArray class]]) {
+                for (id s in subs) {
+                    id found = ApolloFindPostInfoNodeInSubtree(s, piCls, depth - 1);
+                    if (found) return found;
+                }
+            }
+        }
+    } @catch (__unused NSException *e) {}
+    return nil;
 }
+
+static id ApolloPostInfoNodeForAnyNode(id anyNode) {
+    Class piCls = objc_getClass("_TtC6Apollo12PostInfoNode");
+    if (!anyNode || !piCls) return nil;
+    SEL supernodeSel = NSSelectorFromString(@"supernode");
+    id current = anyNode;
+    for (int hops = 0; current && hops < 14; hops++) {
+        // ivar-based (fast, but skips _Atomic Swift ivars)…
+        id found = ApolloPostInfoNodeFromContainerNode(current);
+        if (found) return found;
+        // …then scan this node's subnode subtree (the PostInfoNode is a sibling
+        // subnode of the title node inside the cell, so this catches _Atomic
+        // ivars the scan above misses).
+        found = ApolloFindPostInfoNodeInSubtree(current, piCls, 2);
+        if (found) return found;
+        if (![current respondsToSelector:supernodeSel]) break;
+        @try { current = ((id (*)(id, SEL))objc_msgSend)(current, supernodeSel); }
+        @catch (__unused NSException *e) { break; }
+    }
+    return nil;
+}
+
+// Pull the real UIFont off an attributed string's first character.
+static UIFont *ApolloFontFromAttributedString(id s) {
+    if (![s isKindOfClass:[NSAttributedString class]] || [(NSAttributedString *)s length] == 0) return nil;
+    id f = [(NSAttributedString *)s attribute:NSFontAttributeName atIndex:0 effectiveRange:NULL];
+    return [f isKindOfClass:[UIFont class]] ? f : nil;
+}
+
+// Read the ACTUAL font Apollo uses for a metadata stat node (age/points/etc.),
+// instead of guessing it from the node's frame height (which is unreliable —
+// the frame may not be laid out yet when translation applies to a cell, which
+// made the marker fall back to a wrong hardcoded size on some posts). The
+// attributed string is set at data-binding time, before layout, so it's always
+// available. Tries the node's own text, an ASButtonNode title, then a titleNode
+// child, recursively.
+static UIFont *ApolloStatFontFromNode(id node, int depth) {
+    if (!node || depth < 0) return nil;
+    @try {
+        if ([node respondsToSelector:@selector(attributedText)]) {
+            UIFont *f = ApolloFontFromAttributedString(((id (*)(id, SEL))objc_msgSend)(node, @selector(attributedText)));
+            if (f) return f;
+        }
+    } @catch (__unused NSException *e) {}
+    @try {
+        SEL sel = NSSelectorFromString(@"attributedTitleForState:");
+        if ([node respondsToSelector:sel]) {
+            id s = ((id (*)(id, SEL, NSUInteger))objc_msgSend)(node, sel, 0);   // UIControlStateNormal
+            UIFont *f = ApolloFontFromAttributedString(s);
+            if (f) return f;
+        }
+    } @catch (__unused NSException *e) {}
+    @try {
+        SEL sel = NSSelectorFromString(@"titleNode");
+        if ([node respondsToSelector:sel]) {
+            id tn = ((id (*)(id, SEL))objc_msgSend)(node, sel);
+            if (tn && tn != node) { UIFont *f = ApolloStatFontFromNode(tn, depth - 1); if (f) return f; }
+        }
+    } @catch (__unused NSException *e) {}
+    const char *ivarNames[] = { "titleNode", "_titleNode", "textNode", "_textNode" };
+    for (size_t i = 0; i < sizeof(ivarNames) / sizeof(ivarNames[0]); i++) {
+        Ivar iv = NULL;
+        for (Class c = [node class]; c && c != [NSObject class] && !iv; c = class_getSuperclass(c)) {
+            iv = class_getInstanceVariable(c, ivarNames[i]);
+        }
+        if (!iv) continue;
+        @try {
+            id tn = object_getIvar(node, iv);
+            if (tn && tn != node) { UIFont *f = ApolloStatFontFromNode(tn, depth - 1); if (f) return f; }
+        } @catch (__unused NSException *e) {}
+    }
+    return nil;
+}
+
+// Show/hide the compact "🌐 PT" marker overlaid on the metadata-row PostInfoNode
+// reachable from `anyNode` (a header cell node, a title node, etc.). The label
+// is pinned to the PostInfoNode's OWN view (bottom-trailing), so it tracks the
+// metadata row regardless of cell height — no fragile fixed offset.
+static void ApolloUpdatePostInfoMarkerForNode(id anyNode, NSString *sourceCode, BOOL show, id toggleNode) {
+    id postInfoNode = ApolloPostInfoNodeForAnyNode(anyNode);
+    if (!postInfoNode) return;
+    UIView *piView = nil;
+    @try {
+        if ([postInfoNode respondsToSelector:@selector(view)]) {
+            piView = ((UIView *(*)(id, SEL))objc_msgSend)(postInfoNode, @selector(view));
+        }
+    } @catch (__unused NSException *e) {}
+    if (![piView isKindOfClass:[UIView class]]) return;
+
+    // Capture the app/theme accent on the MAIN thread (this runs on main — it
+    // mutates views) so the marker builders can read it off the ASDK layout
+    // threads for "Match App Colour". piView is a real view in the hierarchy, so
+    // its tintColor is the effective accent.
+    @try { UIColor *t = piView.tintColor; if ([t isKindOfClass:[UIColor class]]) sCachedThemeTint = t; } @catch (__unused NSException *e) {}
+
+    // Anchor the marker right AFTER the age/time node so it sits consistently at
+    // the end of the "↑ 💬 🕐" stats. The PostInfoNode's own bounds vary per cell
+    // (sometimes content-width, sometimes full-width), which made a trailing-edge
+    // pin land all over the place — so pin to the ageButtonNode instead.
+    id ageNode = nil;
+    UIView *ageView = nil;
+    {
+        Ivar iv = NULL;
+        for (Class cls = [postInfoNode class]; cls && cls != [NSObject class] && !iv; cls = class_getSuperclass(cls)) {
+            iv = class_getInstanceVariable(cls, "ageButtonNode");
+        }
+        if (iv) {
+            @try {
+                ageNode = object_getIvar(postInfoNode, iv);
+                if (ageNode && [ageNode respondsToSelector:@selector(view)]) {
+                    ageView = ((UIView *(*)(id, SEL))objc_msgSend)(ageNode, @selector(view));
+                }
+            } @catch (__unused NSException *e) {}
+        }
+    }
+    // Match the metadata stat font EXACTLY by reading Apollo's real stat font off
+    // the age node's attributed string. This is the ground truth (set at bind
+    // time, before layout) — no guessing from frame height, which was unreliable
+    // and made the marker fall back to a wrong hardcoded size on unsettled cells.
+    UIFont *markerFont = ApolloStatFontFromNode(ageNode, 3);
+    if (![markerFont isKindOfClass:[UIFont class]]) {
+        // Last-resort fallback (age text not readable yet): derive from frame
+        // height, else a sane default. A later call self-corrects once readable.
+        CGFloat ageH = ([ageView isKindOfClass:[UIView class]]) ? ageView.frame.size.height : 0.0;
+        CGFloat markerSize = ageH > 6.0 ? MAX(10.0, MIN(16.0, ageH / 1.2)) : 12.0;
+        markerFont = [UIFont systemFontOfSize:markerSize weight:UIFontWeightRegular];
+    }
+
+    // Parent the marker DIRECTLY UNDER the age view (as its child), pinned to the
+    // age view's own trailing/centerY. This is the key robustness fix: the age
+    // view is an ASDK frame-based node — ASDK moves its frame outside AutoLayout,
+    // and on re-processed cells (the first/top post gets a second translation pass)
+    // it shifts ~4pt AFTER our constraint pass, which a piView-level constraint
+    // can't follow (that was the "first post rides high" bug). As a CHILD of the
+    // age view, the marker lives in the age view's coordinate space and moves with
+    // it automatically, no re-layout needed. We center on the age view (not
+    // baseline-align) — the globe attachment perturbs the label's line ascent, so
+    // centerY (frame-based) is the stable choice.
+    UIView *host = ([ageView isKindOfClass:[UIView class]] && ageView.superview) ? ageView : piView;
+    UILabel *label = objc_getAssociatedObject(piView, kApolloPostInfoMarkerLabelKey);
+    BOOL labelValid = [label isKindOfClass:[UILabel class]];
+    if (!labelValid) {
+        label = [[UILabel alloc] init];
+        label.translatesAutoresizingMaskIntoConstraints = NO;
+        label.backgroundColor = [UIColor clearColor];
+        label.numberOfLines = 1;
+        label.userInteractionEnabled = NO;
+        label.hidden = YES;
+        objc_setAssociatedObject(piView, kApolloPostInfoMarkerLabelKey, label, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (!sPostInfoMarkerLabels) sPostInfoMarkerLabels = [NSHashTable weakObjectsHashTable];
+        [sPostInfoMarkerLabels addObject:label];
+    }
+    host.clipsToBounds = NO;   // marker extends past the age view's right edge (re-assert each call in case ASDK reset it)
+    // (Re)parent under the current host each call — the age node re-mounts its view
+    // on re-processing, so re-add to the live one and drop stale constraints.
+    if (label.superview != host) {
+        NSArray *oldC = objc_getAssociatedObject(label, kApolloPostInfoMarkerConstraintsKey);
+        if ([oldC isKindOfClass:[NSArray class]]) [NSLayoutConstraint deactivateConstraints:oldC];
+        [label removeFromSuperview];
+        [host addSubview:label];
+        NSArray *fresh;
+        if (host == ageView) {
+            // Align the marker's TEXT baseline to the age text's baseline
+            // (≈ ageView.top + the stat font's ascender) so "PT" sits on the same
+            // line as "2d"/the stats, and the (larger) globe lines up with the
+            // ↑ 💬 🕐 icons. This is now safe: the label is a CHILD of the age
+            // view, so it's in a stable coordinate space (no cross-boundary drift
+            // that made firstBaselineAnchor unreliable before).
+            //
+            // COMPACT rows draw the ⋯ more-options button immediately after the
+            // age stat — a 6pt lead put the marker right on top of it. When this
+            // is a compact PostInfoNode and the dots are mounted, start the
+            // marker just past their trailing edge instead (…🕐18h ⋯ 🌐PT).
+            CGFloat markerLead = 6.0;
+            {
+                BOOL infoIsCompact = NO;
+                Ivar civ = NULL;
+                for (Class c = [postInfoNode class]; c && c != [NSObject class] && !civ; c = class_getSuperclass(c)) {
+                    civ = class_getInstanceVariable(c, "isCompact");
+                }
+                if (civ) infoIsCompact = *((uint8_t *)(__bridge void *)postInfoNode + ivar_getOffset(civ)) != 0;
+                if (infoIsCompact) {
+                    id dotsNode = GetIvarObjectQuiet(postInfoNode, "moreOptionsButtonNode");
+                    CALayer *dotsLayer = nil;
+                    @try { if ([dotsNode respondsToSelector:@selector(layer)]) dotsLayer = [dotsNode layer]; } @catch (__unused NSException *e) {}
+                    if (dotsLayer && dotsLayer.superlayer && !dotsLayer.hidden && ageView.layer) {
+                        CGRect dotsInAge = [dotsLayer convertRect:dotsLayer.bounds toLayer:ageView.layer];
+                        CGFloat pastDots = CGRectGetMaxX(dotsInAge) - ageView.bounds.size.width + 6.0;
+                        if (pastDots > markerLead && pastDots < 120.0) markerLead = pastDots;
+                    }
+                }
+            }
+            fresh = @[
+                [label.leadingAnchor constraintEqualToAnchor:ageView.trailingAnchor constant:markerLead],
+                [label.firstBaselineAnchor constraintEqualToAnchor:ageView.topAnchor constant:markerFont.ascender],
+            ];
+        } else {
+            fresh = @[
+                [label.trailingAnchor constraintEqualToAnchor:piView.trailingAnchor constant:-2.0],
+                [label.centerYAnchor constraintEqualToAnchor:piView.centerYAnchor constant:0.0],
+            ];
+        }
+        [NSLayoutConstraint activateConstraints:fresh];
+        objc_setAssociatedObject(label, kApolloPostInfoMarkerConstraintsKey, fresh, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    // Record whether the label ACTUALLY ended up as a child of the age view (vs
+    // the piView fallback). A pre-mount install (cached translations complete
+    // synchronously while the cell is still in ASDK's offscreen preload/display
+    // range, so ageView.superview is nil) can only take the fallback — the
+    // PostInfoNode didEnterVisibleState hook reads this flag to re-run the
+    // updater once the row is genuinely on screen, which re-hosts the label the
+    // same way a marker tap does.
+    objc_setAssociatedObject(label, kApolloPostInfoMarkerAnchoredKey,
+                             @(ageView != nil && label.superview == ageView),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    // Make the marker a per-post translate toggle when a feed title node was
+    // supplied. Tapping it flips that post between translated and original (the
+    // comment-marker tap equivalent). The label sits just PAST the age view's
+    // bounds, so a gesture on the label can't be hit-tested; instead we install
+    // one tap gesture on the enclosing CELL view (which receives touches) that
+    // only claims taps landing on a marker (see ApolloFeedMarkerTapTarget).
+    if (toggleNode) {
+        objc_setAssociatedObject(label, kApolloMarkerTitleNodeKey, toggleNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // Install ONE tap gesture on the enclosing TABLE/scroll view, not per-cell:
+        // a per-cell install depended on finding a "Cell"-named ancestor from every
+        // cell layout variant, and any cell that missed it (link-card layouts)
+        // silently lost the toggle — the tap fell through and opened the post. The
+        // table-level gesture receives touches for every cell, and the delegate
+        // already decides claim-vs-passthrough globally by hit-testing marker
+        // frames, so one recognizer per table covers all present and future cells.
+        UIView *hostView = piView;
+        UIView *tableView = nil;
+        for (int i = 0; i < 20 && hostView; i++) {
+            if ([hostView isKindOfClass:[UIScrollView class]]) { tableView = hostView; break; }
+            hostView = hostView.superview;
+        }
+        if (tableView && ![objc_getAssociatedObject(tableView, kApolloMarkerCellGestureKey) boolValue]) {
+            UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:[ApolloFeedMarkerTapTarget shared] action:@selector(handleCellTap:)];
+            tap.delegate = [ApolloFeedMarkerTapTarget shared];
+            [tableView addGestureRecognizer:tap];
+            objc_setAssociatedObject(tableView, kApolloMarkerCellGestureKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    } else {
+        objc_setAssociatedObject(label, kApolloMarkerTitleNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    NSAttributedString *content = (show && sourceCode.length > 0) ? ApolloTranslationCompactCodeMarkerAttributedString(sourceCode, markerFont) : nil;
+    if (!content) {
+        label.attributedText = nil;
+        label.hidden = YES;
+        objc_setAssociatedObject(label, kApolloPostInfoMarkerCodeKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        ApolloReserveMarkerSlotInCompactRow(label, postInfoNode, NO);
+        return;
+    }
+    label.attributedText = content;
+    label.hidden = NO;
+    objc_setAssociatedObject(label, kApolloPostInfoMarkerCodeKey, [sourceCode copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(label, kApolloPostInfoMarkerSizeKey, @(markerFont.pointSize), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloReserveMarkerSlotInCompactRow(label, postInfoNode, YES);
+}
+
+// Post-mount repair for a marker that installed on the piView FALLBACK pin.
+// While a feed cell is still in ASDK's preload/display range its subnode views
+// aren't mounted yet (ageView.superview == nil), so a marker applied from a
+// synchronously-completing cached translation lands on the fallback constraints
+// (trailing/centerY of the whole info row — visually "floating under the author
+// line") and nothing re-evaluates the host afterwards: the owned-and-translated
+// early return in ApolloMaybeTranslatePostTitleNode never reaches the updater
+// again. Tapping the marker happened to repair it because the toggle re-runs the
+// updater on the now-mounted cell. This runs that exact repair automatically
+// when the row enters the VISIBLE range (mounted by definition).
+static void ApolloReanchorPostInfoMarkerIfFallback(id postInfoNode, BOOL allowRetry) {
+    if (!postInfoNode) return;
+    BOOL loaded = NO;
+    @try { loaded = ((BOOL (*)(id, SEL))objc_msgSend)(postInfoNode, @selector(isNodeLoaded)); } @catch (__unused NSException *e) {}
+    if (!loaded) return;
+    UIView *piView = nil;
+    @try { piView = ((UIView *(*)(id, SEL))objc_msgSend)(postInfoNode, @selector(view)); } @catch (__unused NSException *e) {}
+    if (![piView isKindOfClass:[UIView class]]) return;
+    UILabel *label = objc_getAssociatedObject(piView, kApolloPostInfoMarkerLabelKey);
+    if (![label isKindOfClass:[UILabel class]] || label.hidden) return;
+    BOOL anchored = [objc_getAssociatedObject(label, kApolloPostInfoMarkerAnchoredKey) boolValue];
+    // Anchored AND actually attached to a window: nothing to repair. (A nil
+    // window with anchored==YES means the age view was re-mounted out from under
+    // the label during cell re-processing — re-host onto the live one.)
+    if (anchored && label.window) return;
+    NSString *code = objc_getAssociatedObject(label, kApolloPostInfoMarkerCodeKey);
+    if (![code isKindOfClass:[NSString class]] || code.length == 0) return;
+    id toggle = objc_getAssociatedObject(label, kApolloMarkerTitleNodeKey);
+    ApolloLog(@"[Translation] marker re-anchor (%@) code=%@", anchored ? @"detached" : @"fallback-pin", code);
+    ApolloUpdatePostInfoMarkerForNode(postInfoNode, code, YES, toggle);
+    // If the subnode mount still hadn't landed when we re-ran (same-runloop
+    // race with the range update), give it one short delayed retry; otherwise
+    // the marker would stay on the fallback until the cell re-enters the
+    // visible range.
+    if (allowRetry && ![objc_getAssociatedObject(label, kApolloPostInfoMarkerAnchoredKey) boolValue]) {
+        __weak id weakNode = postInfoNode;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            ApolloReanchorPostInfoMarkerIfFallback(weakNode, NO);
+        });
+    }
+}
+
+// Reserve (or release) the marker's slot in the COMPACT stats row. The compact
+// PostInfoNode lays [authorRow, statsRow] in a flexWrap horizontal stack (RE:
+// PostInfoNode.layoutSpecThatFits sets setFlexWrap:1 when isCompact), so the
+// inline-vs-wrapped choice is a pure width decision — one that knows nothing
+// about our out-of-band marker. Rows that "just fit" inline then leave the
+// marker crammed against the screen edge. Reserving the marker's width as
+// spacingAfter on the ⋯ node makes the stack measure the row as if the marker
+// were a real child: tight rows wrap to the two-line layout (like every other
+// post), and the reserved gap after the dots is exactly where the marker sits.
+static const void *kApolloPostInfoMarkerSpacedNodeKey = &kApolloPostInfoMarkerSpacedNodeKey;
+
+static void ApolloReserveMarkerSlotInCompactRow(UILabel *label, id postInfoNode, BOOL show) {
+    id previous = objc_getAssociatedObject(label, kApolloPostInfoMarkerSpacedNodeKey);
+    BOOL infoIsCompact = NO;
+    if (postInfoNode) {
+        Ivar civ = NULL;
+        for (Class c = [postInfoNode class]; c && c != [NSObject class] && !civ; c = class_getSuperclass(c)) {
+            civ = class_getInstanceVariable(c, "isCompact");
+        }
+        if (civ) infoIsCompact = *((uint8_t *)(__bridge void *)postInfoNode + ivar_getOffset(civ)) != 0;
+    }
+    id dotsNode = (show && infoIsCompact) ? GetIvarObjectQuiet(postInfoNode, "moreOptionsButtonNode") : nil;
+    id target = dotsNode ?: previous;
+    if (!target) return;
+    CGFloat want = 0.0;
+    if (show && dotsNode) {
+        CGSize sz = label.intrinsicContentSize;
+        if (sz.width > 1.0 && sz.width < 200.0) want = ceil(sz.width) + 10.0;
+    }
+    id style = nil;
+    @try {
+        if ([target respondsToSelector:@selector(style)]) {
+            style = ((id (*)(id, SEL))objc_msgSend)(target, @selector(style));
+        }
+    } @catch (__unused NSException *e) {}
+    if (!style || ![style respondsToSelector:@selector(setSpacingAfter:)]) return;
+    CGFloat cur = 0.0;
+    @try { cur = ((CGFloat (*)(id, SEL))objc_msgSend)(style, @selector(spacingAfter)); } @catch (__unused NSException *e) {}
+    if (fabs(cur - want) < 0.5) return;
+    @try { ((void (*)(id, SEL, CGFloat))objc_msgSend)(style, @selector(setSpacingAfter:), want); } @catch (__unused NSException *e) { return; }
+    objc_setAssociatedObject(label, kApolloPostInfoMarkerSpacedNodeKey, want > 0.0 ? target : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // Re-run layout so the wrap decision sees the reservation; bubble to the
+    // cell node so the row height can grow for the wrapped line.
+    @try { if ([postInfoNode respondsToSelector:@selector(setNeedsLayout)]) [postInfoNode setNeedsLayout]; } @catch (__unused NSException *e) {}
+    Class cellCls = NSClassFromString(@"ASCellNode");
+    id node = postInfoNode;
+    for (int i = 0; i < 8 && node; i++) {
+        @try {
+            node = [node respondsToSelector:@selector(supernode)]
+                ? ((id (*)(id, SEL))objc_msgSend)(node, @selector(supernode)) : nil;
+        } @catch (__unused NSException *e) { node = nil; }
+        if (cellCls && [node isKindOfClass:cellCls]) {
+            @try { [node setNeedsLayout]; } @catch (__unused NSException *e) {}
+            break;
+        }
+    }
+}
+
+static void ApolloHideAllPostInfoMarkers(void) {
+    if (!sPostInfoMarkerLabels) return;
+    for (UILabel *label in [sPostInfoMarkerLabels allObjects]) {
+        if ([label isKindOfClass:[UILabel class]]) {
+            label.attributedText = nil;
+            label.hidden = YES;
+            ApolloReserveMarkerSlotInCompactRow(label, nil, NO);
+        }
+    }
+}
+
 
 static BOOL ApolloTextMatchesTranslatedDisplayText(NSString *visibleText, NSString *translatedText) {
     if (ApolloTextQualifiesAsBodyCandidate(visibleText, translatedText)) return YES;
@@ -3664,7 +5175,7 @@ static void ApolloUpdateTranslationUIForController(id controller) {
         }
         // Liquid Glass: also pull the globe back out of Apollo's merged container.
         ApolloRemoveGlobeMergeForNavItem(vc.navigationItem);
-        if (!isFeedVC) ApolloUpdateBannerForController(vc);
+        ApolloHideAllPostInfoMarkers();
         return;
     }
 
@@ -3733,8 +5244,6 @@ static void ApolloUpdateTranslationUIForController(id controller) {
         }
         vc.navigationItem.rightBarButtonItems = items;
     }
-
-    if (!isFeedVC) ApolloUpdateBannerForController(vc);
 }
 
 static void ApolloToggleThreadTranslationForController(UIViewController *vc) {
@@ -3929,7 +5438,42 @@ static void ApolloRegisterOwnedTextNode(id textNode) {
 // off path so cells that scrolled off-screen while translated immediately
 // revert — instead of waiting for cellNodeVisibilityEvent (which doesn't
 // always fire reliably for cells already cached in ASDK's preload range).
+// Sweep the tap-to-translate leftovers: strip "🌐 Translate" affordances from
+// undecorated-but-not-owned comment nodes (restoring their clean saved original)
+// and clear @2 auto-pins. Runs as part of every restore-to-original sweep so
+// globe-off / settings flips can't leave live-looking dead affordances behind.
+static void ApolloTapModeStripDecorations(void) {
+    NSArray *snapshot = nil;
+    @synchronized (ApolloTapModeSetsLock()) {
+        snapshot = sTapTouchedNodes ? [sTapTouchedNodes allObjects] : nil;
+    }
+    for (id node in snapshot) {
+        if (!node) continue;
+        @try {
+            id pin = objc_getAssociatedObject(node, kApolloTitlePinnedOriginalKey);
+            if ([pin isKindOfClass:[NSNumber class]] && [(NSNumber *)pin integerValue] == 2) {
+                objc_setAssociatedObject(node, kApolloTitlePinnedOriginalKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                objc_setAssociatedObject(node, kApolloTitlePinnedSourceKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+            }
+            // Owned nodes are handled by the owned-node restore; here we only
+            // clean the DECORATED-but-unowned case (original text + affordance).
+            if ([objc_getAssociatedObject(node, kApolloTranslationOwnedTextNodeKey) boolValue]) continue;
+            if (![node respondsToSelector:@selector(attributedText)]) continue;
+            NSAttributedString *current = ((id (*)(id, SEL))objc_msgSend)(node, @selector(attributedText));
+            if (!ApolloAttributedStringEndsWithMarker(current)) continue;
+            NSAttributedString *saved = objc_getAssociatedObject(node, kApolloOriginalAttributedTextKey);
+            if (![saved isKindOfClass:[NSAttributedString class]]) continue;
+            // Reuse-safety: only strip when the visible text is the saved
+            // original + our appended affordance.
+            if (![current.string hasPrefix:saved.string]) continue;
+            ((void (*)(id, SEL, id))objc_msgSend)(node, @selector(setAttributedText:), saved);
+            ApolloForceRelayoutForTextNodeAndOwner(nil, node);
+        } @catch (__unused NSException *e) {}
+    }
+}
+
 static void ApolloRestoreAllOwnedTextNodes(void) {
+    ApolloTapModeStripDecorations();
     if (!sOwnedTextNodes) return;
     // Cheap fast-path: nothing's been stamped, nothing to do. Avoids the
     // hashtable snapshot + full log line on every gateOK=NO refresh of
@@ -4084,6 +5628,11 @@ static void ApolloRestoreAllOwnedTextNodes(void) {
               (unsigned long)skippedNoOriginal,
               (unsigned long)skippedReuse,
               (unsigned long)skippedTitleStaleReuse);
+
+    // Content just reverted to its original language (globe toggle-off / feature
+    // off) — hide the compact metadata-row markers too (they're separate labels,
+    // not owned text nodes, so the loop above doesn't touch them).
+    ApolloHideAllPostInfoMarkers();
 }
 
 static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
@@ -4148,6 +5697,10 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
     // the previous translated session — it should only drive the preempt
     // path while the controller is in translated mode.
     if (!ApolloControllerIsInTranslatedMode(vc)) return NO;
+    // Per-post pin gate: the user tapped the header marker to see THIS post's
+    // original — without this, our own restore write (original body text on a
+    // now-unowned node) matches the stash and gets instantly re-swapped back.
+    if (ApolloPinActiveOnNode(textNode)) return NO;
     id raw = objc_getAssociatedObject(vc, kApolloLastAppliedPostBodyKey);
     if (![raw isKindOfClass:[NSDictionary class]]) return NO;
     NSDictionary *stash = (NSDictionary *)raw;
@@ -4155,6 +5708,10 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
     NSString *translated = stash[@"translated"];
     if (![body isKindOfClass:[NSString class]] || body.length == 0) return NO;
     if (![translated isKindOfClass:[NSString class]] || translated.length == 0) return NO;
+    // Tap-to-translate: the stash may predate the mode (content translated under
+    // auto-translate). Only preempt-swap when the user has opted THIS post in —
+    // otherwise a fresh/restored body node must stay original (held state).
+    if (sTapToTranslate && !ApolloTapModeIsTranslatedKey(body)) return NO;
     NSString *incomingText = incoming.string;
     if (incomingText.length != body.length) return NO; // cheap reject
     if (!ApolloTextMatchesSourceOrVisualDisplay(incomingText, body)) return NO;
@@ -4403,8 +5960,9 @@ static BOOL ApolloControllerIsConfirmedOriginalMode(UIViewController *vc) {
     // No explicit per-thread override: the VC follows global auto-translate.
     // If auto-translate is OFF, mode == original. If ON, the translated-mode
     // path handles things; we report NO here so callers don't mistakenly
-    // restore originals on a translated thread.
-    if (!sAutoTranslateOnAppear) return YES;
+    // restore originals on a translated thread. Tap-to-translate counts as
+    // translated mode (the pipeline is live; items are individually held).
+    if (!sAutoTranslateOnAppear && !sTapToTranslate) return YES;
     return NO;
 }
 
@@ -4541,6 +6099,36 @@ static void ApolloApplyTranslationToTitleNode(id titleNode, id textNode, NSStrin
     if (!titleNode || !textNode) return;
     if (![sourceText isKindOfClass:[NSString class]] || sourceText.length == 0) return;
     if (![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return;
+    // The user tapped this post's marker to pin it back to the original language;
+    // don't let a re-translation pass swap it back. (The toggle clears this pin
+    // before it re-applies, so a deliberate re-translate still gets through.)
+    // Validate the pinned source matches THIS title — otherwise a cell reused for
+    // a different post inherited the pin and must translate normally.
+    if (ApolloPinActiveOnNode(textNode)) {
+        NSString *pinnedSrc = objc_getAssociatedObject(textNode, kApolloTitlePinnedSourceKey);
+        // A tap-mode HOLD must not swallow a freshly-arrived translation: fall
+        // through so the tap gate below stashes it (keeping the hold) — that's
+        // what makes the eventual tap instant.
+        id pinVal = objc_getAssociatedObject(textNode, kApolloTitlePinnedOriginalKey);
+        BOOL isHeld = sTapToTranslate && [pinVal isKindOfClass:[NSNumber class]] && [(NSNumber *)pinVal integerValue] == 2;
+        BOOL pinnedSrcMatches = [pinnedSrc isKindOfClass:[NSString class]] && [pinnedSrc isEqualToString:sourceText];
+        if (isHeld && pinnedSrcMatches) {
+            // Held: fall through (pin KEPT) so the tap gate below stashes the
+            // freshly-arrived translation while keeping the hold.
+        } else if (pinnedSrcMatches) {
+            // Re-assert the pinned-state marker (target code, e.g. "EN") so a
+            // re-processed/reused cell doesn't leave a stale source code showing.
+            NSString *targetCode = ApolloResolvedTargetLanguageCode();
+            if (targetCode.length > 0) {
+                ApolloUpdatePostInfoMarkerForNode(titleNode, targetCode, sShowTranslationTitleDetails || sTapToTranslate, textNode);
+            }
+            return;
+        } else {
+            // Reused node inherited another post's pin — clear and translate.
+            objc_setAssociatedObject(textNode, kApolloTitlePinnedOriginalKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(textNode, kApolloTitlePinnedSourceKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        }
+    }
 
     NSAttributedString *current = nil;
     @try { current = ((id (*)(id, SEL))objc_msgSend)(textNode, @selector(attributedText)); }
@@ -4573,11 +6161,54 @@ static void ApolloApplyTranslationToTitleNode(id titleNode, id textNode, NSStrin
         objc_setAssociatedObject(textNode, kApolloOriginalAttributedTextKey, [current copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
+    // TAP-TO-TRANSLATE: hold the swap until the user taps the marker. Stash
+    // everything the tap needs (source/translated + auto-pin so every reapply
+    // path and the unowned-preempt hook respect the held state), show the
+    // marker with the TARGET code ("EN" = tap for English), and bail.
+    if (sTapToTranslate && !ApolloTapModeIsTranslatedKey(sourceText)) {
+        objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [sourceText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+        objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+        objc_setAssociatedObject(textNode, kApolloTitlePinnedOriginalKey, @2, OBJC_ASSOCIATION_RETAIN_NONATOMIC);   // @2 = tap-mode auto-pin
+        objc_setAssociatedObject(textNode, kApolloTitlePinnedSourceKey, [sourceText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+        ApolloTapModeRegisterTouchedNode(textNode);
+        UIViewController *tapVC = ApolloEnclosingViewControllerForNode(titleNode);
+        BOOL tapIsHeaderTitle = ApolloClassLooksLikeCommentsViewController([tapVC class]);
+        const char *tapTitleClass = class_getName([titleNode class]);
+        BOOL tapIsPostTitle = tapTitleClass && strstr(tapTitleClass, "PostTitleNode") != NULL;
+        if (!tapIsHeaderTitle && tapIsPostTitle) {
+            NSString *targetCode = ApolloResolvedTargetLanguageCode();
+            if (targetCode.length > 0) {
+                ApolloUpdatePostInfoMarkerForNode(titleNode, targetCode, YES, textNode);
+            }
+        }
+        return;
+    }
+
     NSAttributedString *translatedAttr = ApolloTranslatedAttributedStringPreservingVisualLinks(current, translatedText);
+
+    // FEED titles get a compact "🌐 Spanish" marker line under the title. The
+    // comments-header post is excluded here because it shows the metadata-row
+    // banner instead (avoids a double marker on the post you're viewing).
+    UIViewController *enclosingVC = ApolloEnclosingViewControllerForNode(titleNode);
+    BOOL isCommentsHeaderTitle = ApolloClassLooksLikeCommentsViewController([enclosingVC class]);
+    // Feed titles get a compact "🌐 PT" marker on the post's metadata row
+    // (PostInfoNode) — NOT appended under the title (that collided with flair
+    // pills). The comments-header post is excluded (its own apply drives the
+    // marker). Only the real PostTitleNode drives this — the feed also routes the
+    // body-preview text node through here (titleNode == textNode).
+    const char *titleNodeClass = class_getName([titleNode class]);
+    BOOL titleNodeIsPostTitle = titleNodeClass && strstr(titleNodeClass, "PostTitleNode") != NULL;
+    if (!isCommentsHeaderTitle && titleNodeIsPostTitle) {
+        NSString *titleSourceCode = nil;
+        BOOL showTitleMarker = (sShowTranslationTitleDetails || sTapToTranslate) && ApolloShouldShowTranslationMarkerForSource(sourceText, &titleSourceCode);
+        // Pass the text node (which carries the owned original/translated strings)
+        // so tapping the marker can toggle this post's title back and forth.
+        ApolloUpdatePostInfoMarkerForNode(titleNode, titleSourceCode, showTitleMarker, textNode);
+    }
 
     // Vote-resilience / cell-reuse markers (same scheme as comment cells +
     // post bodies). The title-owned marker tells the global swap hook to
-    // bypass the per-thread translated-mode gate.
+    // bypass the per-thread translated-mode gate. Cache stays CLEAN (marker-free).
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [sourceText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -4589,8 +6220,7 @@ static void ApolloApplyTranslationToTitleNode(id titleNode, id textNode, NSStrin
 
     // Turn the feed/thread globe green now that we've actually swapped a
     // visible title to the translated string.
-    UIViewController *enclosingVC = ApolloEnclosingViewControllerForNode(titleNode);
-    if (ApolloClassLooksLikeCommentsViewController([enclosingVC class])) {
+    if (isCommentsHeaderTitle) {
         ApolloMarkVisibleTranslationApplied(sourceText, translatedText);
     } else {
         ApolloMarkVisibleFeedTitleApplied(sourceText, translatedText);
@@ -4775,6 +6405,29 @@ static void ApolloMaybeTranslatePostTitleNode(id titleNode) {
     NSString *detected = ApolloDetectDominantLanguage(detectionText);
     if ([detected isEqualToString:targetLanguage]) return;
 
+    // TAP-TO-TRANSLATE: marker + hold as soon as the title is detectably
+    // foreign (detection-driven — see the comment/header equivalents).
+    if (sTapToTranslate && detected.length > 0 && !ApolloTapModeIsTranslatedKey(titleText)) {
+        @try {
+            NSAttributedString *cur = ((id (*)(id, SEL))objc_msgSend)(textNode, @selector(attributedText));
+            if ([cur isKindOfClass:[NSAttributedString class]] && cur.length > 0 &&
+                !objc_getAssociatedObject(textNode, kApolloOriginalAttributedTextKey)) {
+                objc_setAssociatedObject(textNode, kApolloOriginalAttributedTextKey, [cur copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+        } @catch (__unused NSException *e) {}
+        objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [titleText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+        objc_setAssociatedObject(textNode, kApolloTitlePinnedOriginalKey, @2, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(textNode, kApolloTitlePinnedSourceKey, [titleText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+        ApolloTapModeRegisterTouchedNode(textNode);
+        UIViewController *heldVC = ApolloEnclosingViewControllerForNode(titleNode);
+        BOOL heldIsHeaderTitle = ApolloClassLooksLikeCommentsViewController([heldVC class]);
+        const char *heldCls = class_getName([titleNode class]);
+        BOOL heldIsPostTitle = heldCls && strstr(heldCls, "PostTitleNode") != NULL;
+        if (!heldIsHeaderTitle && heldIsPostTitle) {
+            ApolloUpdatePostInfoMarkerForNode(titleNode, targetLanguage, YES, textNode);
+        }
+    }
+
     NSString *cacheKey = ApolloTranslationCacheKey(titleText, targetLanguage);
     __weak id weakTitleNode = titleNode;
     __weak id weakTextNode = textNode;
@@ -4945,6 +6598,21 @@ static void ApolloMaybeTranslateFeedPostBodyNode(id feedCellNode, id excludeTitl
 
 %end
 
+// Visible-state = the row is genuinely on screen, so the age view is mounted —
+// the one guaranteed post-mount event to repair a marker stuck on the piView
+// fallback pin (see ApolloReanchorPostInfoMarkerIfFallback). The async hop
+// mirrors the title-node hooks above and lets ASDK finish the mount pass first.
+%hook _TtC6Apollo12PostInfoNode
+
+- (void)didEnterVisibleState {
+    %orig;
+    if (!sPostInfoMarkerLabels) return;   // no marker has ever been created
+    __weak id weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{ ApolloReanchorPostInfoMarkerIfFallback(weakSelf, YES); });
+}
+
+%end
+
 %hook _TtC6Apollo16PostTitleURLNode
 
 - (void)didLoad {
@@ -5035,7 +6703,7 @@ static void ApolloFeedVCInstallGlobe(UIViewController *vc) {
         // this feed). Always (re)apply the current global default so toggling
         // "Auto Translate by Default" takes effect on next visit even for VCs
         // still alive in memory from a previous install.
-        BOOL defaultTranslated = sAutoTranslateOnAppear;
+        BOOL defaultTranslated = sAutoTranslateOnAppear || sTapToTranslate;
         objc_setAssociatedObject(vc, kApolloThreadTranslatedModeKey, @(defaultTranslated), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(vc, kApolloThreadOriginalModeKey, @(!defaultTranslated), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         sLastFeedTitleModeKnown = YES;
@@ -5624,6 +7292,169 @@ static void ApolloReapplyTranslationOnAppResume(void) {
 
 %end
 
+// Tap handling for the per-item "Translated from …" / "Show translation" marker.
+// In a NAMED group so its generated hook symbols don't collide with the
+// ApolloDeletedCommentsUI MarkdownNode hook (same class + selectors); %orig
+// chains between the two at runtime, each handling only its own attribute.
+%group ApolloTranslationMarkerTap
+%hook _TtC6Apollo12MarkdownNode
+
+- (BOOL)textNode:(id)textNode shouldHighlightLinkAttribute:(id)attribute value:(id)value atPoint:(CGPoint)point {
+    if ([attribute isKindOfClass:[NSString class]] &&
+        [(NSString *)attribute isEqualToString:ApolloTranslationMarkerLinkAttributeName]) {
+        return YES;
+    }
+    return %orig;
+}
+
+- (BOOL)textNode:(id)textNode shouldLongPressLinkAttribute:(id)attribute value:(id)value atPoint:(CGPoint)point {
+    if ([attribute isKindOfClass:[NSString class]] &&
+        [(NSString *)attribute isEqualToString:ApolloTranslationMarkerLinkAttributeName]) {
+        return NO;
+    }
+    return %orig;
+}
+
+- (void)textNode:(id)textNode tappedLinkAttribute:(id)attribute value:(id)value atPoint:(CGPoint)point textRange:(NSRange)textRange {
+    if ([attribute isKindOfClass:[NSString class]] &&
+        [(NSString *)attribute isEqualToString:ApolloTranslationMarkerLinkAttributeName]) {
+        ApolloToggleTranslationForCommentTextNode(textNode);
+        return;
+    }
+    %orig;
+}
+
+%end
+%end
+
+// ============ TEMP DEBUG TRIGGERS (sim verification only — remove) ============
+#if APOLLO_SIM_BUILD
+static void ApolloDbgToggleTopMarker(CFNotificationCenterRef c, void *o, CFStringRef n, const void *obj, CFDictionaryRef u) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UILabel *best = nil; CGFloat bestY = CGFLOAT_MAX;
+        for (UILabel *label in [sPostInfoMarkerLabels allObjects]) {
+            if (![label isKindOfClass:[UILabel class]] || label.hidden || !label.window) continue;
+            if (!objc_getAssociatedObject(label, kApolloMarkerTitleNodeKey)) continue;
+            CGRect wf = [label convertRect:label.bounds toView:nil];
+            if (wf.origin.y > 120.0 && wf.origin.y < bestY) { bestY = wf.origin.y; best = label; }
+        }
+        if (!best) { ApolloLog(@"[Tw/dbg] no visible marker"); return; }
+        ApolloLog(@"[Tw/dbg] toggling marker at y=%.0f", bestY);
+        ApolloToggleTranslationForTitleNode(objc_getAssociatedObject(best, kApolloMarkerTitleNodeKey));
+    });
+}
+static UIScrollView *ApolloDbgFindScroll(UIView *v, int d) {
+    if (!v || d < 0) return nil;
+    if ([v isKindOfClass:[UIScrollView class]] && v.frame.size.height > 300.0) return (UIScrollView *)v;
+    for (UIView *s in v.subviews) { UIScrollView *r = ApolloDbgFindScroll(s, d - 1); if (r) return r; }
+    return nil;
+}
+static void ApolloDbgScrollFeed(CFNotificationCenterRef c, void *o, CFStringRef n, const void *obj, CFDictionaryRef u) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (UIWindow *w in ApolloAllWindows()) {
+            UIScrollView *sv = ApolloDbgFindScroll(w, 14);
+            if (sv) {
+                CGPoint p = sv.contentOffset; p.y += 650.0;
+                [sv setContentOffset:p animated:NO];
+                ApolloLog(@"[Tw/dbg] scrolled to y=%.0f", p.y);
+                return;
+            }
+        }
+        ApolloLog(@"[Tw/dbg] no scroll view");
+    });
+}
+static void ApolloDbgFlipTapMode(CFNotificationCenterRef c, void *o, CFStringRef n, const void *obj, CFDictionaryRef u) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        sTapToTranslate = !sTapToTranslate;
+        [[NSUserDefaults standardUserDefaults] setBool:sTapToTranslate forKey:@"TapToTranslate"];
+        ApolloLog(@"[Tw/dbg] sTapToTranslate=%d", sTapToTranslate);
+        // Mirror the real settings toggle so the live-refresh observer runs.
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloShowTranslationDetailsChanged" object:nil];
+        [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification object:nil userInfo:@{@"reason": @"settings-change"}];
+    });
+}
+static void ApolloDbgTapComment(CFNotificationCenterRef c, void *o, CFStringRef n, const void *obj, CFDictionaryRef u) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (UIWindow *w in ApolloAllWindows()) {
+            NSMutableArray *nodes = [NSMutableArray array];
+            NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:256];
+            ApolloCollectAttributedTextNodes(w, 18, visited, nodes);
+            id best = nil; CGFloat bestY = CGFLOAT_MAX;
+            for (id node in nodes) {
+                NSAttributedString *attr = nil;
+                @try { attr = ((id (*)(id, SEL))objc_msgSend)(node, @selector(attributedText)); } @catch (__unused NSException *e) { continue; }
+                if (!ApolloAttributedStringEndsWithMarker(attr)) continue;
+                UIView *v = nil;
+                @try { if ([node respondsToSelector:@selector(view)]) v = ((UIView *(*)(id, SEL))objc_msgSend)(node, @selector(view)); } @catch (__unused NSException *e) {}
+                if (!v.window) continue;
+                CGFloat y = [v convertRect:v.bounds toView:nil].origin.y;
+                if (y > 150.0 && y < bestY) { bestY = y; best = node; }
+            }
+            if (best) {
+                ApolloLog(@"[Tw/dbg] tapping comment affordance at y=%.0f", bestY);
+                ApolloToggleTranslationForCommentTextNode(best);
+                return;
+            }
+        }
+        ApolloLog(@"[Tw/dbg] no comment affordance visible");
+    });
+}
+static void ApolloDbgDumpInsets(CFNotificationCenterRef c, void *o, CFStringRef n, const void *obj, CFDictionaryRef u) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UITableView *tv = GetCommentsTableView(sVisibleCommentsViewController);
+        if (!tv) { ApolloLog(@"[Tw/dbg] no comments table"); return; }
+        // Clamp to the true max scroll position first (dbg.scroll overshoots).
+        CGFloat maxOff = MAX(0, tv.contentSize.height - tv.bounds.size.height + tv.adjustedContentInset.bottom);
+        [tv setContentOffset:CGPointMake(0, maxOff) animated:NO];
+        UITableViewCell *last = tv.visibleCells.lastObject;
+        CGRect lastF = last ? [last convertRect:last.bounds toView:tv] : CGRectZero;
+        ApolloLog(@"[Tw/dbg] contentSize=%.0f bounds=%.0f offset=%.0f inset(b)=%.0f adj(b)=%.0f lastCellMaxY=%.0f",
+                  tv.contentSize.height, tv.bounds.size.height, tv.contentOffset.y,
+                  tv.contentInset.bottom, tv.adjustedContentInset.bottom, CGRectGetMaxY(lastF));
+        // and the deepest text node inside the last cell (our marker lives in it)
+        if (last) {
+            NSMutableArray *nodes = [NSMutableArray array];
+            NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:64];
+            ApolloCollectAttributedTextNodes(last, 8, visited, nodes);
+            CGFloat maxY = 0; NSString *tail = @"";
+            for (id node in nodes) {
+                UIView *v = nil;
+                @try { if ([node respondsToSelector:@selector(view)]) v = ((UIView *(*)(id, SEL))objc_msgSend)(node, @selector(view)); } @catch (__unused NSException *e) {}
+                if (!v.window) continue;
+                CGRect f = [v convertRect:v.bounds toView:tv];
+                if (CGRectGetMaxY(f) > maxY) {
+                    maxY = CGRectGetMaxY(f);
+                    NSAttributedString *a = nil;
+                    @try { a = ((id (*)(id, SEL))objc_msgSend)(node, @selector(attributedText)); } @catch (__unused NSException *e) {}
+                    tail = a.string.length > 24 ? [a.string substringFromIndex:a.string.length - 24] : (a.string ?: @"");
+                }
+            }
+            ApolloLog(@"[Tw/dbg] deepest textNode maxY=%.0f tail='%@'", maxY, tail);
+        }
+    });
+}
+static void ApolloDbgOpenFirstPost(CFNotificationCenterRef c, void *o, CFStringRef n, const void *obj, CFDictionaryRef u) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (UIWindow *w in ApolloAllWindows()) {
+            UIScrollView *sv = ApolloDbgFindScroll(w, 14);
+            if (![sv isKindOfClass:[UITableView class]]) continue;
+            UITableView *tv = (UITableView *)sv;
+            for (NSIndexPath *ip in tv.indexPathsForVisibleRows) {
+                CGRect vis = [tv convertRect:[tv rectForRowAtIndexPath:ip] toView:nil];
+                if (vis.origin.y < 200.0) continue;   // skip rows under the header banner
+                @try {
+                    [tv.delegate tableView:tv didSelectRowAtIndexPath:ip];
+                    ApolloLog(@"[Tw/dbg] opened row %ld-%ld", (long)ip.section, (long)ip.row);
+                } @catch (NSException *e) { ApolloLog(@"[Tw/dbg] open failed: %@", e.name); }
+                return;
+            }
+        }
+        ApolloLog(@"[Tw/dbg] no table/rows");
+    });
+}
+#endif
+// ==============================================================================
+
 %ctor {
     sTranslationCache = [NSCache new];
     sCommentTranslationByFullName = [NSCache new];
@@ -5643,6 +7474,66 @@ static void ApolloReapplyTranslationOnAppResume(void) {
     // Hydrate disk cache early so any cells laid out during the first frame
     // already see translations.
     ApolloHydrateTranslationCachesFromDisk();
+
+    // Live-refresh when translation DISPLAY settings change (Tap to Translate,
+    // the two Details toggles, Match App Colour). Full reset-and-reapply: put
+    // every touched node back to its original, clear tap-mode session state,
+    // then re-run the apply passes so the visible UI re-derives from the
+    // CURRENT flags (markers rebuild with the right colour/visibility, tap
+    // mode holds or releases immediately — no scroll/reuse needed).
+    [[NSNotificationCenter defaultCenter] addObserverForName:@"ApolloShowTranslationDetailsChanged"
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *note) {
+        ApolloTapModeClearSessionSets();
+        ApolloRestoreAllOwnedTextNodes();
+        ApolloHideAllPostInfoMarkers();
+        // Re-apply the visible thread (comments + header) from caches.
+        ApolloReapplyTranslationOnAppResume();
+        // Titles (comments-header + any visible post titles) reapply via the
+        // title rescan — the comments reapply above doesn't cover them.
+        for (NSNumber *delay in @[ @0.05, @0.5 ]) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                UIViewController *cvc = sVisibleCommentsViewController;
+                if (!cvc.isViewLoaded || !cvc.view.window) return;
+                if (!ApolloControllerIsInTranslatedMode(cvc)) return;
+                NSHashTable *tVisited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:256];
+                ApolloRescanTitleNodesInTree(cvc.view, 16, tVisited);
+            });
+        }
+        // Refresh any visible feed VCs so titles re-run their apply passes.
+        UIWindow *keyWindow = nil;
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]] && scene.activationState == UISceneActivationStateForegroundActive) {
+                for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                    if (w.isKeyWindow) { keyWindow = w; break; }
+                }
+                if (keyWindow) break;
+            }
+        }
+        UIViewController *root = keyWindow.rootViewController;
+        NSMutableArray *queue = [NSMutableArray array];
+        if (root) [queue addObject:root];
+        while (queue.count) {
+            UIViewController *vc = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            if ([objc_getAssociatedObject(vc, kApolloFeedTranslationVCKey) boolValue]) {
+                ApolloUpdateTranslationUIForController(vc);
+            }
+            for (UIViewController *child in vc.childViewControllers) [queue addObject:child];
+            if (vc.presentedViewController) [queue addObject:vc.presentedViewController];
+        }
+    }];
+
+#if APOLLO_SIM_BUILD
+    // TEMP: darwin-notification debug triggers (idb taps are down; remove after verification)
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, ApolloDbgToggleTopMarker, CFSTR("apollofix.dbg.toggle"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, ApolloDbgScrollFeed, CFSTR("apollofix.dbg.scroll"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, ApolloDbgOpenFirstPost, CFSTR("apollofix.dbg.open"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, ApolloDbgFlipTapMode, CFSTR("apollofix.dbg.tapmode"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, ApolloDbgTapComment, CFSTR("apollofix.dbg.tapcomment"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, ApolloDbgDumpInsets, CFSTR("apollofix.dbg.insets"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+#endif
 
     // Memory-warning handler: only drop the raw key->text cache (cheap to
     // recompute via the persistent fullName caches). Do NOT wipe the
@@ -5775,5 +7666,39 @@ static void ApolloReapplyTranslationOnAppResume(void) {
         }
     }];
 
+#if APOLLO_SIM_BUILD
+    // Sim-only sanity check for the proper-noun protection (issue #549). A few seconds after
+    // launch, run representative titles through the REAL iOS NLTagger model + the protect/skip
+    // path and log the outcome, plus one end-to-end pass through ApolloRequestTranslation. The
+    // all-names skip returns the original without any provider/model, so this is reliable even
+    // with no account/feed and no downloaded translation model. Compiled out of device builds.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        NSArray<NSString *> *titles = @[ @"Dua Lipa", @"Sabalenka def. Kostovic",
+            @"Tjen def. Fernandez", @"I love Dua Lipa's new album",
+            @"Roger Federer wins again", @"Bonjour tout le monde",
+            @"voy a casa", @"Che bella giornata", @"Bonjour" ];
+        ApolloLog(@"[Translation][NameTest] provider=%@ — proper-noun protection self-test", sTranslationProvider ?: @"(nil)");
+        for (NSString *title in titles) {
+            NSDictionary<NSString *, NSString *> *names = nil;
+            NSString *protectedText = ApolloProtectTranslationNames(title, &names);
+            BOOL onlyNames = names.count > 0 && ApolloProtectedTextIsOnlyProtectedTokens(protectedText, names, @{});
+            BOOL titleHeuristic = ApolloTitleLooksLikeProperNouns(title);
+            BOOL willSkip = onlyNames || titleHeuristic;
+            ApolloLog(@"[Translation][NameTest] \"%@\" -> ner=[%@] titleHeuristic=%d => %@",
+                title,
+                names.count ? [names.allValues componentsJoinedByString:@", "] : @"none",
+                titleHeuristic,
+                willSkip ? @"SKIP (left untranslated)" : @"translate");
+        }
+        NSString *probe = @"Dua Lipa";
+        ApolloRequestTranslation(ApolloTranslationCacheKey(probe, @"en"), probe, @"en", ^(NSString *translated, NSError *error) {
+            ApolloLog(@"[Translation][NameTest] end-to-end \"%@\" => \"%@\" (err=%@) — %@",
+                probe, translated ?: @"(nil)", error ? @(error.code) : @"none",
+                [translated isEqualToString:probe] ? @"PASS name preserved" : @"CHECK");
+        });
+    });
+#endif
+
     %init;
+    %init(ApolloTranslationMarkerTap);
 }

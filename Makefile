@@ -30,7 +30,9 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloSettingsTableViewController.m \
     $(SRC_DIR)/ApolloRedditMediaUpload.m \
     $(SRC_DIR)/ApolloNotificationBackend.m \
+    $(SRC_DIR)/ApolloUsageHeartbeat.m \
     $(SRC_DIR)/ApolloPushNotifications.m \
+    $(SRC_DIR)/ApolloBarkNotifications.m \
     $(SRC_DIR)/ApolloUserProfileCache.m \
     $(SRC_DIR)/ApolloSubredditInfoCache.m \
     $(SRC_DIR)/ApolloSubredditCustomBannerCache.m \
@@ -62,6 +64,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloInboxCommentScroll.xm \
     $(SRC_DIR)/ApolloStatsRowTouch.xm \
     $(SRC_DIR)/ApolloLiveCommentsFollow.xm \
+    $(SRC_DIR)/ApolloPerPostCommentSort.xm \
     $(SRC_DIR)/ApolloLiquidGlass.xm \
     $(SRC_DIR)/ApolloLiquidGlassIconPicker.xm \
     $(SRC_DIR)/ApolloModmailLayout.xm \
@@ -136,10 +139,12 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloAccountCredentials.m \
     $(SRC_DIR)/ApolloAccountSwitcherViewController.xm \
     $(SRC_DIR)/ApolloSignInSplash.xm \
+    $(SRC_DIR)/ApolloHideSubscribePrompt.xm \
     $(SRC_DIR)/CustomAPIViewController.m \
     $(SRC_DIR)/ApolloAISettingsViewController.m \
     $(SRC_DIR)/ApolloDeletedCommentsSettingsViewController.m \
     $(SRC_DIR)/ApolloLinkPreviewSettingsViewController.m \
+    $(SRC_DIR)/InlineMediaSettingsViewController.m \
     $(SRC_DIR)/ApolloOpenInAppViewController.m \
     $(SRC_DIR)/ApolloHideNativeOpenInAppRows.xm \
     $(SRC_DIR)/TranslationSettingsViewController.m \
@@ -209,6 +214,9 @@ ifeq ($(APOLLO_SIM_BUILD),1)
 # MobileSubstrate generator does, so force-include it for the MSHookIvar template
 # (a pure ObjC-runtime helper with no CydiaSubstrate link dependency).
 ApolloReborn_CFLAGS += -DAPOLLO_SIM_BUILD=1 -include substrate.h
+# Swift sources gate sim-only test plumbing (e.g. the host Apple-translation
+# bridge in ApolloAppleTranslation.swift) on the same flag.
+ApolloReborn_SWIFTFLAGS += -DAPOLLO_SIM_BUILD
 # Xcode 27 sim builds raise DEPLOY_MIN to 15.0 (older targets fail libc++'s
 # "no longer supported" check), which turns UIApplication.windows deprecation
 # warnings into -Werror failures. Silence them rather than rewriting working
@@ -255,11 +263,27 @@ lg-previews:
 	@echo "Regenerating $(notdir $(LG_PREVIEW_HEADER)) from liquid-glass/icons.json"
 	@python3 $(LG_DIR)/scripts/generate_previews_header.py $(LG_PREVIEW_HEADER)
 
-# Move libflex into bundle for rootless deb builds
-#   Remove libflex.plist for all packages since it's not needed
+# Staged jailbreak resource bundle (holds libflex, PNGs, and the ARVariant
+# marker). Space in "Application Support" — always reference it quoted in recipes.
+STAGED_APOLLO_BUNDLE = $(THEOS_STAGING_DIR)/Library/Application Support/ApolloReborn/ApolloReborn.bundle
+
+# before-package runs after the bundle is staged but before the .deb is built.
+# Three things happen here:
+#   - libflex.dylib is moved into the bundle for rootless (its DynamicLibraries
+#     home doesn't exist rootless);
+#   - libflex.plist is dropped for every scheme (unused);
+#   - the usage-heartbeat build variant is stamped so jailbreak installs report a
+#     channel to beat.apolloreborn.app instead of "unknown". ApolloBuildVariant()
+#     reads this ARVariant.txt marker for .deb installs (there's no repackaged
+#     Info.plist to carry ARBuildVariant the way injected IPAs do). Injected IPAs
+#     stamp Info.plist at packaging time and check it first, so this file being
+#     copied into an IPA's bundle is harmless — the plist key wins.
 before-package::
 ifeq ($(THEOS_PACKAGE_SCHEME),rootless)
-	@mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/libflex.dylib $(THEOS_STAGING_DIR)/Library/Application\ Support/ApolloReborn/ApolloReborn.bundle/libflex.dylib
+	@mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/libflex.dylib "$(STAGED_APOLLO_BUNDLE)/libflex.dylib"
+	@printf 'deb-rootless\n' > "$(STAGED_APOLLO_BUNDLE)/ARVariant.txt"
+else
+	@printf 'deb-rootful\n' > "$(STAGED_APOLLO_BUNDLE)/ARVariant.txt"
 endif
 	@rm $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/libflex.plist
 
