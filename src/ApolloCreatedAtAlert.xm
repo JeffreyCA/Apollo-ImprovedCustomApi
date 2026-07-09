@@ -1,16 +1,19 @@
 // ApolloCreatedAtAlert
 //
-// Tap a comment/post timestamp ("2.8y") to reveal an alert with the absolute
-// creation date — mirrors Apollo's existing Edited-pencil alert.
+// Tap one of the info-row detail icons — % upvoted (smiley), timestamp (age), or
+// edited (pencil) — to reveal its detail (a ratio or an absolute date). The Info
+// Row "Popup" / "Overlay" modes pick the presentation (a dismissable alert or a
+// small auto-fading card); with both off the icons are inert.
 //
-// Wiring: the timestamp display nodes (CommentCellNode.ageNode,
-// PostInfoNode.ageButtonNode) are layer-backed, so addTarget: and per-node
-// gestures don't fire. We install one UITapGestureRecognizer on the cell's
-// own view (always view-backed) and hit-test the embedded node's CALayer
-// from shouldReceiveTouch:.
+// Wiring: one UITapGestureRecognizer per cell (installed on the cell's view,
+// which is always view-backed) hit-tests the embedded info nodes' CALayers from
+// shouldReceiveTouch: and picks the nearest one. cancelsTouchesInView swallows
+// the touch, so the native % / edited button alerts never also fire — we present
+// the detail ourselves (the age was never natively tappable). See ApolloInfoKind
+// / ApolloPresentInfoDetail; the magnifier loupe routes through the same entry.
 //
-// Hooked cells: CommentCellNode (ageNode), CommentsHeaderCellNode /
-// LargePostCellNode / CompactPostCellNode (postInfoNode.ageButtonNode).
+// Hooked cells: CommentCellNode (ageNode, editedIndicatorNode), CommentsHeader /
+// LargePost / CompactPost cell nodes (postInfoNode.{age,percentageLiked,edited}ButtonNode).
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -84,73 +87,88 @@ static NSString *ApolloRelativeAgoString(NSDate *date) {
     return [NSString stringWithFormat:@"%.1fy", interval / 31556736.0];
 }
 
-static UIViewController *ApolloPresenterForNode(ApolloASDisplayNode *node) {
-    if (!node) return nil;
 
-    // Texture's closestViewController walks supernode → UIResponder chain.
-    UIViewController *vc = nil;
-    if ([node respondsToSelector:@selector(closestViewController)]) {
-        @try { vc = node.closestViewController; } @catch (__unused id e) {}
-    }
-    if (vc) return vc;
+// Data accessors for the three info kinds (createdUTC is declared on RDKComment above).
+@interface RDKLink (ApolloInfoAccessor)
+@property (nonatomic, readonly) NSDate *edited;
+@property (nonatomic, readonly) double upvoteRatio;
+@end
+@interface RDKComment (ApolloInfoEditedAccessor)
+@property (nonatomic, readonly) NSDate *edited;
+@end
 
-    UIView *view = nil;
-    @try { view = node.view; } @catch (__unused id e) {}
-    UIWindow *window = view.window;
-    if (!window) {
-        for (UIWindow *w in ApolloAllWindows()) {
-            if (w.isKeyWindow) { window = w; break; }
+// Build the two text lines for an info kind. line1 = the bold headline (also the
+// popup title), line2 = the detail (also the popup message); line2 may be nil.
+// Returns NO when there's no data to show (e.g. never edited, no ratio).
+static BOOL ApolloInfoLinesForKind(ApolloInfoKind kind, id link, id comment,
+                                   NSString **outLine1, NSString **outLine2) {
+    switch (kind) {
+        case ApolloInfoKindAge: {
+            BOOL isComment = (comment != nil);
+            NSDate *date = isComment ? [comment createdUTC] : [link createdUTC];
+            if (![date isKindOfClass:[NSDate class]]) return NO;
+            NSString *verb = isComment ? @"Commented" : @"Posted";
+            NSString *rel = ApolloRelativeAgoString(date) ?: @"Just now";
+            *outLine1 = [rel isEqualToString:@"Just now"] ? [NSString stringWithFormat:@"%@ %@", verb, rel]
+                                                          : [NSString stringWithFormat:@"%@ %@ Ago", verb, rel];
+            *outLine2 = (fabs([date timeIntervalSinceNow]) >= 5.0)
+                ? [NSString stringWithFormat:@"%@ on %@", verb, [ApolloAbsoluteDateFormatter() stringFromDate:date]] : nil;
+            return YES;
+        }
+        case ApolloInfoKindPercentage: {
+            if (![link respondsToSelector:@selector(upvoteRatio)]) return NO;
+            double ratio = [link upvoteRatio];
+            if (ratio <= 0.0 || ratio > 1.0) return NO;
+            long pct = lround(ratio * 100.0);
+            *outLine1 = [NSString stringWithFormat:@"%ld%% Upvoted", pct];
+            *outLine2 = [NSString stringWithFormat:@"%ld%% of voters upvoted this post.", pct];
+            return YES;
+        }
+        case ApolloInfoKindEdited: {
+            NSDate *date = comment ? [comment edited] : [link edited];
+            if (![date isKindOfClass:[NSDate class]]) return NO;
+            NSString *rel = ApolloRelativeAgoString(date) ?: @"Just now";
+            *outLine1 = [rel isEqualToString:@"Just now"] ? @"Edited Just now"
+                                                          : [NSString stringWithFormat:@"Edited %@ Ago", rel];
+            *outLine2 = (fabs([date timeIntervalSinceNow]) >= 5.0)
+                ? [NSString stringWithFormat:@"Last edited on %@", [ApolloAbsoluteDateFormatter() stringFromDate:date]] : nil;
+            return YES;
         }
     }
-    return [window visibleViewController];
+    return NO;
 }
 
-static void ApolloPresentCreatedAtAlert(NSDate *createdAt, ApolloASDisplayNode *anchor, BOOL isComment) {
-    if (!createdAt || ![createdAt isKindOfClass:[NSDate class]]) return;
-    UIViewController *presenter = ApolloPresenterForNode(anchor);
-    if (!presenter) return;
+BOOL ApolloPresentInfoDetail(ApolloInfoKind kind, id link, id comment, CGRect anchorRectInWindow, UIWindow *window) {
+    if (!sInfoRowPopupMode && !sInfoRowOverlayMode) return NO;   // both off: inert
+    NSString *line1 = nil, *line2 = nil;
+    if (!ApolloInfoLinesForKind(kind, link, comment, &line1, &line2) || line1.length == 0) return NO;
 
-    NSString *verb = isComment ? @"Commented" : @"Posted";
-    NSString *relative = ApolloRelativeAgoString(createdAt) ?: @"Just now";
-    NSString *title;
-    if ([relative isEqualToString:@"Just now"]) {
-        title = [NSString stringWithFormat:@"%@ %@", verb, relative];
-    } else {
-        title = [NSString stringWithFormat:@"%@ %@ Ago", verb, relative];
+    if (sInfoRowOverlayMode && window && !CGRectIsEmpty(anchorRectInWindow) && !CGRectIsNull(anchorRectInWindow)) {
+        ApolloPresentInfoOverlay(line1, line2, anchorRectInWindow, window);
+        return YES;
     }
-
-    NSString *message = nil;
-    if (fabs([createdAt timeIntervalSinceNow]) >= 5.0) {
-        message = [NSString stringWithFormat:@"%@ on %@", verb,
-                                              [ApolloAbsoluteDateFormatter() stringFromDate:createdAt]];
-    }
-
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
-                                                                   message:message
+    // Popup mode (or overlay with no resolvable anchor → fall back to the popup so
+    // the tap isn't lost).
+    UIViewController *presenter = window ? [window visibleViewController] : nil;
+    if (!presenter) return NO;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:line1 message:line2
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
     [presenter presentViewController:alert animated:YES completion:nil];
+    return YES;
 }
 
-// MARK: - Transient time overlay (Info Row "Timestamp Overlay" mode)
+// MARK: - Transient info overlay (Info Row "Overlay" mode)
 
 // Tag so only one overlay is ever on screen (rapid taps replace, not stack).
 static const NSInteger kApolloTimeOverlayTag = 0x54494D45;  // 'TIME'
 
-void ApolloPresentTimeOverlay(NSDate *createdAt, CGRect anchorRectInWindow, UIWindow *window, BOOL isComment) {
-    if (![createdAt isKindOfClass:[NSDate class]] || !window) return;
+void ApolloPresentInfoOverlay(NSString *line1, NSString *line2, CGRect anchorRectInWindow, UIWindow *window) {
+    if (line1.length == 0 || !window) return;
 
     for (UIView *v in [window.subviews copy]) {
         if (v.tag == kApolloTimeOverlayTag) [v removeFromSuperview];
     }
-
-    NSString *verb = isComment ? @"Commented" : @"Posted";
-    NSString *relative = ApolloRelativeAgoString(createdAt) ?: @"Just now";
-    NSString *line1 = [relative isEqualToString:@"Just now"]
-        ? [NSString stringWithFormat:@"%@ Just now", verb]
-        : [NSString stringWithFormat:@"%@ %@ Ago", verb, relative];
-    NSString *line2 = (fabs([createdAt timeIntervalSinceNow]) >= 5.0)
-        ? [ApolloAbsoluteDateFormatter() stringFromDate:createdAt] : nil;
 
     NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
     para.alignment = NSTextAlignmentCenter;
@@ -233,46 +251,69 @@ void ApolloPresentTimeOverlay(NSDate *createdAt, CGRect anchorRectInWindow, UIWi
     }];
 }
 
-// YES if `touch` falls inside `targetNode`'s layer (in containerView coords),
-// padded for comfortable touch targets. Works for layer-backed nodes too.
-static BOOL ApolloTouchHitsNode(ApolloASDisplayNode *targetNode, UIView *containerView, UITouch *touch) {
-    if (!targetNode || targetNode.isHidden || !containerView || !touch) return NO;
-
-    CALayer *targetLayer = nil;
-    @try { targetLayer = targetNode.layer; } @catch (__unused id e) {}
-    if (!targetLayer || !containerView.layer) return NO;
-
-    CGRect rect = [targetLayer convertRect:targetLayer.bounds toLayer:containerView.layer];
-    if (CGRectIsEmpty(rect) || CGRectIsNull(rect) || CGRectIsInfinite(rect)) return NO;
-
-    // The age node is the *rightmost* stat, so its left edge borders a neighbor
-    // (the comment bubble in a feed post, the "% liked" in the comments header).
-    // Keep a small left pad so the timestamp stops stealing taps meant for that
-    // neighbor, while still expanding generously into the empty space on the right
-    // and vertically (the row is thin). asymmetric = {top, left, bottom, right}.
-    rect = UIEdgeInsetsInsetRect(rect, UIEdgeInsetsMake(-8.0, -4.0, -8.0, -10.0));
-    CGPoint pt = [touch locationInView:containerView];
-    return CGRectContainsPoint(rect, pt);
+// Padded hit rect for a node in containerView coords, or CGRectNull. Works for
+// layer-backed nodes. Padding is modest and roughly symmetric: the info icons —
+// score, %, comments, age, edited — sit right next to each other, so generous
+// padding would let them steal each other's taps; overlaps are broken by
+// nearest-center in ApolloInfoNodeHitAtPoint.
+static CGRect ApolloNodeHitRect(ApolloASDisplayNode *node, UIView *containerView) {
+    if (!node || node.isHidden || !containerView) return CGRectNull;
+    CALayer *layer = nil;
+    @try { layer = node.layer; } @catch (__unused id e) {}
+    if (!layer || !containerView.layer) return CGRectNull;
+    CGRect rect = [layer convertRect:layer.bounds toLayer:containerView.layer];
+    if (CGRectIsEmpty(rect) || CGRectIsNull(rect) || CGRectIsInfinite(rect)) return CGRectNull;
+    return UIEdgeInsetsInsetRect(rect, UIEdgeInsetsMake(-9.0, -7.0, -9.0, -7.0));
 }
 
-// Resolves the timestamp node for a cell. Comment cells expose ageNode
-// directly; post-style cells embed PostInfoNode which holds ageButtonNode.
+// Resolves the timestamp node. Comment cells expose ageNode directly; post-style
+// cells embed PostInfoNode.ageButtonNode.
 static ApolloASDisplayNode *ApolloAgeDisplayNodeForCell(id cell) {
     if (!cell) return nil;
-
     ApolloASDisplayNode *direct = ApolloIvarValueByName(cell, "ageNode");
     if (direct) return direct;
-
     id postInfoNode = ApolloIvarValueByName(cell, "postInfoNode");
-    if (postInfoNode) {
-        ApolloASDisplayNode *ageButtonNode = ApolloIvarValueByName(postInfoNode, "ageButtonNode");
-        if (ageButtonNode) return ageButtonNode;
-    }
-    return nil;
+    return postInfoNode ? ApolloIvarValueByName(postInfoNode, "ageButtonNode") : nil;
 }
 
-// Idempotent.
-static void ApolloInstallAgeTapOnCell(id cell, SEL handler) {
+// The "% Upvoted" smiley — post/comments-header only (PostInfoNode); nil elsewhere.
+static ApolloASDisplayNode *ApolloPercentageDisplayNodeForCell(id cell) {
+    id postInfoNode = ApolloIvarValueByName(cell, "postInfoNode");
+    return postInfoNode ? ApolloIvarValueByName(postInfoNode, "percentageLikedButtonNode") : nil;
+}
+
+// The edited pencil. Comment cells expose editedIndicatorNode; post-style cells
+// embed PostInfoNode.editedButtonNode.
+static ApolloASDisplayNode *ApolloEditedDisplayNodeForCell(id cell) {
+    ApolloASDisplayNode *direct = ApolloIvarValueByName(cell, "editedIndicatorNode");
+    if (direct) return direct;
+    id postInfoNode = ApolloIvarValueByName(cell, "postInfoNode");
+    return postInfoNode ? ApolloIvarValueByName(postInfoNode, "editedButtonNode") : nil;
+}
+
+// Which info icon a point (in cellView coords) lands on — age / % / edited —
+// choosing the nearest center when padded regions overlap. Sets *outKind; nil if none.
+static ApolloASDisplayNode *ApolloInfoNodeHitAtPoint(id cell, UIView *cellView, CGPoint pt, ApolloInfoKind *outKind) {
+    if (!cellView) return nil;
+    struct { ApolloInfoKind kind; ApolloASDisplayNode *node; } cands[] = {
+        { ApolloInfoKindAge,        ApolloAgeDisplayNodeForCell(cell) },
+        { ApolloInfoKindPercentage, ApolloPercentageDisplayNodeForCell(cell) },
+        { ApolloInfoKindEdited,     ApolloEditedDisplayNodeForCell(cell) },
+    };
+    ApolloASDisplayNode *best = nil; ApolloInfoKind bestKind = ApolloInfoKindAge; CGFloat bestDist = CGFLOAT_MAX;
+    for (size_t i = 0; i < sizeof(cands) / sizeof(cands[0]); i++) {
+        CGRect rect = ApolloNodeHitRect(cands[i].node, cellView);
+        if (CGRectIsNull(rect) || !CGRectContainsPoint(rect, pt)) continue;
+        CGFloat d = fabs(pt.x - CGRectGetMidX(rect));
+        if (d < bestDist) { bestDist = d; best = cands[i].node; bestKind = cands[i].kind; }
+    }
+    if (best && outKind) *outKind = bestKind;
+    return best;
+}
+
+// Idempotent. cancelsTouchesInView swallows the touch so the native % / edited
+// button actions never also fire — we present the detail ourselves (or nothing).
+static void ApolloInstallInfoTapOnCell(id cell, SEL handler) {
     if (!cell) return;
     if (objc_getAssociatedObject(cell, kApolloAgeTapGestureKey)) return;
 
@@ -288,63 +329,46 @@ static void ApolloInstallAgeTapOnCell(id cell, SEL handler) {
     [cellView addGestureRecognizer:tap];
 }
 
-// Only acts on our own gesture; defers to other delegate-routed gestures.
-static BOOL ApolloAgeTapShouldReceiveTouch(id cell, UIGestureRecognizer *gr, UITouch *touch) {
+// Only acts on our own gesture; claims a touch only when it lands on one of the
+// three info icons (% upvoted / timestamp / edited).
+static BOOL ApolloInfoTapShouldReceiveTouch(id cell, UIGestureRecognizer *gr, UITouch *touch) {
     if (!objc_getAssociatedObject(gr, kApolloAgeTapMarkerKey)) return YES;
+    UIView *cellView = nil;
+    @try { cellView = [(ApolloASDisplayNode *)cell view]; } @catch (__unused id e) {}
+    if (!cellView) return NO;
+    return ApolloInfoNodeHitAtPoint(cell, cellView, [touch locationInView:cellView], NULL) != nil;
+}
+
+static void ApolloInfoTapFired(id cell, UITapGestureRecognizer *tap) {
+    if (tap.state != UIGestureRecognizerStateRecognized) return;
+    // Both Popup and Overlay off: these icons are inert. The gesture still
+    // recognizes (cancelsTouchesInView == YES), so the tap is swallowed and
+    // nothing happens — no popup/overlay, and the native % / edited alerts are
+    // suppressed too.
+    if (!sInfoRowPopupMode && !sInfoRowOverlayMode) return;
 
     UIView *cellView = nil;
     @try { cellView = [(ApolloASDisplayNode *)cell view]; } @catch (__unused id e) {}
-    ApolloASDisplayNode *ageNode = ApolloAgeDisplayNodeForCell(cell);
-    return ApolloTouchHitsNode(ageNode, cellView, touch);
-}
+    if (!cellView) return;
 
-static void ApolloAgeTapFired(id cell, UITapGestureRecognizer *tap) {
-    if (tap.state != UIGestureRecognizerStateRecognized) return;
-    // Both Info Row timestamp modes OFF: the age is inert. The gesture still
-    // recognizes (cancelsTouchesInView == YES), so the tap is swallowed and
-    // nothing happens — no popup/overlay, and no fall-through post-open (this
-    // region never opened the post to begin with).
-    if (!sInfoRowTapTimestamp && !sInfoRowTapTimestampOverlay) return;
+    ApolloInfoKind kind = ApolloInfoKindAge;
+    ApolloASDisplayNode *node = ApolloInfoNodeHitAtPoint(cell, cellView, [tap locationInView:cellView], &kind);
+    if (!node) return;
 
-    // Comment cells carry an RDKComment; everything else is a post (RDKLink).
-    RDKComment *comment = ApolloIvarValueByName(cell, "comment");
-    NSDate *date = nil;
-    BOOL isComment = NO;
-    if (comment) {
-        NSDate *d = comment.createdUTC;
-        if ([d isKindOfClass:[NSDate class]]) {
-            date = d;
-            isComment = YES;
-        }
+    UIWindow *window = cellView.window;
+    CGRect anchor = CGRectNull;
+    CALayer *nl = nil;
+    @try { nl = node.layer; } @catch (__unused id e) {}
+    if (nl && window) {
+        @try { anchor = [nl convertRect:nl.bounds toLayer:window.layer]; } @catch (__unused id e) {}
     }
-    if (!date) {
-        RDKLink *link = ApolloIvarValueByName(cell, "link");
-        NSDate *d = link.createdUTC;
-        if ([d isKindOfClass:[NSDate class]]) date = d;
-    }
-    if (!date) return;
 
-    // Match the vote buttons' native feedback: a light tick acknowledging the tap.
-    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
-
-    if (sInfoRowTapTimestampOverlay) {
-        // Transient overlay just above the age node.
-        UIView *cellView = nil;
-        @try { cellView = [(ApolloASDisplayNode *)cell view]; } @catch (__unused id e) {}
-        ApolloASDisplayNode *ageNode = ApolloAgeDisplayNodeForCell(cell);
-        UIWindow *window = cellView.window;
-        CGRect anchor = CGRectZero;
-        if (ageNode && ageNode.layer && window) {
-            @try { anchor = [ageNode.layer convertRect:ageNode.layer.bounds toLayer:window.layer]; }
-            @catch (__unused id e) {}
-        }
-        if (window && !CGRectIsEmpty(anchor) && !CGRectIsNull(anchor)) {
-            ApolloPresentTimeOverlay(date, anchor, window, isComment);
-            return;
-        }
-        // Fall back to the popup if we can't resolve an anchor, so the tap isn't lost.
+    id link = ApolloIvarValueByName(cell, "link");
+    id comment = ApolloIvarValueByName(cell, "comment");
+    if (ApolloPresentInfoDetail(kind, link, comment, anchor, window)) {
+        // Match the vote buttons' native feedback: a light tick on the tap.
+        [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
     }
-    ApolloPresentCreatedAtAlert(date, (ApolloASDisplayNode *)cell, isComment);
 }
 
 // MARK: - Hooks
@@ -353,17 +377,17 @@ static void ApolloAgeTapFired(id cell, UITapGestureRecognizer *tap) {
 
 - (void)didLoad {
     %orig;
-    ApolloInstallAgeTapOnCell(self, @selector(apollo_ageTapFired:));
+    ApolloInstallInfoTapOnCell(self, @selector(apollo_infoTapFired:));
 }
 
 %new
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
-    return ApolloAgeTapShouldReceiveTouch(self, gestureRecognizer, touch);
+    return ApolloInfoTapShouldReceiveTouch(self, gestureRecognizer, touch);
 }
 
 %new
-- (void)apollo_ageTapFired:(UITapGestureRecognizer *)tap {
-    ApolloAgeTapFired(self, tap);
+- (void)apollo_infoTapFired:(UITapGestureRecognizer *)tap {
+    ApolloInfoTapFired(self, tap);
 }
 
 %end
@@ -372,17 +396,17 @@ static void ApolloAgeTapFired(id cell, UITapGestureRecognizer *tap) {
 
 - (void)didLoad {
     %orig;
-    ApolloInstallAgeTapOnCell(self, @selector(apollo_ageTapFired:));
+    ApolloInstallInfoTapOnCell(self, @selector(apollo_infoTapFired:));
 }
 
 %new
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
-    return ApolloAgeTapShouldReceiveTouch(self, gestureRecognizer, touch);
+    return ApolloInfoTapShouldReceiveTouch(self, gestureRecognizer, touch);
 }
 
 %new
-- (void)apollo_ageTapFired:(UITapGestureRecognizer *)tap {
-    ApolloAgeTapFired(self, tap);
+- (void)apollo_infoTapFired:(UITapGestureRecognizer *)tap {
+    ApolloInfoTapFired(self, tap);
 }
 
 %end
@@ -391,17 +415,17 @@ static void ApolloAgeTapFired(id cell, UITapGestureRecognizer *tap) {
 
 - (void)didLoad {
     %orig;
-    ApolloInstallAgeTapOnCell(self, @selector(apollo_ageTapFired:));
+    ApolloInstallInfoTapOnCell(self, @selector(apollo_infoTapFired:));
 }
 
 %new
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
-    return ApolloAgeTapShouldReceiveTouch(self, gestureRecognizer, touch);
+    return ApolloInfoTapShouldReceiveTouch(self, gestureRecognizer, touch);
 }
 
 %new
-- (void)apollo_ageTapFired:(UITapGestureRecognizer *)tap {
-    ApolloAgeTapFired(self, tap);
+- (void)apollo_infoTapFired:(UITapGestureRecognizer *)tap {
+    ApolloInfoTapFired(self, tap);
 }
 
 %end
@@ -410,17 +434,17 @@ static void ApolloAgeTapFired(id cell, UITapGestureRecognizer *tap) {
 
 - (void)didLoad {
     %orig;
-    ApolloInstallAgeTapOnCell(self, @selector(apollo_ageTapFired:));
+    ApolloInstallInfoTapOnCell(self, @selector(apollo_infoTapFired:));
 }
 
 %new
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
-    return ApolloAgeTapShouldReceiveTouch(self, gestureRecognizer, touch);
+    return ApolloInfoTapShouldReceiveTouch(self, gestureRecognizer, touch);
 }
 
 %new
-- (void)apollo_ageTapFired:(UITapGestureRecognizer *)tap {
-    ApolloAgeTapFired(self, tap);
+- (void)apollo_infoTapFired:(UITapGestureRecognizer *)tap {
+    ApolloInfoTapFired(self, tap);
 }
 
 %end

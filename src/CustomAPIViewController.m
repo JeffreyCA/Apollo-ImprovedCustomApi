@@ -578,20 +578,22 @@ typedef NS_ENUM(NSInteger, Tag) {
     }
 }
 
-// One-line state summary shown under the "Info Row" disclosure row. The
-// Translation switch only counts as "off" when a marker is actually available
-// (otherwise it's faded, not a deliberate choice), so the summary never claims
-// the user turned something off that they couldn't reach.
+// One-line state summary shown under the "Info Row" disclosure row: magnifier
+// state, the detail-icon display style (Popups / Overlays / off), then any action
+// icons the user turned off. Translation only counts as "off" when a marker is
+// actually available (otherwise it's faded, not a deliberate choice).
 - (NSString *)infoRowSummaryText {
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    [parts addObject:sIconRowMagnifier ? @"Magnifier on" : @"Magnifier off"];
+    [parts addObject:sInfoRowOverlayMode ? @"Overlays" : sInfoRowPopupMode ? @"Popups" : @"Info taps off"];
+
     NSMutableArray<NSString *> *off = [NSMutableArray array];
     if (!sInfoRowTapUpvote) [off addObject:@"Upvote"];
     if (!sInfoRowTapComments) [off addObject:@"Comments"];
-    if (!sInfoRowTapTimestamp && !sInfoRowTapTimestampOverlay) [off addObject:@"Timestamp"];
     BOOL translationAvailable = sTapToTranslate || sShowTranslationTitleDetails || sShowTranslationDetails;
     if (translationAvailable && !sInfoRowTapTranslation) [off addObject:@"Translation"];
-    NSString *taps = off.count == 0 ? @"all taps on"
-                                    : [NSString stringWithFormat:@"%@ off", [off componentsJoinedByString:@", "]];
-    return [NSString stringWithFormat:@"%@ · %@", sIconRowMagnifier ? @"Magnifier on" : @"Magnifier off", taps];
+    if (off.count) [parts addObject:[NSString stringWithFormat:@"%@ off", [off componentsJoinedByString:@", "]]];
+    return [parts componentsJoinedByString:@" · "];
 }
 
 - (UITableViewCell *)infoRowCellForTableView:(UITableView *)tableView {

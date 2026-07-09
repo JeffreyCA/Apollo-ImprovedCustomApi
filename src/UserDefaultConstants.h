@@ -116,12 +116,13 @@ static NSString *const UDKeyIconRowMagnifier = @"IconRowMagnifier";
 //   Upvote     — the ↑ score (activated via the loupe; % ratio is unaffected).
 //   Comments   — the direct comment-bubble tap that jumps to the comments; OFF
 //                reverts to a stock tap (opens the post at the top).
-//   Timestamp  — the age tap (ApolloCreatedAtAlert.xm). Two mutually-exclusive
-//                modes: InfoRowTapTimestamp shows the dismissable "Posted … Ago"
-//                popup alert; InfoRowTapTimestampOverlay instead flashes a small
-//                theme-bordered overlay just above the timestamp that fades on its
-//                own after ~2s. At most one is on; both off = the age is inert
-//                (no popup/overlay, no post-open — it never opened the post).
+//   Popup/Overlay — the display style shared by the three tappable "info" icons:
+//                % upvoted (smiley), timestamp (age), and edited (pencil), all of
+//                which reveal detail (a ratio or an absolute date). InfoRowPopupMode
+//                shows the dismissable alert; InfoRowOverlayMode instead flashes a
+//                small theme-bordered card just above the icon that fades on its own
+//                after ~2s. Mutually exclusive; both off = those three icons are
+//                inert (the % / edited native popups are taken over and suppressed).
 //   Translation— the 🌐 marker tap beside a post's stats (feed title + comments
 //                header) that toggles the title translation (ApolloTranslation.xm,
 //                ApolloFeedMarkerTapTarget). Takes priority over Tap to Translate
@@ -131,8 +132,8 @@ static NSString *const UDKeyIconRowMagnifier = @"IconRowMagnifier";
 //                marker can appear (Tap to Translate or a Details toggle enabled).
 static NSString *const UDKeyInfoRowTapUpvote = @"InfoRowTapUpvote";
 static NSString *const UDKeyInfoRowTapComments = @"InfoRowTapComments";
-static NSString *const UDKeyInfoRowTapTimestamp = @"InfoRowTapTimestamp";                 // popup alert mode
-static NSString *const UDKeyInfoRowTapTimestampOverlay = @"InfoRowTapTimestampOverlay";   // transient overlay mode
+static NSString *const UDKeyInfoRowPopupMode = @"InfoRowPopupMode";       // %/time/edited → popup alert
+static NSString *const UDKeyInfoRowOverlayMode = @"InfoRowOverlayMode";   // %/time/edited → transient overlay
 static NSString *const UDKeyInfoRowTapTranslation = @"InfoRowTapTranslation";
 static NSString *const UDKeyLiveCommentsFollow = @"LiveCommentsFollow";
 // Render image URLs (i.redd.it, preview.redd.it, i.imgur.com, generic .png/.jpg/.jpeg/.webp)

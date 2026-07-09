@@ -79,18 +79,22 @@ extern BOOL sKeepSearchBarInPlace;
 // magnifier loupe: slide to pick an icon, release to activate it (upvote /
 // comments / posted / % upvoted / translation). See ApolloStatsRowTouch.xm.
 extern BOOL sIconRowMagnifier;
-// Per-icon info-row tap switches (Info Row settings sub-screen). Each defaults
-// ON. OFF makes that icon inert on a direct tap and excludes it from the
-// magnifier loupe. sInfoRowTapTranslation governs the 🌐 marker beside a post's
-// stats (feed title + comments header) and takes priority over Tap to Translate
-// / title Details: with those on, OFF still suppresses that marker's tap. It
-// does NOT touch the inline "Translate" affordance under comment/self-post body
-// text (that stays governed by Translation settings).
+// Info Row settings sub-screen switches. Disabled icons still appear in the
+// magnifier loupe but do nothing on release; a disabled direct tap does nothing.
+// sInfoRowTapTranslation governs the 🌐 marker beside a post's stats (feed title
+// + comments header) and takes priority over Tap to Translate / title Details;
+// it does NOT touch the inline "Translate" affordance under comment/self-post
+// body text (that stays in Translation settings).
 // See ApolloStatsRowTouch.xm, ApolloCreatedAtAlert.xm, ApolloTranslation.xm.
 extern BOOL sInfoRowTapUpvote;
 extern BOOL sInfoRowTapComments;
-extern BOOL sInfoRowTapTimestamp;          // timestamp tap → dismissable popup alert
-extern BOOL sInfoRowTapTimestampOverlay;   // timestamp tap → transient auto-fading overlay (mutually exclusive with the popup)
+// The tappable "info" icons — % upvoted, timestamp, and edited — all share one
+// display style, chosen by these two mutually-exclusive toggles: Popup = the
+// dismissable alert; Overlay = the small auto-fading card above the icon. Both
+// off = those three icons do nothing when tapped (or when picked in the loupe).
+// Popup defaults ON; the settings UI + a load-time clamp keep them exclusive.
+extern BOOL sInfoRowPopupMode;
+extern BOOL sInfoRowOverlayMode;
 extern BOOL sInfoRowTapTranslation;
 // When ON (default), Live Update comment sort keeps the newest comments visible at the top
 // while you're at the top, and shows a "N new comments" jump pill when you've scrolled down

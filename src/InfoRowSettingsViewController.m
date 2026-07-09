@@ -14,8 +14,8 @@ typedef NS_ENUM(NSInteger, ApolloIRSection) {
 typedef NS_ENUM(NSInteger, ApolloIRActionRow) {
     ApolloIRActionRowUpvote = 0,
     ApolloIRActionRowComments,
-    ApolloIRActionRowTimestampPopup,
-    ApolloIRActionRowTimestampOverlay,
+    ApolloIRActionRowPopup,     // %/time/edited → popup alert
+    ApolloIRActionRowOverlay,   // %/time/edited → transient overlay
     ApolloIRActionRowTranslation,
     ApolloIRActionRowCount,
 };
@@ -97,7 +97,7 @@ typedef NS_ENUM(NSInteger, ApolloIRActionRow) {
         case ApolloIRSectionMagnify:
             return @"Press and hold a post's info row to zoom the icons in a glass card, then slide to the one you want and release to tap it. Icons turned off below still show here, but releasing on one does nothing.";
         case ApolloIRSectionActions: {
-            NSString *base = @"Choose which info-row icons respond to a tap. When an icon is off, tapping it does nothing — and it still appears in the magnifier, but selecting it there does nothing either.\n\nComments still opens the post when off — it just no longer jumps straight to the comments.\n\nTimestamp Popup and Timestamp Overlay are two ways to show a post or comment's full date & time; you can use one or neither.";
+            NSString *base = @"Choose what the info-row icons do when tapped. When something is off, tapping it does nothing — and it still appears in the magnifier, but selecting it there does nothing either.\n\nComments still opens the post when off — it just no longer jumps straight to the comments.\n\nPopup and Overlay set how the three detail icons — % upvoted, timestamp, and edited — reveal their info: a dismissable popup, or a small card that fades on its own. Pick one style or neither (neither = those icons do nothing).";
             if ([self translationMarkerAvailable]) {
                 return [base stringByAppendingString:@"\n\nTranslation covers the 🌐 marker beside a post's stats. It takes priority over Tap to Translate and the Details toggles, so turning it off keeps that marker visible but makes tapping it do nothing. (The Translate line under comment text is separate — control it in Translation settings.)"];
             }
@@ -129,20 +129,20 @@ typedef NS_ENUM(NSInteger, ApolloIRActionRow) {
                                       on:sInfoRowTapComments
                                  enabled:YES
                                   action:@selector(commentsSwitchToggled:)];
-        case ApolloIRActionRowTimestampPopup:
-            // Mutually exclusive with the overlay mode below — faded while it's on.
-            return [self switchCellLabel:@"Timestamp Popup"
-                                  detail:@"Tap a post or comment's age to show the full date and time in a popup you tap to dismiss."
-                                      on:(sInfoRowTapTimestamp && !sInfoRowTapTimestampOverlay)
-                                 enabled:!sInfoRowTapTimestampOverlay
-                                  action:@selector(timestampPopupSwitchToggled:)];
-        case ApolloIRActionRowTimestampOverlay:
-            // Mutually exclusive with the popup mode above — faded while it's on.
-            return [self switchCellLabel:@"Timestamp Overlay"
-                                  detail:@"Tap the age to briefly flash the full date and time just above it — it fades away on its own."
-                                      on:(sInfoRowTapTimestampOverlay && !sInfoRowTapTimestamp)
-                                 enabled:!sInfoRowTapTimestamp
-                                  action:@selector(timestampOverlaySwitchToggled:)];
+        case ApolloIRActionRowPopup:
+            // Mutually exclusive with Overlay below — faded while it's on.
+            return [self switchCellLabel:@"Popup"
+                                  detail:@"Tap the % upvoted, timestamp, or edited icon to show its detail in a popup you tap to dismiss."
+                                      on:(sInfoRowPopupMode && !sInfoRowOverlayMode)
+                                 enabled:!sInfoRowOverlayMode
+                                  action:@selector(popupModeSwitchToggled:)];
+        case ApolloIRActionRowOverlay:
+            // Mutually exclusive with Popup above — faded while it's on.
+            return [self switchCellLabel:@"Overlay"
+                                  detail:@"Show that detail in a small card just above the icon instead — it fades away on its own."
+                                      on:(sInfoRowOverlayMode && !sInfoRowPopupMode)
+                                 enabled:!sInfoRowPopupMode
+                                  action:@selector(overlayModeSwitchToggled:)];
         case ApolloIRActionRowTranslation: {
             BOOL available = [self translationMarkerAvailable];
             return [self switchCellLabel:@"Translation"
@@ -172,25 +172,25 @@ typedef NS_ENUM(NSInteger, ApolloIRActionRow) {
     [[NSUserDefaults standardUserDefaults] setBool:sInfoRowTapComments forKey:UDKeyInfoRowTapComments];
 }
 
-// The two timestamp modes are mutually exclusive: turning one on turns the other
-// off, and each row is faded while the other is on (see cellForRow). reloadData
+// Popup and Overlay are mutually exclusive: turning one on turns the other off,
+// and each row is faded while the other is on (see cellForRow). reloadData
 // refreshes the faded state.
-- (void)timestampPopupSwitchToggled:(UISwitch *)sw {
-    sInfoRowTapTimestamp = sw.on;
-    if (sw.on) sInfoRowTapTimestampOverlay = NO;
-    [self persistTimestampModes];
+- (void)popupModeSwitchToggled:(UISwitch *)sw {
+    sInfoRowPopupMode = sw.on;
+    if (sw.on) sInfoRowOverlayMode = NO;
+    [self persistInfoModes];
 }
 
-- (void)timestampOverlaySwitchToggled:(UISwitch *)sw {
-    sInfoRowTapTimestampOverlay = sw.on;
-    if (sw.on) sInfoRowTapTimestamp = NO;
-    [self persistTimestampModes];
+- (void)overlayModeSwitchToggled:(UISwitch *)sw {
+    sInfoRowOverlayMode = sw.on;
+    if (sw.on) sInfoRowPopupMode = NO;
+    [self persistInfoModes];
 }
 
-- (void)persistTimestampModes {
+- (void)persistInfoModes {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    [d setBool:sInfoRowTapTimestamp forKey:UDKeyInfoRowTapTimestamp];
-    [d setBool:sInfoRowTapTimestampOverlay forKey:UDKeyInfoRowTapTimestampOverlay];
+    [d setBool:sInfoRowPopupMode forKey:UDKeyInfoRowPopupMode];
+    [d setBool:sInfoRowOverlayMode forKey:UDKeyInfoRowOverlayMode];
     [self.tableView reloadData];
 }
 
