@@ -598,12 +598,30 @@ NSString *ApolloDeletedCommentsRedditBodyHTML(NSString *body) {
     return ApolloDeletedCommentsEscapeHTML(html);
 }
 
-static void ApolloDeletedCommentsSetRecoveredBody(NSMutableDictionary *data, NSString *body) {
+// Prefer the archive's OWN markdown-rendered HTML (Arctic md2html=true, or Reddit) over the
+// local regex converter, which only knows http(s) links and **bold** and silently drops
+// italics, blockquotes, lists, code, strikethrough, superscript, spoilers, etc. Arctic's
+// body_html is raw tags with entity-escaped content (i.e. the post-unescape form). Apollo
+// unescapes a comment's body_html exactly once before parsing, so we escape it a single time
+// here to match Reddit's own body_html wire format. Falls back to the regex converter when the
+// archive has no usable HTML.
+static NSString *ApolloDeletedCommentsModelBodyHTMLForArchive(NSDictionary *archived, NSString *fallbackBody) {
+    NSString *archivedHTML = [archived[@"body_html"] isKindOfClass:[NSString class]] ? archived[@"body_html"] : nil;
+    if (archivedHTML.length > 0) {
+        NSString *archivedText = ApolloDeletedCommentsUnescapedHTMLText(archivedHTML);
+        if (!ApolloDeletedCommentsBodyLooksDeleted(archivedText)) {
+            return ApolloDeletedCommentsEscapeHTML(archivedHTML);
+        }
+    }
+    return ApolloDeletedCommentsRedditBodyHTML(fallbackBody);
+}
+
+static void ApolloDeletedCommentsSetRecoveredBody(NSMutableDictionary *data, NSDictionary *archived, NSString *body) {
     NSString *trimmed = ApolloDeletedCommentsTrimmedString(body);
     if (trimmed.length == 0) return;
 
     data[@"body"] = trimmed;
-    NSString *bodyHTML = ApolloDeletedCommentsRedditBodyHTML(trimmed);
+    NSString *bodyHTML = ApolloDeletedCommentsModelBodyHTMLForArchive(archived, trimmed);
     if (bodyHTML.length > 0) data[@"body_html"] = bodyHTML;
 }
 
@@ -646,7 +664,7 @@ BOOL ApolloDeletedCommentsApplyRecoveredArchivedCommentToObject(id comment, NSDi
     if (fullName.length == 0 || body.length == 0 || ApolloDeletedCommentsBodyLooksDeleted(body)) return NO;
 
     NSString *author = [archived[@"author"] isKindOfClass:[NSString class]] ? archived[@"author"] : nil;
-    NSString *bodyHTML = ApolloDeletedCommentsRedditBodyHTML(body);
+    NSString *bodyHTML = ApolloDeletedCommentsModelBodyHTMLForArchive(archived, body);
     NSString *resolvedReason = reason.length > 0 ? reason : ApolloDeletedCommentsReasonForArchived(archived);
 
     ApolloDeletedCommentsSetObjectValue(comment, @selector(setBody:), body);
@@ -917,9 +935,18 @@ static void ApolloDeletedCommentsFetchArcticComments(NSString *linkFullName, voi
     components.queryItems = @[
         [NSURLQueryItem queryItemWithName:@"link_id" value:linkFullName],
         [NSURLQueryItem queryItemWithName:@"limit" value:@"5000"],
-        [NSURLQueryItem queryItemWithName:@"start_depth" value:@"20"],
-        [NSURLQueryItem queryItemWithName:@"start_breadth" value:@"50"],
-        [NSURLQueryItem queryItemWithName:@"md2html" value:@"false"],
+        // Raise the collapse thresholds. Arctic folds comments beyond start_depth /
+        // start_breadth into bodyless "kind: more" stubs, and those can never be
+        // recovered — on a popular post with many top-level comments the 51st+ (at the
+        // old breadth=50) or anything past depth 20 silently dropped out. Keep it capped
+        // overall by limit=5000 so mega-threads stay bounded.
+        [NSURLQueryItem queryItemWithName:@"start_depth" value:@"50"],
+        [NSURLQueryItem queryItemWithName:@"start_breadth" value:@"500"],
+        // Have Arctic render markdown -> HTML server-side. Its body_html then carries the
+        // full formatting (links, bold, italics, quotes, lists, code, strikethrough) that
+        // we feed to Apollo's native renderer; the old local regex converter only produced
+        // links + bold.
+        [NSURLQueryItem queryItemWithName:@"md2html" value:@"true"],
     ];
     NSURL *url = components.URL;
     if (!url) {
@@ -931,15 +958,45 @@ static void ApolloDeletedCommentsFetchArcticComments(NSString *linkFullName, voi
     urlRequest.timeoutInterval = 10.0;
 
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:urlRequest completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        NSDictionary *comments = nil;
         NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
         ApolloDeletedCommentsRecordArcticResponse(http, error);
-        if (!error && data.length > 0) {
-            if (!http || (http.statusCode >= 200 && http.statusCode < 300)) {
-                id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+
+        // Separate a GENUINE tree (data is an array — possibly empty) from a TRANSIENT
+        // failure: a network error, a non-2xx status, or Arctic's app-level throttle body
+        // {"data":null,"error":"Timeout. Maybe slow down a bit"} which it returns with
+        // HTTP 200. A transient failure must NOT be cached as an empty result: an empty
+        // cache entry is non-nil, so CachedArcticComments serves it for the whole empty-TTL
+        // window and both FetchArcticComments and WarmArcticCacheForLink treat that as
+        // "already fetched" — permanently masking comments that DO exist in the archive
+        // until the entry expires. That is the "same comments repeatedly fail to load" bug.
+        BOOL transient = NO;
+        NSDictionary *comments = nil;
+        if (error || (http && !(http.statusCode >= 200 && http.statusCode < 300)) || data.length == 0) {
+            transient = YES;
+        } else {
+            id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            BOOL hasAppError = [root isKindOfClass:[NSDictionary class]] &&
+                               ((NSDictionary *)root)[@"error"] &&
+                               ((NSDictionary *)root)[@"error"] != [NSNull null];
+            BOOL dataIsArray = [root isKindOfClass:[NSDictionary class]] &&
+                               [((NSDictionary *)root)[@"data"] isKindOfClass:[NSArray class]];
+            if (hasAppError || !dataIsArray) {
+                transient = YES;
+                // The app-level throttle comes back as HTTP 200, so RecordArcticResponse
+                // did not start a cooldown — back off here so we stop hammering.
+                if (hasAppError) ApolloDeletedCommentsArcticBeginCooldown(ApolloDeletedCommentsArcticErrorCooldown, @"arctic app error");
+            } else {
                 comments = ApolloDeletedCommentsArcticCommentMapFromRoot(root);
             }
         }
+
+        if (transient) {
+            // Leave the cache untouched so the next thread observation retries (after any
+            // cooldown); just release the waiters so nothing hangs.
+            ApolloDeletedCommentsFinishInflightArcticFetch(linkFullName, @{});
+            return;
+        }
+
         ApolloDeletedCommentsStoreArcticComments(linkFullName, comments ?: @{}, comments.count > 0 ? ApolloDeletedCommentsArcticSuccessCacheTTL : ApolloDeletedCommentsArcticEmptyCacheTTL);
         ApolloDeletedCommentsFinishInflightArcticFetch(linkFullName, comments ?: @{});
     }];
@@ -996,7 +1053,7 @@ static NSMutableDictionary *ApolloDeletedCommentsThingFromArchived(NSDictionary 
     data[@"id"] = identifier;
     data[@"name"] = fullName ?: [@"t1_" stringByAppendingString:identifier];
     data[@"author"] = author.length > 0 ? author : @"[deleted]";
-    ApolloDeletedCommentsSetRecoveredBody(data, body);
+    ApolloDeletedCommentsSetRecoveredBody(data, archived, body);
     data[@"parent_id"] = [archived[@"parent_id"] isKindOfClass:[NSString class]] ? archived[@"parent_id"] : @"";
     data[@"link_id"] = [archived[@"link_id"] isKindOfClass:[NSString class]] ? archived[@"link_id"] : @"";
     data[@"subreddit"] = [archived[@"subreddit"] isKindOfClass:[NSString class]] ? archived[@"subreddit"] : @"";
@@ -1057,7 +1114,7 @@ static NSUInteger ApolloDeletedCommentsPatchRedditJSONNode(id node, NSDictionary
                 if (fullName.length > 0) {
                     ApolloDeletedCommentsStoreArchivedCommentsByFullName(@{fullName: archived});
                 }
-                ApolloDeletedCommentsSetRecoveredBody(data, archivedBody);
+                ApolloDeletedCommentsSetRecoveredBody(data, archived, archivedBody);
                 if (author.length > 0) data[@"author"] = author;
                 if ([archived[@"created_utc"] respondsToSelector:@selector(doubleValue)]) data[@"created_utc"] = archived[@"created_utc"];
                 if ([archived[@"score"] respondsToSelector:@selector(integerValue)]) data[@"score"] = archived[@"score"];

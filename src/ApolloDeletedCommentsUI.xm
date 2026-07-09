@@ -1057,6 +1057,91 @@ static BOOL ApolloDeletedCommentsBodyAttributesNeedRefresh(NSDictionary *attribu
     return NO;
 }
 
+static UIFont *ApolloDeletedCommentsFontByAddingTraits(UIFont *base, UIFontDescriptorSymbolicTraits traits) {
+    if (![base isKindOfClass:[UIFont class]]) base = [UIFont systemFontOfSize:15.0];
+    UIFontDescriptor *descriptor = [base.fontDescriptor fontDescriptorWithSymbolicTraits:(base.fontDescriptor.symbolicTraits | traits)];
+    if (!descriptor) return base;
+    UIFont *result = [UIFont fontWithDescriptor:descriptor size:base.pointSize];
+    return result ?: base;
+}
+
+static UIColor *ApolloDeletedCommentsBodyLinkColor(void) {
+    for (UIWindow *window in ApolloAllWindows()) {
+        UIColor *tint = window.tintColor;
+        if ([tint isKindOfClass:[UIColor class]]) return tint;
+    }
+    return [UIColor systemBlueColor];
+}
+
+// Render a recovered comment's raw markdown body into an attributed string so links, bold,
+// italics, strikethrough and inline code display as formatting instead of literal
+// "[text](url)" / "**text**" source (issue #620 D). Inline Reddit images can't be reproduced
+// here (they need Apollo's native image nodes and media_metadata the archive rarely carries),
+// but the far more common text markdown now renders. Each pass rewrites matches right-to-left
+// so ranges stay valid as the string shrinks.
+static NSAttributedString *ApolloDeletedCommentsAttributedStringFromMarkdown(NSString *markdown, NSDictionary *baseAttributes) {
+    NSDictionary *base = [baseAttributes isKindOfClass:[NSDictionary class]] ? baseAttributes : @{};
+    NSMutableAttributedString *attr = [[NSMutableAttributedString alloc] initWithString:(markdown ?: @"") attributes:base];
+    if (attr.length == 0) return attr;
+
+    UIFont *baseFont = base[NSFontAttributeName];
+    if (![baseFont isKindOfClass:[UIFont class]]) baseFont = [UIFont systemFontOfSize:15.0];
+
+    NSString *(^substr)(NSRange) = ^NSString *(NSRange r) {
+        if (r.location == NSNotFound || NSMaxRange(r) > attr.string.length) return nil;
+        return [attr.string substringWithRange:r];
+    };
+
+    // 1) Links [text](http(s)://url) — capture url before the replace, keep the visible text.
+    NSRegularExpression *linkRe = [NSRegularExpression regularExpressionWithPattern:@"\\[([^\\]\\n]+?)\\]\\((https?://[^\\s)]+)\\)" options:0 error:nil];
+    UIColor *linkColor = ApolloDeletedCommentsBodyLinkColor();
+    NSArray<NSTextCheckingResult *> *linkMatches = [linkRe matchesInString:attr.string options:0 range:NSMakeRange(0, attr.string.length)];
+    for (NSInteger i = (NSInteger)linkMatches.count - 1; i >= 0; i--) {
+        NSTextCheckingResult *m = linkMatches[i];
+        NSString *text = substr([m rangeAtIndex:1]);
+        NSString *url = substr([m rangeAtIndex:2]);
+        if (text.length == 0) continue;
+        [attr replaceCharactersInRange:m.range withString:text];
+        NSRange r = NSMakeRange(m.range.location, text.length);
+        NSURL *linkURL = url.length > 0 ? [NSURL URLWithString:url] : nil;
+        if (linkURL) [attr addAttribute:NSLinkAttributeName value:linkURL range:r];
+        if (linkColor) [attr addAttribute:NSForegroundColorAttributeName value:linkColor range:r];
+    }
+
+    // Generic inline pass: replace each match with capture group 1's text and style that range.
+    void (^inlinePass)(NSString *, void (^)(NSRange)) = ^(NSString *pattern, void (^style)(NSRange)) {
+        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+        if (!re) return;
+        NSArray<NSTextCheckingResult *> *ms = [re matchesInString:attr.string options:0 range:NSMakeRange(0, attr.string.length)];
+        for (NSInteger i = (NSInteger)ms.count - 1; i >= 0; i--) {
+            NSTextCheckingResult *m = ms[i];
+            NSString *inner = substr([m rangeAtIndex:1]);
+            if (inner.length == 0) continue;
+            [attr replaceCharactersInRange:m.range withString:inner];
+            style(NSMakeRange(m.range.location, inner.length));
+        }
+    };
+
+    // 2) Inline code `code`
+    inlinePass(@"`([^`\\n]+?)`", ^(NSRange r) {
+        [attr addAttribute:NSFontAttributeName value:[UIFont monospacedSystemFontOfSize:baseFont.pointSize weight:UIFontWeightRegular] range:r];
+    });
+    // 3) Bold **text** or __text__
+    inlinePass(@"\\*\\*([^\\n]+?)\\*\\*|__([^\\n]+?)__", ^(NSRange r) {
+        [attr addAttribute:NSFontAttributeName value:ApolloDeletedCommentsFontByAddingTraits(baseFont, UIFontDescriptorTraitBold) range:r];
+    });
+    // 4) Strikethrough ~~text~~
+    inlinePass(@"~~([^\\n]+?)~~", ^(NSRange r) {
+        [attr addAttribute:NSStrikethroughStyleAttributeName value:@(NSUnderlineStyleSingle) range:r];
+    });
+    // 5) Italic *text* or _text_ (single delimiter; run last so it doesn't eat ** / __)
+    inlinePass(@"(?<![\\*_])[\\*_]([^\\*_\\n]+?)[\\*_](?![\\*_])", ^(NSRange r) {
+        [attr addAttribute:NSFontAttributeName value:ApolloDeletedCommentsFontByAddingTraits(baseFont, UIFontDescriptorTraitItalic) range:r];
+    });
+
+    return attr;
+}
+
 static NSAttributedString *ApolloDeletedCommentsBodyAttributedText(NSAttributedString *templateText, NSString *body) {
     NSMutableDictionary *attributes = ApolloDeletedCommentsBodyAttributesFromAttributedText(templateText);
     if (ApolloDeletedCommentsBodyAttributesNeedRefresh(attributes)) {
@@ -1065,7 +1150,7 @@ static NSAttributedString *ApolloDeletedCommentsBodyAttributedText(NSAttributedS
     if (!attributes) {
         attributes = ApolloDeletedCommentsDefaultBodyAttributes();
     }
-    return [[NSAttributedString alloc] initWithString:body ?: @"" attributes:attributes];
+    return ApolloDeletedCommentsAttributedStringFromMarkdown(body ?: @"", attributes);
 }
 
 static NSAttributedString *ApolloDeletedCommentsBodyTextByNormalizingFont(NSAttributedString *attributedText) {
@@ -2520,20 +2605,34 @@ static void ApolloDeletedCommentsScheduleHostLayoutRefresh(id cellNode) {
             [view setNeedsDisplay];
         }
 
-        @try {
-            if ([strongHostView isKindOfClass:[UICollectionView class]]) {
-                [(UICollectionView *)strongHostView performBatchUpdates:nil completion:nil];
-            } else if ([strongHostView isKindOfClass:[UITableView class]]) {
-                UITableView *tableView = (UITableView *)strongHostView;
-                [tableView beginUpdates];
-                [tableView endUpdates];
-            } else {
+        // Commit the deleted-cell height correction WITHOUT animation. This is an internal
+        // re-measure to pick up a taller recovered body / reason chip — NOT a user-initiated
+        // collapse or expand. Animating it makes a deleted sibling that just grew glide
+        // downward while the native collapse is animating rows upward, i.e. the "second
+        // comment goes down instead of up" wrong-direction collapse in issue #620. Suppress
+        // both the implicit UITableView row animation and the Core Animation actions so the
+        // row snaps to its correct height. Native collapse/expand animates via its own path
+        // and is untouched.
+        void (^commit)(void) = ^{
+            @try {
+                if ([strongHostView isKindOfClass:[UICollectionView class]]) {
+                    [(UICollectionView *)strongHostView performBatchUpdates:nil completion:nil];
+                } else if ([strongHostView isKindOfClass:[UITableView class]]) {
+                    UITableView *tableView = (UITableView *)strongHostView;
+                    [tableView beginUpdates];
+                    [tableView endUpdates];
+                } else {
+                    [strongHostView setNeedsLayout];
+                    [strongHostView layoutIfNeeded];
+                }
+            } @catch (__unused NSException *e) {
                 [strongHostView setNeedsLayout];
-                [strongHostView layoutIfNeeded];
             }
-        } @catch (__unused NSException *e) {
-            [strongHostView setNeedsLayout];
-        }
+        };
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        [UIView performWithoutAnimation:commit];
+        [CATransaction commit];
     });
 }
 
@@ -2752,8 +2851,17 @@ static id __attribute__((unused)) ApolloDeletedCommentsDeletedMarkdownLayoutSpec
                              sTapToRevealDeletedComments &&
                              recovered &&
                              revealed;
+    // In the default "Show" mode (no tap-to-reveal) a recovered comment would otherwise
+    // fall through to %orig, whose MarkdownNode renders the raw markdown SOURCE as literal
+    // text ("[text](url)", "**bold**") because its display nodes were built while the body
+    // was still "[removed]". Own the layout here too so we render the recovered body through
+    // our markdown-aware attributed-string builder — that's the fix for the "markdown not
+    // rendered" half of issue #620 D.
+    BOOL autoShowRecovered = ApolloDeletedCommentsFeatureActive() &&
+                             !sTapToRevealDeletedComments &&
+                             recovered;
 
-    if (!(placeholderOnly || shouldHide || revealedRecovered)) {
+    if (!(placeholderOnly || shouldHide || revealedRecovered || autoShowRecovered)) {
         return nil;
     }
 
@@ -2794,9 +2902,9 @@ static id __attribute__((unused)) ApolloDeletedCommentsDeletedMarkdownLayoutSpec
 
     NSAttributedString *original = nil;
     if (appAttributes && resolvedBody.length > 0) {
-        original = [[NSAttributedString alloc] initWithString:resolvedBody attributes:appAttributes];
+        original = ApolloDeletedCommentsAttributedStringFromMarkdown(resolvedBody, appAttributes);
     } else if (nativeAttributes && resolvedBody.length > 0) {
-        original = [[NSAttributedString alloc] initWithString:resolvedBody attributes:nativeAttributes];
+        original = ApolloDeletedCommentsAttributedStringFromMarkdown(resolvedBody, nativeAttributes);
     } else {
         original = ApolloDeletedCommentsBodyAttributedText(templateText, resolvedBody);
     }
@@ -2805,8 +2913,8 @@ static id __attribute__((unused)) ApolloDeletedCommentsDeletedMarkdownLayoutSpec
     objc_setAssociatedObject(cellNode, kApolloDeletedCommentsHiddenTextNodesKey, @[textNode], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(cellNode, kApolloDeletedCommentsHiddenTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     NSDictionary *chipAttributes = ApolloDeletedCommentsReasonChipBaseAttributes(original, cellNode);
-    if (revealedRecovered) {
-        // Show the recovered body itself.
+    if (revealedRecovered || autoShowRecovered) {
+        // Show the recovered body itself (rendered markdown), with the reason chip.
         displayText = ApolloDeletedCommentsAttributedTextWithReasonPrefix(textNode, original);
     } else if (placeholderOnly) {
         displayText = ApolloDeletedCommentsReasonChipAttributedText(ApolloDeletedCommentsReasonLabelForComment(comment),
