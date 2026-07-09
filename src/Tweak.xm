@@ -290,10 +290,16 @@ static OSStatus SecItemCopyMatching_replacement(CFDictionaryRef query, CFTypeRef
     }
 #endif
 
-    if (IsValetQuery(strippedQuery)) {
-        strippedQuery = ApolloQueryByBroadeningSynchronizable(strippedQuery);
+    OSStatus status = ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemCopyMatching_orig)((__bridge CFDictionaryRef)strippedQuery, result);
+    if (status == errSecItemNotFound && IsValetQuery(strippedQuery)) {
+        // Only fall back to the broadened (synced-included) read on a local miss, so a
+        // good local item always wins over a potentially stale synced one.
+        NSDictionary *broadened = ApolloQueryByBroadeningSynchronizable(strippedQuery);
+        if (broadened != strippedQuery) {
+            status = ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemCopyMatching_orig)((__bridge CFDictionaryRef)broadened, result);
+        }
     }
-    return ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemCopyMatching_orig)((__bridge CFDictionaryRef)strippedQuery, result);
+    return status;
 }
 
 static void *SecItemUpdate_orig;
