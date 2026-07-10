@@ -1,10 +1,12 @@
 #import "settings/ApolloSettingsSearch.h"
 
 #import <objc/runtime.h>
+#import <string.h>
 
 #import "ApolloCommon.h"
 #import "settings/ApolloSettingsRouter.h"
 #import "settings/ApolloSettingsSearchNativeIndex.h"
+#import "settings/ApolloSettingsTableViewController.h"
 
 #pragma mark - Entry model
 
@@ -48,9 +50,20 @@ static NSString *ApolloSearchTitleOfCell(UITableViewCell *cell) {
     return ApolloSearchFirstLabelText(cell.contentView);
 }
 
+static UITableView *ApolloSearchTableInView(UIView *view) {
+    if ([view isKindOfClass:[UITableView class]]) return (UITableView *)view;
+    for (UIView *subview in view.subviews) {
+        UITableView *table = ApolloSearchTableInView(subview);
+        if (table) return table;
+    }
+    return nil;
+}
+
 // The table view backing a settings screen: UITableViewController's own, a
 // "tableView" ivar (the pattern Apollo's Swift VCs and ours both use), or the
-// first UITableView in the view tree.
+// first UITableView anywhere in the view tree. Apollo's root table is nested
+// under container views on newer UIKit, so checking direct children only made
+// the search-results controller miss its theme donor and fall back to black.
 static UITableView *ApolloSearchTableInViewController(UIViewController *vc) {
     if ([vc isKindOfClass:[UITableViewController class]]) return ((UITableViewController *)vc).tableView;
     Ivar ivar = class_getInstanceVariable([vc class], "tableView");
@@ -58,10 +71,7 @@ static UITableView *ApolloSearchTableInViewController(UIViewController *vc) {
         id value = object_getIvar(vc, ivar);
         if ([value isKindOfClass:[UITableView class]]) return value;
     }
-    for (UIView *sub in vc.view.subviews) {
-        if ([sub isKindOfClass:[UITableView class]]) return (UITableView *)sub;
-    }
-    return nil;
+    return ApolloSearchTableInView(vc.view);
 }
 
 // Visit every row the table's dataSource currently serves (display space, so
@@ -116,6 +126,11 @@ static NSIndexPath *ApolloSearchFindRowTitled(UITableView *table, NSString *titl
 
 static NSArray<ApolloSettingsSearchEntry *> *ApolloSettingsSearchBuildIndex(void) {
     NSMutableArray<ApolloSettingsSearchEntry *> *entries = [NSMutableArray array];
+    NSMutableSet<NSString *> *registeredScreenTitles = [NSMutableSet set];
+    for (NSString *routeId in ApolloSettingsRouteIds()) {
+        NSString *title = ApolloSettingsRouteTitle(routeId).lowercaseString;
+        if (title.length > 0) [registeredScreenTitles addObject:title];
+    }
 
     // Reborn screens: scanned live so the index always reflects the rows a
     // user would actually find (conditional rows appear/disappear with their
@@ -140,8 +155,13 @@ static NSArray<ApolloSettingsSearchEntry *> *ApolloSettingsSearchBuildIndex(void
         UITableView *table = ApolloSearchTableInViewController(vc);
         if (!table) continue;
 
-        ApolloSearchScanTable(table, ^(__unused NSIndexPath *indexPath, NSString *title, NSString *header, __unused BOOL disclosure) {
+        ApolloSearchScanTable(table, ^(__unused NSIndexPath *indexPath, NSString *title, NSString *header, BOOL disclosure) {
             if ([title compare:screenTitle options:NSCaseInsensitiveSearch] == NSOrderedSame) return;
+            // A disclosure whose title is itself a registered destination is
+            // already represented by that destination's screen entry. Keeping
+            // both produces duplicate-looking results, and the weaker copy
+            // merely opens the parent screen and flashes its disclosure row.
+            if (disclosure && [registeredScreenTitles containsObject:title.lowercaseString]) return;
             ApolloSettingsSearchEntry *entry = [[ApolloSettingsSearchEntry alloc] init];
             entry.title = title;
             entry.breadcrumb = header.length > 0
@@ -157,6 +177,10 @@ static NSArray<ApolloSettingsSearchEntry *> *ApolloSettingsSearchBuildIndex(void
     // note). Navigation is label-matched at selection time, so a moved row
     // degrades to "lands on its screen", never a wrong tap.
     for (NSArray *row in ApolloSettingsSearchNativeRows()) {
+        // Reborn replaces this dead Apollo row with its Translation disclosure
+        // in General → Other. Keeping the snapshot entry would return a result
+        // that can no longer be found or flashed after navigation.
+        if ([row[0] isEqualToString:@"Always Offer Translate"]) continue;
         ApolloSettingsSearchEntry *entry = [[ApolloSettingsSearchEntry alloc] init];
         entry.title = row[0];
         entry.breadcrumb = row[1];
@@ -167,10 +191,76 @@ static NSArray<ApolloSettingsSearchEntry *> *ApolloSettingsSearchBuildIndex(void
         [entries addObject:entry];
     }
 
+    // Runtime-injected leaf rows do not exist in the generated native crawl.
+    // Disclosure injections are already represented by router entries above;
+    // Color Flairs is the one injected switch with no dedicated screen/route.
+    ApolloSettingsSearchEntry *colorFlairs = [[ApolloSettingsSearchEntry alloc] init];
+    colorFlairs.title = @"Color Flairs";
+    colorFlairs.breadcrumb = @"Appearance → Flair";
+    colorFlairs.nativePath = @[ @"Appearance" ];
+    colorFlairs.rowTitle = @"Color Flairs";
+    [entries addObject:colorFlairs];
+
     return entries;
 }
 
 #pragma mark - Matching
+
+// Fold punctuation/diacritics to spaces once per comparison. Settings names
+// contain hyphens, ampersands and curly punctuation, and users should not need
+// to type those exactly ("pip" and acronym matching are handled below).
+static NSString *ApolloSearchNormalized(NSString *string) {
+    NSString *folded = [[string ?: @"" stringByFoldingWithOptions:NSDiacriticInsensitiveSearch
+                                                            locale:NSLocale.currentLocale] lowercaseString];
+    NSMutableString *result = [NSMutableString stringWithCapacity:folded.length];
+    BOOL lastWasSpace = YES;
+    for (NSUInteger i = 0; i < folded.length; i++) {
+        unichar c = [folded characterAtIndex:i];
+        if ([NSCharacterSet.alphanumericCharacterSet characterIsMember:c]) {
+            [result appendFormat:@"%C", c];
+            lastWasSpace = NO;
+        } else if (!lastWasSpace) {
+            [result appendString:@" "];
+            lastWasSpace = YES;
+        }
+    }
+    if ([result hasSuffix:@" "]) [result deleteCharactersInRange:NSMakeRange(result.length - 1, 1)];
+    return result;
+}
+
+static NSArray<NSString *> *ApolloSearchWords(NSString *normalized) {
+    if (normalized.length == 0) return @[];
+    return [normalized componentsSeparatedByString:@" "];
+}
+
+// Bounded Levenshtein distance. We only accept one typo for normal-sized
+// words, so abandon a row as soon as its cheapest candidate exceeds the cap.
+// The search index is only a few hundred entries, but this keeps each keypress
+// predictably cheap and avoids broad/noisy fuzzy results for short queries.
+static NSUInteger ApolloSearchEditDistanceAtMost(NSString *a, NSString *b, NSUInteger limit) {
+    if (a.length > b.length + limit || b.length > a.length + limit) return limit + 1;
+    NSUInteger previous[b.length + 1], current[b.length + 1];
+    for (NSUInteger j = 0; j <= b.length; j++) previous[j] = j;
+    for (NSUInteger i = 1; i <= a.length; i++) {
+        current[0] = i;
+        NSUInteger rowMin = current[0];
+        unichar ac = [a characterAtIndex:i - 1];
+        for (NSUInteger j = 1; j <= b.length; j++) {
+            NSUInteger substitution = previous[j - 1] + (ac == [b characterAtIndex:j - 1] ? 0 : 1);
+            current[j] = MIN(MIN(previous[j] + 1, current[j - 1] + 1), substitution);
+            rowMin = MIN(rowMin, current[j]);
+        }
+        if (rowMin > limit) return limit + 1;
+        memcpy(previous, current, sizeof(NSUInteger) * (b.length + 1));
+    }
+    return previous[b.length];
+}
+
+static BOOL ApolloSearchTokenFuzzyMatchesWord(NSString *token, NSString *word) {
+    if (token.length < 4 || word.length < 4) return NO;
+    if ([word hasPrefix:token] || [token hasPrefix:word]) return YES;
+    return ApolloSearchEditDistanceAtMost(token, word, 1) <= 1;
+}
 
 static NSInteger ApolloSearchScore(ApolloSettingsSearchEntry *entry, NSString *query) {
     static NSStringCompareOptions const opts = NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch;
@@ -190,13 +280,48 @@ static NSInteger ApolloSearchScore(ApolloSettingsSearchEntry *entry, NSString *q
         } else {
             // Multi-word query: every token must land somewhere in title+crumb.
             NSArray<NSString *> *tokens = [query componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-            if (tokens.count < 2) return -1;
             NSString *haystack = [NSString stringWithFormat:@"%@ %@", title, entry.breadcrumb];
+            BOOL allLiteral = tokens.count >= 2;
             for (NSString *token in tokens) {
-                if (token.length == 0) continue;
-                if ([haystack rangeOfString:token options:opts].location == NSNotFound) return -1;
+                if (token.length > 0 && [haystack rangeOfString:token options:opts].location == NSNotFound) {
+                    allLiteral = NO;
+                    break;
+                }
             }
-            score = 40;
+            if (allLiteral) {
+                score = 40;
+            } else {
+                NSString *normalizedQuery = ApolloSearchNormalized(query);
+                NSArray<NSString *> *queryWords = ApolloSearchWords(normalizedQuery);
+                NSArray<NSString *> *haystackWords = ApolloSearchWords(ApolloSearchNormalized(haystack));
+
+                // Initialisms are useful for settings vocabulary: "pip" finds
+                // Picture-in-Picture and "api" finds Accounts & API Keys.
+                NSMutableString *initials = [NSMutableString string];
+                for (NSString *word in ApolloSearchWords(ApolloSearchNormalized(title))) {
+                    if (word.length > 0) [initials appendString:[word substringToIndex:1]];
+                }
+                if (normalizedQuery.length >= 2 && [initials hasPrefix:normalizedQuery]) {
+                    score = 48;
+                } else {
+                    BOOL allFuzzy = queryWords.count > 0;
+                    for (NSString *token in queryWords) {
+                        BOOL tokenMatched = NO;
+                        for (NSString *word in haystackWords) {
+                            if (ApolloSearchTokenFuzzyMatchesWord(token, word)) {
+                                tokenMatched = YES;
+                                break;
+                            }
+                        }
+                        if (!tokenMatched) {
+                            allFuzzy = NO;
+                            break;
+                        }
+                    }
+                    if (!allFuzzy) return -1;
+                    score = 32;
+                }
+            }
         }
     }
     // Prefer the tweak's own rows ever so slightly on ties, and screens over
@@ -283,7 +408,7 @@ static void ApolloSettingsSearchOpenEntry(UIViewController *settingsVC, ApolloSe
 
 #pragma mark - Results controller
 
-@interface ApolloSettingsSearchResultsController : UITableViewController <UISearchResultsUpdating, UISearchControllerDelegate>
+@interface ApolloSettingsSearchResultsController : ApolloSettingsTableViewController <UISearchResultsUpdating, UISearchControllerDelegate>
 @property (nonatomic, weak) UIViewController *settingsVC;
 @property (nonatomic, weak) UISearchController *searchController;
 @property (nonatomic, copy) NSArray<ApolloSettingsSearchEntry *> *index;
@@ -301,10 +426,23 @@ static void ApolloSettingsSearchOpenEntry(UIViewController *settingsVC, ApolloSe
     return [super initWithStyle:UITableViewStyleInsetGrouped];
 }
 
+// Search-results controllers are presented by UISearchController rather than
+// pushed onto the navigation stack, so the normal "previous controller"
+// lookup cannot find Apollo's Settings table. Point the shared theming layer at
+// the root table explicitly so custom themes carry through to the background,
+// separators, cells, disclosure indicators, and accent color.
+- (UITableView *)apollo_sourceThemeTableView {
+    return ApolloSearchTableInViewController(self.settingsVC);
+}
+
 // Rebuild on every search session, not once per launch: conditional rows
 // (visible blocks, remapped native rows) change with the flags the user just
 // toggled, and the scan is ~a dozen lightweight VC loads.
 - (void)willPresentSearchController:(__unused UISearchController *)searchController {
+    // UISearchController may load its results view before settingsVC is wired
+    // up, so repeat the inherited-theme pass at presentation time when the
+    // live root Settings table is guaranteed to exist.
+    [self apollo_applyTheme];
     self.index = ApolloSettingsSearchBuildIndex();
     ApolloLog(@"[SettingsSearch] index built: %lu entries", (unsigned long)self.index.count);
 }

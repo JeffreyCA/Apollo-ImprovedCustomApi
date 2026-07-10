@@ -172,4 +172,3 @@ void ApolloSettingsRouteOpen(NSString *routeId) {
         ApolloSettingsRouteOpenWithRetry(routeId, 0);
     });
 }
-

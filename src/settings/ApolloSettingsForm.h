@@ -73,6 +73,14 @@ typedef UITableViewCell *_Nonnull (^ApolloSettingsCellBlock)(UITableView *tableV
 // For switch rows: control enablement, re-read on every configure. nil == enabled.
 @property (nonatomic, copy, nullable) BOOL (^enabled)(void);
 
+// Settings-app-style leading icon tile: a white SF symbol on a colored 29pt
+// rounded square (like Settings.app's row icons). Set both or neither.
+// Built-in row kinds share reuse pools, so the form resets imageView.image to
+// nil on rows without one; custom rows own their imageView (e.g. About's
+// fetched avatars) unless they opt in by setting these.
+@property (nonatomic, copy, nullable) NSString *iconSystemName;
+@property (nonatomic, strong, nullable) UIColor *iconTileColor;
+
 // Insert/delete animation when `visible` flips (default UITableViewRowAnimationFade).
 @property (nonatomic) UITableViewRowAnimation showHideAnimation;
 

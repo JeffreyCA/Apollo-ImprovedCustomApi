@@ -383,7 +383,8 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
         textField.delegate = self;
         textField.textAlignment = NSTextAlignmentRight;
         textField.clearButtonMode = UITextFieldViewModeWhileEditing;
-        textField.font = [UIFont systemFontOfSize:16];
+        textField.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCallout];
+        textField.adjustsFontForContentSizeCategory = YES;
         textField.secureTextEntry = secureEntry;
         textField.autocorrectionType = UITextAutocorrectionTypeNo;
         textField.autocapitalizationType = UITextAutocapitalizationTypeNone;

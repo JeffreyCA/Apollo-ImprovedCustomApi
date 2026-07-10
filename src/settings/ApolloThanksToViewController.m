@@ -125,7 +125,7 @@ static BOOL ApolloThanksToContributorIsPinned(NSDictionary *contributor) {
     cell.textLabel.text = [self displayNameForContributor:c];
     cell.detailTextLabel.text = nil;
     cell.textLabel.font = ApolloThanksToContributorIsPinned(c)
-        ? [UIFont boldSystemFontOfSize:17]
+        ? [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline]   // bold body weight, Dynamic Type aware
         : [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     cell.imageView.image = nil;

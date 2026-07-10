@@ -36,7 +36,6 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/settings/ApolloBuyUsACoffeeViewController.m \
     $(SRC_DIR)/settings/ApolloSettingsRouter.m \
     $(SRC_DIR)/settings/ApolloSettingsSearch.m \
-    $(SRC_DIR)/settings/ApolloGetStartedCard.m \
     $(SRC_DIR)/ApolloToast.m \
     $(SRC_DIR)/ApolloRedditMediaUpload.m \
     $(SRC_DIR)/ApolloNotificationBackend.m \
@@ -238,6 +237,8 @@ ApolloReborn_SWIFTFLAGS += -DAPOLLO_SIM_BUILD
 # warnings into -Werror failures. Silence them rather than rewriting working
 # device-targeted call sites just for the sim build.
 ApolloReborn_CFLAGS += -Wno-deprecated-declarations
+# TEMP (never commit): env-gated route opener for hands-off sim screenshots.
+ApolloReborn_FILES += $(SRC_DIR)/ApolloSimOpenRoute.m
 else
 ApolloReborn_OBJ_FILES = $(shell find $(FFMPEG_KIT_DIR) -name '*.a')
 

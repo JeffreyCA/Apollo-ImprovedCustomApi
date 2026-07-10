@@ -38,6 +38,31 @@ static BOOL sApolloAboutTipJarBypassReskin = NO;
 // contain SettingsVC).
 static __weak UIViewController *sApolloLastSettingsVC = nil;
 
+// Apollo's root Settings screen adds an Export button for its legacy settings
+// archive. Reborn owns Backup/Restore in its Data section, so two export paths
+// with different formats are ambiguous. Remove only Apollo's export action and
+// preserve any other trailing item (for example a wallpaper promotion).
+static void ApolloRemoveLegacySettingsExportButton(UIViewController *vc) {
+    NSArray<UIBarButtonItem *> *items = vc.navigationItem.rightBarButtonItems;
+    if (items.count == 0 && vc.navigationItem.rightBarButtonItem) {
+        items = @[ vc.navigationItem.rightBarButtonItem ];
+    }
+    if (items.count == 0) return;
+
+    SEL exportAction = @selector(exportBarButtonItemTappedWithSender:);
+    NSMutableArray<UIBarButtonItem *> *kept = [NSMutableArray arrayWithCapacity:items.count];
+    for (UIBarButtonItem *item in items) {
+        BOOL titleIsExport = item.title.length > 0 &&
+            [item.title compare:@"Export" options:NSCaseInsensitiveSearch] == NSOrderedSame;
+        BOOL isExport = item.action == exportAction || titleIsExport;
+        if (!isExport) [kept addObject:item];
+    }
+    if (kept.count != items.count) {
+        vc.navigationItem.rightBarButtonItems = kept.count > 0 ? kept : nil;
+        ApolloLog(@"[Settings] removed legacy Export bar button");
+    }
+}
+
 static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
     CGSize size = CGSizeMake(29, 29);
     UIGraphicsBeginImageContextWithOptions(size, NO, 0);
@@ -54,6 +79,60 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
     return result;
 }
 
+// Apollo's older root icons mix circular color fields with newer rounded-square
+// artwork. Keep branded artwork (App Icon, Pixel Pals) intact, but normalize
+// the system-style destinations to the 29pt continuous rounded-square geometry
+// used by modern Settings screens.
+static UIImage *ApolloRootSettingsIconForTitle(NSString *title) {
+    if ([title isEqualToString:@"General"]) {
+        return createSettingsIcon(@"gearshape.fill", [UIColor systemGrayColor]);
+    }
+    if ([title isEqualToString:@"Appearance"]) {
+        return createSettingsIcon(@"paintbrush.fill", [UIColor systemBlueColor]);
+    }
+    if ([title isEqualToString:@"Notifications"]) {
+        return createSettingsIcon(@"bell.fill", [UIColor systemRedColor]);
+    }
+    if ([title isEqualToString:@"Passcode"] || [title isEqualToString:@"Face ID & Passcode"]) {
+        return createSettingsIcon(@"lock.fill", [UIColor systemPinkColor]);
+    }
+    if ([title isEqualToString:@"Filters & Blocks"]) {
+        return createSettingsIcon(@"nosign", [UIColor systemGreenColor]);
+    }
+    if ([title isEqualToString:@"Gestures"]) {
+        return createSettingsIcon(@"hand.tap.fill", [UIColor systemIndigoColor]);
+    }
+    if ([title isEqualToString:@"About"]) {
+        return createSettingsIcon(@"info.circle.fill", [UIColor systemGray2Color]);
+    }
+    if ([title isEqualToString:@"Apollo Ultra"]) {
+        return createSettingsIcon(@"sparkles", [UIColor systemOrangeColor]);
+    }
+    return nil;
+}
+
+static UIImage *ApolloRootSettingsArtworkAtStandardSize(UIImage *artwork) {
+    if (!artwork) return nil;
+    CGSize size = CGSizeMake(29.0, 29.0);
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.opaque = NO;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
+    return [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *context) {
+        UIBezierPath *clip = [UIBezierPath bezierPathWithRoundedRect:(CGRect){ CGPointZero, size } cornerRadius:6.0];
+        [clip addClip];
+        [artwork drawInRect:(CGRect){ CGPointZero, size }];
+    }];
+}
+
+static UITableView *ApolloRootSettingsTableInView(UIView *view) {
+    if ([view isKindOfClass:UITableView.class]) return (UITableView *)view;
+    for (UIView *subview in view.subviews) {
+        UITableView *tableView = ApolloRootSettingsTableInView(subview);
+        if (tableView) return tableView;
+    }
+    return nil;
+}
+
 %hook SettingsViewController
 
 // Settings search lives on the root screen's navigation item (see
@@ -62,6 +141,28 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
 - (void)viewDidLoad {
     %orig;
     ApolloSettingsSearchAttach((UIViewController *)self);
+    ApolloRemoveLegacySettingsExportButton((UIViewController *)self);
+
+    // Apollo predates navigation-item search on this screen and leaves its old
+    // first-section breathing room in place. With a pinned search bar that
+    // becomes a conspicuous empty band, so opt out of the modern extra header
+    // padding. The grouped section's own inset remains intact.
+    UIViewController *vc = (UIViewController *)self;
+    UITableView *tableView = ApolloRootSettingsTableInView(vc.view);
+    if (tableView) {
+        if (@available(iOS 15.0, *)) tableView.sectionHeaderTopPadding = 0.0;
+        UIEdgeInsets inset = tableView.contentInset;
+        inset.top -= 24.0;
+        tableView.contentInset = inset;
+        UIEdgeInsets indicatorInsets = tableView.verticalScrollIndicatorInsets;
+        indicatorInsets.top -= 24.0;
+        tableView.verticalScrollIndicatorInsets = indicatorInsets;
+    }
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    ApolloRemoveLegacySettingsExportButton((UIViewController *)self);
 }
 
 // Capture the live SettingsVC instance for the About > Tip Jar fallback path.
@@ -70,18 +171,17 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
     sApolloLastSettingsVC = (UIViewController *)self;
 }
 
-// Inject a new section 1 (the tweak's settings rows; see the row list in numberOfRowsInSection:) between Tip Jar (section 0) and General (original section 1)
+// Keep both injected destinations on cells Apollo creates and themes itself.
+// This is important for stock Apollo themes, whose card surfaces are not UIKit
+// semantic colors. Section 0 remains the native Tip Jar cell (reskinned as the
+// coffee link); section 1 borrows native General's first cell for Reborn.
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
     return %orig + 1;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (section == 1) return 1; // Apollo Reborn (the hub). The former top-level
-                                // rows live in their native families now:
-                                // Saved Categories + Translation → General → Other,
-                                // Tag Filters → Filters & Blocks,
-                                // Picture-in-Picture → General → Media.
+    if (section == 1) return 1;
     if (section > 1) return %orig(tableView, section - 1);
     return %orig;
 }
@@ -91,8 +191,6 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
         UITableViewCell *cell = %orig;
         NSString *label = cell.textLabel.text;
         if ([label isEqualToString:@"Tip Jar"] || [label isEqualToString:@"Buy Us a Coffee"] || [label isEqualToString:@"Support Links"]) {
-            // Snapshot the native green-jar icon once, before we overwrite it,
-            // so the About > Tip Jar injected row can reuse the exact asset.
             if (!sApolloCachedTipJarIcon && [label isEqualToString:@"Tip Jar"] && cell.imageView.image) {
                 sApolloCachedTipJarIcon = cell.imageView.image;
             }
@@ -103,19 +201,30 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
         return cell;
     }
     if (indexPath.section == 1) {
-        // Borrow a themed cell from the original section 1 row 0
-        NSIndexPath *origFirst = [NSIndexPath indexPathForRow:0 inSection:1];
-        UITableViewCell *cell = %orig(tableView, origFirst);
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        NSIndexPath *nativeGeneralFirst = [NSIndexPath indexPathForRow:0 inSection:1];
+        UITableViewCell *cell = %orig(tableView, nativeGeneralFirst);
         cell.textLabel.text = @"Apollo Reborn";
         cell.imageView.image = ApolloRebornOptionsSettingsIcon(29.0) ?: createSettingsIcon(@"key.fill", [UIColor systemTealColor]);
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;
     }
-    if (indexPath.section > 1) {
-        NSIndexPath *adjusted = [NSIndexPath indexPathForRow:indexPath.row inSection:indexPath.section - 1];
-        return %orig(tableView, adjusted);
+    NSIndexPath *nativePath = [NSIndexPath indexPathForRow:indexPath.row inSection:indexPath.section - 1];
+    UITableViewCell *cell = %orig(tableView, nativePath);
+    static BOOL loggedNativeRootCellAppearance = NO;
+    if (!loggedNativeRootCellAppearance) {
+        loggedNativeRootCellAppearance = YES;
+        ApolloLog(@"[SettingsThemeProbe] cell=%@ bg=%@ content=%@ backgroundView=%@ config=%@",
+                  NSStringFromClass(cell.class), cell.backgroundColor,
+                  cell.contentView.backgroundColor, cell.backgroundView.backgroundColor,
+                  cell.backgroundConfiguration.backgroundColor);
     }
-    return %orig;
+    UIImage *normalizedIcon = ApolloRootSettingsIconForTitle(cell.textLabel.text);
+    if (normalizedIcon) cell.imageView.image = normalizedIcon;
+    else if ([cell.textLabel.text isEqualToString:@"App Icon"] &&
+             (cell.imageView.image.size.width > 29.5 || cell.imageView.image.size.height > 29.5)) {
+        cell.imageView.image = ApolloRootSettingsArtworkAtStandardSize(cell.imageView.image);
+    }
+    return cell;
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -143,8 +252,8 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
         return;
     }
     if (indexPath.section > 1) {
-        NSIndexPath *adjusted = [NSIndexPath indexPathForRow:indexPath.row inSection:indexPath.section - 1];
-        %orig(tableView, adjusted);
+        NSIndexPath *nativePath = [NSIndexPath indexPathForRow:indexPath.row inSection:indexPath.section - 1];
+        %orig(tableView, nativePath);
         return;
     }
     %orig;
@@ -164,12 +273,12 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
 
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 1) {
-        NSIndexPath *origFirst = [NSIndexPath indexPathForRow:0 inSection:1];
-        return %orig(tableView, origFirst);
+        NSIndexPath *nativeGeneralFirst = [NSIndexPath indexPathForRow:0 inSection:1];
+        return %orig(tableView, nativeGeneralFirst);
     }
     if (indexPath.section > 1) {
-        NSIndexPath *adjusted = [NSIndexPath indexPathForRow:indexPath.row inSection:indexPath.section - 1];
-        return %orig(tableView, adjusted);
+        NSIndexPath *nativePath = [NSIndexPath indexPathForRow:indexPath.row inSection:indexPath.section - 1];
+        return %orig(tableView, nativePath);
     }
     return %orig;
 }

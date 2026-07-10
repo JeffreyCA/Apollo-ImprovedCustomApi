@@ -111,6 +111,51 @@ typedef NS_ENUM(NSInteger, ApolloSFRowKind) {
 
 @end
 
+#pragma mark - Icon tiles
+
+// Settings-app-style icon tile: a white SF symbol centered on a colored 29pt
+// rounded square. Cached per symbol + resolved color; the color is resolved
+// against the presenting view's traits because system colors differ slightly
+// between light and dark. Unknown symbol names fail soft to a plain tile.
+static UIImage *ApolloSettingsIconTileImage(NSString *symbolName, UIColor *tileColor, UITraitCollection *traits) {
+    static NSCache<NSString *, UIImage *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSCache new]; });
+
+    UIColor *resolved = [(tileColor ?: UIColor.systemGrayColor) resolvedColorWithTraitCollection:traits];
+    CGFloat r = 0, g = 0, b = 0, a = 1;
+    if (![resolved getRed:&r green:&g blue:&b alpha:&a]) {
+        CGFloat w = 0.5;
+        [resolved getWhite:&w alpha:&a];
+        r = g = b = w;
+    }
+    NSString *key = [NSString stringWithFormat:@"%@|%.3f|%.3f|%.3f|%.3f", symbolName, r, g, b, a];
+    UIImage *cached = [cache objectForKey:key];
+    if (cached) return cached;
+
+    static const CGFloat side = 29.0;
+    UIImage *glyph = [[UIImage systemImageNamed:symbolName
+                              withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:15
+                                                                                                weight:UIImageSymbolWeightMedium]]
+                      imageWithTintColor:UIColor.whiteColor renderingMode:UIImageRenderingModeAlwaysOriginal];
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(side, side)];
+    UIImage *tile = [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *ctx) {
+        [resolved setFill];
+        [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, side, side) cornerRadius:6.5] fill];
+        CGSize gs = glyph.size;
+        if (gs.width > 0 && gs.height > 0) {
+            // Symbols vary in aspect ratio; cap the longer side so wide glyphs
+            // (person.3.fill) don't touch the tile edges.
+            CGFloat scale = MIN(1.0, MIN(19.0 / gs.width, 19.0 / gs.height));
+            gs = CGSizeMake(gs.width * scale, gs.height * scale);
+            [glyph drawInRect:CGRectMake((side - gs.width) / 2.0, (side - gs.height) / 2.0, gs.width, gs.height)];
+        }
+    }];
+    tile = [tile imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+    [cache setObject:tile forKey:key];
+    return tile;
+}
+
 #pragma mark - Form view controller
 
 // Associates the model row with its live UISwitch so one shared valueChanged
@@ -131,6 +176,11 @@ static const void *kApolloSFSwitchRowKey = &kApolloSFSwitchRowKey;
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    // Let standard cells grow for Dynamic Type and long localized labels.
+    // Returning UITableViewAutomaticDimension from the delegate below keeps
+    // explicit row.height blocks authoritative while avoiding 44pt clipping.
+    self.tableView.rowHeight = UITableViewAutomaticDimension;
+    self.tableView.estimatedRowHeight = 52.0;
     [self rebuildForm];
 }
 
@@ -320,9 +370,11 @@ static void ApolloSFAddPath(NSMutableDictionary<NSNumber *, NSMutableArray<NSInd
                 cell.accessoryView = toggle;
             }
             cell.textLabel.text = row.title;
+            cell.textLabel.numberOfLines = 0;
             toggle.on = row.isOn ? row.isOn() : NO;
             BOOL enabled = row.enabled ? row.enabled() : YES;
             toggle.enabled = enabled;
+            toggle.accessibilityLabel = row.title;
             cell.textLabel.enabled = enabled;
             objc_setAssociatedObject(toggle, kApolloSFSwitchRowKey, row, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             break;
@@ -333,6 +385,7 @@ static void ApolloSFAddPath(NSMutableDictionary<NSNumber *, NSMutableArray<NSInd
             cell = [tableView dequeueReusableCellWithIdentifier:reuseID];
             if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:reuseID];
             cell.textLabel.text = row.title;
+            cell.textLabel.numberOfLines = 0;
             cell.detailTextLabel.text = row.detail ? row.detail() : nil;
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.accessoryType = (row.kind == ApolloSFRowKindDisclosure)
@@ -346,6 +399,7 @@ static void ApolloSFAddPath(NSMutableDictionary<NSNumber *, NSMutableArray<NSInd
             cell = [tableView dequeueReusableCellWithIdentifier:reuseID];
             if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseID];
             cell.textLabel.text = row.title;
+            cell.textLabel.numberOfLines = 0;
             // Shared pool: reset what a sibling's configure block may have added
             // (e.g. Translation's "Add Language…" disclosure chevron).
             cell.accessoryType = UITableViewCellAccessoryNone;
@@ -357,6 +411,13 @@ static void ApolloSFAddPath(NSMutableDictionary<NSNumber *, NSMutableArray<NSInd
             cell = row.cellBlock(tableView, row);
             break;
         }
+    }
+    // Icon tile (see header): reset for icon-less built-in rows because their
+    // reuse pools are shared; leave custom rows' imageView alone unless opted in.
+    if (row.iconSystemName) {
+        cell.imageView.image = ApolloSettingsIconTileImage(row.iconSystemName, row.iconTileColor, self.traitCollection);
+    } else if (row.kind != ApolloSFRowKindCustom) {
+        cell.imageView.image = nil;
     }
     if (row.configure) row.configure(cell);
     return cell;

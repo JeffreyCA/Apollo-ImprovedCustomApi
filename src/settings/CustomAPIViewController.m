@@ -1,6 +1,5 @@
 #import "settings/CustomAPIViewController.h"
 #import "ApolloCommon.h"
-#import "settings/ApolloGetStartedCard.h"
 #import "ApolloNotificationBackend.h"
 #import "ApolloBarkNotifications.h"
 #import "ApolloPushNotifications.h"
@@ -278,7 +277,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (NSString *)mediaUploadProviderText {
     switch (sImageUploadProvider) {
         case ImageUploadProviderReddit:   return @"Reddit";
-        case ImageUploadProviderImgChest: return @"Img Chest";
+        case ImageUploadProviderImgChest: return @"Image Chest";
         case ImageUploadProviderImgur:
         default:                          return @"Imgur";
     }
@@ -297,7 +296,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     NSString *imgurTitle = (sImageUploadProvider == ImageUploadProviderImgur) ? @"Imgur (Current)" : @"Imgur";
     NSString *redditTitle = (sImageUploadProvider == ImageUploadProviderReddit) ? @"Reddit (Current)" : @"Reddit";
-    NSString *imgChestTitle = (sImageUploadProvider == ImageUploadProviderImgChest) ? @"Img Chest (Current)" : @"Img Chest";
+    NSString *imgChestTitle = (sImageUploadProvider == ImageUploadProviderImgChest) ? @"Image Chest (Current)" : @"Image Chest";
 
     [sheet addAction:[UIAlertAction actionWithTitle:imgurTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
         [self setImageUploadProvider:ImageUploadProviderImgur];
@@ -309,8 +308,8 @@ typedef NS_ENUM(NSInteger, Tag) {
         // Uploading requires an API token (free at imgchest.com); without one
         // there is nothing to authenticate the POST with.
         if (sImageChestAPIToken.length == 0) {
-            [self showAlertWithTitle:@"Img Chest API Key Required"
-                             message:@"Add your Img Chest API key in the API Keys section first, then select Img Chest as the upload host."];
+            [self showAlertWithTitle:@"Image Chest API Key Required"
+                             message:@"Add your Image Chest API key under Apollo Reborn → Accounts & API Keys first, then select Image Chest as the upload host."];
             return;
         }
         [self setImageUploadProvider:ImageUploadProviderImgChest];
@@ -329,7 +328,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (NSString *)commentLinkHostText {
     switch (sCommentLinkHost) {
         case CommentLinkHostImgur:    return @"Imgur";
-        case CommentLinkHostImgChest: return @"Img Chest";
+        case CommentLinkHostImgChest: return @"Image Chest";
         case CommentLinkHostOff:
         default:                      return @"Off";
     }
@@ -351,7 +350,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     NSString *offTitle = (sCommentLinkHost == CommentLinkHostOff) ? @"Off (Current)" : @"Off";
     NSString *imgurTitle = (sCommentLinkHost == CommentLinkHostImgur) ? @"Imgur (Current)" : @"Imgur";
-    NSString *imgChestTitle = (sCommentLinkHost == CommentLinkHostImgChest) ? @"Img Chest (Current)" : @"Img Chest";
+    NSString *imgChestTitle = (sCommentLinkHost == CommentLinkHostImgChest) ? @"Image Chest (Current)" : @"Image Chest";
 
     [sheet addAction:[UIAlertAction actionWithTitle:offTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
         [self setCommentLinkHost:CommentLinkHostOff];
@@ -361,7 +360,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         // keyless ones just 401 — refuse the host rather than fail silently later.
         if (sImgurClientId.length == 0) {
             [self showAlertWithTitle:@"Imgur API Key Required"
-                             message:@"Add your Imgur API key in the API Keys section first, then select Imgur as the comment link host."];
+                             message:@"Add your Imgur API key under Apollo Reborn → Accounts & API Keys first, then select Imgur as the comment link host."];
             return;
         }
         [self setCommentLinkHost:CommentLinkHostImgur];
@@ -369,8 +368,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     [sheet addAction:[UIAlertAction actionWithTitle:imgChestTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
         // Same gate as the Media Upload Host picker: uploading needs an API token.
         if (sImageChestAPIToken.length == 0) {
-            [self showAlertWithTitle:@"Img Chest API Key Required"
-                             message:@"Add your Img Chest API key in the API Keys section first, then select Img Chest as the comment link host."];
+            [self showAlertWithTitle:@"Image Chest API Key Required"
+                             message:@"Add your Image Chest API key under Apollo Reborn → Accounts & API Keys first, then select Image Chest as the comment link host."];
             return;
         }
         [self setCommentLinkHost:CommentLinkHostImgChest];
@@ -437,7 +436,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 #pragma mark - View Lifecycle
 
 // The hub and its group screens share this class family; hub-only behavior
-// (Get Started card, About icon prefetch) keys off this.
+// (currently About icon prefetch) keys off this.
 - (BOOL)apollo_isHub {
     return [self class] == [CustomAPIViewController class];
 }
@@ -455,131 +454,9 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self apollo_disableAutoHideTabBarIdleIfUnsupported];
     if (![self apollo_isHub]) return;
 
-    [self updateGetStartedCard];
-
     [[ApolloSubredditInfoCache sharedCache] requestInfoForSubreddit:kApolloRebornSubredditName completion:^(ApolloSubredditInfo *info) {
         (void)info;
     }];
-}
-
-#pragma mark - Get Started card
-
-// A status-driven onboarding card at the top of the hub. It lists the required
-// setup steps (Reddit API key + signed-in account) plus an optional-keys nudge,
-// and collapses entirely once the required steps are done. It rides the
-// tableHeaderView, so it adds zero rows/sections to the form's index space.
-- (void)updateGetStartedCard {
-    if (![self apollo_isHub]) return; // group screens never carry the card
-    BOOL redditKeySet = sRedditClientId.length > 0;
-    BOOL signedIn = ApolloActiveAccountUsername().length > 0;
-
-    // Collapse the card the moment the essentials are in place.
-    if (redditKeySet && signedIn) {
-        if (self.tableView.tableHeaderView) self.tableView.tableHeaderView = nil;
-        return;
-    }
-
-    NSInteger remaining = (redditKeySet ? 0 : 1) + (signedIn ? 0 : 1);
-    NSString *subtitle = (remaining == 1)
-        ? @"One step to go — you're almost set."
-        : @"A couple of quick steps to get Apollo working.";
-
-    __weak typeof(self) weakSelf = self;
-    NSMutableArray<ApolloGetStartedStep *> *steps = [NSMutableArray array];
-
-    [steps addObject:[ApolloGetStartedStep stepWithTitle:@"Add your Reddit API key"
-                                                subtitle:(redditKeySet ? nil : @"Tap to jump to the API Keys field.")
-                                                    done:redditKeySet
-                                              actionable:!redditKeySet
-                                                  action:^{ [weakSelf getStartedFocusRedditKey]; }]];
-
-    BOOL canReachAccount = !signedIn
-        && [ApolloMainTabBarController() respondsToSelector:@selector(goToProfileTab)];
-    [steps addObject:[ApolloGetStartedStep stepWithTitle:@"Sign in to Reddit"
-                                                subtitle:(signedIn ? nil : @"Sign in from the Account tab using your key.")
-                                                    done:signedIn
-                                              actionable:canReachAccount
-                                                  action:^{ [weakSelf getStartedGoToAccountTab]; }]];
-
-    // Optional keys: never blocks completion, only shown during onboarding.
-    BOOL giphySet = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyGiphyAPIKey].length > 0;
-    BOOL optionalDone = sImgurClientId.length > 0 && sImageChestAPIToken.length > 0 && giphySet;
-    ApolloGetStartedStep *optional =
-        [ApolloGetStartedStep stepWithTitle:@"Optional upload keys"
-                                   subtitle:@"Imgur / Img Chest images and Giphy GIFs."
-                                       done:optionalDone
-                                 actionable:YES
-                                     action:^{ [weakSelf getStartedFocusRedditKey]; }];
-    optional.badge = @"Optional";
-    [steps addObject:optional];
-
-    ApolloGetStartedCardView *card =
-        [[ApolloGetStartedCardView alloc] initWithTitle:@"Get Started"
-                                               subtitle:subtitle
-                                                  steps:steps
-                                            accentColor:[self apollo_themeAccentColor]
-                                          cardBackground:[self apollo_themeCellBackgroundColor]];
-
-    CGFloat width = self.tableView.bounds.size.width;
-    if (width <= 0) width = UIScreen.mainScreen.bounds.size.width;
-    CGFloat height = [card heightForWidth:width];
-    card.frame = CGRectMake(0, 0, width, height);
-    self.tableView.tableHeaderView = card;
-}
-
-- (void)getStartedFocusRedditKey {
-    // By identity, not index math — the form layer owns the geometry. On the
-    // hub the row lives on the Accounts & API Keys screen: push it, then let
-    // the pushed instance (same class family) do the scroll + focus.
-    NSIndexPath *ip = [self indexPathForRowID:@"api.redditKey"];
-    if (!ip) {
-        ApolloAccountsAPIKeysViewController *vc =
-            [[ApolloAccountsAPIKeysViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-        if (!self.navigationController) return;
-        [self.navigationController pushViewController:vc animated:YES];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.55 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [vc getStartedFocusRedditKey];
-        });
-        return;
-    }
-    [self.tableView scrollToRowAtIndexPath:ip atScrollPosition:UITableViewScrollPositionTop animated:YES];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UITableViewCell *cell = [self cellForRowID:@"api.redditKey"];
-        UITextField *field = [self apollo_firstTextFieldInView:cell.contentView];
-        [field becomeFirstResponder];
-    });
-}
-
-- (UITextField *)apollo_firstTextFieldInView:(UIView *)view {
-    for (UIView *sub in view.subviews) {
-        if ([sub isKindOfClass:[UITextField class]]) return (UITextField *)sub;
-        UITextField *nested = [self apollo_firstTextFieldInView:sub];
-        if (nested) return nested;
-    }
-    return nil;
-}
-
-- (void)getStartedGoToAccountTab {
-    UIViewController *tab = ApolloMainTabBarController();
-    if ([tab respondsToSelector:@selector(goToProfileTab)]) {
-        ((void (*)(id, SEL))objc_msgSend)(tab, @selector(goToProfileTab));
-    }
-}
-
-- (void)viewDidLayoutSubviews {
-    [super viewDidLayoutSubviews];
-    // tableHeaderView isn't auto-sized: keep its height in sync with the current
-    // width (first real layout, rotation, split-view resize). Only re-assign when
-    // the size actually changed so this doesn't loop.
-    UIView *header = self.tableView.tableHeaderView;
-    if (![header isKindOfClass:[ApolloGetStartedCardView class]]) return;
-    CGFloat width = self.tableView.bounds.size.width;
-    if (width <= 0) return;
-    CGFloat height = [(ApolloGetStartedCardView *)header heightForWidth:width];
-    if (fabs(header.frame.size.width - width) > 0.5 || fabs(header.frame.size.height - height) > 0.5) {
-        header.frame = CGRectMake(0, 0, width, height);
-        self.tableView.tableHeaderView = header;
-    }
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -594,8 +471,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self reloadRowWithID:@"ai.settings"];
     [self reloadRowWithID:@"inlineMedia.settings"];
     [self reloadRowWithID:@"linkPreviews.settings"];
-    // Sign-in state may have changed while we were on the Account tab.
-    [self updateGetStartedCard];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -669,6 +544,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
         }
         cell.textLabel.text = title;
+        cell.textLabel.numberOfLines = 0;
         cell.detailTextLabel.text = subtitle ? subtitle() : nil;
         return cell;
     }
@@ -688,10 +564,12 @@ typedef NS_ENUM(NSInteger, Tag) {
     ApolloSettingsRow *apiKeys =
         [self hubDisclosureRowWithID:@"setup.apiKeys"
                                title:@"Accounts & API Keys"
-                            subtitle:^NSString * { return @"Reddit · Imgur · Giphy · Img Chest"; }
+                            subtitle:^NSString * { return @"Reddit · Imgur · Giphy · Image Chest"; }
                                 push:^UIViewController * {
             return [[ApolloAccountsAPIKeysViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
+    apiKeys.iconSystemName = @"key.fill";
+    apiKeys.iconTileColor = [UIColor systemGrayColor];
     return [ApolloSettingsSection sectionWithTitle:@"Setup" footer:nil rows:@[ apiKeys ]];
 }
 
@@ -726,11 +604,22 @@ typedef NS_ENUM(NSInteger, Tag) {
                                 push:^UIViewController * {
             return [[ApolloInterfaceSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
+    ApolloSettingsRow *linkPreviews = [self buildLinkPreviewsRow];
+    ApolloSettingsRow *apolloAI = [self buildApolloAIRow];
+
+    posts.iconSystemName        = @"newspaper.fill";              posts.iconTileColor        = [UIColor systemOrangeColor];
+    comments.iconSystemName     = @"text.bubble.fill";            comments.iconTileColor     = [UIColor systemGreenColor];
+    media.iconSystemName        = @"play.rectangle.fill";         media.iconTileColor        = [UIColor systemPinkColor];
+    subreddits.iconSystemName   = @"person.3.fill";               subreddits.iconTileColor   = [UIColor systemRedColor];
+    profiles.iconSystemName     = @"person.crop.circle.fill";     profiles.iconTileColor     = [UIColor systemTealColor];
+    interface_.iconSystemName   = @"slider.horizontal.3";         interface_.iconTileColor   = [UIColor systemPurpleColor];
+    linkPreviews.iconSystemName = @"link";                        linkPreviews.iconTileColor = [UIColor systemBlueColor];
+    apolloAI.iconSystemName     = @"sparkles";                    apolloAI.iconTileColor     = [UIColor systemIndigoColor];
 
     return [ApolloSettingsSection sectionWithTitle:@"Features"
                                             footer:nil
                                               rows:@[ posts, comments, media, subreddits, profiles, interface_,
-                                                      [self buildLinkPreviewsRow], [self buildApolloAIRow] ]];
+                                                      linkPreviews, apolloAI ]];
 }
 
 - (ApolloSettingsSection *)buildAdvancedSection {
@@ -752,6 +641,9 @@ typedef NS_ENUM(NSInteger, Tag) {
                                      title:@"FLEX Debugging"
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFLEX]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf flexSwitchToggled:sender]; }];
+
+    backend.iconSystemName = @"bell.badge.fill";  backend.iconTileColor = [UIColor systemRedColor];
+    flex.iconSystemName    = @"ant.fill";         flex.iconTileColor    = [UIColor systemGrayColor];
 
     return [ApolloSettingsSection sectionWithTitle:@"Advanced" footer:nil rows:@[ backend, flex ]];
 }
@@ -782,6 +674,11 @@ typedef NS_ENUM(NSInteger, Tag) {
                                     action:^{
             [weakSelf promptClearCustomSubredditBannersFromSourceView:[weakSelf cellForRowID:@"data.clearBanners"]];
         }];
+
+    backup.iconSystemName       = @"square.and.arrow.up.fill";    backup.iconTileColor       = [UIColor systemBlueColor];
+    restore.iconSystemName      = @"square.and.arrow.down.fill";  restore.iconTileColor      = [UIColor systemGreenColor];
+    clearCaches.iconSystemName  = @"trash.fill";                  clearCaches.iconTileColor  = [UIColor systemRedColor];
+    clearBanners.iconSystemName = @"photo.fill";                  clearBanners.iconTileColor = [UIColor systemOrangeColor];
 
     return [ApolloSettingsSection sectionWithTitle:@"Data"
                                             footer:nil
@@ -849,8 +746,8 @@ typedef NS_ENUM(NSInteger, Tag) {
         [ApolloSettingsRow customRowWithID:@"api.imgChestKey"
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
             UITableViewCell *cell = [weakSelf stackedTextFieldCellWithIdentifier:@"Cell_API_ImageChest"
-                                                                           label:@"Img Chest API Key"
-                                                                     placeholder:@"Img Chest API Key"
+                                                                           label:@"Image Chest API Key"
+                                                                     placeholder:@"Image Chest API Key"
                                                                             text:sImageChestAPIToken
                                                                              tag:TagImageChestAPIToken];
             [weakSelf apollo_applySecureTextEntry:YES toCell:cell];
@@ -941,7 +838,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
                 cell.textLabel.numberOfLines = 0;
             }
-            cell.textLabel.text = @"Giphy & Img Chest API Key Setup";
+            cell.textLabel.text = @"Giphy & Image Chest API Key Setup";
             return cell;
         }
                                   onSelect:^{ [weakSelf pushInstructionsViewController]; }];
@@ -1697,6 +1594,9 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return !ApolloUsageHeartbeatIsDisabled(); }
                                   onToggle:^(UISwitch *sender) { [weakSelf usageHeartbeatSwitchToggled:sender]; }];
 
+    heartbeat.iconSystemName = @"waveform.path.ecg";
+    heartbeat.iconTileColor = [UIColor systemPinkColor];
+
     return [ApolloSettingsSection sectionWithTitle:@"Privacy" footer:nil rows:@[ heartbeat ]];
 }
 
@@ -1746,7 +1646,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_About_ThanksTo"];
             }
             cell.textLabel.text = @"Thanks To";
-            cell.imageView.image = [weakSelf iconImageFromEmoji:@"🙏" size:32];
+            cell.imageView.image = ApolloEmojiSettingsIcon(@"🙏", [UIColor systemIndigoColor], 29.0);
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
             return cell;
@@ -1766,7 +1666,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_About_Privacy"];
             }
             cell.textLabel.text = @"Privacy Policy";
-            cell.imageView.image = [weakSelf iconImageFromEmoji:@"\U0001F512" size:32];
+            cell.imageView.image = ApolloEmojiSettingsIcon(@"\U0001F512", [UIColor systemGreenColor], 29.0);
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
             return cell;
@@ -1806,7 +1706,8 @@ typedef NS_ENUM(NSInteger, Tag) {
         textField.delegate = self;
         textField.textAlignment = NSTextAlignmentRight;
         textField.clearButtonMode = UITextFieldViewModeWhileEditing;
-        textField.font = [UIFont systemFontOfSize:16];
+        textField.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCallout];
+        textField.adjustsFontForContentSizeCategory = YES;
         textField.autocorrectionType = UITextAutocorrectionTypeNo;
         textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
         textField.returnKeyType = UIReturnKeyDone;
@@ -1832,6 +1733,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         }
     }
     textField.text = text;
+    textField.accessibilityLabel = label;   // VoiceOver: tie the field to its caption
     cell.textLabel.text = label;
 
     return cell;
@@ -1862,13 +1764,15 @@ typedef NS_ENUM(NSInteger, Tag) {
 
         UILabel *captionLabel = [[UILabel alloc] init];
         captionLabel.tag = kLabelTag;
-        captionLabel.font = [UIFont systemFontOfSize:17];
+        captionLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+        captionLabel.adjustsFontForContentSizeCategory = YES;
         captionLabel.translatesAutoresizingMaskIntoConstraints = NO;
 
         UITextField *textField = [[UITextField alloc] init];
         textField.tag = tag;
         textField.delegate = self;
-        textField.font = [UIFont systemFontOfSize:16];
+        textField.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCallout];
+        textField.adjustsFontForContentSizeCategory = YES;
         textField.clearButtonMode = UITextFieldViewModeWhileEditing;
         textField.autocorrectionType = UITextAutocorrectionTypeNo;
         textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
@@ -1892,7 +1796,8 @@ typedef NS_ENUM(NSInteger, Tag) {
         if (detail) {
             UILabel *detailLabel = [[UILabel alloc] init];
             detailLabel.tag = kDetailTag;
-            detailLabel.font = [UIFont systemFontOfSize:12];
+            detailLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
+            detailLabel.adjustsFontForContentSizeCategory = YES;
             detailLabel.textColor = [UIColor secondaryLabelColor];
             detailLabel.numberOfLines = 0;
             detailLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1926,6 +1831,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     }
     textField.text = text;
     textField.placeholder = placeholder;
+    textField.accessibilityLabel = label;   // VoiceOver: tie the field to its caption
     if (tag == TagImageChestAPIToken) {
         textField.textAlignment = NSTextAlignmentLeft;
         textField.adjustsFontSizeToFitWidth = NO;
@@ -1972,19 +1878,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     return url.host.length > 0;
 }
 
-- (UIImage *)iconImageFromEmoji:(NSString *)emoji size:(CGFloat)size {
-    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
-    format.opaque = NO;
-    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(size, size) format:format];
-    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        UIFont *font = [UIFont systemFontOfSize:size * 0.7];
-        NSDictionary *attrs = @{NSFontAttributeName: font};
-        CGSize textSize = [emoji sizeWithAttributes:attrs];
-        CGPoint origin = CGPointMake((size - textSize.width) / 2.0, (size - textSize.height) / 2.0);
-        [emoji drawAtPoint:origin withAttributes:attrs];
-    }];
-}
-
 - (void)configureAboutSubredditCell:(UITableViewCell *)cell subredditName:(NSString *)subredditName {
     NSURLSessionDataTask *existingTask = objc_getAssociatedObject(cell, &kAboutSubredditIconTaskKey);
     if (existingTask) {
@@ -1992,7 +1885,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         objc_setAssociatedObject(cell, &kAboutSubredditIconTaskKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
-    cell.imageView.image = ApolloEmojiSettingsIcon(@"👽", [UIColor systemOrangeColor], 32.0);
+    cell.imageView.image = ApolloEmojiSettingsIcon(@"👽", [UIColor systemOrangeColor], 29.0);
 
     ApolloSubredditInfo *cached = [[ApolloSubredditInfoCache sharedCache] cachedInfoForSubreddit:subredditName];
     if (cached.iconURL) {
@@ -2029,7 +1922,10 @@ typedef NS_ENUM(NSInteger, Tag) {
             UITableViewCell *strongCell = weakCell;
             typeof(self) strongSelf = weakSelf;
             if (!strongCell || !strongSelf) return;
-            strongCell.imageView.image = [strongSelf roundedImage:image size:32 cornerRadius:16];
+            // Keep remote subreddit artwork in the same Settings-style tile
+            // geometry as every other About icon. A circular replacement here
+            // made the row visibly jump shape after the async image arrived.
+            strongCell.imageView.image = [strongSelf roundedImage:image size:29 cornerRadius:6.5];
             [strongCell setNeedsLayout];
         });
     }];
@@ -2048,8 +1944,10 @@ typedef NS_ENUM(NSInteger, Tag) {
     cell.textLabel.text = title;
     cell.detailTextLabel.text = subtitle;
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     if (b64Image.length > 0) {
-        cell.imageView.image = [self roundedImage:[self decodeBase64ToImage:b64Image] size:32 cornerRadius:5];
+        cell.imageView.image = [self roundedImage:[self decodeBase64ToImage:b64Image] size:29 cornerRadius:6.5];
     } else if (!cell.imageView.image) {
         cell.imageView.image = nil;
     }
@@ -2064,7 +1962,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 // not position) so a buildForm reorder can never misfile a footer.
 - (NSAttributedString *)footerAttributedTextForSection:(NSInteger)section {
     NSString *sectionTitle = [self tableView:self.tableView titleForHeaderInSection:section];
-    NSDictionary *plainAttrs = @{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [UIColor secondaryLabelColor]};
+    NSDictionary *plainAttrs = @{NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote], NSForegroundColorAttributeName: [UIColor secondaryLabelColor]};
     NSMutableAttributedString *text;
 
     if ([sectionTitle isEqualToString:@"Data"]) {
@@ -2076,7 +1974,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             initWithString:@"Reddit and Imgur no longer allow new API key creation. Existing keys still work if you have access. Image Chest is optional and improves album metadata when a personal token is configured. You may be able to use credentials from another 3rd-party app ("
             attributes:plainAttrs];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"more info"
-            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [self apollo_themeAccentColor], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/Apollo-Reborn/Apollo-Reborn?tab=readme-ov-file#dont-have-an-api-key"]}]];
+            attributes:@{NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote], NSForegroundColorAttributeName: [self apollo_themeAccentColor], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/Apollo-Reborn/Apollo-Reborn?tab=readme-ov-file#dont-have-an-api-key"]}]];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"). The Reddit API Key/Secret/Redirect URI above are the default, used by any signed-in account that doesn't have its own key — set a different key per account from the account switcher."
             attributes:plainAttrs]];
     } else if ([sectionTitle isEqualToString:@"Sources"]) {
@@ -2084,16 +1982,16 @@ typedef NS_ENUM(NSInteger, Tag) {
             initWithString:@"Configure custom subreddit sources by providing a URL to a plaintext file with line-separated subreddit names (without /r/). "
             attributes:plainAttrs];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"Example file"
-            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [self apollo_themeAccentColor], NSLinkAttributeName: [NSURL URLWithString:@"https://jeffreyca.github.io/subreddits/popular.txt"]}]];
+            attributes:@{NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote], NSForegroundColorAttributeName: [self apollo_themeAccentColor], NSLinkAttributeName: [NSURL URLWithString:@"https://jeffreyca.github.io/subreddits/popular.txt"]}]];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@" ("
             attributes:plainAttrs]];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"GitHub repo"
-            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [self apollo_themeAccentColor], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/JeffreyCA/subreddits"]}]];
+            attributes:@{NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote], NSForegroundColorAttributeName: [self apollo_themeAccentColor], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/JeffreyCA/subreddits"]}]];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@")"
             attributes:plainAttrs]];
     } else if ([sectionTitle isEqualToString:@"Uploads"]) {
         text = [[NSMutableAttributedString alloc]
-            initWithString:@"Media Upload Host selects where Apollo uploads media attached to posts and comments.\n\nComment Link Host uploads images added to a comment or reply to Imgur or Img Chest and inserts a plain link instead of a native Reddit image, so they work even in subreddits that don't allow images in comments. Apollo still shows the linked image inline.\n\nManage past uploads from Settings → General → Media → Manage Uploads."
+            initWithString:@"Media Upload Host selects where Apollo uploads media attached to posts and comments.\n\nComment Link Host uploads images added to a comment or reply to Imgur or Image Chest and inserts a plain link instead of a native Reddit image, so they work even in subreddits that don't allow images in comments. Apollo still shows the linked image inline.\n\nManage past uploads from Settings → General → Media → Manage Uploads."
             attributes:plainAttrs];
     } else if ([sectionTitle isEqualToString:@"Network"]) {
         text = [[NSMutableAttributedString alloc]
@@ -2104,7 +2002,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             initWithString:@"For users running their own "
             attributes:plainAttrs];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"forked apollo-backend"
-            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/nickclyde/apollo-backend"]}]];
+            attributes:@{NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote], NSLinkAttributeName: [NSURL URLWithString:@"https://github.com/nickclyde/apollo-backend"]}]];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@" instance. APNs delivery requires a paid Apple Developer account on the signing side. Leave empty to disable."
             attributes:plainAttrs]];
         NSString *barkLead = ApolloPushNotificationsSupported()
@@ -2116,14 +2014,14 @@ typedef NS_ENUM(NSInteger, Tag) {
         barkTail = [barkTail stringByAppendingString:@" Notifications show your selected app icon automatically; to also hear Apollo's notification sounds, import the matching .caf from the project's assets/bark-sounds via the Bark app's Service tab → Alert Sound → view all sounds → Upload Sound."];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:barkLead attributes:plainAttrs]];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"Bark app"
-            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSLinkAttributeName: [NSURL URLWithString:@"https://apps.apple.com/us/app/bark-custom-notifications/id1403753865"]}]];
+            attributes:@{NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote], NSLinkAttributeName: [NSURL URLWithString:@"https://apps.apple.com/us/app/bark-custom-notifications/id1403753865"]}]];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:barkTail attributes:plainAttrs]];
     } else if ([sectionTitle isEqualToString:@"Privacy"]) {
         text = [[NSMutableAttributedString alloc]
             initWithString:@"Sends one anonymous heartbeat so we can estimate active Apollo Reborn installs. No Reddit activity, account details, or feature usage is collected. More details can be found in our "
             attributes:plainAttrs];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"privacy policy"
-            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:13], NSForegroundColorAttributeName: [self apollo_themeAccentColor], NSLinkAttributeName: [NSURL URLWithString:@"https://apolloreborn.app/privacy"]}]];
+            attributes:@{NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote], NSForegroundColorAttributeName: [self apollo_themeAccentColor], NSLinkAttributeName: [NSURL URLWithString:@"https://apolloreborn.app/privacy"]}]];
         [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"."
             attributes:plainAttrs]];
     } else {
@@ -2290,6 +2188,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     vc.view.tintColor = self.view.tintColor;
 
     UITextView *textView = [[UITextView alloc] init];
+    textView.adjustsFontForContentSizeCategory = YES;
     textView.editable = NO;
     textView.backgroundColor = [UIColor clearColor];
     textView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2313,12 +2212,15 @@ typedef NS_ENUM(NSInteger, Tag) {
         NSMutableAttributedString *attributedText = [textView.attributedText mutableCopy];
         [attributedText enumerateAttribute:NSFontAttributeName inRange:NSMakeRange(0, attributedText.length) options:0 usingBlock:^(id value, NSRange range, BOOL *stop) {
             UIFont *oldFont = (UIFont *)value;
-            UIFont *newFont = oldFont ? [oldFont fontWithSize:15] : [UIFont systemFontOfSize:15];
+            // Re-set at 15pt (preserving the markdown bold), then wrap in
+            // UIFontMetrics so the text tracks Dynamic Type.
+            UIFont *baseFont = oldFont ? [oldFont fontWithSize:15] : [UIFont systemFontOfSize:15];
+            UIFont *newFont = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleSubheadline] scaledFontForFont:baseFont];
             [attributedText addAttribute:NSFontAttributeName value:newFont range:range];
         }];
         textView.attributedText = attributedText;
     } else {
-        textView.font = [UIFont systemFontOfSize:15];
+        textView.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
         textView.text =
             @"If you're having trouble signing in, try the following:\n\n"
             @"1. Accept cookies first\n"
@@ -2348,11 +2250,12 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)pushInstructionsViewController {
     UIViewController *vc = [[UIViewController alloc] init];
-    vc.title = @"Giphy & ImgChest API Key Setup";
+    vc.title = @"Giphy & Image Chest API Key Setup";
     vc.view.backgroundColor = self.tableView.backgroundColor;
     vc.view.tintColor = self.view.tintColor;
 
     UITextView *textView = [[UITextView alloc] init];
+    textView.adjustsFontForContentSizeCategory = YES;
     textView.editable = NO;
     textView.selectable = YES;
     textView.delegate = self;
@@ -2375,12 +2278,12 @@ typedef NS_ENUM(NSInteger, Tag) {
             @"\t- **App description:** Apollo API Key *(or anything brief)*\n"
             @"5. Check the box to agree to the terms, then click **Create API Key**.\n"
             @"6. On your dashboard, click your new API key to copy it.\n"
-            @"7. Paste it into **Giphy API Key** under Apollo Reborn → API Keys.\n\n"
-            @"**Img Chest API Key**\n\n"
+            @"7. Paste it into **Giphy API Key** under Apollo Reborn → Accounts & API Keys.\n\n"
+            @"**Image Chest API Key**\n\n"
             @"1. Go to [imgchest.com](https://imgchest.com/) and click **Register** to create an account.\n"
             @"2. After signing in, open the menu from your profile picture and choose **API**.\n"
             @"3. Click **Create API Token**, give it a name, then click **Create**.\n"
-            @"4. Copy the token and paste it into **Img Chest API Key** under Apollo Reborn → API Keys.";
+            @"4. Copy the token and paste it into **Image Chest API Key** under Apollo Reborn → Accounts & API Keys.";
 
         NSAttributedStringMarkdownParsingOptions *markdownOptions = [[NSAttributedStringMarkdownParsingOptions alloc] init];
         markdownOptions.interpretedSyntax = NSAttributedStringMarkdownInterpretedSyntaxInlineOnly;
@@ -2389,12 +2292,15 @@ typedef NS_ENUM(NSInteger, Tag) {
         NSMutableAttributedString *attributedText = [textView.attributedText mutableCopy];
         [attributedText enumerateAttribute:NSFontAttributeName inRange:NSMakeRange(0, attributedText.length) options:0 usingBlock:^(id value, NSRange range, BOOL *stop) {
             UIFont *oldFont = (UIFont *)value;
-            UIFont *newFont = oldFont ? [oldFont fontWithSize:15] : [UIFont systemFontOfSize:15];
+            // Re-set at 15pt (preserving the markdown bold), then wrap in
+            // UIFontMetrics so the text tracks Dynamic Type.
+            UIFont *baseFont = oldFont ? [oldFont fontWithSize:15] : [UIFont systemFontOfSize:15];
+            UIFont *newFont = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleSubheadline] scaledFontForFont:baseFont];
             [attributedText addAttribute:NSFontAttributeName value:newFont range:range];
         }];
         textView.attributedText = attributedText;
     } else {
-        textView.font = [UIFont systemFontOfSize:15];
+        textView.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
         textView.dataDetectorTypes = UIDataDetectorTypeLink;
         textView.text =
             @"Giphy API Key\n\n"
@@ -2407,12 +2313,12 @@ typedef NS_ENUM(NSInteger, Tag) {
             @"   - App description: Apollo API Key (or anything brief)\n"
             @"5. Check the box to agree to the terms, then click Create API Key.\n"
             @"6. On your dashboard, click your new API key to copy it.\n"
-            @"7. Paste it into Giphy API Key under Apollo Reborn → API Keys.\n\n"
-            @"Img Chest API Key\n\n"
+            @"7. Paste it into Giphy API Key under Apollo Reborn → Accounts & API Keys.\n\n"
+            @"Image Chest API Key\n\n"
             @"1. Go to https://imgchest.com/ and click Register to create an account.\n"
             @"2. After signing in, open the menu from your profile picture and choose API.\n"
             @"3. Click Create API Token, give it a name, then click Create.\n"
-            @"4. Copy the token and paste it into Img Chest API Key under Apollo Reborn → API Keys.";
+            @"4. Copy the token and paste it into Image Chest API Key under Apollo Reborn → Accounts & API Keys.";
     }
     textView.textColor = UIColor.labelColor;
     textView.textContainerInset = UIEdgeInsetsMake(16, 16, 16, 16);
@@ -2529,12 +2435,6 @@ typedef NS_ENUM(NSInteger, Tag) {
         textField.secureTextEntry = YES;
     }
 
-    // The Reddit key or an optional key may have just changed — refresh the
-    // Get Started card's checklist (and collapse it if setup is now complete).
-    if (textField.tag == TagRedditClientId || textField.tag == TagImgurClientId ||
-        textField.tag == TagImageChestAPIToken || textField.tag == TagGiphyAPIKey) {
-        [self updateGetStartedCard];
-    }
 }
 
 #pragma mark - Switch Actions
