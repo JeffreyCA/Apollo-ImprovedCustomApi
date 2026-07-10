@@ -212,6 +212,14 @@ void ApolloPresentInfoOverlay(NSString *line1, NSString *line2, UIView *anchorVi
     }
 
     UILabel *label = [[UILabel alloc] init];
+    // Pin the fonts: ThemeRuntime re-fonts labels when they ATTACH to the window
+    // (RethemeFontOnAttach) — i.e. after we've measured. A themed font with taller
+    // metrics (SF Rounded/New York) made the two lines stop fitting the measured
+    // frame, so UILabel silently dropped the date line (the "only 'Posted 1d Ago'"
+    // bug on themed devices). The theme's own design keeps system chrome in SF
+    // (alerts included), so pinning this floating card is consistent — and keeps
+    // measurement == rendering, always two lines.
+    ApolloThemeRuntimeSetFontPinned(label, YES);
     label.numberOfLines = 0;
     label.attributedText = text;
     CGFloat maxTextW = MIN(300.0, host.bounds.size.width - 32.0);
