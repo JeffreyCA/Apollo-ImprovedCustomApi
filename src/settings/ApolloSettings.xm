@@ -77,8 +77,11 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (section == 1) return 5; // Custom API, Saved Categories, Translation, Tag Filters, Picture-in-Picture
-                                // (Theme Builder now lives under Appearance → Themes)
+    if (section == 1) return 1; // Apollo Reborn (the hub). The former top-level
+                                // rows live in their native families now:
+                                // Saved Categories + Translation → General → Other,
+                                // Tag Filters → Filters & Blocks,
+                                // Picture-in-Picture → General → Media.
     if (section > 1) return %orig(tableView, section - 1);
     return %orig;
 }
@@ -104,24 +107,8 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
         NSIndexPath *origFirst = [NSIndexPath indexPathForRow:0 inSection:1];
         UITableViewCell *cell = %orig(tableView, origFirst);
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        if (indexPath.row == 0) {
-            cell.textLabel.text = @"Apollo Reborn";
-            cell.imageView.image = ApolloRebornOptionsSettingsIcon(29.0) ?: createSettingsIcon(@"key.fill", [UIColor systemTealColor]);
-        } else if (indexPath.row == 1) {
-            cell.textLabel.text = @"Saved Categories";
-            cell.imageView.image = createSettingsIcon(@"bookmark.fill", [UIColor systemOrangeColor]);
-        } else if (indexPath.row == 2) {
-            cell.textLabel.text = @"Translation";
-            cell.imageView.image = createSettingsIcon(@"globe", [UIColor systemIndigoColor]);
-        } else if (indexPath.row == 3) {
-            cell.textLabel.text = @"Tag Filters";
-            cell.imageView.image = createSettingsIcon(@"eye.slash.fill", [UIColor systemRedColor]);
-        } else {
-            cell.textLabel.text = @"Picture-in-Picture";
-            // systemBlue mirrors iOS' own Settings > General > Picture in
-            // Picture icon and avoids the neighbors' teal/orange/indigo/red.
-            cell.imageView.image = createSettingsIcon(@"pip.enter", [UIColor systemBlueColor]);
-        }
+        cell.textLabel.text = @"Apollo Reborn";
+        cell.imageView.image = ApolloRebornOptionsSettingsIcon(29.0) ?: createSettingsIcon(@"key.fill", [UIColor systemTealColor]);
         return cell;
     }
     if (indexPath.section > 1) {
@@ -151,22 +138,8 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
     }
     if (indexPath.section == 1) {
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
-        if (indexPath.row == 0) {
-            CustomAPIViewController *vc = [[CustomAPIViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-            [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
-        } else if (indexPath.row == 1) {
-            SavedCategoriesViewController *vc = [[SavedCategoriesViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-            [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
-        } else if (indexPath.row == 2) {
-            TranslationSettingsViewController *vc = [[TranslationSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-            [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
-        } else if (indexPath.row == 3) {
-            TagFiltersViewController *vc = [[TagFiltersViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-            [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
-        } else {
-            PictureInPictureViewController *vc = [[PictureInPictureViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-            [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
-        }
+        CustomAPIViewController *vc = [[CustomAPIViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
         return;
     }
     if (indexPath.section > 1) {
@@ -209,10 +182,12 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
 // %hook stacks on the same delegate methods disagree about index-path spaces
 // once one of them shifts rows (review finding on PR #570). Features register
 // what they need: the "Always Offer Translate" hiding registers from
-// ApolloTranslation.xm, the Open-in-App row hiding from
-// src/settings/ApolloHideNativeOpenInAppRows.xm, and the "Remember Post Sort"
-// row from ApolloPerPostCommentSort.xm. Register any future General-screen row
-// work there too; never %hook that screen's table methods directly.
+// ApolloTranslation.xm, the "Remember Post Sort" row from
+// ApolloPerPostCommentSort.xm, and the IA-restructure disclosure rows (Open in
+// App, Picture-in-Picture, Translation, Saved Categories) from
+// src/settings/ApolloSettingsNativeInjections.xm. Register any future
+// General-screen row work there too; never %hook that screen's table methods
+// directly.
 
 // MARK: - About View Controller (Tip Jar injection)
 //

@@ -126,7 +126,7 @@ static NSArray<ApolloSettingsSearchEntry *> *ApolloSettingsSearchBuildIndex(void
 
         ApolloSettingsSearchEntry *screen = [[ApolloSettingsSearchEntry alloc] init];
         screen.title = screenTitle;
-        screen.breadcrumb = @"Apollo Reborn";
+        screen.breadcrumb = ApolloSettingsRouteBreadcrumb(routeId) ?: @"Apollo Reborn";
         screen.routeId = routeId;
         [entries addObject:screen];
 

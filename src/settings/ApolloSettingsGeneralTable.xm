@@ -66,6 +66,7 @@ typedef UITableViewCell *(^ApolloGTRowFactory)(UIViewController *vc, UITableView
 @property (nonatomic, copy) NSString *anchorTitle;
 @property (nonatomic, copy) NSString *sectionMarkerTitle;
 @property (nonatomic, copy) ApolloGTRowFactory factory;
+@property (nonatomic, copy) void (^onSelect)(UIViewController *vc); // nil = inert row
 @end
 @implementation ApolloGTInjection
 @end
@@ -82,11 +83,19 @@ void ApolloGeneralTableHideRows(BOOL (^cellMatcher)(UITableViewCell *cell)) {
 void ApolloGeneralTableInjectRow(NSString *anchorTitle,
                                  NSString *sectionMarkerTitle,
                                  ApolloGTRowFactory factory) {
+    ApolloGeneralTableInjectSelectableRow(anchorTitle, sectionMarkerTitle, factory, nil);
+}
+
+void ApolloGeneralTableInjectSelectableRow(NSString *anchorTitle,
+                                           NSString *sectionMarkerTitle,
+                                           ApolloGTRowFactory factory,
+                                           void (^onSelect)(UIViewController *vc)) {
     if (!anchorTitle || !factory) return;
     ApolloGTInjection *inj = [ApolloGTInjection new];
     inj.anchorTitle = anchorTitle;
     inj.sectionMarkerTitle = sectionMarkerTitle;
     inj.factory = factory;
+    inj.onSelect = onSelect;
     if (!sGTInjections) sGTInjections = [NSMutableArray array];
     [sGTInjections addObject:inj];
 }
@@ -267,12 +276,17 @@ static void ApolloGTZeroReturn(NSInvocation *inv) {
         return;
     }
     if (sel == @selector(tableView:willSelectRowAtIndexPath:)) {
-        id ret = nil;
+        // Selectable injections keep the tap; inert (switch) rows return nil.
+        ApolloGTInjection *inj = (injectionIdx < sGTInjections.count) ? sGTInjections[injectionIdx] : nil;
+        id ret = inj.onSelect ? displayPath : nil;
+        if (ret) CFAutorelease(CFBridgingRetain(ret));
         [inv setReturnValue:&ret];
         return;
     }
     if (sel == @selector(tableView:didSelectRowAtIndexPath:)) {
         [_tableView deselectRowAtIndexPath:displayPath animated:YES];
+        ApolloGTInjection *inj = (injectionIdx < sGTInjections.count) ? sGTInjections[injectionIdx] : nil;
+        if (inj.onSelect) inj.onSelect(vc);
         return;
     }
     ApolloGTZeroReturn(inv);

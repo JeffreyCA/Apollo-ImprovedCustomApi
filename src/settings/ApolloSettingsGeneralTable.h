@@ -41,6 +41,16 @@ void ApolloGeneralTableInjectRow(NSString *anchorTitle,
                                  UITableViewCell *(^factory)(UIViewController *vc,
                                                              UITableViewCell *donor));
 
+// Like ApolloGeneralTableInjectRow, but the injected row is tappable:
+// onSelect runs on selection (vc = the live General screen, for pushing), and
+// the row highlights like a native disclosure row. Rows registered with the
+// plain function stay inert (their switch is the control).
+void ApolloGeneralTableInjectSelectableRow(NSString *anchorTitle,
+                                           NSString *sectionMarkerTitle,
+                                           UITableViewCell *(^factory)(UIViewController *vc,
+                                                                       UITableViewCell *donor),
+                                           void (^onSelect)(UIViewController *vc));
+
 // The live General-screen instance, if any (weak-backed; nil once it's gone).
 UIViewController *ApolloGeneralTableActiveVC(void);
 

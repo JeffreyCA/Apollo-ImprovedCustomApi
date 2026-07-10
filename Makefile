@@ -76,6 +76,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloCommentVoteFlicker.xm \
     $(SRC_DIR)/ApolloLiveCommentsFollow.xm \
     $(SRC_DIR)/settings/ApolloSettingsGeneralTable.xm \
+    $(SRC_DIR)/settings/ApolloSettingsNativeInjections.xm \
     $(SRC_DIR)/ApolloPerPostCommentSort.xm \
     $(SRC_DIR)/ApolloLiquidGlass.xm \
     $(SRC_DIR)/ApolloLiquidGlassIconPicker.xm \
@@ -162,7 +163,6 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/settings/InlineMediaSettingsViewController.m \
     $(SRC_DIR)/InfoRowSettingsViewController.m \
     $(SRC_DIR)/settings/ApolloOpenInAppViewController.m \
-    $(SRC_DIR)/settings/ApolloHideNativeOpenInAppRows.xm \
     $(SRC_DIR)/settings/TranslationSettingsViewController.m \
     $(SRC_DIR)/settings/SavedCategoriesViewController.m \
     $(SRC_DIR)/TagFiltersViewController.m \

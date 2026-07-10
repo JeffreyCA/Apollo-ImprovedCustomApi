@@ -20,6 +20,11 @@ BOOL ApolloSettingsRouteExists(NSString *routeId);
 // Returns nil for unknown ids.
 NSString *ApolloSettingsRouteTitle(NSString *routeId);
 
+// Where the screen lives in the settings UI, as a breadcrumb string (e.g.
+// "translation" -> "General → Other"). Shown under search results so users
+// learn the real location. Returns nil for unknown ids.
+NSString *ApolloSettingsRouteBreadcrumb(NSString *routeId);
+
 // All registered route ids, in presentation order (aliases excluded).
 NSArray<NSString *> *ApolloSettingsRouteIds(void);
 

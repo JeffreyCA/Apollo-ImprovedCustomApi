@@ -27,6 +27,7 @@ static ApolloSettingsRouteBuilder ApolloSettingsInsetGrouped(Class cls) {
 
 static NSArray<NSString *> *sRouteIds = nil;                                  // presentation order, no aliases
 static NSDictionary<NSString *, NSString *> *sRouteTitles = nil;              // id -> screen title
+static NSDictionary<NSString *, NSString *> *sRouteBreadcrumbs = nil;         // id -> UI location
 static NSDictionary<NSString *, ApolloSettingsRouteBuilder> *sRouteBuilders = nil; // id (incl. aliases) -> builder
 static NSDictionary<NSString *, NSString *> *sRouteAliases = nil;             // alias -> canonical id
 
@@ -35,26 +36,41 @@ static void ApolloSettingsRouterEnsureRegistry(void) {
     dispatch_once(&onceToken, ^{
         NSMutableArray<NSString *> *ids = [NSMutableArray array];
         NSMutableDictionary<NSString *, NSString *> *titles = [NSMutableDictionary dictionary];
+        NSMutableDictionary<NSString *, NSString *> *crumbs = [NSMutableDictionary dictionary];
         NSMutableDictionary<NSString *, ApolloSettingsRouteBuilder> *builders = [NSMutableDictionary dictionary];
 
-        void (^add)(NSString *, NSString *, ApolloSettingsRouteBuilder) =
-            ^(NSString *routeId, NSString *title, ApolloSettingsRouteBuilder builder) {
+        // The breadcrumb is the screen's home in the settings UI (IA
+        // restructure: some Reborn screens live inside Apollo's native
+        // screens now, not under the Reborn hub). Purely descriptive — shown
+        // under search results — so updating one when a screen moves is safe.
+        void (^add)(NSString *, NSString *, NSString *, ApolloSettingsRouteBuilder) =
+            ^(NSString *routeId, NSString *title, NSString *breadcrumb, ApolloSettingsRouteBuilder builder) {
                 [ids addObject:routeId];
                 titles[routeId] = title;
+                crumbs[routeId] = breadcrumb;
                 builders[routeId] = builder;
             };
 
-        add(@"reborn", @"Apollo Reborn", ApolloSettingsInsetGrouped([CustomAPIViewController class]));
-        add(@"saved-categories", @"Saved Categories", ApolloSettingsInsetGrouped([SavedCategoriesViewController class]));
-        add(@"translation", @"Translation", ApolloSettingsInsetGrouped([TranslationSettingsViewController class]));
-        add(@"tag-filters", @"Tag Filters", ApolloSettingsInsetGrouped([TagFiltersViewController class]));
-        add(@"picture-in-picture", @"Picture-in-Picture", ApolloSettingsInsetGrouped([PictureInPictureViewController class]));
-        add(@"apollo-ai", @"Apollo AI", ApolloSettingsInsetGrouped([ApolloAISettingsViewController class]));
-        add(@"deleted-comments", @"Deleted Comments", ApolloSettingsInsetGrouped([ApolloDeletedCommentsSettingsViewController class]));
-        add(@"rich-link-previews", @"Rich Link Previews", ApolloSettingsInsetGrouped([ApolloLinkPreviewSettingsViewController class]));
-        add(@"inline-media", @"Inline Media", ApolloSettingsInsetGrouped([InlineMediaSettingsViewController class]));
-        add(@"open-in-app", @"Open in App", ApolloSettingsInsetGrouped([ApolloOpenInAppViewController class]));
-        add(@"theme-manager", @"Theme Manager", ^UIViewController *{
+        add(@"reborn", @"Apollo Reborn", @"Settings", ApolloSettingsInsetGrouped([CustomAPIViewController class]));
+        // The hub's group screens (settings IA restructure).
+        add(@"accounts-api-keys", @"Accounts & API Keys", @"Apollo Reborn → Setup", ApolloSettingsInsetGrouped([ApolloAccountsAPIKeysViewController class]));
+        add(@"posts-feeds", @"Posts & Feeds", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloPostsFeedsViewController class]));
+        add(@"comments", @"Comments", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloCommentsSettingsViewController class]));
+        add(@"media", @"Media", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloMediaSettingsViewController class]));
+        add(@"subreddits", @"Subreddits", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloSubredditsSettingsViewController class]));
+        add(@"profiles", @"Profiles", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloProfilesSettingsViewController class]));
+        add(@"interface", @"Interface", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloInterfaceSettingsViewController class]));
+        add(@"notification-backend", @"Notification Backend", @"Apollo Reborn → Advanced", ApolloSettingsInsetGrouped([ApolloNotificationBackendViewController class]));
+        add(@"saved-categories", @"Saved Categories", @"General → Other", ApolloSettingsInsetGrouped([SavedCategoriesViewController class]));
+        add(@"translation", @"Translation", @"General → Other", ApolloSettingsInsetGrouped([TranslationSettingsViewController class]));
+        add(@"tag-filters", @"Tag Filters", @"Filters & Blocks", ApolloSettingsInsetGrouped([TagFiltersViewController class]));
+        add(@"picture-in-picture", @"Picture-in-Picture", @"General → Media", ApolloSettingsInsetGrouped([PictureInPictureViewController class]));
+        add(@"apollo-ai", @"Apollo AI", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloAISettingsViewController class]));
+        add(@"deleted-comments", @"Deleted Comments", @"Apollo Reborn → Comments", ApolloSettingsInsetGrouped([ApolloDeletedCommentsSettingsViewController class]));
+        add(@"rich-link-previews", @"Rich Link Previews", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloLinkPreviewSettingsViewController class]));
+        add(@"inline-media", @"Inline Media", @"Apollo Reborn → Media", ApolloSettingsInsetGrouped([InlineMediaSettingsViewController class]));
+        add(@"open-in-app", @"Open in App", @"General → Open Links", ApolloSettingsInsetGrouped([ApolloOpenInAppViewController class]));
+        add(@"theme-manager", @"Theme Manager", @"Appearance", ^UIViewController *{
             return [[ApolloThemeManagerViewController alloc] init]; // default init = hub/list mode
         });
 
@@ -62,10 +78,12 @@ static void ApolloSettingsRouterEnsureRegistry(void) {
         [sRouteAliases enumerateKeysAndObjectsUsingBlock:^(NSString *alias, NSString *canonical, BOOL *stop) {
             builders[alias] = builders[canonical];
             titles[alias] = titles[canonical];
+            crumbs[alias] = crumbs[canonical];
         }];
 
         sRouteIds = [ids copy];
         sRouteTitles = [titles copy];
+        sRouteBreadcrumbs = [crumbs copy];
         sRouteBuilders = [builders copy];
     });
 }
@@ -80,6 +98,12 @@ NSString *ApolloSettingsRouteTitle(NSString *routeId) {
     if (![routeId isKindOfClass:[NSString class]]) return nil;
     ApolloSettingsRouterEnsureRegistry();
     return sRouteTitles[routeId.lowercaseString];
+}
+
+NSString *ApolloSettingsRouteBreadcrumb(NSString *routeId) {
+    if (![routeId isKindOfClass:[NSString class]]) return nil;
+    ApolloSettingsRouterEnsureRegistry();
+    return sRouteBreadcrumbs[routeId.lowercaseString];
 }
 
 NSArray<NSString *> *ApolloSettingsRouteIds(void) {
