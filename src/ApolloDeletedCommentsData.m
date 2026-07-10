@@ -750,6 +750,19 @@ static NSUInteger ApolloDeletedCommentsMarkDeletedPlaceholdersInJSONNode(id node
             NSString *body = [data[@"body"] isKindOfClass:[NSString class]] ? data[@"body"] : nil;
             NSString *bodyHTML = [data[@"body_html"] isKindOfClass:[NSString class]] ? data[@"body_html"] : nil;
             ApolloDeletedCommentsApplyPlaceholderMetadata(data, ApolloDeletedCommentsReasonForCurrentBody(body, bodyHTML));
+            // Clear the server's removal-collapse HERE, in the pass that runs on EVERY
+            // comments response — not only in the Arctic-gated patch walk. That walk is
+            // skipped whenever the archive hasn't answered yet (big payloads, cooldowns,
+            // the 2s hold timing out), which is exactly the situation on 🧨 mass-removal
+            // threads — so their placeholders arrived still collapsed and only expanded
+            // when the late per-cell path caught them on screen (#630 round 6).
+            // Only the VISUAL flags: collapsed_reason/_code stay intact because they can
+            // be a comment's sole removal signal (empty body + live author), and the
+            // recovery walk re-evaluates CommentDataLooksDeleted from them later —
+            // nulling them here would make that walk skip the comment. The recovery
+            // path's ClearRemovalMetadata still nulls them once a body is restored.
+            data[@"collapsed"] = @NO;
+            data[@"collapsed_because_crowd_control"] = @NO;
             marked++;
         }
         for (id value in [dict allValues]) {

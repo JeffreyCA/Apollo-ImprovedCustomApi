@@ -280,6 +280,14 @@ static UIColor *ApolloLPResolvedColor(UIColor *color, UITraitCollection *traitCo
 static UIView *ApolloLPViewForNode(ASDisplayNode *node) {
     if (!node || ![node respondsToSelector:@selector(view)]) return nil;
     @try {
+        // [node view] FORCE-LOADS the backing view; below-fold preload-range cards
+        // must not pay that (memory + main-thread work for rows that may never
+        // display). An unloaded node has no on-screen row to fix anyway — its next
+        // display pass measures with the corrected layout.
+        if ([node respondsToSelector:@selector(isNodeLoaded)] &&
+            !((BOOL (*)(id, SEL))objc_msgSend)(node, @selector(isNodeLoaded))) {
+            return nil;
+        }
         UIView *view = ((UIView *(*)(id, SEL))objc_msgSend)(node, @selector(view));
         return [view isKindOfClass:[UIView class]] ? view : nil;
     } @catch (__unused NSException *exception) {
@@ -3182,7 +3190,23 @@ static BOOL ApolloLPInvokeScrollViewHeightRefresh(ASDisplayNode *node) {
         return YES;
     }
 
-    ApolloLPPerformScrollViewHeightRefresh(scrollView);
+    // Coalesce the immediate path too: a thread opening with N link cards used to
+    // fire N separate empty begin/endUpdates, each an O(rows) height re-query on a
+    // big table (part of "certain threads get very laggy", #630 round 6). One
+    // short-deferred refresh per scroll view batches a burst of healing cards
+    // into a single pass; the pending flag is shared with the settle path so the
+    // two can never double-fire.
+    if (!objc_getAssociatedObject(scrollView, &kApolloLPSettleRefreshPendingKey)) {
+        objc_setAssociatedObject(scrollView, &kApolloLPSettleRefreshPendingKey, @YES, OBJC_ASSOCIATION_RETAIN);
+        __weak UIView *weakScrollView = scrollView;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UIView *strongScrollView = weakScrollView;
+            if (!strongScrollView) return;
+            objc_setAssociatedObject(strongScrollView, &kApolloLPSettleRefreshPendingKey, nil, OBJC_ASSOCIATION_RETAIN);
+            if (!strongScrollView.window) return;
+            ApolloLPPerformScrollViewHeightRefresh(strongScrollView);
+        });
+    }
     return YES;
 }
 
@@ -3209,7 +3233,9 @@ static id ApolloLPTextureNodeForScrollView(UIView *scrollView) {
     return nil;
 }
 
-static BOOL ApolloLPInvokeTextureScrollRelayoutIfPossible(UIView *scrollView, NSString *host, NSString *kind) {
+// No longer called from the row-reload path (full-table relayout pinned main for
+// seconds on big threads — #630 round 6); kept for manual debugging only.
+static BOOL __attribute__((unused)) ApolloLPInvokeTextureScrollRelayoutIfPossible(UIView *scrollView, NSString *host, NSString *kind) {
     id node = ApolloLPTextureNodeForScrollView(scrollView);
     if (!node) return NO;
 
@@ -3286,7 +3312,12 @@ static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDispla
                         ApolloLPRenoteDroppedRowReload(weakOriginNode, hostCopy, indexPathCopy.row);
                         return;
                     }
-                    ApolloLPInvokeTextureScrollRelayoutIfPossible(tableView, hostCopy, @"table");
+                    // Reload ONLY the affected row. This used to also run a full-table
+                    // relayoutItems first, which re-lays out EVERY node synchronously on
+                    // main — on big threads that pinned the main thread for seconds per
+                    // healing card ("threads get very laggy" + the 0x8BADF00D scene-update
+                    // watchdog kill in #630 round 6). The single-row reload re-measures
+                    // this row's node from scratch, which is all the healer needs.
                     [tableView reloadRowsAtIndexPaths:@[indexPathCopy] withRowAnimation:UITableViewRowAnimationNone];
                     ApolloLPLogOncePerHost(hostCopy, [NSString stringWithFormat:@"V12-row-reload kind=table row=%ld", (long)indexPathCopy.row]);
                 } @catch (__unused NSException *exception) {
@@ -3309,7 +3340,8 @@ static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDispla
                         ApolloLPRenoteDroppedRowReload(weakOriginNode, hostCopy, indexPathCopy.item);
                         return;
                     }
-                    ApolloLPInvokeTextureScrollRelayoutIfPossible(collectionView, hostCopy, @"collection");
+                    // Single-item reload only — no full-table relayoutItems (see the
+                    // table branch above; that pinned main for seconds on big threads).
                     [collectionView performBatchUpdates:^{
                         [collectionView reloadItemsAtIndexPaths:@[indexPathCopy]];
                     } completion:nil];
@@ -3337,13 +3369,31 @@ static void ApolloLPInvokeContainerRelayoutIfPossible(ASDisplayNode *node, ASDis
         }
     }
 
-    if (containerNode && ApolloLPInvokeRelayoutItemsIfPossible(containerNode)) {
-        ApolloLPLogOncePerHost(host, @"V12-table-relayout-items");
+    // Cheap path first: begin/endUpdates re-queries row heights and only re-measures
+    // nodes whose calculated layout was invalidated above. The old order preferred
+    // -[ASTableNode relayoutItems], which re-lays out EVERY node in the table
+    // synchronously on main — seconds of work on big threads, and the source of the
+    // scene-update watchdog kill in #630 round 6. relayoutItems survives only as a
+    // last-resort fallback, rate-limited and never while backgrounded.
+    if (ApolloLPInvokeScrollViewHeightRefresh(cellNode ?: node)) {
+        ApolloLPLogOncePerHost(host, @"V12-scrollview-height-refresh");
         return;
     }
 
-    if (ApolloLPInvokeScrollViewHeightRefresh(cellNode ?: node)) {
-        ApolloLPLogOncePerHost(host, @"V12-scrollview-height-refresh");
+    // Active only: the scene-update watchdog runs while the app is Inactive/Background
+    // (snapshotting), which is exactly when a multi-second full relayout becomes a
+    // 0x8BADF00D kill instead of mere jank.
+    if (containerNode &&
+        [UIApplication sharedApplication].applicationState == UIApplicationStateActive) {
+        static NSTimeInterval sLastFullRelayoutUptime = 0;
+        NSTimeInterval now = CACurrentMediaTime();
+        if (now - sLastFullRelayoutUptime > 10.0 &&
+            ApolloLPInvokeRelayoutItemsIfPossible(containerNode)) {
+            // Burn the rate-limit only on a SUCCESSFUL invocation, so a failed
+            // attempt doesn't suppress the next legitimate fallback.
+            sLastFullRelayoutUptime = now;
+            ApolloLPLogOncePerHost(host, @"V12-table-relayout-items");
+        }
     }
 }
 
