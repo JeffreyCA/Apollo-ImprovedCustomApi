@@ -3,6 +3,7 @@
 #import "ApolloThemeCompiler.h"
 #import "ApolloThemeGalleryCatalog.h"
 #import "ApolloCommon.h"
+#import <CoreText/CoreText.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
 #import <dlfcn.h>
@@ -207,11 +208,37 @@ static BOOL FontLooksLikeAppleSystemDesign(UIFont *font) {
     return NO;
 }
 
+// Apollo's markdown code faces do NOT come through fontWithName: as originally
+// assumed here — they're built with monospacedSystemFontOfSize:weight:, which
+// is itself a *system-design* font (name .AppleSystemUIFontMonospaced / family
+// prefixed .SFMono) and therefore matches FontLooksLikeAppleSystemDesign above.
+// Left unguarded, every sink/refresh path re-derives it into the active theme
+// design and strips the monospacing — reproducible under ANY custom theme,
+// including one whose font choice is plain SF Pro (the sink/refresh/attach
+// paths don't short-circuit on System the way ThemedFont() does; they still
+// call ApolloThemeFontApply(System, font), which rebuilds from a proportional
+// Body descriptor). Exempt anything already monospaced, independent of design.
+static BOOL FontIsMonospaced(UIFont *font) {
+    if (![font isKindOfClass:[UIFont class]]) return NO;
+    if (font.fontDescriptor.symbolicTraits & UIFontDescriptorTraitMonoSpace) return YES;
+    NSString *fontName = font.fontName ?: @"";
+    NSString *familyName = font.familyName ?: @"";
+    return [fontName localizedCaseInsensitiveContainsString:@"Mono"] ||
+           [familyName localizedCaseInsensitiveContainsString:@"Mono"];
+}
+
+// Single themeability gate used by every sink/refresh/attach path: a font must
+// look like a re-derivable Apple system design AND not already be monospaced
+// (code faces stay put no matter which design the theme is set to).
+static BOOL FontIsThemeable(UIFont *font) {
+    return FontLooksLikeAppleSystemDesign(font) && !FontIsMonospaced(font);
+}
+
 static UIFont *ThemedTextSinkFont(UIFont *font, id owner, uintptr_t caller) {
     if (!sEnabled || !font || sFontBypass) return font;
     if (FontPinned(owner)) return font;
     if (!TextSinkMayUseTheme(owner, caller)) return font;
-    if (!FontLooksLikeAppleSystemDesign(font)) return font;
+    if (!FontIsThemeable(font)) return font;
 
     sFontBypass++;
     UIFont *themed = ApolloThemeFontApply(sFontChoice, font);
@@ -449,7 +476,7 @@ static BOOL ChromeBarLooksApolloOwned(UIView *bar) {
 static void RefreshFontOnTextControl(UIView *view, ApolloThemeFont target) {
     if (FontPinned(view)) return;
     UIFont *font = ((UILabel *)view).font; // UILabel/UITextField/UITextView all expose `font`
-    if (![font isKindOfClass:[UIFont class]] || !FontLooksLikeAppleSystemDesign(font)) return;
+    if (![font isKindOfClass:[UIFont class]] || !FontIsThemeable(font)) return;
     sFontBypass++;
     UIFont *themed = ApolloThemeFontApply(target, font);
     if (themed && ![themed.fontName isEqualToString:font.fontName]) {
@@ -505,7 +532,7 @@ static void RethemeFontOnAttach(UIView *view) {
     if (!view.window) return;
     if (FontPinned(view)) return;
     UIFont *font = ((UILabel *)view).font; // UILabel/UITextField/UITextView all expose `font`
-    if (![font isKindOfClass:[UIFont class]] || !FontLooksLikeAppleSystemDesign(font)) return;
+    if (![font isKindOfClass:[UIFont class]] || !FontIsThemeable(font)) return;
     sFontBypass++;
     UIFont *themed = ApolloThemeFontApply(sFontChoice, font);
     if (themed && ![themed.fontName isEqualToString:font.fontName] && ObjectChainLooksApolloOwned(view)) {
@@ -1029,10 +1056,14 @@ void ApolloThemeRuntimeInvalidate(void) {
 // (ApolloThemeFontApply), preserving size/weight/traits/Dynamic Type. Apollo
 // is Swift, but UIFont.systemFont(ofSize:)/preferredFont(forTextStyle:)
 // compile down to these class methods, so Texture attributed strings are
-// covered. fontWithDescriptor:size: (our own re-derive path) and
-// fontWithName: (Apollo's markdown code blocks) are deliberately NOT hooked.
-// monospacedDigitSystemFontOfSize:weight: is also left alone — those callers
-// want column-aligned counters, which every design already honours there.
+// covered. fontWithDescriptor:size: (our own re-derive path) is deliberately
+// NOT hooked at the factory level, and neither is monospacedDigitSystemFontOfSize:
+// weight: (column-aligned counters, which every design already honours) nor
+// monospacedSystemFontOfSize:weight: (Apollo's markdown code blocks — NOT
+// fontWithName: as previously assumed here). The latter two are still system-
+// design fonts by name/family, so they DO reach the sink hooks below (setFont:,
+// attributed-string rewrites); FontIsThemeable()'s FontIsMonospaced() check is
+// what actually keeps code blocks monospaced, not an unhooked factory.
 
 %hook UIFont
 
@@ -1058,6 +1089,67 @@ void ApolloThemeRuntimeInvalidate(void) {
 
 + (UIFont *)preferredFontForTextStyle:(UIFontTextStyle)style compatibleWithTraitCollection:(UITraitCollection *)traitCollection {
     return ThemedFont(%orig, (uintptr_t)__builtin_return_address(0));
+}
+
+%end
+
+// SF Pro Rounded has no true italic face. CoreText doesn't fail an italic
+// request against it — it silently hands back an upright descriptor while
+// still reporting the trait as satisfied, so the caller has no way to detect
+// the failure after the fact. That caller isn't just this tweak's own code:
+// Apollo's OWN markdown-to-attributedstring conversion asks OUR factory hooks
+// above for a body font (getting back an already-Rounded one), then tries to
+// add italic to THAT font itself via fontDescriptorWithSymbolicTraits: — and
+// silently gets the same upright result, before ApolloThemeFontApply's own
+// per-run theming ever sees the text. By the time a per-run fixup could look
+// at it, the italic intent is already gone with no signal left to recover it.
+// Catch it at the one place both call sites actually go through: redirect the
+// WHOLE request to the DEFAULT (SF Pro) design at the same weight, which
+// always has a real italic face, whenever a Rounded-family descriptor is
+// asked for italic and doesn't already have it.
+%hook UIFontDescriptor
+
+- (UIFontDescriptor *)fontDescriptorWithSymbolicTraits:(UIFontDescriptorSymbolicTraits)symbolicTraits {
+    if (sEnabled && sFontChoice == ApolloThemeFontRounded &&
+        (symbolicTraits & UIFontDescriptorTraitItalic) &&
+        !(self.symbolicTraits & UIFontDescriptorTraitItalic) &&
+        [self.postscriptName localizedCaseInsensitiveContainsString:@"Rounded"] &&
+        CallerMayUseThemeRuntime((uintptr_t)__builtin_return_address(0))) {
+        // self.fontAttributes[UIFontDescriptorTraitsAttribute] isn't reliably
+        // populated once a descriptor is already concrete (which this one is
+        // — it came from an already-resolved .SFUIRounded-Bold-style font):
+        // the weight is baked into the postscript name at that point, not
+        // restated in the abstract traits dict. Resolving self into a font
+        // and reading CTFontCopyTraits (same technique ApolloThemeFontApply
+        // uses) is what actually reports the real weight — the traits-dict
+        // read silently defaulted every case to Regular, dropping bold.
+        CGFloat weight = UIFontWeightRegular;
+        UIFont *selfFont = [UIFont fontWithDescriptor:self size:(self.pointSize > 0 ? self.pointSize : 17.0)];
+        if (selfFont) {
+            NSDictionary *ctTraits = CFBridgingRelease(CTFontCopyTraits((__bridge CTFontRef)selfFont));
+            NSNumber *weightValue = ctTraits[(__bridge NSString *)kCTFontWeightTrait];
+            if ([weightValue isKindOfClass:[NSNumber class]]) weight = weightValue.doubleValue;
+        }
+        // Set weight and the caller's full requested symbolic traits (bold,
+        // italic, whatever else) TOGETHER in one combined traits dictionary.
+        // fontDescriptorWithSymbolicTraits: is documented as a FAMILY-MEMBER
+        // LOOKUP ("returns a new font descriptor reference in the same
+        // family with the given symbolic traits"), not an attribute merge —
+        // calling it after separately setting weight via
+        // fontDescriptorByAddingAttributes: silently discarded the weight
+        // (a bold Rounded header lost its boldness once italicized),
+        // because it replaces the descriptor with whichever family member
+        // matches the coarse symbolic bits, disregarding the fine-grained
+        // numeric weight set moments earlier.
+        UIFontDescriptor *fallback = [UIFontDescriptor preferredFontDescriptorWithTextStyle:UIFontTextStyleBody];
+        return [fallback fontDescriptorByAddingAttributes:@{
+            UIFontDescriptorTraitsAttribute: @{
+                UIFontWeightTrait: @(weight),
+                UIFontSymbolicTrait: @(symbolicTraits),
+            },
+        }];
+    }
+    return %orig;
 }
 
 %end
