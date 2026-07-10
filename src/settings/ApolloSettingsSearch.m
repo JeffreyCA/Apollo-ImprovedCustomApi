@@ -181,6 +181,11 @@ static NSArray<ApolloSettingsSearchEntry *> *ApolloSettingsSearchBuildIndex(void
         // in General → Other. Keeping the snapshot entry would return a result
         // that can no longer be found or flashed after navigation.
         if ([row[0] isEqualToString:@"Always Offer Translate"]) continue;
+        // Reborn owns the prominent Feature Requests entry (Apollo Reborn →
+        // About → Fider board), already indexed from the live Reborn crawl.
+        // The native About row now just opens a new-vs-archived chooser, so a
+        // second "Feature Requests" result would look like a duplicate.
+        if ([row[0] isEqualToString:@"Feature Requests"]) continue;
         ApolloSettingsSearchEntry *entry = [[ApolloSettingsSearchEntry alloc] init];
         entry.title = row[0];
         entry.breadcrumb = row[1];
@@ -517,7 +522,58 @@ static void ApolloSettingsSearchOpenEntry(UIViewController *settingsVC, ApolloSe
 
 #pragma mark - Attach
 
+#pragma mark - Pull to search
+
+// Overscrolling the settings table past a threshold and releasing activates the
+// search field, so a deliberate downward pull opens search (in addition to
+// tapping the pinned bar). Peak overscroll is tracked via an extra target on
+// the table's own pan recognizer, so no scroll-delegate hooking is needed and
+// Apollo's own scrolling is untouched.
+@interface ApolloSettingsSearchPullToActivate : NSObject
+@property (nonatomic, weak) UISearchController *searchController;
+@property (nonatomic, weak) UIScrollView *scrollView;
+@property (nonatomic) CGFloat peakOverscroll;
+@end
+
+@implementation ApolloSettingsSearchPullToActivate
+- (void)handlePan:(UIPanGestureRecognizer *)pan {
+    UIScrollView *sv = self.scrollView;
+    UISearchController *sc = self.searchController;
+    if (!sv || !sc) return;
+
+    CGFloat overscroll = -(sv.contentOffset.y + sv.adjustedContentInset.top);
+    switch (pan.state) {
+        case UIGestureRecognizerStateBegan:
+            self.peakOverscroll = 0;
+            break;
+        case UIGestureRecognizerStateChanged:
+            if (overscroll > self.peakOverscroll) self.peakOverscroll = overscroll;
+            break;
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled: {
+            // ~1.5x the search bar height: a clear intentional pull, not the
+            // small bounce from flicking an already-at-top list.
+            static const CGFloat kActivateThreshold = 88.0;
+            BOOL shouldActivate = self.peakOverscroll >= kActivateThreshold && !sc.active;
+            self.peakOverscroll = 0;
+            if (shouldActivate) {
+                // Defer past the rubber-band settle so presenting the results
+                // controller isn't fighting the scroll animation.
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    sc.active = YES;
+                    [sc.searchBar becomeFirstResponder];
+                });
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+@end
+
 static char kApolloSettingsSearchAttachedKey;
+static char kApolloSettingsSearchPullKey;
 
 void ApolloSettingsSearchAttach(UIViewController *settingsVC) {
     if (!settingsVC || objc_getAssociatedObject(settingsVC, &kApolloSettingsSearchAttachedKey)) return;
@@ -536,5 +592,16 @@ void ApolloSettingsSearchAttach(UIViewController *settingsVC) {
     settingsVC.definesPresentationContext = YES;
 
     objc_setAssociatedObject(settingsVC, &kApolloSettingsSearchAttachedKey, searchController, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    // Pull-to-search: activate the field on a deliberate overscroll pull-down.
+    UITableView *rootTable = ApolloSearchTableInViewController(settingsVC);
+    if (rootTable) {
+        ApolloSettingsSearchPullToActivate *pull = [[ApolloSettingsSearchPullToActivate alloc] init];
+        pull.searchController = searchController;
+        pull.scrollView = rootTable;
+        [rootTable.panGestureRecognizer addTarget:pull action:@selector(handlePan:)];
+        objc_setAssociatedObject(settingsVC, &kApolloSettingsSearchPullKey, pull, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
     ApolloLog(@"[SettingsSearch] attached to %@", settingsVC);
 }

@@ -32,11 +32,28 @@ static UIImage *sApolloCachedTipJarIcon = nil;
 // tap handler is the only safe way to construct + present TipJar2VC).
 static BOOL sApolloAboutTipJarBypassReskin = NO;
 
+// Reborn owns the primary Feature Requests board (Fider); Apollo's original
+// board is archived. When YES, a re-entrant didSelect on the native About row
+// skips the chooser and falls through to Apollo's original handler (the only
+// way to reach %orig from inside the chooser's action block).
+static BOOL sApolloAboutFeatureRequestsBypass = NO;
+
+// Reborn's feature-request board. Kept in sync with the prominent About row in
+// CustomAPIViewController.
+static NSString *const kApolloRebornFeatureRequestsURL = @"https://apolloreborn.fider.io/";
+
 // Weakly-held last-seen Apollo SettingsViewController instance. Captured in
 // viewDidAppear and used as a fallback when About is presented modally (in
 // which case the About VC's navigationController.viewControllers does NOT
 // contain SettingsVC).
 static __weak UIViewController *sApolloLastSettingsVC = nil;
+static char kApolloRootNativeSurfaceKey;
+
+static void ApolloApplyRootNativeSurface(UITableViewCell *cell, UIColor *surface) {
+    if (!cell || !surface) return;
+    cell.backgroundColor = surface;
+    cell.contentView.backgroundColor = [UIColor clearColor];
+}
 
 // Apollo's root Settings screen adds an Export button for its legacy settings
 // archive. Reborn owns Backup/Restore in its Data section, so two export paths
@@ -106,7 +123,8 @@ static UIImage *ApolloRootSettingsIconForTitle(NSString *title) {
         return createSettingsIcon(@"info.circle.fill", [UIColor systemGray2Color]);
     }
     if ([title isEqualToString:@"Apollo Ultra"]) {
-        return createSettingsIcon(@"sparkles", [UIColor systemOrangeColor]);
+        // Not "sparkles" — that's the hub's Apollo AI tile; keep Ultra distinct.
+        return createSettingsIcon(@"star.circle.fill", [UIColor systemOrangeColor]);
     }
     return nil;
 }
@@ -171,52 +189,54 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
     sApolloLastSettingsVC = (UIViewController *)self;
 }
 
-// Keep both injected destinations on cells Apollo creates and themes itself.
-// This is important for stock Apollo themes, whose card surfaces are not UIKit
-// semantic colors. Section 0 remains the native Tip Jar cell (reskinned as the
-// coffee link); section 1 borrows native General's first cell for Reborn.
+// Reborn and support form one compact primary card. The cells are tweak-owned
+// because UIKit requires a cell dequeued for an index path to be returned for
+// that same path. Their surface is copied from a real native row below after
+// Apollo has themed it (see the native branch in cellForRowAtIndexPath:).
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return %orig + 1;
+    return %orig;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (section == 1) return 1;
-    if (section > 1) return %orig(tableView, section - 1);
+    if (section == 0) return 2;
     return %orig;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.section == 0) {
-        UITableViewCell *cell = %orig;
-        NSString *label = cell.textLabel.text;
-        if ([label isEqualToString:@"Tip Jar"] || [label isEqualToString:@"Buy Us a Coffee"] || [label isEqualToString:@"Support Links"]) {
-            if (!sApolloCachedTipJarIcon && [label isEqualToString:@"Tip Jar"] && cell.imageView.image) {
-                sApolloCachedTipJarIcon = cell.imageView.image;
-            }
-            cell.textLabel.text = @"Buy Us a Coffee";
-            cell.imageView.image = ApolloBuyMeACoffeeSettingsIcon(29.0);
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        NSString *reuseID = indexPath.row == 0 ? @"Cell_ApolloRebornRoot" : @"Cell_BuyCoffeeRoot";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuseID];
+        if (!cell) {
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:reuseID];
         }
-        return cell;
-    }
-    if (indexPath.section == 1) {
-        NSIndexPath *nativeGeneralFirst = [NSIndexPath indexPathForRow:0 inSection:1];
-        UITableViewCell *cell = %orig(tableView, nativeGeneralFirst);
-        cell.textLabel.text = @"Apollo Reborn";
-        cell.imageView.image = ApolloRebornOptionsSettingsIcon(29.0) ?: createSettingsIcon(@"key.fill", [UIColor systemTealColor]);
+        cell.textLabel.text = indexPath.row == 0 ? @"Apollo Reborn" : @"Buy Us a Coffee";
+        cell.imageView.image = indexPath.row == 0
+            ? (ApolloRebornOptionsSettingsIcon(29.0) ?: createSettingsIcon(@"key.fill", [UIColor systemTealColor]))
+            : ApolloBuyMeACoffeeSettingsIcon(29.0);
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        ApolloApplyRootNativeSurface(cell, objc_getAssociatedObject(self, &kApolloRootNativeSurfaceKey));
         return cell;
     }
-    NSIndexPath *nativePath = [NSIndexPath indexPathForRow:indexPath.row inSection:indexPath.section - 1];
-    UITableViewCell *cell = %orig(tableView, nativePath);
-    static BOOL loggedNativeRootCellAppearance = NO;
-    if (!loggedNativeRootCellAppearance) {
-        loggedNativeRootCellAppearance = YES;
-        ApolloLog(@"[SettingsThemeProbe] cell=%@ bg=%@ content=%@ backgroundView=%@ config=%@",
-                  NSStringFromClass(cell.class), cell.backgroundColor,
-                  cell.contentView.backgroundColor, cell.backgroundView.backgroundColor,
-                  cell.backgroundConfiguration.backgroundColor);
+
+    UITableViewCell *cell = %orig;
+    UIColor *nativeSurface = cell.backgroundColor ?: cell.contentView.backgroundColor;
+    if (nativeSurface) {
+        objc_setAssociatedObject(self, &kApolloRootNativeSurfaceKey, nativeSurface,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        for (UITableViewCell *visibleCell in tableView.visibleCells) {
+            NSIndexPath *visiblePath = [tableView indexPathForCell:visibleCell];
+            if (visiblePath.section == 0) ApolloApplyRootNativeSurface(visibleCell, nativeSurface);
+        }
+        __weak UITableView *weakTable = tableView;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UITableView *liveTable = weakTable;
+            for (UITableViewCell *visibleCell in liveTable.visibleCells) {
+                NSIndexPath *visiblePath = [liveTable indexPathForCell:visibleCell];
+                if (visiblePath.section == 0) ApolloApplyRootNativeSurface(visibleCell, nativeSurface);
+            }
+        });
     }
     UIImage *normalizedIcon = ApolloRootSettingsIconForTitle(cell.textLabel.text);
     if (normalizedIcon) cell.imageView.image = normalizedIcon;
@@ -236,50 +256,33 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
             %orig;
             return;
         }
-        UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-        NSString *label = cell.textLabel.text;
-        if (indexPath.row == 0 || [label isEqualToString:@"Tip Jar"] || [label isEqualToString:@"Buy Us a Coffee"] || [label isEqualToString:@"Support Links"]) {
-            [tableView deselectRowAtIndexPath:indexPath animated:YES];
+        [tableView deselectRowAtIndexPath:indexPath animated:YES];
+        if (indexPath.row == 0) {
+            CustomAPIViewController *vc = [[CustomAPIViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+            [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
+            return;
+        }
+        if (indexPath.row == 1) {
             ApolloBuyUsACoffeeViewController *vc = [[ApolloBuyUsACoffeeViewController alloc] init];
             [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
             return;
         }
     }
-    if (indexPath.section == 1) {
-        [tableView deselectRowAtIndexPath:indexPath animated:YES];
-        CustomAPIViewController *vc = [[CustomAPIViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-        [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
-        return;
-    }
-    if (indexPath.section > 1) {
-        NSIndexPath *nativePath = [NSIndexPath indexPathForRow:indexPath.row inSection:indexPath.section - 1];
-        %orig(tableView, nativePath);
-        return;
-    }
     %orig;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    if (section == 1) return nil;
-    if (section > 1) return %orig(tableView, section - 1);
+    if (section == 0) return nil;
     return %orig;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    if (section == 1) return nil;
-    if (section > 1) return %orig(tableView, section - 1);
+    if (section == 0) return nil;
     return %orig;
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.section == 1) {
-        NSIndexPath *nativeGeneralFirst = [NSIndexPath indexPathForRow:0 inSection:1];
-        return %orig(tableView, nativeGeneralFirst);
-    }
-    if (indexPath.section > 1) {
-        NSIndexPath *nativePath = [NSIndexPath indexPathForRow:indexPath.row inSection:indexPath.section - 1];
-        return %orig(tableView, nativePath);
-    }
+    if (indexPath.section == 0) return 52.0;
     return %orig;
 }
 
@@ -306,6 +309,51 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
 // standalone section 0 at the top of the native About screen with a single
 // "Tip Jar" row that presents `_TtC6Apollo21TipJar2ViewController` using its
 // own transitioning delegate (defined in the +Apollo category).
+
+// Present the new-vs-archived chooser for the native About > Feature Requests
+// row. "Apollo Reborn" opens Reborn's Fider board; "Apollo (Archived)" replays
+// the tap through the original handler by re-entering didSelect with the bypass
+// flag set (%orig can't be called from a block).
+static void ApolloPresentFeatureRequestsChooser(UIViewController *aboutVC,
+                                                 UITableView *tableView,
+                                                 NSIndexPath *indexPath) {
+    UIAlertController *sheet =
+        [UIAlertController alertControllerWithTitle:@"Feature Requests"
+                                            message:@"Apollo Reborn has its own board for suggesting and voting on ideas. Apollo's original board is archived and no longer monitored."
+                                     preferredStyle:UIAlertControllerStyleActionSheet];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Apollo Reborn"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *action) {
+        NSURL *url = [NSURL URLWithString:kApolloRebornFeatureRequestsURL];
+        if (!ApolloRouteResolvedURLViaApolloScheme(url)) {
+            ApolloPresentWebURLFromViewController(aboutVC, url);
+        }
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Apollo (Archived)"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *action) {
+        sApolloAboutFeatureRequestsBypass = YES;
+        @try {
+            [(id)aboutVC tableView:tableView didSelectRowAtIndexPath:indexPath];
+        } @catch (NSException *e) {
+            ApolloLog(@"[FeatureRequests] archived tap threw: %@", e);
+        }
+        sApolloAboutFeatureRequestsBypass = NO;
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+
+    // iPad: anchor the sheet to the tapped row.
+    UIPopoverPresentationController *pop = sheet.popoverPresentationController;
+    if (pop) {
+        UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+        pop.sourceView = cell ?: tableView;
+        pop.sourceRect = cell ? cell.bounds : CGRectMake(CGRectGetMidX(tableView.bounds), CGRectGetMidY(tableView.bounds), 0, 0);
+    }
+    [aboutVC presentViewController:sheet animated:YES completion:nil];
+}
 
 %hook SettingsAboutViewController
 
@@ -423,6 +471,18 @@ static UITableView *ApolloRootSettingsTableInView(UIView *view) {
         sApolloAboutTipJarBypassReskin = NO;
         return;
     }
+    // Intercept the native "Feature Requests" row: route to Reborn's board (or
+    // the archived Apollo board) via a chooser. The bypass flag lets the
+    // archived action fall through to Apollo's original handler below.
+    if (!sApolloAboutFeatureRequestsBypass) {
+        UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+        if ([cell.textLabel.text isEqualToString:@"Feature Requests"]) {
+            [tableView deselectRowAtIndexPath:indexPath animated:YES];
+            ApolloPresentFeatureRequestsChooser((UIViewController *)self, tableView, indexPath);
+            return;
+        }
+    }
+
     NSIndexPath *adjusted = [NSIndexPath indexPathForRow:indexPath.row inSection:indexPath.section - 1];
     %orig(tableView, adjusted);
 }

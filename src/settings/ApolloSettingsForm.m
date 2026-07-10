@@ -190,6 +190,18 @@ static const void *kApolloSFSwitchRowKey = &kApolloSFSwitchRowKey;
     [self.tableView reloadData];
 }
 
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    // Icon tiles bake a trait-resolved fill color at render time (see
+    // ApolloSettingsIconTileImage). apollo_applyTheme restyles visible cells in
+    // place but does not re-run cellForRow, so on a light<->dark flip the tiles
+    // would keep the previous appearance's resolved color until reuse. Reload
+    // to re-render them for the new appearance.
+    if (previousTraitCollection.userInterfaceStyle != self.traitCollection.userInterfaceStyle) {
+        [self.tableView reloadData];
+    }
+}
+
 - (NSArray<NSArray<ApolloSettingsRow *> *> *)computeVisibleRows {
     NSMutableArray *all = [NSMutableArray arrayWithCapacity:_sections.count];
     for (ApolloSettingsSection *section in _sections) {

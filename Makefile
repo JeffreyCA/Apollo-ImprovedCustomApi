@@ -237,7 +237,9 @@ ApolloReborn_SWIFTFLAGS += -DAPOLLO_SIM_BUILD
 # warnings into -Werror failures. Silence them rather than rewriting working
 # device-targeted call sites just for the sim build.
 ApolloReborn_CFLAGS += -Wno-deprecated-declarations
-# TEMP (never commit): env-gated route opener for hands-off sim screenshots.
+# Sim-only dev helper: env-gated (APOLLO_OPEN_ROUTE) route opener for hands-off
+# screenshots. Only ever compiled into the simulator build, never the device/
+# release build (this branch is under the APOLLO_SIM_BUILD ifeq).
 ApolloReborn_FILES += $(SRC_DIR)/ApolloSimOpenRoute.m
 else
 ApolloReborn_OBJ_FILES = $(shell find $(FFMPEG_KIT_DIR) -name '*.a')

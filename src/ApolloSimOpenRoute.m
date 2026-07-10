@@ -1,7 +1,8 @@
-// TEMPORARY sim-only helper (never committed): when APOLLO_OPEN_ROUTE is set,
-// open that settings route a few seconds after launch so screens can be
-// screenshotted via `simctl io` without any UI taps. Compiled only under
-// APOLLO_SIM_BUILD via the Makefile's sim-only file list.
+// Sim-only dev helper: when the APOLLO_OPEN_ROUTE env var is set, open that
+// settings route a few seconds after launch so screens can be screenshotted
+// via `simctl io` without any UI taps. Compiled ONLY under APOLLO_SIM_BUILD
+// (see the Makefile's sim-only file list), so it is never present in a device
+// or release build — the env gate then makes it inert unless deliberately set.
 
 #import <UIKit/UIKit.h>
 #import "settings/ApolloSettingsRouter.h"

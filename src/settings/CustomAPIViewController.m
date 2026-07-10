@@ -471,6 +471,13 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self reloadRowWithID:@"ai.settings"];
     [self reloadRowWithID:@"inlineMedia.settings"];
     [self reloadRowWithID:@"linkPreviews.settings"];
+    // The Setup section footer (onboarding nudge) collapses once a Reddit key
+    // exists, which may have just been entered on the pushed API Keys screen.
+    // Section 0 is Setup on the hub; reloading it re-evaluates the footer.
+    if ([self apollo_isHub] && self.tableView.numberOfSections > 0) {
+        [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:0]
+                      withRowAnimation:UITableViewRowAnimationNone];
+    }
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -642,10 +649,17 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFLEX]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf flexSwitchToggled:sender]; }];
 
-    backend.iconSystemName = @"bell.badge.fill";  backend.iconTileColor = [UIColor systemRedColor];
-    flex.iconSystemName    = @"ant.fill";         flex.iconTileColor    = [UIColor systemGrayColor];
+    // Diagnostics belong with the other developer tools, not tucked into About.
+    ApolloSettingsRow *exportLogs =
+        [ApolloSettingsRow buttonRowWithID:@"about.exportLogs"
+                                     title:@"Export Debug Logs"
+                                    action:^{ [weakSelf exportLogs]; }];
 
-    return [ApolloSettingsSection sectionWithTitle:@"Advanced" footer:nil rows:@[ backend, flex ]];
+    backend.iconSystemName    = @"bell.badge.fill";              backend.iconTileColor    = [UIColor systemRedColor];
+    flex.iconSystemName       = @"ant.fill";                     flex.iconTileColor       = [UIColor systemGrayColor];
+    exportLogs.iconSystemName = @"square.and.arrow.up.on.square.fill"; exportLogs.iconTileColor = [UIColor systemGrayColor];
+
+    return [ApolloSettingsSection sectionWithTitle:@"Advanced" footer:nil rows:@[ backend, flex, exportLogs ]];
 }
 
 - (ApolloSettingsSection *)buildDataSection {
@@ -1653,10 +1667,28 @@ typedef NS_ENUM(NSInteger, Tag) {
         }
                                   onSelect:^{ [weakSelf pushThanksToViewController]; }];
 
-    ApolloSettingsRow *exportLogs =
-        [ApolloSettingsRow buttonRowWithID:@"about.exportLogs"
-                                     title:@"Export Debug Logs"
-                                    action:^{ [weakSelf exportLogs]; }];
+    // Apollo Reborn's own feature-request board (Fider). Kept prominent at the
+    // top of About; the archived Apollo board is reachable via a chooser on the
+    // native About > Feature Requests row (see ApolloSettings.xm).
+    ApolloSettingsRow *featureRequests =
+        [ApolloSettingsRow customRowWithID:@"about.featureRequests"
+                                      cell:^UITableViewCell *(UITableView *tableView, __unused ApolloSettingsRow *row) {
+            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_About_FeatureRequests"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"Cell_About_FeatureRequests"];
+                cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+                cell.detailTextLabel.numberOfLines = 0;
+            }
+            cell.textLabel.text = @"Feature Requests";
+            cell.detailTextLabel.text = @"Suggest and vote on ideas for Apollo Reborn";
+            cell.imageView.image = ApolloEmojiSettingsIcon(@"\U0001F4A1", [UIColor systemYellowColor], 29.0);
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            return cell;
+        }
+                                  onSelect:^{
+            [weakSelf presentURLInApolloBrowser:[NSURL URLWithString:@"https://apolloreborn.fider.io/"]];
+        }];
 
     ApolloSettingsRow *privacyPolicy =
         [ApolloSettingsRow customRowWithID:@"about.privacyPolicy"
@@ -1683,7 +1715,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     return [ApolloSettingsSection sectionWithTitle:@"About"
                                             footer:nil
-                                              rows:@[ github, subreddit, thanksTo, exportLogs, privacyPolicy, version ]];
+                                              rows:@[ featureRequests, github, subreddit, thanksTo, privacyPolicy, version ]];
 }
 
 #pragma mark - Cell Builders
@@ -1965,7 +1997,17 @@ typedef NS_ENUM(NSInteger, Tag) {
     NSDictionary *plainAttrs = @{NSFontAttributeName: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote], NSForegroundColorAttributeName: [UIColor secondaryLabelColor]};
     NSMutableAttributedString *text;
 
-    if ([sectionTitle isEqualToString:@"Data"]) {
+    if ([sectionTitle isEqualToString:@"Setup"]) {
+        // Onboarding nudge (replaces the old Get Started card): with no Reddit
+        // key, sign-in can't happen, and the key field is now one level down
+        // under Accounts & API Keys — so point new users there. Collapses to
+        // no footer once a key is set. Only shown on the hub's own Setup
+        // section (group screens don't carry it).
+        if (sRedditClientId.length > 0) return nil;
+        text = [[NSMutableAttributedString alloc]
+            initWithString:@"Apollo needs a Reddit API key to sign in. Open Accounts & API Keys to add one — Imgur, Giphy, and Image Chest keys there are optional and only enable extra upload features."
+            attributes:plainAttrs];
+    } else if ([sectionTitle isEqualToString:@"Data"]) {
         text = [[NSMutableAttributedString alloc]
             initWithString:@"Restore also signs you back into the accounts saved in the backup. The backup .zip contains your login credentials — anyone with the file can sign in as you, so keep it private. It also includes an accounts.txt listing the saved usernames."
             attributes:plainAttrs];
