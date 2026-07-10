@@ -10,6 +10,7 @@
 #import "ApolloThemeManagerViewController.h"
 #import "PictureInPictureViewController.h"
 #import "ApolloSettingsSearch.h"
+#import "ApolloReportViewController.h"
 
 // MARK: - Settings View Controller (Custom API row injection)
 
@@ -479,6 +480,12 @@ static void ApolloPresentFeatureRequestsChooser(UIViewController *aboutVC,
         if ([cell.textLabel.text isEqualToString:@"Feature Requests"]) {
             [tableView deselectRowAtIndexPath:indexPath animated:YES];
             ApolloPresentFeatureRequestsChooser((UIViewController *)self, tableView, indexPath);
+            return;
+        }
+        if ([cell.textLabel.text isEqualToString:@"Bug Reports"]) {
+            [tableView deselectRowAtIndexPath:indexPath animated:YES];
+            ApolloReportViewController *controller = [[ApolloReportViewController alloc] init];
+            [((UIViewController *)self).navigationController pushViewController:controller animated:YES];
             return;
         }
     }

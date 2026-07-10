@@ -31,6 +31,7 @@
 #import "settings/ApolloBackupRestore.h"
 #import "settings/ApolloThanksToViewController.h"
 #import "settings/ApolloBuyUsACoffeeViewController.h"
+#import "settings/ApolloReportViewController.h"
 
 // The six speeds the "Hold for Video Speed" picker offers, in display order. They
 // mirror the video player's own speed menu minus 1.0× (holding at normal speed
@@ -1690,6 +1691,27 @@ typedef NS_ENUM(NSInteger, Tag) {
             [weakSelf presentURLInApolloBrowser:[NSURL URLWithString:@"https://apolloreborn.fider.io/"]];
         }];
 
+    ApolloSettingsRow *bugReports =
+        [ApolloSettingsRow customRowWithID:@"about.bugReports"
+                                      cell:^UITableViewCell *(UITableView *tableView, __unused ApolloSettingsRow *row) {
+            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_About_BugReports"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"Cell_About_BugReports"];
+                cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+                cell.detailTextLabel.numberOfLines = 0;
+            }
+            cell.textLabel.text = @"Bug Reports";
+            cell.detailTextLabel.text = @"Report a problem and optionally attach Reborn logs";
+            cell.imageView.image = ApolloEmojiSettingsIcon(@"\U0001F41B", [UIColor systemRedColor], 29.0);
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            return cell;
+        }
+                                  onSelect:^{
+            ApolloReportViewController *controller = [[ApolloReportViewController alloc] init];
+            [weakSelf.navigationController pushViewController:controller animated:YES];
+        }];
+
     ApolloSettingsRow *privacyPolicy =
         [ApolloSettingsRow customRowWithID:@"about.privacyPolicy"
                                       cell:^UITableViewCell *(UITableView *tableView, __unused ApolloSettingsRow *row) {
@@ -1715,7 +1737,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     return [ApolloSettingsSection sectionWithTitle:@"About"
                                             footer:nil
-                                              rows:@[ featureRequests, github, subreddit, thanksTo, privacyPolicy, version ]];
+                                              rows:@[ featureRequests, bugReports, github, subreddit, thanksTo, privacyPolicy, version ]];
 }
 
 #pragma mark - Cell Builders
