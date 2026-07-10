@@ -446,9 +446,15 @@ static void ApolloInfoTapFired(id cell, UITapGestureRecognizer *tap) {
     ApolloInfoKind kind = ApolloInfoKindAge;
     ApolloASDisplayNode *node = ApolloInfoNodeHitAtPoint(cell, cellView, [tap locationInView:cellView], &kind);
     if (!node) return;
-    // Edited is handled by the editedButtonTappedWithSender: hook (native interactive
-    // button), not this gesture — guard in case nearest-center still lands on it.
-    if (kind == ApolloInfoKindEdited) return;
+    // Edited is normally handled by the editedButtonTappedWithSender: hook, so
+    // shouldReceiveTouch: returns NO for it and this gesture never claims it. But
+    // nearest-center runs twice — at touch-began (shouldReceiveTouch:) and again here
+    // at recognition — on locations that can differ by up to the tap slop (~10pt). A
+    // tap that began nearest age/% (claimed, cancelsTouchesInView already cancelled the
+    // native control) can drift into the edited icon's nearest-center band by
+    // recognition. Rather than drop that tap (the native alert can no longer fire),
+    // present the edited detail ourselves through the same path.
+    if (kind == ApolloInfoKindEdited) { ApolloHandleEditedButtonTap(cell, node); return; }
 
     UIWindow *window = cellView.window;
     CGRect anchor = CGRectNull;
