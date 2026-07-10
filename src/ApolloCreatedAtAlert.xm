@@ -5,15 +5,23 @@
 // Row "Popup" / "Overlay" modes pick the presentation (a dismissable alert or a
 // small auto-fading card); with both off the icons are inert.
 //
-// Wiring: one UITapGestureRecognizer per cell (installed on the cell's view,
-// which is always view-backed) hit-tests the embedded info nodes' CALayers from
-// shouldReceiveTouch: and picks the nearest one. cancelsTouchesInView swallows
-// the touch, so the native % / edited button alerts never also fire — we present
-// the detail ourselves (the age was never natively tappable). See ApolloInfoKind
-// / ApolloPresentInfoDetail; the magnifier loupe routes through the same entry.
+// Wiring — two paths, because Apollo wires these icons two different ways:
+//   • age + % upvoted: Apollo leaves these ApolloButtonNodes non-interactive
+//     (userInteractionEnabled == NO, no target-action), so one UITapGestureRecognizer
+//     per cell (installed on the always-view-backed cell view) hit-tests their CALayers
+//     from shouldReceiveTouch:, picks the nearest, and cancelsTouchesInView swallows the
+//     touch while we present the detail.
+//   • edited pencil: this one IS a natively interactive ApolloButtonNode with a
+//     target-action (-editedButtonTappedWithSender:), and its control fires on touch-up
+//     faster than our tap gesture can reliably win — so the cell gesture deliberately
+//     does NOT claim edited (see ApolloInfoTapShouldReceiveTouch). Instead we %hook
+//     editedButtonTappedWithSender: directly and suppress %orig, which is race-free.
+// Both paths funnel into ApolloPresentInfoDetail (the magnifier loupe uses it too).
 //
 // Hooked cells: CommentCellNode (ageNode, editedIndicatorNode), CommentsHeader /
 // LargePost / CompactPost cell nodes (postInfoNode.{age,percentageLiked,edited}ButtonNode).
+// The edited take-over hook lives on CommentCellNode + CommentsHeaderCellNode (the only
+// cells whose edited pencil is natively tappable — it doesn't appear in feed post cells).
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -373,22 +381,62 @@ static void ApolloInstallInfoTapOnCell(id cell, SEL handler) {
     [cellView addGestureRecognizer:tap];
 }
 
-// Only acts on our own gesture; claims a touch only when it lands on one of the
-// three info icons (% upvoted / timestamp / edited).
+// Only acts on our own gesture; claims a touch only when it lands on the age or %
+// icon. The edited pencil is handled separately (see below).
 static BOOL ApolloInfoTapShouldReceiveTouch(id cell, UIGestureRecognizer *gr, UITouch *touch) {
     if (!objc_getAssociatedObject(gr, kApolloAgeTapMarkerKey)) return YES;
     UIView *cellView = nil;
     @try { cellView = [(ApolloASDisplayNode *)cell view]; } @catch (__unused id e) {}
     if (!cellView) return NO;
-    return ApolloInfoNodeHitAtPoint(cell, cellView, [touch locationInView:cellView], NULL) != nil;
+    CGPoint pt = [touch locationInView:cellView];
+    ApolloInfoKind hitKind = ApolloInfoKindAge;
+    ApolloASDisplayNode *hit = ApolloInfoNodeHitAtPoint(cell, cellView, pt, &hitKind);
+    // The edited pencil is a *natively interactive* ApolloButtonNode (target-action
+    // -editedButtonTappedWithSender:) — unlike the age/% buttons, which Apollo leaves
+    // non-interactive for us to claim. cancelsTouchesInView can't reliably beat the
+    // control's own touch-up, so we don't claim edited here; the dedicated
+    // editedButtonTappedWithSender: hook below takes it over instead. (Nearest-center
+    // still considers edited so an adjacent age/% tap isn't misattributed to it.)
+    return (hit != nil && hitKind != ApolloInfoKindEdited);
+}
+
+// Shared take-over for the native edited-pencil tap (-editedButtonTappedWithSender:
+// on CommentCellNode / CommentsHeaderCellNode). Returns YES when the native alert
+// should be suppressed: either we presented our own detail, or the icon is inert
+// (both modes off). Returns NO only when a mode is on but we couldn't present, so
+// the caller falls back to Apollo's native alert rather than a dead tap.
+static BOOL ApolloHandleEditedButtonTap(id cell, id sender) {
+    if (!sInfoRowPopupMode && !sInfoRowOverlayMode) return YES;   // inert: swallow the native alert
+
+    UIView *cellView = nil;
+    @try { cellView = [(ApolloASDisplayNode *)cell view]; } @catch (__unused id e) {}
+    if (!cellView) return NO;
+    UIWindow *window = cellView.window;
+
+    // Anchor on the tapped button itself; fall back to the resolved edited node.
+    ApolloASDisplayNode *node = [sender respondsToSelector:@selector(layer)] ? (ApolloASDisplayNode *)sender : nil;
+    if (!node) node = ApolloEditedDisplayNodeForCell(cell);
+    CGRect anchor = CGRectNull;
+    CALayer *nl = nil;
+    @try { nl = node.layer; } @catch (__unused id e) {}
+    if (nl && window) {
+        @try { anchor = [nl convertRect:nl.bounds toLayer:window.layer]; } @catch (__unused id e) {}
+    }
+
+    id link = ApolloIvarValueByName(cell, "link");
+    id comment = ApolloIvarValueByName(cell, "comment");
+    if (ApolloPresentInfoDetail(ApolloInfoKindEdited, link, comment, cellView, anchor, window)) {
+        [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+        return YES;
+    }
+    return NO;
 }
 
 static void ApolloInfoTapFired(id cell, UITapGestureRecognizer *tap) {
     if (tap.state != UIGestureRecognizerStateRecognized) return;
-    // Both Popup and Overlay off: these icons are inert. The gesture still
-    // recognizes (cancelsTouchesInView == YES), so the tap is swallowed and
-    // nothing happens — no popup/overlay, and the native % / edited alerts are
-    // suppressed too.
+    // Both Popup and Overlay off: the age/% icons are inert. The gesture still
+    // recognizes (cancelsTouchesInView == YES), so the tap is swallowed and nothing
+    // happens — no popup/overlay, and no fall-through to opening the post either.
     if (!sInfoRowPopupMode && !sInfoRowOverlayMode) return;
 
     UIView *cellView = nil;
@@ -398,6 +446,9 @@ static void ApolloInfoTapFired(id cell, UITapGestureRecognizer *tap) {
     ApolloInfoKind kind = ApolloInfoKindAge;
     ApolloASDisplayNode *node = ApolloInfoNodeHitAtPoint(cell, cellView, [tap locationInView:cellView], &kind);
     if (!node) return;
+    // Edited is handled by the editedButtonTappedWithSender: hook (native interactive
+    // button), not this gesture — guard in case nearest-center still lands on it.
+    if (kind == ApolloInfoKindEdited) return;
 
     UIWindow *window = cellView.window;
     CGRect anchor = CGRectNull;
@@ -434,6 +485,13 @@ static void ApolloInfoTapFired(id cell, UITapGestureRecognizer *tap) {
     ApolloInfoTapFired(self, tap);
 }
 
+// Take over the native edited-pencil alert (comment cells). editedButtonTappedWithSender:
+// is the ApolloButtonNode's target-action; suppress %orig when we handle it.
+- (void)editedButtonTappedWithSender:(id)sender {
+    if (ApolloHandleEditedButtonTap(self, sender)) return;
+    %orig;
+}
+
 %end
 
 %hook _TtC6Apollo22CommentsHeaderCellNode
@@ -451,6 +509,12 @@ static void ApolloInfoTapFired(id cell, UITapGestureRecognizer *tap) {
 %new
 - (void)apollo_infoTapFired:(UITapGestureRecognizer *)tap {
     ApolloInfoTapFired(self, tap);
+}
+
+// Take over the native edited-pencil alert (post header — the icon the user tapped).
+- (void)editedButtonTappedWithSender:(id)sender {
+    if (ApolloHandleEditedButtonTap(self, sender)) return;
+    %orig;
 }
 
 %end
