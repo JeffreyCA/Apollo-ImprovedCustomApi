@@ -3820,13 +3820,25 @@ static void ApolloDeletedCommentsRevealCommentInsteadOfCollapsing(RDKComment *co
     }
 
     // Stamp the collapse/expand moment. The host-wide height fixup
-    // (ScheduleHostLayoutRefresh) defers itself while a collapse animation is in
-    // flight: an empty beginUpdates/endUpdates mid-animation re-queries every row
-    // height and restarts the native delete/insert animations, which is what made
+    // (ScheduleHostLayoutRefresh) and the link-preview module's row-height
+    // refresh defer themselves while a collapse animation is in flight: an
+    // empty beginUpdates/endUpdates mid-animation re-queries every row height
+    // and restarts the native delete/insert animations, which is what made
     // sibling rows glide the wrong way during a collapse (issue #620, round 2).
-    // Parse-time setCollapsed: storms also stamp this, but that only delays the
-    // initial height fixup by <=0.65s, which is harmless.
-    ApolloDeletedCommentsNoteCollapseEvent();
+    //
+    // Main-thread setters only: a collapse that animates the table always
+    // originates on main (user tap, Apollo's own UI-driven collapses, our
+    // late-archive un-collapse). Model PARSING also calls setCollapsed: — in
+    // background-thread storms, one per comment, on every thread open — and
+    // stamping those armed the window at exactly the moment link-preview
+    // placeholders shrink to their final compact size, deferring (and with
+    // cell reuse, losing) their row-height refresh: the stretched compact
+    // cards reported in #620. No table animation can be running from a
+    // background parse, so those stamps protected nothing. This also keeps
+    // the stamp variable main-thread-only (it was cross-thread racy before).
+    if ([NSThread isMainThread]) {
+        ApolloDeletedCommentsNoteCollapseEvent();
+    }
 
     // Collapse/expand stays fully native here and never reveals: revealing is a
     // separate chip-region tap handled by the cell's reveal recognizer. (Earlier

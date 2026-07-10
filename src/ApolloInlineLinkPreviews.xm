@@ -125,6 +125,10 @@ static char kApolloLinkPreviewNodesKey;
 static char kApolloLinkPreviewFetchInFlightKey;
 static char kApolloLinkPreviewOriginalHostShellKey;
 static char kApolloLinkPreviewRenderedPlaceholderKey;
+// V24: context of the last RICH render (hero/compact), for detecting a
+// final-hero -> final-compact flip that has no placeholder mark. Atomic
+// association: written from Texture's background measurement threads.
+static char kApolloLPLastRenderedContextKey;
 static char kApolloLinkPreviewBackgroundColorPresetKey;
 static char kApolloLinkPreviewAreaKey;
 static char kApolloLinkPreviewContextMenuInstalledKey;
@@ -148,7 +152,7 @@ typedef struct {
 
 static void ApolloLPLogOncePerHost(NSString *host, NSString *event);
 static void ApolloLPTriggerRelayoutForHost(ASDisplayNode *node, NSString *host);
-static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, NSString *host);
+static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDisplayNode *originNode, NSString *host);
 static ASDisplayNode *ApolloLPFindOwningCellNode(ASDisplayNode *node);
 static void ApolloLPNoteRowReloadMissForNode(ASDisplayNode *node, NSString *host);
 static BOOL ApolloLPIsRedditUserProfileURL(NSURL *url);
@@ -1045,7 +1049,7 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
                     ApolloLog(@"[LinkPreviews] V21-dead-image-compact-reflow host=%@", hostCopy ?: ApolloLPHost(imageURL));
                     ApolloLPTriggerRelayoutForHost(hostNode, hostCopy);
                     ASDisplayNode *cellNode = ApolloLPFindOwningCellNode(hostNode);
-                    if (!ApolloLPInvokeRowReloadIfPossible(cellNode ?: hostNode, hostCopy)) {
+                    if (!ApolloLPInvokeRowReloadIfPossible(cellNode ?: hostNode, hostNode, hostCopy)) {
                         ApolloLPNoteRowReloadMissForNode(hostNode, hostCopy);
                     }
                 }
@@ -1581,7 +1585,7 @@ static BOOL ApolloLPFireRowReloadFromAttachedNodesForURL(NSString *urlString, NS
         UIView *view = loaded ? ApolloLPViewForNode(node) : nil;
         if (!view.window) continue; // only an on-screen tree can resolve its row's index path
         ASDisplayNode *cellNode = ApolloLPFindOwningCellNode(node);
-        if (ApolloLPInvokeRowReloadIfPossible(cellNode ?: node, host)) {
+        if (ApolloLPInvokeRowReloadIfPossible(cellNode ?: node, node, host)) {
             fired = YES;
         }
     }
@@ -1626,6 +1630,13 @@ static void ApolloLPRunCrossNodeRowReloadPoll(void) {
 // the V23 cross-instance reload keyed by the node's URL. Try to fire right
 // away — when the preview resolves while the row is already on screen, the
 // display tree is attached and the row heals immediately.
+//
+// V24: the map entry is armed even when the immediate fire reports success —
+// a YES from the fire only means a reload was SCHEDULED, and its async body
+// can still drop on the visibility guard. The poll drains the entry on the
+// next fire (an extra reload of an already-correct row is harmless and
+// documented as such above), so arming unconditionally trades one cheap
+// reload for never losing the row.
 static void ApolloLPNoteRowReloadMissForNode(ASDisplayNode *node, NSString *host) {
     if (!node) return;
     objc_setAssociatedObject(node, &kApolloLPPendingRowReloadHostKey, host ?: @"?", OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -1633,12 +1644,11 @@ static void ApolloLPNoteRowReloadMissForNode(ASDisplayNode *node, NSString *host
     NSURL *url = objc_getAssociatedObject(node, &kApolloLinkPreviewURLKey);
     NSString *urlString = url.absoluteString;
     if (urlString.length == 0) return;
-    if (ApolloLPFireRowReloadFromAttachedNodesForURL(urlString, host)) {
-        ApolloLog(@"[LinkPreviews] V23-cross-node-row-reload host=%@", host ?: @"?");
-        return;
-    }
     ApolloLPPendingCrossNodeRowReloads()[urlString] = [NSDate date];
     ApolloLPScheduleCrossNodeRowReloadPoll();
+    if (ApolloLPFireRowReloadFromAttachedNodesForURL(urlString, host)) {
+        ApolloLog(@"[LinkPreviews] V23-cross-node-row-reload host=%@", host ?: @"?");
+    }
 }
 
 static void ApolloLPMarkNodeForColorRefresh(ASDisplayNode *node) {
@@ -3108,38 +3118,72 @@ static ASDisplayNode *ApolloLPFindOwningCellNode(ASDisplayNode *node) {
     return nil;
 }
 
+static void ApolloLPPerformScrollViewHeightRefresh(UIView *scrollView) {
+    if ([scrollView isKindOfClass:[UITableView class]]) {
+        UITableView *tableView = (UITableView *)scrollView;
+        [tableView beginUpdates];
+        [tableView endUpdates];
+    } else if ([scrollView isKindOfClass:[UICollectionView class]]) {
+        [(UICollectionView *)scrollView performBatchUpdates:nil completion:nil];
+    }
+}
+
+// V24: settle-deferred begin/endUpdates. Holds the RESOLVED scroll view
+// strongly instead of re-walking from a weak node after the wait: the row
+// reload that usually accompanies this refresh re-creates the cell node, so
+// a weak node reference dies before the collapse settles and the deferred
+// refresh silently vanished — leaving compact cards stranded inside their
+// tall hero-measured rows (#620 stretched-card report). The table view
+// outlives the animation, one pending refresh per table is enough (an empty
+// begin/endUpdates re-queries EVERY row height), and the retry is bounded so
+// a long collapse-event storm can't queue forever — after the cap we fire
+// anyway, which at worst re-runs the (rare) mid-animation glitch this gate
+// exists to avoid, never a permanently wrong layout.
+static char kApolloLPSettleRefreshPendingKey;
+
+static void ApolloLPScheduleSettleDeferredHeightRefresh(UIView *scrollView, NSTimeInterval settleDelay, NSInteger attemptsLeft) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((settleDelay + 0.03) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        NSTimeInterval remaining = ApolloDeletedCommentsCollapseSettleDelayRemaining();
+        if (remaining > 0 && attemptsLeft > 0) {
+            ApolloLPScheduleSettleDeferredHeightRefresh(scrollView, remaining, attemptsLeft - 1);
+            return;
+        }
+        objc_setAssociatedObject(scrollView, &kApolloLPSettleRefreshPendingKey, nil, OBJC_ASSOCIATION_RETAIN);
+        if (!scrollView.window) return; // screen went away; nothing left to fix
+        ApolloLog(@"[LinkPreviews] V24-settle-deferred-height-refresh fired attemptsLeft=%ld", (long)attemptsLeft);
+        ApolloLPPerformScrollViewHeightRefresh(scrollView);
+    });
+}
+
 static BOOL ApolloLPInvokeScrollViewHeightRefresh(ASDisplayNode *node) {
+    // Resolve the enclosing table/collection view FIRST, while the caller's
+    // node is still alive and attached — a deferred walk routinely fails
+    // after cell reuse (V24, see above).
+    UIView *view = ApolloLPViewForNode(node);
+    UIView *scrollView = nil;
+    for (UIView *current = view; current; current = current.superview) {
+        if ([current isKindOfClass:[UITableView class]] || [current isKindOfClass:[UICollectionView class]]) {
+            scrollView = current;
+            break;
+        }
+    }
+    if (!scrollView) return NO;
+
     // A comment collapse/expand animation is running: an empty begin/endUpdates
     // now re-queries every row height mid-animation and restarts the native row
     // animations (ghosting / rows sliding the wrong way — #630). Re-run the
-    // refresh once the collapse settles instead.
+    // refresh once the collapse settles instead, coalesced per scroll view.
     NSTimeInterval settleDelay = ApolloDeletedCommentsCollapseSettleDelayRemaining();
     if (settleDelay > 0) {
-        __weak ASDisplayNode *weakNode = node;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((settleDelay + 0.03) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            ASDisplayNode *strongNode = weakNode;
-            if (strongNode) ApolloLPInvokeScrollViewHeightRefresh(strongNode);
-        });
+        if (!objc_getAssociatedObject(scrollView, &kApolloLPSettleRefreshPendingKey)) {
+            objc_setAssociatedObject(scrollView, &kApolloLPSettleRefreshPendingKey, @YES, OBJC_ASSOCIATION_RETAIN);
+            ApolloLPScheduleSettleDeferredHeightRefresh(scrollView, settleDelay, 6);
+        }
         return YES;
     }
 
-    UIView *view = ApolloLPViewForNode(node);
-    for (UIView *current = view; current; current = current.superview) {
-        if ([current isKindOfClass:[UITableView class]]) {
-            UITableView *tableView = (UITableView *)current;
-            [tableView beginUpdates];
-            [tableView endUpdates];
-            return YES;
-        }
-
-        if ([current isKindOfClass:[UICollectionView class]]) {
-            UICollectionView *collectionView = (UICollectionView *)current;
-            [collectionView performBatchUpdates:nil completion:nil];
-            return YES;
-        }
-    }
-
-    return NO;
+    ApolloLPPerformScrollViewHeightRefresh(scrollView);
+    return YES;
 }
 
 static id ApolloLPTextureNodeForScrollView(UIView *scrollView) {
@@ -3192,7 +3236,26 @@ static void ApolloLPLogRowReloadMissAncestry(ASDisplayNode *startNode, UIView *c
     ApolloLPLogOncePerHost(host, [NSString stringWithFormat:@"V23-miss-node-chain %@", [nodeChain componentsJoinedByString:@" > "]]);
 }
 
-static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, NSString *host) {
+// V24: the async reload bodies below can still drop their reload when the
+// captured index path has left the visible set by the time the block runs
+// (fast scroll, or a native collapse animation mutating the table — the very
+// situation the settle gate detects). The synchronous YES already told the
+// caller "handled", which suppresses the V20/V23 miss bookkeeping — so a
+// dropped reload used to disarm every healer at once and the row kept its
+// stale hero height forever (#620 stretched compact cards). Re-note the miss
+// from the block instead of silently returning: that re-arms the V20 pending
+// mark and the V23 cross-node map, whose 1s poll reloads the row as soon as
+// it is back on screen. `originNode` is the LinkButtonNode that owns the
+// preview (it carries the URL association the bookkeeping needs); if it has
+// been deallocated the cell was re-created, which re-measures with cached
+// metadata and heals the height by itself — nothing to re-arm.
+static void ApolloLPRenoteDroppedRowReload(ASDisplayNode *originNode, NSString *host, NSInteger row) {
+    if (!originNode) return;
+    ApolloLog(@"[LinkPreviews] V24-row-reload-dropped-renote host=%@ row=%ld", host ?: @"?", (long)row);
+    ApolloLPNoteRowReloadMissForNode(originNode, host);
+}
+
+static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDisplayNode *originNode, NSString *host) {
     UIView *cellView = ApolloLPViewForNode(startNode);
     if (!cellView) {
         ApolloLPLogOncePerHost(host, @"V12-row-reload-miss no-view");
@@ -3216,9 +3279,13 @@ static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, NSString
 
             NSString *hostCopy = [host copy];
             NSIndexPath *indexPathCopy = [indexPath copy];
+            __weak ASDisplayNode *weakOriginNode = originNode;
             dispatch_async(dispatch_get_main_queue(), ^{
                 @try {
-                    if (![[tableView indexPathsForVisibleRows] containsObject:indexPathCopy]) return;
+                    if (![[tableView indexPathsForVisibleRows] containsObject:indexPathCopy]) {
+                        ApolloLPRenoteDroppedRowReload(weakOriginNode, hostCopy, indexPathCopy.row);
+                        return;
+                    }
                     ApolloLPInvokeTextureScrollRelayoutIfPossible(tableView, hostCopy, @"table");
                     [tableView reloadRowsAtIndexPaths:@[indexPathCopy] withRowAnimation:UITableViewRowAnimationNone];
                     ApolloLPLogOncePerHost(hostCopy, [NSString stringWithFormat:@"V12-row-reload kind=table row=%ld", (long)indexPathCopy.row]);
@@ -3235,9 +3302,13 @@ static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, NSString
 
             NSString *hostCopy = [host copy];
             NSIndexPath *indexPathCopy = [indexPath copy];
+            __weak ASDisplayNode *weakOriginNode = originNode;
             dispatch_async(dispatch_get_main_queue(), ^{
                 @try {
-                    if (![[collectionView indexPathsForVisibleItems] containsObject:indexPathCopy]) return;
+                    if (![[collectionView indexPathsForVisibleItems] containsObject:indexPathCopy]) {
+                        ApolloLPRenoteDroppedRowReload(weakOriginNode, hostCopy, indexPathCopy.item);
+                        return;
+                    }
                     ApolloLPInvokeTextureScrollRelayoutIfPossible(collectionView, hostCopy, @"collection");
                     [collectionView performBatchUpdates:^{
                         [collectionView reloadItemsAtIndexPaths:@[indexPathCopy]];
@@ -3333,7 +3404,7 @@ static void ApolloLPTriggerPlaceholderContextRelayout(ASDisplayNode *node, NSStr
               host ?: @"(nohost)", ApolloLPContextLogName(fromContext), ApolloLPContextLogName(toContext));
     ApolloLPTriggerRelayoutInternal(node, NO, host);
     ASDisplayNode *cellNode = ApolloLPFindOwningCellNode(node);
-    if (!ApolloLPInvokeRowReloadIfPossible(cellNode ?: node, host)) {
+    if (!ApolloLPInvokeRowReloadIfPossible(cellNode ?: node, node, host)) {
         ApolloLPNoteRowReloadMissForNode(node, host);
     }
 
@@ -3343,7 +3414,7 @@ static void ApolloLPTriggerPlaceholderContextRelayout(ASDisplayNode *node, NSStr
         ASDisplayNode *strongNode = weakNode;
         if (!strongNode) return;
         ASDisplayNode *strongCellNode = ApolloLPFindOwningCellNode(strongNode);
-        if (ApolloLPInvokeRowReloadIfPossible(strongCellNode ?: strongNode, hostCopy)) {
+        if (ApolloLPInvokeRowReloadIfPossible(strongCellNode ?: strongNode, strongNode, hostCopy)) {
             objc_setAssociatedObject(strongNode, &kApolloLPPendingRowReloadHostKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
             NSURL *url = objc_getAssociatedObject(strongNode, &kApolloLinkPreviewURLKey);
             if (url.absoluteString.length > 0) {
@@ -3406,7 +3477,7 @@ static void ApolloLPRunOverflowHeightCheck(ASDisplayNode *node, NSString *host, 
         if (overflow > 8.0) {
             ApolloLog(@"[LinkPreviews] V18-stale-row-height host=%@ overflow=%.0fpt -> reloading row",
                       host ?: @"?", overflow);
-            ApolloLPInvokeRowReloadIfPossible(node, host);
+            ApolloLPInvokeRowReloadIfPossible(node, node, host);
         }
     } @catch (__unused NSException *exception) {}
 }
@@ -4163,12 +4234,28 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
         : ApolloLPBuildCompactCardSpec((ASDisplayNode *)self, url, displayPreview, finalVariant);
     if (richSpec) {
         NSNumber *renderedPlaceholder = objc_getAssociatedObject(self, &kApolloLinkPreviewRenderedPlaceholderKey);
-        if (renderedPlaceholder) {
+        // V24: also track the CONTEXT of every rich render. A final-hero card
+        // can later re-render final-compact with no placeholder involved at
+        // all (the multi-link rule counts links via a cell-subtree walk, so a
+        // measurement against a not-yet-complete subtree can resolve hero and
+        // a later one compact). That flip had NO relayout trigger — the
+        // compact card kept the hero row height and V18's overflow geometry
+        // is blind to oversize rows. Fire the same shrink relayout for it.
+        NSNumber *lastRenderedContext = objc_getAssociatedObject(self, &kApolloLPLastRenderedContextKey);
+        objc_setAssociatedObject(self, &kApolloLPLastRenderedContextKey, @(context), OBJC_ASSOCIATION_RETAIN);
+        BOOL finalShrankToCompact = !renderedPlaceholder &&
+            [lastRenderedContext isKindOfClass:[NSNumber class]] &&
+            lastRenderedContext.unsignedIntegerValue == ApolloLPContextSelfText &&
+            context == ApolloLPContextCompact;
+        if (renderedPlaceholder || finalShrankToCompact) {
             objc_setAssociatedObject(self, &kApolloLinkPreviewRenderedPlaceholderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             __weak ASDisplayNode *weakSelf = (ASDisplayNode *)self;
             NSString *hostCopy = [host copy];
-            ApolloLPContext placeholderContext = (ApolloLPContext)[renderedPlaceholder unsignedIntegerValue];
-            BOOL placeholderShrankToCompact = placeholderContext == ApolloLPContextSelfText && context == ApolloLPContextCompact;
+            ApolloLPContext placeholderContext = renderedPlaceholder ? (ApolloLPContext)[renderedPlaceholder unsignedIntegerValue] : ApolloLPContextSelfText;
+            BOOL placeholderShrankToCompact = (placeholderContext == ApolloLPContextSelfText && context == ApolloLPContextCompact) || finalShrankToCompact;
+            if (finalShrankToCompact) {
+                ApolloLPLogOncePerHost(host, @"V24-final-hero-to-compact-shrink");
+            }
             dispatch_async(dispatch_get_main_queue(), ^{
                 ASDisplayNode *strongSelf = weakSelf;
                 if (!strongSelf) return;
@@ -4227,7 +4314,13 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
             ASDisplayNode *strongSelf = weakSelf;
             if (!strongSelf) return;
             ASDisplayNode *cellNode = ApolloLPFindOwningCellNode(strongSelf);
-            ApolloLPInvokeRowReloadIfPossible(cellNode ?: strongSelf, pendingHost);
+            // V24: the mark was consumed above; if the reload can't even be
+            // scheduled, re-arm instead of discarding the result — otherwise
+            // this re-fire was one-shot and a single failed walk stranded the
+            // row at its stale height.
+            if (!ApolloLPInvokeRowReloadIfPossible(cellNode ?: strongSelf, strongSelf, pendingHost)) {
+                ApolloLPNoteRowReloadMissForNode(strongSelf, pendingHost);
+            }
         });
     }
     ApolloLPScheduleOverflowHeightCheck((ASDisplayNode *)self, @"visible-check");
