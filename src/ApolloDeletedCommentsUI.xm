@@ -2382,17 +2382,37 @@ static NSURL *ApolloDeletedCommentsLinkURLAtCellPoint(id cellNode, CGPoint point
 
 static const void *kApolloDeletedCommentsLinkTapGestureKey = &kApolloDeletedCommentsLinkTapGestureKey;
 
+// Open a link tapped inside a recovered body. Reddit URLs route through Apollo's own
+// URL handler so posts/comments/subreddits/users open the NATIVE views (#630 round 4:
+// "links to reddit posts take you out of Apollo, into the web view"); everything else
+// opens in Apollo's web view.
+static void ApolloDeletedCommentsOpenRecoveredBodyURL(UIViewController *presenter, NSURL *url) {
+    if (!url) return;
+    NSString *host = [url.host lowercaseString] ?: @"";
+    BOOL isReddit = [host isEqualToString:@"redd.it"] ||
+                    [host hasSuffix:@".redd.it"] ||
+                    [host isEqualToString:@"reddit.com"] ||
+                    [host hasSuffix:@".reddit.com"];
+    if (isReddit && ApolloRouteURLThroughApp(url)) return;
+    ApolloPresentWebURLFromViewController(presenter, url);
+}
+
 @interface ApolloDeletedCommentsLinkTapHandler : NSObject <UIGestureRecognizerDelegate>
 @property (nonatomic, weak) id cellNode;
+// Resolved ONCE at touch-begin and reused for every later decision. Round 3 resolved
+// independently at claim time and again at tap-end; near a link's edge those two
+// points can disagree, so the gesture claimed the tap (cancelling Apollo's collapse
+// tap) and then opened nothing — the "comment won't collapse until you collapse a
+// different one" regression. With a single resolution, claim == open, always.
+@property (nonatomic, strong) NSURL *pendingURL;
 @end
 
 @implementation ApolloDeletedCommentsLinkTapHandler
 
 - (void)apolloLinkTap:(UITapGestureRecognizer *)recognizer {
     if (recognizer.state != UIGestureRecognizerStateEnded) return;
-    id cellNode = self.cellNode;
-    if (!cellNode) return;
-    NSURL *url = ApolloDeletedCommentsLinkURLAtCellPoint(cellNode, [recognizer locationInView:recognizer.view]);
+    NSURL *url = self.pendingURL;
+    self.pendingURL = nil;
     if (!url) return;
 
     UIViewController *presenter = nil;
@@ -2401,15 +2421,17 @@ static const void *kApolloDeletedCommentsLinkTapGestureKey = &kApolloDeletedComm
     }
     if (!presenter) return;
     ApolloLog(@"[DeletedComments] Opening recovered-body link %@", url.absoluteString);
-    ApolloPresentWebURLFromViewController(presenter, url);
+    ApolloDeletedCommentsOpenRecoveredBodyURL(presenter, url);
 }
 
 // Claim the tap only when a link is actually under the finger; every other tap
 // (collapse, expand, reveal chip, buttons) passes through untouched.
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    self.pendingURL = nil;
     id cellNode = self.cellNode;
     if (!cellNode || !ApolloDeletedCommentsFeatureActive()) return NO;
-    return ApolloDeletedCommentsLinkURLAtCellPoint(cellNode, [touch locationInView:gestureRecognizer.view]) != nil;
+    self.pendingURL = ApolloDeletedCommentsLinkURLAtCellPoint(cellNode, [touch locationInView:gestureRecognizer.view]);
+    return self.pendingURL != nil;
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
@@ -2419,14 +2441,12 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
 
 // Same arbitration as the reveal tap: Apollo's single-tap collapse must wait for —
 // and be cancelled by — a successful link tap, so tapping a link never collapses.
+// Reuses the touch-begin resolution — never re-hit-tests.
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
 shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
     if (![otherGestureRecognizer isKindOfClass:[UITapGestureRecognizer class]]) return NO;
     if (((UITapGestureRecognizer *)otherGestureRecognizer).numberOfTapsRequired > 1) return NO;
-    id cellNode = self.cellNode;
-    if (!cellNode) return NO;
-    CGPoint p = [otherGestureRecognizer locationInView:gestureRecognizer.view];
-    return ApolloDeletedCommentsLinkURLAtCellPoint(cellNode, p) != nil;
+    return self.pendingURL != nil;
 }
 @end
 
@@ -3632,6 +3652,22 @@ static void ApolloDeletedCommentsCaptureLiveCommentBodyFont(id textNode, NSAttri
 
 %hook _TtC6Apollo15CommentCellNode
 
+// Apply a cached recovered archive to the MODEL at preload — before the node's first
+// measurement — so a late-arriving archive still renders (and MEASURES) the recovered
+// body the first time the cell appears. Applying only at display state meant the row
+// was first measured from the short "[removed]" placeholder and re-measured taller
+// while already visible: the "deleted comments don't load until you scroll to them"
+// pop-in of #630 round 4, and a stale-height source for glitchy first collapses.
+// Preload is a data-loading callback, not a layout one, so model writes are safe here
+// (the #514 constraint is about layout callbacks).
+- (void)didEnterPreloadState {
+    %orig;
+    if (ApolloDeletedCommentsFeatureActive()) {
+        ApolloDeletedCommentsApplyCachedArchiveToVisibleDeletedCell((id)self);
+        ApolloDeletedCommentsSynchronizeCommentModelDisplayState((id)self);
+    }
+}
+
 - (void)didLoad {
     %orig;
     ApolloDeletedCommentsUpdateCell((id)self);
@@ -3782,6 +3818,44 @@ static void ApolloDeletedCommentsRevealCommentInsteadOfCollapsing(RDKComment *co
         }
     });
 }
+
+// Apollo's ListAdapter force-traps (Swift precondition, EXC_BREAKPOINT) when a row
+// selection arrives for an index beyond its objects array — which happens when rows
+// are removed (a comment collapse) between a tap and UIKit's deferred selection
+// delivery (_UIAfterCACommitBlock -> _userSelectRowAtPendingSelectionIndexPath).
+// Urano hit exactly this in #630 round 4 (crash report: brk in the didSelectRow
+// handler's bounds check at ListAdapter.objects[row]). Drop out-of-range selections
+// instead of letting Apollo trap; a dropped tap on a just-shrunk table is a no-op the
+// user re-taps, not a crash. The Swift Array ivar's count lives at buffer+0x10, the
+// same load Apollo's own code performs right before its trap.
+static BOOL ApolloDeletedCommentsRowSelectionIsStale(id adapter, NSIndexPath *indexPath) {
+    if (![indexPath isKindOfClass:[NSIndexPath class]]) return NO;
+    NSInteger row = indexPath.row;
+    if (row < 0) return YES;
+    @try {
+        Ivar objectsIvar = class_getInstanceVariable(object_getClass(adapter), "objects");
+        if (!objectsIvar) return NO;
+        ptrdiff_t offset = ivar_getOffset(objectsIvar);
+        if (offset <= 0) return NO;
+        uintptr_t buffer = *(uintptr_t *)((uint8_t *)(__bridge void *)adapter + offset);
+        if (!buffer) return NO;
+        NSInteger count = *(NSInteger *)(buffer + 0x10);
+        if (count >= 0 && count < 1000000 && row >= count) {
+            ApolloLog(@"[DeletedComments] Dropping stale row selection %ld (objects=%ld) — table shrank under the tap", (long)row, (long)count);
+            return YES;
+        }
+    } @catch (__unused NSException *e) {}
+    return NO;
+}
+
+%hook _TtC6Apollo11ListAdapter
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (ApolloDeletedCommentsRowSelectionIsStale((id)self, indexPath)) return;
+    %orig;
+}
+
+%end
 
 %hook RDKComment
 
