@@ -134,7 +134,6 @@ static char kApolloLinkPreviewImageFallbackScheduledKey;
 static char kApolloLinkPreviewImageFallbackInFlightKey;
 static char kApolloLinkPreviewImageFallbackAppliedURLKey;
 static char kApolloLinkPreviewRenderSignaturesKey;
-static char kApolloLinkPreviewV17LogCountKey;
 static char kApolloLinkPreviewCropContextKey;
 
 static NSHashTable<id> *sApolloLPRegisteredLinkNodes = nil;
@@ -1768,19 +1767,59 @@ static BOOL ApolloLPSetTextNodeAttributedTextIfChanged(ASTextNode *textNode, NSA
     return YES;
 }
 
+// Regexes compiled once — NSRegularExpression is immutable and thread-safe.
+// Compiling them per clean call was the hottest allocation in the card render
+// path: several cleans per measure, several measures per card, per scroll.
+static NSRegularExpression *ApolloLPTagRegex(void) {
+    static NSRegularExpression *r; static dispatch_once_t once;
+    dispatch_once(&once, ^{ r = [NSRegularExpression regularExpressionWithPattern:@"<[^>]+>" options:0 error:nil]; });
+    return r;
+}
+static NSRegularExpression *ApolloLPWhitespaceRunRegex(void) {
+    static NSRegularExpression *r; static dispatch_once_t once;
+    dispatch_once(&once, ^{ r = [NSRegularExpression regularExpressionWithPattern:@"\\s+" options:0 error:nil]; });
+    return r;
+}
+static NSRegularExpression *ApolloLPInlineWhitespaceRegex(void) {
+    static NSRegularExpression *r; static dispatch_once_t once;
+    // \x0B (vertical tab), NOT \v: in ICU regex \v is a class shorthand for
+    // ALL vertical whitespace including \n — it silently ate the very line
+    // breaks the multiline variant exists to preserve.
+    dispatch_once(&once, ^{ r = [NSRegularExpression regularExpressionWithPattern:@"[\\t\\f\\x0B ]+" options:0 error:nil]; });
+    return r;
+}
+static NSRegularExpression *ApolloLPBlankRunRegex(void) {
+    static NSRegularExpression *r; static dispatch_once_t once;
+    dispatch_once(&once, ^{ r = [NSRegularExpression regularExpressionWithPattern:@"\\n{3,}" options:0 error:nil]; });
+    return r;
+}
+
+// Cleaned-text memo: the SAME titles/descriptions are re-cleaned on every
+// measure of every card (and again by the render-signature path). Keyed by
+// the source string with an "s|"/"m|" prefix so the single-line and multiline
+// variants of the same source never collide. NSCache: thread-safe + bounded.
+static NSCache<NSString *, NSString *> *ApolloLPCleanMemo(void) {
+    static NSCache *c; static dispatch_once_t once;
+    dispatch_once(&once, ^{ c = [NSCache new]; c.countLimit = 512; });
+    return c;
+}
+
 static NSString *ApolloLPCleanDisplayText(NSString *text) {
     if (![text isKindOfClass:[NSString class]] || text.length == 0) return text;
+    NSString *memoKey = [@"s|" stringByAppendingString:text];
+    NSString *memo = [ApolloLPCleanMemo() objectForKey:memoKey];
+    if (memo) return memo;
     // Decode HTML entities FIRST (named + numeric, incl. « » ° €) — the fetcher
     // decodes freshly-stored metadata, but cached and *translated* card text reach
     // this render choke point raw and would otherwise show literal "&laquo;".
     // Decoding before tag-stripping also lets an encoded "&lt;b&gt;" collapse out.
     NSString *clean = ApolloLinkPreviewDecodeEntities(text) ?: text;
-    NSRegularExpression *tagRegex = [NSRegularExpression regularExpressionWithPattern:@"<[^>]+>" options:0 error:nil];
-    clean = [tagRegex stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@" "];
-    NSRegularExpression *whitespace = [NSRegularExpression regularExpressionWithPattern:@"\\s+" options:0 error:nil];
-    clean = [whitespace stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@" "];
+    clean = [ApolloLPTagRegex() stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@" "];
+    clean = [ApolloLPWhitespaceRunRegex() stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@" "];
     clean = [clean stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    return clean.length > 0 ? clean : text;
+    NSString *result = clean.length > 0 ? clean : text;
+    [ApolloLPCleanMemo() setObject:result forKey:memoKey];
+    return result;
 }
 
 // Like ApolloLPCleanDisplayText, but preserves the text's line structure —
@@ -1789,20 +1828,19 @@ static NSString *ApolloLPCleanDisplayText(NSString *text) {
 // a multi-paragraph post into one run-on blob.
 static NSString *ApolloLPCleanMultilineDisplayText(NSString *text) {
     if (![text isKindOfClass:[NSString class]] || text.length == 0) return text;
+    NSString *memoKey = [@"m|" stringByAppendingString:text];
+    NSString *memo = [ApolloLPCleanMemo() objectForKey:memoKey];
+    if (memo) return memo;
     // Decode entities first (see ApolloLPCleanDisplayText) — keeps numeric/named
     // entities out of cached/translated multiline bodies (e.g. Bluesky posts).
     NSString *clean = ApolloLinkPreviewDecodeEntities(text) ?: text;
-    NSRegularExpression *tagRegex = [NSRegularExpression regularExpressionWithPattern:@"<[^>]+>" options:0 error:nil];
-    clean = [tagRegex stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@" "];
-    // \x0B (vertical tab), NOT \v: in ICU regex \v is a class shorthand for
-    // ALL vertical whitespace including \n — it silently ate the very line
-    // breaks this function exists to preserve.
-    NSRegularExpression *inlineWhitespace = [NSRegularExpression regularExpressionWithPattern:@"[\\t\\f\\x0B ]+" options:0 error:nil];
-    clean = [inlineWhitespace stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@" "];
-    NSRegularExpression *blankRuns = [NSRegularExpression regularExpressionWithPattern:@"\\n{3,}" options:0 error:nil];
-    clean = [blankRuns stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@"\n\n"];
+    clean = [ApolloLPTagRegex() stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@" "];
+    clean = [ApolloLPInlineWhitespaceRegex() stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@" "];
+    clean = [ApolloLPBlankRunRegex() stringByReplacingMatchesInString:clean options:0 range:NSMakeRange(0, clean.length) withTemplate:@"\n\n"];
     clean = [clean stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    return clean.length > 0 ? clean : text;
+    NSString *result = clean.length > 0 ? clean : text;
+    [ApolloLPCleanMemo() setObject:result forKey:memoKey];
+    return result;
 }
 
 static NSString *ApolloLPDisplayTitleForPreview(ApolloLinkPreview *preview) {
@@ -3261,42 +3299,92 @@ static void ApolloLPInvokeContainerRelayoutIfPossible(ASDisplayNode *node, ASDis
     }
 }
 
-static void ApolloLPTriggerRelayoutInternal(ASDisplayNode *node, BOOL scheduleDelayed, NSString *host) {
-    ASDisplayNode *cellNode = ApolloLPFindOwningCellNode(node);
+// Cheap synchronous part of a relayout trigger: dirty the ancestor chain's
+// cached layouts. Flag flips only — the expensive re-measure happens in the
+// single escalation below. Every card must dirty its own path (several cards
+// can share one cell), so this always runs at trigger time.
+static void ApolloLPInvalidateAncestorChain(ASDisplayNode *node) {
     NSUInteger depth = 0;
     for (ASDisplayNode *current = node; current && depth < 32; current = current.supernode, depth++) {
-        SEL invalidate = @selector(invalidateCalculatedLayout);
-        if ([current respondsToSelector:invalidate]) {
-            ((void (*)(id, SEL))objc_msgSend)(current, invalidate);
+        if ([current respondsToSelector:@selector(invalidateCalculatedLayout)]) {
+            ((void (*)(id, SEL))objc_msgSend)(current, @selector(invalidateCalculatedLayout));
         }
-
-        SEL relayout = NSSelectorFromString(@"_u_setNeedsLayoutFromAbove");
-        if ([current respondsToSelector:relayout]) {
-            ((void (*)(id, SEL))objc_msgSend)(current, relayout);
-        }
-
-        SEL setNeedsLayout = @selector(setNeedsLayout);
-        if ([current respondsToSelector:setNeedsLayout]) {
-            ((void (*)(id, SEL))objc_msgSend)(current, setNeedsLayout);
+        if ([current respondsToSelector:@selector(setNeedsLayout)]) {
+            ((void (*)(id, SEL))objc_msgSend)(current, @selector(setNeedsLayout));
         }
     }
+}
 
+// The expensive part: ONE _u_setNeedsLayoutFromAbove escalation at the cell
+// (Texture re-measures the whole ancestor chain itself — the old shape called
+// it at EVERY level, an O(depth²) climb per preview resolution), plus the
+// cell transition and container relayout.
+static void ApolloLPPerformRelayoutClimb(ASDisplayNode *node, ASDisplayNode *cellNode, NSString *host) {
+    ASDisplayNode *target = cellNode ?: node;
+    SEL relayout = NSSelectorFromString(@"_u_setNeedsLayoutFromAbove");
+    if ([target respondsToSelector:relayout]) {
+        ((void (*)(id, SEL))objc_msgSend)(target, relayout);
+    }
     if (cellNode) {
         ApolloLPInvokeTransitionLayoutIfPossible(cellNode);
     }
+    ApolloLPInvokeContainerRelayoutIfPossible(node, cellNode, host);
+}
 
+// Debounce state lives on the climb TARGET (the owning cell when found), so
+// every card in a cell shares one pending climb. ~50 staggered cold preview
+// resolutions used to mean ~50 synchronous full-cell re-measures; now a burst
+// collapses to one climb ~QUIET ms after its last trigger (MAX-capped).
+static char kApolloLPClimbArmedKey;
+static char kApolloLPClimbLastMsKey;
+static char kApolloLPClimbFirstMsKey;
+static const double kApolloLPClimbQuietMs = 150.0;
+static const double kApolloLPClimbMaxMs   = 400.0;
+
+static void ApolloLPArmRelayoutClimb(ASDisplayNode *node, ASDisplayNode *cellNode, NSString *host, double delayMs) {
+    __weak ASDisplayNode *weakNode = node;
+    __weak ASDisplayNode *weakCell = cellNode;
+    NSString *hostCopy = [host copy];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayMs * NSEC_PER_MSEC)),
+                   dispatch_get_main_queue(), ^{
+        ASDisplayNode *n = weakNode;
+        ASDisplayNode *cell = weakCell;
+        ASDisplayNode *target = cell ?: n;
+        if (!n || !target) return;
+        double now = ApolloPerfNowMs();
+        double last = [objc_getAssociatedObject(target, &kApolloLPClimbLastMsKey) doubleValue];
+        double first = [objc_getAssociatedObject(target, &kApolloLPClimbFirstMsKey) doubleValue];
+        double sinceLast = now - last;
+        if (sinceLast < kApolloLPClimbQuietMs - 10.0 && now - first < kApolloLPClimbMaxMs) {
+            ApolloLPArmRelayoutClimb(n, cell, hostCopy, kApolloLPClimbQuietMs - sinceLast);
+            return;
+        }
+        objc_setAssociatedObject(target, &kApolloLPClimbArmedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(target, &kApolloLPClimbFirstMsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloLPPerformRelayoutClimb(n, cell, hostCopy);
+    });
+}
+
+static void ApolloLPTriggerRelayoutInternal(ASDisplayNode *node, BOOL scheduleDelayed, NSString *host) {
+    if (!node) return;
+    ASDisplayNode *cellNode = ApolloLPFindOwningCellNode(node);
+    ApolloLPInvalidateAncestorChain(node);
+
+    // scheduleDelayed == NO is the immediate path (placeholder-context shrink
+    // checks row-reload right after; it needs the climb done synchronously).
     if (!scheduleDelayed) {
-        ApolloLPInvokeContainerRelayoutIfPossible(node, cellNode, host);
+        ApolloLPPerformRelayoutClimb(node, cellNode, host);
+        return;
     }
 
-    if (scheduleDelayed) {
-        __weak ASDisplayNode *weakNode = node;
-        NSString *hostCopy = [host copy];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(80 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
-            ASDisplayNode *strongNode = weakNode;
-            if (strongNode) ApolloLPTriggerRelayoutInternal(strongNode, NO, hostCopy);
-        });
-    }
+    // Per-resolution path: debounced.
+    ASDisplayNode *target = cellNode ?: node;
+    double now = ApolloPerfNowMs();
+    objc_setAssociatedObject(target, &kApolloLPClimbLastMsKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if ([objc_getAssociatedObject(target, &kApolloLPClimbArmedKey) boolValue]) return;
+    objc_setAssociatedObject(target, &kApolloLPClimbArmedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(target, &kApolloLPClimbFirstMsKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloLPArmRelayoutClimb(node, cellNode, host, kApolloLPClimbQuietMs);
 }
 
 static void ApolloLPTriggerRelayoutForHost(ASDisplayNode *node, NSString *host) {
@@ -3952,25 +4040,11 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
     NSString *host = ApolloLPHost(url);
     ApolloLPArea area = ApolloLPAreaForLinkButton((ASDisplayNode *)self);
 
-    // V17 diagnostic logging: per-node rate-limited (max 6 calls) snapshot of
-    // area resolution + supernode chain depth to identify the vote-time
-    // compact→hero flip. Always-on; gated by per-node counter to bound noise.
-    {
-        NSNumber *countObj = objc_getAssociatedObject(self, &kApolloLinkPreviewV17LogCountKey);
-        NSUInteger count = [countObj isKindOfClass:[NSNumber class]] ? countObj.unsignedIntegerValue : 0;
-        if (count < 6) {
-            NSUInteger walkDepth = 0;
-            ApolloLPArea walkArea = ApolloLPAreaBody;
-            BOOL walkResolved = ApolloLPResolveAreaByWalk((ASDisplayNode *)self, &walkArea, &walkDepth);
-            NSNumber *cached = objc_getAssociatedObject(self, &kApolloLinkPreviewAreaKey);
-            ASDisplayNode *sup = [(id)self respondsToSelector:@selector(supernode)] ? [(id)self supernode] : nil;
-            ApolloLog(@"[LinkPreviews] V17 layout host=%@ area=%lu cached=%@ walk=%d walkArea=%lu depth=%lu super=%@ bodyMode=%ld commentsMode=%ld n=%lu",
-                      host, (unsigned long)area, cached, walkResolved, (unsigned long)walkArea, (unsigned long)walkDepth,
-                      sup ? NSStringFromClass([sup class]) : @"(nil)",
-                      (long)sLinkPreviewBodyMode, (long)sLinkPreviewCommentsMode, (unsigned long)count);
-            objc_setAssociatedObject(self, &kApolloLinkPreviewV17LogCountKey, @(count + 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-    }
+    // (The old V17 per-measure diagnostic block lived here. It ran a supernode
+    // walk + os_log on virtually every LinkButtonNode measure — its 6-per-node
+    // cap reset constantly because scrolling recreates nodes — which was
+    // measurable overhead in link-dense comment threads. The vote-time
+    // compact→hero flip it was added to diagnose is long since fixed.)
     if (ApolloLPIsImageChestAlbumURL(url)) {
         // #552: defer to the inline-image album renderer (ApolloInlineImages'
         // LinkButtonNode hook) instead of suppressing to empty. Suppressing left

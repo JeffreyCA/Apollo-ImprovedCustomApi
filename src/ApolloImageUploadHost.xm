@@ -3703,7 +3703,6 @@ static CGImageRef hooked_CGImageSourceCreateThumbnailAtIndex(CGImageSourceRef is
     CFDictionaryRef newOptions = ApolloCopyOptionsWithReplacement(options, kCGImageSourceThumbnailMaxPixelSize, largeMaxRef);
     CFRelease(largeMaxRef);
 
-    ApolloLog(@"[ImageUploadHost] Bypassing Apollo's 2000px image-prep cap for full-resolution upload");
     CGImageRef result = orig_CGImageSourceCreateThumbnailAtIndex(isrc, index, newOptions);
     if (newOptions) CFRelease(newOptions);
     return result;

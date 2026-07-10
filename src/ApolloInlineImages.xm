@@ -201,6 +201,7 @@ static void ApolloStartInlineGIFPlayback(ASNetworkImageNode *imageNode);
 static void ApolloStopInlineGIFPlayback(ASNetworkImageNode *imageNode);
 static BOOL ApolloResumeInlineGIFPlaybackIfPossible(ASNetworkImageNode *imageNode);
 static void ApolloClearInlineGIFNodeState(ASNetworkImageNode *node);
+static void ApolloScheduleCoalescedHostRelayout(ASNetworkImageNode *imageNode);
 static NSUInteger ApolloInlineGIFGenerationForNode(id node);
 static NSUInteger ApolloInlineGIFBumpGeneration(id node);
 static BOOL ApolloInlineGIFGenerationMatches(id node, NSUInteger generation);
@@ -1921,8 +1922,14 @@ static BOOL ApolloPresentOrResolveImageChestAlbumURL(NSURL *url, UIView *sourceV
     ApolloLog(@"[InlineImages] ratio set imageNode=%p ratio=%.3f size=%@",
               imageNode, newRatio, NSStringFromCGSize(size));
 
-    // Texture's internal "intrinsic size changed" hook; walks up to the
-    // root signaling the table/collection to re-measure the row.
+    // Surface the new size. Prefer the debounced per-host scheduler (one
+    // re-measure per burst); fall back to Texture's direct "intrinsic size
+    // changed" climb only when the node has no live inline host.
+    if ([imageNode isKindOfClass:[ApolloASNetworkImageNodeClass() class]] &&
+        ApolloInlineHostForNode(imageNode)) {
+        ApolloScheduleCoalescedHostRelayout((ASNetworkImageNode *)imageNode);
+        return;
+    }
     SEL sel = NSSelectorFromString(@"_u_setNeedsLayoutFromAbove");
     if (![imageNode respondsToSelector:sel]) return;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -2283,60 +2290,92 @@ static BOOL ApolloApplyResolvedAlbumImageContent(ASNetworkImageNode *imageNode, 
     return YES;
 }
 
-// Relayout-from-above of the image node's host cell, coalesced per host: N
-// album resolutions landing together (a body with many albums) queue ONE
-// invalidate+re-measure of the cell instead of N. Each doRelayout would
-// otherwise invalidate the just-recomputed layout again — up to N full
-// re-measures of a 30-child header row on the main thread.
-static char kApolloHostRelayoutPendingKey;
+// Relayout-from-above of the image node's host cell, debounced per host.
+// Cold-cache opens land N album resolutions 50-500ms apart; per-main-drain
+// coalescing alone still produced up to N full re-measures of a 30-child
+// header row on the main thread (one per resolve). A trailing debounce
+// collapses a burst into one re-measure ~QUIET ms after the last resolve,
+// with a MAX cap so a slow trickle can't starve the row of its first grow.
+static char kApolloHostRelayoutArmedKey;      // NSNumber BOOL — debounce timer armed for this host
+static char kApolloHostRelayoutLastMsKey;     // NSNumber double — ApolloPerfNowMs of latest schedule request
+static char kApolloHostRelayoutFirstMsKey;    // NSNumber double — first request of the current burst
+static char kApolloHostRelayoutOnDidLoadKey;  // NSNumber BOOL — onDidLoad fallback registered (once per host)
+
+static const double kApolloHostRelayoutQuietMs = 180.0;  // fire after this much quiet
+static const double kApolloHostRelayoutMaxMs   = 450.0;  // ...but never later than this after the burst began
+
+// The actual invalidate + re-measure climb. Main thread only.
+static void ApolloHostRelayoutPerform(ASDisplayNode *host) {
+    if (!host) return;
+    ASDisplayNode *n = host;
+    ASDisplayNode *cellNode = nil;
+    while (n) {
+        NSString *cls = NSStringFromClass([n class]);
+        if ([n respondsToSelector:@selector(invalidateCalculatedLayout)]) {
+            [n invalidateCalculatedLayout];
+        }
+        if ([n respondsToSelector:@selector(setNeedsLayout)]) {
+            [n setNeedsLayout];
+        }
+        if ([cls containsString:@"CellNode"]) cellNode = n;
+        n = n.supernode;
+    }
+    SEL relayoutSel = NSSelectorFromString(@"_u_setNeedsLayoutFromAbove");
+    id target = cellNode ?: host;
+    if ([target respondsToSelector:relayoutSel]) {
+        ((void (*)(id, SEL))objc_msgSend)(target, relayoutSel);
+    }
+
+    // The host MarkdownNode may not be view-loaded yet (Profile pre-builds
+    // cells off-screen before mounting) — the climb above can't resize an
+    // unloaded row, so re-run once when it loads. Registered at most once per
+    // host, and only when genuinely not loaded: onDidLoad on a loaded-but-
+    // detached node executes immediately, which used to double the relayout.
+    if (![host isNodeLoaded]
+        && ![objc_getAssociatedObject(host, &kApolloHostRelayoutOnDidLoadKey) boolValue]
+        && [host respondsToSelector:@selector(onDidLoad:)]) {
+        objc_setAssociatedObject(host, &kApolloHostRelayoutOnDidLoadKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [host onDidLoad:^(__kindof ASDisplayNode *node) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                ApolloHostRelayoutPerform(node);
+            });
+        }];
+    }
+}
+
+// Debounce timer: re-arms while schedule requests keep arriving, fires the
+// climb once the burst quiets down (or the max wait elapses).
+static void ApolloHostRelayoutArm(ASDisplayNode *host, double delayMs) {
+    __weak ASDisplayNode *weakHost = host;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayMs * NSEC_PER_MSEC)),
+                   dispatch_get_main_queue(), ^{
+        ASDisplayNode *h = weakHost;
+        if (!h) return;
+        double now = ApolloPerfNowMs();
+        double last = [objc_getAssociatedObject(h, &kApolloHostRelayoutLastMsKey) doubleValue];
+        double first = [objc_getAssociatedObject(h, &kApolloHostRelayoutFirstMsKey) doubleValue];
+        double sinceLast = now - last;
+        if (sinceLast < kApolloHostRelayoutQuietMs - 10.0 && now - first < kApolloHostRelayoutMaxMs) {
+            ApolloHostRelayoutArm(h, kApolloHostRelayoutQuietMs - sinceLast);
+            return;
+        }
+        objc_setAssociatedObject(h, &kApolloHostRelayoutArmedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(h, &kApolloHostRelayoutFirstMsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloHostRelayoutPerform(h);
+    });
+}
 
 static void ApolloScheduleCoalescedHostRelayout(ASNetworkImageNode *imageNode) {
     ASDisplayNode *host = ApolloInlineHostForNode(imageNode);
     if (!host) return;
-    if ([objc_getAssociatedObject(host, &kApolloHostRelayoutPendingKey) boolValue]) return;
-    objc_setAssociatedObject(host, &kApolloHostRelayoutPendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-    // Walk up to the enclosing CellNode and trigger relayout. The host
-    // MarkdownNode may not be attached to its supernodes yet (Profile
-    // pre-builds cells off-screen before mounting), so we also defer a
-    // relayout to onDidLoad which fires when the node is added to its
-    // parent view hierarchy.
-    __weak ASDisplayNode *weakHost = host;
-    void (^doRelayout)(void) = ^{
-        ASDisplayNode *strongHost = weakHost;
-        if (!strongHost) return;
-        ASDisplayNode *n = strongHost;
-        ASDisplayNode *cellNode = nil;
-        while (n) {
-            NSString *cls = NSStringFromClass([n class]);
-            if ([n respondsToSelector:@selector(invalidateCalculatedLayout)]) {
-                [n invalidateCalculatedLayout];
-            }
-            if ([n respondsToSelector:@selector(setNeedsLayout)]) {
-                [n setNeedsLayout];
-            }
-            if ([cls containsString:@"CellNode"]) cellNode = n;
-            n = n.supernode;
-        }
-        SEL relayoutSel = NSSelectorFromString(@"_u_setNeedsLayoutFromAbove");
-        id target = cellNode ?: strongHost;
-        if ([target respondsToSelector:relayoutSel]) {
-            ((void (*)(id, SEL))objc_msgSend)(target, relayoutSel);
-        }
-    };
-
+    // Bookkeeping on main so the timestamp/armed associations never race.
     dispatch_async(dispatch_get_main_queue(), ^{
-        ASDisplayNode *strongHost = weakHost;
-        if (!strongHost) return;
-        objc_setAssociatedObject(strongHost, &kApolloHostRelayoutPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        doRelayout();
-        BOOL hostMounted = [strongHost respondsToSelector:@selector(isNodeLoaded)]
-                          && [strongHost isNodeLoaded] && strongHost.supernode != nil;
-        if (!hostMounted && [strongHost respondsToSelector:@selector(onDidLoad:)]) {
-            [strongHost onDidLoad:^(__kindof ASDisplayNode *node) {
-                dispatch_async(dispatch_get_main_queue(), doRelayout);
-            }];
-        }
+        double now = ApolloPerfNowMs();
+        objc_setAssociatedObject(host, &kApolloHostRelayoutLastMsKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if ([objc_getAssociatedObject(host, &kApolloHostRelayoutArmedKey) boolValue]) return;
+        objc_setAssociatedObject(host, &kApolloHostRelayoutArmedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(host, &kApolloHostRelayoutFirstMsKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloHostRelayoutArm(host, kApolloHostRelayoutQuietMs);
     });
 }
 
