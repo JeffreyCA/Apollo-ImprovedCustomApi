@@ -2886,6 +2886,24 @@ static UIView *ApolloDeletedCommentsHostListViewForCell(id cellNode) {
     return nil;
 }
 
+// Whether an ASDisplayNode has a loaded backing view. [node view] FORCE-LOADS the
+// view, which must never happen for off-screen preloaded cells (wasted memory and
+// main-thread work for cells that may never display) — check this before any
+// CellView/HostListViewForCell call that can run against a non-displayed cell.
+static BOOL ApolloDeletedCommentsNodeIsLoaded(id node) {
+    if (![node respondsToSelector:@selector(isNodeLoaded)]) return YES;
+    @try {
+        return ((BOOL (*)(id, SEL))objc_msgSend)(node, @selector(isNodeLoaded));
+    } @catch (__unused NSException *e) {
+        return NO;
+    }
+}
+
+// The live comments list view, refreshed by every displayed cell's UpdateCell. Used
+// as the host for the height-fixup commit when the recovered cell itself is off
+// screen (its own superview walk can't reach the table without force-loading views).
+static __weak UIView *sApolloDeletedCommentsLastHostListView = nil;
+
 // Native comment collapse/expand animations run ~0.3-0.5s; give them a little headroom.
 // Exported (ApolloDeletedCommentsData.h) so other row-measuring modules — inline link
 // previews in particular — can defer their own table updates during the window.
@@ -2907,8 +2925,14 @@ NSTimeInterval ApolloDeletedCommentsCollapseSettleDelayRemaining(void) {
 static void ApolloDeletedCommentsScheduleHostLayoutRefresh(id cellNode) {
     if (!cellNode || !ApolloDeletedCommentsFeatureActive() || !ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(cellNode)) return;
 
-    UIView *hostView = ApolloDeletedCommentsHostListViewForCell(cellNode);
-    UIView *cellView = ApolloDeletedCommentsCellView(cellNode);
+    // Never force-load an off-screen cell's backing view just to find the table.
+    // For unloaded (preloaded, below-fold) cells fall back to the last host list
+    // view a displayed cell registered — the height fixup still commits once, so
+    // the row scrolls in at the right size instead of popping (#630 round 5).
+    BOOL nodeLoaded = ApolloDeletedCommentsNodeIsLoaded(cellNode);
+    UIView *hostView = nodeLoaded ? ApolloDeletedCommentsHostListViewForCell(cellNode) : nil;
+    UIView *cellView = nodeLoaded ? ApolloDeletedCommentsCellView(cellNode) : nil;
+    if (![hostView isKindOfClass:[UIView class]]) hostView = sApolloDeletedCommentsLastHostListView;
     if (![hostView isKindOfClass:[UIView class]] || !hostView.window) return;
     if (objc_getAssociatedObject(hostView, kApolloDeletedCommentsHostLayoutRefreshScheduledKey)) return;
 
@@ -3322,7 +3346,11 @@ static void ApolloDeletedCommentsApplyRecoveredArchiveToVisibleCell(id cellNode,
     ApolloDeletedCommentsRepairVisibleReasonChipIfNeeded(cellNode);
     ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, ApolloDeletedCommentsKnownBodyContainerNode(cellNode));
     ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, ApolloDeletedCommentsKnownBodyTextNode(cellNode));
-    ApolloDeletedCommentsApplyCellHighlight(cellNode);
+    if (ApolloDeletedCommentsNodeIsLoaded(cellNode)) {
+        // Highlight needs the backing view; an off-screen preloaded cell gets it at
+        // display entry (UpdateCell) instead of force-loading its view here.
+        ApolloDeletedCommentsApplyCellHighlight(cellNode);
+    }
 }
 
 static void ApolloDeletedCommentsHandleArcticCacheUpdated(NSNotification *notification) {
@@ -3451,6 +3479,13 @@ static void ApolloDeletedCommentsScheduleReasonChipRepair(id cellNode) {
 
 static void ApolloDeletedCommentsUpdateCell(id cellNode) {
     ApolloDeletedCommentsTrackVisibleDeletedCommentCell(cellNode);
+    // Remember the live list view so off-screen height fixups have a host to
+    // commit against (see ScheduleHostLayoutRefresh). Only displayed cells reach
+    // here, so the view walk is safe.
+    if (ApolloDeletedCommentsNodeIsLoaded(cellNode)) {
+        UIView *hostView = ApolloDeletedCommentsHostListViewForCell(cellNode);
+        if (hostView) sApolloDeletedCommentsLastHostListView = hostView;
+    }
     ApolloDeletedCommentsApplyCachedArchiveToVisibleDeletedCell(cellNode);
     ApolloDeletedCommentsSynchronizeCommentModelDisplayState(cellNode);
     ApolloDeletedCommentsRepairVisibleReasonChipIfNeeded(cellNode);
@@ -3663,6 +3698,15 @@ static void ApolloDeletedCommentsCaptureLiveCommentBodyFont(id textNode, NSAttri
 - (void)didEnterPreloadState {
     %orig;
     if (ApolloDeletedCommentsFeatureActive()) {
+        // Track from PRELOAD, not just display: when the archive is still in flight
+        // here (big payloads / rate-limit cooldowns get past the 2s inline hold), the
+        // apply below no-ops — and the late HandleArcticCacheUpdated notification only
+        // reaches TRACKED cells. Without this, below-fold preloaded cells kept their
+        // placeholder until display entry = the "pops in when scrolled to" of #630
+        // round 5. Tracking is view-safe pre-display (weak map, model-only gates); the
+        // full UpdateCell is NOT called here because it installs gestures (needs the
+        // backing view).
+        ApolloDeletedCommentsTrackVisibleDeletedCommentCell((id)self);
         ApolloDeletedCommentsApplyCachedArchiveToVisibleDeletedCell((id)self);
         ApolloDeletedCommentsSynchronizeCommentModelDisplayState((id)self);
     }

@@ -6930,8 +6930,13 @@ static void ApolloFeedVCInstallGlobe(UIViewController *vc) {
 
     if (!sEnableBulkTranslation) return;
 
+    // Weak capture: Logos `self` is __unsafe_unretained, and preload/scroll churn
+    // deallocates cells before the main queue drains (#630 round-5 crashes 2+3 —
+    // their stacks show this block tail-calling into MaybeTranslate with a dead cell).
+    __weak __typeof__(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        ApolloMaybeTranslateCommentCellNode((id)self, NO);
+        __typeof__(self) cellNode = weakSelf;
+        if (cellNode) ApolloMaybeTranslateCommentCellNode((id)cellNode, NO);
     });
 }
 
@@ -6940,8 +6945,10 @@ static void ApolloFeedVCInstallGlobe(UIViewController *vc) {
 
     if (!sEnableBulkTranslation) return;
 
+    __weak __typeof__(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        ApolloMaybeTranslateCommentCellNode((id)self, NO);
+        __typeof__(self) cellNode = weakSelf;
+        if (cellNode) ApolloMaybeTranslateCommentCellNode((id)cellNode, NO);
     });
 }
 
@@ -6960,19 +6967,27 @@ static void ApolloFeedVCInstallGlobe(UIViewController *vc) {
     // original text reappears as the cell scrolls back into view.
     if (!sEnableBulkTranslation) return;
 
+    // Logos hook `self` is __unsafe_unretained: capturing it in an async block does
+    // NOT keep the cell alive, and a comment collapse deletes rows (deallocating
+    // their cells) before the main queue drains — the block then ran against a
+    // dangling pointer (objc_retain SIGSEGV, #630 round-5 crash reports). Take a
+    // weak reference and bail if the cell died; a dead cell needs no re-translation.
+    __weak __typeof__(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *owningVC = ApolloOwningCommentsVCForCellNode((id)self);
+        __typeof__(self) cellNode = weakSelf;
+        if (!cellNode) return;
+        UIViewController *owningVC = ApolloOwningCommentsVCForCellNode((id)cellNode);
         if (ApolloControllerIsInTranslatedMode(owningVC)) {
-            if (!ApolloReapplyCachedTranslationForCellNode((id)self)) {
-                ApolloMaybeTranslateCommentCellNode((id)self, NO);
+            if (!ApolloReapplyCachedTranslationForCellNode((id)cellNode)) {
+                ApolloMaybeTranslateCommentCellNode((id)cellNode, NO);
             }
         } else if (ApolloControllerIsConfirmedOriginalMode(owningVC)) {
             // Only restore if the owning VC is confirmed to be in original
             // mode. If the VC is unknown (lifecycle race), defer — the
             // viewDidAppear retries will translate the cell shortly.
-            RDKComment *comment = ApolloCommentFromCellNode((id)self);
+            RDKComment *comment = ApolloCommentFromCellNode((id)cellNode);
             if (comment) {
-                ApolloRestoreOriginalForCellNode((id)self, comment);
+                ApolloRestoreOriginalForCellNode((id)cellNode, comment);
             }
         }
     });
@@ -6988,15 +7003,20 @@ static void ApolloFeedVCInstallGlobe(UIViewController *vc) {
     // that's still sitting on the text node from before the toggle-off.
     if (!sEnableBulkTranslation || event != 0) return;
 
+    // Weak capture for the same reason as didEnterDisplayState above: an async
+    // block holding the raw Logos `self` outlives cells killed by collapse/scroll.
+    __weak __typeof__(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *owningVC = ApolloOwningCommentsVCForCellNode((id)self);
+        __typeof__(self) cellNode = weakSelf;
+        if (!cellNode) return;
+        UIViewController *owningVC = ApolloOwningCommentsVCForCellNode((id)cellNode);
         if (ApolloControllerIsInTranslatedMode(owningVC)) {
-            ApolloReapplyCachedTranslationForCellNode((id)self);
+            ApolloReapplyCachedTranslationForCellNode((id)cellNode);
         } else if (ApolloControllerIsConfirmedOriginalMode(owningVC)) {
             // Same defer-on-unknown rule as didEnterDisplayState above.
-            RDKComment *comment = ApolloCommentFromCellNode((id)self);
+            RDKComment *comment = ApolloCommentFromCellNode((id)cellNode);
             if (comment) {
-                ApolloRestoreOriginalForCellNode((id)self, comment);
+                ApolloRestoreOriginalForCellNode((id)cellNode, comment);
             }
         }
     });
