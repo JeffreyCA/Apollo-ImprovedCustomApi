@@ -9,6 +9,7 @@
 #import "TagFiltersViewController.h"
 #import "ApolloThemeManagerViewController.h"
 #import "PictureInPictureViewController.h"
+#import "ApolloSettingsSearch.h"
 
 // MARK: - Settings View Controller (Custom API row injection)
 
@@ -54,6 +55,14 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
 }
 
 %hook SettingsViewController
+
+// Settings search lives on the root screen's navigation item (see
+// ApolloSettingsSearch.h). Attached in viewDidLoad so the bar exists before
+// the first appearance; the attach is idempotent per VC.
+- (void)viewDidLoad {
+    %orig;
+    ApolloSettingsSearchAttach((UIViewController *)self);
+}
 
 // Capture the live SettingsVC instance for the About > Tip Jar fallback path.
 - (void)viewDidAppear:(BOOL)animated {

@@ -1,0 +1,402 @@
+#import "settings/ApolloSettingsSearch.h"
+
+#import <objc/runtime.h>
+
+#import "ApolloCommon.h"
+#import "settings/ApolloSettingsRouter.h"
+#import "settings/ApolloSettingsSearchNativeIndex.h"
+
+#pragma mark - Entry model
+
+// One searchable row. Exactly one of routeId/nativePath is set:
+//  - routeId: a Reborn screen (push via the route registry); rowTitle, when
+//    set, is the row to scroll to and flash after the push.
+//  - nativePath: labels of the rows to tap through from the Settings root
+//    (empty = the root itself); rowTitle is the final row, either tapped
+//    (pushesFinalRow, i.e. it discloses a screen) or scrolled to and flashed.
+@interface ApolloSettingsSearchEntry : NSObject
+@property (nonatomic, copy) NSString *title;
+@property (nonatomic, copy) NSString *breadcrumb;
+@property (nonatomic, copy) NSString *routeId;
+@property (nonatomic, copy) NSArray<NSString *> *nativePath;
+@property (nonatomic, copy) NSString *rowTitle;
+@property (nonatomic, assign) BOOL pushesFinalRow;
+@end
+
+@implementation ApolloSettingsSearchEntry
+@end
+
+#pragma mark - Table scanning helpers
+
+// First UILabel text in a view tree (fallback for custom cells whose title
+// doesn't live in textLabel).
+static NSString *ApolloSearchFirstLabelText(UIView *view) {
+    for (UIView *sub in view.subviews) {
+        if ([sub isKindOfClass:[UILabel class]]) {
+            NSString *text = ((UILabel *)sub).text;
+            if (text.length > 0) return text;
+        }
+        NSString *nested = ApolloSearchFirstLabelText(sub);
+        if (nested) return nested;
+    }
+    return nil;
+}
+
+static NSString *ApolloSearchTitleOfCell(UITableViewCell *cell) {
+    NSString *title = cell.textLabel.text;
+    if (title.length > 0) return title;
+    return ApolloSearchFirstLabelText(cell.contentView);
+}
+
+// The table view backing a settings screen: UITableViewController's own, a
+// "tableView" ivar (the pattern Apollo's Swift VCs and ours both use), or the
+// first UITableView in the view tree.
+static UITableView *ApolloSearchTableInViewController(UIViewController *vc) {
+    if ([vc isKindOfClass:[UITableViewController class]]) return ((UITableViewController *)vc).tableView;
+    Ivar ivar = class_getInstanceVariable([vc class], "tableView");
+    if (ivar) {
+        id value = object_getIvar(vc, ivar);
+        if ([value isKindOfClass:[UITableView class]]) return value;
+    }
+    for (UIView *sub in vc.view.subviews) {
+        if ([sub isKindOfClass:[UITableView class]]) return (UITableView *)sub;
+    }
+    return nil;
+}
+
+// Visit every row the table's dataSource currently serves (display space, so
+// remapped/hidden native rows and conditional form rows come out exactly as
+// the user would see them).
+static void ApolloSearchScanTable(UITableView *table,
+                                  void (^visit)(NSIndexPath *indexPath, NSString *title, NSString *header, BOOL disclosure)) {
+    id<UITableViewDataSource> dataSource = table.dataSource;
+    if (!dataSource) return;
+
+    NSInteger sections = 1;
+    if ([dataSource respondsToSelector:@selector(numberOfSectionsInTableView:)]) {
+        sections = [dataSource numberOfSectionsInTableView:table];
+    }
+    for (NSInteger s = 0; s < sections; s++) {
+        NSString *header = nil;
+        if ([dataSource respondsToSelector:@selector(tableView:titleForHeaderInSection:)]) {
+            header = [dataSource tableView:table titleForHeaderInSection:s];
+        }
+        NSInteger rows = [dataSource tableView:table numberOfRowsInSection:s];
+        for (NSInteger r = 0; r < rows; r++) {
+            NSIndexPath *indexPath = [NSIndexPath indexPathForRow:r inSection:s];
+            UITableViewCell *cell = nil;
+            @try {
+                cell = [dataSource tableView:table cellForRowAtIndexPath:indexPath];
+            } @catch (NSException *exception) {
+                ApolloLog(@"[SettingsSearch] scan threw at %ld.%ld: %@", (long)s, (long)r, exception);
+                continue;
+            }
+            if (!cell) continue;
+            NSString *title = ApolloSearchTitleOfCell(cell);
+            if (title.length == 0) continue;
+            visit(indexPath, title, header, cell.accessoryType == UITableViewCellAccessoryDisclosureIndicator);
+        }
+    }
+}
+
+// Find a row by its user-visible title, in display space. Trimmed,
+// case-insensitive compare — labels sometimes carry stray whitespace.
+static NSIndexPath *ApolloSearchFindRowTitled(UITableView *table, NSString *title) {
+    __block NSIndexPath *found = nil;
+    NSString *wanted = [title stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    ApolloSearchScanTable(table, ^(NSIndexPath *indexPath, NSString *rowTitle, __unused NSString *header, __unused BOOL disclosure) {
+        if (found) return;
+        NSString *trimmed = [rowTitle stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if ([trimmed compare:wanted options:NSCaseInsensitiveSearch] == NSOrderedSame) found = indexPath;
+    });
+    return found;
+}
+
+#pragma mark - Index build
+
+static NSArray<ApolloSettingsSearchEntry *> *ApolloSettingsSearchBuildIndex(void) {
+    NSMutableArray<ApolloSettingsSearchEntry *> *entries = [NSMutableArray array];
+
+    // Reborn screens: scanned live so the index always reflects the rows a
+    // user would actually find (conditional rows appear/disappear with their
+    // flags). Instantiating + loading a screen runs its viewDidLoad, which for
+    // these VCs is model construction plus at most a cache-priming request.
+    for (NSString *routeId in ApolloSettingsRouteIds()) {
+        NSString *screenTitle = ApolloSettingsRouteTitle(routeId);
+
+        ApolloSettingsSearchEntry *screen = [[ApolloSettingsSearchEntry alloc] init];
+        screen.title = screenTitle;
+        screen.breadcrumb = @"Apollo Reborn";
+        screen.routeId = routeId;
+        [entries addObject:screen];
+
+        UIViewController *vc = ApolloSettingsRouteInstantiate(routeId);
+        @try {
+            [vc loadViewIfNeeded];
+        } @catch (NSException *exception) {
+            ApolloLog(@"[SettingsSearch] load of '%@' threw: %@", routeId, exception);
+            continue;
+        }
+        UITableView *table = ApolloSearchTableInViewController(vc);
+        if (!table) continue;
+
+        ApolloSearchScanTable(table, ^(__unused NSIndexPath *indexPath, NSString *title, NSString *header, __unused BOOL disclosure) {
+            if ([title compare:screenTitle options:NSCaseInsensitiveSearch] == NSOrderedSame) return;
+            ApolloSettingsSearchEntry *entry = [[ApolloSettingsSearchEntry alloc] init];
+            entry.title = title;
+            entry.breadcrumb = header.length > 0
+                ? [NSString stringWithFormat:@"%@ → %@", screenTitle, header]
+                : screenTitle;
+            entry.routeId = routeId;
+            entry.rowTitle = title;
+            [entries addObject:entry];
+        });
+    }
+
+    // Native rows: the generated crawl snapshot (see the header's provenance
+    // note). Navigation is label-matched at selection time, so a moved row
+    // degrades to "lands on its screen", never a wrong tap.
+    for (NSArray *row in ApolloSettingsSearchNativeRows()) {
+        ApolloSettingsSearchEntry *entry = [[ApolloSettingsSearchEntry alloc] init];
+        entry.title = row[0];
+        entry.breadcrumb = row[1];
+        NSString *path = row[2];
+        entry.nativePath = path.length > 0 ? [path componentsSeparatedByString:@"|"] : @[];
+        entry.rowTitle = row[0];
+        entry.pushesFinalRow = [row[3] boolValue];
+        [entries addObject:entry];
+    }
+
+    return entries;
+}
+
+#pragma mark - Matching
+
+static NSInteger ApolloSearchScore(ApolloSettingsSearchEntry *entry, NSString *query) {
+    static NSStringCompareOptions const opts = NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch;
+    NSString *title = entry.title;
+
+    NSInteger score = -1;
+    if ([title rangeOfString:query options:opts | NSAnchoredSearch].location != NSNotFound) {
+        score = 100;
+    } else {
+        NSRange inTitle = [title rangeOfString:query options:opts];
+        if (inTitle.location != NSNotFound) {
+            // Word-boundary prefix ranks above a mid-word hit.
+            unichar before = [title characterAtIndex:inTitle.location - 1];
+            score = [NSCharacterSet.alphanumericCharacterSet characterIsMember:before] ? 55 : 80;
+        } else if ([entry.breadcrumb rangeOfString:query options:opts].location != NSNotFound) {
+            score = 25;
+        } else {
+            // Multi-word query: every token must land somewhere in title+crumb.
+            NSArray<NSString *> *tokens = [query componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+            if (tokens.count < 2) return -1;
+            NSString *haystack = [NSString stringWithFormat:@"%@ %@", title, entry.breadcrumb];
+            for (NSString *token in tokens) {
+                if (token.length == 0) continue;
+                if ([haystack rangeOfString:token options:opts].location == NSNotFound) return -1;
+            }
+            score = 40;
+        }
+    }
+    // Prefer the tweak's own rows ever so slightly on ties, and screens over
+    // leaf rows of the same name.
+    if (entry.routeId) score += 2;
+    if (!entry.rowTitle || entry.pushesFinalRow) score += 1;
+    return score;
+}
+
+#pragma mark - Navigation
+
+static void ApolloSearchFlashRow(UITableView *table, NSIndexPath *indexPath) {
+    [table scrollToRowAtIndexPath:indexPath atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [table selectRowAtIndexPath:indexPath animated:YES scrollPosition:UITableViewScrollPositionNone];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.9 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [table deselectRowAtIndexPath:indexPath animated:YES];
+        });
+    });
+}
+
+// Land on the entry's final row in the (already visible) top view controller.
+// Retries briefly — the just-pushed screen's table may still be loading.
+static void ApolloSearchFinishOnTopOfNav(UINavigationController *nav, ApolloSettingsSearchEntry *entry, NSUInteger attempt) {
+    UITableView *table = ApolloSearchTableInViewController(nav.topViewController);
+    NSIndexPath *indexPath = table ? ApolloSearchFindRowTitled(table, entry.rowTitle) : nil;
+    if (!indexPath) {
+        if (attempt < 4) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                ApolloSearchFinishOnTopOfNav(nav, entry, attempt + 1);
+            });
+        } else {
+            // Fail soft: the screen is open, the row moved/hid — leave it there.
+            ApolloLog(@"[SettingsSearch] row '%@' not found on %@", entry.rowTitle, nav.topViewController);
+        }
+        return;
+    }
+    if (entry.pushesFinalRow) {
+        [table.delegate tableView:table didSelectRowAtIndexPath:indexPath];
+    } else {
+        ApolloSearchFlashRow(table, indexPath);
+    }
+}
+
+// Tap through entry.nativePath from the Settings root, one nav push at a time.
+static void ApolloSearchWalkNativePath(UINavigationController *nav, ApolloSettingsSearchEntry *entry, NSUInteger hop) {
+    if (hop >= entry.nativePath.count) {
+        ApolloSearchFinishOnTopOfNav(nav, entry, 0);
+        return;
+    }
+    UITableView *table = ApolloSearchTableInViewController(nav.topViewController);
+    NSIndexPath *indexPath = table ? ApolloSearchFindRowTitled(table, entry.nativePath[hop]) : nil;
+    if (!indexPath) {
+        ApolloLog(@"[SettingsSearch] hop '%@' not found on %@", entry.nativePath[hop], nav.topViewController);
+        return;
+    }
+    [table.delegate tableView:table didSelectRowAtIndexPath:indexPath];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.55 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        ApolloSearchWalkNativePath(nav, entry, hop + 1);
+    });
+}
+
+static void ApolloSettingsSearchOpenEntry(UIViewController *settingsVC, ApolloSettingsSearchEntry *entry) {
+    UINavigationController *nav = settingsVC.navigationController;
+    if (!nav) return;
+    [nav popToViewController:settingsVC animated:NO];
+
+    if (entry.routeId) {
+        UIViewController *vc = ApolloSettingsRouteInstantiate(entry.routeId);
+        if (!vc) return;
+        [nav pushViewController:vc animated:YES];
+        ApolloLog(@"[SettingsSearch] opened route '%@' (row '%@')", entry.routeId, entry.rowTitle);
+        if (entry.rowTitle) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.55 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                ApolloSearchFinishOnTopOfNav(nav, entry, 0);
+            });
+        }
+        return;
+    }
+
+    ApolloLog(@"[SettingsSearch] walking native path %@ → '%@'", entry.nativePath, entry.rowTitle);
+    ApolloSearchWalkNativePath(nav, entry, 0);
+}
+
+#pragma mark - Results controller
+
+@interface ApolloSettingsSearchResultsController : UITableViewController <UISearchResultsUpdating, UISearchControllerDelegate>
+@property (nonatomic, weak) UIViewController *settingsVC;
+@property (nonatomic, weak) UISearchController *searchController;
+@property (nonatomic, copy) NSArray<ApolloSettingsSearchEntry *> *index;
+@property (nonatomic, copy) NSArray<ApolloSettingsSearchEntry *> *results;
+// Result picked while the search UI was up; navigation runs from
+// didDismissSearchController: — pushing any earlier lands inside the search
+// dismissal transition and UIKit drops it ("while an existing transition or
+// presentation is occurring").
+@property (nonatomic, strong) ApolloSettingsSearchEntry *pendingEntry;
+@end
+
+@implementation ApolloSettingsSearchResultsController
+
+- (instancetype)init {
+    return [super initWithStyle:UITableViewStyleInsetGrouped];
+}
+
+// Rebuild on every search session, not once per launch: conditional rows
+// (visible blocks, remapped native rows) change with the flags the user just
+// toggled, and the scan is ~a dozen lightweight VC loads.
+- (void)willPresentSearchController:(__unused UISearchController *)searchController {
+    self.index = ApolloSettingsSearchBuildIndex();
+    ApolloLog(@"[SettingsSearch] index built: %lu entries", (unsigned long)self.index.count);
+}
+
+- (void)updateSearchResultsForSearchController:(UISearchController *)searchController {
+    NSString *query = [searchController.searchBar.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    if (query.length == 0) {
+        self.results = @[];
+        [self.tableView reloadData];
+        return;
+    }
+    if (!self.index) self.index = ApolloSettingsSearchBuildIndex();
+
+    NSMutableArray<NSDictionary *> *scored = [NSMutableArray array];
+    for (ApolloSettingsSearchEntry *entry in self.index) {
+        NSInteger score = ApolloSearchScore(entry, query);
+        if (score > 0) [scored addObject:@{ @"e": entry, @"s": @(score) }];
+    }
+    [scored sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        NSInteger sa = [a[@"s"] integerValue], sb = [b[@"s"] integerValue];
+        if (sa != sb) return sa > sb ? NSOrderedAscending : NSOrderedDescending;
+        return [((ApolloSettingsSearchEntry *)a[@"e"]).title
+                caseInsensitiveCompare:((ApolloSettingsSearchEntry *)b[@"e"]).title];
+    }];
+    NSMutableArray<ApolloSettingsSearchEntry *> *results = [NSMutableArray array];
+    for (NSDictionary *item in scored) {
+        [results addObject:item[@"e"]];
+        if (results.count >= 50) break;
+    }
+    self.results = results;
+    [self.tableView reloadData];
+}
+
+- (NSInteger)tableView:(__unused UITableView *)tableView numberOfRowsInSection:(__unused NSInteger)section {
+    return (NSInteger)self.results.count;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *const reuseID = @"ApolloSettingsSearchResult";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuseID]
+        ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuseID];
+    ApolloSettingsSearchEntry *entry = self.results[(NSUInteger)indexPath.row];
+    cell.textLabel.text = entry.title;
+    cell.detailTextLabel.text = entry.breadcrumb;
+    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if ((NSUInteger)indexPath.row >= self.results.count) return;
+    // Dismiss the search UI first; didDismissSearchController: navigates once
+    // the dismissal transition has fully completed.
+    self.pendingEntry = self.results[(NSUInteger)indexPath.row];
+    self.searchController.active = NO;
+}
+
+- (void)didDismissSearchController:(__unused UISearchController *)searchController {
+    ApolloSettingsSearchEntry *entry = self.pendingEntry;
+    if (!entry) return;
+    self.pendingEntry = nil;
+    UIViewController *settingsVC = self.settingsVC;
+    // Next runloop turn: let UIKit finish tearing down the presentation state
+    // before we start pushing.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ApolloSettingsSearchOpenEntry(settingsVC, entry);
+    });
+}
+
+@end
+
+#pragma mark - Attach
+
+static char kApolloSettingsSearchAttachedKey;
+
+void ApolloSettingsSearchAttach(UIViewController *settingsVC) {
+    if (!settingsVC || objc_getAssociatedObject(settingsVC, &kApolloSettingsSearchAttachedKey)) return;
+
+    ApolloSettingsSearchResultsController *results = [[ApolloSettingsSearchResultsController alloc] init];
+    results.settingsVC = settingsVC;
+
+    UISearchController *searchController = [[UISearchController alloc] initWithSearchResultsController:results];
+    searchController.searchResultsUpdater = results;
+    searchController.delegate = results;
+    searchController.searchBar.placeholder = @"Search Settings";
+    results.searchController = searchController;
+
+    settingsVC.navigationItem.searchController = searchController;
+    settingsVC.navigationItem.hidesSearchBarWhenScrolling = NO;
+    settingsVC.definesPresentationContext = YES;
+
+    objc_setAssociatedObject(settingsVC, &kApolloSettingsSearchAttachedKey, searchController, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloLog(@"[SettingsSearch] attached to %@", settingsVC);
+}

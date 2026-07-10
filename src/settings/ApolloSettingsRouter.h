@@ -23,6 +23,12 @@ NSString *ApolloSettingsRouteTitle(NSString *routeId);
 // All registered route ids, in presentation order (aliases excluded).
 NSArray<NSString *> *ApolloSettingsRouteIds(void);
 
+// A fresh instance of the route's view controller, or nil for unknown ids.
+// Used by settings search to scan screens for their rows without presenting
+// them, and by callers that need to push/present a screen themselves.
+// Main thread only.
+UIViewController *ApolloSettingsRouteInstantiate(NSString *routeId);
+
 // One synchronous attempt: switch to the Settings tab, pop its stack, push the
 // screen. Returns NO if the route is unknown or the tab UI isn't up yet.
 // Main thread only.

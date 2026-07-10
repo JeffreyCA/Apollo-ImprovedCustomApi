@@ -87,6 +87,13 @@ NSArray<NSString *> *ApolloSettingsRouteIds(void) {
     return sRouteIds;
 }
 
+UIViewController *ApolloSettingsRouteInstantiate(NSString *routeId) {
+    if (![routeId isKindOfClass:[NSString class]]) return nil;
+    ApolloSettingsRouterEnsureRegistry();
+    ApolloSettingsRouteBuilder builder = sRouteBuilders[routeId.lowercaseString];
+    return builder ? builder() : nil;
+}
+
 BOOL ApolloSettingsRouteOpenNow(NSString *routeId) {
     ApolloSettingsRouterEnsureRegistry();
     ApolloSettingsRouteBuilder builder = [routeId isKindOfClass:[NSString class]] ? sRouteBuilders[routeId.lowercaseString] : nil;
