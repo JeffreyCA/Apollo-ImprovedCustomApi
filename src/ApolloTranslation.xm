@@ -5698,7 +5698,22 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
     if (ApolloTextMatchesSourceOrVisualDisplay(incomingText, originalBody)) {
         ApolloTranslationVerboseLog(@"[Translation/vote] prepareSwap: incoming==original → SWAPPING to translated node=%p (incomingLen=%lu)",
                                     textNode, (unsigned long)incomingText.length);
-        if (swapOut) *swapOut = ApolloRebuildTranslatedAttrPreservingAttrs(incomingAttributedText, translatedText);
+        if (swapOut) {
+            NSAttributedString *rebuilt = ApolloRebuildTranslatedAttrPreservingAttrs(incomingAttributedText, translatedText);
+            // Re-append the "Translated from <Language>" marker line for body
+            // nodes (the builder self-gates on the details/tap settings and on
+            // source-language detection; title nodes never carry the line).
+            // Without this, the vote-time swap displayed the translation ONE
+            // LINE SHORTER than what was on screen — the row shrank, every row
+            // below shifted up, and the ~100ms-later scheduled reapply re-added
+            // the marker and shifted them back: a visible bounce on every vote
+            // of a translated comment. Marker parity makes the swap
+            // height-identical AND turns that follow-up reapply into a no-op.
+            if (rebuilt && ![objc_getAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey) boolValue]) {
+                rebuilt = ApolloAttributedStringByAppendingTranslationMarker(rebuilt, originalBody);
+            }
+            *swapOut = rebuilt;
+        }
         return YES;
     }
 
