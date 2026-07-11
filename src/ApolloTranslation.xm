@@ -873,6 +873,35 @@ static NSRange ApolloRangeByTrimmingTrailingURLPunctuation(NSString *text, NSRan
     return range;
 }
 
+// Reddit comment bodies embed inline media as markdown-image tokens whose
+// "URL" is a media id — `![gif](giphy|ECtLJKdGj8jfy)`, `![img](emote|t5_…|…)`.
+// Apollo's renderer strips these from the displayed body (the gif/emote is
+// drawn from media_metadata as its own node), but `comment.body` keeps them —
+// so translating the raw body used to send the token to the provider and then
+// display it LITERALLY as text above the translation. Strip media-id tokens
+// (the `x|y` id form is never a real URL — URLs carry ://) plus the blank
+// lines they leave behind, both from text we send to providers and from
+// cached translations at apply time.
+static NSString *ApolloStripInlineMediaTokens(NSString *text) {
+    if (![text isKindOfClass:[NSString class]] || text.length == 0) return text;
+    if ([text rangeOfString:@"!["].location == NSNotFound) return text;
+    static NSRegularExpression *tokenRe = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        tokenRe = [NSRegularExpression regularExpressionWithPattern:@"!\\[[^\\]\\n]*\\]\\([a-z]+\\|[^)\\n]*\\)"
+                                                            options:0 error:NULL];
+    });
+    NSString *stripped = [tokenRe stringByReplacingMatchesInString:text options:0
+                                                             range:NSMakeRange(0, text.length)
+                                                      withTemplate:@""];
+    if (stripped.length == text.length) return text;
+    // Collapse the blank hole the token leaves (3+ newlines → 2) and trim.
+    while ([stripped rangeOfString:@"\n\n\n"].location != NSNotFound) {
+        stripped = [stripped stringByReplacingOccurrencesOfString:@"\n\n\n" withString:@"\n\n"];
+    }
+    return [stripped stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
 static NSString *ApolloProtectTranslationLinks(NSString *sourceText, NSDictionary<NSString *, NSString *> **protectedLinksOut) {
     if (protectedLinksOut) *protectedLinksOut = @{};
     if (![sourceText isKindOfClass:[NSString class]] || sourceText.length == 0) return sourceText;
@@ -1654,6 +1683,10 @@ static void ApolloTranslationHealCellDisplaySync(id cellNode) {
 static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *comment, NSString *translatedText) {
     if (!commentCellNode || ![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return;
     if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
+    // Cached translations from before media-token stripping may still carry a
+    // literal ![gif](giphy|…) line — normalize at the point of use.
+    translatedText = ApolloStripInlineMediaTokens(translatedText);
+    if (translatedText.length == 0) return;
 
     // Respect a per-item pin: if the user tapped this comment's marker to show
     // its original language, don't (re)translate it (this also blocks the
@@ -1727,6 +1760,20 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloRegisterOwnedTextNode(textNode);
+
+    // EXACT no-op gate: the containment heuristics above decide MATCHING, but
+    // they misfire on repetitive bodies (e.g. long AAAA… strings match both
+    // the original AND the translation), letting the vote-resilience reapply
+    // fall through to a write of the very text already on screen. Every such
+    // write forces a full cell relayout (and a table re-measure whose
+    // estimated heights jump the content offset) — the visible "rows below
+    // lift up" on every vote of a translated comment. If the final display
+    // string is character-identical to what the node already shows, there is
+    // nothing to do.
+    if ([current.string isEqualToString:displayAttr.string]) {
+        ApolloTranslationVerboseLog(@"[Translation/vote] apply: display identical — exact no-op cell=%p", commentCellNode);
+        return;
+    }
 
     @try {
         ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), displayAttr);
@@ -2166,6 +2213,8 @@ static id ApolloBestPostBodyTextNode(id headerCellNode, RDKLink *link, NSString 
 static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *link, NSString *sourceText, NSString *translatedText) {
     if (!headerCellNode) return;
     if (![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return;
+    translatedText = ApolloStripInlineMediaTokens(translatedText);
+    if (translatedText.length == 0) return;
     if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
     NSString *body = sourceText.length > 0 ? sourceText : ApolloPostBodyTextFromLink(link);
     if (![body isKindOfClass:[NSString class]] || body.length == 0) return;
@@ -2262,6 +2311,16 @@ static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *l
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloRegisterOwnedTextNode(textNode);
 
+    // EXACT no-op gate (see comment apply): the vote-time headerReapply
+    // re-applies the stashed post-body translation on every vote; when the
+    // node already shows exactly this text, writing it again only buys a
+    // full header re-measure and a content-offset jump.
+    if ([current.string isEqualToString:translatedAttr.string]) {
+        ApolloTranslationVerboseLog(@"[Translation/vote] headerApply: display identical — exact no-op header=%p", headerCellNode);
+        objc_setAssociatedObject(headerCellNode, kApolloHeaderTranslatedTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+
     @try { ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), translatedAttr); }
     @catch (__unused NSException *e) { return; }
 
@@ -2308,6 +2367,8 @@ static void ApolloApplyTranslationToPostTextNode(id owner, id textNode, NSString
     if (!owner || !textNode) return;
     if (![sourceText isKindOfClass:[NSString class]] || sourceText.length == 0) return;
     if (![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return;
+    translatedText = ApolloStripInlineMediaTokens(translatedText);
+    if (translatedText.length == 0) return;
     if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
     // Marker-tap pin: this post is pinned to its original language; don't re-apply.
     if (ApolloPinActiveOnNode(textNode)) {
@@ -2363,6 +2424,13 @@ static void ApolloApplyTranslationToPostTextNode(id owner, id textNode, NSString
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloRegisterOwnedTextNode(textNode);
+
+    // EXACT no-op gate (see comment apply): skip the write + relayout when the
+    // node already displays exactly this text.
+    if ([current.string isEqualToString:translatedAttr.string]) {
+        objc_setAssociatedObject(owner, kApolloHeaderTranslatedTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
 
     @try { ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), translatedAttr); }
     @catch (__unused NSException *e) { return; }
@@ -2934,8 +3002,11 @@ static void ApolloRequestTranslation(NSString *cacheKey,
     // Protect proper nouns (names/places/orgs) and links from the translator, then translate
     // only what's left. Names are detected first so NLTagger sees clean text (not the link
     // sentinels); restore order is irrelevant since the two token shapes are distinct.
+    // Inline media-id tokens (![gif](giphy|…)) are stripped outright — Apollo never
+    // displays them and the provider would only mangle them.
+    NSString *mediaStripped = ApolloStripInlineMediaTokens(sourceText);
     NSDictionary<NSString *, NSString *> *protectedNames = nil;
-    NSString *nameProtected = ApolloProtectTranslationNames(sourceText, &protectedNames);
+    NSString *nameProtected = ApolloProtectTranslationNames(mediaStripped, &protectedNames);
 
     NSDictionary<NSString *, NSString *> *protectedLinks = nil;
     NSString *requestText = ApolloProtectTranslationLinks(nameProtected, &protectedLinks);
@@ -5679,7 +5750,7 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
     if (swapOut) *swapOut = nil;
 
     NSString *originalBody = objc_getAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey);
-    NSString *translatedText = objc_getAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey);
+    NSString *translatedText = ApolloStripInlineMediaTokens(objc_getAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey));
 
     if (![originalBody isKindOfClass:[NSString class]] || originalBody.length == 0 ||
         ![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0 ||
