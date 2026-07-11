@@ -194,6 +194,7 @@ static BOOL ApolloRefreshVisibleTranslationAppliedForController(UIViewController
 static BOOL ApolloRefreshFeedTitleTranslationAppliedForController(UIViewController *vc);
 static NSString *ApolloDetectDominantLanguage(NSString *text);
 static NSAttributedString *ApolloAttributedStringByAppendingTranslationMarker(NSAttributedString *translatedAttr, NSString *sourceText);
+static void ApolloIndexTranslatedCommentBody(NSString *bodyKey, NSString *fullName);
 static BOOL ApolloShouldShowTranslationMarkerForSource(NSString *sourceText, NSString **outCode);
 static void ApolloToggleTranslationForCommentTextNode(id textNode);
 static void ApolloEnsureMarkerTappableOnNode(id textNode);
@@ -1815,6 +1816,11 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
         [sCommentTranslationByFullName setObject:translatedText forKey:fullName];
         ApolloMirrorSetComment(fullName, translatedText);
         objc_setAssociatedObject(commentCellNode, kApolloAppliedTranslationFullNameKey, fullName, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        // Index both body forms for the unowned-node preempt: the raw model
+        // body AND the rendered string that was on screen before this write
+        // (a rebuilt node is handed the rendered form).
+        ApolloIndexTranslatedCommentBody(comment.body, fullName);
+        if (textMatchesBody) ApolloIndexTranslatedCommentBody(current.string, fullName);
     }
     ApolloMarkVisibleTranslationApplied(comment.body, translatedText);
 }
@@ -5801,6 +5807,69 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
     return NO;
 }
 
+// Comment-cell preempt (mirror of the header stash preempt below): a vote can
+// make Apollo REBUILD a comment's body text node. The fresh node carries no
+// ownership tags, so the owned-node swap in the setAttributedText: hook passes
+// Apollo's ORIGINAL body straight through — the untranslated text (one marker
+// line shorter) is visible for a frame or two until the scheduled reapply
+// swaps it back: a language flash plus a height nudge of every row below, on
+// every vote of a translated comment. To preempt it we keep an index of the
+// bodies we have translated in this session — keyed by BOTH the raw
+// comment.body and the RENDERED string that was on screen when we applied
+// (Apollo hands the rebuilt node the rendered form) — mapping to the comment
+// fullname. When an unowned node receives text matching the index while the
+// visible thread is in translated mode, swap to the cached translation
+// inline and adopt ownership, exactly like the owned-node path would have.
+static NSMutableDictionary<NSString *, NSString *> *sApolloTranslatedBodyIndex = nil;
+
+static void ApolloIndexTranslatedCommentBody(NSString *bodyKey, NSString *fullName) {
+    if (![bodyKey isKindOfClass:[NSString class]] || bodyKey.length == 0) return;
+    if (![fullName isKindOfClass:[NSString class]] || fullName.length == 0) return;
+    @synchronized ([NSMutableDictionary class]) {
+        if (!sApolloTranslatedBodyIndex) sApolloTranslatedBodyIndex = [NSMutableDictionary dictionary];
+        sApolloTranslatedBodyIndex[bodyKey] = fullName;
+    }
+}
+
+static BOOL ApolloPreemptUnownedCommentTextNode(id textNode, NSAttributedString *incoming, NSAttributedString **swapOut) {
+    if (swapOut) *swapOut = nil;
+    if (!textNode || ![incoming isKindOfClass:[NSAttributedString class]] || incoming.length == 0) return NO;
+    UIViewController *vc = sVisibleCommentsViewController;
+    if (!vc || !ApolloControllerIsInTranslatedMode(vc)) return NO;
+    NSString *incomingText = incoming.string;
+    if (incomingText.length == 0) return NO;
+    NSString *fullName = nil;
+    @synchronized ([NSMutableDictionary class]) {
+        fullName = sApolloTranslatedBodyIndex[incomingText];
+    }
+    if (fullName.length == 0) return NO;
+    // Per-item pin: user chose to see this comment's original — honor it.
+    if (sTapToTranslate && !ApolloTapModeIsTranslatedKey(fullName)) return NO;
+    if (sUserPinnedOriginalFullNames && [sUserPinnedOriginalFullNames containsObject:fullName]) return NO;
+    NSString *translated = ApolloStripInlineMediaTokens([sCommentTranslationByFullName objectForKey:fullName]);
+    if (![translated isKindOfClass:[NSString class]] || translated.length == 0) return NO;
+
+    NSAttributedString *rebuilt = ApolloRebuildTranslatedAttrPreservingAttrs(incoming, translated);
+    if (!rebuilt) return NO;
+    // Marker parity with the apply path (builder self-gates on settings +
+    // source-language detection) so the swap is height-identical.
+    rebuilt = ApolloAttributedStringByAppendingTranslationMarker(rebuilt, incomingText);
+
+    // Adopt ownership so subsequent overwrites flow through the normal owned
+    // swap. Store the RENDERED incoming string as the original-body marker —
+    // that is what Apollo hands rebuilt nodes, so future matches are exact.
+    objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [incomingText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translated copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (!objc_getAssociatedObject(textNode, kApolloOriginalAttributedTextKey)) {
+        objc_setAssociatedObject(textNode, kApolloOriginalAttributedTextKey, [incoming copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    ApolloRegisterOwnedTextNode(textNode);
+    if (swapOut) *swapOut = rebuilt;
+    ApolloTranslationVerboseLog(@"[Translation/vote] preempt(comment): unowned node=%p matched body index (%@) → SYNC swap", textNode, fullName);
+    return YES;
+}
+
 // Vote-flash mitigation: when the comments header is rebuilt after a vote
 // tap, the new post-body text node has NO ownership markers yet. The
 // scheduler-based reapply path takes ~80-100ms, during which the original
@@ -5883,7 +5952,8 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
     if (![objc_getAssociatedObject(self, kApolloTranslationOwnedTextNodeKey) boolValue]) {
         // Vote-flash preempt: brand-new (rebuilt) header body text node.
         NSAttributedString *preemptSwap = nil;
-        if (ApolloPreemptUnownedTextNodeFromVCStash(self, attributedText, &preemptSwap)) {
+        if (ApolloPreemptUnownedTextNodeFromVCStash(self, attributedText, &preemptSwap) ||
+            ApolloPreemptUnownedCommentTextNode(self, attributedText, &preemptSwap)) {
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             @try { %orig(preemptSwap); } @catch (__unused NSException *e) {}
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -5956,7 +6026,8 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
     if (![objc_getAssociatedObject(self, kApolloTranslationOwnedTextNodeKey) boolValue]) {
         // Vote-flash preempt (mirror of ASTextNode hook above).
         NSAttributedString *preemptSwap = nil;
-        if (ApolloPreemptUnownedTextNodeFromVCStash(self, attributedText, &preemptSwap)) {
+        if (ApolloPreemptUnownedTextNodeFromVCStash(self, attributedText, &preemptSwap) ||
+            ApolloPreemptUnownedCommentTextNode(self, attributedText, &preemptSwap)) {
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             @try { %orig(preemptSwap); } @catch (__unused NSException *e) {}
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
