@@ -3,7 +3,7 @@
 // Tap one of the info-row detail icons — % upvoted (smiley), timestamp (age), or
 // edited (pencil) — to reveal its detail (a ratio or an absolute date). The Info
 // Row "Popup" / "Overlay" modes pick the presentation (a dismissable alert or a
-// small auto-fading card); with both off the icons are inert.
+// small auto-fading card); with both off Apollo's stock touch handling is unchanged.
 //
 // Wiring — two paths, because Apollo wires these icons two different ways:
 //   • age + % upvoted: Apollo leaves these ApolloButtonNodes non-interactive
@@ -381,10 +381,15 @@ static void ApolloInstallInfoTapOnCell(id cell, SEL handler) {
     [cellView addGestureRecognizer:tap];
 }
 
-// Only acts on our own gesture; claims a touch only when it lands on the age or %
-// icon. The edited pencil is handled separately (see below).
+// Only acts on our own gesture; claims a touch only when a custom presentation mode
+// is enabled and it lands on the age or % icon. The edited pencil is handled
+// separately (see below).
 static BOOL ApolloInfoTapShouldReceiveTouch(id cell, UIGestureRecognizer *gr, UITouch *touch) {
     if (!objc_getAssociatedObject(gr, kApolloAgeTapMarkerKey)) return YES;
+    // Do not let our cancelling recognizer participate when the feature is off.
+    // Returning NO preserves Apollo's stock row selection/comment-collapse behavior.
+    if (!sInfoRowPopupMode && !sInfoRowOverlayMode) return NO;
+
     UIView *cellView = nil;
     @try { cellView = [(ApolloASDisplayNode *)cell view]; } @catch (__unused id e) {}
     if (!cellView) return NO;
@@ -402,11 +407,10 @@ static BOOL ApolloInfoTapShouldReceiveTouch(id cell, UIGestureRecognizer *gr, UI
 
 // Shared take-over for the native edited-pencil tap (-editedButtonTappedWithSender:
 // on CommentCellNode / CommentsHeaderCellNode). Returns YES when the native alert
-// should be suppressed: either we presented our own detail, or the icon is inert
-// (both modes off). Returns NO only when a mode is on but we couldn't present, so
-// the caller falls back to Apollo's native alert rather than a dead tap.
+// should be suppressed because we presented our own detail. Returns NO when both
+// modes are off (preserving Apollo's native alert), or when presentation failed.
 static BOOL ApolloHandleEditedButtonTap(id cell, id sender) {
-    if (!sInfoRowPopupMode && !sInfoRowOverlayMode) return YES;   // inert: swallow the native alert
+    if (!sInfoRowPopupMode && !sInfoRowOverlayMode) return NO;
 
     UIView *cellView = nil;
     @try { cellView = [(ApolloASDisplayNode *)cell view]; } @catch (__unused id e) {}
@@ -434,9 +438,7 @@ static BOOL ApolloHandleEditedButtonTap(id cell, id sender) {
 
 static void ApolloInfoTapFired(id cell, UITapGestureRecognizer *tap) {
     if (tap.state != UIGestureRecognizerStateRecognized) return;
-    // Both Popup and Overlay off: the age/% icons are inert. The gesture still
-    // recognizes (cancelsTouchesInView == YES), so the tap is swallowed and nothing
-    // happens — no popup/overlay, and no fall-through to opening the post either.
+    // Defensive re-check in case the mode changed after touch-down.
     if (!sInfoRowPopupMode && !sInfoRowOverlayMode) return;
 
     UIView *cellView = nil;
