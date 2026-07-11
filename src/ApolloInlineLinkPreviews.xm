@@ -3079,7 +3079,10 @@ static id ApolloLPBuildPlaceholderSpec(ASDisplayNode *hostNode, NSURL *url, Apol
     return ApolloLPMeasuredWrapper(card, insetClass);
 }
 
-static void ApolloLPInvokeTransitionLayoutIfPossible(id node) {
+// UNUSED since the round-7 watchdog fix (#630): transitionLayout with
+// shouldMeasureAsync:NO measures the entire subtree synchronously on main.
+// Kept for reference only — do not reintroduce on cell-sized nodes.
+static void __attribute__((unused)) ApolloLPInvokeTransitionLayoutIfPossible(id node) {
     if (!node) return;
     SEL transitionSel = NSSelectorFromString(@"transitionLayoutWithAnimation:shouldMeasureAsync:measurementCompletion:");
     if (![node respondsToSelector:transitionSel]) return;
@@ -3417,9 +3420,15 @@ static void ApolloLPTriggerRelayoutInternal(ASDisplayNode *node, BOOL scheduleDe
         }
     }
 
-    if (cellNode) {
-        ApolloLPInvokeTransitionLayoutIfPossible(cellNode);
-    }
+    // NOTE: this used to also run transitionLayoutWithAnimation:NO shouldMeasureAsync:NO
+    // on the whole CELL node — a synchronous full-subtree re-measure on the main thread,
+    // fired once per hero->compact card shrink. On big threads that pinned main for
+    // seconds (round-7 watchdog kill in #630: "freeze relating to full size previews
+    // collapsing to compact ones"), and because the measure re-runs layoutSpecThatFits —
+    // the hook that schedules these triggers — it could feed itself. It was also
+    // redundant: the invalidate/_u_setNeedsLayoutFromAbove walk above re-measures the
+    // subtree lazily on the next layout pass, and the container height refresh below
+    // commits the row height.
 
     if (!scheduleDelayed) {
         ApolloLPInvokeContainerRelayoutIfPossible(node, cellNode, host);
@@ -4292,17 +4301,59 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
         // compact card kept the hero row height and V18's overflow geometry
         // is blind to oversize rows. Fire the same shrink relayout for it.
         NSNumber *lastRenderedContext = objc_getAssociatedObject(self, &kApolloLPLastRenderedContextKey);
-        objc_setAssociatedObject(self, &kApolloLPLastRenderedContextKey, @(context), OBJC_ASSOCIATION_RETAIN);
         BOOL finalShrankToCompact = !renderedPlaceholder &&
             [lastRenderedContext isKindOfClass:[NSNumber class]] &&
             lastRenderedContext.unsignedIntegerValue == ApolloLPContextSelfText &&
             context == ApolloLPContextCompact;
-        if (renderedPlaceholder || finalShrankToCompact) {
+        ApolloLPContext placeholderContext = renderedPlaceholder ? (ApolloLPContext)[renderedPlaceholder unsignedIntegerValue] : ApolloLPContextSelfText;
+        BOOL placeholderShrankToCompact = (renderedPlaceholder != nil && placeholderContext == ApolloLPContextSelfText && context == ApolloLPContextCompact) || finalShrankToCompact;
+        // Per-node cooldown for SHRINK-shaped triggers only: hero<->compact can
+        // oscillate across measures (the multi-link count sees a different subtree
+        // off-tree vs attached) and each flip re-fires this trigger — the round-7
+        // #630 freeze. Non-shrink triggers (placeholder->hero) never oscillate and
+        // must not stamp the window: the legitimate hero->compact flip lands
+        // 80-200ms after them by construction (the 80ms delayed re-invalidate pass)
+        // and would otherwise always be swallowed, stranding compact cards in hero
+        // rows — the very #631 symptom this machinery heals.
+        static char kApolloLPShrinkTriggerUptimeKey;
+        NSNumber *lastShrinkTrigger = objc_getAssociatedObject(self, &kApolloLPShrinkTriggerUptimeKey);
+        NSTimeInterval sinceLastShrink = [lastShrinkTrigger isKindOfClass:[NSNumber class]]
+            ? (CACurrentMediaTime() - lastShrinkTrigger.doubleValue) : DBL_MAX;
+        BOOL shrinkCooldownActive = placeholderShrankToCompact && sinceLastShrink < 1.0;
+
+        if (shrinkCooldownActive) {
+            // Skipped by the cooldown: preserve BOTH re-detection edges (keep the
+            // placeholder marker, keep lastRenderedContext at hero) and force one
+            // re-measure after the window so a legitimate shrink is only delayed,
+            // never lost. Without this the flip consumed its edge and the compact
+            // card stayed stranded at hero height forever.
+            objc_setAssociatedObject(self, &kApolloLPLastRenderedContextKey, @(ApolloLPContextSelfText), OBJC_ASSOCIATION_RETAIN);
+            __weak ASDisplayNode *weakSelf = (ASDisplayNode *)self;
+            NSTimeInterval retryDelay = MAX(0.05, 1.0 - sinceLastShrink) + 0.05;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(retryDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                ASDisplayNode *strongSelf = weakSelf;
+                if (!strongSelf) return;
+                @try {
+                    SEL invalidateSel = NSSelectorFromString(@"invalidateCalculatedLayout");
+                    if ([strongSelf respondsToSelector:invalidateSel]) {
+                        ((void (*)(id, SEL))objc_msgSend)(strongSelf, invalidateSel);
+                    }
+                    if ([strongSelf respondsToSelector:@selector(setNeedsLayout)]) {
+                        ((void (*)(id, SEL))objc_msgSend)((id)strongSelf, @selector(setNeedsLayout));
+                    }
+                } @catch (__unused NSException *e) {}
+            });
+        } else {
+            objc_setAssociatedObject(self, &kApolloLPLastRenderedContextKey, @(context), OBJC_ASSOCIATION_RETAIN);
+        }
+
+        if ((renderedPlaceholder || finalShrankToCompact) && !shrinkCooldownActive) {
+            if (placeholderShrankToCompact) {
+                objc_setAssociatedObject(self, &kApolloLPShrinkTriggerUptimeKey, @(CACurrentMediaTime()), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
             objc_setAssociatedObject(self, &kApolloLinkPreviewRenderedPlaceholderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             __weak ASDisplayNode *weakSelf = (ASDisplayNode *)self;
             NSString *hostCopy = [host copy];
-            ApolloLPContext placeholderContext = renderedPlaceholder ? (ApolloLPContext)[renderedPlaceholder unsignedIntegerValue] : ApolloLPContextSelfText;
-            BOOL placeholderShrankToCompact = (placeholderContext == ApolloLPContextSelfText && context == ApolloLPContextCompact) || finalShrankToCompact;
             if (finalShrankToCompact) {
                 ApolloLPLogOncePerHost(host, @"V24-final-hero-to-compact-shrink");
             }

@@ -372,7 +372,18 @@ static void ApolloPFReconcileSeparators(id vc) {
     // Clear first; any further transition will re-set it and re-trigger us.
     objc_setAssociatedObject(tableNode, &kApolloPFSepDirtyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (ApolloPFTableHasOrphanSeparator(tableNode, tv)) {
-        @try { if ([tableNode respondsToSelector:@selector(relayoutItems)]) ((void (*)(id, SEL))objc_msgSend)(tableNode, @selector(relayoutItems)); } @catch (__unused id e) {}
+        // relayoutItems re-lays out EVERY node in the feed synchronously on main —
+        // the 0x8BADF00D watchdog class from #630. Bound it: foreground-active only
+        // and at most once per 10s; a skipped pass leaves a cosmetic 8pt gap that
+        // the next real change (which re-sets the dirty flag) or scroll heals.
+        if ([UIApplication sharedApplication].applicationState == UIApplicationStateActive) {
+            static NSTimeInterval sLastPFRelayoutUptime = 0;
+            NSTimeInterval now = CACurrentMediaTime();
+            if (now - sLastPFRelayoutUptime > 10.0) {
+                sLastPFRelayoutUptime = now;
+                @try { if ([tableNode respondsToSelector:@selector(relayoutItems)]) ((void (*)(id, SEL))objc_msgSend)(tableNode, @selector(relayoutItems)); } @catch (__unused id e) {}
+            }
+        }
     }
 }
 
