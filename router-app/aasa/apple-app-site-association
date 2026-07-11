@@ -1,0 +1,12 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["TEAMID.com.example.linkhop"],
+        "components": [
+          { "/": "/*", "comment": "Every path on the bounce domain opens the router app" }
+        ]
+      }
+    ]
+  }
+}

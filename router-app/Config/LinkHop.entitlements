@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The bounce domain. iOS fetches
+	     https://open.apolloreborn.app/.well-known/apple-app-site-association
+	     (via Apple's CDN) at install time and, when this app's TeamID.BundleID
+	     appears in that file, routes taps on open.apolloreborn.app links here
+	     silently — no "Open in …?" dialog. See ../aasa/ for the file + hosting. -->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:open.apolloreborn.app</string>
+	</array>
+</dict>
+</plist>

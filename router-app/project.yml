@@ -1,0 +1,37 @@
+# XcodeGen project spec — run `xcodegen` in this directory to produce LinkHop.xcodeproj.
+# (brew install xcodegen). Hand-maintained pbxproj files are avoided on purpose.
+#
+# Before archiving for the App Store:
+#   * set DEVELOPMENT_TEAM to the real Apple Developer team ID
+#   * pick a final bundle identifier (see README — keep "apollo"/"reddit" out of it)
+#   * update the associated domain in Config/LinkHop.entitlements if the bounce
+#     host is not open.apolloreborn.app
+name: LinkHop
+options:
+  deploymentTarget:
+    iOS: "15.0"
+  xcodeVersion: "15.0"
+targets:
+  LinkHop:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    entitlements:
+      path: Config/LinkHop.entitlements
+    info:
+      path: Config/Info.plist
+      properties:
+        CFBundleDisplayName: LinkHop
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.linkhop
+        DEVELOPMENT_TEAM: ""
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.9"
+        CURRENT_PROJECT_VERSION: 1
+        MARKETING_VERSION: 1.0.0
