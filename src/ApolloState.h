@@ -80,7 +80,8 @@ extern BOOL sKeepSearchBarInPlace;
 // comments / posted / % upvoted / translation). See ApolloStatsRowTouch.xm.
 extern BOOL sIconRowMagnifier;
 // Info Row settings sub-screen switches. Disabled icons still appear in the
-// magnifier loupe but do nothing on release; a disabled direct tap does nothing.
+// magnifier loupe but do nothing on release. Disabled direct taps keep Apollo's
+// stock behavior instead of being consumed by the tweak.
 // sInfoRowTapTranslation governs the 🌐 marker beside a post's stats (feed title
 // + comments header) and takes priority over Tap to Translate / title Details;
 // it does NOT touch the inline "Translate" affordance under comment/self-post
@@ -90,8 +91,8 @@ extern BOOL sInfoRowTapUpvote;
 extern BOOL sInfoRowTapComments;
 // The tappable "info" icons — % upvoted, timestamp, and edited — all share one
 // display style, chosen by these two mutually-exclusive toggles: Popup = the
-// dismissable alert; Overlay = the small auto-fading card above the icon. Both
-// off = those three icons do nothing when tapped (or when picked in the loupe).
+// dismissable alert; Overlay = the small auto-fading card above the icon. With both
+// off, direct taps use Apollo's stock behavior; picking one in the loupe does nothing.
 // Popup defaults ON; the settings UI + a load-time clamp keep them exclusive.
 extern BOOL sInfoRowPopupMode;
 extern BOOL sInfoRowOverlayMode;
