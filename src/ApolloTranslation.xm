@@ -1619,6 +1619,38 @@ static void ApolloForceRelayoutForTextNodeAndOwner(id owner, id textNode) {
     } @catch (__unused NSException *e) {}
 }
 
+// Anti-flicker heal for translation text swaps. setAttributedText: +
+// setNeedsLayout/Display schedule an ASYNCHRONOUS redisplay of the swapped
+// node; on a visible cell Texture commits the frame with the node's contents
+// cleared and fills it in a frame later — the same nil-contents blank the
+// vote fix (ApolloCommentVoteFlicker.xm) eliminates for byline updates. The
+// vote fix's flush windows end before the translation vote-resilience reapply
+// runs, so translated comments still flashed on vote. Heal at the source
+// instead: after every translation write into an on-screen cell, force the
+// cell subtree to finish display synchronously (now + next runloop turn, when
+// the relayout wave lands). Off-screen cells are skipped — isNodeLoaded is
+// checked BEFORE touching .view so unloaded nodes are never forced to load.
+static void ApolloTranslationHealCellDisplaySync(id cellNode) {
+    if (!cellNode) return;
+    @try {
+        if (![cellNode respondsToSelector:@selector(isNodeLoaded)] ||
+            !((BOOL (*)(id, SEL))objc_msgSend)(cellNode, @selector(isNodeLoaded))) return;
+        UIView *v = [cellNode respondsToSelector:@selector(view)]
+            ? ((UIView *(*)(id, SEL))objc_msgSend)(cellNode, @selector(view)) : nil;
+        if (!v.window) return;
+        if (![cellNode respondsToSelector:@selector(recursivelyEnsureDisplaySynchronously:)]) return;
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(cellNode, @selector(recursivelyEnsureDisplaySynchronously:), YES);
+        __weak id weakCell = cellNode;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id strong = weakCell;
+            if (!strong) return;
+            @try {
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(strong, @selector(recursivelyEnsureDisplaySynchronously:), YES);
+            } @catch (__unused NSException *e) {}
+        });
+    } @catch (__unused NSException *e) {}
+}
+
 static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *comment, NSString *translatedText) {
     if (!commentCellNode || ![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return;
     if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
@@ -1636,6 +1668,7 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
         if (!ApolloTapModeIsTranslatedKey(pinName)) {
             if (ApolloTranslatedTextDiffersFromSource(comment.body, translatedText)) {
                 ApolloAppendTranslateAffordanceForCellNode(commentCellNode, comment);
+                ApolloTranslationHealCellDisplaySync(commentCellNode);
             }
             return;
         }
@@ -1708,6 +1741,7 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
         ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsDisplay));
     }
     ApolloForceRelayoutForTextNodeAndOwner(commentCellNode, textNode);
+    ApolloTranslationHealCellDisplaySync(commentCellNode);
     if (displayAttr != translatedAttr) {
         ApolloEnsureMarkerTappableOnNode(textNode);
         ApolloEnsureCommentsTableBreathingRoom();
@@ -1816,6 +1850,7 @@ static void ApolloRestoreOriginalForCellNode(id commentCellNode, RDKComment *com
         ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsDisplay));
     }
     ApolloForceRelayoutForTextNodeAndOwner(commentCellNode, textNode);
+    ApolloTranslationHealCellDisplaySync(commentCellNode);
 
     objc_setAssociatedObject(commentCellNode, kApolloAppliedTranslationFullNameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
 }
@@ -2237,6 +2272,7 @@ static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *l
         ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsDisplay));
     }
 
+    ApolloTranslationHealCellDisplaySync(headerCellNode);
     objc_setAssociatedObject(headerCellNode, kApolloHeaderTranslatedTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     // Re-entrancy guard + link recovery for vote-tap rebuild (see comment
@@ -2338,6 +2374,7 @@ static void ApolloApplyTranslationToPostTextNode(id owner, id textNode, NSString
         ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsDisplay));
     }
 
+    ApolloTranslationHealCellDisplaySync(owner);
     objc_setAssociatedObject(owner, kApolloHeaderTranslatedTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     // Mirror the per-VC stash so headerReapply has something to recover
     // from even when this code path (not ApolloApplyTranslationToHeaderCellNode)
@@ -2375,6 +2412,7 @@ static void ApolloRestoreOriginalForHeaderCellNode(id headerCellNode, RDKLink *l
     if ([textNode respondsToSelector:@selector(setNeedsDisplay)]) {
         ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsDisplay));
     }
+    ApolloTranslationHealCellDisplaySync(headerCellNode);
     objc_setAssociatedObject(headerCellNode, kApolloAppliedHeaderTranslationFullNameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
 }
 
