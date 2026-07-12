@@ -872,9 +872,31 @@ static BOOL ApolloLPNetworkImageNodeHasImage(ASNetworkImageNode *imageNode) {
     return [image isKindOfClass:[UIImage class]] && image.size.width > 0.0 && image.size.height > 0.0;
 }
 
+// Cap the pixel size of any bitmap the card machinery holds on to. Cards render at
+// most ~screen width x ~200pt; og:image heroes are frequently 2000px+ wide, which
+// decode to 8-12MB each — and the fallback path pins them in defaultImage, where
+// Texture's out-of-range release never touches them. Those per-card pins were the
+// bulk of the #630 round-8 jetsam (+20MB retained per card-heavy thread open).
+static UIImage *ApolloLPDisplaySizedImage(UIImage *image) {
+    if (!image) return nil;
+    CGFloat const maxDim = 1000.0;
+    CGFloat w = image.size.width * image.scale, h = image.size.height * image.scale;
+    CGFloat longest = MAX(w, h);
+    if (longest <= maxDim || w <= 0 || h <= 0) return image;
+    CGFloat ratio = maxDim / longest;
+    CGSize target = CGSizeMake(floor(w * ratio), floor(h * ratio));
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.scale = 1.0;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:target format:format];
+    UIImage *scaled = [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *ctx) {
+        [image drawInRect:CGRectMake(0, 0, target.width, target.height)];
+    }];
+    return scaled ?: image;
+}
+
 static void ApolloLPRememberRenderedImageForURL(ASNetworkImageNode *imageNode, NSURL *imageURL) {
     if (!imageURL.absoluteString.length || !ApolloLPNetworkImageNodeHasImage(imageNode)) return;
-    UIImage *image = imageNode.image;
+    UIImage *image = ApolloLPDisplaySizedImage(imageNode.image);
     NSUInteger cost = (NSUInteger)(image.size.width * image.size.height * image.scale * image.scale * 4.0);
     [ApolloLPFallbackImageCache() setObject:image forKey:imageURL.absoluteString cost:cost];
     ApolloLPMaybeKickFaceScanForNode(imageNode, imageURL, image);
@@ -975,13 +997,16 @@ static void ApolloLPApplyFallbackImage(ASNetworkImageNode *imageNode, NSURL *ima
     if (![currentURL.absoluteString isEqualToString:imageURL.absoluteString]) return;
     if (ApolloLPNetworkImageNodeHasImage(imageNode)) return;
 
-    imageNode.image = image;
+    // Pin only a display-sized bitmap: og:image heroes decode to 8-12MB and
+    // defaultImage is outside Texture's out-of-range release (#630 round 8).
+    UIImage *displayImage = ApolloLPDisplaySizedImage(image);
+    imageNode.image = displayImage;
     // Persist the decoded image as defaultImage so Texture keeps painting it
     // when it releases imageNode.image outside the display range. Without
     // this, re-entering a thread shows a blank/gray frame before the
     // fallback path re-applies the image.
     if ([imageNode respondsToSelector:@selector(setDefaultImage:)]) {
-        imageNode.defaultImage = image;
+        imageNode.defaultImage = displayImage;
     }
     imageNode.backgroundColor = nil;
     objc_setAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackAppliedURLKey, imageURL.absoluteString, OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -3285,6 +3310,36 @@ static void ApolloLPRenoteDroppedRowReload(ASDisplayNode *originNode, NSString *
 }
 
 static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDisplayNode *originNode, NSString *host) {
+    // Hard convergence budget, keyed on the preview URL (falls back to host): every
+    // reload path (V12 shrink heal, V18 overflow, V20 pending mark, V23 poll) funnels
+    // through here, and a row whose height never converges used to reload FOREVER —
+    // each reload allocates a brand-new cell subtree + hero image rasters and wipes
+    // the per-node guards, the #630 round-8 jetsam (+20MB retained per thread open,
+    // sim-measured; 964MB peak on device). Budget exhaustion also drains the V23/V20
+    // arming so the 1s poll stops re-firing; a stuck row height is strictly better
+    // than an OOM kill.
+    static NSMutableDictionary<NSString *, NSMutableArray<NSNumber *> *> *sReloadBudget = nil;
+    if (!sReloadBudget) sReloadBudget = [NSMutableDictionary dictionary];
+    NSURL *budgetURL = originNode ? objc_getAssociatedObject(originNode, &kApolloLinkPreviewURLKey) : nil;
+    NSString *budgetKey = budgetURL.absoluteString.length > 0 ? budgetURL.absoluteString : (host ?: @"(nohost)");
+    NSMutableArray<NSNumber *> *attempts = sReloadBudget[budgetKey];
+    if (!attempts) { attempts = [NSMutableArray array]; sReloadBudget[budgetKey] = attempts; }
+    NSTimeInterval now = CACurrentMediaTime();
+    while (attempts.count > 0 && now - attempts.firstObject.doubleValue > 60.0) {
+        [attempts removeObjectAtIndex:0];
+    }
+    if (attempts.count >= 3) {
+        ApolloLPLogOncePerHost(host, [NSString stringWithFormat:@"V25-reload-budget-exhausted key=%@", budgetKey]);
+        if (originNode) {
+            objc_setAssociatedObject(originNode, &kApolloLPPendingRowReloadHostKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        }
+        if (budgetURL.absoluteString.length > 0) {
+            [ApolloLPPendingCrossNodeRowReloads() removeObjectForKey:budgetURL.absoluteString];
+        }
+        // Report handled: a renote here would just re-arm the healers we drained.
+        return YES;
+    }
+
     UIView *cellView = ApolloLPViewForNode(startNode);
     if (!cellView) {
         ApolloLPLogOncePerHost(host, @"V12-row-reload-miss no-view");
@@ -3306,6 +3361,7 @@ static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDispla
             NSIndexPath *indexPath = [tableView indexPathForCell:tableCell];
             if (!indexPath) return NO;
 
+            [attempts addObject:@(now)]; // burn budget only for a SCHEDULED reload
             NSString *hostCopy = [host copy];
             NSIndexPath *indexPathCopy = [indexPath copy];
             __weak ASDisplayNode *weakOriginNode = originNode;
@@ -3334,6 +3390,7 @@ static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDispla
             NSIndexPath *indexPath = [collectionView indexPathForCell:collectionCell];
             if (!indexPath) return NO;
 
+            [attempts addObject:@(now)]; // burn budget only for a SCHEDULED reload
             NSString *hostCopy = [host copy];
             NSIndexPath *indexPathCopy = [indexPath copy];
             __weak ASDisplayNode *weakOriginNode = originNode;
@@ -3463,9 +3520,15 @@ static void ApolloLPTriggerPlaceholderContextRelayout(ASDisplayNode *node, NSStr
               host ?: @"(nohost)", ApolloLPContextLogName(fromContext), ApolloLPContextLogName(toContext));
     ApolloLPTriggerRelayoutInternal(node, NO, host);
     ASDisplayNode *cellNode = ApolloLPFindOwningCellNode(node);
-    if (!ApolloLPInvokeRowReloadIfPossible(cellNode ?: node, node, host)) {
-        ApolloLPNoteRowReloadMissForNode(node, host);
+    if (ApolloLPInvokeRowReloadIfPossible(cellNode ?: node, node, host)) {
+        // Reload scheduled — done. The old 150ms follow-up ran even after SUCCESS,
+        // and since the successful reload detaches this node from its (deleted)
+        // cell, the follow-up deterministically missed, re-noted a phantom failure,
+        // and re-armed the V20/V23 healers against the replacement node — one of
+        // the feedback cycles behind the #630 round-8 reload loop / jetsam.
+        return;
     }
+    ApolloLPNoteRowReloadMissForNode(node, host);
 
     __weak ASDisplayNode *weakNode = node;
     NSString *hostCopy = [host copy];
@@ -4078,6 +4141,42 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
 
 %hook _TtC6Apollo14LinkButtonNode
 
+// Release the per-card bitmap pins when the card leaves the preload range, and
+// restore them (from the size-capped NSCache) when it comes back. defaultImage is
+// invisible to Texture's own interface-state memory management, so without this
+// every card a session ever rendered kept its decoded bitmap alive — the driver
+// of the round-8 jetsam. Re-entry repaints from the cache before display, so the
+// anti-flash purpose of defaultImage is preserved.
+- (void)didExitPreloadState {
+    %orig;
+    NSDictionary<NSString *, NSDictionary *> *bundles = objc_getAssociatedObject(self, &kApolloLinkPreviewNodesKey);
+    if (![bundles isKindOfClass:[NSDictionary class]]) return;
+    for (NSDictionary *bundle in bundles.allValues) {
+        for (NSString *key in @[@"image", @"avatar"]) {
+            ASNetworkImageNode *imageNode = bundle[key];
+            if (![imageNode respondsToSelector:@selector(setDefaultImage:)]) continue;
+            @try {
+                if (imageNode.defaultImage) imageNode.defaultImage = nil;
+            } @catch (__unused NSException *e) {}
+        }
+    }
+}
+
+- (void)didEnterPreloadState {
+    %orig;
+    NSDictionary<NSString *, NSDictionary *> *bundles = objc_getAssociatedObject(self, &kApolloLinkPreviewNodesKey);
+    if (![bundles isKindOfClass:[NSDictionary class]]) return;
+    for (NSDictionary *bundle in bundles.allValues) {
+        ASNetworkImageNode *imageNode = bundle[@"image"];
+        NSURL *fallbackURL = imageNode ? objc_getAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackURLKey) : nil;
+        if (!fallbackURL.absoluteString.length) continue;
+        UIImage *cached = [ApolloLPFallbackImageCache() objectForKey:fallbackURL.absoluteString];
+        if (cached && !ApolloLPNetworkImageNodeHasImage(imageNode)) {
+            ApolloLPApplyFallbackImage(imageNode, fallbackURL, cached, ApolloLPHost(fallbackURL));
+        }
+    }
+}
+
 - (id)layoutSpecThatFits:(struct CDStruct_90e057aa)constrainedSize {
     NSString *urlString = ApolloGetLinkButtonNodeURLString(self);
     NSURL *url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
@@ -4249,6 +4348,19 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
                 context = ApolloLPContextCompact;
                 ApolloLPLogOncePerHost(host, @"multi-link-collapse-compact");
             }
+        } else {
+            // OFF-TREE measure (fresh node, cell not reachable): default COMPACT, not
+            // hero. Resolving hero here and compact once attached created a
+            // deterministic hero->compact shrink edge on EVERY fresh node — and since
+            // the shrink heal is a row reload that REPLACES the node (wiping every
+            // per-node guard), that edge re-fired per reload: the self-sustaining
+            // reload loop behind the #630 round-8 jetsam (+20MB retained per thread
+            // open, 964MB peak on device). Defaulting compact means an off-tree
+            // measure can only be UPGRADED to hero by an attached single-link
+            // measure — a growth the ordinary height refresh commits without any
+            // reload. A genuinely single-link comment still gets its hero card.
+            context = ApolloLPContextCompact;
+            ApolloLPLogOncePerHost(host, @"offtree-default-compact");
         }
     }
 
