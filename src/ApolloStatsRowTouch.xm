@@ -38,6 +38,7 @@
 #import <objc/message.h>
 
 #import "ApolloCommon.h"
+#import "ApolloCreatedAtAlert.h"
 #import "ApolloState.h"
 #import "ApolloThemeRuntime.h"
 #import "UIWindow+Apollo.h"
@@ -116,9 +117,10 @@ static BOOL SRTConsumeJumpPending(void) {
 
 typedef NS_ENUM(NSInteger, SRTStatKind) {
     SRTStatKindScore = 0,     // release = upvote (the ↑ icon)
-    SRTStatKindPercentage,    // release = "% Upvoted" info alert
+    SRTStatKindPercentage,    // release = "% Upvoted" detail (Popup/Overlay mode)
     SRTStatKindComments,      // release = open post at the comment section
-    SRTStatKindAge,           // release = "Posted … Ago" alert
+    SRTStatKindAge,           // release = "Posted … Ago" detail (Popup/Overlay mode)
+    SRTStatKindEdited,        // release = "Edited … Ago" detail (Popup/Overlay mode)
     SRTStatKindTranslation,   // release = toggle title translated ⇄ original
 };
 
@@ -130,6 +132,22 @@ typedef NS_ENUM(NSInteger, SRTStatKind) {
 @end
 @implementation ApolloSRTTarget
 @end
+
+// Per-icon activation check (Info Row settings sub-screen). Disabled icons STILL
+// appear in the loupe (see SRTTargetsForCell) — this only gates what happens on
+// RELEASE: a disabled kind does nothing. The three "info" icons (% upvoted, age,
+// edited) share the Popup/Overlay mode: enabled if either mode is on.
+static BOOL SRTKindTapEnabled(SRTStatKind kind) {
+    switch (kind) {
+        case SRTStatKindScore:       return sInfoRowTapUpvote;
+        case SRTStatKindComments:    return sInfoRowTapComments;
+        case SRTStatKindPercentage:  return sInfoRowPopupMode || sInfoRowOverlayMode;
+        case SRTStatKindAge:         return sInfoRowPopupMode || sInfoRowOverlayMode;
+        case SRTStatKindEdited:      return sInfoRowPopupMode || sInfoRowOverlayMode;
+        case SRTStatKindTranslation: return sInfoRowTapTranslation;
+    }
+    return YES;
+}
 
 // The translation module (ApolloTranslation.xm — actively developed in its own
 // workstream, so we only *look at* its artifacts, never call its internals
@@ -168,9 +186,12 @@ static NSArray<ApolloSRTTarget *> *SRTTargetsForCell(id cell, UIView *cellView) 
         {"percentageLikedButtonNode",  SRTStatKindPercentage, @"% Upvoted"},
         {"commentsInfoNode",           SRTStatKindComments,   @"Comments"},
         {"ageButtonNode",              SRTStatKindAge,        @"Posted"},
+        {"editedButtonNode",           SRTStatKindEdited,     @"Edited"},
     };
     NSMutableArray<ApolloSRTTarget *> *out = [NSMutableArray array];
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < (int)(sizeof(specs) / sizeof(specs[0])); i++) {
+        // Disabled icons still APPEAR in the loupe (the user can slide over them);
+        // releasing on one just does nothing — gated in SRTActivateTarget, not here.
         ApolloSRTNode *node = (ApolloSRTNode *)SRTIvar(postInfoNode, specs[i].ivar);
         if (!node || node.isHidden) continue;
         CALayer *layer = nil; @try { layer = node.layer; } @catch (__unused id e) {}
@@ -183,6 +204,7 @@ static NSArray<ApolloSRTTarget *> *SRTTargetsForCell(id cell, UIView *cellView) 
         [out addObject:t];
     }
     // Optional 🌐 translation marker (a UILabel overlaid by the translation module).
+    // Always shown in the loupe when present; activation is gated in SRTActivateTarget.
     UILabel *marker = SRTTranslationMarkerLabel(postInfoNode);
     if (marker && marker.layer && cellView.layer) {
         CGRect rect = [marker.layer convertRect:marker.layer.bounds toLayer:cellView.layer];
@@ -465,28 +487,11 @@ static NSInteger SRTNearestTargetIndex(NSArray<ApolloSRTTarget *> *targets, CGFl
 
 @end
 
-// MARK: - Magnifier: activation (open post / created-at alert)
+// MARK: - Magnifier: activation (open post / vote / info detail)
 
-static NSDateFormatter *SRTAbsDateFormatter(void) {
-    static NSDateFormatter *f; static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        f = [[NSDateFormatter alloc] init];
-        f.dateStyle = NSDateFormatterLongStyle;
-        f.timeStyle = NSDateFormatterShortStyle;
-    });
-    return f;
-}
-
-static NSString *SRTRelativeAgo(NSDate *date) {
-    NSTimeInterval t = fabs([date timeIntervalSinceNow]);
-    if (t < 5.0)        return @"Just now";
-    if (t < 60.0)       return [NSString stringWithFormat:@"%lds",  (long)t];
-    if (t < 3600.0)     return [NSString stringWithFormat:@"%ldm",  (long)(t / 60.0)];
-    if (t < 86400.0)    return [NSString stringWithFormat:@"%ldh",  (long)(t / 3600.0)];
-    if (t < 2592000.0)  return [NSString stringWithFormat:@"%ldd",  (long)(t / 86400.0)];
-    if (t < 31536000.0) return [NSString stringWithFormat:@"%ldmo", (long)(t / 2592000.0)];
-    return [NSString stringWithFormat:@"%.1fy", t / 31556736.0];
-}
+// The % upvoted / age / edited details are presented via ApolloCreatedAtAlert's
+// ApolloPresentInfoDetail (see SRTActivateTarget), so the loupe matches the
+// direct taps and there's no duplicate alert/overlay/date code here.
 
 static UIViewController *SRTVisibleVCForView(UIView *view) {
     UIResponder *r = view;
@@ -495,28 +500,6 @@ static UIViewController *SRTVisibleVCForView(UIView *view) {
         r = r.nextResponder;
     }
     return nil;
-}
-
-// Present the same "Posted … Ago" alert as ApolloCreatedAtAlert (feed post).
-static void SRTPresentCreatedAtAlert(id cell, UIView *cellView) {
-    id link = SRTIvar(cell, "link");
-    NSDate *date = nil;
-    if ([link respondsToSelector:@selector(createdUTC)]) {
-        @try { date = [link createdUTC]; } @catch (__unused id e) {}
-    }
-    if (![date isKindOfClass:[NSDate class]]) return;
-    UIViewController *presenter = SRTVisibleVCForView(cellView);
-    if (!presenter) return;
-
-    NSString *rel = SRTRelativeAgo(date);
-    NSString *title = [rel isEqualToString:@"Just now"] ? @"Posted Just now"
-                                                        : [NSString stringWithFormat:@"Posted %@ Ago", rel];
-    NSString *msg = (fabs([date timeIntervalSinceNow]) >= 5.0)
-        ? [NSString stringWithFormat:@"Posted on %@", [SRTAbsDateFormatter() stringFromDate:date]] : nil;
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:msg
-                                                       preferredStyle:UIAlertControllerStyleAlert];
-    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
-    [presenter presentViewController:a animated:YES completion:nil];
 }
 
 // Open the post the same way a tap would: replay Apollo's own row selection. When
@@ -574,27 +557,6 @@ static BOOL SRTSendTouchUpInside(id controlNode) {
     return YES;
 }
 
-static void SRTPresentSimpleAlert(UIView *cellView, NSString *title, NSString *message) {
-    UIViewController *presenter = SRTVisibleVCForView(cellView);
-    if (!presenter) return;
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:message
-                                                       preferredStyle:UIAlertControllerStyleAlert];
-    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
-    [presenter presentViewController:a animated:YES completion:nil];
-}
-
-// "94% Upvoted" info for the smiley — mirrors what the row displays.
-static void SRTPresentUpvoteRatioAlert(id cell, UIView *cellView) {
-    id link = SRTIvar(cell, "link");
-    SEL ratioSel = NSSelectorFromString(@"upvoteRatio");
-    if (!link || ![link respondsToSelector:ratioSel]) return;
-    double ratio = ((double (*)(id, SEL))objc_msgSend)(link, ratioSel);
-    if (ratio <= 0.0 || ratio > 1.0) return;
-    long pct = lround(ratio * 100.0);
-    SRTPresentSimpleAlert(cellView, [NSString stringWithFormat:@"%ld%% Upvoted", pct],
-                          [NSString stringWithFormat:@"%ld%% of voters upvoted this post.", pct]);
-}
-
 // Toggle the post title translated ⇄ original through the translation module's
 // own tap target (ApolloTranslation.xm). Runtime-bridged so this module never
 // links against that one: shared.pendingLabel = marker; handleCellTap:nil.
@@ -613,6 +575,7 @@ static BOOL SRTToggleTranslationForMarker(UILabel *marker) {
 
 static void SRTActivateTarget(id cell, UIView *cellView, ApolloSRTTarget *target) {
     if (!target) return;
+    if (!SRTKindTapEnabled(target.kind)) return;   // defensive: disabled kinds never reach here
     switch (target.kind) {
         case SRTStatKindScore: {
             if (!SRTSendTouchUpInside(SRTUpvoteButtonForCell(cell))) {
@@ -624,12 +587,21 @@ static void SRTActivateTarget(id cell, UIView *cellView, ApolloSRTTarget *target
         case SRTStatKindComments:
             SRTOpenPostForCell(cell, cellView, /*jump=*/YES);
             break;
-        case SRTStatKindAge:
-            SRTPresentCreatedAtAlert(cell, cellView);
-            break;
         case SRTStatKindPercentage:
-            SRTPresentUpvoteRatioAlert(cell, cellView);
+        case SRTStatKindAge:
+        case SRTStatKindEdited: {
+            // The three "info" icons share ApolloCreatedAtAlert's presenter, so the
+            // loupe matches the direct tap (Popup alert or Overlay per the mode).
+            ApolloInfoKind ik = target.kind == SRTStatKindPercentage ? ApolloInfoKindPercentage
+                              : target.kind == SRTStatKindEdited      ? ApolloInfoKindEdited
+                                                                      : ApolloInfoKindAge;
+            id link = SRTIvar(cell, "link");
+            id comment = SRTIvar(cell, "comment");
+            UIWindow *window = cellView.window;
+            CGRect anchor = window ? [cellView convertRect:target.rect toView:nil] : CGRectNull;
+            ApolloPresentInfoDetail(ik, link, comment, cellView, anchor, window);
             break;
+        }
         case SRTStatKindTranslation:
             SRTToggleTranslationForMarker(target.markerLabel);
             break;
@@ -662,16 +634,38 @@ static const UIEdgeInsets kSRTCommentInsets = (UIEdgeInsets){ -11.0, -7.0, -11.0
 @interface ApolloSRTGestureDelegate : NSObject <UIGestureRecognizerDelegate>
 @end
 
-// Snapshot the strip region of the (rasterized) cell into an image for the loupe.
-static UIImage *SRTSnapshotStrip(UIView *cellView, CGRect stripRect) {
+// Snapshot the strip region (the info row) into an image for the loupe.
+//
+// We render from the WINDOW, not the cell: on a very long post the comments-header
+// cell's own bounds are enormous (thousands of points), and drawing them with
+// drawViewHierarchyInRect comes back blank (the off-screen expanse blows past the
+// snapshot's texture budget) — which is exactly the "magnifier icons are blank on
+// long posts" bug. The window is always screen-sized and the info row is visible
+// in it while you hold, so snapshotting the window's strip region is reliable
+// regardless of how tall the cell is. `hideDuringSnapshot` (the loupe, on the
+// re-snapshot) is momentarily hidden so it can't capture itself over the icons.
+static UIImage *SRTSnapshotStrip(UIView *cellView, CGRect stripRect, UIView *hideDuringSnapshot) {
     if (stripRect.size.width < 1.0 || stripRect.size.height < 1.0) return nil;
+    UIView *source = cellView;
+    CGRect rect = stripRect;
+    UIWindow *window = cellView.window;
+    if (window) {
+        source = window;
+        rect = [cellView convertRect:stripRect toView:window];   // → window coords
+    }
+    if (rect.size.width < 1.0 || rect.size.height < 1.0) return nil;
+
+    BOOL wasHidden = hideDuringSnapshot.hidden;
+    hideDuringSnapshot.hidden = YES;
     UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat preferredFormat];
     fmt.opaque = NO;
-    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:stripRect.size format:fmt];
-    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        CGContextTranslateCTM(ctx.CGContext, -stripRect.origin.x, -stripRect.origin.y);
-        [cellView drawViewHierarchyInRect:cellView.bounds afterScreenUpdates:NO];
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:rect.size format:fmt];
+    UIImage *out = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGContextTranslateCTM(ctx.CGContext, -rect.origin.x, -rect.origin.y);
+        [source drawViewHierarchyInRect:source.bounds afterScreenUpdates:NO];
     }];
+    hideDuringSnapshot.hidden = wasHidden;
+    return out;
 }
 
 // Selection pill tint: the theme accent (custom or stock Apollo theme — Mint →
@@ -814,6 +808,7 @@ static void SRTWireCornerFailureRequirements(UIGestureRecognizer *loupe, UIView 
         return inside;
     }
     // The comment tap only cares about the comment-bubble region.
+    if (!sInfoRowTapComments) return NO;   // Info Row switch OFF: stock tap (opens post at top)
     UIView *cellView = nil;
     @try { cellView = [(ApolloSRTNode *)cell view]; } @catch (__unused id e) {}
     ApolloSRTNode *commentsNode = SRTCommentsNodeForCell(cell);
@@ -966,7 +961,7 @@ static const CGFloat kSRTCancelSlopY = 64.0;
             UIView *host = cellView.window;
             if (targets.count == 0 || !host) return;
             CGRect stripRect = SRTStripRect(targets);
-            UIImage *img = SRTSnapshotStrip(cellView, stripRect);
+            UIImage *img = SRTSnapshotStrip(cellView, stripRect, nil);   // loupe not shown yet
             if (!img) return;
             CGFloat zoom = (host.bounds.size.width - 40.0) / MAX(stripRect.size.width, 1.0);
             zoom = MAX(1.4, MIN(zoom, 2.4));
@@ -985,7 +980,7 @@ static const CGFloat kSRTCancelSlopY = 64.0;
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.09 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     ApolloSRTLoupeView *l = weakLoupe;
                     if (!l || !l.superview) return;
-                    UIImage *fresh = SRTSnapshotStrip(cellView, snapRect);
+                    UIImage *fresh = SRTSnapshotStrip(cellView, snapRect, l);   // hide the loupe so it isn't captured
                     if (fresh) l.stripImageView.image = fresh;
                 });
             }

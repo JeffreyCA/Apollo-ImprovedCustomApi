@@ -14,6 +14,7 @@
 #import "ApolloDeletedCommentsSettingsViewController.h"
 #import "ApolloLinkPreviewSettingsViewController.h"
 #import "InlineMediaSettingsViewController.h"
+#import "InfoRowSettingsViewController.h"
 #import "ApolloOpenInAppViewController.h"
 #import "ApolloSubredditCustomBannerCache.h"
 #import "ApolloSubredditCustomIconCache.h"
@@ -34,6 +35,7 @@ typedef NS_ENUM(NSInteger, SectionIndex) {
     SectionBackupRestore = 0,
     SectionAPIKeys,
     SectionGeneral,
+    SectionInfoRow,       // single row -> InfoRowSettingsViewController
     SectionApolloAI,
     SectionInlineMedia,   // single row -> InlineMediaSettingsViewController
     SectionLinkPreviews,
@@ -576,6 +578,52 @@ typedef NS_ENUM(NSInteger, Tag) {
     }
 }
 
+// One-line state summary shown under the "Info Row" disclosure row: magnifier
+// state, the detail-icon display style (Popups / Overlays / off), then any action
+// icons the user turned off. Translation only counts as "off" when a marker is
+// actually available (otherwise it's faded, not a deliberate choice).
+- (NSString *)infoRowSummaryText {
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    [parts addObject:sIconRowMagnifier ? @"Magnifier on" : @"Magnifier off"];
+    [parts addObject:sInfoRowOverlayMode ? @"Overlays" : sInfoRowPopupMode ? @"Popups" : @"Info taps off"];
+
+    NSMutableArray<NSString *> *off = [NSMutableArray array];
+    if (!sInfoRowTapUpvote) [off addObject:@"Upvote"];
+    if (!sInfoRowTapComments) [off addObject:@"Comments"];
+    BOOL translationAvailable = sTapToTranslate || sShowTranslationTitleDetails || sShowTranslationDetails;
+    if (translationAvailable && !sInfoRowTapTranslation) [off addObject:@"Translation"];
+    if (off.count) [parts addObject:[NSString stringWithFormat:@"%@ off", [off componentsJoinedByString:@", "]]];
+    return [parts componentsJoinedByString:@" · "];
+}
+
+- (UITableViewCell *)infoRowCellForTableView:(UITableView *)tableView {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_InfoRow"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
+                                      reuseIdentifier:@"Cell_InfoRow"];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    }
+    cell.textLabel.text = @"Info Row Settings";
+    cell.detailTextLabel.text = [self infoRowSummaryText];
+    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    cell.detailTextLabel.numberOfLines = 0;
+    cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    return cell;
+}
+
+- (void)openInfoRowSettings {
+    InfoRowSettingsViewController *vc =
+        [[InfoRowSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    if (self.navigationController) {
+        [self.navigationController pushViewController:vc animated:YES];
+    } else {
+        UINavigationController *navigation =
+            [[UINavigationController alloc] initWithRootViewController:vc];
+        [self presentViewController:navigation animated:YES completion:nil];
+    }
+}
+
 - (UITableViewCell *)deletedCommentsCellForTableView:(UITableView *)tableView {
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Gen_DeletedComments"];
     if (!cell) {
@@ -644,9 +692,9 @@ typedef NS_ENUM(NSInteger, Tag) {
         [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:kAPIKeyRowWebSessionLogin inSection:SectionAPIKeys]]
                               withRowAnimation:UITableViewRowAnimationNone];
     }
-    // Refresh the Apollo AI and Rich Link Previews status subtitles after returning
-    // from their subviews.
-    [self.tableView reloadSections:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(SectionApolloAI, 3)]
+    // Refresh the Info Row, Apollo AI, Inline Media and Rich Link Previews status
+    // subtitles after returning from their subviews.
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(SectionInfoRow, 4)]
                   withRowAnimation:UITableViewRowAnimationNone];
 }
 
@@ -700,15 +748,17 @@ typedef NS_ENUM(NSInteger, Tag) {
         // disclosure row (row 7). Includes the keep-search-in-place,
         // follow-live-comments, iPad-tab-bar-bottom and icon-row-magnifier
         // toggles. No conditional rows remain, so the count is constant.
-        case SectionGeneral: return 14;
+        case SectionGeneral: return 13;   // magnifier row moved to the Info Row sub-screen
+        case SectionInfoRow: return 1;
         case SectionApolloAI: return 1;
         case SectionInlineMedia: return 1;
         case SectionLinkPreviews: return 1;
         // Media base rows. The inline-media rows (Previews toggle, Alignment,
-        // Autoplay Inline GIFs) moved to the Inline Media sub-screen
-        // (SectionInlineMedia). The hold-speed picker (row 11) shows only while
-        // its toggle is on.
-        case SectionMedia: return 10 + (sVideoHoldSpeedEnabled ? 1 : 0);
+        // Autoplay Inline GIFs) and "Inline Media in Chat" moved to the Inline
+        // Media sub-screen (SectionInlineMedia). Row 9 is the "Sports Clip Links
+        // Play Inline" toggle. The hold-speed picker (row 11) shows only while its
+        // toggle is on.
+        case SectionMedia: return 11 + (sVideoHoldSpeedEnabled ? 1 : 0);
         case SectionSubreddits: return 10 - (sSubredditListEnhancements ? 0 : 1) - (sCommunityHighlights ? 0 : 1);
         case SectionNotificationBackend: return kNotifBackendRowCount;
         case SectionPrivacy: return 1; // Anonymous Install Count toggle
@@ -722,6 +772,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionBackupRestore: return @"Data";
         case SectionAPIKeys: return @"API Keys";
         case SectionGeneral: return @"General";
+        case SectionInfoRow: return @"Info Row";
         case SectionApolloAI: return @"Apollo AI";
         case SectionInlineMedia: return @"Inline Media";
         case SectionLinkPreviews: return @"Rich Link Previews";
@@ -740,6 +791,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionBackupRestore: cell = [self backupRestoreCellForRow:indexPath.row tableView:tableView]; break;
         case SectionAPIKeys: cell = [self apiKeyCellForRow:indexPath.row tableView:tableView]; break;
         case SectionGeneral: cell = [self generalCellForRow:indexPath.row tableView:tableView]; break;
+        case SectionInfoRow: cell = [self infoRowCellForTableView:tableView]; break;
         case SectionApolloAI: cell = [self apolloAICellForTableView:tableView]; break;
         case SectionInlineMedia: cell = [self inlineMediaCellForTableView:tableView]; break;
         case SectionLinkPreviews: cell = [self linkPreviewsCellForTableView:tableView]; break;
@@ -1203,12 +1255,8 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.detailTextLabel.enabled = supported;
             return cell;
         }
-        case 13:
-            return [self switchCellWithIdentifier:@"Cell_Gen_IconRowMagnifier"
-                                            label:@"Magnify Info Row on Hold"
-                                           detail:@"Press and hold a post's info row (score, comments, time…) to magnify the icons and slide to the one you want."
-                                               on:[defaults boolForKey:UDKeyIconRowMagnifier]
-                                           action:@selector(iconRowMagnifierSwitchToggled:)];
+        // The "Magnify Info Row on Hold" toggle moved to the Info Row sub-screen
+        // (SectionInfoRow), alongside the per-icon tap switches.
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -1313,11 +1361,19 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Show Detailed Profiles"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowDetailedProfiles]
                                            action:@selector(showDetailedProfilesSwitchToggled:)];
+        case 9:
+            // Sports-clip host links (streamff/streamin/streamain/…) play inline
+            // as native video instead of a link-preview card; explained in the
+            // section footer.
+            return [self switchCellWithIdentifier:@"Cell_Media_SportsClips"
+                                            label:@"Sports Clip Links Play Inline"
+                                               on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeySportsClipsInlineVideo]
+                                           action:@selector(sportsClipsSwitchToggled:)];
         // "Inline Media in Chat" moved to the Inline Media Settings sub-screen
         // (SectionInlineMedia), alongside Inline Media Previews.
-        case 9:
+        case 10:
             // Master toggle for "Hold for Video Speed". When on, the hold-speed
-            // picker (row 10) is shown below; when off, the right side of a
+            // picker (row 11) is shown below; when off, the right side of a
             // fullscreen video keeps Apollo's normal long-press menu. The gesture is
             // explained in the section footer, matching the sibling Media toggles
             // (which are plain switches with no inline subtitle).
@@ -1325,7 +1381,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Hold for Video Speed"
                                                on:sVideoHoldSpeedEnabled
                                            action:@selector(videoHoldSpeedSwitchToggled:)];
-        case 10: {
+        case 11: {
             UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Media_HoldSpeedValue"];
             if (!cell) {
                 cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Media_HoldSpeedValue"];
@@ -1715,7 +1771,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             attributes:plainAttrs]];
     } else if (section == SectionMedia) {
         text = [[NSMutableAttributedString alloc]
-            initWithString:@"Media Upload Host selects where Apollo uploads media attached to posts and comments.\n\nComment Link Host uploads images added to a comment or reply to Imgur or Img Chest and inserts a plain link instead of a native Reddit image, so they work even in subreddits that don't allow images in comments. Apollo still shows the linked image inline.\n\nProxying routes Imgur image requests through DuckDuckGo to bypass regional blocks; albums and uploads are unsupported by the proxy."
+            initWithString:@"Media Upload Host selects where Apollo uploads media attached to posts and comments.\n\nComment Link Host uploads images added to a comment or reply to Imgur or Img Chest and inserts a plain link instead of a native Reddit image, so they work even in subreddits that don't allow images in comments. Apollo still shows the linked image inline.\n\nProxying routes Imgur image requests through DuckDuckGo to bypass regional blocks; albums and uploads are unsupported by the proxy.\n\nSports Clip Links Play Inline makes highlight-clip links (streamff, streamin, streamain, bangr, dubz, dropr, MLB clips) play as inline videos like Streamable, instead of a link card. Clips removed from those sites show a video error."
             attributes:plainAttrs];
     } else if (section == SectionNotificationBackend) {
         text = [[NSMutableAttributedString alloc]
@@ -1808,6 +1864,11 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 
+    if (indexPath.section == SectionInfoRow) {
+        [self openInfoRowSettings];
+        return;
+    }
+
     if (indexPath.section == SectionApolloAI) {
         [self openApolloAISettings];
         return;
@@ -1885,7 +1946,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             [self presentImageUploadProviderSheetFromSourceView:cell];
         } else if (indexPath.row == 3) {
             [self presentCommentLinkHostSheetFromSourceView:cell];
-        } else if (indexPath.row == 10) {
+        } else if (indexPath.row == 11) {
             [self presentVideoHoldSpeedSheetFromSourceView:cell];
         }
     } else if (indexPath.section == SectionNotificationBackend) {
@@ -1998,6 +2059,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         if (row == kAPIKeyRowTroubleshooting || row == kAPIKeyRowSetupGuide ||
             row == kAPIKeyRowWebSessionLogin || row == kAPIKeyRowWidgetSetupCode) return YES;
     }
+    if (indexPath.section == SectionInfoRow) return YES;
     if (indexPath.section == SectionApolloAI) return YES;
     if (indexPath.section == SectionInlineMedia) return YES;
     if (indexPath.section == SectionLinkPreviews) return YES;
@@ -2008,7 +2070,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     }
     if (indexPath.section == SectionMedia) {
         return (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 ||
-                indexPath.row == 3 || indexPath.row == 10);
+                indexPath.row == 3 || indexPath.row == 11);
     }
     if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 || indexPath.row == 3 || indexPath.row == 4)) return YES;
     if (indexPath.section == SectionNotificationBackend) {
@@ -2342,8 +2404,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (void)usageHeartbeatSwitchToggled:(UISwitch *)sender {
-    // Mirror the opt-out into both NSUserDefaults and the durable heartbeat plist
-    // so a sign-in / settings restore can't silently re-enable it. on = NOT disabled.
+    // Mirror the opt-out into durable storage. on = NOT disabled.
     ApolloSetUsageHeartbeatDisabled(!sender.isOn);
 }
 
@@ -2545,10 +2606,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSUserDefaults standardUserDefaults] setBool:sKeepSearchBarInPlace forKey:UDKeyKeepSearchBarInPlace];
 }
 
-- (void)iconRowMagnifierSwitchToggled:(UISwitch *)sender {
-    sIconRowMagnifier = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sIconRowMagnifier forKey:UDKeyIconRowMagnifier];
-}
+// The magnifier toggle moved to InfoRowSettingsViewController (SectionInfoRow),
+// which owns its own switch handler; the old inline handler is gone with it.
 
 - (void)liveCommentsFollowSwitchToggled:(UISwitch *)sender {
     sLiveCommentsFollow = sender.isOn;
@@ -2605,6 +2664,12 @@ typedef NS_ENUM(NSInteger, Tag) {
 // Inline Media Previews / Alignment / Autoplay Inline GIFs UI moved to
 // InlineMediaSettingsViewController (SectionInlineMedia row).
 
+#pragma mark - Sports Clip Links
+
+- (void)sportsClipsSwitchToggled:(UISwitch *)sender {
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeySportsClipsInlineVideo];
+}
+
 #pragma mark - Hold for Video Speed
 
 - (void)videoHoldSpeedSwitchToggled:(UISwitch *)sender {
@@ -2612,10 +2677,10 @@ typedef NS_ENUM(NSInteger, Tag) {
     sVideoHoldSpeedEnabled = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sVideoHoldSpeedEnabled forKey:UDKeyVideoHoldSpeedEnabled];
     if (sVideoHoldSpeedEnabled == wasOn) return;
-    // The "Hold Speed" picker (row 10) is the last Media row and is shown
+    // The "Hold Speed" picker (row 11) is the last Media row and is shown
     // only while this toggle is on. Insert/delete it so the row counts stay
     // consistent.
-    NSIndexPath *pickerPath = [NSIndexPath indexPathForRow:10 inSection:SectionMedia];
+    NSIndexPath *pickerPath = [NSIndexPath indexPathForRow:11 inSection:SectionMedia];
     if (sVideoHoldSpeedEnabled) {
         [self.tableView insertRowsAtIndexPaths:@[pickerPath] withRowAnimation:UITableViewRowAnimationFade];
     } else {
@@ -2630,7 +2695,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)setVideoHoldSpeed:(float)speed {
     sVideoHoldSpeed = ApolloSanitizedHoldSpeed(speed);
     [[NSUserDefaults standardUserDefaults] setFloat:sVideoHoldSpeed forKey:UDKeyVideoHoldSpeed];
-    NSIndexPath *pickerPath = [NSIndexPath indexPathForRow:10 inSection:SectionMedia];
+    NSIndexPath *pickerPath = [NSIndexPath indexPathForRow:11 inSection:SectionMedia];
     if ([[self.tableView indexPathsForVisibleRows] containsObject:pickerPath]) {
         [self.tableView reloadRowsAtIndexPaths:@[pickerPath] withRowAnimation:UITableViewRowAnimationNone];
     }

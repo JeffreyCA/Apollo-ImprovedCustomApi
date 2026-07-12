@@ -71,8 +71,8 @@
       { "id": "helios-halo",              "displayName": "Helios Halo",         "designer": "IllIIllIllIllII", "group": "custom" },
       { "id": "helios-cryo",              "displayName": "Helios Cryo",         "designer": "IllIIllIllIllII", "group": "custom" },
       { "id": "helios-cryo-halo",         "displayName": "Helios Cryo Halo",    "designer": "IllIIllIllIllII", "group": "custom" },
-      { "id": "helios-ultra",             "displayName": "Helios Ultra",        "designer": "IllIIllIllIllII", "group": "custom" },
-      { "id": "helios-ultra-halo",        "displayName": "Helios Ultra Halo",   "designer": "IllIIllIllIllII", "group": "custom" },
       { "id": "helios-parallax",          "displayName": "Helios Parallax",     "designer": "IllIIllIllIllII", "group": "custom" },
-      { "id": "helios-parallax-halo",     "displayName": "Helios Parallax Halo","designer": "IllIIllIllIllII", "group": "custom" }]
+      { "id": "helios-parallax-halo",     "displayName": "Helios Parallax Halo","designer": "IllIIllIllIllII", "group": "custom" },
+      { "id": "helios-ultra",             "displayName": "Helios Ultra",        "designer": "IllIIllIllIllII", "group": "custom" },
+      { "id": "helios-ultra-halo",        "displayName": "Helios Ultra Halo",   "designer": "IllIIllIllIllII", "group": "custom" }]
 }

@@ -3,6 +3,7 @@
 #import "ApolloThemeCompiler.h"
 #import "ApolloThemeGalleryCatalog.h"
 #import "ApolloCommon.h"
+#import <CoreText/CoreText.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
 #import <dlfcn.h>
@@ -14,6 +15,7 @@
 
 @interface ASDisplayNode : NSObject
 - (ASDisplayNode *)supernode;
+@property (nonatomic, strong) UIColor *backgroundColor;
 @end
 
 @interface ASTextNode : ASDisplayNode
@@ -48,6 +50,18 @@
 @interface _TtC6Apollo24ApolloSearchBarTextField : UITextField
 @end
 
+// Apollo inserts these Texture cells between comment sections. Their internal
+// separatorNode is painted from Apollo's shared "gray" role (the same role as
+// muted text), rather than from its separator role, so RGB remapping alone
+// cannot distinguish the divider from a genuine muted label.
+@interface _TtC6Apollo21ThinSeparatorCellNode : ASDisplayNode
+@end
+
+// The post header above a comment thread owns two more explicit Texture
+// hairlines: one above the action quick bar and one above the comments list.
+@interface _TtC6Apollo22CommentsHeaderCellNode : ASDisplayNode
+@end
+
 // ===========================================================================
 // Runtime state
 // ===========================================================================
@@ -68,6 +82,53 @@ static uintptr_t sApolloStart = 0;
 static uintptr_t sApolloEnd = 0;
 static uintptr_t sTweakStart = 0;
 static uintptr_t sTweakEnd = 0;
+
+// Apply UIKit-owned colours at the view sink as well as at UIColor creation.
+// UITableView creates its default hairline colour inside UIKit, so the
+// caller-gated UIColor.separatorColor hook deliberately cannot see it. The
+// Search tab likewise uses a stock UISearchBar (not ApolloSearchBarTextField),
+// whose input fill is assembled inside UIKit from its own palette.
+static void ApplyThemeTableSeparator(UITableView *tableView) {
+    if (!sEnabled || !tableView) return;
+    UIColor *separator = ApolloThemeRuntimeColor(ApolloThemeTokenSeparator);
+    if (separator && ![tableView.separatorColor isEqual:separator]) {
+        tableView.separatorColor = separator;
+    }
+}
+
+static void ApplyThemeSearchFieldBackground(UISearchBar *searchBar) {
+    if (!sEnabled || !searchBar) return;
+    UIColor *raised = ApolloThemeRuntimeColor(ApolloThemeTokenTertiaryBackground);
+    UITextField *field = searchBar.searchTextField;
+    if (raised && field && ![field.backgroundColor isEqual:raised]) {
+        field.backgroundColor = raised;
+    }
+}
+
+static void ApplyThemeThinSeparatorNode(_TtC6Apollo21ThinSeparatorCellNode *cellNode) {
+    if (!sEnabled || !cellNode) return;
+    Ivar separatorIvar = class_getInstanceVariable(object_getClass(cellNode), "separatorNode");
+    ASDisplayNode *separatorNode = separatorIvar ? object_getIvar(cellNode, separatorIvar) : nil;
+    UIColor *separator = ApolloThemeRuntimeColor(ApolloThemeTokenSeparator);
+    if (separatorNode && separator) separatorNode.backgroundColor = separator;
+}
+
+static ASDisplayNode *ApolloThemeObjectIvar(id owner, const char *name) {
+    if (!owner || !name) return nil;
+    Ivar ivar = class_getInstanceVariable(object_getClass(owner), name);
+    return ivar ? object_getIvar(owner, ivar) : nil;
+}
+
+static void ApplyThemeCommentsHeaderSeparators(_TtC6Apollo22CommentsHeaderCellNode *headerNode) {
+    if (!sEnabled || !headerNode) return;
+    UIColor *separator = ApolloThemeRuntimeColor(ApolloThemeTokenSeparator);
+    if (!separator) return;
+
+    ASDisplayNode *quickBarSeparator = ApolloThemeObjectIvar(headerNode, "quickBarSeparatorNode");
+    ASDisplayNode *commentsSeparator = ApolloThemeObjectIvar(headerNode, "commentsSeparatorNode");
+    if (quickBarSeparator) quickBarSeparator.backgroundColor = separator;
+    if (commentsSeparator) commentsSeparator.backgroundColor = separator;
+}
 
 static void RecordImageBounds(const struct mach_header *mh, intptr_t slide, uintptr_t *outStart, uintptr_t *outEnd) {
     if (!mh || mh->magic != MH_MAGIC_64) return;
@@ -207,11 +268,37 @@ static BOOL FontLooksLikeAppleSystemDesign(UIFont *font) {
     return NO;
 }
 
+// Apollo's markdown code faces do NOT come through fontWithName: as originally
+// assumed here — they're built with monospacedSystemFontOfSize:weight:, which
+// is itself a *system-design* font (name .AppleSystemUIFontMonospaced / family
+// prefixed .SFMono) and therefore matches FontLooksLikeAppleSystemDesign above.
+// Left unguarded, every sink/refresh path re-derives it into the active theme
+// design and strips the monospacing — reproducible under ANY custom theme,
+// including one whose font choice is plain SF Pro (the sink/refresh/attach
+// paths don't short-circuit on System the way ThemedFont() does; they still
+// call ApolloThemeFontApply(System, font), which rebuilds from a proportional
+// Body descriptor). Exempt anything already monospaced, independent of design.
+static BOOL FontIsMonospaced(UIFont *font) {
+    if (![font isKindOfClass:[UIFont class]]) return NO;
+    if (font.fontDescriptor.symbolicTraits & UIFontDescriptorTraitMonoSpace) return YES;
+    NSString *fontName = font.fontName ?: @"";
+    NSString *familyName = font.familyName ?: @"";
+    return [fontName localizedCaseInsensitiveContainsString:@"Mono"] ||
+           [familyName localizedCaseInsensitiveContainsString:@"Mono"];
+}
+
+// Single themeability gate used by every sink/refresh/attach path: a font must
+// look like a re-derivable Apple system design AND not already be monospaced
+// (code faces stay put no matter which design the theme is set to).
+static BOOL FontIsThemeable(UIFont *font) {
+    return FontLooksLikeAppleSystemDesign(font) && !FontIsMonospaced(font);
+}
+
 static UIFont *ThemedTextSinkFont(UIFont *font, id owner, uintptr_t caller) {
     if (!sEnabled || !font || sFontBypass) return font;
     if (FontPinned(owner)) return font;
     if (!TextSinkMayUseTheme(owner, caller)) return font;
-    if (!FontLooksLikeAppleSystemDesign(font)) return font;
+    if (!FontIsThemeable(font)) return font;
 
     sFontBypass++;
     UIFont *themed = ApolloThemeFontApply(sFontChoice, font);
@@ -449,7 +536,7 @@ static BOOL ChromeBarLooksApolloOwned(UIView *bar) {
 static void RefreshFontOnTextControl(UIView *view, ApolloThemeFont target) {
     if (FontPinned(view)) return;
     UIFont *font = ((UILabel *)view).font; // UILabel/UITextField/UITextView all expose `font`
-    if (![font isKindOfClass:[UIFont class]] || !FontLooksLikeAppleSystemDesign(font)) return;
+    if (![font isKindOfClass:[UIFont class]] || !FontIsThemeable(font)) return;
     sFontBypass++;
     UIFont *themed = ApolloThemeFontApply(target, font);
     if (themed && ![themed.fontName isEqualToString:font.fontName]) {
@@ -505,7 +592,7 @@ static void RethemeFontOnAttach(UIView *view) {
     if (!view.window) return;
     if (FontPinned(view)) return;
     UIFont *font = ((UILabel *)view).font; // UILabel/UITextField/UITextView all expose `font`
-    if (![font isKindOfClass:[UIFont class]] || !FontLooksLikeAppleSystemDesign(font)) return;
+    if (![font isKindOfClass:[UIFont class]] || !FontIsThemeable(font)) return;
     sFontBypass++;
     UIFont *themed = ApolloThemeFontApply(sFontChoice, font);
     if (themed && ![themed.fontName isEqualToString:font.fontName] && ObjectChainLooksApolloOwned(view)) {
@@ -1029,10 +1116,14 @@ void ApolloThemeRuntimeInvalidate(void) {
 // (ApolloThemeFontApply), preserving size/weight/traits/Dynamic Type. Apollo
 // is Swift, but UIFont.systemFont(ofSize:)/preferredFont(forTextStyle:)
 // compile down to these class methods, so Texture attributed strings are
-// covered. fontWithDescriptor:size: (our own re-derive path) and
-// fontWithName: (Apollo's markdown code blocks) are deliberately NOT hooked.
-// monospacedDigitSystemFontOfSize:weight: is also left alone — those callers
-// want column-aligned counters, which every design already honours there.
+// covered. fontWithDescriptor:size: (our own re-derive path) is deliberately
+// NOT hooked at the factory level, and neither is monospacedDigitSystemFontOfSize:
+// weight: (column-aligned counters, which every design already honours) nor
+// monospacedSystemFontOfSize:weight: (Apollo's markdown code blocks — NOT
+// fontWithName: as previously assumed here). The latter two are still system-
+// design fonts by name/family, so they DO reach the sink hooks below (setFont:,
+// attributed-string rewrites); FontIsThemeable()'s FontIsMonospaced() check is
+// what actually keeps code blocks monospaced, not an unhooked factory.
 
 %hook UIFont
 
@@ -1058,6 +1149,67 @@ void ApolloThemeRuntimeInvalidate(void) {
 
 + (UIFont *)preferredFontForTextStyle:(UIFontTextStyle)style compatibleWithTraitCollection:(UITraitCollection *)traitCollection {
     return ThemedFont(%orig, (uintptr_t)__builtin_return_address(0));
+}
+
+%end
+
+// SF Pro Rounded has no true italic face. CoreText doesn't fail an italic
+// request against it — it silently hands back an upright descriptor while
+// still reporting the trait as satisfied, so the caller has no way to detect
+// the failure after the fact. That caller isn't just this tweak's own code:
+// Apollo's OWN markdown-to-attributedstring conversion asks OUR factory hooks
+// above for a body font (getting back an already-Rounded one), then tries to
+// add italic to THAT font itself via fontDescriptorWithSymbolicTraits: — and
+// silently gets the same upright result, before ApolloThemeFontApply's own
+// per-run theming ever sees the text. By the time a per-run fixup could look
+// at it, the italic intent is already gone with no signal left to recover it.
+// Catch it at the one place both call sites actually go through: redirect the
+// WHOLE request to the DEFAULT (SF Pro) design at the same weight, which
+// always has a real italic face, whenever a Rounded-family descriptor is
+// asked for italic and doesn't already have it.
+%hook UIFontDescriptor
+
+- (UIFontDescriptor *)fontDescriptorWithSymbolicTraits:(UIFontDescriptorSymbolicTraits)symbolicTraits {
+    if (sEnabled && sFontChoice == ApolloThemeFontRounded &&
+        (symbolicTraits & UIFontDescriptorTraitItalic) &&
+        !(self.symbolicTraits & UIFontDescriptorTraitItalic) &&
+        [self.postscriptName localizedCaseInsensitiveContainsString:@"Rounded"] &&
+        CallerMayUseThemeRuntime((uintptr_t)__builtin_return_address(0))) {
+        // self.fontAttributes[UIFontDescriptorTraitsAttribute] isn't reliably
+        // populated once a descriptor is already concrete (which this one is
+        // — it came from an already-resolved .SFUIRounded-Bold-style font):
+        // the weight is baked into the postscript name at that point, not
+        // restated in the abstract traits dict. Resolving self into a font
+        // and reading CTFontCopyTraits (same technique ApolloThemeFontApply
+        // uses) is what actually reports the real weight — the traits-dict
+        // read silently defaulted every case to Regular, dropping bold.
+        CGFloat weight = UIFontWeightRegular;
+        UIFont *selfFont = [UIFont fontWithDescriptor:self size:(self.pointSize > 0 ? self.pointSize : 17.0)];
+        if (selfFont) {
+            NSDictionary *ctTraits = CFBridgingRelease(CTFontCopyTraits((__bridge CTFontRef)selfFont));
+            NSNumber *weightValue = ctTraits[(__bridge NSString *)kCTFontWeightTrait];
+            if ([weightValue isKindOfClass:[NSNumber class]]) weight = weightValue.doubleValue;
+        }
+        // Set weight and the caller's full requested symbolic traits (bold,
+        // italic, whatever else) TOGETHER in one combined traits dictionary.
+        // fontDescriptorWithSymbolicTraits: is documented as a FAMILY-MEMBER
+        // LOOKUP ("returns a new font descriptor reference in the same
+        // family with the given symbolic traits"), not an attribute merge —
+        // calling it after separately setting weight via
+        // fontDescriptorByAddingAttributes: silently discarded the weight
+        // (a bold Rounded header lost its boldness once italicized),
+        // because it replaces the descriptor with whichever family member
+        // matches the coarse symbolic bits, disregarding the fine-grained
+        // numeric weight set moments earlier.
+        UIFontDescriptor *fallback = [UIFontDescriptor preferredFontDescriptorWithTextStyle:UIFontTextStyleBody];
+        return [fallback fontDescriptorByAddingAttributes:@{
+            UIFontDescriptorTraitsAttribute: @{
+                UIFontWeightTrait: @(weight),
+                UIFontSymbolicTrait: @(symbolicTraits),
+            },
+        }];
+    }
+    return %orig;
 }
 
 %end
@@ -1235,6 +1387,74 @@ static ASImageNodeTintColorModificationBlockFn ASImageNodeTintColorModificationB
 - (void)didMoveToWindow {
     %orig;
     RethemeFontOnAttach((UIView *)self);
+}
+
+%end
+
+// UIKit chooses default table separators from inside UIKit itself. That call
+// is intentionally outside the app/tweak caller gate on UIColor's semantic
+// accessors, so enforce the semantic token on the table sink. This covers
+// Apollo's native Appearance tables; Texture's comment dividers are handled
+// separately below because they are independent ASDisplayNodes.
+%hook UITableView
+
+- (void)setSeparatorColor:(UIColor *)color {
+    UIColor *separator = sEnabled ? ApolloThemeRuntimeColor(ApolloThemeTokenSeparator) : nil;
+    %orig(separator ?: color);
+}
+
+- (void)didMoveToWindow {
+    %orig;
+    ApplyThemeTableSeparator(self);
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    %orig;
+    ApplyThemeTableSeparator(self);
+}
+
+%end
+
+// Comment threads use explicit ThinSeparatorCellNode objects between sections.
+// Hopper (Apollo 1.15.11, sub_1003acddc) shows separatorNode receiving
+// sub_10068cda0: Apollo's shared gray/muted-text palette helper. Override the
+// semantic sink after the cell finishes loading so the line follows the
+// Separators editor token without globally reclassifying muted text colors.
+%hook _TtC6Apollo21ThinSeparatorCellNode
+
+- (void)didLoad {
+    %orig;
+    ApplyThemeThinSeparatorNode(self);
+}
+
+%end
+
+// The post header uses its own pair of ASDisplayNode hairlines, so these do not
+// pass through UITableView or ThinSeparatorCellNode. Apply the same semantic
+// separator token once Apollo has finished constructing/loading the header.
+%hook _TtC6Apollo22CommentsHeaderCellNode
+
+- (void)didLoad {
+    %orig;
+    ApplyThemeCommentsHeaderSeparators(self);
+}
+
+%end
+
+// The main Search tab is a stock UISearchBar created by SearchViewController,
+// while feed search uses ApolloSearchBarTextField below. Give both kinds of
+// input the Raised token instead of allowing UIKit/Apollo's shared separator
+// constant to leak into their fill.
+%hook UISearchBar
+
+- (void)didMoveToWindow {
+    %orig;
+    ApplyThemeSearchFieldBackground(self);
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    %orig;
+    ApplyThemeSearchFieldBackground(self);
 }
 
 %end

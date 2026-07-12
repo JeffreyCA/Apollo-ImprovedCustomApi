@@ -3245,6 +3245,16 @@ static BOOL PiPPagerLinkNeverAutoplays(id pageVC) {
         && ((BOOL (*)(id, SEL))objc_msgSend)(link, nsfwSel);
 }
 
+// URL-opened viewers (markdown/inline-media links via the URL router
+// sub_100078db0, plus tip jar/SPCA-album easter eggs) carry no RDKLink —
+// every post-media entry passes one (verified across all pager-init call
+// sites). No link means no inline player home, so an owned player is as
+// PiP-safe as autoplay-off. Image-only nil-link viewers are filtered by the
+// owned-player check.
+static BOOL PiPPagerIsURLOpened(id pageVC) {
+    return pageVC && PiPGetIvar(pageVC, "link") == nil;
+}
+
 // Restore the user's fullscreen playback state on the card after the native
 // dismissal's mute dance settles (T+0 force-mute, T+50ms Ambient downgrade,
 // T+100ms setMuted:YES — relative to viewDidDisappear).
@@ -3377,13 +3387,15 @@ static void PiPRefreshFullscreenPiPButton(id pageVC) {
                                  closeFrame.origin.y,
                                  closeFrame.size.width, closeFrame.size.height);
     pipButton.alpha = closeButton.alpha;
-    // Only when the video can't be autoplaying inline (setting off, or a
-    // spoiler/NSFW post — those never autoplay) AND the page has a fullscreen-
-    // OWNED player (image pages and adopted shared-layer pages keep the X
-    // alone). Live checks — every layout/page-swipe pass re-evaluates.
+    // Only when the video can't be autoplaying inline (setting off, a
+    // spoiler/NSFW post — those never autoplay — or a URL-opened viewer,
+    // which has no inline home at all) AND the page has a fullscreen-OWNED
+    // player (image pages and adopted shared-layer pages keep the X alone).
+    // Live checks — every layout/page-swipe pass re-evaluates.
     pipButton.hidden = closeButton.hidden
         || (PiPOwnedPlayerFromMediaPageVC(pageVC) == nil)
-        || !(ApolloNativeAutoplayEffectivelyOff() || PiPPagerLinkNeverAutoplays(pageVC));
+        || !(ApolloNativeAutoplayEffectivelyOff() || PiPPagerIsURLOpened(pageVC)
+             || PiPPagerLinkNeverAutoplays(pageVC));
 }
 
 // Consulted by ApolloVideoUnmute.xm's MediaPageViewController.viewDidDisappear
@@ -3557,6 +3569,17 @@ BOOL ApolloPiP_WillHandleFullscreenDismiss(void) {
             controller.sessionClaimedAudibly = NO;
             [controller teardownKeepPlaying:NO];
         }
+    } else if (controller.active) {
+        // Nil-link card (URL-opened inline video): no link to dedupe on, so
+        // match the fresh fullscreen player's asset URL against the card's.
+        // Same two-live-players situation and session-handback hazard as the
+        // link-match branch above.
+        NSURL *cardURL = PiPAssetURLForNode(nil, controller.player);
+        if (cardURL && [cardURL isEqual:PiPAssetURLForNode(nil, fullscreenPlayer)]) {
+            ApolloLog(@"[PiP] Fullscreen re-opened our video (asset URL match) — closing card");
+            controller.sessionClaimedAudibly = NO;
+            [controller teardownKeepPlaying:NO];
+        }
     }
     // Fullscreen creates its own (dormant) AVPictureInPictureController on the
     // shared layer — retire our inline one to avoid two controllers on it.
@@ -3599,7 +3622,8 @@ BOOL ApolloPiP_WillHandleFullscreenDismiss(void) {
     // Re-check the gate at tap time: visibility only re-evaluates on layout
     // passes, so a reachability flip while the viewer sits open can leave the
     // button stale-visible. Hide and stand down instead of acting.
-    if (!ApolloNativeAutoplayEffectivelyOff() && !PiPPagerLinkNeverAutoplays(self)) {
+    if (!ApolloNativeAutoplayEffectivelyOff() && !PiPPagerIsURLOpened(self)
+        && !PiPPagerLinkNeverAutoplays(self)) {
         ApolloLog(@"[PiP] Fullscreen PiP tapped but the gate closed — hiding button");
         PiPRefreshFullscreenPiPButton(self);
         return;

@@ -28,6 +28,10 @@ UIImage *ApolloRebornOptionsSettingsIcon(CGFloat size);
 // inject-deb-local.sh). Returns nil if no layout has the file.
 NSString *ApolloBundledResourcePath(NSString *baseName, NSString *extension);
 
+// Monotonic milliseconds (CACurrentMediaTime-based); ~ns-cheap. Used by the
+// trailing-debounce relayout schedulers (InlineImages, LinkPreviews).
+double ApolloPerfNowMs(void);
+
 // The build variant string sent with the anonymous usage heartbeat, e.g.
 // "glass", "deb-rootless". The source of truth is stamped at package time (IPA
 // variants set Info.plist "ARBuildVariant"; .deb installs drop an "ARVariant.txt"

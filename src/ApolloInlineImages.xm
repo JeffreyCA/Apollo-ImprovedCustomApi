@@ -145,7 +145,7 @@ static char kApolloImageNodesByURLKey;         // NSMutableDictionary<NSString U
 static char kApolloImageCacheKey;              // NSString stable cache key (set even before deferred image URLs resolve)
 static char kApolloImageURLKey;                // NSURL on the imageNode AND mirrored on the imageNode's view
 static char kApolloOriginalImageURLKey;        // NSURL for tap/long-press when different from the loaded URL (e.g. album URL)
-static char kApolloHostMarkdownNodeKey;        // weak ref (assign association) to the host MarkdownNode
+static char kApolloHostMarkdownNodeKey;        // ApolloWeakHostBox (zeroing-weak) to the host MarkdownNode/LinkButtonNode
 static char kApolloAspectRatioKey;             // NSNumber height/width — NIL if unknown (no URL params yet, no DIDLOAD yet)
 static char kApolloLongPressInstalledKey;      // NSNumber BOOL — gate for one-shot UIContextMenuInteraction install
 static char kApolloPlayOverlayViewKey;         // ApolloPlayOverlayContainer (play button OR pause badge), also used as install gate
@@ -160,16 +160,40 @@ static char kApolloInlineGIFOverlayReassertKey; // NSNumber BOOL — a play-over
 static char kApolloStackedCardSyncerKey;       // ApolloStackedCardSyncer — keeps the multi-image card peeking behind imageNode
 static char kApolloImageChestItemsKey;         // NSArray<NSDictionary *> direct ImageChest CDN image entries for album pager
 
-// kApolloHostMarkdownNodeKey is an OBJC_ASSOCIATION_ASSIGN (unsafe unretained)
-// reference to the host MarkdownNode. The host can be deallocated before the
-// image node (e.g. during comments table teardown), leaving the association
-// slot pointing at freed memory. Reading it as an `id` lets ARC retain the
-// result, which crashes in objc_retain on the dangling pointer. Bridge-cast to
-// a raw void* so ARC performs no retain/release; we only ever need to know
-// whether the node is an inline-hosted image node, not to message the host.
+// Zeroing-weak holder for the host association. This used to be an
+// OBJC_ASSOCIATION_ASSIGN raw pointer, but the host can be deallocated before
+// the image node (comments table teardown / cell rebuild while an album
+// resolve is still in flight), and any `id`-typed read of a dangling ASSIGN
+// slot crashes in objc_retain. A retained box holding a weak reference reads
+// back as nil instead, from any thread, at any time.
+@interface ApolloWeakHostBox : NSObject
+@property (nonatomic, weak) ASDisplayNode *host;
+@end
+@implementation ApolloWeakHostBox
+@end
+
+static void ApolloSetInlineHostForNode(id node, ASDisplayNode *host) {
+    if (!node) return;
+    if (!host) {
+        objc_setAssociatedObject(node, &kApolloHostMarkdownNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    ApolloWeakHostBox *box = [ApolloWeakHostBox new];
+    box.host = host;
+    objc_setAssociatedObject(node, &kApolloHostMarkdownNodeKey, box, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static ASDisplayNode *ApolloInlineHostForNode(id node) {
+    if (!node) return nil;
+    ApolloWeakHostBox *box = objc_getAssociatedObject(node, &kApolloHostMarkdownNodeKey);
+    return [box isKindOfClass:[ApolloWeakHostBox class]] ? box.host : nil;
+}
+
+// NOTE: with the weak box this flips to NO once the host deallocates (the
+// ASSIGN version stayed "YES" on a dangling slot). That's the semantics the
+// call sites want: a hostless image node is no longer inline-hosted.
 static inline BOOL ApolloImageNodeHasInlineHost(id node) {
-    if (!node) return NO;
-    return ((__bridge void *)objc_getAssociatedObject(node, &kApolloHostMarkdownNodeKey)) != NULL;
+    return ApolloInlineHostForNode(node) != nil;
 }
 
 static void ApolloApplyInlineGIFPlaybackPolicyWithCover(ASNetworkImageNode *imageNode, UIImage *cover, NSUInteger retryIndex);
@@ -177,6 +201,7 @@ static void ApolloStartInlineGIFPlayback(ASNetworkImageNode *imageNode);
 static void ApolloStopInlineGIFPlayback(ASNetworkImageNode *imageNode);
 static BOOL ApolloResumeInlineGIFPlaybackIfPossible(ASNetworkImageNode *imageNode);
 static void ApolloClearInlineGIFNodeState(ASNetworkImageNode *node);
+static void ApolloScheduleCoalescedHostRelayout(ASNetworkImageNode *imageNode);
 static NSUInteger ApolloInlineGIFGenerationForNode(id node);
 static NSUInteger ApolloInlineGIFBumpGeneration(id node);
 static BOOL ApolloInlineGIFGenerationMatches(id node, NSUInteger generation);
@@ -1747,7 +1772,7 @@ static id ApolloFindResponderForSelector(SEL sel, id imageNode) {
         if (ApolloPresentImageChestItems(@[@{ @"url": url }], view, 0)) return;
     }
 
-    ASDisplayNode *host = objc_getAssociatedObject(imageNode, &kApolloHostMarkdownNodeKey);
+    ASDisplayNode *host = ApolloInlineHostForNode(imageNode);
     SEL sel = @selector(textNode:tappedLinkAttribute:value:atPoint:textRange:);
     id target = ApolloFindResponderForSelector(sel, imageNode) ?: ([host respondsToSelector:sel] ? host : nil);
     if (!target) {
@@ -1897,8 +1922,14 @@ static BOOL ApolloPresentOrResolveImageChestAlbumURL(NSURL *url, UIView *sourceV
     ApolloLog(@"[InlineImages] ratio set imageNode=%p ratio=%.3f size=%@",
               imageNode, newRatio, NSStringFromCGSize(size));
 
-    // Texture's internal "intrinsic size changed" hook; walks up to the
-    // root signaling the table/collection to re-measure the row.
+    // Surface the new size. Prefer the debounced per-host scheduler (one
+    // re-measure per burst); fall back to Texture's direct "intrinsic size
+    // changed" climb only when the node has no live inline host.
+    if ([imageNode isKindOfClass:[ApolloASNetworkImageNodeClass() class]] &&
+        ApolloInlineHostForNode(imageNode)) {
+        ApolloScheduleCoalescedHostRelayout((ASNetworkImageNode *)imageNode);
+        return;
+    }
     SEL sel = NSSelectorFromString(@"_u_setNeedsLayoutFromAbove");
     if (![imageNode respondsToSelector:sel]) return;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -2200,10 +2231,17 @@ static void ApolloSetOriginalImageURL(ASNetworkImageNode *imageNode, NSURL *orig
 // URL, captures aspect ratio if available, and triggers cell relayout.
 // Preserves kApolloOriginalImageURLKey so copy/share still use the user
 // posted album URL instead of only the resolved cover image.
-static void ApolloApplyResolvedAlbumImage(ASNetworkImageNode *imageNode, NSDictionary *result) {
-    if (![result isKindOfClass:[NSDictionary class]]) return;
+// Applies a resolved album result to the node (load URL, tap-routing keys,
+// aspect ratio, stacked card) WITHOUT scheduling any relayout. Use directly
+// when the resolution comes from cache during the same layout pass that is
+// creating the node — that pass consumes the ratio immediately, so a
+// relayout-from-above would only re-measure the whole cell again for nothing
+// (9 cached albums × every header-cell rebuild during comments pagination was
+// a visible scroll hitch). Returns YES when the result was applied.
+static BOOL ApolloApplyResolvedAlbumImageContent(ASNetworkImageNode *imageNode, NSDictionary *result) {
+    if (![result isKindOfClass:[NSDictionary class]]) return NO;
     NSURL *imageURL = [result[@"url"] isKindOfClass:[NSURL class]] ? result[@"url"] : nil;
-    if (![imageURL isKindOfClass:[NSURL class]]) return;
+    if (![imageURL isKindOfClass:[NSURL class]]) return NO;
 
     imageNode.URL = imageURL;
     NSArray *images = [result[@"images"] isKindOfClass:[NSArray class]] ? result[@"images"] : nil;
@@ -2225,44 +2263,6 @@ static void ApolloApplyResolvedAlbumImage(ASNetworkImageNode *imageNode, NSDicti
     } else {
         objc_setAssociatedObject(imageNode, &kApolloAspectRatioKey, @(1.0), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-
-    // Walk up to the enclosing CellNode and trigger relayout. The host
-    // MarkdownNode may not be attached to its supernodes yet (Profile
-    // pre-builds cells off-screen before mounting), so we also defer a
-    // relayout to onDidLoad which fires when the node is added to its
-    // parent view hierarchy.
-    ASDisplayNode *host = objc_getAssociatedObject(imageNode, &kApolloHostMarkdownNodeKey);
-    void (^doRelayout)(void) = ^{
-        ASDisplayNode *n = host;
-        ASDisplayNode *cellNode = nil;
-        while (n) {
-            NSString *cls = NSStringFromClass([n class]);
-            if ([n respondsToSelector:@selector(invalidateCalculatedLayout)]) {
-                [n invalidateCalculatedLayout];
-            }
-            if ([n respondsToSelector:@selector(setNeedsLayout)]) {
-                [n setNeedsLayout];
-            }
-            if ([cls containsString:@"CellNode"]) cellNode = n;
-            n = n.supernode;
-        }
-        SEL relayoutSel = NSSelectorFromString(@"_u_setNeedsLayoutFromAbove");
-        id target = cellNode ?: host;
-        if ([target respondsToSelector:relayoutSel]) {
-            ((void (*)(id, SEL))objc_msgSend)(target, relayoutSel);
-        }
-    };
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        doRelayout();
-        BOOL hostMounted = [host respondsToSelector:@selector(isNodeLoaded)]
-                          && [host isNodeLoaded] && host.supernode != nil;
-        if (!hostMounted && [host respondsToSelector:@selector(onDidLoad:)]) {
-            [host onDidLoad:^(__kindof ASDisplayNode *node) {
-                dispatch_async(dispatch_get_main_queue(), doRelayout);
-            }];
-        }
-    });
 
     // Multi-image albums get a "stacked card" peeking out bottom-right to
     // signal "more than one image". Installed on imageNode's view's
@@ -2287,6 +2287,103 @@ static void ApolloApplyResolvedAlbumImage(ASNetworkImageNode *imageNode, NSDicti
             }
         });
     }
+    return YES;
+}
+
+// Relayout-from-above of the image node's host cell, debounced per host.
+// Cold-cache opens land N album resolutions 50-500ms apart; per-main-drain
+// coalescing alone still produced up to N full re-measures of a 30-child
+// header row on the main thread (one per resolve). A trailing debounce
+// collapses a burst into one re-measure ~QUIET ms after the last resolve,
+// with a MAX cap so a slow trickle can't starve the row of its first grow.
+static char kApolloHostRelayoutArmedKey;      // NSNumber BOOL — debounce timer armed for this host
+static char kApolloHostRelayoutLastMsKey;     // NSNumber double — ApolloPerfNowMs of latest schedule request
+static char kApolloHostRelayoutFirstMsKey;    // NSNumber double — first request of the current burst
+static char kApolloHostRelayoutOnDidLoadKey;  // NSNumber BOOL — onDidLoad fallback registered (once per host)
+
+static const double kApolloHostRelayoutQuietMs = 180.0;  // fire after this much quiet
+static const double kApolloHostRelayoutMaxMs   = 450.0;  // ...but never later than this after the burst began
+
+// The actual invalidate + re-measure climb. Main thread only.
+static void ApolloHostRelayoutPerform(ASDisplayNode *host) {
+    if (!host) return;
+    ASDisplayNode *n = host;
+    ASDisplayNode *cellNode = nil;
+    while (n) {
+        NSString *cls = NSStringFromClass([n class]);
+        if ([n respondsToSelector:@selector(invalidateCalculatedLayout)]) {
+            [n invalidateCalculatedLayout];
+        }
+        if ([n respondsToSelector:@selector(setNeedsLayout)]) {
+            [n setNeedsLayout];
+        }
+        if ([cls containsString:@"CellNode"]) cellNode = n;
+        n = n.supernode;
+    }
+    SEL relayoutSel = NSSelectorFromString(@"_u_setNeedsLayoutFromAbove");
+    id target = cellNode ?: host;
+    if ([target respondsToSelector:relayoutSel]) {
+        ((void (*)(id, SEL))objc_msgSend)(target, relayoutSel);
+    }
+
+    // The host MarkdownNode may not be view-loaded yet (Profile pre-builds
+    // cells off-screen before mounting) — the climb above can't resize an
+    // unloaded row, so re-run once when it loads. Registered at most once per
+    // host, and only when genuinely not loaded: onDidLoad on a loaded-but-
+    // detached node executes immediately, which used to double the relayout.
+    if (![host isNodeLoaded]
+        && ![objc_getAssociatedObject(host, &kApolloHostRelayoutOnDidLoadKey) boolValue]
+        && [host respondsToSelector:@selector(onDidLoad:)]) {
+        objc_setAssociatedObject(host, &kApolloHostRelayoutOnDidLoadKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [host onDidLoad:^(__kindof ASDisplayNode *node) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                ApolloHostRelayoutPerform(node);
+            });
+        }];
+    }
+}
+
+// Debounce timer: re-arms while schedule requests keep arriving, fires the
+// climb once the burst quiets down (or the max wait elapses).
+static void ApolloHostRelayoutArm(ASDisplayNode *host, double delayMs) {
+    __weak ASDisplayNode *weakHost = host;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayMs * NSEC_PER_MSEC)),
+                   dispatch_get_main_queue(), ^{
+        ASDisplayNode *h = weakHost;
+        if (!h) return;
+        double now = ApolloPerfNowMs();
+        double last = [objc_getAssociatedObject(h, &kApolloHostRelayoutLastMsKey) doubleValue];
+        double first = [objc_getAssociatedObject(h, &kApolloHostRelayoutFirstMsKey) doubleValue];
+        double sinceLast = now - last;
+        if (sinceLast < kApolloHostRelayoutQuietMs - 10.0 && now - first < kApolloHostRelayoutMaxMs) {
+            ApolloHostRelayoutArm(h, kApolloHostRelayoutQuietMs - sinceLast);
+            return;
+        }
+        objc_setAssociatedObject(h, &kApolloHostRelayoutArmedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(h, &kApolloHostRelayoutFirstMsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloHostRelayoutPerform(h);
+    });
+}
+
+static void ApolloScheduleCoalescedHostRelayout(ASNetworkImageNode *imageNode) {
+    ASDisplayNode *host = ApolloInlineHostForNode(imageNode);
+    if (!host) return;
+    // Bookkeeping on main so the timestamp/armed associations never race.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        double now = ApolloPerfNowMs();
+        objc_setAssociatedObject(host, &kApolloHostRelayoutLastMsKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if ([objc_getAssociatedObject(host, &kApolloHostRelayoutArmedKey) boolValue]) return;
+        objc_setAssociatedObject(host, &kApolloHostRelayoutArmedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(host, &kApolloHostRelayoutFirstMsKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloHostRelayoutArm(host, kApolloHostRelayoutQuietMs);
+    });
+}
+
+// Async-resolution entry point (network completion, reuse-path re-resolve):
+// apply the content, then surface it with one coalesced host relayout.
+static void ApolloApplyResolvedAlbumImage(ASNetworkImageNode *imageNode, NSDictionary *result) {
+    if (!ApolloApplyResolvedAlbumImageContent(imageNode, result)) return;
+    ApolloScheduleCoalescedHostRelayout(imageNode);
 }
 
 // Standalone play-circle glyph (transparent background) drawn into a
@@ -2553,12 +2650,10 @@ static void ApolloClearInlineGIFNodeState(ASNetworkImageNode *node) {
     objc_setAssociatedObject(node, &kApolloInlineAnimatedGIFKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(node, &kApolloInlineGIFUserForcedPlayKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(node, &kApolloInlineGIFOverlayReassertKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(node, &kApolloHostMarkdownNodeKey, nil, OBJC_ASSOCIATION_ASSIGN);
+    ApolloSetInlineHostForNode(node, nil);
     ApolloUnregisterInlineGIFNode(node);
 }
 
-// kApolloHostMarkdownNodeKey uses OBJC_ASSOCIATION_ASSIGN — never read that host
-// pointer during settings refresh; it can dangle after cell reuse while the slot stays non-nil.
 static BOOL ApolloInlineGIFImageNodeIsLiveForRefresh(ASNetworkImageNode *node) {
     if (!ApolloInlineGIFNodeIsRegistryEligible(node)) {
         if (node) ApolloUnregisterInlineGIFNode(node);
@@ -3206,7 +3301,7 @@ static ASNetworkImageNode *ApolloMakeInlineVideoThumbnailNode(NSURL *videoURL,
     // ratio so the layout reserves space immediately; DIDLOAD refines it
     // once the real poster loads.
     objc_setAssociatedObject(imageNode, &kApolloImageURLKey, videoURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(imageNode, &kApolloHostMarkdownNodeKey, hostMarkdownNode, OBJC_ASSOCIATION_ASSIGN);
+    ApolloSetInlineHostForNode(imageNode, hostMarkdownNode);
     objc_setAssociatedObject(imageNode, &kApolloAspectRatioKey, @(9.0 / 16.0), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     __weak ASNetworkImageNode *weakImage = imageNode;
@@ -3221,7 +3316,7 @@ static ASNetworkImageNode *ApolloMakeInlineVideoThumbnailNode(NSURL *videoURL,
         // (RedditVideo entries have no p[]), fall back to DASH manifest
         // + AVAssetImageGenerator to extract a frame at t=0.
         if (!img.URL && !img.image) {
-            ASDisplayNode *host = objc_getAssociatedObject(img, &kApolloHostMarkdownNodeKey);
+            ASDisplayNode *host = ApolloInlineHostForNode(img);
             NSDictionary *mm = ApolloMediaMetadataForHost(host);
             NSURL *posterURL = mm ? ApolloPosterURLFromMediaMetadata(mm, videoURL) : nil;
             if (posterURL) {
@@ -3340,25 +3435,33 @@ static ASNetworkImageNode *ApolloMakeInlineImageNode(NSURL *normalizedURL,
         // copy/share/open actions keep what the user posted.
         objc_setAssociatedObject(imageNode, &kApolloOriginalImageURLKey, normalizedURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    objc_setAssociatedObject(imageNode, &kApolloHostMarkdownNodeKey, hostMarkdownNode, OBJC_ASSOCIATION_ASSIGN);
+    ApolloSetInlineHostForNode(imageNode, hostMarkdownNode);
     if (ratio > 0) {
         objc_setAssociatedObject(imageNode, &kApolloAspectRatioKey, @(ratio), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
-    // Kick off Imgur/ImageChest album resolution. Result is applied
-    // asynchronously via ApolloApplyResolvedAlbumImage, which sets the
-    // load URL, captures aspect ratio, and triggers cell relayout.
+    // Album resolution. Cached results are applied synchronously WITHOUT a
+    // relayout: this runs inside the host's layoutSpecThatFits pass, which
+    // picks up the ratio directly — scheduling relayout-from-above here made
+    // every header-cell rebuild (comments pagination recreates the cell)
+    // re-measure the row once per album. Only a genuinely async resolution
+    // needs the coalesced relayout to surface the image afterwards.
     __weak ASNetworkImageNode *weakImage = imageNode;
     if (deferredImgur) {
-        ApolloResolveImgurURL(normalizedURL, ^(NSDictionary *result) {
-            ASNetworkImageNode *strong = weakImage;
-            if (!strong || !result) return;
-            ApolloApplyResolvedAlbumImage(strong, result);
-        });
+        NSDictionary *cachedImgur = ApolloCachedImgurResolution(normalizedURL);
+        if (cachedImgur) {
+            ApolloApplyResolvedAlbumImageContent(imageNode, cachedImgur);
+        } else {
+            ApolloResolveImgurURL(normalizedURL, ^(NSDictionary *result) {
+                ASNetworkImageNode *strong = weakImage;
+                if (!strong || !result) return;
+                ApolloApplyResolvedAlbumImage(strong, result);
+            });
+        }
     } else if (deferredImageChest) {
         NSDictionary *cached = ApolloImageChestCachedResolution(normalizedURL);
         if (cached) {
-            ApolloApplyResolvedAlbumImage(imageNode, cached);
+            ApolloApplyResolvedAlbumImageContent(imageNode, cached);
         } else {
             ApolloImageChestResolveURL(normalizedURL, ^(NSDictionary *result) {
                 ASNetworkImageNode *strong = weakImage;
@@ -3462,9 +3565,11 @@ static ASLayoutSpec *ApolloWrapImageNodeForLayout(ASNetworkImageNode *imageNode,
     ApolloRegisterInlineMediaLayoutNode((ASDisplayNode *)imageNode);
     NSNumber *ratioNum = objc_getAssociatedObject(imageNode, &kApolloAspectRatioKey);
     if (!ratioNum) {
-        // Unknown ratio → omit from layout. Including with a guessed ratio
-        // would cause cell measurement to capture the wrong size and race
-        // with the post-load relayout-from-above.
+        // Unknown ratio → no visible wrapper yet. Including with a guessed
+        // ratio would cause cell measurement to capture the wrong size and
+        // race with the post-load relayout-from-above. Callers that need the
+        // node in the tree anyway (MarkdownNode decomposition) wrap it in
+        // ApolloHiddenInlineLeafSpec instead.
         return nil;
     }
     CGFloat naturalRatio = [ratioNum doubleValue];
@@ -3553,6 +3658,30 @@ static ASLayoutSpec *ApolloWrapImageNodeForLayout(ASNetworkImageNode *imageNode,
     ASInsetLayoutSpec *insetSpec = [ApolloASInsetLayoutSpecClass() insetLayoutSpecWithInsets:insets child:ratioSpec];
     [[insetSpec style] setValue:@(ApolloASStackLayoutAlignSelfStretch) forKey:@"alignSelf"];
     return insetSpec;
+}
+
+// Zero-size wrapper for a media leaf whose aspect ratio is still unknown.
+//
+// INVARIANT (crash fix): MarkdownNode and LinkButtonNode both enable
+// automaticallyManagesSubnodes, so their subnode arrays are owned exclusively
+// by ASLayoutTransition — it diffs the previous vs pending layout and applies
+// insertSubnode:atIndex: with indexes that are only valid against an array it
+// alone has mutated. Manually calling addSubnode:/removeFromSupernode on these
+// hosts (as this module used to) desyncs that array; with many images
+// resolving at once (e.g. a post with 9 imgur albums) an insertion lands past
+// the end of _subnodes → NSRangeException → abort. Hierarchy membership must
+// therefore come from the returned layout spec, and ONLY from it.
+//
+// That rule is why this wrapper exists: an ASNetworkImageNode only starts
+// loading once it's in the node tree (interface state), and for direct image
+// URLs the aspect ratio is only known after the image loads. So an
+// unknown-ratio leaf is included in the layout at zero size — in the tree and
+// loading, but reserving no space — which preserves the old "appears once the
+// ratio is known" behavior via the didLoadImage → relayout-from-above pass.
+static ASLayoutSpec *ApolloHiddenInlineLeafSpec(ASDisplayNode *leaf) {
+    ASInsetLayoutSpec *spec = [ApolloASInsetLayoutSpecClass() insetLayoutSpecWithInsets:UIEdgeInsetsZero child:leaf];
+    [[spec style] setValue:[NSValue valueWithCGSize:CGSizeZero] forKey:@"preferredSize"];
+    return spec;
 }
 
 // MARK: - Text-splitting
@@ -3673,9 +3802,18 @@ static NSUInteger ApolloUniqueImageChestPostLinkCount(NSAttributedString *attr);
 // Returns an array of leaf nodes (ASTextNode + ASNetworkImageNode instances)
 // in the order they should appear in the augmented stack, replacing the
 // original text node. Returns nil if the text node has no inline media URLs.
-// Side effects: each new leaf is added as a subnode of `hostMarkdownNode`.
+//
+// `seenAbs` (normalized URL absoluteStrings, the imageNode cache key) MUST be
+// shared across every text child of one host rebuild, not per-child: the
+// per-host node cache returns the SAME node instance for a repeated URL, and
+// one node instance appearing at two positions in a single layout is fatal —
+// a node occupies only one _subnodes slot, so ASLayoutTransition's diffed
+// insert indexes overrun the array (NSRangeException). A post linking the
+// same imgur album twice in different paragraphs (separate text children)
+// reproduced this. Later occurrences stay ordinary tappable links.
 static NSArray *ApolloBuildLeavesForTextNode(ASTextNode *textNode,
-                                              ASDisplayNode *hostMarkdownNode) {
+                                              ASDisplayNode *hostMarkdownNode,
+                                              NSMutableSet<NSString *> *seenAbs) {
     NSAttributedString *attr = textNode.attributedText;
     if (attr.length == 0) return nil;
 
@@ -3691,7 +3829,6 @@ static NSArray *ApolloBuildLeavesForTextNode(ASTextNode *textNode,
     // Issue #392: the link/alt text is just the default word "gif" — drop the
     // redundant label beneath the inline GIF (custom alt text stays visible).
     NSMutableArray<NSNumber *> *isDefaultGifLabel = [NSMutableArray array];
-    NSMutableSet<NSString *> *seenAbs = [NSMutableSet set];
     NSUInteger imageChestPostLinkCount = ApolloUniqueImageChestPostLinkCount(attr);
     NSDictionary *hostMediaMetadata = ApolloMediaMetadataForHost(hostMarkdownNode);
     // Original /player URLs classified as video while metadata was unavailable;
@@ -3852,8 +3989,10 @@ static NSArray *ApolloBuildLeavesForTextNode(ASTextNode *textNode,
         if (trimmed.length > 0) {
             ASTextNode *tn = ApolloMakeTextSegmentNode(textNode, trimmed);
             if (tn) {
+                // No manual addSubnode: — the host uses automaticallyManagesSubnodes,
+                // so returning the leaf in the layout spec is what inserts it (see
+                // ApolloHiddenInlineLeafSpec for the full invariant).
                 [leaves addObject:tn];
-                [hostMarkdownNode addSubnode:tn];
             }
         }
 
@@ -3888,7 +4027,7 @@ static ASNetworkImageNode *ApolloImageNodeForURL(NSURL *normalizedURL,
     if (existing) {
         // Reuse: ensure the host association is still up to date in case
         // (somehow) it pointed elsewhere previously.
-        objc_setAssociatedObject(existing, &kApolloHostMarkdownNodeKey, hostMarkdownNode, OBJC_ASSOCIATION_ASSIGN);
+        ApolloSetInlineHostForNode(existing, hostMarkdownNode);
         // If this is a cached album/gallery node whose resolution never
         // completed (e.g. previous host was deallocated mid-fetch), kick
         // off another resolve attempt — the resolver dedupes on cacheKey.
@@ -3912,7 +4051,8 @@ static ASNetworkImageNode *ApolloImageNodeForURL(NSURL *normalizedURL,
 
     ASNetworkImageNode *imageNode = ApolloMakeInlineImageNode(normalizedURL, hostMarkdownNode);
     if (!imageNode) return nil;
-    [hostMarkdownNode addSubnode:imageNode];
+    // No manual addSubnode: — both host classes (MarkdownNode, LinkButtonNode)
+    // use automaticallyManagesSubnodes; layout membership inserts the node.
     if (key) cache[key] = imageNode;
     return imageNode;
 }
@@ -3928,13 +4068,13 @@ static ASNetworkImageNode *ApolloVideoThumbnailNodeForURL(NSURL *normalizedURL,
     NSString *key = [normalizedURL absoluteString];
     ASNetworkImageNode *existing = key ? cache[key] : nil;
     if (existing) {
-        objc_setAssociatedObject(existing, &kApolloHostMarkdownNodeKey, hostMarkdownNode, OBJC_ASSOCIATION_ASSIGN);
+        ApolloSetInlineHostForNode(existing, hostMarkdownNode);
         return existing;
     }
 
     ASNetworkImageNode *videoNode = ApolloMakeInlineVideoThumbnailNode(normalizedURL, hostMarkdownNode);
     if (!videoNode) return nil;
-    [hostMarkdownNode addSubnode:videoNode];
+    // No manual addSubnode: — see ApolloHiddenInlineLeafSpec for the ASM invariant.
     if (key) cache[key] = videoNode;
     return videoNode;
 }
@@ -4049,11 +4189,16 @@ static BOOL ApolloLinkButtonHasInlineHost(ASDisplayNode *linkButtonNode) {
         objc_setAssociatedObject(self, &kApolloProvisionalDecompKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         NSMutableDictionary *newDecomp = [NSMutableDictionary dictionary];
         NSMutableSet<NSString *> *referencedURLs = [NSMutableSet set];
+        // One shared URL-dedupe set for the WHOLE rebuild: a URL repeated in
+        // different text children would otherwise resolve to the same cached
+        // node instance twice in one layout, which crashes the layout
+        // transition (see ApolloBuildLeavesForTextNode).
+        NSMutableSet<NSString *> *seenAbs = [NSMutableSet set];
         Class textNodeCls = ApolloASTextNodeClass();
         Class imageNodeCls = ApolloASNetworkImageNodeClass();
         for (id child in origChildren) {
             if (![child isKindOfClass:textNodeCls]) continue;
-            NSArray *leaves = ApolloBuildLeavesForTextNode((ASTextNode *)child, (ASDisplayNode *)self);
+            NSArray *leaves = ApolloBuildLeavesForTextNode((ASTextNode *)child, (ASDisplayNode *)self, seenAbs);
             if (leaves.count > 0) {
                 NSValue *k = [NSValue valueWithNonretainedObject:child];
                 newDecomp[k] = leaves;
@@ -4073,6 +4218,9 @@ static BOOL ApolloLinkButtonHasInlineHost(ASDisplayNode *linkButtonNode) {
 
         // Garbage-collect imageNodes whose URL no longer appears in the new
         // decomposition (e.g., the comment was edited and the URL removed).
+        // Cache eviction only — no removeFromSupernode: MarkdownNode uses
+        // automaticallyManagesSubnodes, so once the node stops appearing in
+        // the returned layout spec the layout transition removes it itself.
         NSMutableDictionary *imageCache = objc_getAssociatedObject(self, &kApolloImageNodesByURLKey);
         if (imageCache.count > 0) {
             NSArray *cachedURLs = [imageCache.allKeys copy];
@@ -4082,7 +4230,6 @@ static BOOL ApolloLinkButtonHasInlineHost(ASDisplayNode *linkButtonNode) {
                     if ([staleNode isKindOfClass:[ApolloASNetworkImageNodeClass() class]]) {
                         ApolloClearInlineGIFNodeState(staleNode);
                     }
-                    [staleNode removeFromSupernode];
                     [imageCache removeObjectForKey:cachedURL];
                 }
             }
@@ -4106,11 +4253,18 @@ static BOOL ApolloLinkButtonHasInlineHost(ASDisplayNode *linkButtonNode) {
     if (decomp.count == 0) return origSpec;
 
     // Replace each decomposed text node with its leaves. Image nodes whose
-    // ratio is still unknown are omitted — DIDLOAD will trigger a layout-
-    // from-above and they'll appear on the next pass.
+    // ratio is still unknown are included at zero size (ApolloHiddenInlineLeafSpec)
+    // so ASM inserts them into the tree and they start loading; DIDLOAD then
+    // triggers a layout-from-above and they get their real size on that pass.
     NSMutableArray *augmented = [NSMutableArray arrayWithCapacity:origChildren.count];
     Class imageNodeCls = ApolloASNetworkImageNodeClass();
     CGFloat rowMaxWidth = constrainedSize.max.width;
+    // Invariant: no node instance may appear twice in one layout — a node
+    // occupies a single _subnodes slot, so a duplicate desyncs the layout
+    // transition's insert indexes and crashes (NSRangeException). The rebuild
+    // dedupes by URL, but a duplicated instance is fatal enough to enforce
+    // here at assembly too.
+    NSHashTable *usedLeaves = [NSHashTable hashTableWithOptions:NSPointerFunctionsObjectPointerPersonality];
     for (id child in origChildren) {
         NSArray *leaves = decomp[[NSValue valueWithNonretainedObject:child]];
         if (!leaves) {
@@ -4118,9 +4272,15 @@ static BOOL ApolloLinkButtonHasInlineHost(ASDisplayNode *linkButtonNode) {
             continue;
         }
         for (id leaf in leaves) {
+            if ([usedLeaves containsObject:leaf]) {
+                ApolloLog(@"[InlineImages] skipping duplicate leaf instance %p in one layout pass (host=%p)", leaf, self);
+                continue;
+            }
+            [usedLeaves addObject:leaf];
             if ([leaf isKindOfClass:imageNodeCls]) {
-                ASLayoutSpec *wrapped = ApolloWrapImageNodeForLayout((ASNetworkImageNode *)leaf, rowMaxWidth);
-                if (wrapped) [augmented addObject:wrapped];
+                ASLayoutSpec *wrapped = ApolloWrapImageNodeForLayout((ASNetworkImageNode *)leaf, rowMaxWidth)
+                                        ?: ApolloHiddenInlineLeafSpec((ASDisplayNode *)leaf);
+                [augmented addObject:wrapped];
             } else {
                 [augmented addObject:leaf];
             }

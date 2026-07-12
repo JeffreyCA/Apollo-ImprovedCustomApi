@@ -137,9 +137,9 @@ static const NSUInteger kApolloAIMaxPostChars = 1400;
 // summary (capped at kApolloAIPostResponseTokens, ~60 words) would be nearly as
 // long as the post itself, defeating the purpose. Gating well above the summary
 // length means a post summary is only offered when it actually condenses the
-// post (~300 words -> roughly a fifth the length). Short posts and boilerplate
+// post (~200 words -> roughly a third the length). Short posts and boilerplate
 // megathreads get no card at all.
-static const NSUInteger kApolloAIMinPostWords = 300;
+static const NSUInteger kApolloAIMinPostWords = 200;
 static const NSUInteger kApolloAIMinComments = 5;
 static const NSUInteger kApolloAIMinCommentChars = 500;
 // The discussion summary is generated ONCE per page open, so we can afford to
@@ -2007,9 +2007,28 @@ static void ApolloAIApplyRestoredState(id headerNode, NSString *fullName) {
         if (ApolloAISetBoxState(headerNode, NO, ApolloAIBoxStateReady, sCommentSummaryCache[fullName])) changed = YES;
     } else if ([sCommentFailed containsObject:fullName]) {
         if (ApolloAISetBoxState(headerNode, NO, ApolloAIBoxStateError, nil)) changed = YES;
-    } else if ([sCommentInFlight containsObject:fullName] ||
-               [sCapturedComments[fullName] count] >= kApolloAIMinComments) {
+    } else if ([sCommentInFlight containsObject:fullName]) {
+        // A generation is genuinely running -> show the loading card.
         if (ApolloAISetBoxState(headerNode, NO, ApolloAIBoxStateLoading, nil)) changed = YES;
+    } else if ([sCapturedComments[fullName] count] >= kApolloAIMinComments) {
+        // Enough discussion captured, but nothing is in flight yet. The state to
+        // restore depends on the mode, and MUST match what ApolloAIGenerateForController
+        // would set (same predicate) or a recycled/reappearing header desyncs:
+        //   • Auto mode: the generation pass drives it, so Loading is the correct
+        //     placeholder while that kicks off.
+        //   • Tap-to-Summarize, not yet tapped: the idle "Tap to summarize" prompt.
+        //     Restoring Loading here was the bug — it left the discussion card stuck
+        //     on "Summarizing…" forever, because no request is ever in flight until
+        //     the user taps, and a Loading card isn't tappable-to-generate (the tap
+        //     handler only starts generation from the TapToSummarize state), so the
+        //     user was wedged with a spinner that never resolved.
+        //   • Tap-to-Summarize, already tapped (key present, e.g. mid concurrency
+        //     retry): keep Loading, since generation is pending.
+        NSString *commentTapKey = [@"comment|" stringByAppendingString:fullName];
+        BOOL awaitingTap = sEnableTapToSummarize && ![sTapRequested containsObject:commentTapKey];
+        ApolloAIBoxState restored = awaitingTap ? ApolloAIBoxStateTapToSummarize
+                                                : ApolloAIBoxStateLoading;
+        if (ApolloAISetBoxState(headerNode, NO, restored, nil)) changed = YES;
     }
     if (changed) {
         // Re-query the row height AND force a real display pass (see
@@ -2801,7 +2820,11 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
         ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateTapToSummarize, nil);
         ApolloAIForceHeaderRemeasure(fullName);
     } else if (![sPostInFlight containsObject:fullName] && ![sPostFailed containsObject:fullName]) {
-        [sTapRequested removeObject:postTapKey];   // consume a tap request, if any
+        // Do NOT consume the tap request here — see the matching note in the comment
+        // branch below. A concurrency-deferred retry must still re-drive generation
+        // rather than fall back to the idle "Tap to summarize" prompt; the cacheValid /
+        // in-flight / failed guards above short-circuit this gate on re-entry, and the
+        // whole set is cleared with the caches on reset.
         // Drop a stale cache entry generated under a different mode (e.g. a
         // post-only summary cached before this post was detected as link/both).
         if (sPostSummaryCache[fullName].length > 0) {
@@ -2927,7 +2950,14 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
             ApolloAISetBoxStateOnMatchingHeaders(fullName, NO, ApolloAIBoxStateTapToSummarize, nil);
             ApolloAIForceHeaderRemeasure(fullName);
             } else {
-            [sTapRequested removeObject:commentTapKey];   // consume a tap request, if any
+            // Do NOT consume the tap request here. A transient-concurrency (code 9)
+            // deferral clears sCommentInFlight and re-enters this function ~0.75s later;
+            // if the key were already gone we'd fall back into the idle branch above and
+            // silently revert to "Tap to summarize" instead of finishing the summary the
+            // user asked for (common on posts that also have a post/link summary racing
+            // for the on-device model). The key is harmless once generation starts: the
+            // cache-hit / in-flight / failed guards all short-circuit before this gate on
+            // re-entry, and the whole set is cleared with the caches on reset.
             ApolloAIShowLoadingIfIdle(fullName, NO);
             ApolloAIForceHeaderRemeasure(fullName);
             [sCommentInFlight addObject:fullName];
@@ -3108,6 +3138,15 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
         // whole session.
         [sPostSuppressed removeObject:fullName];
         [sPostEmpty removeObject:fullName];     // per-view, like sPostSuppressed
+        // A Tap-to-Summarize request authorizes generation for THIS viewing only.
+        // We no longer consume the key the instant generation starts (so a
+        // concurrency-deferred retry within the same viewing can still finish — no
+        // viewDidDisappear fires during its 0.75s wait), so clear it here instead,
+        // alongside the in-flight/failed teardown above. Without this the key would
+        // leak across viewings and a previously-tapped post would silently
+        // regenerate on reopen without a fresh tap, defeating the point of the mode.
+        [sTapRequested removeObject:[@"post|" stringByAppendingString:fullName]];
+        [sTapRequested removeObject:[@"comment|" stringByAppendingString:fullName]];
         if (sPostSummaryCache[fullName].length == 0) {
             ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateNone, nil);
         }
