@@ -4,6 +4,7 @@
 #import <notify.h>
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloThemeRuntime.h"
 #import "UserDefaultConstants.h"
 
 // MARK: - Tab Bar Collapse Side (Left / Right / Off)
@@ -214,12 +215,13 @@ static void CollapseSideSetNativeHideBars(UISwitch *nativeSwitch, BOOL on) {
     [[NSNotificationCenter defaultCenter] postNotificationName:kApolloHideBarsChangedNote object:nil];
 }
 
-static void CollapseSideRefreshButton(UIButton *button, UISwitch *nativeSwitch);
+static void CollapseSideRefreshRowControl(UITableViewCell *cell);
 
 // Shared by the menu actions and the sim debug trigger: apply a picked mode
 // (0 = Left, 1 = Right, 2 = Off) through Apollo's own toggle plumbing, then
 // refresh the tab bar and the row's control.
-static void CollapseSideApplyModeSelection(NSInteger mode, UIButton *button, UISwitch *nativeSwitch) {
+static void CollapseSideApplyModeSelection(NSInteger mode, UITableViewCell *cell) {
+    UISwitch *nativeSwitch = cell ? objc_getAssociatedObject(cell, &kCollapseSideNativeSwitchKey) : nil;
     if (mode == 2) {
         CollapseSideSetNativeHideBars(nativeSwitch, NO);
     } else {
@@ -227,20 +229,19 @@ static void CollapseSideApplyModeSelection(NSInteger mode, UIButton *button, UIS
         CollapseSideSetNativeHideBars(nativeSwitch, YES);
     }
     CollapseSideRelayoutVisibleTabBars();
-    if (button) CollapseSideRefreshButton(button, nativeSwitch);
+    if (cell) CollapseSideRefreshRowControl(cell);
 }
 
-static UIMenu *CollapseSideBuildMenu(UIButton *button, UISwitch *nativeSwitch) {
+static UIMenu *CollapseSideBuildMenu(UITableViewCell *cell) {
     NSInteger current = CollapseSideCurrentMode();
-    __weak UIButton *weakButton = button;
-    __weak UISwitch *weakSwitch = nativeSwitch;
+    __weak UITableViewCell *weakCell = cell;
 
-    UIAction *(^makeAction)(NSInteger, NSString *) = ^UIAction *(NSInteger mode, NSString *iconName) {
+    UIAction *(^makeAction)(NSInteger) = ^UIAction *(NSInteger mode) {
         UIAction *action = [UIAction actionWithTitle:CollapseSideModeTitle(mode)
-                                               image:iconName ? [UIImage systemImageNamed:iconName] : nil
+                                               image:nil
                                           identifier:nil
                                              handler:^(__unused UIAction *act) {
-            CollapseSideApplyModeSelection(mode, weakButton, weakSwitch);
+            CollapseSideApplyModeSelection(mode, weakCell);
         }];
         action.state = (current == mode) ? UIMenuElementStateOn : UIMenuElementStateOff;
         return action;
@@ -248,34 +249,53 @@ static UIMenu *CollapseSideBuildMenu(UIButton *button, UISwitch *nativeSwitch) {
 
     // "Collapse Tab Bar" section: where the pill docks, or not at all.
     return [UIMenu menuWithTitle:@"Collapse Tab Bar"
-                        children:@[makeAction(0, @"arrow.down.left"),
-                                   makeAction(1, @"arrow.down.right"),
-                                   makeAction(2, @"xmark")]];
+                        children:@[makeAction(0), makeAction(1), makeAction(2)]];
 }
 
-static void CollapseSideRefreshButton(UIButton *button, UISwitch *nativeSwitch) {
-    NSInteger mode = CollapseSideCurrentMode();
-    // UIButtonConfiguration needs iOS 15, which is always true on the Liquid
-    // Glass (iOS 26) path this feature is gated to; the fallback is for the
-    // compiler's benefit at the device build's iOS 14 floor.
-    if (@available(iOS 15.0, *)) {
-        UIButtonConfiguration *config = [UIButtonConfiguration plainButtonConfiguration];
-        config.title = CollapseSideModeTitle(mode);
-        config.image = [UIImage systemImageNamed:@"chevron.up.chevron.down"];
-        config.imagePlacement = NSDirectionalRectEdgeTrailing;
-        config.imagePadding = 4.0;
-        config.preferredSymbolConfigurationForImage =
-            [UIImageSymbolConfiguration configurationWithPointSize:11.0 weight:UIImageSymbolWeightSemibold];
-        config.baseForegroundColor = [UIColor secondaryLabelColor];
-        config.contentInsets = NSDirectionalEdgeInsetsMake(4.0, 8.0, 4.0, 0.0);
-        button.configuration = config;
-    } else {
-        [button setTitle:CollapseSideModeTitle(mode) forState:UIControlStateNormal];
-        [button setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
+// Rebuild the accessory button's title + size. The title is a single
+// attributed line measured with the CELL's current (already-themed) font, and
+// the label is font-pinned afterwards — Apollo's theme runtime re-fonts plain
+// labels after the fact, which is how a size measured pre-theming ends up
+// wrapping "Right" onto two lines at larger text sizes. Measuring the themed
+// font and pinning keeps the measurement authoritative; the willDisplay
+// re-adopt refreshes it whenever the row re-themes.
+static void CollapseSideRefreshRowControl(UITableViewCell *cell) {
+    UIButton *button = objc_getAssociatedObject(cell, &kCollapseSideButtonKey);
+    if (!button) return;
+
+    UIFont *font = cell.detailTextLabel.font ?: cell.textLabel.font
+        ?: [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    UIColor *color = cell.detailTextLabel.textColor ?: [UIColor secondaryLabelColor];
+    NSString *title = CollapseSideModeTitle(CollapseSideCurrentMode());
+
+    NSMutableAttributedString *label = [[NSMutableAttributedString alloc]
+        initWithString:title
+            attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: color}];
+    UIImage *chevron = [[UIImage systemImageNamed:@"chevron.up.chevron.down"
+                                withConfiguration:[UIImageSymbolConfiguration configurationWithFont:font
+                                                                                              scale:UIImageSymbolScaleSmall]]
+        imageWithTintColor:color renderingMode:UIImageRenderingModeAlwaysOriginal];
+    if (chevron) {
+        [label appendAttributedString:[[NSAttributedString alloc]
+            initWithString:@" " attributes:@{NSFontAttributeName: font}]];
+        NSTextAttachment *attachment = [[NSTextAttachment alloc] init];
+        attachment.image = chevron;
+        attachment.bounds = CGRectMake(0.0, (font.capHeight - chevron.size.height) / 2.0,
+                                       chevron.size.width, chevron.size.height);
+        [label appendAttributedString:[NSAttributedString attributedStringWithAttachment:attachment]];
     }
-    button.menu = CollapseSideBuildMenu(button, nativeSwitch);
+
+    button.titleLabel.numberOfLines = 1;
+    button.titleLabel.lineBreakMode = NSLineBreakByClipping;
+    [button setAttributedTitle:label forState:UIControlStateNormal];
+    ApolloThemeRuntimeSetFontPinned(button.titleLabel, YES);
+    CGSize size = [label boundingRectWithSize:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)
+                                      options:NSStringDrawingUsesLineFragmentOrigin
+                                      context:nil].size;
+    button.bounds = CGRectMake(0.0, 0.0, ceil(size.width) + 4.0, MAX(ceil(size.height) + 8.0, 34.0));
+
+    button.menu = CollapseSideBuildMenu(cell);
     button.showsMenuAsPrimaryAction = YES;
-    [button sizeToFit];
 }
 
 // Replace the identified cell's UISwitch accessory with the Left/Right/Off
@@ -296,11 +316,12 @@ static void CollapseSideAdoptCell(UITableViewCell *cell) {
 
     UIButton *button = objc_getAssociatedObject(cell, &kCollapseSideButtonKey);
     if (!button) {
-        button = [UIButton buttonWithType:UIButtonTypeSystem];
+        // Custom type: attributed titles render literally (no system re-tint).
+        button = [UIButton buttonWithType:UIButtonTypeCustom];
         objc_setAssociatedObject(cell, &kCollapseSideButtonKey, button,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    CollapseSideRefreshButton(button, nativeSwitch);
+    CollapseSideRefreshRowControl(cell);
     if (cell.accessoryView != button) cell.accessoryView = button;
 }
 
@@ -467,14 +488,41 @@ static void CollapseSideInstallDebugTriggers(void) {
             if (match) break;
         }
         if (!match) { ApolloLog(@"[CollapseSide] DBG pick: row cell not on screen"); return; }
-        UISwitch *sw = objc_getAssociatedObject(match, &kCollapseSideNativeSwitchKey);
-        UIButton *button = objc_getAssociatedObject(match, &kCollapseSideButtonKey);
-        ApolloLog(@"[CollapseSide] DBG pick mode=%ld cell=%p switch=%p button=%p", (long)mode, match, sw, button);
-        CollapseSideApplyModeSelection(mode, button, sw);
+        ApolloLog(@"[CollapseSide] DBG pick mode=%ld cell=%p switch=%p button=%p", (long)mode, match,
+                  objc_getAssociatedObject(match, &kCollapseSideNativeSwitchKey),
+                  objc_getAssociatedObject(match, &kCollapseSideButtonKey));
+        CollapseSideApplyModeSelection(mode, match);
     };
     CollapseSideDebugRegister("com.apollo.collapseside.pick.left",  ^{ pick(0); });
     CollapseSideDebugRegister("com.apollo.collapseside.pick.right", ^{ pick(1); });
     CollapseSideDebugRegister("com.apollo.collapseside.pick.off",   ^{ pick(2); });
+    // Visually present the row button's menu (private API, sim-only eyeball).
+    CollapseSideDebugRegister("com.apollo.collapseside.showmenu", ^{
+        UITableViewCell *match = nil;
+        for (UIWindow *window in ApolloAllWindows()) {
+            NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:window];
+            while (stack.count) {
+                UIView *view = stack.lastObject; [stack removeLastObject];
+                if ([view isKindOfClass:[UITableViewCell class]] &&
+                    CollapseSideCellMatches((UITableViewCell *)view) && view.window) {
+                    match = (UITableViewCell *)view;
+                    break;
+                }
+                for (UIView *sub in view.subviews) [stack addObject:sub];
+            }
+            if (match) break;
+        }
+        UIButton *button = match ? objc_getAssociatedObject(match, &kCollapseSideButtonKey) : nil;
+        id interaction = button.contextMenuInteraction;
+        SEL present = NSSelectorFromString(@"_presentMenuAtLocation:");
+        if (interaction && [interaction respondsToSelector:present]) {
+            CGPoint mid = CGPointMake(CGRectGetMidX(button.bounds), CGRectGetMidY(button.bounds));
+            ((void (*)(id, SEL, CGPoint))objc_msgSend)(interaction, present, mid);
+            ApolloLog(@"[CollapseSide] DBG showmenu presented");
+        } else {
+            ApolloLog(@"[CollapseSide] DBG showmenu: no interaction (button=%p)", button);
+        }
+    });
 }
 
 #endif // APOLLO_SIM_BUILD
