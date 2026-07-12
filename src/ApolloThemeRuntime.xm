@@ -14,6 +14,7 @@
 
 @interface ASDisplayNode : NSObject
 - (ASDisplayNode *)supernode;
+@property (nonatomic, strong) UIColor *backgroundColor;
 @end
 
 @interface ASTextNode : ASDisplayNode
@@ -48,6 +49,18 @@
 @interface _TtC6Apollo24ApolloSearchBarTextField : UITextField
 @end
 
+// Apollo inserts these Texture cells between comment sections. Their internal
+// separatorNode is painted from Apollo's shared "gray" role (the same role as
+// muted text), rather than from its separator role, so RGB remapping alone
+// cannot distinguish the divider from a genuine muted label.
+@interface _TtC6Apollo21ThinSeparatorCellNode : ASDisplayNode
+@end
+
+// The post header above a comment thread owns two more explicit Texture
+// hairlines: one above the action quick bar and one above the comments list.
+@interface _TtC6Apollo22CommentsHeaderCellNode : ASDisplayNode
+@end
+
 // ===========================================================================
 // Runtime state
 // ===========================================================================
@@ -68,6 +81,53 @@ static uintptr_t sApolloStart = 0;
 static uintptr_t sApolloEnd = 0;
 static uintptr_t sTweakStart = 0;
 static uintptr_t sTweakEnd = 0;
+
+// Apply UIKit-owned colours at the view sink as well as at UIColor creation.
+// UITableView creates its default hairline colour inside UIKit, so the
+// caller-gated UIColor.separatorColor hook deliberately cannot see it. The
+// Search tab likewise uses a stock UISearchBar (not ApolloSearchBarTextField),
+// whose input fill is assembled inside UIKit from its own palette.
+static void ApplyThemeTableSeparator(UITableView *tableView) {
+    if (!sEnabled || !tableView) return;
+    UIColor *separator = ApolloThemeRuntimeColor(ApolloThemeTokenSeparator);
+    if (separator && ![tableView.separatorColor isEqual:separator]) {
+        tableView.separatorColor = separator;
+    }
+}
+
+static void ApplyThemeSearchFieldBackground(UISearchBar *searchBar) {
+    if (!sEnabled || !searchBar) return;
+    UIColor *raised = ApolloThemeRuntimeColor(ApolloThemeTokenTertiaryBackground);
+    UITextField *field = searchBar.searchTextField;
+    if (raised && field && ![field.backgroundColor isEqual:raised]) {
+        field.backgroundColor = raised;
+    }
+}
+
+static void ApplyThemeThinSeparatorNode(_TtC6Apollo21ThinSeparatorCellNode *cellNode) {
+    if (!sEnabled || !cellNode) return;
+    Ivar separatorIvar = class_getInstanceVariable(object_getClass(cellNode), "separatorNode");
+    ASDisplayNode *separatorNode = separatorIvar ? object_getIvar(cellNode, separatorIvar) : nil;
+    UIColor *separator = ApolloThemeRuntimeColor(ApolloThemeTokenSeparator);
+    if (separatorNode && separator) separatorNode.backgroundColor = separator;
+}
+
+static ASDisplayNode *ApolloThemeObjectIvar(id owner, const char *name) {
+    if (!owner || !name) return nil;
+    Ivar ivar = class_getInstanceVariable(object_getClass(owner), name);
+    return ivar ? object_getIvar(owner, ivar) : nil;
+}
+
+static void ApplyThemeCommentsHeaderSeparators(_TtC6Apollo22CommentsHeaderCellNode *headerNode) {
+    if (!sEnabled || !headerNode) return;
+    UIColor *separator = ApolloThemeRuntimeColor(ApolloThemeTokenSeparator);
+    if (!separator) return;
+
+    ASDisplayNode *quickBarSeparator = ApolloThemeObjectIvar(headerNode, "quickBarSeparatorNode");
+    ASDisplayNode *commentsSeparator = ApolloThemeObjectIvar(headerNode, "commentsSeparatorNode");
+    if (quickBarSeparator) quickBarSeparator.backgroundColor = separator;
+    if (commentsSeparator) commentsSeparator.backgroundColor = separator;
+}
 
 static void RecordImageBounds(const struct mach_header *mh, intptr_t slide, uintptr_t *outStart, uintptr_t *outEnd) {
     if (!mh || mh->magic != MH_MAGIC_64) return;
@@ -1235,6 +1295,74 @@ static ASImageNodeTintColorModificationBlockFn ASImageNodeTintColorModificationB
 - (void)didMoveToWindow {
     %orig;
     RethemeFontOnAttach((UIView *)self);
+}
+
+%end
+
+// UIKit chooses default table separators from inside UIKit itself. That call
+// is intentionally outside the app/tweak caller gate on UIColor's semantic
+// accessors, so enforce the semantic token on the table sink. This covers
+// Apollo's native Appearance tables; Texture's comment dividers are handled
+// separately below because they are independent ASDisplayNodes.
+%hook UITableView
+
+- (void)setSeparatorColor:(UIColor *)color {
+    UIColor *separator = sEnabled ? ApolloThemeRuntimeColor(ApolloThemeTokenSeparator) : nil;
+    %orig(separator ?: color);
+}
+
+- (void)didMoveToWindow {
+    %orig;
+    ApplyThemeTableSeparator(self);
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    %orig;
+    ApplyThemeTableSeparator(self);
+}
+
+%end
+
+// Comment threads use explicit ThinSeparatorCellNode objects between sections.
+// Hopper (Apollo 1.15.11, sub_1003acddc) shows separatorNode receiving
+// sub_10068cda0: Apollo's shared gray/muted-text palette helper. Override the
+// semantic sink after the cell finishes loading so the line follows the
+// Separators editor token without globally reclassifying muted text colors.
+%hook _TtC6Apollo21ThinSeparatorCellNode
+
+- (void)didLoad {
+    %orig;
+    ApplyThemeThinSeparatorNode(self);
+}
+
+%end
+
+// The post header uses its own pair of ASDisplayNode hairlines, so these do not
+// pass through UITableView or ThinSeparatorCellNode. Apply the same semantic
+// separator token once Apollo has finished constructing/loading the header.
+%hook _TtC6Apollo22CommentsHeaderCellNode
+
+- (void)didLoad {
+    %orig;
+    ApplyThemeCommentsHeaderSeparators(self);
+}
+
+%end
+
+// The main Search tab is a stock UISearchBar created by SearchViewController,
+// while feed search uses ApolloSearchBarTextField below. Give both kinds of
+// input the Raised token instead of allowing UIKit/Apollo's shared separator
+// constant to leak into their fill.
+%hook UISearchBar
+
+- (void)didMoveToWindow {
+    %orig;
+    ApplyThemeSearchFieldBackground(self);
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    %orig;
+    ApplyThemeSearchFieldBackground(self);
 }
 
 %end
