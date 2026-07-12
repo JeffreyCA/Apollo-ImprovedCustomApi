@@ -847,8 +847,18 @@ static void ApolloLPInstallContextMenuForNode(ASDisplayNode *node, NSURL *url) {
 
     if ([node respondsToSelector:@selector(isNodeLoaded)] && [node isNodeLoaded]) {
         install(node);
+        return;
     }
+    // One pending onDidLoad block per node, EVER. This function runs on every
+    // layoutSpecThatFits pass, and Texture APPENDS each block to the node's
+    // internal _onDidLoadBlocks array — an unloaded node measured N times
+    // accumulated N blocks (each retaining the URL + closure), and detached
+    // measurement trees that never load never drain them: strictly monotonic
+    // per-measure growth on card-heavy threads (#630 round-9 lag audit).
+    static const void *kApolloLPOnDidLoadArmedKey = &kApolloLPOnDidLoadArmedKey;
+    if ([objc_getAssociatedObject(node, kApolloLPOnDidLoadArmedKey) boolValue]) return;
     if ([node respondsToSelector:@selector(onDidLoad:)]) {
+        objc_setAssociatedObject(node, kApolloLPOnDidLoadArmedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [node onDidLoad:^(__kindof ASDisplayNode *loadedNode) {
             install(loadedNode);
         }];
@@ -862,6 +872,17 @@ static NSCache<NSString *, UIImage *> *ApolloLPFallbackImageCache(void) {
         cache = [NSCache new];
         cache.countLimit = 256;
         cache.totalCostLimit = 40 * 1024 * 1024;
+        // Under real memory pressure, drop the whole bitmap cache — cards
+        // re-fetch/re-decode on demand. Cost-limited NSCache contents are not
+        // reliably purged by the system while the app is frontmost, and 40MB
+        // of card bitmaps is exactly the wrong thing to be holding when
+        // jetsam is sizing up the process (#630 round-8/9).
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidReceiveMemoryWarningNotification
+                                                          object:nil
+                                                           queue:nil
+                                                      usingBlock:^(__unused NSNotification *note) {
+            [cache removeAllObjects];
+        }];
     });
     return cache;
 }

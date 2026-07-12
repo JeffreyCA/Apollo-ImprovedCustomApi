@@ -49,6 +49,8 @@ static const void *kApolloDeletedCommentsBodyReplacementTextNodeKey = &kApolloDe
 static const void *kApolloDeletedCommentsOriginalBodyKey = &kApolloDeletedCommentsOriginalBodyKey;
 static const void *kApolloDeletedCommentsOriginalBodyHTMLKey = &kApolloDeletedCommentsOriginalBodyHTMLKey;
 static const void *kApolloDeletedCommentsHostLayoutRefreshScheduledKey = &kApolloDeletedCommentsHostLayoutRefreshScheduledKey;
+static const void *kApolloDeletedCommentsHostRefreshRearmedKey = &kApolloDeletedCommentsHostRefreshRearmedKey;
+static const void *kApolloDeletedCommentsHostRefreshVerifyCountKey = &kApolloDeletedCommentsHostRefreshVerifyCountKey;
 static const void *kApolloDeletedCommentsRevealToggleInFlightKey = &kApolloDeletedCommentsRevealToggleInFlightKey;
 static const void *kApolloDeletedCommentsReasonChipRepairScheduledKey = &kApolloDeletedCommentsReasonChipRepairScheduledKey;
 static const void *kApolloDeletedCommentsRevealTapGestureKey = &kApolloDeletedCommentsRevealTapGestureKey;
@@ -127,6 +129,7 @@ static void ApolloDeletedCommentsDisableRevealTapInterception(id textNode);
 static void ApolloDeletedCommentsSynchronizeCommentModelDisplayState(id cellNode);
 static NSString *ApolloDeletedCommentsReasonLabelForCommentAndBody(RDKComment *comment, NSString *body);
 static void __attribute__((unused)) ApolloDeletedCommentsRepairVisibleReasonChipIfNeeded(id cellNode);
+static void ApolloDeletedCommentsRepairAuthorLabelIfNeeded(id cellNode);
 static void ApolloDeletedCommentsScheduleHostLayoutRefresh(id cellNode);
 static BOOL ApolloDeletedCommentsStringIsReasonLabel(NSString *text);
 static BOOL ApolloDeletedCommentsAuthorLooksDeleted(NSString *author);
@@ -140,6 +143,7 @@ static BOOL ApolloDeletedCommentsTextQualifiesAsBodyFragment(NSString *candidate
 static BOOL ApolloDeletedCommentsTextLooksLikeRecoveredBodyDisplay(NSString *candidate, NSString *body);
 static BOOL ApolloDeletedCommentsCommentIsCollapsed(RDKComment *comment);
 static void ApolloDeletedCommentsRefreshVisibleDeletedCells(void);
+static BOOL ApolloDeletedCommentsNodeIsLoaded(id node);
 static BOOL ApolloDeletedCommentsBodyAttributesAreUsable(NSDictionary *attributes);
 static NSDictionary *ApolloDeletedCommentsRegularizedBodyAttributes(NSDictionary *attributes);
 static void ApolloDeletedCommentsScheduleBodyAttributesRefresh(void);
@@ -740,9 +744,20 @@ static UIImage *ApolloDeletedCommentsReasonChipImage(NSString *text, UIFont *fon
     }];
 }
 
-static NSAttributedString *ApolloDeletedCommentsReasonChipAttributedText(NSString *label, NSDictionary *baseAttributes, BOOL revealLink) {
+static NSAttributedString *ApolloDeletedCommentsReasonChipAttributedText(NSString *label, NSDictionary *baseAttributes, BOOL revealLink, RDKComment *comment) {
     label = ApolloDeletedCommentsNormalizedReasonLabel(label);
     UIFont *font = ApolloDeletedCommentsReasonChipFontForBaseAttributes(baseAttributes);
+
+    // "(Unrecoverable)" suffix: plain text after the pill, only when the Arctic
+    // archive has DEFINITIVELY said it cannot restore this comment (reporter
+    // request, #630 round 9 — "but only when the API actually says that they
+    // aren't there"). Pending fetches, transient failures, and rate limits all
+    // read as not-unrecoverable, so the suffix can only appear, never flicker.
+    BOOL unrecoverable = NO;
+    if (comment) {
+        NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
+        unrecoverable = fullName.length > 0 && ApolloDeletedCommentsIsUnrecoverableComment(fullName);
+    }
 
     // Return the SAME immutable chip string for identical (label, font, revealLink).
     // The chip is rebuilt on every comment-cell measure; without caching, each call
@@ -760,11 +775,12 @@ static NSAttributedString *ApolloDeletedCommentsReasonChipAttributedText(NSStrin
         chipCache = [NSMutableDictionary dictionary];
         chipCacheLock = [NSObject new];
     });
-    NSString *chipCacheKey = [NSString stringWithFormat:@"%@|%@|%.2f|%d",
+    NSString *chipCacheKey = [NSString stringWithFormat:@"%@|%@|%.2f|%d|%d",
                               label ?: @"",
                               [font isKindOfClass:[UIFont class]] ? (font.fontName ?: @"-") : @"-",
                               [font isKindOfClass:[UIFont class]] ? font.pointSize : 0.0,
-                              revealLink ? 1 : 0];
+                              revealLink ? 1 : 0,
+                              unrecoverable ? 1 : 0];
     @synchronized (chipCacheLock) {
         NSAttributedString *cached = chipCache[chipCacheKey];
         if ([cached isKindOfClass:[NSAttributedString class]]) return cached;
@@ -793,9 +809,23 @@ static NSAttributedString *ApolloDeletedCommentsReasonChipAttributedText(NSStrin
         }];
     }
 
+    // The reveal link covers only the PILL run — the suffix appended below is
+    // informational, not tappable.
     if (revealLink) {
         [result addAttribute:ApolloDeletedCommentsRevealAttributeName value:ApolloDeletedCommentsRevealURLString range:NSMakeRange(0, result.length)];
     }
+
+    if (unrecoverable) {
+        UIFont *suffixFont = [UIFont systemFontOfSize:[font isKindOfClass:[UIFont class]] ? font.pointSize : 12.0];
+        [result appendAttributedString:[[NSAttributedString alloc] initWithString:@" (Unrecoverable)" attributes:@{
+            NSFontAttributeName: suffixFont,
+            NSForegroundColorAttributeName: [UIColor secondaryLabelColor],
+            NSParagraphStyleAttributeName: paragraphStyle,
+        }]];
+    }
+
+    // Prefix attribute over the WHOLE run (pill + suffix) so the existing
+    // detect/strip helpers treat them atomically.
     [result addAttribute:ApolloDeletedCommentsReasonPrefixAttributeName value:@YES range:NSMakeRange(0, result.length)];
 
     NSAttributedString *immutableChip = [result copy];
@@ -879,7 +909,8 @@ static void ApolloDeletedCommentsInvalidateCellAndTextNodeLocally(id cellNode, i
 
 static NSAttributedString *ApolloDeletedCommentsPlaceholderAttributedText(NSAttributedString *original, NSString *reasonLabel, id cellNode) {
     NSDictionary *attributes = ApolloDeletedCommentsReasonChipBaseAttributes(original, cellNode);
-    NSAttributedString *chip = ApolloDeletedCommentsReasonChipAttributedText(reasonLabel, attributes, YES);
+    RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
+    NSAttributedString *chip = ApolloDeletedCommentsReasonChipAttributedText(reasonLabel, attributes, YES, comment);
     return chip;
 }
 
@@ -1983,7 +2014,7 @@ static NSAttributedString *ApolloDeletedCommentsAttributedTextWithReasonPrefix(i
     spacerAttributes[NSParagraphStyleAttributeName] = spacerStyle;
     NSMutableAttributedString *decorated = [bodyText mutableCopy];
     [decorated appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n" attributes:spacerAttributes]];
-    [decorated appendAttributedString:ApolloDeletedCommentsReasonChipAttributedText(label, baseAttributes, NO)];
+    [decorated appendAttributedString:ApolloDeletedCommentsReasonChipAttributedText(label, baseAttributes, NO, nil)];
     ApolloDeletedCommentsDisableRevealTapInterception(textNode);
     return decorated;
 }
@@ -2029,7 +2060,8 @@ static NSAttributedString *__attribute__((unused)) ApolloDeletedCommentsAttribut
     BOOL revealLink = sTapToRevealDeletedComments && ApolloDeletedCommentsShouldKeepModelBodyHidden(comment);
     NSAttributedString *chip = ApolloDeletedCommentsReasonChipAttributedText(label,
                                                                              baseAttributes,
-                                                                             revealLink);
+                                                                             revealLink,
+                                                                             comment);
     if (revealLink) ApolloDeletedCommentsEnsureRevealAttributeIsTappable(textNode);
     return chip;
 }
@@ -2167,7 +2199,8 @@ static void ApolloDeletedCommentsApplyStaticPlaceholderChip(id cellNode, NSArray
         if (!placedPlaceholder) {
             replacement = ApolloDeletedCommentsReasonChipAttributedText(ApolloDeletedCommentsReasonLabelForComment(comment),
                                                                         ApolloDeletedCommentsReasonChipBaseAttributes(current, cellNode),
-                                                                        NO);
+                                                                        NO,
+                                                                        comment);
             placedPlaceholder = YES;
         } else {
             replacement = [[NSAttributedString alloc] initWithString:@""
@@ -2310,6 +2343,10 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRec
 // is safe across cell reuse (the comment is resolved live from the cell node).
 static void ApolloDeletedCommentsInstallRevealTapGestureOnCell(id cellNode) {
     if (!cellNode || ![cellNode respondsToSelector:@selector(view)]) return;
+    // Unloaded cells have no view to attach a recognizer to; touching `-view`
+    // would force-load it (see ApolloDeletedCommentsCellView). They install
+    // their gestures at didLoad → UpdateCell instead.
+    if (!ApolloDeletedCommentsNodeIsLoaded(cellNode)) return;
     UIView *view = nil;
     @try {
         view = ((UIView *(*)(id, SEL))objc_msgSend)(cellNode, @selector(view));
@@ -2454,6 +2491,8 @@ shouldBeRequiredToFailByGestureRecognizer:(UIGestureRecognizer *)otherGestureRec
 // delegate gates per-tap so it is inert on cells without recovered links).
 static void ApolloDeletedCommentsInstallLinkTapGestureOnCell(id cellNode) {
     if (!cellNode || ![cellNode respondsToSelector:@selector(view)]) return;
+    // See InstallRevealTapGestureOnCell: never force-load an unloaded cell.
+    if (!ApolloDeletedCommentsNodeIsLoaded(cellNode)) return;
     UIView *view = nil;
     @try {
         view = ((UIView *(*)(id, SEL))objc_msgSend)(cellNode, @selector(view));
@@ -2867,6 +2906,23 @@ static void ApolloDeletedCommentsHandleContentSizeChanged(__unused NSNotificatio
 
 static UIView *ApolloDeletedCommentsCellView(id cellNode) {
     if (!cellNode || ![cellNode respondsToSelector:@selector(view)]) return nil;
+    // Never force-load an unloaded node's backing view. `-view` on an ASDisplayNode
+    // that hasn't loaded synchronously CREATES the UIView (+ layer); doing that for
+    // every preload-tracked below-fold cell (e.g. from RefreshVisibleDeletedCells on
+    // a late Arctic answer) instantiates hundreds of off-screen views in one runloop
+    // tick — a scroll hitch and memory spike in the exact jetsam-sensitive path this
+    // PR is fixing. An unloaded cell has no on-screen view to touch anyway; it runs
+    // its own UpdateCell at didLoad. (Inlined isNodeLoaded — this helper is defined
+    // before ApolloDeletedCommentsNodeIsLoaded.)
+    if ([cellNode respondsToSelector:@selector(isNodeLoaded)]) {
+        BOOL loaded = NO;
+        @try {
+            loaded = ((BOOL (*)(id, SEL))objc_msgSend)(cellNode, @selector(isNodeLoaded));
+        } @catch (__unused NSException *e) {
+            loaded = NO;
+        }
+        if (!loaded) return nil;
+    }
     UIView *view = nil;
     @try {
         view = ((UIView *(*)(id, SEL))objc_msgSend)(cellNode, @selector(view));
@@ -2909,6 +2965,11 @@ static __weak UIView *sApolloDeletedCommentsLastHostListView = nil;
 // previews in particular — can defer their own table updates during the window.
 static const NSTimeInterval kApolloDeletedCommentsCollapseSettleWindow = 0.65;
 static NSTimeInterval sApolloDeletedCommentsLastCollapseEventUptime = 0;
+// Main-thread flag: set around the tweak's own model-only setCollapsed:NO
+// writes so the RDKComment hook does not stamp the collapse-settle window for
+// them (no table animation runs for a model-only un-collapse; the stamp only
+// deferred our own height fixups — #630 round 9).
+static BOOL sApolloDeletedCommentsInternalUncollapse = NO;
 
 void ApolloDeletedCommentsNoteCollapseEvent(void) {
     sApolloDeletedCommentsLastCollapseEventUptime = CACurrentMediaTime();
@@ -2933,7 +2994,33 @@ static void ApolloDeletedCommentsScheduleHostLayoutRefresh(id cellNode) {
     UIView *hostView = nodeLoaded ? ApolloDeletedCommentsHostListViewForCell(cellNode) : nil;
     UIView *cellView = nodeLoaded ? ApolloDeletedCommentsCellView(cellNode) : nil;
     if (![hostView isKindOfClass:[UIView class]]) hostView = sApolloDeletedCommentsLastHostListView;
-    if (![hostView isKindOfClass:[UIView class]] || !hostView.window) return;
+    if (![hostView isKindOfClass:[UIView class]] || !hostView.window) {
+        // No resolvable host RIGHT NOW (below-fold cell before any displayed
+        // deleted cell registered the table, or mid-transition). This used to
+        // silently drop the fixup — the row then kept a height measured for
+        // different content until something else re-queried it (one leg of the
+        // clipped rows / black gaps in #630 round 9). Re-arm ONCE.
+        //
+        // The flag stays SET across the retry: if the host is STILL
+        // unresolvable when the retry re-enters, it must fall through here
+        // WITHOUT arming again. Clearing the flag before recursing turned this
+        // into an unbounded 2.5 Hz dispatch_after chain per node whenever the
+        // thread sat behind a pushed VC (its table off-window). The flag is
+        // cleared only on the success path below, so a genuinely new
+        // unresolvable episode (scroll away and back) can re-arm once more.
+        if (![objc_getAssociatedObject(cellNode, kApolloDeletedCommentsHostRefreshRearmedKey) boolValue]) {
+            objc_setAssociatedObject(cellNode, kApolloDeletedCommentsHostRefreshRearmedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            __weak id weakRearmNode = cellNode;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                id strongNode = weakRearmNode;
+                if (strongNode) ApolloDeletedCommentsScheduleHostLayoutRefresh(strongNode);
+            });
+        }
+        return;
+    }
+    // Host resolved — clear the one-shot re-arm guard so a future off-window
+    // episode for this same node can schedule a fresh retry.
+    objc_setAssociatedObject(cellNode, kApolloDeletedCommentsHostRefreshRearmedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (objc_getAssociatedObject(hostView, kApolloDeletedCommentsHostLayoutRefreshScheduledKey)) return;
 
     objc_setAssociatedObject(hostView, kApolloDeletedCommentsHostLayoutRefreshScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -2994,6 +3081,43 @@ static void ApolloDeletedCommentsScheduleHostLayoutRefresh(id cellNode) {
         [CATransaction setDisableActions:YES];
         [UIView performWithoutAnimation:commit];
         [CATransaction commit];
+
+        // Verify the commit converged. begin/endUpdates fires 0.03s after the
+        // invalidation; when Texture's async re-measure of a much taller
+        // recovered body hasn't landed yet, the STALE height gets re-committed
+        // and nothing re-queries it — content clipped mid-line or floating in
+        // a black gap (#630 round 9). Compare the node's measured height with
+        // the row rect shortly after; on divergence, re-run the refresh.
+        // Bounded to 2 retries per cell so a genuinely dynamic row (video,
+        // streaming card) can't loop it.
+        if (![strongHostView isKindOfClass:[UITableView class]]) return;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            id verifyNode = weakCellNode;
+            UIView *verifyHost = weakHostView;
+            if (!verifyNode || ![verifyHost isKindOfClass:[UITableView class]] || !verifyHost.window) return;
+            NSInteger tries = [objc_getAssociatedObject(verifyNode, kApolloDeletedCommentsHostRefreshVerifyCountKey) integerValue];
+            CGSize calculated = CGSizeZero;
+            @try {
+                calculated = ((CGSize (*)(id, SEL))objc_msgSend)(verifyNode, @selector(calculatedSize));
+            } @catch (__unused NSException *e) {
+                return;
+            }
+            if (calculated.height <= 1.0) return;
+            UIView *nodeView = ApolloDeletedCommentsNodeIsLoaded(verifyNode) ? ApolloDeletedCommentsCellView(verifyNode) : nil;
+            UIView *tableCell = nodeView;
+            while (tableCell && ![tableCell isKindOfClass:[UITableViewCell class]]) tableCell = tableCell.superview;
+            if (!tableCell) return;
+            NSIndexPath *indexPath = [(UITableView *)verifyHost indexPathForCell:(UITableViewCell *)tableCell];
+            if (!indexPath) return;
+            CGRect rowRect = [(UITableView *)verifyHost rectForRowAtIndexPath:indexPath];
+            if (fabs(rowRect.size.height - calculated.height) <= 1.5) {
+                objc_setAssociatedObject(verifyNode, kApolloDeletedCommentsHostRefreshVerifyCountKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                return;
+            }
+            if (tries >= 2) return;
+            objc_setAssociatedObject(verifyNode, kApolloDeletedCommentsHostRefreshVerifyCountKey, @(tries + 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            ApolloDeletedCommentsScheduleHostLayoutRefresh(verifyNode);
+        });
     });
 }
 
@@ -3285,7 +3409,8 @@ static id __attribute__((unused)) ApolloDeletedCommentsDeletedMarkdownLayoutSpec
     } else if (placeholderOnly) {
         displayText = ApolloDeletedCommentsReasonChipAttributedText(ApolloDeletedCommentsReasonLabelForComment(comment),
                                                                     chipAttributes,
-                                                                    NO);
+                                                                    NO,
+                                                                    comment);
     } else {
         displayText = ApolloDeletedCommentsPlaceholderAttributedText(original, ApolloDeletedCommentsReasonLabelForComment(comment), cellNode);
     }
@@ -3332,9 +3457,17 @@ static void ApolloDeletedCommentsApplyRecoveredArchiveToVisibleCell(id cellNode,
     // server's removal-collapse, not a user choice — expand it natively.
     if (wasCollapsedBeforeApply && [(id)comment respondsToSelector:@selector(setCollapsed:)]) {
         @try {
+            // Model-only un-collapse: no table animation is running for this
+            // write, so it must NOT stamp the collapse-settle window — the
+            // stamp would defer THIS APPLY'S OWN height fixup by 0.68s onto
+            // weak refs that die if the row churns (one leg of the clipped
+            // rows / black gaps in #630 round 9). The setCollapsed: hook
+            // checks this flag; main-thread only, like the stamp itself.
+            sApolloDeletedCommentsInternalUncollapse = YES;
             ((void (*)(id, SEL, BOOL))objc_msgSend)((id)comment, @selector(setCollapsed:), NO);
             ApolloLog(@"[DeletedComments] Un-collapsed late-recovered comment %@", fullName);
         } @catch (__unused NSException *e) {}
+        sApolloDeletedCommentsInternalUncollapse = NO;
     }
 
     objc_setAssociatedObject((id)comment, kApolloDeletedCommentsOriginalBodyKey, [archivedBody copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -3344,6 +3477,7 @@ static void ApolloDeletedCommentsApplyRecoveredArchiveToVisibleCell(id cellNode,
 
     ApolloDeletedCommentsSynchronizeCommentModelDisplayState(cellNode);
     ApolloDeletedCommentsRepairVisibleReasonChipIfNeeded(cellNode);
+    ApolloDeletedCommentsRepairAuthorLabelIfNeeded(cellNode);
     ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, ApolloDeletedCommentsKnownBodyContainerNode(cellNode));
     ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, ApolloDeletedCommentsKnownBodyTextNode(cellNode));
     if (ApolloDeletedCommentsNodeIsLoaded(cellNode)) {
@@ -3356,6 +3490,14 @@ static void ApolloDeletedCommentsApplyRecoveredArchiveToVisibleCell(id cellNode,
 static void ApolloDeletedCommentsHandleArcticCacheUpdated(NSNotification *notification) {
     if (!ApolloDeletedCommentsFeatureActive()) return;
     NSDictionary *comments = [notification.userInfo[@"comments"] isKindOfClass:[NSDictionary class]] ? notification.userInfo[@"comments"] : nil;
+
+    // A genuine answer landed — refresh every tracked deleted cell so chips
+    // whose comments were just classified unrecoverable pick up the suffix.
+    // Runs for EMPTY genuine answers too (the archive has nothing for this
+    // thread = everything placeholder'd is a candidate for the suffix).
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        ApolloDeletedCommentsRefreshVisibleDeletedCells();
+    });
     if (comments.count == 0) return;
 
     for (NSString *fullName in comments) {
@@ -3413,6 +3555,22 @@ static void __attribute__((unused)) ApolloDeletedCommentsRepairVisibleReasonChip
         }
         if (![current isKindOfClass:[NSAttributedString class]] || current.length == 0) continue;
         if (ApolloDeletedCommentsAttributedTextHasVisibleReasonChip(current)) {
+            // Late "(Unrecoverable)" flip: the pill rendered before the archive
+            // answered; once the definitive miss lands, rebuild the chip-only
+            // display so the suffix appears. Only for chip-only nodes — a chip
+            // riding under a recovered body means the comment is recoverable.
+            NSString *chipFullName = ApolloDeletedCommentsFullNameForComment(comment);
+            BOOL wantsSuffix = chipFullName.length > 0 && ApolloDeletedCommentsIsUnrecoverableComment(chipFullName);
+            BOOL hasSuffix = [current.string rangeOfString:@"(Unrecoverable)"].location != NSNotFound;
+            BOOL chipOnly = ApolloDeletedCommentsTrimmedString([current.string stringByReplacingOccurrencesOfString:@"(Unrecoverable)" withString:@""]).length <= 1;
+            if (wantsSuffix && !hasSuffix && chipOnly) {
+                NSAttributedString *rebuilt = ApolloDeletedCommentsReasonChipAttributedText(ApolloDeletedCommentsReasonLabelForComment(comment),
+                                                                                            ApolloDeletedCommentsReasonChipBaseAttributes(current, cellNode),
+                                                                                            hiddenTapToReveal,
+                                                                                            comment);
+                ApolloDeletedCommentsSetTextNodeAttributedText(textNode, rebuilt);
+                ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, textNode);
+            }
             return;
         }
 
@@ -3421,7 +3579,8 @@ static void __attribute__((unused)) ApolloDeletedCommentsRepairVisibleReasonChip
         if ([currentLabel isEqualToString:label.uppercaseString]) {
             NSAttributedString *chip = ApolloDeletedCommentsReasonChipAttributedText(label,
                                                                                      ApolloDeletedCommentsReasonChipBaseAttributes(current, cellNode),
-                                                                                     NO);
+                                                                                     NO,
+                                                                                     comment);
             ApolloDeletedCommentsSetTextNodeAttributedText(textNode, chip);
             ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, textNode);
             return;
@@ -3441,6 +3600,64 @@ static void __attribute__((unused)) ApolloDeletedCommentsRepairVisibleReasonChip
             ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, textNode);
             return;
         }
+    }
+}
+
+// Byline repair. The late archive apply corrects the MODEL's author
+// (ApplyRecoveredArchivedCommentToObject → setAuthor:) but every UI refresh on
+// that path is body-only — the byline's authorNode keeps the "[deleted]" string
+// Apollo rendered at cell-configure time until something makes Apollo rebuild
+// the row (collapse/expand), which is exactly the #630 round-9 report. Swap the
+// deleted token inside the author text node for the recovered username with a
+// RANGE replace so everything around it survives: the attributes at the token
+// (font/color/theme), UserAvatars' prepended avatar attachment, and any
+// collapsed "[+N]" suffix. Idempotent — after the swap no deleted token
+// remains, so re-runs fall through without touching the node.
+static void ApolloDeletedCommentsRepairAuthorLabelIfNeeded(id cellNode) {
+    if (!cellNode || !ApolloDeletedCommentsFeatureActive()) return;
+    RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
+    NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
+    if (fullName.length == 0 || !ApolloDeletedCommentsIsRecoveredComment(fullName)) return;
+    NSString *recoveredAuthor = ApolloDeletedCommentsTrimmedString(comment.author);
+    if (recoveredAuthor.length == 0 || ApolloDeletedCommentsAuthorLooksDeleted(recoveredAuthor)) return;
+
+    static const char *authorNames[] = { "authorNode", "authorTextNode", "usernameNode", NULL };
+    id authorRoot = ApolloDeletedCommentsObjectIvarByNames(cellNode, authorNames);
+    if (!authorRoot) return;
+
+    NSMutableArray *candidates = [NSMutableArray array];
+    NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:8];
+    ApolloDeletedCommentsCollectWritableTextNodes(authorRoot, 3, visited, candidates);
+
+    for (id textNode in candidates) {
+        NSAttributedString *current = ApolloDeletedCommentsCurrentAttributedText(textNode);
+        if (![current isKindOfClass:[NSAttributedString class]] || current.length == 0) continue;
+        NSString *plain = current.string;
+        // Bracketed tokens are safe as substring matches; the bare words only
+        // count when they ARE the whole trimmed label, so real usernames that
+        // merely contain "deleted" are never touched.
+        NSRange tokenRange = [plain rangeOfString:@"[deleted]" options:NSCaseInsensitiveSearch];
+        if (tokenRange.location == NSNotFound) {
+            tokenRange = [plain rangeOfString:@"[removed]" options:NSCaseInsensitiveSearch];
+        }
+        if (tokenRange.location == NSNotFound) {
+            NSString *trimmed = ApolloDeletedCommentsTrimmedString(plain).lowercaseString;
+            if ([trimmed isEqualToString:@"deleted"] || [trimmed isEqualToString:@"removed"]) {
+                tokenRange = [plain rangeOfString:trimmed options:NSCaseInsensitiveSearch];
+            }
+        }
+        if (tokenRange.location == NSNotFound) continue;
+
+        NSMutableAttributedString *updated = [current mutableCopy];
+        [updated replaceCharactersInRange:tokenRange withString:recoveredAuthor];
+        @try {
+            ((void (*)(id, SEL, NSAttributedString *))objc_msgSend)(textNode, @selector(setAttributedText:), updated);
+        } @catch (__unused NSException *e) {
+            continue;
+        }
+        ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, textNode);
+        ApolloLog(@"[DeletedComments] Repaired byline for %@ -> u/%@", fullName, recoveredAuthor);
+        return;
     }
 }
 
@@ -3467,6 +3684,7 @@ static void ApolloDeletedCommentsScheduleReasonChipRepair(id cellNode) {
             if (![currentFullName isEqualToString:fullName]) return;
 
             ApolloDeletedCommentsRepairVisibleReasonChipIfNeeded(cellNode);
+            ApolloDeletedCommentsRepairAuthorLabelIfNeeded(cellNode);
             ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, ApolloDeletedCommentsKnownBodyContainerNode(cellNode));
             ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, ApolloDeletedCommentsKnownBodyTextNode(cellNode));
             ApolloDeletedCommentsApplyCellHighlight(cellNode);
@@ -3489,6 +3707,7 @@ static void ApolloDeletedCommentsUpdateCell(id cellNode) {
     ApolloDeletedCommentsApplyCachedArchiveToVisibleDeletedCell(cellNode);
     ApolloDeletedCommentsSynchronizeCommentModelDisplayState(cellNode);
     ApolloDeletedCommentsRepairVisibleReasonChipIfNeeded(cellNode);
+    ApolloDeletedCommentsRepairAuthorLabelIfNeeded(cellNode);
     ApolloDeletedCommentsScheduleReasonChipRepair(cellNode);
     ApolloDeletedCommentsApplyCellHighlight(cellNode);
     if (ApolloDeletedCommentsFeatureActive() && sTapToRevealDeletedComments) {
@@ -3556,11 +3775,11 @@ static NSAttributedString *__attribute__((unused)) ApolloDeletedCommentsRenameRe
     BOOL placeholderOnly = ApolloDeletedCommentsIsDeletedPlaceholder(fullName) &&
                            !ApolloDeletedCommentsIsRecoveredComment(fullName);
     if (placeholderOnly) {
-        return ApolloDeletedCommentsReasonChipAttributedText(ApolloDeletedCommentsReasonLabelForComment(comment), baseAttributes, NO);
+        return ApolloDeletedCommentsReasonChipAttributedText(ApolloDeletedCommentsReasonLabelForComment(comment), baseAttributes, NO, comment);
     }
 
     BOOL revealed = ApolloDeletedCommentsIsCommentRevealed(fullName);
-    NSMutableAttributedString *renamed = [ApolloDeletedCommentsReasonChipAttributedText(ApolloDeletedCommentsReasonLabelForComment(comment), baseAttributes, !revealed) mutableCopy];
+    NSMutableAttributedString *renamed = [ApolloDeletedCommentsReasonChipAttributedText(ApolloDeletedCommentsReasonLabelForComment(comment), baseAttributes, !revealed, comment) mutableCopy];
     NSRange targetRange = NSMakeRange(0, renamed.length);
     [attributedText enumerateAttributesInRange:NSMakeRange(0, attributedText.length)
                                        options:0
@@ -3685,6 +3904,78 @@ static void ApolloDeletedCommentsCaptureLiveCommentBodyFont(id textNode, NSAttri
 - (void)layout;
 @end
 
+// Adopt RAW deleted-looking stubs that never went through the wire transform.
+// Despite the round-9 attribution fixes (link_id from the morechildren POST
+// body, 30-min sliding fallback), a response can still arrive unattributed —
+// its removed comments then carry Reddit's server collapse and NO registry
+// marks, so nothing renders a chip, nothing tracks them for archive arrival,
+// and they stay collapsed until scrolled (#630 rounds 6/9). Preload entry is
+// the earliest per-cell point we can repair that: register the placeholder
+// (chip + tracking + archive lookups all key off the registry), and clear the
+// server's removal-collapse exactly as parse time would have. Once per
+// fullName, so a user's deliberate re-collapse is never fought.
+static void ApolloDeletedCommentsAdoptRawDeletedStubIfNeeded(id cellNode) {
+    if (!ApolloDeletedCommentsFeatureActive()) return;
+    RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
+    NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
+    if (fullName.length == 0) return;
+    // Per-thread gate: FeatureActive() is YES session-wide as soon as ANY thread
+    // has a passive/override enable, so without this a raw stub in an
+    // un-enabled thread would get adopted + un-collapsed. TreatmentAllowedForComment
+    // checks the comment's own linkID against the active set (same gate the
+    // rest of the module uses via CellNodeShouldShowDeletedTreatment).
+    if (!ApolloDeletedCommentsTreatmentAllowedForComment(comment)) return;
+    if (ApolloDeletedCommentsIsDeletedPlaceholder(fullName) || ApolloDeletedCommentsIsRecoveredComment(fullName)) return;
+
+    NSString *body = comment.body;
+    // Deleted-looking = the rendered placeholder tokens ([removed]/[deleted]/…),
+    // an empty body under a deleted author, OR Reddit's server removal signal
+    // (collapsed + a non-empty collapsedReasonCode) — the last covers phrase-body
+    // and mod-removal stubs the token matcher alone misses, mirroring the wire
+    // pass's removal-metadata branch.
+    BOOL hasRemovalCode = NO;
+    if ([(id)comment respondsToSelector:@selector(collapsedReasonCode)]) {
+        @try {
+            NSString *code = ((NSString *(*)(id, SEL))objc_msgSend)((id)comment, @selector(collapsedReasonCode));
+            hasRemovalCode = [code isKindOfClass:[NSString class]] && code.length > 0;
+        } @catch (__unused NSException *e) {}
+    }
+    BOOL looksDeleted = ApolloDeletedCommentsTextLooksLikeDeletedPlaceholderNode(body) ||
+                        (ApolloDeletedCommentsTrimmedString(body).length == 0 &&
+                         ApolloDeletedCommentsAuthorLooksDeleted(comment.author)) ||
+                        (hasRemovalCode && ApolloDeletedCommentsCommentIsCollapsed(comment));
+    if (!looksDeleted) return;
+
+    static NSMutableSet<NSString *> *adopted = nil;
+    static NSObject *adoptedLock = nil;
+    static dispatch_once_t adoptedOnce;
+    dispatch_once(&adoptedOnce, ^{
+        adopted = [NSMutableSet set];
+        adoptedLock = [NSObject new];
+    });
+    @synchronized (adoptedLock) {
+        if ([adopted containsObject:fullName]) return;
+        [adopted addObject:fullName];
+    }
+
+    // Same classification the wire pass uses: moderator wording → mod removal,
+    // otherwise user deletion (the canonical reason strings from Data.m).
+    NSString *lowered = [body lowercaseString] ?: @"";
+    NSString *reason = ([lowered rangeOfString:@"moderator"].location != NSNotFound ||
+                        [lowered rangeOfString:@"removed"].location != NSNotFound)
+                       ? @"moderator_removed" : @"user_deleted";
+    ApolloDeletedCommentsRegisterDeletedPlaceholder(fullName, reason);
+
+    if (ApolloDeletedCommentsCommentIsCollapsed(comment) && [(id)comment respondsToSelector:@selector(setCollapsed:)]) {
+        @try {
+            sApolloDeletedCommentsInternalUncollapse = YES;
+            ((void (*)(id, SEL, BOOL))objc_msgSend)((id)comment, @selector(setCollapsed:), NO);
+        } @catch (__unused NSException *e) {}
+        sApolloDeletedCommentsInternalUncollapse = NO;
+        ApolloLog(@"[DeletedComments] Adopted raw deleted stub %@ (un-collapsed, reason=%@)", fullName, reason);
+    }
+}
+
 %hook _TtC6Apollo15CommentCellNode
 
 // Apply a cached recovered archive to the MODEL at preload — before the node's first
@@ -3706,6 +3997,7 @@ static void ApolloDeletedCommentsCaptureLiveCommentBodyFont(id textNode, NSAttri
         // round 5. Tracking is view-safe pre-display (weak map, model-only gates); the
         // full UpdateCell is NOT called here because it installs gestures (needs the
         // backing view).
+        ApolloDeletedCommentsAdoptRawDeletedStubIfNeeded((id)self);
         ApolloDeletedCommentsTrackVisibleDeletedCommentCell((id)self);
         ApolloDeletedCommentsApplyCachedArchiveToVisibleDeletedCell((id)self);
         ApolloDeletedCommentsSynchronizeCommentModelDisplayState((id)self);
@@ -3954,7 +4246,7 @@ static BOOL ApolloDeletedCommentsRowSelectionIsStale(id adapter, NSIndexPath *in
     // cards reported in #620. No table animation can be running from a
     // background parse, so those stamps protected nothing. This also keeps
     // the stamp variable main-thread-only (it was cross-thread racy before).
-    if ([NSThread isMainThread]) {
+    if ([NSThread isMainThread] && !sApolloDeletedCommentsInternalUncollapse) {
         ApolloDeletedCommentsNoteCollapseEvent();
     }
 

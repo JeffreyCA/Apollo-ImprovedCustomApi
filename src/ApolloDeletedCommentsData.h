@@ -35,6 +35,12 @@ NSString *ApolloDeletedCommentsRecoveredReasonForComment(NSString *fullName);
 void ApolloDeletedCommentsRegisterDeletedPlaceholder(NSString *fullName, NSString *reason);
 BOOL ApolloDeletedCommentsIsDeletedPlaceholder(NSString *fullName);
 NSString *ApolloDeletedCommentsDeletedPlaceholderReason(NSString *fullName);
+// YES when the Arctic archive answered genuinely and definitively cannot
+// restore this comment: it is absent from a coverage-complete tree (and old
+// enough that ingestion lag can't explain it), or the archived copy is itself
+// redacted. Never set from transient failures / rate limits. Drives the
+// "(Unrecoverable)" chip suffix; self-heals if a later fetch finds the comment.
+BOOL ApolloDeletedCommentsIsUnrecoverableComment(NSString *fullName);
 NSDictionary *ApolloDeletedCommentsCachedArchivedComment(NSString *fullName);
 BOOL ApolloDeletedCommentsApplyRecoveredArchivedCommentToObject(id comment, NSDictionary *archived, NSString *reason);
 BOOL ApolloDeletedCommentsIsRecoveredCommentBody(NSString *author, NSString *body);
