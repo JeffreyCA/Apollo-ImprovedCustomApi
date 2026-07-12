@@ -4769,6 +4769,19 @@ static void ApolloUpdatePostInfoMarkerForNode(id anyNode, NSString *sourceCode, 
         ApolloReserveMarkerSlotInCompactRow(label, postInfoNode, NO);
         return;
     }
+    // Keep the label's `font` PROPERTY in sync with the marker's built font.
+    // We only ever set attributedText (the per-run fonts carry the real
+    // stat-matched size), so label.font otherwise stays UIKit's 17pt default.
+    // The theme runtime re-themes fonts on window attach (RethemeFontOnAttach,
+    // %hook UILabel didMoveToWindow) by reading label.font, and -setFont:
+    // re-stamps the WHOLE attributedText: with a non-System theme font active
+    // (Rounded/Serif/Mono) that blew every feed marker up to 17pt on each cell
+    // re-attach — the "🌐 PT is bigger on some posts" bug, invisible under the
+    // System font. With the property synced, that attach-time stamp keeps the
+    // stat size and only swaps the design so the marker matches the themed
+    // stats. Set font BEFORE attributedText so the built runs are the final
+    // state (setFont: re-stamps existing runs).
+    label.font = markerFont;
     label.attributedText = content;
     label.hidden = NO;
     objc_setAssociatedObject(label, kApolloPostInfoMarkerCodeKey, [sourceCode copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
