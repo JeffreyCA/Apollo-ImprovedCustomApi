@@ -673,14 +673,22 @@ static id ApolloDeletedCommentsObjectIvarByNames(id object, const char **candida
             Ivar ivar = class_getInstanceVariable(cls, candidateNames[i]);
             if (!ivar) continue;
             const char *type = ivar_getTypeEncoding(ivar);
-            if (!type) continue;
-            // Skip leading type-encoding qualifier chars before the object marker.
-            // Swift class-type ivars on CommentCellNode (e.g. `bodyNode`) are
-            // declared `_Atomic`, which clang encodes as `A@"..."` — without
-            // skipping the 'A' we'd reject the MarkdownNode and never find it.
-            const char *cursor = type;
-            while (*cursor && strchr("rnNoORVAj", *cursor)) cursor++;
-            if (*cursor != '@') continue;
+            if (type && type[0] != '\0') {
+                // Skip leading type-encoding qualifier chars before the object marker.
+                // Swift class-type ivars on CommentCellNode (e.g. `bodyNode`) are
+                // declared `_Atomic`, which clang encodes as `A@"..."` — without
+                // skipping the 'A' we'd reject the MarkdownNode and never find it.
+                const char *cursor = type;
+                while (*cursor && strchr("rnNoORVAj", *cursor)) cursor++;
+                if (*cursor != '@') continue;
+            }
+            // Some Swift reference ivars expose an EMPTY ObjC type encoding at
+            // runtime. CommentCellNode.authorNode is one of them on this Apollo
+            // build (confirmed live: ivar_getTypeEncoding -> ""), even though
+            // object_getIvar correctly returns its ApolloButtonNode. Candidate
+            // names passed to this helper are deliberately object-only, so an
+            // absent encoding is safe to probe and must not be treated as a
+            // non-object ivar. Reject only a present, explicitly non-object type.
             id value = nil;
             @try {
                 value = object_getIvar(object, ivar);
@@ -3624,6 +3632,52 @@ static void ApolloDeletedCommentsRepairAuthorLabelIfNeeded(id cellNode) {
     static const char *authorNames[] = { "authorNode", "authorTextNode", "usernameNode", NULL };
     id authorRoot = ApolloDeletedCommentsObjectIvarByNames(cellNode, authorNames);
     if (!authorRoot) return;
+
+    // Apollo's current CommentCellNode stores the byline in an ApolloButtonNode.
+    // Its visible ASTextNode is exposed through -titleNode, but is NOT returned by
+    // -subnodes, so the generic recursive collector below never reaches it. That
+    // made round 9's repair a no-op even though the model author had already been
+    // restored (the exact ojaaql3 regression case still showed "[deleted]").
+    //
+    // Update the button's own attributed-title state, not just its private text
+    // node, so a later button layout cannot restore the stale deleted label. The
+    // range replacement preserves Apollo's font/color and any attachment already
+    // present in the title.
+    if ([authorRoot respondsToSelector:@selector(attributedTitleForState:)] &&
+        [authorRoot respondsToSelector:@selector(setAttributedTitle:forState:)]) {
+        @try {
+            NSAttributedString *current = ((NSAttributedString *(*)(id, SEL, UIControlState))objc_msgSend)(authorRoot,
+                                                                                                            @selector(attributedTitleForState:),
+                                                                                                            UIControlStateNormal);
+            if ([current isKindOfClass:[NSAttributedString class]] && current.length > 0) {
+                NSString *plain = current.string;
+                NSRange tokenRange = [plain rangeOfString:@"[deleted]" options:NSCaseInsensitiveSearch];
+                if (tokenRange.location == NSNotFound) {
+                    tokenRange = [plain rangeOfString:@"[removed]" options:NSCaseInsensitiveSearch];
+                }
+                if (tokenRange.location == NSNotFound) {
+                    NSString *trimmed = ApolloDeletedCommentsTrimmedString(plain).lowercaseString;
+                    if ([trimmed isEqualToString:@"deleted"] || [trimmed isEqualToString:@"removed"]) {
+                        tokenRange = [plain rangeOfString:trimmed options:NSCaseInsensitiveSearch];
+                    }
+                }
+                if (tokenRange.location != NSNotFound) {
+                    NSMutableAttributedString *updated = [current mutableCopy];
+                    [updated replaceCharactersInRange:tokenRange withString:recoveredAuthor];
+                    ((void (*)(id, SEL, NSAttributedString *, UIControlState))objc_msgSend)(authorRoot,
+                                                                                           @selector(setAttributedTitle:forState:),
+                                                                                           updated,
+                                                                                           UIControlStateNormal);
+                    id titleNode = [authorRoot respondsToSelector:@selector(titleNode)]
+                        ? ((id (*)(id, SEL))objc_msgSend)(authorRoot, @selector(titleNode))
+                        : nil;
+                    ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, titleNode ?: authorRoot);
+                    ApolloLog(@"[DeletedComments] Repaired button byline for %@ -> u/%@", fullName, recoveredAuthor);
+                    return;
+                }
+            }
+        } @catch (__unused NSException *e) {}
+    }
 
     NSMutableArray *candidates = [NSMutableArray array];
     NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:8];
