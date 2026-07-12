@@ -35,6 +35,10 @@ extern void ApolloVideoUnmute_FixDisconnectedPlayerLayer(id postsViewController)
 //   - SavedPostsCommentsViewController (saved posts)
 //   - ProfileViewController        (user profile)
 //
+// PostsSearchResultsViewController has no native reclaim to defer; its
+// tweak-side equivalent lives in ApolloVideoUnmute.xm (%group
+// SearchResultsReclaim) — deferral changes here likely need mirroring there.
+//
 // =============================================================================
 
 // Flag: prevents re-entry into the deferral path when we manually invoke
