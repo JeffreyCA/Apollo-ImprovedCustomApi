@@ -149,6 +149,79 @@ static inline void ApolloMirrorRemoveLink(NSString *key) {
     if (!key) return;
     @synchronized (sLinkTranslationMirror) { [sLinkTranslationMirror removeObjectForKey:key]; }
 }
+// Mirror of the raw text-keyed cache (sTranslationCache). Titles, rich link
+// previews, and post bodies key by source text rather than fullName, so they
+// need their own suspension-proof store — iOS purges NSCache contents while
+// the app sits suspended in the background (and our memory-warning handler
+// clears the raw cache deliberately), which made every app switch re-run
+// language detection + a provider round-trip for everything visible: the
+// thread flashed back to the original language for ~a second on every
+// foreground. Insertion-order capped so an all-day session stays bounded.
+static NSMutableDictionary<NSString *, NSString *> *sRawTranslationMirror = nil;
+static NSMutableArray<NSString *> *sRawTranslationMirrorOrder = nil;
+static const NSUInteger kApolloRawTranslationMirrorCap = 4096;
+
+static void ApolloRawTranslationCacheSet(NSString *cacheKey, NSString *value) {
+    if (cacheKey.length == 0 || value.length == 0) return;
+    [sTranslationCache setObject:value forKey:cacheKey];
+    @synchronized (sRawTranslationMirror) {
+        if (!sRawTranslationMirror[cacheKey]) [sRawTranslationMirrorOrder addObject:cacheKey];
+        sRawTranslationMirror[cacheKey] = value;
+        if (sRawTranslationMirrorOrder.count > kApolloRawTranslationMirrorCap) {
+            NSRange oldest = NSMakeRange(0, sRawTranslationMirrorOrder.count / 4);
+            for (NSString *evicted in [sRawTranslationMirrorOrder subarrayWithRange:oldest]) {
+                [sRawTranslationMirror removeObjectForKey:evicted];
+            }
+            [sRawTranslationMirrorOrder removeObjectsInRange:oldest];
+        }
+    }
+}
+
+// Cache-lookup helpers that fall back to the mirror dictionaries. An NSCache
+// miss does NOT mean "never translated" — the cache is purged during
+// background suspension. The mirrors survive; on a mirror hit re-seed the
+// NSCache so subsequent lookups take the fast path again. Every read of the
+// three caches must go through these (never objectForKey: directly), or the
+// post-foreground re-apply falls through to the network path again.
+static NSString *ApolloRawTranslationCacheGet(NSString *cacheKey) {
+    if (cacheKey.length == 0) return nil;
+    NSString *hit = [sTranslationCache objectForKey:cacheKey];
+    if (hit.length > 0) return hit;
+    @synchronized (sRawTranslationMirror) { hit = sRawTranslationMirror[cacheKey]; }
+    if (hit.length > 0) [sTranslationCache setObject:hit forKey:cacheKey];
+    return hit;
+}
+static NSString *ApolloCachedCommentTranslationForFullName(NSString *fullName) {
+    if (fullName.length == 0) return nil;
+    NSString *hit = [sCommentTranslationByFullName objectForKey:fullName];
+    if (hit.length > 0) return hit;
+    @synchronized (sCommentTranslationMirror) { hit = sCommentTranslationMirror[fullName]; }
+    if (hit.length > 0) [sCommentTranslationByFullName setObject:hit forKey:fullName];
+    return hit;
+}
+static NSString *ApolloCachedLinkTranslationForKey(NSString *key) {
+    if (key.length == 0) return nil;
+    NSString *hit = [sLinkTranslationByFullName objectForKey:key];
+    if (hit.length > 0) return hit;
+    @synchronized (sLinkTranslationMirror) { hit = sLinkTranslationMirror[key]; }
+    if (hit.length > 0) [sLinkTranslationByFullName setObject:hit forKey:key];
+    return hit;
+}
+
+// Full flush — caches AND mirrors. For "forget everything" flows (the
+// skip-language list changed). Clearing only the NSCaches would leave the
+// mirror fallbacks above serving the stale entries right back.
+static void ApolloClearAllTranslationCaches(void) {
+    [sTranslationCache removeAllObjects];
+    [sCommentTranslationByFullName removeAllObjects];
+    [sLinkTranslationByFullName removeAllObjects];
+    @synchronized (sRawTranslationMirror) {
+        [sRawTranslationMirror removeAllObjects];
+        [sRawTranslationMirrorOrder removeAllObjects];
+    }
+    @synchronized (sCommentTranslationMirror) { [sCommentTranslationMirror removeAllObjects]; }
+    @synchronized (sLinkTranslationMirror) { [sLinkTranslationMirror removeAllObjects]; }
+}
 static NSMutableDictionary<NSString *, NSMutableArray *> *sPendingTranslationCallbacks;
 static __weak UIViewController *sVisibleCommentsViewController = nil;
 // Weak set of every text node we've stamped with the ownership marker. Lets
@@ -2925,7 +2998,7 @@ static void ApolloRequestTranslation(NSString *cacheKey,
                                      NSString *sourceText,
                                      NSString *targetLanguage,
                                      void (^completion)(NSString *translated, NSError *error)) {
-    NSString *cached = [sTranslationCache objectForKey:cacheKey];
+    NSString *cached = ApolloRawTranslationCacheGet(cacheKey);
     if (cached.length > 0) {
         completion(cached, nil);
         return;
@@ -2963,7 +3036,7 @@ static void ApolloRequestTranslation(NSString *cacheKey,
         }
 
         if ([restoredTranslation isKindOfClass:[NSString class]] && restoredTranslation.length > 0) {
-            [sTranslationCache setObject:restoredTranslation forKey:cacheKey];
+            ApolloRawTranslationCacheSet(cacheKey, restoredTranslation);
         }
 
         for (id callbackObj in callbacks) {
@@ -3057,7 +3130,7 @@ NSString *ApolloRichPreviewTranslatedTextIfAvailable(NSURL *url, NSString *field
     if ([detected isEqualToString:targetLanguage]) return nil;
 
     NSString *cacheKey = ApolloRichPreviewTranslationCacheKey(url, field, trimmed, targetLanguage);
-    NSString *cached = [sTranslationCache objectForKey:cacheKey];
+    NSString *cached = ApolloRawTranslationCacheGet(cacheKey);
     if (ApolloTranslatedTextDiffersFromSource(trimmed, cached)) return tapHeld ? nil : cached;
 
     @synchronized (sRichPreviewTranslationInFlightKeys) {
@@ -3134,7 +3207,7 @@ static void ApolloMaybeTranslateCommentCellNode(id commentCellNode, BOOL forceTr
     // Re-apply from the fullName cache without going to the network. This
     // makes collapse/expand and cell reuse re-show the translation immediately.
     if (fullName.length > 0) {
-        NSString *cachedTranslation = [sCommentTranslationByFullName objectForKey:fullName];
+        NSString *cachedTranslation = ApolloCachedCommentTranslationForFullName(fullName);
         if (cachedTranslation.length > 0) {
             ApolloApplyTranslationToCellNode(commentCellNode, comment, cachedTranslation);
             return;
@@ -3237,7 +3310,7 @@ static BOOL ApolloReapplyCachedTranslationForCellNode(id commentCellNode) {
         ApolloTranslationVerboseLog(@"[Translation/vote] commentReapply: empty fullName cellNode=%p", commentCellNode);
         return NO;
     }
-    NSString *cached = [sCommentTranslationByFullName objectForKey:fullName];
+    NSString *cached = ApolloCachedCommentTranslationForFullName(fullName);
     if (cached.length == 0) {
         ApolloTranslationVerboseLog(@"[Translation/vote] commentReapply: cache MISS fullName=%@", fullName);
         return NO;
@@ -3309,7 +3382,7 @@ static BOOL ApolloReapplyCachedTranslationForHeaderCellNode(id headerCellNode) {
         if ([body isKindOfClass:[NSString class]] && body.length > 0) {
             trimmed = [body stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
             NSString *cacheKey = trimmed.length > 0 ? ApolloVisiblePostCacheKey(link, trimmed, targetLanguage) : nil;
-            cached = cacheKey.length > 0 ? [sLinkTranslationByFullName objectForKey:cacheKey] : nil;
+            cached = ApolloCachedLinkTranslationForKey(cacheKey);
         }
     }
 
@@ -3429,7 +3502,7 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *f
 
     NSString *cacheStoreKey = ApolloVisiblePostCacheKey(link, trimmed, targetLanguage);
     if (cacheStoreKey.length > 0) {
-        NSString *cached = [sLinkTranslationByFullName objectForKey:cacheStoreKey];
+        NSString *cached = ApolloCachedLinkTranslationForKey(cacheStoreKey);
         if (cached.length > 0) {
             ApolloApplyTranslationToHeaderCellNode(headerCellNode, link, trimmed, cached);
             return;
@@ -3514,7 +3587,7 @@ static void ApolloMaybeTranslateVisiblePostBodyForController(UIViewController *v
 
     NSString *cacheStoreKey = ApolloVisiblePostCacheKey(link, sourceText, targetLanguage);
     if (cacheStoreKey.length > 0) {
-        NSString *cached = [sLinkTranslationByFullName objectForKey:cacheStoreKey];
+        NSString *cached = ApolloCachedLinkTranslationForKey(cacheStoreKey);
         if (cached.length > 0) {
             ApolloApplyTranslationToPostTextNode(viewController.view, textNode, sourceText, cached);
             return;
@@ -4237,7 +4310,7 @@ static void ApolloToggleTranslationForCommentTextNode(id textNode) {
             ApolloShowOriginalWithRetranslateAffordanceForCellNode(cellNode, comment, textNode);
         } else {
             ApolloTapModeSetKeyTranslated(fullName, YES);            // → translate now
-            NSString *cached = [sCommentTranslationByFullName objectForKey:fullName];
+            NSString *cached = ApolloCachedCommentTranslationForFullName(fullName);
             if (cached.length > 0) {
                 ApolloApplyTranslationToCellNode(cellNode, comment, cached);
             } else {
@@ -4252,7 +4325,7 @@ static void ApolloToggleTranslationForCommentTextNode(id textNode) {
 
     if ([sUserPinnedOriginalFullNames containsObject:fullName]) {
         [sUserPinnedOriginalFullNames removeObject:fullName];        // → re-translate
-        NSString *cached = [sCommentTranslationByFullName objectForKey:fullName];
+        NSString *cached = ApolloCachedCommentTranslationForFullName(fullName);
         if (cached.length > 0) ApolloApplyTranslationToCellNode(cellNode, comment, cached);
     } else {
         [sUserPinnedOriginalFullNames addObject:fullName];           // → show original
@@ -7592,6 +7665,21 @@ static void ApolloDbgOpenFirstPost(CFNotificationCenterRef c, void *o, CFStringR
         ApolloLog(@"[Tw/dbg] no table/rows");
     });
 }
+
+// Mimics what iOS does to the process while it sits suspended in the
+// background: purge every translation NSCache but leave the mirrors alone.
+// Lets the sim exercise the exact device failure mode behind "translations
+// re-translate on every app switch" without a real jetsam pass.
+static void ApolloDbgPurgeNSCaches(CFNotificationCenterRef c, void *o, CFStringRef n, const void *obj, CFDictionaryRef u) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [sTranslationCache removeAllObjects];
+        [sCommentTranslationByFullName removeAllObjects];
+        [sLinkTranslationByFullName removeAllObjects];
+        NSUInteger mirrorCount = 0;
+        @synchronized (sCommentTranslationMirror) { mirrorCount = sCommentTranslationMirror.count; }
+        ApolloLog(@"[Tw/dbg] purged all translation NSCaches (comment mirror keeps %lu)", (unsigned long)mirrorCount);
+    });
+}
 #endif
 // ==============================================================================
 
@@ -7605,6 +7693,8 @@ static void ApolloDbgOpenFirstPost(CFNotificationCenterRef c, void *o, CFStringR
     sLoggedSkippedStructuredPostFullNames = [NSMutableSet set];
     sCommentTranslationMirror = [NSMutableDictionary dictionary];
     sLinkTranslationMirror = [NSMutableDictionary dictionary];
+    sRawTranslationMirror = [NSMutableDictionary dictionary];
+    sRawTranslationMirrorOrder = [NSMutableArray array];
     sPendingTranslationCallbacks = [NSMutableDictionary dictionary];
     sRichPreviewTranslationInFlightKeys = [NSMutableSet set];
     sFeedTitleModeByFeedKey = [NSMutableDictionary dictionary];
@@ -7675,12 +7765,15 @@ static void ApolloDbgOpenFirstPost(CFNotificationCenterRef c, void *o, CFStringR
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, ApolloDbgPinComment, CFSTR("apollofix.dbg.pincomment"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, ApolloDbgToggleCollapse, CFSTR("apollofix.dbg.collapse"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, ApolloDbgDumpInsets, CFSTR("apollofix.dbg.insets"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, ApolloDbgPurgeNSCaches, CFSTR("apollofix.dbg.purgecaches"), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
 #endif
 
-    // Memory-warning handler: only drop the raw key->text cache (cheap to
-    // recompute via the persistent fullName caches). Do NOT wipe the
-    // per-comment / per-post caches — iOS sends memory warnings when the app
-    // is backgrounded, and clearing them caused translated threads to revert
+    // Memory-warning handler: only drop the raw key->text NSCache. Its mirror
+    // keeps the data (plain strings — tiny next to what a real warning is
+    // about), so lookups after the warning still hit via the mirror fallback
+    // instead of burning a provider round-trip. Do NOT wipe the per-comment /
+    // per-post caches — iOS sends memory warnings when the app is
+    // backgrounded, and clearing them caused translated threads to revert
     // to the original language as soon as the user returned to Apollo.
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidReceiveMemoryWarningNotification
                                                       object:nil
@@ -7691,9 +7784,17 @@ static void ApolloDbgOpenFirstPost(CFNotificationCenterRef c, void *o, CFStringR
 
     // App lifecycle: snapshot caches when going to background; re-apply the
     // active thread's translation on return.
+    //
+    // queue:nil — the block must run synchronously inside the notification
+    // post, while the app still has background runtime. With
+    // queue:mainQueue the block lands on the NEXT main-runloop pass, which
+    // never comes before suspension: the snapshot silently slipped to the
+    // following resume (visible in user logs as "[translation/persist]
+    // wrote …" milliseconds after the foreground heal) and was lost
+    // entirely when the app was jetsam-killed while suspended.
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification
                                                       object:nil
-                                                       queue:[NSOperationQueue mainQueue]
+                                                       queue:nil
                                                   usingBlock:^(__unused NSNotification *note) {
         ApolloPersistTranslationCachesToDisk();
     }];
@@ -7723,9 +7824,7 @@ static void ApolloDbgOpenFirstPost(CFNotificationCenterRef c, void *o, CFStringR
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(__unused NSNotification *note) {
-        [sTranslationCache removeAllObjects];
-        [sCommentTranslationByFullName removeAllObjects];
-        [sLinkTranslationByFullName removeAllObjects];
+        ApolloClearAllTranslationCaches();
         @synchronized (sLoggedSkippedCommentFullNames) {
             [sLoggedSkippedCommentFullNames removeAllObjects];
         }
