@@ -67,6 +67,11 @@ extern BOOL sCommunityHighlights;
 // ApolloSubredditHighlights.xm (ApolloHLWebFetch).
 extern BOOL sCommunityHighlightsWeb;
 extern BOOL sAutoHideTabBarShowOnIdle;
+// Which side the iOS 26 minimized (Liquid Glass) tab bar pill docks on:
+// 0 = Left (system default), 1 = Right. Read live at layout time so a change
+// applies without relaunch. Default 0 via registerDefaults
+// (UDKeyTabBarCollapseSide). See ApolloTabBarCollapseSide.xm.
+extern NSInteger sTabBarCollapseSide;
 // iPad + Liquid Glass only. When ON, docks the iOS 26 floating tab bar at the
 // bottom (classic) instead of the top-center pill. Opt-in; default OFF via
 // registerDefaults. Temporary stopgap for issue #387. See ApolloIPadTabBarBottom.xm.

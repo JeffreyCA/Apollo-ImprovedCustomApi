@@ -1671,6 +1671,7 @@ static void initializeRandomSources() {
                                     UDKeyCommunityHighlights: @NO,
                                     UDKeyCommunityHighlightsWeb: @NO,
                                     UDKeyAutoHideTabBarShowOnIdle: @NO,
+                                    UDKeyTabBarCollapseSide: @0,
                                     UDKeyKeepSearchBarInPlace: @NO,
                                     UDKeyIPadTabBarBottom: @NO,
                                     UDKeyIconRowMagnifier: @YES,
@@ -1818,6 +1819,8 @@ static void initializeRandomSources() {
     sCommunityHighlights = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlights];
     sCommunityHighlightsWeb = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlightsWeb];
     sAutoHideTabBarShowOnIdle = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoHideTabBarShowOnIdle];
+    sTabBarCollapseSide = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyTabBarCollapseSide];
+    if (sTabBarCollapseSide != 0 && sTabBarCollapseSide != 1) sTabBarCollapseSide = 0;
     sKeepSearchBarInPlace = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyKeepSearchBarInPlace];
     sIPadTabBarBottom = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIPadTabBarBottom];
     sIconRowMagnifier = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIconRowMagnifier];

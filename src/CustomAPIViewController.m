@@ -1207,7 +1207,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             BOOL idleSupported = [self apollo_supportsAutoHideTabBarIdleSetting];
             UITableViewCell *cell = [self switchCellWithIdentifier:@"Cell_Gen_TabBarIdle"
                                                              label:@"Tab Bar Re-Expands When Idle"
-                                                            detail:@"Requires Liquid Glass and Hide Bars on Scroll in General settings."
+                                                            detail:@"Requires Liquid Glass and Hide Bars on Scroll (Left or Right) in General settings."
                                                                 on:idleSupported && [defaults boolForKey:UDKeyAutoHideTabBarShowOnIdle]
                                                             action:@selector(autoHideTabBarShowOnIdleSwitchToggled:)];
             UISwitch *toggleSwitch = [cell.accessoryView isKindOfClass:[UISwitch class]] ? (UISwitch *)cell.accessoryView : nil;
