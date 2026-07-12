@@ -2717,16 +2717,16 @@ static BOOL ApolloShouldSkipTranslationForText(NSString *text, NSString *targetL
     return NO;
 }
 
-// Strict source-language detector for the Apple backend. Apple needs an EXPLICIT
-// source, and a wrong guess is actively harmful: it spins up a bogus session and
-// makes Apple prompt to download the wrong language (e.g. short Portuguese/Italian
-// text misread as Indonesian/Danish), which then fails and starves the real
-// languages of their model downloads. So we only accept a CONFIDENT, UNAMBIGUOUS
-// top guess — high probability AND a clear margin over the runner-up. Distinct-script
-// languages (Japanese/Chinese/Korean) score ~0.99 with a negligible runner-up and
-// pass trivially; ambiguous short Romance text is left untranslated rather than
-// mis-assigned. (No context "remember the last language" fallback — one bad guess
-// would poison every short snippet after it.)
+// Source-language detector for the Apple backend. Apple needs an EXPLICIT source, and a
+// wrong guess is actively harmful: it spins up a bogus session and makes Apple prompt to
+// download the wrong language (e.g. short Portuguese/Italian text misread as
+// Indonesian/Danish), which then fails and starves the real languages of their model
+// downloads. So the acceptance bar is deliberately conservative — but it is now
+// LENGTH-ADAPTIVE rather than one-size-fits-all, because the flat strict bar was silently
+// dropping clearly-foreign POST BODIES (see the long-text note below). Distinct-script
+// languages (Japanese/Chinese/Korean) score ~0.99 with a negligible runner-up and pass
+// trivially. (No context "remember the last language" fallback — one bad guess would
+// poison every short snippet after it.)
 static NSString *ApolloDetectSourceLanguageForApple(NSString *text) {
     if (![text isKindOfClass:[NSString class]]) return nil;
     NSString *trimmed = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -2751,11 +2751,29 @@ static NSString *ApolloDetectSourceLanguageForApple(NSString *text) {
             if (p > bestProb) { secondProb = bestProb; bestProb = p; best = (NSString *)lang; }
             else if (p > secondProb) { secondProb = p; }
         }
-        // Confident (>=0.62) AND a clear winner (runner-up negligible, or top at least
-        // ~1.8x the runner-up). This rejects the ambiguous guesses that produced the
-        // bogus id/da sessions while still accepting real sentences in any language.
-        if (best.length > 0 && bestProb >= 0.62 &&
-            (secondProb <= 0.0001 || bestProb >= secondProb * 1.8)) {
+        if (best.length == 0) return nil;
+
+        // LENGTH-ADAPTIVE acceptance. Short strings (post titles, team names, one-word
+        // comments) stay STRICT — >=0.62 AND a clear >=1.8x margin — because that is
+        // exactly the ambiguous text where iOS's on-device recognizer produces the id/da
+        // misreads that make Apple prompt for the wrong download. But a full sentence or
+        // paragraph — a real post BODY or an ordinary comment — is detected reliably even
+        // when its top probability is modest, and the flat 0.62/1.8x bar was silently
+        // DROPPING clearly-foreign posts: iOS scores an ~80-char Portuguese body well
+        // below what macOS gives for the same text, so it fell under 0.62 and was never
+        // handed to Apple at all (logged as "source language undetected" even though Apple
+        // translates Portuguese fine). For longer text we lower the floor and margin — the
+        // top guess on a real sentence is trustworthy, and near Romance siblings
+        // (pt/es/gl) sitting close no longer matters because the winner is still correct.
+        BOOL longText = trimmed.length >= 50;
+        double floorProb = longText ? 0.50 : 0.62;
+        double marginX   = longText ? 1.15 : 1.8;
+        BOOL clearWinner = (secondProb <= 0.0001) || (bestProb >= secondProb * marginX);
+        if (bestProb >= floorProb && clearWinner) {
+            if (longText && bestProb < 0.62) {
+                ApolloLog(@"[Translation] Apple source accepted via long-text bar: %@ p=%.2f (2nd=%.2f) len=%lu",
+                          best, bestProb, secondProb, (unsigned long)trimmed.length);
+            }
             return ApolloNormalizeLanguageCode(best);
         }
     }
