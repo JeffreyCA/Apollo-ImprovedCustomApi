@@ -2166,6 +2166,11 @@ static id ApolloBestVisiblePostBodyTextNodeForController(UIViewController *viewC
     id best = nil;
     NSInteger bestScore = NSIntegerMin;
     for (id candidate in candidates) {
+        // Never pick OUR translated title node as the "body": once the title is
+        // swapped to the target language it no longer matches link.title, so the
+        // metadata filter below can't exclude it — a long translated title would
+        // masquerade as the post body (and get body-owned, double-driven).
+        if ([objc_getAssociatedObject(candidate, kApolloTitleOwnedTextNodeKey) boolValue]) continue;
         NSString *text = ApolloVisibleTextFromNode(candidate);
         if (text.length == 0 || ApolloPostTextLooksLikeMetadata(text, link)) continue;
 
@@ -2219,6 +2224,10 @@ static id ApolloBestPostBodyTextNode(id headerCellNode, RDKLink *link, NSString 
     id best = nil;
     NSInteger bestScore = NSIntegerMin;
     for (id n in candidates) {
+        // Same guard as the visible-body scan: a translated title no longer
+        // matches link.title, so without this a long title masquerades as the
+        // post body when the model body is unreadable.
+        if ([objc_getAssociatedObject(n, kApolloTitleOwnedTextNodeKey) boolValue]) continue;
         NSAttributedString *attr = nil;
         @try { attr = ((id (*)(id, SEL))objc_msgSend)(n, @selector(attributedText)); }
         @catch (__unused NSException *e) { continue; }
@@ -3351,6 +3360,7 @@ static NSString *ApolloPostBodyTextFromLink(RDKLink *link);
 static NSString *ApolloVisiblePostCacheKey(RDKLink *link, NSString *sourceText, NSString *targetLanguage);
 static NSString *ApolloResolvedTargetLanguageCode(void);
 static RDKLink *ApolloLinkFromHeaderCellNode(id cellNode);
+static void ApolloInstallHeaderMarkerFromTranslatedTitle(id headerCellNode);
 
 static BOOL ApolloReapplyCachedTranslationForHeaderCellNode(id headerCellNode) {
     if (!headerCellNode) return NO;
@@ -3402,6 +3412,11 @@ static BOOL ApolloReapplyCachedTranslationForHeaderCellNode(id headerCellNode) {
     }
 
     if (cached.length == 0 || trimmed.length == 0) {
+        // Title-only post (no selftext): there is no body translation to
+        // reapply, but the header may have just been rebuilt (vote tap), which
+        // replaces the PostInfoNode under the compact marker. Re-drive the
+        // marker from the translated title so it survives the rebuild.
+        if (trimmed.length == 0) ApolloInstallHeaderMarkerFromTranslatedTitle(headerCellNode);
         ApolloTranslationVerboseLog(@"[Translation/vote] headerReapply: cache MISS (link=%@ body=%lu)", link.fullName ?: @"<nil>", (unsigned long)trimmed.length);
         return NO;
     }
@@ -3451,9 +3466,18 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *f
             body = visibleBody;
         }
     }
-    if (![body isKindOfClass:[NSString class]]) return;
+    if (![body isKindOfClass:[NSString class]] || [[body stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] length] == 0) {
+        // Link/image post — no body to translate, so the body apply (the usual
+        // driver of the thread's compact info-row marker, see
+        // ApolloApplyTranslationToHeaderCellNode) will never run. Drive the
+        // marker from the translated TITLE instead. This pass re-runs on
+        // visibility/reapply events, which also heals cold-open ordering (title
+        // translated before the controller link was readable).
+        ApolloInstallHeaderMarkerFromTranslatedTitle(headerCellNode);
+        return;
+    }
     NSString *trimmed = [body stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (trimmed.length == 0) return;  // link/image post — nothing to translate
+    if (trimmed.length == 0) return;  // unreachable (guarded above); kept for safety
 
     // One-shot diagnostic so we can see exactly why a post body did or did
     // not get gated. Logs once per fullName per session.
@@ -6232,6 +6256,104 @@ static id ApolloTitleTextNodeFromTitleNode(id titleNode) {
     return best;
 }
 
+// Recursively scan a node's subtree for the post TITLE node (class name contains
+// "PostTitle" — covers PostTitleNode and PostTitleURLNode), depth-limited.
+static id ApolloFindPostTitleNodeInSubtree(id node, int depth) {
+    if (!node || depth < 0) return nil;
+    const char *cn = class_getName([node class]);
+    if (cn && strstr(cn, "PostTitle")) return node;
+    @try {
+        SEL subnodesSel = NSSelectorFromString(@"subnodes");
+        if ([node respondsToSelector:subnodesSel]) {
+            NSArray *subs = ((id (*)(id, SEL))objc_msgSend)(node, subnodesSel);
+            if ([subs isKindOfClass:[NSArray class]]) {
+                for (id s in subs) {
+                    id found = ApolloFindPostTitleNodeInSubtree(s, depth - 1);
+                    if (found) return found;
+                }
+            }
+        }
+    } @catch (__unused NSException *e) {}
+    return nil;
+}
+
+// True when the comments-header TITLE must drive the post's info-row marker
+// itself: title-only posts (image/link posts — no selftext) never run the header
+// BODY apply, which is otherwise the only marker driver for the post being
+// viewed (ApolloApplyTranslationToHeaderCellNode line ~2297). The ONLY case we
+// want to exclude is a post that DEFINITIVELY has a selftext body — there the
+// body apply is the canonical marker driver and we don't want a redundant
+// title-driven install. When the controller's RDKLink is unreadable (common for
+// image/rich-media post headers — ApolloLinkFromController returns nil), default
+// to YES: the post is almost always a title-only media post, and even if it has
+// a body, the body apply drives the SAME single per-PostInfoNode label with the
+// same source language, so a title-driven install is harmless (no duplicate UI).
+static BOOL ApolloCommentsHeaderTitleDrivesMarker(UIViewController *enclosingVC) {
+    RDKLink *link = ApolloLinkFromController(enclosingVC);
+    if (!link) return YES;  // link unreadable → assume title-only; body apply (if any) drives the same label
+    NSString *body = ApolloPostBodyTextFromLink(link);
+    NSString *trimmed = [body stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return trimmed.length == 0;
+}
+
+// Title-only posts (image/link posts, no selftext): the header BODY apply — the
+// normal driver of the thread's compact info-row "🌐 PT" marker — never runs, so
+// the post being viewed showed NO language marker anywhere even though its title
+// was translated (the title apply excludes comments-header titles on the
+// assumption the body apply owns the marker). Install the marker from the
+// translated TITLE instead. Called from the header driver's and the vote-reapply
+// path's empty-body bails, which re-run on visibility/vote passes — that also
+// heals cold-open ordering (title translated before the link was readable) and
+// vote rebuilds that replace the PostInfoNode under the marker.
+static void ApolloInstallHeaderMarkerFromTranslatedTitle(id headerCellNode) {
+    if (!headerCellNode) return;
+    if (!sEnableBulkTranslation) return;
+    if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
+    id titleNode = ApolloFindPostTitleNodeInSubtree(headerCellNode, 4);
+    if (!titleNode) return;
+    id textNode = ApolloTitleTextNodeFromTitleNode(titleNode);
+    if (!textNode) return;
+
+    // Tap-mode hold: the title apply held the swap and shows the TARGET code
+    // ("tap for English") — mirror that here.
+    if (sTapToTranslate) {
+        id pinVal = objc_getAssociatedObject(textNode, kApolloTitlePinnedOriginalKey);
+        if ([pinVal isKindOfClass:[NSNumber class]] && [(NSNumber *)pinVal integerValue] == 2) {
+            NSString *targetCode = ApolloResolvedTargetLanguageCode();
+            if (targetCode.length > 0) {
+                ApolloUpdatePostInfoMarkerForNode(headerCellNode, targetCode, YES, textNode);
+            }
+            return;
+        }
+    }
+
+    // Pinned back to original by a marker tap: keep showing the TARGET code
+    // (reads as "tap for English"), like the title apply's pin re-assert.
+    if (ApolloPinActiveOnNode(textNode)) {
+        NSString *pinnedSrc = objc_getAssociatedObject(textNode, kApolloTitlePinnedSourceKey);
+        NSString *currentNorm = ApolloNormalizeTextForCompare(ApolloVisibleTextFromNode(textNode));
+        if ([pinnedSrc isKindOfClass:[NSString class]] && currentNorm.length > 0 &&
+            [ApolloNormalizeTextForCompare(pinnedSrc) isEqualToString:currentNorm]) {
+            NSString *targetCode = ApolloResolvedTargetLanguageCode();
+            if (targetCode.length > 0) {
+                ApolloUpdatePostInfoMarkerForNode(headerCellNode, targetCode, sShowTranslationDetails || sTapToTranslate, textNode);
+            }
+        }
+        return;
+    }
+
+    // Normal mode: only once the title apply has actually swapped this node
+    // (ownership stamped). Re-detect the source language from the saved
+    // original — the same funnel as every other marker, so the skip-list gate
+    // stays intact.
+    if (![objc_getAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey) boolValue]) return;
+    NSString *ownedSource = objc_getAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey);
+    if (![ownedSource isKindOfClass:[NSString class]] || ownedSource.length == 0) return;
+    NSString *sourceCode = nil;
+    BOOL show = (sShowTranslationDetails || sTapToTranslate) && ApolloShouldShowTranslationMarkerForSource(ownedSource, &sourceCode);
+    ApolloUpdatePostInfoMarkerForNode(headerCellNode, sourceCode, show, textNode);
+}
+
 static void ApolloApplyTranslationToTitleNode(id titleNode, id textNode, NSString *sourceText, NSString *translatedText) {
     if (!titleNode || !textNode) return;
     if (![sourceText isKindOfClass:[NSString class]] || sourceText.length == 0) return;
@@ -6255,9 +6377,16 @@ static void ApolloApplyTranslationToTitleNode(id titleNode, id textNode, NSStrin
         } else if (pinnedSrcMatches) {
             // Re-assert the pinned-state marker (target code, e.g. "EN") so a
             // re-processed/reused cell doesn't leave a stale source code showing.
+            // Same flag split as the install below: thread-header markers follow
+            // the Comments & Posts details flag — otherwise a pinned header
+            // marker installed under that flag would be hidden by this reassert,
+            // stranding the post with no un-pin affordance.
             NSString *targetCode = ApolloResolvedTargetLanguageCode();
             if (targetCode.length > 0) {
-                ApolloUpdatePostInfoMarkerForNode(titleNode, targetCode, sShowTranslationTitleDetails || sTapToTranslate, textNode);
+                UIViewController *pinVC = ApolloEnclosingViewControllerForNode(titleNode);
+                BOOL pinIsHeaderTitle = ApolloClassLooksLikeCommentsViewController([pinVC class]);
+                BOOL pinDetailsFlag = pinIsHeaderTitle ? sShowTranslationDetails : sShowTranslationTitleDetails;
+                ApolloUpdatePostInfoMarkerForNode(titleNode, targetCode, pinDetailsFlag || sTapToTranslate, textNode);
             }
             return;
         } else {
@@ -6315,7 +6444,8 @@ static void ApolloApplyTranslationToTitleNode(id titleNode, id textNode, NSStrin
         BOOL tapIsHeaderTitle = ApolloClassLooksLikeCommentsViewController([tapVC class]);
         const char *tapTitleClass = class_getName([titleNode class]);
         BOOL tapIsPostTitle = tapTitleClass && strstr(tapTitleClass, "PostTitleNode") != NULL;
-        if (!tapIsHeaderTitle && tapIsPostTitle) {
+        // Title-only posts: the header title drives the marker (no body apply).
+        if ((!tapIsHeaderTitle || ApolloCommentsHeaderTitleDrivesMarker(tapVC)) && tapIsPostTitle) {
             NSString *targetCode = ApolloResolvedTargetLanguageCode();
             if (targetCode.length > 0) {
                 ApolloUpdatePostInfoMarkerForNode(titleNode, targetCode, YES, textNode);
@@ -6333,14 +6463,21 @@ static void ApolloApplyTranslationToTitleNode(id titleNode, id textNode, NSStrin
     BOOL isCommentsHeaderTitle = ApolloClassLooksLikeCommentsViewController([enclosingVC class]);
     // Feed titles get a compact "🌐 PT" marker on the post's metadata row
     // (PostInfoNode) — NOT appended under the title (that collided with flair
-    // pills). The comments-header post is excluded (its own apply drives the
-    // marker). Only the real PostTitleNode drives this — the feed also routes the
-    // body-preview text node through here (titleNode == textNode).
+    // pills). The comments-header post is normally excluded (its own body apply
+    // drives the marker) — EXCEPT title-only posts (image/link, no selftext),
+    // whose body apply never runs: there the translated TITLE must drive the
+    // marker or the thread shows no language marker at all. Only the real
+    // PostTitleNode drives this — the feed also routes the body-preview text
+    // node through here (titleNode == textNode).
     const char *titleNodeClass = class_getName([titleNode class]);
     BOOL titleNodeIsPostTitle = titleNodeClass && strstr(titleNodeClass, "PostTitleNode") != NULL;
-    if (!isCommentsHeaderTitle && titleNodeIsPostTitle) {
+    BOOL headerTitleDrivesMarker = isCommentsHeaderTitle && ApolloCommentsHeaderTitleDrivesMarker(enclosingVC);
+    if ((!isCommentsHeaderTitle || headerTitleDrivesMarker) && titleNodeIsPostTitle) {
         NSString *titleSourceCode = nil;
-        BOOL showTitleMarker = (sShowTranslationTitleDetails || sTapToTranslate) && ApolloShouldShowTranslationMarkerForSource(sourceText, &titleSourceCode);
+        // Thread-header markers follow the Comments & Posts details flag (same
+        // convention as the body-apply install); feed titles keep the Titles flag.
+        BOOL detailsFlag = isCommentsHeaderTitle ? sShowTranslationDetails : sShowTranslationTitleDetails;
+        BOOL showTitleMarker = (detailsFlag || sTapToTranslate) && ApolloShouldShowTranslationMarkerForSource(sourceText, &titleSourceCode);
         // Pass the text node (which carries the owned original/translated strings)
         // so tapping the marker can toggle this post's title back and forth.
         ApolloUpdatePostInfoMarkerForNode(titleNode, titleSourceCode, showTitleMarker, textNode);
@@ -6521,6 +6658,23 @@ static void ApolloMaybeTranslatePostTitleNode(id titleNode) {
             ownedTranslatedNorm.length > 0 && [currentNorm isEqualToString:ownedTranslatedNorm]) {
             if (ApolloClassLooksLikeCommentsViewController([gateVC class])) {
                 ApolloMarkVisibleTranslationApplied(ownedSource, ownedTranslated);
+                // Title-only posts (image/link, no selftext): this owned-early-
+                // return is the ONLY pass that runs for a header title whose
+                // translation was CACHED from the feed — the fresh title apply
+                // (ApolloApplyTranslationToTitleNode, which installs the marker)
+                // is skipped because the node is already owned+translated. So the
+                // thread showed no language marker at all even though its title
+                // was translated. Drive the compact info-row marker from the
+                // title here for the bodyless-header case (posts WITH a body get
+                // their marker from the header body apply, so this is inert there).
+                const char *ownTitleCls = class_getName([titleNode class]);
+                if (ownTitleCls && strstr(ownTitleCls, "PostTitleNode") &&
+                    ApolloCommentsHeaderTitleDrivesMarker(enclosingVC)) {
+                    NSString *ownHdrCode = nil;
+                    BOOL ownHdrShow = (sShowTranslationDetails || sTapToTranslate) &&
+                        ApolloShouldShowTranslationMarkerForSource(ownedSource, &ownHdrCode);
+                    ApolloUpdatePostInfoMarkerForNode(titleNode, ownHdrCode, ownHdrShow, textNode);
+                }
             } else {
                 ApolloMarkVisibleFeedTitleApplied(ownedSource, ownedTranslated);
             }
@@ -6565,7 +6719,8 @@ static void ApolloMaybeTranslatePostTitleNode(id titleNode) {
         BOOL heldIsHeaderTitle = ApolloClassLooksLikeCommentsViewController([heldVC class]);
         const char *heldCls = class_getName([titleNode class]);
         BOOL heldIsPostTitle = heldCls && strstr(heldCls, "PostTitleNode") != NULL;
-        if (!heldIsHeaderTitle && heldIsPostTitle) {
+        // Title-only posts: the header title drives the marker (no body apply).
+        if ((!heldIsHeaderTitle || ApolloCommentsHeaderTitleDrivesMarker(heldVC)) && heldIsPostTitle) {
             ApolloUpdatePostInfoMarkerForNode(titleNode, targetLanguage, YES, textNode);
         }
     }
