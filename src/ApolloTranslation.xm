@@ -55,6 +55,14 @@ static const void *kApolloOwnedNodeReentrancyKey = &kApolloOwnedNodeReentrancyKe
 // `ApolloControllerIsInTranslatedMode` check used by the comment-thread
 // ownership system. Set in addition to kApolloTranslationOwnedTextNodeKey.
 static const void *kApolloTitleOwnedTextNodeKey = &kApolloTitleOwnedTextNodeKey;
+// Marker for COMMENT body text nodes specifically. The vote-time marker-parity
+// append must only ever decorate comment bodies — posts show the compact
+// info-row "🌐 PT" banner instead of an appended line. "Owned but not
+// title-owned" is NOT a comment test: the post header selftext node, the
+// visible-post-body fallback node, and stash-preempt-adopted header nodes are
+// all owned without the title key. Set in addition to
+// kApolloTranslationOwnedTextNodeKey, only by the comment apply/preempt paths.
+static const void *kApolloCommentOwnedTextNodeKey = &kApolloCommentOwnedTextNodeKey;
 // Marks a UIViewController as a feed-style VC (Posts/LitePosts/SearchResults).
 // The globe-installation code uses this to gate visibility on
 // sTranslatePostTitles in addition to sEnableBulkTranslation.
@@ -1760,6 +1768,7 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [comment.body copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloRegisterOwnedTextNode(textNode);
 
     // EXACT no-op gate: the containment heuristics above decide MATCHING, but
@@ -1844,6 +1853,7 @@ static void ApolloRestoreOriginalForCellNode(id commentCellNode, RDKComment *com
     // Drop ownership BEFORE writing original text back, otherwise the vote-
     // resilience hook would swap the original right back to translated.
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
 
@@ -2472,6 +2482,7 @@ static void ApolloRestoreOriginalForHeaderCellNode(id headerCellNode, RDKLink *l
     if (!textNode) return;
 
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
 
@@ -4196,6 +4207,7 @@ static void ApolloShowOriginalWithRetranslateAffordanceForCellNode(id cellNode, 
     if (![original isKindOfClass:[NSAttributedString class]]) return;
 
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
 
     NSAttributedString *display = ApolloAttributedStringByAppendingRetranslateAffordance(original);
@@ -4490,6 +4502,7 @@ static void ApolloToggleTranslationForTitleNode(id textNode) {
             objc_setAssociatedObject(node, kApolloTitlePinnedOriginalKey, sTapToTranslate ? @2 : (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             objc_setAssociatedObject(node, kApolloTitlePinnedSourceKey, [nodeSource copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
             objc_setAssociatedObject(node, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(node, kApolloCommentOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             NSAttributedString *original = objc_getAssociatedObject(node, kApolloOriginalAttributedTextKey);
             if ([original isKindOfClass:[NSAttributedString class]]) {
                 @try { ((void (*)(id, SEL, id))objc_msgSend)(node, @selector(setAttributedText:), original); }
@@ -5527,6 +5540,7 @@ static BOOL ApolloTextMatchesSourceOrVisualDisplay(NSString *incomingText, NSStr
 static void ApolloClearTranslationOwnershipForTextNode(id textNode) {
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
     if (textNode && sOwnedTextNodes) {
@@ -5616,6 +5630,7 @@ static void ApolloRestoreAllOwnedTextNodes(void) {
         // Drop ownership keys FIRST so the global setAttributedText: hook
         // won't re-swap when we write the original below.
         objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
         objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -5777,16 +5792,23 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
                                     textNode, (unsigned long)incomingText.length);
         if (swapOut) {
             NSAttributedString *rebuilt = ApolloRebuildTranslatedAttrPreservingAttrs(incomingAttributedText, translatedText);
-            // Re-append the "Translated from <Language>" marker line for body
-            // nodes (the builder self-gates on the details/tap settings and on
-            // source-language detection; title nodes never carry the line).
-            // Without this, the vote-time swap displayed the translation ONE
-            // LINE SHORTER than what was on screen — the row shrank, every row
-            // below shifted up, and the ~100ms-later scheduled reapply re-added
-            // the marker and shifted them back: a visible bounce on every vote
-            // of a translated comment. Marker parity makes the swap
-            // height-identical AND turns that follow-up reapply into a no-op.
-            if (rebuilt && ![objc_getAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey) boolValue]) {
+            // Re-append the "Translated from <Language>" marker line for COMMENT
+            // bodies (the builder self-gates on the details/tap settings and on
+            // source-language detection). Without this, the vote-time swap
+            // displayed the translation ONE LINE SHORTER than what was on
+            // screen — the row shrank, every row below shifted up, and the
+            // ~100ms-later scheduled reapply re-added the marker and shifted
+            // them back: a visible bounce on every vote of a translated
+            // comment. Marker parity makes the swap height-identical AND turns
+            // that follow-up reapply into a no-op.
+            // Gate on POSITIVE comment provenance, not "not title-owned": the
+            // post header selftext node, the visible-post-body fallback node,
+            // and stash-preempt-adopted header nodes are all owned WITHOUT the
+            // title key, and appending here put a comment-style "Translated
+            // from <Language>" line inside the POST (colliding with the flair
+            // pill) whenever Apollo re-rendered the thread header. Posts show
+            // the compact info-row "🌐 PT" banner instead — never the line.
+            if (rebuilt && [objc_getAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey) boolValue]) {
                 rebuilt = ApolloAttributedStringByAppendingTranslationMarker(rebuilt, originalBody);
             }
             *swapOut = rebuilt;
@@ -5861,6 +5883,7 @@ static BOOL ApolloPreemptUnownedCommentTextNode(id textNode, NSAttributedString 
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [incomingText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translated copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (!objc_getAssociatedObject(textNode, kApolloOriginalAttributedTextKey)) {
         objc_setAssociatedObject(textNode, kApolloOriginalAttributedTextKey, [incoming copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
