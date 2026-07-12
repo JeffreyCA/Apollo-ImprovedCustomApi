@@ -149,6 +149,11 @@ extern NSString * const kApolloRebornActiveCustomThemeIDKey;    // NSString (leg
 // `id`/`slug` double as the memory of the last custom/gallery selection while
 // kind is "apollo", so re-enabling custom theming restores what was active.
 extern NSString * const kApolloRebornActiveThemePointerKey;     // NSDictionary
+// Optional per-appearance selection pointers. When separate mode is enabled,
+// the runtime uses the light pointer for light UI and the dark pointer for dark UI.
+extern NSString * const kApolloRebornSeparateThemesEnabledKey;  // BOOL
+extern NSString * const kApolloRebornLightThemePointerKey;      // NSDictionary
+extern NSString * const kApolloRebornDarkThemePointerKey;       // NSDictionary
 extern NSString * const kApolloRebornPreviousApolloThemeKey;    // NSString (AppColorTheme name)
 extern NSString * const kApolloRebornRuntimeDonorThemeKey;      // NSString ("outrun")
 extern NSString * const kApolloRebornThemeSchemaVersionKey;     // NSInteger

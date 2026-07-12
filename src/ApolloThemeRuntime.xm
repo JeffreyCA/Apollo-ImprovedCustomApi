@@ -56,10 +56,12 @@ static volatile bool sEnabled = false;
 // Active theme's app-wide font. Read from any thread (Texture builds
 // attributed strings off-main); a single enum-width store is atomic on arm64,
 // matching the sEnabled convention.
-static volatile ApolloThemeFont sFontChoice = ApolloThemeFontSystem;
+static volatile ApolloThemeFont sFontChoices[ApolloThemeModeCount] = {
+    ApolloThemeFontSystem, ApolloThemeFontSystem
+};
 // Mirrors kApolloThemeVoteArrowsAccentKey on the active theme — see the
 // DualStateButtonNode sink below for what this actually recolors.
-static volatile bool sVoteArrowsAccent = false;
+static volatile bool sVoteArrowsAccent[ApolloThemeModeCount] = { false, false };
 static uint32_t sTokens[ApolloThemeModeCount][ApolloThemeTokenCount];
 static uint64_t sEpoch = 0; // bumped whenever sTokens or sEnabled changes
 static os_unfair_lock sLock = OS_UNFAIR_LOCK_INIT;
@@ -151,6 +153,15 @@ static __thread int sBypassHook = 0;
 // a font through fontWithDescriptor:size:.
 static __thread int sFontBypass = 0;
 
+static ApolloThemeMode CurrentRuntimeMode(void) {
+    return UITraitCollection.currentTraitCollection.userInterfaceStyle == UIUserInterfaceStyleDark
+        ? ApolloThemeModeDark : ApolloThemeModeLight;
+}
+
+static ApolloThemeFont CurrentFontChoice(void) {
+    return sFontChoices[CurrentRuntimeMode()];
+}
+
 static BOOL ClassNameLooksApolloOwned(const char *name);
 static BOOL TextSinkMayUseTheme(id object, uintptr_t caller);
 
@@ -175,11 +186,12 @@ static BOOL FontPinned(id view) {
 // UIKit-built chrome (system alerts, share sheet, keyboard) keeps SF Pro —
 // which also keeps the wide SF Mono design out of fixed-width system chrome.
 static UIFont *ThemedFont(UIFont *font, uintptr_t caller) {
-    if (!sEnabled || sFontChoice == ApolloThemeFontSystem || !font) return font;
+    ApolloThemeFont choice = CurrentFontChoice();
+    if (!sEnabled || choice == ApolloThemeFontSystem || !font) return font;
     if (sFontBypass) return font;
     if (!CallerMayUseThemeRuntime(caller)) return font;
     sFontBypass++;
-    UIFont *themed = ApolloThemeFontApply(sFontChoice, font);
+    UIFont *themed = ApolloThemeFontApply(choice, font);
     sFontBypass--;
     return themed;
 }
@@ -214,7 +226,7 @@ static UIFont *ThemedTextSinkFont(UIFont *font, id owner, uintptr_t caller) {
     if (!FontLooksLikeAppleSystemDesign(font)) return font;
 
     sFontBypass++;
-    UIFont *themed = ApolloThemeFontApply(sFontChoice, font);
+    UIFont *themed = ApolloThemeFontApply(CurrentFontChoice(), font);
     sFontBypass--;
     // Preserve identity when the design didn't change, so attributed-string
     // rewrites can skip the copy.
@@ -486,7 +498,7 @@ void ApolloThemeRuntimeRefreshFonts(void) {
     // Runs even when the runtime is INACTIVE: disabling theming (or switching
     // to the System font) must walk existing labels back to SF Pro — nothing
     // else re-derives a font until the view happens to be recreated.
-    ApolloThemeFont target = sEnabled ? sFontChoice : ApolloThemeFontSystem;
+    ApolloThemeFont target = sEnabled ? CurrentFontChoice() : ApolloThemeFontSystem;
     for (UIWindow *window in ApolloAllWindows()) {
         RefreshFontsInViewTree(window, target, NO);
     }
@@ -507,7 +519,7 @@ static void RethemeFontOnAttach(UIView *view) {
     UIFont *font = ((UILabel *)view).font; // UILabel/UITextField/UITextView all expose `font`
     if (![font isKindOfClass:[UIFont class]] || !FontLooksLikeAppleSystemDesign(font)) return;
     sFontBypass++;
-    UIFont *themed = ApolloThemeFontApply(sFontChoice, font);
+    UIFont *themed = ApolloThemeFontApply(CurrentFontChoice(), font);
     if (themed && ![themed.fontName isEqualToString:font.fontName] && ObjectChainLooksApolloOwned(view)) {
         ((void (*)(id, SEL, id))objc_msgSend)(view, @selector(setFont:), themed);
     }
@@ -517,7 +529,7 @@ static void RethemeFontOnAttach(UIView *view) {
 static void ApplyThemeFontToNavigationTitleControl(UIView *titleControl) {
     if (!sEnabled || ![titleControl isKindOfClass:[UIView class]]) return;
     if (!ChromeBarLooksApolloOwned(NavigationBarForDescendant(titleControl))) return;
-    RefreshFontsInViewTree(titleControl, sFontChoice, YES);
+    RefreshFontsInViewTree(titleControl, CurrentFontChoice(), YES);
 }
 
 static BOOL TextSinkMayUseTheme(id object, uintptr_t caller) {
@@ -561,9 +573,10 @@ UIColor *ApolloThemeRuntimeColor(ApolloThemeToken token) {
 }
 
 UIFont *ApolloThemeRuntimeFont(UIFont *base) {
-    if (!sEnabled || sFontChoice == ApolloThemeFontSystem || !base) return base;
+    ApolloThemeFont choice = CurrentFontChoice();
+    if (!sEnabled || choice == ApolloThemeFontSystem || !base) return base;
     sFontBypass++;
-    UIFont *themed = ApolloThemeFontApply(sFontChoice, base);
+    UIFont *themed = ApolloThemeFontApply(choice, base);
     sFontBypass--;
     return themed ?: base;
 }
@@ -679,13 +692,16 @@ void ApolloThemeRuntimeReload(void) {
     ApolloThemeStore *store = [ApolloThemeStore shared];
     BOOL crashed = store.runtimeDisabledDueToCrash;
     BOOL enable = store.customThemeEnabled && !crashed;
-    NSDictionary *theme = enable ? store.activeTheme : nil;
+    NSDictionary *lightTheme = enable ? [store themeForMode:ApolloThemeModeLight] : nil;
+    NSDictionary *darkTheme = enable ? [store themeForMode:ApolloThemeModeDark] : nil;
 
-    if (!theme) {
+    if (!lightTheme || !darkTheme) {
         os_unfair_lock_lock(&sLock);
         sEnabled = false;
-        sFontChoice = ApolloThemeFontSystem;
-        sVoteArrowsAccent = false;
+        sFontChoices[ApolloThemeModeLight] = ApolloThemeFontSystem;
+        sFontChoices[ApolloThemeModeDark] = ApolloThemeFontSystem;
+        sVoteArrowsAccent[ApolloThemeModeLight] = false;
+        sVoteArrowsAccent[ApolloThemeModeDark] = false;
         sEpoch++;
         os_unfair_lock_unlock(&sLock);
         ApolloLog(@"ThemeRuntime: reload -> INACTIVE (enabledFlag=%d crashKill=%d activeTheme=%@)",
@@ -693,14 +709,18 @@ void ApolloThemeRuntimeReload(void) {
         return;
     }
 
-    ApolloCompiledTheme *compiled = nil;
+    ApolloCompiledTheme *compiled[ApolloThemeModeCount] = { nil, nil };
     @try {
-        compiled = [ApolloCompiledTheme compiledThemeWithInput:theme[@"input"]
-                                                       variant:ApolloThemeVariantFromKey(theme[@"variant"])
-                                               advancedEnabled:[theme[kApolloThemeAdvancedOptionsEnabledKey] boolValue]];
+        NSDictionary *themes[ApolloThemeModeCount] = { lightTheme, darkTheme };
+        for (NSUInteger mode = 0; mode < ApolloThemeModeCount; mode++) {
+            NSDictionary *theme = themes[mode];
+            compiled[mode] = [ApolloCompiledTheme compiledThemeWithInput:theme[@"input"]
+                                                                  variant:ApolloThemeVariantFromKey(theme[@"variant"])
+                                                          advancedEnabled:[theme[kApolloThemeAdvancedOptionsEnabledKey] boolValue]];
+        }
     } @catch (NSException *e) {
-        ApolloLog(@"ThemeRuntime: COMPILE EXCEPTION %@ — %@ (theme=%@ input=%@)",
-                  e.name, e.reason, theme[@"name"], theme[@"input"]);
+        ApolloLog(@"ThemeRuntime: COMPILE EXCEPTION %@ — %@ (light=%@ dark=%@)",
+                  e.name, e.reason, lightTheme[@"name"], darkTheme[@"name"]);
         os_unfair_lock_lock(&sLock); sEnabled = false; sEpoch++; os_unfair_lock_unlock(&sLock);
         return;
     }
@@ -708,17 +728,18 @@ void ApolloThemeRuntimeReload(void) {
     os_unfair_lock_lock(&sLock);
     for (NSUInteger m = 0; m < ApolloThemeModeCount; m++) {
         for (NSUInteger t = 0; t < ApolloThemeTokenCount; t++) {
-            sTokens[m][t] = [compiled rgbForToken:(ApolloThemeToken)t mode:(ApolloThemeMode)m];
+            sTokens[m][t] = [compiled[m] rgbForToken:(ApolloThemeToken)t mode:(ApolloThemeMode)m];
         }
+        NSDictionary *theme = m == ApolloThemeModeDark ? darkTheme : lightTheme;
+        sFontChoices[m] = ApolloThemeFontFromKey(theme[kApolloThemeFontKey]);
+        sVoteArrowsAccent[m] = [theme[kApolloThemeVoteArrowsAccentKey] boolValue];
     }
-    sFontChoice = ApolloThemeFontFromKey(theme[kApolloThemeFontKey]);
-    sVoteArrowsAccent = [theme[kApolloThemeVoteArrowsAccentKey] boolValue];
     sEnabled = true;
     sEpoch++;
     os_unfair_lock_unlock(&sLock);
 
-    ApolloLog(@"ThemeRuntime: reload -> ACTIVE theme='%@' variant=%@ font=%@ | light bg=#%06X card=#%06X accent=#%06X label=#%06X | dark bg=#%06X card=#%06X accent=#%06X",
-              theme[@"name"], theme[@"variant"], ApolloThemeFontKey(sFontChoice),
+    ApolloLog(@"ThemeRuntime: reload -> ACTIVE light='%@' dark='%@' | light bg=#%06X card=#%06X accent=#%06X label=#%06X | dark bg=#%06X card=#%06X accent=#%06X",
+              lightTheme[@"name"], darkTheme[@"name"],
               sTokens[0][ApolloThemeTokenBackground], sTokens[0][ApolloThemeTokenSecondaryBackground],
               sTokens[0][ApolloThemeTokenAccent], sTokens[0][ApolloThemeTokenLabel],
               sTokens[1][ApolloThemeTokenBackground], sTokens[1][ApolloThemeTokenSecondaryBackground],
@@ -727,9 +748,10 @@ void ApolloThemeRuntimeReload(void) {
     sFontBypass++;
     UIFont *base = [UIFont systemFontOfSize:17.0 weight:UIFontWeightRegular];
     sFontBypass--;
-    UIFont *resolved = ApolloThemeFontApply(sFontChoice, base);
-    ApolloLog(@"ThemeRuntime: font sample key=%@ base='%@' family='%@' -> resolved='%@' family='%@'",
-              ApolloThemeFontKey(sFontChoice), base.fontName, base.familyName, resolved.fontName, resolved.familyName);
+    ApolloThemeFont currentFont = CurrentFontChoice();
+    UIFont *resolved = ApolloThemeFontApply(currentFont, base);
+    ApolloLog(@"ThemeRuntime: font sample light=%@ dark=%@ base='%@' -> resolved='%@'",
+              ApolloThemeFontKey(sFontChoices[0]), ApolloThemeFontKey(sFontChoices[1]), base.fontName, resolved.fontName);
     UIFont *defaultSample = ApolloThemeFontApply(ApolloThemeFontSystem, base);
     UIFont *roundedSample = ApolloThemeFontApply(ApolloThemeFontRounded, base);
     UIFont *serifSample = ApolloThemeFontApply(ApolloThemeFontSerif, base);
@@ -1176,7 +1198,7 @@ static ASImageNodeTintColorModificationBlockFn ASImageNodeTintColorModificationB
 %hook ASImageNode
 
 - (void)setImageModificationBlock:(id)block {
-    if (sEnabled && sVoteArrowsAccent) {
+    if (sEnabled && sVoteArrowsAccent[CurrentRuntimeMode()]) {
         Class dualStateCls = DualStateButtonNodeClass();
         id supernode = dualStateCls ? [(ASDisplayNode *)self supernode] : nil;
         // isActive==YES is Apollo's own "this is the cast vote" state (white

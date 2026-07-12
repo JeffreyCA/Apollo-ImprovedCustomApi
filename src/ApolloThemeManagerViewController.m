@@ -96,6 +96,34 @@ static ApolloThemeMode CurrentAppearanceMode(UITraitCollection *traits) {
         ? ApolloThemeModeDark : ApolloThemeModeLight;
 }
 
+static UIImage *ThemeAssignmentImage(NSString *symbolName) {
+    NSString *bundlePath = ApolloBundledResourcePath(@"ApolloThemeSymbols", @"bundle");
+    NSBundle *symbols = bundlePath ? [NSBundle bundleWithPath:bundlePath] : nil;
+    UIImageSymbolConfiguration *config =
+        [UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIImageSymbolWeightRegular];
+    UIImage *image = symbols
+        ? [UIImage imageNamed:symbolName inBundle:symbols compatibleWithTraitCollection:nil]
+        : nil;
+    return [(image ?: [UIImage systemImageNamed:@"checkmark" withConfiguration:config])
+        imageByApplyingSymbolConfiguration:config];
+}
+
+static UIImageView *ThemeModeIndicator(NSString *symbolName, UIColor *tint) {
+    CGFloat pointSize = [symbolName isEqualToString:@"moon.fill"] ? 10.5 : 17.0;
+    UIImageSymbolConfiguration *config =
+        [UIImageSymbolConfiguration configurationWithPointSize:pointSize
+                                                        weight:UIImageSymbolWeightRegular];
+    UIImage *image = [symbolName hasPrefix:@"custom."]
+        ? ThemeAssignmentImage(symbolName)
+        : [UIImage systemImageNamed:symbolName withConfiguration:config];
+    UIImageView *view = [[UIImageView alloc] initWithImage:image];
+    view.tintColor = tint;
+    view.contentMode = UIViewContentModeScaleAspectFit;
+    [view.widthAnchor constraintEqualToConstant:[symbolName hasPrefix:@"custom."] ? 32.0 : 24.0].active = YES;
+    [view.heightAnchor constraintEqualToConstant:32.0].active = YES;
+    return view;
+}
+
 static NSString *ThemeInputDescription(NSString *key) {
     if ([key isEqualToString:kApolloThemeInputAccent])
         return @"Selected tabs, links, switches, buttons, and active controls.";
@@ -559,11 +587,19 @@ static NSString *SpacedThemeName(NSString *raw) {
 
 - (NSString *)activeThemeDetail {
     ApolloThemeStore *store = [self store];
+    NSString *modeSuffix = nil;
+    if (store.separateThemesEnabled) {
+        modeSuffix = CurrentAppearanceMode(self.traitCollection) == ApolloThemeModeDark
+            ? @"Dark Mode Theme" : @"Light Mode Theme";
+    }
     switch (store.activeSelectionKind) {
-        case ApolloThemeSelectionGallery: return @"Gallery Theme";
+        case ApolloThemeSelectionGallery:
+            return modeSuffix ? [NSString stringWithFormat:@"From Gallery · %@", modeSuffix] : @"Gallery Theme";
         case ApolloThemeSelectionCustom: {
             NSDictionary *active = [store activeTheme];
-            return active ? [self originDetailForTheme:active] : @"Custom Theme";
+            if (!active) return @"Custom Theme";
+            NSString *origin = [self originDetailForTheme:active];
+            return modeSuffix ? [NSString stringWithFormat:@"%@ · %@", origin, modeSuffix] : origin;
         }
         case ApolloThemeSelectionApollo:
         default:
@@ -712,7 +748,12 @@ static NSString *SpacedThemeName(NSString *raw) {
     if (!self.editingThemeID && (ip.section == HSMyThemes || ip.section == HSImported)) {
         NSDictionary *theme = nil;
         if ([self isThemeIndexPath:ip themeOut:&theme]) {
-            BOOL active = [theme[@"id"] isEqualToString:[self store].activeThemeID] && [self store].customThemeEnabled;
+            ApolloThemeStore *store = [self store];
+            BOOL lightSelected = store.customThemeEnabled &&
+                [store isCustomThemeID:theme[@"id"] selectedForMode:ApolloThemeModeLight];
+            BOOL darkSelected = store.customThemeEnabled &&
+                [store isCustomThemeID:theme[@"id"] selectedForMode:ApolloThemeModeDark];
+            BOOL active = lightSelected || darkSelected;
             if (active) cell.detailTextLabel.textColor = accent;
         }
     }
@@ -1062,7 +1103,11 @@ static NSString *SpacedThemeName(NSString *raw) {
             UIColor *darkBG = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenBackground mode:ApolloThemeModeDark]);
             UIColor *accent = ApolloThemeUIColorFromRGB([c rgbForToken:ApolloThemeTokenAccent
                                                                  mode:CurrentAppearanceMode(self.traitCollection)]);
-            BOOL active = [theme[@"id"] isEqualToString:store.activeThemeID] && store.customThemeEnabled;
+            BOOL lightSelected = store.customThemeEnabled &&
+                [store isCustomThemeID:theme[@"id"] selectedForMode:ApolloThemeModeLight];
+            BOOL darkSelected = store.customThemeEnabled &&
+                [store isCustomThemeID:theme[@"id"] selectedForMode:ApolloThemeModeDark];
+            BOOL active = lightSelected || darkSelected;
             cell.imageView.image = ThemeSwatchImage(lightBG, darkBG, accent);
             cell.detailTextLabel.text = [self originDetailForTheme:theme];
             cell.detailTextLabel.numberOfLines = 0;
@@ -1080,14 +1125,21 @@ static NSString *SpacedThemeName(NSString *raw) {
                 [weakSelf openEditorForThemeID:themeID];
             }] forControlEvents:UIControlEventTouchUpInside];
             if (active) {
-                UIImageSymbolConfiguration *checkCfg = [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightSemibold];
-                UIImageView *check = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark" withConfiguration:checkCfg]];
-                check.tintColor = self.view.tintColor;
-                [check.widthAnchor constraintEqualToConstant:18.0].active = YES;
-                UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[info, check]];
+                NSMutableArray<UIView *> *accessories = [NSMutableArray arrayWithObject:info];
+                if (store.separateThemesEnabled) {
+                    if (lightSelected && darkSelected) {
+                        [accessories addObject:ThemeModeIndicator(@"checkmark", self.view.tintColor)];
+                    } else {
+                        if (lightSelected) [accessories addObject:ThemeModeIndicator(@"sun.max.fill", self.view.tintColor)];
+                        if (darkSelected) [accessories addObject:ThemeModeIndicator(@"moon.fill", self.view.tintColor)];
+                    }
+                } else {
+                    [accessories addObject:ThemeModeIndicator(@"checkmark", self.view.tintColor)];
+                }
+                UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:accessories];
                 stack.axis = UILayoutConstraintAxisHorizontal;
                 stack.alignment = UIStackViewAlignmentCenter;
-                stack.spacing = 8.0;
+                stack.spacing = 6.0;
                 // An accessoryView is frame-based; a zero-sized stack renders
                 // as nothing (the checkmark AND the info button disappeared).
                 CGSize sz = [stack systemLayoutSizeFittingSize:UILayoutFittingCompressedSize];
@@ -1322,7 +1374,7 @@ static NSString *SpacedThemeName(NSString *raw) {
         if ([self isEmptyStateRow:ip]) return;
         NSDictionary *theme = nil;
         if ([self isThemeIndexPath:ip themeOut:&theme]) {
-            [self applyThemeID:theme[@"id"]];
+            [self applyThemeID:theme[@"id"] fromCell:[self.tableView cellForRowAtIndexPath:ip]];
             return;
         }
         return;
@@ -1344,9 +1396,43 @@ static NSString *SpacedThemeName(NSString *raw) {
 
 // Select + enable in one step (list tap, context menu, editor Apply).
 - (void)applyThemeID:(NSString *)themeID {
+    [self applyThemeID:themeID fromCell:nil];
+}
+
+- (void)applyThemeID:(NSString *)themeID fromCell:(UITableViewCell *)cell {
+    ApolloThemeStore *store = [self store];
+    if (!store.separateThemesEnabled) {
+        [self applyThemeID:themeID target:ApolloThemeApplyTargetBoth];
+        return;
+    }
+
+    NSDictionary *theme = [store themeWithID:themeID];
+    NSString *name = [theme[@"name"] isKindOfClass:NSString.class] ? theme[@"name"] : @"Theme";
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"Apply “%@”", name]
+                                                                   message:nil
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) weakSelf = self;
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Light Mode" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [weakSelf applyThemeID:themeID target:ApolloThemeApplyTargetLight];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Dark Mode" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [weakSelf applyThemeID:themeID target:ApolloThemeApplyTargetDark];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Both Modes" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [weakSelf applyThemeID:themeID target:ApolloThemeApplyTargetBoth];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = self.view;
+    sheet.popoverPresentationController.sourceRect = cell
+        ? [cell convertRect:cell.bounds toView:self.view]
+        : CGRectMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1, 1);
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)applyThemeID:(NSString *)themeID target:(ApolloThemeApplyTarget)target {
     ApolloLog(@"ThemeUI: applying theme %@", themeID);
     ApolloThemeStore *store = [self store];
-    [store selectCustomTheme:themeID];
+    [store selectCustomTheme:themeID forTarget:target];
     if ([store runtimeDisabledDueToCrash]) [store clearCrashDisable];
     ApolloThemeRuntimeEnable();
     UINotificationFeedbackGenerator *fb = [[UINotificationFeedbackGenerator alloc] init];
@@ -1508,7 +1594,19 @@ static NSString *SpacedThemeName(NSString *raw) {
                                         variant:ApolloThemeVariantFromKey(theme[@"variant"])
                          advancedOptionsEnabled:[theme[kApolloThemeAdvancedOptionsEnabledKey] boolValue]
                                      generation:generation];
-    [store selectCustomTheme:themeID];
+    if (store.separateThemesEnabled) {
+        BOOL light = slug.length && [store isGallerySlug:slug selectedForMode:ApolloThemeModeLight];
+        BOOL dark = slug.length && [store isGallerySlug:slug selectedForMode:ApolloThemeModeDark];
+        if (light) [store selectCustomTheme:themeID forTarget:ApolloThemeApplyTargetLight];
+        if (dark) [store selectCustomTheme:themeID forTarget:ApolloThemeApplyTargetDark];
+        if (!light && !dark) {
+            ApolloThemeApplyTarget target = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark
+                ? ApolloThemeApplyTargetDark : ApolloThemeApplyTargetLight;
+            [store selectCustomTheme:themeID forTarget:target];
+        }
+    } else {
+        [store selectCustomTheme:themeID];
+    }
     if (store.runtimeDisabledDueToCrash) [store clearCrashDisable];
     ApolloThemeRuntimeEnable();
     UINotificationFeedbackGenerator *fb = [[UINotificationFeedbackGenerator alloc] init];
@@ -1551,7 +1649,9 @@ static NSString *SpacedThemeName(NSString *raw) {
 
 - (void)confirmDeleteThemeIDIfNeeded:(NSString *)themeID {
     ApolloThemeStore *store = [self store];
-    BOOL active = store.customThemeEnabled && [store.activeThemeID isEqualToString:themeID];
+    BOOL active = store.customThemeEnabled &&
+        ([store isCustomThemeID:themeID selectedForMode:ApolloThemeModeLight] ||
+         [store isCustomThemeID:themeID selectedForMode:ApolloThemeModeDark]);
     if (!active) {
         [self deleteThemeAndRefresh:themeID];
         return;
@@ -1601,7 +1701,9 @@ static NSString *SpacedThemeName(NSString *raw) {
         title:@"Delete" handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
             NSString *themeID = theme[@"id"];
             ApolloThemeStore *store = [self store];
-            BOOL active = store.customThemeEnabled && [store.activeThemeID isEqualToString:themeID];
+            BOOL active = store.customThemeEnabled &&
+                ([store isCustomThemeID:themeID selectedForMode:ApolloThemeModeLight] ||
+                 [store isCustomThemeID:themeID selectedForMode:ApolloThemeModeDark]);
             if (!active) {
                 [self deleteThemeAndRefresh:themeID];
                 done(YES);
@@ -1727,7 +1829,9 @@ static NSString *SpacedThemeName(NSString *raw) {
 // Re-apply live if this theme is the active, enabled one.
 - (void)maybeLiveReload {
     ApolloThemeStore *store = [self store];
-    if (store.customThemeEnabled && [store.activeThemeID isEqualToString:self.editingThemeID]) {
+    if (store.customThemeEnabled &&
+        ([store isCustomThemeID:self.editingThemeID selectedForMode:ApolloThemeModeLight] ||
+         [store isCustomThemeID:self.editingThemeID selectedForMode:ApolloThemeModeDark])) {
         ApolloThemeRuntimeReload();
         ApolloThemeRuntimeInvalidate();
     }
