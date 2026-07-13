@@ -767,11 +767,11 @@ static NSArray<NSHTTPCookie *> *ApolloUserFlairCookiesFromHeader(NSString *heade
 }
 
 // Reddit's OAuth emoji endpoint deliberately rejects website-session cookies.
-// Shreddit loads the same catalog through a signed-in web-only endpoint when its
-// flair editor opens. Reproduce that interaction in a hidden WKWebView so the
-// request is made by Reddit's own page, with the active keyless account's exact
-// cookies and request headers. A document-start fetch wrapper clones just that
-// response and converts its HTML list items into a small JSON array for Apollo.
+// Shreddit exposes the same catalog through a signed-in web-only endpoint. Load
+// a subreddit page in a hidden WKWebView, then make that request in its page
+// context once the flair control is ready. The active keyless account's exact
+// cookies stay isolated in that web view, and a document-start fetch wrapper
+// converts the HTML response into a small JSON array for Apollo.
 @interface ApolloUserFlairWebEmojiFetch : NSObject <WKNavigationDelegate>
 @property (nonatomic, strong) WKWebView *web;
 @property (nonatomic, copy) NSString *subreddit;
@@ -854,7 +854,8 @@ static NSArray<NSHTTPCookie *> *ApolloUserFlairCookiesFromHeader(NSString *heade
 - (void)poll {
     if (!self.web || self.finished) return;
     self.polls++;
-    NSString *js = @"(function(){if(window.__apolloEmojiCatalog)return JSON.stringify(window.__apolloEmojiCatalog);var edit=document.querySelector('button[aria-label=\"Edit user flair\"]');if(edit&&!window.__apolloClickedEdit){window.__apolloClickedEdit=true;var target=edit.closest('faceplate-tracker')||edit;target.click();edit.dispatchEvent(new MouseEvent('click',{bubbles:true,composed:true}));}return JSON.stringify({state:'waiting',foundEdit:!!edit});})()";
+    NSString *encoded = [self.subreddit stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet] ?: self.subreddit;
+    NSString *js = [NSString stringWithFormat:@"(function(){if(window.__apolloEmojiCatalog)return JSON.stringify(window.__apolloEmojiCatalog);var edit=document.querySelector('button[aria-label=\"Edit user flair\"]');if(edit&&!window.__apolloDirectEmojiRequest){window.__apolloDirectEmojiRequest=true;fetch('/svc/shreddit/%@/emojis/USER_FLAIR');}return JSON.stringify({state:'waiting',foundEdit:!!edit});})()", encoded];
     __weak typeof(self) weakSelf = self;
     [self.web evaluateJavaScript:js completionHandler:^(id result, NSError *error) {
         typeof(self) self = weakSelf;
