@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <CoreImage/CoreImage.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 
@@ -54,6 +55,9 @@ static const void *kApolloProfileUsernameCopyInteractionKey = &kApolloProfileUse
 static const void *kApolloProfileUsernameCopyValueKey = &kApolloProfileUsernameCopyValueKey;
 static const void *kApolloProfileUsernameCopyLoggedKey = &kApolloProfileUsernameCopyLoggedKey;
 static const void *kApolloProfileUsernameCopyMissLoggedKey = &kApolloProfileUsernameCopyMissLoggedKey;
+static const void *kApolloProfileAmbientViewKey = &kApolloProfileAmbientViewKey;
+static const void *kApolloProfileOriginalTableBackgroundKey = &kApolloProfileOriginalTableBackgroundKey;
+static const void *kApolloProfileOriginalTableBackgroundViewKey = &kApolloProfileOriginalTableBackgroundViewKey;
 static const void *kApolloProfileTabOriginalImageKey = &kApolloProfileTabOriginalImageKey;
 static const void *kApolloProfileTabOriginalSelectedImageKey = &kApolloProfileTabOriginalSelectedImageKey;
 static const void *kApolloProfileTabAppliedUsernameKey = &kApolloProfileTabAppliedUsernameKey;
@@ -62,6 +66,8 @@ static const void *kApolloProfileTabAppliedImageKey = &kApolloProfileTabAppliedI
 // monochromatic-treatment clamp can recognise our avatar regardless of which tab
 // view class hosts it.
 static const void *kApolloProfileTabAvatarImageMarkerKey = &kApolloProfileTabAvatarImageMarkerKey;
+
+@class ApolloProfileStatCard;
 
 @interface ApolloProfileHeaderView : UIView
 @property(nonatomic, strong) UIImageView *bannerImageView;
@@ -73,6 +79,12 @@ static const void *kApolloProfileTabAvatarImageMarkerKey = &kApolloProfileTabAva
 @property(nonatomic, strong) UILabel *usernameLabel;
 @property(nonatomic, strong) UIButton *editProfileButton;
 @property(nonatomic, strong) UILabel *aboutLabel;
+// Glass stat cards (post karma / comment karma / account age). `statCards` holds the
+// currently-visible tiles left-to-right; empty when no stats are available yet.
+@property(nonatomic, strong) NSArray<ApolloProfileStatCard *> *statCards;
+@property(nonatomic, strong) ApolloProfileStatCard *postKarmaCard;
+@property(nonatomic, strong) ApolloProfileStatCard *commentKarmaCard;
+@property(nonatomic, strong) ApolloProfileStatCard *ageCard;
 @property(nonatomic, strong) ApolloProfileSocialLinksView *socialLinksView;
 @property(nonatomic, weak) UIViewController *hostViewController;
 @property(nonatomic, copy) NSString *username;
@@ -88,6 +100,64 @@ static const void *kApolloProfileTabAvatarImageMarkerKey = &kApolloProfileTabAva
 - (void)apollo_updateEditProfileButtonColors;
 @end
 
+// A single table backdrop, deliberately independent of UINavigationBar. UIKit keeps
+// complete ownership of its chrome and UITableView keeps ownership of cell layout.
+// Using backgroundView (rather than a giant table subview) cannot obscure or displace
+// Apollo's native stats and menu rows.
+//
+// Immersive banner treatment ("Sequel"-style): the banner is shown crisp at the top
+// (top-anchored aspectFill — a clean crop, never a stretch) and then *progressively
+// blurs* downward via a variableBlur CAFilter whose per-pixel radius is driven by a
+// vertical mask (sharp at the top, full blur lower down). A theme-colored tint gradient
+// finishes the blend into the page's own background so odd/custom themes stay coherent
+// and the content rows below read cleanly. Falls back to a pre-blurred gradient reveal
+// when the private variableBlur filter is unavailable.
+@interface ApolloProfileAmbientView : UIView
+@property(nonatomic, strong) UIView *contentContainer;      // holds all banner visuals; translated on scroll
+@property(nonatomic, assign) CGFloat contentTranslation;   // points the banner is scrolled up (>=0)
+@property(nonatomic, strong) UIImageView *backdropView;      // blown-up, heavily-blurred backdrop
+@property(nonatomic, strong) UIView *heroClip;              // clips the sharp hero to its natural strip
+@property(nonatomic, strong) UIImageView *heroView;        // sharp banner at natural scale (gets variableBlur)
+@property(nonatomic, strong) CAGradientLayer *heroFeatherMask; // fades the hero's bottom into the backdrop
+@property(nonatomic, strong) CAGradientLayer *tintLayer;   // clear -> theme colour, over everything
+@property(nonatomic, strong) UIColor *pageColor;
+@property(nonatomic, strong) UIImage *sourceBanner;        // last banner set (to detect changes)
+@property(nonatomic, assign) CGFloat bannerRegionHeight;   // how far the banner influence extends before pure theme
+@property(nonatomic, assign) CGFloat topInset;             // safe-area/nav-bar height; the sharp hero starts here
+@property(nonatomic, assign) BOOL usesVariableBlur;
+- (void)applyBanner:(UIImage *)banner pageColor:(UIColor *)pageColor regionHeight:(CGFloat)regionHeight topInset:(CGFloat)topInset;
+@end
+
+// Gaussian sigma for the blown-up backdrop layer (the immersive fill behind everything).
+static CGFloat const ApolloProfileBackdropBlurSigma = 28.0;
+
+// Text over the immersive banner is deliberately NOT themed — it's always light, with a
+// dark readability scrim behind it. Legibility comes from the scrim + halo, so it reads
+// on any banner and any theme (the theme resumes below, on the content rows).
+static UIColor *ApolloProfileOverBlurPrimaryColor(void) { return [UIColor whiteColor]; }
+static UIColor *ApolloProfileOverBlurSecondaryColor(void) { return [UIColor colorWithWhite:1.0 alpha:0.82]; }
+// Height of the prominent sharp hero banner at the top (aspectFill crop).
+static CGFloat const ApolloProfileHeroHeight = 200.0;
+
+// One heavy static gaussian blur of the banner, edge-clamped so the crop stays opaque.
+// Powers the blown-up immersive backdrop layer.
+static UIImage *ApolloGaussianBlurredImage(UIImage *image, CGFloat radius) {
+    if (!image) return nil;
+    CIImage *input = [[CIImage alloc] initWithImage:image];
+    if (!input) return image;
+    CIImage *clamped = [input imageByClampingToExtent];
+    CIImage *blurred = [clamped imageByApplyingGaussianBlurWithSigma:radius];
+    CIImage *cropped = [blurred imageByCroppingToRect:input.extent];
+    static CIContext *ciContext = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ ciContext = [CIContext contextWithOptions:nil]; });
+    CGImageRef cg = [ciContext createCGImage:cropped fromRect:input.extent];
+    if (!cg) return image;
+    UIImage *result = [UIImage imageWithCGImage:cg scale:image.scale orientation:image.imageOrientation];
+    CGImageRelease(cg);
+    return result;
+}
+
 static NSString *ApolloAvatarNormalizedUsername(NSString *username);
 static BOOL ApolloAvatarUsernameMatches(NSString *left, NSString *right);
 static BOOL ApolloProfileUsernameIsLoggedInAccount(NSString *username);
@@ -100,6 +170,257 @@ static void ApolloProfileRefreshControllersForUsername(NSString *username);
 static void ApolloProfileApplyTabAvatarForController(UITabBarController *tabBarController);
 static void ApolloProfileApplyTabAvatarForVisibleWindows(void);
 static void ApolloProfileScheduleTabAvatarRefresh(NSString *reason);
+static void ApolloProfileSyncAmbient(ApolloProfileHeaderView *header);
+static void ApolloProfileInstallAmbient(UIViewController *viewController, UITableView *tableView,
+                                        ApolloProfileHeaderView *header, UIView *wrappedHeader);
+static void ApolloProfileRemoveAmbient(UIViewController *viewController, UITableView *tableView);
+static void ApolloProfileUpdateAmbientScroll(id viewControllerObject, UIScrollView *scrollView);
+
+@implementation ApolloProfileAmbientView
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+    self.userInteractionEnabled = NO;
+    self.clipsToBounds = YES;
+    self.backgroundColor = UIColor.clearColor;
+
+    // All banner visuals live in a container that is translated up 1:1 with the table's
+    // scroll (see setContentTranslation:), so the banner scrolls away with the content
+    // instead of the content sliding over a stationary banner. The theme-colour fill stays
+    // on `self` (fixed), so whatever the banner vacates resolves cleanly into the theme.
+    _contentContainer = [[UIView alloc] init];
+    _contentContainer.userInteractionEnabled = NO;
+    [self addSubview:_contentContainer];
+
+    // 1) Blown-up, heavily-blurred backdrop — the immersive fill. Because it's fully
+    //    blurred the aggressive crop/zoom reads as ambience, not distortion.
+    _backdropView = [[UIImageView alloc] init];
+    _backdropView.contentMode = UIViewContentModeScaleAspectFill;
+    _backdropView.clipsToBounds = YES;
+    [_contentContainer addSubview:_backdropView];
+
+    // 2) Tint gradient blends the backdrop into the page colour for row legibility.
+    _tintLayer = [CAGradientLayer layer];
+    [_contentContainer.layer addSublayer:_tintLayer];
+
+    // 3) Sharp hero at the banner's natural scale, pinned to the top, its bottom
+    //    feathered into the blurred backdrop so the crisp image melts into the blur.
+    _heroClip = [[UIView alloc] init];
+    _heroClip.clipsToBounds = YES;
+    _heroClip.userInteractionEnabled = NO;
+    [_contentContainer addSubview:_heroClip];
+
+    _heroView = [[UIImageView alloc] init];
+    _heroView.contentMode = UIViewContentModeScaleAspectFill; // horizontal centre-crop only
+    _heroView.clipsToBounds = YES;
+    [_heroClip addSubview:_heroView];
+
+    _heroFeatherMask = [CAGradientLayer layer];
+    _heroFeatherMask.colors = @[(id)[UIColor colorWithWhite:1.0 alpha:1.0].CGColor,
+                                (id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor];
+    _heroClip.layer.mask = _heroFeatherMask;
+    return self;
+}
+
+- (void)applyBanner:(UIImage *)banner pageColor:(UIColor *)pageColor regionHeight:(CGFloat)regionHeight topInset:(CGFloat)topInset {
+    if (banner != self.sourceBanner) {
+        self.sourceBanner = banner;
+        self.heroView.image = banner;
+        // The backdrop is a one-time heavy blur of the same banner; recompute only when
+        // the banner actually changes (blurring every layout pass would be wasteful).
+        self.backdropView.image = banner ? ApolloGaussianBlurredImage(banner, ApolloProfileBackdropBlurSigma) : nil;
+    }
+    self.pageColor = pageColor ?: UIColor.systemBackgroundColor;
+    if (regionHeight > 0.0) self.bannerRegionHeight = regionHeight;
+    if (topInset > 0.0) self.topInset = topInset;
+    [self setNeedsLayout];
+}
+
+- (void)setContentTranslation:(CGFloat)contentTranslation {
+    _contentTranslation = contentTranslation;
+    // Move all banner visuals up with the scroll; the theme fill on `self` stays put.
+    self.contentContainer.transform = CGAffineTransformMakeTranslation(0.0, -MAX(0.0, contentTranslation));
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat width = self.bounds.size.width;
+    CGFloat totalHeight = self.bounds.size.height;
+    CGFloat regionH = self.bannerRegionHeight > 0.0 ? MIN(self.bannerRegionHeight, totalHeight) : totalHeight;
+
+    UIColor *resolvedPage = [self.pageColor resolvedColorWithTraitCollection:self.traitCollection];
+    self.backgroundColor = resolvedPage;
+
+    // Size the container to our bounds without disturbing its scroll transform.
+    CGAffineTransform savedTransform = self.contentContainer.transform;
+    self.contentContainer.transform = CGAffineTransformIdentity;
+    self.contentContainer.frame = self.bounds;
+    self.contentContainer.transform = savedTransform;
+
+    UIImage *img = self.heroView.image;
+    BOOL hasBanner = img && img.size.width > 0.0 && img.size.height > 0.0;
+    self.backdropView.hidden = !hasBanner;
+    self.heroClip.hidden = !hasBanner;
+    if (!hasBanner) {
+        self.tintLayer.frame = self.bounds;
+        self.tintLayer.colors = @[(id)resolvedPage.CGColor, (id)resolvedPage.CGColor];
+        return;
+    }
+
+    // Backdrop: aspectFill the whole banner-influenced region (blur hides the zoom).
+    self.backdropView.frame = CGRectMake(0.0, 0.0, width, regionH);
+
+    // Hero: the crisp banner the user first sees — a prominent aspectFill crop (aspect is
+    // preserved; only the sides are trimmed). Keep it below the top chrome so the whole
+    // banner remains visible while the blurred backdrop continues behind the navigation bar.
+    CGFloat top = self.topInset;
+    CGFloat heroH = MIN(MAX(0.0, regionH - top), ApolloProfileHeroHeight);
+    CGFloat heroBottom = top + heroH;
+    self.heroClip.frame = CGRectMake(0.0, top, width, heroH);
+    self.heroView.frame = self.heroClip.bounds;
+
+    // Feather the hero's bottom quarter out into the backdrop. (No CAFilter here: the
+    // variableBlur `layer.filters` path blanks the layer in the Simulator, and the
+    // feather-over-blurred-backdrop already reads as "sharp melting into blur".)
+    self.heroView.layer.filters = nil;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.heroFeatherMask.frame = self.heroClip.bounds;
+    self.heroFeatherMask.locations = @[@0.74, @1.0];
+    [CATransaction commit];
+
+    // Scrim: clear across the sharp hero, then a dark readability scrim (BLACK, not the
+    // theme colour) under the identity text/cards so the always-white text reads on any
+    // banner regardless of theme, finally resolving into the opaque page colour exactly at
+    // the region's bottom (= where the opaque content cells begin) so the seam is clean.
+    CGFloat H = totalHeight > 0.0 ? totalHeight : 1.0;
+    CGFloat regionFrac = MIN(1.0, regionH / H);
+    CGFloat hb = MIN(regionFrac, heroBottom / H);
+    CGFloat span = MAX(0.0, regionFrac - hb);
+    self.tintLayer.frame = self.bounds;
+    self.tintLayer.colors = @[(id)[UIColor colorWithWhite:0.0 alpha:0.0].CGColor,
+                              (id)[UIColor colorWithWhite:0.0 alpha:0.45].CGColor,
+                              (id)[UIColor colorWithWhite:0.0 alpha:0.64].CGColor,
+                              (id)[resolvedPage colorWithAlphaComponent:0.92].CGColor,
+                              (id)[resolvedPage colorWithAlphaComponent:1.0].CGColor];
+    self.tintLayer.locations = @[@0.0,
+                                 @(hb),
+                                 @(hb + span * 0.42),
+                                 @(hb + span * 0.85),
+                                 @(regionFrac)];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    [self setNeedsLayout];
+}
+
+@end
+
+// Height of the glass stat-card row, and the inter-card gap.
+static CGFloat const ApolloProfileStatsRowHeight = 66.0;
+static CGFloat const ApolloProfileStatsCardGap = 10.0;
+
+// Compact count formatting for karma values: 1.2k / 45k / 1.3M.
+static NSString *ApolloProfileFormatCount(NSInteger value) {
+    if (value < 0) return @"—";
+    double v = (double)value;
+    if (v >= 1000000.0) return [NSString stringWithFormat:@"%.1fM", v / 1000000.0];
+    if (v >= 100000.0) return [NSString stringWithFormat:@"%.0fk", v / 1000.0];
+    if (v >= 1000.0) return [NSString stringWithFormat:@"%.1fk", v / 1000.0];
+    return [NSString stringWithFormat:@"%ld", (long)value];
+}
+
+// Account age from a created-utc timestamp: "4y 2mo", "7mo", "New".
+static NSString *ApolloProfileFormatAge(NSTimeInterval createdUTC) {
+    if (createdUTC <= 0.0) return @"—";
+    NSDate *created = [NSDate dateWithTimeIntervalSince1970:createdUTC];
+    NSDateComponents *c = [[NSCalendar currentCalendar] components:NSCalendarUnitYear | NSCalendarUnitMonth
+                                                          fromDate:created toDate:[NSDate date] options:0];
+    if (c.year >= 1) {
+        if (c.month > 0) return [NSString stringWithFormat:@"%ldy %ldmo", (long)c.year, (long)c.month];
+        return [NSString stringWithFormat:@"%ldy", (long)c.year];
+    }
+    if (c.month >= 1) return [NSString stringWithFormat:@"%ldmo", (long)c.month];
+    return @"New";
+}
+
+// Best translucent effect for the stat cards: real Liquid Glass on iOS 26 when the app
+// is in that mode, otherwise a themed thin material that still reads as glass on any
+// theme (dark, light, or a custom accent).
+static UIVisualEffect *ApolloProfileCardEffect(void) {
+    if (IsLiquidGlass()) {
+        Class glassClass = NSClassFromString(@"UIGlassEffect");
+        if (glassClass) {
+            UIVisualEffect *effect = [[glassClass alloc] init];
+            if (effect) return effect;
+        }
+    }
+    return [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
+}
+
+// A single "glass" stat tile: a big value over a small caption, floating on a
+// translucent rounded card. Sits over the ambient banner so it reads as a card on
+// top of the background image.
+@interface ApolloProfileStatCard : UIView
+@property(nonatomic, strong) UIVisualEffectView *effectView;
+@property(nonatomic, strong) UILabel *valueLabel;
+@property(nonatomic, strong) UILabel *captionLabel;
+- (void)setValue:(NSString *)value caption:(NSString *)caption;
+@end
+
+@implementation ApolloProfileStatCard
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+
+    _effectView = [[UIVisualEffectView alloc] initWithEffect:ApolloProfileCardEffect()];
+    _effectView.clipsToBounds = YES;
+    _effectView.layer.cornerRadius = 18.0;
+    _effectView.layer.cornerCurve = kCACornerCurveContinuous;
+    _effectView.layer.borderWidth = 1.0;
+    _effectView.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.14].CGColor;
+    [self addSubview:_effectView];
+
+    _valueLabel = [[UILabel alloc] init];
+    _valueLabel.font = [UIFont systemFontOfSize:18.0 weight:UIFontWeightBold];
+    _valueLabel.textColor = ApolloProfileOverBlurPrimaryColor();
+    _valueLabel.textAlignment = NSTextAlignmentCenter;
+    _valueLabel.adjustsFontSizeToFitWidth = YES;
+    _valueLabel.minimumScaleFactor = 0.7;
+    [_effectView.contentView addSubview:_valueLabel];
+
+    _captionLabel = [[UILabel alloc] init];
+    _captionLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
+    _captionLabel.textColor = ApolloProfileOverBlurSecondaryColor();
+    _captionLabel.textAlignment = NSTextAlignmentCenter;
+    [_effectView.contentView addSubview:_captionLabel];
+    return self;
+}
+
+- (void)setValue:(NSString *)value caption:(NSString *)caption {
+    self.valueLabel.text = value;
+    self.captionLabel.text = caption;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    self.effectView.frame = self.bounds;
+    CGFloat w = self.bounds.size.width;
+    self.valueLabel.frame = CGRectMake(6.0, 12.0, MAX(0.0, w - 12.0), 22.0);
+    self.captionLabel.frame = CGRectMake(6.0, CGRectGetMaxY(self.valueLabel.frame) + 2.0, MAX(0.0, w - 12.0), 14.0);
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    self.valueLabel.textColor = ApolloProfileOverBlurPrimaryColor();
+    self.captionLabel.textColor = ApolloProfileOverBlurSecondaryColor();
+    self.effectView.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.14].CGColor;
+}
+
+@end
 
 @implementation ApolloProfileHeaderView
 
@@ -121,9 +442,11 @@ static void ApolloProfileScheduleTabAvatarRefresh(NSString *reason);
         [self addSubview:_detailsBackgroundView];
 
         _avatarBorderView = [[UIView alloc] init];
-        _avatarBorderView.backgroundColor = [UIColor clearColor];
+        _avatarBorderView.backgroundColor = [UIColor systemBackgroundColor];
         _avatarBorderView.layer.cornerRadius = (ApolloProfileAvatarDiameter + 6.0) / 2.0;
         _avatarBorderView.clipsToBounds = YES;
+        _avatarBorderView.layer.borderWidth = 1.0;
+        _avatarBorderView.layer.borderColor = [UIColor.separatorColor colorWithAlphaComponent:0.5].CGColor;
         [self addSubview:_avatarBorderView];
 
         _avatarImageView = [[UIImageView alloc] init];
@@ -142,22 +465,24 @@ static void ApolloProfileScheduleTabAvatarRefresh(NSString *reason);
         // Labels live directly on the header so we can flow `about` full-width
         // below the avatar; keeps the math simple and avoids reparenting.
         _displayNameLabel = [[UILabel alloc] init];
-        _displayNameLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
-        _displayNameLabel.textColor = [UIColor labelColor];
+        _displayNameLabel.font = [UIFont systemFontOfSize:26.0 weight:UIFontWeightBold];
+        _displayNameLabel.textColor = ApolloProfileOverBlurPrimaryColor();
         _displayNameLabel.numberOfLines = 1;
+        _displayNameLabel.textAlignment = NSTextAlignmentCenter;
         _displayNameLabel.adjustsFontForContentSizeCategory = YES;
         [self addSubview:_displayNameLabel];
 
         _usernameLabel = [[UILabel alloc] init];
-        _usernameLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
-        _usernameLabel.textColor = [UIColor secondaryLabelColor];
+        _usernameLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+        _usernameLabel.textColor = ApolloProfileOverBlurSecondaryColor();
         _usernameLabel.numberOfLines = 1;
+        _usernameLabel.textAlignment = NSTextAlignmentCenter;
         _usernameLabel.adjustsFontForContentSizeCategory = YES;
         [self addSubview:_usernameLabel];
 
         _editProfileButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        [_editProfileButton setTitle:@"Edit" forState:UIControlStateNormal];
-        _editProfileButton.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+        [_editProfileButton setTitle:@"Edit Profile" forState:UIControlStateNormal];
+        _editProfileButton.titleLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightSemibold];
         _editProfileButton.titleLabel.adjustsFontForContentSizeCategory = YES;
         _editProfileButton.backgroundColor = [UIColor tertiarySystemFillColor];
         _editProfileButton.layer.cornerRadius = 13.0;
@@ -170,11 +495,22 @@ static void ApolloProfileScheduleTabAvatarRefresh(NSString *reason);
         [self apollo_updateEditProfileButtonColors];
 
         _aboutLabel = [[UILabel alloc] init];
-        _aboutLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
-        _aboutLabel.textColor = [UIColor labelColor];
-        _aboutLabel.numberOfLines = 0;
+        _aboutLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+        _aboutLabel.textColor = ApolloProfileOverBlurSecondaryColor();
+        _aboutLabel.numberOfLines = 3;
+        _aboutLabel.textAlignment = NSTextAlignmentCenter;
         _aboutLabel.adjustsFontForContentSizeCategory = YES;
         [self addSubview:_aboutLabel];
+
+        // Glass stat cards. Created up front (hidden) and populated in applyProfileInfo.
+        _postKarmaCard = [[ApolloProfileStatCard alloc] init];
+        _commentKarmaCard = [[ApolloProfileStatCard alloc] init];
+        _ageCard = [[ApolloProfileStatCard alloc] init];
+        for (ApolloProfileStatCard *card in @[_postKarmaCard, _commentKarmaCard, _ageCard]) {
+            card.hidden = YES;
+            [self addSubview:card];
+        }
+        _statCards = @[];
 
         // Social-links band, positioned between the username line and the bio.
         // It self-manages its data; when its rendered height changes (links arrive,
@@ -188,16 +524,32 @@ static void ApolloProfileScheduleTabAvatarRefresh(NSString *reason);
             if (strongSelf.heightInvalidationBlock) strongSelf.heightInvalidationBlock();
         };
         [self addSubview:_socialLinksView];
+        [self apollo_applyLegibilityHalo];
     }
     return self;
 }
 
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
     [super traitCollectionDidChange:previousTraitCollection];
-    self.displayNameLabel.textColor = [UIColor labelColor];
-    self.usernameLabel.textColor = [UIColor secondaryLabelColor];
-    self.aboutLabel.textColor = [UIColor labelColor];
+    self.displayNameLabel.textColor = ApolloProfileOverBlurPrimaryColor();
+    self.usernameLabel.textColor = ApolloProfileOverBlurSecondaryColor();
+    self.aboutLabel.textColor = ApolloProfileOverBlurSecondaryColor();
+    self.avatarBorderView.backgroundColor = [UIColor systemBackgroundColor];
+    [self apollo_applyLegibilityHalo];
     [self apollo_updateEditProfileButtonColors];
+}
+
+// The identity text is always light and sits over the banner's dark readability scrim.
+// A soft dark halo behind the glyphs guarantees contrast even where a bright banner
+// bleeds through the scrim.
+- (void)apollo_applyLegibilityHalo {
+    for (UILabel *label in @[self.displayNameLabel, self.usernameLabel, self.aboutLabel]) {
+        label.layer.shadowColor = UIColor.blackColor.CGColor;
+        label.layer.shadowOpacity = 0.55;
+        label.layer.shadowRadius = 3.0;
+        label.layer.shadowOffset = CGSizeMake(0.0, 0.5);
+        label.layer.masksToBounds = NO;
+    }
 }
 
 - (void)tintColorDidChange {
@@ -225,24 +577,29 @@ static void ApolloProfileScheduleTabAvatarRefresh(NSString *reason);
 // Layout constants — kept in one place because preferredHeightForWidth needs
 // to match what layoutSubviews actually does, otherwise the tableHeaderView
 // height won't equal the visible content height and the about text gets clipped.
-static CGFloat const ApolloProfileBannerHeight = 126.0;
-static CGFloat const ApolloProfileAvatarBannerOverlap = 34.0;
-static CGFloat const ApolloProfileSidePadding = 22.0;
-static CGFloat const ApolloProfileTextLeftGap = 14.0;
-static CGFloat const ApolloProfileTextTopGap = 12.0;
-static CGFloat const ApolloProfileAboutSideInset = 20.0;
-static CGFloat const ApolloProfileAboutMaxHeight = 220.0; // ~10 lines @ footnote font, covers 200+ chars at full width
-static CGFloat const ApolloProfileBottomPadding = 16.0;
-static CGFloat const ApolloProfileSocialAboutGap = 8.0;   // gap below the social band, above the bio
+// Raised so the avatar sits lower in the header — more of the banner shows above it.
+static CGFloat const ApolloProfileBannerHeight = 186.0;
+static CGFloat const ApolloProfileAvatarBannerOverlap = 56.0;
+static CGFloat const ApolloProfileAboutSideInset = 24.0;
+static CGFloat const ApolloProfileAboutMaxHeight = 72.0;
+static CGFloat const ApolloProfileBottomPadding = 22.0;
+// Inter-section gaps for the content stack (name → username → Edit → bio → social → cards).
+static CGFloat const ApolloProfileEditTopGap = 14.0;
+static CGFloat const ApolloProfileBioTopGap = 14.0;
+static CGFloat const ApolloProfileSocialTopGap = 14.0;
+static CGFloat const ApolloProfileCardsTopGap = 18.0;
 
 - (CGRect)apollo_avatarFrame {
     CGFloat borderSize = ApolloProfileAvatarDiameter + 6.0;
-    return CGRectMake(ApolloProfileSidePadding, ApolloProfileBannerHeight - ApolloProfileAvatarBannerOverlap, borderSize, borderSize);
+    return CGRectMake(floor((self.bounds.size.width - borderSize) / 2.0),
+                      ApolloProfileBannerHeight - ApolloProfileAvatarBannerOverlap,
+                      borderSize, borderSize);
 }
 
 - (CGRect)apollo_snoovatarFrame {
-    CGFloat snoovatarY = MAX(12.0, ApolloProfileBannerHeight - 92.0);
-    return CGRectMake(20.0, snoovatarY, ApolloProfileSnoovatarWidth, ApolloProfileSnoovatarHeight);
+    CGFloat snoovatarY = MAX(12.0, ApolloProfileBannerHeight - 116.0);
+    return CGRectMake(floor((self.bounds.size.width - ApolloProfileSnoovatarWidth) / 2.0),
+                      snoovatarY, ApolloProfileSnoovatarWidth, ApolloProfileSnoovatarHeight);
 }
 
 - (CGFloat)apollo_aboutHeightForWidth:(CGFloat)width {
@@ -253,29 +610,12 @@ static CGFloat const ApolloProfileSocialAboutGap = 8.0;   // gap below the socia
                                                      options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                                                   attributes:@{NSFontAttributeName: self.aboutLabel.font}
                                                      context:nil];
-    return MIN(ApolloProfileAboutMaxHeight, MAX(18.0, ceil(rect.size.height)));
+    return MIN(ApolloProfileAboutMaxHeight, MAX(self.aboutLabel.font.lineHeight, ceil(rect.size.height)));
 }
 
-// The y-coordinate where the post-name content (the social band, else the bio)
-// starts — full-width, below whichever of the avatar/snoovatar or the
-// displayName/username stack reaches further down. No empty space is wasted
-// beneath the picture when the bio is long.
-- (CGFloat)apollo_socialYForWidth:(CGFloat)width {
-    BOOL showSnoovatar = !self.snoovatarImageView.hidden;
-    CGRect mediaFrame = showSnoovatar ? [self apollo_snoovatarFrame] : [self apollo_avatarFrame];
-    CGFloat mediaBottom = CGRectGetMaxY(mediaFrame);
-
-    CGFloat textX = showSnoovatar ? CGRectGetMaxX(mediaFrame) + ApolloProfileTextLeftGap - 2.0
-                                  : CGRectGetMaxX(mediaFrame) + ApolloProfileTextLeftGap;
-    CGFloat textWidth = MAX(80.0, width - textX - 18.0);
-    CGFloat displayNameY = ApolloProfileBannerHeight + 10.0;
-    CGFloat displayNameH = self.displayNameLabel.hidden ? 0.0 : 24.0;
-    CGFloat usernameTopGap = (self.displayNameLabel.hidden || self.usernameLabel.hidden) ? 0.0 : 1.0;
-    CGFloat usernameH = self.usernameLabel.hidden ? 0.0 : 18.0;
-    CGFloat usernameBottom = displayNameY + displayNameH + usernameTopGap + usernameH;
-    (void)textWidth;
-
-    return MAX(mediaBottom + ApolloProfileTextTopGap, usernameBottom + 10.0);
+// Height reserved for the glass stat-card row (0 when there are no stats yet).
+- (CGFloat)apollo_statsHeightForWidth:(CGFloat)width {
+    return self.statCards.count > 0 ? ApolloProfileStatsRowHeight : 0.0;
 }
 
 // Height the social-links band wants at this header width (0 when off / no links).
@@ -285,69 +625,119 @@ static CGFloat const ApolloProfileSocialAboutGap = 8.0;   // gap below the socia
     return [self.socialLinksView preferredHeightForWidth:bandWidth];
 }
 
-// The about text sits below the social band (which sits below the name stack /
-// avatar). When the band is empty it collapses to zero and the bio sits where it
-// always did.
-- (CGFloat)apollo_aboutYForWidth:(CGFloat)width {
-    CGFloat socialY = [self apollo_socialYForWidth:width];
+// The full vertical content stack, in IA order:
+//   avatar/snoovatar → name → username → [Edit Profile] → bio → social links → stat cards.
+// One pass used for both measuring (apply=NO, returns total height) and laying out
+// (apply=YES, sets every frame), so the two can never drift out of sync.
+- (CGFloat)apollo_layoutContentForWidth:(CGFloat)width apply:(BOOL)apply {
+    CGFloat inset = ApolloProfileAboutSideInset;
+    CGFloat contentWidth = MAX(120.0, width - inset * 2.0);
+    BOOL showSnoovatar = !self.snoovatarImageView.hidden;
+    CGRect mediaFrame = showSnoovatar ? [self apollo_snoovatarFrame] : [self apollo_avatarFrame];
+    CGFloat y = CGRectGetMaxY(mediaFrame) + 14.0;
+
+    if (apply) self.displayNameLabel.frame = CGRectMake(inset, y, contentWidth, 36.0);
+    if (!self.displayNameLabel.hidden) y += 36.0;
+
+    if (apply) self.usernameLabel.frame = CGRectMake(inset, y, contentWidth, 24.0);
+    if (!self.usernameLabel.hidden) y += 24.0;
+
+    if (!self.editProfileButton.hidden) {
+        CGFloat editWidth = 122.0;
+        if (apply) {
+            self.editProfileButton.frame = CGRectMake(floor((width - editWidth) / 2.0), y + ApolloProfileEditTopGap, editWidth, 34.0);
+            self.editProfileButton.layer.cornerRadius = 17.0;
+        }
+        y += ApolloProfileEditTopGap + 34.0;
+    }
+
+    // Bio
+    CGFloat aboutH = [self apollo_aboutHeightForWidth:contentWidth];
+    if (aboutH > 0.0) {
+        y += ApolloProfileBioTopGap;
+        if (apply) self.aboutLabel.frame = CGRectMake(inset, y, contentWidth, aboutH);
+        y += aboutH;
+    } else if (apply) {
+        self.aboutLabel.frame = CGRectMake(inset, y, contentWidth, 0.0);
+    }
+
+    // Social links (borderless row; the band draws no header of its own now)
     CGFloat socialH = [self apollo_socialHeightForWidth:width];
-    if (socialH > 0.0) return socialY + socialH + ApolloProfileSocialAboutGap;
-    return socialY;
+    if (apply) {
+        self.socialLinksView.frame = CGRectMake(inset, socialH > 0.0 ? y + ApolloProfileSocialTopGap : y, contentWidth, socialH);
+        self.socialLinksView.hidden = (socialH <= 0.0);
+    }
+    if (socialH > 0.0) y += ApolloProfileSocialTopGap + socialH;
+
+    // Stat cards
+    NSUInteger cardCount = self.statCards.count;
+    if (cardCount > 0) {
+        y += ApolloProfileCardsTopGap;
+        if (apply) {
+            CGFloat totalGap = ApolloProfileStatsCardGap * (cardCount - 1);
+            CGFloat cardW = floor((contentWidth - totalGap) / cardCount);
+            CGFloat cardX = inset;
+            for (NSUInteger i = 0; i < cardCount; i++) {
+                ApolloProfileStatCard *card = self.statCards[i];
+                CGFloat thisWidth = (i == cardCount - 1) ? (inset + contentWidth - cardX) : cardW;
+                card.frame = CGRectMake(cardX, y, thisWidth, ApolloProfileStatsRowHeight);
+                cardX += cardW + ApolloProfileStatsCardGap;
+            }
+        }
+        y += ApolloProfileStatsRowHeight;
+    }
+
+    return y + ApolloProfileBottomPadding;
 }
 
 - (CGFloat)preferredHeightForWidth:(CGFloat)width {
-    CGFloat aboutWidth = MAX(120.0, width - ApolloProfileAboutSideInset * 2.0);
-    CGFloat aboutHeight = [self apollo_aboutHeightForWidth:aboutWidth];
-    CGFloat aboutY = [self apollo_aboutYForWidth:width];
-    if (aboutHeight <= 0.0) {
-        // No about text — header just needs to clear the avatar / labels.
-        return aboutY + ApolloProfileBottomPadding;
-    }
-    return aboutY + aboutHeight + ApolloProfileBottomPadding;
+    return [self apollo_layoutContentForWidth:width apply:NO];
 }
 
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGFloat width = self.bounds.size.width;
-    self.bannerImageView.frame = CGRectMake(0.0, 0.0, width, ApolloProfileBannerHeight);
-    self.detailsBackgroundView.frame = CGRectMake(0.0, ApolloProfileBannerHeight, width, MAX(0.0, self.bounds.size.height - ApolloProfileBannerHeight));
+    CGFloat stageHeight = ApolloProfileBannerHeight;
+    self.bannerImageView.frame = CGRectMake(0.0, 0.0, width, stageHeight);
+    self.detailsBackgroundView.frame = CGRectMake(0.0, stageHeight, width, MAX(0.0, self.bounds.size.height - stageHeight));
 
     CGRect avatarFrame = [self apollo_avatarFrame];
     self.avatarBorderView.frame = avatarFrame;
     self.avatarBorderView.layer.cornerRadius = avatarFrame.size.width / 2.0;
     self.avatarImageView.frame = CGRectMake(3.0, 3.0, ApolloProfileAvatarDiameter, ApolloProfileAvatarDiameter);
     self.avatarImageView.layer.cornerRadius = ApolloProfileAvatarDiameter / 2.0;
-
     self.snoovatarImageView.frame = [self apollo_snoovatarFrame];
 
-    BOOL showSnoovatar = !self.snoovatarImageView.hidden;
-    CGRect mediaFrame = showSnoovatar ? self.snoovatarImageView.frame : self.avatarBorderView.frame;
-    CGFloat textX = showSnoovatar ? CGRectGetMaxX(mediaFrame) + ApolloProfileTextLeftGap - 2.0
-                                  : CGRectGetMaxX(mediaFrame) + ApolloProfileTextLeftGap;
-    CGFloat textWidth = MAX(80.0, width - textX - 18.0);
-    CGFloat editButtonWidth = self.editProfileButton.hidden ? 0.0 : 52.0;
-    CGFloat editButtonHeight = 26.0;
-    CGFloat displayNameY = ApolloProfileBannerHeight + 10.0;
-    self.editProfileButton.frame = CGRectMake(textX + textWidth - editButtonWidth, displayNameY - 1.0, editButtonWidth, editButtonHeight);
-    self.editProfileButton.layer.cornerRadius = editButtonHeight / 2.0;
-    CGFloat displayNameWidth = self.editProfileButton.hidden ? textWidth : MAX(60.0, textWidth - editButtonWidth - 8.0);
-    self.displayNameLabel.frame = CGRectMake(textX, displayNameY, displayNameWidth, 24.0);
-    self.usernameLabel.frame = CGRectMake(textX, CGRectGetMaxY(self.displayNameLabel.frame) + 1.0, textWidth, 18.0);
-
-    CGFloat aboutWidth = MAX(120.0, width - ApolloProfileAboutSideInset * 2.0);
-
-    CGFloat socialY = [self apollo_socialYForWidth:width];
-    CGFloat socialH = [self apollo_socialHeightForWidth:width];
-    self.socialLinksView.frame = CGRectMake(ApolloProfileAboutSideInset, socialY, aboutWidth, socialH);
-    self.socialLinksView.hidden = (socialH <= 0.0);
-
-    CGFloat aboutHeight = [self apollo_aboutHeightForWidth:aboutWidth];
-    CGFloat aboutY = [self apollo_aboutYForWidth:width];
-    self.aboutLabel.frame = CGRectMake(ApolloProfileAboutSideInset, aboutY, aboutWidth, aboutHeight);
+    [self apollo_layoutContentForWidth:width apply:YES];
 }
 
 - (void)apollo_editProfileTapped {
     ApolloProfileOpenRedditProfileEditor();
+}
+
+// Populate the glass stat cards from `info`, building `statCards` from whichever tiles
+// have real data. Cards with no data are hidden and left out of the row entirely, so
+// the layout centres however many we actually have (0, 1, 2, or 3).
+- (void)apollo_applyStats:(ApolloUserProfileInfo *)info {
+    NSMutableArray<ApolloProfileStatCard *> *visible = [NSMutableArray array];
+
+    if (info.linkKarma >= 0) {
+        [self.postKarmaCard setValue:ApolloProfileFormatCount(info.linkKarma) caption:@"Post Karma"];
+        [visible addObject:self.postKarmaCard];
+    }
+    if (info.commentKarma >= 0) {
+        [self.commentKarmaCard setValue:ApolloProfileFormatCount(info.commentKarma) caption:@"Comment Karma"];
+        [visible addObject:self.commentKarmaCard];
+    }
+    if (info.createdUTC > 0.0) {
+        [self.ageCard setValue:ApolloProfileFormatAge(info.createdUTC) caption:@"Reddit Age"];
+        [visible addObject:self.ageCard];
+    }
+
+    for (ApolloProfileStatCard *card in @[self.postKarmaCard, self.commentKarmaCard, self.ageCard]) {
+        card.hidden = ![visible containsObject:card];
+    }
+    self.statCards = visible;
 }
 
 - (void)applyProfileInfo:(ApolloUserProfileInfo *)info fallbackUsername:(NSString *)username {
@@ -365,6 +755,7 @@ static CGFloat const ApolloProfileSocialAboutGap = 8.0;   // gap below the socia
     self.displayNameLabel.hidden = self.displayNameLabel.text.length == 0;
     self.usernameLabel.hidden = self.usernameLabel.text.length == 0;
     self.aboutLabel.hidden = self.aboutLabel.text.length == 0;
+    [self apollo_applyStats:info];
     // Feed the social-links band the username so it can load/render (no-op if the
     // username is unchanged; the band re-measures the header when links arrive).
     self.socialLinksView.username = username;
@@ -1466,6 +1857,7 @@ static void ApolloProfileLoadImages(ApolloProfileHeaderView *header, NSString *u
             UIImage *banner = [cache cachedImageForURL:info.bannerURL];
             if (banner) {
                 header.bannerImageView.image = banner;
+                ApolloProfileSyncAmbient(header);
             } else {
                 NSURL *bannerURL = info.bannerURL;
                 [cache requestImageForURL:bannerURL completion:^(UIImage *loadedImage) {
@@ -1473,6 +1865,7 @@ static void ApolloProfileLoadImages(ApolloProfileHeaderView *header, NSString *u
                     if (!ApolloAvatarUsernameMatches(header.username, targetUsername)) return;
                     if (!ApolloProfileURLsMatch(header.currentBannerURL, bannerURL)) return;
                     header.bannerImageView.image = loadedImage;
+                    ApolloProfileSyncAmbient(header);
                 }];
             }
         }
@@ -1607,6 +2000,74 @@ static void ApolloProfileInstallUsernameCopyInteraction(UIViewController *viewCo
     }
 }
 
+static void ApolloProfileSyncAmbient(ApolloProfileHeaderView *header) {
+    UIViewController *viewController = header.hostViewController;
+    ApolloProfileAmbientView *ambient = objc_getAssociatedObject(viewController, kApolloProfileAmbientViewKey);
+    if (!ambient) return;
+    UITableView *tableView = ApolloFindTableView(viewController);
+    UIColor *pageColor = objc_getAssociatedObject(viewController, kApolloProfileOriginalTableBackgroundKey)
+        ?: tableView.backgroundColor ?: UIColor.systemBackgroundColor;
+    // Sharp hero starts below the nav bar so the whole banner is in clear view. The
+    // table extends under the bar, so the ambient's own top is behind it.
+    CGFloat topInset = viewController.view.safeAreaInsets.top;
+    if (topInset <= 0.0) topInset = tableView.adjustedContentInset.top;
+    // The banner backs the whole transparent custom header and must reach the pure theme
+    // colour *exactly* where Apollo's opaque content cells begin — i.e. topInset (behind
+    // the nav bar) + the header's height. Fading to theme right at that seam is what
+    // removes the hard line between the blur and the themeable background below.
+    CGFloat width = header.bounds.size.width > 0.0 ? header.bounds.size.width : tableView.bounds.size.width;
+    CGFloat headerHeight = tableView.tableHeaderView.frame.size.height;
+    if (headerHeight <= 0.0) headerHeight = [header preferredHeightForWidth:width];
+    CGFloat regionHeight = topInset + headerHeight;
+    [ambient applyBanner:header.bannerImageView.image pageColor:pageColor regionHeight:regionHeight topInset:topInset];
+}
+
+static void ApolloProfileInstallAmbient(UIViewController *viewController, UITableView *tableView,
+                                        ApolloProfileHeaderView *header, UIView *wrappedHeader) {
+    if (!viewController || !tableView || !header || !wrappedHeader) return;
+    ApolloProfileAmbientView *ambient = objc_getAssociatedObject(viewController, kApolloProfileAmbientViewKey);
+    if (!ambient) {
+        UIColor *pageColor = tableView.backgroundColor ?: UIColor.systemBackgroundColor;
+        objc_setAssociatedObject(viewController, kApolloProfileOriginalTableBackgroundKey,
+                                 pageColor, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        UIView *originalBackgroundView = tableView.backgroundView;
+        if (originalBackgroundView) {
+            objc_setAssociatedObject(viewController, kApolloProfileOriginalTableBackgroundViewKey,
+                                     originalBackgroundView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        viewController.view.backgroundColor = pageColor;
+        tableView.backgroundColor = UIColor.clearColor;
+
+        ambient = [[ApolloProfileAmbientView alloc] initWithFrame:tableView.bounds];
+        ambient.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        tableView.backgroundView = ambient;
+        objc_setAssociatedObject(viewController, kApolloProfileAmbientViewKey,
+                                 ambient, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloLog(@"[ProfileRedesign] Installed native ambient background vc=%p", viewController);
+    } else if (tableView.backgroundView != ambient) {
+        tableView.backgroundView = ambient;
+    }
+    ambient.frame = tableView.bounds;
+    // The hidden image view remains the cache/loading target. Only the controller-
+    // level compositor renders the banner, so there can be no duplicate crop seam.
+    header.bannerImageView.alpha = 0.0;
+    ApolloProfileSyncAmbient(header);
+}
+
+static void ApolloProfileRemoveAmbient(UIViewController *viewController, UITableView *tableView) {
+    ApolloProfileAmbientView *ambient = objc_getAssociatedObject(viewController, kApolloProfileAmbientViewKey);
+    UIView *originalBackgroundView = objc_getAssociatedObject(viewController, kApolloProfileOriginalTableBackgroundViewKey);
+    if (tableView.backgroundView == ambient) tableView.backgroundView = originalBackgroundView;
+    [ambient removeFromSuperview];
+    objc_setAssociatedObject(viewController, kApolloProfileAmbientViewKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(viewController, kApolloProfileOriginalTableBackgroundViewKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UIColor *pageColor = objc_getAssociatedObject(viewController, kApolloProfileOriginalTableBackgroundKey);
+    if (pageColor) tableView.backgroundColor = pageColor;
+    objc_setAssociatedObject(viewController, kApolloProfileOriginalTableBackgroundKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloProfileHeaderView *header = objc_getAssociatedObject(viewController, kApolloProfileHeaderViewKey);
+    header.bannerImageView.alpha = 1.0;
+}
+
 // Tear down the custom profile header and restore Apollo's native table header.
 // Used when "Show Detailed Profiles" is OFF (either toggled off live, or already
 // off when a profile page appears) so the page falls back to Apollo's stock layout.
@@ -1617,6 +2078,7 @@ static void ApolloProfileRemoveHeader(id viewControllerObject, UITableView *tabl
 
     UIView *wrappedHeader = objc_getAssociatedObject(viewControllerObject, kApolloProfileWrappedHeaderKey);
     UIView *originalHeader = objc_getAssociatedObject(viewControllerObject, kApolloProfileOriginalHeaderKey);
+    ApolloProfileRemoveAmbient((UIViewController *)viewControllerObject, tableView);
 
     // The table may currently host our wrapper even if our per-VC refs went stale
     // (fresh controller, reused VC, etc.) — detect it via the wrapper marker.
@@ -1743,6 +2205,8 @@ static void ApolloProfileInstallOrUpdateHeader(id viewControllerObject) {
             ApolloLog(@"[UserAvatars] Resized profile header class=%@ vc=%p username=%@ width=%.1f", className, viewControllerObject, username, width);
         }
     }
+
+    ApolloProfileInstallAmbient(viewController, tableView, header, wrappedHeader);
 
     NSString *storedUsername = objc_getAssociatedObject(viewControllerObject, kApolloProfileUsernameKey);
     if (![storedUsername isEqualToString:username]) {
@@ -2470,6 +2934,32 @@ static void ApolloAvatarApplySubredditIconToSharePreview(id postInfo, NSString *
 
 %end
 
+// Apollo's native profile stats cell (Comment Karma / Post Karma / Account Age). When
+// "Detailed Profiles" is on, our custom header already surfaces these as glass stat
+// cards, so collapse the native cell to an empty (zero-height) layout to avoid the
+// duplicate, unstyled row.
+%hook _TtC6Apollo21ProfileHeaderCellNode
+
+- (id)layoutSpecThatFits:(struct CDStruct_90e057aa)constrainedSize {
+    id spec = %orig;
+    if (!sShowDetailedProfiles) return spec;
+    Class specClass = NSClassFromString(@"ASLayoutSpec");
+    id emptySpec = specClass ? [[specClass alloc] init] : nil;
+    return emptySpec ?: spec;
+}
+
+%end
+
+// Drive the ambient banner to scroll 1:1 with the table so content never slides over a
+// stationary sharp banner. Called from each profile VC's scrollViewDidScroll:.
+static void ApolloProfileUpdateAmbientScroll(id viewControllerObject, UIScrollView *scrollView) {
+    if (![scrollView isKindOfClass:[UIScrollView class]]) return;
+    ApolloProfileAmbientView *ambient = objc_getAssociatedObject(viewControllerObject, kApolloProfileAmbientViewKey);
+    if (!ambient) return;
+    CGFloat rest = -scrollView.adjustedContentInset.top;
+    ambient.contentTranslation = MAX(0.0, scrollView.contentOffset.y - rest);
+}
+
 %hook _TtC6Apollo21ProfileViewController
 
 - (void)viewDidLoad {
@@ -2477,6 +2967,11 @@ static void ApolloAvatarApplySubredditIconToSharePreview(id postInfo, NSString *
     ApolloProfileInstallOrUpdateHeader(self);
     ApolloProfileInstallUsernameCopyInteraction((UIViewController *)self, @"viewDidLoad");
     ApolloProfileApplyTabAvatarForController(((UIViewController *)self).tabBarController);
+}
+
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    %orig;
+    ApolloProfileUpdateAmbientScroll(self, scrollView);
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -2735,6 +3230,11 @@ static void ApolloPinAccountToCurrentDefaultCredentialsIfNeeded(id currentUser) 
     %orig;
     ApolloProfileInstallOrUpdateHeader(self);
     ApolloProfileRefreshControllersForUsername(nil);
+}
+
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    %orig;
+    ApolloProfileUpdateAmbientScroll(self, scrollView);
 }
 
 - (void)viewWillAppear:(BOOL)animated {

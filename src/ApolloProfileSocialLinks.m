@@ -24,14 +24,12 @@ BOOL ApolloProfileSocialLinksEnabled(void) {
 
 #pragma mark - Layout constants
 
-static CGFloat const kSLPillHeight   = 30.0;   // name-pill capsule height
-static CGFloat const kSLBadgeSize    = 30.0;   // circular badge diameter
+static CGFloat const kSLPillHeight   = 36.0;   // name-pill capsule height
+static CGFloat const kSLBadgeSize    = 36.0;   // circular badge diameter
 static CGFloat const kSLBadgeGap     = 8.0;
-static CGFloat const kSLIconSize     = 18.0;
+static CGFloat const kSLIconSize     = 20.0;
 static NSUInteger const kSLMaxBadges = 8;      // beyond this we show a "+N" badge
 static NSUInteger const kSLPillThreshold = 3;  // <=3 links -> name pills; >3 -> icon badges + sheet
-static CGFloat const kSLHeaderHeight = 16.0;   // the "Social Links" caption
-static CGFloat const kSLHeaderGap    = 5.0;    // gap below the header, above the items
 static CGFloat const kSLPillRowGap   = 8.0;    // vertical gap between wrapped pill rows
 static CGFloat const kSLPillHGap     = 8.0;    // horizontal gap between pills
 static CGFloat const kSLPillLeadInset = 12.0;
@@ -276,8 +274,6 @@ static NSArray<ApolloSocialLink *> *ApolloSLLinksFromJSON(NSArray *raw) {
         if (![obj isKindOfClass:[NSDictionary class]]) continue;
         NSString *urlString = obj[@"url"];
         if (![urlString isKindOfClass:[NSString class]] || urlString.length == 0) continue;
-        if ([seen containsObject:urlString]) continue;
-        [seen addObject:urlString];
         NSURL *url = [NSURL URLWithString:urlString];
         ApolloSocialLink *link = [ApolloSocialLink new];
         link.urlString = urlString;
@@ -286,6 +282,11 @@ static NSArray<ApolloSocialLink *> *ApolloSLLinksFromJSON(NSArray *raw) {
         link.type = ApolloSLTypeForHost(host);
         NSString *title = [obj[@"title"] isKindOfClass:[NSString class]] ? [obj[@"title"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] : nil;
         link.title = title.length > 0 ? title : ApolloSLDisplayNameForType(link.type);
+        // Dedup on url + title, so multiple differently-named links to the same URL are
+        // all kept (only true duplicates — same URL AND same label — collapse).
+        NSString *dedupKey = [NSString stringWithFormat:@"%@|%@", urlString, link.title];
+        if ([seen containsObject:dedupKey]) continue;
+        [seen addObject:dedupKey];
         [links addObject:link];
         if (links.count >= 12) break;
     }
@@ -303,30 +304,21 @@ static NSArray<ApolloSocialLink *> *ApolloSLLinksFromJSON(NSArray *raw) {
 
 @implementation ApolloSLWebFetch
 
-// A single non-persistent (in-memory) WKWebsiteDataStore, reused for every
-// social-links scrape this app session.
+// The shared (logged-in) WKWebsiteDataStore, i.e. Apollo's own WebKit session.
 //
-// Why isolate the scrape from the app's shared cookies: Reddit serves the *old*
-// reddit layout at www.reddit.com whenever the logged-in session belongs to an
-// account whose "Use new Reddit as my default experience" preference is disabled.
-// Apollo's OAuth login runs through a www.reddit.com web view, so that account's
-// session + old-reddit preference land in the SHARED default WKWebsiteDataStore.
-// Old reddit has none of the shreddit-* markup the extraction JS targets, so the
-// fallback scrapes footer/sidebar anchors (redditblog.com, posted/commented URLs)
-// and every profile shows the same wrong links. The poison is sticky too —
-// deleting the Apollo account never clears WebKit cookies, so only deleting the
-// whole app cleared it. (Reported on PR #465.)
-//
-// A logged-out, in-memory store sidesteps all of it: with no account session
-// Reddit serves its default (new/shreddit) experience, the scrape can neither
-// poison nor be poisoned by the user's browsing session, and it resets each
-// launch. Shared (not per-scrape) so Reddit's JS bot-challenge cookie warms once
-// per session rather than cold on every profile.
+// History: PR #465 originally used a logged-out, in-memory store to dodge an
+// "old-reddit poison" bug — an account with "Use new Reddit as my default" DISABLED
+// gets served old reddit at www.reddit.com, which lacks the shreddit-* markup the
+// extraction targets, so the broad fallback scraped the wrong (footer/sidebar) anchors.
+// But Reddit has since tightened its anti-bot: a *logged-out* request now hits a hard
+// "You've been blocked by network security. To continue, log in … or use your developer
+// token" wall (verified via the [SocialLinks][web] timeout diagnostic — sawProfile=0,
+// hasApp=0, body="blocked by network security"), so the anonymous scrape returns nothing
+// for EVERY profile. The authenticated session passes the wall and loads the real
+// shreddit profile. The old-reddit poison is instead defused in the extraction JS, which
+// only falls back to broad anchor scraping when `shreddit-app` is actually present.
 + (WKWebsiteDataStore *)apollo_scrapeDataStore {
-    static WKWebsiteDataStore *store;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ store = [WKWebsiteDataStore nonPersistentDataStore]; });
-    return store;
+    return [WKWebsiteDataStore defaultDataStore];
 }
 
 - (void)startForUsername:(NSString *)username completion:(void (^)(NSArray<ApolloSocialLink *> *))done {
@@ -369,13 +361,14 @@ static NSArray<ApolloSocialLink *> *ApolloSLLinksFromJSON(NSArray *raw) {
     "function reddit(h){h=(h||'').toLowerCase();return h.indexOf('reddit.com')>=0||h.indexOf('redd.it')>=0||h.indexOf('redditstatic')>=0||h.indexOf('redditmedia')>=0||h.indexOf('reddithelp')>=0||h==='';}"
     "function inFeed(a){try{return !!(a.closest&&a.closest('shreddit-feed,article,shreddit-post,[data-testid=\"post-container\"],nav,header'));}catch(e){return false;}}"
     "var out=[],seen={};"
-    "function push(a,scoped){try{var href=a.href||a.getAttribute('href');if(!href)return;if(href.indexOf('javascript:')===0)return;if(seen[href])return;var host=a.hostname||'';if(!scoped){if(reddit(host))return;if(inFeed(a))return;}var txt=(a.textContent||'').trim().replace(/\\s+/g,' ');out.push({url:href,title:txt});seen[href]=1;}catch(e){}}"
+    "function push(a,scoped){try{var href=a.href||a.getAttribute('href');if(!href)return;if(href.indexOf('javascript:')===0)return;var txt=(a.textContent||'').trim().replace(/\\s+/g,' ');var key=href+'|'+txt;if(seen[key])return;var host=a.hostname||'';if(!scoped){if(reddit(host))return;if(inFeed(a))return;}out.push({url:href,title:txt});seen[key]=1;}catch(e){}}"
     "var sels=['shreddit-social-links a','customizable-social-links a','profile-social-links a','a[data-testid=\"social-link\"]','faceplate-tracker[noun=\"social_link\"] a','[slot=\"social-links\"] a','[bundlename*=\"social\"] a'];"
     "for(var s=0;s<sels.length;s++){var els=document.querySelectorAll(sels[s]);for(var j=0;j<els.length;j++)push(els[j],true);}"
-    "if(out.length===0){var scope=document.querySelector('shreddit-async-loader[bundlename*=\"profile\"]')||document.querySelector('aside')||document.querySelector('main')||document.body;if(scope){var as=scope.querySelectorAll('a[href]');for(var k=0;k<as.length;k++)push(as[k],false);}}"
+    "if(out.length===0&&document.querySelector('shreddit-app')){var scope=document.querySelector('shreddit-async-loader[bundlename*=\"profile\"]')||document.querySelector('aside')||document.querySelector('main')||document.body;if(scope){var as=scope.querySelectorAll('a[href]');for(var k=0;k<as.length;k++)push(as[k],false);}}"
     "var diag=[];var all=document.querySelectorAll('a[href]');for(var m=0;m<all.length&&diag.length<24;m++){var a2=all[m];if(!reddit(a2.hostname)&&!inFeed(a2)){var p=a2.parentElement;diag.push({h:a2.href,t:(a2.textContent||'').trim().slice(0,28),pt:p?p.tagName.toLowerCase():'',pc:p?(((p.getAttribute('class')||'')+'|'+(p.getAttribute('slot')||''))).slice(0,46):''});}}"
     "var profile=!!document.querySelector('shreddit-app')&&(document.title||'').toLowerCase().indexOf('verification')<0;"
-    "return JSON.stringify({links:out,total:all.length,diag:diag,ready:document.readyState,profile:profile});"
+    "var body=(document.body?(document.body.innerText||'').replace(/\\s+/g,' ').trim().slice(0,180):'');"
+    "return JSON.stringify({links:out,total:all.length,diag:diag,ready:document.readyState,profile:profile,title:(document.title||''),hasApp:!!document.querySelector('shreddit-app'),url:location.href,body:body});"
     "})()";
 }
 
@@ -423,7 +416,8 @@ static NSArray<ApolloSocialLink *> *ApolloSLLinksFromJSON(NSArray *raw) {
         if (ss.polls >= 8) {
             // Saw the real profile but no links → cache "none" (don't re-scrape every visit).
             // Never reached the profile (stuck on interstitial / load failure) → nil so it retries.
-            ApolloLog(@"[SocialLinks][web] u/%@ timed out (ready=%@ sawProfile=%d)", ss.username, ready, ss.sawProfile);
+            ApolloLog(@"[SocialLinks][web] u/%@ timed out (ready=%@ sawProfile=%d hasApp=%@ title=%@ url=%@ body=%@)",
+                      ss.username, ready, ss.sawProfile, j[@"hasApp"], j[@"title"], j[@"url"], j[@"body"]);
             [ss finish:(ss.sawProfile ? @[] : nil)];
             return;
         }
@@ -441,32 +435,131 @@ static NSArray<ApolloSocialLink *> *ApolloSLLinksFromJSON(NSArray *raw) {
 
 @end
 
-// completion(links) on the main queue — synchronous on a warm cache, else after the
-// scrape. links is an (possibly empty) array on success, or nil on failure (not cached
-// so a later visit retries).
-static void ApolloSLFetchLinks(NSString *username, void (^completion)(NSArray<ApolloSocialLink *> *links)) {
-    NSString *key = username.lowercaseString ?: @"";
-    if (key.length == 0) { if (completion) completion(nil); return; }
+// Re-scrape a cached profile at most this often; within a session the in-memory cache
+// serves instantly and never re-scrapes.
+static const NSTimeInterval kSLStaleAfter = 6 * 3600.0;
 
-    NSArray<ApolloSocialLink *> *cached = [ApolloSLLinksCache() objectForKey:key];
-    if (cached) { if (completion) completion(cached); return; }
+// --- Persistent (disk) links cache -----------------------------------------------
+// NSCache is memory-only, so links vanish on every relaunch and every profile re-scrapes
+// (a visible ~1s delay). A tiny plist mirror survives launches: cached links show
+// instantly, and a background re-scrape only runs when the entry is stale.
 
-    // Queue this completion; if a scrape is already running, just wait on it.
+static NSString *ApolloSLDiskCachePath(void) {
+    static NSString *path; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *dir = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+        path = [dir stringByAppendingPathComponent:@"ApolloSocialLinks.plist"];
+    });
+    return path;
+}
+
+static dispatch_queue_t ApolloSLDiskQueue(void) {
+    static dispatch_queue_t q; static dispatch_once_t once;
+    dispatch_once(&once, ^{ q = dispatch_queue_create("com.apollofix.socialLinksDisk", DISPATCH_QUEUE_SERIAL); });
+    return q;
+}
+
+// Main-thread in-memory mirror of the on-disk dict: username(lower) -> {ts, links:[{url,title}]}.
+static NSMutableDictionary *ApolloSLDiskStore(void) {
+    static NSMutableDictionary *store; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSDictionary *onDisk = [NSDictionary dictionaryWithContentsOfFile:ApolloSLDiskCachePath()];
+        store = [onDisk isKindOfClass:[NSDictionary class]] ? [onDisk mutableCopy] : [NSMutableDictionary dictionary];
+    });
+    return store;
+}
+
+static void ApolloSLDiskFlush(void) {
+    NSDictionary *snapshot = [ApolloSLDiskStore() copy];
+    dispatch_async(ApolloSLDiskQueue(), ^{ [snapshot writeToFile:ApolloSLDiskCachePath() atomically:YES]; });
+}
+
+static NSArray<ApolloSocialLink *> *ApolloSLDiskLinks(NSString *key, NSTimeInterval *tsOut) {
+    NSDictionary *entry = ApolloSLDiskStore()[key];
+    if (![entry isKindOfClass:[NSDictionary class]]) return nil;
+    NSArray *rawLinks = entry[@"links"];
+    if (![rawLinks isKindOfClass:[NSArray class]]) return nil;
+    if (tsOut) *tsOut = [entry[@"ts"] doubleValue];
+    return ApolloSLLinksFromJSON(rawLinks);
+}
+
+static void ApolloSLDiskSave(NSString *key, NSArray<ApolloSocialLink *> *links) {
+    NSMutableArray *raw = [NSMutableArray array];
+    for (ApolloSocialLink *l in links) {
+        if (l.urlString.length == 0) continue;
+        [raw addObject:@{@"url": l.urlString, @"title": l.title ?: @""}];
+    }
+    ApolloSLDiskStore()[key] = @{@"ts": @([NSDate date].timeIntervalSince1970), @"links": raw};
+    ApolloSLDiskFlush();
+}
+
+static void ApolloSLDiskRemove(NSString *key) {
+    if (!ApolloSLDiskStore()[key]) return;
+    [ApolloSLDiskStore() removeObjectForKey:key];
+    ApolloSLDiskFlush();
+}
+
+static BOOL ApolloSLLinksEqual(NSArray<ApolloSocialLink *> *a, NSArray<ApolloSocialLink *> *b) {
+    if (a.count != b.count) return NO;
+    for (NSUInteger i = 0; i < a.count; i++) {
+        if (![(a[i].urlString ?: @"") isEqualToString:(b[i].urlString ?: @"")]) return NO;
+        if (![(a[i].title ?: @"") isEqualToString:(b[i].title ?: @"")]) return NO;
+    }
+    return YES;
+}
+
+// Run the WKWebView scrape (coalescing concurrent requests for the same user), caching
+// success into both memory and disk. done(links) fires on the main queue.
+static void ApolloSLStartScrape(NSString *username, NSString *key, void (^done)(NSArray<ApolloSocialLink *> *links)) {
     NSMutableArray *waiters = ApolloSLPending()[key];
-    if (waiters) { if (completion) [waiters addObject:[completion copy]]; return; }
+    if (waiters) { if (done) [waiters addObject:[done copy]]; return; }
     waiters = [NSMutableArray array];
-    if (completion) [waiters addObject:[completion copy]];
+    if (done) [waiters addObject:[done copy]];
     ApolloSLPending()[key] = waiters;
 
     ApolloSLWebFetch *fetch = [[ApolloSLWebFetch alloc] init];
     ApolloSLFetchers()[key] = fetch;
     [fetch startForUsername:username completion:^(NSArray<ApolloSocialLink *> *links) {
-        if (links) [ApolloSLLinksCache() setObject:links forKey:key];  // cache success (incl. empty)
+        if (links) {  // success (incl. empty "none") → cache in memory + persist to disk
+            [ApolloSLLinksCache() setObject:links forKey:key];
+            ApolloSLDiskSave(key, links);
+        }
         NSArray *toNotify = ApolloSLPending()[key];
         [ApolloSLPending() removeObjectForKey:key];
         [ApolloSLFetchers() removeObjectForKey:key];
         for (void (^waiter)(NSArray *) in toNotify) waiter(links);
     }];
+}
+
+// completion(links) on the main queue. Fires immediately from cache (memory, else disk)
+// and MAY fire a second time if a stale disk entry re-scrapes and the links changed.
+// links is a (possibly empty) array on success, or nil on failure (not cached, so retries).
+static void ApolloSLFetchLinks(NSString *username, void (^completion)(NSArray<ApolloSocialLink *> *links)) {
+    NSString *key = username.lowercaseString ?: @"";
+    if (key.length == 0) { if (completion) completion(nil); return; }
+
+    // 1) Warm in-memory cache — already fetched this session, treat as fresh.
+    NSArray<ApolloSocialLink *> *mem = [ApolloSLLinksCache() objectForKey:key];
+    if (mem) { if (completion) completion(mem); return; }
+
+    // 2) Persistent disk cache — show instantly, then re-scrape in the background only
+    //    if it's stale, updating (a 2nd completion) when the links actually changed.
+    NSTimeInterval ts = 0;
+    NSArray<ApolloSocialLink *> *disk = ApolloSLDiskLinks(key, &ts);
+    if (disk) {
+        [ApolloSLLinksCache() setObject:disk forKey:key];
+        if (completion) completion(disk);
+        BOOL stale = ([NSDate date].timeIntervalSince1970 - ts) > kSLStaleAfter;
+        if (stale) {
+            ApolloSLStartScrape(username, key, ^(NSArray<ApolloSocialLink *> *fresh) {
+                if (fresh && !ApolloSLLinksEqual(fresh, disk) && completion) completion(fresh);
+            });
+        }
+        return;
+    }
+
+    // 3) Cold — scrape now.
+    ApolloSLStartScrape(username, key, completion);
 }
 
 #pragma mark - Slide-up "Social Links" sheet
@@ -623,8 +716,13 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor tertiarySystemFillColor];
+        // The band sits over the profile's immersive blurred banner, so — like the rest
+        // of that header — it overrides the theme with a translucent-white "glass" pill
+        // and white text rather than theme fills, for legibility on any banner.
+        self.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.15];
         self.layer.cornerRadius = kSLPillHeight / 2.0;
+        self.layer.borderWidth = 1.0;
+        self.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.18].CGColor;
         self.clipsToBounds = YES;
         _iconView = [[UIImageView alloc] init];
         _iconView.contentMode = UIViewContentModeScaleAspectFit;
@@ -632,9 +730,8 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
         _iconView.layer.cornerRadius = 3.0;
         [self addSubview:_iconView];
         _titleLabel = [[UILabel alloc] init];
-        _titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
-        _titleLabel.adjustsFontForContentSizeCategory = YES;
-        _titleLabel.textColor = [UIColor labelColor];
+        _titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
+        _titleLabel.textColor = [UIColor whiteColor];
         _titleLabel.numberOfLines = 1;
         _titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
         [self addSubview:_titleLabel];
@@ -676,7 +773,8 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
         _headerLabel = [[UILabel alloc] init];
         _headerLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
         _headerLabel.adjustsFontForContentSizeCategory = YES;
-        _headerLabel.textColor = [UIColor secondaryLabelColor];
+        // White-over-blur to match the immersive header (see pill note above).
+        _headerLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.82];
         _headerLabel.text = @"Social Links";
         _headerLabel.hidden = YES;
         [self addSubview:_headerLabel];
@@ -740,7 +838,9 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
 // Pull-to-refresh: drop the cached links for this user and re-scrape.
 - (void)refresh {
     if (self.username.length == 0) return;
-    [ApolloSLLinksCache() removeObjectForKey:self.username.lowercaseString];
+    NSString *key = self.username.lowercaseString;
+    [ApolloSLLinksCache() removeObjectForKey:key];
+    ApolloSLDiskRemove(key);  // force a fresh scrape, not the persisted copy
     self.loadedUsername = nil;
     [self reload];
 }
@@ -754,39 +854,60 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
     return [self apollo_layoutForWidth:width apply:NO];
 }
 
-// Computes the header + items layout for `width` and returns the total height.
+// Computes the items layout for `width` and returns the total height. There is no
+// "Social Links" header any more — the pills/badges stand on their own, centered.
 // When apply==YES it also sets the subview frames (keeps height and layout in sync).
 - (CGFloat)apollo_layoutForWidth:(CGFloat)width apply:(BOOL)apply {
     if (!ApolloProfileSocialLinksEnabled() || self.links.count == 0) return 0.0;
-    if (width <= 1.0) return kSLHeaderHeight + kSLHeaderGap + kSLPillHeight;  // pre-sizing estimate
-
-    if (apply) self.headerLabel.frame = CGRectMake(0.0, 0.0, width, kSLHeaderHeight);
-    CGFloat y = kSLHeaderHeight + kSLHeaderGap;
+    if (width <= 1.0) return kSLPillHeight;  // pre-sizing estimate
 
     if (self.links.count <= kSLPillThreshold) {
-        // Name pills, left-aligned, wrapping to more rows when they don't fit one line.
-        CGFloat x = 0.0, rowTop = y;
-        for (ApolloSLPillView *pill in self.pillViews) {
-            CGFloat pw = [pill preferredWidthForMaxWidth:width];
-            if (x > 0.0 && x + pw > width + 0.5) { x = 0.0; rowTop += kSLPillHeight + kSLPillRowGap; }
-            if (apply) pill.frame = CGRectMake(x, rowTop, pw, kSLPillHeight);
-            x += pw + kSLPillHGap;
+        // Name pills, centered, wrapping to more rows only when they don't fit one line.
+        // Pack into rows first, then centre each row.
+        NSMutableArray<NSNumber *> *widths = [NSMutableArray array];
+        for (ApolloSLPillView *pill in self.pillViews) [widths addObject:@([pill preferredWidthForMaxWidth:width])];
+
+        NSMutableArray<NSMutableArray<NSNumber *> *> *rows = [NSMutableArray array];
+        NSMutableArray<NSNumber *> *rowWidths = [NSMutableArray array];
+        NSMutableArray<NSNumber *> *cur = [NSMutableArray array];
+        CGFloat curW = 0.0;
+        for (NSUInteger i = 0; i < self.pillViews.count; i++) {
+            CGFloat w = widths[i].doubleValue;
+            CGFloat add = (cur.count ? kSLPillHGap : 0.0) + w;
+            if (cur.count && curW + add > width + 0.5) {
+                [rows addObject:cur]; [rowWidths addObject:@(curW)];
+                cur = [NSMutableArray array]; curW = 0.0; add = w;
+            }
+            [cur addObject:@(i)]; curW += add;
         }
-        return rowTop + kSLPillHeight;
+        if (cur.count) { [rows addObject:cur]; [rowWidths addObject:@(curW)]; }
+
+        CGFloat rowTop = 0.0;
+        for (NSUInteger r = 0; r < rows.count; r++) {
+            CGFloat x = MAX(0.0, floor((width - rowWidths[r].doubleValue) / 2.0));
+            for (NSNumber *idxN in rows[r]) {
+                NSUInteger i = idxN.unsignedIntegerValue;
+                CGFloat w = widths[i].doubleValue;
+                if (apply) self.pillViews[i].frame = CGRectMake(x, rowTop, w, kSLPillHeight);
+                x += w + kSLPillHGap;
+            }
+            rowTop += kSLPillHeight + kSLPillRowGap;
+        }
+        return MAX(0.0, rowTop - kSLPillRowGap);
     }
 
-    // >3 links: one row of icon badges (tap anywhere -> sheet).
+    // >3 links: one centered row of icon badges (tap anywhere -> sheet).
     NSUInteger n = self.badgeRow.subviews.count;
     CGFloat rowW = n * kSLBadgeSize + (n > 0 ? (n - 1) * kSLBadgeGap : 0.0);
     if (apply) {
-        self.badgeRow.frame = CGRectMake(0.0, y, rowW, kSLBadgeSize);
+        self.badgeRow.frame = CGRectMake(MAX(0.0, floor((width - rowW) / 2.0)), 0.0, rowW, kSLBadgeSize);
         CGFloat bx = 0.0;
         for (UIView *badge in self.badgeRow.subviews) {
             badge.frame = CGRectMake(bx, 0.0, kSLBadgeSize, kSLBadgeSize);
             bx += kSLBadgeSize + kSLBadgeGap;
         }
     }
-    return y + kSLBadgeSize;
+    return kSLBadgeSize;
 }
 
 #pragma mark Content build
@@ -798,7 +919,7 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
     self.badgeRow = nil;
 
     BOOL show = ApolloProfileSocialLinksEnabled() && self.links.count > 0;
-    self.headerLabel.hidden = !show;
+    self.headerLabel.hidden = YES;  // header removed — pills/badges stand on their own
     if (!show) { [self setNeedsLayout]; return; }
 
     if (self.links.count <= kSLPillThreshold) {
@@ -851,7 +972,7 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
         UILabel *more = [[UILabel alloc] initWithFrame:badge.bounds];
         more.textAlignment = NSTextAlignmentCenter;
         more.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
-        more.textColor = [UIColor secondaryLabelColor];
+        more.textColor = [UIColor whiteColor];
         more.text = [NSString stringWithFormat:@"+%lu", (unsigned long)(self.links.count - shown)];
         [badge addSubview:more];
         [self.badgeRow addSubview:badge];
@@ -861,8 +982,11 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
 
 - (UIView *)badgeContainer {
     UIView *badge = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kSLBadgeSize, kSLBadgeSize)];
-    badge.backgroundColor = [UIColor tertiarySystemFillColor];
+    // Glass badge to match the immersive over-blur header (see pill note above).
+    badge.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.15];
     badge.layer.cornerRadius = kSLBadgeSize / 2.0;
+    badge.layer.borderWidth = 1.0;
+    badge.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.18].CGColor;
     badge.clipsToBounds = YES;
     return badge;
 }
@@ -885,7 +1009,7 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    if (self.headerLabel.hidden || self.links.count == 0) return;
+    if (self.links.count == 0) return;
     if (self.bounds.size.width <= 1.0) return;  // not sized yet — re-laid when the header gives us a width
     [self apollo_layoutForWidth:self.bounds.size.width apply:YES];
 }

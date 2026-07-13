@@ -39,6 +39,9 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
         _bannerURL = bannerURL;
         _defaultSnoo = defaultSnoo;
         _fetchedAt = fetchedAt ?: [NSDate date];
+        _linkKarma = -1;
+        _commentKarma = -1;
+        _createdUTC = 0.0;
     }
     return self;
 }
@@ -205,6 +208,9 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
     dict[@"hasSnoovatar"] = @(info.hasSnoovatar);
     dict[@"isSuspended"] = @(info.isSuspended);
     dict[@"suspensionChecked"] = @(info.suspensionChecked);
+    dict[@"linkKarma"] = @(info.linkKarma);
+    dict[@"commentKarma"] = @(info.commentKarma);
+    dict[@"createdUTC"] = @(info.createdUTC);
     dict[@"fetchedAt"] = @([info.fetchedAt timeIntervalSince1970]);
     return dict;
 }
@@ -234,6 +240,8 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
         fetchedAt = [NSDate distantPast];
         suspensionChecked = NO;
     }
+    // Entries cached before stat capture lack karma/created; force one refetch to gain them.
+    if (!dict[@"createdUTC"]) fetchedAt = [NSDate distantPast];
     ApolloUserProfileInfo *info = [[ApolloUserProfileInfo alloc] initWithUsername:username iconURL:iconURL bannerURL:bannerURL defaultSnoo:defaultSnoo fetchedAt:fetchedAt];
     info.snoovatarURL = snoovatarURL;
     info.decoratorURL = decoratorURL;
@@ -243,6 +251,9 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
     info.hasSnoovatar = hasSnoovatar;
     info.isSuspended = isSuspended;
     info.suspensionChecked = suspensionChecked;
+    if (dict[@"linkKarma"]) info.linkKarma = [dict[@"linkKarma"] integerValue];
+    if (dict[@"commentKarma"]) info.commentKarma = [dict[@"commentKarma"] integerValue];
+    if (dict[@"createdUTC"]) info.createdUTC = [dict[@"createdUTC"] doubleValue];
     return info;
 }
 
@@ -409,6 +420,12 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
     info.hasSnoovatar = snoovatarURL != nil;
     info.isSuspended = isSuspended;
     info.suspensionChecked = YES;
+    id linkKarma = dataDict[@"link_karma"];
+    id commentKarma = dataDict[@"comment_karma"];
+    id createdUTC = dataDict[@"created_utc"];
+    if ([linkKarma respondsToSelector:@selector(integerValue)]) info.linkKarma = [linkKarma integerValue];
+    if ([commentKarma respondsToSelector:@selector(integerValue)]) info.commentKarma = [commentKarma integerValue];
+    if ([createdUTC respondsToSelector:@selector(doubleValue)]) info.createdUTC = [createdUTC doubleValue];
     return info;
 }
 
