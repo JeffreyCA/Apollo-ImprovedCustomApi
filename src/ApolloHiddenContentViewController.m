@@ -1,5 +1,6 @@
 #import "ApolloHiddenContentViewController.h"
 #import "ApolloCommon.h"
+#import <objc/runtime.h>
 
 #pragma mark - Pill badge
 
@@ -36,19 +37,27 @@
 @end
 
 static UIColor *ApolloHiddenContentPillBackgroundColor(ApolloHiddenContentReason reason) {
-    return reason == ApolloHiddenContentReasonDeleted
-        ? [UIColor colorWithRed:1.0 green:0.66 blue:0.64 alpha:1.0]   // salmon, matches deleted-comments chip
-        : [UIColor colorWithRed:1.0 green:0.84 blue:0.55 alpha:1.0];  // amber, distinct "hidden" color
+    switch (reason) {
+        case ApolloHiddenContentReasonDeleted: return [UIColor colorWithRed:1.0 green:0.66 blue:0.64 alpha:1.0];  // salmon, matches deleted-comments chip
+        case ApolloHiddenContentReasonRemoved: return [UIColor colorWithRed:1.0 green:0.71 blue:0.42 alpha:1.0];  // orange, between hidden and deleted
+        case ApolloHiddenContentReasonHidden: default: return [UIColor colorWithRed:1.0 green:0.84 blue:0.55 alpha:1.0]; // amber
+    }
 }
 
 static UIColor *ApolloHiddenContentPillTextColor(ApolloHiddenContentReason reason) {
-    return reason == ApolloHiddenContentReasonDeleted
-        ? [UIColor colorWithRed:0.42 green:0.06 blue:0.06 alpha:1.0]
-        : [UIColor colorWithRed:0.42 green:0.24 blue:0.02 alpha:1.0];
+    switch (reason) {
+        case ApolloHiddenContentReasonDeleted: return [UIColor colorWithRed:0.42 green:0.06 blue:0.06 alpha:1.0];
+        case ApolloHiddenContentReasonRemoved: return [UIColor colorWithRed:0.42 green:0.18 blue:0.02 alpha:1.0];
+        case ApolloHiddenContentReasonHidden: default: return [UIColor colorWithRed:0.42 green:0.24 blue:0.02 alpha:1.0];
+    }
 }
 
 static NSString *ApolloHiddenContentPillLabelText(ApolloHiddenContentReason reason) {
-    return reason == ApolloHiddenContentReasonDeleted ? @"DELETED" : @"HIDDEN";
+    switch (reason) {
+        case ApolloHiddenContentReasonDeleted: return @"DELETED";
+        case ApolloHiddenContentReasonRemoved: return @"REMOVED";
+        case ApolloHiddenContentReasonHidden: default: return @"HIDDEN";
+    }
 }
 
 #pragma mark - Cell
@@ -73,6 +82,7 @@ static NSString *ApolloHiddenContentPillLabelText(ApolloHiddenContentReason reas
     NSString *preview = item.title.length > 0 ? item.title : item.body;
     self.textLabel.text = preview.length > 0 ? preview : @"(no text)";
 
+    // kind (Post/Comment) omitted -- redundant with the screen's own segmented control.
     NSMutableArray<NSString *> *subtitleParts = [NSMutableArray array];
     if (item.subreddit.length > 0) [subtitleParts addObject:[@"r/" stringByAppendingString:item.subreddit]];
     if (item.createdDate) {
@@ -85,7 +95,7 @@ static NSString *ApolloHiddenContentPillLabelText(ApolloHiddenContentReason reas
         });
         [subtitleParts addObject:[formatter stringFromDate:item.createdDate]];
     }
-    [subtitleParts addObject:item.kind == ApolloHiddenContentKindPost ? @"Post" : @"Comment"];
+    if (item.removalDetail.length > 0) [subtitleParts addObject:item.removalDetail];
     self.detailTextLabel.text = [subtitleParts componentsJoinedByString:@" · "];
 
     self.accessoryView = [[ApolloHiddenContentPillLabel alloc] initWithText:ApolloHiddenContentPillLabelText(item.reason)
@@ -95,10 +105,11 @@ static NSString *ApolloHiddenContentPillLabelText(ApolloHiddenContentReason reas
 
 @end
 
-#pragma mark - Deleted-item detail
+#pragma mark - Deleted/removed-item detail
 
-// A deleted item has no live reddit.com page to open, so this shows the
-// already-fetched archived title/body directly instead of a dead permalink.
+// A deleted or removed item's live reddit.com page just shows Reddit's own
+// tombstone ("[removed]"/"[deleted by user]"), not anything useful, so this
+// shows the already-fetched archived title/body directly instead.
 @interface ApolloHiddenContentDetailViewController : UIViewController
 @property (nonatomic, strong) ApolloHiddenContentItem *item;
 @end
@@ -107,10 +118,18 @@ static NSString *ApolloHiddenContentPillLabelText(ApolloHiddenContentReason reas
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = self.item.kind == ApolloHiddenContentKindPost ? @"Deleted Post" : @"Deleted Comment";
+    BOOL isPost = self.item.kind == ApolloHiddenContentKindPost;
+    self.title = self.item.reason == ApolloHiddenContentReasonRemoved
+        ? (isPost ? @"Removed Post" : @"Removed Comment")
+        : (isPost ? @"Deleted Post" : @"Deleted Comment");
     self.view.backgroundColor = [UIColor systemBackgroundColor];
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAction
-                                                                                             target:self action:@selector(apollo_share)];
+    UIBarButtonItem *shareItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAction
+                                                                                 target:self action:@selector(apollo_share)];
+    UIBarButtonItem *arcticShiftItem = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"safari"]
+                                                                          style:UIBarButtonItemStylePlain
+                                                                         target:self action:@selector(apollo_openInArcticShift)];
+    arcticShiftItem.accessibilityLabel = @"Open in Arctic Shift";
+    self.navigationItem.rightBarButtonItems = @[shareItem, arcticShiftItem];
 
     UITextView *textView = [[UITextView alloc] initWithFrame:self.view.bounds];
     textView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -125,6 +144,10 @@ static NSString *ApolloHiddenContentPillLabelText(ApolloHiddenContentReason reas
     NSMutableString *text = [NSMutableString string];
     if (self.item.subreddit.length > 0) [text appendFormat:@"r/%@\n\n", self.item.subreddit];
     if (self.item.title.length > 0) [text appendFormat:@"%@\n\n", self.item.title];
+    if (self.item.removalDetail.length > 0) {
+        NSString *verb = self.item.reason == ApolloHiddenContentReasonDeleted ? @"Deleted by" : @"Removed by";
+        [text appendFormat:@"%@: %@\n\n", verb, self.item.removalDetail];
+    }
     [text appendString:self.item.body.length > 0 ? self.item.body : @"(no body text in the archive)"];
     return text;
 }
@@ -135,9 +158,35 @@ static NSString *ApolloHiddenContentPillLabelText(ApolloHiddenContentReason reas
     [self presentViewController:activity animated:YES completion:nil];
 }
 
+// Arctic Shift has no per-item permalink route -- it's a single-page search UI
+// that auto-runs a search from ?fun=ids&ids=<fullname> in the URL, which is
+// what "ID Lookup" does manually (confirmed against the site's bundled JS).
+- (void)apollo_openInArcticShift {
+    if (self.item.fullName.length == 0) return;
+    NSURLComponents *components = [NSURLComponents componentsWithString:@"https://arctic-shift.photon-reddit.com/search"];
+    components.queryItems = @[
+        [NSURLQueryItem queryItemWithName:@"fun" value:@"ids"],
+        [NSURLQueryItem queryItemWithName:@"ids" value:self.item.fullName],
+    ];
+    if (components.URL) [[UIApplication sharedApplication] openURL:components.URL options:@{} completionHandler:nil];
+}
+
 @end
 
 #pragma mark - View controller
+
+// Associated-object flag lives on the presenting profile screen, not this
+// sheet -- the sheet is dismissed and deallocated. See the header doc on
+// ApolloHiddenContentConsumePendingResume.
+static void const *kApolloHiddenContentPendingResumeKey = &kApolloHiddenContentPendingResumeKey;
+
+BOOL ApolloHiddenContentConsumePendingResume(UIViewController *profileViewController) {
+    if (!profileViewController) return NO;
+    NSNumber *pending = objc_getAssociatedObject(profileViewController, kApolloHiddenContentPendingResumeKey);
+    if (!pending.boolValue) return NO;
+    objc_setAssociatedObject(profileViewController, kApolloHiddenContentPendingResumeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return YES;
+}
 
 @interface ApolloHiddenContentViewController ()
 @property (nonatomic, copy) NSString *username;
@@ -147,6 +196,8 @@ static NSString *ApolloHiddenContentPillLabelText(ApolloHiddenContentReason reas
 @property (nonatomic, strong) UIView *statusContainerView;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic, strong) UILabel *emptyStateLabel;
+// The profile screen this sheet was presented from -- see didSelectRow.
+@property (nonatomic, weak) UIViewController *presentingProfileViewController;
 @end
 
 @implementation ApolloHiddenContentViewController
@@ -155,6 +206,7 @@ static NSString *ApolloHiddenContentPillLabelText(ApolloHiddenContentReason reas
     if (username.length == 0 || !presenter) return;
     ApolloHiddenContentViewController *sheet = [[ApolloHiddenContentViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
     sheet.username = username;
+    sheet.presentingProfileViewController = presenter;
 
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:sheet];
     if (@available(iOS 15.0, *)) {
@@ -289,7 +341,11 @@ static NSString *ApolloHiddenContentPillLabelText(ApolloHiddenContentReason reas
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     ApolloHiddenContentItem *item = self.items[indexPath.row];
 
-    if (item.reason == ApolloHiddenContentReasonDeleted) {
+    // Deleted and Removed items have no useful live reddit.com page (it's just
+    // Reddit's own tombstone) -- show the archived copy instead. Only a
+    // genuinely Hidden item (still fully intact, just excluded from the
+    // account's own listing) is worth opening live.
+    if (item.reason != ApolloHiddenContentReasonHidden) {
         ApolloHiddenContentDetailViewController *detail = [ApolloHiddenContentDetailViewController new];
         detail.item = item;
         [self.navigationController pushViewController:detail animated:YES];
@@ -301,11 +357,30 @@ static NSString *ApolloHiddenContentPillLabelText(ApolloHiddenContentReason reas
     // pushing while the sheet is still up would land the destination inside
     // the sheet's own nav stack instead of the app's normal one.
     if (item.permalink.length == 0) return;
-    NSURL *url = [NSURL URLWithString:[@"https://www.reddit.com" stringByAppendingString:item.permalink]];
+    // NSURLComponents.path percent-encodes on assignment; +URLWithString: does
+    // not, and silently returns nil for a permalink with unencoded non-ASCII
+    // characters (e.g. an accented slug).
+    NSURLComponents *urlComponents = [NSURLComponents new];
+    urlComponents.scheme = @"https";
+    urlComponents.host = @"www.reddit.com";
+    urlComponents.path = item.permalink;
+    NSURL *url = urlComponents.URL;
     if (!url) return;
 
+    // Arm the pending flag *inside* the dismiss completion, not before calling
+    // dismiss: dismissing this sheet reveals the profile (firing its own
+    // -viewDidAppear:) before this completion block runs. Arming earlier means
+    // that reveal immediately consumes the flag and re-presents the sheet
+    // before the live post below is even pushed, so the post opens invisibly
+    // behind it. Arming here means the flag is only seen the *next* time the
+    // profile appears -- when the user backs out of the live post.
+    __weak UIViewController *weakProfileVC = self.presentingProfileViewController;
     UINavigationController *presentingNav = self.navigationController;
     [presentingNav dismissViewControllerAnimated:YES completion:^{
+        UIViewController *profileVC = weakProfileVC;
+        if (profileVC) {
+            objc_setAssociatedObject(profileVC, kApolloHiddenContentPendingResumeKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
         if (!ApolloRouteResolvedURLViaApolloScheme(url)) {
             [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
         }

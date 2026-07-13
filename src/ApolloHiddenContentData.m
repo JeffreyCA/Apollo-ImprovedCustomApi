@@ -220,13 +220,15 @@ static void ApolloHiddenContentFetchArcticItems(NSString *username, ApolloHidden
 
 #pragma mark - Classification (batched /api/info)
 
-// Asks /api/info which candidates still resolve live; the rest are deleted --
-// except a chunk whose request itself failed, reported in `unresolvableFullNames`
-// so the caller can drop those rather than guessing hidden/deleted.
+// Asks /api/info which candidates still resolve live, keyed by fullname to the
+// full child object -- ApolloHiddenContentResolveReason needs the live
+// author/selftext/body, not just presence. A chunk whose request itself failed
+// is reported in `unresolvableFullNames` so the caller can drop those rather
+// than guessing.
 static void ApolloHiddenContentClassify(NSArray<NSString *> *candidateFullNames, NSString *bearerToken,
-                                         void (^completion)(NSSet<NSString *> *stillLiveFullNames, NSSet<NSString *> *unresolvableFullNames)) {
+                                         void (^completion)(NSDictionary<NSString *, NSDictionary *> *liveChildrenByFullName, NSSet<NSString *> *unresolvableFullNames)) {
     if (candidateFullNames.count == 0) {
-        completion([NSSet set], [NSSet set]);
+        completion(@{}, [NSSet set]);
         return;
     }
 
@@ -236,7 +238,7 @@ static void ApolloHiddenContentClassify(NSArray<NSString *> *candidateFullNames,
         [chunks addObject:[candidateFullNames subarrayWithRange:NSMakeRange(i, length)]];
     }
 
-    NSMutableSet<NSString *> *stillLive = [NSMutableSet set];
+    NSMutableDictionary<NSString *, NSDictionary *> *liveChildren = [NSMutableDictionary dictionary];
     NSMutableSet<NSString *> *unresolvable = [NSMutableSet set];
     dispatch_group_t group = dispatch_group_create();
     NSObject *lock = [NSObject new];
@@ -266,7 +268,7 @@ static void ApolloHiddenContentClassify(NSArray<NSString *> *candidateFullNames,
                     for (id child in children) {
                         NSDictionary *childData = [child[@"data"] isKindOfClass:[NSDictionary class]] ? child[@"data"] : nil;
                         NSString *name = [childData[@"name"] isKindOfClass:[NSString class]] ? childData[@"name"] : nil;
-                        if (name.length > 0) [stillLive addObject:name];
+                        if (name.length > 0) liveChildren[name] = childData;
                     }
                 }
             }
@@ -276,13 +278,82 @@ static void ApolloHiddenContentClassify(NSArray<NSString *> *candidateFullNames,
     }
 
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
-        completion(stillLive, unresolvable);
+        completion(liveChildren, unresolvable);
     });
+}
+
+#pragma mark - Reason resolution
+
+// Unrecognized future categories fall through to localizedCapitalizedString
+// rather than nil, so a new Reddit category still shows as "Removed by <X>"
+// instead of silently losing the detail.
+static NSString *ApolloHiddenContentRemovalDetailForCategory(NSString *category) {
+    if ([category isEqualToString:@"moderator"]) return @"Moderator";
+    if ([category isEqualToString:@"automod_filtered"]) return @"AutoMod";
+    if ([category isEqualToString:@"reddit"]) return @"Reddit Admins";
+    return category.length > 0 ? category.localizedCapitalizedString : nil;
+}
+
+// Deleted is only ever reached for a self/account-initiated removal, so
+// "Author" is always an accurate qualifier for it.
+static NSString *const kApolloHiddenContentDeletedByAuthor = @"Author";
+
+// `archiveRaw` is the Arctic Shift copy, checked first since it's free and
+// already fetched; `liveChildData` is this item's current /api/info object, or
+// nil if it no longer resolves live at all. Known gap: link/gallery posts have
+// no selftext, so a removal that happens after Arctic Shift's archive pass and
+// doesn't touch the author has no live signal to key off, and falls through to
+// Hidden.
+static void ApolloHiddenContentResolveReason(NSDictionary *archiveRaw, ApolloHiddenContentKind kind, NSDictionary * _Nullable liveChildData,
+                                              ApolloHiddenContentReason *outReason, NSString * _Nullable *outRemovalDetail) {
+    NSString *archiveCategory = [archiveRaw[@"removed_by_category"] isKindOfClass:[NSString class]] ? archiveRaw[@"removed_by_category"] : nil;
+    if ([archiveCategory isEqualToString:@"deleted"]) {
+        *outReason = ApolloHiddenContentReasonDeleted;
+        *outRemovalDetail = kApolloHiddenContentDeletedByAuthor;
+        return;
+    }
+    if (archiveCategory.length > 0) {
+        *outReason = ApolloHiddenContentReasonRemoved;
+        *outRemovalDetail = ApolloHiddenContentRemovalDetailForCategory(archiveCategory);
+        return;
+    }
+
+    // Arctic Shift saw it clean -- fall back to the live re-check for a removal
+    // that happened after it archived the item.
+    if (!liveChildData) {
+        // No longer resolves at all; can't tell who did it from here.
+        *outReason = ApolloHiddenContentReasonDeleted;
+        *outRemovalDetail = kApolloHiddenContentDeletedByAuthor;
+        return;
+    }
+
+    NSString *liveAuthor = [liveChildData[@"author"] isKindOfClass:[NSString class]] ? liveChildData[@"author"] : nil;
+    if ([liveAuthor isEqualToString:@"[deleted]"]) {
+        *outReason = ApolloHiddenContentReasonDeleted;
+        *outRemovalDetail = kApolloHiddenContentDeletedByAuthor;
+        return;
+    }
+
+    NSString *bodyKey = kind == ApolloHiddenContentKindPost ? @"selftext" : @"body";
+    NSString *liveBody = [liveChildData[bodyKey] isKindOfClass:[NSString class]] ? liveChildData[bodyKey] : nil;
+    if ([liveBody isEqualToString:@"[removed]"]) {
+        *outReason = ApolloHiddenContentReasonRemoved;
+        *outRemovalDetail = nil;
+        return;
+    }
+    if ([liveBody isEqualToString:@"[deleted]"]) {
+        *outReason = ApolloHiddenContentReasonDeleted;
+        *outRemovalDetail = kApolloHiddenContentDeletedByAuthor;
+        return;
+    }
+
+    *outReason = ApolloHiddenContentReasonHidden;
+    *outRemovalDetail = nil;
 }
 
 #pragma mark - Item construction
 
-static ApolloHiddenContentItem *ApolloHiddenContentItemFromArcticDict(NSDictionary *raw, ApolloHiddenContentKind kind, ApolloHiddenContentReason reason) {
+static ApolloHiddenContentItem *ApolloHiddenContentItemFromArcticDict(NSDictionary *raw, ApolloHiddenContentKind kind, ApolloHiddenContentReason reason, NSString * _Nullable removalDetail) {
     ApolloHiddenContentItem *item = [ApolloHiddenContentItem new];
     NSString *rawID = [raw[@"id"] isKindOfClass:[NSString class]] ? raw[@"id"] : nil;
     NSString *name = [raw[@"name"] isKindOfClass:[NSString class]] ? raw[@"name"] : nil;
@@ -294,6 +365,7 @@ static ApolloHiddenContentItem *ApolloHiddenContentItemFromArcticDict(NSDictiona
     item.fullName = name;
     item.kind = kind;
     item.reason = reason;
+    item.removalDetail = removalDetail;
     item.title = [raw[@"title"] isKindOfClass:[NSString class]] ? raw[@"title"] : nil;
     item.body = [raw[(kind == ApolloHiddenContentKindPost ? @"selftext" : @"body")] isKindOfClass:[NSString class]]
         ? raw[(kind == ApolloHiddenContentKindPost ? @"selftext" : @"body")] : nil;
@@ -370,14 +442,18 @@ void ApolloHiddenContentFetch(NSString *username, ApolloHiddenContentKind kind, 
                 return;
             }
 
-            ApolloHiddenContentClassify(candidateFullNames, bearerToken, ^(NSSet<NSString *> *stillLiveFullNames, NSSet<NSString *> *unresolvableFullNames) {
+            ApolloHiddenContentClassify(candidateFullNames, bearerToken, ^(NSDictionary<NSString *, NSDictionary *> *liveChildrenByFullName, NSSet<NSString *> *unresolvableFullNames) {
                 NSMutableArray<ApolloHiddenContentItem *> *results = [NSMutableArray array];
                 for (NSDictionary *raw in candidates) {
                     NSString *rawID = [raw[@"id"] isKindOfClass:[NSString class]] ? raw[@"id"] : nil;
                     NSString *name = [raw[@"name"] isKindOfClass:[NSString class]] ? raw[@"name"] : (rawID.length > 0 ? [prefix stringByAppendingString:rawID] : nil);
                     if ([unresolvableFullNames containsObject:name]) continue;
-                    ApolloHiddenContentReason reason = [stillLiveFullNames containsObject:name] ? ApolloHiddenContentReasonHidden : ApolloHiddenContentReasonDeleted;
-                    ApolloHiddenContentItem *item = ApolloHiddenContentItemFromArcticDict(raw, kind, reason);
+
+                    ApolloHiddenContentReason reason;
+                    NSString *removalDetail;
+                    ApolloHiddenContentResolveReason(raw, kind, liveChildrenByFullName[name], &reason, &removalDetail);
+
+                    ApolloHiddenContentItem *item = ApolloHiddenContentItemFromArcticDict(raw, kind, reason, removalDetail);
                     if (item) [results addObject:item];
                 }
 
@@ -387,9 +463,10 @@ void ApolloHiddenContentFetch(NSString *username, ApolloHiddenContentKind kind, 
                     return [db compare:da];
                 }];
 
-                ApolloLog(@"[HiddenContent] u/%@ (%@): %lu candidates (%lu hidden, %lu deleted, %lu unresolvable)", username, ApolloHiddenContentArcticSearchPath(kind),
+                ApolloLog(@"[HiddenContent] u/%@ (%@): %lu candidates (%lu hidden, %lu removed, %lu deleted, %lu unresolvable)", username, ApolloHiddenContentArcticSearchPath(kind),
                           (unsigned long)results.count,
                           (unsigned long)[results filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"reason == %d", ApolloHiddenContentReasonHidden]].count,
+                          (unsigned long)[results filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"reason == %d", ApolloHiddenContentReasonRemoved]].count,
                           (unsigned long)[results filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"reason == %d", ApolloHiddenContentReasonDeleted]].count,
                           (unsigned long)unresolvableFullNames.count);
 

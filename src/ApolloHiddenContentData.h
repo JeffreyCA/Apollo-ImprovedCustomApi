@@ -7,17 +7,23 @@ typedef NS_ENUM(NSInteger, ApolloHiddenContentKind) {
     ApolloHiddenContentKindComment,
 };
 
-// Hidden: still resolves via /api/info, just excluded from the live listing
-// (Reddit's "hide from profile"). Deleted: /api/info no longer returns it.
+// Hidden: still intact live, just excluded from the account's own listing.
+// Removed: a moderator/AutoMod/admin took the content down (shell still
+// exists). Deleted: the user (or account) deleted it. See
+// ApolloHiddenContentClassify for how these are told apart.
 typedef NS_ENUM(NSInteger, ApolloHiddenContentReason) {
     ApolloHiddenContentReasonHidden = 0,
     ApolloHiddenContentReasonDeleted,
+    ApolloHiddenContentReasonRemoved,
 };
 
 @interface ApolloHiddenContentItem : NSObject
 @property (nonatomic, copy) NSString *fullName;   // e.g. t3_abc123 / t1_abc123
 @property (nonatomic, assign) ApolloHiddenContentKind kind;
 @property (nonatomic, assign) ApolloHiddenContentReason reason;
+// Human-readable "who" -- "Moderator"/"AutoMod"/"Reddit Admins" for Removed,
+// "Author" for Deleted. Nil for Hidden, or when unknown.
+@property (nonatomic, copy, nullable) NSString *removalDetail;
 @property (nonatomic, copy, nullable) NSString *title;       // post title; nil for comments
 @property (nonatomic, copy, nullable) NSString *body;        // selftext / comment body
 @property (nonatomic, copy, nullable) NSString *subreddit;

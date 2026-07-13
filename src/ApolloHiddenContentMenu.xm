@@ -28,6 +28,21 @@ extern NSString *ApolloUsernameFromProfileViewController(UIViewController *viewC
     vc.navigationItem.rightBarButtonItems = items;
 }
 
+// Re-presents the Hidden & Deleted sheet after backing out of a live post
+// opened from it -- see ApolloHiddenContentConsumePendingResume. -viewDidAppear:
+// rather than -viewWillAppear: so this only fires once the pop transition has
+// actually finished.
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    UIViewController *vc = (UIViewController *)self;
+    if (ApolloHiddenContentConsumePendingResume(vc)) {
+        NSString *profileUsername = ApolloUsernameFromProfileViewController(vc);
+        if (profileUsername.length > 0) {
+            [ApolloHiddenContentViewController presentForUsername:profileUsername fromViewController:vc];
+        }
+    }
+}
+
 %new
 - (void)apollo_showHiddenContent {
     UIViewController *vc = (UIViewController *)self;
