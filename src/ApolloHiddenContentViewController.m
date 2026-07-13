@@ -67,20 +67,16 @@ static NSString *ApolloHiddenContentPillLabelText(ApolloHiddenContentReason reas
 
 @implementation ApolloHiddenContentCell
 
-- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
-    self = [super initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuseIdentifier];
-    if (self) {
-        self.textLabel.numberOfLines = 2;
-        self.detailTextLabel.numberOfLines = 1;
-        self.detailTextLabel.font = [UIFont systemFontOfSize:12.0];
-        self.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-    }
-    return self;
-}
-
 - (void)configureWithItem:(ApolloHiddenContentItem *)item {
+    // UIListContentConfiguration rather than the deprecated
+    // textLabel/detailTextLabel pair -- it's iOS 14+, same as the device floor.
+    UIListContentConfiguration *content = [self defaultContentConfiguration];
     NSString *preview = item.title.length > 0 ? item.title : item.body;
-    self.textLabel.text = preview.length > 0 ? preview : @"(no text)";
+    content.text = preview.length > 0 ? preview : @"(no text)";
+    content.textProperties.numberOfLines = 2;
+    content.secondaryTextProperties.numberOfLines = 1;
+    content.secondaryTextProperties.font = [UIFont systemFontOfSize:12.0];
+    content.secondaryTextProperties.color = [UIColor secondaryLabelColor];
 
     // kind (Post/Comment) omitted -- redundant with the screen's own segmented control.
     NSMutableArray<NSString *> *subtitleParts = [NSMutableArray array];
@@ -96,7 +92,8 @@ static NSString *ApolloHiddenContentPillLabelText(ApolloHiddenContentReason reas
         [subtitleParts addObject:[formatter stringFromDate:item.createdDate]];
     }
     if (item.removalDetail.length > 0) [subtitleParts addObject:item.removalDetail];
-    self.detailTextLabel.text = [subtitleParts componentsJoinedByString:@" · "];
+    content.secondaryText = [subtitleParts componentsJoinedByString:@" · "];
+    self.contentConfiguration = content;
 
     self.accessoryView = [[ApolloHiddenContentPillLabel alloc] initWithText:ApolloHiddenContentPillLabelText(item.reason)
                                                               backgroundColor:ApolloHiddenContentPillBackgroundColor(item.reason)
@@ -298,31 +295,40 @@ BOOL ApolloHiddenContentConsumePendingResume(UIViewController *profileViewContro
     [self dismissViewControllerAnimated:YES completion:nil];
 }
 
+// Alert only -- deliberately does NOT dismiss the sheet, so a transient
+// pull-to-refresh or segment-flip failure doesn't discard an already-loaded
+// list. With nothing loaded, the status label below offers the retry path.
 - (void)apollo_showError:(NSString *)message {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Couldn't Fetch Hidden Content"
                                                                      message:message
                                                               preferredStyle:UIAlertControllerStyleAlert];
-    __weak __typeof(self) weakSelf = self;
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [weakSelf apollo_close];
-    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
+    if (self.items.count == 0) {
+        [self apollo_showStatusText:@"Couldn't load results. Pull down to try again."];
+    }
 }
 
-- (void)apollo_showEmptyState {
+- (void)apollo_showStatusText:(NSString *)text {
     if (!self.emptyStateLabel) {
-        self.emptyStateLabel = [[UILabel alloc] initWithFrame:CGRectInset(self.statusContainerView.bounds, 32.0, 0)];
+        self.emptyStateLabel = [[UILabel alloc] init];
         self.emptyStateLabel.numberOfLines = 0;
         self.emptyStateLabel.textAlignment = NSTextAlignmentCenter;
         self.emptyStateLabel.textColor = [UIColor secondaryLabelColor];
         self.emptyStateLabel.font = [UIFont systemFontOfSize:15.0];
-        self.emptyStateLabel.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin
-            | UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
+        // Full-height inset frame + flexible width/height (UILabel centers its
+        // text vertically), so the text re-flows on rotation instead of keeping
+        // its creation-time width.
+        self.emptyStateLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     }
-    NSString *kindName = self.kind == ApolloHiddenContentKindPost ? @"posts" : @"comments";
-    self.emptyStateLabel.text = [NSString stringWithFormat:@"No hidden or deleted %@ found in the archive for this account.", kindName];
-    self.emptyStateLabel.center = CGPointMake(CGRectGetMidX(self.statusContainerView.bounds), CGRectGetMidY(self.statusContainerView.bounds));
+    self.emptyStateLabel.text = text;
+    self.emptyStateLabel.frame = CGRectInset(self.statusContainerView.bounds, 32.0, 0);
     [self.statusContainerView addSubview:self.emptyStateLabel];
+}
+
+- (void)apollo_showEmptyState {
+    NSString *kindName = self.kind == ApolloHiddenContentKindPost ? @"posts" : @"comments";
+    [self apollo_showStatusText:[NSString stringWithFormat:@"No hidden or deleted %@ found in the archive for this account.", kindName]];
 }
 
 #pragma mark - UITableViewDataSource

@@ -107,7 +107,18 @@ static void ApolloHiddenContentFetchLiveListingPage(NSString *username, NSString
     }
     components.queryItems = queryItems;
 
-    NSURLRequest *request = ApolloHiddenContentAuthedRequest(components.URL, bearerToken);
+    // Real Reddit usernames are URL-safe, but the username can also come from
+    // the nav-title fallback in ApolloUsernameFromProfileViewController -- an
+    // unexpected character makes componentsWithString: (and thus .URL) return
+    // nil, and NSURLSession raises on a nil-URL request.
+    NSURL *url = components.URL;
+    if (!url) {
+        ApolloLog(@"[HiddenContent] Live %@ listing skipped: couldn't build a URL for u/%@", listingKind, username);
+        completion(YES, YES);
+        return;
+    }
+
+    NSURLRequest *request = ApolloHiddenContentAuthedRequest(url, bearerToken);
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
         if (error || !data.length || (http && (http.statusCode < 200 || http.statusCode >= 300))) {
@@ -463,11 +474,15 @@ void ApolloHiddenContentFetch(NSString *username, ApolloHiddenContentKind kind, 
                     return [db compare:da];
                 }];
 
+                NSUInteger hiddenCount = 0, removedCount = 0, deletedCount = 0;
+                for (ApolloHiddenContentItem *result in results) {
+                    if (result.reason == ApolloHiddenContentReasonHidden) hiddenCount++;
+                    else if (result.reason == ApolloHiddenContentReasonRemoved) removedCount++;
+                    else if (result.reason == ApolloHiddenContentReasonDeleted) deletedCount++;
+                }
                 ApolloLog(@"[HiddenContent] u/%@ (%@): %lu candidates (%lu hidden, %lu removed, %lu deleted, %lu unresolvable)", username, ApolloHiddenContentArcticSearchPath(kind),
                           (unsigned long)results.count,
-                          (unsigned long)[results filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"reason == %d", ApolloHiddenContentReasonHidden]].count,
-                          (unsigned long)[results filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"reason == %d", ApolloHiddenContentReasonRemoved]].count,
-                          (unsigned long)[results filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"reason == %d", ApolloHiddenContentReasonDeleted]].count,
+                          (unsigned long)hiddenCount, (unsigned long)removedCount, (unsigned long)deletedCount,
                           (unsigned long)unresolvableFullNames.count);
 
                 finish(results, !liveIncomplete && unresolvableFullNames.count == 0);
