@@ -48,6 +48,10 @@
 
 @interface ASDisplayNode : NSObject
 @property (nonatomic) BOOL neverShowPlaceholders;
+@property (nonatomic) BOOL displaysAsynchronously;
+- (NSArray<ASDisplayNode *> *)subnodes;
+- (void)setNeedsLayout;
+- (void)layoutIfNeeded;
 - (void)recursivelyEnsureDisplaySynchronously:(BOOL)sync;
 @end
 
@@ -109,6 +113,66 @@ static void ApolloVFEnsureSynchronousDisplay(NSArray *cells, const char *stage) 
     }
 }
 
+// The comment-count bubble in a feed's info row is a tiny layer-backed Texture
+// subtree. When a pushed comments controller covers the feed, Texture leaves
+// that subtree's display range and discards its backing contents. On an
+// interactive pop it normally redraws the bubble asynchronously; UIKit can
+// remove the transition snapshot one frame before that redraw commits, which
+// is the isolated bubble flicker visible on swipe-back.
+//
+// Keep this one cheap subtree synchronous for its lifetime. PostInfoNode arms
+// the initial subtree when it enters the hierarchy, then re-arms Apollo's
+// replacement subtree inside readCommentsUpdatedWithNotification:. This avoids
+// navigation timing assumptions and does not make the post body, media, or the
+// rest of the feed draw synchronously.
+static void ApolloVFStabilizeCommentsInfoNode(ASDisplayNode *node, BOOL flush) {
+    if (!node) return;
+    @try {
+        NSMutableArray<ASDisplayNode *> *pending = [NSMutableArray arrayWithObject:node];
+        while (pending.count > 0) {
+            ASDisplayNode *current = pending.lastObject;
+            [pending removeLastObject];
+            if ([current respondsToSelector:@selector(setNeverShowPlaceholders:)]) {
+                current.neverShowPlaceholders = YES;
+            }
+            if ([current respondsToSelector:@selector(setDisplaysAsynchronously:)]) {
+                current.displaysAsynchronously = NO;
+            }
+            if ([current respondsToSelector:@selector(subnodes)]) {
+                NSArray *children = current.subnodes;
+                if (children.count > 0) [pending addObjectsFromArray:children];
+            }
+        }
+        if (flush && [node respondsToSelector:@selector(recursivelyEnsureDisplaySynchronously:)]) {
+            [node recursivelyEnsureDisplaySynchronously:YES];
+        }
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            ApolloLog(@"[VoteFlicker] comments info subtree armed for synchronous display");
+        });
+    } @catch (__unused NSException *e) {}
+}
+
+static void ApolloVFRealizeUpdatedCommentsInfo(id postInfo, const char *stage) {
+    if (!postInfo) return;
+    @try {
+        ASDisplayNode *commentsInfo = (ASDisplayNode *)ApolloVFIvar(postInfo, "commentsInfoNode");
+        if (!commentsInfo) return;
+        ApolloVFStabilizeCommentsInfoNode(commentsInfo, NO);
+        if ([postInfo respondsToSelector:@selector(setNeedsLayout)]) {
+            [postInfo setNeedsLayout];
+        }
+        if ([postInfo respondsToSelector:@selector(layoutIfNeeded)]) {
+            [postInfo layoutIfNeeded];
+        }
+        ApolloVFStabilizeCommentsInfoNode(commentsInfo, YES);
+        if ([postInfo respondsToSelector:@selector(recursivelyEnsureDisplaySynchronously:)]) {
+            [postInfo recursivelyEnsureDisplaySynchronously:YES];
+        }
+        ApolloLog(@"[VoteFlicker] read-comments update realized synchronously (%s)", stage);
+    } @catch (__unused NSException *e) {}
+}
+
 // Shared handler body for both section-controller hooks: arm the matching
 // visible cell(s) before the reconfigure, flush the display wave right after,
 // and once more on the next runloop turn (the -setNeedsLayout relayout lands
@@ -138,6 +202,28 @@ static void ApolloVFHandleModelUpdate(id note, void (^origCall)(void)) {
 %hook _TtC6Apollo22CommentsHeaderCellNode
 - (void)didEnterVisibleState { %orig; ApolloVFTrackCell(self, YES); }
 - (void)didExitVisibleState  { %orig; ApolloVFTrackCell(self, NO);  }
+%end
+
+// CommentsInfoNode's plain -init is intentionally unavailable in Apollo's
+// Swift class, and its Texture lifecycle methods are inherited rather than
+// class-owned. PostInfoNode does own didEnterHierarchy and already has the
+// fully-built commentsInfoNode at that point, making this the reliable place
+// to arm the bubble before its first display-range entry.
+%hook _TtC6Apollo12PostInfoNode
+- (void)didEnterHierarchy {
+    %orig;
+    ASDisplayNode *commentsInfo = (ASDisplayNode *)ApolloVFIvar(self, "commentsInfoNode");
+    ApolloVFStabilizeCommentsInfoNode(commentsInfo, YES);
+}
+
+- (void)readCommentsUpdatedWithNotification:(id)notification {
+    %orig;
+    ApolloVFRealizeUpdatedCommentsInfo(self, "now");
+    __weak id weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ApolloVFRealizeUpdatedCommentsInfo(weakSelf, "next-turn");
+    });
+}
 %end
 
 // Feed post cells participate in the foreground heal below (their text blanks
