@@ -4,6 +4,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #include <dlfcn.h>
+#include <float.h>
 #include <string.h>
 
 #import "ApolloCommon.h"
@@ -80,6 +81,7 @@ static const CGFloat kApolloGlobeMergeSlotWidth = 34.0;
 // 44pt mod-badge slot's leading padding so the globe→badge gap looks even).
 static const CGFloat kApolloGlobeMergeGlyphNudge = 3.0;
 static const void *kApolloFeedSettledTitleRefreshScheduledKey = &kApolloFeedSettledTitleRefreshScheduledKey;
+static const void *kApolloPostTitleTranslationScheduledKey = &kApolloPostTitleTranslationScheduledKey;
 static const void *kApolloReapplyScheduledKey = &kApolloReapplyScheduledKey;
 // Phase C — post selftext translation.
 static const void *kApolloAppliedHeaderTranslationFullNameKey = &kApolloAppliedHeaderTranslationFullNameKey;
@@ -114,6 +116,14 @@ static const void *kApolloReconcileGenerationKey = &kApolloReconcileGenerationKe
 static NSString *const kApolloDefaultLibreTranslateURL = @"https://libretranslate.de/translate";
 
 static NSCache<NSString *, NSString *> *sTranslationCache;
+// Language recognition is CPU-heavy enough to show up while rows enter the
+// viewport. Cache both successful and inconclusive detections for the session.
+static NSCache<NSString *, NSString *> *sDetectedLanguageCache;
+static NSString *const kApolloNoDetectedLanguage = @"<none>";
+// Avoid immediately repeating provider setup/network work for the same text
+// after an expected transient failure. Bounded and cleared on lifecycle edges.
+static NSMutableDictionary<NSString *, NSDictionary *> *sTranslationFailureCooldowns;
+static const NSTimeInterval kApolloTranslationFailureRetryDelay = 15.0;
 // fullName ("t1_xxxxx") -> translated body text. Survives cell reuse / collapse.
 static NSCache<NSString *, NSString *> *sCommentTranslationByFullName;
 // fullName ("t3_xxxxx") -> translated post selftext. Same idea, for posts.
@@ -2699,7 +2709,18 @@ static NSString *ApolloDominantLanguageWithConfidence(NSString *text, double *ou
 }
 
 static NSString *ApolloDetectDominantLanguage(NSString *text) {
-    return ApolloDominantLanguageWithConfidence(text, NULL);
+    if (![text isKindOfClass:[NSString class]]) return nil;
+    NSString *trimmed = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length < 8) return nil;
+
+    NSString *cached = [sDetectedLanguageCache objectForKey:trimmed];
+    if (cached) {
+        return [cached isEqualToString:kApolloNoDetectedLanguage] ? nil : cached;
+    }
+
+    NSString *detected = ApolloDominantLanguageWithConfidence(trimmed, NULL);
+    [sDetectedLanguageCache setObject:(detected ?: kApolloNoDetectedLanguage) forKey:trimmed];
+    return detected;
 }
 
 // Returns YES if the user has asked us not to translate text in `detectedLang`.
@@ -2875,6 +2896,57 @@ static void ApolloTranslateTextWithFallback(NSString *text,
     });
 }
 
+static NSString *ApolloTranslationFailureCooldownKey(NSString *cacheKey) {
+    NSString *provider = sTranslationProvider.length > 0 ? sTranslationProvider : @"google";
+    return [NSString stringWithFormat:@"%@|%@", provider, cacheKey ?: @""];
+}
+
+static NSError *ApolloRecentTranslationFailure(NSString *cacheKey) {
+    if (cacheKey.length == 0 || !sTranslationFailureCooldowns) return nil;
+    NSString *failureKey = ApolloTranslationFailureCooldownKey(cacheKey);
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    @synchronized (sTranslationFailureCooldowns) {
+        NSDictionary *record = sTranslationFailureCooldowns[failureKey];
+        NSNumber *timestamp = [record[@"timestamp"] isKindOfClass:[NSNumber class]] ? record[@"timestamp"] : nil;
+        NSError *error = [record[@"error"] isKindOfClass:[NSError class]] ? record[@"error"] : nil;
+        if (timestamp && error && now - timestamp.doubleValue < kApolloTranslationFailureRetryDelay) {
+            return error;
+        }
+        if (record) [sTranslationFailureCooldowns removeObjectForKey:failureKey];
+    }
+    return nil;
+}
+
+static void ApolloRecordTranslationFailure(NSString *cacheKey, NSError *error) {
+    if (cacheKey.length == 0 || !error || !sTranslationFailureCooldowns) return;
+    NSString *failureKey = ApolloTranslationFailureCooldownKey(cacheKey);
+    @synchronized (sTranslationFailureCooldowns) {
+        if (sTranslationFailureCooldowns.count >= 512 && !sTranslationFailureCooldowns[failureKey]) {
+            __block NSString *oldestKey = nil;
+            __block NSTimeInterval oldest = DBL_MAX;
+            [sTranslationFailureCooldowns enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSDictionary *record, BOOL *stop) {
+                (void)stop;
+                NSNumber *timestamp = [record[@"timestamp"] isKindOfClass:[NSNumber class]] ? record[@"timestamp"] : nil;
+                if (!timestamp || timestamp.doubleValue < oldest) {
+                    oldest = timestamp ? timestamp.doubleValue : 0.0;
+                    oldestKey = key;
+                }
+            }];
+            if (oldestKey) [sTranslationFailureCooldowns removeObjectForKey:oldestKey];
+        }
+        sTranslationFailureCooldowns[failureKey] = @{
+            @"timestamp": @([NSDate timeIntervalSinceReferenceDate]),
+            @"error": error,
+        };
+    }
+}
+
+static void ApolloClearTranslationFailureCooldowns(void) {
+    @synchronized (sTranslationFailureCooldowns) {
+        [sTranslationFailureCooldowns removeAllObjects];
+    }
+}
+
 static void ApolloRequestTranslation(NSString *cacheKey,
                                      NSString *sourceText,
                                      NSString *targetLanguage,
@@ -2882,6 +2954,12 @@ static void ApolloRequestTranslation(NSString *cacheKey,
     NSString *cached = [sTranslationCache objectForKey:cacheKey];
     if (cached.length > 0) {
         completion(cached, nil);
+        return;
+    }
+
+    NSError *recentFailure = ApolloRecentTranslationFailure(cacheKey);
+    if (recentFailure) {
+        completion(nil, recentFailure);
         return;
     }
 
@@ -2918,6 +2996,11 @@ static void ApolloRequestTranslation(NSString *cacheKey,
 
         if ([restoredTranslation isKindOfClass:[NSString class]] && restoredTranslation.length > 0) {
             [sTranslationCache setObject:restoredTranslation forKey:cacheKey];
+            @synchronized (sTranslationFailureCooldowns) {
+                [sTranslationFailureCooldowns removeObjectForKey:ApolloTranslationFailureCooldownKey(cacheKey)];
+            }
+        } else if (error) {
+            ApolloRecordTranslationFailure(cacheKey, error);
         }
 
         for (id callbackObj in callbacks) {
@@ -6578,27 +6661,48 @@ static void ApolloMaybeTranslateFeedPostBodyNode(id feedCellNode, id excludeTitl
     });
 }
 
+// didLoad, preload, and display commonly arrive in the same main-queue turn.
+// Keep all three recovery hooks, but collapse them into one title/body scan so
+// a newly visible row does not traverse its node tree three times.
+static void ApolloSchedulePostTitleTranslation(id titleNode) {
+    if (!titleNode || !sEnableBulkTranslation || !sTranslatePostTitles) return;
+    @synchronized (titleNode) {
+        if ([objc_getAssociatedObject(titleNode, kApolloPostTitleTranslationScheduledKey) boolValue]) return;
+        objc_setAssociatedObject(titleNode,
+                                 kApolloPostTitleTranslationScheduledKey,
+                                 @YES,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    __weak id weakTitleNode = titleNode;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        id strongTitleNode = weakTitleNode;
+        if (!strongTitleNode) return;
+        @synchronized (strongTitleNode) {
+            objc_setAssociatedObject(strongTitleNode,
+                                     kApolloPostTitleTranslationScheduledKey,
+                                     nil,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        ApolloMaybeTranslatePostTitleNode(strongTitleNode);
+    });
+}
+
 %hook _TtC6Apollo13PostTitleNode
 
 - (void)didLoad {
     %orig;
-    if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
-    __weak id weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{ ApolloMaybeTranslatePostTitleNode(weakSelf); });
+    ApolloSchedulePostTitleTranslation(self);
 }
 
 - (void)didEnterPreloadState {
     %orig;
-    if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
-    __weak id weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{ ApolloMaybeTranslatePostTitleNode(weakSelf); });
+    ApolloSchedulePostTitleTranslation(self);
 }
 
 - (void)didEnterDisplayState {
     %orig;
-    if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
-    __weak id weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{ ApolloMaybeTranslatePostTitleNode(weakSelf); });
+    ApolloSchedulePostTitleTranslation(self);
 }
 
 %end
@@ -6622,23 +6726,17 @@ static void ApolloMaybeTranslateFeedPostBodyNode(id feedCellNode, id excludeTitl
 
 - (void)didLoad {
     %orig;
-    if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
-    __weak id weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{ ApolloMaybeTranslatePostTitleNode(weakSelf); });
+    ApolloSchedulePostTitleTranslation(self);
 }
 
 - (void)didEnterPreloadState {
     %orig;
-    if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
-    __weak id weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{ ApolloMaybeTranslatePostTitleNode(weakSelf); });
+    ApolloSchedulePostTitleTranslation(self);
 }
 
 - (void)didEnterDisplayState {
     %orig;
-    if (!sEnableBulkTranslation || !sTranslatePostTitles) return;
-    __weak id weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{ ApolloMaybeTranslatePostTitleNode(weakSelf); });
+    ApolloSchedulePostTitleTranslation(self);
 }
 
 %end
@@ -7462,6 +7560,9 @@ static void ApolloDbgOpenFirstPost(CFNotificationCenterRef c, void *o, CFStringR
 
 %ctor {
     sTranslationCache = [NSCache new];
+    sDetectedLanguageCache = [NSCache new];
+    sDetectedLanguageCache.countLimit = 2048;
+    sTranslationFailureCooldowns = [NSMutableDictionary dictionary];
     sCommentTranslationByFullName = [NSCache new];
     sCommentTranslationByFullName.countLimit = 2048;
     sLinkTranslationByFullName = [NSCache new];
@@ -7550,6 +7651,8 @@ static void ApolloDbgOpenFirstPost(CFNotificationCenterRef c, void *o, CFStringR
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(__unused NSNotification *note) {
         [sTranslationCache removeAllObjects];
+        [sDetectedLanguageCache removeAllObjects];
+        ApolloClearTranslationFailureCooldowns();
     }];
 
     // App lifecycle: snapshot caches when going to background; re-apply the
@@ -7564,6 +7667,8 @@ static void ApolloDbgOpenFirstPost(CFNotificationCenterRef c, void *o, CFStringR
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(__unused NSNotification *note) {
+        // Language packs or network state may have changed in the background.
+        ApolloClearTranslationFailureCooldowns();
         ApolloReapplyTranslationOnAppResume();
         [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification
                                                             object:nil
@@ -7573,6 +7678,7 @@ static void ApolloDbgOpenFirstPost(CFNotificationCenterRef c, void *o, CFStringR
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(__unused NSNotification *note) {
+        ApolloClearTranslationFailureCooldowns();
         ApolloReapplyTranslationOnAppResume();
         [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification
                                                             object:nil
@@ -7587,6 +7693,8 @@ static void ApolloDbgOpenFirstPost(CFNotificationCenterRef c, void *o, CFStringR
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(__unused NSNotification *note) {
         [sTranslationCache removeAllObjects];
+        [sDetectedLanguageCache removeAllObjects];
+        ApolloClearTranslationFailureCooldowns();
         [sCommentTranslationByFullName removeAllObjects];
         [sLinkTranslationByFullName removeAllObjects];
         @synchronized (sLoggedSkippedCommentFullNames) {
