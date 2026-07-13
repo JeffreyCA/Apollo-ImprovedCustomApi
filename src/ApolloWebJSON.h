@@ -39,6 +39,13 @@ NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request);
 // and posts ApolloWebJSONSessionExpiredNotification (at most once per session).
 void ApolloWebJSONNoteResponse(NSURLRequest *request, NSURLResponse *response);
 
+// Restores image metadata Reddit omits from some cookie-authenticated listing
+// items. The corresponding comments response still contains `post_hint` and the
+// full `preview`, so incomplete direct i.redd.it items are hydrated from that
+// response before RDKResponseSerializer parses them. This preserves the real
+// preview URL and aspect ratio instead of fabricating dimensions.
+NSData *ApolloWebJSONFixupListingMediaResponseData(NSURLResponse *response, NSData *data);
+
 // Fixes up the parsed response object for cookie-routed comment writes
 // (/api/editusertext, /api/comment). www.reddit.com returns each thing's data in
 // the legacy old-reddit {parent, content:"<html>"} shape, which Apollo can't

@@ -747,7 +747,12 @@ void ApolloWebJSONRepairPoisonedAccountBlobs(void) {
 // mode / for the modern shape — see ApolloWebJSONFixupWriteResponseObject.
 %hook RDKResponseSerializer
 - (id)responseObjectForResponse:(id)response data:(id)data error:(id *)error {
-    id obj = %orig;
+    id serializerData = data;
+    if (sWebJSONEnabled) {
+        @try { serializerData = ApolloWebJSONFixupListingMediaResponseData(response, data); }
+        @catch (NSException *e) { ApolloLog(@"[WebJSON] listing-media fixup failed: %@", e); }
+    }
+    id obj = %orig(response, serializerData, error);
     if (sWebJSONEnabled) {
         @try { obj = ApolloWebJSONFixupWriteResponseObject(response, obj); }
         @catch (NSException *e) { ApolloLog(@"[WebJSON] write-response fixup failed: %@", e); }
