@@ -32,6 +32,11 @@
 #import "settings/ApolloThanksToViewController.h"
 #import "settings/ApolloBuyUsACoffeeViewController.h"
 #import "settings/ApolloReportViewController.h"
+#import "settings/ApolloOpenInAppViewController.h"
+#import "settings/SavedCategoriesViewController.h"
+#import "settings/TranslationSettingsViewController.h"
+#import "PictureInPictureViewController.h"
+#import "TagFiltersViewController.h"
 
 // The six speeds the "Hold for Video Speed" picker offers, in display order. They
 // mirror the video player's own speed menu minus 1.0× (holding at normal speed
@@ -525,11 +530,63 @@ typedef NS_ENUM(NSInteger, Tag) {
     return @[
         [self buildSetupSection],
         [self buildFeaturesSection],
+        [self buildShortcutsSection],
         [self buildDataSection],
         [self buildAdvancedSection],
         [self buildPrivacySection],
         [self buildAboutSection],
     ];
+}
+
+// These screens retain their contextual homes in Apollo's own settings (where
+// they sit beside related native controls), but a second entrance here keeps
+// established Reborn users from having to remember the migration map.
+- (ApolloSettingsSection *)buildShortcutsSection {
+    ApolloSettingsRow *openInApp =
+        [self hubDisclosureRowWithID:@"shortcut.openInApp" title:@"Open in App" subtitle:nil
+                                push:^UIViewController * {
+            return [[ApolloOpenInAppViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        }];
+    ApolloSettingsRow *pip =
+        [self hubDisclosureRowWithID:@"shortcut.pip" title:@"Picture-in-Picture" subtitle:nil
+                                push:^UIViewController * {
+            return [[PictureInPictureViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        }];
+    ApolloSettingsRow *translation =
+        [self hubDisclosureRowWithID:@"shortcut.translation" title:@"Translation" subtitle:nil
+                                push:^UIViewController * {
+            return [[TranslationSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        }];
+    ApolloSettingsRow *savedCategories =
+        [self hubDisclosureRowWithID:@"shortcut.savedCategories" title:@"Saved Categories" subtitle:nil
+                                push:^UIViewController * {
+            return [[SavedCategoriesViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        }];
+    ApolloSettingsRow *tagFilters =
+        [self hubDisclosureRowWithID:@"shortcut.tagFilters" title:@"Tag Filters" subtitle:nil
+                                push:^UIViewController * {
+            return [[TagFiltersViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        }];
+    // Flair is intentionally a switch alias, not another screen: Appearance →
+    // Flair remains the canonical native placement and the same preference is
+    // changed from either entrance.
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsRow *colorFlairs =
+        [ApolloSettingsRow switchRowWithID:@"shortcut.colorFlairs"
+                                     title:@"Color Flairs"
+                                      isOn:^BOOL { return sEnableFlairColors; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf flairColorsSwitchToggled:sender]; }];
+
+    openInApp.iconSystemName = @"arrow.up.forward.app.fill";      openInApp.iconTileColor = [UIColor systemBlueColor];
+    pip.iconSystemName = @"pip.fill";                             pip.iconTileColor = [UIColor systemPurpleColor];
+    translation.iconSystemName = @"character.bubble.fill";        translation.iconTileColor = [UIColor systemTealColor];
+    savedCategories.iconSystemName = @"bookmark.fill";            savedCategories.iconTileColor = [UIColor systemOrangeColor];
+    tagFilters.iconSystemName = @"tag.fill";                      tagFilters.iconTileColor = [UIColor systemGreenColor];
+    colorFlairs.iconSystemName = @"paintpalette.fill";            colorFlairs.iconTileColor = [UIColor systemPinkColor];
+
+    return [ApolloSettingsSection sectionWithTitle:@"Shortcuts"
+                                            footer:@"Quick links to settings that also live in their own sections and in Apollo's settings."
+                                              rows:@[ openInApp, pip, translation, savedCategories, tagFilters, colorFlairs ]];
 }
 
 // Shared plain disclosure-row builder for the hub's navigation rows: title
@@ -578,7 +635,9 @@ typedef NS_ENUM(NSInteger, Tag) {
         }];
     apiKeys.iconSystemName = @"key.fill";
     apiKeys.iconTileColor = [UIColor systemGrayColor];
-    return [ApolloSettingsSection sectionWithTitle:@"Setup" footer:nil rows:@[ apiKeys ]];
+    return [ApolloSettingsSection sectionWithTitle:@"Setup"
+                                            footer:nil
+                                              rows:@[ apiKeys ]];
 }
 
 - (ApolloSettingsSection *)buildFeaturesSection {
@@ -625,7 +684,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     apolloAI.iconSystemName     = @"sparkles";                    apolloAI.iconTileColor     = [UIColor systemIndigoColor];
 
     return [ApolloSettingsSection sectionWithTitle:@"Features"
-                                            footer:nil
+                                            footer:@"Fine-tune posts, comments, media, subreddits, profiles and the interface."
                                               rows:@[ posts, comments, media, subreddits, profiles, interface_,
                                                       linkPreviews, apolloAI ]];
 }
@@ -660,7 +719,9 @@ typedef NS_ENUM(NSInteger, Tag) {
     flex.iconSystemName       = @"ant.fill";                     flex.iconTileColor       = [UIColor systemGrayColor];
     exportLogs.iconSystemName = @"square.and.arrow.up.on.square.fill"; exportLogs.iconTileColor = [UIColor systemGrayColor];
 
-    return [ApolloSettingsSection sectionWithTitle:@"Advanced" footer:nil rows:@[ backend, flex, exportLogs ]];
+    return [ApolloSettingsSection sectionWithTitle:@"Advanced"
+                                            footer:@"Notification backend, developer tools and diagnostics."
+                                              rows:@[ backend, flex, exportLogs ]];
 }
 
 - (ApolloSettingsSection *)buildDataSection {
@@ -859,7 +920,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onSelect:^{ [weakSelf pushInstructionsViewController]; }];
 
     return [ApolloSettingsSection sectionWithTitle:@"Sign-In"
-                                            footer:nil
+                                            footer:@"Choose how accounts sign in, or get help setting up your keys."
                                               rows:@[ universalOAuth, troubleshooting, setupGuide ]];
 }
 
@@ -945,7 +1006,9 @@ typedef NS_ENUM(NSInteger, Tag) {
         }
                                   onSelect:^{ [weakSelf copyWidgetSetupCode]; }];
 
-    return [ApolloSettingsSection sectionWithTitle:@"Extras" footer:nil rows:@[ widgetSetupCode ]];
+    return [ApolloSettingsSection sectionWithTitle:@"Extras"
+                                            footer:@"Copy a code to set up the Apollo home-screen widget."
+                                              rows:@[ widgetSetupCode ]];
 }
 
 // The Comments group screen (ApolloCommentsSettingsViewController) —
@@ -986,7 +1049,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onSelect:nil];
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:nil
+                                            footer:@"Options for reading comment threads, including viewing removed comments."
                                               rows:@[ collapsePinned, liveCommentsFollow, deletedComments ]];
 }
 
@@ -1021,7 +1084,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onToggle:^(UISwitch *sender) { [weakSelf filterNSFWRecentlyReadSwitchToggled:sender]; }];
 
     return [ApolloSettingsSection sectionWithTitle:@"Recently Read"
-                                            footer:nil
+                                            footer:@"Show thumbnails on posts you've already read, and cap how many Apollo remembers."
                                               rows:@[ readThumbnails, readPostMax, filterNSFWRR ]];
 }
 
@@ -1059,7 +1122,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onToggle:^(UISwitch *sender) { [weakSelf blockAnnouncementsSwitchToggled:sender]; }];
 
     return [ApolloSettingsSection sectionWithTitle:@"Feed"
-                                            footer:nil
+                                            footer:@"Small tweaks for the post list."
                                               rows:@[ textPostThumbnails, iconRowMagnifier, blockAnnouncements ]];
 }
 
@@ -1076,11 +1139,8 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                                  label:@"Tab Bar Re-Expands When Idle"
                                                                 detail:@"Requires Liquid Glass and Hide Bars on Scroll in General settings."
                                                                     on:idleSupported && [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoHideTabBarShowOnIdle]
+                                                               enabled:idleSupported
                                                                 action:@selector(autoHideTabBarShowOnIdleSwitchToggled:)];
-            UISwitch *toggleSwitch = [cell.accessoryView isKindOfClass:[UISwitch class]] ? (UISwitch *)cell.accessoryView : nil;
-            toggleSwitch.enabled = idleSupported;
-            cell.textLabel.enabled = idleSupported;
-            cell.detailTextLabel.enabled = idleSupported;
             return cell ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
         }
                                   onSelect:nil];
@@ -1092,14 +1152,11 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
             BOOL lgSupported = IsLiquidGlass();
             UITableViewCell *cell = [weakSelf switchCellWithIdentifier:@"Cell_Gen_KeepSearchInPlace"
-                                                                 label:@"Keep Search Bar In Place"
+                                                                 label:@"Keep Search Bar Visible"
                                                                 detail:@"Requires Liquid Glass."
                                                                     on:lgSupported && [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyKeepSearchBarInPlace]
+                                                               enabled:lgSupported
                                                                 action:@selector(keepSearchBarInPlaceSwitchToggled:)];
-            UISwitch *toggleSwitch = [cell.accessoryView isKindOfClass:[UISwitch class]] ? (UISwitch *)cell.accessoryView : nil;
-            toggleSwitch.enabled = lgSupported;
-            cell.textLabel.enabled = lgSupported;
-            cell.detailTextLabel.enabled = lgSupported;
             return cell ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
         }
                                   onSelect:nil];
@@ -1114,11 +1171,8 @@ typedef NS_ENUM(NSInteger, Tag) {
                                                                  label:@"Move Tab Bar to Bottom"
                                                                 detail:@"iPad only. Docks the tab bar at the bottom instead of the top."
                                                                     on:supported && [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIPadTabBarBottom]
+                                                               enabled:supported
                                                                 action:@selector(iPadTabBarBottomSwitchToggled:)];
-            UISwitch *toggleSwitch = [cell.accessoryView isKindOfClass:[UISwitch class]] ? (UISwitch *)cell.accessoryView : nil;
-            toggleSwitch.enabled = supported;
-            cell.textLabel.enabled = supported;
-            cell.detailTextLabel.enabled = supported;
             return cell ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
         }
                                   onSelect:nil];
@@ -1296,7 +1350,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (ApolloSettingsSection *)buildMediaInlineSection {
     return [ApolloSettingsSection sectionWithTitle:@"Inline Media"
-                                            footer:nil
+                                            footer:@"Show images and play GIFs inline in the feed."
                                               rows:@[ [self buildInlineMediaRow] ]];
 }
 
@@ -1368,7 +1422,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onToggle:^(UISwitch *sender) { [weakSelf showDetailedProfilesSwitchToggled:sender]; }];
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:nil
+                                            footer:@"Show profile pictures, and open Reborn's detailed profile pages with a banner, bio and social links."
                                               rows:@[ userAvatars, profileTabAvatar, detailedProfiles ]];
 }
 
@@ -1412,7 +1466,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     highlightsWeb.visible = ^BOOL { return sCommunityHighlights; };
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:nil
+                                            footer:@"Enhance the subreddit list and community pages with dividers, headers and highlights."
                                               rows:@[ enhancements, modernDividers, headers, highlights,
                                                       highlightsWeb ]];
 }
@@ -1736,7 +1790,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                  onSelect:nil];
 
     return [ApolloSettingsSection sectionWithTitle:@"About"
-                                            footer:nil
+                                            footer:@"Request features, report bugs, or browse the source. Apollo Reborn is free and open source."
                                               rows:@[ featureRequests, bugReports, github, subreddit, thanksTo, privacyPolicy, version ]];
 }
 
@@ -1905,21 +1959,78 @@ typedef NS_ENUM(NSInteger, Tag) {
                                        detail:(NSString *)detail
                                            on:(BOOL)on
                                        action:(SEL)action {
-    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:identifier];
-    if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:identifier];
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        cell.textLabel.numberOfLines = 0;
-        cell.detailTextLabel.numberOfLines = 0;
-        cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    return [self switchCellWithIdentifier:identifier label:label detail:detail on:on enabled:YES action:action];
+}
 
-        UISwitch *toggleSwitch = [[UISwitch alloc] init];
+// A title + optional multi-line subtitle + trailing switch. Hand-laid with Auto
+// Layout (not UITableViewCellStyleSubtitle nor a content-configuration + switch
+// accessory): both of those measure the labels at the full cell width — the
+// switch accessory isn't reserved during self-sizing — so a wrapping subtitle
+// under-measures and its last line clips against the cell's bottom edge. Here
+// the switch is constrained inline, so the labels wrap at the true available
+// width and the cell height is exact.
+- (UITableViewCell *)switchCellWithIdentifier:(NSString *)identifier
+                                        label:(NSString *)label
+                                       detail:(NSString *)detail
+                                           on:(BOOL)on
+                                      enabled:(BOOL)enabled
+                                       action:(SEL)action {
+    static const NSInteger kTitleTag = 7001, kDetailTag = 7002, kSwitchTag = 7003;
+    UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:identifier];
+    UILabel *titleLabel; UILabel *detailLabel; UISwitch *toggleSwitch;
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:identifier];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+
+        titleLabel = [[UILabel alloc] init];
+        titleLabel.tag = kTitleTag;
+        titleLabel.numberOfLines = 0;
+        titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+        titleLabel.adjustsFontForContentSizeCategory = YES;
+
+        detailLabel = [[UILabel alloc] init];
+        detailLabel.tag = kDetailTag;
+        detailLabel.numberOfLines = 0;
+        detailLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+        detailLabel.adjustsFontForContentSizeCategory = YES;
+
+        UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[ titleLabel, detailLabel ]];
+        stack.axis = UILayoutConstraintAxisVertical;
+        stack.spacing = 3.0;
+        stack.translatesAutoresizingMaskIntoConstraints = NO;
+
+        toggleSwitch = [[UISwitch alloc] init];
+        toggleSwitch.tag = kSwitchTag;
         [toggleSwitch addTarget:self action:action forControlEvents:UIControlEventValueChanged];
-        cell.accessoryView = toggleSwitch;
+        toggleSwitch.translatesAutoresizingMaskIntoConstraints = NO;
+        [toggleSwitch setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [toggleSwitch setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+
+        [cell.contentView addSubview:stack];
+        [cell.contentView addSubview:toggleSwitch];
+        UILayoutGuide *m = cell.contentView.layoutMarginsGuide;
+        [NSLayoutConstraint activateConstraints:@[
+            [stack.leadingAnchor constraintEqualToAnchor:m.leadingAnchor],
+            [stack.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:11.0],
+            [stack.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-11.0],
+            [toggleSwitch.leadingAnchor constraintEqualToAnchor:stack.trailingAnchor constant:12.0],
+            [toggleSwitch.trailingAnchor constraintEqualToAnchor:m.trailingAnchor],
+            [toggleSwitch.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+        ]];
+    } else {
+        titleLabel = [cell.contentView viewWithTag:kTitleTag];
+        detailLabel = [cell.contentView viewWithTag:kDetailTag];
+        toggleSwitch = (UISwitch *)[cell.contentView viewWithTag:kSwitchTag];
     }
-    cell.textLabel.text = label;
-    cell.detailTextLabel.text = detail;
-    ((UISwitch *)cell.accessoryView).on = on;
+
+    titleLabel.text = label;
+    titleLabel.textColor = enabled ? [UIColor labelColor] : [UIColor tertiaryLabelColor];
+    detailLabel.text = detail;
+    detailLabel.textColor = enabled ? [UIColor secondaryLabelColor] : [UIColor tertiaryLabelColor];
+    detailLabel.hidden = (detail.length == 0);
+    toggleSwitch.on = on;
+    toggleSwitch.enabled = enabled;
+    toggleSwitch.onTintColor = [self apollo_themeAccentColor];
     return cell;
 }
 
@@ -2113,7 +2224,15 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
     NSAttributedString *text = [self footerAttributedTextForSection:section];
-    if (!text) return 12.0;
+    if (!text) {
+        // No attributed footer for this section. If the form model supplies a
+        // plain string footer, let UIKit's default footer label self-size to it
+        // (a hard-coded small height would clip multi-line hint text — the very
+        // regression this screen had). Otherwise return a small inter-section
+        // spacer so back-to-back sections don't crowd.
+        NSString *plainFooter = [self tableView:tableView titleForFooterInSection:section];
+        return plainFooter.length > 0 ? UITableViewAutomaticDimension : 12.0;
+    }
 
     CGFloat tableWidth = tableView.bounds.size.width;
     if (tableWidth <= 0) tableWidth = [UIScreen mainScreen].bounds.size.width;

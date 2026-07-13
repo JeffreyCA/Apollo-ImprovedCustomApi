@@ -117,7 +117,7 @@ typedef NS_ENUM(NSInteger, ApolloSFRowKind) {
 // rounded square. Cached per symbol + resolved color; the color is resolved
 // against the presenting view's traits because system colors differ slightly
 // between light and dark. Unknown symbol names fail soft to a plain tile.
-static UIImage *ApolloSettingsIconTileImage(NSString *symbolName, UIColor *tileColor, UITraitCollection *traits) {
+UIImage *ApolloSettingsIconTileImage(NSString *symbolName, UIColor *tileColor, UITraitCollection *traits) {
     static NSCache<NSString *, UIImage *> *cache;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ cache = [NSCache new]; });

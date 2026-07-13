@@ -4,6 +4,7 @@
 #import <string.h>
 
 #import "ApolloCommon.h"
+#import "settings/ApolloSettingsForm.h"
 #import "settings/ApolloSettingsRouter.h"
 #import "settings/ApolloSettingsSearchNativeIndex.h"
 #import "settings/ApolloSettingsTableViewController.h"
@@ -23,6 +24,10 @@
 @property (nonatomic, copy) NSArray<NSString *> *nativePath;
 @property (nonatomic, copy) NSString *rowTitle;
 @property (nonatomic, assign) BOOL pushesFinalRow;
+// Native-style icon tile shown at the leading edge of the result row. Captured
+// live from the real cell where the row has one, else inherited from the
+// parent screen (see the icon resolution pass in the index build).
+@property (nonatomic, strong) UIImage *iconImage;
 @end
 
 @implementation ApolloSettingsSearchEntry
@@ -78,7 +83,7 @@ static UITableView *ApolloSearchTableInViewController(UIViewController *vc) {
 // remapped/hidden native rows and conditional form rows come out exactly as
 // the user would see them).
 static void ApolloSearchScanTable(UITableView *table,
-                                  void (^visit)(NSIndexPath *indexPath, NSString *title, NSString *header, BOOL disclosure)) {
+                                  void (^visit)(NSIndexPath *indexPath, NSString *title, NSString *header, BOOL disclosure, UIImage *icon)) {
     id<UITableViewDataSource> dataSource = table.dataSource;
     if (!dataSource) return;
 
@@ -104,7 +109,7 @@ static void ApolloSearchScanTable(UITableView *table,
             if (!cell) continue;
             NSString *title = ApolloSearchTitleOfCell(cell);
             if (title.length == 0) continue;
-            visit(indexPath, title, header, cell.accessoryType == UITableViewCellAccessoryDisclosureIndicator);
+            visit(indexPath, title, header, cell.accessoryType == UITableViewCellAccessoryDisclosureIndicator, cell.imageView.image);
         }
     }
 }
@@ -114,7 +119,7 @@ static void ApolloSearchScanTable(UITableView *table,
 static NSIndexPath *ApolloSearchFindRowTitled(UITableView *table, NSString *title) {
     __block NSIndexPath *found = nil;
     NSString *wanted = [title stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    ApolloSearchScanTable(table, ^(NSIndexPath *indexPath, NSString *rowTitle, __unused NSString *header, __unused BOOL disclosure) {
+    ApolloSearchScanTable(table, ^(NSIndexPath *indexPath, NSString *rowTitle, __unused NSString *header, __unused BOOL disclosure, __unused UIImage *icon) {
         if (found) return;
         NSString *trimmed = [rowTitle stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
         if ([trimmed compare:wanted options:NSCaseInsensitiveSearch] == NSOrderedSame) found = indexPath;
@@ -122,10 +127,41 @@ static NSIndexPath *ApolloSearchFindRowTitled(UITableView *table, NSString *titl
     return found;
 }
 
+#pragma mark - Result icons
+
+// Native settings sections aren't scanned live (they come from the static
+// snapshot), so their icons are mapped here — mirroring Apollo's own root icons
+// (ApolloRootSettingsIconForTitle) plus the Reborn hub — and rendered in the
+// same tile style the Reborn cells use, so the result list reads as one set.
+static UIImage *ApolloSearchMappedIconTile(NSString *title, UITraitCollection *traits) {
+    static NSDictionary<NSString *, NSArray *> *map; // title.lower -> @[symbol, UIColor]
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        map = @{
+            @"general":            @[ @"gearshape.fill",   UIColor.systemGrayColor ],
+            @"appearance":         @[ @"paintbrush.fill",  UIColor.systemBlueColor ],
+            @"notifications":      @[ @"bell.fill",        UIColor.systemRedColor ],
+            @"passcode":           @[ @"lock.fill",        UIColor.systemPinkColor ],
+            @"face id & passcode": @[ @"lock.fill",        UIColor.systemPinkColor ],
+            @"filters & blocks":   @[ @"nosign",           UIColor.systemGreenColor ],
+            @"gestures":           @[ @"hand.tap.fill",    UIColor.systemIndigoColor ],
+            @"about":              @[ @"info.circle.fill", UIColor.systemGray2Color ],
+            @"apollo ultra":       @[ @"star.circle.fill", UIColor.systemOrangeColor ],
+            @"apollo reborn":      @[ @"key.fill",         UIColor.systemTealColor ],
+        };
+    });
+    NSArray *meta = title.length ? map[title.lowercaseString] : nil;
+    return meta ? ApolloSettingsIconTileImage(meta[0], meta[1], traits) : nil;
+}
+
 #pragma mark - Index build
 
-static NSArray<ApolloSettingsSearchEntry *> *ApolloSettingsSearchBuildIndex(void) {
+static NSArray<ApolloSettingsSearchEntry *> *ApolloSettingsSearchBuildIndex(UITraitCollection *traits) {
     NSMutableArray<ApolloSettingsSearchEntry *> *entries = [NSMutableArray array];
+    // title.lower -> the icon tile the row renders in the real settings UI,
+    // captured live while scanning (covers every Reborn hub/screen row that has
+    // one). Parent lookups resolve against this too.
+    NSMutableDictionary<NSString *, UIImage *> *iconByTitle = [NSMutableDictionary dictionary];
     NSMutableSet<NSString *> *registeredScreenTitles = [NSMutableSet set];
     for (NSString *routeId in ApolloSettingsRouteIds()) {
         NSString *title = ApolloSettingsRouteTitle(routeId).lowercaseString;
@@ -155,7 +191,14 @@ static NSArray<ApolloSettingsSearchEntry *> *ApolloSettingsSearchBuildIndex(void
         UITableView *table = ApolloSearchTableInViewController(vc);
         if (!table) continue;
 
-        ApolloSearchScanTable(table, ^(__unused NSIndexPath *indexPath, NSString *title, NSString *header, BOOL disclosure) {
+        ApolloSearchScanTable(table, ^(__unused NSIndexPath *indexPath, NSString *title, NSString *header, BOOL disclosure, UIImage *icon) {
+            // Record the row's real icon first — even for rows we won't add as
+            // their own entry (a disclosure that's a registered destination),
+            // because that's exactly where a screen's parent icon lives (e.g.
+            // the hub's "Translation" row supplies the Translation screen icon).
+            if (icon && title.length && !iconByTitle[title.lowercaseString]) {
+                iconByTitle[title.lowercaseString] = icon;
+            }
             if ([title compare:screenTitle options:NSCaseInsensitiveSearch] == NSOrderedSame) return;
             // A disclosure whose title is itself a registered destination is
             // already represented by that destination's screen entry. Keeping
@@ -169,6 +212,7 @@ static NSArray<ApolloSettingsSearchEntry *> *ApolloSettingsSearchBuildIndex(void
                 : screenTitle;
             entry.routeId = routeId;
             entry.rowTitle = title;
+            entry.iconImage = icon; // own icon if the row has one; else resolved below
             [entries addObject:entry];
         });
     }
@@ -205,6 +249,26 @@ static NSArray<ApolloSettingsSearchEntry *> *ApolloSettingsSearchBuildIndex(void
     colorFlairs.nativePath = @[ @"Appearance" ];
     colorFlairs.rowTitle = @"Color Flairs";
     [entries addObject:colorFlairs];
+
+    // Resolve a leading icon for every result so the list is visually uniform:
+    //   own row icon (captured above) → the parent screen/section's icon (by
+    //   breadcrumb) → a neutral generic. Parent lookup consults both the live
+    //   capture and the native map.
+    UIImage *(^lookup)(NSString *) = ^UIImage *(NSString *name) {
+        if (name.length == 0) return nil;
+        return iconByTitle[name.lowercaseString] ?: ApolloSearchMappedIconTile(name, traits);
+    };
+    UIImage *generic = ApolloSettingsIconTileImage(@"magnifyingglass", UIColor.systemGray2Color, traits);
+    for (ApolloSettingsSearchEntry *entry in entries) {
+        if (entry.iconImage) continue;
+        UIImage *icon = lookup(entry.title);              // the row/screen's own icon
+        if (!icon && entry.breadcrumb.length) {
+            NSArray<NSString *> *crumbs = [entry.breadcrumb componentsSeparatedByString:@" → "];
+            icon = lookup(crumbs.firstObject);            // top-level parent (General, Apollo Reborn, …)
+            if (!icon && crumbs.count > 1) icon = lookup(crumbs.lastObject); // nearest parent
+        }
+        entry.iconImage = icon ?: generic;
+    }
 
     return entries;
 }
@@ -448,7 +512,7 @@ static void ApolloSettingsSearchOpenEntry(UIViewController *settingsVC, ApolloSe
     // up, so repeat the inherited-theme pass at presentation time when the
     // live root Settings table is guaranteed to exist.
     [self apollo_applyTheme];
-    self.index = ApolloSettingsSearchBuildIndex();
+    self.index = ApolloSettingsSearchBuildIndex(self.traitCollection);
     ApolloLog(@"[SettingsSearch] index built: %lu entries", (unsigned long)self.index.count);
 }
 
@@ -459,7 +523,7 @@ static void ApolloSettingsSearchOpenEntry(UIViewController *settingsVC, ApolloSe
         [self.tableView reloadData];
         return;
     }
-    if (!self.index) self.index = ApolloSettingsSearchBuildIndex();
+    if (!self.index) self.index = ApolloSettingsSearchBuildIndex(self.traitCollection);
 
     NSMutableArray<NSDictionary *> *scored = [NSMutableArray array];
     for (ApolloSettingsSearchEntry *entry in self.index) {
@@ -493,6 +557,7 @@ static void ApolloSettingsSearchOpenEntry(UIViewController *settingsVC, ApolloSe
     cell.textLabel.text = entry.title;
     cell.detailTextLabel.text = entry.breadcrumb;
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    cell.imageView.image = entry.iconImage;
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     return cell;
 }
@@ -524,38 +589,121 @@ static void ApolloSettingsSearchOpenEntry(UIViewController *settingsVC, ApolloSe
 
 #pragma mark - Pull to search
 
-// Overscrolling the settings table past a threshold and releasing activates the
-// search field, so a deliberate downward pull opens search (in addition to
-// tapping the pinned bar). Peak overscroll is tracked via an extra target on
-// the table's own pan recognizer, so no scroll-delegate hooking is needed and
-// Apollo's own scrolling is untouched.
+// The nav-bar search field is always visible, but a deliberate downward pull on
+// the settings list also opens it — with a playful affordance drawn in the gap
+// the pull reveals: a magnifying glass that scales + fills in with pull
+// progress, a "Pull to search → Release to search" caption, and a soft haptic
+// as it arms. Overscroll is read off the table's own pan recognizer (no
+// scroll-delegate hooking), so Apollo's scrolling is untouched.
+static const CGFloat kPullActivateThreshold = 78.0;  // overscroll to arm (past this, release opens search)
+static const CGFloat kPullRevealStart       = 6.0;   // overscroll before the affordance starts fading in
+
 @interface ApolloSettingsSearchPullToActivate : NSObject
 @property (nonatomic, weak) UISearchController *searchController;
 @property (nonatomic, weak) UIScrollView *scrollView;
+@property (nonatomic, strong) UIView *affordance;
+@property (nonatomic, strong) UIImageView *glassIcon;
+@property (nonatomic, strong) UILabel *caption;
+@property (nonatomic, strong) UIImpactFeedbackGenerator *haptic;
 @property (nonatomic) CGFloat peakOverscroll;
+@property (nonatomic) BOOL armed;   // haptic + "release" state latched once per pull
 @end
 
 @implementation ApolloSettingsSearchPullToActivate
+
+// Build the pull affordance and pin it in the gap just under the search bar
+// (the container's safe-area top, which sits below the always-visible nav
+// field). It starts invisible and is revealed by the pull.
+- (void)installAffordanceInContainer:(UIView *)container {
+    UIView *host = [[UIView alloc] init];
+    host.translatesAutoresizingMaskIntoConstraints = NO;
+    host.userInteractionEnabled = NO;
+    host.alpha = 0.0;
+
+    UIImageView *glass = [[UIImageView alloc] initWithImage:
+        [UIImage systemImageNamed:@"magnifyingglass"
+                withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:20.0
+                                                                                  weight:UIImageSymbolWeightSemibold]]];
+    glass.translatesAutoresizingMaskIntoConstraints = NO;
+    glass.tintColor = [UIColor secondaryLabelColor];
+    [host addSubview:glass];
+
+    UILabel *label = [[UILabel alloc] init];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
+    label.textColor = [UIColor secondaryLabelColor];
+    label.text = @"Pull to search";
+    [host addSubview:label];
+
+    [container addSubview:host];
+    UILayoutGuide *safe = container.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [host.topAnchor constraintEqualToAnchor:safe.topAnchor constant:6.0],
+        [host.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [host.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [glass.centerXAnchor constraintEqualToAnchor:host.centerXAnchor],
+        [glass.topAnchor constraintEqualToAnchor:host.topAnchor],
+        [label.centerXAnchor constraintEqualToAnchor:host.centerXAnchor],
+        [label.topAnchor constraintEqualToAnchor:glass.bottomAnchor constant:6.0],
+        [label.bottomAnchor constraintEqualToAnchor:host.bottomAnchor],
+    ]];
+    self.affordance = host;
+    self.glassIcon = glass;
+    self.caption = label;
+    self.haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+}
+
+// Map pull progress onto the affordance: fade + scale the glass in, tint + relabel
+// once armed, and fire the haptic on the arming edge.
+- (void)renderOverscroll:(CGFloat)overscroll {
+    CGFloat progress = 0.0;
+    if (overscroll > kPullRevealStart) {
+        progress = (overscroll - kPullRevealStart) / (kPullActivateThreshold - kPullRevealStart);
+        progress = MAX(0.0, MIN(1.0, progress));
+    }
+    self.affordance.alpha = progress;
+    CGFloat scale = 0.6 + 0.4 * progress;
+    self.glassIcon.transform = CGAffineTransformMakeScale(scale, scale);
+
+    BOOL armed = overscroll >= kPullActivateThreshold;
+    if (armed != self.armed) {
+        self.armed = armed;
+        self.caption.text = armed ? @"Release to search" : @"Pull to search";
+        UIColor *accent = [self.searchController.searchResultsUpdater
+                              respondsToSelector:@selector(apollo_themeAccentColor)]
+            ? [(id)self.searchController.searchResultsUpdater apollo_themeAccentColor] : nil;
+        UIColor *tint = armed ? (accent ?: [UIColor systemBlueColor]) : [UIColor secondaryLabelColor];
+        [UIView animateWithDuration:0.15 animations:^{
+            self.glassIcon.tintColor = tint;
+            self.caption.textColor = tint;
+        }];
+        if (armed) { [self.haptic impactOccurred]; [self.haptic prepare]; }
+    }
+}
+
 - (void)handlePan:(UIPanGestureRecognizer *)pan {
     UIScrollView *sv = self.scrollView;
     UISearchController *sc = self.searchController;
     if (!sv || !sc) return;
+    if (sc.active) { self.affordance.alpha = 0.0; return; }
 
     CGFloat overscroll = -(sv.contentOffset.y + sv.adjustedContentInset.top);
     switch (pan.state) {
         case UIGestureRecognizerStateBegan:
             self.peakOverscroll = 0;
+            self.armed = NO;
+            [self.haptic prepare];
             break;
         case UIGestureRecognizerStateChanged:
             if (overscroll > self.peakOverscroll) self.peakOverscroll = overscroll;
+            [self renderOverscroll:overscroll];
             break;
         case UIGestureRecognizerStateEnded:
         case UIGestureRecognizerStateCancelled: {
-            // ~1.5x the search bar height: a clear intentional pull, not the
-            // small bounce from flicking an already-at-top list.
-            static const CGFloat kActivateThreshold = 88.0;
-            BOOL shouldActivate = self.peakOverscroll >= kActivateThreshold && !sc.active;
+            BOOL shouldActivate = self.peakOverscroll >= kPullActivateThreshold && !sc.active;
             self.peakOverscroll = 0;
+            self.armed = NO;
+            [UIView animateWithDuration:0.2 animations:^{ self.affordance.alpha = 0.0; }];
             if (shouldActivate) {
                 // Defer past the rubber-band settle so presenting the results
                 // controller isn't fighting the scroll animation.
@@ -585,6 +733,7 @@ void ApolloSettingsSearchAttach(UIViewController *settingsVC) {
     searchController.searchResultsUpdater = results;
     searchController.delegate = results;
     searchController.searchBar.placeholder = @"Search Settings";
+    searchController.obscuresBackgroundDuringPresentation = NO;
     results.searchController = searchController;
 
     settingsVC.navigationItem.searchController = searchController;
@@ -593,12 +742,14 @@ void ApolloSettingsSearchAttach(UIViewController *settingsVC) {
 
     objc_setAssociatedObject(settingsVC, &kApolloSettingsSearchAttachedKey, searchController, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    // Pull-to-search: activate the field on a deliberate overscroll pull-down.
+    // Pull-to-search: a downward overscroll reveals the animated affordance and,
+    // on release past the threshold, opens search.
     UITableView *rootTable = ApolloSearchTableInViewController(settingsVC);
     if (rootTable) {
         ApolloSettingsSearchPullToActivate *pull = [[ApolloSettingsSearchPullToActivate alloc] init];
         pull.searchController = searchController;
         pull.scrollView = rootTable;
+        [pull installAffordanceInContainer:settingsVC.view];
         [rootTable.panGestureRecognizer addTarget:pull action:@selector(handlePan:)];
         objc_setAssociatedObject(settingsVC, &kApolloSettingsSearchPullKey, pull, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }

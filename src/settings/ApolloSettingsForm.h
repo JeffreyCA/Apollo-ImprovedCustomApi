@@ -152,6 +152,13 @@ void ApolloSettingsPresentPicker(UIViewController *presenter,
                                  NSInteger currentIndex,
                                  void (^apply)(NSInteger pickedIndex));
 
+// Settings-app-style icon tile: a white SF symbol on a colored 29pt rounded
+// square (cached). Shared with settings search so result rows can render the
+// same native-style icons. Unknown symbol names fail soft to a plain tile.
+UIImage *ApolloSettingsIconTileImage(NSString *symbolName,
+                                     UIColor *_Nullable tileColor,
+                                     UITraitCollection *_Nullable traits);
+
 #ifdef __cplusplus
 }
 #endif
