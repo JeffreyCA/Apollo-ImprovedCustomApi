@@ -2,6 +2,7 @@
 #import "ApolloState.h"
 #import "ApolloWebJSON.h"
 #import "ApolloWebSessionStore.h"
+#import <WebKit/WebKit.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 
@@ -730,29 +731,275 @@ static NSMutableDictionary<NSString *, NSArray *> *ApolloUserFlairEmojiListCache
     return cache;
 }
 
+// Old Reddit's flair selector embeds only the emoji used by its visible
+// templates. Keep track of those cache entries as partial so opening the editor
+// still fetches Reddit's complete user-flair-allowed emoji catalogue.
+static NSMutableSet<NSString *> *ApolloUserFlairPartialEmojiCacheKeys(void) {
+    static NSMutableSet *keys = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ keys = [NSMutableSet set]; });
+    return keys;
+}
+
+static NSMutableDictionary<NSString *, id> *ApolloUserFlairWebEmojiFetches(void);
+
+static NSArray<NSHTTPCookie *> *ApolloUserFlairCookiesFromHeader(NSString *header) {
+    if (header.length == 0) return @[];
+    NSMutableArray *cookies = [NSMutableArray array];
+    NSCharacterSet *whitespace = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    for (NSString *rawPair in [header componentsSeparatedByString:@";"]) {
+        NSString *pair = [rawPair stringByTrimmingCharactersInSet:whitespace];
+        NSRange separator = [pair rangeOfString:@"="];
+        if (separator.location == NSNotFound || separator.location == 0) continue;
+        NSString *name = [[pair substringToIndex:separator.location] stringByTrimmingCharactersInSet:whitespace];
+        NSString *value = [pair substringFromIndex:separator.location + 1];
+        if (name.length == 0) continue;
+        NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:@{
+            NSHTTPCookieName: name,
+            NSHTTPCookieValue: value,
+            NSHTTPCookieDomain: @".reddit.com",
+            NSHTTPCookiePath: @"/",
+            NSHTTPCookieSecure: @"TRUE",
+        }];
+        if (cookie) [cookies addObject:cookie];
+    }
+    return cookies;
+}
+
+// Reddit's OAuth emoji endpoint deliberately rejects website-session cookies.
+// Shreddit loads the same catalog through a signed-in web-only endpoint when its
+// flair editor opens. Reproduce that interaction in a hidden WKWebView so the
+// request is made by Reddit's own page, with the active keyless account's exact
+// cookies and request headers. A document-start fetch wrapper clones just that
+// response and converts its HTML list items into a small JSON array for Apollo.
+@interface ApolloUserFlairWebEmojiFetch : NSObject <WKNavigationDelegate>
+@property (nonatomic, strong) WKWebView *web;
+@property (nonatomic, copy) NSString *subreddit;
+@property (nonatomic, copy) NSString *cacheKey;
+@property (nonatomic, strong) NSArray *fallback;
+@property (nonatomic, strong) NSMutableArray *completions;
+@property (nonatomic) NSUInteger polls;
+@property (nonatomic) BOOL finished;
+@end
+
+@implementation ApolloUserFlairWebEmojiFetch
+- (instancetype)initWithSubreddit:(NSString *)subreddit fallback:(NSArray *)fallback {
+    if ((self = [super init])) {
+        _subreddit = [subreddit copy];
+        _cacheKey = subreddit.lowercaseString;
+        _fallback = fallback ?: @[];
+        _completions = [NSMutableArray array];
+    }
+    return self;
+}
+
+- (void)addCompletion:(void (^)(NSArray *))completion {
+    if (completion) [self.completions addObject:[completion copy]];
+}
+
+- (void)start {
+    self.polls = 0;
+    UIWindow *window = nil;
+    for (UIWindow *candidate in ApolloAllWindows()) {
+        if (candidate.isKeyWindow) { window = candidate; break; }
+    }
+    if (!window) window = ApolloAllWindows().firstObject;
+    if (!window) {
+        [self finishWithItems:nil status:0 responseLength:0 reason:@"no app window"];
+        return;
+    }
+    WKWebViewConfiguration *config = [WKWebViewConfiguration new];
+    // Keep this account's cookies isolated from other API-free accounts and
+    // from any unrelated Reddit login left in WebKit's shared browser store.
+    config.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
+    NSString *hook = @"(function(){var f=window.fetch;if(!f)return;window.fetch=function(){var a=arguments,u=String(a[0]&&a[0].url||a[0]),match=/\\/svc\\/shreddit\\/[^/]+\\/emojis\\/USER_FLAIR/i.test(u);var p=f.apply(this,a);if(match){p.then(function(r){r.clone().text().then(function(t){try{var d=new DOMParser().parseFromString(t,'text/html'),items=Array.from(d.querySelectorAll('li[data-token][data-url]')).map(function(n){var name=n.getAttribute('data-token')||'',url=n.getAttribute('data-url')||'';if(name.charAt(0)===':')name=name.slice(1);if(name.charAt(name.length-1)===':')name=name.slice(0,-1);return{name:name,url:url};}).filter(function(x){return x.name&&x.url;});window.__apolloEmojiCatalog={state:'done',status:r.status,length:t.length,items:items};}catch(e){window.__apolloEmojiCatalog={state:'error',error:String(e)};}}).catch(function(e){window.__apolloEmojiCatalog={state:'error',error:String(e)};});}).catch(function(e){window.__apolloEmojiCatalog={state:'error',error:String(e)};});}return p;};})();";
+    WKUserScript *script = [[WKUserScript alloc] initWithSource:hook injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
+    [config.userContentController addUserScript:script];
+    self.web = [[WKWebView alloc] initWithFrame:window.bounds configuration:config];
+    self.web.navigationDelegate = self;
+    self.web.alpha = 0.011;
+    self.web.userInteractionEnabled = NO;
+    self.web.customUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+    [window insertSubview:self.web atIndex:0];
+    ApolloWebSessionEntry *session = ApolloActiveWebSession();
+    NSArray<NSHTTPCookie *> *cookies = ApolloUserFlairCookiesFromHeader(session.cookieHeader);
+    if (cookies.count == 0) {
+        [self finishWithItems:nil status:0 responseLength:0 reason:@"active web session has no cookies"];
+        return;
+    }
+    NSString *encoded = [self.subreddit stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet] ?: self.subreddit;
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:
+        [NSString stringWithFormat:@"https://sh.reddit.com/r/%@/", encoded]]];
+    [request setValue:session.cookieHeader forHTTPHeaderField:@"Cookie"];
+    dispatch_group_t cookieGroup = dispatch_group_create();
+    WKHTTPCookieStore *cookieStore = config.websiteDataStore.httpCookieStore;
+    for (NSHTTPCookie *cookie in cookies) {
+        dispatch_group_enter(cookieGroup);
+        [cookieStore setCookie:cookie completionHandler:^{ dispatch_group_leave(cookieGroup); }];
+    }
+    __weak typeof(self) weakSelf = self;
+    dispatch_group_notify(cookieGroup, dispatch_get_main_queue(), ^{
+        typeof(self) self = weakSelf;
+        if (!self || self.finished) return;
+        [self.web loadRequest:request];
+        [self pollAfter:2.5];
+    });
+}
+
+- (void)pollAfter:(NSTimeInterval)delay {
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [weakSelf poll]; });
+}
+
+- (void)poll {
+    if (!self.web || self.finished) return;
+    self.polls++;
+    NSString *js = @"(function(){if(window.__apolloEmojiCatalog)return JSON.stringify(window.__apolloEmojiCatalog);var edit=document.querySelector('button[aria-label=\"Edit user flair\"]');if(edit&&!window.__apolloClickedEdit){window.__apolloClickedEdit=true;var target=edit.closest('faceplate-tracker')||edit;target.click();edit.dispatchEvent(new MouseEvent('click',{bubbles:true,composed:true}));}return JSON.stringify({state:'waiting',foundEdit:!!edit});})()";
+    __weak typeof(self) weakSelf = self;
+    [self.web evaluateJavaScript:js completionHandler:^(id result, NSError *error) {
+        typeof(self) self = weakSelf;
+        if (!self || self.finished) return;
+        NSDictionary *payload = nil;
+        if ([result isKindOfClass:[NSString class]]) {
+            NSData *data = [(NSString *)result dataUsingEncoding:NSUTF8StringEncoding];
+            id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+            if ([json isKindOfClass:[NSDictionary class]]) payload = json;
+        }
+        NSString *state = [payload[@"state"] isKindOfClass:[NSString class]] ? payload[@"state"] : @"";
+        if ([state isEqualToString:@"done"]) {
+            NSArray *items = [payload[@"items"] isKindOfClass:[NSArray class]] ? payload[@"items"] : @[];
+            [self finishWithItems:items
+                           status:[payload[@"status"] integerValue]
+                   responseLength:[payload[@"length"] unsignedIntegerValue]
+                           reason:nil];
+            return;
+        }
+        if ([state isEqualToString:@"error"]) {
+            [self finishWithItems:nil status:0 responseLength:0
+                           reason:[payload[@"error"] isKindOfClass:[NSString class]] ? payload[@"error"] : @"web response error"];
+            return;
+        }
+        if (self.polls >= 12) {
+            NSString *reason = error.localizedDescription ?: ([payload[@"foundEdit"] boolValue]
+                ? @"emoji response timed out" : @"flair editor button was not found");
+            [self finishWithItems:nil status:0 responseLength:0 reason:reason];
+            return;
+        }
+        [self pollAfter:1.5];
+    }];
+}
+
+- (void)finishWithItems:(NSArray *)items status:(NSInteger)status
+          responseLength:(NSUInteger)responseLength reason:(NSString *)reason {
+    if (self.finished) return;
+    self.finished = YES;
+
+    BOOL validResponse = (status == 200 && [items isKindOfClass:[NSArray class]]);
+    NSMutableDictionary<NSString *, NSString *> *uniqueURLs = [NSMutableDictionary dictionary];
+    if (validResponse) {
+        for (id raw in items) {
+            if (![raw isKindOfClass:[NSDictionary class]]) continue;
+            NSString *name = [raw[@"name"] isKindOfClass:[NSString class]] ? raw[@"name"] : nil;
+            NSString *url = [raw[@"url"] isKindOfClass:[NSString class]] ? raw[@"url"] : nil;
+            if (name.length > 0 && url.length > 0) uniqueURLs[name] = url;
+        }
+    }
+    NSMutableArray *emojis = [NSMutableArray arrayWithCapacity:uniqueURLs.count];
+    for (NSString *name in [[uniqueURLs allKeys] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)]) {
+        [emojis addObject:@{ @"name": name, @"url": uniqueURLs[name] }];
+    }
+    NSArray *result = validResponse ? emojis : self.fallback;
+    if (validResponse) {
+        @synchronized (ApolloUserFlairEmojiListCache()) {
+            ApolloUserFlairEmojiListCache()[self.cacheKey] = emojis;
+            [ApolloUserFlairPartialEmojiCacheKeys() removeObject:self.cacheKey];
+        }
+    }
+
+    ApolloLog(@"[UserFlair][Web] emoji catalog r/%@ HTTP %ld bytes=%lu choices=%lu fallback=%@ reason=%@",
+              self.subreddit, (long)status, (unsigned long)responseLength,
+              (unsigned long)result.count, validResponse ? @"no" : @"yes", reason ?: @"none");
+
+    self.web.navigationDelegate = nil;
+    [self.web stopLoading];
+    [self.web removeFromSuperview];
+    self.web = nil;
+    NSMutableDictionary *fetches = ApolloUserFlairWebEmojiFetches();
+    @synchronized (fetches) {
+        if (fetches[self.cacheKey] == self) [fetches removeObjectForKey:self.cacheKey];
+    }
+    NSArray *callbacks = [self.completions copy];
+    [self.completions removeAllObjects];
+    for (void (^callback)(NSArray *) in callbacks) callback(result ?: @[]);
+}
+
+- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    [self finishWithItems:nil status:0 responseLength:0 reason:error.localizedDescription];
+}
+
+- (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
+    [self finishWithItems:nil status:0 responseLength:0 reason:@"web content process terminated"];
+}
+@end
+
+static NSMutableDictionary<NSString *, id> *ApolloUserFlairWebEmojiFetches(void) {
+    static NSMutableDictionary *fetches;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ fetches = [NSMutableDictionary dictionary]; });
+    return fetches;
+}
+
+static void ApolloUserFlairFetchEmojisViaWeb(NSString *subreddit, NSArray *fallback,
+                                              void (^completion)(NSArray *emojis)) {
+    dispatch_block_t start = ^{
+        NSString *key = subreddit.lowercaseString;
+        NSMutableDictionary *fetches = ApolloUserFlairWebEmojiFetches();
+        ApolloUserFlairWebEmojiFetch *fetch;
+        @synchronized (fetches) { fetch = fetches[key]; }
+        if (fetch) {
+            [fetch addCompletion:completion];
+            return;
+        }
+        fetch = [[ApolloUserFlairWebEmojiFetch alloc] initWithSubreddit:subreddit fallback:fallback];
+        [fetch addCompletion:completion];
+        @synchronized (fetches) { fetches[key] = fetch; }
+        [fetch start];
+    };
+    if ([NSThread isMainThread]) start();
+    else dispatch_async(dispatch_get_main_queue(), start);
+}
+
 static void ApolloUserFlairFetchEmojis(NSString *subreddit, void (^completion)(NSArray *emojis)) {
     NSString *key = subreddit.lowercaseString;
     if (key.length == 0) { if (completion) completion(@[]); return; }
     NSArray *cached;
-    @synchronized (ApolloUserFlairEmojiListCache()) { cached = ApolloUserFlairEmojiListCache()[key]; }
-    if (cached) { if (completion) completion(cached); return; }
+    BOOL cachedIsPartial = NO;
+    @synchronized (ApolloUserFlairEmojiListCache()) {
+        cached = ApolloUserFlairEmojiListCache()[key];
+        cachedIsPartial = [ApolloUserFlairPartialEmojiCacheKeys() containsObject:key];
+    }
+    if (cached && !cachedIsPartial) { if (completion) completion(cached); return; }
 
     // A process-global captured bearer can belong to a different OAuth account.
     // Never use it while the active account is the API-key-free web-session
-    // account; the web selector bridge below carries that account's own cookie.
-    NSString *token = ApolloWebJSONHasUsableSession() ? nil : [sLatestRedditBearerToken copy];
+    // account; use that account's signed-in website session instead.
+    if (ApolloWebJSONHasUsableSession()) {
+        ApolloUserFlairFetchEmojisViaWeb(subreddit, cached, completion);
+        return;
+    }
+    NSString *token = [sLatestRedditBearerToken copy];
+    if (token.length == 0) { if (completion) completion(cached ?: @[]); return; }
     NSString *enc = [subreddit stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]] ?: subreddit;
-    NSString *urlStr = token.length
-        ? [NSString stringWithFormat:@"https://oauth.reddit.com/api/v1/%@/emojis/all?raw_json=1", enc]
-        : [NSString stringWithFormat:@"https://www.reddit.com/api/v1/%@/emojis/all.json?raw_json=1", enc];
+    NSString *urlStr = [NSString stringWithFormat:@"https://oauth.reddit.com/api/v1/%@/emojis/all?raw_json=1", enc];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
     if (token.length) [req setValue:[@"Bearer " stringByAppendingString:token] forHTTPHeaderField:@"Authorization"];
-    [req setValue:@"Apollo iOS" forHTTPHeaderField:@"User-Agent"];
+    [req setValue:(sUserAgent.length > 0 ? sUserAgent : @"Apollo iOS") forHTTPHeaderField:@"User-Agent"];
     req.timeoutInterval = 20;
     [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *error) {
         NSMutableArray *emojis = [NSMutableArray array];
         id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
-        if ([json isKindOfClass:[NSDictionary class]]) {
+        BOOL validCatalogue = [json isKindOfClass:[NSDictionary class]];
+        if (validCatalogue) {
             for (NSString *group in (NSDictionary *)json) {
                 id g = ((NSDictionary *)json)[group];
                 if (![g isKindOfClass:[NSDictionary class]]) continue;
@@ -769,10 +1016,23 @@ static void ApolloUserFlairFetchEmojis(NSString *subreddit, void (^completion)(N
         [emojis sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
             return [a[@"name"] caseInsensitiveCompare:b[@"name"]];
         }];
-        ApolloLog(@"[UserFlair] fetched %lu user-flair emoji for r/%@", (unsigned long)emojis.count, subreddit);
+        NSHTTPURLResponse *http = [resp isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)resp : nil;
+        ApolloLog(@"[UserFlair] fetched %lu user-flair emoji for r/%@ HTTP %ld keyless=%@ valid=%@ error=%@",
+                  (unsigned long)emojis.count, subreddit, (long)http.statusCode,
+                  @"no", validCatalogue ? @"yes" : @"no", error ? @"yes" : @"no");
         dispatch_async(dispatch_get_main_queue(), ^{
-            @synchronized (ApolloUserFlairEmojiListCache()) { ApolloUserFlairEmojiListCache()[key] = emojis; }
-            if (completion) completion(emojis);
+            NSArray *result = emojis;
+            @synchronized (ApolloUserFlairEmojiListCache()) {
+                if (validCatalogue && http.statusCode == 200) {
+                    ApolloUserFlairEmojiListCache()[key] = emojis;
+                    [ApolloUserFlairPartialEmojiCacheKeys() removeObject:key];
+                } else if (cached.count > 0) {
+                    // Preserve template-embedded icons if Reddit temporarily
+                    // rejects or fails the complete catalogue request.
+                    result = cached;
+                }
+            }
+            if (completion) completion(result);
         });
     }] resume];
 }
@@ -1868,10 +2128,10 @@ static NSArray *ApolloUserFlairWebOptionsFromHTML(NSData *data, NSString *subred
         [options addObject:option];
     }
 
-    // The OAuth emoji catalogue is unavailable to a keyless account, but the
-    // selector embeds the concrete URL for every emoji its choices use. Seed the
-    // normal cache from that data (including an empty result) so editable flair
-    // rows can reuse the available emoji set without making a known-403 request.
+    // Seed a partial fallback with the concrete URLs embedded in the templates.
+    // This is deliberately marked partial: when the editor opens it must still
+    // fetch Reddit's complete catalog, otherwise communities with one editable
+    // template (such as r/soccer) show only its current icon instead of all choices.
     NSMutableArray *cachedEmojis = [NSMutableArray arrayWithCapacity:allEmojiURLs.count];
     for (NSString *name in [[allEmojiURLs allKeys] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)]) {
         [cachedEmojis addObject:@{ @"name": name, @"url": allEmojiURLs[name] }];
@@ -1879,7 +2139,11 @@ static NSArray *ApolloUserFlairWebOptionsFromHTML(NSData *data, NSString *subred
     NSString *cacheKey = subreddit.lowercaseString;
     if (cacheKey.length > 0) {
         @synchronized (ApolloUserFlairEmojiListCache()) {
-            ApolloUserFlairEmojiListCache()[cacheKey] = cachedEmojis;
+            BOOL existingIsPartial = [ApolloUserFlairPartialEmojiCacheKeys() containsObject:cacheKey];
+            if (!ApolloUserFlairEmojiListCache()[cacheKey] || existingIsPartial) {
+                ApolloUserFlairEmojiListCache()[cacheKey] = cachedEmojis;
+                [ApolloUserFlairPartialEmojiCacheKeys() addObject:cacheKey];
+            }
         }
     }
 
