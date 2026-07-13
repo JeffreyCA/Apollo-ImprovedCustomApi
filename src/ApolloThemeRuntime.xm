@@ -1192,7 +1192,7 @@ void ApolloThemeRuntimeInvalidate(void) {
 %hook UIFontDescriptor
 
 - (UIFontDescriptor *)fontDescriptorWithSymbolicTraits:(UIFontDescriptorSymbolicTraits)symbolicTraits {
-    if (sEnabled && sFontChoice == ApolloThemeFontRounded &&
+    if (sEnabled && CurrentFontChoice() == ApolloThemeFontRounded &&
         (symbolicTraits & UIFontDescriptorTraitItalic) &&
         !(self.symbolicTraits & UIFontDescriptorTraitItalic) &&
         [self.postscriptName localizedCaseInsensitiveContainsString:@"Rounded"] &&
