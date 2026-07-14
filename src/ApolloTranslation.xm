@@ -5810,6 +5810,12 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
             // the compact info-row "🌐 PT" banner instead — never the line.
             if (rebuilt && [objc_getAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey) boolValue]) {
                 rebuilt = ApolloAttributedStringByAppendingTranslationMarker(rebuilt, originalBody);
+                // Apollo may reset linkAttributeNames when it rebuilds the
+                // text node during a vote. Restore our custom marker link in
+                // the same synchronous path as the marker itself; otherwise
+                // the later reapply sees identical text and short-circuits,
+                // leaving the freshly appended marker visible but inert.
+                ApolloEnsureMarkerTappableOnNode(textNode);
             }
             *swapOut = rebuilt;
         }
@@ -5836,20 +5842,55 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
 // line shorter) is visible for a frame or two until the scheduled reapply
 // swaps it back: a language flash plus a height nudge of every row below, on
 // every vote of a translated comment. To preempt it we keep an index of the
-// bodies we have translated in this session — keyed by BOTH the raw
+// bodies we have translated in the visible thread — keyed by BOTH the raw
 // comment.body and the RENDERED string that was on screen when we applied
-// (Apollo hands the rebuilt node the rendered form) — mapping to the comment
-// fullname. When an unowned node receives text matching the index while the
-// visible thread is in translated mode, swap to the cached translation
-// inline and adopt ownership, exactly like the owned-node path would have.
-static NSMutableDictionary<NSString *, NSString *> *sApolloTranslatedBodyIndex = nil;
+// (Apollo hands the rebuilt node the rendered form) — mapping to every matching
+// comment fullname. The fresh node must then resolve its OWN enclosing comment
+// and find that fullname in the candidate set before it can adopt a translation.
+// This matters for common identical bodies such as "Thanks!": body text alone
+// is not an identity and a last-write-wins map can apply another comment's pin
+// state or cached translation.
+static NSMutableDictionary<NSString *, NSMutableSet<NSString *> *> *sApolloTranslatedBodyIndex = nil;
+static __weak UIViewController *sApolloTranslatedBodyIndexController = nil;
+static NSUInteger const kApolloTranslatedBodyIndexMaximumKeys = 2048;
+
+static NSObject *ApolloTranslatedBodyIndexLock(void) {
+    static NSObject *lock = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        lock = [NSObject new];
+    });
+    return lock;
+}
+
+// The index is only meaningful inside the CommentsVC that populated it. Clear
+// it as soon as a different thread becomes visible, and keep a hard ceiling for
+// unusually long sessions so translated comments cannot accumulate forever.
+static void ApolloScopeTranslatedBodyIndexLocked(UIViewController *controller) {
+    if (sApolloTranslatedBodyIndexController == controller) return;
+    [sApolloTranslatedBodyIndex removeAllObjects];
+    sApolloTranslatedBodyIndexController = controller;
+}
 
 static void ApolloIndexTranslatedCommentBody(NSString *bodyKey, NSString *fullName) {
     if (![bodyKey isKindOfClass:[NSString class]] || bodyKey.length == 0) return;
     if (![fullName isKindOfClass:[NSString class]] || fullName.length == 0) return;
-    @synchronized ([NSMutableDictionary class]) {
+    UIViewController *controller = sVisibleCommentsViewController;
+    if (!controller) return;
+    @synchronized (ApolloTranslatedBodyIndexLock()) {
         if (!sApolloTranslatedBodyIndex) sApolloTranslatedBodyIndex = [NSMutableDictionary dictionary];
-        sApolloTranslatedBodyIndex[bodyKey] = fullName;
+        ApolloScopeTranslatedBodyIndexLocked(controller);
+        NSMutableSet<NSString *> *fullNames = sApolloTranslatedBodyIndex[bodyKey];
+        if (!fullNames) {
+            if (sApolloTranslatedBodyIndex.count >= kApolloTranslatedBodyIndexMaximumKeys) {
+                ApolloLog(@"[Translation/vote] Body index reached %lu keys; clearing active-thread cache",
+                          (unsigned long)kApolloTranslatedBodyIndexMaximumKeys);
+                [sApolloTranslatedBodyIndex removeAllObjects];
+            }
+            fullNames = [NSMutableSet set];
+            sApolloTranslatedBodyIndex[bodyKey] = fullNames;
+        }
+        [fullNames addObject:fullName];
     }
 }
 
@@ -5860,11 +5901,22 @@ static BOOL ApolloPreemptUnownedCommentTextNode(id textNode, NSAttributedString 
     if (!vc || !ApolloControllerIsInTranslatedMode(vc)) return NO;
     NSString *incomingText = incoming.string;
     if (incomingText.length == 0) return NO;
-    NSString *fullName = nil;
-    @synchronized ([NSMutableDictionary class]) {
-        fullName = sApolloTranslatedBodyIndex[incomingText];
-    }
+
+    // Body text narrows the search, but never identifies the comment. Resolve
+    // the owning model from this fresh node so identical bodies cannot borrow
+    // another comment's translation cache or per-item pin state.
+    id cellNode = ApolloCommentCellNodeForTextNode(textNode);
+    RDKComment *comment = cellNode ? ApolloCommentFromCellNode(cellNode) : nil;
+    NSString *fullName = comment ? ApolloCommentFullName(comment) : nil;
     if (fullName.length == 0) return NO;
+
+    BOOL indexedForComment = NO;
+    @synchronized (ApolloTranslatedBodyIndexLock()) {
+        ApolloScopeTranslatedBodyIndexLocked(vc);
+        NSSet<NSString *> *fullNames = sApolloTranslatedBodyIndex[incomingText];
+        indexedForComment = [fullNames containsObject:fullName];
+    }
+    if (!indexedForComment) return NO;
     // Per-item pin: user chose to see this comment's original — honor it.
     if (sTapToTranslate && !ApolloTapModeIsTranslatedKey(fullName)) return NO;
     if (sUserPinnedOriginalFullNames && [sUserPinnedOriginalFullNames containsObject:fullName]) return NO;
@@ -5876,6 +5928,7 @@ static BOOL ApolloPreemptUnownedCommentTextNode(id textNode, NSAttributedString 
     // Marker parity with the apply path (builder self-gates on settings +
     // source-language detection) so the swap is height-identical.
     rebuilt = ApolloAttributedStringByAppendingTranslationMarker(rebuilt, incomingText);
+    ApolloEnsureMarkerTappableOnNode(textNode);
 
     // Adopt ownership so subsequent overwrites flow through the normal owned
     // swap. Store the RENDERED incoming string as the original-body marker —
