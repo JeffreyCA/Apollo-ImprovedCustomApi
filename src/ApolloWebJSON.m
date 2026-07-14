@@ -841,6 +841,64 @@ static BOOL ApolloWebJSONURLIsDirectRedditImage(NSString *URLString) {
     return [imageExtensions containsObject:URL.pathExtension.lowercaseString];
 }
 
+// Enrichment is deliberately bounded and memoized. Listing serialization is a
+// synchronous boundary in Apollo, so the first lookup can briefly hold that
+// background serializer, but a post must never pay that cost repeatedly. A
+// short negative cache also prevents permanently incomplete/deleted posts from
+// generating a request on every refresh. The in-flight set deduplicates the
+// same post across concurrent listing serializers; the second listing simply
+// renders without enrichment and a later render can use the populated cache.
+static NSObject *ApolloWebJSONMediaHydrationCacheLock(void) {
+    static NSObject *lock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
+static NSCache<NSString *, NSDictionary *> *ApolloWebJSONMediaHydrationPositiveCache(void) {
+    static NSCache<NSString *, NSDictionary *> *cache;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [NSCache new];
+        cache.countLimit = 256;
+    });
+    return cache;
+}
+
+static NSCache<NSString *, NSDate *> *ApolloWebJSONMediaHydrationNegativeCache(void) {
+    static NSCache<NSString *, NSDate *> *cache;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [NSCache new];
+        cache.countLimit = 256;
+    });
+    return cache;
+}
+
+static NSMutableSet<NSString *> *ApolloWebJSONMediaHydrationInFlight(void) {
+    static NSMutableSet<NSString *> *identifiers;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ identifiers = [NSMutableSet set]; });
+    return identifiers;
+}
+
+static void ApolloWebJSONFinishMediaHydration(NSString *identifier, NSDictionary *post) {
+    if (identifier.length == 0) return;
+    @synchronized (ApolloWebJSONMediaHydrationCacheLock()) {
+        [ApolloWebJSONMediaHydrationInFlight() removeObject:identifier];
+        if ([post isKindOfClass:[NSDictionary class]]) {
+            [ApolloWebJSONMediaHydrationPositiveCache() setObject:post forKey:identifier];
+            [ApolloWebJSONMediaHydrationNegativeCache() removeObjectForKey:identifier];
+        } else {
+            // Reddit post metadata is effectively immutable, but keep failures
+            // temporary so a transient block page or connection loss can heal.
+            [ApolloWebJSONMediaHydrationNegativeCache()
+                setObject:[NSDate dateWithTimeIntervalSinceNow:10.0 * 60.0]
+                   forKey:identifier];
+        }
+    }
+}
+
 // Fetches the richer post objects returned by /comments/<id>.json for a small
 // collection of listing items. Requests run in parallel so a page pays roughly
 // one network round trip even if two or three posts need repair. This is called
@@ -856,11 +914,40 @@ static NSDictionary<NSString *, NSDictionary *> *ApolloWebJSONFetchFullPostsForM
     NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
     dispatch_group_t group = dispatch_group_create();
     NSMutableDictionary<NSString *, NSDictionary *> *results = [NSMutableDictionary dictionary];
-    NSMutableArray<NSURLSessionDataTask *> *tasks = [NSMutableArray arrayWithCapacity:identifiers.count];
+    NSMutableArray<NSString *> *identifiersToFetch = [NSMutableArray arrayWithCapacity:identifiers.count];
 
-    for (NSString *identifier in identifiers) {
+    NSDate *now = [NSDate date];
+    @synchronized (ApolloWebJSONMediaHydrationCacheLock()) {
+        for (NSString *identifier in identifiers) {
+            NSDictionary *cachedPost = [ApolloWebJSONMediaHydrationPositiveCache() objectForKey:identifier];
+            if (cachedPost) {
+                results[identifier] = cachedPost;
+                continue;
+            }
+
+            NSDate *retryAfter = [ApolloWebJSONMediaHydrationNegativeCache() objectForKey:identifier];
+            if (retryAfter && [retryAfter compare:now] == NSOrderedDescending) continue;
+            if (retryAfter) [ApolloWebJSONMediaHydrationNegativeCache() removeObjectForKey:identifier];
+
+            if ([ApolloWebJSONMediaHydrationInFlight() containsObject:identifier]) continue;
+            [ApolloWebJSONMediaHydrationInFlight() addObject:identifier];
+            [identifiersToFetch addObject:identifier];
+        }
+    }
+
+    if (identifiersToFetch.count == 0) {
+        [session finishTasksAndInvalidate];
+        return [results copy];
+    }
+
+    NSMutableArray<NSURLSessionDataTask *> *tasks = [NSMutableArray arrayWithCapacity:identifiersToFetch.count];
+
+    for (NSString *identifier in identifiersToFetch) {
         NSString *escapedID = [identifier stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
-        if (escapedID.length == 0) continue;
+        if (escapedID.length == 0) {
+            ApolloWebJSONFinishMediaHydration(identifier, nil);
+            continue;
+        }
 
         // Use old.reddit.com for the enrichment request. The listing response
         // being serialized already occupies a www.reddit.com connection; using
@@ -870,7 +957,7 @@ static NSDictionary<NSString *, NSDictionary *> *ApolloWebJSONFetchFullPostsForM
         NSURL *URL = ApolloWebJSONURLWithFragment([NSURL URLWithString:URLString], kApolloWebJSONProbeMarker);
         NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:URL
                                                                cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                                           timeoutInterval:10.0];
+                                                           timeoutInterval:2.5];
         [request setValue:webSession.cookieHeader forHTTPHeaderField:@"Cookie"];
         [request setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
         request.HTTPShouldHandleCookies = NO;
@@ -893,16 +980,19 @@ static NSDictionary<NSString *, NSDictionary *> *ApolloWebJSONFetchFullPostsForM
                     NSDictionary *preview = [post[@"preview"] isKindOfClass:[NSDictionary class]] ? post[@"preview"] : nil;
                     if (preview && [[post[@"id"] description] isEqualToString:identifier]) {
                         @synchronized (results) { results[identifier] = post; }
+                        ApolloWebJSONFinishMediaHydration(identifier, post);
                     }
                 }
                 BOOL foundPreview = NO;
                 @synchronized (results) { foundPreview = results[identifier] != nil; }
                 if (!foundPreview) {
+                    ApolloWebJSONFinishMediaHydration(identifier, nil);
                     ApolloLog(@"[WebJSON] Direct-image metadata failed for t3_%@: HTTP %ld, %lu bytes, error=%@",
                               identifier, (long)HTTPResponse.statusCode,
                               (unsigned long)responseData.length, error);
                 }
             } @catch (NSException *exception) {
+                ApolloWebJSONFinishMediaHydration(identifier, nil);
                 ApolloLog(@"[WebJSON] Direct-image metadata parsing failed for t3_%@: %@",
                           identifier, exception);
             } @finally {
@@ -913,12 +1003,19 @@ static NSDictionary<NSString *, NSDictionary *> *ApolloWebJSONFetchFullPostsForM
         [task resume];
     }
 
-    long waitResult = dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12 * NSEC_PER_SEC)));
+    long waitResult = dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)));
     if (waitResult != 0) {
         for (NSURLSessionDataTask *task in tasks) [task cancel];
+        for (NSString *identifier in identifiersToFetch) {
+            BOOL stillInFlight = NO;
+            @synchronized (ApolloWebJSONMediaHydrationCacheLock()) {
+                stillInFlight = [ApolloWebJSONMediaHydrationInFlight() containsObject:identifier];
+            }
+            if (stillInFlight) ApolloWebJSONFinishMediaHydration(identifier, nil);
+        }
         [session invalidateAndCancel];
         ApolloLog(@"[WebJSON] Timed out hydrating %lu incomplete image post%@",
-                  (unsigned long)identifiers.count, identifiers.count == 1 ? @"" : @"s");
+                  (unsigned long)identifiersToFetch.count, identifiersToFetch.count == 1 ? @"" : @"s");
     } else {
         [session finishTasksAndInvalidate];
     }
@@ -948,17 +1045,20 @@ NSData *ApolloWebJSONFixupListingMediaResponseData(NSURLResponse *response, NSDa
     NSMutableArray *children = [listingData[@"children"] isKindOfClass:[NSMutableArray class]] ? listingData[@"children"] : nil;
     if (!children) return data;
 
-    static const NSUInteger kMaximumHydrationsPerResponse = 6;
+    static const NSUInteger kMaximumHydrationsPerResponse = 3;
     NSMutableArray<NSMutableDictionary *> *candidatePosts = [NSMutableArray array];
     NSMutableArray<NSString *> *candidateIDs = [NSMutableArray array];
     for (id childObject in children) {
         if (![childObject isKindOfClass:[NSMutableDictionary class]]) continue;
         NSMutableDictionary *child = childObject;
-        if (![child[@"kind"] isEqualToString:@"t3"]) continue;
+        NSString *kind = [child[@"kind"] isKindOfClass:[NSString class]] ? child[@"kind"] : nil;
+        if (![kind isEqualToString:@"t3"]) continue;
 
         NSMutableDictionary *post = [child[@"data"] isKindOfClass:[NSMutableDictionary class]] ? child[@"data"] : nil;
         if (!post || [post[@"preview"] isKindOfClass:[NSDictionary class]]) continue;
-        if (![post[@"is_reddit_media_domain"] boolValue]) continue;
+        NSNumber *isRedditMediaDomain = [post[@"is_reddit_media_domain"] isKindOfClass:[NSNumber class]]
+            ? post[@"is_reddit_media_domain"] : nil;
+        if (![isRedditMediaDomain boolValue]) continue;
 
         NSString *destination = [post[@"url_overridden_by_dest"] isKindOfClass:[NSString class]]
             ? post[@"url_overridden_by_dest"] : post[@"url"];
