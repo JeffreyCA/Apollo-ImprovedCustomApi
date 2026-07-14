@@ -21,6 +21,7 @@
 // pattern used for other iOS 26-only APIs (see ApolloNativeActionMenus.xm).
 
 static NSString *const ApolloScrollEdgeEffectStyleChangedNotification = @"ApolloScrollEdgeEffectStyleChangedNotification";
+static char kApolloScrollEdgeEffectForcedHiddenKey;
 
 static id ApolloScrollEdgeEffectStyleObjectForMode(NSInteger mode) {
     Class styleClass = objc_getClass("UIScrollEdgeEffectStyle");
@@ -37,6 +38,7 @@ static id ApolloScrollEdgeEffectStyleObjectForMode(NSInteger mode) {
 }
 
 static BOOL sLoggedScrollEdgeEffectDiagnostics = NO;
+static BOOL sLoggedScrollEdgeEffectSetterOverride = NO;
 
 static void ApolloApplyScrollEdgeEffectToEdge(UIScrollView *scrollView, SEL edgeSelector, NSInteger mode) {
     if (![scrollView respondsToSelector:edgeSelector]) return;
@@ -46,7 +48,16 @@ static void ApolloApplyScrollEdgeEffectToEdge(UIScrollView *scrollView, SEL edge
     SEL setHiddenSelector = NSSelectorFromString(@"setHidden:");
     BOOL hasSetHidden = [effect respondsToSelector:setHiddenSelector];
     if (hasSetHidden) {
-        ((void (*)(id, SEL, BOOL))objc_msgSend)(effect, setHiddenSelector, mode == ApolloScrollEdgeEffectStyleHidden);
+        if (mode == ApolloScrollEdgeEffectStyleHidden) {
+            // Remember only the visibility changes made by this feature. When the
+            // user switches away from Hidden, restore those effects without
+            // un-hiding edges that UIKit intentionally keeps disabled.
+            objc_setAssociatedObject(effect, &kApolloScrollEdgeEffectForcedHiddenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(effect, setHiddenSelector, YES);
+        } else if (objc_getAssociatedObject(effect, &kApolloScrollEdgeEffectForcedHiddenKey)) {
+            objc_setAssociatedObject(effect, &kApolloScrollEdgeEffectForcedHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(effect, setHiddenSelector, NO);
+        }
     }
 
     SEL setStyleSelector = NSSelectorFromString(@"setStyle:");
@@ -69,13 +80,16 @@ static void ApolloApplyScrollEdgeEffectToEdge(UIScrollView *scrollView, SEL edge
 void ApolloApplyScrollEdgeEffectStyle(UIScrollView *scrollView) {
     if (!IsLiquidGlass()) return;
 
-    SEL topSelector = NSSelectorFromString(@"topEdgeEffect");
-    SEL bottomSelector = NSSelectorFromString(@"bottomEdgeEffect");
-    if (![scrollView respondsToSelector:topSelector]) return;
-
     NSInteger mode = sScrollEdgeEffectStyle;
-    ApolloApplyScrollEdgeEffectToEdge(scrollView, topSelector, mode);
-    ApolloApplyScrollEdgeEffectToEdge(scrollView, bottomSelector, mode);
+    NSArray<NSString *> *edgeSelectors = @[
+        @"topEdgeEffect",
+        @"leftEdgeEffect",
+        @"bottomEdgeEffect",
+        @"rightEdgeEffect",
+    ];
+    for (NSString *selectorName in edgeSelectors) {
+        ApolloApplyScrollEdgeEffectToEdge(scrollView, NSSelectorFromString(selectorName), mode);
+    }
 }
 
 static void ApolloApplyScrollEdgeEffectStyleToViewTree(UIView *view) {
@@ -87,11 +101,49 @@ static void ApolloApplyScrollEdgeEffectStyleToViewTree(UIView *view) {
     }
 }
 
+void ApolloApplyScrollEdgeEffectStyleToViewController(UIViewController *viewController) {
+    if (!IsLiquidGlass() || !viewController.isViewLoaded) return;
+    ApolloApplyScrollEdgeEffectStyleToViewTree(viewController.view);
+}
+
 static void ApolloApplyScrollEdgeEffectStyleToAllScrollViews(void) {
     for (UIWindow *window in UIApplication.sharedApplication.windows) {
         ApolloApplyScrollEdgeEffectStyleToViewTree(window);
     }
 }
+
+// A one-shot UIScrollView lifecycle update is not sufficient on iOS 27. UIKit
+// configures some edge effects after didMoveToWindow and may later restore its
+// new hard default while navigation chrome changes. SwiftUI solves this through
+// an inherited environment value on NavigationStack; Apollo is UIKit, so the
+// equivalent app-wide enforcement point is UIScrollEdgeEffect's style setter.
+// This also covers scroll views created after the setting changes.
+%hook UIScrollEdgeEffect
+
+- (void)setStyle:(id)style {
+    NSInteger mode = sScrollEdgeEffectStyle;
+    id selectedStyle = style;
+    if (IsLiquidGlass() && (mode == ApolloScrollEdgeEffectStyleSoft || mode == ApolloScrollEdgeEffectStyleHard)) {
+        selectedStyle = ApolloScrollEdgeEffectStyleObjectForMode(mode) ?: style;
+        if (!sLoggedScrollEdgeEffectSetterOverride) {
+            sLoggedScrollEdgeEffectSetterOverride = YES;
+            ApolloLog(@"[ScrollEdgeEffect] enforcing mode=%ld for UIKit edge-effect updates proposed=%@ selected=%@",
+                      (long)mode, style, selectedStyle);
+        }
+    }
+    %orig(selectedStyle);
+}
+
+- (void)setHidden:(BOOL)hidden {
+    if (IsLiquidGlass() && sScrollEdgeEffectStyle == ApolloScrollEdgeEffectStyleHidden) {
+        objc_setAssociatedObject(self, &kApolloScrollEdgeEffectForcedHiddenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        %orig(YES);
+        return;
+    }
+    %orig(hidden);
+}
+
+%end
 
 %ctor {
     ApolloLog(@"[ScrollEdgeEffect] module loaded, mode=%ld liquidGlass=%d", (long)sScrollEdgeEffectStyle, IsLiquidGlass());

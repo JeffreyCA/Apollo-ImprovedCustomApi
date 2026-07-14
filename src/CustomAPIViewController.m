@@ -303,7 +303,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSUserDefaults standardUserDefaults] setInteger:sScrollEdgeEffectStyle forKey:UDKeyScrollEdgeEffectStyle];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloScrollEdgeEffectStyleChangedNotification" object:nil];
 
-    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:(sShowDeletedComments ? 11 : 10) inSection:SectionGeneral];
+    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:13 inSection:SectionGeneral];
     if ([[self.tableView indexPathsForVisibleRows] containsObject:indexPath]) {
         [self.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
     }
@@ -1952,12 +1952,15 @@ typedef NS_ENUM(NSInteger, Tag) {
     }
 
     if (indexPath.section == SectionGeneral) {
-        // The two disclosure rows: "Deleted Comments" (row 3) and "Open in App"
-        // (row 7). Everything else in General is a switch/field handled inline.
+        // Disclosure/action rows in General. Everything else is a switch or
+        // text field handled inline by its control.
         if (indexPath.row == 3) {
             [self openDeletedCommentsSettings];
         } else if (indexPath.row == 7) {
             [self openOpenInAppSettings];
+        } else if (IsLiquidGlass() && indexPath.row == 13) {
+            UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+            [self presentScrollEdgeEffectStyleSheetFromSourceView:cell];
         }
         return;
     }
@@ -2002,12 +2005,6 @@ typedef NS_ENUM(NSInteger, Tag) {
             [self exportLogs];
         } else if (indexPath.row == 4) {
             [self presentURLInApolloBrowser:[NSURL URLWithString:@"https://apolloreborn.app/privacy"]];
-        }
-    } else if (indexPath.section == SectionGeneral) {
-        NSInteger scrollEdgeEffectRow = 13;
-        if (IsLiquidGlass() && indexPath.row == scrollEdgeEffectRow) {
-            UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-            [self presentScrollEdgeEffectStyleSheetFromSourceView:cell];
         }
     } else if (indexPath.section == SectionMedia) {
         UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];

@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 
 @class UIScrollView;
+@class UIViewController;
 
 extern NSString *sRedditClientId;
 extern NSString *sRedditClientSecret;
@@ -128,6 +129,12 @@ extern NSInteger sScrollEdgeEffectStyle;
 // ApolloAutoHideTabBar.xm — kept here to avoid a second %hook UIScrollView didMoveToWindow,
 // which the Logos internal generator silently drops as a duplicate symbol.
 void ApolloApplyScrollEdgeEffectStyle(UIScrollView *scrollView);
+// Applies the selected style to every scroll view owned by an Apollo list
+// controller. Home, Profile, Comments, and similar screens all inherit Apollo's
+// ASTableViewController, which layers an intercepting UIScrollView over its
+// ASTableView. Applying at the controller level mirrors SwiftUI's inherited
+// NavigationStack modifier and reaches both views.
+void ApolloApplyScrollEdgeEffectStyleToViewController(UIViewController *viewController);
 extern BOOL sModernSubredditDividers;
 // Master toggle for subreddit list enhancements (see UDKeySubredditListEnhancements).
 extern BOOL sSubredditListEnhancements;
