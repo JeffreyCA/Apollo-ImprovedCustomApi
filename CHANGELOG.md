@@ -10,7 +10,6 @@ All notable changes to this project will be documented in this file.
 - Add **Hidden Content Recovery** to profiles so you can find hidden, removed, or deleted posts and comments and view archived copies when live content is gone (#633: @ostechgit)
 - Revamp **Settings** with task-focused sections, unified search, direct navigation to individual options, and dedicated feature-request and privacy-conscious bug-report flows (#637: @jordanearle)
 - Add native **Reddit Polls** voting and creation behind an opt-in setting, using a separate per-account web session when needed (#643: @jordanearle)
-- Replace **Hide Bars on Scroll** with a **Left / Right / Off** picker for the collapsed Liquid Glass tab bar (#645: @icpryde)
 - Enable viewing and changing **user flair** while using API-Key-Free mode (#653: @icpryde)
 - Redesign **Detailed Profiles** with immersive banners, prominent avatars, glass stat cards, and improved Social Links (#655: @jordanearle)
 - Add modern **Reddit Chat** for API-Key-Free accounts, with an opt-in option for API-key accounts that preserves Apollo's legacy Direct Chat (#658: @icpryde)
@@ -20,9 +19,7 @@ All notable changes to this project will be documented in this file.
 - Fix comments flashing blank when voting or returning from the app switcher, including translated comments briefly reverting or changing height (#627: @icpryde)
 - Fix long posts failing to translate and improve Apple's language detection for clearly foreign short post bodies (#629: @icpryde)
 - Improve **Deleted Comments** recovery reliability and coverage, render recovered Markdown correctly, and stop row-height updates from animating against comment collapse (#630: @icpryde)
-- Fix notification-backend account registration failing when Reddit credentials were omitted from upload-task request bodies (#642: @nickclyde)
 - Fix **Auto Hide Read Posts** ignoring Popular and All when **Disable in Subreddits** is enabled (#649: @icpryde)
-- Improve feed scrolling smoothness by reducing repeated translation, link-preview, and flair work as rows enter the viewport (#652: @icpryde)
 - Fix direct Reddit images appearing as link cards instead of inline images in API-Key-Free feeds (#654: @icpryde)
 
 ## [v3.4.1] - 2026-07-14
@@ -32,6 +29,7 @@ All notable changes to this project will be documented in this file.
 - Add a **Remember Post Sort** toggle in **Settings > General > Comments** that restores the comment sort you last picked for a post when you reopen it (#570: @icpryde)
 - Add a **Tap to Play** mode for inline GIFs and a new **Inline Media** settings sub-screen that gathers the Inline Media Previews, Alignment, and Autoplay controls plus a new **Inline Media Size** slider (#602: @icpryde)
 - Play short-clip host links — **streamff, streamin, streamain, dubz, dropr, bangr, and MLB** clips — inline as real videos with autoplay, fullscreen, mute, and PiP, just like Streamable posts (#596: @icpryde)
+- Replace **Hide Bars on Scroll** with a **Left / Right / Off** picker for the collapsed Liquid Glass tab bar (#645: @icpryde)
 
 ### Fixes
 
@@ -41,6 +39,8 @@ All notable changes to this project will be documented in this file.
 - Fix **Tag Filters** double-blurring media on top of Apollo's own "tap to view" overlay when **Blur mature (18+) images and media** is enabled, including compact NSFW thumbnails (#585: @JeffreyCA)
 - Improve **Recently Read Posts** so revisited posts move to the top and the screen refreshes in place when you return, while fixing stale, resurrected, or crashing rows during refresh and deletion (#632: @JeffreyCA)
 - Fix bulk **Hide Read Posts** and unhide actions silently skipping 50 posts when processing more than 50 at once (#650: @icpryde)
+- Fix notification-backend account registration failing when Reddit credentials were omitted from upload-task request bodies (#642: @nickclyde)
+- Improve feed scrolling smoothness by reducing repeated translation, link-preview, and flair work as rows enter the viewport (#652: @icpryde)
 
 ## [v3.4.0] - 2026-07-08
 
