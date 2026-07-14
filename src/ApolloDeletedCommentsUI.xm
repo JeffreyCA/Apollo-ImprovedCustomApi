@@ -9,6 +9,7 @@
 #import "ApolloCommon.h"
 #import "ApolloDeletedCommentsData.h"
 #import "ApolloState.h"
+#import "ApolloThemeRuntime.h"
 #import "Tweak.h"
 
 @class ASDisplayNode;
@@ -1120,11 +1121,10 @@ static UIFont *ApolloDeletedCommentsFontByAddingTraits(UIFont *base, UIFontDescr
 }
 
 static UIColor *ApolloDeletedCommentsBodyLinkColor(void) {
-    for (UIWindow *window in ApolloAllWindows()) {
-        UIColor *tint = window.tintColor;
-        if ([tint isKindOfClass:[UIColor class]]) return tint;
-    }
-    return [UIColor systemBlueColor];
+    // Markdown layout runs on Texture's background measurement queues. The
+    // theme runtime exposes the accent without walking UIApplication/windows,
+    // keeping this helper safe off the main thread.
+    return ApolloThemeAccentColor() ?: [UIColor systemBlueColor];
 }
 
 // Render a recovered comment's raw markdown body into an attributed string so links, bold,
@@ -1245,14 +1245,25 @@ static NSAttributedString *ApolloDeletedCommentsAttributedStringFromMarkdown(NSS
         if (linkColor) [attr addAttribute:NSForegroundColorAttributeName value:linkColor range:r];
     }
 
-    // Generic inline pass: replace each match with capture group 1's text and style that range.
+    // Generic inline pass: replace each match with its first participating
+    // capture group's text and style that range. Alternations such as the bold
+    // pass put their second branch in group 2, so assuming group 1 would leave
+    // __underscore bold__ untouched.
     void (^inlinePass)(NSString *, void (^)(NSRange)) = ^(NSString *pattern, void (^style)(NSRange)) {
         NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
         if (!re) return;
         NSArray<NSTextCheckingResult *> *ms = [re matchesInString:attr.string options:0 range:NSMakeRange(0, attr.string.length)];
         for (NSInteger i = (NSInteger)ms.count - 1; i >= 0; i--) {
             NSTextCheckingResult *m = ms[i];
-            NSString *inner = substr([m rangeAtIndex:1]);
+            NSRange innerRange = NSMakeRange(NSNotFound, 0);
+            for (NSUInteger capture = 1; capture < m.numberOfRanges; capture++) {
+                NSRange candidate = [m rangeAtIndex:capture];
+                if (candidate.location != NSNotFound) {
+                    innerRange = candidate;
+                    break;
+                }
+            }
+            NSString *inner = substr(innerRange);
             if (inner.length == 0) continue;
             [attr replaceCharactersInRange:m.range withString:inner];
             style(NSMakeRange(m.range.location, inner.length));

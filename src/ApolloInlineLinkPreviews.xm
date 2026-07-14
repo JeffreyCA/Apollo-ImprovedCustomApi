@@ -1715,7 +1715,7 @@ static NSString *ApolloLPBundleKey(NSURL *url, NSString *variant) {
     return [NSString stringWithFormat:@"%@|%@", url.absoluteString ?: @"", variant ?: @"default"];
 }
 
-static NSDictionary *ApolloLPNodeBundleForHost(ASDisplayNode *hostNode, NSURL *url, NSString *variant) {
+static NSDictionary *ApolloLPNodeBundleForHostUnlocked(ASDisplayNode *hostNode, NSURL *url, NSString *variant) {
     ApolloLPRegisterLinkPreviewNode(hostNode);
 
     NSMutableDictionary<NSString *, NSDictionary *> *bundles = objc_getAssociatedObject(hostNode, &kApolloLinkPreviewNodesKey);
@@ -1783,6 +1783,26 @@ static NSDictionary *ApolloLPNodeBundleForHost(ASDisplayNode *hostNode, NSURL *u
     };
     bundles[key] = bundle;
     return bundle;
+}
+
+// The bundle map is written from Texture measurement queues and read from the
+// main-thread preload/theme paths. Use the host node itself as the single lock
+// for every map access. Holding it through bundle construction also prevents two
+// concurrent measurements from creating and attaching duplicate node bundles.
+static NSDictionary *ApolloLPNodeBundleForHost(ASDisplayNode *hostNode, NSURL *url, NSString *variant) {
+    if (!hostNode) return nil;
+    @synchronized (hostNode) {
+        return ApolloLPNodeBundleForHostUnlocked(hostNode, url, variant);
+    }
+}
+
+static NSArray<NSDictionary *> *ApolloLPNodeBundlesSnapshot(ASDisplayNode *hostNode) {
+    if (!hostNode) return @[];
+    @synchronized (hostNode) {
+        NSDictionary<NSString *, NSDictionary *> *bundles = objc_getAssociatedObject(hostNode, &kApolloLinkPreviewNodesKey);
+        if (![bundles isKindOfClass:[NSDictionary class]]) return @[];
+        return [bundles.allValues copy];
+    }
 }
 
 static NSAttributedString *ApolloLPAttributedString(NSString *string, UIFont *font, UIColor *color) {
@@ -3663,21 +3683,18 @@ static NSUInteger ApolloLPRecolorLinkPreviewBackgroundsForNode(ASDisplayNode *no
     ApolloLPCustomCardTextColors(&titleColor, &secondaryColor);
 
     NSUInteger recolored = 0;
-    NSDictionary<NSString *, NSDictionary *> *bundles = objc_getAssociatedObject(node, &kApolloLinkPreviewNodesKey);
-    if ([bundles isKindOfClass:[NSDictionary class]]) {
-        for (NSDictionary *bundle in bundles.allValues) {
-            if (![bundle isKindOfClass:[NSDictionary class]]) continue;
-            ASDisplayNode *backgroundNode = bundle[@"background"];
-            NSURL *url = bundle[@"url"];
-            if (![url isKindOfClass:[NSURL class]]) continue;
-            if (ApolloLPApplyCardBackgroundColor(node, backgroundNode, url, YES)) {
-                // Background changed — bring the text ink along so it keeps
-                // contrasting with the new fill (or reverts to label colors).
-                ApolloLPRecolorTextNode(bundle[@"site"], secondaryColor);
-                ApolloLPRecolorTextNode(bundle[@"title"], titleColor);
-                ApolloLPRecolorTextNode(bundle[@"description"], secondaryColor);
-                recolored++;
-            }
+    for (NSDictionary *bundle in ApolloLPNodeBundlesSnapshot(node)) {
+        if (![bundle isKindOfClass:[NSDictionary class]]) continue;
+        ASDisplayNode *backgroundNode = bundle[@"background"];
+        NSURL *url = bundle[@"url"];
+        if (![url isKindOfClass:[NSURL class]]) continue;
+        if (ApolloLPApplyCardBackgroundColor(node, backgroundNode, url, YES)) {
+            // Background changed — bring the text ink along so it keeps
+            // contrasting with the new fill (or reverts to label colors).
+            ApolloLPRecolorTextNode(bundle[@"site"], secondaryColor);
+            ApolloLPRecolorTextNode(bundle[@"title"], titleColor);
+            ApolloLPRecolorTextNode(bundle[@"description"], secondaryColor);
+            recolored++;
         }
     }
 
@@ -3718,10 +3735,7 @@ static BOOL ApolloLPURLsMatch(NSURL *lhs, NSURL *rhs) {
 
 static BOOL ApolloLPRegisteredNodeHasPreviewURL(ASDisplayNode *node, NSURL *url) {
     if (!node || !url) return NO;
-    NSDictionary<NSString *, NSDictionary *> *bundles = objc_getAssociatedObject(node, &kApolloLinkPreviewNodesKey);
-    if (![bundles isKindOfClass:[NSDictionary class]]) return NO;
-
-    for (NSDictionary *bundle in bundles.allValues) {
+    for (NSDictionary *bundle in ApolloLPNodeBundlesSnapshot(node)) {
         if (![bundle isKindOfClass:[NSDictionary class]]) continue;
         NSURL *bundleURL = bundle[@"url"];
         if (ApolloLPURLsMatch(bundleURL, url)) return YES;
@@ -4081,9 +4095,7 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
 // anti-flash purpose of defaultImage is preserved.
 - (void)didExitPreloadState {
     %orig;
-    NSDictionary<NSString *, NSDictionary *> *bundles = objc_getAssociatedObject(self, &kApolloLinkPreviewNodesKey);
-    if (![bundles isKindOfClass:[NSDictionary class]]) return;
-    for (NSDictionary *bundle in bundles.allValues) {
+    for (NSDictionary *bundle in ApolloLPNodeBundlesSnapshot((ASDisplayNode *)self)) {
         for (NSString *key in @[@"image", @"avatar"]) {
             ASNetworkImageNode *imageNode = bundle[key];
             if (![imageNode respondsToSelector:@selector(setDefaultImage:)]) continue;
@@ -4096,9 +4108,7 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
 
 - (void)didEnterPreloadState {
     %orig;
-    NSDictionary<NSString *, NSDictionary *> *bundles = objc_getAssociatedObject(self, &kApolloLinkPreviewNodesKey);
-    if (![bundles isKindOfClass:[NSDictionary class]]) return;
-    for (NSDictionary *bundle in bundles.allValues) {
+    for (NSDictionary *bundle in ApolloLPNodeBundlesSnapshot((ASDisplayNode *)self)) {
         ASNetworkImageNode *imageNode = bundle[@"image"];
         NSURL *fallbackURL = imageNode ? objc_getAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackURLKey) : nil;
         if (!fallbackURL.absoluteString.length) continue;
