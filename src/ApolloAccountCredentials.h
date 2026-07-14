@@ -81,8 +81,9 @@ NSString * _Nullable ApolloActiveAccountUsername(void);
 // entry wins at the transport chokepoint and in the switcher badge). The OAuth
 // callback arms this flag; the RDKClient user-install hook consumes it — but
 // ONLY for a username that did not yet exist in the persisted account blobs
-// at arm time (see the implementation note in ApolloAccountCredentials.m for
-// why identity-binding is required: the install hooks also fire from
+// OR the web-session username index at arm time (see the implementation note
+// in ApolloAccountCredentials.m for why identity-binding is required: the
+// install hooks also fire from
 // NSKeyedUnarchiver decodes and background identity refreshes of stored
 // accounts, which must never spend the flag or remove a session).
 //
@@ -92,7 +93,7 @@ void ApolloNoteInteractiveOAuthSignIn(void);
 // Disarm without consuming (sign-in cancelled or failed).
 void ApolloCancelInteractiveOAuthSignIn(void);
 // Consume for `username`: YES exactly once, iff armed within the last 120
-// seconds AND `username` was not present in the account blobs at arm time.
+// seconds AND `username` was not present in either identity source at arm time.
 // Installs for pre-existing usernames return NO without disarming.
 BOOL ApolloTakeInteractiveOAuthSignInForNewUsername(NSString *username);
 

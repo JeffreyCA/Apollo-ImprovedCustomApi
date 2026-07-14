@@ -1,4 +1,5 @@
 #import "ApolloAccountCredentials.h"
+#import "ApolloWebSessionStore.h"
 #import "ApolloState.h"
 #import "ApolloCommon.h"
 #import "Defaults.h"
@@ -209,11 +210,16 @@ NSString *ApolloEffectiveRedirectURI(void) {
 // design therefore spends the flag on whatever stored account decodes first
 // (and, catastrophically, would remove THAT account's web session).
 //
-// Instead, arming snapshots the usernames already present in the account
-// blobs; only an install for a username NOT in that snapshot — the genuinely
-// new sign-in — consumes. Installs for pre-existing usernames pass through
-// WITHOUT disarming, so decode/refresh traffic can't spend the flag. The
-// trade-off is that re-authenticating an already-present username via OAuth
+// Instead, arming snapshots every identity already known through EITHER the
+// account blobs or the per-account web-session index. The second source is
+// essential: a synthesized keyless account can be archived before its
+// currentUser.username is readable, then have that username backfilled while
+// decoding. Looking only at RedditAccounts2 would misclassify that existing
+// account as the new OAuth sign-in and delete its healthy web session.
+// Only an install absent from both identity sources consumes. Installs for
+// pre-existing usernames pass through WITHOUT disarming, so decode/refresh
+// traffic can't spend the flag. The trade-off is that re-authenticating an
+// already-present username via OAuth
 // doesn't auto-remove its stale web session — that case is served by the
 // explicit "Use API Key Instead…" flow (switcher ellipsis / settings toggle).
 static os_unfair_lock sOAuthSignInLock = OS_UNFAIR_LOCK_INIT;
@@ -240,9 +246,10 @@ static NSSet<NSString *> *ApolloAllPersistedAccountUsernames(void) {
 void ApolloNoteInteractiveOAuthSignIn(void) {
     // Snapshot BEFORE arming: the decode below fires the hooked setters
     // itself, and they must observe the flag as still disarmed.
-    NSSet<NSString *> *preexisting = ApolloAllPersistedAccountUsernames();
+    NSMutableSet<NSString *> *preexisting = [ApolloAllPersistedAccountUsernames() mutableCopy];
+    [preexisting unionSet:ApolloWebSessionUsernames()];
     os_unfair_lock_lock(&sOAuthSignInLock);
-    sOAuthSignInPreexisting = preexisting;
+    sOAuthSignInPreexisting = [preexisting copy];
     sOAuthSignInArmedAt = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_unlock(&sOAuthSignInLock);
     ApolloLog(@"[AccountCredentials] Interactive OAuth sign-in callback received — armed web-session cleanup (%lu pre-existing account(s))",

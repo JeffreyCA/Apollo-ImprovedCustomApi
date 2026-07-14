@@ -2716,11 +2716,13 @@ static void ApolloPinAccountToCurrentDefaultCredentialsIfNeeded(id currentUser) 
     // previous keyless sign-in under the same name). Without this the stale
     // entry permanently wins at the transport chokepoint and badges the
     // account "web session" in the switcher. Identity-bound: the flag only
-    // consumes for a username that was NOT in the account blobs when the
-    // OAuth callback armed it, so the heavy routine traffic through these
-    // hooks — NSKeyedUnarchiver decodes of RedditAccounts2 (which fire
-    // -setCurrentUser: per stored account), background identity refreshes,
-    // keyless synthesis — can never spend the flag or remove a session.
+    // consumes for a username that was absent from BOTH the account blobs and
+    // web-session index when the OAuth callback armed it. The harvest path
+    // also cancels any unfinished OAuth attempt before keyless synthesis, so
+    // the heavy routine traffic through these hooks — NSKeyedUnarchiver
+    // decodes of RedditAccounts2 (which fire -setCurrentUser: per stored
+    // account), background identity refreshes, keyless synthesis — can never
+    // spend the flag or remove a healthy session.
     if (ApolloTakeInteractiveOAuthSignInForNewUsername(username) && ApolloWebSessionFor(username) != nil) {
         ApolloWebSessionRemove(username);
         ApolloLog(@"[AccountCredentials] u/%@ signed in with an API key — removed its stale web session (now an OAuth account)", username);

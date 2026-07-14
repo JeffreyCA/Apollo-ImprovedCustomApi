@@ -240,6 +240,13 @@ static void ApolloWebSessionProbeMeField(WKWebView *webView, NSString *field, vo
 // persists cookie + modhash under `username` via ApolloWebSessionSet.
 static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStore, NSString *username, NSString *modhash,
                                                    void (^completion)(NSUInteger cookieCount)) {
+    // Choosing or refreshing keyless auth supersedes any unfinished OAuth
+    // attempt. In particular, a failed OAuth token exchange can leave its
+    // cleanup discriminator armed for up to 120 seconds; synthesizing the new
+    // keyless account below fires RDKClient's user-install hook and would
+    // otherwise consume that stale signal and immediately delete the session
+    // this harvest just stored.
+    ApolloCancelInteractiveOAuthSignIn();
     [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
         NSDate *farFuture = [NSDate dateWithTimeIntervalSinceNow:kFarFutureCookieInterval];
         NSMutableArray<NSString *> *pairs = [NSMutableArray array];
