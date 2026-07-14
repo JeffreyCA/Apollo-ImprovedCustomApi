@@ -1017,9 +1017,10 @@ static UIImage *RecentlyReadNSFWBadgeImage(CGFloat fontSize) {
     }
     self.allPostFullNames = allNames;
 
-    // Remove from data arrays
+    // Keep in sync with the activePosts getter's condition, or the table's
+    // row count won't actually shrink and deleteRowsAtIndexPaths: below crashes.
     [self.posts removeObject:link];
-    if ([self isSearchActive]) {
+    if ([self isSearchActive] || [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFilterNSFWRecentlyRead]) {
         [self.filteredPosts removeObject:link];
     }
 
