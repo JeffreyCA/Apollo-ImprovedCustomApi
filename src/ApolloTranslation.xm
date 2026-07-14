@@ -2956,13 +2956,13 @@ static NSString *ApolloDetectSourceLanguageForApple(NSString *text) {
 //   2. No cross-provider fallback: if Apple is selected it stays Apple. On a missing
 //      language model the shim drives Apple's one-time system download sheet; on any
 //      hard failure the original text is left intact.
-static void ApolloTranslateViaApple(NSString *text,
-                                    NSString *targetLanguage,
-                                    void (^completion)(NSString *translated, NSError *error)) {
+static void ApolloTranslateViaAppleWithSource(NSString *text,
+                                              NSString *targetLanguage,
+                                              NSString *source,
+                                              void (^completion)(NSString *translated, NSError *error)) {
 #if APOLLO_HAS_APPLE_TRANSLATE
-    NSString *source = ApolloDetectSourceLanguageForApple(text);
     if (source.length == 0) {
-        // Couldn't confidently fingerprint this snippet — don't guess (a wrong source
+        // Could not confidently fingerprint the full input — do not guess (a wrong source
         // makes Apple prompt for the wrong language and fail). Leave the original text.
         NSError *err = [NSError errorWithDomain:@"ApolloTranslation" code:301
             userInfo:@{NSLocalizedDescriptionKey: @"Apple: source language undetected"}];
@@ -2991,6 +2991,13 @@ static void ApolloTranslateViaApple(NSString *text,
         dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, error); });
     }
 #endif
+}
+
+static void ApolloTranslateViaApple(NSString *text,
+                                    NSString *targetLanguage,
+                                    void (^completion)(NSString *translated, NSError *error)) {
+    ApolloTranslateViaAppleWithSource(text, targetLanguage,
+        ApolloDetectSourceLanguageForApple(text), completion);
 }
 
 // Max encoded size (in `q=` percent-encoded characters) of a single request sent to a
@@ -3271,16 +3278,18 @@ static void ApolloTranslateTextWithFallback(NSString *text,
     // Apple is on-device and deliberately has NO cross-provider fallback: if the user picked
     // Apple, translation stays Apple (we'd rather prompt to download a language model than
     // silently substitute Google output). On failure the error propagates and the caller
-    // leaves the original text. Chunk it the same way; the shim already detects each chunk's
-    // source per snippet (which also handles a multilingual post better than one whole-text
-    // guess), and the large first chunk seeds the context fallback for any shorter tail chunk.
+    // leaves the original text. Detect the source ONCE from the full protected text, whose
+    // length/context makes the conservative detector reliable, then reuse it for every
+    // chunk. Detecting each chunk independently makes a short/link-heavy tail fail with
+    // error 301 after earlier chunks already translated.
     if ([sTranslationProvider isEqualToString:@"apple"]) {
         if (chunks.count <= 1) {
             ApolloTranslateViaApple(text, targetLanguage, completion);
         } else {
+            NSString *source = ApolloDetectSourceLanguageForApple(text);
             ApolloTranslateChunksSequentially(chunks, separators, targetLanguage,
                 ^(NSString *chunk, NSString *target, void (^cb)(NSString *, NSError *)) {
-                    ApolloTranslateViaApple(chunk, target, cb);
+                    ApolloTranslateViaAppleWithSource(chunk, target, source, cb);
                 }, completion);
         }
         return;
