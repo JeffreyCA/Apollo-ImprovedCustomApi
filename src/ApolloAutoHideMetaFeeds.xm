@@ -44,39 +44,79 @@
 
 static NSString *const kApolloDisableInSubredditsKey = @"DisableAutoHideReadPostsInSubreddits";
 
-// Walk to the visible leaf view controller of the key/normal window.
-static UIViewController *ApolloAHVisibleLeaf(void) {
+// Select the active app window deterministically. ApolloAllWindows() spans every
+// connected scene, so a hidden normal-level window from an inactive scene must
+// not win merely because it happened to be enumerated first.
+static UIWindow *ApolloAHActiveWindow(void) {
+    UIWindow *normalFallback = nil;
     for (UIWindow *w in ApolloAllWindows()) {
-        if (!w.isKeyWindow && w.windowLevel != UIWindowLevelNormal) continue;
-        UIViewController *vc = w.rootViewController;
-        while (vc.presentedViewController) vc = vc.presentedViewController;
-        for (int i = 0; i < 12 && vc; i++) {
-            if ([vc isKindOfClass:[UINavigationController class]]) {
-                vc = [(UINavigationController *)vc topViewController]; continue;
-            }
-            if ([vc isKindOfClass:[UITabBarController class]]) {
-                vc = [(UITabBarController *)vc selectedViewController]; continue;
-            }
-            if ([vc isKindOfClass:[UISplitViewController class]]) {
-                vc = [(UISplitViewController *)vc viewControllers].lastObject ?: vc; continue;
-            }
-            break;
-        }
-        if (vc) return vc;
+        if (![w isKindOfClass:[UIWindow class]] || w.isHidden || w.alpha <= 0.01 || !w.rootViewController) continue;
+        if (w.windowLevel != UIWindowLevelNormal) continue;
+        if (w.isKeyWindow) return w;
+        if (!normalFallback) normalFallback = w;
     }
-    return nil;
+    return normalFallback;
+}
+
+// Collect every visible leaf in the active container hierarchy. A split view is
+// different from a navigation/tab container: both columns can be visible, and
+// on iPad the feed commonly remains in the primary column while comments occupy
+// the secondary. Presented controllers still replace the underlying hierarchy,
+// preserving the Settings-screen behavior described below.
+static void ApolloAHCollectVisibleLeaves(UIViewController *vc,
+                                         NSMutableArray<UIViewController *> *leaves,
+                                         NSUInteger depth) {
+    if (!vc || depth >= 16) return;
+    if (vc.presentedViewController) {
+        ApolloAHCollectVisibleLeaves(vc.presentedViewController, leaves, depth + 1);
+        return;
+    }
+    if ([vc isKindOfClass:[UINavigationController class]]) {
+        ApolloAHCollectVisibleLeaves([(UINavigationController *)vc visibleViewController], leaves, depth + 1);
+        return;
+    }
+    if ([vc isKindOfClass:[UITabBarController class]]) {
+        ApolloAHCollectVisibleLeaves([(UITabBarController *)vc selectedViewController], leaves, depth + 1);
+        return;
+    }
+    if ([vc isKindOfClass:[UISplitViewController class]]) {
+        for (UIViewController *column in [(UISplitViewController *)vc viewControllers]) {
+            ApolloAHCollectVisibleLeaves(column, leaves, depth + 1);
+        }
+        return;
+    }
+    [leaves addObject:vc];
+}
+
+static NSArray<UIViewController *> *ApolloAHVisibleLeaves(void) {
+    UIWindow *window = ApolloAHActiveWindow();
+    if (!window) return @[];
+    NSMutableArray<UIViewController *> *leaves = [NSMutableArray array];
+    ApolloAHCollectVisibleLeaves(window.rootViewController, leaves, 0);
+    return leaves;
 }
 
 // Decode the `currentPostsType` enum's leading Swift String payload (the subreddit
 // slug for the `.subreddit(name)` case) and return YES if it names the Popular or
-// All meta-feed. Only small Swift strings (<=15 bytes) are decoded — both "popular"
-// and "all" are small, and non-subreddit cases (e.g. `.home`) hold no such string,
-// so an exact case-insensitive match to "popular"/"all" cannot false-positive.
+// All meta-feed. The PostsType case tag is checked before touching the payload:
+// several non-subreddit cases also begin with a Swift String, so decoding bytes
+// without tag 0 could mistake a multireddit or username named "all" for r/all.
+// Only small Swift strings (<=15 bytes) are needed for these two slugs.
 static BOOL ApolloAHTypeIsMetaFeed(id postsVC) {
     if (!postsVC) return NO;
-    Ivar iv = class_getInstanceVariable(object_getClass(postsVC), "currentPostsType");
+    Ivar iv = class_getInstanceVariable([postsVC class], "currentPostsType");
     if (!iv) return NO;
-    const uint8_t *base = (const uint8_t *)(__bridge void *)postsVC + ivar_getOffset(iv);
+    ptrdiff_t ivarOffset = ivar_getOffset(iv);
+    static const ptrdiff_t kApolloPostsTypeTagOffset = 0x20;
+    static const uint8_t kApolloPostsTypeSubreddit = 0;
+    if (ivarOffset < 0 || (size_t)ivarOffset + kApolloPostsTypeTagOffset >= class_getInstanceSize([postsVC class])) {
+        return NO;
+    }
+
+    const uint8_t *base = (const uint8_t *)(__bridge void *)postsVC + ivarOffset;
+    uint8_t tag = 0xFF;
+    memcpy(&tag, base + kApolloPostsTypeTagOffset, sizeof(tag));
+    if (tag != kApolloPostsTypeSubreddit) return NO;
 
     uint64_t w0 = 0, w1 = 0;
     memcpy(&w0, base, sizeof(w0));
@@ -98,17 +138,17 @@ static BOOL ApolloAHTypeIsMetaFeed(id postsVC) {
     return [slug isEqualToString:@"popular"] || [slug isEqualToString:@"all"];
 }
 
-// Is the feed currently on screen the Popular or All meta-feed? Only the visible
-// leaf is considered: posts are marked read on the feed that's actually on screen,
-// and the gate is read on the main thread at that moment (verified), so the leaf
-// is that feed. Keeping it to the visible leaf also means the Settings toggle —
-// read while the Settings screen is on top, not a feed — always reflects the real
-// stored value.
+// Is a visible feed currently the Popular or All meta-feed? On phones this is a
+// single leaf; on iPad both split columns are inspected so a primary-column feed
+// is not lost behind a secondary comments controller. A presented Settings screen
+// replaces the underlying hierarchy, so its toggle still reads the stored value.
 static BOOL ApolloAHOnMetaFeed(void) {
     Class postsClass = objc_getClass("_TtC6Apollo19PostsViewController");
     if (!postsClass) return NO;
-    UIViewController *leaf = ApolloAHVisibleLeaf();
-    return [leaf isKindOfClass:postsClass] && ApolloAHTypeIsMetaFeed(leaf);
+    for (UIViewController *leaf in ApolloAHVisibleLeaves()) {
+        if ([leaf isKindOfClass:postsClass] && ApolloAHTypeIsMetaFeed(leaf)) return YES;
+    }
+    return NO;
 }
 
 %hook NSUserDefaults
