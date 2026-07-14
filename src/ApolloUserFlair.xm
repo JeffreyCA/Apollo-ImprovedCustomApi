@@ -5,6 +5,7 @@
 #import <WebKit/WebKit.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+#import <stdlib.h>
 
 static char kApolloUserFlairEditorPresentedKey;
 static char kApolloUserFlairCapturedOptionsKey;
@@ -1866,15 +1867,70 @@ static NSString *ApolloUserFlairHTMLAttribute(NSString *tag, NSString *name) {
 
 static NSString *ApolloUserFlairDecodeHTML(NSString *html) {
     if (html.length == 0) return @"";
-    NSString *wrapped = [NSString stringWithFormat:@"<span>%@</span>", html];
-    NSData *data = [wrapped dataUsingEncoding:NSUTF8StringEncoding];
-    NSDictionary *options = @{
-        NSDocumentTypeDocumentAttribute: NSHTMLTextDocumentType,
-        NSCharacterEncodingDocumentAttribute: @(NSUTF8StringEncoding),
-    };
-    NSAttributedString *decoded = [[NSAttributedString alloc] initWithData:data
-        options:options documentAttributes:NULL error:NULL];
-    return decoded.string ?: html;
+
+    // This parser runs on the flair fetch's background queue. Foundation's HTML
+    // attributed-string importer is WebKit-backed and main-thread-only, so keep
+    // the old-Reddit attribute decoding small, deterministic, and thread-safe.
+    static NSRegularExpression *entityRegex;
+    static NSDictionary<NSString *, NSString *> *namedEntities;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        entityRegex = [NSRegularExpression regularExpressionWithPattern:
+            @"&(#(?:x[0-9a-f]+|[0-9]+)|amp|lt|gt|quot|apos);"
+            options:NSRegularExpressionCaseInsensitive error:NULL];
+        namedEntities = @{
+            @"amp": @"&",
+            @"lt": @"<",
+            @"gt": @">",
+            @"quot": @"\"",
+            @"apos": @"'",
+        };
+    });
+
+    NSArray<NSTextCheckingResult *> *matches = [entityRegex matchesInString:html options:0
+        range:NSMakeRange(0, html.length)];
+    if (matches.count == 0) return html;
+
+    NSMutableString *decoded = [NSMutableString stringWithCapacity:html.length];
+    NSUInteger cursor = 0;
+    for (NSTextCheckingResult *match in matches) {
+        if (match.numberOfRanges < 2 || match.range.location < cursor) continue;
+        [decoded appendString:[html substringWithRange:NSMakeRange(cursor, match.range.location - cursor)]];
+
+        NSString *token = [html substringWithRange:[match rangeAtIndex:1]];
+        NSString *replacement = namedEntities[token.lowercaseString];
+        if ([token hasPrefix:@"#"] && token.length > 1) {
+            BOOL hexadecimal = token.length > 2 &&
+                ([[token substringWithRange:NSMakeRange(1, 1)] caseInsensitiveCompare:@"x"] == NSOrderedSame);
+            NSString *digits = [token substringFromIndex:hexadecimal ? 2 : 1];
+            unsigned long long scalar = 0;
+            if (hexadecimal) {
+                NSScanner *scanner = [NSScanner scannerWithString:digits];
+                [scanner scanHexLongLong:&scalar];
+            } else {
+                scalar = strtoull(digits.UTF8String, NULL, 10);
+            }
+
+            if (scalar > 0 && scalar <= 0x10FFFF && !(scalar >= 0xD800 && scalar <= 0xDFFF)) {
+                if (scalar <= 0xFFFF) {
+                    unichar character = (unichar)scalar;
+                    replacement = [NSString stringWithCharacters:&character length:1];
+                } else {
+                    scalar -= 0x10000;
+                    unichar characters[2] = {
+                        (unichar)(0xD800 + (scalar >> 10)),
+                        (unichar)(0xDC00 + (scalar & 0x3FF)),
+                    };
+                    replacement = [NSString stringWithCharacters:characters length:2];
+                }
+            }
+        }
+
+        [decoded appendString:replacement ?: [html substringWithRange:match.range]];
+        cursor = NSMaxRange(match.range);
+    }
+    if (cursor < html.length) [decoded appendString:[html substringFromIndex:cursor]];
+    return decoded;
 }
 
 static NSString *ApolloUserFlairCSSClassFromClassAttribute(NSString *classAttribute) {
@@ -2313,8 +2369,35 @@ static id ApolloUserFlairPerformWebUpdate(NSString *path, NSString *subreddit,
 // Fetched once per controller from Reddit's flairselector `current`.
 static void ApolloUserFlairFetchCurrentFlair(UIViewController *controller, NSString *subreddit) {
     if (!controller || subreddit.length == 0) return;
+
+    // The keyless bridge populates its current-flair cache alongside the options
+    // request. numberOfRows can run before that response arrives, so do not stamp
+    // the one-shot marker until a real (possibly explicitly empty) current state
+    // exists. Apollo reloads the table after installing the fetched choices; that
+    // later numberOfRows pass then applies the cache and the native checkmark.
+    if (ApolloWebJSONHasUsableSession()) {
+        if (objc_getAssociatedObject(controller, &kApolloUserFlairCurrentFlairKey)) return;
+        NSDictionary *webCurrent = ApolloUserFlairWebCurrentForSubreddit(subreddit);
+        if (!webCurrent) return;
+
+        NSString *webText = [webCurrent[@"text"] isKindOfClass:[NSString class]] ? webCurrent[@"text"] : @"";
+        NSString *webTemplateID = [webCurrent[@"templateID"] isKindOfClass:[NSString class]]
+            ? webCurrent[@"templateID"] : @"";
+        objc_setAssociatedObject(controller, &kApolloUserFlairCurrentFlairKey,
+            @{ @"text": webText, @"templateID": webTemplateID }, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (!objc_getAssociatedObject(controller, &kApolloUserFlairWebStateAppliedKey)) {
+            BOOL set = ApolloUserFlairSetSwiftOptionalStringIvar(controller, @"currentFlairID", webTemplateID);
+            objc_setAssociatedObject(controller, &kApolloUserFlairWebStateAppliedKey, @YES,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            ApolloLog(@"[UserFlair][Web] applied initial r/%@ template=%@ text=%@ setter=%@",
+                      subreddit, webTemplateID.length > 0 ? @"matched" : @"none",
+                      webText.length > 0 ? @"present" : @"empty", set ? @"yes" : @"no");
+        }
+        return;
+    }
+
     if (objc_getAssociatedObject(controller, &kApolloUserFlairCurrentFlairKey)) return; // already fetched
-    // Mark as in-flight so we don't fire twice (numberOfRows is called repeatedly).
+    // Mark as in-flight so we don't fire the OAuth request twice (numberOfRows is called repeatedly).
     objc_setAssociatedObject(controller, &kApolloUserFlairCurrentFlairKey, @{}, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     // Reddit's /api/flairselector `current` reliably returns the applied flair_text but
@@ -2327,30 +2410,6 @@ static void ApolloUserFlairFetchCurrentFlair(UIViewController *controller, NSStr
     // and re-saving silently overwrites the user's real flair.
     NSString *nativeTemplateID = ApolloUserFlairSwiftStringIvar(controller, @"currentFlairID");
     if (![nativeTemplateID isKindOfClass:[NSString class]]) nativeTemplateID = nil;
-
-    // The keyless bridge fetches the signed-in user's actual flair from old
-    // Reddit's subreddit sidebar alongside the choices. Apply its matched
-    // template through a Swift helper so Apollo's own currentFlairID comparison
-    // draws the initial checkmark and its editor receives the customized text.
-    // Apply only once per controller: after the user taps another row, Apollo's
-    // newly selected currentFlairID must win over the fetched initial state.
-    if (ApolloWebJSONHasUsableSession()) {
-        NSDictionary *webCurrent = ApolloUserFlairWebCurrentForSubreddit(subreddit);
-        NSString *webText = [webCurrent[@"text"] isKindOfClass:[NSString class]] ? webCurrent[@"text"] : @"";
-        NSString *webTemplateID = [webCurrent[@"templateID"] isKindOfClass:[NSString class]]
-            ? webCurrent[@"templateID"] : @"";
-        objc_setAssociatedObject(controller, &kApolloUserFlairCurrentFlairKey,
-            @{ @"text": webText, @"templateID": webTemplateID }, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        if (webCurrent && !objc_getAssociatedObject(controller, &kApolloUserFlairWebStateAppliedKey)) {
-            BOOL set = ApolloUserFlairSetSwiftOptionalStringIvar(controller, @"currentFlairID", webTemplateID);
-            objc_setAssociatedObject(controller, &kApolloUserFlairWebStateAppliedKey, @YES,
-                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            ApolloLog(@"[UserFlair][Web] applied initial r/%@ template=%@ text=%@ setter=%@",
-                      subreddit, webTemplateID.length > 0 ? @"matched" : @"none",
-                      webText.length > 0 ? @"present" : @"empty", set ? @"yes" : @"no");
-        }
-        return;
-    }
 
     NSString *token = [sLatestRedditBearerToken copy];
     if (token.length == 0) return;
