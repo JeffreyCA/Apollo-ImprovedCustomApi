@@ -21,6 +21,12 @@ typedef NS_ENUM(NSUInteger, ApolloThemeSelectionKind) {
     ApolloThemeSelectionGallery,  // a catalog preset, by slug (applied by reference)
 };
 
+typedef NS_ENUM(NSUInteger, ApolloThemeApplyTarget) {
+    ApolloThemeApplyTargetBoth = 0,
+    ApolloThemeApplyTargetLight,
+    ApolloThemeApplyTargetDark,
+};
+
 // Resolves a gallery slug to a theme-shaped dict (name/input/variant/advanced/
 // font) or nil. Registered by the gallery catalog module at load; absent
 // resolver = every slug unresolvable (older build), which falls back to Apollo.
@@ -43,6 +49,8 @@ typedef NSDictionary *_Nullable (^ApolloThemeGalleryResolver)(NSString *slug);
 - (void)selectApolloTheme;                       // custom runtime off; keeps last id/slug as memory
 - (void)selectCustomTheme:(NSString *)themeID;   // stored theme active
 - (void)selectGalleryTheme:(NSString *)slug;     // catalog preset active, by reference
+- (void)selectCustomTheme:(NSString *)themeID forTarget:(ApolloThemeApplyTarget)target;
+- (void)selectGalleryTheme:(NSString *)slug forTarget:(ApolloThemeApplyTarget)target;
 // Flip an "apollo" pointer back to the remembered custom/gallery selection
 // (falling back to the first stored theme). NO when there is nothing to
 // restore; already-custom pointers are kept as-is.
@@ -74,6 +82,13 @@ typedef NSDictionary *_Nullable (^ApolloThemeGalleryResolver)(NSString *slug);
 // Resolved theme dict for the pointer: stored theme for Custom, synthesized
 // catalog dict for Gallery, nil for Apollo.
 - (nullable NSDictionary *)activeTheme;
+- (nullable NSDictionary *)themeForMode:(ApolloThemeMode)mode;
+- (BOOL)isCustomThemeID:(NSString *)themeID selectedForMode:(ApolloThemeMode)mode;
+- (BOOL)isGallerySlug:(NSString *)slug selectedForMode:(ApolloThemeMode)mode;
+
+// Enabling snapshots the current selection into both slots. Disabling keeps
+// the currently-effective slot as the ordinary single selection.
+@property (nonatomic) BOOL separateThemesEnabled;
 
 #pragma mark - CRUD
 

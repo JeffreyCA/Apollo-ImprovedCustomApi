@@ -82,6 +82,8 @@ static char kApolloMediaComposerBodyToolbarRetriesScheduledKey;
 static char kApolloMediaComposerBodyEditorFreshOpenKey;
 static char kApolloMediaComposerNativeBodyEditorOwnerKey;
 static char kApolloMediaComposerNativeBodyEditorSavedKey;
+static char kApolloMediaComposerBodyDoneItemKey;
+static char kApolloMediaComposerBodyCancelItemKey;
 static BOOL sApolloMediaComposerContextActive = NO;
 static BOOL sApolloMediaComposerPickerActive = NO;
 static BOOL sApolloMediaComposerInlineBodyPickerActive = NO;
@@ -1520,28 +1522,64 @@ static void ApolloMediaComposerConfigureNativeBodyEditor(UIViewController *edito
     UIViewController *ownerController = ApolloMediaComposerOwnerForNativeBodyEditor(editor);
     if (!ownerController) return;
 
-    editor.title = @"Text (optional)";
-    editor.navigationItem.title = @"Text (optional)";
-    UIColor *accentColor = ApolloPhotoComposerAccentColor(ownerController) ?: ownerController.view.tintColor ?: editor.view.tintColor;
+    // Idempotency guard. This runs from viewDidLoad/viewWillAppear/viewDidAppear AND
+    // viewDidLayoutSubviews. The original body allocated two fresh UIBarButtonItems and
+    // unconditionally reassigned navigationItem.rightBarButtonItem(s)/leftBarButtonItem
+    // (a *structural* nav-bar mutation) on every layout pass. On the iOS 26 Liquid Glass
+    // nav bar, _UINavigationBarContentView self-sizes its bar-button/title subtree via
+    // -_calculatedSystemLayoutSizeFittingSize inside the same CATransaction commit;
+    // reassigning the items from within a layout callback re-invalidates that measurement
+    // and re-dirties the controller's layout, so the pass never converges and the
+    // scene-update watchdog fires (0x8BADF00D) after 10s — the reported "Text (optional)"
+    // freeze. Fix: create the Done/Cancel pair once, cache it, and only write nav-bar /
+    // title / tint inputs when they actually differ, so steady-state passes are no-ops and
+    // no re-measure loop can form. (See the compose-freeze investigation; the #586 dynamic
+    // accent color only accelerated the loop, it was not the cause.)
+    UIBarButtonItem *doneItem = objc_getAssociatedObject(editor, &kApolloMediaComposerBodyDoneItemKey);
+    UIBarButtonItem *cancelItem = objc_getAssociatedObject(editor, &kApolloMediaComposerBodyCancelItemKey);
+    BOOL firstConfigure = (![doneItem isKindOfClass:[UIBarButtonItem class]] || ![cancelItem isKindOfClass:[UIBarButtonItem class]]);
 
-    UIBarButtonItem *doneItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:editor action:@selector(apollo_mediaBodyDoneButtonTapped:)];
-    UIBarButtonItem *cancelItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel target:editor action:@selector(apollo_mediaBodyCancelButtonTapped:)];
-    if (accentColor) {
-        doneItem.tintColor = accentColor;
-        cancelItem.tintColor = accentColor;
-        editor.view.tintColor = accentColor;
+    if (firstConfigure) {
+        UIColor *accentColor = ApolloPhotoComposerAccentColor(ownerController) ?: ownerController.view.tintColor ?: editor.view.tintColor;
+        doneItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:editor action:@selector(apollo_mediaBodyDoneButtonTapped:)];
+        cancelItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel target:editor action:@selector(apollo_mediaBodyCancelButtonTapped:)];
+        if (accentColor) {
+            doneItem.tintColor = accentColor;
+            cancelItem.tintColor = accentColor;
+            editor.view.tintColor = accentColor;
+        }
+        objc_setAssociatedObject(editor, &kApolloMediaComposerBodyDoneItemKey, doneItem, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(editor, &kApolloMediaComposerBodyCancelItemKey, cancelItem, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        @try { [editor setValue:doneItem forKey:@"postBarButtonItem"]; } @catch (__unused NSException *e) {}
+        @try { [editor setValue:doneItem forKey:@"postWithCharactersRemainingBarButtonItem"]; } @catch (__unused NSException *e) {}
+        @try { [editor setValue:@NO forKey:@"submitTapped"]; } @catch (__unused NSException *e) {}
     }
-    editor.navigationItem.rightBarButtonItem = doneItem;
-    editor.navigationItem.rightBarButtonItems = @[doneItem];
-    editor.navigationItem.leftBarButtonItem = cancelItem;
 
-    @try { [editor setValue:doneItem forKey:@"postBarButtonItem"]; } @catch (__unused NSException *e) {}
-    @try { [editor setValue:doneItem forKey:@"postWithCharactersRemainingBarButtonItem"]; } @catch (__unused NSException *e) {}
-    @try { [editor setValue:@NO forKey:@"submitTapped"]; } @catch (__unused NSException *e) {}
+    if (![editor.title isEqualToString:@"Text (optional)"]) editor.title = @"Text (optional)";
+    UINavigationItem *navigationItem = editor.navigationItem;
+    if (![navigationItem.title isEqualToString:@"Text (optional)"]) navigationItem.title = @"Text (optional)";
 
+    // Only (re-)assert the items when they are not already ours; if Apollo ever clobbers
+    // them we re-apply, but steady-state passes write nothing and never touch the nav bar.
+    if (navigationItem.rightBarButtonItem != doneItem) navigationItem.rightBarButtonItem = doneItem;
+    NSArray<UIBarButtonItem *> *rightItems = navigationItem.rightBarButtonItems;
+    if (rightItems.count != 1 || rightItems.firstObject != doneItem) navigationItem.rightBarButtonItems = @[doneItem];
+    if (navigationItem.leftBarButtonItem != cancelItem) navigationItem.leftBarButtonItem = cancelItem;
+
+    // Seeding is internally one-shot (guarded by kApolloMediaComposerBodyTextViewSeededKey)
+    // and does no layout-dirtying work, so it stays callable — the text view may not exist
+    // yet on the first (viewDidLoad) pass.
     ApolloMediaComposerSeedNativeBodyEditorTextView(editor, ownerController, @"configure-native-compose");
-    ApolloMediaComposerApplyNativeEditorToolbarRestrictions(editor, ownerController, @"native-compose-configure");
-    ApolloMediaComposerScheduleNativeEditorToolbarRetries(editor, ownerController);
+
+    // The keyboard/markdown accessory toolbar is hosted asynchronously and its gating helper
+    // walks every visible window (expensive). Do it once here and let the one-shot retry
+    // schedule (0.1–2.5s) plus MarkVisibleNativeBodyTextViews catch the late toolbar, instead
+    // of walking every window on every layout pass.
+    if (firstConfigure) {
+        ApolloMediaComposerApplyNativeEditorToolbarRestrictions(editor, ownerController, @"native-compose-configure");
+        ApolloMediaComposerScheduleNativeEditorToolbarRetries(editor, ownerController);
+    }
 }
 
 static void ApolloMediaComposerSaveNativeBodyEditor(UIViewController *editor, NSString *reason, BOOL updatePreview) {

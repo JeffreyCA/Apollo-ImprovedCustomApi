@@ -34,9 +34,15 @@ BOOL sShowSubredditHeaders = NO;
 BOOL sCommunityHighlights = NO;
 BOOL sCommunityHighlightsWeb = NO;
 BOOL sAutoHideTabBarShowOnIdle = NO;
+NSInteger sTabBarCollapseSide = 0;   // 0 = Left (system default), 1 = Right (UDKeyTabBarCollapseSide)
 BOOL sIPadTabBarBottom = NO;   // opt-in (default OFF via registerDefaults, UDKeyIPadTabBarBottom); iPad-gated in the module
 BOOL sKeepSearchBarInPlace = NO;
 BOOL sIconRowMagnifier = YES;   // effective default ON via registerDefaults (UDKeyIconRowMagnifier)
+BOOL sInfoRowTapUpvote = YES;      // effective default ON via registerDefaults (UDKeyInfoRowTapUpvote)
+BOOL sInfoRowTapComments = YES;    // effective default ON via registerDefaults (UDKeyInfoRowTapComments)
+BOOL sInfoRowPopupMode = YES;      // info icons (%/time/edited) → popup alert; default ON (UDKeyInfoRowPopupMode)
+BOOL sInfoRowOverlayMode = NO;     // info icons → transient overlay; default OFF (UDKeyInfoRowOverlayMode)
+BOOL sInfoRowTapTranslation = YES; // effective default ON via registerDefaults (UDKeyInfoRowTapTranslation)
 BOOL sModernSubredditDividers = YES;
 BOOL sSubredditListEnhancements = YES;
 BOOL sEnableFlairColors = NO;

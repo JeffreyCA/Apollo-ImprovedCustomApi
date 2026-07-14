@@ -67,6 +67,11 @@ extern BOOL sCommunityHighlights;
 // ApolloSubredditHighlights.xm (ApolloHLWebFetch).
 extern BOOL sCommunityHighlightsWeb;
 extern BOOL sAutoHideTabBarShowOnIdle;
+// Which side the iOS 26 minimized (Liquid Glass) tab bar pill docks on:
+// 0 = Left (system default), 1 = Right. Read live at layout time so a change
+// applies without relaunch. Default 0 via registerDefaults
+// (UDKeyTabBarCollapseSide). See ApolloTabBarCollapseSide.xm.
+extern NSInteger sTabBarCollapseSide;
 // iPad + Liquid Glass only. When ON, docks the iOS 26 floating tab bar at the
 // bottom (classic) instead of the top-center pill. Opt-in; default OFF via
 // registerDefaults. Temporary stopgap for issue #387. See ApolloIPadTabBarBottom.xm.
@@ -79,6 +84,24 @@ extern BOOL sKeepSearchBarInPlace;
 // magnifier loupe: slide to pick an icon, release to activate it (upvote /
 // comments / posted / % upvoted / translation). See ApolloStatsRowTouch.xm.
 extern BOOL sIconRowMagnifier;
+// Info Row settings sub-screen switches. Disabled icons still appear in the
+// magnifier loupe but do nothing on release. Disabled direct taps keep Apollo's
+// stock behavior instead of being consumed by the tweak.
+// sInfoRowTapTranslation governs the 🌐 marker beside a post's stats (feed title
+// + comments header) and takes priority over Tap to Translate / title Details;
+// it does NOT touch the inline "Translate" affordance under comment/self-post
+// body text (that stays in Translation settings).
+// See ApolloStatsRowTouch.xm, ApolloCreatedAtAlert.xm, ApolloTranslation.xm.
+extern BOOL sInfoRowTapUpvote;
+extern BOOL sInfoRowTapComments;
+// The tappable "info" icons — % upvoted, timestamp, and edited — all share one
+// display style, chosen by these two mutually-exclusive toggles: Popup = the
+// dismissable alert; Overlay = the small auto-fading card above the icon. With both
+// off, direct taps use Apollo's stock behavior; picking one in the loupe does nothing.
+// Popup defaults ON; the settings UI + a load-time clamp keep them exclusive.
+extern BOOL sInfoRowPopupMode;
+extern BOOL sInfoRowOverlayMode;
+extern BOOL sInfoRowTapTranslation;
 // When ON (default), Live Update comment sort keeps the newest comments visible at the top
 // while you're at the top, and shows a "N new comments" jump pill when you've scrolled down
 // to read/reply. See ApolloLiveCommentsFollow.xm. Default ON via registerDefaults.
