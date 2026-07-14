@@ -2,6 +2,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "ApolloCommon.h"
+#import "ApolloSettingsTableViewController.h"
 
 // MARK: - Liquid Glass App Icon Picker
 //
@@ -413,7 +414,7 @@ static void LGApplyAlternateIcon(UITableView *tableView, NSString *iconID) {
 
 // Displays all icons in a single push-presentation group. Parameterised by
 // group index so no group-specific knowledge is hardcoded here.
-@interface LGGroupIconsViewController : UITableViewController
+@interface LGGroupIconsViewController : ApolloSettingsTableViewController
 - (instancetype)initWithGroupIndex:(NSInteger)groupIndex;
 @end
 

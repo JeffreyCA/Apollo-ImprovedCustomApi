@@ -100,7 +100,7 @@ struct ShortcutsWidgetView: View {
         let size: CGFloat = 30
         return Group {
             if let img = imageFromData(item.iconData) {
-                img.resizable().scaledToFill()
+                img.accentedPhotoResizable().scaledToFill()
                     .frame(width: size, height: size)
                     .clipShape(Circle())
             } else {

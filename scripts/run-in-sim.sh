@@ -26,10 +26,22 @@
 #                                         # so it matches your installed device build)
 #   scripts/run-in-sim.sh --backup my.zip # preload an Apollo settings backup (API keys + account)
 #
+# Xcode 27 / Device Hub:
+#   - The simulator GUI is now Device Hub (com.apple.dt.Devices), not Simulator.app;
+#     this script opens whichever is present.
+#   - `--drive`'s screenshot is taken via `simctl io screenshot`, not idb — idb's
+#     screenshot RPC doesn't work against Xcode 27's iOS-27 sims. `idb ui describe-all`
+#     (the accessibility tree) is unaffected.
+#   - idb's HID commands (`idb ui tap`/`text`/swipe) are currently broken under Xcode 27:
+#     idb_companion 1.1.8 hardcodes SimulatorKit.framework at
+#     Contents/Developer/Library/PrivateFrameworks/, which Xcode 27 moved to
+#     Contents/SharedFrameworks/. Xcode.app's bundle can't be patched (write-protected),
+#     so for now drive taps manually in Device Hub until idb_companion ships a fix.
+#
 # Env overrides:
 #   BASE_IPA (./apollo-base.ipa)  BUNDLE_ID (com.christianselig.Apollo)
 #   SIM_NAME (Apollo-Sim)  SIM_DEVICE_TYPE (iPhone 16 Pro)  SIM_RUNTIME (newest iOS)
-#   DEPLOY_MIN (14.0)  WORK_DIR (./.sim)  IDB (idb on PATH)
+#   DEPLOY_MIN (15.0)  WORK_DIR (./.sim)  IDB (idb on PATH)
 #   BACKUP_ZIP (--backup)  APPEARANCE (light|dark, --dark/--light)  GLASS (0|1, --glass)
 #
 set -euo pipefail
@@ -40,7 +52,7 @@ BUNDLE_ID="${BUNDLE_ID:-com.christianselig.Apollo}"
 SIM_NAME="${SIM_NAME:-Apollo-Sim}"
 SIM_DEVICE_TYPE="${SIM_DEVICE_TYPE:-iPhone 16 Pro}"
 SIM_RUNTIME="${SIM_RUNTIME:-}"
-DEPLOY_MIN="${DEPLOY_MIN:-14.0}"
+DEPLOY_MIN="${DEPLOY_MIN:-15.0}"
 WORK_DIR="${WORK_DIR:-./.sim}"
 IDB="${IDB:-idb}"
 DEFAULT_BUNDLE_ID="com.christianselig.Apollo"
@@ -119,7 +131,11 @@ PYEOF
 # ----------------------------------------------------------------------------
 if [[ "$DO_BUILD" == 1 ]]; then
     log "Building tweak for the simulator SDK (internal generator, APOLLO_SIM_BUILD=1)"
+    # Theos's simulator target defaults TARGET_CODESIGN_FLAGS to a real
+    # 'Apple Development' identity, which not every machine's keychain has.
+    # Ad-hoc is all the sim needs — we re-sign ad-hoc after copying anyway.
     make TARGET="simulator:clang:latest:${DEPLOY_MIN}" \
+         TARGET_CODESIGN_FLAGS="--sign -" \
          LOGOS_DEFAULT_GENERATOR=internal \
          APOLLO_SIM_BUILD=1 -j"$(sysctl -n hw.ncpu)"
 fi
@@ -187,10 +203,24 @@ if [[ "$FRESH_APP" == 1 || ! -d "$APP_DIR" ]]; then
     unzip -q "$SRC_IPA" 'Payload/*' -d "$WORK_DIR"
     [[ -d "$APP_DIR" ]] || die "extracted IPA has no Payload/Apollo.app"
 
+    # apollo-base.ipa is the "already-injected" device-build shell: it carries a
+    # prior device-targeted ApolloReborn build (as ApolloImprovedCustomApi.dylib)
+    # that hard-links CydiaSubstrate via jailbreak rootless paths. That's
+    # irrelevant here — the sim flow injects its own ApolloReborn.dylib via
+    # DYLD_INSERT_LIBRARIES — and CydiaSubstrate uses LC_VERSION_MIN_IPHONEOS
+    # (not LC_BUILD_VERSION), so the platform patcher below can't flip it to
+    # Simulator; dyld_sim hard-fails resolving its rootless-path dependency and
+    # SIGABRTs the whole app at launch. Strip both before patching.
+    rm -rf "$APP_DIR/Frameworks/ApolloImprovedCustomApi.dylib" "$APP_DIR/Frameworks/CydiaSubstrate.framework"
+
     write_patcher
     # Patch every Mach-O in the bundle (main binary + appex + frameworks).
-    mapfile -t MACHOS < <(find "$APP_DIR" -type f -print0 \
-        | while IFS= read -r -d '' f; do file "$f" 2>/dev/null | grep -q 'Mach-O' && printf '%s\n' "$f"; done)
+    MACHOS=()
+    while IFS= read -r -d '' f; do
+        if file "$f" 2>/dev/null | grep -q 'Mach-O'; then
+            MACHOS+=("$f")
+        fi
+    done < <(find "$APP_DIR" -type f -print0)
     log "Patching ${#MACHOS[@]} Mach-O files to iOS-Simulator platform"
     python3 "$PATCH_PY" "${MACHOS[@]}"
 
@@ -220,7 +250,7 @@ if [[ "$FRESH_APP" == 1 || ! -d "$APP_DIR" ]]; then
     # Re-sign ad-hoc inside-out (frameworks, then plugins, then the app).
     log "Re-signing ad-hoc"
     if [[ -d "$APP_DIR/Frameworks" ]]; then
-        find "$APP_DIR/Frameworks" -maxdepth 1 -name '*.framework' -print0 \
+        find "$APP_DIR/Frameworks" -maxdepth 1 \( -name '*.framework' -o -name '*.dylib' \) -print0 \
             | while IFS= read -r -d '' fw; do codesign -f -s - "$fw" >/dev/null 2>&1; done
     fi
     if [[ -d "$APP_DIR/PlugIns" ]]; then
@@ -256,7 +286,9 @@ if ! xcrun simctl list devices booted | grep -q "$DEV"; then
     log "Booting simulator $DEV"
     xcrun simctl boot "$DEV" 2>/dev/null || true
 fi
-open -a Simulator >/dev/null 2>&1 || true
+# Xcode 27 replaced Simulator.app with Device Hub (bundle id com.apple.dt.Devices);
+# fall back to the old name for Xcode <= 26.
+open -a "Device Hub" >/dev/null 2>&1 || open -a Simulator >/dev/null 2>&1 || true
 echo "$DEV" > "$WORK_DIR/device.txt"
 
 if [[ -n "$APPEARANCE" ]]; then
@@ -327,7 +359,10 @@ if [[ "$DO_LOGS" == 1 ]]; then
 fi
 
 log "Launching $BUNDLE_ID with ApolloReborn.dylib injected"
-SIMCTL_CHILD_DYLD_INSERT_LIBRARIES="$(cd "$WORK_DIR" && pwd)/ApolloReborn.dylib" \
+DYLIB_INJECT="/tmp/ApolloRebornSim-${BUNDLE_ID//[^A-Za-z0-9_.-]/_}.dylib"
+cp "$DYLIB_DST" "$DYLIB_INJECT"
+codesign -f -s - "$DYLIB_INJECT" >/dev/null 2>&1
+SIMCTL_CHILD_DYLD_INSERT_LIBRARIES="$DYLIB_INJECT" \
     xcrun simctl launch "$DEV" "$BUNDLE_ID"
 
 # ----------------------------------------------------------------------------
@@ -339,11 +374,15 @@ if [[ "$DO_DRIVE" == 1 ]]; then
         log "idb: connecting and capturing UI state"
         "$IDB" connect "$DEV" >/dev/null 2>&1 || true
         "$IDB" ui describe-all --udid "$DEV" > "$WORK_DIR/uitree.json" 2>/dev/null || true
-        "$IDB" screenshot --udid "$DEV" "$WORK_DIR/screenshot.png" 2>/dev/null || true
-        log "idb: wrote $WORK_DIR/uitree.json and $WORK_DIR/screenshot.png"
     else
         echo "  (idb not found on PATH; set IDB=/path/to/idb — see AGENTS.md)" >&2
     fi
+    # Screenshot via simctl, not idb: idb_companion's screenshot RPC returns
+    # "No Image available to encode" against Xcode 27 / Device Hub's iOS-27
+    # simulators (its screen-capture path predates Device Hub's renderer).
+    # `simctl io screenshot` is unaffected and works on every Xcode version.
+    xcrun simctl io "$DEV" screenshot "$WORK_DIR/screenshot.png" >/dev/null 2>&1 || true
+    log "idb/simctl: wrote $WORK_DIR/uitree.json and $WORK_DIR/screenshot.png"
 fi
 
 if [[ -n "$LOG_PID" ]]; then

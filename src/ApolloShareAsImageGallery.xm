@@ -22,6 +22,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "ApolloCommon.h"
+#import "ApolloHostedVideo.h"
 
 // ASSizeRange is { CGSize min; CGSize max; }. The rest of the repo matches the
 // -layoutSpecThatFits: selector ABI with `struct CDStruct_90e057aa` from the
@@ -103,6 +104,17 @@ static void ApolloShareSetIvarBool(id obj, const char *name, BOOL value) {
     ptrdiff_t offset = ivar_getOffset(ivar);
     unsigned char *base = (unsigned char *)(__bridge void *)obj;
     base[offset] = value ? 1 : 0;
+}
+
+// Reads a Swift Bool ivar (a single byte at the ivar offset). Returns NO when the
+// ivar is missing. Mirror of ApolloShareSetIvarBool's offset math.
+static BOOL ApolloShareIvarBool(id obj, const char *name) {
+    if (!obj || !name) return NO;
+    Ivar ivar = class_getInstanceVariable(object_getClass(obj), name);
+    if (!ivar) return NO;
+    ptrdiff_t offset = ivar_getOffset(ivar);
+    const unsigned char *base = (const unsigned char *)(__bridge const void *)obj;
+    return base[offset] != 0;
 }
 
 #pragma mark - Gallery model extraction
@@ -542,6 +554,68 @@ static void ApolloShareGalleryPrepareSingle(id previewNode, id link) {
         return;
     }
 
+    // External hosted video (Streamable / Redgifs): these carry no RDKVideo, so
+    // ApolloShareLinkHasVideo is NO and Apollo shows its compact link card with the
+    // host's scraped title (e.g. "Watch ssstwitter…"). Resolve the poster + true
+    // size from the host API and install it full-width — dropping the link card —
+    // so the share card matches the post. ApolloShareAsVideo then composites the
+    // clip over this correctly-sized still (no crop). Resolution is async (an API
+    // call), unlike the native poster path below, so it has its own flow.
+    NSURL *linkURL = (NSURL *)ApolloShareCall(link, @selector(URL));
+    if (ApolloHostedVideoKindForURL(linkURL) != ApolloHostedVideoNone) {
+        // Re-entrancy guard: flip to Placeholder synchronously before async work, so
+        // repeated background layout passes don't launch duplicate resolves.
+        objc_setAssociatedObject(previewNode, &kApolloShareGalleryStateKey,
+                                 @(ApolloShareGalleryStatePlaceholder),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        // Smooth the first frame: drop the compact link card IMMEDIATELY with a
+        // neutral placeholder, BEFORE the async host-API poster resolve, so the
+        // junk-titled link card never flashes. Size it from Reddit's own scraped
+        // preview aspect when available (previewMedia/thumbnail) so there's no
+        // reflow; the host API then confirms the exact aspect + supplies the still.
+        CGSize syncAspect = ApolloShareResolvePosterAspect(link);
+        UIImage *immediate = ApolloShareGalleryRenderSingle(nil, syncAspect);
+        if (immediate) ApolloShareGalleryInstallImageOnMain(previewNode, immediate, NO);
+        ApolloLog(@"[ShareGallery] hosted video node=%p url=%@ syncAspect=%@ — placeholder + resolve",
+                  previewNode, linkURL.absoluteString, NSStringFromCGSize(syncAspect));
+        __weak id weakNode = previewNode;
+        ApolloHostedVideoResolve(linkURL, ^(__unused NSURL *mp4, NSURL *posterURL,
+                                            CGSize pixelSize, __unused BOOL hasAudio) {
+            id strongNode = weakNode;
+            if (!strongNode) return;
+            if (!posterURL) {
+                // No poster resolvable — leave Apollo's native card untouched.
+                objc_setAssociatedObject(strongNode, &kApolloShareGalleryStateKey,
+                                         @(ApolloShareGalleryStateApplied),
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                return;
+            }
+            CGSize aspect = (pixelSize.width > 0 && pixelSize.height > 0) ? pixelSize : CGSizeZero;
+            // Placeholder immediately (correct aspect) so the link card doesn't linger.
+            UIImage *placeholder = ApolloShareGalleryRenderSingle(nil, aspect);
+            if (placeholder) ApolloShareGalleryInstallImageOnMain(strongNode, placeholder, NO);
+            ApolloShareGalleryFetchImages(@[posterURL], ^(NSArray *images) {
+                id n2 = weakNode;
+                if (!n2) return;
+                UIImage *fetched = nil;
+                for (id img in images) {
+                    if ([img isKindOfClass:[UIImage class]]) { fetched = (UIImage *)img; break; }
+                }
+                UIImage *single = fetched ? ApolloShareGalleryRenderSingle(fetched, aspect) : nil;
+                ApolloLog(@"[ShareGallery] hosted poster fetch node=%p ok=%d", n2, fetched != nil);
+                if (single) {
+                    ApolloShareGalleryInstallImageOnMain(n2, single, YES);
+                } else {
+                    objc_setAssociatedObject(n2, &kApolloShareGalleryStateKey,
+                                             @(ApolloShareGalleryStateApplied),
+                                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
+            });
+        });
+        return;
+    }
+
     BOOL hasVideo = ApolloShareLinkHasVideo(link);
     BOOL obscured = ApolloShareLinkIsObscured(link);
     NSURL *posterURL = (hasVideo || obscured) ? ApolloShareResolvePosterURL(link) : nil;
@@ -607,18 +681,65 @@ static void ApolloShareGalleryPrepare(id previewNode) {
     NSNumber *stateNum = objc_getAssociatedObject(previewNode, &kApolloShareGalleryStateKey);
     ApolloShareGalleryState state = stateNum ? (ApolloShareGalleryState)stateNum.integerValue
                                              : ApolloShareGalleryStateNone;
-    if (state != ApolloShareGalleryStateNone) return; // already placeholder/applied
+    if (state == ApolloShareGalleryStateApplied) {
+        // Toggling a preview option (e.g. "Include Post Details") makes Apollo
+        // rebuild the node and RESET imageForImagePost/linkButtonNode back to its
+        // native compact link card. Our state is still "Applied", so without this
+        // the collage would be lost and the compact card would show. Re-assert the
+        // cached collage when we detect the reset. Comment / non-gallery shares
+        // never cache a collage, so they no-op here.
+        //
+        // But only while the post media is actually being shown: if the user has
+        // since turned "Include Post Details" (and "Include Post Text, Poll, or
+        // Image") back OFF on a comment share, the preview is meant to be the bare
+        // comment, so re-injecting would leak the post collage back in. Re-using the
+        // same condition as the bail check below keeps the two in lock-step.
+        BOOL postMediaShown = (ApolloShareIvarObject(previewNode, "comment") == nil) ||
+                              ApolloShareIvarBool(previewNode, "includePostDetails") ||
+                              ApolloShareIvarBool(previewNode, "includePostTextPollOrImage");
+        UIImage *cached = objc_getAssociatedObject(previewNode, &kApolloShareGalleryCollageKey);
+        if (postMediaShown &&
+            [cached isKindOfClass:[UIImage class]] &&
+            ApolloShareIvarObject(previewNode, "imageForImagePost") == nil) {
+            ApolloLog(@"[ShareGallery] collage reset by a toggle, re-injecting cached image");
+            ApolloShareGalleryInstallImageOnMain(previewNode, cached, YES);
+        }
+        return;
+    }
+    if (state != ApolloShareGalleryStateNone) return; // placeholder in flight
 
-    // Comment-share mode: when the user is sharing a COMMENT (not the post),
-    // the node still carries the post's `link` ivar, but the shared image
-    // should be the comment itself — not the post's gallery/video/spoiler
-    // media. Injecting imageForImagePost here is what made the post images
-    // leak into comment shares, so leave Apollo's native comment rendering
-    // completely alone in this mode.
-    if (ApolloShareIvarObject(previewNode, "comment") != nil) {
-        objc_setAssociatedObject(previewNode, &kApolloShareGalleryStateKey,
-                                 @(ApolloShareGalleryStateApplied),
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // Comment-share mode: when the user is sharing a COMMENT (not the post), the
+    // shared image is normally just the comment, so we must NOT touch the post's
+    // media — injecting imageForImagePost there is what made the post's gallery
+    // image leak into a plain comment share.
+    //
+    // EXCEPTION: when the user shows the underlying post above the comment, Apollo
+    // ALSO renders the post's media region — and for a gallery/video/spoiler post
+    // that region falls back to Apollo's compact link card (imageForImagePost stays
+    // nil), exactly as it does for a post share. In that case we DO want to inject
+    // the collage/poster into the post media region; the comment itself
+    // (baseCommentNode) is laid out separately and is left untouched.
+    //
+    // Two distinct node flags can request the post media in comment mode, and they
+    // map to two different sheet toggles: "Include Post Details" (includePostDetails)
+    // and "Include Post Text, Poll, or Image" (includePostTextPollOrImage). The sheet
+    // surfaces one or the other depending on context, so we must honour BOTH —
+    // checking only includePostTextPollOrImage left "Include Post Details" gallery
+    // shares falling back to the compact link card (#551 follow-up). Only bail when
+    // the post media is NOT being shown by either flag.
+    //
+    // CRUCIAL: do NOT mark the node Applied on this bail. The sheet opens with post
+    // details OFF, so this gate is the FIRST thing that fires for every comment
+    // share — caching "Applied" here would lock the node, and because Apollo reuses
+    // the same preview node when the user later toggles "Include Post Details" ON,
+    // we'd never re-examine it and the compact link card would stay stuck (the
+    // collage only appeared before when Apollo happened to rebuild the node — racy).
+    // Leaving the state untouched (None) makes each layout pass re-check, so the
+    // collage is injected the moment post media is turned on. The check is cheap
+    // (ivar reads) and no network fetch starts until a gallery is actually detected.
+    if (ApolloShareIvarObject(previewNode, "comment") != nil &&
+        !ApolloShareIvarBool(previewNode, "includePostTextPollOrImage") &&
+        !ApolloShareIvarBool(previewNode, "includePostDetails")) {
         return;
     }
 

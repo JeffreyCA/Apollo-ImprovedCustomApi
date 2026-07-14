@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Gruvbox Dark",
+  "slug": "gruvbox-dark",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "B57614",
+      "card": "FCF4D3",
+      "background": "F3EBCC",
+      "raised": "F8F0D0",
+      "bars": "F7EFCF",
+      "mutedText": "7C6F64",
+      "text": "595048",
+      "separator": "DBD4B8"
+    },
+    "dark": {
+      "accent": "FABD2F",
+      "card": "262626",
+      "background": "212121",
+      "raised": "3B3B3B",
+      "bars": "242424",
+      "mutedText": "B1A69B",
+      "text": "B9AFA5",
+      "separator": "4F4F4F"
+    }
+  }
+}

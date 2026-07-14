@@ -109,6 +109,15 @@ else
     echo "Warning: xcodegen not found — test IPA will NOT include Reborn widgets."
 fi
 
+# Stamp the usage-heartbeat build variant (ARBuildVariant in Info.plist) so test
+# installs can be separated from release builds in aggregate reporting. Override
+# with BUILD_VARIANT=glass to simulate a specific release channel.
+BUILD_VARIANT="${BUILD_VARIANT:-dev}"
+echo "Stamping build variant: $BUILD_VARIANT"
+"$BUILD_DIR/scripts/apply-patches.sh" --ipa "$OUTPUT_IPA" -o "$OUTPUT_IPA.bv" \
+    --module "stamp-build-variant:$BUILD_VARIANT"
+mv "$OUTPUT_IPA.bv" "$OUTPUT_IPA"
+
 echo "Verifying CydiaSubstrate linkage..."
 VERIFY_DIR="$(mktemp -d /tmp/apollo-ipa-verify-XXXXXX)"
 unzip -q "$OUTPUT_IPA" -d "$VERIFY_DIR"

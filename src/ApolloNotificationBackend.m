@@ -1,7 +1,9 @@
 #import "ApolloNotificationBackend.h"
+#import "ApolloBarkNotifications.h"
 #import "ApolloCommon.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
+#import "ApolloAccountCredentials.h"
 
 // Legacy hosts that previously routed to christianselig/apollo-backend. All
 // three are blocked by the existing blocklist in Tweak.xm; when a backend URL
@@ -85,10 +87,16 @@ NSURL *ApolloNotificationBackendBaseURL(void) {
     return sCachedBaseURL;
 }
 
+NSString *ApolloNotificationBackendRegistrationToken(void) {
+    ApolloEnsureBackendCacheValid();
+    return sCachedRegistrationToken;
+}
+
 // MARK: - Path classification
 
-// Match `/v1/device` exactly (device registration — header-gated, no body
-// augmentation needed since Apollo's body only carries the APNs token).
+// Match `/v1/device` exactly (device registration — header-gated; the body is
+// augmented with the delivery transport, see
+// ApolloAugmentDeviceRegistrationBody below).
 static BOOL ApolloPathIsDeviceRegistration(NSString *path) {
     return [path isEqualToString:@"/v1/device"];
 }
@@ -134,18 +142,32 @@ static BOOL ApolloPathRequiresRegistrationToken(NSString *path) {
 // accountRegistrationRequest struct requires. Snake_case keys match the
 // struct's explicit json tags. Empty strings are sent for unset settings so
 // the backend returns a clear 422 instead of the tweak silently dropping.
-static NSDictionary<NSString *, NSString *> *ApolloRedditCredentialsForRegistration(void) {
+//
+// Resolved per-account: `username` (already present on every account-upsert
+// body item — it's Apollo's own registration payload, one item per account)
+// looks up that account's stored credential override via
+// ApolloAccountCredentialsFor; missing/empty fields fall back to the global
+// default. This keeps backend push registration correct even when different
+// accounts use different Reddit API clients (see ApolloAccountCredentials.h).
+// A nil username returns the global defaults — used for the X-Apollo-Reddit-*
+// header channel, which is per-request and can't carry per-account overrides.
+static NSDictionary<NSString *, NSString *> *ApolloRedditCredentialsForRegistration(NSString *username) {
+    ApolloAccountCredentialEntry *entry = username.length > 0 ? ApolloAccountCredentialsFor(username) : nil;
+    NSString *clientId = (entry && entry.clientId.length > 0) ? entry.clientId : (sRedditClientId ?: @"");
+    NSString *clientSecret = (entry && entry.clientSecret.length > 0) ? entry.clientSecret : (sRedditClientSecret ?: @"");
+    NSString *redirectURI = (entry && entry.redirectURI.length > 0) ? entry.redirectURI : (sRedirectURI ?: @"");
     return @{
-        @"reddit_client_id":     sRedditClientId     ?: @"",
-        @"reddit_client_secret": sRedditClientSecret ?: @"",
-        @"reddit_redirect_uri":  sRedirectURI        ?: @"",
-        @"reddit_user_agent":    sUserAgent          ?: @"",
+        @"reddit_client_id":     clientId,
+        @"reddit_client_secret": clientSecret,
+        @"reddit_redirect_uri":  redirectURI,
+        @"reddit_user_agent":    sUserAgent ?: @"",
     };
 }
 
 static NSDictionary *ApolloAccountObjectWithRedditCredentials(NSDictionary *original) {
     NSMutableDictionary *augmented = [original mutableCopy] ?: [NSMutableDictionary dictionary];
-    NSDictionary<NSString *, NSString *> *creds = ApolloRedditCredentialsForRegistration();
+    NSString *username = [original[@"username"] isKindOfClass:[NSString class]] ? original[@"username"] : nil;
+    NSDictionary<NSString *, NSString *> *creds = ApolloRedditCredentialsForRegistration(username);
     for (NSString *key in creds) {
         // Don't clobber a field Apollo's body somehow already provides — the
         // user's setting is the fallback, not an override.
@@ -200,6 +222,40 @@ static NSData *ApolloAugmentAccountUpsertBody(NSData *originalBody, BOOL bulk) {
     return out;
 }
 
+// Inject the delivery transport into Apollo's `POST /v1/device` body (which
+// natively carries only the APNs token + sandbox flag). With Bark mode active
+// the device registers as transport=bark with its Bark push URL; otherwise
+// transport=apns is set EXPLICITLY rather than omitted, so the backend's
+// upsert self-heals a row that previously registered as bark (Bark disabled,
+// entitlement state changed, …). Returns nil when augmentation isn't possible
+// (no body, parse error, unexpected shape) — the caller falls through to
+// Apollo's original body and the backend defaults the transport to apns.
+static NSData *ApolloAugmentDeviceRegistrationBody(NSData *originalBody) {
+    if (originalBody.length == 0) return nil;
+
+    NSError *err = nil;
+    id parsed = [NSJSONSerialization JSONObjectWithData:originalBody options:NSJSONReadingMutableContainers error:&err];
+    if (err || ![parsed isKindOfClass:[NSDictionary class]]) {
+        ApolloLog(@"[NotifBackend] Could not parse device-registration body as a JSON object: %@", err);
+        return nil;
+    }
+
+    NSMutableDictionary *augmented = [(NSDictionary *)parsed mutableCopy];
+    if (ApolloBarkModeActive()) {
+        augmented[@"transport"] = @"bark";
+        augmented[@"transport_endpoint"] = ApolloBarkEffectivePushURL().absoluteString;
+    } else {
+        augmented[@"transport"] = @"apns";
+    }
+
+    NSData *out = [NSJSONSerialization dataWithJSONObject:augmented options:0 error:&err];
+    if (err) {
+        ApolloLog(@"[NotifBackend] Could not re-serialize augmented device body: %@", err);
+        return nil;
+    }
+    return out;
+}
+
 // MARK: - Request rewrite
 
 NSURLRequest *ApolloRewriteRequestForNotificationBackend(NSURLRequest *request) {
@@ -240,7 +296,7 @@ NSURLRequest *ApolloRewriteRequestForNotificationBackend(NSURLRequest *request) 
         }
     }
 
-    // Body augmentation for the two account-upsert endpoints. The forked
+    // Credential injection for the two account-upsert endpoints. The forked
     // backend's accountRegistrationRequest requires four Reddit OAuth fields
     // that Apollo's wire format never carried; inject them from the tweak's
     // saved settings.
@@ -248,6 +304,29 @@ NSURLRequest *ApolloRewriteRequestForNotificationBackend(NSURLRequest *request) 
         BOOL singular = ApolloPathIsAccountUpsertSingular(path);
         BOOL bulk = !singular && ApolloPathIsAccountUpsertBulk(path);
         if (singular || bulk) {
+            // Headers are the reliable channel for the global-default
+            // credentials: like /v1/device below, Apollo can post these
+            // upserts as upload tasks whose body data rides outside the
+            // request object (`fromData:`), in which case the body rewrite
+            // below never reaches the wire and the backend sees Apollo's raw
+            // payload (no reddit_client_id -> 422). Headers set on the
+            // request always reach the wire. The backend fills missing
+            // fields body > header > env, so the per-account overrides
+            // (body-only) still win whenever the body rewrite does land.
+            NSDictionary<NSString *, NSString *> *globalCreds = ApolloRedditCredentialsForRegistration(nil);
+            NSDictionary<NSString *, NSString *> *headerForBodyKey = @{
+                @"reddit_client_id":     @"X-Apollo-Reddit-Client-Id",
+                @"reddit_client_secret": @"X-Apollo-Reddit-Client-Secret",
+                @"reddit_redirect_uri":  @"X-Apollo-Reddit-Redirect-Uri",
+                @"reddit_user_agent":    @"X-Apollo-Reddit-User-Agent",
+            };
+            for (NSString *bodyKey in headerForBodyKey) {
+                NSString *value = globalCreds[bodyKey];
+                if (value.length > 0) {
+                    [mutable setValue:value forHTTPHeaderField:headerForBodyKey[bodyKey]];
+                }
+            }
+
             NSData *augmented = ApolloAugmentAccountUpsertBody(mutable.HTTPBody, bulk);
             if (augmented) {
                 mutable.HTTPBody = augmented;
@@ -255,10 +334,35 @@ NSURLRequest *ApolloRewriteRequestForNotificationBackend(NSURLRequest *request) 
                 if ([mutable valueForHTTPHeaderField:@"Content-Type"] == nil) {
                     [mutable setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
                 }
-                ApolloLog(@"[NotifBackend] Augmented %@ body (+reddit_* fields, %lu bytes)",
-                          singular ? @"account" : @"accounts",
-                          (unsigned long)augmented.length);
             }
+            ApolloLog(@"[NotifBackend] %@ upsert: reddit_* creds in headers%@",
+                      singular ? @"account" : @"accounts",
+                      augmented ? @" + body augmented" : @" (body not reachable, header-only)");
+        } else if (ApolloPathIsDeviceRegistration(path)) {
+            // Headers are the authoritative channel: Apollo posts /v1/device
+            // as an upload task whose body data is attached outside the
+            // request object, so the body rewrite below doesn't always reach
+            // the wire — headers set on _originalRequest/_currentRequest
+            // reliably do (proven by X-Registration-Token above). The backend
+            // prefers these headers over body fields.
+            BOOL bark = ApolloBarkModeActive();
+            [mutable setValue:(bark ? @"bark" : @"apns") forHTTPHeaderField:@"X-Apollo-Transport"];
+            if (bark) {
+                // Effective URL = push URL + ?icon= pin for the user's
+                // selected app icon (see ApolloBarkEffectivePushURL).
+                [mutable setValue:ApolloBarkEffectivePushURL().absoluteString forHTTPHeaderField:@"X-Apollo-Transport-Endpoint"];
+            }
+            NSData *augmented = ApolloAugmentDeviceRegistrationBody(mutable.HTTPBody);
+            if (augmented) {
+                mutable.HTTPBody = augmented;
+                [mutable setValue:[NSString stringWithFormat:@"%lu", (unsigned long)augmented.length] forHTTPHeaderField:@"Content-Length"];
+                if ([mutable valueForHTTPHeaderField:@"Content-Type"] == nil) {
+                    [mutable setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+                }
+            }
+            ApolloLog(@"[NotifBackend] Tagged /v1/device registration (transport=%@%@)",
+                      bark ? @"bark" : @"apns",
+                      augmented ? @", body augmented" : @", header-only");
         }
     }
 

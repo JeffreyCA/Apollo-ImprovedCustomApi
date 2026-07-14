@@ -7,6 +7,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloThemeRuntime.h"
 #import "fishhook.h"
 
 @class PHAssetCollection;
@@ -81,6 +82,8 @@ static char kApolloMediaComposerBodyToolbarRetriesScheduledKey;
 static char kApolloMediaComposerBodyEditorFreshOpenKey;
 static char kApolloMediaComposerNativeBodyEditorOwnerKey;
 static char kApolloMediaComposerNativeBodyEditorSavedKey;
+static char kApolloMediaComposerBodyDoneItemKey;
+static char kApolloMediaComposerBodyCancelItemKey;
 static BOOL sApolloMediaComposerContextActive = NO;
 static BOOL sApolloMediaComposerPickerActive = NO;
 static BOOL sApolloMediaComposerInlineBodyPickerActive = NO;
@@ -824,7 +827,7 @@ static void ApolloMediaComposerPresentPickerWarning(id picker, NSString *title, 
     // picker's `presentingViewController` becomes nil and we can't find a host to present from.
     UIViewController *pickerController = [picker isKindOfClass:[UIViewController class]] ? (UIViewController *)picker : nil;
     UIWindow *initialWindow = nil;
-    for (UIWindow *window in [UIApplication.sharedApplication.windows reverseObjectEnumerator]) {
+    for (UIWindow *window in [ApolloAllWindows() reverseObjectEnumerator]) {
         if (window.isKeyWindow) { initialWindow = window; break; }
         if (!initialWindow && !window.hidden && window.alpha > 0.01) initialWindow = window;
     }
@@ -840,7 +843,7 @@ static void ApolloMediaComposerPresentPickerWarning(id picker, NSString *title, 
             UIViewController *baseController = weakPresenter;
             if (!baseController) {
                 UIWindow *retryWindow = nil;
-                for (UIWindow *window in [UIApplication.sharedApplication.windows reverseObjectEnumerator]) {
+                for (UIWindow *window in [ApolloAllWindows() reverseObjectEnumerator]) {
                     if (window.isKeyWindow) { retryWindow = window; break; }
                     if (!retryWindow && !window.hidden && window.alpha > 0.01) retryWindow = window;
                 }
@@ -1282,7 +1285,7 @@ static UIViewController *ApolloMediaComposerVisibleComposerController(void) {
     UIViewController *candidate = ApolloMediaComposerCanonicalBodyController(sApolloMediaComposerActiveBodyController);
     if (candidate) return candidate;
 
-    for (UIWindow *window in [UIApplication.sharedApplication.windows reverseObjectEnumerator]) {
+    for (UIWindow *window in [ApolloAllWindows() reverseObjectEnumerator]) {
         if (window.hidden || window.alpha < 0.01) continue;
         NSMutableArray<UIViewController *> *stack = [NSMutableArray array];
         if (window.rootViewController) [stack addObject:window.rootViewController];
@@ -1432,7 +1435,7 @@ static UITextView *ApolloMediaComposerFindVisibleBodyTextViewInView(UIView *root
 }
 
 static UITextView *ApolloMediaComposerFindVisibleBodyTextViewInWindows(void) {
-    NSArray<UIWindow *> *windows = UIApplication.sharedApplication.windows;
+    NSArray<UIWindow *> *windows = ApolloAllWindows();
     for (UIWindow *window in [windows reverseObjectEnumerator]) {
         UITextView *textView = ApolloMediaComposerFindVisibleBodyTextViewInView(window);
         if (ApolloMediaComposerTrimmedBodyText(ApolloMediaComposerNormalizedRawBodyText(textView.text)).length > 0) return textView;
@@ -1519,28 +1522,64 @@ static void ApolloMediaComposerConfigureNativeBodyEditor(UIViewController *edito
     UIViewController *ownerController = ApolloMediaComposerOwnerForNativeBodyEditor(editor);
     if (!ownerController) return;
 
-    editor.title = @"Text (optional)";
-    editor.navigationItem.title = @"Text (optional)";
-    UIColor *accentColor = ApolloPhotoComposerAccentColor(ownerController) ?: ownerController.view.tintColor ?: editor.view.tintColor;
+    // Idempotency guard. This runs from viewDidLoad/viewWillAppear/viewDidAppear AND
+    // viewDidLayoutSubviews. The original body allocated two fresh UIBarButtonItems and
+    // unconditionally reassigned navigationItem.rightBarButtonItem(s)/leftBarButtonItem
+    // (a *structural* nav-bar mutation) on every layout pass. On the iOS 26 Liquid Glass
+    // nav bar, _UINavigationBarContentView self-sizes its bar-button/title subtree via
+    // -_calculatedSystemLayoutSizeFittingSize inside the same CATransaction commit;
+    // reassigning the items from within a layout callback re-invalidates that measurement
+    // and re-dirties the controller's layout, so the pass never converges and the
+    // scene-update watchdog fires (0x8BADF00D) after 10s — the reported "Text (optional)"
+    // freeze. Fix: create the Done/Cancel pair once, cache it, and only write nav-bar /
+    // title / tint inputs when they actually differ, so steady-state passes are no-ops and
+    // no re-measure loop can form. (See the compose-freeze investigation; the #586 dynamic
+    // accent color only accelerated the loop, it was not the cause.)
+    UIBarButtonItem *doneItem = objc_getAssociatedObject(editor, &kApolloMediaComposerBodyDoneItemKey);
+    UIBarButtonItem *cancelItem = objc_getAssociatedObject(editor, &kApolloMediaComposerBodyCancelItemKey);
+    BOOL firstConfigure = (![doneItem isKindOfClass:[UIBarButtonItem class]] || ![cancelItem isKindOfClass:[UIBarButtonItem class]]);
 
-    UIBarButtonItem *doneItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:editor action:@selector(apollo_mediaBodyDoneButtonTapped:)];
-    UIBarButtonItem *cancelItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel target:editor action:@selector(apollo_mediaBodyCancelButtonTapped:)];
-    if (accentColor) {
-        doneItem.tintColor = accentColor;
-        cancelItem.tintColor = accentColor;
-        editor.view.tintColor = accentColor;
+    if (firstConfigure) {
+        UIColor *accentColor = ApolloPhotoComposerAccentColor(ownerController) ?: ownerController.view.tintColor ?: editor.view.tintColor;
+        doneItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:editor action:@selector(apollo_mediaBodyDoneButtonTapped:)];
+        cancelItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel target:editor action:@selector(apollo_mediaBodyCancelButtonTapped:)];
+        if (accentColor) {
+            doneItem.tintColor = accentColor;
+            cancelItem.tintColor = accentColor;
+            editor.view.tintColor = accentColor;
+        }
+        objc_setAssociatedObject(editor, &kApolloMediaComposerBodyDoneItemKey, doneItem, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(editor, &kApolloMediaComposerBodyCancelItemKey, cancelItem, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        @try { [editor setValue:doneItem forKey:@"postBarButtonItem"]; } @catch (__unused NSException *e) {}
+        @try { [editor setValue:doneItem forKey:@"postWithCharactersRemainingBarButtonItem"]; } @catch (__unused NSException *e) {}
+        @try { [editor setValue:@NO forKey:@"submitTapped"]; } @catch (__unused NSException *e) {}
     }
-    editor.navigationItem.rightBarButtonItem = doneItem;
-    editor.navigationItem.rightBarButtonItems = @[doneItem];
-    editor.navigationItem.leftBarButtonItem = cancelItem;
 
-    @try { [editor setValue:doneItem forKey:@"postBarButtonItem"]; } @catch (__unused NSException *e) {}
-    @try { [editor setValue:doneItem forKey:@"postWithCharactersRemainingBarButtonItem"]; } @catch (__unused NSException *e) {}
-    @try { [editor setValue:@NO forKey:@"submitTapped"]; } @catch (__unused NSException *e) {}
+    if (![editor.title isEqualToString:@"Text (optional)"]) editor.title = @"Text (optional)";
+    UINavigationItem *navigationItem = editor.navigationItem;
+    if (![navigationItem.title isEqualToString:@"Text (optional)"]) navigationItem.title = @"Text (optional)";
 
+    // Only (re-)assert the items when they are not already ours; if Apollo ever clobbers
+    // them we re-apply, but steady-state passes write nothing and never touch the nav bar.
+    if (navigationItem.rightBarButtonItem != doneItem) navigationItem.rightBarButtonItem = doneItem;
+    NSArray<UIBarButtonItem *> *rightItems = navigationItem.rightBarButtonItems;
+    if (rightItems.count != 1 || rightItems.firstObject != doneItem) navigationItem.rightBarButtonItems = @[doneItem];
+    if (navigationItem.leftBarButtonItem != cancelItem) navigationItem.leftBarButtonItem = cancelItem;
+
+    // Seeding is internally one-shot (guarded by kApolloMediaComposerBodyTextViewSeededKey)
+    // and does no layout-dirtying work, so it stays callable — the text view may not exist
+    // yet on the first (viewDidLoad) pass.
     ApolloMediaComposerSeedNativeBodyEditorTextView(editor, ownerController, @"configure-native-compose");
-    ApolloMediaComposerApplyNativeEditorToolbarRestrictions(editor, ownerController, @"native-compose-configure");
-    ApolloMediaComposerScheduleNativeEditorToolbarRetries(editor, ownerController);
+
+    // The keyboard/markdown accessory toolbar is hosted asynchronously and its gating helper
+    // walks every visible window (expensive). Do it once here and let the one-shot retry
+    // schedule (0.1–2.5s) plus MarkVisibleNativeBodyTextViews catch the late toolbar, instead
+    // of walking every window on every layout pass.
+    if (firstConfigure) {
+        ApolloMediaComposerApplyNativeEditorToolbarRestrictions(editor, ownerController, @"native-compose-configure");
+        ApolloMediaComposerScheduleNativeEditorToolbarRetries(editor, ownerController);
+    }
 }
 
 static void ApolloMediaComposerSaveNativeBodyEditor(UIViewController *editor, NSString *reason, BOOL updatePreview) {
@@ -1855,7 +1894,7 @@ static BOOL ApolloMediaComposerViewIsDescendantOfView(UIView *view, UIView *ance
 
 static BOOL ApolloMediaComposerTextViewIsInsideVisibleNativeEditor(UITextView *textView) {
     if (![textView isKindOfClass:[UITextView class]] || !textView.window) return NO;
-    for (UIWindow *window in [UIApplication.sharedApplication.windows reverseObjectEnumerator]) {
+    for (UIWindow *window in [ApolloAllWindows() reverseObjectEnumerator]) {
         UIViewController *visibleController = ApolloMediaComposerVisibleControllerFromController(window.rootViewController);
         if (!ApolloMediaComposerControllerLooksLikeNativeTextEditor(visibleController)) continue;
         if (ApolloMediaComposerViewIsDescendantOfView(textView, visibleController.view)) return YES;
@@ -2062,7 +2101,7 @@ static void ApolloMediaComposerApplyNativeEditorToolbarRestrictions(UIViewContro
     // The markdown toolbar is hosted as an inputAccessoryView, which UIKit places inside a
     // separate UIRemoteKeyboardWindow / UITextEffectsWindow rather than in the editor's view
     // tree. Walk every visible window's subview tree to catch it.
-    for (UIWindow *window in UIApplication.sharedApplication.windows) {
+    for (UIWindow *window in ApolloAllWindows()) {
         if (window.hidden || window.alpha < 0.01) continue;
         if (window == editor.view.window) continue; // already walked via editor.view
         ApolloMediaComposerCollectButtonsInView(window, buttons, &budget);
@@ -2157,7 +2196,7 @@ static void ApolloMediaComposerMarkVisibleNativeBodyTextViews(UIViewController *
         markedCount = ApolloMediaComposerMarkNativeBodyTextViewsInView(controller.view, ownerController, reason);
         editorController = controller;
     } else {
-        NSArray<UIWindow *> *windows = UIApplication.sharedApplication.windows;
+        NSArray<UIWindow *> *windows = ApolloAllWindows();
         for (UIWindow *window in [windows reverseObjectEnumerator]) {
             UIViewController *visibleController = ApolloMediaComposerVisibleControllerFromController(window.rootViewController);
             if (!ApolloMediaComposerControllerLooksLikeNativeTextEditor(visibleController)) continue;
@@ -2829,15 +2868,7 @@ static BOOL ApolloPhotoComposerTextEqualsPost(NSString *text) {
 }
 
 static UIColor *ApolloPhotoComposerAccentColor(UIViewController *controller) {
-    NSMutableArray<UIColor *> *candidates = [NSMutableArray array];
-    if (controller.tabBarController.tabBar.tintColor) [candidates addObject:controller.tabBarController.tabBar.tintColor];
-    if (controller.navigationController.navigationBar.tintColor) [candidates addObject:controller.navigationController.navigationBar.tintColor];
-    if (controller.view.tintColor) [candidates addObject:controller.view.tintColor];
-    if (controller.view.window.tintColor) [candidates addObject:controller.view.window.tintColor];
-    for (UIColor *color in candidates) {
-        if ([color isKindOfClass:[UIColor class]]) return color;
-    }
-    return nil;
+    return ApolloThemeAccentColor() ?: controller.view.tintColor;
 }
 
 static BOOL ApolloPhotoComposerApplyAccentToPostButton(UIButton *button, UIColor *accentColor) {
@@ -2911,7 +2942,7 @@ static BOOL ApolloMediaComposerPresenterLooksLikeNativeBodyEditor(UIViewControll
     UIViewController *visibleFromPresenter = ApolloMediaComposerVisibleControllerFromController(presenter);
     if (ApolloMediaComposerControllerLooksLikeNativeTextEditor(visibleFromPresenter)) return YES;
 
-    NSArray<UIWindow *> *windows = UIApplication.sharedApplication.windows;
+    NSArray<UIWindow *> *windows = ApolloAllWindows();
     for (UIWindow *window in [windows reverseObjectEnumerator]) {
         UIViewController *visibleController = ApolloMediaComposerVisibleControllerFromController(window.rootViewController);
         if (ApolloMediaComposerControllerLooksLikeNativeTextEditor(visibleController)) return YES;

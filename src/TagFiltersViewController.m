@@ -14,7 +14,7 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
 
 #pragma mark - Per-subreddit detail VC
 
-@interface TagFilterSubredditDetailViewController : UITableViewController
+@interface TagFilterSubredditDetailViewController : ApolloSettingsTableViewController
 @property (nonatomic, copy) NSString *subredditName;   // lowercased
 @property (nonatomic, copy) void (^onChange)(void);
 @end
@@ -106,7 +106,7 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
     if (indexPath.section == 1) {
         UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
         cell.textLabel.text = @"Reset to Global Defaults";
-        cell.textLabel.textColor = [UIColor systemBlueColor];
+        [self apollo_applyAccentActionTextColorToCell:cell];
         cell.textLabel.textAlignment = NSTextAlignmentCenter;
         return cell;
     }
@@ -236,7 +236,7 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
         }
         UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
         cell.textLabel.text = @"Add Subreddit…";
-        cell.textLabel.textColor = [UIColor systemBlueColor];
+        [self apollo_applyAccentActionTextColorToCell:cell];
         return cell;
     }
 

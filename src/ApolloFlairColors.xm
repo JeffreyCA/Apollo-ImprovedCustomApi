@@ -74,6 +74,9 @@ static char kApolloFlairTextNodeForegroundKey;
 // hash color and the flair drifts to a wrong shade (e.g. purple -> teal).
 static char kApolloFlairNodeResolvedBackgroundKey;
 static char kApolloFlairNodeResolvedTextKey;
+// Guards the re-tag/recolor pass inside the setBackgroundColor: chokepoint so a
+// nested background/text write can't re-enter it.
+static char kApolloFlairReentrancyKey;
 
 #pragma mark - Fallback cache (text -> colors)
 
@@ -220,8 +223,6 @@ static void ApolloFlairAnnotate(NSArray *flairs, UIColor *background, UIColor *t
     }
 }
 
-static NSUInteger sApolloFlairRecoverLogCount = 0;
-
 // Reddit sometimes nests the link/comment fields under a "data" sub-dictionary
 // (the t3 / t1 "thing" wrapper). Pick whichever dict actually carries the flair
 // keys so recovery works regardless of which layer Mantle handed us.
@@ -255,10 +256,6 @@ static void ApolloFlairRecoverColors(id model, NSDictionary *rawJson, BOOL isLin
             ApolloFlairAnnotate(ApolloFlairArrayProperty(model, @selector(linkFlair)), linkBG, linkText);
             ApolloFlairAnnotate(ApolloFlairArrayProperty(model, @selector(linkFlairRichText)), linkBG, linkText);
             ApolloFlairCacheColors(ApolloFlairStringProperty(model, @selector(linkFlairText)), linkBG, linkText);
-            if (sApolloFlairRecoverLogCount < 30) {
-                sApolloFlairRecoverLogCount++;
-                ApolloLog(@"[FlairColors] recovered link flair bg=%@ textMode=%@", json[@"link_flair_background_color"], json[@"link_flair_text_color"]);
-            }
         }
     }
 
@@ -268,10 +265,6 @@ static void ApolloFlairRecoverColors(id model, NSDictionary *rawJson, BOOL isLin
         ApolloFlairAnnotate(ApolloFlairArrayProperty(model, @selector(authorFlair)), authorBG, authorText);
         ApolloFlairAnnotate(ApolloFlairArrayProperty(model, @selector(authorFlairRichtext)), authorBG, authorText);
         ApolloFlairCacheColors(ApolloFlairStringProperty(model, @selector(authorFlairPlaintext)), authorBG, authorText);
-        if (sApolloFlairRecoverLogCount < 30) {
-            sApolloFlairRecoverLogCount++;
-            ApolloLog(@"[FlairColors] recovered author flair bg=%@ textMode=%@", json[@"author_flair_background_color"], json[@"author_flair_text_color"]);
-        }
     }
 }
 
@@ -490,14 +483,6 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
         Class linkClass = objc_getClass("RDKLink");
         Class commentClass = objc_getClass("RDKComment");
         if (linkClass && [model isKindOfClass:linkClass]) {
-            static NSUInteger sLinkLog = 0;
-            if (sLinkLog < 10) {
-                sLinkLog++;
-                ApolloLog(@"[FlairColors] adapter RDKLink hasBGKey=%d bg=%@ flairKeys=%@",
-                          (int)(json[@"link_flair_background_color"] != nil),
-                          json[@"link_flair_background_color"],
-                          json[@"link_flair_richtext"] ? @"richtext" : (json[@"link_flair_text"] ? @"text" : @"none"));
-            }
             ApolloFlairRecoverColors(model, json, YES);
         } else if (commentClass && [model isKindOfClass:commentClass]) {
             ApolloFlairRecoverColors(model, json, NO);
@@ -512,11 +497,6 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
 // methods directly (not the instance method), so we must hook here.
 + (id)modelOfClass:(Class)modelClass fromJSONDictionary:(NSDictionary *)JSONDictionary error:(NSError **)error {
     id model = %orig;
-    static NSUInteger sClassLog = 0;
-    if (sClassLog < 5) {
-        sClassLog++;
-        ApolloLog(@"[FlairColors] +modelOfClass:%@ fromJSONDictionary fired", NSStringFromClass(modelClass));
-    }
     ApolloFlairRecoverForModel(model, JSONDictionary);
     return model;
 }
@@ -524,12 +504,6 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
 // Listing/array funnel — JSON array and model array are index-parallel.
 + (id)modelsOfClass:(Class)modelClass fromJSONArray:(NSArray *)JSONArray error:(NSError **)error {
     id models = %orig;
-    static NSUInteger sArrayLog = 0;
-    if (sArrayLog < 5) {
-        sArrayLog++;
-        ApolloLog(@"[FlairColors] +modelsOfClass:%@ fromJSONArray count=%lu fired",
-                  NSStringFromClass(modelClass), (unsigned long)([JSONArray isKindOfClass:[NSArray class]] ? JSONArray.count : 0));
-    }
     if ([models isKindOfClass:[NSArray class]] && [JSONArray isKindOfClass:[NSArray class]] &&
         [(NSArray *)models count] == JSONArray.count) {
         NSArray *modelArray = (NSArray *)models;
@@ -561,16 +535,6 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
 
 - (void)didLoad {
     %orig;
-    static NSUInteger sDidLoadLogCount = 0;
-    if (sDidLoadLogCount < 20) {
-        sDidLoadLogCount++;
-        NSArray *flairs = ApolloFlairSwiftArrayIvar(self, "flairs");
-        UIColor *bg = nil, *tx = nil;
-        BOOL resolved = ApolloFlairResolveColors(flairs, &bg, &tx);
-        ApolloLog(@"[FlairColors] FlairNode.didLoad enabled=%d flairs=%lu firstText=%@ resolved=%d bg=%@",
-                  (int)sEnableFlairColors, (unsigned long)flairs.count,
-                  flairs.count ? ApolloFlairText(flairs.firstObject) : @"(none)", (int)resolved, bg);
-    }
     ApolloFlairApply(self, YES);
 }
 
@@ -589,18 +553,60 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
 
 - (void)didEnterVisibleState {
     %orig;
-    // THIS is the callback that fires when the app returns from the background.
-    // On app background, Texture clears the node's Visible interface state while
-    // typically RETAINING the Display state, so didEnterDisplayState does NOT
-    // re-fire on foreground — only didEnterVisibleState does. Apollo re-themes the
-    // flair to its default grey during its own %orig here, so we reapply our
-    // colors AFTER %orig to win the race. Idempotent (no-op if already colored).
-    static NSUInteger sVisibleLogCount = 0;
-    if (sVisibleLogCount < 20) {
-        sVisibleLogCount++;
-        ApolloLog(@"[FlairColors] FlairNode.didEnterVisibleState enabled=%d reapplying", (int)sEnableFlairColors);
-    }
+    // Fires when the app returns from the background. This reapply is a best-effort
+    // reapply, but it is NOT the guarantee: Apollo's v3.4.0 Theme-Manager repaint
+    // re-themes the flair pill grey as part of a trait-change cascade that runs
+    // independently of — and can land AFTER — this callback, so a lifecycle-timed
+    // reapply cannot reliably win the race. The real guarantee is the write-time
+    // setBackgroundColor: chokepoint below (mirroring the text chokepoint). We keep
+    // this reapply because it's cheap and idempotent and covers the non-race paths.
     ApolloFlairApply(self, YES);
+}
+
+// Write-time chokepoint for the flair PILL BACKGROUND — the missing half of the
+// #391 fix. #391 hardened the flair TEXT color with a setAttributedText:
+// chokepoint (below) but left the pill background protected only by the
+// lifecycle-callback reapply above (ApolloFlairSetBackground, run only from
+// ApolloFlairApply). That reapply is a race with no last-writer guarantee: on app
+// foreground Apollo re-themes the flair pill to its default grey as part of a
+// trait-change / Theme-Manager repaint that runs independently of — and can land
+// after — didEnterVisibleState, so the grey write is the final writer and the
+// pill stays grey until the next scroll (didEnterDisplayState re-runs
+// ApolloFlairApply). We close that race the same way the text color is protected:
+// re-impose our memoized background for any FlairNode we've colored, regardless of
+// which path issued the grey write. Strict no-op for any flair we never colored
+// and when the feature is off.
+- (void)setBackgroundColor:(UIColor *)color {
+    if (!sEnableFlairColors) { %orig; return; }
+
+    UIColor *memo = objc_getAssociatedObject(self, &kApolloFlairNodeResolvedBackgroundKey);
+    // Never-colored flair (feature was off when it rendered, or we chose not to
+    // color it): pass straight through, behaves exactly like stock.
+    if (!memo) { %orig; return; }
+    // Our own write (ApolloFlairSetBackground sets exactly this color): pass it
+    // through unchanged — no substitution, so there is no write loop. (%orig is the
+    // raw setter IMP and never re-enters this hook; this branch just avoids the
+    // redundant corner-radius/text work below on our own writes.)
+    if ([color isEqual:memo]) { %orig; return; }
+
+    // Apollo tried to paint grey — re-impose our color and restore the pill
+    // geometry ApolloFlairSetBackground normally sets.
+    %orig(memo);
+    ((void (*)(id, SEL, double))objc_msgSend)(self, @selector(setCornerRadius:), 4.0);
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(self, @selector(setClipsToBounds:), YES);
+
+    // Apollo rebuilds the content text nodes on the same re-theme; the rebuilt
+    // nodes are fresh and untagged, so the setAttributedText: chokepoint no-ops on
+    // them until ApolloFlairApply runs again (a scroll). Re-tag and recolor the
+    // CURRENT content nodes here so the text survives the re-theme too, without
+    // waiting for a scroll. Idempotent; reentrancy-guarded.
+    if (!objc_getAssociatedObject(self, &kApolloFlairReentrancyKey)) {
+        objc_setAssociatedObject(self, &kApolloFlairReentrancyKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        NSArray *contentNodes = ApolloFlairSwiftArrayIvar(self, "contentNodes");
+        UIColor *memoText = objc_getAssociatedObject(self, &kApolloFlairNodeResolvedTextKey);
+        ApolloFlairRecolorTextNodes(contentNodes, memoText);
+        objc_setAssociatedObject(self, &kApolloFlairReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
 }
 
 %end
@@ -639,10 +645,4 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
 %ctor {
     sApolloFlairColorCache = [NSCache new];
     sApolloFlairColorCache.countLimit = 512;
-    ApolloLog(@"[FlairColors] ctor: module loaded enabled=%d FlairNodeClass=%p MTLJSONAdapterClass=%p RDKLink=%p RDKComment=%p",
-              (int)sEnableFlairColors,
-              objc_getClass("_TtC6Apollo9FlairNode"),
-              objc_getClass("MTLJSONAdapter"),
-              objc_getClass("RDKLink"),
-              objc_getClass("RDKComment"));
 }

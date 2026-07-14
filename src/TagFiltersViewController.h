@@ -1,4 +1,4 @@
-#import <UIKit/UIKit.h>
+#import "ApolloSettingsTableViewController.h"
 
-@interface TagFiltersViewController : UITableViewController
+@interface TagFiltersViewController : ApolloSettingsTableViewController
 @end

@@ -1,5 +1,6 @@
 #import "ApolloCommon.h"
 #import "ApolloNativeActionMetadata.h"
+#import "ApolloThemeRuntime.h"
 
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
@@ -22,6 +23,11 @@ static BOOL sApolloNativeActionMenuNextPresentationModeratorStyle = NO;
 @interface ApolloNativeActionMenuPresenter : NSObject <UIContextMenuInteractionDelegate>
 @property (nonatomic, strong) UIMenu *menu;
 @property (nonatomic, weak) UIView *sourceView;
+// Issue #249: the REAL tapped control (sort/ellipsis bar button, cell "..."
+// button). The interaction stays on the invisible proxy anchor, but the
+// highlight/dismiss previews target this view so the iOS 26 liquid-glass
+// "magic morph" has a visible source to bloom out of.
+@property (nonatomic, weak) UIView *morphSourceView;
 @property (nonatomic, strong) UIContextMenuInteraction *interaction;
 @property (nonatomic, assign) BOOL removeSourceViewOnEnd;
 @end
@@ -31,6 +37,23 @@ static BOOL ApolloNativeActionMenusEnabled(void) {
         return IsLiquidGlass() && objc_getClass("_UIContextMenuPlatformMetrics_Glass") != Nil;
     }
     return NO;
+}
+
+// Issue #249: whether UIKit's liquid-glass menu morph ("magic morph") is on.
+// _UIContextMenuMagicMorphAnimationEnabled() gates on _UISolariumEnabled() +
+// an internal preference; UIKit consults it when deciding to swap the source
+// preview for a morphable one (UIContextMenuInteraction.mm) and when picking
+// _UIContextMenuLiquidMorphPresentationAnimation (_UIContextMenuPresentation.mm).
+// If the symbol is gone in a future UIKit, assume on — this code only runs on
+// glass builds where Solarium is active, and a wrong YES just means an overlap
+// style UIKit ignores.
+static BOOL ApolloNativeActionMenuMagicMorphEnabled(void) {
+    static BOOL (*sEnabledFn)(void);
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sEnabledFn = (BOOL (*)(void))dlsym(RTLD_DEFAULT, "_UIContextMenuMagicMorphAnimationEnabled");
+    });
+    return sEnabledFn ? sEnabledFn() : YES;
 }
 
 static NSString *ApolloDecodeSwiftString(uint64_t w0, uint64_t w1) {
@@ -144,14 +167,22 @@ static UIImage *ApolloNativeActionMenuTintedImage(UIImage *image, UIColor *tintC
 }
 
 static void ApolloNativeActionMenuStyleElementTitle(UIMenuElement *element, UIColor *tintColor) {
-    if (!element || !tintColor || ![element respondsToSelector:@selector(setAttributedTitle:)]) return;
+    if (!element || ![element respondsToSelector:@selector(setAttributedTitle:)]) return;
 
     NSString *title = element.title;
     if (title.length == 0) return;
 
-    NSAttributedString *attributedTitle = [[NSAttributedString alloc] initWithString:title attributes:@{
-        NSForegroundColorAttributeName: tintColor
-    }];
+    NSMutableDictionary *attributes = [NSMutableDictionary dictionary];
+    if (tintColor) attributes[NSForegroundColorAttributeName] = tintColor;
+
+    UIFont *baseFont = [UIFont systemFontOfSize:17.0 weight:UIFontWeightRegular];
+    UIFont *themeFont = ApolloThemeRuntimeFont(baseFont);
+    if (themeFont && ![themeFont.fontName isEqualToString:baseFont.fontName]) {
+        attributes[NSFontAttributeName] = themeFont;
+    }
+    if (attributes.count == 0) return;
+
+    NSAttributedString *attributedTitle = [[NSAttributedString alloc] initWithString:title attributes:attributes];
     ((void (*)(id, SEL, id))objc_msgSend)(element, @selector(setAttributedTitle:), attributedTitle);
 }
 
@@ -243,10 +274,8 @@ static void ApolloNativeActionMenuStyleElement(UIMenuElement *element, BOOL mode
     UIColor *moderatorTintColor = ApolloNativeActionMenuModeratorColor();
     UIColor *elementTintColor = (!destructive && (moderatorStyle || opensModeratorMenu)) ? moderatorTintColor : nil;
 
-    if (elementTintColor) {
-        ApolloNativeActionMenuStyleElementTitle(element, elementTintColor);
-        ApolloNativeActionMenuStyleElementImage(element, elementTintColor);
-    }
+    ApolloNativeActionMenuStyleElementTitle(element, elementTintColor);
+    if (elementTintColor) ApolloNativeActionMenuStyleElementImage(element, elementTintColor);
 
     if ([element isKindOfClass:[UIAction class]]) {
         UIAction *action = (UIAction *)element;
@@ -549,9 +578,7 @@ static UIAction *ApolloNativeActionMenuAction(NSString *title, NSString *subtitl
         ApolloNativeActionMenuSelectRow(actionController, row);
     }];
 
-    if (tintColor) {
-        ApolloNativeActionMenuStyleElementTitle(action, tintColor);
-    }
+    ApolloNativeActionMenuStyleElementTitle(action, tintColor);
 
     if (subtitle.length > 0 && [action respondsToSelector:@selector(setSubtitle:)]) {
         ((void (*)(id, SEL, id))objc_msgSend)(action, @selector(setSubtitle:), subtitle);
@@ -777,6 +804,12 @@ static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderat
     }
 
     NSString *title = ApolloReadSwiftStringIvar(actionController, "actionsDescription") ?: @"";
+    // Issue #515: append "Public Sticky from Subreddit" when this is the removal
+    // "Notify user via…" menu (no-op otherwise).
+    ApolloInjectPublicStickyAsSubredditIfNeeded(children, title);
+    // Append "Show/Hide Deleted Comments" when this is a comments view's "..."
+    // menu (no-op otherwise; see ApolloDeletedCommentsMenu.xm).
+    ApolloInjectDeletedCommentsMenuItemIfNeeded(children, title, actionController);
     return [UIMenu menuWithTitle:title children:children];
 }
 
@@ -791,7 +824,57 @@ static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderat
     }];
 }
 
+// Issue #249: UIKit's iOS 26 liquid-glass menu bloom only runs when the menu
+// style asks for it. -[_UIContextMenuLiquidMorphPresentationAnimation
+// sourcePreviewMorphsToMenu] requires preferredLayout == 3 (compact/actions-
+// only) AND shouldMenuOverlapSourcePreview == YES; without a delegate style
+// UIKit uses +[_UIContextMenuStyle defaultStyle] (layout 100, overlap NO) and
+// the presentation degrades to the legacy fade. Mirror what UIKit's own
+// button-menu path builds in _UIControlMenuSupportDefaultMenuStyle().
+// NOTE: layout 3 swaps the presentation to the actions-only controller, so
+// this style is only correct for menus that have NO preview platter.
+static id ApolloNativeActionMenuCompactMenuStyle(void) {
+    Class styleClass = objc_getClass("_UIContextMenuStyle");
+    SEL defaultStyleSelector = NSSelectorFromString(@"defaultStyle");
+    if (!styleClass || ![styleClass respondsToSelector:defaultStyleSelector]) return nil;
+
+    id style = ((id (*)(id, SEL))objc_msgSend)(styleClass, defaultStyleSelector);
+    if (!style) return nil;
+
+    SEL setPreferredLayoutSelector = NSSelectorFromString(@"setPreferredLayout:");
+    if ([style respondsToSelector:setPreferredLayoutSelector]) {
+        ((void (*)(id, SEL, NSInteger))objc_msgSend)(style, setPreferredLayoutSelector, 3);
+    }
+    SEL setOverlapSelector = NSSelectorFromString(@"setShouldMenuOverlapSourcePreview:");
+    if ([style respondsToSelector:setOverlapSelector]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(style, setOverlapSelector, ApolloNativeActionMenuMagicMorphEnabled());
+    }
+    return style;
+}
+
+- (id)_contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction styleForMenuWithConfiguration:(__unused UIContextMenuConfiguration *)configuration {
+    return ApolloNativeActionMenuCompactMenuStyle();
+}
+
 - (UITargetedPreview *)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction previewForHighlightingMenuWithConfiguration:(__unused UIContextMenuConfiguration *)configuration {
+    // Issue #249: give the liquid morph a visible source. UIKit swaps this
+    // preview for -[UITargetedPreview _resolvedMorphablePreview] and blooms
+    // the menu out of it; the native button path builds it over the control's
+    // _morphView (the glass background platter when there is one, else the
+    // control itself) — see _UIControlMenuSupportTargetedPreviewOverViews().
+    UIView *morphSource = self.morphSourceView;
+    if (morphSource.window) {
+        UIView *morphView = morphSource;
+        SEL morphViewSelector = NSSelectorFromString(@"_morphView");
+        if ([morphSource respondsToSelector:morphViewSelector]) {
+            UIView *resolved = ((id (*)(id, SEL))objc_msgSend)(morphSource, morphViewSelector);
+            if (resolved.window) morphView = resolved;
+        }
+        return [[UITargetedPreview alloc] initWithView:morphView];
+    }
+
+    // Fallback (real control gone/windowless): the invisible proxy anchor.
+    // No morph in this case, but the menu still appears anchored correctly.
     UIView *sourceView = self.sourceView;
     if (!sourceView) return nil;
 
@@ -809,15 +892,26 @@ static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderat
     return [self contextMenuInteraction:interaction previewForHighlightingMenuWithConfiguration:configuration];
 }
 
-- (void)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction willEndForConfiguration:(__unused UIContextMenuConfiguration *)configuration animator:(__unused id<UIContextMenuInteractionAnimating>)animator {
+- (void)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction willEndForConfiguration:(__unused UIContextMenuConfiguration *)configuration animator:(id<UIContextMenuInteractionAnimating>)animator {
     UIView *sourceView = self.sourceView;
     UIContextMenuInteraction *menuInteraction = self.interaction;
-    if (sourceView && menuInteraction) {
+    if (!sourceView || !menuInteraction) return;
+
+    BOOL removeSourceViewOnEnd = self.removeSourceViewOnEnd;
+    // Issue #249: tear down at dismissal END, not START — removing the anchor
+    // (the interaction's host view) while the menu is still morphing back into
+    // the source button cuts the dismissal animation short.
+    void (^teardown)(void) = ^{
         [sourceView removeInteraction:menuInteraction];
         objc_setAssociatedObject(sourceView, &kApolloNativeActionMenuControllerKey, nil, OBJC_ASSOCIATION_ASSIGN);
-        if (self.removeSourceViewOnEnd) {
+        if (removeSourceViewOnEnd) {
             [sourceView removeFromSuperview];
         }
+    };
+    if (animator) {
+        [animator addCompletion:teardown];
+    } else {
+        teardown();
     }
 }
 
@@ -896,6 +990,20 @@ typedef UIMenu * (^ApolloNativeActionMenuProvider)(NSArray<UIMenuElement *> *sug
     sApolloNativeActionMenuConfigurationSourceView = previousSourceView;
     return configuration;
 }
+
+// Issue #249 follow-up: the media viewer's long-press menu has no preview
+// platter (the media is already fullscreen), so it can adopt the compact
+// glass style and grow in liquid-style like a button menu instead of
+// popping in. Previewed menus keep the native rich style — layout 3 would
+// drop their preview platter.
+%new
+- (id)_contextMenuInteraction:(UIContextMenuInteraction *)interaction styleForMenuWithConfiguration:(UIContextMenuConfiguration *)configuration {
+    if (!ApolloNativeActionMenusEnabled()) return nil;
+    id previewProvider = nil;
+    @try { previewProvider = [configuration valueForKey:@"previewProvider"]; } @catch (__unused NSException *exception) {}
+    if (previewProvider) return nil;
+    return ApolloNativeActionMenuCompactMenuStyle();
+}
 %end
 
 static UIViewController *ApolloNativeActionMenuViewControllerForView(UIView *view) {
@@ -961,6 +1069,7 @@ static BOOL ApolloNativeActionMenuPresent(id presenter, id actionController, voi
     ApolloNativeActionMenuPresenter *menuPresenter = [ApolloNativeActionMenuPresenter new];
     menuPresenter.menu = menu;
     menuPresenter.sourceView = anchorView;
+    menuPresenter.morphSourceView = sourceView;
     menuPresenter.removeSourceViewOnEnd = removeAnchorViewOnEnd;
 
     UIContextMenuInteraction *interaction = [[UIContextMenuInteraction alloc] initWithDelegate:menuPresenter];
@@ -973,6 +1082,18 @@ static BOOL ApolloNativeActionMenuPresent(id presenter, id actionController, voi
 
     [anchorView addInteraction:interaction];
     objc_setAssociatedObject(anchorView, &kApolloNativeActionMenuControllerKey, menuPresenter, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    // Issue #249: a programmatic presentation has no active click driver, so
+    // -[UIContextMenuInteraction menuAppearance] falls back to the interaction's
+    // fallbackDriverStyle — which defaults to 0 and resolves to the "rich"
+    // (long-press preview) appearance instead of the compact button-menu one.
+    // Compact appearance is what makes UIKit force preferredLayout 3 and compute
+    // the glass attachment point. UIKit's own programmatic presenters set the
+    // fallback first (UITextItemInteractionHandler, _UISearchSuggestionController).
+    SEL fallbackDriverStyleSelector = NSSelectorFromString(@"_setFallbackDriverStyle:");
+    if ([interaction respondsToSelector:fallbackDriverStyleSelector]) {
+        ((void (*)(id, SEL, NSUInteger))objc_msgSend)(interaction, fallbackDriverStyleSelector, 1);
+    }
 
     CGPoint location = CGPointMake(CGRectGetMidX(anchorView.bounds), CGRectGetMidY(anchorView.bounds));
     ((void (*)(id, SEL, CGPoint))objc_msgSend)(interaction, NSSelectorFromString(@"_presentMenuAtLocation:"), location);

@@ -36,9 +36,10 @@ on:
         type: boolean
         default: false
       url_schemes:
-        description: 'Comma-separated URL schemes to add (e.g. "custom, test, myapp")'
+        description: 'Comma-separated URL schemes to add'
         required: false
         type: string
+        default: 'dystopia,redreader'
       remove_code_signature:
         description: 'Remove code signature'
         required: false
@@ -70,10 +71,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          # submodules + LFS required so patch.sh --liquid-glass gets the real
-          # Assets.car (Git LFS), not an un-pulled pointer that crashes the IPA.
           submodules: recursive
-          lfs: true
 
       - name: Validate inputs
         run: |
@@ -101,6 +99,10 @@ jobs:
           path: theos
           submodules: recursive
 
+      - name: Select Xcode 26.0.1
+        if: inputs.inject_tweak
+        run: sudo xcode-select -s /Applications/Xcode_26.0.1.app
+
       - name: Build rootful tweak package
         if: inputs.inject_tweak
         run: make package FINALPACKAGE=1
@@ -122,15 +124,6 @@ jobs:
       - name: Collect debug symbols
         if: inputs.inject_tweak
         run: bash ./scripts/collect-debug-symbols.sh --label rootful --output-dir ./dist/symbols
-
-      - name: Archive debug symbols
-        if: inputs.inject_tweak
-        id: symbols
-        run: |
-          SYMBOLS_ZIP="Apollo-Reborn-dSYMs-${{ github.run_number }}.zip"
-          (cd dist && zip -qry "../${SYMBOLS_ZIP}" symbols)
-          echo "symbols_zip=${SYMBOLS_ZIP}" >> "$GITHUB_OUTPUT"
-          echo "Debug symbols: ${SYMBOLS_ZIP} ($(wc -c < "${SYMBOLS_ZIP}") bytes)"
 
       - name: Install cyan injector
         if: inputs.inject_tweak
@@ -184,6 +177,26 @@ jobs:
           mv -f injected.ipa Apollo.ipa
           echo "Injected Apollo.ipa size: $(wc -c < Apollo.ipa) bytes"
 
+      - name: Collect widget debug symbols
+        if: inputs.inject_tweak && github.event.inputs.no_extensions != 'true'
+        run: |
+          WIDGET_DSYM="widgets/build/Build/Products/Release-iphoneos/ApolloRebornWidgets.appex.dSYM"
+          if [ ! -d "$WIDGET_DSYM" ]; then
+            echo "Error: missing widget dSYM: $WIDGET_DSYM" >&2
+            exit 1
+          fi
+          mkdir -p ./dist/symbols/widgets
+          cp -R "$WIDGET_DSYM" ./dist/symbols/widgets/
+
+      - name: Archive debug symbols
+        if: inputs.inject_tweak
+        id: symbols
+        run: |
+          SYMBOLS_ZIP="Apollo-Reborn-dSYMs-${{ github.run_number }}.zip"
+          (cd dist && zip -qry "../${SYMBOLS_ZIP}" symbols)
+          echo "symbols_zip=${SYMBOLS_ZIP}" >> "$GITHUB_OUTPUT"
+          echo "Debug symbols: ${SYMBOLS_ZIP} ($(wc -c < "${SYMBOLS_ZIP}") bytes)"
+
       - name: Build output filename
         id: outname
         run: |
@@ -199,7 +212,7 @@ jobs:
           if [ "${{ github.event.inputs.liquid_glass_icons }}" == "true" ]; then
             SUFFIX="${SUFFIX}-LiquidGlassIcons"
           fi
-          if [ -n "${{ github.event.inputs.url_schemes }}" ]; then
+          if [ -n "${{ github.event.inputs.url_schemes }}" ] && [ "${{ github.event.inputs.url_schemes }}" != "dystopia,redreader" ]; then
             SUFFIX="${SUFFIX}-URLSchemes"
           fi
           OUTPUT_IPA="${BASE}${SUFFIX}.ipa"
@@ -246,6 +259,27 @@ jobs:
           fi
           echo "output_ipa=${OUTPUT_IPA}" >> "$GITHUB_OUTPUT"
           echo "Final IPA: ${OUTPUT_IPA} ($(wc -c < "$OUTPUT_IPA") bytes)"
+
+      - name: Validate output IPA
+        if: inputs.inject_tweak
+        run: |
+          IPA="${{ steps.patch.outputs.output_ipa }}"
+          if [ "${{ github.event.inputs.no_extensions }}" == "true" ]; then
+            if unzip -Z1 "$IPA" | grep -Eq '^Payload/[^/]+\.app/PlugIns/[^/]+\.appex/'; then
+              echo "Error: no-extensions output contains app extensions:" >&2
+              unzip -Z1 "$IPA" | grep -E '^Payload/[^/]+\.app/PlugIns/[^/]+\.appex/' >&2
+              exit 1
+            fi
+          else
+            if ! unzip -Z1 "$IPA" | grep -Eq '^Payload/[^/]+\.app/PlugIns/ApolloRebornWidgets\.appex/'; then
+              echo "Error: output IPA is missing ApolloRebornWidgets.appex" >&2
+              exit 1
+            fi
+            if unzip -Z1 "$IPA" | grep -Eq '^Payload/[^/]+\.app/PlugIns/AthenaWidgetExtension\.appex/'; then
+              echo "Error: output IPA still contains stock AthenaWidgetExtension.appex" >&2
+              exit 1
+            fi
+          fi
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

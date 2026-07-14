@@ -10,10 +10,64 @@ iOS tweak for [Apollo for Reddit app](https://apolloapp.io/) that lets you conti
 >
 > **Apollo Reborn team:** @JeffreyCA, @icpryde, @jordanearle, @nickclyde, @DeltAndy123 ❤️
 
-
 ## Install
 
 Pre-built IPAs and AltStore Classic/SideStore/Feather sources are now available at **[apolloreborn.app](https://apolloreborn.app/#download)**!
+
+### Which build should I install?
+
+The download page offers **Standard / GLASS** builds (with Apollo's app extensions plus the Apollo-Reborn widgets) and **No Extensions** builds. They are the same app — the difference is how much it costs to sideload:
+
+- **Standard / GLASS** bundle ~6 app extensions, so a sideload registers about **7 App IDs** (one per extension plus the app). A **free Apple ID** can register only **10 App IDs per 7 days**, so a clean single install fits — but it's easy to exceed by installing under more than one bundle ID, reinstalling within the same week, or sideloading other extension-bearing apps. If an install fails with an App ID error, install a **No Extensions** build or wait for older App IDs to expire. A **paid** Apple Developer account has a much higher cap. ([AltStore explains the limit](https://faq.altstore.io/altstore-classic/app-ids).)
+- **No Extensions** strips all app extensions (including widgets), so it only needs **1 App ID** — the reliable choice on a free Apple ID that's running low.
+
+> This is separate from whether an installed extension actually *launches* on iOS 26, which depends on your installer — see the caveat in [Opening links in Apollo](#opening-links-in-apollo).
+
+## Don't have an API key?
+
+> [!IMPORTANT]
+> Reddit and Imgur no longer allow new API key creation so you'll need to share or use existing keys.
+>
+> Reddit has also recently started revoking API keys that are specifically used for Apollo or any other third party client. If you still have your own working key, see [Avoiding API key revocations](#avoiding-api-key-revocations).
+
+Reddit has a special deal with [Dystopia](https://apps.apple.com/us/app/dystopia-for-reddit/id1430599061) and [RedReader](https://play.google.com/store/apps/details?id=org.quantumbadger.redreader) to use the API for free for accessibility reasons. It is possible to use the client ID from one of those apps on either iOS or Android:
+
+1. Install [Dystopia](https://apps.apple.com/us/app/dystopia-for-reddit/id1430599061) from the App Store (if running iOS) or [RedReader](https://play.google.com/store/apps/details?id=org.quantumbadger.redreader) from the Play Store (if running Android).
+2. Log in with your Reddit account in Dystopia/RedReader and allow it access to your account.
+3. After logging in, you should receive an email from Reddit with the subject "You’ve authorized a new app in your Reddit account". Open the email and look for the text after "App ID". Copy that value.
+4. In Apollo Reborn's settings, go to **Custom API** and enter the following values:
+    - **Reddit API Key**: Paste the App ID you copied from the email
+    - **Redirect URI**:
+        - If using Dystopia: `dystopia://response`
+        - If using RedReader: `redreader://rr_oauth_redir`
+    - **User Agent**:
+        - If using Dystopia: `ios:com.CarbonDev.Dystopia:v1.0.1(by /u/DystopiaForReddit)`
+        - If using RedReader: `RedReader/1.25.1`
+5. Log in to Reddit in Apollo normally. Reddit should ask to connect your Reddit account with Dystopia/RedReader instead of your own Reddit app. Accept the connection and you should be good to go!
+
+Credits to [this guide](https://github.com/wchill/patcheddit?tab=readme-ov-file#what-if-i-dont-have-a-client-id) for the original workaround with RedReader.
+
+More discussion in [#82](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/82) and [#367](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/367).
+
+## Avoiding API key revocations
+
+> [!NOTE]
+> This section is for users who still have their **own** Reddit API key. If you're using the Dystopia/RedReader client IDs from the section above, do **not** change any of these values — that setup only works because it matches those apps' settings exactly.
+
+Reddit doesn't publish how it decides which keys to revoke, but past revocation waves appear to target keys that identifiably belong to third-party clients. Keys whose settings don't mention Apollo have tended to survive. There are no guarantees, but you can remove the obvious signals. Reddit can see:
+
+1. Your API app's registered settings at [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps): name, description, about URL, and redirect URI.
+2. The `redirect_uri` sent with every sign-in request.
+3. The `User-Agent` header on all API traffic.
+
+To scrub these:
+
+1. **Rename your Reddit API app.** At [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps), edit your app so the name, description, and about URL don't contain "Apollo", "Reborn", or the name of any other third-party client. Something generic and personal works best (e.g. `my-ios-app`).
+2. **Change the redirect URI.** In the same edit form, replace `apollo://reddit-oauth` with a personal scheme (e.g. `myscheme://reddit-oauth`), then enter the **exact same value** in Apollo Reborn's settings under **Custom API** → **Redirect URI**. On v3.1.0 or later no IPA patching is needed — any scheme works (see [Custom Redirect URI](#custom-redirect-uri) if you're on an older version). You won't be signed out: the redirect URI is only checked at sign-in time, so existing sessions keep refreshing normally.
+3. **Set a custom User Agent.** In **Custom API** → **User Agent**, don't leave the field blank — the built-in default is the same browser string for every Apollo Reborn user, which is itself a fingerprint. Use Reddit's recommended format, personalized to you: `ios:<your.bundle.id>:v1.0 (by /u/<your_username>)`.
+4. **(Sideloaders, optional) Pick a bundle ID without "Apollo".** The bundle ID isn't sent to Reddit directly, so this is the least important signal, but it keeps "Apollo" out of any string that could end up in your user agent and costs nothing to change at signing time.
+
+Finally, **don't copy these examples verbatim**. If everyone adopts the same "safe" name and redirect URI, that just becomes the next thing to scan for. The goal is to look like a small one-off personal script, which means values unique to you.
 
 ## Features
 
@@ -55,14 +109,29 @@ Pre-built IPAs and AltStore Classic/SideStore/Feather sources are now available 
 - **Inline Media Previews**: Render images, GIFs, videos, and Imgur albums inline within posts and comments (Settings > Custom API > Media > Inline Media Previews)
 - **Rich Link Previews**: Render metadata-rich link cards in post bodies and comments (Settings > Custom API > Media)
 - **User Profile Pictures**: Show Reddit user avatars next to usernames in feeds, comments, and user profiles (Settings > Custom API > Media > Show User Profile Pictures)
-- **Self-hosted Notifications** (advanced): Optionally route push registrations, watchers, and inbox checks through your own forked [apollo-backend](https://github.com/nickclyde/apollo-backend) instance instead of having those requests silently dropped (Settings > Custom API > Notification Backend)
+- **Self-hosted Notifications** (advanced): Optionally route push registrations, watchers, and inbox checks through your own [apollo-backend](https://github.com/Apollo-Reborn/apollo-backend) instance instead of having those requests silently dropped — delivered over native APNs (paid Apple Developer account) or the free [Bark](https://apps.apple.com/us/app/bark-custom-notifications/id1403753865) app, which works even on free-Apple-ID sideloads (Settings > Custom API > Notification Backend)
+
+### Not seeing thumbnails or inline previews?
+
+> [!TIP]
+> If thumbnails or inline media previews aren't showing up, it's usually a Reddit account setting rather than a tweak issue. Open [old.reddit.com/prefs](https://old.reddit.com/prefs) and log in, then under the **Media** section:
+>
+> - Set **Thumbnails** to *"show thumbnails next to links"*
+> - Set **Media previews** to *"auto-expand media previews"*
+>
+> Save your preferences and relaunch Apollo.
 
 ### Self-hosted notifications (advanced)
 
-The legacy Apollo push backends went dark in June 2023 and are otherwise blocked by the tweak. If you run your own instance of [nickclyde/apollo-backend](https://github.com/nickclyde/apollo-backend) (with your own Reddit OAuth `CLIENT_ID` / `CLIENT_SECRET` baked into its env vars), you can set the URL under **Settings > Custom API > Notification Backend** and the tweak will route all `apollopushserver.xyz`, `beta.apollonotifications.com`, and `apolloreq.com` traffic to that host instead. Leave the field empty to keep the current "silently dropped" behavior.
+The legacy Apollo push backends went dark in June 2023 and are otherwise blocked by the tweak. If you run your own instance of [apollo-backend](https://github.com/Apollo-Reborn/apollo-backend), you can set the URL under **Settings > Custom API > Notification Backend** and the tweak will route all `apollopushserver.xyz`, `beta.apollonotifications.com`, and `apolloreq.com` traffic to that host instead. Leave the field empty to keep the current "silently dropped" behavior.
+
+Notifications can be delivered two ways — pick the one that matches your Apple account:
+
+- **Native push (APNs) — requires a paid Apple Developer account ($99/year).** Real APNs delivery needs an `aps-environment` entitlement, which Apple only grants to paid teams, plus an explicit App ID with Push Notifications enabled (not the wildcard profile most sideloading tools create). This path supports everything, including Live Activities. Follow the backend's [Getting Started guide](https://github.com/Apollo-Reborn/apollo-backend/blob/main/GETTING_STARTED.md).
+- **Bark — free, no Apple Developer account.** Enable **Bark Delivery** under the same Notification Backend settings and notifications are relayed through the free [Bark](https://apps.apple.com/us/app/bark-custom-notifications/id1403753865) App Store app instead of APNs. This is the path for free-Apple-ID sideloads, which can never receive APNs pushes. Apollo's native notification and watcher UI works unmodified, taps deep-link back into Apollo, and Apollo's icons and notification sounds carry over. Follow the backend's [Bark Getting Started guide](https://github.com/Apollo-Reborn/apollo-backend/blob/main/GETTING_STARTED_BARK.md). Trade-offs: Live Activities remain APNs-only, and notification content transits the Bark relay (self-host `bark-server` — bundled with the backend — to keep it off Bark's hosted `api.day.app`).
 
 > [!IMPORTANT]
-> APNs delivery requires a real `aps-environment` entitlement, which Apple only grants under a paid Apple Developer team. Free-account sideloads can still register and exercise the watcher CRUD, but push notifications will never actually arrive.
+> A free-account sideload has no push entitlement, so native APNs pushes can never arrive on it no matter how the backend is configured — **Bark is the supported path there** (the tweak detects the missing entitlement and explains this in the Notifications settings). Paid-certificate installs can use either delivery method and switch between them in place.
 
 ## Known Issues
 
@@ -112,52 +181,6 @@ Only the scheme + host are rewritten, so the full path/query is preserved — co
 
 Then, in any browser, on a Reddit page tap **Share → Open in Apollo**.
 
-## Don't have an API key?
-
-> [!IMPORTANT]
-> Reddit and Imgur no longer allow new API key creation so you'll need to share or use existing keys.
->
-> Reddit has also recently started revoking API keys that are specifically used for Apollo or any other third party client. If you still have your own working key, see [Avoiding API key revocations](#avoiding-api-key-revocations).
-
-Reddit has a special deal with [Dystopia](https://apps.apple.com/us/app/dystopia-for-reddit/id1430599061) and [RedReader](https://play.google.com/store/apps/details?id=org.quantumbadger.redreader) to use the API for free for accessibility reasons. It is possible to use the client ID from one of those apps on either iOS or Android:
-
-1. Install [Dystopia](https://apps.apple.com/us/app/dystopia-for-reddit/id1430599061) from the App Store (if running iOS) or [RedReader](https://play.google.com/store/apps/details?id=org.quantumbadger.redreader) from the Play Store (if running Android).
-2. Log in with your Reddit account in Dystopia/RedReader and allow it access to your account.
-3. After logging in, you should receive an email from Reddit with the subject "You’ve authorized a new app in your Reddit account". Open the email and look for the text after "App ID". Copy that value.
-4. In Apollo Reborn's settings, go to **Custom API** and enter the following values:
-    - **Reddit API Key**: Paste the App ID you copied from the email
-    - **Redirect URI**:
-        - If using Dystopia: `dystopia://response`
-        - If using RedReader: `redreader://rr_oauth_redir`
-    - **User Agent**:
-        - If using Dystopia: `ios:com.CarbonDev.Dystopia:v1.0.1(by /u/DystopiaForReddit)`
-        - If using RedReader: `RedReader/1.25.1`
-5. Log in to Reddit in Apollo normally. Reddit should ask to connect your Reddit account with Dystopia/RedReader instead of your own Reddit app. Accept the connection and you should be good to go!
-
-Credits to [this guide](https://github.com/wchill/patcheddit?tab=readme-ov-file#what-if-i-dont-have-a-client-id) for the original workaround with RedReader.
-
-More discussion in [#82](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/82) and [#367](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/367).
-
-## Avoiding API key revocations
-
-> [!NOTE]
-> This section is for users who still have their **own** Reddit API key. If you're using the Dystopia/RedReader client IDs from the section above, do **not** change any of these values — that setup only works because it matches those apps' settings exactly.
-
-Reddit doesn't publish how it decides which keys to revoke, but past revocation waves appear to target keys that identifiably belong to third-party clients. Keys whose settings don't mention Apollo have tended to survive. There are no guarantees, but you can remove the obvious signals. Reddit can see:
-
-1. Your API app's registered settings at [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps): name, description, about URL, and redirect URI.
-2. The `redirect_uri` sent with every sign-in request.
-3. The `User-Agent` header on all API traffic.
-
-To scrub these:
-
-1. **Rename your Reddit API app.** At [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps), edit your app so the name, description, and about URL don't contain "Apollo", "Reborn", or the name of any other third-party client. Something generic and personal works best (e.g. `my-ios-app`).
-2. **Change the redirect URI.** In the same edit form, replace `apollo://reddit-oauth` with a personal scheme (e.g. `myscheme://reddit-oauth`), then enter the **exact same value** in Apollo Reborn's settings under **Custom API** → **Redirect URI**. On v3.1.0 or later no IPA patching is needed — any scheme works (see [Custom Redirect URI](#custom-redirect-uri) if you're on an older version). You won't be signed out: the redirect URI is only checked at sign-in time, so existing sessions keep refreshing normally.
-3. **Set a custom User Agent.** In **Custom API** → **User Agent**, don't leave the field blank — the built-in default is the same browser string for every Apollo Reborn user, which is itself a fingerprint. Use Reddit's recommended format, personalized to you: `ios:<your.bundle.id>:v1.0 (by /u/<your_username>)`.
-4. **(Sideloaders, optional) Pick a bundle ID without "Apollo".** The bundle ID isn't sent to Reddit directly, so this is the least important signal, but it keeps "Apollo" out of any string that could end up in your user agent and costs nothing to change at signing time.
-
-Finally, **don't copy these examples verbatim**. If everyone adopts the same "safe" name and redirect URI, that just becomes the next thing to scan for. The goal is to look like a small one-off personal script, which means values unique to you.
-
 ## Custom Redirect URI
 
 > [!NOTE]
@@ -195,8 +218,8 @@ Resulting `Info.plist` entry:
 
 Available patches:
 
-- **`--liquid-glass`** - enables the iOS 26 Liquid Glass UI and installs a pack of Liquid Glass icons that can be switched between in the tweak's in-app icon picker. Requires the Git LFS asset to be pulled first (`git lfs install && git lfs pull`); see the [Build](#build) note. `patch.sh` will refuse to run with an un-pulled pointer.
-- **`--liquid-glass-icons`** - installs the Liquid Glass icon catalog **only**, without the iOS 26 UI chrome (skips the `vtool` build-version bump that opts the app into the iOS 26 runtime, so legacy UIKit behaviors like the bottom-tab swipe gesture are preserved). Mutually exclusive with `--liquid-glass`. Same Git LFS requirement applies.
+- **`--liquid-glass`** - enables the iOS 26 Liquid Glass UI and installs a pack of Liquid Glass icons that can be switched between in the tweak's in-app icon picker.
+- **`--liquid-glass-icons`** - installs the Liquid Glass icon catalog **only**, without the iOS 26 UI chrome (skips the `vtool` build-version bump that opts the app into the iOS 26 runtime, so legacy UIKit behaviors like the bottom-tab swipe gesture are preserved). Mutually exclusive with `--liquid-glass`.
 - **`--url-schemes <list>`** - adds comma-separated URL schemes to `CFBundleURLTypes` (see [Custom Redirect URI](#custom-redirect-uri), obsolete on v3.1.0+).
 - **`--remove-code-signature`** - strips the existing code signature.
 
@@ -233,12 +256,8 @@ For the in-house four-variant IPA release flow, AltStore Classic/SideStore/Feath
 **Instructions:**
 1. `git clone https://github.com/Apollo-Reborn/Apollo-Reborn`
 2. `cd Apollo-Reborn`
-3. `git lfs install && git lfs pull` (see the note below)
-4. `git submodule update --init --recursive`
-5. `make package` or `make package THEOS_PACKAGE_SCHEME=rootless` for rootless variant
-
-> [!IMPORTANT]
-> The prebuilt Liquid Glass asset catalog (`liquid-glass/prebuilt/Assets.car`) is stored with [Git LFS](https://git-lfs.com). A plain `git clone` without git-lfs installed leaves a tiny text pointer in its place instead of the real ~80 MB file, which makes `patch.sh --liquid-glass` produce a broken IPA that crashes on launch. Run `git lfs install` (one-time per machine) followed by `git lfs pull` to fetch the real asset. Verify with `git lfs ls-files` — a `*` next to the file means it's present.
+3. `git submodule update --init --recursive`
+4. `make package` or `make package THEOS_PACKAGE_SCHEME=rootless` for rootless variant
 
 ## Contributors ✨
 
@@ -275,6 +294,11 @@ Thank you to these wonderful people:
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/lampemw"><img src="https://avatars.githubusercontent.com/u/6135609?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="lampemw"/></a><br /><sub><b>lampemw</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/commits?author=lampemw" title="Code">Code</a></td>
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/rebelancap"><img src="https://avatars.githubusercontent.com/u/7285817?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="rebelancap"/></a><br /><sub><b>rebelancap</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/commits?author=rebelancap" title="Code">Code</a></td>
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/nackerr"><img src="https://avatars.githubusercontent.com/u/25311402?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="nackerr"/></a><br /><sub><b>nackerr</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/commits?author=nackerr" title="Code">Code</a></td>
+      <td align="center" valign="top" width="14.29%"><a href="https://github.com/Alstruit"><img src="https://avatars.githubusercontent.com/u/34786806?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="Alstruit"/></a><br /><sub><b>Alstruit</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/commits?author=Alstruit" title="Code">Code</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.29%"><a href="https://github.com/federgilad"><img src="https://avatars.githubusercontent.com/u/38831140?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="federgilad"/></a><br /><sub><b>federgilad</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/commits?author=federgilad" title="Code">Code</a></td>
+      <td align="center" valign="top" width="14.29%"><a href="https://github.com/ostechgit"><img src="https://avatars.githubusercontent.com/u/50818622?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="ostechgit"/></a><br /><sub><b>ostechgit</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/commits?author=ostechgit" title="Code">Code</a></td>
     </tr>
   </tbody>
 </table>
@@ -289,6 +313,11 @@ Thank you to these wonderful people:
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/bajader"><img src="https://avatars.githubusercontent.com/u/98495831?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="bajader"/></a><br /><sub><b>bajader</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/metalnakls"><img src="https://avatars.githubusercontent.com/u/15786688?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="metalnakls"/></a><br /><sub><b>metalnakls</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
       <td align="center" valign="top" width="14.29%"><a href="https://github.com/paulo1manso"><img src="https://avatars.githubusercontent.com/u/77062284?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="paulo1manso"/></a><br /><sub><b>paulo1manso</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
+      <td align="center" valign="top" width="14.29%"><a href="https://github.com/lilacvibes"><img src="https://avatars.githubusercontent.com/u/61892971?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="lilacvibes"/></a><br /><sub><b>lilacvibes</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
+      <td align="center" valign="top" width="14.29%"><a href="https://github.com/harshb16"><img src="https://avatars.githubusercontent.com/u/49092079?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="harshb16"/></a><br /><sub><b>harshb16</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.29%"><a href="https://github.com/IllIIllIllIllII"><img src="https://avatars.githubusercontent.com/u/132845378?v=4&amp;s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="IllIIllIllIllII"/></a><br /><sub><b>IllIIllIllIllII</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
       <td align="center" valign="top" width="14.29%"><a href="https://www.reddit.com/user/harunatsu91202024/"><img src="https://i.redd.it/snoovatar/avatars/ef90ed21-4a24-4a78-b535-848d4efc6378.png?s=100" width="100px;" height="100px;" style="object-fit: cover;" alt="harumatsu"/></a><br /><sub><b>harumatsu</b></sub><br /><a href="https://github.com/Apollo-Reborn/Apollo-Reborn/tree/main/liquid-glass#bundled-icons" title="Icon and design">Design</a></td>
     </tr>
   </tbody>

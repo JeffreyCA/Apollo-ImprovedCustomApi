@@ -30,6 +30,9 @@
 
 extern NSString *const ApolloTagFiltersChangedNotification;
 
+@interface RDKUser : NSObject
+@end
+
 // MARK: - Minimal AsyncDisplayKit forward declarations
 
 @interface ApolloTagDisplayNode : UIResponder
@@ -50,6 +53,7 @@ static const void *kApolloTagOverlaysKey = &kApolloTagOverlaysKey;        // NSA
 static const void *kApolloTagRevealedKindsKey = &kApolloTagRevealedKindsKey; // NSMutableSet<NSString *> of revealed kinds (@"title", @"media")
 static const void *kApolloTagAppliedLinkKey = &kApolloTagAppliedLinkKey;  // NSValue (non-retained pointer to current link, used to detect cell reuse)
 static const void *kApolloTagOverlayKindKey = &kApolloTagOverlayKindKey;  // NSString on overlay: @"title" or @"media"
+static const void *kApolloTagNativeObscuredKey = &kApolloTagNativeObscuredKey; // NSNumber BOOL: Apollo's native obscured overlay was seen for this cell+link
 
 static id ApolloTagIvarValueByName(id obj, const char *name) {
     if (!obj || !name) return nil;
@@ -133,17 +137,20 @@ static UIView *ApolloTagViewForNode(id node) {
 // MARK: - Blur target geometry
 //
 // Compact cells: blur thumbnailNode + titleNode separately (these are already
-//   the only on-screen content above the action row, and Apollo natively blurs
-//   spoiler video thumbnails so a harmless extra blur on top is fine).
+//   the only on-screen content above the action row). The thumbnail overlay
+//   is skipped when Apollo natively blurs it: spoilers always, NSFW per the
+//   captured blur-mature pref.
 //
 // Large cells: build TWO overlays — one over the title area, one over the
 //   media area — so users can tap-reveal either independently. Each overlay
 //   gets its own "kind" (@"title" / @"media"); tapping reveals only that part.
 //
-//   For SPOILER-only posts whose media is a video, Apollo already shows its
-//   own native "Spoiler — Contains spoiler – tap to watch" overlay on the
-//   video, so the media overlay is suppressed (only the title is covered).
-//   For NSFW posts, we always cover both regardless of media type.
+//   The media overlay is suppressed whenever Apollo is (or will be) natively
+//   obscuring the media, so the two blurs never stack: observed via
+//   RichMediaNode.obscuredContentInfoOverlayNode (latched), predicted via the
+//   captured blur-mature pref for NSFW (the native overlay materializes late,
+//   and waiting for it flashes ours first), plus the legacy spoiler-video
+//   heuristic. The title overlay still applies — Apollo never covers titles.
 //
 //   Coverage uses the actual subnode frames (richMediaNode / thumbnailNode /
 //   crosspostNode→richMediaNode) extended horizontally to the cell width so
@@ -192,6 +199,108 @@ static BOOL ApolloTagMediaIsVideo(id richMediaNode) {
     return vn != nil;
 }
 
+// Captured Reddit account pref "Blur mature (18+) images and media",
+// PER ACCOUNT. Apollo parses pref_no_profanity from self /me.json (and self
+// /about.json) into RDKUser.noProfanity via Mantle. With multiple accounts
+// added, Apollo materializes an RDKUser for EVERY stored account (switcher
+// refreshes, session restores) — a single last-writer-wins global held
+// whichever account happened to parse most recently, which is wrong for the
+// signed-in account whenever two accounts' prefs disagree, and the 0↔1
+// ping-pong re-ran the visible-cell refresh once per parse. Captures are
+// keyed by lowercased username and decisions resolve against the ACTIVE
+// account. Effective value is -1 (unknown) until the active account's pref
+// is captured; some sessions never capture it at all (web-JSON/cookie
+// identity synthesizes the account without a /me fetch), so unknown must NOT
+// suppress our cover (see below). All state is main-thread confined: the
+// Mantle setter can fire on background parse queues mid-init, so captures
+// hop to main (where the parsed object is fully populated); decisions run
+// from cell didLoad/layout on main.
+static NSMutableDictionary<NSString *, NSNumber *> *sTagNoProfanityByUser = nil;
+static NSString *sTagActiveUsername = nil;
+static NSInteger sTagEffectiveNoProfanity = -1;
+
+static void ApolloTagRefreshAllVisibleCells(void);
+
+static NSString *ApolloTagNormalizedUsername(id userObject) {
+    NSString *name = nil;
+    if ([userObject respondsToSelector:@selector(username)]) {
+        id v = ((id (*)(id, SEL))objc_msgSend)(userObject, @selector(username));
+        if ([v isKindOfClass:[NSString class]]) name = v;
+    }
+    if (name.length == 0 && [userObject respondsToSelector:@selector(name)]) {
+        id v = ((id (*)(id, SEL))objc_msgSend)(userObject, @selector(name));
+        if ([v isKindOfClass:[NSString class]]) name = v;
+    }
+    return name.length > 0 ? [name lowercaseString] : nil;
+}
+
+// Live lookup for sessions restored with a signed-in user before any
+// -[RDKClient setCurrentUser:] fires under our hook.
+static NSString *ApolloTagLiveActiveUsername(void) {
+    Class clientClass = objc_getClass("RDKClient");
+    if (!clientClass || ![clientClass respondsToSelector:@selector(sharedClient)]) return nil;
+    id client = ((id (*)(id, SEL))objc_msgSend)(clientClass, @selector(sharedClient));
+    if (!client || ![client respondsToSelector:@selector(currentUser)]) return nil;
+    id currentUser = ((id (*)(id, SEL))objc_msgSend)(client, @selector(currentUser));
+    return currentUser ? ApolloTagNormalizedUsername(currentUser) : nil;
+}
+
+// Main thread only. Re-resolves the active account's captured pref; on an
+// EFFECTIVE change (capture for the active account, or an account switch)
+// re-evaluates visible cells — a statically-visible feed gets no layout pass
+// of its own when /me lands or the account flips.
+static void ApolloTagRecomputeEffectiveNoProfanity(void) {
+    if (sTagActiveUsername.length == 0) sTagActiveUsername = ApolloTagLiveActiveUsername();
+    NSNumber *captured = sTagActiveUsername.length > 0 ? sTagNoProfanityByUser[sTagActiveUsername] : nil;
+    NSInteger effective = captured ? (captured.boolValue ? 1 : 0) : -1;
+    if (effective == sTagEffectiveNoProfanity) return;
+    sTagEffectiveNoProfanity = effective;
+    ApolloLog(@"[TagFilters] Effective pref_no_profanity=%ld for u/%@ (blur mature media)",
+              (long)effective, sTagActiveUsername ?: @"(unknown)");
+    ApolloTagRefreshAllVisibleCells();
+}
+
+// Predicts Apollo's native NSFW obscuring for a link, so the tweak's overlay
+// can stay out of the way from the FIRST layout pass (the native overlay node
+// materializes late — waiting for it flashes our overlay first). Requires a
+// captured YES: treating unknown as "will blur" would drop BOTH covers in
+// sessions where the pref never parses (web-JSON identity) — Apollo's user
+// object exists with noProfanity NO, so no native overlay ever appears. The
+// conservative default costs only a brief launch-window double-blur.
+static BOOL ApolloTagNativeWillBlurNSFW(BOOL isNSFW) {
+    return isNSFW && sTagEffectiveNoProfanity == 1;
+}
+
+// Apollo's native obscured overlay ("NSFW / Spoiler — tap to view") lives on
+// RichMediaNode.obscuredContentInfoOverlayNode, created iff the node was
+// configured obscured — spoilers always, NSFW per the blur-mature pref (with
+// a default-blur while Apollo's user object hasn't loaded). LATCHED per
+// cell+link: the native reveal reconfigures the node with the ivar nil, and
+// re-adding our overlay right after the user tapped through Apollo's own
+// gate would gate them twice.
+//
+// latchTrusted=NO for NSFW-only links once the pref is known OFF: any native
+// overlay seen then was launch-window default-blur residue, and when Apollo
+// reconfigures the cell un-obscured the latch would otherwise strand the
+// media with NEITHER gate. (Spoiler-tagged links keep the latch — their
+// native blur is pref-independent, so a vanished overlay there is a real
+// user reveal.)
+static BOOL ApolloTagMediaNativelyObscured(id cell, id richMediaNode, BOOL latchTrusted) {
+    id overlay = richMediaNode
+        ? ApolloTagIvarValueByName(richMediaNode, "obscuredContentInfoOverlayNode") : nil;
+    if (!latchTrusted) {
+        objc_setAssociatedObject(cell, kApolloTagNativeObscuredKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return overlay != nil;
+    }
+    NSNumber *latched = objc_getAssociatedObject(cell, kApolloTagNativeObscuredKey);
+    if ([latched boolValue]) return YES;
+    if (!overlay) return NO;
+    objc_setAssociatedObject(cell, kApolloTagNativeObscuredKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return YES;
+}
+
 // Returns an array of NSDictionary entries: @{ @"rect": NSValue<CGRect>, @"kind": NSString }.
 // Rects are in cellView coordinates. `kind` is one of @"title" or @"media".
 static NSArray<NSDictionary *> *ApolloTagBlurEntriesForCell(id cell, RDKLink *link) {
@@ -206,14 +315,14 @@ static NSArray<NSDictionary *> *ApolloTagBlurEntriesForCell(id cell, RDKLink *li
     if (isCompact) {
         // Compact: blur titleNode + (usually) thumbnailNode at their actual
         // frames. Pill only on the title (the thumbnail is too small to wear
-        // it). For SPOILER-only posts the thumbnail is suppressed because
-        // Apollo already natively blurs spoiler thumbnails in compact mode;
-        // covering it again would just stack two grey rectangles. NSFW posts
-        // always get both.
+        // it). The thumbnail overlay is skipped when Apollo already blurs it
+        // natively — spoilers always, NSFW per the predicted blur-mature pref
+        // (compact cells have no richMediaNode overlay ivar to observe).
         BOOL compactIsNSFW = NO, compactIsSpoiler = NO;
         @try { compactIsNSFW = link.isNSFW; } @catch (__unused id e) {}
         @try { compactIsSpoiler = link.isSpoiler; } @catch (__unused id e) {}
-        BOOL skipCompactThumb = (!compactIsNSFW && compactIsSpoiler);
+        BOOL skipCompactThumb = (!compactIsNSFW && compactIsSpoiler)
+            || ApolloTagNativeWillBlurNSFW(compactIsNSFW);
         for (NSString *name in @[@"thumbnailNode", @"titleNode"]) {
             BOOL isTitle = [name isEqualToString:@"titleNode"];
             if (!isTitle && skipCompactThumb) continue;
@@ -258,11 +367,17 @@ static NSArray<NSDictionary *> *ApolloTagBlurEntriesForCell(id cell, RDKLink *li
         }
     }
 
-    // Media overlay: only build it unless this is a SPOILER-only video post
-    // (Apollo's native spoiler overlay already covers the player). Square
-    // corners — the media area runs edge-to-edge and any rounding leaves a
-    // sliver of the underlying image visible in the corners.
-    BOOL skipMedia = (!isNSFW && isSpoiler && ApolloTagMediaIsVideo(richMediaNode));
+    // Media overlay: skipped when Apollo is already natively obscuring this
+    // media (obscuredContentInfoOverlayNode present — covers NSFW under the
+    // account's blur-mature pref and spoilers alike; latched so the native
+    // reveal isn't followed by our overlay), plus the legacy spoiler-video
+    // heuristic for configurations where the ivar isn't observable yet.
+    // Square corners — the media area runs edge-to-edge and any rounding
+    // leaves a sliver of the underlying image visible in the corners.
+    BOOL latchTrusted = isSpoiler || sTagEffectiveNoProfanity != 0;
+    BOOL skipMedia = ApolloTagMediaNativelyObscured(cell, richMediaNode, latchTrusted)
+        || (richMediaNode && ApolloTagNativeWillBlurNSFW(isNSFW))
+        || (!isNSFW && isSpoiler && ApolloTagMediaIsVideo(richMediaNode));
     if (!skipMedia && mediaView) {
         CGRect mf = [mediaView.superview convertRect:mediaView.frame toView:cellView];
         // Stretch horizontally to full cell width so a horizontally-scrollable
@@ -425,6 +540,7 @@ static void ApolloTagApplyDecisionToCell(id cell) {
     void *prevPtr = prevValue ? [prevValue pointerValue] : NULL;
     if (prevPtr != appliedLinkPtr) {
         objc_setAssociatedObject(cell, kApolloTagRevealedKindsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(cell, kApolloTagNativeObscuredKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(cell, kApolloTagAppliedLinkKey,
                                  [NSValue valueWithPointer:appliedLinkPtr],
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -453,7 +569,7 @@ static UIViewController *ApolloTagPresenterForCell(id cell) {
     UIView *view = ApolloTagCellView(cell);
     UIWindow *window = view.window;
     if (!window) {
-        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+        for (UIWindow *w in ApolloAllWindows()) {
             if (w.isKeyWindow) { window = w; break; }
         }
     }
@@ -532,7 +648,7 @@ static void ApolloTagRefreshAllVisibleCells(void) {
             for (UIView *sub in root.subviews) walk(sub);
         };
         walk = localWalk;
-        for (UIWindow *window in [UIApplication sharedApplication].windows) {
+        for (UIWindow *window in ApolloAllWindows()) {
             walk(window);
         }
         walk = nil;
@@ -540,6 +656,49 @@ static void ApolloTagRefreshAllVisibleCells(void) {
 }
 
 // MARK: - Cell hooks
+
+// Captures a per-account blur-mature pref as Apollo parses it from /me.json
+// (Mantle key path data.pref_no_profanity → this setter). A pref change made
+// on Reddit's side flows in on the next /me refresh. The capture hops to
+// main because Mantle can call this setter mid-init on a background parse
+// queue — on main the object's username is populated and all TagFilters
+// state is main-confined (the old direct call also walked UIWindows from the
+// parse thread). Cell refresh happens only when the ACTIVE account's
+// effective value changes, inside the recompute.
+%hook RDKUser
+
+- (void)setNoProfanity:(BOOL)value {
+    %orig;
+    id parsedUser = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *username = ApolloTagNormalizedUsername(parsedUser);
+        if (username.length == 0) return;  // uncaptured stays conservative (-1)
+        if (!sTagNoProfanityByUser) sTagNoProfanityByUser = [NSMutableDictionary dictionary];
+        NSNumber *previous = sTagNoProfanityByUser[username];
+        if (!previous || previous.boolValue != value) {
+            sTagNoProfanityByUser[username] = @(value);
+            ApolloLog(@"[TagFilters] Captured pref_no_profanity=%d for u/%@ (blur mature media)", value, username);
+        }
+        ApolloTagRecomputeEffectiveNoProfanity();
+    });
+}
+
+%end
+
+// Account switches move the effective pref to the new account's captured
+// value (or back to unknown if it was never captured for them).
+%hook RDKClient
+
+- (void)setCurrentUser:(id)user {
+    %orig;
+    id newUser = user;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        sTagActiveUsername = newUser ? ApolloTagNormalizedUsername(newUser) : nil;
+        ApolloTagRecomputeEffectiveNoProfanity();
+    });
+}
+
+%end
 
 %hook _TtC6Apollo17LargePostCellNode
 

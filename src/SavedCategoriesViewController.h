@@ -1,6 +1,6 @@
-#import <UIKit/UIKit.h>
+#import "ApolloSettingsTableViewController.h"
 
-@interface SavedCategoriesViewController : UITableViewController {
+@interface SavedCategoriesViewController : ApolloSettingsTableViewController {
     NSArray<NSString *> *_categoryNames;
 }
 @end

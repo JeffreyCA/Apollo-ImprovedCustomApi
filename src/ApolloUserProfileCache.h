@@ -37,6 +37,12 @@ extern NSString * const ApolloUserProfileUsernameKey;
 - (void)requestInfoForUsername:(NSString *)username completion:(void (^)(ApolloUserProfileInfo *info))completion;
 - (void)refetchInfoForUsername:(NSString *)username completion:(void (^)(ApolloUserProfileInfo *info))completion;
 
+// Bulk-prefetch many users' avatars in ONE request (Reddit's user_data_by_account_ids,
+// chunked at 100) keyed by t2_ account fullname, instead of one about.json per user.
+// Caches a lightweight account-icon entry per user so inline comment avatars are ready
+// before their cells render. No-op without a bearer token (the endpoint needs OAuth).
+- (void)batchPrefetchProfilesForFullNames:(NSArray<NSString *> *)fullNames;
+
 - (UIImage *)cachedImageForURL:(NSURL *)url;
 - (void)requestImageForURL:(NSURL *)url completion:(void (^)(UIImage *image))completion;
 

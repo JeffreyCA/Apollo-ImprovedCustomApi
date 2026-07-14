@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Tokyo Night Moon",
+  "slug": "tokyo-night-moon",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "3760BF",
+      "card": "E8E9EB",
+      "background": "E0E1E3",
+      "raised": "E5E6E7",
+      "bars": "E3E4E6",
+      "mutedText": "6172B0",
+      "text": "3F4A72",
+      "separator": "CACBCC"
+    },
+    "dark": {
+      "accent": "82AAFF",
+      "card": "212334",
+      "background": "1C1E2C",
+      "raised": "363848",
+      "bars": "1F2031",
+      "mutedText": "A5ABCC",
+      "text": "A7ADCD",
+      "separator": "4A4B5A"
+    }
+  }
+}

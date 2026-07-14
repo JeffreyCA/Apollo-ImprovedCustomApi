@@ -5,8 +5,12 @@
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloThemeRuntime.h"
 #import "ApolloUserProfileCache.h"
+#import "ApolloSubredditInfoCache.h"
 #import "ApolloBannedProfile.h"
+#import "ApolloProfileSocialLinks.h"
+#import "ApolloAccountCredentials.h"
 
 static NSString *const ApolloUserAvatarsToggleChangedNotification = @"ApolloUserAvatarsToggleChangedNotification";
 static NSString *const ApolloProfileTabAvatarIconChangedNotification = @"ApolloProfileTabAvatarIconChangedNotification";
@@ -19,7 +23,12 @@ static CGFloat const ApolloProfileHeaderHeight = 206.0;
 static CGFloat const ApolloProfileAvatarDiameter = 96.0;
 static CGFloat const ApolloProfileSnoovatarWidth = 156.0;
 static CGFloat const ApolloProfileSnoovatarHeight = 178.0;
-static NSUInteger const ApolloInlineAvatarMaxActiveInfoRequests = 6;
+// Governs how many about.json info fetches are in flight at once. Kept a touch above
+// the info session's per-host socket cap (8) so NSURLSession — not this app-level
+// gate — manages the queue, while still bounding wasted fetches when fast-scrolling a
+// huge thread. (Was 6, which exactly duplicated the old socket cap and only added
+// queueing latency.)
+static NSUInteger const ApolloInlineAvatarMaxActiveInfoRequests = 10;
 static NSUInteger const ApolloInlineAvatarMaxBindAttempts = 4;
 static NSUInteger const ApolloInlineAvatarLogLimit = 16;
 
@@ -49,6 +58,10 @@ static const void *kApolloProfileTabOriginalImageKey = &kApolloProfileTabOrigina
 static const void *kApolloProfileTabOriginalSelectedImageKey = &kApolloProfileTabOriginalSelectedImageKey;
 static const void *kApolloProfileTabAppliedUsernameKey = &kApolloProfileTabAppliedUsernameKey;
 static const void *kApolloProfileTabAppliedImageKey = &kApolloProfileTabAppliedImageKey;
+// Marker stamped on every rendered profile-tab avatar UIImage so the UIImageView
+// monochromatic-treatment clamp can recognise our avatar regardless of which tab
+// view class hosts it.
+static const void *kApolloProfileTabAvatarImageMarkerKey = &kApolloProfileTabAvatarImageMarkerKey;
 
 @interface ApolloProfileHeaderView : UIView
 @property(nonatomic, strong) UIImageView *bannerImageView;
@@ -60,8 +73,15 @@ static const void *kApolloProfileTabAppliedImageKey = &kApolloProfileTabAppliedI
 @property(nonatomic, strong) UILabel *usernameLabel;
 @property(nonatomic, strong) UIButton *editProfileButton;
 @property(nonatomic, strong) UILabel *aboutLabel;
+@property(nonatomic, strong) ApolloProfileSocialLinksView *socialLinksView;
 @property(nonatomic, weak) UIViewController *hostViewController;
 @property(nonatomic, copy) NSString *username;
+// The avatar/snoovatar and banner URLs the most recent profile info applied to this
+// header wanted. The header view is reused across usernames (and re-fetched for the
+// same user), so async image completions compare against these to detect that a newer
+// load has superseded the URL they were fetching before stamping a stale image.
+@property(nonatomic, copy) NSURL *currentProfileImageURL;
+@property(nonatomic, copy) NSURL *currentBannerURL;
 @property(nonatomic, copy) void (^heightInvalidationBlock)(void);
 - (void)applyProfileInfo:(ApolloUserProfileInfo *)info fallbackUsername:(NSString *)username;
 - (CGFloat)preferredHeightForWidth:(CGFloat)width;
@@ -75,6 +95,7 @@ static BOOL ApolloProfileUsernameIsLoggedInAccount(NSString *username);
 static void ApolloProfileOpenRedditProfileEditor(void);
 static void ApolloProfileSetSnoovatarMode(ApolloProfileHeaderView *header, BOOL showSnoovatar);
 static void ApolloProfileLoadImages(ApolloProfileHeaderView *header, NSString *username, BOOL forceRefresh);
+static void ApolloProfileRemoveHeader(id viewControllerObject, UITableView *tableView);
 static void ApolloProfileRefreshControllersForUsername(NSString *username);
 static void ApolloProfileApplyTabAvatarForController(UITabBarController *tabBarController);
 static void ApolloProfileApplyTabAvatarForVisibleWindows(void);
@@ -140,6 +161,9 @@ static void ApolloProfileScheduleTabAvatarRefresh(NSString *reason);
         _editProfileButton.titleLabel.adjustsFontForContentSizeCategory = YES;
         _editProfileButton.backgroundColor = [UIColor tertiarySystemFillColor];
         _editProfileButton.layer.cornerRadius = 13.0;
+        // contentEdgeInsets is deprecated (iOS 15+) in favor of UIButtonConfiguration, but the
+        // device build floors at iOS 14 (still-supported devices), where UIButtonConfiguration
+        // doesn't exist and would crash.
         _editProfileButton.contentEdgeInsets = UIEdgeInsetsMake(4.0, 12.0, 4.0, 12.0);
         [_editProfileButton addTarget:self action:@selector(apollo_editProfileTapped) forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:_editProfileButton];
@@ -151,6 +175,19 @@ static void ApolloProfileScheduleTabAvatarRefresh(NSString *reason);
         _aboutLabel.numberOfLines = 0;
         _aboutLabel.adjustsFontForContentSizeCategory = YES;
         [self addSubview:_aboutLabel];
+
+        // Social-links band, positioned between the username line and the bio.
+        // It self-manages its data; when its rendered height changes (links arrive,
+        // toggle flips) it re-measures the header so the tableHeaderView grows.
+        _socialLinksView = [[ApolloProfileSocialLinksView alloc] init];
+        __weak ApolloProfileHeaderView *weakSelf = self;
+        _socialLinksView.heightChangedBlock = ^{
+            ApolloProfileHeaderView *strongSelf = weakSelf;
+            if (!strongSelf) return;
+            [strongSelf setNeedsLayout];
+            if (strongSelf.heightInvalidationBlock) strongSelf.heightInvalidationBlock();
+        };
+        [self addSubview:_socialLinksView];
     }
     return self;
 }
@@ -174,16 +211,7 @@ static void ApolloProfileScheduleTabAvatarRefresh(NSString *reason);
 }
 
 - (UIColor *)apollo_themeAccentColor {
-    NSMutableArray<UIColor *> *candidates = [NSMutableArray array];
-    if (self.hostViewController.tabBarController.tabBar.tintColor) [candidates addObject:self.hostViewController.tabBarController.tabBar.tintColor];
-    if (self.hostViewController.navigationController.navigationBar.tintColor) [candidates addObject:self.hostViewController.navigationController.navigationBar.tintColor];
-    if (self.hostViewController.view.tintColor) [candidates addObject:self.hostViewController.view.tintColor];
-    if (self.window.tintColor) [candidates addObject:self.window.tintColor];
-    if (self.tintColor) [candidates addObject:self.tintColor];
-    for (UIColor *color in candidates) {
-        if ([color isKindOfClass:[UIColor class]]) return color;
-    }
-    return [UIColor systemBlueColor];
+    return ApolloThemeAccentColor() ?: self.tintColor ?: [UIColor systemBlueColor];
 }
 
 - (void)apollo_updateEditProfileButtonColors {
@@ -205,6 +233,7 @@ static CGFloat const ApolloProfileTextTopGap = 12.0;
 static CGFloat const ApolloProfileAboutSideInset = 20.0;
 static CGFloat const ApolloProfileAboutMaxHeight = 220.0; // ~10 lines @ footnote font, covers 200+ chars at full width
 static CGFloat const ApolloProfileBottomPadding = 16.0;
+static CGFloat const ApolloProfileSocialAboutGap = 8.0;   // gap below the social band, above the bio
 
 - (CGRect)apollo_avatarFrame {
     CGFloat borderSize = ApolloProfileAvatarDiameter + 6.0;
@@ -227,11 +256,11 @@ static CGFloat const ApolloProfileBottomPadding = 16.0;
     return MIN(ApolloProfileAboutMaxHeight, MAX(18.0, ceil(rect.size.height)));
 }
 
-// Computes the y-coordinate where the about text should start, full-width,
-// based on the bottom of whichever of (avatar/snoovatar, displayName/username
-// stack) reaches further down. This ensures the about text always sits below
-// the avatar — no empty space wasted beneath the picture when about is long.
-- (CGFloat)apollo_aboutYForWidth:(CGFloat)width {
+// The y-coordinate where the post-name content (the social band, else the bio)
+// starts — full-width, below whichever of the avatar/snoovatar or the
+// displayName/username stack reaches further down. No empty space is wasted
+// beneath the picture when the bio is long.
+- (CGFloat)apollo_socialYForWidth:(CGFloat)width {
     BOOL showSnoovatar = !self.snoovatarImageView.hidden;
     CGRect mediaFrame = showSnoovatar ? [self apollo_snoovatarFrame] : [self apollo_avatarFrame];
     CGFloat mediaBottom = CGRectGetMaxY(mediaFrame);
@@ -246,8 +275,24 @@ static CGFloat const ApolloProfileBottomPadding = 16.0;
     CGFloat usernameBottom = displayNameY + displayNameH + usernameTopGap + usernameH;
     (void)textWidth;
 
-    CGFloat candidateY = MAX(mediaBottom + ApolloProfileTextTopGap, usernameBottom + 10.0);
-    return candidateY;
+    return MAX(mediaBottom + ApolloProfileTextTopGap, usernameBottom + 10.0);
+}
+
+// Height the social-links band wants at this header width (0 when off / no links).
+- (CGFloat)apollo_socialHeightForWidth:(CGFloat)width {
+    if (!self.socialLinksView) return 0.0;
+    CGFloat bandWidth = MAX(120.0, width - ApolloProfileAboutSideInset * 2.0);
+    return [self.socialLinksView preferredHeightForWidth:bandWidth];
+}
+
+// The about text sits below the social band (which sits below the name stack /
+// avatar). When the band is empty it collapses to zero and the bio sits where it
+// always did.
+- (CGFloat)apollo_aboutYForWidth:(CGFloat)width {
+    CGFloat socialY = [self apollo_socialYForWidth:width];
+    CGFloat socialH = [self apollo_socialHeightForWidth:width];
+    if (socialH > 0.0) return socialY + socialH + ApolloProfileSocialAboutGap;
+    return socialY;
 }
 
 - (CGFloat)preferredHeightForWidth:(CGFloat)width {
@@ -290,6 +335,12 @@ static CGFloat const ApolloProfileBottomPadding = 16.0;
     self.usernameLabel.frame = CGRectMake(textX, CGRectGetMaxY(self.displayNameLabel.frame) + 1.0, textWidth, 18.0);
 
     CGFloat aboutWidth = MAX(120.0, width - ApolloProfileAboutSideInset * 2.0);
+
+    CGFloat socialY = [self apollo_socialYForWidth:width];
+    CGFloat socialH = [self apollo_socialHeightForWidth:width];
+    self.socialLinksView.frame = CGRectMake(ApolloProfileAboutSideInset, socialY, aboutWidth, socialH);
+    self.socialLinksView.hidden = (socialH <= 0.0);
+
     CGFloat aboutHeight = [self apollo_aboutHeightForWidth:aboutWidth];
     CGFloat aboutY = [self apollo_aboutYForWidth:width];
     self.aboutLabel.frame = CGRectMake(ApolloProfileAboutSideInset, aboutY, aboutWidth, aboutHeight);
@@ -314,6 +365,9 @@ static CGFloat const ApolloProfileBottomPadding = 16.0;
     self.displayNameLabel.hidden = self.displayNameLabel.text.length == 0;
     self.usernameLabel.hidden = self.usernameLabel.text.length == 0;
     self.aboutLabel.hidden = self.aboutLabel.text.length == 0;
+    // Feed the social-links band the username so it can load/render (no-op if the
+    // username is unchanged; the band re-measures the header when links arrive).
+    self.socialLinksView.username = username;
     [self setNeedsLayout];
     if (self.heightInvalidationBlock) {
         self.heightInvalidationBlock();
@@ -1348,13 +1402,35 @@ static ApolloProfileHeaderView *ApolloProfileCreateHeader(CGFloat width) {
     return header;
 }
 
+static BOOL ApolloProfileURLsMatch(NSURL *left, NSURL *right) {
+    if (left == right) return YES;
+    if (!left || !right) return NO;
+    return [left.absoluteString isEqualToString:right.absoluteString];
+}
+
 static void ApolloProfileLoadImages(ApolloProfileHeaderView *header, NSString *username, BOOL forceRefresh) {
     if (!header || username.length == 0) return;
     ApolloUserProfileCache *cache = [ApolloUserProfileCache sharedCache];
     ApolloUserProfileInfo *cachedInfo = [cache cachedInfoForUsername:username];
 
+    // The header view is cached on the profile/account-manager VC and repointed to a
+    // new username by ApolloProfileInstallOrUpdateHeader (account switch, reused
+    // persistent ProfileViewController, etc.). These info/image fetches are async and
+    // land on the main queue, so by the time a completion fires the header may already
+    // belong to a different user — stamping a late result would bleed user A's
+    // avatar/snoovatar/banner/name/bio onto user B and never self-heal. Capture the
+    // target identity up front and bail from every completion whose header no longer
+    // matches it (mirrors the social-links band's `username == want` guard).
+    NSString *targetUsername = ApolloAvatarNormalizedUsername(username);
+    if (targetUsername.length == 0) return;
+
     void (^applyInfo)(ApolloUserProfileInfo *) = ^(ApolloUserProfileInfo *info) {
         if (!info) return;
+        // Dropped if the header was repointed to another user while this was in flight.
+        if (!ApolloAvatarUsernameMatches(header.username, targetUsername)) {
+            ApolloLog(@"[UserAvatars] Dropping stale profile info for u/%@ (header now u/%@)", targetUsername, header.username ?: @"nil");
+            return;
+        }
         [header applyProfileInfo:info fallbackUsername:username];
 
         if (header.hostViewController) {
@@ -1365,6 +1441,10 @@ static void ApolloProfileLoadImages(ApolloProfileHeaderView *header, NSString *u
         ApolloProfileSetSnoovatarMode(header, showSnoovatar);
 
         NSURL *profileImageURL = showSnoovatar ? info.snoovatarURL : info.iconURL;
+        // Record what this (now-current) info wants so a later async image completion
+        // can tell whether it has been superseded by a newer load for the same user.
+        header.currentProfileImageURL = profileImageURL;
+        header.currentBannerURL = info.bannerURL;
         if (profileImageURL) {
             UIImage *image = [cache cachedImageForURL:profileImageURL];
             if (image) {
@@ -1373,6 +1453,10 @@ static void ApolloProfileLoadImages(ApolloProfileHeaderView *header, NSString *u
             } else {
                 [cache requestImageForURL:profileImageURL completion:^(UIImage *loadedImage) {
                     if (!loadedImage) return;
+                    // Re-validate: the header may have switched users, or a newer fetch
+                    // for this same user may have chosen a different avatar/snoovatar URL.
+                    if (!ApolloAvatarUsernameMatches(header.username, targetUsername)) return;
+                    if (!ApolloProfileURLsMatch(header.currentProfileImageURL, profileImageURL)) return;
                     if (showSnoovatar) header.snoovatarImageView.image = loadedImage;
                     else header.avatarImageView.image = loadedImage;
                 }];
@@ -1383,8 +1467,12 @@ static void ApolloProfileLoadImages(ApolloProfileHeaderView *header, NSString *u
             if (banner) {
                 header.bannerImageView.image = banner;
             } else {
-                [cache requestImageForURL:info.bannerURL completion:^(UIImage *loadedImage) {
-                    if (loadedImage) header.bannerImageView.image = loadedImage;
+                NSURL *bannerURL = info.bannerURL;
+                [cache requestImageForURL:bannerURL completion:^(UIImage *loadedImage) {
+                    if (!loadedImage) return;
+                    if (!ApolloAvatarUsernameMatches(header.username, targetUsername)) return;
+                    if (!ApolloProfileURLsMatch(header.currentBannerURL, bannerURL)) return;
+                    header.bannerImageView.image = loadedImage;
                 }];
             }
         }
@@ -1519,6 +1607,46 @@ static void ApolloProfileInstallUsernameCopyInteraction(UIViewController *viewCo
     }
 }
 
+// Tear down the custom profile header and restore Apollo's native table header.
+// Used when "Show Detailed Profiles" is OFF (either toggled off live, or already
+// off when a profile page appears) so the page falls back to Apollo's stock layout.
+// Safe to call repeatedly: once the wrapper is removed and the per-VC state cleared,
+// subsequent calls are a cheap no-op.
+static void ApolloProfileRemoveHeader(id viewControllerObject, UITableView *tableView) {
+    if (!viewControllerObject) return;
+
+    UIView *wrappedHeader = objc_getAssociatedObject(viewControllerObject, kApolloProfileWrappedHeaderKey);
+    UIView *originalHeader = objc_getAssociatedObject(viewControllerObject, kApolloProfileOriginalHeaderKey);
+
+    // The table may currently host our wrapper even if our per-VC refs went stale
+    // (fresh controller, reused VC, etc.) — detect it via the wrapper marker.
+    UIView *currentTableHeader = tableView.tableHeaderView;
+    if (currentTableHeader && objc_getAssociatedObject(currentTableHeader, kApolloProfileWrapperMarkerKey)) {
+        wrappedHeader = currentTableHeader;
+        originalHeader = objc_getAssociatedObject(currentTableHeader, kApolloProfileOriginalHeaderKey) ?: originalHeader;
+    }
+
+    if (wrappedHeader && tableView.tableHeaderView == wrappedHeader) {
+        // Pull Apollo's native header back out of our wrapper, reset its frame to the
+        // origin, and reinstate it as the table header (nil if Apollo had none — that
+        // is the stock look for AsyncDisplayKit profiles whose stats live in cells).
+        if (originalHeader) {
+            CGFloat width = tableView.bounds.size.width > 0 ? tableView.bounds.size.width : originalHeader.frame.size.width;
+            [originalHeader removeFromSuperview];
+            originalHeader.frame = CGRectMake(0.0, 0.0, width, originalHeader.frame.size.height);
+        }
+        tableView.tableHeaderView = originalHeader;  // nil is valid — clears the header
+        NSString *className = NSStringFromClass([(UIViewController *)viewControllerObject class]);
+        ApolloLog(@"[UserAvatars] Removed profile header (toggle off) class=%@ vc=%p native=%@", className, viewControllerObject, originalHeader ? NSStringFromClass([originalHeader class]) : @"nil");
+    }
+
+    // Clear all per-VC state so a later re-enable installs a fresh header cleanly.
+    objc_setAssociatedObject(viewControllerObject, kApolloProfileHeaderViewKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(viewControllerObject, kApolloProfileWrappedHeaderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(viewControllerObject, kApolloProfileOriginalHeaderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(viewControllerObject, kApolloProfileUsernameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+}
+
 static void ApolloProfileInstallOrUpdateHeader(id viewControllerObject) {
     if (![viewControllerObject isKindOfClass:[UIViewController class]]) return;
     UIViewController *viewController = (UIViewController *)viewControllerObject;
@@ -1531,20 +1659,25 @@ static void ApolloProfileInstallOrUpdateHeader(id viewControllerObject) {
         return;
     }
 
+    // "Show Detailed Profiles" OFF → revert to Apollo's stock profile layout. Tear
+    // down anything we previously installed and bail before building/refreshing it.
+    // (Independent of sShowUserAvatars, which only governs the inline username avatars.)
+    if (!sShowDetailedProfiles) {
+        ApolloProfileRemoveHeader(viewControllerObject, tableView);
+        return;
+    }
+
     ApolloProfileHeaderView *header = objc_getAssociatedObject(viewControllerObject, kApolloProfileHeaderViewKey);
     UIView *wrappedHeader = objc_getAssociatedObject(viewControllerObject, kApolloProfileWrappedHeaderKey);
     UIView *originalHeader = objc_getAssociatedObject(viewControllerObject, kApolloProfileOriginalHeaderKey);
 
-    if (!sShowUserAvatars) {
-        if (wrappedHeader && tableView.tableHeaderView == wrappedHeader) {
-            tableView.tableHeaderView = originalHeader;
-            ApolloLog(@"[UserAvatars] Profile header restored native header class=%@ vc=%p", className, viewControllerObject);
-        }
-        objc_setAssociatedObject(viewControllerObject, kApolloProfileHeaderViewKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(viewControllerObject, kApolloProfileWrappedHeaderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(viewControllerObject, kApolloProfileOriginalHeaderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        return;
-    }
+    // The custom profile header (avatar + banner + bio + social links) is the
+    // profile page's OWN content, not one of the inline avatars the
+    // "Show User Profile Pictures" toggle governs. It must stay visible
+    // regardless of that toggle — a profile always shows the stuff in it.
+    // (Inline comment/feed/chat/mod-list avatars stay gated on sShowUserAvatars;
+    // the gate is intentionally absent here so toggling the feature off leaves
+    // profile avatars/banners alone and intact.)
 
     NSString *username = ApolloUsernameFromProfileViewController(viewController);
     if (username.length == 0) {
@@ -1570,6 +1703,7 @@ static void ApolloProfileInstallOrUpdateHeader(id viewControllerObject) {
         objc_setAssociatedObject(viewControllerObject, kApolloProfileOriginalHeaderKey, originalHeader, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     header.hostViewController = viewController;
+    header.socialLinksView.hostViewController = viewController;
     header.username = username;
     [header apollo_updateEditProfileButtonColors];
     __weak UIViewController *weakProfileController = viewController;
@@ -1616,6 +1750,10 @@ static void ApolloProfileInstallOrUpdateHeader(id viewControllerObject) {
         header.avatarImageView.image = ApolloProfilePlaceholderAvatar();
         header.snoovatarImageView.image = nil;
         header.bannerImageView.image = nil;
+        // Forget the previous user's expected image URLs so an in-flight completion
+        // from that user can't match and stamp onto the freshly-repointed header.
+        header.currentProfileImageURL = nil;
+        header.currentBannerURL = nil;
         [header applyProfileInfo:nil fallbackUsername:username];
         ApolloProfileSetSnoovatarMode(header, NO);
         ApolloProfileLoadImages(header, username, NO);
@@ -1652,7 +1790,7 @@ static void ApolloProfileRefreshControllersForUsername(NSString *username) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:128];
         NSUInteger refreshCount = 0;
-        for (UIWindow *window in [UIApplication sharedApplication].windows) {
+        for (UIWindow *window in ApolloAllWindows()) {
             ApolloProfileRefreshViewControllersInTree(window.rootViewController, username, visited, &refreshCount);
         }
         if (username.length > 0 || refreshCount > 0) {
@@ -1721,7 +1859,38 @@ static void ApolloProfileRestoreTabAvatarItem(UITabBarItem *item) {
 
 static UIImage *ApolloProfileTabAvatarImage(UIImage *sourceImage) {
     UIImage *avatar = ApolloCircularAvatarImage(sourceImage, ApolloProfileTabAvatarDiameter);
-    return [avatar imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+    avatar = [avatar imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+    objc_setAssociatedObject(avatar, kApolloProfileTabAvatarImageMarkerKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return avatar;
+}
+
+// YES when this image view is currently displaying one of our rendered profile-tab
+// avatars (as image or highlightedImage). Used to clamp iOS 26's monochromatic tab
+// treatment so the avatar never renders as a grey silhouette.
+static BOOL ApolloProfileImageViewShowsTabAvatar(UIImageView *imageView) {
+    if (![imageView isKindOfClass:[UIImageView class]]) return NO;
+    if ([objc_getAssociatedObject(imageView.image, kApolloProfileTabAvatarImageMarkerKey) boolValue]) return YES;
+    if ([objc_getAssociatedObject(imageView.highlightedImage, kApolloProfileTabAvatarImageMarkerKey) boolValue]) return YES;
+    return NO;
+}
+
+static BOOL ApolloProfileImageIsTabAvatar(UIImage *image) {
+    return [objc_getAssociatedObject(image, kApolloProfileTabAvatarImageMarkerKey) boolValue];
+}
+
+// Force iOS 26's monochromatic tab treatment off on an image view. Called both when
+// the OS toggles the treatment (the setter hooks) and when our avatar image is first
+// assigned (setImage:), so the clamp wins regardless of the order the OS configures
+// the button in.
+static BOOL sApolloClampingTabTreatment = NO;
+static void ApolloProfileForceTabAvatarColour(UIImageView *imageView) {
+    if (sApolloClampingTabTreatment || ![imageView isKindOfClass:[UIImageView class]]) return;
+    sApolloClampingTabTreatment = YES;
+    SEL eSel = NSSelectorFromString(@"_setEnableMonochromaticTreatment:");
+    SEL mSel = NSSelectorFromString(@"_setMonochromaticTreatment:");
+    if ([imageView respondsToSelector:mSel]) ((void (*)(id, SEL, int64_t))objc_msgSend)(imageView, mSel, 0);
+    if ([imageView respondsToSelector:eSel]) ((void (*)(id, SEL, BOOL))objc_msgSend)(imageView, eSel, NO);
+    sApolloClampingTabTreatment = NO;
 }
 
 static UIImage *ApolloProfileTabOriginalRenderingImage(UIImage *image) {
@@ -1771,6 +1940,46 @@ static UITabBarItem *ApolloProfileTabItemFromFloatingItem(id item) {
         if ([linkedItem isKindOfClass:[UITabBarItem class]]) return linkedItem;
     }
     return nil;
+}
+
+// Resolve the UITabBarItem that owns a tab-icon UIImageView by walking up to its
+// host tab-button / item view. Used by the monochromatic clamp so the decision is
+// keyed on the long-lived item (and its apollo_profileTabAvatarIconActive flag),
+// NOT on the avatar UIImage's associated-object marker — which iOS 26 strips when it
+// re-derives the displayed image on trait/selection cycles (issue #407).
+static UITabBarItem *ApolloProfileTabItemForIconImageView(UIImageView *imageView) {
+    if (![imageView isKindOfClass:[UIImageView class]]) return nil;
+    UIView *cur = imageView;
+    for (int depth = 0; cur && depth < 9; depth++, cur = cur.superview) {
+        NSString *cn = NSStringFromClass([cur class]);
+        if ([cn containsString:@"TabButton"]) {
+            // Primary (platter) button: matched against tabBar.items via _tabBarButton.
+            UITabBarItem *item = ApolloProfileTabItemForTabBarButton(cur);
+            if (item) return item;
+            // Secondary buttons (e.g. the selected-content overlay) aren't registered
+            // as the item's _tabBarButton — fall back to the button's own item ivar.
+            Ivar ivar = class_getInstanceVariable([cur class], "_item") ?: class_getInstanceVariable([cur class], "item");
+            if (ivar) {
+                id maybe = object_getIvar(cur, ivar);
+                if ([maybe isKindOfClass:[UITabBarItem class]]) return (UITabBarItem *)maybe;
+            }
+        } else if ([cn containsString:@"FloatingTabBarItemView"]) {
+            if ([cur respondsToSelector:@selector(item)]) {
+                id floatingItem = ((id (*)(id, SEL))objc_msgSend)(cur, @selector(item));
+                UITabBarItem *item = ApolloProfileTabItemFromFloatingItem(floatingItem);
+                if (item) return item;
+            }
+        }
+    }
+    return nil;
+}
+
+// YES when this image view is the profile tab's avatar slot. Marker fast-path first
+// (covers the freshly-stamped image), then the durable structural lookup.
+static BOOL ApolloProfileImageViewIsProfileTabAvatarSlot(UIImageView *imageView) {
+    if (ApolloProfileImageViewShowsTabAvatar(imageView)) return YES;
+    UITabBarItem *item = ApolloProfileTabItemForIconImageView(imageView);
+    return item && [objc_getAssociatedObject(item, ApolloProfileTabAvatarActiveKey()) boolValue];
 }
 
 static void ApolloProfileSyncLegacyTabButtonAvatar(id button) {
@@ -1894,7 +2103,7 @@ static void ApolloProfileApplyTabAvatarInTree(UIViewController *viewController, 
 static void ApolloProfileApplyTabAvatarForVisibleWindows(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:32];
-        for (UIWindow *window in [UIApplication sharedApplication].windows) {
+        for (UIWindow *window in ApolloAllWindows()) {
             ApolloProfileApplyTabAvatarInTree(window.rootViewController, visited);
         }
     });
@@ -1994,11 +2203,86 @@ static void ApolloProfileOpenRedditProfileEditor(void) {
 
 %end
 
+// ---- Batch prefetch (#4/#5): collect comment authors' t2_ fullnames from their cells
+// (as they enter Texture's preload range, ahead of display) and coalesce them into ONE
+// user_data_by_account_ids request — so a thread's avatars are cached in a few batched
+// requests, ahead of scroll, instead of one about.json per author as each cell appears.
+// (Reading the Swift CommentTree / IGListKit objects array directly is not ObjC-safe, so
+// the per-cell `comment` ivar — the same one the avatar binding already reads — is used.)
+static NSMutableSet<NSString *> *sApolloPendingBatchFullNames = nil;
+static BOOL sApolloBatchFireScheduled = NO;
+
+static NSString *ApolloCommentAuthorFullName(id comment) {
+    if (!comment || ![comment respondsToSelector:@selector(authorFullName)]) return nil;
+    @try {
+        NSString *(*msgSend)(id, SEL) = (NSString *(*)(id, SEL))objc_msgSend;
+        NSString *fullName = msgSend(comment, @selector(authorFullName));
+        return [fullName isKindOfClass:[NSString class]] ? fullName : nil;
+    } @catch (__unused NSException *exception) {
+        return nil;
+    }
+}
+
+// Fire whatever fullnames have accumulated as one batched request. Main-thread only.
+static void ApolloInlineAvatarFireBatchNow(void) {
+    sApolloBatchFireScheduled = NO;
+    if (sApolloPendingBatchFullNames.count == 0) return;
+    NSArray<NSString *> *batch = [sApolloPendingBatchFullNames allObjects];
+    [sApolloPendingBatchFullNames removeAllObjects];
+    [[ApolloUserProfileCache sharedCache] batchPrefetchProfilesForFullNames:batch];
+}
+
+// Coalesce authors into batches. A thread open (or fast scroll) floods cells into the
+// preload range at once → fire promptly once a burst accumulates; a slow trickle of
+// cells is gathered over a short window so it still collapses into one request rather
+// than many 1-id calls. Main-thread only, so the statics need no locking.
+static void ApolloInlineAvatarEnqueueFullNameForBatch(NSString *fullName) {
+    if (!sShowUserAvatars) return;
+    if (![fullName isKindOfClass:[NSString class]] || ![fullName hasPrefix:@"t2_"]) return;
+    if (!sApolloPendingBatchFullNames) sApolloPendingBatchFullNames = [NSMutableSet set];
+    [sApolloPendingBatchFullNames addObject:fullName];
+    if (sApolloPendingBatchFullNames.count >= 25) {
+        ApolloInlineAvatarFireBatchNow();
+        return;
+    }
+    if (sApolloBatchFireScheduled) return;
+    sApolloBatchFireScheduled = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        ApolloInlineAvatarFireBatchNow();
+    });
+}
+
+// Read the comment cell's own RDKComment (the same safe ivar path the avatar binding
+// uses) to get the author's t2_ fullname, and enqueue it for the batch — unless we
+// already have that user's avatar cached (memory is hydrated from disk at launch, so
+// this is a cheap check that stops return visits from re-batching known users).
+static void ApolloInlineAvatarBatchEnqueueFromCommentCell(id cell) {
+    if (!cell) return;
+    id comment = ApolloObjectIvarValue(cell, @"comment");
+    if (!comment) return;
+    NSString *fullName = ApolloCommentAuthorFullName(comment);
+    if (fullName.length == 0) return;
+    NSString *username = ApolloUsernameFromModelObject(comment);
+    if (username.length > 0 && [[ApolloUserProfileCache sharedCache] cachedInfoForUsername:username].iconURL) return;
+    ApolloInlineAvatarEnqueueFullNameForBatch(fullName);
+}
+
 %hook _TtC6Apollo15CommentCellNode
+
+// didEnterPreloadState fires while a cell is still in Texture's preload range (AHEAD of
+// display), so enqueuing the author here lets the coalesced batch cache their avatar
+// before the cell actually appears — turning ~N per-author about.json calls into a
+// handful of batched requests, and making the avatar already-present on scroll.
+- (void)didEnterPreloadState {
+    %orig;
+    if (!sShowUserAvatars) return;
+    ApolloInlineAvatarBatchEnqueueFromCommentCell(self);
+}
 
 - (void)didLoad {
     %orig;
     if (!sShowUserAvatars) return;
+    ApolloInlineAvatarBatchEnqueueFromCommentCell(self);
     ApolloApplyAvatarToCellWithDiameter(self, ApolloUsernameFromCell(self, @"comment"), ApolloCommentInlineAvatarDiameter);
 }
 
@@ -2034,6 +2318,158 @@ static void ApolloProfileOpenRedditProfileEditor(void) {
 
 %end
 
+// Share as Image renders the post into a fresh SaveAsImagePreviewNode instead
+// of snapshotting the live cell, so the exported image loses the inline author
+// avatar (issue #381). Comments inside the preview are real CommentCellNode
+// instances (hooked above) and already get theirs; only the post's info line
+// needs help. The preview's `link` ivar carries the post author, and the
+// shared text-node machinery handles binding/fetch/late re-apply.
+//
+// The preview node's view is never loaded (Apollo rasterizes the node tree),
+// so didLoad never fires — hook layoutSpecThatFits: like
+// ApolloShareAsImageGallery does. It runs on Texture's background layout
+// threads and fires repeatedly; gate to one main-queue application per node.
+static BOOL ApolloAvatarIvarBool(id obj, const char *name) {
+    if (!obj || !name) return NO;
+    Ivar ivar = class_getInstanceVariable(object_getClass(obj), name);
+    if (!ivar) return NO;
+    const uint8_t *base = (const uint8_t *)(__bridge const void *)obj;
+    return base[ivar_getOffset(ivar)] != 0;
+}
+
+// ASSizeRange { CGSize min; CGSize max; } — same -layoutSpecThatFits: ABI
+// name the rest of the repo uses (see ApolloShareAsImageGallery.xm).
+struct CDStruct_90e057aa { CGSize min; CGSize max; };
+
+static char kApolloAvatarSharePreviewAppliedKey;
+
+// Apollo builds the preview's PostInfoNode with showSubredditIcon=NO — the
+// subredditIconNode is never created, so there is nothing to unhide. Mirror
+// the native icon by inserting it into the byline text in front of the
+// subreddit name, the same way the author avatar rides the username.
+static void ApolloAvatarInsertSubredditIconIntoPostInfo(id postInfo, NSString *subreddit, UIImage *iconImage) {
+    if (!postInfo || subreddit.length == 0 || !iconImage) return;
+    NSMutableArray *textNodes = [NSMutableArray array];
+    ApolloCollectTextNodes(postInfo, [NSMutableSet set], textNodes, 0);
+    for (id textNode in textNodes) {
+        NSAttributedString *text = ApolloAttributedTextForNode(textNode);
+        if (text.length == 0) continue;
+        // Case-insensitive: the model carries the lowercased subreddit name
+        // (e.g. "benfica") while the byline renders the display case
+        // ("Benfica").
+        NSRange range = [text.string rangeOfString:subreddit options:NSCaseInsensitiveSearch];
+        if (range.location == NSNotFound) continue;
+
+        // Already iconed (attachment + spacer directly before the name)?
+        if (range.location >= 2 &&
+            [text attribute:kApolloAvatarAttachmentMarkerAttributeName atIndex:range.location - 2 effectiveRange:nil]) {
+            return;
+        }
+
+        // Same font-scaled sizing as the author avatar attachment, so both
+        // icons in the byline come out the same size.
+        NSUInteger attrIndex = MIN(range.location, text.length - 1);
+        UIFont *font = [text attribute:NSFontAttributeName atIndex:attrIndex effectiveRange:nil];
+        if (![font isKindOfClass:[UIFont class]]) font = [UIFont systemFontOfSize:13.0];
+        CGFloat capHeight = font.capHeight > 0.0 ? font.capHeight : (font.pointSize * 0.7);
+        CGFloat lineHeight = font.lineHeight > 0.0 ? font.lineHeight : (font.pointSize * 1.2);
+        CGFloat diameter = MIN(ApolloFeedInlineAvatarDiameter,
+                               MIN(floor(lineHeight * 1.4), MAX(20.0, floor(capHeight * 2.25))));
+
+        NSTextAttachment *attachment = [[NSTextAttachment alloc] init];
+        attachment.image = ApolloCircularAvatarImage(iconImage, diameter);
+        attachment.bounds = CGRectMake(0.0, (capHeight - diameter) / 2.0, diameter, diameter);
+
+        NSDictionary *baseAttributes = [text attributesAtIndex:attrIndex effectiveRange:nil] ?: @{};
+        NSMutableAttributedString *attachmentString = [[NSMutableAttributedString alloc] initWithAttributedString:[NSAttributedString attributedStringWithAttachment:attachment]];
+        [attachmentString addAttribute:kApolloAvatarAttachmentMarkerAttributeName value:@YES range:NSMakeRange(0, attachmentString.length)];
+
+        NSMutableAttributedString *result = [[NSMutableAttributedString alloc] initWithAttributedString:text];
+        [result insertAttributedString:[[NSAttributedString alloc] initWithString:@" " attributes:baseAttributes] atIndex:range.location];
+        [result insertAttributedString:attachmentString atIndex:range.location];
+        ApolloSetAttributedTextForNode(textNode, result);
+        ApolloNodeSetNeedsLayout(textNode);
+        ApolloLog(@"[UserAvatars] Share preview subreddit icon applied r/%@", subreddit);
+        return;
+    }
+}
+
+// Apollo's own "show subreddit icons on posts" setting — the share preview
+// should mirror the live byline, which follows this, not the tweak's user
+// avatar setting. Missing key = Apollo's default (icons on).
+static BOOL ApolloNativeShowSubredditIconsForPosts(void) {
+    id value = [[NSUserDefaults standardUserDefaults] objectForKey:@"ShowSubredditIconsForPosts"];
+    return value ? [value boolValue] : YES;
+}
+
+static void ApolloAvatarApplySubredditIconToSharePreview(id postInfo, NSString *subreddit) {
+    if (!postInfo || subreddit.length == 0) return;
+    __weak id weakPostInfo = postInfo;
+    void (^applyInfo)(ApolloSubredditInfo *) = ^(ApolloSubredditInfo *info) {
+        if (!info.iconURL) {
+            ApolloLog(@"[UserAvatars] Share preview subreddit icon unavailable r/%@ (no iconURL)", subreddit);
+            return;
+        }
+        [[ApolloUserProfileCache sharedCache] requestImageForURL:info.iconURL completion:^(UIImage *image) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                ApolloAvatarInsertSubredditIconIntoPostInfo(weakPostInfo, subreddit, image);
+            });
+        }];
+    };
+    ApolloSubredditInfoCache *cache = [ApolloSubredditInfoCache sharedCache];
+    ApolloSubredditInfo *cached = [cache cachedInfoForSubreddit:subreddit];
+    if (cached) {
+        applyInfo(cached);
+    } else {
+        [cache requestInfoForSubreddit:subreddit completion:^(ApolloSubredditInfo *info) {
+            applyInfo(info);
+        }];
+    }
+}
+
+%hook _TtC6Apollo22SaveAsImagePreviewNode
+
+- (id)layoutSpecThatFits:(struct CDStruct_90e057aa)constrainedSize {
+    if ((sShowUserAvatars || ApolloNativeShowSubredditIconsForPosts()) &&
+        ![objc_getAssociatedObject(self, &kApolloAvatarSharePreviewAppliedKey) boolValue]) {
+        // Synchronous flip: layout passes come in bursts on multiple threads.
+        objc_setAssociatedObject(self, &kApolloAvatarSharePreviewAppliedKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        __weak id weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id node = weakSelf;
+            if (!node) return;
+            BOOL includePostDetails = ApolloAvatarIvarBool(node, "includePostDetails");
+            BOOL hideUsernames = ApolloAvatarIvarBool(node, "hideUsernames");
+            BOOL hideSubreddit = ApolloAvatarIvarBool(node, "hideSubreddit");
+            NSString *username = ApolloUsernameFromCell(node, @"link");
+            ApolloLog(@"[UserAvatars] Share preview layout details=%d hideUsernames=%d hideSubreddit=%d username=%@ node=%p",
+                      includePostDetails, hideUsernames, hideSubreddit, username, node);
+            // No author line without post details; no avatar when usernames
+            // are hidden — the rendered text won't contain the author.
+            if (!includePostDetails) return;
+            // Each icon follows its own setting, mirroring the live byline:
+            // author avatar = the tweak's user avatars option, subreddit
+            // icon = Apollo's native subreddit icons option.
+            if (sShowUserAvatars && !hideUsernames) {
+                ApolloApplyAvatarToCellWithDiameter(node, username, ApolloFeedInlineAvatarDiameter);
+            }
+            if (ApolloNativeShowSubredditIconsForPosts() && !hideSubreddit) {
+                id link = ApolloObjectIvarValue(node, @"link");
+                NSString *subreddit = nil;
+                @try {
+                    if ([link respondsToSelector:@selector(subreddit)]) subreddit = [link performSelector:@selector(subreddit)];
+                } @catch (__unused NSException *e) {}
+                if ([subreddit isKindOfClass:[NSString class]]) {
+                    ApolloAvatarApplySubredditIconToSharePreview(ApolloObjectIvarValue(node, @"postInfoNode"), subreddit);
+                }
+            }
+        });
+    }
+    return %orig;
+}
+
+%end
+
 %hook _TtC6Apollo21ProfileViewController
 
 - (void)viewDidLoad {
@@ -2065,13 +2501,15 @@ static void ApolloProfileOpenRedditProfileEditor(void) {
 
 - (void)refreshControlActivatedWithSender:(id)sender {
     %orig;
-    if (!sShowUserAvatars) return;
+    // Profile avatar/banner always refresh on pull-to-refresh, independent of the
+    // inline-avatars toggle (the profile header is always shown — see above).
     NSString *username = ApolloUsernameFromProfileViewController((UIViewController *)self);
     if (username.length == 0) return;
     ApolloProfileHeaderView *header = objc_getAssociatedObject(self, kApolloProfileHeaderViewKey);
     if (!header) return;
     ApolloLog(@"[UserAvatars] Pull-to-refresh forcing avatar/banner refetch for u/%@", username);
     ApolloProfileLoadImages(header, username, YES);
+    [header.socialLinksView refresh];
 }
 
 - (void)redditAccountChangedWithNotification:(id)notification {
@@ -2173,6 +2611,63 @@ static void ApolloProfileOpenRedditProfileEditor(void) {
 
 %end
 
+// iOS 26's tab bar applies a "monochromatic treatment" to the unselected tab icons
+// (grey silhouette). On the floating/platter tab bar the profile avatar is hosted by
+// plain UIImageViews under _UITabButton, which none of the tab-button-specific hooks
+// above reach — so the avatar would render as a grey blob whenever the OS's coloured
+// "selected content" overlay stops covering it (e.g. after returning from a DM chat
+// room — issue #407). Detect the profile slot structurally (image view -> _UITabButton
+// -> UITabBarItem -> apollo_profileTabAvatarIconActive), which survives the image
+// re-derivation that strips our UIImage marker, then clamp the treatment off and
+// restore our coloured avatar if iOS baked the grey into the derived pixels.
+%hook UIImageView
+
+- (void)setImage:(UIImage *)image {
+    %orig(image);
+    if (sApolloClampingTabTreatment || sApolloProfileTabSyncingView) return;   // ignore our own writes
+    if (!ApolloProfileImageViewIsProfileTabAvatarSlot(self)) return;
+    // iOS 26 sometimes hands the slot a derived copy of our avatar with the
+    // monochrome treatment baked into the pixels (marker stripped). Clamping the
+    // treatment flag can't recolour baked-in grey, so restore our stored colour
+    // avatar whenever the installed image isn't ours.
+    if (!ApolloProfileImageIsTabAvatar(self.image)) {
+        UITabBarItem *item = ApolloProfileTabItemForIconImageView(self);
+        UIImage *avatar = ApolloProfileTabAppliedAvatarForItem(item);
+        if (avatar) {
+            sApolloProfileTabSyncingView = YES;
+            self.image = avatar;
+            self.highlightedImage = avatar;
+            sApolloProfileTabSyncingView = NO;
+        }
+    }
+    ApolloProfileForceTabAvatarColour(self);
+}
+
+- (void)setHighlightedImage:(UIImage *)image {
+    %orig(image);
+    if (!sApolloClampingTabTreatment && ApolloProfileImageViewIsProfileTabAvatarSlot(self)) {
+        ApolloProfileForceTabAvatarColour(self);
+    }
+}
+
+- (void)_setEnableMonochromaticTreatment:(BOOL)enable {
+    if (enable && !sApolloClampingTabTreatment && ApolloProfileImageViewIsProfileTabAvatarSlot(self)) {
+        %orig(NO);
+        return;
+    }
+    %orig(enable);
+}
+
+- (void)_setMonochromaticTreatment:(int64_t)treatment {
+    if (treatment != 0 && !sApolloClampingTabTreatment && ApolloProfileImageViewIsProfileTabAvatarSlot(self)) {
+        %orig(0);
+        return;
+    }
+    %orig(treatment);
+}
+
+%end
+
 %hook _UIFloatingTabBarItemView
 
 - (void)reloadItemView {
@@ -2197,15 +2692,38 @@ static void ApolloProfileOpenRedditProfileEditor(void) {
 
 %end
 
+// The first time an account's username appears with no per-account credential
+// override yet (a brand new sign-in, or an existing account's first launch
+// under a build with this feature), pin it to whatever Reddit API client is
+// the CURRENT default. That "session was issued under this key" snapshot is
+// exactly what makes per-account credentials useful: if the user later
+// changes the global default key (e.g. to onboard a different account), this
+// account's refresh keeps using the key it actually has a valid
+// refresh_token for — Reddit binds refresh tokens to the issuing client_id,
+// so naively following a changed global default 400s with invalid_grant
+// (see the AFHTTPRequestSerializer hook in Tweak.xm for the other half of
+// this fix). Never overwrites an existing override — only fills the gap once.
+static void ApolloPinAccountToCurrentDefaultCredentialsIfNeeded(id currentUser) {
+    NSString *username = nil;
+    @try { username = [currentUser valueForKey:@"username"]; }
+    @catch (__unused NSException *e) { return; }
+    if (![username isKindOfClass:[NSString class]] || username.length == 0) return;
+    if (ApolloAccountCredentialsFor(username) != nil) return;
+
+    ApolloAccountCredentialsSet(username, sRedditClientId, sRedditClientSecret, sRedirectURI);
+}
+
 %hook RDKClient
 
 - (void)setCurrentUser:(id)currentUser {
     %orig(currentUser);
+    ApolloPinAccountToCurrentDefaultCredentialsIfNeeded(currentUser);
     ApolloProfileScheduleAccountChangeTabAvatarRefresh(@"RDKClient currentUser");
 }
 
 - (void)updateCurrentUserWithNewUser:(id)newUser {
     %orig(newUser);
+    ApolloPinAccountToCurrentDefaultCredentialsIfNeeded(newUser);
     ApolloProfileScheduleAccountChangeTabAvatarRefresh(@"RDKClient user update");
 }
 

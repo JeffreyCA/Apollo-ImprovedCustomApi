@@ -1,5 +1,6 @@
 #import "ApolloRedditMediaUpload.h"
 #import "ApolloCommon.h"
+#import "ApolloWebJSON.h"
 
 #import <objc/runtime.h>
 
@@ -403,6 +404,84 @@ NSData *ApolloSyntheticImgurUploadResponseData(NSURL *mediaURL, NSString *mimeTy
     return [NSJSONSerialization dataWithJSONObject:syntheticResponse options:0 error:nil];
 }
 
+// Shared second half of a Reddit media upload: POST the file (plus the lease's
+// returned form fields) to the S3 endpoint the lease handed back, then parse the
+// <Location> URL out of the S3 XML response and report it. assetID/webSocketURL
+// are passed straight through to `completion` — the oauth lease supplies them; the
+// keyless cookie lease (image_upload_s3.json) has none and passes nil. They're
+// never needed to perform the upload itself, so nil is safe.
+static void ApolloPerformRedditMediaS3Upload(NSURL *actionURL,
+                                             NSDictionary<NSString *, NSString *> *fields,
+                                             NSData *mediaData,
+                                             NSURL *mediaFileURL,
+                                             NSString *filename,
+                                             NSString *mimeType,
+                                             NSString *assetID,
+                                             NSString *webSocketURL,
+                                             ApolloRedditMediaUploadOperation *operation,
+                                             ApolloRedditMediaUploadCompletion completion) {
+    if (operation.cancelled) {
+        completion(nil, nil, nil, ApolloRedditUploadCancelledError());
+        return;
+    }
+
+    NSString *s3Boundary = ApolloBoundary();
+    NSMutableURLRequest *s3Request = [NSMutableURLRequest requestWithURL:actionURL];
+    s3Request.HTTPMethod = @"POST";
+    [s3Request setValue:[@"multipart/form-data; boundary=" stringByAppendingString:s3Boundary] forHTTPHeaderField:@"Content-Type"];
+    NSError *bodyFileError = nil;
+    unsigned long long s3BodyLength = 0;
+    NSURL *s3BodyURL = ApolloMultipartBodyFileForFields(fields, mediaData, mediaFileURL, filename, mimeType, s3Boundary, &s3BodyLength, &bodyFileError);
+    if (!s3BodyURL) {
+        completion(nil, assetID, webSocketURL, bodyFileError ?: ApolloRedditUploadError(47, @"Could not prepare Reddit media storage upload"));
+        return;
+    }
+    [s3Request setValue:[NSString stringWithFormat:@"%llu", s3BodyLength] forHTTPHeaderField:@"Content-Length"];
+
+    ApolloLog(@"[RedditUpload] Uploading %@ to Reddit media storage", filename);
+
+    __block NSURLSessionUploadTask *s3Task = nil;
+    s3Task = [ApolloRedditMediaUploadProgressSession() uploadTaskWithRequest:s3Request fromFile:s3BodyURL completionHandler:^(NSData *s3Data, NSURLResponse *s3Response, NSError *s3Error) {
+        [[NSFileManager defaultManager] removeItemAtURL:s3BodyURL error:nil];
+        objc_setAssociatedObject(s3Task, &kApolloRedditMediaUploadProgressOperationKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        [operation apolloClearStorageTask:s3Task];
+        if (operation.cancelled) {
+            completion(nil, nil, nil, ApolloRedditUploadCancelledError());
+            return;
+        }
+        if (s3Error) {
+            completion(nil, assetID, webSocketURL, s3Error);
+            return;
+        }
+
+        NSInteger s3StatusCode = [(NSHTTPURLResponse *)s3Response statusCode];
+        if (![s3Response isKindOfClass:[NSHTTPURLResponse class]] || s3StatusCode < 200 || s3StatusCode >= 300 || s3Data.length == 0) {
+            completion(nil, assetID, webSocketURL, ApolloRedditUploadError(s3StatusCode ?: 30, @"Reddit media storage upload failed"));
+            return;
+        }
+
+        NSError *xmlError = nil;
+        NSURL *imageURL = ApolloLocationURLFromS3Response(s3Data, &xmlError);
+        if (!imageURL) {
+            completion(nil, assetID, webSocketURL, xmlError);
+            return;
+        }
+
+        ApolloLog(@"[RedditUpload] Uploaded media: %@ assetID=%@", imageURL.absoluteString, assetID ?: @"(none)");
+        ApolloRedditMediaUploadProgress handler = operation.progressHandler;
+        if (handler) handler(1.0, (int64_t)s3BodyLength, (int64_t)s3BodyLength);
+        completion(imageURL, assetID, webSocketURL, nil);
+    }];
+    objc_setAssociatedObject(s3Task, &kApolloRedditMediaUploadProgressOperationKey, operation, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (![operation apolloSetStorageTask:s3Task]) {
+        objc_setAssociatedObject(s3Task, &kApolloRedditMediaUploadProgressOperationKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        [[NSFileManager defaultManager] removeItemAtURL:s3BodyURL error:nil];
+        completion(nil, nil, nil, ApolloRedditUploadCancelledError());
+        return;
+    }
+    [s3Task resume];
+}
+
 static void ApolloRequestRedditMediaAsset(NSData *mediaData,
                                           NSURL *mediaFileURL,
                                           NSString *filename,
@@ -489,66 +568,130 @@ static void ApolloRequestRedditMediaAsset(NSData *mediaData,
             return;
         }
 
+        ApolloPerformRedditMediaS3Upload(actionURL, fields, mediaData, mediaFileURL, filename, mimeType, assetID, webSocketURL, operation, completion);
+    }];
+    if (![operation apolloSetAssetTask:task]) {
+        completion(nil, nil, nil, ApolloRedditUploadCancelledError());
+        return;
+    }
+    [task resume];
+}
+
+// Percent-encode a value for an application/x-www-form-urlencoded body. Encodes
+// everything outside the RFC 3986 unreserved set (so "/" in a MIME type and any
+// odd filename characters are escaped).
+static NSString *ApolloFormURLEncode(NSString *value) {
+    NSMutableCharacterSet *allowed = [NSMutableCharacterSet alphanumericCharacterSet];
+    [allowed addCharactersInString:@"-._~"];
+    return [value stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: @"";
+}
+
+// Keyless lease variant: instead of the oauth media/asset.json lease (which needs
+// a real Bearer and 403s for cookie auth), POST the old-reddit web lease
+// www.reddit.com/api/image_upload_s3.json with cookie + X-Modhash. This is
+// Hydra's proven keyless upload path. Reddit returns the FLAT {action, fields}
+// S3-presigned shape (no asset/asset_id/websocket_url), so the completion's
+// assetID/webSocketURL are always nil — the S3 <Location> URL is the whole
+// payload. Image only (the endpoint doesn't take video).
+static void ApolloRequestRedditMediaAssetViaCookie(NSData *mediaData,
+                                                   NSURL *mediaFileURL,
+                                                   NSString *filename,
+                                                   NSString *mimeType,
+                                                   NSString *cookieHeader,
+                                                   NSString *modhash,
+                                                   NSString *userAgent,
+                                                   ApolloRedditMediaUploadOperation *operation,
+                                                   ApolloRedditMediaUploadCompletion completion) {
+    if (operation.cancelled) {
+        completion(nil, nil, nil, ApolloRedditUploadCancelledError());
+        return;
+    }
+
+    // Probe fragment marks the request so the Web JSON chokepoint leaves it alone —
+    // we set Cookie ourselves and re-pointing/counting it would be circular. The
+    // fragment is stripped by NSURLSession before transmission; Reddit never sees it.
+    NSURL *url = ApolloWebJSONProbeURL([NSURL URLWithString:@"https://www.reddit.com/api/image_upload_s3.json"]);
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+    request.HTTPMethod = @"POST";
+    [request setValue:cookieHeader forHTTPHeaderField:@"Cookie"];
+    if (modhash.length > 0) [request setValue:modhash forHTTPHeaderField:@"X-Modhash"];
+    [request setValue:userAgent forHTTPHeaderField:@"User-Agent"];
+    [request setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
+    request.HTTPShouldHandleCookies = NO;
+    NSString *body = [NSString stringWithFormat:@"filepath=%@&mimetype=%@&raw_json=1",
+                      ApolloFormURLEncode(filename), ApolloFormURLEncode(mimeType)];
+    request.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
+
+    unsigned long long mediaLength = mediaFileURL ? ApolloFileSizeForURL(mediaFileURL) : (unsigned long long)mediaData.length;
+    ApolloLog(@"[RedditUpload] Requesting keyless web media lease for %@ (%@, %@ bytes)", filename, mimeType, @(mediaLength));
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (operation.cancelled) {
             completion(nil, nil, nil, ApolloRedditUploadCancelledError());
             return;
         }
-
-        NSString *s3Boundary = ApolloBoundary();
-        NSMutableURLRequest *s3Request = [NSMutableURLRequest requestWithURL:actionURL];
-        s3Request.HTTPMethod = @"POST";
-        [s3Request setValue:[@"multipart/form-data; boundary=" stringByAppendingString:s3Boundary] forHTTPHeaderField:@"Content-Type"];
-        NSError *bodyFileError = nil;
-        unsigned long long s3BodyLength = 0;
-        NSURL *s3BodyURL = ApolloMultipartBodyFileForFields(fields, mediaData, mediaFileURL, filename, mimeType, s3Boundary, &s3BodyLength, &bodyFileError);
-        if (!s3BodyURL) {
-            completion(nil, assetID, webSocketURL, bodyFileError ?: ApolloRedditUploadError(47, @"Could not prepare Reddit media storage upload"));
+        if (error) {
+            completion(nil, nil, nil, error);
             return;
         }
-        [s3Request setValue:[NSString stringWithFormat:@"%llu", s3BodyLength] forHTTPHeaderField:@"Content-Length"];
 
-        ApolloLog(@"[RedditUpload] Uploading %@ to Reddit media storage", filename);
+        NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        NSInteger statusCode = http.statusCode;
 
-        __block NSURLSessionUploadTask *s3Task = nil;
-        s3Task = [ApolloRedditMediaUploadProgressSession() uploadTaskWithRequest:s3Request fromFile:s3BodyURL completionHandler:^(NSData *s3Data, NSURLResponse *s3Response, NSError *s3Error) {
-            [[NSFileManager defaultManager] removeItemAtURL:s3BodyURL error:nil];
-            objc_setAssociatedObject(s3Task, &kApolloRedditMediaUploadProgressOperationKey, nil, OBJC_ASSOCIATION_ASSIGN);
-            [operation apolloClearStorageTask:s3Task];
-            if (operation.cancelled) {
-                completion(nil, nil, nil, ApolloRedditUploadCancelledError());
-                return;
-            }
-            if (s3Error) {
-                completion(nil, assetID, webSocketURL, s3Error);
-                return;
-            }
-
-            NSInteger s3StatusCode = [(NSHTTPURLResponse *)s3Response statusCode];
-            if (![s3Response isKindOfClass:[NSHTTPURLResponse class]] || s3StatusCode < 200 || s3StatusCode >= 300 || s3Data.length == 0) {
-                completion(nil, assetID, webSocketURL, ApolloRedditUploadError(s3StatusCode ?: 30, @"Reddit media storage upload failed"));
-                return;
-            }
-
-            NSError *xmlError = nil;
-            NSURL *imageURL = ApolloLocationURLFromS3Response(s3Data, &xmlError);
-            if (!imageURL) {
-                completion(nil, assetID, webSocketURL, xmlError);
-                return;
-            }
-
-            ApolloLog(@"[RedditUpload] Uploaded media: %@ assetID=%@", imageURL.absoluteString, assetID);
-            ApolloRedditMediaUploadProgress handler = operation.progressHandler;
-            if (handler) handler(1.0, (int64_t)s3BodyLength, (int64_t)s3BodyLength);
-            completion(imageURL, assetID, webSocketURL, nil);
-        }];
-        objc_setAssociatedObject(s3Task, &kApolloRedditMediaUploadProgressOperationKey, operation, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        if (![operation apolloSetStorageTask:s3Task]) {
-            objc_setAssociatedObject(s3Task, &kApolloRedditMediaUploadProgressOperationKey, nil, OBJC_ASSOCIATION_ASSIGN);
-            [[NSFileManager defaultManager] removeItemAtURL:s3BodyURL error:nil];
-            completion(nil, nil, nil, ApolloRedditUploadCancelledError());
+        // Expired/revoked cookie → Reddit serves its 403 text/html block page.
+        // Surface the same "session expired" prompt the chokepoint observer would
+        // (this request carries the probe header, so it bypasses that observer).
+        NSString *contentType = [[http.allHeaderFields[@"Content-Type"] description] lowercaseString] ?: @"";
+        if (statusCode == 403 && [contentType containsString:@"text/html"]) {
+            ApolloLog(@"[RedditUpload] Keyless web media lease got a 403 HTML block page — session likely expired");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[NSNotificationCenter defaultCenter] postNotificationName:ApolloWebJSONSessionExpiredNotification object:nil];
+            });
+            completion(nil, nil, nil, ApolloRedditUploadError(403, @"Reddit web session expired — sign in again"));
             return;
         }
-        [s3Task resume];
+
+        if (!http || statusCode < 200 || statusCode >= 300 || data.length == 0) {
+            completion(nil, nil, nil, ApolloRedditUploadError(statusCode ?: 20, @"Reddit did not provide upload fields"));
+            return;
+        }
+
+        NSError *jsonError = nil;
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
+        if (![json isKindOfClass:[NSDictionary class]]) {
+            completion(nil, nil, nil, jsonError ?: ApolloRedditUploadError(21, @"Reddit upload field response was not JSON"));
+            return;
+        }
+
+        // Flat shape: action + fields live at the top level (no args/asset wrapper).
+        NSString *action = [json[@"action"] isKindOfClass:[NSString class]] ? json[@"action"] : nil;
+        NSArray *fieldArray = [json[@"fields"] isKindOfClass:[NSArray class]] ? json[@"fields"] : nil;
+        if (action.length == 0 || fieldArray.count == 0) {
+            completion(nil, nil, nil, ApolloRedditUploadError(22, @"Reddit upload field response was incomplete"));
+            return;
+        }
+
+        NSMutableDictionary<NSString *, NSString *> *fields = [NSMutableDictionary dictionary];
+        for (id item in fieldArray) {
+            if (![item isKindOfClass:[NSDictionary class]]) continue;
+            NSString *name = [item[@"name"] isKindOfClass:[NSString class]] ? item[@"name"] : nil;
+            NSString *value = [item[@"value"] isKindOfClass:[NSString class]] ? item[@"value"] : nil;
+            if (name.length > 0 && value) fields[name] = value;
+        }
+        if (fields.count == 0) {
+            completion(nil, nil, nil, ApolloRedditUploadError(23, @"Reddit upload field response had no usable fields"));
+            return;
+        }
+
+        NSString *actionURLString = [action hasPrefix:@"//"] ? [@"https:" stringByAppendingString:action] : action;
+        NSURL *actionURL = [NSURL URLWithString:actionURLString];
+        if (!actionURL) {
+            completion(nil, nil, nil, ApolloRedditUploadError(24, @"Reddit upload field response had an invalid upload URL"));
+            return;
+        }
+
+        // No asset_id/websocket from the web lease — pass nil for both.
+        ApolloPerformRedditMediaS3Upload(actionURL, fields, mediaData, mediaFileURL, filename, mimeType, nil, nil, operation, completion);
     }];
     if (![operation apolloSetAssetTask:task]) {
         completion(nil, nil, nil, ApolloRedditUploadCancelledError());
@@ -609,6 +752,63 @@ ApolloRedditMediaUploadOperation *ApolloUploadMediaFileToRedditCancellable(NSURL
     NSString *resolvedUserAgent = userAgent.length > 0 ? userAgent : @"Apollo-Reborn/RedditMediaUpload";
 
     ApolloRequestRedditMediaAsset(nil, mediaFileURL, resolvedFilename, resolvedMIMEType, bearerToken, resolvedUserAgent, operation, safeCompletion);
+    return operation;
+}
+
+ApolloRedditMediaUploadOperation *ApolloUploadMediaDataToRedditViaCookieCancellable(NSData *mediaData,
+                                                                                    NSString *filename,
+                                                                                    NSString *mimeType,
+                                                                                    NSString *cookieHeader,
+                                                                                    NSString *modhash,
+                                                                                    NSString *userAgent,
+                                                                                    ApolloRedditMediaUploadProgress progressHandler,
+                                                                                    ApolloRedditMediaUploadCompletion completion) {
+    ApolloRedditMediaUploadOperation *operation = [ApolloRedditMediaUploadOperation new];
+    operation.progressHandler = progressHandler;
+    ApolloRedditMediaUploadCompletion safeCompletion = completion ?: ^(__unused NSURL *mediaURL, __unused NSString *assetID, __unused NSString *webSocketURL, __unused NSError *error) {};
+    if (mediaData.length == 0) {
+        safeCompletion(nil, nil, nil, ApolloRedditUploadError(1, @"Media data was empty"));
+        return operation;
+    }
+    if (cookieHeader.length == 0) {
+        safeCompletion(nil, nil, nil, ApolloRedditUploadError(2, @"No Reddit web session cookie available"));
+        return operation;
+    }
+
+    NSString *resolvedMIMEType = ApolloMediaMIMETypeForFilename(filename, mimeType);
+    NSString *resolvedFilename = ApolloNormalizedFilename(filename, resolvedMIMEType);
+    NSString *resolvedUserAgent = userAgent.length > 0 ? userAgent : @"Apollo-Reborn/RedditMediaUpload";
+
+    ApolloRequestRedditMediaAssetViaCookie(mediaData, nil, resolvedFilename, resolvedMIMEType, cookieHeader, modhash, resolvedUserAgent, operation, safeCompletion);
+    return operation;
+}
+
+ApolloRedditMediaUploadOperation *ApolloUploadMediaFileToRedditViaCookieCancellable(NSURL *mediaFileURL,
+                                                                                    NSString *filename,
+                                                                                    NSString *mimeType,
+                                                                                    NSString *cookieHeader,
+                                                                                    NSString *modhash,
+                                                                                    NSString *userAgent,
+                                                                                    ApolloRedditMediaUploadProgress progressHandler,
+                                                                                    ApolloRedditMediaUploadCompletion completion) {
+    ApolloRedditMediaUploadOperation *operation = [ApolloRedditMediaUploadOperation new];
+    operation.progressHandler = progressHandler;
+    ApolloRedditMediaUploadCompletion safeCompletion = completion ?: ^(__unused NSURL *mediaURL, __unused NSString *assetID, __unused NSString *webSocketURL, __unused NSError *error) {};
+    unsigned long long fileSize = ApolloFileSizeForURL(mediaFileURL);
+    if (![mediaFileURL isKindOfClass:[NSURL class]] || !mediaFileURL.isFileURL || fileSize == 0) {
+        safeCompletion(nil, nil, nil, ApolloRedditUploadError(1, @"Media file was empty"));
+        return operation;
+    }
+    if (cookieHeader.length == 0) {
+        safeCompletion(nil, nil, nil, ApolloRedditUploadError(2, @"No Reddit web session cookie available"));
+        return operation;
+    }
+
+    NSString *resolvedMIMEType = ApolloMediaMIMETypeForFilename(filename ?: mediaFileURL.lastPathComponent, mimeType);
+    NSString *resolvedFilename = ApolloNormalizedFilename(filename.length > 0 ? filename : mediaFileURL.lastPathComponent, resolvedMIMEType);
+    NSString *resolvedUserAgent = userAgent.length > 0 ? userAgent : @"Apollo-Reborn/RedditMediaUpload";
+
+    ApolloRequestRedditMediaAssetViaCookie(nil, mediaFileURL, resolvedFilename, resolvedMIMEType, cookieHeader, modhash, resolvedUserAgent, operation, safeCompletion);
     return operation;
 }
 

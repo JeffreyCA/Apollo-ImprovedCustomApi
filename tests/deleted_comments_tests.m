@@ -2,6 +2,8 @@
 
 #import "ApolloDeletedCommentsData.h"
 
+extern BOOL sTapToRevealDeletedComments;
+
 static id MutableJSON(id object) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:object options:0 error:nil];
     return [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:nil];
@@ -49,6 +51,28 @@ static NSMutableDictionary *VisibleDeletedRoot(void) {
     });
 }
 
+static NSMutableDictionary *VisibleRemovedRoot(void) {
+    return MutableJSON(@{
+        @"kind": @"Listing",
+        @"data": @{
+            @"children": @[
+                @{
+                    @"kind": @"t1",
+                    @"data": @{
+                        @"id": @"c2",
+                        @"name": @"t1_c2",
+                        @"body": @"[removed]",
+                        @"body_html": @"&lt;div class=\"md\"&gt;&lt;p&gt;[removed]&lt;/p&gt;&lt;/div&gt;",
+                        @"author": @"[deleted]",
+                        @"score": @0,
+                        @"replies": @"",
+                    },
+                },
+            ],
+        },
+    });
+}
+
 static NSMutableDictionary *MoreRoot(NSArray *children, NSNumber *count) {
     return MutableJSON(@{
         @"kind": @"Listing",
@@ -79,8 +103,9 @@ static void TestURLExtraction(void) {
 static void TestDeletedBodyPolicy(void) {
     Require(ApolloDeletedCommentsTestBodyLooksDeleted(@"[deleted]", nil), @"detects [deleted]");
     Require(ApolloDeletedCommentsTestBodyLooksDeleted(@"[removed]", nil), @"detects [removed]");
-    Require(ApolloDeletedCommentsTestBodyLooksDeleted(@"", nil), @"detects empty body");
-    Require(ApolloDeletedCommentsTestBodyLooksDeleted(@"hello", @"&lt;p&gt;Removed by moderator&lt;/p&gt;"), @"detects removed HTML");
+    Require(!ApolloDeletedCommentsTestBodyLooksDeleted(@"", nil), @"empty body alone is not deleted");
+    Require(ApolloDeletedCommentsTestBodyLooksDeleted(@"", @"&lt;p&gt;Removed by moderator&lt;/p&gt;"), @"detects removed HTML without body");
+    Require(!ApolloDeletedCommentsTestBodyLooksDeleted(@"hello", @"&lt;p&gt;Removed by moderator&lt;/p&gt;"), @"stale removed HTML does not override visible body");
     Require(!ApolloDeletedCommentsTestBodyLooksDeleted(@"normal comment", nil), @"normal body is not deleted");
 }
 
@@ -94,7 +119,28 @@ static void TestVisibleReplacement(void) {
     Require([data[@"score"] isEqual:@42], @"replaces score");
     Require([data[@"apollo_recovered_deleted_comment"] boolValue], @"sets marker");
     Require([data[@"apollo_recovered_deleted_reason"] isEqualToString:@"user_deleted"], @"sets reason");
+    Require(data[@"author_flair_text"] == nil, @"does not replace author flair with recovered reason");
     Require([data[@"user_vote"] isEqual:@0] && [data[@"likes"] isKindOfClass:[NSNull class]], @"neutralizes vote metadata");
+}
+
+static void TestTapToRevealPatchDoesNotEmitNativeSpoiler(void) {
+    BOOL previousTapSetting = sTapToRevealDeletedComments;
+    sTapToRevealDeletedComments = YES;
+
+    NSMutableDictionary *root = VisibleDeletedRoot();
+    NSUInteger patched = ApolloDeletedCommentsTestPatchRedditJSONRoot(root, @{@"t1_c1": Archived(@"c1", @"Recovered body", @{@"removal_type": @"deleted"})});
+    NSDictionary *data = root[@"data"][@"children"][0][@"data"];
+    NSString *body = data[@"body"];
+    NSString *bodyHTML = data[@"body_html"];
+
+    sTapToRevealDeletedComments = previousTapSetting;
+
+    Require(patched == 1, @"tap-to-reveal patches one visible comment");
+    Require([body isEqualToString:@"DELETED BY USER"], @"tap-to-reveal hides the recovered body before first render");
+    Require([body rangeOfString:@">!"].location == NSNotFound, @"tap-to-reveal body does not use native spoiler markdown");
+    Require([bodyHTML rangeOfString:@"md-spoiler-text"].location == NSNotFound, @"tap-to-reveal body_html does not use native spoiler HTML");
+    Require([bodyHTML rangeOfString:@"DELETED BY USER"].location != NSNotFound, @"tap-to-reveal body_html uses the reason label before first render");
+    Require([bodyHTML rangeOfString:@"Recovered body"].location == NSNotFound, @"tap-to-reveal body_html does not expose recovered text before reveal");
 }
 
 static void TestMoreExpansion(void) {
@@ -133,14 +179,60 @@ static void TestNoOp(void) {
     Require([root[@"data"][@"children"][0][@"data"][@"body"] isEqualToString:@"[deleted]"], @"body remains unchanged");
 }
 
+static void TestPlaceholderMetadata(void) {
+    NSMutableDictionary *deletedRoot = VisibleDeletedRoot();
+    NSUInteger deletedMarked = ApolloDeletedCommentsTestMarkDeletedPlaceholdersInRoot(deletedRoot);
+    NSDictionary *deletedData = deletedRoot[@"data"][@"children"][0][@"data"];
+    Require(deletedMarked == 1, @"marks deleted placeholder");
+    Require([deletedData[@"apollo_deleted_comment_placeholder"] boolValue], @"sets deleted placeholder marker");
+    Require([deletedData[@"apollo_deleted_comment_placeholder_reason"] isEqualToString:@"user_deleted"], @"deleted placeholder reason");
+
+    NSMutableDictionary *removedRoot = VisibleRemovedRoot();
+    NSUInteger removedMarked = ApolloDeletedCommentsTestMarkDeletedPlaceholdersInRoot(removedRoot);
+    NSDictionary *removedData = removedRoot[@"data"][@"children"][0][@"data"];
+    Require(removedMarked == 1, @"marks removed placeholder");
+    Require([removedData[@"apollo_deleted_comment_placeholder"] boolValue], @"sets removed placeholder marker");
+    Require([removedData[@"apollo_deleted_comment_placeholder_reason"] isEqualToString:@"moderator_removed"], @"removed placeholder reason");
+}
+
+static void TestImmediatePatchReturnsPlaceholderWithoutArchive(void) {
+    NSMutableDictionary *root = VisibleRemovedRoot();
+    NSData *data = [NSJSONSerialization dataWithJSONObject:root options:0 error:nil];
+    NSURLRequest *request = [NSURLRequest requestWithURL:[NSURL URLWithString:@"https://oauth.reddit.com/comments/thread.json?raw_json=1"]];
+    NSData *patchedData = ApolloDeletedCommentsTestPatchResponseImmediate(data, request);
+    NSDictionary *patched = [NSJSONSerialization JSONObjectWithData:patchedData options:0 error:nil];
+    NSDictionary *commentData = patched[@"data"][@"children"][0][@"data"];
+    Require([commentData[@"body"] isEqualToString:@"[removed]"], @"immediate patch leaves body as placeholder");
+    Require([commentData[@"apollo_deleted_comment_placeholder"] boolValue], @"immediate patch marks placeholder");
+    Require(commentData[@"apollo_recovered_deleted_comment"] == nil, @"immediate patch does not pretend placeholder is recovered");
+}
+
+static void TestArcticCooldownPolicy(void) {
+    Require(ApolloDeletedCommentsTestArcticResponseShouldCooldown(429, NSIntegerMax), @"429 triggers cooldown");
+    Require(ApolloDeletedCommentsTestArcticResponseShouldCooldown(200, 3), @"low remaining quota triggers cooldown");
+    Require(!ApolloDeletedCommentsTestArcticResponseShouldCooldown(200, 4), @"remaining quota above threshold does not trigger cooldown");
+    Require(!ApolloDeletedCommentsTestArcticResponseShouldCooldown(200, NSIntegerMax), @"missing quota header does not trigger cooldown");
+}
+
+static void TestReasonLabels(void) {
+    Require([ApolloDeletedCommentsTestDisplayLabelForReason(@"user_deleted") isEqualToString:@"DELETED BY USER"], @"user-deleted reason label");
+    Require([ApolloDeletedCommentsTestDisplayLabelForReason(@"moderator_removed") isEqualToString:@"REMOVED BY MOD"], @"mod-deleted reason label");
+    Require([ApolloDeletedCommentsTestDisplayLabelForReason(nil) isEqualToString:@"REMOVED BY MOD"], @"default reason label");
+}
+
 int main(void) {
     @autoreleasepool {
         TestURLExtraction();
         TestDeletedBodyPolicy();
         TestVisibleReplacement();
+        TestTapToRevealPatchDoesNotEmitNativeSpoiler();
         TestMoreExpansion();
         TestMixedMoreKeepsRemainingChildren();
         TestNoOp();
+        TestPlaceholderMetadata();
+        TestImmediatePatchReturnsPlaceholderWithoutArchive();
+        TestArcticCooldownPolicy();
+        TestReasonLabels();
         NSLog(@"deleted_comments_tests passed");
     }
     return 0;

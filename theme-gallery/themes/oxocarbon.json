@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Oxocarbon",
+  "slug": "oxocarbon",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "0F62FE",
+      "card": "FFFEFD",
+      "background": "F6F5F4",
+      "raised": "FBFAF9",
+      "bars": "FAF9F8",
+      "mutedText": "525252",
+      "text": "525252",
+      "separator": "DEDDDC"
+    },
+    "dark": {
+      "accent": "78A9FF",
+      "card": "151515",
+      "background": "121212",
+      "raised": "2B2B2B",
+      "bars": "141414",
+      "mutedText": "979797",
+      "text": "A1A1A1",
+      "separator": "404040"
+    }
+  }
+}

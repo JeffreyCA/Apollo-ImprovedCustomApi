@@ -1,4 +1,6 @@
 #import "ApolloCommon.h"
+#import "ApolloState.h"
+#import <QuartzCore/QuartzCore.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
 #import <objc/message.h>
@@ -19,7 +21,7 @@ os_log_t ApolloFixLog(void) {
     return log;
 }
 
-NSString *ApolloCollectLogs(void) {
+static NSString *ApolloCollectLogsFiltered(BOOL aiOnly) {
     if (@available(iOS 15.0, *)) {
         NSError *error = nil;
         OSLogStore *store = [OSLogStore storeWithScope:OSLogStoreCurrentProcessIdentifier error:&error];
@@ -39,22 +41,35 @@ NSString *ApolloCollectLogs(void) {
             return [NSString stringWithFormat:@"Failed to enumerate logs: %@", error.localizedDescription];
         }
 
-        if (entries.count == 0) {
-            return @"No [ApolloFix] log entries found since app launch.";
-        }
-
         NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
         formatter.dateFormat = @"HH:mm:ss.SSS";
 
+        NSMutableArray<OSLogEntryLog *> *filteredEntries = [NSMutableArray array];
+        for (OSLogEntryLog *entry in entries) {
+            if (![entry isKindOfClass:[OSLogEntryLog class]]) continue;
+            if (!aiOnly ||
+                [entry.category isEqualToString:@"AISummary"] ||
+                [entry.composedMessage containsString:@"[AISummary]"] ||
+                [entry.composedMessage containsString:@"[ApolloAISettings]"]) {
+                [filteredEntries addObject:entry];
+            }
+        }
+
+        if (filteredEntries.count == 0) {
+            return aiOnly
+                ? @"No Apollo AI log entries found since app launch."
+                : @"No [ApolloFix] log entries found since app launch.";
+        }
+
         NSMutableString *output = [NSMutableString new];
-        [output appendFormat:@"ApolloFix Logs — %@ (%lu entries)\n\n",
+        [output appendFormat:@"%@ — %@ (%lu entries)\n\n",
+            aiOnly ? @"Apollo AI Logs" : @"ApolloFix Logs",
             [NSDateFormatter localizedStringFromDate:[NSDate date]
                                            dateStyle:NSDateFormatterMediumStyle
                                            timeStyle:NSDateFormatterShortStyle],
-            (unsigned long)entries.count];
+            (unsigned long)filteredEntries.count];
 
-        for (OSLogEntryLog *entry in entries) {
-            if (![entry isKindOfClass:[OSLogEntryLog class]]) continue;
+        for (OSLogEntryLog *entry in filteredEntries) {
             [output appendFormat:@"[%@] %@\n", [formatter stringFromDate:entry.date], entry.composedMessage];
         }
 
@@ -64,10 +79,30 @@ NSString *ApolloCollectLogs(void) {
     return @"Log export requires iOS 15+.";
 }
 
+NSString *ApolloCollectLogs(void) {
+    return ApolloCollectLogsFiltered(NO);
+}
+
+NSString *ApolloCollectAILogs(void) {
+    return ApolloCollectLogsFiltered(YES);
+}
+
 // Get the SDK version from the main binary's LC_BUILD_VERSION load command
 // Returns 0 if not found, otherwise packed version (major << 16 | minor << 8 | patch)
 static uint32_t GetLinkedSDKVersion(void) {
-    const struct mach_header_64 *header = (const struct mach_header_64 *)_dyld_get_image_header(0);
+    // Find the main executable by filetype instead of assuming image index 0.
+    // In the simulator the injected tweak dylib can occupy index 0, which made
+    // IsLiquidGlass() read the dylib's own SDK (always current) instead of
+    // Apollo's — masking every legacy (non-glass) code path during sim testing.
+    const struct mach_header_64 *header = NULL;
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const struct mach_header *h = _dyld_get_image_header(i);
+        if (h && h->filetype == MH_EXECUTE) {
+            header = (const struct mach_header_64 *)h;
+            break;
+        }
+    }
+    if (!header) header = (const struct mach_header_64 *)_dyld_get_image_header(0);
     if (!header) return 0;
 
     uintptr_t cursor = (uintptr_t)header + sizeof(struct mach_header_64);
@@ -201,6 +236,44 @@ BOOL ApolloRouteResolvedURLViaApolloScheme(NSURL *resolvedURL) {
     return ApolloRouteURLThroughUIApplication(apolloURL);
 }
 
+#pragma mark - Settings Theme Inheritance
+
+static UITableView *ApolloFindTableViewInView(UIView *view) {
+    if (!view) return nil;
+    if ([view isKindOfClass:[UITableView class]]) return (UITableView *)view;
+    for (UIView *subview in view.subviews) {
+        UITableView *tableView = ApolloFindTableViewInView(subview);
+        if (tableView) return tableView;
+    }
+    return nil;
+}
+
+UITableView *ApolloInheritedSettingsThemeSourceTableView(UITableViewController *controller) {
+    if (!controller) return nil;
+
+    NSArray<UIViewController *> *stack = controller.navigationController.viewControllers;
+    NSUInteger index = [stack indexOfObject:controller];
+    if (index == NSNotFound || index == 0) return nil;
+
+    UIViewController *source = stack[index - 1];
+    if ([source respondsToSelector:@selector(tableView)]) {
+        id tableView = ((id (*)(id, SEL))objc_msgSend)(source, @selector(tableView));
+        if ([tableView isKindOfClass:[UITableView class]]) return tableView;
+    }
+
+    return ApolloFindTableViewInView(source.view);
+}
+
+void ApolloApplyInheritedSettingsTableTheme(UITableViewController *controller) {
+    if (!controller) return;
+
+    UITableView *source = ApolloInheritedSettingsThemeSourceTableView(controller);
+    UIColor *backgroundColor = source.backgroundColor ?: controller.tableView.backgroundColor;
+    controller.view.backgroundColor = backgroundColor;
+    controller.tableView.backgroundColor = backgroundColor;
+    controller.tableView.separatorColor = source.separatorColor ?: [UIColor separatorColor];
+}
+
 #pragma mark - LinkButtonNode URL extraction
 
 // Extract URL string from a LinkButtonNode, with iOS 26 fallback.
@@ -248,6 +321,111 @@ NSString *ApolloGetLinkButtonNodeURLString(id linkButtonNode) {
     }
 
     return nil;
+}
+
+#pragma mark - Junk link-card titles
+
+BOOL ApolloIsJunkNumericTitle(NSString *title) {
+    if (![title isKindOfClass:[NSString class]]) return NO;
+
+    NSString *trimmed = [title stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length == 0) return NO;
+
+    // Must contain no letters anywhere...
+    if ([trimmed rangeOfCharacterFromSet:[NSCharacterSet letterCharacterSet]].location != NSNotFound) {
+        return NO;
+    }
+    // ...but at least one digit (targets numeric-ID titles, while leaving
+    // emoji-only or punctuation-only titles untouched).
+    if ([trimmed rangeOfCharacterFromSet:[NSCharacterSet decimalDigitCharacterSet]].location == NSNotFound) {
+        return NO;
+    }
+
+    // The title is now letter-free with at least one digit, but that still
+    // covers numbers a user would legitimately want to keep: a year ("2024",
+    // "1917"), a short number ("300"), a date ("9/11"), or a phone-number page
+    // ("1-800-273-8255"). Only substitute when it actually looks like a scraped
+    // internal-ID dump rather than a plausible real title — i.e. either:
+    //   * a single long run of digits (timestamps, opaque IDs), or
+    //   * several whitespace-separated all-numeric tokens (the fifa.com
+    //     match-center "285023 289273 400021448" pattern).
+    NSCharacterSet *digits = [NSCharacterSet decimalDigitCharacterSet];
+
+    NSUInteger longestRun = 0, currentRun = 0, totalDigits = 0;
+    for (NSUInteger i = 0; i < trimmed.length; i++) {
+        if ([digits characterIsMember:[trimmed characterAtIndex:i]]) {
+            currentRun++;
+            totalDigits++;
+            if (currentRun > longestRun) longestRun = currentRun;
+        } else {
+            currentRun = 0;
+        }
+    }
+    // A run this long is not a year/date/short number; it's an ID or timestamp.
+    if (longestRun >= 7) return YES;
+
+    NSUInteger numericTokens = 0;
+    for (NSString *token in [trimmed componentsSeparatedByCharactersInSet:
+                             [NSCharacterSet whitespaceAndNewlineCharacterSet]]) {
+        if (token.length == 0) continue;
+        if ([token rangeOfCharacterFromSet:[digits invertedSet]].location == NSNotFound) {
+            numericTokens++; // token is purely digits
+        }
+    }
+    // Multiple bare numeric tokens (with enough digits to not be, say, "12 34")
+    // is the multi-ID dump shape, not a real headline.
+    if (numericTokens >= 2 && totalDigits >= 6) return YES;
+
+    return NO;
+}
+
+NSString *ApolloWebsiteNameFromHost(NSString *host) {
+    if (host.length == 0) return nil;
+
+    host = host.lowercaseString;
+    while ([host hasSuffix:@"."]) host = [host substringToIndex:host.length - 1];
+    if (host.length == 0) return nil;
+
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSString *p in [host componentsSeparatedByString:@"."]) {
+        if (p.length > 0) [parts addObject:p];
+    }
+    NSUInteger n = parts.count;
+    if (n == 0) return nil;
+
+    NSString *label;
+    if (n == 1) {
+        label = parts[0];
+    } else {
+        static NSSet *ccSLDs = nil; // second-level labels under country-code TLDs
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            ccSLDs = [NSSet setWithArray:@[@"co", @"com", @"org", @"net", @"gov",
+                                           @"edu", @"ac", @"gob", @"go", @"or", @"ne"]];
+        });
+        NSString *last = parts[n - 1];
+        NSString *secondLast = parts[n - 2];
+        if (n >= 3 && last.length == 2 && [ccSLDs containsObject:secondLast]) {
+            label = parts[n - 3];
+        } else {
+            label = parts[n - 2];
+        }
+    }
+    if (label.length == 0) return nil;
+
+    // Needs at least one letter, otherwise we'd just swap digits for digits.
+    if ([label rangeOfCharacterFromSet:[NSCharacterSet letterCharacterSet]].location == NSNotFound) {
+        return nil;
+    }
+
+    // Short labels are almost always acronyms (FIFA, ESPN, BBC, TIME); longer
+    // ones read better title-cased.
+    if (label.length <= 4) {
+        return label.uppercaseString;
+    }
+    NSString *first = [[label substringToIndex:1] uppercaseString];
+    return [first stringByAppendingString:[label substringFromIndex:1]];
 }
 
 UIImage *ApolloEmojiSettingsIcon(NSString *emoji, UIColor *backgroundColor, CGFloat size) {
@@ -331,6 +509,25 @@ NSString *ApolloBundledResourcePath(NSString *baseName, NSString *extension) {
         if ([fileManager fileExistsAtPath:path]) return path;
     }
     return nil;
+}
+
+NSString *ApolloBuildVariant(void) {
+    // 1. IPA variants: stamped into Info.plist by build_release_variants.sh.
+    NSString *stamped = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"ARBuildVariant"];
+    if ([stamped isKindOfClass:NSString.class] && stamped.length) return stamped;
+
+    // 2. Jailbroken .deb installs (no repackaged Info.plist to carry
+    //    ARBuildVariant): read the ARVariant.txt marker stamped into
+    //    ApolloReborn.bundle by the Makefile's before-package hook — "deb-rootful"
+    //    or "deb-rootless" per THEOS_PACKAGE_SCHEME — resolved across the rootful
+    //    (/Library/...) and rootless (/var/jb/...) install layouts.
+    NSString *markerPath = ApolloBundledResourcePath(@"ARVariant", @"txt");
+    if (markerPath) {
+        NSString *m = [[NSString stringWithContentsOfFile:markerPath encoding:NSUTF8StringEncoding error:NULL]
+                       stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (m.length) return m;
+    }
+    return @"unknown";
 }
 
 static UIImage *ApolloCachedBundledPNGNamed(NSString *resourceName) {
@@ -490,4 +687,100 @@ BOOL ApolloIsSystemShareComposeController(UIViewController *controller) {
         if (cls && [controller isKindOfClass:cls]) return YES;
     }
     return NO;
+}
+
+NSArray<UIWindow *> *ApolloAllWindows(void) {
+    NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if ([scene isKindOfClass:[UIWindowScene class]])
+            [windows addObjectsFromArray:((UIWindowScene *)scene).windows];
+    }
+    return windows;
+}
+
+#pragma mark - Color Helpers
+
+UIColor *ApolloColorFromHexString(NSString *hex) {
+    if (![hex isKindOfClass:[NSString class]]) return nil;
+    NSString *clean = [hex stringByReplacingOccurrencesOfString:@"#" withString:@""];
+    clean = [clean stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (clean.length != 6) return nil;
+    unsigned int value = 0;
+    NSScanner *scanner = [NSScanner scannerWithString:clean];
+    if (![scanner scanHexInt:&value] || !scanner.isAtEnd) return nil;
+    return [UIColor colorWithRed:((value >> 16) & 0xFF) / 255.0
+                           green:((value >> 8) & 0xFF) / 255.0
+                            blue:(value & 0xFF) / 255.0
+                           alpha:1.0];
+}
+
+NSString *ApolloHexStringFromColor(UIColor *color) {
+    if (![color isKindOfClass:[UIColor class]]) return nil;
+    CGFloat r = 0.0, g = 0.0, b = 0.0, a = 0.0;
+    if (![color getRed:&r green:&g blue:&b alpha:&a]) return nil;
+    r = MIN(MAX(r, 0.0), 1.0);
+    g = MIN(MAX(g, 0.0), 1.0);
+    b = MIN(MAX(b, 0.0), 1.0);
+    return [NSString stringWithFormat:@"%02X%02X%02X",
+            (int)lround(r * 255.0), (int)lround(g * 255.0), (int)lround(b * 255.0)];
+}
+
+BOOL ApolloColorIsLight(UIColor *color) {
+    CGFloat r = 0.0, g = 0.0, b = 0.0, a = 0.0;
+    if (![color isKindOfClass:[UIColor class]] || ![color getRed:&r green:&g blue:&b alpha:&a]) {
+        return YES;
+    }
+    // Rec.601 perceptual luminance. Bright fills (yellow, mint, lime) land high
+    // and want dark text; saturated blues/purples land low and want white text.
+    CGFloat luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+    return luminance >= 0.6;
+}
+
+UIColor *ApolloLinkPreviewPresetColor(NSInteger preset) {
+    switch (preset) {
+        case ApolloLinkPreviewCardColorGray:     return [UIColor colorWithWhite:0.56 alpha:1.0];
+        case ApolloLinkPreviewCardColorRed:      return [UIColor colorWithRed:1.00 green:0.23 blue:0.19 alpha:1.0];
+        case ApolloLinkPreviewCardColorOrange:   return [UIColor colorWithRed:1.00 green:0.58 blue:0.00 alpha:1.0];
+        case ApolloLinkPreviewCardColorYellow:   return [UIColor colorWithRed:1.00 green:0.80 blue:0.00 alpha:1.0];
+        case ApolloLinkPreviewCardColorGreen:    return [UIColor colorWithRed:0.20 green:0.78 blue:0.35 alpha:1.0];
+        case ApolloLinkPreviewCardColorMint:     return [UIColor colorWithRed:0.00 green:0.78 blue:0.75 alpha:1.0];
+        case ApolloLinkPreviewCardColorTeal:     return [UIColor colorWithRed:0.19 green:0.69 blue:0.78 alpha:1.0];
+        case ApolloLinkPreviewCardColorCyan:     return [UIColor colorWithRed:0.20 green:0.68 blue:0.90 alpha:1.0];
+        case ApolloLinkPreviewCardColorBlue:     return [UIColor colorWithRed:0.00 green:0.48 blue:1.00 alpha:1.0];
+        case ApolloLinkPreviewCardColorIndigo:   return [UIColor colorWithRed:0.35 green:0.34 blue:0.84 alpha:1.0];
+        case ApolloLinkPreviewCardColorPurple:   return [UIColor colorWithRed:0.69 green:0.32 blue:0.87 alpha:1.0];
+        case ApolloLinkPreviewCardColorPink:     return [UIColor colorWithRed:1.00 green:0.18 blue:0.33 alpha:1.0];
+        case ApolloLinkPreviewCardColorBrown:    return [UIColor colorWithRed:0.64 green:0.52 blue:0.37 alpha:1.0];
+        case ApolloLinkPreviewCardColorCoral:    return [UIColor colorWithRed:1.00 green:0.50 blue:0.31 alpha:1.0];
+        case ApolloLinkPreviewCardColorLime:     return [UIColor colorWithRed:0.60 green:0.80 blue:0.00 alpha:1.0];
+        case ApolloLinkPreviewCardColorOlive:    return [UIColor colorWithRed:0.50 green:0.60 blue:0.20 alpha:1.0];
+        case ApolloLinkPreviewCardColorLavender: return [UIColor colorWithRed:0.56 green:0.45 blue:0.90 alpha:1.0];
+        case ApolloLinkPreviewCardColorSlate:    return [UIColor colorWithRed:0.35 green:0.43 blue:0.50 alpha:1.0];
+        case ApolloLinkPreviewCardColorNeutral:
+        default:                                 return [UIColor colorWithWhite:0.72 alpha:1.0];
+    }
+}
+
+uint32_t ApolloPackedColorFromHexString(NSString *hex) {
+    UIColor *color = ApolloColorFromHexString(hex);
+    if (!color) return 0;
+    CGFloat r = 0.0, g = 0.0, b = 0.0, a = 0.0;
+    if (![color getRed:&r green:&g blue:&b alpha:&a]) return 0;
+    uint32_t R = (uint32_t)lround(MIN(MAX(r, 0.0), 1.0) * 255.0);
+    uint32_t G = (uint32_t)lround(MIN(MAX(g, 0.0), 1.0) * 255.0);
+    uint32_t B = (uint32_t)lround(MIN(MAX(b, 0.0), 1.0) * 255.0);
+    return (1u << 24) | (R << 16) | (G << 8) | B;
+}
+
+void ApolloSetLinkPreviewCardColorHex(NSString *hex) {
+    UIColor *color = ApolloColorFromHexString(hex);
+    // Canonicalize to "RRGGBB" uppercase so persistence + UI display stay tidy.
+    sLinkPreviewCardColorHex = color ? ApolloHexStringFromColor(color) : nil;
+    // Publish the render snapshot AFTER the string, so a background reader that
+    // observes a non-zero packed value already has a consistent RGB to draw.
+    sLinkPreviewCardColorPacked = color ? ApolloPackedColorFromHexString(sLinkPreviewCardColorHex) : 0;
+}
+
+double ApolloPerfNowMs(void) {
+    return CACurrentMediaTime() * 1000.0;
 }

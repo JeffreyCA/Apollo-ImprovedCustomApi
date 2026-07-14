@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "SynthWave '84",
+  "slug": "synthwave-84",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "D33682",
+      "card": "FFF8FA",
+      "background": "F6EFF1",
+      "raised": "FBF4F6",
+      "bars": "FAF3F5",
+      "mutedText": "6D597A",
+      "text": "614F6D",
+      "separator": "DED8DA"
+    },
+    "dark": {
+      "accent": "FF7EDB",
+      "card": "242233",
+      "background": "1F1D2B",
+      "raised": "3A3747",
+      "bars": "222030",
+      "mutedText": "A6ABC8",
+      "text": "A8ADC9",
+      "separator": "4D4B59"
+    }
+  }
+}

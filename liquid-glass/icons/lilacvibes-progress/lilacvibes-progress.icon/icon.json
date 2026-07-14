@@ -1,0 +1,410 @@
+{
+  "color-space-for-untagged-svg-colors" : "display-p3",
+  "fill-specializations" : [
+    {
+      "value" : "system-light"
+    },
+    {
+      "appearance" : "dark",
+      "value" : "system-dark"
+    }
+  ],
+  "groups" : [
+    {
+      "blur-material" : 0.49,
+      "hidden-specializations" : [
+        {
+          "idiom" : "square",
+          "value" : false
+        }
+      ],
+      "layers" : [
+        {
+          "image-name" : "apollo_antennaball 2.svg",
+          "name" : "antennaball",
+          "position-specializations" : [
+            {
+              "idiom" : "square",
+              "value" : {
+                "scale" : 0.24,
+                "translation-in-points" : [
+                  0,
+                  -63
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "blend-mode" : "normal",
+          "fill" : "none",
+          "hidden" : false,
+          "image-name" : "eyes.svg",
+          "name" : "eyes",
+          "position-specializations" : [
+            {
+              "value" : {
+                "scale" : 1,
+                "translation-in-points" : [
+                  0,
+                  0
+                ]
+              }
+            },
+            {
+              "idiom" : "square",
+              "value" : {
+                "scale" : 0.5,
+                "translation-in-points" : [
+                  0,
+                  22
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "fill" : {
+            "solid" : "extended-gray:0.25000,1.00000"
+          },
+          "hidden" : false,
+          "image-name" : "stem.svg",
+          "name" : "stem",
+          "position-specializations" : [
+            {
+              "idiom" : "square",
+              "value" : {
+                "scale" : 0.54,
+                "translation-in-points" : [
+                  0,
+                  -43
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "fill" : {
+            "solid" : "display-p3:0.97572,0.97016,1.00000,1.00000"
+          },
+          "image-name" : "face_separate.svg",
+          "name" : "face",
+          "position-specializations" : [
+            {
+              "idiom" : "square",
+              "value" : {
+                "scale" : 0.47,
+                "translation-in-points" : [
+                  0,
+                  25
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "fill" : {
+            "solid" : "extended-gray:1.00000,1.00000"
+          },
+          "hidden" : false,
+          "image-name" : "helmet.svg",
+          "name" : "helmet",
+          "position-specializations" : [
+            {
+              "idiom" : "square",
+              "value" : {
+                "scale" : 0.54,
+                "translation-in-points" : [
+                  0,
+                  16
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "gray:0.60000,0.30000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:0.25000,0.30000"
+              }
+            }
+          ],
+          "image-name" : "face_separate.svg",
+          "name" : "face_separator",
+          "position-specializations" : [
+            {
+              "idiom" : "square",
+              "value" : {
+                "scale" : 0.56,
+                "translation-in-points" : [
+                  0,
+                  24
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "fill" : {
+            "solid" : "extended-gray:0.25000,1.00000"
+          },
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "antennae 2.svg",
+          "name" : "antennae",
+          "position-specializations" : [
+            {
+              "idiom" : "square",
+              "value" : {
+                "scale" : 0.54,
+                "translation-in-points" : [
+                  0,
+                  -14
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "name" : "apollo",
+      "position" : {
+        "scale" : 6,
+        "translation-in-points" : [
+          0,
+          0
+        ]
+      },
+      "shadow-specializations" : [
+        {
+          "value" : {
+            "kind" : "layer-color",
+            "opacity" : 1
+          }
+        },
+        {
+          "appearance" : "tinted",
+          "value" : {
+            "kind" : "layer-color",
+            "opacity" : 3.2
+          }
+        }
+      ],
+      "specular" : true,
+      "translucency-specializations" : [
+        {
+          "value" : {
+            "enabled" : true,
+            "value" : 0.44
+          }
+        },
+        {
+          "appearance" : "dark",
+          "value" : {
+            "enabled" : true,
+            "value" : 0.7
+          }
+        }
+      ]
+    },
+    {
+      "blur-material" : 0.24,
+      "hidden" : false,
+      "layers" : [
+        {
+          "image-name" : "stripe10 2.svg",
+          "name" : "stripe10",
+          "position" : {
+            "scale" : 2,
+            "translation-in-points" : [
+              -528,
+              0.017350157728742488
+            ]
+          }
+        },
+        {
+          "image-name" : "stripe9 2.svg",
+          "name" : "stripe9",
+          "position" : {
+            "scale" : 2,
+            "translation-in-points" : [
+              -478,
+              -0.2945774647887447
+            ]
+          }
+        },
+        {
+          "image-name" : "stripe8 2.svg",
+          "name" : "stripe8",
+          "position" : {
+            "scale" : 2,
+            "translation-in-points" : [
+              -428,
+              0
+            ]
+          }
+        },
+        {
+          "image-name" : "stripe7 2.svg",
+          "name" : "stripe7",
+          "position" : {
+            "scale" : 2,
+            "translation-in-points" : [
+              -378,
+              0
+            ]
+          }
+        },
+        {
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "stripe6 6.svg",
+          "name" : "stripe6",
+          "position" : {
+            "scale" : 2,
+            "translation-in-points" : [
+              -328,
+              0
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "display-p3:0.38818,0.06415,0.46655,1.00000"
+          },
+          "glass" : true,
+          "image-name" : "sunset5.svg",
+          "name" : "stripe5",
+          "position" : {
+            "scale" : 1.69,
+            "translation-in-points" : [
+              0,
+              482
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "display-p3:0.10852,0.27124,0.88623,1.00000"
+          },
+          "glass" : true,
+          "image-name" : "sunset4.svg",
+          "name" : "stripe4",
+          "position" : {
+            "scale" : 1.69,
+            "translation-in-points" : [
+              0,
+              415
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "display-p3:0.29136,0.66050,0.24971,1.00000"
+          },
+          "image-name" : "sunset3.svg",
+          "name" : "stripe3",
+          "position" : {
+            "scale" : 1.69,
+            "translation-in-points" : [
+              0,
+              352
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "display-p3:0.83357,0.78698,0.26134,1.00000"
+          },
+          "image-name" : "sunset2.svg",
+          "name" : "stripe2",
+          "position" : {
+            "scale" : 1.69,
+            "translation-in-points" : [
+              0,
+              283
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "display-p3:0.88281,0.54102,0.19861,1.00000"
+          },
+          "image-name" : "sunset1.svg",
+          "name" : "stripe1",
+          "position" : {
+            "scale" : 1.69,
+            "translation-in-points" : [
+              0,
+              219
+            ]
+          }
+        },
+        {
+          "blend-mode" : "normal",
+          "fill" : {
+            "solid" : "display-p3:0.78369,0.16785,0.11566,1.00000"
+          },
+          "image-name" : "sunset0.svg",
+          "name" : "stripe0",
+          "position" : {
+            "scale" : 1.69,
+            "translation-in-points" : [
+              0,
+              154
+            ]
+          }
+        }
+      ],
+      "lighting" : "individual",
+      "name" : "flag",
+      "shadow-specializations" : [
+        {
+          "value" : {
+            "kind" : "neutral",
+            "opacity" : 0.8
+          }
+        },
+        {
+          "appearance" : "dark",
+          "value" : {
+            "kind" : "none",
+            "opacity" : 0.8
+          }
+        },
+        {
+          "appearance" : "tinted",
+          "value" : {
+            "kind" : "none",
+            "opacity" : 0.8
+          }
+        }
+      ],
+      "specular" : true,
+      "translucency-specializations" : [
+        {
+          "value" : {
+            "enabled" : true,
+            "value" : 0.3
+          }
+        },
+        {
+          "appearance" : "dark",
+          "value" : {
+            "enabled" : true,
+            "value" : 0.4
+          }
+        }
+      ]
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : "shared"
+  }
+}

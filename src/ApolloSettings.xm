@@ -6,13 +6,12 @@
 #import "SavedCategoriesViewController.h"
 #import "TranslationSettingsViewController.h"
 #import "TagFiltersViewController.h"
+#import "ApolloThemeManagerViewController.h"
+#import "PictureInPictureViewController.h"
 
 // MARK: - Settings View Controller (Custom API row injection)
 
 @interface SettingsViewController : UIViewController
-@end
-
-@interface SettingsGeneralViewController : UIViewController
 @end
 
 @interface SettingsAboutViewController : UIViewController
@@ -36,23 +35,6 @@ static BOOL sApolloAboutTipJarBypassReskin = NO;
 // which case the About VC's navigationController.viewControllers does NOT
 // contain SettingsVC).
 static __weak UIViewController *sApolloLastSettingsVC = nil;
-
-// Apollo's native General > Other section contains an "Always Offer
-// Translate" row that is redundant and confusing now that we ship our
-// own Translation feature. Hide the row by collapsing its height to 0
-// and skipping selection. The underlying Apollo setting/code is
-// untouched — we just don't show the row.
-static NSString *const kApolloAlwaysOfferTranslateLabel = @"Always Offer Translate";
-static const void *kApolloHiddenRowsKey = &kApolloHiddenRowsKey;
-
-static NSMutableSet<NSIndexPath *> *ApolloHiddenRowsForTableView(UITableView *tableView) {
-    NSMutableSet *set = objc_getAssociatedObject(tableView, kApolloHiddenRowsKey);
-    if (!set) {
-        set = [NSMutableSet set];
-        objc_setAssociatedObject(tableView, kApolloHiddenRowsKey, set, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    return set;
-}
 
 static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
     CGSize size = CGSizeMake(29, 29);
@@ -78,14 +60,15 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
     sApolloLastSettingsVC = (UIViewController *)self;
 }
 
-// Inject a new section 1 (Custom API + Saved Categories) between Tip Jar (section 0) and General (original section 1)
+// Inject a new section 1 (the tweak's settings rows; see the row list in numberOfRowsInSection:) between Tip Jar (section 0) and General (original section 1)
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
     return %orig + 1;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (section == 1) return 4; // Custom API, Saved Categories, Translation, Tag Filters
+    if (section == 1) return 5; // Custom API, Saved Categories, Translation, Tag Filters, Picture-in-Picture
+                                // (Theme Builder now lives under Appearance → Themes)
     if (section > 1) return %orig(tableView, section - 1);
     return %orig;
 }
@@ -120,9 +103,14 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
         } else if (indexPath.row == 2) {
             cell.textLabel.text = @"Translation";
             cell.imageView.image = createSettingsIcon(@"globe", [UIColor systemIndigoColor]);
-        } else {
+        } else if (indexPath.row == 3) {
             cell.textLabel.text = @"Tag Filters";
             cell.imageView.image = createSettingsIcon(@"eye.slash.fill", [UIColor systemRedColor]);
+        } else {
+            cell.textLabel.text = @"Picture-in-Picture";
+            // systemBlue mirrors iOS' own Settings > General > Picture in
+            // Picture icon and avoids the neighbors' teal/orange/indigo/red.
+            cell.imageView.image = createSettingsIcon(@"pip.enter", [UIColor systemBlueColor]);
         }
         return cell;
     }
@@ -162,8 +150,11 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
         } else if (indexPath.row == 2) {
             TranslationSettingsViewController *vc = [[TranslationSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
             [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
-        } else {
+        } else if (indexPath.row == 3) {
             TagFiltersViewController *vc = [[TagFiltersViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+            [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
+        } else {
+            PictureInPictureViewController *vc = [[PictureInPictureViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
             [((UIViewController *)self).navigationController pushViewController:vc animated:YES];
         }
         return;
@@ -202,58 +193,11 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
 
 %end
 
-%hook SettingsGeneralViewController
-
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell = %orig;
-    NSString *text = cell.textLabel.text;
-    NSMutableSet *hidden = ApolloHiddenRowsForTableView(tableView);
-    if (text && [text isEqualToString:kApolloAlwaysOfferTranslateLabel]) {
-        [hidden addObject:indexPath];
-        cell.hidden = YES;
-        cell.contentView.hidden = YES;
-    } else {
-        if ([hidden containsObject:indexPath]) {
-            [hidden removeObject:indexPath];
-        }
-    }
-    return cell;
-}
-
-- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
-    NSMutableSet *hidden = ApolloHiddenRowsForTableView(tableView);
-    if ([hidden containsObject:indexPath]) {
-        return 0.0;
-    }
-    // Peek at the cell to discover whether it's the row we want to hide before height is finalized.
-    UITableViewCell *peek = [self tableView:tableView cellForRowAtIndexPath:indexPath];
-    NSString *text = peek.textLabel.text;
-    if (text && [text isEqualToString:kApolloAlwaysOfferTranslateLabel]) {
-        [hidden addObject:indexPath];
-        return 0.0;
-    }
-    return %orig;
-}
-
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    NSMutableSet *hidden = ApolloHiddenRowsForTableView(tableView);
-    if ([hidden containsObject:indexPath]) {
-        [tableView deselectRowAtIndexPath:indexPath animated:NO];
-        return;
-    }
-    %orig;
-}
-
-- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
-    %orig;
-    NSString *text = cell.textLabel.text;
-    if (text && [text isEqualToString:kApolloAlwaysOfferTranslateLabel]) {
-        cell.hidden = YES;
-        cell.contentView.hidden = YES;
-    }
-}
-
-%end
+// NOTE: the SettingsGeneralViewController hooks (hiding the native "Always Offer
+// Translate" row) moved to ApolloPerPostCommentSort.xm, which owns the single
+// table remapper for that screen — two independent %hook stacks on the same
+// delegate methods disagree about index-path spaces once one of them shifts rows
+// (review finding on PR #570). Keep any future General-screen row work there.
 
 // MARK: - About View Controller (Tip Jar injection)
 //
@@ -405,7 +349,6 @@ static UIImage *createSettingsIcon(NSString *sfSymbolName, UIColor *bgColor) {
 
 %ctor {
     %init(SettingsViewController=objc_getClass("_TtC6Apollo22SettingsViewController"),
-          SettingsGeneralViewController=objc_getClass("_TtC6Apollo29SettingsGeneralViewController"),
           SettingsAboutViewController=objc_getClass("_TtC6Apollo27SettingsAboutViewController"));
 
     if (objc_getClass("_TtC6Apollo26ApolloSafariViewController")) {

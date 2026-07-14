@@ -14,6 +14,11 @@ BOOL ApolloIsNotificationBackendConfigured(void);
 // NSUserDefaultsDidChangeNotification.
 NSURL *ApolloNotificationBackendBaseURL(void);
 
+// The trimmed X-Registration-Token value, or nil when unset. For requests the
+// tweak makes to the backend itself (the rewrite hook injects this same value
+// into Apollo's rewritten registration requests).
+NSString *ApolloNotificationBackendRegistrationToken(void);
+
 // If `request`'s host is one of the three legacy Apollo push backends AND a
 // backend URL is configured, returns a copy of the request with scheme/host/
 // port replaced by the configured backend. Path, query, method, headers, and

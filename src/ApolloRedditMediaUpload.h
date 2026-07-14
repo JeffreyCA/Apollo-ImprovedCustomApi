@@ -36,6 +36,27 @@ ApolloRedditMediaUploadOperation *ApolloUploadMediaFileToRedditCancellable(NSURL
                                                                            NSString *userAgent,
                                                                            ApolloRedditMediaUploadProgress progressHandler,
                                                                            ApolloRedditMediaUploadCompletion completion);
+// Keyless (Web JSON) variants: upload an image to Reddit using a harvested web
+// session cookie + modhash instead of an OAuth bearer (POST www.reddit.com/api/
+// image_upload_s3.json — Hydra's path). The completion's assetID/webSocketURL are
+// always nil (the web lease returns none); the mediaURL is the real S3 Location.
+// Image MIME types only.
+ApolloRedditMediaUploadOperation *ApolloUploadMediaDataToRedditViaCookieCancellable(NSData *mediaData,
+                                                                                    NSString *filename,
+                                                                                    NSString *mimeType,
+                                                                                    NSString *cookieHeader,
+                                                                                    NSString *modhash,
+                                                                                    NSString *userAgent,
+                                                                                    ApolloRedditMediaUploadProgress progressHandler,
+                                                                                    ApolloRedditMediaUploadCompletion completion);
+ApolloRedditMediaUploadOperation *ApolloUploadMediaFileToRedditViaCookieCancellable(NSURL *mediaFileURL,
+                                                                                    NSString *filename,
+                                                                                    NSString *mimeType,
+                                                                                    NSString *cookieHeader,
+                                                                                    NSString *modhash,
+                                                                                    NSString *userAgent,
+                                                                                    ApolloRedditMediaUploadProgress progressHandler,
+                                                                                    ApolloRedditMediaUploadCompletion completion);
 void ApolloUploadMediaDataToReddit(NSData *mediaData,
                                    NSString *filename,
                                    NSString *mimeType,

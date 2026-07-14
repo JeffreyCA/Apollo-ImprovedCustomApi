@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Catppuccin Macchiato",
+  "slug": "catppuccin-macchiato",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "8839EF",
+      "card": "F3F4F6",
+      "background": "EAEBED",
+      "raised": "EFF0F2",
+      "bars": "EEEFF1",
+      "mutedText": "6C6F85",
+      "text": "505262",
+      "separator": "D3D4D6"
+    },
+    "dark": {
+      "accent": "C6A0F6",
+      "card": "232538",
+      "background": "1E2030",
+      "raised": "383A4C",
+      "bars": "202334",
+      "mutedText": "979AAD",
+      "text": "AEB0BF",
+      "separator": "4B4E5D"
+    }
+  }
+}

@@ -21,6 +21,7 @@ struct CalendarWidgetView: View {
                 if entry.calendarShowTitle { titleOverlay(post.title, style: entry.calendarStyle) }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .modifier(AccentedPhotoBackground(data: renders[0].imageData))
             .opensInApollo(post)
         }
     }
@@ -77,6 +78,9 @@ struct CalendarWidgetView: View {
     }
 
     /// New York serif — editorial masthead, centered with a hairline rule.
+    /// No dim layer: a full-frame overlay only covers the margin-inset content
+    /// rect, so it rendered as a visible floating box over the photo. The text
+    /// shadow alone carries legibility (like the other centered style, Stamp).
     private func serifStyle(_ d: Date) -> some View {
         VStack(spacing: s(4)) {
             Text(weekday(d, short: false).uppercased())
@@ -91,7 +95,6 @@ struct CalendarWidgetView: View {
         .foregroundStyle(.white)
         .modifier(TextShadow())
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background { Color.black.opacity(0.22) }
     }
 
     /// Monospaced — digital readout, top-left, ISO date line.
@@ -163,10 +166,13 @@ struct CalendarWidgetView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, s(14)).padding(.vertical, s(10))
             .background(alignment: bottomAnchored ? .top : .bottom) {
+                // Bleed well past the content margins (like the date scrims) so
+                // the gradient reaches the widget edge instead of stopping at
+                // the margin-inset content rect and showing a boxy seam.
                 LinearGradient(colors: [.clear, .black.opacity(0.55)],
                                startPoint: bottomAnchored ? .bottom : .top,
                                endPoint: bottomAnchored ? .top : .bottom)
-                    .padding(-10)
+                    .padding(-24)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity,
                    alignment: bottomAnchored ? .top : .bottom)

@@ -42,7 +42,6 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: recursive
-          lfs: true
           # The source push at the end uses a GitHub App token that can bypass
           # the protected main ruleset. Do not persist checkout's GITHUB_TOKEN
           # auth header, or Git may push as github-actions[bot] instead.
@@ -61,6 +60,9 @@ jobs:
           ref: 9bc73406cf80b711ef4d02c15ff1dedc4478a275 # master @ 2026-04-09
           path: theos
           submodules: recursive
+
+      - name: Select Xcode 26.0.1
+        run: sudo xcode-select -s /Applications/Xcode_26.0.1.app
 
       - name: Build rootful tweak package
         run: make package FINALPACKAGE=1
@@ -152,7 +154,7 @@ jobs:
           # trailing dpkg packaging revision in control (e.g. 2.14.0-33 -> 2.14.0).
           TWEAK_VERSION=$(sed -n 's/^Version: //p' control | sed 's/~/-/g' | sed -E 's/-[0-9]+$//')
           TAG_NAME="v${APOLLO_VERSION}_${TWEAK_VERSION}"
-          RELEASE_NAME="Apollo v${APOLLO_VERSION} with Apollo-Reborn v${TWEAK_VERSION}"
+          RELEASE_NAME="v${TWEAK_VERSION} -"
           echo "apollo_version=${APOLLO_VERSION}" >> "$GITHUB_OUTPUT"
           echo "tweak_version=${TWEAK_VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
@@ -167,6 +169,19 @@ jobs:
             --ipa ./Apollo.ipa \
             --deb "${{ steps.rootful_deb.outputs.deb_path }}" \
             --output-dir ./dist/out
+
+      - name: Validate IPA variants
+        run: bash ./scripts/validate_release_variants.sh ./dist/out
+
+      - name: Collect widget debug symbols
+        run: |
+          WIDGET_DSYM="widgets/build/Build/Products/Release-iphoneos/ApolloRebornWidgets.appex.dSYM"
+          if [ ! -d "$WIDGET_DSYM" ]; then
+            echo "Error: missing widget dSYM: $WIDGET_DSYM" >&2
+            exit 1
+          fi
+          mkdir -p ./dist/symbols/widgets
+          cp -R "$WIDGET_DSYM" ./dist/symbols/widgets/
 
       - name: Archive debug symbols
         id: symbols

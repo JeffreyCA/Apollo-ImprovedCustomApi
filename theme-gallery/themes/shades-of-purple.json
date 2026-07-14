@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 3,
+  "name": "Shades of Purple",
+  "slug": "shades-of-purple",
+  "variant": "balanced",
+  "advancedEnabled": true,
+  "input": {
+    "light": {
+      "accent": "7E57C2",
+      "card": "FFFEFD",
+      "background": "F6F5F4",
+      "raised": "FBFAF9",
+      "bars": "FAF9F8",
+      "mutedText": "7A67B8",
+      "text": "5D4E8C",
+      "separator": "DEDDDC"
+    },
+    "dark": {
+      "accent": "FFCC66",
+      "card": "2B2952",
+      "background": "252346",
+      "raised": "403E64",
+      "bars": "28274C",
+      "mutedText": "BEB6EF",
+      "text": "BEB6EF",
+      "separator": "535174"
+    }
+  }
+}
