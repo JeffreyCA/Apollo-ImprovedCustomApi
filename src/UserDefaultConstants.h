@@ -97,9 +97,6 @@ static NSString *const UDKeyAutoHideTabBarShowOnIdle = @"AutoHideTabBarShowOnIdl
 // choice is surfaced on Apollo's native Settings > General > "Hide Bars on
 // Scroll" row (Off = the native toggle off). See ApolloTabBarCollapseSide.xm.
 static NSString *const UDKeyTabBarCollapseSide = @"TabBarCollapseSide";
-// Posted after sTabBarCollapseSide changes so an on-screen minimized pill
-// re-lays out to the new side immediately.
-static NSString *const ApolloTabBarCollapseSideChangedNotification = @"ApolloTabBarCollapseSideChangedNotification";
 // When ON, focusing the main feed / subreddit search keeps the nav bar and the search
 // field in place (results populate the feed below the field) instead of Apollo's stock
 // "search takeover" (nav slides away + fades, field docks to the top and grows). Mutually

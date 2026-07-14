@@ -1,7 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-#import <notify.h>
 #import "ApolloCommon.h"
 #import "ApolloState.h"
 #import "ApolloThemeRuntime.h"
@@ -193,8 +192,6 @@ static void CollapseSideSetSide(NSInteger side) {
     if (sTabBarCollapseSide != side) {
         sTabBarCollapseSide = side;
         [[NSUserDefaults standardUserDefaults] setInteger:side forKey:UDKeyTabBarCollapseSide];
-        [[NSNotificationCenter defaultCenter] postNotificationName:ApolloTabBarCollapseSideChangedNotification
-                                                            object:nil];
     }
 }
 
@@ -217,9 +214,8 @@ static void CollapseSideSetNativeHideBars(UISwitch *nativeSwitch, BOOL on) {
 
 static void CollapseSideRefreshRowControl(UITableViewCell *cell);
 
-// Shared by the menu actions and the sim debug trigger: apply a picked mode
-// (0 = Left, 1 = Right, 2 = Off) through Apollo's own toggle plumbing, then
-// refresh the tab bar and the row's control.
+// Apply a picked mode (0 = Left, 1 = Right, 2 = Off) through Apollo's own
+// toggle plumbing, then refresh the tab bar and the row's control.
 static void CollapseSideApplyModeSelection(NSInteger mode, UITableViewCell *cell) {
     UISwitch *nativeSwitch = cell ? objc_getAssociatedObject(cell, &kCollapseSideNativeSwitchKey) : nil;
     if (mode == 2) {
@@ -349,189 +345,8 @@ static BOOL CollapseSideCellMatches(UITableViewCell *cell) {
 
 %end
 
-// MARK: - Simulator debug triggers
-//
-// idb HID input is unavailable in this dev setup, so drive the states with
-// darwin notifications (same pattern as ApolloThemeRE.xm):
-//   xcrun simctl spawn <DEV> notifyutil -p com.apollo.collapseside.<name>
-#if APOLLO_SIM_BUILD
-
-static UITabBar *CollapseSideDebugVisibleTabBar(void) {
-    for (UIWindow *window in ApolloAllWindows()) {
-        if (window.hidden || window.alpha <= 0.0) continue;
-        NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:window];
-        while (stack.count) {
-            UIView *view = stack.lastObject;
-            [stack removeLastObject];
-            if ([view isKindOfClass:[UITabBar class]] && view.window) return (UITabBar *)view;
-            for (UIView *sub in view.subviews) [stack addObject:sub];
-        }
-    }
-    return nil;
-}
-
-static void CollapseSideDebugSetMinimized(BOOL minimized) {
-    UITabBar *tabBar = CollapseSideDebugVisibleTabBar();
-    id provider = CollapseSideVisualProvider(tabBar);
-    SEL sel = NSSelectorFromString(@"setMinimized:");
-    if (!provider || ![provider respondsToSelector:sel]) {
-        ApolloLog(@"[CollapseSide] DBG setMinimized: no provider (tabBar=%@)", tabBar);
-        return;
-    }
-    ((void (*)(id, SEL, BOOL))objc_msgSend)(provider, sel, minimized);
-    ApolloLog(@"[CollapseSide] DBG setMinimized:%d on %@", minimized, [provider class]);
-}
-
-static void CollapseSideDebugDumpView(UIView *view, NSUInteger depth, NSMutableString *out) {
-    [out appendFormat:@"\n%*s%@ frame=%@ hidden=%d alpha=%.2f",
-        (int)(depth * 2), "", NSStringFromClass([view class]),
-        NSStringFromCGRect(view.frame), view.hidden, view.alpha];
-    if (depth < 7) {
-        for (UIView *sub in view.subviews) CollapseSideDebugDumpView(sub, depth + 1, out);
-    }
-}
-
-static void CollapseSideDebugDump(void) {
-    UITabBar *tabBar = CollapseSideDebugVisibleTabBar();
-    if (!tabBar) { ApolloLog(@"[CollapseSide] DBG dump: no tab bar"); return; }
-    id provider = CollapseSideVisualProvider(tabBar);
-    NSMutableString *out = [NSMutableString stringWithFormat:
-        @"provider=%@ minimized=%d side=%ld nativeOn=%d",
-        [provider class], (int)(CollapseSideProviderMorphTarget(provider) == 2),
-        (long)sTabBarCollapseSide, CollapseSideNativeHideBarsOn()];
-    // Provider ivars of interest.
-    for (NSString *name in @[@"collapsePlatterView", @"platterView", @"lensView", @"collapseButton", @"accessoryView"]) {
-        UIView *view = CollapseSideProviderIvarView(provider, name.UTF8String);
-        [out appendFormat:@"\n  ivar %@ = %@ frame=%@ super=%@", name, [view class],
-            view ? NSStringFromCGRect(view.frame) : @"-",
-            NSStringFromClass([view.superview class])];
-    }
-    CollapseSideDebugDumpView(tabBar, 0, out);
-    ApolloLog(@"[CollapseSide] DBG dump: %@", out);
-}
-
-static void CollapseSideDebugRegister(const char *name, dispatch_block_t block) {
-    int token = 0;
-    notify_register_dispatch(name, &token, dispatch_get_main_queue(), ^(__unused int t) { block(); });
-}
-
-static void CollapseSideInstallDebugTriggers(void) {
-    CollapseSideDebugRegister("com.apollo.collapseside.minimize", ^{ CollapseSideDebugSetMinimized(YES); });
-    CollapseSideDebugRegister("com.apollo.collapseside.expand",   ^{ CollapseSideDebugSetMinimized(NO); });
-    CollapseSideDebugRegister("com.apollo.collapseside.left",  ^{
-        CollapseSideSetSide(0); CollapseSideRelayoutVisibleTabBars();
-    });
-    CollapseSideDebugRegister("com.apollo.collapseside.right", ^{
-        CollapseSideSetSide(1); CollapseSideRelayoutVisibleTabBars();
-    });
-    CollapseSideDebugRegister("com.apollo.collapseside.hidebars.on",  ^{ CollapseSideSetNativeHideBars(nil, YES); });
-    CollapseSideDebugRegister("com.apollo.collapseside.hidebars.off", ^{ CollapseSideSetNativeHideBars(nil, NO); });
-    CollapseSideDebugRegister("com.apollo.collapseside.dump", ^{ CollapseSideDebugDump(); });
-    // Present Apollo's native General settings screen (no HID needed) to
-    // eyeball the replaced "Hide Bars on Scroll" row, auto-scrolled into view.
-    CollapseSideDebugRegister("com.apollo.collapseside.opensettings", ^{
-        Class cls = objc_getClass("_TtC6Apollo29SettingsGeneralViewController");
-        if (!cls) { ApolloLog(@"[CollapseSide] DBG opensettings: class missing"); return; }
-        UIViewController *vc = [[cls alloc] init];
-        UIViewController *top = nil;
-        for (UIWindow *window in ApolloAllWindows()) {
-            if (window.isKeyWindow) { top = window.rootViewController; break; }
-        }
-        while (top.presentedViewController) top = top.presentedViewController;
-        if (!top) { ApolloLog(@"[CollapseSide] DBG opensettings: no top VC"); return; }
-        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
-        [top presentViewController:nav animated:YES completion:^{
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                UITableView *table = nil;
-                NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:vc.view];
-                while (stack.count) {
-                    UIView *view = stack.lastObject; [stack removeLastObject];
-                    if ([view isKindOfClass:[UITableView class]]) { table = (UITableView *)view; break; }
-                    for (UIView *sub in view.subviews) [stack addObject:sub];
-                }
-                if (!table) return;
-                id<UITableViewDataSource> ds = table.dataSource;
-                NSInteger sections = [ds numberOfSectionsInTableView:table];
-                for (NSInteger s = 0; s < sections; s++) {
-                    NSInteger rows = [ds tableView:table numberOfRowsInSection:s];
-                    for (NSInteger r = 0; r < rows; r++) {
-                        NSIndexPath *ip = [NSIndexPath indexPathForRow:r inSection:s];
-                        UITableViewCell *cell = [ds tableView:table cellForRowAtIndexPath:ip];
-                        if (CollapseSideCellMatches(cell)) {
-                            [table scrollToRowAtIndexPath:ip
-                                         atScrollPosition:UITableViewScrollPositionMiddle
-                                                 animated:NO];
-                            ApolloLog(@"[CollapseSide] DBG opensettings: scrolled to %@", ip);
-                            return;
-                        }
-                    }
-                }
-            });
-        }];
-    });
-    // Drive the row's menu selection end-to-end (finds the visible cell's
-    // stashed Eureka switch + button):  ...pick.left / ...pick.right / ...pick.off
-    void (^pick)(NSInteger) = ^(NSInteger mode) {
-        UITableViewCell *match = nil;
-        for (UIWindow *window in ApolloAllWindows()) {
-            NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:window];
-            while (stack.count) {
-                UIView *view = stack.lastObject; [stack removeLastObject];
-                if ([view isKindOfClass:[UITableViewCell class]] &&
-                    CollapseSideCellMatches((UITableViewCell *)view) && view.window) {
-                    match = (UITableViewCell *)view;
-                    break;
-                }
-                for (UIView *sub in view.subviews) [stack addObject:sub];
-            }
-            if (match) break;
-        }
-        if (!match) { ApolloLog(@"[CollapseSide] DBG pick: row cell not on screen"); return; }
-        ApolloLog(@"[CollapseSide] DBG pick mode=%ld cell=%p switch=%p button=%p", (long)mode, match,
-                  objc_getAssociatedObject(match, &kCollapseSideNativeSwitchKey),
-                  objc_getAssociatedObject(match, &kCollapseSideButtonKey));
-        CollapseSideApplyModeSelection(mode, match);
-    };
-    CollapseSideDebugRegister("com.apollo.collapseside.pick.left",  ^{ pick(0); });
-    CollapseSideDebugRegister("com.apollo.collapseside.pick.right", ^{ pick(1); });
-    CollapseSideDebugRegister("com.apollo.collapseside.pick.off",   ^{ pick(2); });
-    // Visually present the row button's menu (private API, sim-only eyeball).
-    CollapseSideDebugRegister("com.apollo.collapseside.showmenu", ^{
-        UITableViewCell *match = nil;
-        for (UIWindow *window in ApolloAllWindows()) {
-            NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:window];
-            while (stack.count) {
-                UIView *view = stack.lastObject; [stack removeLastObject];
-                if ([view isKindOfClass:[UITableViewCell class]] &&
-                    CollapseSideCellMatches((UITableViewCell *)view) && view.window) {
-                    match = (UITableViewCell *)view;
-                    break;
-                }
-                for (UIView *sub in view.subviews) [stack addObject:sub];
-            }
-            if (match) break;
-        }
-        UIButton *button = match ? objc_getAssociatedObject(match, &kCollapseSideButtonKey) : nil;
-        id interaction = button.contextMenuInteraction;
-        SEL present = NSSelectorFromString(@"_presentMenuAtLocation:");
-        if (interaction && [interaction respondsToSelector:present]) {
-            CGPoint mid = CGPointMake(CGRectGetMidX(button.bounds), CGRectGetMidY(button.bounds));
-            ((void (*)(id, SEL, CGPoint))objc_msgSend)(interaction, present, mid);
-            ApolloLog(@"[CollapseSide] DBG showmenu presented");
-        } else {
-            ApolloLog(@"[CollapseSide] DBG showmenu: no interaction (button=%p)", button);
-        }
-    });
-}
-
-#endif // APOLLO_SIM_BUILD
-
 %ctor {
     %init(SettingsGeneralViewController=objc_getClass("_TtC6Apollo29SettingsGeneralViewController"));
-#if APOLLO_SIM_BUILD
-    CollapseSideInstallDebugTriggers();
-#endif
     ApolloLog(@"[CollapseSide] hook installed (supported=%d side=%ld)",
               CollapseSideSupported(), (long)sTabBarCollapseSide);
 }
