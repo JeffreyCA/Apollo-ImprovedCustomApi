@@ -223,8 +223,6 @@ static void ApolloFlairAnnotate(NSArray *flairs, UIColor *background, UIColor *t
     }
 }
 
-static NSUInteger sApolloFlairRecoverLogCount = 0;
-
 // Reddit sometimes nests the link/comment fields under a "data" sub-dictionary
 // (the t3 / t1 "thing" wrapper). Pick whichever dict actually carries the flair
 // keys so recovery works regardless of which layer Mantle handed us.
@@ -258,10 +256,6 @@ static void ApolloFlairRecoverColors(id model, NSDictionary *rawJson, BOOL isLin
             ApolloFlairAnnotate(ApolloFlairArrayProperty(model, @selector(linkFlair)), linkBG, linkText);
             ApolloFlairAnnotate(ApolloFlairArrayProperty(model, @selector(linkFlairRichText)), linkBG, linkText);
             ApolloFlairCacheColors(ApolloFlairStringProperty(model, @selector(linkFlairText)), linkBG, linkText);
-            if (sApolloFlairRecoverLogCount < 30) {
-                sApolloFlairRecoverLogCount++;
-                ApolloLog(@"[FlairColors] recovered link flair bg=%@ textMode=%@", json[@"link_flair_background_color"], json[@"link_flair_text_color"]);
-            }
         }
     }
 
@@ -271,10 +265,6 @@ static void ApolloFlairRecoverColors(id model, NSDictionary *rawJson, BOOL isLin
         ApolloFlairAnnotate(ApolloFlairArrayProperty(model, @selector(authorFlair)), authorBG, authorText);
         ApolloFlairAnnotate(ApolloFlairArrayProperty(model, @selector(authorFlairRichtext)), authorBG, authorText);
         ApolloFlairCacheColors(ApolloFlairStringProperty(model, @selector(authorFlairPlaintext)), authorBG, authorText);
-        if (sApolloFlairRecoverLogCount < 30) {
-            sApolloFlairRecoverLogCount++;
-            ApolloLog(@"[FlairColors] recovered author flair bg=%@ textMode=%@", json[@"author_flair_background_color"], json[@"author_flair_text_color"]);
-        }
     }
 }
 
@@ -493,14 +483,6 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
         Class linkClass = objc_getClass("RDKLink");
         Class commentClass = objc_getClass("RDKComment");
         if (linkClass && [model isKindOfClass:linkClass]) {
-            static NSUInteger sLinkLog = 0;
-            if (sLinkLog < 10) {
-                sLinkLog++;
-                ApolloLog(@"[FlairColors] adapter RDKLink hasBGKey=%d bg=%@ flairKeys=%@",
-                          (int)(json[@"link_flair_background_color"] != nil),
-                          json[@"link_flair_background_color"],
-                          json[@"link_flair_richtext"] ? @"richtext" : (json[@"link_flair_text"] ? @"text" : @"none"));
-            }
             ApolloFlairRecoverColors(model, json, YES);
         } else if (commentClass && [model isKindOfClass:commentClass]) {
             ApolloFlairRecoverColors(model, json, NO);
@@ -515,11 +497,6 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
 // methods directly (not the instance method), so we must hook here.
 + (id)modelOfClass:(Class)modelClass fromJSONDictionary:(NSDictionary *)JSONDictionary error:(NSError **)error {
     id model = %orig;
-    static NSUInteger sClassLog = 0;
-    if (sClassLog < 5) {
-        sClassLog++;
-        ApolloLog(@"[FlairColors] +modelOfClass:%@ fromJSONDictionary fired", NSStringFromClass(modelClass));
-    }
     ApolloFlairRecoverForModel(model, JSONDictionary);
     return model;
 }
@@ -527,12 +504,6 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
 // Listing/array funnel — JSON array and model array are index-parallel.
 + (id)modelsOfClass:(Class)modelClass fromJSONArray:(NSArray *)JSONArray error:(NSError **)error {
     id models = %orig;
-    static NSUInteger sArrayLog = 0;
-    if (sArrayLog < 5) {
-        sArrayLog++;
-        ApolloLog(@"[FlairColors] +modelsOfClass:%@ fromJSONArray count=%lu fired",
-                  NSStringFromClass(modelClass), (unsigned long)([JSONArray isKindOfClass:[NSArray class]] ? JSONArray.count : 0));
-    }
     if ([models isKindOfClass:[NSArray class]] && [JSONArray isKindOfClass:[NSArray class]] &&
         [(NSArray *)models count] == JSONArray.count) {
         NSArray *modelArray = (NSArray *)models;
@@ -564,16 +535,6 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
 
 - (void)didLoad {
     %orig;
-    static NSUInteger sDidLoadLogCount = 0;
-    if (sDidLoadLogCount < 20) {
-        sDidLoadLogCount++;
-        NSArray *flairs = ApolloFlairSwiftArrayIvar(self, "flairs");
-        UIColor *bg = nil, *tx = nil;
-        BOOL resolved = ApolloFlairResolveColors(flairs, &bg, &tx);
-        ApolloLog(@"[FlairColors] FlairNode.didLoad enabled=%d flairs=%lu firstText=%@ resolved=%d bg=%@",
-                  (int)sEnableFlairColors, (unsigned long)flairs.count,
-                  flairs.count ? ApolloFlairText(flairs.firstObject) : @"(none)", (int)resolved, bg);
-    }
     ApolloFlairApply(self, YES);
 }
 
@@ -599,11 +560,6 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
     // reapply cannot reliably win the race. The real guarantee is the write-time
     // setBackgroundColor: chokepoint below (mirroring the text chokepoint). We keep
     // this reapply because it's cheap and idempotent and covers the non-race paths.
-    static NSUInteger sVisibleLogCount = 0;
-    if (sVisibleLogCount < 20) {
-        sVisibleLogCount++;
-        ApolloLog(@"[FlairColors] FlairNode.didEnterVisibleState enabled=%d reapplying", (int)sEnableFlairColors);
-    }
     ApolloFlairApply(self, YES);
 }
 
@@ -632,12 +588,6 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
     // raw setter IMP and never re-enters this hook; this branch just avoids the
     // redundant corner-radius/text work below on our own writes.)
     if ([color isEqual:memo]) { %orig; return; }
-
-    static NSUInteger sBGChokeLog = 0;
-    if (sBGChokeLog < 20) {
-        sBGChokeLog++;
-        ApolloLog(@"[FlairColors] setBackgroundColor: re-imposing memoized flair color over %@", color);
-    }
 
     // Apollo tried to paint grey — re-impose our color and restore the pill
     // geometry ApolloFlairSetBackground normally sets.
@@ -695,10 +645,4 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
 %ctor {
     sApolloFlairColorCache = [NSCache new];
     sApolloFlairColorCache.countLimit = 512;
-    ApolloLog(@"[FlairColors] ctor: module loaded enabled=%d FlairNodeClass=%p MTLJSONAdapterClass=%p RDKLink=%p RDKComment=%p",
-              (int)sEnableFlairColors,
-              objc_getClass("_TtC6Apollo9FlairNode"),
-              objc_getClass("MTLJSONAdapter"),
-              objc_getClass("RDKLink"),
-              objc_getClass("RDKComment"));
 }

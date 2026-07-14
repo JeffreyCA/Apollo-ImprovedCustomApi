@@ -41,6 +41,40 @@ static ApolloCompiledTheme *GalleryCompiledTheme(NSDictionary *theme) {
                                        advancedEnabled:[theme[kApolloThemeAdvancedOptionsEnabledKey] boolValue]];
 }
 
+static UIView *GalleryModeAccessory(BOOL lightSelected, BOOL darkSelected, UIColor *tint) {
+    NSMutableArray<UIImageView *> *icons = [NSMutableArray array];
+    UIImageSymbolConfiguration *config =
+        [UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightRegular];
+    if (lightSelected && darkSelected) {
+        UIImageView *icon = [[UIImageView alloc] initWithImage:
+            [UIImage systemImageNamed:@"checkmark" withConfiguration:config]];
+        icon.tintColor = tint;
+        [icon.widthAnchor constraintEqualToConstant:24.0].active = YES;
+        [icon.heightAnchor constraintEqualToConstant:32.0].active = YES;
+        [icons addObject:icon];
+    } else {
+    for (NSString *name in @[@"sun.max.fill", @"moon.fill"]) {
+        BOOL selected = [name containsString:@"sun"] ? lightSelected : darkSelected;
+        if (!selected) continue;
+        UIImageSymbolConfiguration *iconConfig = [UIImageSymbolConfiguration configurationWithPointSize:
+            [name isEqualToString:@"moon.fill"] ? 10.5 : 17.0 weight:UIImageSymbolWeightRegular];
+        UIImage *image = [UIImage systemImageNamed:name withConfiguration:iconConfig];
+        UIImageView *icon = [[UIImageView alloc] initWithImage:image];
+        icon.tintColor = tint;
+        [icon.widthAnchor constraintEqualToConstant:32.0].active = YES;
+        [icon.heightAnchor constraintEqualToConstant:32.0].active = YES;
+        [icons addObject:icon];
+    }
+    }
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:icons];
+    stack.axis = UILayoutConstraintAxisHorizontal;
+    stack.alignment = UIStackViewAlignmentCenter;
+    stack.spacing = 6.0;
+    CGSize size = [stack systemLayoutSizeFittingSize:UILayoutFittingCompressedSize];
+    stack.frame = CGRectMake(0, 0, size.width, MAX(size.height, 24.0));
+    return stack;
+}
+
 typedef void (^ApolloThemeGalleryAction)(NSString *slug);
 
 @interface ApolloThemeGalleryPreviewViewController : UIViewController
@@ -443,13 +477,21 @@ typedef void (^ApolloThemeGalleryAction)(NSString *slug);
     ApolloCompiledTheme *compiled = [self compiledForSlug:slug];
     ApolloThemeMode mode = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark
         ? ApolloThemeModeDark : ApolloThemeModeLight;
-    BOOL active = [ApolloThemeStore shared].activeSelectionKind == ApolloThemeSelectionGallery
-        && [[ApolloThemeStore shared].activeGallerySlug isEqualToString:slug];
+    ApolloThemeStore *store = [ApolloThemeStore shared];
+    BOOL lightSelected = store.customThemeEnabled &&
+        [store isGallerySlug:slug selectedForMode:ApolloThemeModeLight];
+    BOOL darkSelected = store.customThemeEnabled &&
+        [store isGallerySlug:slug selectedForMode:ApolloThemeModeDark];
+    BOOL active = lightSelected || darkSelected;
 
     cell.textLabel.text = theme[@"name"] ?: slug;
     cell.detailTextLabel.text = [ApolloThemeVariantKey(ApolloThemeVariantFromKey(theme[@"variant"])) capitalizedString];
     cell.imageView.image = GalleryRowImage(compiled, mode);
-    cell.accessoryType = active ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryDisclosureIndicator;
+    if (active && store.separateThemesEnabled) {
+        cell.accessoryView = GalleryModeAccessory(lightSelected, darkSelected, self.view.tintColor);
+    } else {
+        cell.accessoryType = active ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryDisclosureIndicator;
+    }
     [self applyThemeToCell:cell];
     cell.accessibilityValue = active ? @"Active" : nil;
     return cell;
@@ -474,9 +516,38 @@ typedef void (^ApolloThemeGalleryAction)(NSString *slug);
 }
 
 - (void)applyGallerySlug:(NSString *)slug dismissing:(UIViewController *)presented {
+    ApolloThemeStore *store = [ApolloThemeStore shared];
+    if (!store.separateThemesEnabled) {
+        [self applyGallerySlug:slug target:ApolloThemeApplyTargetBoth dismissing:presented];
+        return;
+    }
+
+    NSDictionary *theme = [self themeForSlug:slug];
+    NSString *name = [theme[@"name"] isKindOfClass:NSString.class] ? theme[@"name"] : @"Theme";
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"Apply “%@”", name]
+                                                                   message:nil
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) weakSelf = self;
+    __weak UIViewController *weakPresented = presented;
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Light Mode" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [weakSelf applyGallerySlug:slug target:ApolloThemeApplyTargetLight dismissing:weakPresented];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Dark Mode" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [weakSelf applyGallerySlug:slug target:ApolloThemeApplyTargetDark dismissing:weakPresented];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Both Modes" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [weakSelf applyGallerySlug:slug target:ApolloThemeApplyTargetBoth dismissing:weakPresented];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = presented.view;
+    sheet.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX(presented.view.bounds), CGRectGetMidY(presented.view.bounds), 1, 1);
+    [presented presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)applyGallerySlug:(NSString *)slug target:(ApolloThemeApplyTarget)target dismissing:(UIViewController *)presented {
     ApolloLog(@"ThemeGallery: applying gallery slug %@", slug);
     ApolloThemeStore *store = [ApolloThemeStore shared];
-    [store selectGalleryTheme:slug];
+    [store selectGalleryTheme:slug forTarget:target];
     if (store.runtimeDisabledDueToCrash) [store clearCrashDisable];
     ApolloThemeRuntimeEnable();
     UINotificationFeedbackGenerator *fb = [[UINotificationFeedbackGenerator alloc] init];
@@ -494,7 +565,19 @@ typedef void (^ApolloThemeGalleryAction)(NSString *slug);
                                         variant:ApolloThemeVariantFromKey(theme[@"variant"])
                          advancedOptionsEnabled:[theme[kApolloThemeAdvancedOptionsEnabledKey] boolValue]
                                      generation:@{ @"source": @"gallery", @"slug": slug }];
-    [store selectCustomTheme:themeID];
+    if (store.separateThemesEnabled) {
+        BOOL light = [store isGallerySlug:slug selectedForMode:ApolloThemeModeLight];
+        BOOL dark = [store isGallerySlug:slug selectedForMode:ApolloThemeModeDark];
+        if (light) [store selectCustomTheme:themeID forTarget:ApolloThemeApplyTargetLight];
+        if (dark) [store selectCustomTheme:themeID forTarget:ApolloThemeApplyTargetDark];
+        if (!light && !dark) {
+            ApolloThemeApplyTarget target = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark
+                ? ApolloThemeApplyTargetDark : ApolloThemeApplyTargetLight;
+            [store selectCustomTheme:themeID forTarget:target];
+        }
+    } else {
+        [store selectCustomTheme:themeID];
+    }
     if (store.runtimeDisabledDueToCrash) [store clearCrashDisable];
     ApolloThemeRuntimeEnable();
     UINotificationFeedbackGenerator *fb = [[UINotificationFeedbackGenerator alloc] init];

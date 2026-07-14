@@ -149,7 +149,6 @@ typedef struct {
     NSUInteger recolored;
 } ApolloLPRegisteredRecolorResult;
 
-static void ApolloLPLogOncePerHost(NSString *host, NSString *event);
 static void ApolloLPTriggerRelayoutForHost(ASDisplayNode *node, NSString *host);
 static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDisplayNode *originNode, NSString *host);
 static ASDisplayNode *ApolloLPFindOwningCellNode(ASDisplayNode *node);
@@ -1012,6 +1011,7 @@ static BOOL ApolloLPImageURLIsDead(NSURL *url) {
 }
 
 static void ApolloLPApplyFallbackImage(ASNetworkImageNode *imageNode, NSURL *imageURL, UIImage *image, NSString *host) {
+    (void)host;
     if (!imageNode || !image || image.size.width <= 0.0 || image.size.height <= 0.0) return;
     NSURL *currentURL = objc_getAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackURLKey);
     if (![currentURL.absoluteString isEqualToString:imageURL.absoluteString]) return;
@@ -1031,7 +1031,6 @@ static void ApolloLPApplyFallbackImage(ASNetworkImageNode *imageNode, NSURL *ima
     imageNode.backgroundColor = nil;
     objc_setAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackAppliedURLKey, imageURL.absoluteString, OBJC_ASSOCIATION_COPY_NONATOMIC);
     ApolloLPMaybeKickFaceScanForNode(imageNode, imageURL, image);
-    ApolloLPLogOncePerHost(host ?: ApolloLPHost(imageURL), @"fallback-image-applied");
 }
 
 static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL *imageURL, NSString *host) {
@@ -1059,6 +1058,7 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
     __weak ASNetworkImageNode *weakImageNode = imageNode;
     NSString *hostCopy = [host copy];
     [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        (void)error;
         UIImage *image = data.length > 0 ? [UIImage imageWithData:data scale:UIScreen.mainScreen.scale] : nil;
         BOOL definitivelyDead = NO;
         if (image) {
@@ -1066,12 +1066,6 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
             [ApolloLPFallbackImageCache() setObject:image forKey:key cost:cost];
         } else {
             NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-            ApolloLog(@"[LinkPreviews] fallback-image failed host=%@ status=%ld bytes=%lu err=%@ url=%@",
-                      hostCopy ?: ApolloLPHost(imageURL),
-                      (long)httpResponse.statusCode,
-                      (unsigned long)data.length,
-                      error.localizedDescription ?: @"nil",
-                      imageURL.absoluteString);
             // 4xx = the file genuinely isn't there (clip hosts publish og:image
             // before generating the thumbnail). Transient network errors and
             // 5xx don't dead-mark, so flaky connectivity can't compact-ify
@@ -1099,7 +1093,6 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
                     hostNode = hostNode.supernode;
                 }
                 if (hostNode) {
-                    ApolloLog(@"[LinkPreviews] V21-dead-image-compact-reflow host=%@", hostCopy ?: ApolloLPHost(imageURL));
                     ApolloLPTriggerRelayoutForHost(hostNode, hostCopy);
                     ASDisplayNode *cellNode = ApolloLPFindOwningCellNode(hostNode);
                     if (!ApolloLPInvokeRowReloadIfPossible(cellNode ?: hostNode, hostNode, hostCopy)) {
@@ -1358,7 +1351,7 @@ static void ApolloLPStartFaceScanIfNeeded(NSString *key, UIImage *image, NSStrin
         if ([pending containsObject:key]) return;
         [pending addObject:key];
     }
-    NSString *hostCopy = [host copy];
+    (void)host;
     // Deliberately do NOT capture the UIImage: a fast scroll can queue many
     // scans, and blocks pinning full decoded bitmaps would hold megabytes
     // NSCache couldn't evict under pressure. Re-fetch from the fallback cache
@@ -1366,7 +1359,6 @@ static void ApolloLPStartFaceScanIfNeeded(NSString *key, UIImage *image, NSStrin
     // it got evicted meanwhile, drop without caching a verdict so a later
     // arrival can re-kick.
     dispatch_async(ApolloLPFaceScanQueue(), ^{
-        CFTimeInterval started = CACurrentMediaTime();
         UIImage *scanUIImage = [ApolloLPFallbackImageCache() objectForKey:key];
         CGImageRef scanImage = scanUIImage.CGImage;
         if (!scanImage) {
@@ -1381,7 +1373,6 @@ static void ApolloLPStartFaceScanIfNeeded(NSString *key, UIImage *image, NSStrin
             return;
         }
         CGRect region = CGRectNull;
-        NSUInteger faceCount = 0;
         @try {
             CGFloat width = (CGFloat)CGImageGetWidth(scanImage);
             CGFloat height = (CGFloat)CGImageGetHeight(scanImage);
@@ -1397,7 +1388,6 @@ static void ApolloLPStartFaceScanIfNeeded(NSString *key, UIImage *image, NSStrin
                                                    bounds.size.width / width,
                                                    bounds.size.height / height);
                     region = CGRectIsNull(region) ? normalized : CGRectUnion(region, normalized);
-                    faceCount++;
                 }
             }
         } @catch (NSException *exception) {
@@ -1405,10 +1395,6 @@ static void ApolloLPStartFaceScanIfNeeded(NSString *key, UIImage *image, NSStrin
         }
         [ApolloLPFaceRegionCache() setObject:[NSValue valueWithCGRect:region] forKey:key];
         @synchronized (pending) { [pending removeObject:key]; }
-        ApolloLog(@"[LinkPreviews] V22-face-scan host=%@ faces=%lu top=%.2f ms=%.0f",
-                  hostCopy ?: @"?", (unsigned long)faceCount,
-                  CGRectIsNull(region) ? -1.0 : region.origin.y,
-                  (CACurrentMediaTime() - started) * 1000.0);
         dispatch_async(dispatch_get_main_queue(), ^{ ApolloLPRefineCropAnchorsForKey(key); });
     });
 }
@@ -1490,13 +1476,6 @@ static void ApolloLPApplyVerticalCropAnchor(ASNetworkImageNode *imageNode, Apoll
         ApolloLPStartFaceScanIfNeeded(key, availableImage, host);
     }
     ApolloLPSetCropAnchorY(imageNode, anchorY, NO);
-    // Stable dedup key (no per-image numbers — those would degrade the
-    // once-per-host set to once-per-geometry). Numeric detail lives in the
-    // per-scan V22-face-scan log line.
-    NSString *kind = region
-        ? (CGRectIsNull([region CGRectValue]) ? (defaultAnchorY <= 0.0 ? @"top" : @"center") : @"face")
-        : (visibleFrac <= 0.0 ? @"unknown-size" : (defaultAnchorY <= 0.0 ? @"top" : @"center"));
-    ApolloLPLogOncePerHost(host, [NSString stringWithFormat:@"V22-crop-anchor kind=%@", kind]);
 }
 
 static UIColor *ApolloLPBlendColor(UIColor *foreground, UIColor *background, CGFloat foregroundAlpha, UITraitCollection *traitCollection) {
@@ -1562,13 +1541,11 @@ static UIColor *ApolloLPCardBackgroundColorForNode(ASDisplayNode *hostNode, NSUR
     if (custom) {
         // Paint the card the exact picked color, identical in light/dark, so the
         // result matches the swatch the user chose (WYSIWYG). Text auto-contrasts.
-        ApolloLPLogOncePerHost(ApolloLPHost(url), @"V13-card-color-custom-resolved");
         return custom;
     }
 
     // Default ("Neutral"): keep the original subtle, theme-aware card background.
     UIColor *tintColor = ApolloLinkPreviewPresetColor(ApolloLinkPreviewCardColorNeutral);
-    ApolloLPLogOncePerHost(ApolloLPHost(url), @"V13-card-color-default-resolved");
 
     if (@available(iOS 13.0, *)) {
         return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traitCollection) {
@@ -1670,7 +1647,6 @@ static void ApolloLPRunCrossNodeRowReloadPoll(void) {
         NSString *host = ApolloLPHost([NSURL URLWithString:urlString]);
         if (ApolloLPFireRowReloadFromAttachedNodesForURL(urlString, host)) {
             [pending removeObjectForKey:urlString];
-            ApolloLog(@"[LinkPreviews] V23-cross-node-row-reload host=%@", host ?: @"?");
         }
     }
     if (pending.count > 0) {
@@ -1926,7 +1902,6 @@ static NSString *ApolloLPDisplayTitleForPreview(ApolloLinkPreview *preview) {
             name = site;
         }
         if (name.length > 0) {
-            ApolloLPLogOncePerHost(site, [NSString stringWithFormat:@"junk-numeric-title-substituted->%@", name]);
             return name;
         }
     }
@@ -2104,10 +2079,6 @@ static void ApolloLPRememberCompactPlaceholderHost(NSURL *url) {
     }
 }
 
-static NSString *ApolloLPContextLogName(ApolloLPContext context) {
-    return context == ApolloLPContextSelfText ? @"hero" : @"compact";
-}
-
 static id ApolloLPModelFromNodeIvar(ASDisplayNode *node, const char *ivarName) {
     if (!node || !ivarName) return nil;
     Ivar ivar = class_getInstanceVariable([node class], ivarName);
@@ -2116,9 +2087,7 @@ static id ApolloLPModelFromNodeIvar(ASDisplayNode *node, const char *ivarName) {
     id model = nil;
     @try {
         model = object_getIvar(node, ivar);
-    } @catch (NSException *exception) {
-        ApolloLog(@"[LinkPreviews] ivar read failed node=%@ ivar=%s err=%@",
-                  NSStringFromClass([node class]), ivarName, exception.reason ?: exception.name);
+    } @catch (__unused NSException *exception) {
     }
     return model;
 }
@@ -2280,9 +2249,6 @@ static ApolloLPArea ApolloLPAreaForLinkButton(ASDisplayNode *linkButtonNode) {
                 [(id)cell setNeedsLayout];
             }
         }
-        ApolloLog(@"[LinkPreviews] V18 deferred-upgrade fallback=%ld→resolved=%ld cell=%@",
-                  (long)fallbackMode, (long)resolvedMode,
-                  cell ? NSStringFromClass([cell class]) : @"(no-cell)");
     });
     return fallbackArea;
 }
@@ -2550,7 +2516,6 @@ static id ApolloLPBuildCompactCardSpec(ASDisplayNode *hostNode, NSURL *url, Apol
     ASDisplayNode *backgroundNode = bundle[@"background"];
 
     ApolloLPSetAvatarNodeVisible(avatarNode, NO);
-    ApolloLPLogOncePerHost(ApolloLPHost(url), @"hid-orphan-avatar-compact");
 
     Class stackClass = ApolloLPClass(@"ASStackLayoutSpec");
     Class insetClass = ApolloLPClass(@"ASInsetLayoutSpec");
@@ -2620,7 +2585,6 @@ static id ApolloLPBuildHeroCardSpec(ASDisplayNode *hostNode, NSURL *url, ApolloL
     ASDisplayNode *backgroundNode = bundle[@"background"];
 
     ApolloLPSetAvatarNodeVisible(avatarNode, NO);
-    ApolloLPLogOncePerHost(ApolloLPHost(url), @"hid-orphan-avatar-hero");
 
     Class stackClass = ApolloLPClass(@"ASStackLayoutSpec");
     Class insetClass = ApolloLPClass(@"ASInsetLayoutSpec");
@@ -2668,7 +2632,6 @@ static id ApolloLPBuildHeroCardSpec(ASDisplayNode *hostNode, NSURL *url, ApolloL
             if (isPosterPreview) {
                 imageNode.contentMode = UIViewContentModeScaleAspectFit;
                 ratio = MAX(MIN(naturalRatio, 1.1), 0.6);
-                ApolloLPLogOncePerHost(ApolloLPHost(url), [NSString stringWithFormat:@"V12-poster-hero-image ratio=%.2f", ratio]);
             } else {
                 ratio = MAX(MIN(naturalRatio, 0.6), 0.45);
             }
@@ -2749,12 +2712,6 @@ static id ApolloLPBuildBlueskyPostCardSpec(ASDisplayNode *hostNode, NSURL *url, 
     // for multi-line posts. Bluesky posts are capped at ~300 chars, so the
     // body is naturally bounded even without a line limit.
     NSString *postText = preview.postText.length > 0 ? ApolloLPCleanMultilineDisplayText(preview.postText) : ApolloLPCleanMultilineDisplayText(preview.desc);
-    NSUInteger bodyNewlines = postText.length > 0 ? [postText componentsSeparatedByString:@"\n"].count - 1 : 0;
-    NSUInteger rawNewlines = preview.postText.length > 0 ? [preview.postText componentsSeparatedByString:@"\n"].count - 1 : 0;
-    ApolloLPLogOncePerHost(ApolloLPHost(url),
-        [NSString stringWithFormat:@"V19-bluesky-body source=%@ len=%lu newlines=%lu rawNewlines=%lu",
-         preview.postText.length > 0 ? @"postText" : @"desc",
-         (unsigned long)postText.length, (unsigned long)bodyNewlines, (unsigned long)rawNewlines]);
     BOOL imageIsAvatar = preview.avatarURL.absoluteString.length > 0
         && [preview.imageURL.absoluteString isEqualToString:preview.avatarURL.absoluteString];
     BOOL hasPostImage = preview.imageURL.absoluteString.length > 0 && !imageIsAvatar && !preview.imageIsFallbackIcon;
@@ -2920,26 +2877,6 @@ static id ApolloLPBuildRedditUserCardSpec(ASDisplayNode *hostNode, NSURL *url, A
     NSString *aboutText = isBannedUser ? ApolloBannedProfileBannedDescriptionText() : (preview.desc.length > 0 ? preview.desc : handleText);
     NSURL *avatarURL = isBannedUser ? nil : (preview.avatarURL ?: preview.imageURL);
 
-    NSString *cardUsername = ApolloLPNormalizedRedditUsername(ApolloLPRedditUsernameFromProfileURL(url));
-    if (cardUsername.length == 0) {
-        cardUsername = ApolloLPNormalizedRedditUsername(preview.authorHandle);
-    }
-    if (cardUsername.length > 0) {
-        static NSMutableSet<NSString *> *sLoggedRedditUserCardStates;
-        static dispatch_once_t sLoggedRedditUserCardStatesOnce;
-        dispatch_once(&sLoggedRedditUserCardStatesOnce, ^{
-            sLoggedRedditUserCardStates = [NSMutableSet set];
-        });
-        NSString *logKey = cardUsername.lowercaseString;
-        if (![sLoggedRedditUserCardStates containsObject:logKey]) {
-            [sLoggedRedditUserCardStates addObject:logKey];
-            ApolloLog(@"[BannedProfile] reddit-user card u/%@ cachedSuspended=%@ previewBanned=%@",
-                      cardUsername,
-                      ApolloBannedProfileCachedIsSuspended(cardUsername) ? @"YES" : @"NO",
-                      isBannedUser ? @"YES" : @"NO");
-        }
-    }
-
     ApolloLPApplyCardBackgroundColor(hostNode, backgroundNode, url, NO);
     backgroundNode.cornerRadius = 10.0;
     backgroundNode.clipsToBounds = YES;
@@ -3082,7 +3019,6 @@ static id ApolloLPBuildPlaceholderSpec(ASDisplayNode *hostNode, NSURL *url, Apol
     ASDisplayNode *backgroundNode = bundle[@"background"];
 
     ApolloLPSetAvatarNodeVisible(avatarNode, NO);
-    ApolloLPLogOncePerHost(ApolloLPHost(url), @"hid-orphan-avatar-placeholder");
 
     Class stackClass = ApolloLPClass(@"ASStackLayoutSpec");
     Class insetClass = ApolloLPClass(@"ASInsetLayoutSpec");
@@ -3323,30 +3259,13 @@ static id ApolloLPTextureNodeForScrollView(UIView *scrollView) {
 // No longer called from the row-reload path (full-table relayout pinned main for
 // seconds on big threads — #630 round 6); kept for manual debugging only.
 static BOOL __attribute__((unused)) ApolloLPInvokeTextureScrollRelayoutIfPossible(UIView *scrollView, NSString *host, NSString *kind) {
+    (void)host;
+    (void)kind;
     id node = ApolloLPTextureNodeForScrollView(scrollView);
     if (!node) return NO;
 
     if (!ApolloLPInvokeRelayoutItemsIfPossible(node)) return NO;
-    ApolloLPLogOncePerHost(host, [NSString stringWithFormat:@"V12-texture-scroll-relayout kind=%@", kind ?: @"unknown"]);
     return YES;
-}
-
-// Debug aid for row-reload misses: dump the superview + supernode ancestor
-// chains so a miss log pinpoints which container class the walk failed to
-// recognize (e.g. the search results VC's cell tree).
-static void ApolloLPLogRowReloadMissAncestry(ASDisplayNode *startNode, UIView *cellView, NSString *host) {
-    NSMutableArray<NSString *> *viewChain = [NSMutableArray array];
-    NSUInteger depth = 0;
-    for (UIView *current = cellView; current && depth < 40; current = current.superview, depth++) {
-        [viewChain addObject:NSStringFromClass([current class])];
-    }
-    NSMutableArray<NSString *> *nodeChain = [NSMutableArray array];
-    depth = 0;
-    for (ASDisplayNode *current = startNode; current && depth < 40; current = current.supernode, depth++) {
-        [nodeChain addObject:NSStringFromClass([current class])];
-    }
-    ApolloLPLogOncePerHost(host, [NSString stringWithFormat:@"V23-miss-view-chain %@", [viewChain componentsJoinedByString:@" > "]]);
-    ApolloLPLogOncePerHost(host, [NSString stringWithFormat:@"V23-miss-node-chain %@", [nodeChain componentsJoinedByString:@" > "]]);
 }
 
 // V24: the async reload bodies below can still drop their reload when the
@@ -3388,7 +3307,6 @@ static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDispla
         [attempts removeObjectAtIndex:0];
     }
     if (attempts.count >= 3) {
-        ApolloLPLogOncePerHost(host, [NSString stringWithFormat:@"V25-reload-budget-exhausted key=%@", budgetKey]);
         if (originNode) {
             objc_setAssociatedObject(originNode, &kApolloLPPendingRowReloadHostKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
         }
@@ -3401,7 +3319,6 @@ static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDispla
 
     UIView *cellView = ApolloLPViewForNode(startNode);
     if (!cellView) {
-        ApolloLPLogOncePerHost(host, @"V12-row-reload-miss no-view");
         return NO;
     }
 
@@ -3437,7 +3354,6 @@ static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDispla
                     // watchdog kill in #630 round 6). The single-row reload re-measures
                     // this row's node from scratch, which is all the healer needs.
                     [tableView reloadRowsAtIndexPaths:@[indexPathCopy] withRowAnimation:UITableViewRowAnimationNone];
-                    ApolloLPLogOncePerHost(hostCopy, [NSString stringWithFormat:@"V12-row-reload kind=table row=%ld", (long)indexPathCopy.row]);
                 } @catch (__unused NSException *exception) {
                 }
             });
@@ -3464,7 +3380,6 @@ static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDispla
                     [collectionView performBatchUpdates:^{
                         [collectionView reloadItemsAtIndexPaths:@[indexPathCopy]];
                     } completion:nil];
-                    ApolloLPLogOncePerHost(hostCopy, [NSString stringWithFormat:@"V12-row-reload kind=collection row=%ld", (long)indexPathCopy.item]);
                 } @catch (__unused NSException *exception) {
                 }
             });
@@ -3472,8 +3387,6 @@ static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDispla
         }
     }
 
-    ApolloLPLogOncePerHost(host, @"V12-row-reload-miss no-scroll-cell");
-    ApolloLPLogRowReloadMissAncestry(startNode, cellView, host);
     return NO;
 }
 
@@ -3495,7 +3408,6 @@ static void ApolloLPInvokeContainerRelayoutIfPossible(ASDisplayNode *node, ASDis
     // scene-update watchdog kill in #630 round 6. relayoutItems survives only as a
     // last-resort fallback, rate-limited and never while backgrounded.
     if (ApolloLPInvokeScrollViewHeightRefresh(cellNode ?: node)) {
-        ApolloLPLogOncePerHost(host, @"V12-scrollview-height-refresh");
         return;
     }
 
@@ -3511,7 +3423,6 @@ static void ApolloLPInvokeContainerRelayoutIfPossible(ASDisplayNode *node, ASDis
             // Burn the rate-limit only on a SUCCESSFUL invocation, so a failed
             // attempt doesn't suppress the next legitimate fallback.
             sLastFullRelayoutUptime = now;
-            ApolloLPLogOncePerHost(host, @"V12-table-relayout-items");
         }
     }
 }
@@ -3625,10 +3536,10 @@ static void ApolloLPTriggerRelayoutForHost(ASDisplayNode *node, NSString *host) 
 // declared with the dead-image helpers) and re-fire the reload from
 // didEnterVisibleState once the cell actually exists on screen.
 static void ApolloLPTriggerPlaceholderContextRelayout(ASDisplayNode *node, NSString *host, ApolloLPContext fromContext, ApolloLPContext toContext) {
+    (void)fromContext;
+    (void)toContext;
     if (!node) return;
 
-    ApolloLog(@"[LinkPreviews] V12-placeholder-context-shrink-refresh host=%@ from=%@ to=%@",
-              host ?: @"(nohost)", ApolloLPContextLogName(fromContext), ApolloLPContextLogName(toContext));
     ApolloLPTriggerRelayoutInternal(node, NO, host);
     ASDisplayNode *cellNode = ApolloLPFindOwningCellNode(node);
     if (ApolloLPInvokeRowReloadIfPossible(cellNode ?: node, node, host)) {
@@ -3947,12 +3858,10 @@ static NSUInteger ApolloLPRefreshLinkPreviewScrollViewsInView(UIView *view, NSHa
 static void ApolloLPRefreshVisibleLayoutsForModeChange(NSString *areaName) {
     dispatch_async(dispatch_get_main_queue(), ^{
         BOOL cardColorRefresh = [areaName isEqualToString:@"card-color"];
-        ApolloLPRegisteredRecolorResult registeredResult = {0, 0};
-        NSUInteger registeredInvalidated = 0;
         if (cardColorRefresh) {
-            registeredResult = ApolloLPRecolorRegisteredLinkPreviewBackgrounds();
+            ApolloLPRecolorRegisteredLinkPreviewBackgrounds();
         } else {
-            registeredInvalidated = ApolloLPInvalidateRegisteredLinkPreviewNodes(areaName ?: @"mode-change");
+            ApolloLPInvalidateRegisteredLinkPreviewNodes(areaName ?: @"mode-change");
         }
 
         NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
@@ -3979,34 +3888,18 @@ static void ApolloLPRefreshVisibleLayoutsForModeChange(NSString *areaName) {
             }
         }
 
-        NSUInteger visibleRecolored = 0;
         NSHashTable *visitedRecolorObjects = [NSHashTable weakObjectsHashTable];
         NSHashTable *visitedLayoutObjects = [NSHashTable weakObjectsHashTable];
-        NSUInteger invalidatedNodes = 0;
         for (UIWindow *window in windows) {
             if (cardColorRefresh) {
-                visibleRecolored += ApolloLPRecolorLinkPreviewBackgroundsInTree(window, 24, visitedRecolorObjects);
+                ApolloLPRecolorLinkPreviewBackgroundsInTree(window, 24, visitedRecolorObjects);
             }
-            invalidatedNodes += ApolloLPInvalidateLinkButtonNodesInTree(window, 24, visitedLayoutObjects);
+            ApolloLPInvalidateLinkButtonNodesInTree(window, 24, visitedLayoutObjects);
         }
 
         NSHashTable<UIView *> *visitedViews = [NSHashTable weakObjectsHashTable];
-        NSUInteger refreshCount = 0;
         for (UIWindow *window in windows) {
-            refreshCount += ApolloLPRefreshLinkPreviewScrollViewsInView(window, visitedViews);
-        }
-
-        if (cardColorRefresh) {
-            ApolloLog(@"[LinkPreviews] V14-card-color-global-refresh area=%@ scrollViews=%lu linkNodes=%lu registeredNodes=%lu registeredRecolored=%lu visibleRecolored=%lu",
-                      areaName ?: @"unknown",
-                      (unsigned long)refreshCount,
-                      (unsigned long)invalidatedNodes,
-                      (unsigned long)registeredResult.nodes,
-                      (unsigned long)registeredResult.recolored,
-                      (unsigned long)visibleRecolored);
-        } else {
-            ApolloLog(@"[LinkPreviews] V14-mode-change-layout-refresh area=%@ scrollViews=%lu linkNodes=%lu registeredNodes=%lu",
-                      areaName ?: @"unknown", (unsigned long)refreshCount, (unsigned long)invalidatedNodes, (unsigned long)registeredInvalidated);
+            ApolloLPRefreshLinkPreviewScrollViewsInView(window, visitedViews);
         }
     });
 }
@@ -4068,10 +3961,8 @@ static void ApolloLPArmTranslationLayoutRefreshForURL(NSURL *url, NSString *urlK
 }
 
 static void ApolloLPFireTranslationLayoutRefreshForURL(NSURL *url, NSString *urlKey) {
-    NSUInteger invalidated = ApolloLPInvalidateRegisteredLinkPreviewNodesForURL(url, @"translation-update-url");
-    ApolloLog(@"[LinkPreviews] V15-translation-url-refresh host=%@ invalidated=%lu",
-              ApolloLPHost(url) ?: @"(nohost)",
-              (unsigned long)invalidated);
+    (void)urlKey;
+    ApolloLPInvalidateRegisteredLinkPreviewNodesForURL(url, @"translation-update-url");
 }
 
 static void ApolloLPScheduleTranslationLayoutRefreshForURL(NSURL *url) {
@@ -4109,51 +4000,6 @@ static void ApolloLPScheduleTranslationLayoutRefreshForURL(NSURL *url) {
     ApolloLPArmTranslationLayoutRefreshForURL(url, urlKey, 0.30);
 }
 
-// Round 4 diagnostic flag: throttles the per-call logging so a feed scroll
-// doesn't spam OSLog with the same host hundreds of times. We still want one
-// entry per unique host per session so we can correlate hook activity with
-// the user's screenshots.
-static NSMutableSet<NSString *> *ApolloLPLoggedHosts(void) {
-    static NSMutableSet *set;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ set = [NSMutableSet set]; });
-    return set;
-}
-
-static void ApolloLPLogOncePerHost(NSString *host, NSString *event) {
-    if (host.length == 0) host = @"(nohost)";
-    NSString *key = [NSString stringWithFormat:@"%@|%@", host, event];
-    @synchronized (ApolloLPLoggedHosts()) {
-        if ([ApolloLPLoggedHosts() containsObject:key]) return;
-        [ApolloLPLoggedHosts() addObject:key];
-    }
-    ApolloLog(@"[LinkPreviews] %@ host=%@", event, host);
-}
-
-static void ApolloLPLogMetadataOnce(NSString *host, ApolloLinkPreview *preview, ApolloLPArea area, NSInteger mode, ApolloLPContext context) {
-    if (host.length == 0) host = @"(nohost)";
-    NSString *key = [NSString stringWithFormat:@"%@|metadata-v10", host];
-    @synchronized (ApolloLPLoggedHosts()) {
-        if ([ApolloLPLoggedHosts() containsObject:key]) return;
-        [ApolloLPLoggedHosts() addObject:key];
-    }
-
-    NSString *areaName = (area == ApolloLPAreaComments) ? @"comments" : @"body";
-    NSString *cardName = (context == ApolloLPContextSelfText) ? @"hero" : @"compact";
-    ApolloLog(@"[LinkPreviews] V12 metadata host=%@ area=%@ mode=%ld card=%@ site=%d title=%d desc=%d image=%d fallbackIcon=%d titleLen=%lu descLen=%lu",
-              host,
-              areaName,
-              (long)mode,
-              cardName,
-              preview.siteName.length > 0,
-              preview.title.length > 0,
-              preview.desc.length > 0,
-              preview.imageURL.absoluteString.length > 0,
-              preview.imageIsFallbackIcon,
-              (unsigned long)preview.title.length,
-              (unsigned long)preview.desc.length);
-}
-
 static NSString *ApolloLPVariant(ApolloLPArea area, NSInteger mode, ApolloLPContext context, BOOL placeholder) {
     NSString *areaName = (area == ApolloLPAreaComments) ? @"comments" : @"body";
     NSString *contextName = (context == ApolloLPContextSelfText) ? @"hero" : @"compact";
@@ -4180,16 +4026,8 @@ static NSString *ApolloLPRenderSignature(NSURL *url, ApolloLinkPreview *preview,
             preview.imageIsFallbackIcon];
 }
 
-static NSMutableDictionary<NSString *, NSNumber *> *ApolloLPConsecutiveDuplicateRenderCounts(void) {
-    static NSMutableDictionary<NSString *, NSNumber *> *map;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        map = [NSMutableDictionary dictionary];
-    });
-    return map;
-}
-
 static BOOL ApolloLPMarkRenderSignatureIfChanged(ASDisplayNode *hostNode, NSString *variant, NSString *signature, NSString *host) {
+    (void)host;
     if (!hostNode || variant.length == 0 || signature.length == 0) return YES;
 
     NSMutableDictionary<NSString *, NSString *> *signatures = objc_getAssociatedObject(hostNode, &kApolloLinkPreviewRenderSignaturesKey);
@@ -4199,28 +4037,11 @@ static BOOL ApolloLPMarkRenderSignatureIfChanged(ASDisplayNode *hostNode, NSStri
     }
 
     NSString *lastSignature = signatures[variant];
-    NSString *countKey = host.length > 0 ? host : @"(nohost)";
     if ([lastSignature isEqualToString:signature]) {
-        ApolloLPLogOncePerHost(host, @"duplicate-render-signature");
-        // Track consecutive duplicate-signature renders per host so a
-        // follow-up log can confirm that re-entering a thread is no longer
-        // producing extra paints. The "stable" log fires at most once per
-        // host per session, on the third consecutive identical render.
-        @synchronized (ApolloLPConsecutiveDuplicateRenderCounts()) {
-            NSUInteger current = ApolloLPConsecutiveDuplicateRenderCounts()[countKey].unsignedIntegerValue;
-            current += 1;
-            ApolloLPConsecutiveDuplicateRenderCounts()[countKey] = @(current);
-            if (current == 3) {
-                ApolloLPLogOncePerHost(host, @"V17-thread-render-stable");
-            }
-        }
         return NO;
     }
 
     signatures[variant] = signature;
-    @synchronized (ApolloLPConsecutiveDuplicateRenderCounts()) {
-        [ApolloLPConsecutiveDuplicateRenderCounts() removeObjectForKey:countKey];
-    }
     return YES;
 }
 
@@ -4299,7 +4120,6 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
     }
 
     if (!url) {
-        ApolloLPLogOncePerHost(NSStringFromClass([(id)self class]), @"no-url");
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
         return %orig;
     }
@@ -4319,25 +4139,21 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
         // for in-text links, never a bare link post, so nothing filled the space.
         // Deferring lets the album cover render (or the native card show as a
         // placeholder / failure fallback) regardless of hook load order.
-        ApolloLPLogOncePerHost(host, @"defer-imagechest-album");
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
         return %orig;
     }
 
     NSInteger selectedMode = ApolloLPModeForArea(area);
     if (selectedMode == ApolloLinkPreviewModeOff) {
-        ApolloLPLogOncePerHost(host, area == ApolloLPAreaComments ? @"comments-disabled" : @"body-disabled");
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
         return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, %orig);
     }
 
     if (ApolloLPShouldDeferToInlineMedia(url)) {
-        ApolloLPLogOncePerHost(host, @"defer-inline-media");
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
         return %orig;
     }
     if ([ApolloLinkPreviewFetcher isTwitterURL:url]) {
-        ApolloLPLogOncePerHost(host, @"defer-twitter");
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
         return %orig;
     }
@@ -4349,7 +4165,6 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
     // than reuse it forever (the render gate alone accepts handle-only).
     if (cached && ApolloLPIsBlueskyPostURL(url) &&
         (!ApolloLPIsBlueskyPostPreview(url, cached) || cached.postText.length == 0)) {
-        ApolloLPLogOncePerHost(host, @"stale-bluesky-inline-refetch");
         cached = nil;
     }
     if (cached && (ApolloLPIsRedditUserProfileURL(url) || ApolloLPIsRedditSubredditURL(url))) {
@@ -4360,7 +4175,6 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
         BOOL staleRedditUserSuspension = ApolloLPIsRedditUserProfileURL(url)
             && ApolloLPRedditUserPreviewNeedsSuspensionRefetch(url, cached);
         if (![cached hasUsefulMetadata] || staleRedditUser || staleRedditSubreddit || staleRedditUserSuspension) {
-            ApolloLPLogOncePerHost(host, staleRedditUserSuspension ? @"stale-reddit-user-suspension-refetch" : (staleRedditUser ? @"stale-reddit-user-refetch" : (staleRedditSubreddit ? @"stale-reddit-subreddit-refetch" : @"stale-reddit-empty-refetch")));
             if (staleRedditUserSuspension) {
                 NSString *username = ApolloLPNormalizedRedditUsername(ApolloLPRedditUsernameFromProfileURL(url));
                 if (username.length > 0) {
@@ -4375,7 +4189,6 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
         ApolloLPContext placeholderContext = compactPlaceholder ? ApolloLPContextCompact : ApolloLPContextSelfText;
         NSNumber *inFlight = objc_getAssociatedObject(self, &kApolloLinkPreviewFetchInFlightKey);
         if (![inFlight boolValue]) {
-            ApolloLPLogOncePerHost(host, @"cache-miss-fetch");
             objc_setAssociatedObject(self, &kApolloLinkPreviewFetchInFlightKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             __weak ASDisplayNode *weakSelf = (ASDisplayNode *)self;
             [ApolloLinkPreviewFetcher requestPreviewForURL:url completion:^(__unused ApolloLinkPreview *preview) {
@@ -4390,9 +4203,6 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
                     objc_setAssociatedObject(strongSelf, &kApolloLinkPreviewFetchInFlightKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                     if (preview) {
                         NSUInteger invalidated = ApolloLPInvalidateRegisteredLinkPreviewNodesForURL(url, @"cache-update-url");
-                        ApolloLog(@"[LinkPreviews] V16-cache-url-refresh host=%@ invalidated=%lu",
-                                  host ?: @"(nohost)",
-                                  (unsigned long)invalidated);
                         if (invalidated == 0) {
                             ApolloLPTriggerRelayoutForHost(strongSelf, host);
                         }
@@ -4408,9 +4218,6 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
         if (placeholder) {
             objc_setAssociatedObject(self, &kApolloLinkPreviewRenderedPlaceholderKey, @(placeholderContext), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             ApolloLPClearHostShell((ASDisplayNode *)self);
-            ApolloLPLogOncePerHost(host, area == ApolloLPAreaComments ? @"area-comments-placeholder" : @"area-body-placeholder");
-            ApolloLPLogOncePerHost(host, placeholderContext == ApolloLPContextSelfText ? @"mode-full-placeholder" : @"mode-compact-placeholder");
-            ApolloLPLogOncePerHost(host, placeholderContext == ApolloLPContextSelfText ? @"render-hero-placeholder" : @"render-compact-placeholder");
             return placeholder;
         }
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
@@ -4418,7 +4225,6 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
     }
 
     if (![cached hasUsefulMetadata]) {
-        ApolloLPLogOncePerHost(host, @"cache-hit-empty");
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
         return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, %orig);
     }
@@ -4443,7 +4249,6 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
             NSUInteger linkCount = ApolloLPCountEligiblePreviewLinksInTree(cell);
             if (linkCount >= 2) {
                 context = ApolloLPContextCompact;
-                ApolloLPLogOncePerHost(host, @"multi-link-collapse-compact");
             }
         } else {
             // OFF-TREE measure (fresh node, cell not reachable): default COMPACT, not
@@ -4457,7 +4262,6 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
             // measure — a growth the ordinary height refresh commits without any
             // reload. A genuinely single-link comment still gets its hero card.
             context = ApolloLPContextCompact;
-            ApolloLPLogOncePerHost(host, @"offtree-default-compact");
         }
     }
 
@@ -4468,29 +4272,15 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
     if (context == ApolloLPContextSelfText && !isBlueskyPost && !isRedditUser && !isRedditSubreddit &&
         ApolloLPImageURLIsDead(displayPreview.imageURL)) {
         context = ApolloLPContextCompact;
-        ApolloLPLogOncePerHost(host, @"V21-dead-image-compact");
     }
 
-    ApolloLPLogMetadataOnce(host, displayPreview, area, selectedMode, context);
     if (!isBlueskyPost && !isRedditUser && !isRedditSubreddit && displayPreview.imageIsFallbackIcon) {
         ApolloLPRememberCompactPlaceholderHost(url);
-        ApolloLPLogOncePerHost(host, @"fallback-icon-compact");
     } else if (!isBlueskyPost && !isRedditUser && !isRedditSubreddit && selectedMode == ApolloLinkPreviewModeFull && context == ApolloLPContextCompact) {
         ApolloLPRememberCompactPlaceholderHost(url);
-        ApolloLPLogOncePerHost(host, @"full-fallback-compact");
     }
     NSString *finalVariant = ApolloLPVariant(area, selectedMode, context, NO);
     ApolloLPMarkRenderSignatureIfChanged((ASDisplayNode *)self, finalVariant, ApolloLPRenderSignature(url, displayPreview, finalVariant), host);
-    if (isBlueskyPost) {
-        // Diagnostic for the card-clamp fix: record the height budget the cell
-        // hands the card. A finite max.height here is the clamp scenario the
-        // description's flexShrink now absorbs (text truncates instead of
-        // painting past the card background).
-        ApolloLPLogOncePerHost(host, [NSString stringWithFormat:@"V20-bsky-constraint min=%.0fx%.0f max=%.0fx%.0f area=%lu",
-                                      constrainedSize.min.width, constrainedSize.min.height,
-                                      constrainedSize.max.width, constrainedSize.max.height,
-                                      (unsigned long)area]);
-    }
     id richSpec = isBlueskyPost
         ? ApolloLPBuildBlueskyPostCardSpec((ASDisplayNode *)self, url, displayPreview, finalVariant)
         : isRedditUser
@@ -4563,13 +4353,9 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
             objc_setAssociatedObject(self, &kApolloLinkPreviewRenderedPlaceholderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             __weak ASDisplayNode *weakSelf = (ASDisplayNode *)self;
             NSString *hostCopy = [host copy];
-            if (finalShrankToCompact) {
-                ApolloLPLogOncePerHost(host, @"V24-final-hero-to-compact-shrink");
-            }
             dispatch_async(dispatch_get_main_queue(), ^{
                 ASDisplayNode *strongSelf = weakSelf;
                 if (!strongSelf) return;
-                ApolloLPLogOncePerHost(hostCopy, @"V12-post-final-height-refresh");
                 if (placeholderShrankToCompact) {
                     ApolloLPTriggerPlaceholderContextRelayout(strongSelf, hostCopy, placeholderContext, context);
                 } else {
@@ -4582,12 +4368,8 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
             });
         }
         ApolloLPClearHostShell((ASDisplayNode *)self);
-        ApolloLPLogOncePerHost(host, area == ApolloLPAreaComments ? @"area-comments" : @"area-body");
-        ApolloLPLogOncePerHost(host, isBlueskyPost ? @"mode-bluesky-post" : (isRedditUser ? @"mode-reddit-user" : (isRedditSubreddit ? @"mode-reddit-subreddit" : (context == ApolloLPContextSelfText ? @"mode-full" : @"mode-compact"))));
-        ApolloLPLogOncePerHost(host, isBlueskyPost ? @"render-bluesky-post" : (isRedditUser ? @"render-reddit-user" : (isRedditSubreddit ? @"render-reddit-subreddit" : (context == ApolloLPContextSelfText ? @"render-hero" : @"render-compact"))));
         return richSpec;
     }
-    ApolloLPLogOncePerHost(host, @"build-failed");
     ApolloLPRestoreHostShell((ASDisplayNode *)self);
     return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, %orig);
 }
@@ -4617,7 +4399,6 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
     NSString *pendingHost = objc_getAssociatedObject(self, &kApolloLPPendingRowReloadHostKey);
     if (pendingHost) {
         objc_setAssociatedObject(self, &kApolloLPPendingRowReloadHostKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
-        ApolloLog(@"[LinkPreviews] V20-deferred-row-reload host=%@", pendingHost);
         __weak ASDisplayNode *weakSelf = (ASDisplayNode *)self;
         // Let the cell finish attaching before resolving its index path.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(50 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
@@ -4705,10 +4486,6 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
             ApolloLPScheduleTranslationLayoutRefreshForURL(url);
         } else if ([reason isEqualToString:@"settings-change"] || [reason isEqualToString:@"mode-toggle"]) {
             ApolloLPScheduleTranslationLayoutRefreshForURL(nil);
-        } else {
-            ApolloLog(@"[LinkPreviews] V15-translation-refresh-ignored reason=%@", reason ?: @"unknown");
         }
     }];
-
-    ApolloLog(@"[LinkPreviews] ctor: hook installed for _TtC6Apollo14LinkButtonNode bodyMode=%ld commentsMode=%ld cardColorHex=%@", (long)sLinkPreviewBodyMode, (long)sLinkPreviewCommentsMode, sLinkPreviewCardColorHex ?: @"(default)");
 }

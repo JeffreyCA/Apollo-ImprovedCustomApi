@@ -90,6 +90,13 @@ static NSString *const UDKeyShowSubredditHeaders = @"ShowSubredditHeaders";
 static NSString *const UDKeyCommunityHighlights = @"CommunityHighlights";
 static NSString *const UDKeyCommunityHighlightsWeb = @"CommunityHighlightsWeb";
 static NSString *const UDKeyAutoHideTabBarShowOnIdle = @"AutoHideTabBarShowOnIdle";
+// Which side the iOS 26 minimized (Liquid Glass) tab bar pill docks on when
+// "Hide Bars on Scroll" collapses it: 0 = Left (system default), 1 = Right.
+// Only meaningful while the native tabBarMinimizeBehavior path is active
+// (Liquid Glass); the pre-26 hide-bars path has no pill. The Left/Right/Off
+// choice is surfaced on Apollo's native Settings > General > "Hide Bars on
+// Scroll" row (Off = the native toggle off). See ApolloTabBarCollapseSide.xm.
+static NSString *const UDKeyTabBarCollapseSide = @"TabBarCollapseSide";
 // When ON, focusing the main feed / subreddit search keeps the nav bar and the search
 // field in place (results populate the feed below the field) instead of Apollo's stock
 // "search takeover" (nav slides away + fades, field docks to the top and grows). Mutually

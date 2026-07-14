@@ -149,6 +149,8 @@ static BOOL ApolloPathRequiresRegistrationToken(NSString *path) {
 // ApolloAccountCredentialsFor; missing/empty fields fall back to the global
 // default. This keeps backend push registration correct even when different
 // accounts use different Reddit API clients (see ApolloAccountCredentials.h).
+// A nil username returns the global defaults — used for the X-Apollo-Reddit-*
+// header channel, which is per-request and can't carry per-account overrides.
 static NSDictionary<NSString *, NSString *> *ApolloRedditCredentialsForRegistration(NSString *username) {
     ApolloAccountCredentialEntry *entry = username.length > 0 ? ApolloAccountCredentialsFor(username) : nil;
     NSString *clientId = (entry && entry.clientId.length > 0) ? entry.clientId : (sRedditClientId ?: @"");
@@ -294,7 +296,7 @@ NSURLRequest *ApolloRewriteRequestForNotificationBackend(NSURLRequest *request) 
         }
     }
 
-    // Body augmentation for the two account-upsert endpoints. The forked
+    // Credential injection for the two account-upsert endpoints. The forked
     // backend's accountRegistrationRequest requires four Reddit OAuth fields
     // that Apollo's wire format never carried; inject them from the tweak's
     // saved settings.
@@ -302,6 +304,29 @@ NSURLRequest *ApolloRewriteRequestForNotificationBackend(NSURLRequest *request) 
         BOOL singular = ApolloPathIsAccountUpsertSingular(path);
         BOOL bulk = !singular && ApolloPathIsAccountUpsertBulk(path);
         if (singular || bulk) {
+            // Headers are the reliable channel for the global-default
+            // credentials: like /v1/device below, Apollo can post these
+            // upserts as upload tasks whose body data rides outside the
+            // request object (`fromData:`), in which case the body rewrite
+            // below never reaches the wire and the backend sees Apollo's raw
+            // payload (no reddit_client_id -> 422). Headers set on the
+            // request always reach the wire. The backend fills missing
+            // fields body > header > env, so the per-account overrides
+            // (body-only) still win whenever the body rewrite does land.
+            NSDictionary<NSString *, NSString *> *globalCreds = ApolloRedditCredentialsForRegistration(nil);
+            NSDictionary<NSString *, NSString *> *headerForBodyKey = @{
+                @"reddit_client_id":     @"X-Apollo-Reddit-Client-Id",
+                @"reddit_client_secret": @"X-Apollo-Reddit-Client-Secret",
+                @"reddit_redirect_uri":  @"X-Apollo-Reddit-Redirect-Uri",
+                @"reddit_user_agent":    @"X-Apollo-Reddit-User-Agent",
+            };
+            for (NSString *bodyKey in headerForBodyKey) {
+                NSString *value = globalCreds[bodyKey];
+                if (value.length > 0) {
+                    [mutable setValue:value forHTTPHeaderField:headerForBodyKey[bodyKey]];
+                }
+            }
+
             NSData *augmented = ApolloAugmentAccountUpsertBody(mutable.HTTPBody, bulk);
             if (augmented) {
                 mutable.HTTPBody = augmented;
@@ -309,10 +334,10 @@ NSURLRequest *ApolloRewriteRequestForNotificationBackend(NSURLRequest *request) 
                 if ([mutable valueForHTTPHeaderField:@"Content-Type"] == nil) {
                     [mutable setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
                 }
-                ApolloLog(@"[NotifBackend] Augmented %@ body (+reddit_* fields, %lu bytes)",
-                          singular ? @"account" : @"accounts",
-                          (unsigned long)augmented.length);
             }
+            ApolloLog(@"[NotifBackend] %@ upsert: reddit_* creds in headers%@",
+                      singular ? @"account" : @"accounts",
+                      augmented ? @" + body augmented" : @" (body not reachable, header-only)");
         } else if (ApolloPathIsDeviceRegistration(path)) {
             // Headers are the authoritative channel: Apollo posts /v1/device
             // as an upload task whose body data is attached outside the

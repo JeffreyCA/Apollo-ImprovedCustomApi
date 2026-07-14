@@ -61,11 +61,18 @@ typedef NS_ENUM(NSInteger, ApolloNativeThemeScreenMode) {
 };
 
 static const void *kNativeScreenModeKey = &kNativeScreenModeKey;
+static const void *kNativeOriginalSectionCountKey = &kNativeOriginalSectionCountKey;
 static ApolloNativeThemeScreenMode sPendingNativeScreenMode = ApolloNativeThemeScreenFull;
 
 static ApolloNativeThemeScreenMode NativeScreenModeFor(id vc) {
     NSNumber *n = objc_getAssociatedObject(vc, kNativeScreenModeKey);
     return n ? (ApolloNativeThemeScreenMode)n.integerValue : ApolloNativeThemeScreenFull;
+}
+
+static BOOL IsSeparateThemesSection(id vc, NSInteger section) {
+    NSNumber *count = objc_getAssociatedObject(vc, kNativeOriginalSectionCountKey);
+    return count && section == count.integerValue &&
+        NativeScreenModeFor(vc) == ApolloNativeThemeScreenOptions;
 }
 
 // Section classification is by header title because the options sections are
@@ -357,7 +364,14 @@ static UIImage *CustomPickerSwatch(void) {
     }
 }
 
+- (long long)numberOfSectionsInTableView:(UITableView *)tv {
+    long long count = %orig;
+    objc_setAssociatedObject(self, kNativeOriginalSectionCountKey, @(count), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return NativeScreenModeFor(self) == ApolloNativeThemeScreenOptions ? count + 1 : count;
+}
+
 - (long long)tableView:(UITableView *)tv numberOfRowsInSection:(long long)section {
+    if (IsSeparateThemesSection(self, section)) return 1;
     if (!NativeScreenSectionVisible(self, tv, section)) return 0;
     long long n = %orig;
     if (section == 0) n += 1; // injected "Custom" row
@@ -365,6 +379,7 @@ static UIImage *CustomPickerSwatch(void) {
 }
 
 - (id)tableView:(UITableView *)tv titleForHeaderInSection:(long long)section {
+    if (IsSeparateThemesSection(self, section)) return nil;
     id title = %orig;
     if (sRawHeaderTitleQuery) return title; // classification query — unfiltered
     NSString *t = [title isKindOfClass:NSString.class] ? title : nil;
@@ -373,6 +388,29 @@ static UIImage *CustomPickerSwatch(void) {
 }
 
 - (id)tableView:(UITableView *)tv viewForFooterInSection:(long long)section {
+    if (IsSeparateThemesSection(self, section)) {
+        UITableViewHeaderFooterView *footer = [[UITableViewHeaderFooterView alloc] initWithReuseIdentifier:nil];
+        UILabel *label = [[UILabel alloc] initWithFrame:CGRectZero];
+        label.translatesAutoresizingMaskIntoConstraints = NO;
+        label.text = @"Choose a different custom theme for each appearance.";
+        label.textColor = UIColor.secondaryLabelColor;
+        label.font = [UIFont systemFontOfSize:13.0];
+        label.numberOfLines = 0;
+        [footer.contentView addSubview:label];
+        [NSLayoutConstraint activateConstraints:@[
+            [label.leadingAnchor constraintEqualToAnchor:footer.contentView.layoutMarginsGuide.leadingAnchor],
+            [label.trailingAnchor constraintEqualToAnchor:footer.contentView.layoutMarginsGuide.trailingAnchor],
+            [label.topAnchor constraintEqualToAnchor:footer.contentView.topAnchor constant:4.0],
+            [label.bottomAnchor constraintEqualToAnchor:footer.contentView.bottomAnchor constant:-8.0]
+        ]];
+        return footer;
+    }
+    if (!NativeScreenSectionVisible(self, tv, section)) return nil;
+    return %orig;
+}
+
+- (id)tableView:(UITableView *)tv titleForFooterInSection:(long long)section {
+    if (IsSeparateThemesSection(self, section)) return nil;
     if (!NativeScreenSectionVisible(self, tv, section)) return nil;
     return %orig;
 }
@@ -383,17 +421,59 @@ static UIImage *CustomPickerSwatch(void) {
 // sizing everywhere else (identical to the methods not existing).
 %new
 - (double)tableView:(UITableView *)tv heightForHeaderInSection:(long long)section {
+    if (IsSeparateThemesSection(self, section)) return 0.001;
     if (!NativeScreenSectionVisible(self, tv, section)) return 0.001;
     return UITableViewAutomaticDimension;
 }
 
 %new
 - (double)tableView:(UITableView *)tv heightForFooterInSection:(long long)section {
+    if (IsSeparateThemesSection(self, section)) return UITableViewAutomaticDimension;
     if (!NativeScreenSectionVisible(self, tv, section)) return 0.001;
     return UITableViewAutomaticDimension;
 }
 
 - (id)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    if (IsSeparateThemesSection(self, ip.section)) {
+        // Borrow a real Apollo options cell so this synthetic section gets the
+        // same inset-grouped background, margins, and typography as its peers.
+        // A standalone UITableViewCell does not receive Apollo's row styling.
+        NSIndexPath *donor = nil;
+        NSNumber *originalCount = objc_getAssociatedObject(self, kNativeOriginalSectionCountKey);
+        for (NSInteger section = 1; section < originalCount.integerValue; section++) {
+            NSInteger rows = ((NSInteger (*)(id, SEL, UITableView *, NSInteger))objc_msgSend)(
+                self, @selector(tableView:numberOfRowsInSection:), tv, section);
+            if (NativeScreenSectionVisible(self, tv, section) &&
+                rows > 0) {
+                donor = [NSIndexPath indexPathForRow:0 inSection:section];
+                break;
+            }
+        }
+        UITableViewCell *cell = donor
+            ? %orig(tv, donor)
+            : [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+        NSString *title = @"Use Different Themes for Light & Dark Mode";
+        NSString *detail = @"Choose Light, Dark, or Both when applying a theme.";
+        if ([cell.contentConfiguration isKindOfClass:UIListContentConfiguration.class]) {
+            UIListContentConfiguration *config = [(UIListContentConfiguration *)cell.contentConfiguration copy];
+            config.text = title;
+            config.secondaryText = detail;
+            config.textProperties.numberOfLines = 0;
+            config.secondaryTextProperties.numberOfLines = 0;
+            cell.contentConfiguration = config;
+        }
+        cell.textLabel.text = title;
+        cell.textLabel.numberOfLines = 0;
+        cell.detailTextLabel.text = detail;
+        cell.detailTextLabel.numberOfLines = 0;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        UISwitch *toggle = [[UISwitch alloc] initWithFrame:CGRectZero];
+        toggle.on = [ApolloThemeStore shared].separateThemesEnabled;
+        [toggle addTarget:self action:@selector(apollo_separateThemesChanged:) forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = toggle;
+        return cell;
+    }
     BOOL enabled = [ApolloThemeStore shared].customThemeEnabled;
     if (ip.section == 0 && ip.row == 0) {
         // Borrow a stock theme cell so it inherits Apollo's styling, then restyle.
@@ -424,12 +504,14 @@ static UIImage *CustomPickerSwatch(void) {
 }
 
 - (double)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
+    if (IsSeparateThemesSection(self, ip.section)) return UITableViewAutomaticDimension;
     if (ip.section == 0 && ip.row == 0) return %orig(tv, [NSIndexPath indexPathForRow:0 inSection:0]);
     if (ip.section == 0) return %orig(tv, [NSIndexPath indexPathForRow:ip.row - 1 inSection:0]);
     return %orig;
 }
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    if (IsSeparateThemesSection(self, ip.section)) return;
     if (ip.section == 0 && ip.row == 0) {            // Custom selected
         [tv deselectRowAtIndexPath:ip animated:YES];
         ApolloThemeStore *store = [ApolloThemeStore shared];
@@ -451,6 +533,14 @@ static UIImage *CustomPickerSwatch(void) {
         return;
     }
     %orig;
+}
+
+%new
+- (void)apollo_separateThemesChanged:(UISwitch *)sender {
+    ApolloThemeStore *store = [ApolloThemeStore shared];
+    store.separateThemesEnabled = sender.isOn;
+    ApolloThemeRuntimeReload();
+    ApolloThemeRuntimeInvalidate();
 }
 
 %end
