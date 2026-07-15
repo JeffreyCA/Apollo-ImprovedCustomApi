@@ -152,6 +152,8 @@ static NSString *ApolloHiddenContentPillLabelText(ApolloHiddenContentReason reas
 - (void)apollo_share {
     UIActivityViewController *activity = [[UIActivityViewController alloc] initWithActivityItems:@[[self apollo_archivedText]]
                                                                              applicationActivities:nil];
+    // iPad presents this as a popover, which crashes without an anchor.
+    activity.popoverPresentationController.barButtonItem = self.navigationItem.rightBarButtonItems.firstObject;
     [self presentViewController:activity animated:YES completion:nil];
 }
 

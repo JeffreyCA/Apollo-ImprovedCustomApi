@@ -85,12 +85,15 @@ static NSString *ApolloHiddenContentFullNamePrefix(ApolloHiddenContentKind kind)
 // Pages through /user/<username>/<listingKind>.json into `fullNames`. A page-1
 // error is fatal (an empty live set would misclassify everything as hidden/
 // deleted); a later-page error just marks the result incomplete and stops.
+// `oldestCreatedUTCSeen` is the oldest created_utc paged through so far -- the
+// cutoff below which a later-page failure leaves no live coverage at all.
 static void ApolloHiddenContentFetchLiveListingPage(NSString *username, NSString *listingKind, NSString *bearerToken,
                                                      NSString * _Nullable after, NSMutableSet<NSString *> *fullNames,
-                                                     void (^completion)(BOOL fatalError, BOOL incomplete)) {
+                                                     NSNumber * _Nullable oldestCreatedUTCSeen,
+                                                     void (^completion)(BOOL fatalError, BOOL incomplete, NSNumber * _Nullable oldestCreatedUTCSeen)) {
     if (fullNames.count >= kApolloHiddenContentLiveListingCap) {
         ApolloLog(@"[HiddenContent] Live %@ listing capped at %lu items for u/%@", listingKind, (unsigned long)kApolloHiddenContentLiveListingCap, username);
-        completion(NO, NO);
+        completion(NO, NO, oldestCreatedUTCSeen);
         return;
     }
 
@@ -114,7 +117,7 @@ static void ApolloHiddenContentFetchLiveListingPage(NSString *username, NSString
     NSURL *url = components.URL;
     if (!url) {
         ApolloLog(@"[HiddenContent] Live %@ listing skipped: couldn't build a URL for u/%@", listingKind, username);
-        completion(YES, YES);
+        completion(YES, YES, oldestCreatedUTCSeen);
         return;
     }
 
@@ -124,25 +127,31 @@ static void ApolloHiddenContentFetchLiveListingPage(NSString *username, NSString
         if (error || !data.length || (http && (http.statusCode < 200 || http.statusCode >= 300))) {
             ApolloLog(@"[HiddenContent] Live %@ listing fetch stopped early on page %@ (status=%ld error=%@)",
                       listingKind, isFirstPage ? @"1" : @"N", (long)http.statusCode, error.localizedDescription ?: @"none");
-            dispatch_async(dispatch_get_main_queue(), ^{ completion(isFirstPage, YES); });
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(isFirstPage, YES, oldestCreatedUTCSeen); });
             return;
         }
 
         NSDictionary *root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
         NSDictionary *listingData = [root[@"data"] isKindOfClass:[NSDictionary class]] ? root[@"data"] : nil;
         NSArray *children = [listingData[@"children"] isKindOfClass:[NSArray class]] ? listingData[@"children"] : nil;
+        NSNumber *newOldestCreatedUTCSeen = oldestCreatedUTCSeen;
         for (id child in children) {
             NSDictionary *childData = [child[@"data"] isKindOfClass:[NSDictionary class]] ? child[@"data"] : nil;
             NSString *name = [childData[@"name"] isKindOfClass:[NSString class]] ? childData[@"name"] : nil;
             if (name.length > 0) [fullNames addObject:name];
+            id createdUTC = childData[@"created_utc"];
+            NSNumber *createdNumber = [createdUTC isKindOfClass:[NSNumber class]] ? createdUTC : nil;
+            if (createdNumber && (!newOldestCreatedUTCSeen || createdNumber.doubleValue < newOldestCreatedUTCSeen.doubleValue)) {
+                newOldestCreatedUTCSeen = createdNumber;
+            }
         }
 
         NSString *nextAfter = [listingData[@"after"] isKindOfClass:[NSString class]] ? listingData[@"after"] : nil;
         dispatch_async(dispatch_get_main_queue(), ^{
             if (nextAfter.length > 0 && children.count > 0) {
-                ApolloHiddenContentFetchLiveListingPage(username, listingKind, bearerToken, nextAfter, fullNames, completion);
+                ApolloHiddenContentFetchLiveListingPage(username, listingKind, bearerToken, nextAfter, fullNames, newOldestCreatedUTCSeen, completion);
             } else {
-                completion(NO, NO);
+                completion(NO, NO, newOldestCreatedUTCSeen);
             }
         });
     }];
@@ -150,10 +159,10 @@ static void ApolloHiddenContentFetchLiveListingPage(NSString *username, NSString
 }
 
 static void ApolloHiddenContentFetchLiveFullNames(NSString *username, ApolloHiddenContentKind kind, NSString *bearerToken,
-                                                   void (^completion)(NSSet<NSString *> *fullNames, BOOL fatalError, BOOL incomplete)) {
+                                                   void (^completion)(NSSet<NSString *> *fullNames, BOOL fatalError, BOOL incomplete, NSNumber * _Nullable oldestCreatedUTCSeen)) {
     NSMutableSet<NSString *> *fullNames = [NSMutableSet set];
-    ApolloHiddenContentFetchLiveListingPage(username, ApolloHiddenContentLiveListingKind(kind), bearerToken, nil, fullNames, ^(BOOL fatalError, BOOL incomplete) {
-        completion(fullNames, fatalError, incomplete);
+    ApolloHiddenContentFetchLiveListingPage(username, ApolloHiddenContentLiveListingKind(kind), bearerToken, nil, fullNames, nil, ^(BOOL fatalError, BOOL incomplete, NSNumber * _Nullable oldestCreatedUTCSeen) {
+        completion(fullNames, fatalError, incomplete, oldestCreatedUTCSeen);
     });
 }
 
@@ -165,13 +174,17 @@ static NSString *ApolloHiddenContentArcticSearchPath(ApolloHiddenContentKind kin
 
 // Pages through Arctic Shift's author-search endpoint using `before` (epoch
 // seconds of the oldest item seen so far) as the pagination cursor, newest-first.
+// Mirrors the live listing's fatal/incomplete split: a page-1 error is fatal,
+// a later-page error just marks the pass incomplete.
 static void ApolloHiddenContentFetchArcticPage(NSString *username, ApolloHiddenContentKind kind, NSNumber * _Nullable before,
-                                                NSMutableArray<NSDictionary *> *items, void (^completion)(void)) {
+                                                NSMutableArray<NSDictionary *> *items, void (^completion)(BOOL fatalError, BOOL incomplete)) {
     if (items.count >= kApolloHiddenContentArcticCap) {
         ApolloLog(@"[HiddenContent] Arctic %@ search capped at %lu items for u/%@", ApolloHiddenContentArcticSearchPath(kind), (unsigned long)kApolloHiddenContentArcticCap, username);
-        completion();
+        completion(NO, NO);
         return;
     }
+
+    BOOL isFirstPage = (before == nil);
 
     NSURLComponents *components = [NSURLComponents componentsWithString:
         [@"https://arctic-shift.photon-reddit.com" stringByAppendingString:ApolloHiddenContentArcticSearchPath(kind)]];
@@ -192,8 +205,9 @@ static void ApolloHiddenContentFetchArcticPage(NSString *username, ApolloHiddenC
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
         if (error || !data.length || (http && (http.statusCode < 200 || http.statusCode >= 300))) {
-            ApolloLog(@"[HiddenContent] Arctic %@ search stopped early (status=%ld error=%@)", ApolloHiddenContentArcticSearchPath(kind), (long)http.statusCode, error.localizedDescription ?: @"none");
-            dispatch_async(dispatch_get_main_queue(), completion);
+            ApolloLog(@"[HiddenContent] Arctic %@ search stopped early on page %@ (status=%ld error=%@)",
+                      ApolloHiddenContentArcticSearchPath(kind), isFirstPage ? @"1" : @"N", (long)http.statusCode, error.localizedDescription ?: @"none");
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(isFirstPage, YES); });
             return;
         }
 
@@ -214,7 +228,7 @@ static void ApolloHiddenContentFetchArcticPage(NSString *username, ApolloHiddenC
             if (page.count >= kApolloHiddenContentPageSize && oldestSeen) {
                 ApolloHiddenContentFetchArcticPage(username, kind, oldestSeen, items, completion);
             } else {
-                completion();
+                completion(NO, NO);
             }
         });
     }];
@@ -222,10 +236,10 @@ static void ApolloHiddenContentFetchArcticPage(NSString *username, ApolloHiddenC
 }
 
 static void ApolloHiddenContentFetchArcticItems(NSString *username, ApolloHiddenContentKind kind,
-                                                 void (^completion)(NSArray<NSDictionary *> *items)) {
+                                                 void (^completion)(NSArray<NSDictionary *> *items, BOOL fatalError, BOOL incomplete)) {
     NSMutableArray<NSDictionary *> *items = [NSMutableArray array];
-    ApolloHiddenContentFetchArcticPage(username, kind, nil, items, ^{
-        completion(items);
+    ApolloHiddenContentFetchArcticPage(username, kind, nil, items, ^(BOOL fatalError, BOOL incomplete) {
+        completion(items, fatalError, incomplete);
     });
 }
 
@@ -412,8 +426,8 @@ void ApolloHiddenContentFetch(NSString *username, ApolloHiddenContentKind kind, 
         return;
     }
 
-    ApolloHiddenContentFetchLiveFullNames(username, kind, bearerToken, ^(NSSet<NSString *> *liveFullNames, BOOL fatalError, BOOL liveIncomplete) {
-        if (fatalError) {
+    ApolloHiddenContentFetchLiveFullNames(username, kind, bearerToken, ^(NSSet<NSString *> *liveFullNames, BOOL liveFatalError, BOOL liveIncomplete, NSNumber * _Nullable liveOldestCreatedUTCSeen) {
+        if (liveFatalError) {
             completion(nil, @"Couldn't verify this account's current posts/comments (network or session error). Try again.");
             return;
         }
@@ -425,31 +439,54 @@ void ApolloHiddenContentFetch(NSString *username, ApolloHiddenContentKind kind, 
             completion(results, nil);
         };
 
-        ApolloHiddenContentFetchArcticItems(username, kind, ^(NSArray<NSDictionary *> *arcticItems) {
+        ApolloHiddenContentFetchArcticItems(username, kind, ^(NSArray<NSDictionary *> *arcticItems, BOOL arcticFatalError, BOOL arcticIncomplete) {
+            if (arcticFatalError) {
+                completion(nil, @"Couldn't search the archive for older posts/comments (network error). Try again.");
+                return;
+            }
             if (arcticItems.count == 0) {
-                finish(@[], !liveIncomplete);
+                finish(@[], !liveIncomplete && !arcticIncomplete);
                 return;
             }
 
             // Candidates: archived items missing from the live listing, deduped
             // by fullname (Arctic Shift's cursor can repeat items sharing a
-            // created_utc second across pages).
+            // created_utc second across pages). If the live listing stopped
+            // early, liveFullNames only covers down to liveOldestCreatedUTCSeen,
+            // so an older item wasn't checked -- drop it instead of letting it
+            // fall through to a false HIDDEN.
             NSString *prefix = ApolloHiddenContentFullNamePrefix(kind);
             NSMutableArray<NSDictionary *> *candidates = [NSMutableArray array];
             NSMutableArray<NSString *> *candidateFullNames = [NSMutableArray array];
             NSMutableSet<NSString *> *seenFullNames = [NSMutableSet set];
+            NSUInteger droppedForIncompleteLiveCoverage = 0;
 
             for (NSDictionary *raw in arcticItems) {
                 NSString *rawID = [raw[@"id"] isKindOfClass:[NSString class]] ? raw[@"id"] : nil;
                 NSString *name = [raw[@"name"] isKindOfClass:[NSString class]] ? raw[@"name"] : (rawID.length > 0 ? [prefix stringByAppendingString:rawID] : nil);
                 if (name.length == 0 || [liveFullNames containsObject:name] || [seenFullNames containsObject:name]) continue;
+
+                if (liveIncomplete && liveOldestCreatedUTCSeen) {
+                    id createdUTC = raw[@"created_utc"];
+                    NSNumber *createdNumber = [createdUTC isKindOfClass:[NSNumber class]] ? createdUTC : nil;
+                    if (createdNumber && createdNumber.doubleValue < liveOldestCreatedUTCSeen.doubleValue) {
+                        droppedForIncompleteLiveCoverage++;
+                        continue;
+                    }
+                }
+
                 [seenFullNames addObject:name];
                 [candidates addObject:raw];
                 [candidateFullNames addObject:name];
             }
 
+            if (droppedForIncompleteLiveCoverage > 0) {
+                ApolloLog(@"[HiddenContent] u/%@ (%@): dropped %lu candidate(s) older than the live listing's reachable range after a mid-pagination failure",
+                          username, ApolloHiddenContentArcticSearchPath(kind), (unsigned long)droppedForIncompleteLiveCoverage);
+            }
+
             if (candidateFullNames.count == 0) {
-                finish(@[], !liveIncomplete);
+                finish(@[], !liveIncomplete && !arcticIncomplete);
                 return;
             }
 
@@ -485,7 +522,7 @@ void ApolloHiddenContentFetch(NSString *username, ApolloHiddenContentKind kind, 
                           (unsigned long)hiddenCount, (unsigned long)removedCount, (unsigned long)deletedCount,
                           (unsigned long)unresolvableFullNames.count);
 
-                finish(results, !liveIncomplete && unresolvableFullNames.count == 0);
+                finish(results, !liveIncomplete && !arcticIncomplete && unresolvableFullNames.count == 0);
             });
         });
     });
