@@ -1,4 +1,5 @@
 #import "ApolloThemeTokens.h"
+#import "ApolloCommon.h"
 #import <math.h>
 
 #pragma mark - Token keys
@@ -16,6 +17,9 @@ NSString * const kApolloRebornCustomThemeEnabledKey   = @"ApolloReborn.customThe
 NSString * const kApolloRebornCustomThemesKey         = @"ApolloReborn.customThemes";
 NSString * const kApolloRebornActiveCustomThemeIDKey  = @"ApolloReborn.activeCustomThemeID";
 NSString * const kApolloRebornActiveThemePointerKey   = @"ApolloReborn.activeThemePointer";
+NSString * const kApolloRebornSeparateThemesEnabledKey = @"ApolloReborn.separateThemesEnabled";
+NSString * const kApolloRebornLightThemePointerKey     = @"ApolloReborn.lightThemePointer";
+NSString * const kApolloRebornDarkThemePointerKey      = @"ApolloReborn.darkThemePointer";
 NSString * const kApolloRebornPreviousApolloThemeKey  = @"ApolloReborn.previousApolloTheme";
 NSString * const kApolloRebornRuntimeDonorThemeKey    = @"ApolloReborn.runtimeDonorTheme";
 NSString * const kApolloRebornThemeSchemaVersionKey   = @"ApolloReborn.themeSchemaVersion";
@@ -196,6 +200,11 @@ UIFont *ApolloThemeFontApply(ApolloThemeFont font, UIFont *base) {
     // tile rendered in the live theme's design). The text-style descriptor is
     // the one public route to a system-family descriptor that does not pass
     // through the (runtime-hooked) UIFont factories.
+    //
+    // Deliberately does NOT carry an italic trait: an italic attempt is
+    // always built from a separate descriptor derived from this one (see
+    // below), so this stays a clean, reusable base for the upright
+    // resolution and (for Rounded) the SF Pro italic fallback alike.
     UIFontDescriptor *descriptor = [UIFontDescriptor preferredFontDescriptorWithTextStyle:UIFontTextStyleBody];
     if (font != ApolloThemeFontSystem) {
         descriptor = [descriptor fontDescriptorWithDesign:design] ?: descriptor;
@@ -203,11 +212,7 @@ UIFont *ApolloThemeFontApply(ApolloThemeFont font, UIFont *base) {
     descriptor = [descriptor fontDescriptorByAddingAttributes:@{
         UIFontDescriptorTraitsAttribute: @{ UIFontWeightTrait: @(weight) },
     }];
-    if (italic) {
-        UIFontDescriptor *italicDescriptor =
-            [descriptor fontDescriptorWithSymbolicTraits:descriptor.symbolicTraits | UIFontDescriptorTraitItalic];
-        if (italicDescriptor) descriptor = italicDescriptor;
-    }
+
     // SF Mono's fixed-width glyphs are visibly wider than the proportional
     // system faces, so at an identical point size a monospaced theme reads as
     // "bigger" and eats more horizontal room. Nudge the effective size down a
@@ -221,8 +226,70 @@ UIFont *ApolloThemeFontApply(ApolloThemeFont font, UIFont *base) {
 
     // Explicit size wins over the descriptor's text-style size, preserving any
     // Dynamic Type scaling already applied to base.
-    UIFont *derived = [UIFont fontWithDescriptor:descriptor size:effectiveSize];
-    if (!derived) return base;
+    UIFont *upright = [UIFont fontWithDescriptor:descriptor size:effectiveSize];
+    if (!upright) return base;
+
+    UIFont *derived = upright;
+    if (italic) {
+        if (font == ApolloThemeFontRounded) {
+            // SF Pro Rounded ships no italic face, and CoreText doesn't fail
+            // the request when one is missing — it silently hands back the
+            // same upright font. Two different runtime-detection strategies
+            // were tried here (checking the resolved font's own symbolic
+            // traits, then comparing fontName against the upright
+            // resolution) and a shear-matrix UIFontDescriptor as the
+            // fallback in both cases — none of it produced visibly slanted
+            // text on-device. CoreText appears to just ignore custom
+            // matrices for Apple's .SFUI-* system-design fonts the way it
+            // doesn't for ordinary named fonts.
+            //
+            // Which designs have a real italic face is static platform
+            // knowledge, not something worth re-deriving at runtime: SF Pro,
+            // New York, and SF Mono all resolve genuine italics (confirmed by
+            // hands-on testing across all four theme fonts); Rounded is the
+            // one exception today. So italic runs under a Rounded theme fall
+            // back to the DEFAULT (SF Pro) design, which is guaranteed to
+            // have a real italic face — the rest of the paragraph keeps
+            // Rounded, only italic runs differ in roundedness. That reads far
+            // better than "italic" text that's indistinguishable from
+            // upright.
+            // Set weight and the italic symbolic trait TOGETHER in one
+            // combined traits dictionary rather than two chained calls.
+            // fontDescriptorWithSymbolicTraits: is documented as a FAMILY-
+            // MEMBER LOOKUP ("returns a new font descriptor reference in the
+            // same family with the given symbolic traits"), not an attribute
+            // merge — calling it after separately setting weight via
+            // fontDescriptorByAddingAttributes: silently discarded the
+            // weight (bold text under Rounded lost its boldness once
+            // italicized), because it replaces the descriptor with whichever
+            // family member matches the coarse symbolic bits, disregarding
+            // the fine-grained numeric weight set moments earlier.
+            UIFontDescriptor *fallback = [UIFontDescriptor preferredFontDescriptorWithTextStyle:UIFontTextStyleBody];
+            fallback = [fallback fontDescriptorByAddingAttributes:@{
+                UIFontDescriptorTraitsAttribute: @{
+                    UIFontWeightTrait: @(weight),
+                    UIFontSymbolicTrait: @(fallback.symbolicTraits | UIFontDescriptorTraitItalic),
+                },
+            }];
+            UIFont *fallbackFont = [UIFont fontWithDescriptor:fallback size:effectiveSize];
+            derived = fallbackFont ?: upright;
+            ApolloLog(@"ThemeTokens: Rounded has no italic face, falling back to SF Pro italic (base=%@ -> %@)",
+                      base.fontName, derived.fontName);
+        } else {
+            // Same combined-dictionary fix as above: set weight and the
+            // italic symbolic trait together rather than via a separate
+            // fontDescriptorWithSymbolicTraits: call, which discards weight.
+            UIFontDescriptor *italicDescriptor = [descriptor fontDescriptorByAddingAttributes:@{
+                UIFontDescriptorTraitsAttribute: @{
+                    UIFontWeightTrait: @(weight),
+                    UIFontSymbolicTrait: @(descriptor.symbolicTraits | UIFontDescriptorTraitItalic),
+                },
+            }];
+            UIFont *italicFont = italicDescriptor ? [UIFont fontWithDescriptor:italicDescriptor size:effectiveSize] : nil;
+            derived = italicFont ?: upright;
+        }
+    }
+
     [FontApplyCache() setObject:derived forKey:cacheKey];
     return derived;
 }

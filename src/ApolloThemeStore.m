@@ -204,9 +204,65 @@ static ApolloThemeGalleryResolver sGalleryResolver = nil;
     return [d isKindOfClass:[NSDictionary class]] ? d : @{ kPointerKindKey: kPointerApollo };
 }
 
+- (NSDictionary *)pointerForMode:(ApolloThemeMode)mode {
+    if (!self.separateThemesEnabled) return [self activePointer];
+    NSString *key = mode == ApolloThemeModeDark ? kApolloRebornDarkThemePointerKey
+                                                 : kApolloRebornLightThemePointerKey;
+    NSDictionary *pointer = [GroupDefaults() dictionaryForKey:key];
+    return [pointer isKindOfClass:[NSDictionary class]] ? pointer : [self activePointer];
+}
+
+- (ApolloThemeMode)currentAppearanceMode {
+#if __has_include(<UIKit/UIKit.h>)
+    return UITraitCollection.currentTraitCollection.userInterfaceStyle == UIUserInterfaceStyleDark
+        ? ApolloThemeModeDark : ApolloThemeModeLight;
+#else
+    return ApolloThemeModeLight;
+#endif
+}
+
+- (NSDictionary *)effectivePointer {
+    return [self pointerForMode:[self currentAppearanceMode]];
+}
+
 - (void)setActivePointer:(NSDictionary *)pointer {
     ApolloLog(@"ThemeStore: activePointer = %@", pointer);
     [GroupDefaults() setObject:pointer forKey:kApolloRebornActiveThemePointerKey];
+}
+
+- (void)setPointer:(NSDictionary *)pointer forTarget:(ApolloThemeApplyTarget)target {
+    if (!self.separateThemesEnabled || target == ApolloThemeApplyTargetBoth) {
+        [self setActivePointer:pointer];
+        if (self.separateThemesEnabled) {
+            [GroupDefaults() setObject:pointer forKey:kApolloRebornLightThemePointerKey];
+            [GroupDefaults() setObject:pointer forKey:kApolloRebornDarkThemePointerKey];
+        }
+        return;
+    }
+    NSString *key = target == ApolloThemeApplyTargetDark ? kApolloRebornDarkThemePointerKey
+                                                          : kApolloRebornLightThemePointerKey;
+    [GroupDefaults() setObject:pointer forKey:key];
+    // Keep the legacy pointer useful for older builds and for disabling the
+    // feature: it follows the most recently applied selection.
+    [self setActivePointer:pointer];
+    ApolloLog(@"ThemeStore: %@ pointer = %@", target == ApolloThemeApplyTargetDark ? @"dark" : @"light", pointer);
+}
+
+- (BOOL)separateThemesEnabled {
+    return [GroupDefaults() boolForKey:kApolloRebornSeparateThemesEnabledKey];
+}
+
+- (void)setSeparateThemesEnabled:(BOOL)enabled {
+    if (enabled == self.separateThemesEnabled) return;
+    if (enabled) {
+        NSDictionary *pointer = [self activePointer];
+        [GroupDefaults() setObject:pointer forKey:kApolloRebornLightThemePointerKey];
+        [GroupDefaults() setObject:pointer forKey:kApolloRebornDarkThemePointerKey];
+    } else {
+        [self setActivePointer:[self effectivePointer]];
+    }
+    [GroupDefaults() setBool:enabled forKey:kApolloRebornSeparateThemesEnabledKey];
+    ApolloLog(@"ThemeStore: separate light/dark themes %@", enabled ? @"enabled" : @"disabled");
 }
 
 - (ApolloThemeSelectionKind)storedSelectionKind {
@@ -252,9 +308,19 @@ static ApolloThemeGalleryResolver sGalleryResolver = nil;
     [self setActivePointer:@{ kPointerKindKey: kPointerCustom, kPointerIDKey: themeID }];
 }
 
+- (void)selectCustomTheme:(NSString *)themeID forTarget:(ApolloThemeApplyTarget)target {
+    if (themeID.length == 0) { [self selectApolloTheme]; return; }
+    [self setPointer:@{ kPointerKindKey: kPointerCustom, kPointerIDKey: themeID } forTarget:target];
+}
+
 - (void)selectGalleryTheme:(NSString *)slug {
     if (slug.length == 0) { [self selectApolloTheme]; return; }
     [self setActivePointer:@{ kPointerKindKey: kPointerGallery, kPointerSlugKey: slug }];
+}
+
+- (void)selectGalleryTheme:(NSString *)slug forTarget:(ApolloThemeApplyTarget)target {
+    if (slug.length == 0) { [self selectApolloTheme]; return; }
+    [self setPointer:@{ kPointerKindKey: kPointerGallery, kPointerSlugKey: slug } forTarget:target];
 }
 
 - (BOOL)restoreLastCustomSelection {
@@ -327,8 +393,14 @@ static ApolloThemeGalleryResolver sGalleryResolver = nil;
 }
 
 - (NSDictionary *)activeTheme {
-    NSDictionary *p = [self activePointer];
-    switch ([self storedSelectionKind]) {
+    return [self themeForMode:[self currentAppearanceMode]];
+}
+
+- (NSDictionary *)themeForMode:(ApolloThemeMode)mode {
+    NSDictionary *p = [self pointerForMode:mode];
+    NSString *kind = p[kPointerKindKey];
+    switch ([kind isEqual:kPointerGallery] ? ApolloThemeSelectionGallery :
+            ([kind isEqual:kPointerCustom] ? ApolloThemeSelectionCustom : ApolloThemeSelectionApollo)) {
         case ApolloThemeSelectionGallery:
             return [self galleryThemeForSlug:p[kPointerSlugKey]];
         case ApolloThemeSelectionCustom: {
@@ -340,6 +412,17 @@ static ApolloThemeGalleryResolver sGalleryResolver = nil;
         case ApolloThemeSelectionApollo:
             return nil;
     }
+    return nil;
+}
+
+- (BOOL)isCustomThemeID:(NSString *)themeID selectedForMode:(ApolloThemeMode)mode {
+    NSDictionary *p = [self pointerForMode:mode];
+    return [p[kPointerKindKey] isEqual:kPointerCustom] && [p[kPointerIDKey] isEqual:themeID];
+}
+
+- (BOOL)isGallerySlug:(NSString *)slug selectedForMode:(ApolloThemeMode)mode {
+    NSDictionary *p = [self pointerForMode:mode];
+    return [p[kPointerKindKey] isEqual:kPointerGallery] && [p[kPointerSlugKey] isEqual:slug];
 }
 
 #pragma mark - CRUD
@@ -433,6 +516,22 @@ static ApolloThemeGalleryResolver sGalleryResolver = nil;
     if (themes.count == before) { ApolloLog(@"ThemeStore: deleteTheme %@ — not found", themeID); return NO; }
     ApolloLog(@"ThemeStore: deleteTheme %@ (now %lu themes)", themeID, (unsigned long)themes.count);
     [self setAllThemes:themes];
+    if (self.separateThemesEnabled) {
+        NSString *nextID = themes.firstObject[@"id"];
+        for (ApolloThemeMode mode = ApolloThemeModeLight; mode < ApolloThemeModeCount; mode++) {
+            if (![self isCustomThemeID:themeID selectedForMode:mode]) continue;
+            ApolloThemeApplyTarget target = mode == ApolloThemeModeDark
+                ? ApolloThemeApplyTargetDark : ApolloThemeApplyTargetLight;
+            if (nextID) {
+                [self selectCustomTheme:nextID forTarget:target];
+            } else {
+                ApolloThemeMode otherMode = mode == ApolloThemeModeDark
+                    ? ApolloThemeModeLight : ApolloThemeModeDark;
+                [self setPointer:[self pointerForMode:otherMode] forTarget:target];
+            }
+        }
+        return YES;
+    }
     NSDictionary *p = [self activePointer];
     if ([p[kPointerIDKey] isEqual:themeID]) {
         if ([self storedSelectionKind] == ApolloThemeSelectionCustom) {

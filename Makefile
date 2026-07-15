@@ -64,21 +64,26 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloInboxCommentScroll.xm \
     $(SRC_DIR)/ApolloStatsRowTouch.xm \
     $(SRC_DIR)/ApolloLiveCommentsFollow.xm \
+    $(SRC_DIR)/ApolloPerPostCommentSort.xm \
     $(SRC_DIR)/ApolloLiquidGlass.xm \
     $(SRC_DIR)/ApolloLiquidGlassIconPicker.xm \
     $(SRC_DIR)/ApolloModmailLayout.xm \
     $(SRC_DIR)/ApolloAutoHideTabBar.xm \
+    $(SRC_DIR)/ApolloTabBarCollapseSide.xm \
     $(SRC_DIR)/ApolloIPadTabBarBottom.xm \
     $(SRC_DIR)/ApolloSettings.xm \
     $(SRC_DIR)/ApolloRecentlyRead.xm \
     $(SRC_DIR)/ApolloHiddenContentData.m \
     $(SRC_DIR)/ApolloHiddenContentViewController.m \
     $(SRC_DIR)/ApolloHiddenContentMenu.xm \
+    $(SRC_DIR)/ApolloHideLinksBatchFix.xm \
     $(SRC_DIR)/ApolloSavedCategories.xm \
     $(SRC_DIR)/ApolloUserFlair.xm \
     $(SRC_DIR)/ApolloFlairColors.xm \
     $(SRC_DIR)/ApolloNativeActionMenus.xm \
     $(SRC_DIR)/ApolloHostedVideo.m \
+    $(SRC_DIR)/ApolloSportsClipResolver.m \
+    $(SRC_DIR)/ApolloSportsClips.xm \
     $(SRC_DIR)/ApolloRedgifsSubdomainFix.xm \
     $(SRC_DIR)/ApolloShareAsImageGallery.xm \
     $(SRC_DIR)/ApolloShareAsImageLink.xm \
@@ -145,6 +150,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloDeletedCommentsSettingsViewController.m \
     $(SRC_DIR)/ApolloLinkPreviewSettingsViewController.m \
     $(SRC_DIR)/InlineMediaSettingsViewController.m \
+    $(SRC_DIR)/InfoRowSettingsViewController.m \
     $(SRC_DIR)/ApolloOpenInAppViewController.m \
     $(SRC_DIR)/ApolloHideNativeOpenInAppRows.xm \
     $(SRC_DIR)/TranslationSettingsViewController.m \
@@ -272,12 +278,11 @@ STAGED_APOLLO_BUNDLE = $(THEOS_STAGING_DIR)/Library/Application Support/ApolloRe
 #   - libflex.dylib is moved into the bundle for rootless (its DynamicLibraries
 #     home doesn't exist rootless);
 #   - libflex.plist is dropped for every scheme (unused);
-#   - the usage-heartbeat build variant is stamped so jailbreak installs report a
-#     channel to beat.apolloreborn.app instead of "unknown". ApolloBuildVariant()
-#     reads this ARVariant.txt marker for .deb installs (there's no repackaged
-#     Info.plist to carry ARBuildVariant the way injected IPAs do). Injected IPAs
-#     stamp Info.plist at packaging time and check it first, so this file being
-#     copied into an IPA's bundle is harmless — the plist key wins.
+#   - the usage-heartbeat build variant marker is stamped for jailbreak installs.
+#     ApolloBuildVariant() reads ARVariant.txt for .deb installs (there's no
+#     repackaged Info.plist to carry ARBuildVariant the way injected IPAs do).
+#     Injected IPAs stamp Info.plist at packaging time and check it first, so
+#     this file being copied into an IPA's bundle is harmless — the plist key wins.
 before-package::
 ifeq ($(THEOS_PACKAGE_SCHEME),rootless)
 	@mv $(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/libflex.dylib "$(STAGED_APOLLO_BUNDLE)/libflex.dylib"

@@ -38,6 +38,7 @@
 #import <objc/message.h>
 
 #import "ApolloCommon.h"
+#import "ApolloCreatedAtAlert.h"
 #import "ApolloState.h"
 #import "ApolloThemeRuntime.h"
 #import "UIWindow+Apollo.h"
@@ -116,9 +117,10 @@ static BOOL SRTConsumeJumpPending(void) {
 
 typedef NS_ENUM(NSInteger, SRTStatKind) {
     SRTStatKindScore = 0,     // release = upvote (the ↑ icon)
-    SRTStatKindPercentage,    // release = "% Upvoted" info alert
+    SRTStatKindPercentage,    // release = "% Upvoted" detail (Popup/Overlay mode)
     SRTStatKindComments,      // release = open post at the comment section
-    SRTStatKindAge,           // release = "Posted … Ago" alert
+    SRTStatKindAge,           // release = "Posted … Ago" detail (Popup/Overlay mode)
+    SRTStatKindEdited,        // release = "Edited … Ago" detail (Popup/Overlay mode)
     SRTStatKindTranslation,   // release = toggle title translated ⇄ original
 };
 
@@ -130,6 +132,22 @@ typedef NS_ENUM(NSInteger, SRTStatKind) {
 @end
 @implementation ApolloSRTTarget
 @end
+
+// Per-icon activation check (Info Row settings sub-screen). Disabled icons STILL
+// appear in the loupe (see SRTTargetsForCell) — this only gates what happens on
+// RELEASE: a disabled kind does nothing. The three "info" icons (% upvoted, age,
+// edited) share the Popup/Overlay mode: enabled if either mode is on.
+static BOOL SRTKindTapEnabled(SRTStatKind kind) {
+    switch (kind) {
+        case SRTStatKindScore:       return sInfoRowTapUpvote;
+        case SRTStatKindComments:    return sInfoRowTapComments;
+        case SRTStatKindPercentage:  return sInfoRowPopupMode || sInfoRowOverlayMode;
+        case SRTStatKindAge:         return sInfoRowPopupMode || sInfoRowOverlayMode;
+        case SRTStatKindEdited:      return sInfoRowPopupMode || sInfoRowOverlayMode;
+        case SRTStatKindTranslation: return sInfoRowTapTranslation;
+    }
+    return YES;
+}
 
 // The translation module (ApolloTranslation.xm — actively developed in its own
 // workstream, so we only *look at* its artifacts, never call its internals
@@ -168,9 +186,12 @@ static NSArray<ApolloSRTTarget *> *SRTTargetsForCell(id cell, UIView *cellView) 
         {"percentageLikedButtonNode",  SRTStatKindPercentage, @"% Upvoted"},
         {"commentsInfoNode",           SRTStatKindComments,   @"Comments"},
         {"ageButtonNode",              SRTStatKindAge,        @"Posted"},
+        {"editedButtonNode",           SRTStatKindEdited,     @"Edited"},
     };
     NSMutableArray<ApolloSRTTarget *> *out = [NSMutableArray array];
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < (int)(sizeof(specs) / sizeof(specs[0])); i++) {
+        // Disabled icons still APPEAR in the loupe (the user can slide over them);
+        // releasing on one just does nothing — gated in SRTActivateTarget, not here.
         ApolloSRTNode *node = (ApolloSRTNode *)SRTIvar(postInfoNode, specs[i].ivar);
         if (!node || node.isHidden) continue;
         CALayer *layer = nil; @try { layer = node.layer; } @catch (__unused id e) {}
@@ -183,6 +204,7 @@ static NSArray<ApolloSRTTarget *> *SRTTargetsForCell(id cell, UIView *cellView) 
         [out addObject:t];
     }
     // Optional 🌐 translation marker (a UILabel overlaid by the translation module).
+    // Always shown in the loupe when present; activation is gated in SRTActivateTarget.
     UILabel *marker = SRTTranslationMarkerLabel(postInfoNode);
     if (marker && marker.layer && cellView.layer) {
         CGRect rect = [marker.layer convertRect:marker.layer.bounds toLayer:cellView.layer];
@@ -465,28 +487,11 @@ static NSInteger SRTNearestTargetIndex(NSArray<ApolloSRTTarget *> *targets, CGFl
 
 @end
 
-// MARK: - Magnifier: activation (open post / created-at alert)
+// MARK: - Magnifier: activation (open post / vote / info detail)
 
-static NSDateFormatter *SRTAbsDateFormatter(void) {
-    static NSDateFormatter *f; static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        f = [[NSDateFormatter alloc] init];
-        f.dateStyle = NSDateFormatterLongStyle;
-        f.timeStyle = NSDateFormatterShortStyle;
-    });
-    return f;
-}
-
-static NSString *SRTRelativeAgo(NSDate *date) {
-    NSTimeInterval t = fabs([date timeIntervalSinceNow]);
-    if (t < 5.0)        return @"Just now";
-    if (t < 60.0)       return [NSString stringWithFormat:@"%lds",  (long)t];
-    if (t < 3600.0)     return [NSString stringWithFormat:@"%ldm",  (long)(t / 60.0)];
-    if (t < 86400.0)    return [NSString stringWithFormat:@"%ldh",  (long)(t / 3600.0)];
-    if (t < 2592000.0)  return [NSString stringWithFormat:@"%ldd",  (long)(t / 86400.0)];
-    if (t < 31536000.0) return [NSString stringWithFormat:@"%ldmo", (long)(t / 2592000.0)];
-    return [NSString stringWithFormat:@"%.1fy", t / 31556736.0];
-}
+// The % upvoted / age / edited details are presented via ApolloCreatedAtAlert's
+// ApolloPresentInfoDetail (see SRTActivateTarget), so the loupe matches the
+// direct taps and there's no duplicate alert/overlay/date code here.
 
 static UIViewController *SRTVisibleVCForView(UIView *view) {
     UIResponder *r = view;
@@ -495,28 +500,6 @@ static UIViewController *SRTVisibleVCForView(UIView *view) {
         r = r.nextResponder;
     }
     return nil;
-}
-
-// Present the same "Posted … Ago" alert as ApolloCreatedAtAlert (feed post).
-static void SRTPresentCreatedAtAlert(id cell, UIView *cellView) {
-    id link = SRTIvar(cell, "link");
-    NSDate *date = nil;
-    if ([link respondsToSelector:@selector(createdUTC)]) {
-        @try { date = [link createdUTC]; } @catch (__unused id e) {}
-    }
-    if (![date isKindOfClass:[NSDate class]]) return;
-    UIViewController *presenter = SRTVisibleVCForView(cellView);
-    if (!presenter) return;
-
-    NSString *rel = SRTRelativeAgo(date);
-    NSString *title = [rel isEqualToString:@"Just now"] ? @"Posted Just now"
-                                                        : [NSString stringWithFormat:@"Posted %@ Ago", rel];
-    NSString *msg = (fabs([date timeIntervalSinceNow]) >= 5.0)
-        ? [NSString stringWithFormat:@"Posted on %@", [SRTAbsDateFormatter() stringFromDate:date]] : nil;
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:msg
-                                                       preferredStyle:UIAlertControllerStyleAlert];
-    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
-    [presenter presentViewController:a animated:YES completion:nil];
 }
 
 // Open the post the same way a tap would: replay Apollo's own row selection. When
@@ -574,27 +557,6 @@ static BOOL SRTSendTouchUpInside(id controlNode) {
     return YES;
 }
 
-static void SRTPresentSimpleAlert(UIView *cellView, NSString *title, NSString *message) {
-    UIViewController *presenter = SRTVisibleVCForView(cellView);
-    if (!presenter) return;
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:message
-                                                       preferredStyle:UIAlertControllerStyleAlert];
-    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
-    [presenter presentViewController:a animated:YES completion:nil];
-}
-
-// "94% Upvoted" info for the smiley — mirrors what the row displays.
-static void SRTPresentUpvoteRatioAlert(id cell, UIView *cellView) {
-    id link = SRTIvar(cell, "link");
-    SEL ratioSel = NSSelectorFromString(@"upvoteRatio");
-    if (!link || ![link respondsToSelector:ratioSel]) return;
-    double ratio = ((double (*)(id, SEL))objc_msgSend)(link, ratioSel);
-    if (ratio <= 0.0 || ratio > 1.0) return;
-    long pct = lround(ratio * 100.0);
-    SRTPresentSimpleAlert(cellView, [NSString stringWithFormat:@"%ld%% Upvoted", pct],
-                          [NSString stringWithFormat:@"%ld%% of voters upvoted this post.", pct]);
-}
-
 // Toggle the post title translated ⇄ original through the translation module's
 // own tap target (ApolloTranslation.xm). Runtime-bridged so this module never
 // links against that one: shared.pendingLabel = marker; handleCellTap:nil.
@@ -613,6 +575,7 @@ static BOOL SRTToggleTranslationForMarker(UILabel *marker) {
 
 static void SRTActivateTarget(id cell, UIView *cellView, ApolloSRTTarget *target) {
     if (!target) return;
+    if (!SRTKindTapEnabled(target.kind)) return;   // defensive: disabled kinds never reach here
     switch (target.kind) {
         case SRTStatKindScore: {
             if (!SRTSendTouchUpInside(SRTUpvoteButtonForCell(cell))) {
@@ -624,12 +587,21 @@ static void SRTActivateTarget(id cell, UIView *cellView, ApolloSRTTarget *target
         case SRTStatKindComments:
             SRTOpenPostForCell(cell, cellView, /*jump=*/YES);
             break;
-        case SRTStatKindAge:
-            SRTPresentCreatedAtAlert(cell, cellView);
-            break;
         case SRTStatKindPercentage:
-            SRTPresentUpvoteRatioAlert(cell, cellView);
+        case SRTStatKindAge:
+        case SRTStatKindEdited: {
+            // The three "info" icons share ApolloCreatedAtAlert's presenter, so the
+            // loupe matches the direct tap (Popup alert or Overlay per the mode).
+            ApolloInfoKind ik = target.kind == SRTStatKindPercentage ? ApolloInfoKindPercentage
+                              : target.kind == SRTStatKindEdited      ? ApolloInfoKindEdited
+                                                                      : ApolloInfoKindAge;
+            id link = SRTIvar(cell, "link");
+            id comment = SRTIvar(cell, "comment");
+            UIWindow *window = cellView.window;
+            CGRect anchor = window ? [cellView convertRect:target.rect toView:nil] : CGRectNull;
+            ApolloPresentInfoDetail(ik, link, comment, cellView, anchor, window);
             break;
+        }
         case SRTStatKindTranslation:
             SRTToggleTranslationForMarker(target.markerLabel);
             break;
@@ -662,16 +634,38 @@ static const UIEdgeInsets kSRTCommentInsets = (UIEdgeInsets){ -11.0, -7.0, -11.0
 @interface ApolloSRTGestureDelegate : NSObject <UIGestureRecognizerDelegate>
 @end
 
-// Snapshot the strip region of the (rasterized) cell into an image for the loupe.
-static UIImage *SRTSnapshotStrip(UIView *cellView, CGRect stripRect) {
+// Snapshot the strip region (the info row) into an image for the loupe.
+//
+// We render from the WINDOW, not the cell: on a very long post the comments-header
+// cell's own bounds are enormous (thousands of points), and drawing them with
+// drawViewHierarchyInRect comes back blank (the off-screen expanse blows past the
+// snapshot's texture budget) — which is exactly the "magnifier icons are blank on
+// long posts" bug. The window is always screen-sized and the info row is visible
+// in it while you hold, so snapshotting the window's strip region is reliable
+// regardless of how tall the cell is. `hideDuringSnapshot` (the loupe, on the
+// re-snapshot) is momentarily hidden so it can't capture itself over the icons.
+static UIImage *SRTSnapshotStrip(UIView *cellView, CGRect stripRect, UIView *hideDuringSnapshot) {
     if (stripRect.size.width < 1.0 || stripRect.size.height < 1.0) return nil;
+    UIView *source = cellView;
+    CGRect rect = stripRect;
+    UIWindow *window = cellView.window;
+    if (window) {
+        source = window;
+        rect = [cellView convertRect:stripRect toView:window];   // → window coords
+    }
+    if (rect.size.width < 1.0 || rect.size.height < 1.0) return nil;
+
+    BOOL wasHidden = hideDuringSnapshot.hidden;
+    hideDuringSnapshot.hidden = YES;
     UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat preferredFormat];
     fmt.opaque = NO;
-    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:stripRect.size format:fmt];
-    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-        CGContextTranslateCTM(ctx.CGContext, -stripRect.origin.x, -stripRect.origin.y);
-        [cellView drawViewHierarchyInRect:cellView.bounds afterScreenUpdates:NO];
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:rect.size format:fmt];
+    UIImage *out = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGContextTranslateCTM(ctx.CGContext, -rect.origin.x, -rect.origin.y);
+        [source drawViewHierarchyInRect:source.bounds afterScreenUpdates:NO];
     }];
+    hideDuringSnapshot.hidden = wasHidden;
+    return out;
 }
 
 // Selection pill tint: the theme accent (custom or stock Apollo theme — Mint →
@@ -814,6 +808,7 @@ static void SRTWireCornerFailureRequirements(UIGestureRecognizer *loupe, UIView 
         return inside;
     }
     // The comment tap only cares about the comment-bubble region.
+    if (!sInfoRowTapComments) return NO;   // Info Row switch OFF: stock tap (opens post at top)
     UIView *cellView = nil;
     @try { cellView = [(ApolloSRTNode *)cell view]; } @catch (__unused id e) {}
     ApolloSRTNode *commentsNode = SRTCommentsNodeForCell(cell);
@@ -966,7 +961,7 @@ static const CGFloat kSRTCancelSlopY = 64.0;
             UIView *host = cellView.window;
             if (targets.count == 0 || !host) return;
             CGRect stripRect = SRTStripRect(targets);
-            UIImage *img = SRTSnapshotStrip(cellView, stripRect);
+            UIImage *img = SRTSnapshotStrip(cellView, stripRect, nil);   // loupe not shown yet
             if (!img) return;
             CGFloat zoom = (host.bounds.size.width - 40.0) / MAX(stripRect.size.width, 1.0);
             zoom = MAX(1.4, MIN(zoom, 2.4));
@@ -985,7 +980,7 @@ static const CGFloat kSRTCancelSlopY = 64.0;
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.09 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     ApolloSRTLoupeView *l = weakLoupe;
                     if (!l || !l.superview) return;
-                    UIImage *fresh = SRTSnapshotStrip(cellView, snapRect);
+                    UIImage *fresh = SRTSnapshotStrip(cellView, snapRect, l);   // hide the loupe so it isn't captured
                     if (fresh) l.stripImageView.image = fresh;
                 });
             }
@@ -1099,12 +1094,10 @@ static const NSTimeInterval kSRTDeadline = 6.0;    // let the comment tree load 
 static const CGFloat kSRTDrift = 4.0;
 static const int kSRTHeldToFinish = 4;
 
-static const void *kSRTGenKey   = &kSRTGenKey;   // NSNumber long
-static const void *kSRTUserKey  = &kSRTUserKey;  // NSNumber bool: user dragged -> stop
-static const void *kSRTDoneKey  = &kSRTDoneKey;  // NSNumber bool
-static const void *kSRTReadyKey = &kSRTReadyKey; // NSNumber bool: content settled -> ok to pin
-static const void *kSRTLastHKey = &kSRTLastHKey; // NSNumber double: last contentSize.height
-static const void *kSRTHeldKey  = &kSRTHeldKey;  // NSNumber int
+static const void *kSRTGenKey    = &kSRTGenKey;    // NSNumber long
+static const void *kSRTUserKey   = &kSRTUserKey;   // NSNumber bool: user dragged -> stop
+static const void *kSRTDoneKey   = &kSRTDoneKey;   // NSNumber bool
+static const void *kSRTHeldKey   = &kSRTHeldKey;   // NSNumber int: consecutive on-target ticks
 
 static long gSRTGen = 0;
 
@@ -1154,8 +1147,14 @@ static NSIndexPath *SRTFirstCommentIndexPath(id tableNode, UITableView *tableVie
     return nil;
 }
 
-// Small gap left above the action bar so its separator/hairline shows (not flush-cut).
-static const CGFloat kSRTLandingMargin = 8.0;
+// Land the action bar flush at the top of the scroll area (just under the nav
+// bar). The action bar is the *last* row of the post header, so putting its top
+// at the content-inset boundary means no post-body text peeks above it — the
+// discussion (summary + first comments) sits right below, which is where a
+// "jump to comments" tap wants to be. A previous 8pt margin left a sliver of the
+// body's final line (its descenders) hanging above the bar, which read as a
+// glitch rather than a deliberate frame (issue #622). 0 removes it cleanly.
+static const CGFloat kSRTLandingMargin = 0.0;
 
 // Content-space Y of the post's quick action bar (up/down/save/reply/share). It's a
 // subnode (quickBarNode) at the bottom of the CommentsHeaderCellNode, not its own row.
@@ -1184,8 +1183,10 @@ static CGFloat SRTQuickBarTopContentY(id tableNode, UITableView *tableView) {
     return NAN;
 }
 
-// Where to land: the action bar top (preferred, so the up/down/reply row + summary
-// stay visible), else the first comment as a fallback.
+// The content-offset that seats the landing anchor — the post's action bar
+// (preferred, so the up/down/reply row stays visible), else the first comment as a
+// fallback — at the top of the scroll area, just under the nav bar. Clamped to the
+// current scroll range. Returns NAN when there's nothing to anchor to yet.
 static CGFloat SRTLandingOffset(id tableNode, UITableView *tv, NSIndexPath *firstCommentIP) {
     CGFloat insetTop = tv.adjustedContentInset.top;
     CGFloat insetBottom = tv.adjustedContentInset.bottom;
@@ -1193,39 +1194,77 @@ static CGFloat SRTLandingOffset(id tableNode, UITableView *tv, NSIndexPath *firs
     CGFloat maxOff = MAX(-insetTop, tv.contentSize.height - viewportH + insetBottom);
     CGFloat targetTop;
     CGFloat qbTop = SRTQuickBarTopContentY(tableNode, tv);
-    if (!isnan(qbTop)) {
-        targetTop = qbTop - kSRTLandingMargin;
-    } else if (firstCommentIP) {
-        targetTop = [tv rectForRowAtIndexPath:firstCommentIP].origin.y;
-    } else {
-        return tv.contentOffset.y;
-    }
+    if (!isnan(qbTop))          targetTop = qbTop - kSRTLandingMargin;
+    else if (firstCommentIP)    targetTop = [tv rectForRowAtIndexPath:firstCommentIP].origin.y;
+    else                        return NAN;
     return MIN(MAX(targetTop - insetTop, -insetTop), maxOff);
 }
 
 // -1 not ready, 0 corrected (was off), 1 already on target.
+//
+// The landing anchor is the post's action bar, which lives at the bottom of the
+// header cell. Apollo builds that header synchronously from the RDKLink the instant
+// the CommentsViewController loads — long before the comment tree streams in over
+// the network — so its content-Y is resolvable during the push transition itself.
+// That's what lets us land *invisibly* (issue #622): we don't wait for a comment to
+// exist, we pin to the header the moment it's measured, so the view slides in
+// already scrolled to the discussion instead of opening at the top and jumping down.
 static int SRTPinLanding(UIViewController *vc) {
     id tableNode = SRTIvar(vc, "tableNode");
     UITableView *tv = SRTTableForVC(vc);
     if (!tv) return -1;
 
+    // The comments view is an ASTableNode and does NOT forward
+    // scrollViewWillBeginDragging: to the VC (device-proven — see
+    // ApolloLiveCommentsFollow), so we can't rely on that delegate callback to learn
+    // the user took over. Read the scroll state directly instead: never fight a
+    // finger on the list. A real drag/fling hands the jump over for good; a plain
+    // touch-down (tracking, e.g. tapping to collapse a comment) just skips this
+    // frame's pin so we don't tug against the touch.
+    if (tv.isDragging || tv.isDecelerating) {
+        SRTSet(vc, kSRTUserKey, @YES);
+        SRTSet(vc, kSRTDoneKey, @YES);
+        return -1;
+    }
+    if (tv.isTracking) return -1;
+
     CGFloat h = tv.contentSize.height;
     CGFloat insetTop = tv.adjustedContentInset.top;
     CGFloat insetBottom = tv.adjustedContentInset.bottom;
     CGFloat viewportH = tv.bounds.size.height;
-    if ((h + insetTop + insetBottom) <= viewportH + 1.0) return -1;   // whole thread fits — nothing to do
+    if (viewportH < 1.0) return -1;                                  // not laid out yet
+    if ((h + insetTop + insetBottom) <= viewportH + 1.0) return -1;  // whole thread fits — nothing to do
 
-    // Readiness: comments have loaded (first comment exists). Offset is the action bar.
-    NSIndexPath *first = SRTFirstCommentIndexPath(tableNode, tv);
-    if (!first || first.section >= [tv numberOfSections]) return -1;
-
+    CGFloat qbTop = SRTQuickBarTopContentY(tableNode, tv);
+    // Only pay for the first-comment scan when the header anchor is unavailable.
+    NSIndexPath *first = isnan(qbTop) ? SRTFirstCommentIndexPath(tableNode, tv) : nil;
     CGFloat desired = SRTLandingOffset(tableNode, tv, first);
+    if (isnan(desired)) return -1;                                   // nothing to anchor to yet
+
     CGFloat cur = tv.contentOffset.y;
     if (fabs(cur - desired) > kSRTDrift) {
         [tv setContentOffset:CGPointMake(tv.contentOffset.x, desired) animated:NO];
+        ApolloLog(@"[StatsRow] pin: qbTop=%.1f cur=%.1f -> %.1f (h=%.1f vh=%.1f inTop=%.1f)",
+                  qbTop, cur, desired, h, viewportH, insetTop);
         return 0;
     }
     return 1;
+}
+
+// YES when the action-bar landing is fully reachable right now — enough content
+// below it to scroll its top to the nav bar. A cold long-body post whose comments
+// haven't loaded yet is NOT reachable (the target clamps short); we keep ticking so
+// the landing finalizes once the tree grows, rather than finishing at a clamped
+// interim position.
+static BOOL SRTLandingReachable(id tableNode, UITableView *tv) {
+    CGFloat qbTop = SRTQuickBarTopContentY(tableNode, tv);
+    if (isnan(qbTop)) return NO;
+    CGFloat insetTop = tv.adjustedContentInset.top;
+    CGFloat insetBottom = tv.adjustedContentInset.bottom;
+    CGFloat viewportH = tv.bounds.size.height;
+    CGFloat maxOff = MAX(-insetTop, tv.contentSize.height - viewportH + insetBottom);
+    CGFloat target = (qbTop - kSRTLandingMargin) - insetTop;
+    return target <= maxOff + 0.5;
 }
 
 static void SRTScheduleTick(__weak UIViewController *weakVC, long gen, NSDate *deadline);
@@ -1247,36 +1286,32 @@ static void SRTTick(__weak UIViewController *weakVC, long gen, NSDate *deadline)
         return;
     }
 
-    // Wait for the comment tree + header to finish measuring, so the target
-    // offset is computed against the *final* layout (single clean placement).
-    CGFloat h = tableView.contentSize.height;
-    NSNumber *lastHN = SRTNum(vc, kSRTLastHKey);
-    BOOL hStable = (lastHN != nil) && (fabs(h - lastHN.doubleValue) < 0.5);
-    SRTSet(vc, kSRTLastHKey, @(h));
+    // Pin to the header's action bar as soon as it's measured — no waiting on the
+    // comment tree. This backstops the viewDidLayoutSubviews pin for layout passes
+    // that don't re-fire, and finalizes the cold long-body case: a post whose action
+    // bar couldn't reach the top pre-load becomes reachable once its comments arrive.
+    int r = SRTPinLanding(vc);                                 // -1 not ready, 0 corrected, 1 on target
+    // "Done" only once we're on target AND the anchor is fully reachable (comments
+    // provided the height) — otherwise a cold long-body post would finish while its
+    // comments are still loading, settling at a clamped interim position.
+    BOOL settled = (r == 1) && SRTLandingReachable(tableNode, tableView);
 
-    NSIndexPath *first = SRTFirstCommentIndexPath(tableNode, tableView);
-
-    if (first && hStable) {
-        SRTSet(vc, kSRTReadyKey, @YES);   // viewDidLayoutSubviews may now pin (flash-free)
-        int r = SRTPinLanding(vc);
-        if (r == 1) {
-            int held = [SRTNum(vc, kSRTHeldKey) intValue] + 1;
-            SRTSet(vc, kSRTHeldKey, @(held));
-            if (held >= kSRTHeldToFinish) {
-                SRTSet(vc, kSRTDoneKey, @YES);
-                ApolloLog(@"[StatsRow] landed (action bar at top) — done (gen=%ld)", gen);
-                return;
-            }
-        } else if (r == 0) {
-            SRTSet(vc, kSRTHeldKey, @(0));
-            ApolloLog(@"[StatsRow] pinned landing (action bar) row %@ (gen=%ld)", first, gen);
+    if (settled) {
+        int held = [SRTNum(vc, kSRTHeldKey) intValue] + 1;
+        SRTSet(vc, kSRTHeldKey, @(held));
+        if (held >= kSRTHeldToFinish) {
+            SRTSet(vc, kSRTDoneKey, @YES);
+            ApolloLog(@"[StatsRow] landed (action bar at top) — done (gen=%ld)", gen);
+            return;
         }
-        SRTScheduleTick(weakVC, gen, deadline);
-        return;
+    } else {
+        SRTSet(vc, kSRTHeldKey, @(0));      // still settling — reset the streak
     }
 
     if (pastDeadline) {
-        if (first) SRTPinLanding(vc);   // best effort even if height never fully settled
+        SRTPinLanding(vc);                 // one last best-effort placement
+        SRTSet(vc, kSRTDoneKey, @YES);     // stop auto-pinning past the network load window
+        ApolloLog(@"[StatsRow] jump deadline reached — settling (gen=%ld)", gen);
         return;
     }
     SRTScheduleTick(weakVC, gen, deadline);
@@ -1371,7 +1406,7 @@ static BOOL SRTShouldSuppressMenu(id interaction, CGPoint location) {
 
 %hook _TtC6Apollo22CommentsViewController
 
-- (void)viewDidAppear:(BOOL)animated {
+- (void)viewWillAppear:(BOOL)animated {
     %orig;
     if (!SRTConsumeJumpPending()) return;   // only when a bubble tap armed us
 
@@ -1379,21 +1414,41 @@ static BOOL SRTShouldSuppressMenu(id interaction, CGPoint location) {
     SRTSet(self, kSRTGenKey, @(gen));
     SRTSet(self, kSRTUserKey, @NO);
     SRTSet(self, kSRTDoneKey, @NO);
-    SRTSet(self, kSRTReadyKey, @NO);
     SRTSet(self, kSRTHeldKey, @(0));
-    objc_setAssociatedObject(self, kSRTLastHKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    // Land BEFORE the push transition paints. The post header (and its action bar)
+    // is usually already measured by now — built synchronously from the link —
+    // so this first pin makes the view slide in already scrolled to the
+    // discussion, instead of opening at the top and then jumping down (#622).
+    // viewDidLayoutSubviews + the tick loop cover the passes where the header
+    // wasn't measured at this exact instant.
+    SRTPinLanding((UIViewController *)self);
 
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:kSRTDeadline];
     SRTScheduleTick((UIViewController *)self, gen, deadline);
-    ApolloLog(@"[StatsRow] comments appeared with jump pending — arming scroll (gen=%ld)", gen);
+    ApolloLog(@"[StatsRow] comments will appear with jump pending — landing early (gen=%ld)", gen);
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    // Belt-and-braces: if the header measured too late to pin before the transition
+    // painted (rare), catch up now so we still land on the action bar.
+    if ([SRTNum(self, kSRTGenKey) longValue] == 0) return;   // no jump active for this VC
+    if ([SRTNum(self, kSRTDoneKey) boolValue]) return;
+    if ([SRTNum(self, kSRTUserKey) boolValue]) return;
+    SRTPinLanding((UIViewController *)self);
 }
 
 - (void)viewDidLayoutSubviews {
     %orig;
     if (![NSThread isMainThread]) return;
-    if (![SRTNum(self, kSRTReadyKey) boolValue]) return;
+    if ([SRTNum(self, kSRTGenKey) longValue] == 0) return;   // no jump active for this VC
     if ([SRTNum(self, kSRTDoneKey) boolValue]) return;
     if ([SRTNum(self, kSRTUserKey) boolValue]) return;
+    // Flash-free pin: this runs in the same layout pass in which Apollo re-parks
+    // the offset, so its top-of-post value never paints. Anchored on the header,
+    // it fires from the very first pass during the push (the proven sibling
+    // technique in ApolloInboxCommentScroll).
     SRTPinLanding((UIViewController *)self);
 }
 

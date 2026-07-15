@@ -21,6 +21,11 @@ typedef NS_ENUM(NSInteger, ApolloHostedVideoKind) {
     ApolloHostedVideoNone = 0,
     ApolloHostedVideoStreamable,
     ApolloHostedVideoRedgifs,
+    // A sports-clip host (streamff/streamin/streamain/…) from the "Sports Clip
+    // Links Play Inline" feature. Only reported while that toggle is ON, so the
+    // share paths follow the same switch as inline playback: toggle off = these
+    // posts are plain links again (no Share-as-Video, stock link card).
+    ApolloHostedVideoSportsClip,
 };
 
 // This file is plain Objective-C (.m, C linkage) but its callers are Logos .xm

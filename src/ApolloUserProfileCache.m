@@ -489,6 +489,24 @@ static NSTimeInterval ApolloUserProfileRetryBackoffForAttempt(NSInteger attempt)
     [self startInfoFetchForKey:key bypassingCache:bypassingCache attempt:0];
 }
 
+// Negative-cache a permanent miss (404 nonexistent/deleted user, unparseable
+// body) so repeated lookups short-circuit for the cache TTL. Without this,
+// every layout pass of any cell referencing the user (inline avatar path,
+// u/ link-preview prefetch) refires the fetch — one network round trip per
+// ~200ms for as long as the cell is near the viewport, which lags comment
+// scrolling. The sentinel has fetchedAt=now + suspensionChecked=YES so
+// requestInfoForUsername's freshness short-circuit skips the network, and a
+// nil username so display fallbacks keep the author's original casing.
+// Memory-only (never diskInfo): a transient upstream 404 must not persist
+// across launches.
+- (void)cacheNotFoundInfoForKey:(NSString *)key {
+    if (!key) return;
+    ApolloUserProfileInfo *sentinel = [ApolloUserProfileInfo new];
+    sentinel.fetchedAt = [NSDate date];
+    sentinel.suspensionChecked = YES;
+    [self.infoCache setObject:sentinel forKey:key];
+}
+
 - (void)startInfoFetchForKey:(NSString *)key bypassingCache:(BOOL)bypassingCache attempt:(NSInteger)attempt {
     NSMutableURLRequest *request = [[self profileRequestForUsername:key] mutableCopy];
     if (bypassingCache) {
@@ -537,12 +555,14 @@ static NSTimeInterval ApolloUserProfileRetryBackoffForAttempt(NSInteger attempt)
         if (statusCode < 200 || statusCode >= 300) {
             // Permanent (404 not found, 403 forbidden, etc.) — no retry.
             ApolloLog(@"[UserAvatars] Profile fetch for u/%@ returned HTTP %ld", key, (long)statusCode);
+            [self cacheNotFoundInfoForKey:key];
             [self finishInfoRequestForKey:key info:nil];
             return;
         }
 
         ApolloUserProfileInfo *info = [self profileInfoFromResponseData:data fallbackUsername:key];
         if (!info) {
+            [self cacheNotFoundInfoForKey:key];
             [self finishInfoRequestForKey:key info:nil];
             return;
         }

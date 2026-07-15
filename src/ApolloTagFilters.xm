@@ -199,14 +199,66 @@ static BOOL ApolloTagMediaIsVideo(id richMediaNode) {
     return vn != nil;
 }
 
-// Captured Reddit account pref "Blur mature (18+) images and media": Apollo
-// parses pref_no_profanity from /me.json (self /about.json too) into
-// RDKUser.noProfanity via Mantle — only self responses carry the field, so
-// the setter hook below fires only for the signed-in account. -1 until the
-// first parse. Some sessions never parse it at all (web-JSON/cookie identity
-// synthesizes the account without a /me fetch), leaving Apollo's own
-// noProfanity NO — so unknown must NOT suppress our cover (see below).
-static NSInteger sTagRedditNoProfanity = -1;
+// Captured Reddit account pref "Blur mature (18+) images and media",
+// PER ACCOUNT. Apollo parses pref_no_profanity from self /me.json (and self
+// /about.json) into RDKUser.noProfanity via Mantle. With multiple accounts
+// added, Apollo materializes an RDKUser for EVERY stored account (switcher
+// refreshes, session restores) — a single last-writer-wins global held
+// whichever account happened to parse most recently, which is wrong for the
+// signed-in account whenever two accounts' prefs disagree, and the 0↔1
+// ping-pong re-ran the visible-cell refresh once per parse. Captures are
+// keyed by lowercased username and decisions resolve against the ACTIVE
+// account. Effective value is -1 (unknown) until the active account's pref
+// is captured; some sessions never capture it at all (web-JSON/cookie
+// identity synthesizes the account without a /me fetch), so unknown must NOT
+// suppress our cover (see below). All state is main-thread confined: the
+// Mantle setter can fire on background parse queues mid-init, so captures
+// hop to main (where the parsed object is fully populated); decisions run
+// from cell didLoad/layout on main.
+static NSMutableDictionary<NSString *, NSNumber *> *sTagNoProfanityByUser = nil;
+static NSString *sTagActiveUsername = nil;
+static NSInteger sTagEffectiveNoProfanity = -1;
+
+static void ApolloTagRefreshAllVisibleCells(void);
+
+static NSString *ApolloTagNormalizedUsername(id userObject) {
+    NSString *name = nil;
+    if ([userObject respondsToSelector:@selector(username)]) {
+        id v = ((id (*)(id, SEL))objc_msgSend)(userObject, @selector(username));
+        if ([v isKindOfClass:[NSString class]]) name = v;
+    }
+    if (name.length == 0 && [userObject respondsToSelector:@selector(name)]) {
+        id v = ((id (*)(id, SEL))objc_msgSend)(userObject, @selector(name));
+        if ([v isKindOfClass:[NSString class]]) name = v;
+    }
+    return name.length > 0 ? [name lowercaseString] : nil;
+}
+
+// Live lookup for sessions restored with a signed-in user before any
+// -[RDKClient setCurrentUser:] fires under our hook.
+static NSString *ApolloTagLiveActiveUsername(void) {
+    Class clientClass = objc_getClass("RDKClient");
+    if (!clientClass || ![clientClass respondsToSelector:@selector(sharedClient)]) return nil;
+    id client = ((id (*)(id, SEL))objc_msgSend)(clientClass, @selector(sharedClient));
+    if (!client || ![client respondsToSelector:@selector(currentUser)]) return nil;
+    id currentUser = ((id (*)(id, SEL))objc_msgSend)(client, @selector(currentUser));
+    return currentUser ? ApolloTagNormalizedUsername(currentUser) : nil;
+}
+
+// Main thread only. Re-resolves the active account's captured pref; on an
+// EFFECTIVE change (capture for the active account, or an account switch)
+// re-evaluates visible cells — a statically-visible feed gets no layout pass
+// of its own when /me lands or the account flips.
+static void ApolloTagRecomputeEffectiveNoProfanity(void) {
+    if (sTagActiveUsername.length == 0) sTagActiveUsername = ApolloTagLiveActiveUsername();
+    NSNumber *captured = sTagActiveUsername.length > 0 ? sTagNoProfanityByUser[sTagActiveUsername] : nil;
+    NSInteger effective = captured ? (captured.boolValue ? 1 : 0) : -1;
+    if (effective == sTagEffectiveNoProfanity) return;
+    sTagEffectiveNoProfanity = effective;
+    ApolloLog(@"[TagFilters] Effective pref_no_profanity=%ld for u/%@ (blur mature media)",
+              (long)effective, sTagActiveUsername ?: @"(unknown)");
+    ApolloTagRefreshAllVisibleCells();
+}
 
 // Predicts Apollo's native NSFW obscuring for a link, so the tweak's overlay
 // can stay out of the way from the FIRST layout pass (the native overlay node
@@ -216,7 +268,7 @@ static NSInteger sTagRedditNoProfanity = -1;
 // object exists with noProfanity NO, so no native overlay ever appears. The
 // conservative default costs only a brief launch-window double-blur.
 static BOOL ApolloTagNativeWillBlurNSFW(BOOL isNSFW) {
-    return isNSFW && sTagRedditNoProfanity == 1;
+    return isNSFW && sTagEffectiveNoProfanity == 1;
 }
 
 // Apollo's native obscured overlay ("NSFW / Spoiler — tap to view") lives on
@@ -322,7 +374,7 @@ static NSArray<NSDictionary *> *ApolloTagBlurEntriesForCell(id cell, RDKLink *li
     // heuristic for configurations where the ivar isn't observable yet.
     // Square corners — the media area runs edge-to-edge and any rounding
     // leaves a sliver of the underlying image visible in the corners.
-    BOOL latchTrusted = isSpoiler || sTagRedditNoProfanity != 0;
+    BOOL latchTrusted = isSpoiler || sTagEffectiveNoProfanity != 0;
     BOOL skipMedia = ApolloTagMediaNativelyObscured(cell, richMediaNode, latchTrusted)
         || (richMediaNode && ApolloTagNativeWillBlurNSFW(isNSFW))
         || (!isNSFW && isSpoiler && ApolloTagMediaIsVideo(richMediaNode));
@@ -605,21 +657,45 @@ static void ApolloTagRefreshAllVisibleCells(void) {
 
 // MARK: - Cell hooks
 
-// Captures the account's blur-mature pref as Apollo parses it from /me.json
+// Captures a per-account blur-mature pref as Apollo parses it from /me.json
 // (Mantle key path data.pref_no_profanity → this setter). A pref change made
-// on Reddit's side flows in on the next /me refresh. On any change, visible
-// cells are re-evaluated — a statically-visible feed gets no layout pass of
-// its own when /me lands, so overlays computed under the unknown/-1 default
-// would otherwise stay wrong until the user scrolls.
+// on Reddit's side flows in on the next /me refresh. The capture hops to
+// main because Mantle can call this setter mid-init on a background parse
+// queue — on main the object's username is populated and all TagFilters
+// state is main-confined (the old direct call also walked UIWindows from the
+// parse thread). Cell refresh happens only when the ACTIVE account's
+// effective value changes, inside the recompute.
 %hook RDKUser
 
 - (void)setNoProfanity:(BOOL)value {
     %orig;
-    if (sTagRedditNoProfanity != (value ? 1 : 0)) {
-        sTagRedditNoProfanity = value ? 1 : 0;
-        ApolloLog(@"[TagFilters] Captured pref_no_profanity=%d (blur mature media)", value);
-        ApolloTagRefreshAllVisibleCells();
-    }
+    id parsedUser = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSString *username = ApolloTagNormalizedUsername(parsedUser);
+        if (username.length == 0) return;  // uncaptured stays conservative (-1)
+        if (!sTagNoProfanityByUser) sTagNoProfanityByUser = [NSMutableDictionary dictionary];
+        NSNumber *previous = sTagNoProfanityByUser[username];
+        if (!previous || previous.boolValue != value) {
+            sTagNoProfanityByUser[username] = @(value);
+            ApolloLog(@"[TagFilters] Captured pref_no_profanity=%d for u/%@ (blur mature media)", value, username);
+        }
+        ApolloTagRecomputeEffectiveNoProfanity();
+    });
+}
+
+%end
+
+// Account switches move the effective pref to the new account's captured
+// value (or back to unknown if it was never captured for them).
+%hook RDKClient
+
+- (void)setCurrentUser:(id)user {
+    %orig;
+    id newUser = user;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        sTagActiveUsername = newUser ? ApolloTagNormalizedUsername(newUser) : nil;
+        ApolloTagRecomputeEffectiveNoProfanity();
+    });
 }
 
 %end

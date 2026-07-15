@@ -1,5 +1,6 @@
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import <QuartzCore/QuartzCore.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
 #import <objc/message.h>
@@ -778,4 +779,8 @@ void ApolloSetLinkPreviewCardColorHex(NSString *hex) {
     // Publish the render snapshot AFTER the string, so a background reader that
     // observes a non-zero packed value already has a consistent RGB to draw.
     sLinkPreviewCardColorPacked = color ? ApolloPackedColorFromHexString(sLinkPreviewCardColorHex) : 0;
+}
+
+double ApolloPerfNowMs(void) {
+    return CACurrentMediaTime() * 1000.0;
 }

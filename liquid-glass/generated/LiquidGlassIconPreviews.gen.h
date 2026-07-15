@@ -86,10 +86,10 @@ static const LGIconRowEntry kLGGroupEntries_custom[] = {
     { "helios-halo", "Helios Halo", "IllIIllIllIllII" },
     { "helios-cryo", "Helios Cryo", "IllIIllIllIllII" },
     { "helios-cryo-halo", "Helios Cryo Halo", "IllIIllIllIllII" },
-    { "helios-ultra", "Helios Ultra", "IllIIllIllIllII" },
-    { "helios-ultra-halo", "Helios Ultra Halo", "IllIIllIllIllII" },
     { "helios-parallax", "Helios Parallax", "IllIIllIllIllII" },
     { "helios-parallax-halo", "Helios Parallax Halo", "IllIIllIllIllII" },
+    { "helios-ultra", "Helios Ultra", "IllIIllIllIllII" },
+    { "helios-ultra-halo", "Helios Ultra Halo", "IllIIllIllIllII" },
 };
 
 static const LGIconGroupDef kLGIconGroups[] = {
