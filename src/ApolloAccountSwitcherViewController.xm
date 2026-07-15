@@ -626,25 +626,6 @@ static id _Nullable ApolloGetObjectIvar(id object, const char *name) {
     });
 }
 
-// Blocks starting (or re-starting) a web-session login while the master
-// "API-Key-Free Mode" switch is off. Without this, a session could be
-// harvested and stored for an account that ApolloWebJSONHasUsableSession()
-// (gated on sWebJSONEnabled) will never actually treat as usable — the
-// account would have no working OAuth key (none configured) AND no working
-// cookie transport (flag off), so every request just hangs forever with no
-// visible error. Settings already hides its own "Web Session Accounts" row
-// the same way; this is the switcher's equivalent gate.
-- (BOOL)presentWebJSONDisabledAlertIfNeeded {
-    if (sWebJSONEnabled) return NO;
-    UIAlertController *alert = [UIAlertController
-        alertControllerWithTitle:@"API-Key-Free Mode Is Off"
-                          message:@"Turn on \"API-Key-Free Mode\" in Settings → Apollo Reborn → Accounts & API Keys first — otherwise a web-session account has no working way to authenticate and every request will hang."
-                   preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-    return YES;
-}
-
 // Web-session ("API-Key-Free") sign-in: presents the WKWebView login flow. If a
 // web-session account already exists, the shared persistent cookie jar needs
 // clearing first so the login form actually shows instead of silently reusing

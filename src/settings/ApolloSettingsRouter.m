@@ -11,6 +11,7 @@
 #import "settings/ApolloLinkPreviewSettingsViewController.h"
 #import "settings/ApolloOpenInAppViewController.h"
 #import "settings/CustomAPIViewController.h"
+#import "settings/InfoRowSettingsViewController.h"
 #import "settings/InlineMediaSettingsViewController.h"
 #import "settings/SavedCategoriesViewController.h"
 #import "settings/TranslationSettingsViewController.h"
@@ -55,6 +56,7 @@ static void ApolloSettingsRouterEnsureRegistry(void) {
         // The hub's group screens (settings IA restructure).
         add(@"accounts-api-keys", @"Accounts & API Keys", @"Apollo Reborn → Setup", ApolloSettingsInsetGrouped([ApolloAccountsAPIKeysViewController class]));
         add(@"posts-feeds", @"Posts & Feeds", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloPostsFeedsViewController class]));
+        add(@"info-row", @"Info Row", @"Apollo Reborn → Features → Posts & Feeds", ApolloSettingsInsetGrouped([InfoRowSettingsViewController class]));
         add(@"comments", @"Comments", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloCommentsSettingsViewController class]));
         add(@"media", @"Media", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloMediaSettingsViewController class]));
         add(@"subreddits", @"Subreddits", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloSubredditsSettingsViewController class]));

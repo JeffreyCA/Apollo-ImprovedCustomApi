@@ -551,8 +551,15 @@ static const char kARCompletion = '\0';
         for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
             if (scene.activationState == UISceneActivationStateForegroundActive
                     && [scene isKindOfClass:[UIWindowScene class]]) {
-                window = ((UIWindowScene *)scene).keyWindow ?: ((UIWindowScene *)scene).windows.firstObject;
-                break;
+                NSArray<UIWindow *> *sceneWindows = ((UIWindowScene *)scene).windows;
+                for (UIWindow *candidate in sceneWindows) {
+                    if (candidate.isKeyWindow) {
+                        window = candidate;
+                        break;
+                    }
+                }
+                window = window ?: sceneWindows.firstObject;
+                if (window) break;
             }
         }
     }

@@ -5,6 +5,7 @@
 #import "ApolloPushNotifications.h"
 #import "ApolloUsageHeartbeat.h"
 #import "InlineMediaSettingsViewController.h"
+#import "InfoRowSettingsViewController.h"
 #import "ApolloWebSessionLoginViewController.h"
 #import "settings/ApolloAISettingsViewController.h"
 #import "ApolloWebSessionStore.h"
@@ -474,6 +475,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self reloadRowWithID:@"api.webSessionLogin"];
     // Refresh the Apollo AI and Rich Link Previews status subtitles after returning
     // from their subviews.
+    [self reloadRowWithID:@"feat.infoRow"];
     [self reloadRowWithID:@"ai.settings"];
     [self reloadRowWithID:@"inlineMedia.settings"];
     [self reloadRowWithID:@"linkPreviews.settings"];
@@ -636,7 +638,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     apiKeys.iconSystemName = @"key.fill";
     apiKeys.iconTileColor = [UIColor systemGrayColor];
     return [ApolloSettingsSection sectionWithTitle:@"Setup"
-                                            footer:nil
+                                            footer:@"Your Reddit sign-in credentials, plus optional Imgur, Giphy and Image Chest keys for uploads and GIFs."
                                               rows:@[ apiKeys ]];
 }
 
@@ -757,7 +759,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     clearBanners.iconSystemName = @"photo.fill";                  clearBanners.iconTileColor = [UIColor systemOrangeColor];
 
     return [ApolloSettingsSection sectionWithTitle:@"Data"
-                                            footer:nil
+                                            footer:@"Back up or restore your Reborn settings and API keys, or clear cached data."
                                               rows:@[ backup, restore, clearCaches, clearBanners ]];
 }
 
@@ -872,7 +874,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onSelect:nil];
 
     return [ApolloSettingsSection sectionWithTitle:@"Default API Keys"
-                                            footer:nil
+                                            footer:@"Default credentials, used by any account without a per-account override. Reddit is required to sign in; the rest enable image uploads and the GIF picker."
                                               rows:@[ redditKey, redditSecret, imgurKey, imgChestKey, giphyKey,
                                                       redirectURI, userAgent ]];
 }
@@ -1094,6 +1096,25 @@ typedef NS_ENUM(NSInteger, Tag) {
 // wrote Apollo's own keys, and the native rows ("Open Videos in YouTube
 // App", "Open Links in") are shown again in General → Other.
 
+// Compact state shown below the Info Row disclosure. This is derived from the
+// same globals as the destination form, so returning from that screen only
+// needs an identity-based reload of the hub row.
+- (NSString *)infoRowSummaryText {
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    [parts addObject:sIconRowMagnifier ? @"Magnifier on" : @"Magnifier off"];
+    [parts addObject:sInfoRowOverlayMode ? @"Overlays" : sInfoRowPopupMode ? @"Popups" : @"Info taps off"];
+
+    NSMutableArray<NSString *> *disabled = [NSMutableArray array];
+    if (!sInfoRowTapUpvote) [disabled addObject:@"Upvote"];
+    if (!sInfoRowTapComments) [disabled addObject:@"Comments"];
+    BOOL translationAvailable = sTapToTranslate || sShowTranslationTitleDetails || sShowTranslationDetails;
+    if (translationAvailable && !sInfoRowTapTranslation) [disabled addObject:@"Translation"];
+    if (disabled.count > 0) {
+        [parts addObject:[NSString stringWithFormat:@"%@ off", [disabled componentsJoinedByString:@", "]]];
+    }
+    return [parts componentsJoinedByString:@" · "];
+}
+
 - (ApolloSettingsSection *)buildPostsFeedSection {
     __weak typeof(self) weakSelf = self;
 
@@ -1103,17 +1124,13 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFeedTextPostThumbnails]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf textPostThumbnailsSwitchToggled:sender]; }];
 
-    ApolloSettingsRow *iconRowMagnifier =
-        [ApolloSettingsRow customRowWithID:@"gen.iconRowMagnifier"
-                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
-            return [weakSelf switchCellWithIdentifier:@"Cell_Gen_IconRowMagnifier"
-                                                label:@"Magnify Info Row on Hold"
-                                               detail:@"Press and hold a post's info row (score, comments, time…) to magnify the icons and slide to the one you want."
-                                                   on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIconRowMagnifier]
-                                               action:@selector(iconRowMagnifierSwitchToggled:)]
-                ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-        }
-                                  onSelect:nil];
+    ApolloSettingsRow *infoRow =
+        [self hubDisclosureRowWithID:@"feat.infoRow"
+                               title:@"Info Row"
+                            subtitle:^NSString * { return [weakSelf infoRowSummaryText]; }
+                                push:^UIViewController * {
+            return [[InfoRowSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        }];
 
     ApolloSettingsRow *blockAnnouncements =
         [ApolloSettingsRow switchRowWithID:@"gen.blockAnnouncements"
@@ -1123,7 +1140,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     return [ApolloSettingsSection sectionWithTitle:@"Feed"
                                             footer:@"Small tweaks for the post list."
-                                              rows:@[ textPostThumbnails, iconRowMagnifier, blockAnnouncements ]];
+                                              rows:@[ textPostThumbnails, infoRow, blockAnnouncements ]];
 }
 
 // Interface group screen (ApolloInterfaceSettingsViewController) — the
@@ -1380,7 +1397,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     commentLinkHost.configure = disclosure;
 
     return [ApolloSettingsSection sectionWithTitle:@"Uploads"
-                                            footer:nil
+                                            footer:@"Media Upload Host sets where images attached to posts and comments are uploaded. Comment Link Host uploads images in comments to Imgur or Image Chest and inserts a plain link, so they work even where images aren't allowed."
                                               rows:@[ uploadHost, commentLinkHost ]];
 }
 
@@ -1393,7 +1410,9 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProxyImgurDDG]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf proxyImgurDDGSwitchToggled:sender]; }];
 
-    return [ApolloSettingsSection sectionWithTitle:@"Network" footer:nil rows:@[ proxyImgur ]];
+    return [ApolloSettingsSection sectionWithTitle:@"Network"
+                                            footer:@"Route Imgur images through DuckDuckGo to bypass regional blocks. Albums and uploads aren't supported by the proxy."
+                                              rows:@[ proxyImgur ]];
 }
 
 // Profiles group screen (ApolloProfilesSettingsViewController).
@@ -2880,11 +2899,6 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)keepSearchBarInPlaceSwitchToggled:(UISwitch *)sender {
     sKeepSearchBarInPlace = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sKeepSearchBarInPlace forKey:UDKeyKeepSearchBarInPlace];
-}
-
-- (void)iconRowMagnifierSwitchToggled:(UISwitch *)sender {
-    sIconRowMagnifier = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sIconRowMagnifier forKey:UDKeyIconRowMagnifier];
 }
 
 - (void)liveCommentsFollowSwitchToggled:(UISwitch *)sender {
