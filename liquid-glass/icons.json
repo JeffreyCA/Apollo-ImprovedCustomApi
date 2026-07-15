@@ -74,5 +74,6 @@
       { "id": "helios-parallax",          "displayName": "Helios Parallax",     "designer": "IllIIllIllIllII", "group": "custom" },
       { "id": "helios-parallax-halo",     "displayName": "Helios Parallax Halo","designer": "IllIIllIllIllII", "group": "custom" },
       { "id": "helios-ultra",             "displayName": "Helios Ultra",        "designer": "IllIIllIllIllII", "group": "custom" },
-      { "id": "helios-ultra-halo",        "displayName": "Helios Ultra Halo",   "designer": "IllIIllIllIllII", "group": "custom" }]
+      { "id": "helios-ultra-halo",        "displayName": "Helios Ultra Halo",   "designer": "IllIIllIllIllII", "group": "custom" },
+      { "id": "apollo-classic",           "displayName": "Apollo Classic",      "designer": "IllIIllIllIllII", "group": "community" }]
 }

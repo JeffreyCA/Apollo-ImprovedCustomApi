@@ -26,6 +26,7 @@ static const LGIconRowEntry kLGGroupEntries_community[] = {
     { "jryng", "OG", "jryng" },
     { "metalnakls", "metalnakls", "metalnakls" },
     { "harunatsu", "harunatsu", "harunatsu91202024" },
+    { "apollo-classic", "Apollo Classic", "IllIIllIllIllII" },
 };
 
 static const LGIconRowEntry kLGGroupEntries_new_variants[] = {
@@ -93,7 +94,7 @@ static const LGIconRowEntry kLGGroupEntries_custom[] = {
 };
 
 static const LGIconGroupDef kLGIconGroups[] = {
-    { "community", "Liquid Glass", LGGroupPresentationInline, kLGGroupEntries_community, 4 },
+    { "community", "Liquid Glass", LGGroupPresentationInline, kLGGroupEntries_community, 5 },
     { "new-variants", "New Variants", LGGroupPresentationPush, kLGGroupEntries_new_variants, 45 },
     { "custom", "Custom", LGGroupPresentationPush, kLGGroupEntries_custom, 13 },
 };
