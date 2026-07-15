@@ -25,6 +25,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloAISummary.h"
+#import "ApolloAICloudBridge.h"
 #import "ApolloThemeRuntime.h"
 #import "ApolloState.h"
 #import "Tweak.h"
@@ -124,6 +125,12 @@ maximumResponseTokens:(NSInteger)maximumResponseTokens
 @end
 
 static ApolloFoundationModels *ApolloAIBridge(void) {
+    // Cloud providers (OpenRouter/Gemini/custom) go through ApolloAICloudBridge,
+    // which exposes the identical selector surface — the cast is safe because
+    // every send below is dynamically dispatched against that shared surface.
+    if (sAISummaryProvider.length > 0 && ![sAISummaryProvider isEqualToString:@"apple"]) {
+        return (ApolloFoundationModels *)[ApolloAICloudBridge shared];
+    }
     Class cls = NSClassFromString(@"ApolloFoundationModels");
     if (!cls) return nil;
     return [cls shared];
@@ -257,6 +264,29 @@ static NSMutableSet<NSString *> *sCommentGenerationScheduled;
 // loading<->error as the retry schedule and comment captures re-fire.
 static NSMutableSet<NSString *> *sPostFailed;
 static NSMutableSet<NSString *> *sCommentFailed;
+// "post|<fullName>" / "comment|<fullName>" -> the friendly error message shown
+// when the generation failed. Kept alongside sPostFailed/sCommentFailed so a
+// recycled header re-applies the SPECIFIC message (e.g. the cloud "check your
+// API key" hint) instead of degrading to the generic error body.
+static NSMutableDictionary<NSString *, NSString *> *sFailedErrorMessages;
+
+static NSString *ApolloAIFailedMessageKey(NSString *fullName, BOOL isPost) {
+    return [NSString stringWithFormat:@"%@|%@", isPost ? @"post" : @"comment", fullName];
+}
+
+static void ApolloAIRecordFailure(NSString *fullName, BOOL isPost, NSString *message) {
+    NSMutableSet *failed = isPost ? sPostFailed : sCommentFailed;
+    [failed addObject:fullName];
+    if (message.length > 0) {
+        sFailedErrorMessages[ApolloAIFailedMessageKey(fullName, isPost)] = message;
+    }
+}
+
+static void ApolloAIClearFailure(NSString *fullName, BOOL isPost) {
+    NSMutableSet *failed = isPost ? sPostFailed : sCommentFailed;
+    [failed removeObject:fullName];
+    [sFailedErrorMessages removeObjectForKey:ApolloAIFailedMessageKey(fullName, isPost)];
+}
 // fullNames whose link/article post box is currently HIDDEN — the page had no
 // usable prose to summarize (score-card / SPA / paywall stub), or the model
 // couldn't summarize the little there was. Distinct from sPostFailed: a
@@ -470,6 +500,7 @@ static void ApolloAIEnsureState(void) {
         sCommentGenerationScheduled = [NSMutableSet set];
         sPostFailed = [NSMutableSet set];
         sCommentFailed = [NSMutableSet set];
+        sFailedErrorMessages = [NSMutableDictionary dictionary];
         sPostSuppressed = [NSMutableSet set];
         sPostEmpty = [NSMutableSet set];
         sTimedOutRequests = [NSMutableSet set];
@@ -508,6 +539,7 @@ NSUInteger ApolloAIClearSummaryCache(void) {
     [sCommentGenerationScheduled removeAllObjects];
     [sPostFailed removeAllObjects];
     [sCommentFailed removeAllObjects];
+    [sFailedErrorMessages removeAllObjects];
     [sPostSuppressed removeAllObjects];
     [sPostEmpty removeAllObjects];
     [sTimedOutRequests removeAllObjects];
@@ -1999,14 +2031,16 @@ static void ApolloAIApplyRestoredState(id headerNode, NSString *fullName) {
     } else if (sPostSummaryCache[fullName].length > 0) {
         if (ApolloAISetBoxState(headerNode, YES, ApolloAIBoxStateReady, sPostSummaryCache[fullName])) changed = YES;
     } else if ([sPostFailed containsObject:fullName]) {
-        if (ApolloAISetBoxState(headerNode, YES, ApolloAIBoxStateError, nil)) changed = YES;
+        if (ApolloAISetBoxState(headerNode, YES, ApolloAIBoxStateError,
+                                sFailedErrorMessages[ApolloAIFailedMessageKey(fullName, YES)])) changed = YES;
     } else if ([sPostInFlight containsObject:fullName]) {
         if (ApolloAISetBoxState(headerNode, YES, ApolloAIBoxStateLoading, nil)) changed = YES;
     }
     if (sCommentSummaryCache[fullName].length > 0) {
         if (ApolloAISetBoxState(headerNode, NO, ApolloAIBoxStateReady, sCommentSummaryCache[fullName])) changed = YES;
     } else if ([sCommentFailed containsObject:fullName]) {
-        if (ApolloAISetBoxState(headerNode, NO, ApolloAIBoxStateError, nil)) changed = YES;
+        if (ApolloAISetBoxState(headerNode, NO, ApolloAIBoxStateError,
+                                sFailedErrorMessages[ApolloAIFailedMessageKey(fullName, NO)])) changed = YES;
     } else if ([sCommentInFlight containsObject:fullName]) {
         // A generation is genuinely running -> show the loading card.
         if (ApolloAISetBoxState(headerNode, NO, ApolloAIBoxStateLoading, nil)) changed = YES;
@@ -2075,7 +2109,7 @@ static void ApolloAISuppressLinkSummary(NSString *fullName) {
     if (fullName.length == 0) return;
     [sPostInFlight removeObject:fullName];
     [sPostRequestIDs removeObjectForKey:fullName];
-    [sPostFailed removeObject:fullName];        // NOT an error — don't show the triangle
+    ApolloAIClearFailure(fullName, YES);        // NOT an error — don't show the triangle
     [sBothSummaryPosts removeObject:fullName];
     if (sEnableTapToSummarize) {
         // Tap-to-Summarize: the user explicitly tapped this card, so silently
@@ -2107,9 +2141,13 @@ static NSString *ApolloAIFriendlyError(NSError *error) {
         case 7:
             return @"The model declined to summarize this content.";
         case 8:
-            return @"This thread is too long to summarize on-device.";
+            return @"This thread is too long for the model to summarize.";
         case 10:
             return @"Summaries aren't available for this language yet.";
+        case 11: // cloud only: HTTP 401/402/403
+            return @"The AI provider rejected the request. Check your API key (and account credits) in Apollo AI settings.";
+        case 12: // cloud only: unreachable / bad request / bad model
+            return @"Couldn't reach the AI service. Check your connection and provider settings, then try again.";
         default:
             break;
     }
@@ -2304,8 +2342,7 @@ static void ApolloAIScheduleGenerationTimeout(NSString *fullName, BOOL isPost, N
             ApolloAISuppressLinkSummary(fullName);
             return;
         }
-        NSMutableSet *failed = isPost ? sPostFailed : sCommentFailed;
-        [failed addObject:fullName];
+        ApolloAIRecordFailure(fullName, isPost, @"This summary took too long. Reopen the post to try again.");
         ApolloAISetBoxStateOnMatchingHeaders(
             fullName, isPost, ApolloAIBoxStateError,
             @"This summary took too long. Reopen the post to try again.");
@@ -2621,8 +2658,8 @@ maximumResponseTokens:responseTokens
                         ApolloAISuppressLinkSummary(fullName);
                         return;
                     }
-                    [sPostFailed addObject:fullName];
                     NSString *msg = error ? ApolloAIFriendlyError(error) : @"The model returned an empty summary.";
+                    ApolloAIRecordFailure(fullName, YES, msg);
                     ApolloLog(@"[AISummary] link summary error: %@", error ? error.localizedDescription : @"(empty)");
                     ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateError, msg);
                     if (ApolloAIAnyHeaderExpanded(fullName, YES)) {
@@ -2729,7 +2766,9 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
     // device), so we attempt anyway and let a real generation error be the gate.
     NSInteger status = [bridge availabilityStatus];
     if (status == 4) {
-        ApolloLog(@"[AISummary] FoundationModels unavailable (status=4), skipping");
+        // On-device: FoundationModels framework absent (pre-iOS 26). Cloud:
+        // provider selected but not configured yet (no API key / base URL).
+        ApolloLog(@"[AISummary] backend %@ unavailable (status=4), skipping", sAISummaryProvider);
         return;
     }
     if (status != 0) {
@@ -2881,8 +2920,8 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
                                 }
                                 return;
                             }
-                            [sPostFailed addObject:fullName];
                             NSString *msg = error ? ApolloAIFriendlyError(error) : @"The model returned an empty summary.";
+                            ApolloAIRecordFailure(fullName, YES, msg);
                             ApolloLog(@"[AISummary] post summary error: %@", error ? error.localizedDescription : @"(empty)");
                             ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateError, msg);
                             if (ApolloAIAnyHeaderExpanded(fullName, YES)) {
@@ -3003,8 +3042,8 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
                                 }
                                 return;
                             }
-                            [sCommentFailed addObject:fullName];
                             NSString *msg = error ? ApolloAIFriendlyError(error) : @"The model returned an empty summary.";
+                            ApolloAIRecordFailure(fullName, NO, msg);
                             ApolloLog(@"[AISummary] comment summary error: %@", error ? error.localizedDescription : @"(empty)");
                             ApolloAISetBoxStateOnMatchingHeaders(fullName, NO, ApolloAIBoxStateError, msg);
                             if (ApolloAIAnyHeaderExpanded(fullName, NO)) {
@@ -3126,8 +3165,8 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
         [sCommentInFlight removeObject:fullName];
         [sPostRequestIDs removeObjectForKey:fullName];
         [sCommentRequestIDs removeObjectForKey:fullName];
-        [sPostFailed removeObject:fullName];
-        [sCommentFailed removeObject:fullName];
+        ApolloAIClearFailure(fullName, YES);
+        ApolloAIClearFailure(fullName, NO);
         // Suppression is per-view, exactly like sPostFailed above: a link we hid
         // because it had no usable prose (or failed transiently — model still
         // downloading, a flaky network, a slow fetch that timed out) gets a fresh

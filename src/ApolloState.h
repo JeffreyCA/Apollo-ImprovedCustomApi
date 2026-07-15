@@ -138,6 +138,17 @@ extern BOOL sEnableAIPostSummaries;     // post / link / both summaries
 extern BOOL sEnableAICommentSummaries;  // the "Discussion so far" summary
 extern BOOL sEnableTapToSummarize;      // generate only on tap (off = automatic)
 extern BOOL sEnableAIAutoExpandSummaries; // auto-open a summary card once it's ready (off = stay collapsed)
+// AI summary backend selection + per-provider cloud credentials (see
+// UserDefaultConstants.h). sAISummaryProvider is always one of
+// apple|openrouter|gemini|custom (sanitized on load); the rest are nil when unset.
+extern NSString *sAISummaryProvider;
+extern NSString *sOpenRouterAPIKey;
+extern NSString *sOpenRouterAIModel;
+extern NSString *sGeminiAPIKey;
+extern NSString *sGeminiAIModel;
+extern NSString *sCustomAIAPIKey;
+extern NSString *sCustomAIModel;
+extern NSString *sCustomAIBaseURL;
 
 // Horizontal alignment for inline media containers narrower than the row width
 // (tall portrait images, height-capped images). Has no effect on full-width media.

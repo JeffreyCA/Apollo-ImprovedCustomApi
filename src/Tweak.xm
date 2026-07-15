@@ -1699,6 +1699,7 @@ static void initializeRandomSources() {
                                     UDKeyEnableAICommentSummaries: @YES,
                                     UDKeyEnableTapToSummarize: @NO,
                                     UDKeyEnableAIAutoExpandSummaries: @NO,
+                                    UDKeyAISummaryProvider: @"apple",
                                     UDKeyPictureInPictureEnabled: @NO,
                                     UDKeyPictureInPictureActivation: @(ApolloPiPActivationModeUnmutedOnly),
                                     UDKeyPictureInPictureStartPosition: @(ApolloPiPStartPositionTopRight),
@@ -1763,6 +1764,30 @@ static void initializeRandomSources() {
     if (sEnableTapToSummarize && sEnableAIAutoExpandSummaries) {
         sEnableAIAutoExpandSummaries = NO;
         [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyEnableAIAutoExpandSummaries];
+    }
+    // AI summary backend: sanitize to a known provider (unrecognized/unset → apple,
+    // the on-device default), mirroring the translation-provider handling below.
+    {
+        NSString *aiProvider = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyAISummaryProvider];
+        if ([aiProvider isEqualToString:@"openrouter"] || [aiProvider isEqualToString:@"gemini"] ||
+            [aiProvider isEqualToString:@"custom"] || [aiProvider isEqualToString:@"apple"]) {
+            sAISummaryProvider = [aiProvider copy];
+        } else {
+            sAISummaryProvider = @"apple";
+        }
+        NSString *(^loadKey)(NSString *) = ^NSString *(NSString *udKey) {
+            NSString *v = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:udKey];
+            if (![v isKindOfClass:[NSString class]]) return nil;
+            v = [v stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            return v.length > 0 ? [v copy] : nil;
+        };
+        sOpenRouterAPIKey = loadKey(UDKeyOpenRouterAPIKey);
+        sOpenRouterAIModel = loadKey(UDKeyOpenRouterAIModel);
+        sGeminiAPIKey = loadKey(UDKeyGeminiAPIKey);
+        sGeminiAIModel = loadKey(UDKeyGeminiAIModel);
+        sCustomAIAPIKey = loadKey(UDKeyCustomAIAPIKey);
+        sCustomAIModel = loadKey(UDKeyCustomAIModel);
+        sCustomAIBaseURL = loadKey(UDKeyCustomAIBaseURL);
     }
     sInlineImageAlignment = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyInlineImageAlignment];
     if (sInlineImageAlignment < ApolloInlineImageAlignmentCenter || sInlineImageAlignment > ApolloInlineImageAlignmentRight) {

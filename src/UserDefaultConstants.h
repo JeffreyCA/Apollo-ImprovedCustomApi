@@ -216,6 +216,19 @@ static NSString *const UDKeyEnableTapToSummarize = @"EnableTapToSummarize";
 // (current behaviour: cards open on tap). Tapping an idle "Tap to summarize"
 // card always opens it once loaded, regardless of this setting.
 static NSString *const UDKeyEnableAIAutoExpandSummaries = @"EnableAIAutoExpandSummaries";
+// AI summary backend. "apple" (on-device FoundationModels, the default) or a
+// cloud provider reached through an OpenAI-compatible chat-completions API:
+// "openrouter" | "gemini" | "custom". Cloud providers need a user-supplied API
+// key; "custom" additionally needs a base URL. Keys/models are stored
+// per-provider so switching back and forth never loses them.
+static NSString *const UDKeyAISummaryProvider = @"AISummaryProvider"; // apple | openrouter | gemini | custom
+static NSString *const UDKeyOpenRouterAPIKey  = @"OpenRouterAPIKey";
+static NSString *const UDKeyOpenRouterAIModel = @"OpenRouterAIModel";
+static NSString *const UDKeyGeminiAPIKey      = @"GeminiAPIKey";
+static NSString *const UDKeyGeminiAIModel     = @"GeminiAIModel";
+static NSString *const UDKeyCustomAIAPIKey    = @"CustomAIAPIKey";
+static NSString *const UDKeyCustomAIModel     = @"CustomAIModel";
+static NSString *const UDKeyCustomAIBaseURL   = @"CustomAIBaseURL"; // OpenAI-compatible base URL, e.g. https://api.example.com/v1
 
 // Picture-in-Picture: floating in-app mini-player for comments-page videos.
 static NSString *const UDKeyPictureInPictureEnabled = @"PictureInPictureEnabled";       // master switch
