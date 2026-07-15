@@ -62,7 +62,11 @@ static const void *kApolloDeletedCommentsHostRefreshVerifyCountKey = &kApolloDel
 static const void *kApolloDeletedCommentsRevealToggleInFlightKey = &kApolloDeletedCommentsRevealToggleInFlightKey;
 static const void *kApolloDeletedCommentsReasonChipRepairScheduledKey = &kApolloDeletedCommentsReasonChipRepairScheduledKey;
 static const void *kApolloDeletedCommentsRevealTapGestureKey = &kApolloDeletedCommentsRevealTapGestureKey;
-static const void *kApolloDeletedCommentsCollapsedAuthorTitleKey = &kApolloDeletedCommentsCollapsedAuthorTitleKey;
+// Native author title saved while an unrecoverable placeholder uses the compact
+// status chip in Apollo's author row. The same override is used expanded and
+// collapsed; keeping one saved title makes both transitions reversible if a
+// later Arctic response recovers the comment after all.
+static const void *kApolloDeletedCommentsAuthorStatusNativeTitleKey = &kApolloDeletedCommentsAuthorStatusNativeTitleKey;
 
 static NSMutableDictionary<NSString *, NSHashTable *> *sApolloDeletedCommentsVisibleCellsByFullName = nil;
 static NSObject *sApolloDeletedCommentsVisibleCellsLock = nil;
@@ -162,8 +166,8 @@ static BOOL ApolloDeletedCommentsBodyAttributesAreUsable(NSDictionary *attribute
 static NSDictionary *ApolloDeletedCommentsRegularizedBodyAttributes(NSDictionary *attributes);
 static void ApolloDeletedCommentsScheduleBodyAttributesRefresh(void);
 static BOOL ApolloDeletedCommentsBodyAttributeFontsDiffer(NSDictionary *left, NSDictionary *right);
-static void ApolloDeletedCommentsRestoreCollapsedAuthorChip(id cellNode);
-static void ApolloDeletedCommentsApplyCollapsedAuthorChipIfNeeded(id cellNode);
+static void ApolloDeletedCommentsRestoreAuthorStatusChip(id cellNode);
+static void ApolloDeletedCommentsApplyAuthorStatusChipIfNeeded(id cellNode);
 
 static Class ApolloDeletedCommentsASTextNodeClass(void) {
     static Class cls = Nil;
@@ -372,6 +376,19 @@ static BOOL ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(id cellNode)
         return NO;
     }
     return ApolloDeletedCommentsTreatmentAllowedForComment(ApolloDeletedCommentsCommentFromCellNode(cellNode));
+}
+
+// A definitively unrecoverable placeholder has no useful author or body to show.
+// Present its complete state in Apollo's existing author row so the row stays a
+// single compact line (author/score/age/actions), both expanded and collapsed.
+// Recovered comments deliberately do NOT qualify: their restored username is
+// useful context and must remain Apollo's native collapsed byline.
+static BOOL ApolloDeletedCommentsCommentUsesAuthorStatusChip(RDKComment *comment) {
+    NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
+    if (fullName.length == 0) return NO;
+    return ApolloDeletedCommentsIsUnrecoverableComment(fullName) &&
+           ApolloDeletedCommentsIsDeletedPlaceholder(fullName) &&
+           !ApolloDeletedCommentsIsRecoveredComment(fullName);
 }
 
 static BOOL ApolloDeletedCommentsCellNodeCanRevealRecoveredBody(id cellNode) {
@@ -783,7 +800,11 @@ static UIImage *ApolloDeletedCommentsReasonChipImage(NSString *text, UIFont *fon
     }];
 }
 
-static NSAttributedString *ApolloDeletedCommentsReasonChipAttributedText(NSString *label, NSDictionary *baseAttributes, BOOL revealLink, RDKComment *comment) {
+static NSAttributedString *ApolloDeletedCommentsReasonChipAttributedTextForPlacement(NSString *label,
+                                                                                     NSDictionary *baseAttributes,
+                                                                                     BOOL revealLink,
+                                                                                     RDKComment *comment,
+                                                                                     BOOL compactAuthorLine) {
     label = ApolloDeletedCommentsNormalizedReasonLabel(label);
     UIFont *font = ApolloDeletedCommentsReasonChipFontForBaseAttributes(baseAttributes);
 
@@ -803,7 +824,7 @@ static NSAttributedString *ApolloDeletedCommentsReasonChipAttributedText(NSStrin
         font = [font fontWithSize:MAX(11.0, font.pointSize * 0.90)];
     }
 
-    // Return the SAME immutable chip string for identical (label, font, revealLink).
+    // Return the SAME immutable chip string for identical visual inputs.
     // The chip is rebuilt on every comment-cell measure; without caching, each call
     // renders a fresh UIImage inside a fresh NSTextAttachment, so successive chip
     // strings are never -isEqualToAttributedString: to each other. That kept the body
@@ -819,22 +840,30 @@ static NSAttributedString *ApolloDeletedCommentsReasonChipAttributedText(NSStrin
         chipCache = [NSMutableDictionary dictionary];
         chipCacheLock = [NSObject new];
     });
-    NSString *chipCacheKey = [NSString stringWithFormat:@"%@|%@|%.2f|%d|%d",
+    NSString *chipCacheKey = [NSString stringWithFormat:@"%@|%@|%.2f|%d|%d|%d",
                               label ?: @"",
                               [font isKindOfClass:[UIFont class]] ? (font.fontName ?: @"-") : @"-",
                               [font isKindOfClass:[UIFont class]] ? font.pointSize : 0.0,
                               revealLink ? 1 : 0,
-                              unrecoverable ? 1 : 0];
+                              unrecoverable ? 1 : 0,
+                              compactAuthorLine ? 1 : 0];
     @synchronized (chipCacheLock) {
         NSAttributedString *cached = chipCache[chipCacheKey];
         if ([cached isKindOfClass:[NSAttributedString class]]) return cached;
     }
 
     UIImage *image = ApolloDeletedCommentsReasonChipImage(displayLabel, font);
-    CGFloat chipLineHeight = [image isKindOfClass:[UIImage class]] ? image.size.height + 6.0 : font.lineHeight + 6.0;
+    // Body chips intentionally carry breathing room below the paragraph. An
+    // author-row chip must not inherit that body-only +6 line height and +4
+    // paragraph spacing: those ten points were the off-center gap in IMG_4459.
+    // Its line box is exactly the chip height, and its attachment is centered
+    // against the native author font's ascender/descender metrics.
+    CGFloat chipLineHeight = [image isKindOfClass:[UIImage class]]
+        ? image.size.height + (compactAuthorLine ? 0.0 : 6.0)
+        : font.lineHeight + (compactAuthorLine ? 0.0 : 6.0);
     NSMutableParagraphStyle *paragraphStyle = [NSMutableParagraphStyle new];
     paragraphStyle.lineSpacing = 0.0;
-    paragraphStyle.paragraphSpacing = 4.0;
+    paragraphStyle.paragraphSpacing = compactAuthorLine ? 0.0 : 4.0;
     paragraphStyle.minimumLineHeight = ceil(chipLineHeight);
     paragraphStyle.maximumLineHeight = ceil(chipLineHeight);
 
@@ -842,7 +871,10 @@ static NSAttributedString *ApolloDeletedCommentsReasonChipAttributedText(NSStrin
     if ([image isKindOfClass:[UIImage class]]) {
         NSTextAttachment *attachment = [NSTextAttachment new];
         attachment.image = image;
-        attachment.bounds = CGRectMake(0.0, -1.0, image.size.width, image.size.height);
+        CGFloat attachmentY = compactAuthorLine
+            ? font.descender + ((font.lineHeight - image.size.height) / 2.0)
+            : -1.0;
+        attachment.bounds = CGRectMake(0.0, attachmentY, image.size.width, image.size.height);
         result = [[NSAttributedString attributedStringWithAttachment:attachment] mutableCopy];
         [result addAttribute:NSParagraphStyleAttributeName value:paragraphStyle range:NSMakeRange(0, result.length)];
     } else {
@@ -870,6 +902,27 @@ static NSAttributedString *ApolloDeletedCommentsReasonChipAttributedText(NSStrin
         chipCache[chipCacheKey] = immutableChip;
     }
     return immutableChip;
+}
+
+static NSAttributedString *ApolloDeletedCommentsReasonChipAttributedText(NSString *label,
+                                                                         NSDictionary *baseAttributes,
+                                                                         BOOL revealLink,
+                                                                         RDKComment *comment) {
+    return ApolloDeletedCommentsReasonChipAttributedTextForPlacement(label,
+                                                                      baseAttributes,
+                                                                      revealLink,
+                                                                      comment,
+                                                                      NO);
+}
+
+static NSAttributedString *ApolloDeletedCommentsAuthorStatusChipAttributedText(NSString *label,
+                                                                               NSDictionary *baseAttributes,
+                                                                               RDKComment *comment) {
+    return ApolloDeletedCommentsReasonChipAttributedTextForPlacement(label,
+                                                                      baseAttributes,
+                                                                      NO,
+                                                                      comment,
+                                                                      YES);
 }
 
 static id ApolloDeletedCommentsKnownBodyTextNode(id commentCellNode) {
@@ -947,6 +1000,12 @@ static void ApolloDeletedCommentsInvalidateCellAndTextNodeLocally(id cellNode, i
 static NSAttributedString *ApolloDeletedCommentsPlaceholderAttributedText(NSAttributedString *original, NSString *reasonLabel, id cellNode) {
     NSDictionary *attributes = ApolloDeletedCommentsReasonChipBaseAttributes(original, cellNode);
     RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
+    if (ApolloDeletedCommentsCommentUsesAuthorStatusChip(comment)) {
+        // The full unrecoverable status lives in the author row. Leaving a
+        // second body chip here makes an expanded placeholder two lines tall
+        // and exposes Apollo's otherwise-useless deleted byline above it.
+        return [[NSAttributedString alloc] initWithString:@"" attributes:attributes ?: @{}];
+    }
     NSAttributedString *chip = ApolloDeletedCommentsReasonChipAttributedText(reasonLabel, attributes, YES, comment);
     return chip;
 }
@@ -2139,6 +2198,13 @@ static NSAttributedString *__attribute__((unused)) ApolloDeletedCommentsAttribut
         return attributedText;
     }
 
+    if (ApolloDeletedCommentsCommentUsesAuthorStatusChip(comment)) {
+        NSDictionary *attributes = attributedText.length > 0
+            ? ([attributedText attributesAtIndex:0 effectiveRange:NULL] ?: @{})
+            : @{};
+        return [[NSAttributedString alloc] initWithString:@"" attributes:attributes];
+    }
+
     NSString *label = ApolloDeletedCommentsReasonLabelForComment(comment);
     if (![text isEqualToString:label]) return attributedText;
 
@@ -2271,6 +2337,7 @@ static void ApolloDeletedCommentsApplyStaticPlaceholderChip(id cellNode, NSArray
     RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
     if (!comment || textNodes.count == 0) return;
 
+    BOOL statusLivesInAuthorRow = ApolloDeletedCommentsCommentUsesAuthorStatusChip(comment);
     BOOL placedPlaceholder = NO;
     for (id textNode in textNodes) {
         NSAttributedString *current = nil;
@@ -2282,7 +2349,7 @@ static void ApolloDeletedCommentsApplyStaticPlaceholderChip(id cellNode, NSArray
         if (![current isKindOfClass:[NSAttributedString class]] || current.length == 0) continue;
 
         NSAttributedString *replacement = nil;
-        if (!placedPlaceholder) {
+        if (!statusLivesInAuthorRow && !placedPlaceholder) {
             replacement = ApolloDeletedCommentsReasonChipAttributedText(ApolloDeletedCommentsReasonLabelForComment(comment),
                                                                         ApolloDeletedCommentsReasonChipBaseAttributes(current, cellNode),
                                                                         NO,
@@ -3412,6 +3479,7 @@ static id __attribute__((unused)) ApolloDeletedCommentsDeletedMarkdownLayoutSpec
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
     BOOL placeholderOnly = ApolloDeletedCommentsCellNodeIsDeletedPlaceholder(cellNode) &&
                            !ApolloDeletedCommentsCellNodeIsRecovered(cellNode);
+    BOOL statusLivesInAuthorRow = ApolloDeletedCommentsCommentUsesAuthorStatusChip(comment);
     BOOL recovered = ApolloDeletedCommentsCellNodeCanRevealRecoveredBody(cellNode);
     BOOL revealed = ApolloDeletedCommentsIsCommentRevealed(fullName);
     BOOL shouldHide = ApolloDeletedCommentsFeatureActive() &&
@@ -3492,6 +3560,11 @@ static id __attribute__((unused)) ApolloDeletedCommentsDeletedMarkdownLayoutSpec
     if (revealedRecovered || autoShowRecovered) {
         // Show the recovered body itself (rendered markdown), with the reason chip.
         displayText = ApolloDeletedCommentsAttributedTextWithReasonPrefix(textNode, original);
+    } else if (placeholderOnly && statusLivesInAuthorRow) {
+        // The author/score/age row already contains the complete unrecoverable
+        // status. A zero-height body keeps the expanded row as compact as its
+        // collapsed form instead of adding a second chip line.
+        displayText = [[NSAttributedString alloc] initWithString:@"" attributes:chipAttributes ?: @{}];
     } else if (placeholderOnly) {
         displayText = ApolloDeletedCommentsReasonChipAttributedText(ApolloDeletedCommentsReasonLabelForComment(comment),
                                                                     chipAttributes,
@@ -3642,7 +3715,7 @@ static void ApolloDeletedCommentsApplyRecoveredArchiveToVisibleCell(id cellNode,
         return;
     }
     if (!ApolloDeletedCommentsVisibleCommentNeedsRecoveredArchive(comment, archivedBody)) return;
-    ApolloDeletedCommentsRestoreCollapsedAuthorChip(cellNode);
+    ApolloDeletedCommentsRestoreAuthorStatusChip(cellNode);
 
     NSString *reason = ApolloDeletedCommentsDeletedPlaceholderReason(fullName) ?: ApolloDeletedCommentsRecoveredReasonForComment(fullName);
     BOOL wasCollapsedBeforeApply = ApolloDeletedCommentsCommentIsCollapsed(comment);
@@ -3679,7 +3752,7 @@ static void ApolloDeletedCommentsApplyRecoveredArchiveToVisibleCell(id cellNode,
     ApolloDeletedCommentsSynchronizeCommentModelDisplayState(cellNode);
     ApolloDeletedCommentsRepairVisibleReasonChipIfNeeded(cellNode);
     ApolloDeletedCommentsRepairAuthorLabelIfNeeded(cellNode);
-    ApolloDeletedCommentsApplyCollapsedAuthorChipIfNeeded(cellNode);
+    ApolloDeletedCommentsApplyAuthorStatusChipIfNeeded(cellNode);
     ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, ApolloDeletedCommentsKnownBodyContainerNode(cellNode));
     ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, ApolloDeletedCommentsKnownBodyTextNode(cellNode));
     if (ApolloDeletedCommentsNodeIsLoaded(cellNode)) {
@@ -3754,6 +3827,21 @@ static void __attribute__((unused)) ApolloDeletedCommentsRepairVisibleReasonChip
         id knownBodyNode = ApolloDeletedCommentsFallbackBodyTextNode(cellNode);
         if (knownBodyNode) textNodes = @[knownBodyNode];
     }
+    if (ApolloDeletedCommentsCommentUsesAuthorStatusChip(comment)) {
+        // Unrecoverable placeholders are one compact author row. Clear any
+        // stale body chip produced before the definitive Arctic miss arrived;
+        // the author override installed later in UpdateCell carries the state.
+        for (id textNode in textNodes) {
+            NSAttributedString *current = ApolloDeletedCommentsCurrentAttributedText(textNode);
+            NSDictionary *attributes = current.length > 0
+                ? ([current attributesAtIndex:0 effectiveRange:NULL] ?: @{})
+                : @{};
+            ApolloDeletedCommentsSetTextNodeAttributedText(textNode,
+                [[NSAttributedString alloc] initWithString:@"" attributes:attributes]);
+            ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, textNode);
+        }
+        return;
+    }
     for (id textNode in textNodes) {
         NSAttributedString *current = nil;
         @try {
@@ -3825,85 +3913,129 @@ static id ApolloDeletedCommentsAuthorRootForCell(id cellNode) {
     return ApolloDeletedCommentsObjectIvarByNames(cellNode, authorNames);
 }
 
-// A native collapsed comment omits its body node, which previously made a
-// deleted comment fall back to a plain "[deleted]" byline and lose both the
-// reason and unrecoverable state. While collapsed, put the SAME reason pill in
-// Apollo's author button. Save the native title and restore it before any author
-// repair or when the row expands, so normal rows and recovered usernames remain
-// fully native.
-static void ApolloDeletedCommentsRestoreCollapsedAuthorChip(id cellNode) {
-    NSDictionary *saved = objc_getAssociatedObject(cellNode, kApolloDeletedCommentsCollapsedAuthorTitleKey);
+static void ApolloDeletedCommentsInvalidateAuthorStatusLayout(id cellNode, id authorRoot) {
+    id titleNode = [authorRoot respondsToSelector:@selector(titleNode)]
+        ? ((id (*)(id, SEL))objc_msgSend)(authorRoot, @selector(titleNode))
+        : nil;
+    for (id node in @[titleNode ?: NSNull.null, authorRoot ?: NSNull.null, cellNode ?: NSNull.null]) {
+        if (node == NSNull.null) continue;
+        if ([node respondsToSelector:@selector(invalidateCalculatedLayout)]) {
+            @try { ((void (*)(id, SEL))objc_msgSend)(node, @selector(invalidateCalculatedLayout)); }
+            @catch (__unused NSException *e) {}
+        }
+        if ([node respondsToSelector:@selector(setNeedsLayout)]) {
+            @try { ((void (*)(id, SEL))objc_msgSend)(node, @selector(setNeedsLayout)); }
+            @catch (__unused NSException *e) {}
+        }
+    }
+}
+
+// Restore Apollo's native author title before username repair or when an
+// unrecoverable placeholder becomes recoverable later. Recovered comments never
+// use the status override, so their username stays native even while collapsed.
+static void ApolloDeletedCommentsRestoreAuthorStatusChip(id cellNode) {
+    NSDictionary *saved = objc_getAssociatedObject(cellNode, kApolloDeletedCommentsAuthorStatusNativeTitleKey);
     if (![saved isKindOfClass:[NSDictionary class]]) return;
-    objc_setAssociatedObject(cellNode, kApolloDeletedCommentsCollapsedAuthorTitleKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(cellNode, kApolloDeletedCommentsAuthorStatusNativeTitleKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
     NSString *currentFullName = ApolloDeletedCommentsFullNameForComment(comment);
     NSString *savedFullName = [saved[@"fullName"] isKindOfClass:[NSString class]] ? saved[@"fullName"] : nil;
     NSAttributedString *savedTitle = [saved[@"title"] isKindOfClass:[NSAttributedString class]] ? saved[@"title"] : nil;
-    if (savedTitle.length == 0 || ![currentFullName isEqualToString:savedFullName]) return;
-
     id authorRoot = ApolloDeletedCommentsAuthorRootForCell(cellNode);
-    if (![authorRoot respondsToSelector:@selector(setAttributedTitle:forState:)]) return;
+    NSNumber *savedInteraction = [saved[@"userInteractionEnabled"] isKindOfClass:[NSNumber class]]
+        ? saved[@"userInteractionEnabled"]
+        : @YES;
+    if ([authorRoot respondsToSelector:@selector(setUserInteractionEnabled:)]) {
+        @try {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(authorRoot,
+                                                   @selector(setUserInteractionEnabled:),
+                                                   savedInteraction.boolValue);
+        } @catch (__unused NSException *e) {}
+    }
+    if (savedTitle.length == 0 || ![currentFullName isEqualToString:savedFullName] ||
+        ![authorRoot respondsToSelector:@selector(setAttributedTitle:forState:)]) return;
+
     @try {
         ((void (*)(id, SEL, NSAttributedString *, UIControlState))objc_msgSend)(authorRoot,
                                                                                @selector(setAttributedTitle:forState:),
                                                                                savedTitle,
                                                                                UIControlStateNormal);
-        if ([authorRoot respondsToSelector:@selector(setNeedsLayout)]) {
-            ((void (*)(id, SEL))objc_msgSend)(authorRoot, @selector(setNeedsLayout));
-        }
+        ApolloDeletedCommentsInvalidateAuthorStatusLayout(cellNode, authorRoot);
     } @catch (__unused NSException *e) {}
 }
 
-static void ApolloDeletedCommentsApplyCollapsedAuthorChipIfNeeded(id cellNode) {
+// Definitively unrecoverable placeholders have no useful username/body. Put the
+// combined status chip in Apollo's existing author row for both expanded and
+// collapsed states. This keeps the score/age/actions line compact and avoids a
+// redundant "[deleted]" line. All recovered comments fall through and retain
+// their recovered author title.
+static void ApolloDeletedCommentsApplyAuthorStatusChipIfNeeded(id cellNode) {
     if (!cellNode || !ApolloDeletedCommentsFeatureActive()) return;
     RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
-    if (!comment || !ApolloDeletedCommentsCommentIsCollapsed(comment) ||
-        !ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(cellNode)) {
-        ApolloDeletedCommentsRestoreCollapsedAuthorChip(cellNode);
+    if (!comment || !ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(cellNode) ||
+        !ApolloDeletedCommentsCommentUsesAuthorStatusChip(comment)) {
+        ApolloDeletedCommentsRestoreAuthorStatusChip(cellNode);
         return;
     }
 
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
-    if (fullName.length == 0) return;
     id authorRoot = ApolloDeletedCommentsAuthorRootForCell(cellNode);
-    if (![authorRoot respondsToSelector:@selector(attributedTitleForState:)] ||
+    if (fullName.length == 0 ||
+        ![authorRoot respondsToSelector:@selector(attributedTitleForState:)] ||
         ![authorRoot respondsToSelector:@selector(setAttributedTitle:forState:)]) return;
 
     @try {
         NSAttributedString *current = ((NSAttributedString *(*)(id, SEL, UIControlState))objc_msgSend)(authorRoot,
                                                                                                         @selector(attributedTitleForState:),
                                                                                                         UIControlStateNormal);
-        if (![current isKindOfClass:[NSAttributedString class]] || current.length == 0) return;
+        NSDictionary *saved = objc_getAssociatedObject(cellNode, kApolloDeletedCommentsAuthorStatusNativeTitleKey);
+        NSString *savedFullName = [saved[@"fullName"] isKindOfClass:[NSString class]] ? saved[@"fullName"] : nil;
+        if ([saved isKindOfClass:[NSDictionary class]] && ![savedFullName isEqualToString:fullName]) {
+            // Cell reuse: Apollo has already supplied the new row's title. Never
+            // restore the previous comment's title onto this one.
+            NSNumber *savedInteraction = [saved[@"userInteractionEnabled"] isKindOfClass:[NSNumber class]]
+                ? saved[@"userInteractionEnabled"]
+                : @YES;
+            if ([authorRoot respondsToSelector:@selector(setUserInteractionEnabled:)]) {
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(authorRoot,
+                                                       @selector(setUserInteractionEnabled:),
+                                                       savedInteraction.boolValue);
+            }
+            saved = nil;
+            objc_setAssociatedObject(cellNode, kApolloDeletedCommentsAuthorStatusNativeTitleKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
 
-        NSDictionary *saved = objc_getAssociatedObject(cellNode, kApolloDeletedCommentsCollapsedAuthorTitleKey);
+        NSAttributedString *nativeTitle = [saved[@"title"] isKindOfClass:[NSAttributedString class]] ? saved[@"title"] : current;
+        if (![nativeTitle isKindOfClass:[NSAttributedString class]] || nativeTitle.length == 0) return;
         if (![saved isKindOfClass:[NSDictionary class]]) {
+            BOOL nativeInteractionEnabled = [authorRoot respondsToSelector:@selector(isUserInteractionEnabled)]
+                ? ((BOOL (*)(id, SEL))objc_msgSend)(authorRoot, @selector(isUserInteractionEnabled))
+                : YES;
             objc_setAssociatedObject(cellNode,
-                                     kApolloDeletedCommentsCollapsedAuthorTitleKey,
-                                     @{ @"fullName": fullName, @"title": [current copy] },
+                                     kApolloDeletedCommentsAuthorStatusNativeTitleKey,
+                                     @{ @"fullName": fullName,
+                                        @"title": [nativeTitle copy],
+                                        @"userInteractionEnabled": @(nativeInteractionEnabled) },
                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
 
-        NSAttributedString *chip = ApolloDeletedCommentsReasonChipAttributedText(ApolloDeletedCommentsReasonLabelForComment(comment),
-                                                                                  ApolloDeletedCommentsReasonChipBaseAttributes(current, cellNode),
-                                                                                  NO,
-                                                                                  comment);
+        NSAttributedString *chip = ApolloDeletedCommentsAuthorStatusChipAttributedText(ApolloDeletedCommentsReasonLabelForComment(comment),
+                                                                                        ApolloDeletedCommentsReasonChipBaseAttributes(nativeTitle, cellNode),
+                                                                                        comment);
         ((void (*)(id, SEL, NSAttributedString *, UIControlState))objc_msgSend)(authorRoot,
                                                                                @selector(setAttributedTitle:forState:),
                                                                                chip,
                                                                                UIControlStateNormal);
-        id titleNode = [authorRoot respondsToSelector:@selector(titleNode)]
-            ? ((id (*)(id, SEL))objc_msgSend)(authorRoot, @selector(titleNode))
-            : nil;
-        if ([titleNode respondsToSelector:@selector(setNeedsLayout)]) {
-            ((void (*)(id, SEL))objc_msgSend)(titleNode, @selector(setNeedsLayout));
+        // The status is presentation, not a profile link. Let touches fall
+        // through to the comment cell so tapping the chip collapses/expands
+        // normally instead of opening the deleted user's nonexistent profile.
+        if ([authorRoot respondsToSelector:@selector(setUserInteractionEnabled:)]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(authorRoot,
+                                                   @selector(setUserInteractionEnabled:),
+                                                   NO);
         }
-        if ([authorRoot respondsToSelector:@selector(setNeedsLayout)]) {
-            ((void (*)(id, SEL))objc_msgSend)(authorRoot, @selector(setNeedsLayout));
-        }
-        if ([cellNode respondsToSelector:@selector(setNeedsLayout)]) {
-            ((void (*)(id, SEL))objc_msgSend)(cellNode, @selector(setNeedsLayout));
-        }
+        ApolloDeletedCommentsInvalidateAuthorStatusLayout(cellNode, authorRoot);
     } @catch (__unused NSException *e) {}
 }
 
@@ -4032,10 +4164,10 @@ static void ApolloDeletedCommentsScheduleReasonChipRepair(id cellNode) {
             NSString *currentFullName = ApolloDeletedCommentsFullNameForComment(currentComment);
             if (![currentFullName isEqualToString:fullName]) return;
 
-            ApolloDeletedCommentsRestoreCollapsedAuthorChip(cellNode);
+            ApolloDeletedCommentsRestoreAuthorStatusChip(cellNode);
             ApolloDeletedCommentsRepairVisibleReasonChipIfNeeded(cellNode);
             ApolloDeletedCommentsRepairAuthorLabelIfNeeded(cellNode);
-            ApolloDeletedCommentsApplyCollapsedAuthorChipIfNeeded(cellNode);
+            ApolloDeletedCommentsApplyAuthorStatusChipIfNeeded(cellNode);
             ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, ApolloDeletedCommentsKnownBodyContainerNode(cellNode));
             ApolloDeletedCommentsRelayoutCellAndTextNode(cellNode, ApolloDeletedCommentsKnownBodyTextNode(cellNode));
             ApolloDeletedCommentsApplyCellHighlight(cellNode);
@@ -4047,8 +4179,8 @@ static void ApolloDeletedCommentsScheduleReasonChipRepair(id cellNode) {
 }
 
 static void ApolloDeletedCommentsUpdateCell(id cellNode) {
-    // Author repair must see Apollo's real title, never our collapsed pill.
-    ApolloDeletedCommentsRestoreCollapsedAuthorChip(cellNode);
+    // Author repair must see Apollo's real title, never our status override.
+    ApolloDeletedCommentsRestoreAuthorStatusChip(cellNode);
     ApolloDeletedCommentsTrackVisibleDeletedCommentCell(cellNode);
     // Remember the live list view so off-screen height fixups have a host to
     // commit against (see ScheduleHostLayoutRefresh). Only displayed cells reach
@@ -4061,7 +4193,7 @@ static void ApolloDeletedCommentsUpdateCell(id cellNode) {
     ApolloDeletedCommentsSynchronizeCommentModelDisplayState(cellNode);
     ApolloDeletedCommentsRepairVisibleReasonChipIfNeeded(cellNode);
     ApolloDeletedCommentsRepairAuthorLabelIfNeeded(cellNode);
-    ApolloDeletedCommentsApplyCollapsedAuthorChipIfNeeded(cellNode);
+    ApolloDeletedCommentsApplyAuthorStatusChipIfNeeded(cellNode);
     ApolloDeletedCommentsScheduleReasonChipRepair(cellNode);
     ApolloDeletedCommentsApplyCellHighlight(cellNode);
     if (ApolloDeletedCommentsFeatureActive() && sTapToRevealDeletedComments) {
@@ -4100,7 +4232,7 @@ static void ApolloDeletedCommentsScheduleVisibleCellRefreshForComment(RDKComment
     }
 }
 
-static void ApolloDeletedCommentsScheduleCollapsedAuthorChipForComment(RDKComment *comment) {
+static void ApolloDeletedCommentsScheduleCollapsedAuthorPresentationForComment(RDKComment *comment) {
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
     if (fullName.length == 0) return;
 
@@ -4112,7 +4244,7 @@ static void ApolloDeletedCommentsScheduleCollapsedAuthorChipForComment(RDKCommen
             for (id cellNode in ApolloDeletedCommentsTrackedCellsForFullName(fullName)) {
                 RDKComment *currentComment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
                 if (![ApolloDeletedCommentsFullNameForComment(currentComment) isEqualToString:fullName]) continue;
-                ApolloDeletedCommentsApplyCollapsedAuthorChipIfNeeded(cellNode);
+                ApolloDeletedCommentsApplyAuthorStatusChipIfNeeded(cellNode);
             }
         });
     }
@@ -4396,9 +4528,19 @@ static void ApolloDeletedCommentsAdoptRawDeletedStubIfNeeded(id cellNode) {
         Class insetClass = ApolloDeletedCommentsASInsetLayoutSpecClass();
         if (insetClass) {
             @try {
+                // Even when MarkdownNode returns a zero-height replacement,
+                // Apollo's expanded CommentCell stack reserves its fixed
+                // 14-point header/body slot. Reclaim only that empty slot for
+                // author-row unrecoverable placeholders; the native header,
+                // score, age and actions remain untouched. This makes the
+                // expanded state the same compact height as the native
+                // collapsed row and centers the inline chip without moving it.
+                UIEdgeInsets insets = ApolloDeletedCommentsCommentUsesAuthorStatusChip(comment)
+                    ? UIEdgeInsetsMake(0.0, 0.0, -14.0, 0.0)
+                    : UIEdgeInsetsMake(0.0, 0.0, 8.0, 0.0);
                 return ((id (*)(Class, SEL, UIEdgeInsets, id))objc_msgSend)(insetClass,
                                                                              @selector(insetLayoutSpecWithInsets:child:),
-                                                                             UIEdgeInsetsMake(0.0, 0.0, 8.0, 0.0),
+                                                                             insets,
                                                                              spec);
             } @catch (__unused NSException *e) {}
         }
@@ -4619,7 +4761,7 @@ static BOOL ApolloDeletedCommentsRowSelectionIsStale(id adapter, NSIndexPath *in
     // while Apollo's native row animation is in flight.
     if (!internalUncollapse) {
         if (collapsed) {
-            ApolloDeletedCommentsScheduleCollapsedAuthorChipForComment((RDKComment *)self);
+            ApolloDeletedCommentsScheduleCollapsedAuthorPresentationForComment((RDKComment *)self);
         } else {
             ApolloDeletedCommentsScheduleVisibleCellRefreshForComment((RDKComment *)self);
         }
