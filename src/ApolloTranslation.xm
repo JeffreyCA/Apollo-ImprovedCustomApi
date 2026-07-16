@@ -3895,13 +3895,39 @@ static BOOL ApolloReapplyCachedTranslationForCellNode(id commentCellNode) {
     return YES;
 }
 
+// Rapid consecutive votes can reset a comment's body back to the original
+// WHILE the recently-applied re-entrancy guard from the previous vote's
+// restore is still hot (~150ms). The guard exists to break the harmless
+// apply → layout-invalidate → schedule loop on ALREADY-translated text, so
+// honoring it when the on-screen text has genuinely regressed leaves the
+// original language (one marker line shorter) on screen until something else
+// re-triggers a pass — the "flickers again after a few rapid votes" report.
+// Bypass the guard only when the body no longer shows the cached translation.
+static BOOL ApolloTextMatchesSourceOrVisualDisplay(NSString *incomingText, NSString *targetText);
+static BOOL ApolloCellNodeStillShowsCachedTranslation(id commentCellNode) {
+    RDKComment *comment = ApolloCommentFromCellNode(commentCellNode);
+    if (!comment) return YES; // can't tell — keep the guard
+    NSString *fullName = ApolloCommentFullName(comment);
+    NSString *translated = fullName.length > 0 ? ApolloCachedCommentTranslationForFullName(fullName) : nil;
+    if (translated.length == 0) return YES; // nothing to restore anyway
+    id textNode = ApolloBestCommentTextNode(commentCellNode, comment);
+    if (!textNode) return YES;
+    NSAttributedString *current = nil;
+    @try { current = ((id (*)(id, SEL))objc_msgSend)(textNode, @selector(attributedText)); }
+    @catch (__unused NSException *e) { return YES; }
+    if (![current isKindOfClass:[NSAttributedString class]] || current.length == 0) return YES;
+    return ApolloTextMatchesSourceOrVisualDisplay(current.string, ApolloStripInlineMediaTokens(translated));
+}
+
 static void ApolloScheduleCachedTranslationReapplyForCellNode(id commentCellNode) {
     if (!commentCellNode || !sEnableBulkTranslation) return;
     if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
     if ([objc_getAssociatedObject(commentCellNode, kApolloReapplyScheduledKey) boolValue]) return;
     // Re-entrancy guard: skip if we just applied translation here. Breaks
-    // the apply -> ASDK invalidates layout -> hook -> schedule loop.
-    if ([objc_getAssociatedObject(commentCellNode, kApolloRecentlyAppliedKey) boolValue]) return;
+    // the apply -> ASDK invalidates layout -> hook -> schedule loop — but
+    // only while the body still SHOWS the translation (see above).
+    if ([objc_getAssociatedObject(commentCellNode, kApolloRecentlyAppliedKey) boolValue] &&
+        ApolloCellNodeStillShowsCachedTranslation(commentCellNode)) return;
     objc_setAssociatedObject(commentCellNode, kApolloReapplyScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloTranslationVerboseLog(@"[Translation/vote] commentReapply: SCHEDULED cellNode=%p", commentCellNode);
     __weak id weakNode = commentCellNode;
