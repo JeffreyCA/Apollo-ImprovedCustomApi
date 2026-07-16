@@ -133,4 +133,10 @@ NSArray<NSDictionary *> *ApolloKeychainMirrorItemsForBackup(void);
 // Mirrors the line into a file that survives force-quit, so Export Debug Logs carries the
 // session that actually signed the user out. Safe to call from any thread; never logs secrets.
 void ApolloAppendLoginDiag(NSString *line);
+
+// Dev-only login-persistence debug (see Tweak.xm). A report of where the account keychain item
+// lives (access group/size/protection per copy), and a best-effort attempt to create a real
+// cross-access-group duplicate to reproduce the root cause. Both also write to the diag log.
+NSString *ApolloDebugAccountKeychainReport(void);
+NSString *ApolloDebugCreateCrossGroupAccountDuplicate(void);
 __END_DECLS

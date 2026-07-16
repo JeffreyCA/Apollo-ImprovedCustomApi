@@ -884,7 +884,9 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionSubreddits: return 10 - (sSubredditListEnhancements ? 0 : 1) - (sCommunityHighlights ? 0 : 1);
         case SectionNotificationBackend: return kNotifBackendRowCount;
         case SectionPrivacy: return 1; // Anonymous Install Count toggle
-        case SectionAbout: return 6; // GitHub + Reddit + Thanks To + Export Logs + Privacy Policy + Version
+        // GitHub + Reddit + Thanks To + Export Logs + Privacy Policy + Version, plus a dev-only
+        // "Login Persistence Debug" row when FLEX (developer mode) is enabled.
+        case SectionAbout: return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFLEX] ? 7 : 6;
         default: return 0;
     }
 }
@@ -1797,6 +1799,21 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.detailTextLabel.text = @TWEAK_VERSION;
             return cell;
         }
+        case 6: { // dev-only, only present when FLEX is enabled (see numberOfRowsInSection)
+            UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_About_LoginDebug"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"Cell_About_LoginDebug"];
+            }
+            cell.textLabel.text = @"🔧 Login Persistence Debug";
+            BOOL forceMiss = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDebugForceAccountReadMiss];
+            BOOL noRecover = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDebugDisableKeychainRecovery];
+            cell.detailTextLabel.text = [NSString stringWithFormat:@"force-miss %@ · recovery %@",
+                                         forceMiss ? @"ON" : @"off", noRecover ? @"OFF" : @"on"];
+            cell.detailTextLabel.textColor = (forceMiss || noRecover) ? [UIColor systemRedColor] : [UIColor secondaryLabelColor];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            return cell;
+        }
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -2089,6 +2106,8 @@ typedef NS_ENUM(NSInteger, Tag) {
             [self exportLogs];
         } else if (indexPath.row == 4) {
             [self presentURLInApolloBrowser:[NSURL URLWithString:@"https://apolloreborn.app/privacy"]];
+        } else if (indexPath.row == 6) {
+            [self presentLoginPersistenceDebugSheetFromIndexPath:indexPath];
         }
     } else if (indexPath.section == SectionMedia) {
         UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
@@ -2268,6 +2287,74 @@ typedef NS_ENUM(NSInteger, Tag) {
             });
         });
     }];
+}
+
+#pragma mark - Login Persistence Debug (dev-only, FLEX-gated)
+
+- (void)presentLoginPersistenceDebugResult:(NSString *)text title:(NSString *)title {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:text preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Copy" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        UIPasteboard.generalPasteboard.string = text;
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)presentLoginPersistenceDebugSheetFromIndexPath:(NSIndexPath *)indexPath {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL forceMiss = [defaults boolForKey:UDKeyDebugForceAccountReadMiss];
+    BOOL noRecover = [defaults boolForKey:UDKeyDebugDisableKeychainRecovery];
+
+    UIAlertController *sheet = [UIAlertController
+        alertControllerWithTitle:@"Login Persistence Debug"
+                         message:@"Dev-only fault injection. This simulates the broken-keychain read on THIS device to exercise the fix — a pass here is a regression check, not field confirmation. \"Disable recovery\" + \"force read-miss\" will actually sign you out (reproduces the bug)."
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:(forceMiss ? @"✓ Force account read-miss (ON)" : @"Force account read-miss (off)")
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        [defaults setBool:!forceMiss forKey:UDKeyDebugForceAccountReadMiss];
+        [self.tableView reloadData];
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:(noRecover ? @"✓ Disable recovery — watch the wipe (ON)" : @"Disable recovery — watch the wipe (off)")
+                                              style:(noRecover ? UIAlertActionStyleDestructive : UIAlertActionStyleDefault)
+                                            handler:^(UIAlertAction *a) {
+        [defaults setBool:!noRecover forKey:UDKeyDebugDisableKeychainRecovery];
+        [self.tableView reloadData];
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Dump account keychain report"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        [self presentLoginPersistenceDebugResult:ApolloDebugAccountKeychainReport() title:@"Account keychain report"];
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Create real cross-group duplicate (best-effort)"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        [self presentLoginPersistenceDebugResult:ApolloDebugCreateCrossGroupAccountDuplicate() title:@"Cross-group duplicate"];
+    }]];
+
+    if (forceMiss || noRecover) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Clear all fault flags"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *a) {
+            [defaults setBool:NO forKey:UDKeyDebugForceAccountReadMiss];
+            [defaults setBool:NO forKey:UDKeyDebugDisableKeychainRecovery];
+            [self.tableView reloadData];
+        }]];
+    }
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+
+    UIPopoverPresentationController *pop = sheet.popoverPresentationController;
+    if (pop) {
+        UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:indexPath];
+        pop.sourceView = cell ?: self.view;
+        pop.sourceRect = cell ? cell.bounds : CGRectZero;
+    }
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 
 #pragma mark - Troubleshooting VC

@@ -17,6 +17,11 @@ static NSString *const UDKeyUseCustomOAuthSignIn = @"UseCustomOAuthSignIn";
 static NSString *const UDKeyUserAgent = @"UserAgent";
 static NSString *const UDKeyBlockAnnouncements = @"DisableApollonouncements";
 static NSString *const UDKeyEnableFLEX = @"EnableFlexDebugging";
+// Login-persistence debug (dev-only, gated behind FLEX). Force the account keychain read to
+// miss (simulate the broken-keychain -25300), and/or disable enumeration recovery, so the
+// wipe->recover chain can be exercised on any device. Inert unless set.
+static NSString *const UDKeyDebugForceAccountReadMiss = @"ApolloDebugForceAccountReadMiss";
+static NSString *const UDKeyDebugDisableKeychainRecovery = @"ApolloDebugDisableKeychainRecovery";
 static NSString *const UDKeyShowRandNsfw = @"ShowRandNsfwButton";
 static NSString *const UDKeyRandomSubredditsSource = @"RandomSubredditsSource";
 static NSString *const UDKeyRandNsfwSubredditsSource = @"RandNsfwSubredditsSource";

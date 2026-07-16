@@ -431,6 +431,24 @@ static OSStatus ApolloValetRecoverRead(NSDictionary *query, CFTypeRef *result, N
     return ApolloMirrorServe(query, data, result);
 }
 
+// MARK: - Login-persistence fault injection (dev-only self-test)
+//
+// The affected-device failure signature — a SCOPED account read returning -25300 while an
+// enumeration returns the item — is confirmed from real field logs, but no maintainer device
+// exhibits it, so there's nothing to test the fix against locally. These dev-only toggles
+// replay that exact signature on any device by forcing the account read to miss, so the
+// wipe->recover chain can be exercised on real hardware. This tests the RESPONSE, not the
+// real-world cause: on a healthy device the enumeration trivially returns the real account, so a
+// green result here is a regression check, NOT field confirmation (that still needs an affected
+// user's log). Every simulated read is logged [FaultInjection] so it can never be mistaken for a
+// genuine keychain failure. Inert unless the (FLEX-gated) toggles are set.
+static BOOL ApolloDebugForceAccountReadMiss(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:@"ApolloDebugForceAccountReadMiss"];
+}
+static BOOL ApolloDebugDisableRecovery(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:@"ApolloDebugDisableKeychainRecovery"];
+}
+
 // MARK: - Keychain trace (login-persistence diagnostics)
 //
 // We could not reproduce the "logged out after force-quit / after idling in the background"
@@ -591,6 +609,100 @@ static NSString *ApolloAccountsBlobGroupBreakdown(void) {
     }
     return [NSString stringWithFormat:@"copies=%lu %@",
             (unsigned long)copies.count, [copies componentsJoinedByString:@" "]];
+}
+
+// Exported for the dev-only debug screen: a human-readable report of where the account item
+// lives (each copy's access group / size / protection class), plus the current defaults state.
+NSString *ApolloDebugAccountKeychainReport(void) {
+    NSString *breakdown = ApolloAccountsBlobGroupBreakdown();
+    ApolloLoginDiag(@"[DebugReport] %@", breakdown);
+    return breakdown;
+}
+
+// Best-effort: try to create a genuine cross-access-group DUPLICATE of the account item, to
+// reproduce the real root cause (not a mock) on a device whose signing entitles a second
+// keychain group. Reads the current item via enumeration, then writes a copy into candidate
+// groups using the UN-stripped real SecItemAdd (our normal hook strips the group, so this must
+// bypass it). Logs each attempt's status: 0 = duplicate created, -34018 = not entitled to that
+// group (so this device can't exhibit the split via it), -25299 = a copy already there. Returns
+// a summary for display. Only meaningful with an account signed in.
+NSString *ApolloDebugCreateCrossGroupAccountDuplicate(void) {
+    // 1. Find the current account item + its access group + data.
+    NSDictionary *q = @{
+        (__bridge id)kSecClass:              (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecMatchLimit:         (__bridge id)kSecMatchLimitAll,
+        (__bridge id)kSecReturnAttributes:   @YES,
+        (__bridge id)kSecReturnData:         @YES,
+        (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
+    };
+    CFTypeRef result = NULL;
+    OSStatus st = ApolloRealSecItemCopyMatching(q, &result);
+    if (st != errSecSuccess || !result) {
+        if (result) CFRelease(result);
+        return [NSString stringWithFormat:@"No account item to duplicate (enum status=%d). Sign in first.", (int)st];
+    }
+    NSArray *found = (__bridge_transfer NSArray *)result;
+    NSDictionary *acctItem = nil;
+    for (NSDictionary *item in found) {
+        NSString *service = item[(__bridge id)kSecAttrService];
+        NSString *account = item[(__bridge id)kSecAttrAccount];
+        if ([service isKindOfClass:[NSString class]] && [service containsString:kValetServiceSubstring] &&
+            [account isKindOfClass:[NSString class]] && [account containsString:@"RedditAccounts2"] &&
+            [item[(__bridge id)kSecValueData] isKindOfClass:[NSData class]]) {
+            acctItem = item;
+            break;
+        }
+    }
+    if (!acctItem) return @"No 2RedditAccounts2 item found in the keychain. Sign in first.";
+
+    NSString *service = acctItem[(__bridge id)kSecAttrService];
+    NSString *account = acctItem[(__bridge id)kSecAttrAccount];
+    NSData *data = acctItem[(__bridge id)kSecValueData];
+    NSString *currentGroup = [acctItem[(__bridge id)kSecAttrAccessGroup] isKindOfClass:[NSString class]]
+                                 ? acctItem[(__bridge id)kSecAttrAccessGroup] : nil;
+
+    // 2. Candidate second groups, derived from the current group's team prefix. The app group's
+    //    keychain form and a synthetic sibling both make plausible "second drawer" targets; which
+    //    (if any) the signer entitles varies by install method.
+    NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+    NSString *prefix = nil;
+    if (currentGroup.length) {
+        NSRange dot = [currentGroup rangeOfString:@"."];
+        if (dot.location != NSNotFound) prefix = [currentGroup substringToIndex:dot.location];
+    }
+    if (prefix.length) {
+        [candidates addObject:[NSString stringWithFormat:@"%@.group.com.christianselig.apollo", prefix]];
+        [candidates addObject:[NSString stringWithFormat:@"%@.com.christianselig.Apollo", prefix]];
+        [candidates addObject:[NSString stringWithFormat:@"%@.com.christianselig.Apollo.debugdup", prefix]];
+    }
+
+    NSMutableString *report = [NSMutableString stringWithFormat:@"Current group: %@\ndata: %lu bytes\n",
+                               currentGroup ?: @"?", (unsigned long)data.length];
+    if (candidates.count == 0) {
+        [report appendString:@"Could not derive a team prefix — cannot attempt a second group."];
+        ApolloLoginDiag(@"[DebugDup] %@", report);
+        return report;
+    }
+    for (NSString *grp in candidates) {
+        if ([grp isEqualToString:currentGroup]) { [report appendFormat:@"\n%@ — skipped (== current)", grp]; continue; }
+        NSDictionary *add = @{
+            (__bridge id)kSecClass:           (__bridge id)kSecClassGenericPassword,
+            (__bridge id)kSecAttrService:     service,
+            (__bridge id)kSecAttrAccount:     account,
+            (__bridge id)kSecAttrAccessGroup: grp,
+            (__bridge id)kSecAttrAccessible:  (__bridge id)kSecAttrAccessibleAfterFirstUnlock,
+            (__bridge id)kSecValueData:       data,
+        };
+        OSStatus as = ApolloRealSecItemAdd(add, NULL); // un-stripped: keep the explicit group
+        NSString *note = as == errSecSuccess ? @"DUPLICATE CREATED"
+                       : as == errSecDuplicateItem ? @"already present here"
+                       : as == -34018 ? @"not entitled to this group"
+                       : @"failed";
+        [report appendFormat:@"\n%@ -> status=%d (%@)", grp, (int)as, note];
+    }
+    ApolloInvalidateRecoverCache();
+    ApolloLoginDiag(@"[DebugDup] %@", [report stringByReplacingOccurrencesOfString:@"\n" withString:@" | "]);
+    return report;
 }
 
 static void ApolloLogAccountSnapshot(NSString *reason) {
@@ -806,17 +918,26 @@ static OSStatus SecItemCopyMatching_replacement(CFDictionaryRef query, CFTypeRef
         }
     }
 
-    // For the trace, capture the returned byte length even when the caller passed result=NULL
-    // (an existence check) — do our own attributed read on the accounts item so the log always
-    // carries the size that distinguishes an empty blob from a populated one.
-    OSStatus status = ApolloRealSecItemCopyMatching(strippedQuery, result);
-    if (status == errSecItemNotFound && IsValetQuery(strippedQuery)) {
-        // Only fall back to the broadened (synced-included) read on a local miss, so a
-        // good local item always wins over a potentially stale synced one.
-        NSDictionary *broadened = ApolloQueryByBroadeningSynchronizable(strippedQuery);
-        if (broadened != strippedQuery) {
-            status = ApolloRealSecItemCopyMatching(broadened, result);
-            ApolloKeychainTrace(@"COPY-broadened", strippedQuery, status, nil);
+    // Dev-only fault injection: force the account scoped read to miss so the wipe->recover chain
+    // can be exercised on a healthy device (see "fault injection" above). Skips the real reads
+    // for the accounts item and drops straight to -25300, exactly as an affected device does.
+    OSStatus status;
+    if (ApolloIsAccountsBlobQuery(strippedQuery) && ApolloDebugForceAccountReadMiss()) {
+        status = errSecItemNotFound;
+        ApolloLoginDiag(@"[FaultInjection] forcing account scoped read miss (SIMULATED — not a real keychain failure)");
+    } else {
+        // For the trace, capture the returned byte length even when the caller passed result=NULL
+        // (an existence check) — do our own attributed read on the accounts item so the log always
+        // carries the size that distinguishes an empty blob from a populated one.
+        status = ApolloRealSecItemCopyMatching(strippedQuery, result);
+        if (status == errSecItemNotFound && IsValetQuery(strippedQuery)) {
+            // Only fall back to the broadened (synced-included) read on a local miss, so a
+            // good local item always wins over a potentially stale synced one.
+            NSDictionary *broadened = ApolloQueryByBroadeningSynchronizable(strippedQuery);
+            if (broadened != strippedQuery) {
+                status = ApolloRealSecItemCopyMatching(broadened, result);
+                ApolloKeychainTrace(@"COPY-broadened", strippedQuery, status, nil);
+            }
         }
     }
 
@@ -824,7 +945,8 @@ static OSStatus SecItemCopyMatching_replacement(CFDictionaryRef query, CFTypeRef
     // affected devices the scoped read misses an item that an enumeration can see. Serve the
     // enumerated value so Valet's read succeeds and AccountManager never issues the wiping
     // empty write. This is the read-side counterpart of the write-side self-heal.
-    if (status == errSecItemNotFound && ApolloIsSingleItemValetQuery(strippedQuery)) {
+    // (The dev-only "disable recovery" toggle skips this so the raw wipe can be observed.)
+    if (status == errSecItemNotFound && ApolloIsSingleItemValetQuery(strippedQuery) && !ApolloDebugDisableRecovery()) {
         NSString *foundGroup = nil;
         OSStatus recovered = ApolloValetRecoverRead(strippedQuery, result, &foundGroup);
         if (recovered == errSecSuccess) {
