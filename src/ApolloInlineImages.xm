@@ -74,6 +74,10 @@ typedef NS_ENUM(unsigned char, ApolloASStackLayoutAlignSelf) {
 - (UIView *)view;
 - (BOOL)isNodeLoaded;
 - (void)onDidLoad:(void(^)(__kindof ASDisplayNode *node))body;
+@property (nonatomic) CGRect bounds;
+- (void)layout;
+- (void)setNeedsDisplay;
+- (void)displayWillStartAsynchronously:(BOOL)asynchronously;
 @property (nonatomic) BOOL userInteractionEnabled;
 @property (nullable, nonatomic, copy) UIColor *backgroundColor;
 @end
@@ -147,6 +151,7 @@ static char kApolloImageURLKey;                // NSURL on the imageNode AND mir
 static char kApolloOriginalImageURLKey;        // NSURL for tap/long-press when different from the loaded URL (e.g. album URL)
 static char kApolloHostMarkdownNodeKey;        // ApolloWeakHostBox (zeroing-weak) to the host MarkdownNode/LinkButtonNode
 static char kApolloAspectRatioKey;             // NSNumber height/width — NIL if unknown (no URL params yet, no DIDLOAD yet)
+static char kApolloLastDisplayBoundsKey;       // NSValue CGSize — bounds when the last display pass started (#673 stale-backing heal)
 static char kApolloLongPressInstalledKey;      // NSNumber BOOL — gate for one-shot UIContextMenuInteraction install
 static char kApolloPlayOverlayViewKey;         // ApolloPlayOverlayContainer (play button OR pause badge), also used as install gate
 static char kApolloInlineAnimatedGIFKey;       // NSNumber BOOL — node loaded an animated GIF
@@ -194,6 +199,19 @@ static ASDisplayNode *ApolloInlineHostForNode(id node) {
 // call sites want: a hostless image node is no longer inline-hosted.
 static inline BOOL ApolloImageNodeHasInlineHost(id node) {
     return ApolloInlineHostForNode(node) != nil;
+}
+
+// "Is this one of OUR inline media leaves?" — for lifetime-scoped hooks that
+// must keep working after the host association is gone. The host box is wiped
+// by ApolloClearInlineGIFNodeState (which the clearImage hook runs when a
+// collapse drops the node out of the tree and Texture purges its image), but
+// the decomposition can hand the SAME node instance back on re-expand — so a
+// host-based check would skip exactly the nodes the #673 stale-backing heal
+// exists for. kApolloImageCacheKey is stamped once at creation and never
+// cleared; video-thumbnail leaves don't carry it, so fall back to the host.
+static inline BOOL ApolloIsInlineMediaLeafNode(id node) {
+    if (objc_getAssociatedObject(node, &kApolloImageCacheKey) != nil) return YES;
+    return ApolloImageNodeHasInlineHost(node);
 }
 
 static void ApolloApplyInlineGIFPlaybackPolicyWithCover(ASNetworkImageNode *imageNode, UIImage *cover, NSUInteger retryIndex);
@@ -2152,6 +2170,59 @@ static void ApolloGateNativeInlineAnimatedImageIfNeeded(ASDisplayNode *node) {
 %end
 
 %hook ASNetworkImageNode
+
+// Stale-backing-store heal (#673: inline image renders tiny after a comment
+// collapse/expand). When Apollo re-expands a collapsed comment it re-sets the
+// MarkdownNode's attributed text, which rebuilds the decomposition with a
+// fresh image node whose aspect ratio is still unknown. If PINRemoteImage
+// then delivers the (cached) image while the node is laid out at a transient
+// wrong size — measured in the sim as full-row-width x raw-image-height
+// (e.g. 372x1044) between the intrinsic-size measure and the debounced
+// ratio-wrap relayout — Texture renders the backing store for THOSE bounds.
+// When the ratio wrapper's correct bounds land a moment later, Texture does
+// NOT re-render existing contents on a bounds change (the backing layer has
+// needsDisplayOnBoundsChange == NO), and because inline images draw with
+// contentMode aspect-fit (layer contentsGravity resizeAspect), the stale
+// oversized bitmap letterboxes inside the new frame instead of stretching —
+// the image shows tiny and centered in a full-height row. Zero-height passes
+// are immune (nothing renders, so Texture re-displays once real bounds
+// arrive), which is why initial loads and plain scrolling never showed this.
+//
+// Invariant enforced here: an inline image node whose last display pass ran
+// under different bounds than its current layout must re-display. We snapshot
+// the bounds every time a display pass starts, and compare on every layout;
+// on mismatch, request a fresh display. The redundant re-display this causes
+// for the benign zero -> real transition is a no-op (Texture coalesces it
+// with the display it schedules anyway).
+
+- (void)displayWillStartAsynchronously:(BOOL)asynchronously {
+    if (ApolloIsInlineMediaLeafNode(self)) {
+        objc_setAssociatedObject(self, &kApolloLastDisplayBoundsKey,
+                                 [NSValue valueWithCGSize:[(ASDisplayNode *)self bounds].size],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    %orig;
+}
+
+- (void)layout {
+    %orig;
+    if (!ApolloIsInlineMediaLeafNode(self)) return;
+    NSValue *lastVal = objc_getAssociatedObject(self, &kApolloLastDisplayBoundsKey);
+    if (!lastVal) return; // never displayed — the first display matches by construction
+    CGSize cur = [(ASDisplayNode *)self bounds].size;
+    if (cur.width < 1.0 || cur.height < 1.0) return; // hidden/zero-size pass — nothing visible to heal
+    CGSize last = [lastVal CGSizeValue];
+    if (fabs(cur.width - last.width) < 0.75 && fabs(cur.height - last.height) < 0.75) return;
+    // Record before the display actually runs so intermediate layout passes
+    // (the transition applies the same bounds several times) don't queue
+    // duplicate display requests.
+    objc_setAssociatedObject(self, &kApolloLastDisplayBoundsKey,
+                             [NSValue valueWithCGSize:cur],
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloLog(@"[InlineImages] re-display: backing store was rendered at %@ but node is now %@ (node=%p)",
+              NSStringFromCGSize(last), NSStringFromCGSize(cur), self);
+    [(ASDisplayNode *)self setNeedsDisplay];
+}
 
 - (void)setURL:(NSURL *)URL {
     if (ApolloImageNodeHasInlineHost(self) &&
