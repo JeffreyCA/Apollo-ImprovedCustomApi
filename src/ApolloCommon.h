@@ -123,4 +123,9 @@ void ApolloInjectPublicStickyAsSubredditIfNeeded(NSMutableArray *children, NSStr
 // ActionController is tagged on first build so re-builds re-inject and other
 // menus can't claim the item.
 void ApolloInjectDeletedCommentsMenuItemIfNeeded(NSMutableArray *children, NSString *menuTitle, id actionController);
+
+// Container keychain mirror (Tweak.xm): the Valet items the real keychain could not persist
+// on a keychain-broken sideload, so a backup taken there still carries the signed-in account.
+// Returns an array of { "service", "account", "data" } dicts (empty when the mirror is dormant).
+NSArray<NSDictionary *> *ApolloKeychainMirrorItemsForBackup(void);
 __END_DECLS

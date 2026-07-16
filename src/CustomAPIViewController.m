@@ -2962,18 +2962,36 @@ static NSArray<NSDictionary *> *ApolloCaptureValetKeychainItems(void) {
         return items;
     }
     NSArray *found = (__bridge_transfer NSArray *)result;
+    // Keyed by service+account so mirror-only items can be merged in without duplicating a key.
+    NSMutableDictionary<NSString *, NSDictionary *> *byKey = [NSMutableDictionary dictionary];
     for (NSDictionary *item in found) {
         NSString *service = item[(__bridge id)kSecAttrService];
         NSData *data = item[(__bridge id)kSecValueData];
         if (![service isKindOfClass:[NSString class]] || ![service containsString:kValetServiceSubstring]) continue;
         if (![data isKindOfClass:[NSData class]]) continue;
         NSString *account = item[(__bridge id)kSecAttrAccount];
-        [items addObject:@{
-            @"service": service,
-            @"account": ([account isKindOfClass:[NSString class]] ? account : @""),
-            @"data":    data,
-        }];
+        NSString *acct = [account isKindOfClass:[NSString class]] ? account : @"";
+        byKey[[NSString stringWithFormat:@"%@\n%@", service, acct]] = @{
+            @"service": service, @"account": acct, @"data": data,
+        };
     }
+
+    // Merge the container mirror. On a keychain-broken device the account item exists ONLY in
+    // the mirror (the real keychain enumeration above missed it), and where both exist the
+    // mirror value is the authoritative one (the real copy is the stale row that failed to
+    // update), so mirror entries win.
+    for (NSDictionary *item in ApolloKeychainMirrorItemsForBackup()) {
+        NSString *service = item[@"service"];
+        NSData *data = item[@"data"];
+        if (![service isKindOfClass:[NSString class]] || ![service containsString:kValetServiceSubstring]) continue;
+        if (![data isKindOfClass:[NSData class]]) continue;
+        NSString *acct = [item[@"account"] isKindOfClass:[NSString class]] ? item[@"account"] : @"";
+        byKey[[NSString stringWithFormat:@"%@\n%@", service, acct]] = @{
+            @"service": service, @"account": acct, @"data": data,
+        };
+    }
+
+    [items addObjectsFromArray:byKey.allValues];
     return items;
 }
 

@@ -2,6 +2,7 @@
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <os/lock.h>
 #import <sys/utsname.h>
 #import <Security/Security.h>
 #import <StoreKit/StoreKit.h>
@@ -163,6 +164,158 @@ static OSStatus SimKeychainServe(NSDictionary *q, NSData *data, CFTypeRef *resul
 }
 #endif
 
+// Real-keychain entry points captured by fishhook (see %ctor). The self-heal helpers and
+// the replacements below call through these to reach Security.framework directly, bypassing
+// our own replacements (no re-entrancy).
+static void *SecItemCopyMatching_orig;
+static void *SecItemAdd_orig;
+static void *SecItemUpdate_orig;
+static void *SecItemDelete_orig;
+
+static OSStatus ApolloRealSecItemCopyMatching(NSDictionary *q, CFTypeRef *result) {
+    return ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemCopyMatching_orig)((__bridge CFDictionaryRef)q, result);
+}
+static OSStatus ApolloRealSecItemAdd(NSDictionary *q, CFTypeRef *result) {
+    return ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemAdd_orig)((__bridge CFDictionaryRef)q, result);
+}
+static OSStatus ApolloRealSecItemUpdate(NSDictionary *q, NSDictionary *attrs) {
+    return ((OSStatus (*)(CFDictionaryRef, CFDictionaryRef))SecItemUpdate_orig)((__bridge CFDictionaryRef)q, (__bridge CFDictionaryRef)attrs);
+}
+static OSStatus ApolloRealSecItemDelete(NSDictionary *q) {
+    return ((OSStatus (*)(CFDictionaryRef))SecItemDelete_orig)((__bridge CFDictionaryRef)q);
+}
+
+// MARK: - Device keychain mirror (failure-scoped fallback store)
+//
+// The self-heal above fixes the common case: a synced/duplicate Valet item the real keychain
+// can still be coerced into writing. But some sideload/free-signer devices have a keychain
+// that is *unusable* for Apollo's items entirely — securityd rejects every Sec* call with
+// errSecMissingEntitlement (-34018) on a bad keychain-access-groups entitlement, or a
+// migration-orphaned item that reads/updates/deletes as not-found yet still blocks an add.
+// In those cases Valet's save silently fails and AccountManager wipes the signed-in account,
+// so the user is logged out on the next cold launch.
+//
+// When (and only when) the real keychain cannot persist a Valet item, mirror its value to a
+// file-protected plist in the app container and report success to Valet. A key that has a
+// mirror entry is one the real keychain failed to hold, so the mirror is authoritative for
+// it: reads are served from the mirror until a *real* write for that key later succeeds, at
+// which point the mirror entry is dropped and the real keychain takes over again. Healthy
+// devices never create an entry, so this is dormant unless the keychain is actually broken.
+//
+// Tradeoff: refresh tokens then live at rest under file protection rather than keychain
+// protection. Apollo's own Backup Settings already exports these same items to a plain zip,
+// and NSFileProtectionCompleteUntilFirstUserAuthentication keeps them encrypted at rest.
+static NSString *ApolloKeychainMirrorPath(void) {
+    return [[NSHomeDirectory() stringByAppendingPathComponent:@"Library"]
+                stringByAppendingPathComponent:@"ApolloKeychainMirror.plist"];
+}
+static NSString *ApolloKeychainMirrorKey(NSString *service, NSString *account) {
+    return [NSString stringWithFormat:@"%@\n%@", service ?: @"", account ?: @""];
+}
+
+static os_unfair_lock sMirrorLock = OS_UNFAIR_LOCK_INIT;
+// Guarded by sMirrorLock. Each entry: mirrorKey -> { "service", "account", "data" }.
+static NSMutableDictionary<NSString *, NSDictionary *> *sMirror;
+
+static NSMutableDictionary *ApolloMirrorLoadLocked(void) {
+    if (!sMirror) {
+        NSDictionary *disk = [NSDictionary dictionaryWithContentsOfFile:ApolloKeychainMirrorPath()];
+        sMirror = disk ? [disk mutableCopy] : [NSMutableDictionary dictionary];
+    }
+    return sMirror;
+}
+
+static void ApolloMirrorPersistLocked(void) {
+    NSString *path = ApolloKeychainMirrorPath();
+    if (sMirror.count == 0) {
+        [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+        return;
+    }
+    if ([sMirror writeToFile:path atomically:YES]) {
+        [[NSFileManager defaultManager]
+            setAttributes:@{NSFileProtectionKey: NSFileProtectionCompleteUntilFirstUserAuthentication}
+             ofItemAtPath:path error:nil];
+    }
+}
+
+static NSData *ApolloMirrorGet(NSString *service, NSString *account) {
+    os_unfair_lock_lock(&sMirrorLock);
+    NSDictionary *entry = ApolloMirrorLoadLocked()[ApolloKeychainMirrorKey(service, account)];
+    NSData *data = [entry[@"data"] isKindOfClass:[NSData class]] ? entry[@"data"] : nil;
+    os_unfair_lock_unlock(&sMirrorLock);
+    return data;
+}
+
+// Stash a value the real keychain refused to hold. Loud on purpose — a mirror engagement is
+// the fingerprint of a broken keychain and should be visible in an uploaded log.
+static void ApolloMirrorPut(NSString *service, NSString *account, NSData *data) {
+    if (![data isKindOfClass:[NSData class]]) return;
+    os_unfair_lock_lock(&sMirrorLock);
+    NSMutableDictionary *store = ApolloMirrorLoadLocked();
+    store[ApolloKeychainMirrorKey(service, account)] = @{
+        @"service": service ?: @"",
+        @"account": account ?: @"",
+        @"data":    data,
+    };
+    ApolloMirrorPersistLocked();
+    os_unfair_lock_unlock(&sMirrorLock);
+    ApolloLog(@"[KeychainMirror] real keychain could not persist item; mirrored to container service=%@ account=%@",
+              service, account);
+}
+
+// A real write for this key finally landed — drop the mirror entry so the real keychain is
+// authoritative again (lets a device recover out of mirror mode if the keychain starts working).
+static void ApolloMirrorRemove(NSString *service, NSString *account) {
+    NSString *key = ApolloKeychainMirrorKey(service, account);
+    os_unfair_lock_lock(&sMirrorLock);
+    NSMutableDictionary *store = ApolloMirrorLoadLocked();
+    BOOL had = store[key] != nil;
+    if (had) {
+        [store removeObjectForKey:key];
+        ApolloMirrorPersistLocked();
+    }
+    os_unfair_lock_unlock(&sMirrorLock);
+    if (had) ApolloLog(@"[KeychainMirror] real keychain took over item; dropped mirror service=%@ account=%@",
+                       service, account);
+}
+
+// Snapshot for Backup Settings, so a backup taken on a keychain-broken device still carries
+// the account (the mirror is the only place the item exists there). Non-static: used by
+// CustomAPIViewController's backup capture.
+NSArray<NSDictionary *> *ApolloKeychainMirrorItemsForBackup(void) {
+    os_unfair_lock_lock(&sMirrorLock);
+    NSArray *values = [ApolloMirrorLoadLocked() allValues];
+    os_unfair_lock_unlock(&sMirrorLock);
+    return values ?: @[];
+}
+
+// Build a SecItemCopyMatching result for mirrored data, honoring the query's return flags
+// (same shape contract as the real keychain / the sim shim's SimKeychainServe).
+static OSStatus ApolloMirrorServe(NSDictionary *q, NSData *data, CFTypeRef *result) {
+    if (!result) return errSecSuccess;
+    if (q[(__bridge id)kSecReturnAttributes]) {
+        NSMutableDictionary *attrs = [NSMutableDictionary dictionary];
+        if (q[(__bridge id)kSecAttrAccount]) attrs[(__bridge id)kSecAttrAccount] = q[(__bridge id)kSecAttrAccount];
+        if (q[(__bridge id)kSecAttrService]) attrs[(__bridge id)kSecAttrService] = q[(__bridge id)kSecAttrService];
+        if (q[(__bridge id)kSecReturnData]) attrs[(__bridge id)kSecValueData] = data;
+        *result = (__bridge_retained CFTypeRef)attrs;
+    } else {
+        *result = (__bridge_retained CFTypeRef)data;
+    }
+    return errSecSuccess;
+}
+
+// A single-item Valet read (service + account, not an enumeration) — the only shape the mirror
+// can answer. kSecMatchLimitAll enumerations (e.g. backup capture) must fall through to the
+// real keychain and pick up mirror items via ApolloKeychainMirrorItemsForBackup instead.
+static BOOL ApolloIsSingleItemValetQuery(NSDictionary *query) {
+    if (!IsValetQuery(query)) return NO;
+    if (!query[(__bridge id)kSecAttrAccount]) return NO;
+    id limit = query[(__bridge id)kSecMatchLimit];
+    if (limit && [limit isEqual:(__bridge id)kSecMatchLimitAll]) return NO;
+    return YES;
+}
+
 // Fixes apollo-reborn#567: an iCloud-synced Valet item can miss a plain read
 // (errSecItemNotFound) but still collide on add (errSecDuplicateItem), and
 // AccountManager wipes the account instead of retrying. Broaden reads to include
@@ -175,13 +328,11 @@ static NSDictionary *ApolloQueryByBroadeningSynchronizable(NSDictionary *query) 
     return broadened;
 }
 
-static void *SecItemCopyMatching_orig;
-
 static OSStatus ApolloCopyExistingKeychainItem(NSDictionary *strippedQuery, CFTypeRef *outResult) {
     NSMutableDictionary *readQuery = [strippedQuery mutableCopy];
     [readQuery removeObjectForKey:(__bridge id)kSecValueData];
     NSDictionary *broadened = ApolloQueryByBroadeningSynchronizable(readQuery);
-    return ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemCopyMatching_orig)((__bridge CFDictionaryRef)broadened, outResult);
+    return ApolloRealSecItemCopyMatching(broadened, outResult);
 }
 
 static BOOL ApolloExistingKeychainItemHasSameValue(NSDictionary *strippedQuery) {
@@ -218,7 +369,7 @@ static BOOL ApolloUpdateStaleKeychainItem(NSDictionary *query) {
     NSMutableDictionary *searchQuery = ApolloSelfHealSearchQuery(query);
     searchQuery[(__bridge id)kSecAttrSynchronizable] = (__bridge id)kSecAttrSynchronizableAny;
     NSDictionary *update = @{(__bridge id)kSecValueData: newValue};
-    OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)searchQuery, (__bridge CFDictionaryRef)update);
+    OSStatus status = ApolloRealSecItemUpdate(searchQuery, update);
     ApolloLog(@"[KeychainSelfHeal] updated duplicate item in place service=%@ account=%@ status=%d",
               query[(__bridge id)kSecAttrService], query[(__bridge id)kSecAttrAccount], (int)status);
     return status == errSecSuccess;
@@ -229,16 +380,15 @@ static BOOL ApolloUpdateStaleKeychainItem(NSDictionary *query) {
 static void ApolloDeleteStaleKeychainItem(NSDictionary *query) {
     NSMutableDictionary *deleteQuery = ApolloSelfHealSearchQuery(query);
     deleteQuery[(__bridge id)kSecAttrSynchronizable] = (__bridge id)kCFBooleanFalse;
-    OSStatus status = SecItemDelete((__bridge CFDictionaryRef)deleteQuery);
+    OSStatus status = ApolloRealSecItemDelete(deleteQuery);
     if (status == errSecItemNotFound) {
         deleteQuery[(__bridge id)kSecAttrSynchronizable] = (__bridge id)kSecAttrSynchronizableAny;
-        status = SecItemDelete((__bridge CFDictionaryRef)deleteQuery);
+        status = ApolloRealSecItemDelete(deleteQuery);
     }
     ApolloLog(@"[KeychainSelfHeal] deleted stale duplicate item service=%@ account=%@ status=%d",
               query[(__bridge id)kSecAttrService], query[(__bridge id)kSecAttrAccount], (int)status);
 }
 
-static void *SecItemAdd_orig;
 static OSStatus SecItemAdd_replacement(CFDictionaryRef query, CFTypeRef *result) {
     NSDictionary *strippedQuery = stripGroupAccessAttr(query);
 #if APOLLO_SIM_BUILD
@@ -252,15 +402,36 @@ static OSStatus SecItemAdd_replacement(CFDictionaryRef query, CFTypeRef *result)
         return errSecSuccess;
     }
 #endif
-    OSStatus status = ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemAdd_orig)((__bridge CFDictionaryRef)strippedQuery, result);
-    if (status == errSecDuplicateItem && IsValetQuery(strippedQuery)) {
+    OSStatus status = ApolloRealSecItemAdd(strippedQuery, result);
+    if (!IsValetQuery(strippedQuery)) return status;
+
+    NSString *service = strippedQuery[(__bridge id)kSecAttrService];
+    NSString *account = strippedQuery[(__bridge id)kSecAttrAccount];
+
+    if (status == errSecDuplicateItem) {
         if (ApolloExistingKeychainItemHasSameValue(strippedQuery) ||
             ApolloUpdateStaleKeychainItem(strippedQuery)) {
             if (result) ApolloCopyExistingKeychainItem(strippedQuery, result);
+            ApolloMirrorRemove(service, account);
             return errSecSuccess;
         }
         ApolloDeleteStaleKeychainItem(strippedQuery);
-        status = ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemAdd_orig)((__bridge CFDictionaryRef)strippedQuery, result);
+        status = ApolloRealSecItemAdd(strippedQuery, result);
+    }
+
+    if (status == errSecSuccess) {
+        ApolloMirrorRemove(service, account);
+        return status;
+    }
+
+    // The real keychain could not hold this Valet item after every self-heal attempt
+    // (bad keychain entitlement -34018, an undeletable orphan still colliding, etc.).
+    // Fall back to the container mirror so the account still persists across launches.
+    NSData *value = strippedQuery[(__bridge id)kSecValueData];
+    if ([value isKindOfClass:[NSData class]]) {
+        ApolloMirrorPut(service, account, value);
+        if (result) ApolloMirrorServe(strippedQuery, value, result);
+        return errSecSuccess;
     }
     return status;
 }
@@ -293,21 +464,31 @@ static OSStatus SecItemCopyMatching_replacement(CFDictionaryRef query, CFTypeRef
     }
 #endif
 
-    OSStatus status = ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemCopyMatching_orig)((__bridge CFDictionaryRef)strippedQuery, result);
+    // A key with a mirror entry is one the real keychain failed to persist, so its real-keychain
+    // copy (if any) is stale by definition — the mirror is authoritative until a real write for
+    // that key succeeds and drops the entry. Only single-item reads can be served this way.
+    if (ApolloIsSingleItemValetQuery(strippedQuery)) {
+        NSString *service = strippedQuery[(__bridge id)kSecAttrService];
+        NSString *account = strippedQuery[(__bridge id)kSecAttrAccount];
+        NSData *mirrored = ApolloMirrorGet(service, account);
+        if (mirrored) return ApolloMirrorServe(strippedQuery, mirrored, result);
+    }
+
+    OSStatus status = ApolloRealSecItemCopyMatching(strippedQuery, result);
     if (status == errSecItemNotFound && IsValetQuery(strippedQuery)) {
         // Only fall back to the broadened (synced-included) read on a local miss, so a
         // good local item always wins over a potentially stale synced one.
         NSDictionary *broadened = ApolloQueryByBroadeningSynchronizable(strippedQuery);
         if (broadened != strippedQuery) {
-            status = ((OSStatus (*)(CFDictionaryRef, CFTypeRef *))SecItemCopyMatching_orig)((__bridge CFDictionaryRef)broadened, result);
+            status = ApolloRealSecItemCopyMatching(broadened, result);
         }
     }
     return status;
 }
 
-static void *SecItemUpdate_orig;
 static OSStatus SecItemUpdate_replacement(CFDictionaryRef query, CFDictionaryRef attributesToUpdate) {
     NSDictionary *strippedQuery = stripGroupAccessAttr(query);
+    NSDictionary *attrs = (__bridge NSDictionary *)attributesToUpdate;
 
     // Block attempts to disable Ultra/Pro
     if (IsUltraProOverrideKey(strippedQuery)) {
@@ -317,7 +498,7 @@ static OSStatus SecItemUpdate_replacement(CFDictionaryRef query, CFDictionaryRef
 #if APOLLO_SIM_BUILD
     if (IsValetQuery(strippedQuery)) {
         NSString *key = SimKeychainKey(strippedQuery[(__bridge id)kSecAttrService], strippedQuery[(__bridge id)kSecAttrAccount]);
-        id value = ((__bridge NSDictionary *)attributesToUpdate)[(__bridge id)kSecValueData];
+        id value = attrs[(__bridge id)kSecValueData];
         if ([value isKindOfClass:[NSData class]]) {
             SimKeychainStore()[key] = value;
             SimKeychainPersist();
@@ -327,13 +508,53 @@ static OSStatus SecItemUpdate_replacement(CFDictionaryRef query, CFDictionaryRef
     }
 #endif
 
-    return ((OSStatus (*)(CFDictionaryRef, CFDictionaryRef))SecItemUpdate_orig)((__bridge CFDictionaryRef)strippedQuery, attributesToUpdate);
+    OSStatus status = ApolloRealSecItemUpdate(strippedQuery, attrs);
+    if (!IsValetQuery(strippedQuery)) return status;
+
+    NSString *service = strippedQuery[(__bridge id)kSecAttrService];
+    NSString *account = strippedQuery[(__bridge id)kSecAttrAccount];
+
+    // The write path's missing half (mirror of the SecItemAdd self-heal): Valet reaches
+    // SecItemUpdate because its existence check saw an item, but a plain update only matches
+    // non-synced items, so a synced/shadow row makes the update miss (errSecItemNotFound) and
+    // Valet's save silently fails — the account is never persisted. Broaden to synced items;
+    // if the row is still unreachable, force the write to land as a fresh local item.
+    if (status == errSecItemNotFound) {
+        NSMutableDictionary *broadened = [strippedQuery mutableCopy];
+        broadened[(__bridge id)kSecAttrSynchronizable] = (__bridge id)kSecAttrSynchronizableAny;
+        status = ApolloRealSecItemUpdate(broadened, attrs);
+        ApolloLog(@"[KeychainSelfHeal] broadened update service=%@ account=%@ status=%d", service, account, (int)status);
+
+        if (status == errSecItemNotFound) {
+            NSData *value = attrs[(__bridge id)kSecValueData];
+            if ([value isKindOfClass:[NSData class]]) {
+                ApolloDeleteStaleKeychainItem(strippedQuery);
+                NSMutableDictionary *add = ApolloSelfHealSearchQuery(strippedQuery);
+                [add removeObjectForKey:(__bridge id)kSecAttrSynchronizable];
+                add[(__bridge id)kSecValueData] = value;
+                status = ApolloRealSecItemAdd(add, NULL);
+                ApolloLog(@"[KeychainSelfHeal] update->add recreate service=%@ account=%@ status=%d", service, account, (int)status);
+            }
+        }
+    }
+
+    if (status == errSecSuccess) {
+        ApolloMirrorRemove(service, account);
+        return status;
+    }
+
+    // Real keychain still can't hold it — mirror the new value (see SecItemAdd_replacement).
+    NSData *value = attrs[(__bridge id)kSecValueData];
+    if ([value isKindOfClass:[NSData class]]) {
+        ApolloMirrorPut(service, account, value);
+        return errSecSuccess;
+    }
+    return status;
 }
 
-#if APOLLO_SIM_BUILD
-static void *SecItemDelete_orig;
 static OSStatus SecItemDelete_replacement(CFDictionaryRef query) {
     NSDictionary *strippedQuery = stripGroupAccessAttr(query);
+#if APOLLO_SIM_BUILD
     if (IsValetQuery(strippedQuery)) {
         NSString *key = SimKeychainKey(strippedQuery[(__bridge id)kSecAttrService], strippedQuery[(__bridge id)kSecAttrAccount]);
         if (SimKeychainStore()[key]) {
@@ -342,9 +563,18 @@ static OSStatus SecItemDelete_replacement(CFDictionaryRef query) {
         }
         return errSecSuccess;
     }
-    return ((OSStatus (*)(CFDictionaryRef))SecItemDelete_orig)((__bridge CFDictionaryRef)strippedQuery);
-}
 #endif
+    OSStatus status = ApolloRealSecItemDelete(strippedQuery);
+    if (IsValetQuery(strippedQuery)) {
+        // Valet's own removeObject and Apollo's cleanup delete without kSecAttrSynchronizable,
+        // which leaves a synced shadow behind to re-break the next sign-in. Also sweep synced
+        // copies, and drop any container mirror entry so sign-out really signs out.
+        NSDictionary *broadened = ApolloQueryByBroadeningSynchronizable(strippedQuery);
+        if (broadened != strippedQuery) ApolloRealSecItemDelete(broadened);
+        ApolloMirrorRemove(strippedQuery[(__bridge id)kSecAttrService], strippedQuery[(__bridge id)kSecAttrAccount]);
+    }
+    return status;
+}
 
 // --- Device detection (for Pixel Pals and Dynamic Island behaviour) ---
 // Apollo's device model mapper (sub_1007a3cdc) only recognizes models up to iPhone 14 Pro Max.
@@ -2103,21 +2333,16 @@ static void initializeRandomSources() {
     NSDate *dateIn90d = [NSDate dateWithTimeIntervalSinceNow:60*60*24*90];
     [[NSUserDefaults standardUserDefaults] setObject:dateIn90d forKey:@"WallpaperPromptMostRecent2"];
 
-    // Sideload fixes
-    rebind_symbols((struct rebinding[4]) {
+    // Sideload fixes. SecItemDelete is hooked on device too now (not just the simulator): the
+    // keychain self-heal and container mirror need it to sweep synced shadow items on sign-out,
+    // so a subsequent sign-in isn't re-broken by a stale synced copy.
+    rebind_symbols((struct rebinding[5]) {
         {"SecItemAdd", (void *)SecItemAdd_replacement, (void **)&SecItemAdd_orig},
         {"SecItemCopyMatching", (void *)SecItemCopyMatching_replacement, (void **)&SecItemCopyMatching_orig},
         {"SecItemUpdate", (void *)SecItemUpdate_replacement, (void **)&SecItemUpdate_orig},
-        {"uname", (void *)uname_replacement, (void **)&uname_orig}
-    }, 4);
-
-#if APOLLO_SIM_BUILD
-    // Virtualized-keychain delete (see the SecItem* shim above): only needed in the simulator,
-    // where the real keychain is unreachable. Kept out of the device rebind set entirely.
-    rebind_symbols((struct rebinding[1]) {
         {"SecItemDelete", (void *)SecItemDelete_replacement, (void **)&SecItemDelete_orig},
-    }, 1);
-#endif
+        {"uname", (void *)uname_replacement, (void **)&uname_orig}
+    }, 5);
 
     if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFLEX]) {
         if (!%c(FLEXManager)) {
