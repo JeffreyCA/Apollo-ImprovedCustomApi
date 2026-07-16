@@ -5786,6 +5786,8 @@ static void ApolloDetachGlobeFromContainer(UIButton *globe) {
     [container setNeedsLayout];
 }
 
+static BOOL ApolloButtonGlyphPads(UIButton *btn, CGFloat *outLeft, CGFloat *outRight);
+
 // Place the globe correctly for this nav item (idempotent). If Apollo has a
 // multi-button trailing container, inject the globe as its leading button so
 // every icon is one evenly-spaced group (issue #393). Otherwise fall back to a
@@ -5826,20 +5828,22 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
         // first button ~10pt in) — inheriting it would leave a gap before the
         // globe, so we re-place the leading edge to match the trailing inset.
         CGFloat leadingX = CGFLOAT_MAX, rightEdge = 0.0, firstBtnWidth = 0.0;
+        UIButton *lastBtn = nil;
         for (UIView *sub in container.subviews) {
             if (![sub isKindOfClass:[UIButton class]]) continue;
             if (CGRectGetMinX(sub.frame) < leadingX) {
                 leadingX = CGRectGetMinX(sub.frame);
                 firstBtnWidth = CGRectGetWidth(sub.frame);  // the button the globe sits before
             }
-            rightEdge = MAX(rightEdge, CGRectGetMaxX(sub.frame));
+            if (CGRectGetMaxX(sub.frame) > rightEdge) {
+                rightEdge = CGRectGetMaxX(sub.frame);
+                lastBtn = (UIButton *)sub;
+            }
         }
         if (leadingX == CGFLOAT_MAX) leadingX = 0.0;
         CGFloat contW = container.frame.size.width;
         CGFloat trailInset = (contW > rightEdge) ? (contW - rightEdge) : 0.0;
         trailInset = MAX(0.0, MIN(trailInset, 20.0));
-        CGFloat globeX = trailInset;                    // symmetric leading inset
-        CGFloat shift  = globeX + gw - leadingX;        // first Apollo button lands flush after the globe
 
         // Center the glyph, then nudge it toward the next icon by HALF that
         // icon's extra slot width beyond a normal ~38pt slot. The mod badge sits
@@ -5851,6 +5855,25 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
         nudge = MAX(0.0, MIN(nudge, kApolloGlobeMergeGlyphNudge));
         globe.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
         globe.imageEdgeInsets = UIEdgeInsetsMake(0.0, nudge, 0.0, -nudge);
+
+        // Symmetric container insets alone still read lopsided: the globe's
+        // 34pt slot only carries ~5pt of glyph centering while the trailing
+        // ••• slot centers a 25pt icon in 38-44pt (~7-10pt of air). Match the
+        // GLYPH-to-capsule-edge padding on both sides instead — the same rule
+        // the no-globe normalization below applies — by starting the globe
+        // slot at the difference. Falls back to bare symmetric insets if
+        // either glyph can't be measured.
+        CGFloat globeX = trailInset;
+        globe.frame = CGRectMake(0.0, 0.0, gw, h);  // size it so glyph pads resolve
+        CGFloat gGlyphL = 0.0, gGlyphR = 0.0, lastGlyphL = 0.0, lastGlyphR = 0.0;
+        if (lastBtn &&
+            ApolloButtonGlyphPads(globe, &gGlyphL, &gGlyphR) &&
+            ApolloButtonGlyphPads(lastBtn, &lastGlyphL, &lastGlyphR)) {
+            CGFloat glyphAware = trailInset + lastGlyphR - gGlyphL;
+            globeX = MAX(trailInset, MIN(glyphAware, trailInset + 12.0));
+        }
+        CGFloat shift = globeX + gw - leadingX;         // first Apollo button lands flush after the globe
+
         for (UIView *sub in container.subviews) {
             if (![sub isKindOfClass:[UIButton class]]) continue;
             CGRect f = sub.frame;
