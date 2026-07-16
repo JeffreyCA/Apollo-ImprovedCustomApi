@@ -8,6 +8,7 @@
 #include <string.h>
 
 #import "ApolloCommon.h"
+#import "ApolloDeletedCommentsData.h"
 #import "ApolloState.h"
 #import "ApolloThemeRuntime.h"
 #import "ApolloTranslation.h"
@@ -1691,8 +1692,34 @@ static id ApolloBestCommentTextNode(id commentCellNode, RDKComment *comment) {
 
 // One deferred, per-table-coalesced empty begin/endUpdates: re-queries row heights and
 // re-measures only nodes whose calculated layout was invalidated. Mirrors the
-// link-preview module's coalesced height refresh (#630 rounds 6-7).
+// link-preview module's coalesced height refresh (#630 rounds 6-7), including its
+// collapse-settle gate: an empty begin/endUpdates fired while a comment
+// collapse/expand row animation is running re-queries every row height
+// mid-animation and restarts the native delete/insert animations (#620 round 2's
+// wrong-way glide). Defer to the window's end, bounded like the LP refresher so
+// a collapse storm can't postpone the height commit forever.
 static char kApolloTranslationHeightCommitPendingKey;
+static void ApolloTranslationRunHostHeightCommit(UITableView *tableView, NSInteger attemptsLeft) {
+    NSTimeInterval settleDelay = ApolloDeletedCommentsCollapseSettleDelayRemaining();
+    if (settleDelay > 0 && attemptsLeft > 0) {
+        __weak UITableView *weakTableView = tableView;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((settleDelay + 0.03) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UITableView *strongTableView = weakTableView;
+            if (!strongTableView) return;
+            ApolloTranslationRunHostHeightCommit(strongTableView, attemptsLeft - 1);
+        });
+        return;
+    }
+    objc_setAssociatedObject(tableView, &kApolloTranslationHeightCommitPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (!tableView.window) return;
+    @try {
+        [UIView performWithoutAnimation:^{
+            [tableView beginUpdates];
+            [tableView endUpdates];
+        }];
+    } @catch (__unused NSException *e) {}
+}
+
 static void ApolloTranslationScheduleHostHeightCommit(id cellNode) {
     if (!cellNode) return;
     UIView *cellView = nil;
@@ -1720,14 +1747,7 @@ static void ApolloTranslationScheduleHostHeightCommit(id cellNode) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UITableView *strongTableView = weakTableView;
         if (!strongTableView) return;
-        objc_setAssociatedObject(strongTableView, &kApolloTranslationHeightCommitPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        if (!strongTableView.window) return;
-        @try {
-            [UIView performWithoutAnimation:^{
-                [strongTableView beginUpdates];
-                [strongTableView endUpdates];
-            }];
-        } @catch (__unused NSException *e) {}
+        ApolloTranslationRunHostHeightCommit(strongTableView, 6);
     });
 }
 

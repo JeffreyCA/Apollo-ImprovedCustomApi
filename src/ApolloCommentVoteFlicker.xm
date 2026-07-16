@@ -173,11 +173,50 @@ static void ApolloVFRealizeUpdatedCommentsInfo(id postInfo, const char *stage) {
     } @catch (__unused NSException *e) {}
 }
 
+// A vote (or any in-place model update) makes Apollo splice a Mantle COPY of
+// the comment into the tree, and Mantle's copy re-runs every property setter —
+// including setCollapsed: with whatever the model last parsed from the server.
+// Reddit marks crowd-controlled comments `collapsed: true` in the listing JSON,
+// but Apollo's initial cell build renders them EXPANDED (the flatten only
+// collapses tracker/blocked/AutoMod comments), so the flag sits latent in the
+// model. The vote-time reconfigure (unlike the initial build) DOES honor
+// comment.collapsed, so the row the user just voted on snaps into the
+// collapsed presentation (body hidden, child-count badge) and then bounces
+// back when the next update lands — the "flicker" on every vote in
+// crowd-controlled threads (reported against translated threads because
+// foreign-language subs are where both crowd control and translation are on).
+//
+// Neutralize the flag on the incoming copy when it is merely CARRIED OVER
+// (old model and copy both say collapsed) rather than deliberately flipped:
+// Apollo's own collapse toggle never routes through this notification (it
+// splices + rebuilds directly), so a carried-over YES here can only be stale
+// server state the visible row never rendered. The write goes straight to the
+// ivar so no setCollapsed: hooks (cover views, settle windows) fire for what
+// is a pure metadata correction.
+static void ApolloVFNeutralizeCarriedOverCollapse(id note) {
+    @try {
+        id oldModel = [note isKindOfClass:[NSNotification class]] ? [(NSNotification *)note object] : nil;
+        id newModel = [note isKindOfClass:[NSNotification class]] ? [(NSNotification *)note userInfo][@"newModel"] : nil;
+        Class commentClass = objc_getClass("RDKComment");
+        if (!commentClass || ![oldModel isKindOfClass:commentClass] || ![newModel isKindOfClass:commentClass]) return;
+        if (![oldModel respondsToSelector:@selector(collapsed)] ||
+            ![newModel respondsToSelector:@selector(collapsed)]) return;
+        BOOL oldCollapsed = ((BOOL (*)(id, SEL))objc_msgSend)(oldModel, @selector(collapsed));
+        BOOL newCollapsed = ((BOOL (*)(id, SEL))objc_msgSend)(newModel, @selector(collapsed));
+        if (!newCollapsed || !oldCollapsed) return; // absent, or a deliberate flip — leave it alone
+        Ivar collapsedIvar = class_getInstanceVariable([newModel class], "_collapsed");
+        if (!collapsedIvar) return;
+        *(BOOL *)((uint8_t *)(__bridge void *)newModel + ivar_getOffset(collapsedIvar)) = NO;
+        ApolloLog(@"[VoteFlicker] cleared carried-over server collapse on updated comment (crowd-control flag)");
+    } @catch (__unused NSException *e) {}
+}
+
 // Shared handler body for both section-controller hooks: arm the matching
 // visible cell(s) before the reconfigure, flush the display wave right after,
 // and once more on the next runloop turn (the -setNeedsLayout relayout lands
 // there; its re-displays are what commit blank without this).
 static void ApolloVFHandleModelUpdate(id note, void (^origCall)(void)) {
+    ApolloVFNeutralizeCarriedOverCollapse(note);
     NSArray *cells = ApolloVFCellsForUpdatedModel(note);
     for (ASDisplayNode *cell in cells) {
         @try {
