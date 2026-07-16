@@ -290,7 +290,8 @@ static void ApolloMirrorPut(NSString *service, NSString *account, NSData *data, 
 
 // A real write for this key finally landed — drop the mirror entry so the real keychain is
 // authoritative again (lets a device recover out of mirror mode if the keychain starts working).
-static void ApolloMirrorRemove(NSString *service, NSString *account) {
+// Returns YES if a mirror entry was actually dropped.
+static BOOL ApolloMirrorRemove(NSString *service, NSString *account) {
     NSString *key = ApolloKeychainMirrorKey(service, account);
     os_unfair_lock_lock(&sMirrorLock);
     NSMutableDictionary *store = ApolloMirrorLoadLocked();
@@ -302,6 +303,7 @@ static void ApolloMirrorRemove(NSString *service, NSString *account) {
     os_unfair_lock_unlock(&sMirrorLock);
     if (had) ApolloLoginDiag(@"[KeychainMirror] real keychain took over item; dropped mirror service=%@ account=%@",
                              service, account);
+    return had;
 }
 
 // Snapshot for Backup Settings, so a backup taken on a keychain-broken device still carries
@@ -314,8 +316,11 @@ NSArray<NSDictionary *> *ApolloKeychainMirrorItemsForBackup(void) {
     return values ?: @[];
 }
 
-// Build a SecItemCopyMatching result for mirrored data, honoring the query's return flags
-// (same shape contract as the real keychain / the sim shim's SimKeychainServe).
+// Build a SecItemCopyMatching result for mirrored/recovered data, honoring the query's return
+// flags (same shape contract as the real keychain / the sim shim's SimKeychainServe).
+// NOTE: a kSecReturnAttributes result carries only service/account/data — NOT accessibility,
+// access group, or creation/modification dates. This is faithful for Valet's data reads (which
+// is all that uses it), but an attribute-inspecting caller would be served an incomplete dict.
 static OSStatus ApolloMirrorServe(NSDictionary *q, NSData *data, CFTypeRef *result) {
     if (!result) return errSecSuccess;
     if (q[(__bridge id)kSecReturnAttributes]) {
@@ -431,6 +436,91 @@ static OSStatus ApolloValetRecoverRead(NSDictionary *query, CFTypeRef *result, N
     return ApolloMirrorServe(query, data, result);
 }
 
+// Dev-only fault-injection flags (FLEX-gated; see the "fault injection" section below for the
+// full rationale). Declared up here because the destructive-write guard consults the
+// disable-recovery toggle to stay bypassable when reproducing the raw wipe.
+static BOOL ApolloDebugForceAccountReadMiss(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:@"ApolloDebugForceAccountReadMiss"];
+}
+static BOOL ApolloDebugDisableRecovery(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:@"ApolloDebugDisableKeychainRecovery"];
+}
+
+// MARK: - Destructive-write guard (last line of defense)
+//
+// Recovery only fires on errSecItemNotFound. Any OTHER read-failure mode — errSecInteractionNotAllowed,
+// a transient -34018, an enumeration miss, a TTL race — still lets AccountManager prune to an
+// empty array, and the self-heal would then force that empty blob over the good one, exactly as
+// 3.4.1 does. Since the whole bug class is "a failed read turns into a destructive write", refuse
+// to overwrite a populated account blob with an empty/tiny one UNLESS that item was successfully
+// served (a real scoped read OR recovery) earlier this session. A genuine sign-out always follows
+// a session with working reads, so it still persists; a session that never once read the account
+// has no business erasing it.
+static const NSUInteger kAccountBlobPopulatedThreshold = 512; // empty array ~219B; populated >1KB
+
+// The account-family items whose destruction logs the user out.
+static BOOL IsAccountsFamilyQuery(NSDictionary *query) {
+    if (!IsValetQuery(query)) return NO;
+    NSString *account = query[(__bridge id)kSecAttrAccount];
+    return [account isKindOfClass:[NSString class]] &&
+           ([account containsString:@"RedditAccounts2"] || [account containsString:@"ApplicationOnlyAccount2"]);
+}
+
+// Accounts successfully served (real read or recovery) this session, so their writes are trusted.
+static os_unfair_lock sServedLock = OS_UNFAIR_LOCK_INIT;
+static NSMutableSet<NSString *> *sServedAccounts;
+
+static void ApolloMarkAccountServed(NSString *account) {
+    if (![account isKindOfClass:[NSString class]]) return;
+    os_unfair_lock_lock(&sServedLock);
+    if (!sServedAccounts) sServedAccounts = [NSMutableSet set];
+    [sServedAccounts addObject:account];
+    os_unfair_lock_unlock(&sServedLock);
+}
+static BOOL ApolloWasAccountServed(NSString *account) {
+    os_unfair_lock_lock(&sServedLock);
+    BOOL served = [sServedAccounts containsObject:account];
+    os_unfair_lock_unlock(&sServedLock);
+    return served;
+}
+
+// Largest existing copy of this account item across all access groups (via enumeration), or -1.
+static long ApolloExistingAccountBlobMaxLen(NSString *service, NSString *account) {
+    NSDictionary *q = @{
+        (__bridge id)kSecClass:              (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecMatchLimit:         (__bridge id)kSecMatchLimitAll,
+        (__bridge id)kSecReturnAttributes:   @YES,
+        (__bridge id)kSecReturnData:         @YES,
+        (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
+    };
+    CFTypeRef result = NULL;
+    OSStatus st = ApolloRealSecItemCopyMatching(q, &result);
+    if (st != errSecSuccess || !result) { if (result) CFRelease(result); return -1; }
+    NSArray *found = (__bridge_transfer NSArray *)result;
+    long maxLen = -1;
+    for (NSDictionary *item in found) {
+        if (![item[(__bridge id)kSecAttrService] isEqual:service]) continue;
+        if (![item[(__bridge id)kSecAttrAccount] isEqual:account]) continue;
+        NSData *data = item[(__bridge id)kSecValueData];
+        if ([data isKindOfClass:[NSData class]] && (long)data.length > maxLen) maxLen = (long)data.length;
+    }
+    return maxLen;
+}
+
+// YES if this write would erase a populated account blob after a session with no successful read
+// of it — the failed-read→destructive-write signature. Bypassed by the dev "disable recovery"
+// toggle so the raw wipe can still be reproduced on demand.
+static BOOL ApolloShouldBlockDestructiveAccountWrite(NSDictionary *query, NSData *newValue) {
+    if (ApolloDebugDisableRecovery()) return NO;
+    if (!IsAccountsFamilyQuery(query)) return NO;
+    NSString *account = query[(__bridge id)kSecAttrAccount];
+    if (ApolloWasAccountServed(account)) return NO; // reads worked this session — trust the write
+    NSUInteger newLen = [newValue isKindOfClass:[NSData class]] ? newValue.length : 0;
+    if (newLen >= kAccountBlobPopulatedThreshold) return NO; // not an empty/tiny write
+    long existing = ApolloExistingAccountBlobMaxLen(query[(__bridge id)kSecAttrService], account);
+    return existing >= (long)kAccountBlobPopulatedThreshold; // a populated copy exists — protect it
+}
+
 // MARK: - Login-persistence fault injection (dev-only self-test)
 //
 // The affected-device failure signature — a SCOPED account read returning -25300 while an
@@ -442,12 +532,7 @@ static OSStatus ApolloValetRecoverRead(NSDictionary *query, CFTypeRef *result, N
 // green result here is a regression check, NOT field confirmation (that still needs an affected
 // user's log). Every simulated read is logged [FaultInjection] so it can never be mistaken for a
 // genuine keychain failure. Inert unless the (FLEX-gated) toggles are set.
-static BOOL ApolloDebugForceAccountReadMiss(void) {
-    return [[NSUserDefaults standardUserDefaults] boolForKey:@"ApolloDebugForceAccountReadMiss"];
-}
-static BOOL ApolloDebugDisableRecovery(void) {
-    return [[NSUserDefaults standardUserDefaults] boolForKey:@"ApolloDebugDisableKeychainRecovery"];
-}
+// (ApolloDebugForceAccountReadMiss / ApolloDebugDisableRecovery are defined above the guard.)
 
 // MARK: - Keychain trace (login-persistence diagnostics)
 //
@@ -847,6 +932,14 @@ static OSStatus SecItemAdd_replacement(CFDictionaryRef query, CFTypeRef *result)
     ApolloKeychainTrace(@"ADD", strippedQuery, status,
                         [NSString stringWithFormat:@"writeLen=%ld", ApolloValueDataLength(strippedQuery)]);
 
+    // Last line of defense: never let a failed-read session erase a populated account blob by
+    // self-healing an empty add over it. Report success so Valet doesn't error; keep the good blob.
+    if (ApolloShouldBlockDestructiveAccountWrite(strippedQuery, strippedQuery[(__bridge id)kSecValueData])) {
+        ApolloLoginDiag(@"[KeychainGuard] BLOCKED empty add over populated account blob (no successful read this session) account=%@ writeLen=%ld",
+                        account, ApolloValueDataLength(strippedQuery));
+        return errSecSuccess;
+    }
+
     if (status == errSecDuplicateItem) {
         if (ApolloExistingKeychainItemHasSameValue(strippedQuery) ||
             ApolloUpdateStaleKeychainItem(strippedQuery)) {
@@ -914,6 +1007,7 @@ static OSStatus SecItemCopyMatching_replacement(CFDictionaryRef query, CFTypeRef
         if (mirrored) {
             ApolloKeychainTrace(@"COPY", strippedQuery, errSecSuccess,
                                 [NSString stringWithFormat:@"route=mirror readLen=%lu", (unsigned long)mirrored.length]);
+            if (IsAccountsFamilyQuery(strippedQuery)) ApolloMarkAccountServed(account);
             return ApolloMirrorServe(strippedQuery, mirrored, result);
         }
     }
@@ -957,8 +1051,15 @@ static OSStatus SecItemCopyMatching_replacement(CFDictionaryRef query, CFTypeRef
                             strippedQuery[(__bridge id)kSecAttrAccount],
                             [queriedGroup isKindOfClass:[NSString class]] ? queriedGroup : @"(stripped/none)",
                             foundGroup ?: @"?");
+            if (IsAccountsFamilyQuery(strippedQuery)) ApolloMarkAccountServed(strippedQuery[(__bridge id)kSecAttrAccount]);
             return errSecSuccess;
         }
+    }
+
+    // A genuine successful read marks the account as served this session, so the destructive-write
+    // guard trusts a later empty write (a real sign-out) rather than blocking it.
+    if (status == errSecSuccess && IsAccountsFamilyQuery(strippedQuery)) {
+        ApolloMarkAccountServed(strippedQuery[(__bridge id)kSecAttrAccount]);
     }
 
     if (ApolloIsAccountsBlobQuery(strippedQuery)) {
@@ -1002,6 +1103,14 @@ static OSStatus SecItemUpdate_replacement(CFDictionaryRef query, CFDictionaryRef
         return SimKeychainStore()[key] ? errSecSuccess : errSecItemNotFound;
     }
 #endif
+
+    // Last line of defense (see SecItemAdd_replacement): don't let a failed-read session update a
+    // populated account blob down to empty. Guard BEFORE the real update so the good blob survives.
+    if (ApolloShouldBlockDestructiveAccountWrite(strippedQuery, attrs[(__bridge id)kSecValueData])) {
+        ApolloLoginDiag(@"[KeychainGuard] BLOCKED empty update over populated account blob (no successful read this session) account=%@ writeLen=%ld",
+                        strippedQuery[(__bridge id)kSecAttrAccount], ApolloValueDataLength(attrs));
+        return errSecSuccess;
+    }
 
     OSStatus status = ApolloRealSecItemUpdate(strippedQuery, attrs);
     if (!IsValetQuery(strippedQuery)) return status;
@@ -1088,7 +1197,12 @@ static OSStatus SecItemDelete_replacement(CFDictionaryRef query) {
         // copies, and drop any container mirror entry so sign-out really signs out.
         NSDictionary *broadened = ApolloQueryByBroadeningSynchronizable(strippedQuery);
         if (broadened != strippedQuery) ApolloRealSecItemDelete(broadened);
-        ApolloMirrorRemove(strippedQuery[(__bridge id)kSecAttrService], strippedQuery[(__bridge id)kSecAttrAccount]);
+        BOOL droppedMirror = ApolloMirrorRemove(strippedQuery[(__bridge id)kSecAttrService], strippedQuery[(__bridge id)kSecAttrAccount]);
+        // On the -34018 cohort the item lived only in the container mirror, so the real delete
+        // returns a failing status even though the delete succeeded from Valet's point of view.
+        // Report success when the mirror held the key, so Valet.canAccessKeychain()'s canary (which
+        // may exercise delete) isn't left gating the whole account load off on exactly those devices.
+        if (droppedMirror && status != errSecSuccess) status = errSecSuccess;
     }
     return status;
 }
