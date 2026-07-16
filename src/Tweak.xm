@@ -513,10 +513,12 @@ static long ApolloExistingAccountBlobMaxLen(NSString *service, NSString *account
 static BOOL ApolloShouldBlockDestructiveAccountWrite(NSDictionary *query, NSData *newValue) {
     if (ApolloDebugDisableRecovery()) return NO;
     if (!IsAccountsFamilyQuery(query)) return NO;
+    // Only guard an actual DATA write — an attribute-only update (no kSecValueData) destroys
+    // nothing and must pass through.
+    if (![newValue isKindOfClass:[NSData class]]) return NO;
     NSString *account = query[(__bridge id)kSecAttrAccount];
     if (ApolloWasAccountServed(account)) return NO; // reads worked this session — trust the write
-    NSUInteger newLen = [newValue isKindOfClass:[NSData class]] ? newValue.length : 0;
-    if (newLen >= kAccountBlobPopulatedThreshold) return NO; // not an empty/tiny write
+    if (newValue.length >= kAccountBlobPopulatedThreshold) return NO; // not an empty/tiny write
     long existing = ApolloExistingAccountBlobMaxLen(query[(__bridge id)kSecAttrService], account);
     return existing >= (long)kAccountBlobPopulatedThreshold; // a populated copy exists — protect it
 }
@@ -919,6 +921,18 @@ static OSStatus SecItemAdd_replacement(CFDictionaryRef query, CFTypeRef *result)
         return errSecSuccess;
     }
 #endif
+    // Last line of defense, checked BEFORE touching the keychain: never let a failed-read session
+    // erase a populated account blob. Because of the access-group split, a stripped empty add can
+    // *succeed* into the app's default drawer (no duplicate there) and create a fresh empty copy
+    // that recovery's newest-by-date pick would then serve — so this has to run before the real
+    // add, not after. Non-Valet / non-accounts / populated / already-served writes pass straight
+    // through. Report success so Valet doesn't error; the good blob is untouched.
+    if (ApolloShouldBlockDestructiveAccountWrite(strippedQuery, strippedQuery[(__bridge id)kSecValueData])) {
+        ApolloLoginDiag(@"[KeychainGuard] BLOCKED empty add over populated account blob (no successful read this session) account=%@ writeLen=%ld",
+                        strippedQuery[(__bridge id)kSecAttrAccount], ApolloValueDataLength(strippedQuery));
+        return errSecSuccess;
+    }
+
     OSStatus status = ApolloRealSecItemAdd(strippedQuery, result);
     if (!IsValetQuery(strippedQuery)) return status;
 
@@ -931,14 +945,6 @@ static OSStatus SecItemAdd_replacement(CFDictionaryRef query, CFTypeRef *result)
     NSString *account = strippedQuery[(__bridge id)kSecAttrAccount];
     ApolloKeychainTrace(@"ADD", strippedQuery, status,
                         [NSString stringWithFormat:@"writeLen=%ld", ApolloValueDataLength(strippedQuery)]);
-
-    // Last line of defense: never let a failed-read session erase a populated account blob by
-    // self-healing an empty add over it. Report success so Valet doesn't error; keep the good blob.
-    if (ApolloShouldBlockDestructiveAccountWrite(strippedQuery, strippedQuery[(__bridge id)kSecValueData])) {
-        ApolloLoginDiag(@"[KeychainGuard] BLOCKED empty add over populated account blob (no successful read this session) account=%@ writeLen=%ld",
-                        account, ApolloValueDataLength(strippedQuery));
-        return errSecSuccess;
-    }
 
     if (status == errSecDuplicateItem) {
         if (ApolloExistingKeychainItemHasSameValue(strippedQuery) ||

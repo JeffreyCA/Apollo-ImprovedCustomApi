@@ -37,6 +37,10 @@ static NSString *ApolloLoginDiagLogPath(void) {
 }
 
 static const NSUInteger kApolloLoginDiagMaxBytes = 256 * 1024; // ~256KB tail is plenty of sessions
+// When trimming, drop back to this (not just under the cap) so the next ~64KB of lines don't each
+// re-trigger a full read+rewrite of the file. Without the headroom, once the buffer is at capacity
+// every single append would rewrite the whole file — expensive on the keychain hot path.
+static const NSUInteger kApolloLoginDiagTrimTo = 192 * 1024;
 
 void ApolloAppendLoginDiag(NSString *line) {
     if (![line isKindOfClass:[NSString class]] || line.length == 0) return;
@@ -68,7 +72,7 @@ void ApolloAppendLoginDiag(NSString *line) {
             if (end + stamped.length > kApolloLoginDiagMaxBytes) {
                 NSData *all = [NSData dataWithContentsOfFile:path];
                 if (all.length > kApolloLoginDiagMaxBytes) {
-                    NSData *tail = [all subdataWithRange:NSMakeRange(all.length - kApolloLoginDiagMaxBytes, kApolloLoginDiagMaxBytes)];
+                    NSData *tail = [all subdataWithRange:NSMakeRange(all.length - kApolloLoginDiagTrimTo, kApolloLoginDiagTrimTo)];
                     NSString *tailStr = [[NSString alloc] initWithData:tail encoding:NSUTF8StringEncoding];
                     NSRange nl = [tailStr rangeOfString:@"\n"];
                     if (nl.location != NSNotFound && nl.location + 1 < tailStr.length) {
