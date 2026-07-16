@@ -1506,13 +1506,15 @@ BOOL ApolloWebJSONShouldStubInvitedModerators(NSURLResponse *response) {
 }
 
 // GET /r/<sub>/api/link_flair(_v2) — the post composer's flair-template list —
-// is OAuth-only: the www mirror 404s for cookie auth (verified live; old
-// reddit picks flair via a different POST flow the app can't use). The rewrite
-// still routes it to www so it draws a definitive 404 instead of the oauth
-// 401→refresh→retry loop (see the classifier note), and this override turns
-// that 404 into an empty flair list so the Submit drawer loads normally — no
-// flair choices, a missing feature rather than a hang. user_flair(_v2) gets
-// the same treatment for symmetry. OAuth accounts untouched (session gate).
+// rejects cookie auth: the www mirror 404s for it (verified live; old reddit
+// picks flair via a different POST flow the app can't use). The rewrite still
+// routes it to www so it draws a definitive 404 instead of the oauth
+// 401→refresh→retry loop (see the classifier note), and the serializer then
+// recovers the real list from oauth.reddit.com with the session's token_v2
+// bearer (ApolloWebJSONRescueFlairList below), stubbing an empty list only
+// when no usable bearer exists — no flair choices, but the Submit drawer
+// still loads instead of hanging. user_flair(_v2) gets the same treatment
+// for symmetry. OAuth accounts untouched (session gate).
 BOOL ApolloWebJSONShouldStubFlairList(NSURLResponse *response) {
     if (!ApolloWebJSONHasUsableSession()) return NO;
     if (![response isKindOfClass:[NSHTTPURLResponse class]]) return NO;
@@ -1526,6 +1528,156 @@ BOOL ApolloWebJSONShouldStubFlairList(NSURLResponse *response) {
                                                          options:0 error:NULL];
     });
     return [re firstMatchInString:path options:0 range:NSMakeRange(0, path.length)] != nil;
+}
+
+#pragma mark - Keyless flair rescue (token_v2 bearer)
+
+// The flair-template endpoints reject cookie auth on www, but the web
+// session's own token_v2 cookie is a valid OAuth bearer that oauth.reddit.com
+// accepts for them (verified live 2026-07-16, full native response shape).
+// The rescue below refetches the failed flair list that way, so keyless
+// accounts get real flair options in the composer instead of the empty stub.
+
+BOOL ApolloWebJSONRequestIsInternal(NSURL *url) {
+    return ApolloWebJSONURLIsProbe(url);
+}
+
+// Unix expiry of a JWT's `exp` claim, or 0 when unparseable (treated as
+// expired). token_v2 is a standard three-segment JWT.
+static NSTimeInterval ApolloWebJSONJWTExpiry(NSString *jwt) {
+    NSArray<NSString *> *parts = [jwt componentsSeparatedByString:@"."];
+    if (parts.count < 2) return 0;
+    NSString *payload = [[parts[1] stringByReplacingOccurrencesOfString:@"-" withString:@"+"]
+                         stringByReplacingOccurrencesOfString:@"_" withString:@"/"];
+    while (payload.length % 4 != 0) payload = [payload stringByAppendingString:@"="];
+    NSData *data = [[NSData alloc] initWithBase64EncodedString:payload options:0];
+    if (!data) return 0;
+    NSDictionary *claims = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+    if (![claims isKindOfClass:[NSDictionary class]]) return 0;
+    id exp = claims[@"exp"];
+    return [exp respondsToSelector:@selector(doubleValue)] ? [exp doubleValue] : 0;
+}
+
+static NSString *ApolloWebJSONCookieValueFromHeader(NSString *header, NSString *name) {
+    for (NSString *pair in [header componentsSeparatedByString:@";"]) {
+        NSString *trimmed = [pair stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        NSRange eq = [trimmed rangeOfString:@"="];
+        if (eq.location == NSNotFound || eq.location == 0) continue;
+        if ([[trimmed substringToIndex:eq.location] isEqualToString:name]) {
+            return [trimmed substringFromIndex:eq.location + 1];
+        }
+    }
+    return nil;
+}
+
+// The session's token_v2 when it's still comfortably valid (5-minute margin
+// against mid-flight expiry), else nil.
+static NSString *ApolloWebJSONUsableTokenV2ForSession(ApolloWebSessionEntry *session) {
+    NSString *token = ApolloWebJSONCookieValueFromHeader(session.cookieHeader ?: @"", @"token_v2");
+    if (token.length == 0) return nil;
+    if (ApolloWebJSONJWTExpiry(token) <= [[NSDate date] timeIntervalSince1970] + 300) return nil;
+    return token;
+}
+
+// Reddit rotates token_v2 (~24h JWT) via Set-Cookie only on HTML page loads —
+// Apollo's .json traffic never triggers one, so the stored token routinely
+// ages out while reddit_session stays perfectly valid. Fetch one HTML page
+// with the session cookie and persist the rotated cookies through the same
+// Set-Cookie merge live traffic uses. Serialized behind a lock; losers of the
+// race see the winner's fresh token on the re-check. Synchronous (bounded by
+// the request timeout) — background queues only.
+static NSString *ApolloWebJSONMintTokenV2ForAccount(NSString *username) {
+    static NSObject *mintLock;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ mintLock = [NSObject new]; });
+    @synchronized (mintLock) {
+        ApolloWebSessionEntry *session = ApolloWebSessionFor(username);
+        if (session.cookieHeader.length == 0) return nil;
+        NSString *existing = ApolloWebJSONUsableTokenV2ForSession(session);
+        if (existing) return existing; // a concurrent rescuer already minted
+
+        // The probe fragment keeps the transport hooks' hands off this request
+        // (no rewrite, no expiry accounting, no bearer capture); it never
+        // reaches the wire.
+        NSURL *mintURL = ApolloWebJSONProbeURL([NSURL URLWithString:@"https://www.reddit.com/"]);
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:mintURL];
+        [req setValue:session.cookieHeader forHTTPHeaderField:@"Cookie"];
+        [req setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
+        req.HTTPShouldHandleCookies = NO;
+        req.timeoutInterval = 10;
+
+        dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+        __block NSHTTPURLResponse *http = nil;
+        [[[NSURLSession sharedSession] dataTaskWithRequest:req
+                                         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            if ([resp isKindOfClass:[NSHTTPURLResponse class]]) http = (NSHTTPURLResponse *)resp;
+            dispatch_semaphore_signal(sema);
+        }] resume];
+        if (dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 12 * NSEC_PER_SEC)) != 0) {
+            ApolloLog(@"[WebJSON] token_v2 mint timed out for u/%@", username);
+            return nil;
+        }
+        if (!http || http.statusCode < 200 || http.statusCode >= 400) {
+            ApolloLog(@"[WebJSON] token_v2 mint failed for u/%@ (HTTP %ld)", username, (long)http.statusCode);
+            return nil;
+        }
+        ApolloWebJSONMergeSetCookiesFromResponse(username, http);
+        NSString *minted = ApolloWebJSONUsableTokenV2ForSession(ApolloWebSessionFor(username));
+        ApolloLog(@"[WebJSON] token_v2 mint for u/%@ %@", username, minted ? @"succeeded" : @"produced no usable token");
+        return minted;
+    }
+}
+
+NSArray *ApolloWebJSONRescueFlairList(NSHTTPURLResponse *response) {
+    NSURL *failedURL = response.URL;
+    if (!failedURL) return nil;
+    // The account marker was stamped by the rewrite that authenticated the
+    // failed request; fall back to the active session for safety.
+    NSString *username = ApolloWebJSONAccountFromURL(failedURL) ?: ApolloActiveWebSessionUsername();
+    if (username.length == 0) return nil;
+    ApolloWebSessionEntry *session = ApolloWebSessionFor(username);
+    if (session.cookieHeader.length == 0) return nil;
+
+    NSString *token = ApolloWebJSONUsableTokenV2ForSession(session) ?: ApolloWebJSONMintTokenV2ForAccount(username);
+    if (token.length == 0) return nil;
+
+    // Same path + query as the failed www request, back on the oauth host.
+    NSURLComponents *components = [NSURLComponents componentsWithURL:failedURL resolvingAgainstBaseURL:NO];
+    if (!components) return nil;
+    components.host = @"oauth.reddit.com";
+    components.fragment = nil;
+    NSURL *oauthURL = components.URL ? ApolloWebJSONProbeURL(components.URL) : nil;
+    if (!oauthURL) return nil;
+
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:oauthURL];
+    [req setValue:[@"Bearer " stringByAppendingString:token] forHTTPHeaderField:@"Authorization"];
+    [req setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
+    req.HTTPShouldHandleCookies = NO;
+    req.timeoutInterval = 10;
+
+    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+    __block NSData *body = nil;
+    __block NSInteger status = 0;
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req
+                                     completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        body = data;
+        if ([resp isKindOfClass:[NSHTTPURLResponse class]]) status = ((NSHTTPURLResponse *)resp).statusCode;
+        dispatch_semaphore_signal(sema);
+    }] resume];
+    if (dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 12 * NSEC_PER_SEC)) != 0) {
+        ApolloLog(@"[WebJSON] Flair rescue timed out for %@", failedURL.path);
+        return nil;
+    }
+    if (status != 200 || body.length == 0) {
+        ApolloLog(@"[WebJSON] Flair rescue got HTTP %ld for %@", (long)status, failedURL.path);
+        return nil;
+    }
+    id json = [NSJSONSerialization JSONObjectWithData:body options:0 error:NULL];
+    if (![json isKindOfClass:[NSArray class]]) {
+        ApolloLog(@"[WebJSON] Flair rescue got a non-array payload for %@", failedURL.path);
+        return nil;
+    }
+    return json;
 }
 
 #pragma mark - Credential hydration
