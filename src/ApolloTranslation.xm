@@ -52,6 +52,7 @@ static const void *kApolloTranslationOwnedTextNodeKey = &kApolloTranslationOwned
 static const void *kApolloOwnedNodeOriginalBodyKey = &kApolloOwnedNodeOriginalBodyKey;
 static const void *kApolloOwnedNodeTranslatedTextKey = &kApolloOwnedNodeTranslatedTextKey;
 static const void *kApolloOwnedNodeReentrancyKey = &kApolloOwnedNodeReentrancyKey;
+static const void *kApolloDeferredPreemptScheduledKey = &kApolloDeferredPreemptScheduledKey;
 // Marker for title text nodes. Title nodes live outside the comments view
 // controller (feeds, search, profiles) so they must bypass the
 // `ApolloControllerIsInTranslatedMode` check used by the comment-thread
@@ -6666,6 +6667,56 @@ static BOOL ApolloPreemptUnownedCommentTextNode(id textNode, NSAttributedString 
     return YES;
 }
 
+// The comment preempt above must resolve the node's enclosing cell for
+// identity, but a vote's rebuilt body node receives its first write while
+// still DETACHED — the preempt declines, Apollo's original-language text goes
+// through, and the ~10ms scheduled reapply usually overwrites it before its
+// async render commits. Usually: when the render wins that race, the comment
+// visibly flashes the original language for a frame or two on the vote (the
+// row height no longer moves — the vote-flicker module holds it — but the
+// text itself repaints). Close the race: when a DECLINED unowned write looks
+// like one of this thread's translated bodies (candidate set exists in the
+// body index — a cheap dictionary hit), retry the preempt one runloop turn
+// later. The node is attached by then, so the preempt can resolve the real
+// comment and swap; the synchronous heal then flushes the swap before the
+// original's async render can commit.
+static void ApolloScheduleDeferredCommentPreempt(id textNode, NSAttributedString *incomingAttributedText) {
+    NSString *incomingText = [incomingAttributedText isKindOfClass:[NSAttributedString class]] ? incomingAttributedText.string : nil;
+    if (!textNode || incomingText.length == 0) return;
+    UIViewController *vc = sVisibleCommentsViewController;
+    if (!vc || !ApolloControllerIsInTranslatedMode(vc)) return;
+    BOOL hasCandidates = NO;
+    @synchronized (ApolloTranslatedBodyIndexLock()) {
+        ApolloScopeTranslatedBodyIndexLocked(vc);
+        hasCandidates = ((NSSet *)sApolloTranslatedBodyIndex[incomingText]).count > 0;
+    }
+    if (!hasCandidates) return;
+    if ([objc_getAssociatedObject(textNode, kApolloDeferredPreemptScheduledKey) boolValue]) return;
+    objc_setAssociatedObject(textNode, kApolloDeferredPreemptScheduledKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak id weakNode = textNode;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        id node = weakNode;
+        if (!node) return;
+        objc_setAssociatedObject(node, kApolloDeferredPreemptScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // Adopted by a preempt/apply in the meantime — nothing to do.
+        if ([objc_getAssociatedObject(node, kApolloTranslationOwnedTextNodeKey) boolValue]) return;
+        NSAttributedString *current = nil;
+        @try { current = ((id (*)(id, SEL))objc_msgSend)(node, @selector(attributedText)); }
+        @catch (__unused NSException *e) { return; }
+        if (![current isKindOfClass:[NSAttributedString class]] ||
+            ![current.string isEqualToString:incomingText]) return; // text moved on
+        NSAttributedString *swap = nil;
+        if (!ApolloPreemptUnownedCommentTextNode(node, current, &swap) || !swap) return;
+        objc_setAssociatedObject(node, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        @try { ((void (*)(id, SEL, id))objc_msgSend)(node, @selector(setAttributedText:), swap); }
+        @catch (__unused NSException *e) {}
+        objc_setAssociatedObject(node, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        id cellNode = ApolloCommentCellNodeForTextNode(node);
+        if (cellNode) ApolloTranslationHealCellDisplaySync(cellNode);
+        ApolloTranslationVerboseLog(@"[Translation/vote] deferred preempt: rebuilt node=%p swapped after attach", node);
+    });
+}
+
 // Vote-flash mitigation: when the comments header is rebuilt after a vote
 // tap, the new post-body text node has NO ownership markers yet. The
 // scheduler-based reapply path takes ~80-100ms, during which the original
@@ -6755,6 +6806,10 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             return;
         }
+        // Preempt declined (typically: rebuilt node still detached, identity
+        // unresolvable). If this looks like a translated body, retry next
+        // turn once the node is attached — see the deferred preempt above.
+        ApolloScheduleDeferredCommentPreempt(self, attributedText);
         %orig;
         return;
     }
@@ -6829,6 +6884,10 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             return;
         }
+        // Preempt declined (typically: rebuilt node still detached, identity
+        // unresolvable). If this looks like a translated body, retry next
+        // turn once the node is attached — see the deferred preempt above.
+        ApolloScheduleDeferredCommentPreempt(self, attributedText);
         %orig;
         return;
     }
