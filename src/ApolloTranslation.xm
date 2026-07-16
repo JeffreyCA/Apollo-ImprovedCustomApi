@@ -4011,6 +4011,33 @@ static void ApolloScheduleCachedTranslationReapplyForHeaderCellNode(id headerCel
     });
 }
 
+// Synchronous vote-path reapply, called by the vote-flicker module BETWEEN
+// Apollo's model-update reconfigure and its synchronous display flush. The
+// reconfigure resets the body back to the untranslated original through a
+// path that never crosses the setAttributedText: hook, so the row measures
+// one marker line shorter and the flush commits that height as an ANIMATED
+// table update; the scheduled +10ms reapply then restores the translation
+// with a second animated commit — the comment's bottom divider visibly
+// nudges up and springs back on every vote of a translated comment (and on
+// device the untranslated text itself is on screen for those frames).
+// Restoring the translation here, in the same runloop turn as the
+// reconfigure, means the original-language state is never measured or
+// painted: the flush sees the final text and the row height never changes.
+BOOL ApolloTranslationReapplySynchronouslyForVoteReconfigure(id cellNode) {
+    if (!cellNode || !sEnableBulkTranslation) return NO;
+    if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return NO;
+    NSString *className = NSStringFromClass([cellNode class]);
+    @try {
+        if ([className containsString:@"CommentsHeaderCellNode"]) {
+            return ApolloReapplyCachedTranslationForHeaderCellNode(cellNode);
+        }
+        if ([className containsString:@"CommentCellNode"]) {
+            return ApolloReapplyCachedTranslationForCellNode(cellNode);
+        }
+    } @catch (__unused NSException *e) {}
+    return NO;
+}
+
 #pragma mark - Phase C: post selftext translation driver
 
 static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *fallbackLink, BOOL forceTranslation) {
@@ -6452,6 +6479,31 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
 
     NSString *incomingText = incomingAttributedText.string;
     if (ApolloTextMatchesSourceOrVisualDisplay(incomingText, translatedText)) {
+        // Marker parity for the pass-through branch too: Apollo's vote-time
+        // rewrite can hand this hook the CLEAN translation (no "Translated
+        // from <Language>" line). Letting it through unchanged measures the
+        // row one marker line shorter until the scheduled reapply re-appends
+        // the marker ~10ms later — and BOTH height commits run as animated
+        // table updates, so the comment's bottom divider visibly nudges up
+        // and springs back on every vote. Same rule as the incoming==original
+        // rebuild below (round 4's fix), applied here: swap in incoming +
+        // marker. Guarded on the incoming being EXACTLY the clean translation:
+        // the surrounding matcher tolerates marker-bearing variants (which
+        // must pass through untouched — appending blindly doubled the line on
+        // every initial render), so only the character-identical marker-less
+        // form takes this branch.
+        if (swapOut && [incomingText isEqualToString:translatedText] &&
+            [objc_getAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey) boolValue]) {
+            NSAttributedString *withMarker = ApolloAttributedStringByAppendingTranslationMarker(incomingAttributedText, originalBody);
+            if ([withMarker isKindOfClass:[NSAttributedString class]] &&
+                withMarker != incomingAttributedText &&
+                ![withMarker.string isEqualToString:incomingText]) {
+                ApolloTranslationVerboseLog(@"[Translation/vote] prepareSwap: incoming==translated but marker-less → appending marker node=%p", textNode);
+                ApolloEnsureMarkerTappableOnNode(textNode);
+                *swapOut = withMarker;
+                return YES;
+            }
+        }
         ApolloTranslationVerboseLog(@"[Translation/vote] prepareSwap: incoming==translated, no-op node=%p", textNode);
         return NO;
     }

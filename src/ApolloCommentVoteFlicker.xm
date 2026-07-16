@@ -45,6 +45,7 @@
 #import <objc/message.h>
 
 #import "ApolloCommon.h"
+#import "ApolloTranslation.h"
 
 @interface ASDisplayNode : NSObject
 @property (nonatomic) BOOL neverShowPlaceholders;
@@ -211,6 +212,45 @@ static void ApolloVFNeutralizeCarriedOverCollapse(id note) {
     } @catch (__unused NSException *e) {}
 }
 
+// ── Vote-window row-height quiesce ──────────────────────────────────────────
+// A vote's reconfigure rebuilds the comment's body text node and the fresh
+// node briefly holds the UNTRANSLATED original — one "Translated from X"
+// marker line shorter than what's on screen. The rebuilt node is still
+// detached when its text is set, so the translation module's identity-checked
+// preempt must decline (an identical body could otherwise borrow another
+// comment's translation), and the scheduled reapply restores the text ~10ms
+// later. The text race is invisible (the reapply's synchronous heal wins),
+// but ASTableView's requeryNodeHeights runs in between: it commits the
+// one-line-shorter measure as an ANIMATED row update and then a second
+// animated update restores it — the comment's bottom divider visibly nudges
+// up and springs back on every vote. Suppress height re-queries for a short
+// window around the reconfigure and re-run once after it: the intermediate
+// measure is never committed, and the deferred re-query commits the (by then
+// unchanged) final height.
+static CFAbsoluteTime sApolloVFHeightQuiesceUntil = 0;
+static char kApolloVFRequeryDeferredKey;
+
+static void (*orig_ApolloVFRequeryNodeHeights)(id, SEL);
+static void ApolloVFRequeryNodeHeights(id self, SEL _cmd) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now < sApolloVFHeightQuiesceUntil) {
+        if (!objc_getAssociatedObject(self, &kApolloVFRequeryDeferredKey)) {
+            objc_setAssociatedObject(self, &kApolloVFRequeryDeferredKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            NSTimeInterval delay = MAX(0.02, (sApolloVFHeightQuiesceUntil - now) + 0.02);
+            __weak UIView *weakSelf = (UIView *)self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                UIView *strongSelf = weakSelf;
+                if (!strongSelf) return;
+                objc_setAssociatedObject(strongSelf, &kApolloVFRequeryDeferredKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                if (!strongSelf.window) return;
+                @try { orig_ApolloVFRequeryNodeHeights(strongSelf, _cmd); } @catch (__unused NSException *e) {}
+            });
+        }
+        return;
+    }
+    orig_ApolloVFRequeryNodeHeights(self, _cmd);
+}
+
 // Shared handler body for both section-controller hooks: arm the matching
 // visible cell(s) before the reconfigure, flush the display wave right after,
 // and once more on the next runloop turn (the -setNeedsLayout relayout lands
@@ -225,8 +265,22 @@ static void ApolloVFHandleModelUpdate(id note, void (^origCall)(void)) {
             }
         } @catch (__unused NSException *e) {}
     }
+    if (cells.count > 0) {
+        sApolloVFHeightQuiesceUntil = CFAbsoluteTimeGetCurrent() + 0.12;
+    }
     origCall();
     if (cells.count == 0) return;
+    // Restore the cached translation BEFORE flushing display: the reconfigure
+    // above resets a translated body to the untranslated original (bypassing
+    // the text-setter hooks), and flushing that state would measure the row
+    // one marker line shorter — an animated height commit that visibly nudges
+    // the comment's bottom divider until the scheduled reapply restores the
+    // text. Reapplying here keeps the original-language state from ever being
+    // measured or painted; the flush below then realizes the final text.
+    for (ASDisplayNode *cell in cells) {
+        @try { ApolloTranslationReapplySynchronouslyForVoteReconfigure(cell); }
+        @catch (__unused NSException *e) {}
+    }
     ApolloVFEnsureSynchronousDisplay(cells, "post-reconfigure");
     dispatch_async(dispatch_get_main_queue(), ^{
         ApolloVFEnsureSynchronousDisplay(cells, "next-turn");
@@ -317,6 +371,18 @@ static void ApolloVFForegroundHeal(const char *stage) {
 
 %ctor {
     %init;
+
+    // Vote-window height quiesce (see sApolloVFHeightQuiesceUntil above).
+    // Manual swizzle with an existence guard: requeryNodeHeights is a Texture
+    // internal — if a future Apollo binary ships without it, the quiesce
+    // silently disarms and the rest of the module is unaffected.
+    Class tableClass = objc_getClass("ASTableView");
+    Method requeryMethod = tableClass ? class_getInstanceMethod(tableClass, NSSelectorFromString(@"requeryNodeHeights")) : NULL;
+    if (requeryMethod) {
+        orig_ApolloVFRequeryNodeHeights = (void (*)(id, SEL))method_getImplementation(requeryMethod);
+        method_setImplementation(requeryMethod, (IMP)ApolloVFRequeryNodeHeights);
+    }
+
     NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
     void (^heal)(NSNotification *) = ^(__unused NSNotification *n) {
         ApolloVFForegroundHeal("now");
