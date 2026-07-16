@@ -2245,7 +2245,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         return (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 ||
                 indexPath.row == 3 || indexPath.row == 11);
     }
-    if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 || indexPath.row == 3 || indexPath.row == 4)) return YES;
+    if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 || indexPath.row == 3 || indexPath.row == 4 || indexPath.row == 6)) return YES;
     if (indexPath.section == SectionNotificationBackend) {
         return (indexPath.row == kNotifBackendRowTestConnection || indexPath.row == kNotifBackendRowTestBark);
     }
