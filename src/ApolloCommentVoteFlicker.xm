@@ -45,7 +45,6 @@
 #import <objc/message.h>
 
 #import "ApolloCommon.h"
-#import "ApolloTranslation.h"
 
 @interface ASDisplayNode : NSObject
 @property (nonatomic) BOOL neverShowPlaceholders;
@@ -270,17 +269,15 @@ static void ApolloVFHandleModelUpdate(id note, void (^origCall)(void)) {
     }
     origCall();
     if (cells.count == 0) return;
-    // Restore the cached translation BEFORE flushing display: the reconfigure
-    // above resets a translated body to the untranslated original (bypassing
-    // the text-setter hooks), and flushing that state would measure the row
-    // one marker line shorter — an animated height commit that visibly nudges
-    // the comment's bottom divider until the scheduled reapply restores the
-    // text. Reapplying here keeps the original-language state from ever being
-    // measured or painted; the flush below then realizes the final text.
-    for (ASDisplayNode *cell in cells) {
-        @try { ApolloTranslationReapplySynchronouslyForVoteReconfigure(cell); }
-        @catch (__unused NSException *e) {}
-    }
+    // NOTE: do NOT reapply the cached translation synchronously here. The
+    // reconfigure resets the body to the untranslated original ~15ms LATER
+    // (async), and an early reapply stamps the translation module's
+    // recently-applied guard — which then blocks the scheduled reapply that
+    // would restore the text after that reset, leaving the original language
+    // on screen and its (shorter) row height to be committed for real. The
+    // module's own +10ms scheduled reapply lands after the reset and restores
+    // cleanly; the height quiesce above keeps the interim measure from ever
+    // being committed.
     ApolloVFEnsureSynchronousDisplay(cells, "post-reconfigure");
     dispatch_async(dispatch_get_main_queue(), ^{
         ApolloVFEnsureSynchronousDisplay(cells, "next-turn");

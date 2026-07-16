@@ -4011,33 +4011,6 @@ static void ApolloScheduleCachedTranslationReapplyForHeaderCellNode(id headerCel
     });
 }
 
-// Synchronous vote-path reapply, called by the vote-flicker module BETWEEN
-// Apollo's model-update reconfigure and its synchronous display flush. The
-// reconfigure resets the body back to the untranslated original through a
-// path that never crosses the setAttributedText: hook, so the row measures
-// one marker line shorter and the flush commits that height as an ANIMATED
-// table update; the scheduled +10ms reapply then restores the translation
-// with a second animated commit — the comment's bottom divider visibly
-// nudges up and springs back on every vote of a translated comment (and on
-// device the untranslated text itself is on screen for those frames).
-// Restoring the translation here, in the same runloop turn as the
-// reconfigure, means the original-language state is never measured or
-// painted: the flush sees the final text and the row height never changes.
-BOOL ApolloTranslationReapplySynchronouslyForVoteReconfigure(id cellNode) {
-    if (!cellNode || !sEnableBulkTranslation) return NO;
-    if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return NO;
-    NSString *className = NSStringFromClass([cellNode class]);
-    @try {
-        if ([className containsString:@"CommentsHeaderCellNode"]) {
-            return ApolloReapplyCachedTranslationForHeaderCellNode(cellNode);
-        }
-        if ([className containsString:@"CommentCellNode"]) {
-            return ApolloReapplyCachedTranslationForCellNode(cellNode);
-        }
-    } @catch (__unused NSException *e) {}
-    return NO;
-}
-
 #pragma mark - Phase C: post selftext translation driver
 
 static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *fallbackLink, BOOL forceTranslation) {
