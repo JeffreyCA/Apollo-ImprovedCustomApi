@@ -226,6 +226,27 @@ static os_unfair_lock sOAuthSignInLock = OS_UNFAIR_LOCK_INIT;
 static CFAbsoluteTime sOAuthSignInArmedAt = 0;
 static NSSet<NSString *> *sOAuthSignInPreexisting = nil; // lowercased usernames at arm time
 
+// Login-persistence diagnostics: how many accounts are in the persisted RedditAccounts2 blob,
+// and how many of those still carry a currentUser identity. `count>0` with `withUser<count`
+// means the blob survived but an identity/token was cleared — a different failure than the
+// whole blob vanishing (`count==0`).
+void ApolloPersistedAccountStats(NSInteger *outCount, NSInteger *outWithUser) {
+    NSInteger count = 0, withUser = 0;
+    NSUserDefaults *group = [[NSUserDefaults alloc] initWithSuiteName:kApolloAccountCredsGroupSuite];
+    id accounts = ApolloAccountCredsUnarchive([group objectForKey:@"RedditAccounts2"]);
+    if ([accounts isKindOfClass:[NSArray class]]) {
+        count = (NSInteger)[(NSArray *)accounts count];
+        for (id client in (NSArray *)accounts) {
+            id user = nil;
+            @try { user = [client valueForKey:@"currentUser"]; }
+            @catch (__unused NSException *e) { user = nil; }
+            if (user) withUser++;
+        }
+    }
+    if (outCount) *outCount = count;
+    if (outWithUser) *outWithUser = withUser;
+}
+
 // All lowercased usernames currently in the persisted RedditAccounts2 blob.
 static NSSet<NSString *> *ApolloAllPersistedAccountUsernames(void) {
     NSMutableSet<NSString *> *names = [NSMutableSet set];

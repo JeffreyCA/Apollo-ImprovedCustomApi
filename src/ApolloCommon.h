@@ -128,4 +128,9 @@ void ApolloInjectDeletedCommentsMenuItemIfNeeded(NSMutableArray *children, NSStr
 // on a keychain-broken sideload, so a backup taken there still carries the signed-in account.
 // Returns an array of { "service", "account", "data" } dicts (empty when the mirror is dormant).
 NSArray<NSDictionary *> *ApolloKeychainMirrorItemsForBackup(void);
+
+// Append a login-persistence diagnostic line to the cross-launch buffer in the app container.
+// Mirrors the line into a file that survives force-quit, so Export Debug Logs carries the
+// session that actually signed the user out. Safe to call from any thread; never logs secrets.
+void ApolloAppendLoginDiag(NSString *line);
 __END_DECLS

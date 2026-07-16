@@ -22,6 +22,7 @@
 #import "ApolloState.h"
 #import "Tweak.h"
 #import "CustomAPIViewController.h"
+#import "Version.h"
 #import "UserDefaultConstants.h"
 #import "ApolloPostFilterStore.h"
 #import "Defaults.h"
@@ -185,6 +186,20 @@ static OSStatus ApolloRealSecItemDelete(NSDictionary *q) {
     return ((OSStatus (*)(CFDictionaryRef))SecItemDelete_orig)((__bridge CFDictionaryRef)q);
 }
 
+// A login-persistence diagnostic line: into os_log (current-session export) AND the cross-launch
+// buffer in the container (survives force-quit, so the session that signed the user out is still
+// in Export Debug Logs). Used by every [KeychainTrace]/[AccountSnapshot]/[KeychainSelfHeal]/
+// [KeychainMirror] site below. Never pass secrets — only statuses, byte lengths, and disposition.
+static void ApolloLoginDiag(NSString *fmt, ...) NS_FORMAT_FUNCTION(1, 2);
+static void ApolloLoginDiag(NSString *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    NSString *line = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+    ApolloLog(@"%@", line);
+    ApolloAppendLoginDiag(line);
+}
+
 // MARK: - Device keychain mirror (failure-scoped fallback store)
 //
 // The self-heal above fixes the common case: a synced/duplicate Valet item the real keychain
@@ -242,7 +257,7 @@ static void ApolloMirrorPersistLocked(void) {
         // If this fails the mirror is memory-only and the account is gone on the next cold
         // launch with no on-disk fingerprint — loud, since a mirror engagement is our only
         // trace of a broken keychain.
-        ApolloLog(@"[KeychainMirror] FAILED to write mirror to %@ — mirror is memory-only this session", path);
+        ApolloLoginDiag(@"[KeychainMirror] FAILED to write mirror to %@ — mirror is memory-only this session", path);
     }
 }
 
@@ -269,8 +284,8 @@ static void ApolloMirrorPut(NSString *service, NSString *account, NSData *data, 
     };
     ApolloMirrorPersistLocked();
     os_unfair_lock_unlock(&sMirrorLock);
-    ApolloLog(@"[KeychainMirror] real keychain could not persist item (status=%d); mirrored %lu bytes to container service=%@ account=%@",
-              (int)failStatus, (unsigned long)data.length, service, account);
+    ApolloLoginDiag(@"[KeychainMirror] real keychain could not persist item (status=%d); mirrored %lu bytes to container service=%@ account=%@",
+                    (int)failStatus, (unsigned long)data.length, service, account);
 }
 
 // A real write for this key finally landed — drop the mirror entry so the real keychain is
@@ -285,8 +300,8 @@ static void ApolloMirrorRemove(NSString *service, NSString *account) {
         ApolloMirrorPersistLocked();
     }
     os_unfair_lock_unlock(&sMirrorLock);
-    if (had) ApolloLog(@"[KeychainMirror] real keychain took over item; dropped mirror service=%@ account=%@",
-                       service, account);
+    if (had) ApolloLoginDiag(@"[KeychainMirror] real keychain took over item; dropped mirror service=%@ account=%@",
+                             service, account);
 }
 
 // Snapshot for Backup Settings, so a backup taken on a keychain-broken device still carries
@@ -368,19 +383,21 @@ static long ApolloValueDataLength(NSDictionary *dict) {
 }
 
 // One trace line per Valet keychain operation. `op` is the call name; `extra` is optional
-// trailing context (byte lengths, route taken). Only the account blob is traced by default so
-// the log stays legible; flip ApolloTraceAllValet to include Ultra/Pro + canary traffic too.
-static BOOL ApolloTraceAllValet(void) { return NO; }
+// trailing context (byte lengths, route taken). ALL Valet traffic is traced — not just the
+// account blob — so the canary Valet.canAccessKeychain() writes/reads (its master gate: a NO
+// there skips the whole account load) and any account-adjacent item are captured too. Valet
+// traffic is low-frequency, so this doesn't flood.
+static BOOL ApolloTraceAllValet(void) { return YES; }
 
 static void ApolloKeychainTrace(NSString *op, NSDictionary *query, OSStatus status, NSString *extra) {
     BOOL isAccounts = ApolloIsAccountsBlobQuery(query);
     if (!isAccounts && !ApolloTraceAllValet()) return;
     if (!IsValetQuery(query)) return;
     NSString *account = query[(__bridge id)kSecAttrAccount] ?: @"(nil)";
-    ApolloLog(@"[KeychainTrace] %@ account=%@ sync=%@ status=%d%@%@",
-              op, account, ApolloSyncDispositionString(query), (int)status,
-              isAccounts ? @" <ACCOUNTS>" : @"",
-              extra.length ? [@" " stringByAppendingString:extra] : @"");
+    ApolloLoginDiag(@"[KeychainTrace] %@ account=%@ sync=%@ status=%d%@%@",
+                    op, account, ApolloSyncDispositionString(query), (int)status,
+                    isAccounts ? @" <ACCOUNTS>" : @"",
+                    extra.length ? [@" " stringByAppendingString:extra] : @"");
 }
 
 // A point-in-time snapshot of where the signed-in account actually lives, logged at each app
@@ -392,10 +409,12 @@ static void ApolloKeychainTrace(NSString *op, NSDictionary *query, OSStatus stat
 static NSString *const kApolloGroupSuite = @"group.com.christianselig.apollo";
 
 // Real-keychain byte length of the accounts item (-1 = absent, -2 = read error/status). Also
-// reports the status out-param so a -34018 entitlement rejection is distinguishable from a
-// genuine not-found. Enumerates generic passwords and filters, so no exact Valet service string
-// is needed.
-static long ApolloRealAccountsBlobLength(OSStatus *outStatus) {
+// reports the status and the item's protection class (kSecAttrAccessible) out-params. The
+// protection class matters for the warm-signout theory: a WhenUnlocked item cannot be read
+// while the device is locked in the background, which would present exactly as "signed out
+// after idling". Enumerates generic passwords and filters, so no exact Valet service string
+// is needed. -34018 distinguishes an entitlement rejection from a genuine not-found.
+static long ApolloRealAccountsBlobLength(OSStatus *outStatus, NSString **outAccessible) {
     NSDictionary *q = @{
         (__bridge id)kSecClass:            (__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecMatchLimit:       (__bridge id)kSecMatchLimitAll,
@@ -416,6 +435,10 @@ static long ApolloRealAccountsBlobLength(OSStatus *outStatus) {
         if (![account isKindOfClass:[NSString class]] || ![account containsString:@"RedditAccounts2"]) continue;
         NSData *data = item[(__bridge id)kSecValueData];
         len = [data isKindOfClass:[NSData class]] ? (long)data.length : -1;
+        if (outAccessible) {
+            id acc = item[(__bridge id)kSecAttrAccessible];
+            *outAccessible = [acc isKindOfClass:[NSString class]] ? acc : [acc description];
+        }
         break;
     }
     return len;
@@ -433,21 +456,34 @@ static long ApolloMirrorAccountsBlobLength(void) {
     return -1;
 }
 
+// Device lock state — "protected data available" is NO while the device is locked. A keychain
+// read that fails only when this is NO is the accessibility-class signature of the warm signout.
+static NSString *ApolloProtectedDataString(void) {
+    id app = [UIApplication respondsToSelector:@selector(sharedApplication)] ? [UIApplication sharedApplication] : nil;
+    if (![app respondsToSelector:@selector(isProtectedDataAvailable)]) return @"?";
+    return [app isProtectedDataAvailable] ? @"unlocked" : @"LOCKED";
+}
+
 static void ApolloLogAccountSnapshot(NSString *reason) {
     // Defaults mirror (group suite): what Apollo's own loader reads. Length distinguishes a
-    // populated archive from an empty/absent one without unarchiving.
+    // populated archive from an empty/absent one without unarchiving; the account stats separate
+    // "blob present but identity/token cleared" (count>0, withUser<count) from "blob gone".
     NSUserDefaults *group = [[NSUserDefaults alloc] initWithSuiteName:kApolloGroupSuite];
     id defaultsBlob = [group objectForKey:@"RedditAccounts2"];
     long defaultsLen = [defaultsBlob isKindOfClass:[NSData class]] ? (long)[(NSData *)defaultsBlob length] : -1;
     NSInteger index = [group objectForKey:@"CurrentRedditAccountIndex"] ? [group integerForKey:@"CurrentRedditAccountIndex"] : -999;
     NSString *active = ApolloActiveAccountUsername();
+    NSInteger acctCount = 0, acctWithUser = 0;
+    ApolloPersistedAccountStats(&acctCount, &acctWithUser);
 
     OSStatus kcStatus = errSecSuccess;
-    long kcLen = ApolloRealAccountsBlobLength(&kcStatus);
+    NSString *accessible = nil;
+    long kcLen = ApolloRealAccountsBlobLength(&kcStatus, &accessible);
     long mirrorLen = ApolloMirrorAccountsBlobLength();
 
-    ApolloLog(@"[AccountSnapshot] %@ | keychain: len=%ld status=%d | defaults: len=%ld index=%ld | mirror: len=%ld | active=%@",
-              reason, kcLen, (int)kcStatus, defaultsLen, (long)index, mirrorLen, active ?: @"(nil)");
+    ApolloLoginDiag(@"[AccountSnapshot] %@ | device=%@ | keychain: len=%ld status=%d accessible=%@ | defaults: len=%ld index=%ld accounts=%ld withUser=%ld | mirror: len=%ld | active=%@",
+                    reason, ApolloProtectedDataString(), kcLen, (int)kcStatus, accessible ?: @"?",
+                    defaultsLen, (long)index, (long)acctCount, (long)acctWithUser, mirrorLen, active ?: @"(nil)");
 }
 
 // Fixes apollo-reborn#567: an iCloud-synced Valet item can miss a plain read
@@ -523,8 +559,8 @@ static BOOL ApolloUpdateStaleKeychainItem(NSDictionary *query) {
     searchQuery[(__bridge id)kSecAttrSynchronizable] = (__bridge id)kSecAttrSynchronizableAny;
     NSDictionary *update = @{(__bridge id)kSecValueData: newValue};
     OSStatus status = ApolloRealSecItemUpdate(searchQuery, update);
-    ApolloLog(@"[KeychainSelfHeal] updated duplicate item in place service=%@ account=%@ status=%d",
-              query[(__bridge id)kSecAttrService], query[(__bridge id)kSecAttrAccount], (int)status);
+    ApolloLoginDiag(@"[KeychainSelfHeal] updated duplicate item in place service=%@ account=%@ status=%d",
+                    query[(__bridge id)kSecAttrService], query[(__bridge id)kSecAttrAccount], (int)status);
     return status == errSecSuccess;
 }
 
@@ -538,8 +574,8 @@ static void ApolloDeleteStaleKeychainItem(NSDictionary *query) {
         deleteQuery[(__bridge id)kSecAttrSynchronizable] = (__bridge id)kSecAttrSynchronizableAny;
         status = ApolloRealSecItemDelete(deleteQuery);
     }
-    ApolloLog(@"[KeychainSelfHeal] deleted stale duplicate item service=%@ account=%@ status=%d",
-              query[(__bridge id)kSecAttrService], query[(__bridge id)kSecAttrAccount], (int)status);
+    ApolloLoginDiag(@"[KeychainSelfHeal] deleted stale duplicate item service=%@ account=%@ status=%d",
+                    query[(__bridge id)kSecAttrService], query[(__bridge id)kSecAttrAccount], (int)status);
 }
 
 static OSStatus SecItemAdd_replacement(CFDictionaryRef query, CFTypeRef *result) {
@@ -711,7 +747,7 @@ static OSStatus SecItemUpdate_replacement(CFDictionaryRef query, CFDictionaryRef
         NSMutableDictionary *broadened = [strippedQuery mutableCopy];
         broadened[(__bridge id)kSecAttrSynchronizable] = (__bridge id)kSecAttrSynchronizableAny;
         status = ApolloRealSecItemUpdate(broadened, attrs);
-        ApolloLog(@"[KeychainSelfHeal] broadened update service=%@ account=%@ status=%d", service, account, (int)status);
+        ApolloLoginDiag(@"[KeychainSelfHeal] broadened update service=%@ account=%@ status=%d", service, account, (int)status);
 
         if (status == errSecItemNotFound) {
             NSData *value = attrs[(__bridge id)kSecValueData];
@@ -730,8 +766,8 @@ static OSStatus SecItemUpdate_replacement(CFDictionaryRef query, CFDictionaryRef
                 add[(__bridge id)kSecAttrAccessible] = accessible;
                 add[(__bridge id)kSecValueData] = value;
                 status = ApolloRealSecItemAdd(add, NULL);
-                ApolloLog(@"[KeychainSelfHeal] update->add recreate service=%@ account=%@ accessible=%@ status=%d",
-                          service, account, accessible, (int)status);
+                ApolloLoginDiag(@"[KeychainSelfHeal] update->add recreate service=%@ account=%@ accessible=%@ status=%d",
+                                service, account, accessible, (int)status);
             }
         }
     }
@@ -2662,6 +2698,9 @@ static void initializeRandomSources() {
         [nc addObserverForName:name object:nil queue:[NSOperationQueue mainQueue]
                     usingBlock:^(NSNotification *note) { ApolloLogAccountSnapshot(reason); }];
     }
-    // Baseline snapshot of the on-disk state at launch, before AccountManager loads.
+    // Session boundary in the persistent buffer so a force-quit + relaunch is legible, followed
+    // by a baseline snapshot of the on-disk state at launch (before AccountManager loads).
+    NSString *appVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
+    ApolloLoginDiag(@"===== launch (Apollo %@, tweak %@) =====", appVersion, @TWEAK_VERSION);
     ApolloLogAccountSnapshot(@"ctor");
 }
