@@ -1892,13 +1892,25 @@ static void ApolloHLCollapseOrphanSeparators(UIViewController *vc) {
         }
     }
     if (changed) {
-        id tableNode = ApolloHLTypedIvar(vc, @"tableNode", objc_getClass("ASTableNode"));
-        if ([tableNode respondsToSelector:@selector(relayoutItems)]) ((void (*)(id, SEL))objc_msgSend)(tableNode, @selector(relayoutItems));
-        // relayoutItems re-measures but the shrink doesn't paint until the next
-        // layout pass (otherwise the breaker stays thick until the user scrolls) —
-        // force the table to apply it now.
-        [tv setNeedsLayout];
-        [tv layoutIfNeeded];
+        // relayoutItems re-lays out EVERY node in the feed synchronously on main —
+        // multi-second work on a long-scrolled feed, the 0x8BADF00D watchdog class
+        // from #630. Bound it: foreground-active only (Inactive is the snapshot
+        // window) and at most once per 10s; a skipped pass just leaves the breaker
+        // thick until the next scroll re-measures it, which is cosmetic.
+        if ([UIApplication sharedApplication].applicationState == UIApplicationStateActive) {
+            static NSTimeInterval sLastHLRelayoutUptime = 0;
+            NSTimeInterval now = CACurrentMediaTime();
+            if (now - sLastHLRelayoutUptime > 10.0) {
+                sLastHLRelayoutUptime = now;
+                id tableNode = ApolloHLTypedIvar(vc, @"tableNode", objc_getClass("ASTableNode"));
+                if ([tableNode respondsToSelector:@selector(relayoutItems)]) ((void (*)(id, SEL))objc_msgSend)(tableNode, @selector(relayoutItems));
+                // relayoutItems re-measures but the shrink doesn't paint until the next
+                // layout pass (otherwise the breaker stays thick until the user scrolls) —
+                // force the table to apply it now.
+                [tv setNeedsLayout];
+                [tv layoutIfNeeded];
+            }
+        }
     }
 }
 

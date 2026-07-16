@@ -1,6 +1,7 @@
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloWebJSON.h"
 #import "ApolloWebSessionStore.h"
+#import "ApolloAccountCredentials.h"
 #import "ApolloState.h"
 #import "ApolloCommon.h"
 #import "UIWindow+Apollo.h"
@@ -239,6 +240,13 @@ static void ApolloWebSessionProbeMeField(WKWebView *webView, NSString *field, vo
 // persists cookie + modhash under `username` via ApolloWebSessionSet.
 static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStore, NSString *username, NSString *modhash,
                                                    void (^completion)(NSUInteger cookieCount)) {
+    // Choosing or refreshing keyless auth supersedes any unfinished OAuth
+    // attempt. In particular, a failed OAuth token exchange can leave its
+    // cleanup discriminator armed for up to 120 seconds; synthesizing the new
+    // keyless account below fires RDKClient's user-install hook and would
+    // otherwise consume that stale signal and immediately delete the session
+    // this harvest just stored.
+    ApolloCancelInteractiveOAuthSignIn();
     [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
         NSDate *farFuture = [NSDate dateWithTimeIntervalSinceNow:kFarFutureCookieInterval];
         NSMutableArray<NSString *> *pairs = [NSMutableArray array];
@@ -259,6 +267,27 @@ static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStor
             // A fresh harvest supersedes any expiry verdict this launch reached
             // for the account — re-arm detection for the NEW session.
             ApolloWebJSONNoteSessionReauthenticated(username);
+            // A web-session account only works while the Web JSON transport is
+            // enabled. The mode is chosen per account at sign-in now (the
+            // choosers no longer gate on the master flag), so signing in
+            // without an API key IS the opt-in — flip the internal flag on
+            // rather than leaving the fresh session with no working transport.
+            if (!sWebJSONEnabled) {
+                sWebJSONEnabled = YES;
+                [[NSUserDefaults standardUserDefaults] setBool:YES forKey:UDKeyWebJSONEnabled];
+                ApolloLog(@"[WebJSON] Enabled Web JSON transport — u/%@ signed in without an API key", username);
+            }
+            // Tell the Custom API screen to re-derive itself. It may be
+            // sitting right behind this login page sheet (whose dismissal
+            // fires no viewWillAppear on the presenter), and BOTH its
+            // SectionAPIKeys row count (flag-dependent Web Session Login row)
+            // and its per-account rows (the just-harvested account is keyless
+            // now) are stale after a harvest — even one that didn't flip the
+            // flag. A stale committed row count makes the next row-level
+            // table update throw, so this must fire on every harvest.
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[NSNotificationCenter defaultCenter] postNotificationName:ApolloWebJSONEnabledDidChangeNotification object:nil];
+            });
         }
         completion(pairs.count);
     }];
@@ -684,15 +713,9 @@ void ApolloWebSessionPresentSignInChooser(UIViewController *host, void (^apiKeyH
     [sheet addAction:[UIAlertAction actionWithTitle:@"Sign In Without API Key (Experimental)"
                                               style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *a) {
-        if (!sWebJSONEnabled) {
-            UIAlertController *alert = [UIAlertController
-                alertControllerWithTitle:@"API-Key-Free Mode Is Off"
-                                  message:@"Turn on \"API-Key-Free Mode\" in Settings → API Keys first — otherwise a web-session account has no working way to authenticate and every request will hang."
-                           preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            [host presentViewController:alert animated:YES completion:nil];
-            return;
-        }
+        // No master-flag gate here: API-key-free is chosen per account at
+        // sign-in, and a successful harvest enables the transport flag itself
+        // (ApolloWebSessionHarvestFromCookieStore).
         BOOL hasExistingWebSession = ApolloWebSessionUsernames().count > 0;
         ApolloWebSessionLoginViewController *vc = hasExistingWebSession
             ? [ApolloWebSessionLoginViewController loginControllerForAdditionalAccount]
@@ -704,4 +727,69 @@ void ApolloWebSessionPresentSignInChooser(UIViewController *host, void (^apiKeyH
     sheet.popoverPresentationController.sourceView = host.view;
     sheet.popoverPresentationController.sourceRect = host.view.bounds;
     [host presentViewController:sheet animated:YES completion:nil];
+}
+
+#pragma mark - Per-account mode conversions
+
+void ApolloPresentSwitchToAPIKeyFlow(UIViewController *host, NSString *username, void (^completion)(BOOL switched)) {
+    if (username.length == 0) { if (completion) completion(NO); return; }
+    completion = [completion copy];
+
+    // What would the account fall back to? A real OAuth credential on disk plus
+    // an API key (its own or the default) means the switch "just works" after a
+    // relaunch; anything less means the user has to sign in again with a key.
+    ApolloAccountCredentialEntry *entry = ApolloAccountCredentialsFor(username);
+    BOOL hasKey = entry.clientId.length > 0 || sRedditClientId.length > 0;
+    BOOL hasRealCredential = ApolloWebJSONDiskAccountHasRealCredential(username);
+    BOOL cleanSwitch = hasKey && hasRealCredential;
+
+    NSString *message = cleanSwitch
+        ? [NSString stringWithFormat:@"u/%@ will stop using its web session and go back to signing in with its API key. Apollo needs to quit and reopen to finish the switch.", username]
+        : [NSString stringWithFormat:@"u/%@ signed in without an API key, and no API-key sign-in is stored for it. Its web session will be removed — you'll then need to sign it in again with an API key (Accounts → Add Account).", username];
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Use API Key Instead?"
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Switch to API Key"
+                                              style:(cleanSwitch ? UIAlertActionStyleDefault : UIAlertActionStyleDestructive)
+                                            handler:^(UIAlertAction *a) {
+        ApolloWebSessionRemove(username);
+        ApolloLog(@"[WebJSON] u/%@ switched to API-key sign-in — web session removed", username);
+        if (completion) completion(YES);
+
+        // The in-memory RDKClient for this account still carries a synthetic
+        // cookie-session credential (installed at launch); the real OAuth
+        // credential is only reloaded from the account blobs on the next
+        // launch, so requests for this account are dead until then.
+        UIAlertController *quit = [UIAlertController alertControllerWithTitle:@"Quit & Reopen to Finish"
+                                                                      message:[NSString stringWithFormat:@"u/%@ switches to its API key the next time Apollo starts.", username]
+                                                               preferredStyle:UIAlertControllerStyleAlert];
+        [quit addAction:[UIAlertAction actionWithTitle:@"Quit Apollo" style:UIAlertActionStyleDefault handler:^(UIAlertAction *q) {
+            exit(0);
+        }]];
+        [quit addAction:[UIAlertAction actionWithTitle:@"Later" style:UIAlertActionStyleCancel handler:nil]];
+        [host presentViewController:quit animated:YES completion:nil];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *a) {
+        if (completion) completion(NO);
+    }]];
+    [host presentViewController:alert animated:YES completion:nil];
+}
+
+void ApolloPresentSwitchToKeylessFlow(UIViewController *host, NSString *username) {
+    if (username.length == 0) return;
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Sign In Without API Key?"
+                         message:[NSString stringWithFormat:@"You'll sign in to reddit.com as u/%@ in a web view. The account's stored API key stays saved but won't be used while the web session exists.", username]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Continue" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        // The add-account variant clears the shared cookie jar first so the
+        // web view isn't pre-signed-in as some OTHER account — the user must
+        // authenticate as the account they're converting.
+        ApolloWebSessionLoginViewController *vc = [ApolloWebSessionLoginViewController loginControllerForAdditionalAccount];
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+        [host presentViewController:nav animated:YES completion:nil];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [host presentViewController:alert animated:YES completion:nil];
 }

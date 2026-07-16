@@ -4092,6 +4092,41 @@ static BOOL ApolloChildrenIdentityMatches(NSArray *a, NSArray *b) {
     return YES;
 }
 
+// Content-equality fallback for when element-pointer identity FAILS. Apollo
+// usually reuses the child element pointers across layoutSpecThatFits: passes
+// (see ApolloChildrenIdentityMatches), but it INTERMITTENTLY hands a fresh set
+// of child ASTextNodes for byte-identical content — observed on the in-place
+// relayout Apollo runs after a comment is up/down-voted (the vote re-sets the
+// byline score and calls -setNeedsLayout on the cell). Pointer identity then
+// fails and, without this check, we would take the REBUILD path and recreate
+// the body's text-segment leaf nodes; a freshly-allocated Texture node has an
+// empty backing store and paints blank for the one async-display frame before
+// it draws — i.e. the whole comment body "flickers" on every vote. This
+// compares the children by rendered content so a score-only vote is recognised
+// as unchanged and the existing (already-drawn) leaf nodes are reused instead.
+// Runs only on the identity-mismatch slow path, never on the fast reuse path.
+static BOOL ApolloChildrenContentMatches(NSArray *a, NSArray *b) {
+    if (!a || !b) return NO;
+    if (a.count != b.count) return NO;
+    for (NSUInteger i = 0; i < a.count; i++) {
+        id ca = a[i], cb = b[i];
+        if (ca == cb) continue;
+        // Only reuse when both are text nodes with equal attributed content
+        // (equal string AND equal attributes — a link/URL edit must still
+        // rebuild so the decomposition re-scans the new URLs). Any other shape
+        // is treated conservatively as a content change → rebuild.
+        if (![ca respondsToSelector:@selector(attributedText)] ||
+            ![cb respondsToSelector:@selector(attributedText)]) {
+            return NO;
+        }
+        NSAttributedString *ta = [(ASTextNode *)ca attributedText];
+        NSAttributedString *tb = [(ASTextNode *)cb attributedText];
+        if (ta == tb) continue;
+        if (!ta || !tb || ![ta isEqualToAttributedString:tb]) return NO;
+    }
+    return YES;
+}
+
 static id ApolloModelFromNodeIvar(ASDisplayNode *node, const char *ivarName) {
     if (!node || !ivarName) return nil;
     Ivar ivar = class_getInstanceVariable([node class], ivarName);
@@ -4179,7 +4214,41 @@ static BOOL ApolloLinkButtonHasInlineHost(ASDisplayNode *linkButtonNode) {
     NSArray *cachedOrigChildren = objc_getAssociatedObject(self, &kApolloCachedOrigChildrenKey);
     NSDictionary *decomp = objc_getAssociatedObject(self, &kApolloDecompositionMapKey);
 
-    if (!ApolloChildrenIdentityMatches(cachedOrigChildren, origChildren)) {
+    BOOL identityMatches = ApolloChildrenIdentityMatches(cachedOrigChildren, origChildren);
+
+    // Vote-flicker fix: element-pointer identity USUALLY holds across passes
+    // (see ApolloChildrenIdentityMatches) but Apollo INTERMITTENTLY hands a
+    // fresh set of child ASTextNodes for byte-identical content — observed on
+    // the in-place relayout Apollo runs after a comment is up/down-voted (the
+    // vote re-sets the byline score and calls -setNeedsLayout on the cell).
+    // Without this guard the mismatch would take the rebuild path below and
+    // recreate the body's text-segment leaf nodes; a freshly-allocated Texture
+    // node has an empty backing store and paints blank for the one async-display
+    // frame before it draws — i.e. the whole comment "flickers" on every vote
+    // (and that size churn cascades a re-display onto the sibling inline image /
+    // link card too). When the content is actually unchanged, re-key the EXISTING
+    // decomposition onto the new child pointers and reuse the already-drawn leaf
+    // nodes instead — nothing is recreated, so nothing blanks. The augmented-build
+    // loop below looks leaves up by NSValue(nonretained child pointer), so the map
+    // MUST be re-keyed old→new here (positional; the content match guarantees the
+    // 1:1 correspondence). Runs only on the identity-mismatch slow path.
+    if (!identityMatches && decomp.count > 0 &&
+        cachedOrigChildren.count == origChildren.count &&
+        ApolloChildrenContentMatches(cachedOrigChildren, origChildren)) {
+        NSMutableDictionary *rekeyed = [NSMutableDictionary dictionaryWithCapacity:origChildren.count];
+        for (NSUInteger i = 0; i < origChildren.count; i++) {
+            NSArray *leaves = decomp[[NSValue valueWithNonretainedObject:cachedOrigChildren[i]]];
+            if (leaves) rekeyed[[NSValue valueWithNonretainedObject:origChildren[i]]] = leaves;
+        }
+        objc_setAssociatedObject(self, &kApolloDecompositionMapKey, rekeyed.count > 0 ? rekeyed : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(self, &kApolloCachedOrigChildrenKey, origChildren, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        decomp = rekeyed.count > 0 ? rekeyed : nil;
+        identityMatches = YES; // content is stable — skip the rebuild below
+        ApolloLog(@"[InlineImages] vote-stable relayout: reused decomposition across pointer churn (md=%p leaves=%lu) — no rebuild, no flicker",
+                  self, (unsigned long)rekeyed.count);
+    }
+
+    if (!identityMatches) {
         // Rebuild decomposition. We do NOT removeFromSupernode the previous
         // imageNodes here — ApolloImageNodeForURL reuses them by URL. Text
         // segments ARE recreated each time (cheap, attributedText varies).

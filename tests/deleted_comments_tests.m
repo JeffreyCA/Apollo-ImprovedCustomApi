@@ -195,6 +195,43 @@ static void TestPlaceholderMetadata(void) {
     Require([removedData[@"apollo_deleted_comment_placeholder_reason"] isEqualToString:@"moderator_removed"], @"removed placeholder reason");
 }
 
+static void TestIntactCommentFromDeletedAccountIsPreserved(void) {
+    NSMutableDictionary *root = MutableJSON(@{
+        @"kind": @"Listing",
+        @"data": @{
+            @"children": @[
+                @{
+                    @"kind": @"t1",
+                    @"data": @{
+                        @"id": @"intact",
+                        @"name": @"t1_intact",
+                        @"body": @"This historical comment is still completely intact.",
+                        @"body_html": @"&lt;div class=\"md\"&gt;&lt;p&gt;This historical comment is still completely intact.&lt;/p&gt;&lt;/div&gt;",
+                        @"author": @"[deleted]",
+                        // Reddit can retain stale collapse metadata after an
+                        // account deletion. Neither field may override a body.
+                        @"collapsed": @YES,
+                        @"collapsed_reason_code": @"DELETED",
+                        @"replies": @"",
+                    },
+                },
+            ],
+        },
+    });
+
+    NSUInteger marked = ApolloDeletedCommentsTestMarkDeletedPlaceholdersInRoot(root);
+    NSDictionary *data = root[@"data"][@"children"][0][@"data"];
+    Require(marked == 0, @"deleted author does not mark an intact comment");
+    Require(data[@"apollo_deleted_comment_placeholder"] == nil, @"intact comment gets no placeholder marker");
+    Require([data[@"collapsed"] boolValue], @"intact comment keeps its native collapse state");
+
+    NSUInteger patched = ApolloDeletedCommentsTestPatchRedditJSONRoot(root,
+        @{@"t1_intact": Archived(@"intact", @"This historical comment is still completely intact.", @{})});
+    Require(patched == 0, @"archive does not rewrite an intact deleted-account comment");
+    Require([data[@"author"] isEqualToString:@"[deleted]"], @"archive does not resurrect the deleted username");
+    Require([data[@"body"] isEqualToString:@"This historical comment is still completely intact."], @"intact body is preserved");
+}
+
 static void TestImmediatePatchReturnsPlaceholderWithoutArchive(void) {
     NSMutableDictionary *root = VisibleRemovedRoot();
     NSData *data = [NSJSONSerialization dataWithJSONObject:root options:0 error:nil];
@@ -230,6 +267,7 @@ int main(void) {
         TestMixedMoreKeepsRemainingChildren();
         TestNoOp();
         TestPlaceholderMetadata();
+        TestIntactCommentFromDeletedAccountIsPreserved();
         TestImmediatePatchReturnsPlaceholderWithoutArchive();
         TestArcticCooldownPolicy();
         TestReasonLabels();

@@ -74,6 +74,29 @@ NSString *ApolloEffectiveRedirectURI(void);
 // ([[RDKClient sharedClient] currentUser].username), or nil if none/unavailable.
 NSString * _Nullable ApolloActiveAccountUsername(void);
 
+// Interactive OAuth (API-key) sign-in tracking. Auth modes are mutually
+// exclusive per account, but nothing used to enforce the transition: an
+// account that once had a web session and later signs in WITH an API key kept
+// its stale web-session entry, which permanently masked it as "keyless" (the
+// entry wins at the transport chokepoint and in the switcher badge). The OAuth
+// callback arms this flag; the RDKClient user-install hook consumes it — but
+// ONLY for a username that did not yet exist in the persisted account blobs
+// OR the web-session username index at arm time (see the implementation note
+// in ApolloAccountCredentials.m for why identity-binding is required: the
+// install hooks also fire from
+// NSKeyedUnarchiver decodes and background identity refreshes of stored
+// accounts, which must never spend the flag or remove a session).
+//
+// Arm when an OAuth authorization callback carrying ?code= is delivered
+// (both the universal WKWebView flow and native ASWebAuthenticationSession).
+void ApolloNoteInteractiveOAuthSignIn(void);
+// Disarm without consuming (sign-in cancelled or failed).
+void ApolloCancelInteractiveOAuthSignIn(void);
+// Consume for `username`: YES exactly once, iff armed within the last 120
+// seconds AND `username` was not present in either identity source at arm time.
+// Installs for pre-existing usernames return NO without disarming.
+BOOL ApolloTakeInteractiveOAuthSignInForNewUsername(NSString *username);
+
 #ifdef __cplusplus
 }
 #endif

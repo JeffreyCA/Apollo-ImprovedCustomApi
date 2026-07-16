@@ -63,8 +63,27 @@ extern "C" {
 //   • "Sign In With API Key"          → invokes apiKeyHandler
 //   • "Sign In Without API Key (Experimental)" → presents ApolloWebSessionLoginViewController
 //   • "Cancel"
-// Only call this when sWebJSONEnabled is YES (the caller is responsible for that gate).
+// Not gated on sWebJSONEnabled: the mode is chosen per account at sign-in, and
+// a successful keyless harvest enables the transport flag itself.
 void ApolloWebSessionPresentSignInChooser(UIViewController *host, void (^apiKeyHandler)(void));
+
+// Per-account mode conversions (shared by the Custom API settings screen's
+// API-Key-Free switch and the account switcher's per-account menu).
+//
+// Keyless -> API key: confirms with the user, removes u/`username`'s stored
+// web session, then (because the in-memory client still carries a synthetic
+// cookie-session credential until the account blobs are reloaded) offers to
+// quit Apollo so the account comes back on its real OAuth credential.
+// `completion(YES)` fires only when the user confirmed and the session was
+// removed; `completion(NO)` on cancel. Completion is optional.
+void ApolloPresentSwitchToAPIKeyFlow(UIViewController *host, NSString *username, void (^ _Nullable completion)(BOOL switched));
+
+// API key -> keyless: confirms, then presents the web-session login so the
+// user signs u/`username` in on reddit.com. The harvest stores the session
+// under whatever username actually logs in (normally the same account) and
+// enables the transport flag; the account's stored API key is kept but goes
+// unused while the web session exists.
+void ApolloPresentSwitchToKeylessFlow(UIViewController *host, NSString *username);
 
 #ifdef __cplusplus
 }

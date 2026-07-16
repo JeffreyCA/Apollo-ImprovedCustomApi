@@ -196,6 +196,13 @@ static BOOL ApolloRouteURLThroughUIApplication(NSURL *url) {
     }
 }
 
+// Public wrapper: route a reddit URL through Apollo's own handler so posts,
+// comments, subreddits and users open the native views. Returns NO when the
+// handler is unavailable, so callers can fall back to a web view.
+BOOL ApolloRouteURLThroughApp(NSURL *url) {
+    return ApolloRouteURLThroughUIApplication(url);
+}
+
 NSURL *ApolloURLByConvertingResolvedURLToApolloScheme(NSURL *url) {
     if (![url isKindOfClass:[NSURL class]]) {
         return nil;

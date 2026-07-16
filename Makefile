@@ -26,6 +26,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloFoundationModels.swift \
     $(SRC_DIR)/ApolloAISummary.xm \
     $(SRC_DIR)/ApolloAICloudBridge.m \
+    $(SRC_DIR)/ApolloAutoHideMetaFeeds.xm \
     $(SRC_DIR)/Tweak.xm \
     $(SRC_DIR)/ApolloCommon.m \
     $(SRC_DIR)/ApolloSettingsTableViewController.m \
@@ -64,6 +65,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloCommentsCollapse.xm \
     $(SRC_DIR)/ApolloInboxCommentScroll.xm \
     $(SRC_DIR)/ApolloStatsRowTouch.xm \
+    $(SRC_DIR)/ApolloCommentVoteFlicker.xm \
     $(SRC_DIR)/ApolloLiveCommentsFollow.xm \
     $(SRC_DIR)/ApolloPerPostCommentSort.xm \
     $(SRC_DIR)/ApolloLiquidGlass.xm \
@@ -74,8 +76,12 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloIPadTabBarBottom.xm \
     $(SRC_DIR)/ApolloSettings.xm \
     $(SRC_DIR)/ApolloRecentlyRead.xm \
+    $(SRC_DIR)/ApolloHiddenContentData.m \
+    $(SRC_DIR)/ApolloHiddenContentViewController.m \
+    $(SRC_DIR)/ApolloHiddenContentMenu.xm \
     $(SRC_DIR)/ApolloHideLinksBatchFix.xm \
     $(SRC_DIR)/ApolloSavedCategories.xm \
+    $(SRC_DIR)/ApolloSwiftIvarBridge.swift \
     $(SRC_DIR)/ApolloUserFlair.xm \
     $(SRC_DIR)/ApolloFlairColors.xm \
     $(SRC_DIR)/ApolloNativeActionMenus.xm \

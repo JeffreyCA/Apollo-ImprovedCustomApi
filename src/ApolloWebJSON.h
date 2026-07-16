@@ -39,6 +39,13 @@ NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request);
 // and posts ApolloWebJSONSessionExpiredNotification (at most once per session).
 void ApolloWebJSONNoteResponse(NSURLRequest *request, NSURLResponse *response);
 
+// Restores image metadata Reddit omits from some cookie-authenticated listing
+// items. The corresponding comments response still contains `post_hint` and the
+// full `preview`, so incomplete direct i.redd.it items are hydrated from that
+// response before RDKResponseSerializer parses them. This preserves the real
+// preview URL and aspect ratio instead of fabricating dimensions.
+NSData *ApolloWebJSONFixupListingMediaResponseData(NSURLResponse *response, NSData *data);
+
 // Fixes up the parsed response object for cookie-routed comment writes
 // (/api/editusertext, /api/comment). www.reddit.com returns each thing's data in
 // the legacy old-reddit {parent, content:"<html>"} shape, which Apollo can't
@@ -168,6 +175,25 @@ void ApolloWebJSONSeedBearerRegistryFromDisk(void);
 // Implemented in ApolloWebJSONIdentity.xm; call from %ctor before account
 // synthesis.
 void ApolloWebJSONRepairPoisonedAccountBlobs(void);
+
+// Posted (main thread) whenever sWebJSONEnabled is flipped OUTSIDE the Custom
+// API settings screen — e.g. a keyless harvest auto-enabling it while that
+// screen sits behind the login sheet. The screen's SectionAPIKeys row count
+// depends on the flag (the Web Session Login row only exists while it's on),
+// and a page-sheet dismissal does NOT fire viewWillAppear on the presenter,
+// so without this signal the table's committed row count goes stale and the
+// next row-level update throws NSInternalInconsistencyException.
+extern NSString * const ApolloWebJSONEnabledDidChangeNotification;
+
+// YES if the persisted account blobs (RedditAccounts2 + the Valet sensitive
+// array) contain an account for `username` (case-insensitive) whose stored
+// credential is REAL — a non-synthetic access token or a non-empty refresh
+// token. That marks a genuine OAuth (API-key) account; a keyless-synthesized
+// account's sensitive dict only ever holds a synthetic bearer and no refresh
+// token. Used by the legacy-session migration to avoid converting an OAuth
+// account to keyless just because the old single-global web session happened
+// to be harvested under its username. Implemented in ApolloWebJSONIdentity.xm.
+BOOL ApolloWebJSONDiskAccountHasRealCredential(NSString *username);
 
 // Returns a copy of `url` with the internal probe fragment applied. The
 // fragment is stripped by NSURLSession before transmission so it never reaches

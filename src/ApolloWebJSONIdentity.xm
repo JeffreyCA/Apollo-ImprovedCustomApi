@@ -559,6 +559,26 @@ void ApolloWebJSONSeedBearerRegistryFromDisk(void) {
     if (seeded > 0) ApolloLog(@"[WebJSON][identity] Seeded bearer registry from disk (%lu account(s))", (unsigned long)seeded);
 }
 
+BOOL ApolloWebJSONDiskAccountHasRealCredential(NSString *username) {
+    if (username.length == 0) return NO;
+    NSString *lowerUsername = username.lowercaseString;
+    NSUserDefaults *group = [[NSUserDefaults alloc] initWithSuiteName:kApolloGroupSuite];
+    id accountsObj = ApolloWebJSONUnarchive([group objectForKey:@"RedditAccounts2"]);
+    NSArray *accounts = [accountsObj isKindOfClass:[NSArray class]] ? accountsObj : @[];
+    if (accounts.count == 0) return NO;
+    NSArray<NSDictionary *> *valet = ApolloWebJSONReadValetAccountsArray(NULL) ?: @[];
+
+    for (NSUInteger i = 0; i < accounts.count && i < valet.count; i++) {
+        if (![ApolloWebJSONUsernameAtIndex(accounts, i) isEqualToString:lowerUsername]) continue;
+        NSDictionary *sensitive = [valet[i] isKindOfClass:[NSDictionary class]] ? valet[i] : nil;
+        NSString *accessToken  = [sensitive[@"accessToken"]  isKindOfClass:[NSString class]] ? sensitive[@"accessToken"]  : nil;
+        NSString *refreshToken = [sensitive[@"refreshToken"] isKindOfClass:[NSString class]] ? sensitive[@"refreshToken"] : nil;
+        if (refreshToken.length > 0) return YES;
+        if (accessToken.length > 0 && !ApolloWebJSONBearerIsSynthetic(accessToken)) return YES;
+    }
+    return NO;
+}
+
 // One-shot launch repair for installs poisoned by the pre-fix cross-account
 // identity leak (see ApolloWebJSONRewriteRequest's bearer-attribution comment):
 // a cookie-rewritten /api/v1/me answered an OAuth account's identity refresh
@@ -747,7 +767,12 @@ void ApolloWebJSONRepairPoisonedAccountBlobs(void) {
 // mode / for the modern shape — see ApolloWebJSONFixupWriteResponseObject.
 %hook RDKResponseSerializer
 - (id)responseObjectForResponse:(id)response data:(id)data error:(id *)error {
-    id obj = %orig;
+    id serializerData = data;
+    if (sWebJSONEnabled) {
+        @try { serializerData = ApolloWebJSONFixupListingMediaResponseData(response, data); }
+        @catch (NSException *e) { ApolloLog(@"[WebJSON] listing-media fixup failed: %@", e); }
+    }
+    id obj = %orig(response, serializerData, error);
     if (sWebJSONEnabled) {
         @try { obj = ApolloWebJSONFixupWriteResponseObject(response, obj); }
         @catch (NSException *e) { ApolloLog(@"[WebJSON] write-response fixup failed: %@", e); }

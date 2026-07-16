@@ -20,8 +20,11 @@ NS_ASSUME_NONNULL_BEGIN
 // The session is sensitive (it IS the account's live login, not just an API
 // client secret), so it's kept in the keychain — reusing ApolloWebJSON.m's
 // existing service string so the simulator's Valet/SecItem virtualization keeps
-// covering it. The global `sWebJSONEnabled` flag remains the master kill-switch
-// (per product decision); only the *session data* moves per-account.
+// covering it. The global `sWebJSONEnabled` flag still exists as the internal
+// transport gate, but it is auto-managed rather than user-facing: a keyless
+// sign-in (harvest) turns it on, and launch turns it on whenever stored
+// sessions exist. The Settings switch that used to write it now reflects and
+// converts the ACTIVE account's sign-in mode instead.
 
 @interface ApolloWebSessionEntry : NSObject
 @property (nonatomic, copy) NSString *cookieHeader;

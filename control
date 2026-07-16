@@ -1,6 +1,6 @@
 Package: com.apollo.reborn
 Name: Apollo-Reborn
-Version: 3.4.0
+Version: 3.4.1
 Architecture: iphoneos-arm
 Description: Apollo for Reddit tweak with in-app configurable API keys
 Maintainer: Apollo Reborn team

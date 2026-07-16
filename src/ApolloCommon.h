@@ -56,6 +56,10 @@ NSString *ApolloWebsiteNameFromHost(NSString *host);
 // nil if neither path yields a usable string.
 NSString *ApolloGetLinkButtonNodeURLString(id linkButtonNode);
 void ApolloPresentWebURLFromViewController(UIViewController *presenter, NSURL *url);
+// Route a reddit URL through Apollo's own AppDelegate URL handler (native post/
+// subreddit/user views). Returns NO if the handler is unavailable — fall back to
+// ApolloPresentWebURLFromViewController.
+BOOL ApolloRouteURLThroughApp(NSURL *url);
 
 // Returns all UIWindows across every connected UIWindowScene.
 // Use instead of the deprecated UIApplication.windows property.

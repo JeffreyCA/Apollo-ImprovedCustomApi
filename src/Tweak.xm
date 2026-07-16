@@ -486,11 +486,28 @@ static const char kARCompletion = '\0';
 - (instancetype)initWithURL:(NSURL *)URL
         callbackURLScheme:(NSString *)callbackURLScheme
         completionHandler:(void (^)(NSURL *, NSError *))completionHandler {
-    id result = %orig;
+    // Wrap the completion so BOTH sign-in flows (native ASWebAuthenticationSession
+    // and our WKWebView replacement, which reads the associated handler) report
+    // the outcome of the interactive OAuth sign-in: a callback URL carrying
+    // ?code= arms the stale-web-session cleanup consumed by the RDKClient
+    // user-install hook (ApolloUserAvatars.xm); a cancel/failure disarms it.
+    void (^original)(NSURL *, NSError *) = [completionHandler copy];
+    void (^wrapped)(NSURL *, NSError *) = ^(NSURL *callbackURL, NSError *error) {
+        BOOL gotAuthCode = NO;
+        if (callbackURL && !error) {
+            for (NSURLQueryItem *item in [NSURLComponents componentsWithURL:callbackURL resolvingAgainstBaseURL:NO].queryItems) {
+                if ([item.name isEqualToString:@"code"] && item.value.length > 0) { gotAuthCode = YES; break; }
+            }
+        }
+        if (gotAuthCode) ApolloNoteInteractiveOAuthSignIn();
+        else ApolloCancelInteractiveOAuthSignIn();
+        if (original) original(callbackURL, error);
+    };
+    id result = %orig(URL, callbackURLScheme, wrapped);
     id target = result ?: self;
     objc_setAssociatedObject(target, &kARScheme,     callbackURLScheme, OBJC_ASSOCIATION_COPY);
     objc_setAssociatedObject(target, &kARAuthURL,    URL,               OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(target, &kARCompletion, completionHandler, OBJC_ASSOCIATION_COPY);
+    objc_setAssociatedObject(target, &kARCompletion, wrapped,           OBJC_ASSOCIATION_COPY);
     return result;
 }
 
@@ -1094,6 +1111,14 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
     NSURLRequest *currentRequest = [self valueForKey:@"_currentRequest"];
     ApolloRedditCaptureBearerTokenFromRequest(request, @"__NSCFLocalSessionTask _originalRequest");
     ApolloRedditCaptureBearerTokenFromRequest(currentRequest, @"__NSCFLocalSessionTask _currentRequest");
+
+    // Observe comments requests at RESUME time as well as at task creation. Once the
+    // app has been running for a while, Apollo can hand us tasks whose creation never
+    // passed through the hooked dataTaskWith… selectors (seen with single-comment
+    // permalink views: only the resume fired, so the Arctic warm never started and the
+    // deleted comment rendered as a bare chip — issue #620 round 2). Observation is
+    // cheap (parses reddit-host comments URLs only) and warming is deduped downstream.
+    ApolloDeletedCommentsHandleRequestObservation(request ?: currentRequest, @"onqueue_resume");
 
     NSURLRequest *redditMediaRequest = ApolloRedditMaybeRewriteSubmitRequest(request) ?: ApolloRedditMaybeRewriteSubmitRequest(currentRequest);
     if (!redditMediaRequest) {
@@ -2137,6 +2162,19 @@ static void initializeRandomSources() {
     // where sWebJSONEnabled is read). Migrates any legacy NSUserDefaults cookie,
     // then any legacy single-global session, into the per-account store.
     ApolloWebJSONLoadPersistedCredentials();
+    // Per-account coherence: a stored web session IS that account's sign-in —
+    // it only works while the Web JSON transport is enabled. The mode is
+    // chosen per account now (sign-in choosers no longer gate on this flag,
+    // and turning an account's mode off REMOVES its session), so "sessions
+    // exist but the flag is off" is a stale kill-switch state from an older
+    // build; without this the accounts would badge as keyless in the switcher
+    // while every one of their requests hangs.
+    if (!sWebJSONEnabled && ApolloWebSessionUsernames().count > 0) {
+        sWebJSONEnabled = YES;
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:UDKeyWebJSONEnabled];
+        ApolloLog(@"[WebJSON] Enabled Web JSON transport at launch — %lu web-session account(s) exist",
+                  (unsigned long)ApolloWebSessionUsernames().count);
+    }
     if (sWebJSONEnabled) {
         NSArray<NSString *> *webSessionUsers = ApolloWebSessionUsernames().allObjects;
         ApolloLog(@"[WebJSON] enabled at launch, %lu web-session account(s): %@",

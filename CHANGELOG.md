@@ -6,9 +6,23 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
+- Revamp **Settings** with task-focused sections, unified search, direct navigation to individual options, and dedicated feature-request and privacy-conscious bug-report flows (#637: @jordanearle)
+- Add native **Reddit Polls** voting and creation behind an opt-in setting, using a separate per-account web session when needed (#643: @jordanearle)
+- Redesign **Detailed Profiles** with immersive banners, prominent avatars, glass stat cards, and improved Social Links (#655: @jordanearle)
+- Add modern **Reddit Chat** for API-Key-Free accounts, with an opt-in option for API-key accounts that preserves Apollo's legacy Direct Chat (#658: @icpryde)
+
+## [v3.4.1] - 2026-07-15
+
+### Features
+
+- Add the **Apollo Classic** Liquid Glass app icon to the in-app icon picker (#660: @IllIIllIllIllII)
 - Add a **Remember Post Sort** toggle in **Settings > General > Comments** that restores the comment sort you last picked for a post when you reopen it (#570: @icpryde)
 - Add a **Tap to Play** mode for inline GIFs and a new **Inline Media** settings sub-screen that gathers the Inline Media Previews, Alignment, and Autoplay controls plus a new **Inline Media Size** slider (#602: @icpryde)
 - Play short-clip host links — **streamff, streamin, streamain, dubz, dropr, bangr, and MLB** clips — inline as real videos with autoplay, fullscreen, mute, and PiP, just like Streamable posts (#596: @icpryde)
+- Replace **Hide Bars on Scroll** with a **Left / Right / Off** picker for the collapsed Liquid Glass tab bar (#645: @icpryde)
+- Make the **account switcher** and **Custom API** settings reflect each account's actual sign-in mode and credentials instead of showing one global state (#603: @icpryde)
+- Add **Hidden Content Recovery** to profiles so you can find hidden, removed, or deleted posts and comments and view archived copies when live content is gone (#633: @ostechgit)
+- Enable viewing and changing **user flair** while using API-Key-Free mode (#653: @icpryde)
 
 ### Fixes
 
@@ -16,6 +30,15 @@ All notable changes to this project will be documented in this file.
 - Fix **inline GIF autoplay** not being honored under Never / WiFi Only for GIFs on slow hosts, and paused GIFs losing their play overlay and opening the media viewer when tapped (#602: @icpryde)
 - Fix converted **native menus** on Liquid Glass builds using the old fade animation instead of the iOS 26 glass morph that blooms the menu out of the tapped button (#600: @icpryde)
 - Fix **Tag Filters** double-blurring media on top of Apollo's own "tap to view" overlay when **Blur mature (18+) images and media** is enabled, including compact NSFW thumbnails (#585: @JeffreyCA)
+- Improve **Recently Read Posts** so revisited posts move to the top and the screen refreshes in place when you return, while fixing stale, resurrected, or crashing rows during refresh and deletion (#632: @JeffreyCA)
+- Fix bulk **Hide Read Posts** and unhide actions silently skipping 50 posts when processing more than 50 at once (#650: @icpryde)
+- Fix notification-backend account registration failing when Reddit credentials were omitted from upload-task request bodies (#642: @nickclyde)
+- Improve feed scrolling smoothness by reducing repeated translation, link-preview, and flair work as rows enter the viewport (#652: @icpryde)
+- Fix comments flashing blank when voting or returning from the app switcher, including translated comments briefly reverting or changing height (#627: @icpryde)
+- Fix long posts failing to translate and improve Apple's language detection for clearly foreign short post bodies (#629: @icpryde)
+- Improve **Deleted Comments** recovery reliability and coverage, render recovered Markdown correctly, and stop row-height updates from animating against comment collapse (#630: @icpryde)
+- Fix **Auto Hide Read Posts** ignoring Popular and All when **Disable in Subreddits** is enabled (#649: @icpryde)
+- Fix direct Reddit images appearing as link cards instead of inline images in API-Key-Free feeds (#654: @icpryde)
 
 ## [v3.4.0] - 2026-07-08
 
@@ -649,6 +672,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v3.4.1]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.4.0...v1.15.11_3.4.1
 [v3.4.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.3.0...v1.15.11_3.4.0
 [v3.3.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.2.0...v1.15.11_3.3.0
 [v3.2.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.1.1...v1.15.11_3.2.0

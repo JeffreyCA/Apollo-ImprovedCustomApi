@@ -56,6 +56,14 @@ static const void *kApolloOwnedNodeReentrancyKey = &kApolloOwnedNodeReentrancyKe
 // `ApolloControllerIsInTranslatedMode` check used by the comment-thread
 // ownership system. Set in addition to kApolloTranslationOwnedTextNodeKey.
 static const void *kApolloTitleOwnedTextNodeKey = &kApolloTitleOwnedTextNodeKey;
+// Marker for COMMENT body text nodes specifically. The vote-time marker-parity
+// append must only ever decorate comment bodies — posts show the compact
+// info-row "🌐 PT" banner instead of an appended line. "Owned but not
+// title-owned" is NOT a comment test: the post header selftext node, the
+// visible-post-body fallback node, and stash-preempt-adopted header nodes are
+// all owned without the title key. Set in addition to
+// kApolloTranslationOwnedTextNodeKey, only by the comment apply/preempt paths.
+static const void *kApolloCommentOwnedTextNodeKey = &kApolloCommentOwnedTextNodeKey;
 // Marks a UIViewController as a feed-style VC (Posts/LitePosts/SearchResults).
 // The globe-installation code uses this to gate visibility on
 // sTranslatePostTitles in addition to sEnableBulkTranslation.
@@ -277,6 +285,7 @@ static BOOL ApolloRefreshVisibleTranslationAppliedForController(UIViewController
 static BOOL ApolloRefreshFeedTitleTranslationAppliedForController(UIViewController *vc);
 static NSString *ApolloDetectDominantLanguage(NSString *text);
 static NSAttributedString *ApolloAttributedStringByAppendingTranslationMarker(NSAttributedString *translatedAttr, NSString *sourceText);
+static void ApolloIndexTranslatedCommentBody(NSString *bodyKey, NSString *fullName);
 static BOOL ApolloShouldShowTranslationMarkerForSource(NSString *sourceText, NSString **outCode);
 static void ApolloToggleTranslationForCommentTextNode(id textNode);
 static void ApolloEnsureMarkerTappableOnNode(id textNode);
@@ -966,6 +975,35 @@ static NSRange ApolloRangeByTrimmingTrailingURLPunctuation(NSString *text, NSRan
     return range;
 }
 
+// Reddit comment bodies embed inline media as markdown-image tokens whose
+// "URL" is a media id — `![gif](giphy|ECtLJKdGj8jfy)`, `![img](emote|t5_…|…)`.
+// Apollo's renderer strips these from the displayed body (the gif/emote is
+// drawn from media_metadata as its own node), but `comment.body` keeps them —
+// so translating the raw body used to send the token to the provider and then
+// display it LITERALLY as text above the translation. Strip media-id tokens
+// (the `x|y` id form is never a real URL — URLs carry ://) plus the blank
+// lines they leave behind, both from text we send to providers and from
+// cached translations at apply time.
+static NSString *ApolloStripInlineMediaTokens(NSString *text) {
+    if (![text isKindOfClass:[NSString class]] || text.length == 0) return text;
+    if ([text rangeOfString:@"!["].location == NSNotFound) return text;
+    static NSRegularExpression *tokenRe = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        tokenRe = [NSRegularExpression regularExpressionWithPattern:@"!\\[[^\\]\\n]*\\]\\([a-z]+\\|[^)\\n]*\\)"
+                                                            options:0 error:NULL];
+    });
+    NSString *stripped = [tokenRe stringByReplacingMatchesInString:text options:0
+                                                             range:NSMakeRange(0, text.length)
+                                                      withTemplate:@""];
+    if (stripped.length == text.length) return text;
+    // Collapse the blank hole the token leaves (3+ newlines → 2) and trim.
+    while ([stripped rangeOfString:@"\n\n\n"].location != NSNotFound) {
+        stripped = [stripped stringByReplacingOccurrencesOfString:@"\n\n\n" withString:@"\n\n"];
+    }
+    return [stripped stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
 static NSString *ApolloProtectTranslationLinks(NSString *sourceText, NSDictionary<NSString *, NSString *> **protectedLinksOut) {
     if (protectedLinksOut) *protectedLinksOut = @{};
     if (![sourceText isKindOfClass:[NSString class]] || sourceText.length == 0) return sourceText;
@@ -1651,10 +1689,51 @@ static id ApolloBestCommentTextNode(id commentCellNode, RDKComment *comment) {
     return bestNode;
 }
 
+// One deferred, per-table-coalesced empty begin/endUpdates: re-queries row heights and
+// re-measures only nodes whose calculated layout was invalidated. Mirrors the
+// link-preview module's coalesced height refresh (#630 rounds 6-7).
+static char kApolloTranslationHeightCommitPendingKey;
+static void ApolloTranslationScheduleHostHeightCommit(id cellNode) {
+    if (!cellNode) return;
+    UIView *cellView = nil;
+    @try {
+        if ([cellNode respondsToSelector:@selector(isNodeLoaded)] &&
+            !((BOOL (*)(id, SEL))objc_msgSend)(cellNode, @selector(isNodeLoaded))) {
+            return; // off-screen: the next display pass measures with the invalidated layout
+        }
+        if ([cellNode isKindOfClass:[UIView class]]) {
+            cellView = (UIView *)cellNode;
+        } else if ([cellNode respondsToSelector:@selector(view)]) {
+            cellView = ((UIView *(*)(id, SEL))objc_msgSend)(cellNode, @selector(view));
+        }
+    } @catch (__unused NSException *e) { return; }
+
+    UITableView *tableView = nil;
+    for (UIView *current = cellView; current; current = current.superview) {
+        if ([current isKindOfClass:[UITableView class]]) { tableView = (UITableView *)current; break; }
+    }
+    if (!tableView || !tableView.window) return;
+    if (objc_getAssociatedObject(tableView, &kApolloTranslationHeightCommitPendingKey)) return;
+    objc_setAssociatedObject(tableView, &kApolloTranslationHeightCommitPendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    __weak UITableView *weakTableView = tableView;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UITableView *strongTableView = weakTableView;
+        if (!strongTableView) return;
+        objc_setAssociatedObject(strongTableView, &kApolloTranslationHeightCommitPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (!strongTableView.window) return;
+        @try {
+            [UIView performWithoutAnimation:^{
+                [strongTableView beginUpdates];
+                [strongTableView endUpdates];
+            }];
+        } @catch (__unused NSException *e) {}
+    });
+}
+
 static void ApolloForceRelayoutForTextNodeAndOwner(id owner, id textNode) {
     SEL invalidateSel = NSSelectorFromString(@"invalidateCalculatedLayout");
     SEL supernodeSel = NSSelectorFromString(@"supernode");
-    SEL transitionSel = NSSelectorFromString(@"transitionLayoutWithAnimation:shouldMeasureAsync:measurementCompletion:");
 
     void (^nudgeObject)(id) = ^(id object) {
         if (!object) return;
@@ -1693,28 +1772,54 @@ static void ApolloForceRelayoutForTextNodeAndOwner(id owner, id textNode) {
     }
     if (!cellNode) cellNode = owner;
 
+    // This used to finish with transitionLayoutWithAnimation:NO shouldMeasureAsync:NO on
+    // the CELL node — a synchronous full-subtree measure on the main thread, fired per
+    // translated comment and looped over every visible cell on globe toggles. Same
+    // primitive as the round-7 link-preview watchdog freeze (#630), same replacement:
+    // the invalidate walk above marks the nodes dirty for the next layout pass, and a
+    // coalesced begin/endUpdates commits the new row heights lazily.
+    ApolloTranslationScheduleHostHeightCommit(cellNode);
+}
+
+// Anti-flicker heal for translation text swaps. setAttributedText: +
+// setNeedsLayout/Display schedule an ASYNCHRONOUS redisplay of the swapped
+// node; on a visible cell Texture commits the frame with the node's contents
+// cleared and fills it in a frame later — the same nil-contents blank the
+// vote fix (ApolloCommentVoteFlicker.xm) eliminates for byline updates. The
+// vote fix's flush windows end before the translation vote-resilience reapply
+// runs, so translated comments still flashed on vote. Heal at the source
+// instead: after every translation write into an on-screen cell, force the
+// cell subtree to finish display synchronously (now + next runloop turn, when
+// the relayout wave lands). Off-screen cells are skipped — isNodeLoaded is
+// checked BEFORE touching .view so unloaded nodes are never forced to load.
+static void ApolloTranslationHealCellDisplaySync(id cellNode) {
+    if (!cellNode) return;
     @try {
-        if ([cellNode respondsToSelector:transitionSel]) {
-            NSMethodSignature *sig = [cellNode methodSignatureForSelector:transitionSel];
-            if (sig) {
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                inv.target = cellNode;
-                inv.selector = transitionSel;
-                BOOL animated = NO;
-                BOOL async = NO;
-                void (^completion)(void) = nil;
-                [inv setArgument:&animated atIndex:2];
-                [inv setArgument:&async atIndex:3];
-                [inv setArgument:&completion atIndex:4];
-                [inv invoke];
-            }
-        }
+        if (![cellNode respondsToSelector:@selector(isNodeLoaded)] ||
+            !((BOOL (*)(id, SEL))objc_msgSend)(cellNode, @selector(isNodeLoaded))) return;
+        UIView *v = [cellNode respondsToSelector:@selector(view)]
+            ? ((UIView *(*)(id, SEL))objc_msgSend)(cellNode, @selector(view)) : nil;
+        if (!v.window) return;
+        if (![cellNode respondsToSelector:@selector(recursivelyEnsureDisplaySynchronously:)]) return;
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(cellNode, @selector(recursivelyEnsureDisplaySynchronously:), YES);
+        __weak id weakCell = cellNode;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            id strong = weakCell;
+            if (!strong) return;
+            @try {
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(strong, @selector(recursivelyEnsureDisplaySynchronously:), YES);
+            } @catch (__unused NSException *e) {}
+        });
     } @catch (__unused NSException *e) {}
 }
 
 static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *comment, NSString *translatedText) {
     if (!commentCellNode || ![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return;
     if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
+    // Cached translations from before media-token stripping may still carry a
+    // literal ![gif](giphy|…) line — normalize at the point of use.
+    translatedText = ApolloStripInlineMediaTokens(translatedText);
+    if (translatedText.length == 0) return;
 
     // Respect a per-item pin: if the user tapped this comment's marker to show
     // its original language, don't (re)translate it (this also blocks the
@@ -1729,6 +1834,7 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
         if (!ApolloTapModeIsTranslatedKey(pinName)) {
             if (ApolloTranslatedTextDiffersFromSource(comment.body, translatedText)) {
                 ApolloAppendTranslateAffordanceForCellNode(commentCellNode, comment);
+                ApolloTranslationHealCellDisplaySync(commentCellNode);
             }
             return;
         }
@@ -1815,7 +1921,22 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [comment.body copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloRegisterOwnedTextNode(textNode);
+
+    // EXACT no-op gate: the containment heuristics above decide MATCHING, but
+    // they misfire on repetitive bodies (e.g. long AAAA… strings match both
+    // the original AND the translation), letting the vote-resilience reapply
+    // fall through to a write of the very text already on screen. Every such
+    // write forces a full cell relayout (and a table re-measure whose
+    // estimated heights jump the content offset) — the visible "rows below
+    // lift up" on every vote of a translated comment. If the final display
+    // string is character-identical to what the node already shows, there is
+    // nothing to do.
+    if ([current.string isEqualToString:displayAttr.string]) {
+        ApolloTranslationVerboseLog(@"[Translation/vote] apply: display identical — exact no-op cell=%p", commentCellNode);
+        return;
+    }
 
     @try {
         ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), displayAttr);
@@ -1830,6 +1951,7 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
         ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsDisplay));
     }
     ApolloForceRelayoutForTextNodeAndOwner(commentCellNode, textNode);
+    ApolloTranslationHealCellDisplaySync(commentCellNode);
     if (displayAttr != translatedAttr) {
         ApolloEnsureMarkerTappableOnNode(textNode);
         ApolloEnsureCommentsTableBreathingRoom();
@@ -1856,6 +1978,11 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
         [sCommentTranslationByFullName setObject:translatedText forKey:fullName];
         ApolloMirrorSetComment(fullName, translatedText);
         objc_setAssociatedObject(commentCellNode, kApolloAppliedTranslationFullNameKey, fullName, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        // Index both body forms for the unowned-node preempt: the raw model
+        // body AND the rendered string that was on screen before this write
+        // (a rebuilt node is handed the rendered form).
+        ApolloIndexTranslatedCommentBody(comment.body, fullName);
+        if (textMatchesBody) ApolloIndexTranslatedCommentBody(current.string, fullName);
     }
     ApolloMarkVisibleTranslationApplied(comment.body, translatedText);
 }
@@ -1879,6 +2006,7 @@ static void ApolloRestoreOriginalForCellNode(id commentCellNode, RDKComment *com
     // Drop ownership BEFORE writing original text back, otherwise the vote-
     // resilience hook would swap the original right back to translated.
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
 
@@ -1938,6 +2066,7 @@ static void ApolloRestoreOriginalForCellNode(id commentCellNode, RDKComment *com
         ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsDisplay));
     }
     ApolloForceRelayoutForTextNodeAndOwner(commentCellNode, textNode);
+    ApolloTranslationHealCellDisplaySync(commentCellNode);
 
     objc_setAssociatedObject(commentCellNode, kApolloAppliedTranslationFullNameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
 }
@@ -2262,6 +2391,8 @@ static id ApolloBestPostBodyTextNode(id headerCellNode, RDKLink *link, NSString 
 static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *link, NSString *sourceText, NSString *translatedText) {
     if (!headerCellNode) return;
     if (![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return;
+    translatedText = ApolloStripInlineMediaTokens(translatedText);
+    if (translatedText.length == 0) return;
     if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
     NSString *body = sourceText.length > 0 ? sourceText : ApolloPostBodyTextFromLink(link);
     if (![body isKindOfClass:[NSString class]] || body.length == 0) return;
@@ -2361,6 +2492,16 @@ static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *l
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloRegisterOwnedTextNode(textNode);
 
+    // EXACT no-op gate (see comment apply): the vote-time headerReapply
+    // re-applies the stashed post-body translation on every vote; when the
+    // node already shows exactly this text, writing it again only buys a
+    // full header re-measure and a content-offset jump.
+    if ([current.string isEqualToString:translatedAttr.string]) {
+        ApolloTranslationVerboseLog(@"[Translation/vote] headerApply: display identical — exact no-op header=%p", headerCellNode);
+        objc_setAssociatedObject(headerCellNode, kApolloHeaderTranslatedTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+
     @try { ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), translatedAttr); }
     @catch (__unused NSException *e) { return; }
 
@@ -2371,6 +2512,7 @@ static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *l
         ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsDisplay));
     }
 
+    ApolloTranslationHealCellDisplaySync(headerCellNode);
     objc_setAssociatedObject(headerCellNode, kApolloHeaderTranslatedTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     // Re-entrancy guard + link recovery for vote-tap rebuild (see comment
@@ -2406,6 +2548,8 @@ static void ApolloApplyTranslationToPostTextNode(id owner, id textNode, NSString
     if (!owner || !textNode) return;
     if (![sourceText isKindOfClass:[NSString class]] || sourceText.length == 0) return;
     if (![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0) return;
+    translatedText = ApolloStripInlineMediaTokens(translatedText);
+    if (translatedText.length == 0) return;
     if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
     // Marker-tap pin: this post is pinned to its original language; don't re-apply.
     if (ApolloPinActiveOnNode(textNode)) {
@@ -2465,6 +2609,13 @@ static void ApolloApplyTranslationToPostTextNode(id owner, id textNode, NSString
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloRegisterOwnedTextNode(textNode);
 
+    // EXACT no-op gate (see comment apply): skip the write + relayout when the
+    // node already displays exactly this text.
+    if ([current.string isEqualToString:translatedAttr.string]) {
+        objc_setAssociatedObject(owner, kApolloHeaderTranslatedTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+
     @try { ((void (*)(id, SEL, id))objc_msgSend)(textNode, @selector(setAttributedText:), translatedAttr); }
     @catch (__unused NSException *e) { return; }
 
@@ -2475,6 +2626,7 @@ static void ApolloApplyTranslationToPostTextNode(id owner, id textNode, NSString
         ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsDisplay));
     }
 
+    ApolloTranslationHealCellDisplaySync(owner);
     objc_setAssociatedObject(owner, kApolloHeaderTranslatedTextNodeKey, textNode, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     // Mirror the per-VC stash so headerReapply has something to recover
     // from even when this code path (not ApolloApplyTranslationToHeaderCellNode)
@@ -2498,6 +2650,7 @@ static void ApolloRestoreOriginalForHeaderCellNode(id headerCellNode, RDKLink *l
     if (!textNode) return;
 
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
 
@@ -2512,6 +2665,7 @@ static void ApolloRestoreOriginalForHeaderCellNode(id headerCellNode, RDKLink *l
     if ([textNode respondsToSelector:@selector(setNeedsDisplay)]) {
         ((void (*)(id, SEL))objc_msgSend)(textNode, @selector(setNeedsDisplay));
     }
+    ApolloTranslationHealCellDisplaySync(headerCellNode);
     objc_setAssociatedObject(headerCellNode, kApolloAppliedHeaderTranslationFullNameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
 }
 
@@ -2880,16 +3034,16 @@ static BOOL ApolloShouldSkipTranslationForText(NSString *text, NSString *targetL
     return ApolloLanguageCodeIsInSkipList(detected);
 }
 
-// Strict source-language detector for the Apple backend. Apple needs an EXPLICIT
-// source, and a wrong guess is actively harmful: it spins up a bogus session and
-// makes Apple prompt to download the wrong language (e.g. short Portuguese/Italian
-// text misread as Indonesian/Danish), which then fails and starves the real
-// languages of their model downloads. So we only accept a CONFIDENT, UNAMBIGUOUS
-// top guess — high probability AND a clear margin over the runner-up. Distinct-script
-// languages (Japanese/Chinese/Korean) score ~0.99 with a negligible runner-up and
-// pass trivially; ambiguous short Romance text is left untranslated rather than
-// mis-assigned. (No context "remember the last language" fallback — one bad guess
-// would poison every short snippet after it.)
+// Source-language detector for the Apple backend. Apple needs an EXPLICIT source, and a
+// wrong guess is actively harmful: it spins up a bogus session and makes Apple prompt to
+// download the wrong language (e.g. short Portuguese/Italian text misread as
+// Indonesian/Danish), which then fails and starves the real languages of their model
+// downloads. So the acceptance bar is deliberately conservative — but it is now
+// LENGTH-ADAPTIVE rather than one-size-fits-all, because the flat strict bar was silently
+// dropping clearly-foreign POST BODIES (see the long-text note below). Distinct-script
+// languages (Japanese/Chinese/Korean) score ~0.99 with a negligible runner-up and pass
+// trivially. (No context "remember the last language" fallback — one bad guess would
+// poison every short snippet after it.)
 static NSString *ApolloDetectSourceLanguageForApple(NSString *text) {
     if (![text isKindOfClass:[NSString class]]) return nil;
     NSString *trimmed = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -2914,11 +3068,29 @@ static NSString *ApolloDetectSourceLanguageForApple(NSString *text) {
             if (p > bestProb) { secondProb = bestProb; bestProb = p; best = (NSString *)lang; }
             else if (p > secondProb) { secondProb = p; }
         }
-        // Confident (>=0.62) AND a clear winner (runner-up negligible, or top at least
-        // ~1.8x the runner-up). This rejects the ambiguous guesses that produced the
-        // bogus id/da sessions while still accepting real sentences in any language.
-        if (best.length > 0 && bestProb >= 0.62 &&
-            (secondProb <= 0.0001 || bestProb >= secondProb * 1.8)) {
+        if (best.length == 0) return nil;
+
+        // LENGTH-ADAPTIVE acceptance. Short strings (post titles, team names, one-word
+        // comments) stay STRICT — >=0.62 AND a clear >=1.8x margin — because that is
+        // exactly the ambiguous text where iOS's on-device recognizer produces the id/da
+        // misreads that make Apple prompt for the wrong download. But a full sentence or
+        // paragraph — a real post BODY or an ordinary comment — is detected reliably even
+        // when its top probability is modest, and the flat 0.62/1.8x bar was silently
+        // DROPPING clearly-foreign posts: iOS scores an ~80-char Portuguese body well
+        // below what macOS gives for the same text, so it fell under 0.62 and was never
+        // handed to Apple at all (logged as "source language undetected" even though Apple
+        // translates Portuguese fine). For longer text we lower the floor and margin — the
+        // top guess on a real sentence is trustworthy, and near Romance siblings
+        // (pt/es/gl) sitting close no longer matters because the winner is still correct.
+        BOOL longText = trimmed.length >= 50;
+        double floorProb = longText ? 0.50 : 0.62;
+        double marginX   = longText ? 1.15 : 1.8;
+        BOOL clearWinner = (secondProb <= 0.0001) || (bestProb >= secondProb * marginX);
+        if (bestProb >= floorProb && clearWinner) {
+            if (longText && bestProb < 0.62) {
+                ApolloLog(@"[Translation] Apple source accepted via long-text bar: %@ p=%.2f (2nd=%.2f) len=%lu",
+                          best, bestProb, secondProb, (unsigned long)trimmed.length);
+            }
             return ApolloNormalizeLanguageCode(best);
         }
     }
@@ -2938,13 +3110,13 @@ static NSString *ApolloDetectSourceLanguageForApple(NSString *text) {
 //   2. No cross-provider fallback: if Apple is selected it stays Apple. On a missing
 //      language model the shim drives Apple's one-time system download sheet; on any
 //      hard failure the original text is left intact.
-static void ApolloTranslateViaApple(NSString *text,
-                                    NSString *targetLanguage,
-                                    void (^completion)(NSString *translated, NSError *error)) {
+static void ApolloTranslateViaAppleWithSource(NSString *text,
+                                              NSString *targetLanguage,
+                                              NSString *source,
+                                              void (^completion)(NSString *translated, NSError *error)) {
 #if APOLLO_HAS_APPLE_TRANSLATE
-    NSString *source = ApolloDetectSourceLanguageForApple(text);
     if (source.length == 0) {
-        // Couldn't confidently fingerprint this snippet — don't guess (a wrong source
+        // Could not confidently fingerprint the full input — do not guess (a wrong source
         // makes Apple prompt for the wrong language and fail). Leave the original text.
         NSError *err = [NSError errorWithDomain:@"ApolloTranslation" code:301
             userInfo:@{NSLocalizedDescriptionKey: @"Apple: source language undetected"}];
@@ -2975,6 +3147,265 @@ static void ApolloTranslateViaApple(NSString *text,
 #endif
 }
 
+static void ApolloTranslateViaApple(NSString *text,
+                                    NSString *targetLanguage,
+                                    void (^completion)(NSString *translated, NSError *error)) {
+    ApolloTranslateViaAppleWithSource(text, targetLanguage,
+        ApolloDetectSourceLanguageForApple(text), completion);
+}
+
+// Max encoded size (in `q=` percent-encoded characters) of a single request sent to a
+// network translation provider. The public Google endpoint is a GET with the whole text
+// in the URL query param; a long post body overflows the server's URL length limit
+// (empirically HTTP 400 once the URL passes ~15KB, i.e. ~9000 chars of accented Latin or
+// ~1600 CJK chars) and the ENTIRE translation fails — which is why long posts silently
+// don't translate. 5000 keeps the full URL around ~5.1KB, comfortably inside the range
+// that responds 200, with margin for the LibreTranslate fallback's per-request caps too.
+static const NSUInteger kApolloTranslationChunkByteBudget = 5000;
+
+// Percent-encoded length of `s` as it appears in the Google `q=` query param. Percent
+// encoding is per-character, so this is additive — len(a+b) == len(a)+len(b) — which lets
+// the splitter accumulate chunk sizes incrementally instead of re-encoding growing strings.
+static NSUInteger ApolloEncodedTranslationLength(NSString *s) {
+    if (s.length == 0) return 0;
+    NSString *enc = [s stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    return enc ? enc.length : s.length;
+}
+
+// Split `text` into ordered chunks whose individual `q=` encoded sizes each stay at or
+// under `byteBudget`, preferring sentence/paragraph boundaries (falling back to word, then
+// character boundaries for pathological input). Fills `separatorsOut` with the exact
+// whitespace that sat between consecutive chunks (count == chunks.count - 1) so the caller
+// can rejoin translated pieces without losing paragraph structure. Chunk boundaries only
+// ever land on whitespace, so the single-token protection sentinels
+// (APOLLOTRANSLATION…TOKEN — no whitespace) are never split across a boundary and survive
+// the round-trip intact. Text already inside the budget returns as a single chunk, so the
+// common (short) path is byte-for-byte the same request as before.
+static NSArray<NSString *> *ApolloSplitTranslationText(NSString *text, NSUInteger byteBudget, NSArray<NSString *> **separatorsOut) {
+    if (separatorsOut) *separatorsOut = @[];
+    if (![text isKindOfClass:[NSString class]] || text.length == 0) return text ? @[text] : @[];
+    if (byteBudget < 64) byteBudget = 64;   // sanity floor
+    if (ApolloEncodedTranslationLength(text) <= byteBudget) return @[text];
+
+    NSMutableArray<NSString *> *chunks = [NSMutableArray array];
+    NSMutableArray<NSString *> *separators = [NSMutableArray array];
+    NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+
+    // Single funnel: append a chunk plus, for every chunk after the first, the whitespace
+    // that precedes it. Guarantees separators.count == chunks.count - 1. Callers pass the
+    // reused `current`/`cur` NSMutableStrings, so snapshot an immutable copy — otherwise
+    // every stored chunk would alias the same buffer and show its final value.
+    void (^emitChunk)(NSString *, NSString *) = ^(NSString *chunk, NSString *sepBefore) {
+        if (chunks.count > 0) [separators addObject:(sepBefore ? [sepBefore copy] : @"")];
+        [chunks addObject:(chunk ? [chunk copy] : @"")];
+    };
+
+    // Word-level packer for a single over-budget unit (a sentence longer than the budget);
+    // emits through emitChunk, using `leadSep` before its first emitted chunk. Preserves the
+    // unit's internal whitespace and hard-splits any single token that alone exceeds budget.
+    void (^packWords)(NSString *, NSString *) = ^(NSString *unit, NSString *leadSep) {
+        NSUInteger n = unit.length, i = 0;
+        NSMutableString *cur = [NSMutableString string];
+        NSUInteger curEnc = 0;
+        NSString *pend = @""; NSUInteger pendEnc = 0;
+        NSString *nextLead = leadSep ?: @"";
+        while (i < n) {
+            NSUInteger w0 = i;
+            while (i < n && ![ws characterIsMember:[unit characterAtIndex:i]]) i++;
+            NSString *word = [unit substringWithRange:NSMakeRange(w0, i - w0)];
+            NSUInteger s0 = i;
+            while (i < n && [ws characterIsMember:[unit characterAtIndex:i]]) i++;
+            NSString *trail = [unit substringWithRange:NSMakeRange(s0, i - s0)];
+            NSUInteger wordEnc = ApolloEncodedTranslationLength(word);
+
+            if (wordEnc > byteBudget) {
+                // A single token (no whitespace) larger than the budget — e.g. a giant URL
+                // or a wall of emoji. Hard-split it, but grow the pieces one *composed
+                // character sequence* at a time so a boundary never lands inside a surrogate
+                // pair / combining sequence (which would produce a lone surrogate that
+                // percent-encodes to nil and corrupts the request). Always emit at least one
+                // sequence per piece, even if that sequence alone exceeds the budget.
+                if (cur.length) { emitChunk(cur, nextLead); nextLead = pend; [cur setString:@""]; curEnc = 0; }
+                NSUInteger wl = word.length, j = 0;
+                // A protection sentinel (APOLLOTRANSLATIONLINK/NAME<n>TOKEN) can be embedded in
+                // a whitespace-free run (e.g. a URL inside spaceless CJK), so it can land in
+                // this monster token. Precompute their ranges so a byte-budget cut never
+                // bisects one — otherwise the restore pass can't match it and the raw sentinel
+                // leaks into the translation with the URL/name lost.
+                static NSRegularExpression *sSentinelRE;
+                static dispatch_once_t sSentinelOnce;
+                dispatch_once(&sSentinelOnce, ^{
+                    sSentinelRE = [NSRegularExpression regularExpressionWithPattern:@"APOLLOTRANSLATION(?:LINK|NAME)[0-9]+TOKEN" options:0 error:NULL];
+                });
+                NSArray<NSTextCheckingResult *> *sentinels = [sSentinelRE matchesInString:word options:0 range:NSMakeRange(0, wl)];
+                while (j < wl) {
+                    NSUInteger end = NSMaxRange([word rangeOfComposedCharacterSequenceAtIndex:j]);
+                    if (end > wl) end = wl;
+                    while (end < wl) {
+                        NSUInteger nextEnd = NSMaxRange([word rangeOfComposedCharacterSequenceAtIndex:end]);
+                        if (nextEnd > wl) nextEnd = wl;
+                        if (ApolloEncodedTranslationLength([word substringWithRange:NSMakeRange(j, nextEnd - j)]) > byteBudget) break;
+                        end = nextEnd;
+                    }
+                    // Snap the cut out of any sentinel it lands strictly inside: push the
+                    // sentinel wholly into the next piece, or (if it starts at this piece's
+                    // head and overruns the budget) keep it whole here, a little over budget.
+                    for (NSTextCheckingResult *m in sentinels) {
+                        NSRange r = m.range;
+                        if (end > r.location && end < NSMaxRange(r)) {
+                            end = (r.location > j) ? r.location : NSMaxRange(r);
+                            break;
+                        }
+                    }
+                    if (end > wl) end = wl;
+                    if (end <= j) end = MIN(j + 1, wl);   // never stall
+                    emitChunk([word substringWithRange:NSMakeRange(j, end - j)], nextLead);
+                    nextLead = @"";
+                    j = end;
+                }
+                // `cur` is empty after a hard-split, so the whitespace that followed the
+                // token is the separator BEFORE the next chunk (nextLead), not a pending
+                // internal joiner — otherwise it gets overwritten and the space is lost.
+                nextLead = trail; pend = @""; pendEnc = 0;
+                continue;
+            }
+
+            if (cur.length && (curEnc + pendEnc + wordEnc) > byteBudget) {
+                emitChunk(cur, nextLead); nextLead = pend;
+                [cur setString:word]; curEnc = wordEnc;
+                pend = trail; pendEnc = ApolloEncodedTranslationLength(trail);
+            } else {
+                if (cur.length) { [cur appendString:pend]; curEnc += pendEnc; }
+                [cur appendString:word]; curEnc += wordEnc;
+                pend = trail; pendEnc = ApolloEncodedTranslationLength(trail);
+            }
+        }
+        if (cur.length) emitChunk(cur, nextLead);
+    };
+
+    // Level 1: segment into sentence/paragraph units + the whitespace after each. A break
+    // is a whitespace run that either contains a newline (paragraph) or immediately follows
+    // sentence-ending punctuation; all other whitespace stays inside the unit.
+    NSMutableArray<NSString *> *units = [NSMutableArray array];
+    NSMutableArray<NSString *> *unitSeps = [NSMutableArray array];   // sep AFTER units[k]
+    {
+        NSCharacterSet *terms = [NSCharacterSet characterSetWithCharactersInString:@".!?…。！？؟।"];
+        NSCharacterSet *newlines = [NSCharacterSet newlineCharacterSet];
+        NSUInteger n = text.length, i = 0, unitStart = 0;
+        while (i < n) {
+            if ([ws characterIsMember:[text characterAtIndex:i]]) {
+                NSUInteger s0 = i; BOOL hasNL = NO;
+                while (i < n && [ws characterIsMember:[text characterAtIndex:i]]) {
+                    if ([newlines characterIsMember:[text characterAtIndex:i]]) hasNL = YES;
+                    i++;
+                }
+                unichar prev = s0 > 0 ? [text characterAtIndex:s0 - 1] : 0;
+                BOOL afterTerm = prev != 0 && [terms characterIsMember:prev];
+                if ((hasNL || afterTerm) && s0 > unitStart) {
+                    [units addObject:[text substringWithRange:NSMakeRange(unitStart, s0 - unitStart)]];
+                    [unitSeps addObject:[text substringWithRange:NSMakeRange(s0, i - s0)]];
+                    unitStart = i;
+                }
+            } else {
+                i++;
+            }
+        }
+        if (unitStart < n) { [units addObject:[text substringWithRange:NSMakeRange(unitStart, n - unitStart)]]; [unitSeps addObject:@""]; }
+    }
+
+    // Level 2: greedily pack whole units into chunks; a unit larger than the budget is
+    // word-split in place (its surrounding separators still tile exactly).
+    NSMutableString *current = [NSMutableString string];
+    NSUInteger currentEnc = 0;
+    NSString *sepBeforeCurrent = @"";   // whitespace that precedes `current` when it emits
+    NSString *pendingSep = @"";         // whitespace after current's last unit
+    NSUInteger pendingSepEnc = 0;
+
+    for (NSUInteger idx = 0; idx < units.count; idx++) {
+        NSString *u = units[idx];
+        NSString *s = unitSeps[idx];
+        NSUInteger uEnc = ApolloEncodedTranslationLength(u);
+
+        if (uEnc > byteBudget) {
+            NSString *leadSep;
+            if (current.length) { emitChunk(current, sepBeforeCurrent); leadSep = pendingSep; [current setString:@""]; currentEnc = 0; }
+            else { leadSep = sepBeforeCurrent; }
+            packWords(u, leadSep);
+            sepBeforeCurrent = s;   // next real chunk gets this as its preceding separator
+            pendingSep = @""; pendingSepEnc = 0;
+            continue;
+        }
+
+        if (current.length == 0) {
+            [current appendString:u]; currentEnc = uEnc;
+            pendingSep = s; pendingSepEnc = ApolloEncodedTranslationLength(s);
+        } else if ((currentEnc + pendingSepEnc + uEnc) > byteBudget) {
+            emitChunk(current, sepBeforeCurrent);
+            sepBeforeCurrent = pendingSep;
+            [current setString:u]; currentEnc = uEnc;
+            pendingSep = s; pendingSepEnc = ApolloEncodedTranslationLength(s);
+        } else {
+            [current appendString:pendingSep]; [current appendString:u];
+            currentEnc += pendingSepEnc + uEnc;
+            pendingSep = s; pendingSepEnc = ApolloEncodedTranslationLength(s);
+        }
+    }
+    if (current.length) emitChunk(current, sepBeforeCurrent);
+
+    if (separatorsOut) *separatorsOut = separators;
+    return chunks;
+}
+
+// Translate `chunks` in order through `translateOne` (one network round-trip per chunk),
+// then reassemble the results with `separators` between them. Sequential (not parallel) so
+// the output order is deterministic and we never fan out N simultaneous requests at the
+// same public endpoint. Any chunk failing fails the whole translation (nil result) so the
+// caller can fall back to the other provider, matching the single-request behaviour.
+static void ApolloTranslateChunksSequentially(NSArray<NSString *> *chunks,
+                                              NSArray<NSString *> *separators,
+                                              NSString *targetLanguage,
+                                              void (^translateOne)(NSString *chunk, NSString *target, void (^cb)(NSString *, NSError *)),
+                                              void (^completion)(NSString *joined, NSError *error)) {
+    NSMutableArray<NSString *> *results = [NSMutableArray arrayWithCapacity:chunks.count];
+    // Recursive async driver. `holder` keeps the step block alive across the network
+    // callbacks (a strong local would die when this function returns); re-invocation goes
+    // through a __weak ref so there's no compiler-visible retain cycle. Emptying `holder`
+    // at either terminal releases the block — no leak.
+    NSMutableArray *holder = [NSMutableArray array];
+    __weak __block void (^weakStep)(void) = nil;
+    void (^step)(void) = ^{
+        NSUInteger idx = results.count;
+        if (idx >= chunks.count) {
+            NSMutableString *joined = [NSMutableString string];
+            for (NSUInteger k = 0; k < results.count; k++) {
+                if (k > 0) {
+                    NSString *sep = (k - 1 < separators.count) ? separators[k - 1] : @" ";
+                    [joined appendString:(sep ?: @"")];
+                }
+                [joined appendString:results[k]];
+            }
+            [holder removeAllObjects];   // finished — release the driver block
+            completion([joined copy], nil);
+            return;
+        }
+        translateOne(chunks[idx], targetLanguage, ^(NSString *translated, NSError *error) {
+            if (![translated isKindOfClass:[NSString class]] || translated.length == 0) {
+                NSError *chunkError = error ?: [NSError errorWithDomain:@"ApolloTranslation" code:103
+                    userInfo:@{NSLocalizedDescriptionKey: @"Chunked translation failed"}];
+                [holder removeAllObjects];   // release on the failure path too
+                completion(nil, chunkError);
+                return;
+            }
+            [results addObject:translated];
+            void (^next)(void) = weakStep;
+            if (next) next();
+        });
+    };
+    [holder addObject:step];
+    weakStep = step;
+    step();
+}
+
 static void ApolloTranslateTextWithFallback(NSString *text,
                                             NSString *targetLanguage,
                                             void (^completion)(NSString *translated, NSError *error)) {
@@ -2989,13 +3420,32 @@ static void ApolloTranslateTextWithFallback(NSString *text,
         return;
     }
 
-    // Apple is on-device and deliberately has NO cross-provider fallback: if the
-    // user picked Apple, translation stays Apple (we'd rather prompt to download a
-    // language model than silently substitute Google output). On failure the error
-    // propagates and the caller leaves the original text. (A future opt-in fallback
-    // could be added here.)
+    // Split oversized text once, up front — every provider path reuses it. A full post
+    // selftext both overflows the Google GET endpoint's URL limit (HTTP 400 -> whole
+    // request fails) AND bogs down Apple's on-device serial session (a single giant
+    // translate can hang/fail — the same reason the feed preview is length-capped), so all
+    // three providers translate it in sentence-bounded chunks and reassemble in order.
+    // Short text yields a single chunk, so the everyday path is exactly one request as before.
+    NSArray<NSString *> *separators = nil;
+    NSArray<NSString *> *chunks = ApolloSplitTranslationText(text, kApolloTranslationChunkByteBudget, &separators);
+
+    // Apple is on-device and deliberately has NO cross-provider fallback: if the user picked
+    // Apple, translation stays Apple (we'd rather prompt to download a language model than
+    // silently substitute Google output). On failure the error propagates and the caller
+    // leaves the original text. Detect the source ONCE from the full protected text, whose
+    // length/context makes the conservative detector reliable, then reuse it for every
+    // chunk. Detecting each chunk independently makes a short/link-heavy tail fail with
+    // error 301 after earlier chunks already translated.
     if ([sTranslationProvider isEqualToString:@"apple"]) {
-        ApolloTranslateViaApple(text, targetLanguage, completion);
+        if (chunks.count <= 1) {
+            ApolloTranslateViaApple(text, targetLanguage, completion);
+        } else {
+            NSString *source = ApolloDetectSourceLanguageForApple(text);
+            ApolloTranslateChunksSequentially(chunks, separators, targetLanguage,
+                ^(NSString *chunk, NSString *target, void (^cb)(NSString *, NSError *)) {
+                    ApolloTranslateViaAppleWithSource(chunk, target, source, cb);
+                }, completion);
+        }
         return;
     }
 
@@ -3007,29 +3457,30 @@ static void ApolloTranslateTextWithFallback(NSString *text,
         primaryProvider = @"google";
     }
 
-    void (^callPrimary)(void (^)(NSString *, NSError *)) = ^(void (^cb)(NSString *, NSError *)) {
-        if ([primaryProvider isEqualToString:@"libre"]) {
-            ApolloTranslateViaLibre(text, targetLanguage, cb);
+    // Run one whole (possibly multi-chunk) translation through the named provider.
+    void (^runProvider)(NSString *, void (^)(NSString *, NSError *)) = ^(NSString *provider, void (^done)(NSString *, NSError *)) {
+        void (^one)(NSString *, NSString *, void (^)(NSString *, NSError *)) = ^(NSString *chunk, NSString *target, void (^cb)(NSString *, NSError *)) {
+            if ([provider isEqualToString:@"libre"]) {
+                ApolloTranslateViaLibre(chunk, target, cb);
+            } else {
+                ApolloTranslateViaGoogle(chunk, target, cb);
+            }
+        };
+        if (chunks.count <= 1) {
+            one(text, targetLanguage, done);
         } else {
-            ApolloTranslateViaGoogle(text, targetLanguage, cb);
+            ApolloTranslateChunksSequentially(chunks, separators, targetLanguage, one, done);
         }
     };
 
-    // If the primary provider fails, fall back to the other one.
-    void (^fallback)(void) = ^{
-        if ([primaryProvider isEqualToString:@"google"]) {
-            ApolloTranslateViaLibre(text, targetLanguage, completion);
-        } else {
-            ApolloTranslateViaGoogle(text, targetLanguage, completion);
-        }
-    };
-
-    callPrimary(^(NSString *translated, NSError *error) {
+    // If the primary provider fails (including a mid-chunk failure), fall back to the other.
+    runProvider(primaryProvider, ^(NSString *translated, NSError *error) {
         if ([translated isKindOfClass:[NSString class]] && translated.length > 0) {
             completion(translated, nil);
             return;
         }
-        fallback();
+        NSString *other = [primaryProvider isEqualToString:@"google"] ? @"libre" : @"google";
+        runProvider(other, completion);
     });
 }
 
@@ -3116,8 +3567,11 @@ static void ApolloRequestTranslation(NSString *cacheKey,
     // Protect proper nouns (names/places/orgs) and links from the translator, then translate
     // only what's left. Names are detected first so NLTagger sees clean text (not the link
     // sentinels); restore order is irrelevant since the two token shapes are distinct.
+    // Inline media-id tokens (![gif](giphy|…)) are stripped outright — Apollo never
+    // displays them and the provider would only mangle them.
+    NSString *mediaStripped = ApolloStripInlineMediaTokens(sourceText);
     NSDictionary<NSString *, NSString *> *protectedNames = nil;
-    NSString *nameProtected = ApolloProtectTranslationNames(sourceText, &protectedNames);
+    NSString *nameProtected = ApolloProtectTranslationNames(mediaStripped, &protectedNames);
 
     NSDictionary<NSString *, NSString *> *protectedLinks = nil;
     NSString *requestText = ApolloProtectTranslationLinks(nameProtected, &protectedLinks);
@@ -4334,6 +4788,7 @@ static void ApolloShowOriginalWithRetranslateAffordanceForCellNode(id cellNode, 
     if (![original isKindOfClass:[NSAttributedString class]]) return;
 
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
 
     NSAttributedString *display = ApolloAttributedStringByAppendingRetranslateAffordance(original);
@@ -4628,6 +5083,7 @@ static void ApolloToggleTranslationForTitleNode(id textNode) {
             objc_setAssociatedObject(node, kApolloTitlePinnedOriginalKey, sTapToTranslate ? @2 : (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             objc_setAssociatedObject(node, kApolloTitlePinnedSourceKey, [nodeSource copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
             objc_setAssociatedObject(node, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(node, kApolloCommentOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             NSAttributedString *original = objc_getAssociatedObject(node, kApolloOriginalAttributedTextKey);
             if ([original isKindOfClass:[NSAttributedString class]]) {
                 @try { ((void (*)(id, SEL, id))objc_msgSend)(node, @selector(setAttributedText:), original); }
@@ -5733,6 +6189,7 @@ static BOOL ApolloTextMatchesSourceOrVisualDisplay(NSString *incomingText, NSStr
 static void ApolloClearTranslationOwnershipForTextNode(id textNode) {
     objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
     if (textNode && sOwnedTextNodes) {
@@ -5822,6 +6279,7 @@ static void ApolloRestoreAllOwnedTextNodes(void) {
         // Drop ownership keys FIRST so the global setAttributedText: hook
         // won't re-swap when we write the original below.
         objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
         objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -5962,7 +6420,7 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
     if (swapOut) *swapOut = nil;
 
     NSString *originalBody = objc_getAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey);
-    NSString *translatedText = objc_getAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey);
+    NSString *translatedText = ApolloStripInlineMediaTokens(objc_getAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey));
 
     if (![originalBody isKindOfClass:[NSString class]] || originalBody.length == 0 ||
         ![translatedText isKindOfClass:[NSString class]] || translatedText.length == 0 ||
@@ -5981,7 +6439,35 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
     if (ApolloTextMatchesSourceOrVisualDisplay(incomingText, originalBody)) {
         ApolloTranslationVerboseLog(@"[Translation/vote] prepareSwap: incoming==original → SWAPPING to translated node=%p (incomingLen=%lu)",
                                     textNode, (unsigned long)incomingText.length);
-        if (swapOut) *swapOut = ApolloRebuildTranslatedAttrPreservingAttrs(incomingAttributedText, translatedText);
+        if (swapOut) {
+            NSAttributedString *rebuilt = ApolloRebuildTranslatedAttrPreservingAttrs(incomingAttributedText, translatedText);
+            // Re-append the "Translated from <Language>" marker line for COMMENT
+            // bodies (the builder self-gates on the details/tap settings and on
+            // source-language detection). Without this, the vote-time swap
+            // displayed the translation ONE LINE SHORTER than what was on
+            // screen — the row shrank, every row below shifted up, and the
+            // ~100ms-later scheduled reapply re-added the marker and shifted
+            // them back: a visible bounce on every vote of a translated
+            // comment. Marker parity makes the swap height-identical AND turns
+            // that follow-up reapply into a no-op.
+            // Gate on POSITIVE comment provenance, not "not title-owned": the
+            // post header selftext node, the visible-post-body fallback node,
+            // and stash-preempt-adopted header nodes are all owned WITHOUT the
+            // title key, and appending here put a comment-style "Translated
+            // from <Language>" line inside the POST (colliding with the flair
+            // pill) whenever Apollo re-rendered the thread header. Posts show
+            // the compact info-row "🌐 PT" banner instead — never the line.
+            if (rebuilt && [objc_getAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey) boolValue]) {
+                rebuilt = ApolloAttributedStringByAppendingTranslationMarker(rebuilt, originalBody);
+                // Apollo may reset linkAttributeNames when it rebuilds the
+                // text node during a vote. Restore our custom marker link in
+                // the same synchronous path as the marker itself; otherwise
+                // the later reapply sees identical text and short-circuits,
+                // leaving the freshly appended marker visible but inert.
+                ApolloEnsureMarkerTappableOnNode(textNode);
+            }
+            *swapOut = rebuilt;
+        }
         return YES;
     }
 
@@ -5996,6 +6482,117 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
                                     textNode, incomingPreview, origPreview);
     }
     return NO;
+}
+
+// Comment-cell preempt (mirror of the header stash preempt below): a vote can
+// make Apollo REBUILD a comment's body text node. The fresh node carries no
+// ownership tags, so the owned-node swap in the setAttributedText: hook passes
+// Apollo's ORIGINAL body straight through — the untranslated text (one marker
+// line shorter) is visible for a frame or two until the scheduled reapply
+// swaps it back: a language flash plus a height nudge of every row below, on
+// every vote of a translated comment. To preempt it we keep an index of the
+// bodies we have translated in the visible thread — keyed by BOTH the raw
+// comment.body and the RENDERED string that was on screen when we applied
+// (Apollo hands the rebuilt node the rendered form) — mapping to every matching
+// comment fullname. The fresh node must then resolve its OWN enclosing comment
+// and find that fullname in the candidate set before it can adopt a translation.
+// This matters for common identical bodies such as "Thanks!": body text alone
+// is not an identity and a last-write-wins map can apply another comment's pin
+// state or cached translation.
+static NSMutableDictionary<NSString *, NSMutableSet<NSString *> *> *sApolloTranslatedBodyIndex = nil;
+static __weak UIViewController *sApolloTranslatedBodyIndexController = nil;
+static NSUInteger const kApolloTranslatedBodyIndexMaximumKeys = 2048;
+
+static NSObject *ApolloTranslatedBodyIndexLock(void) {
+    static NSObject *lock = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        lock = [NSObject new];
+    });
+    return lock;
+}
+
+// The index is only meaningful inside the CommentsVC that populated it. Clear
+// it as soon as a different thread becomes visible, and keep a hard ceiling for
+// unusually long sessions so translated comments cannot accumulate forever.
+static void ApolloScopeTranslatedBodyIndexLocked(UIViewController *controller) {
+    if (sApolloTranslatedBodyIndexController == controller) return;
+    [sApolloTranslatedBodyIndex removeAllObjects];
+    sApolloTranslatedBodyIndexController = controller;
+}
+
+static void ApolloIndexTranslatedCommentBody(NSString *bodyKey, NSString *fullName) {
+    if (![bodyKey isKindOfClass:[NSString class]] || bodyKey.length == 0) return;
+    if (![fullName isKindOfClass:[NSString class]] || fullName.length == 0) return;
+    UIViewController *controller = sVisibleCommentsViewController;
+    if (!controller) return;
+    @synchronized (ApolloTranslatedBodyIndexLock()) {
+        if (!sApolloTranslatedBodyIndex) sApolloTranslatedBodyIndex = [NSMutableDictionary dictionary];
+        ApolloScopeTranslatedBodyIndexLocked(controller);
+        NSMutableSet<NSString *> *fullNames = sApolloTranslatedBodyIndex[bodyKey];
+        if (!fullNames) {
+            if (sApolloTranslatedBodyIndex.count >= kApolloTranslatedBodyIndexMaximumKeys) {
+                ApolloLog(@"[Translation/vote] Body index reached %lu keys; clearing active-thread cache",
+                          (unsigned long)kApolloTranslatedBodyIndexMaximumKeys);
+                [sApolloTranslatedBodyIndex removeAllObjects];
+            }
+            fullNames = [NSMutableSet set];
+            sApolloTranslatedBodyIndex[bodyKey] = fullNames;
+        }
+        [fullNames addObject:fullName];
+    }
+}
+
+static BOOL ApolloPreemptUnownedCommentTextNode(id textNode, NSAttributedString *incoming, NSAttributedString **swapOut) {
+    if (swapOut) *swapOut = nil;
+    if (!textNode || ![incoming isKindOfClass:[NSAttributedString class]] || incoming.length == 0) return NO;
+    UIViewController *vc = sVisibleCommentsViewController;
+    if (!vc || !ApolloControllerIsInTranslatedMode(vc)) return NO;
+    NSString *incomingText = incoming.string;
+    if (incomingText.length == 0) return NO;
+
+    // Body text narrows the search, but never identifies the comment. Resolve
+    // the owning model from this fresh node so identical bodies cannot borrow
+    // another comment's translation cache or per-item pin state.
+    id cellNode = ApolloCommentCellNodeForTextNode(textNode);
+    RDKComment *comment = cellNode ? ApolloCommentFromCellNode(cellNode) : nil;
+    NSString *fullName = comment ? ApolloCommentFullName(comment) : nil;
+    if (fullName.length == 0) return NO;
+
+    BOOL indexedForComment = NO;
+    @synchronized (ApolloTranslatedBodyIndexLock()) {
+        ApolloScopeTranslatedBodyIndexLocked(vc);
+        NSSet<NSString *> *fullNames = sApolloTranslatedBodyIndex[incomingText];
+        indexedForComment = [fullNames containsObject:fullName];
+    }
+    if (!indexedForComment) return NO;
+    // Per-item pin: user chose to see this comment's original — honor it.
+    if (sTapToTranslate && !ApolloTapModeIsTranslatedKey(fullName)) return NO;
+    if (sUserPinnedOriginalFullNames && [sUserPinnedOriginalFullNames containsObject:fullName]) return NO;
+    NSString *translated = ApolloStripInlineMediaTokens([sCommentTranslationByFullName objectForKey:fullName]);
+    if (![translated isKindOfClass:[NSString class]] || translated.length == 0) return NO;
+
+    NSAttributedString *rebuilt = ApolloRebuildTranslatedAttrPreservingAttrs(incoming, translated);
+    if (!rebuilt) return NO;
+    // Marker parity with the apply path (builder self-gates on settings +
+    // source-language detection) so the swap is height-identical.
+    rebuilt = ApolloAttributedStringByAppendingTranslationMarker(rebuilt, incomingText);
+    ApolloEnsureMarkerTappableOnNode(textNode);
+
+    // Adopt ownership so subsequent overwrites flow through the normal owned
+    // swap. Store the RENDERED incoming string as the original-body marker —
+    // that is what Apollo hands rebuilt nodes, so future matches are exact.
+    objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [incomingText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translated copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (!objc_getAssociatedObject(textNode, kApolloOriginalAttributedTextKey)) {
+        objc_setAssociatedObject(textNode, kApolloOriginalAttributedTextKey, [incoming copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    ApolloRegisterOwnedTextNode(textNode);
+    if (swapOut) *swapOut = rebuilt;
+    ApolloTranslationVerboseLog(@"[Translation/vote] preempt(comment): unowned node=%p matched body index (%@) → SYNC swap", textNode, fullName);
+    return YES;
 }
 
 // Vote-flash mitigation: when the comments header is rebuilt after a vote
@@ -6080,7 +6677,8 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
     if (![objc_getAssociatedObject(self, kApolloTranslationOwnedTextNodeKey) boolValue]) {
         // Vote-flash preempt: brand-new (rebuilt) header body text node.
         NSAttributedString *preemptSwap = nil;
-        if (ApolloPreemptUnownedTextNodeFromVCStash(self, attributedText, &preemptSwap)) {
+        if (ApolloPreemptUnownedTextNodeFromVCStash(self, attributedText, &preemptSwap) ||
+            ApolloPreemptUnownedCommentTextNode(self, attributedText, &preemptSwap)) {
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             @try { %orig(preemptSwap); } @catch (__unused NSException *e) {}
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -6153,7 +6751,8 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
     if (![objc_getAssociatedObject(self, kApolloTranslationOwnedTextNodeKey) boolValue]) {
         // Vote-flash preempt (mirror of ASTextNode hook above).
         NSAttributedString *preemptSwap = nil;
-        if (ApolloPreemptUnownedTextNodeFromVCStash(self, attributedText, &preemptSwap)) {
+        if (ApolloPreemptUnownedTextNodeFromVCStash(self, attributedText, &preemptSwap) ||
+            ApolloPreemptUnownedCommentTextNode(self, attributedText, &preemptSwap)) {
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             @try { %orig(preemptSwap); } @catch (__unused NSException *e) {}
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -7402,8 +8001,13 @@ static void ApolloFeedVCInstallGlobe(UIViewController *vc) {
 
     if (!sEnableBulkTranslation) return;
 
+    // Weak capture: Logos `self` is __unsafe_unretained, and preload/scroll churn
+    // deallocates cells before the main queue drains (#630 round-5 crashes 2+3 —
+    // their stacks show this block tail-calling into MaybeTranslate with a dead cell).
+    __weak __typeof__(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        ApolloMaybeTranslateCommentCellNode((id)self, NO);
+        __typeof__(self) cellNode = weakSelf;
+        if (cellNode) ApolloMaybeTranslateCommentCellNode((id)cellNode, NO);
     });
 }
 
@@ -7412,8 +8016,10 @@ static void ApolloFeedVCInstallGlobe(UIViewController *vc) {
 
     if (!sEnableBulkTranslation) return;
 
+    __weak __typeof__(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        ApolloMaybeTranslateCommentCellNode((id)self, NO);
+        __typeof__(self) cellNode = weakSelf;
+        if (cellNode) ApolloMaybeTranslateCommentCellNode((id)cellNode, NO);
     });
 }
 
@@ -7432,19 +8038,27 @@ static void ApolloFeedVCInstallGlobe(UIViewController *vc) {
     // original text reappears as the cell scrolls back into view.
     if (!sEnableBulkTranslation) return;
 
+    // Logos hook `self` is __unsafe_unretained: capturing it in an async block does
+    // NOT keep the cell alive, and a comment collapse deletes rows (deallocating
+    // their cells) before the main queue drains — the block then ran against a
+    // dangling pointer (objc_retain SIGSEGV, #630 round-5 crash reports). Take a
+    // weak reference and bail if the cell died; a dead cell needs no re-translation.
+    __weak __typeof__(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *owningVC = ApolloOwningCommentsVCForCellNode((id)self);
+        __typeof__(self) cellNode = weakSelf;
+        if (!cellNode) return;
+        UIViewController *owningVC = ApolloOwningCommentsVCForCellNode((id)cellNode);
         if (ApolloControllerIsInTranslatedMode(owningVC)) {
-            if (!ApolloReapplyCachedTranslationForCellNode((id)self)) {
-                ApolloMaybeTranslateCommentCellNode((id)self, NO);
+            if (!ApolloReapplyCachedTranslationForCellNode((id)cellNode)) {
+                ApolloMaybeTranslateCommentCellNode((id)cellNode, NO);
             }
         } else if (ApolloControllerIsConfirmedOriginalMode(owningVC)) {
             // Only restore if the owning VC is confirmed to be in original
             // mode. If the VC is unknown (lifecycle race), defer — the
             // viewDidAppear retries will translate the cell shortly.
-            RDKComment *comment = ApolloCommentFromCellNode((id)self);
+            RDKComment *comment = ApolloCommentFromCellNode((id)cellNode);
             if (comment) {
-                ApolloRestoreOriginalForCellNode((id)self, comment);
+                ApolloRestoreOriginalForCellNode((id)cellNode, comment);
             }
         }
     });
@@ -7460,15 +8074,20 @@ static void ApolloFeedVCInstallGlobe(UIViewController *vc) {
     // that's still sitting on the text node from before the toggle-off.
     if (!sEnableBulkTranslation || event != 0) return;
 
+    // Weak capture for the same reason as didEnterDisplayState above: an async
+    // block holding the raw Logos `self` outlives cells killed by collapse/scroll.
+    __weak __typeof__(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIViewController *owningVC = ApolloOwningCommentsVCForCellNode((id)self);
+        __typeof__(self) cellNode = weakSelf;
+        if (!cellNode) return;
+        UIViewController *owningVC = ApolloOwningCommentsVCForCellNode((id)cellNode);
         if (ApolloControllerIsInTranslatedMode(owningVC)) {
-            ApolloReapplyCachedTranslationForCellNode((id)self);
+            ApolloReapplyCachedTranslationForCellNode((id)cellNode);
         } else if (ApolloControllerIsConfirmedOriginalMode(owningVC)) {
             // Same defer-on-unknown rule as didEnterDisplayState above.
-            RDKComment *comment = ApolloCommentFromCellNode((id)self);
+            RDKComment *comment = ApolloCommentFromCellNode((id)cellNode);
             if (comment) {
-                ApolloRestoreOriginalForCellNode((id)self, comment);
+                ApolloRestoreOriginalForCellNode((id)cellNode, comment);
             }
         }
     });

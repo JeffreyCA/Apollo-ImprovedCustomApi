@@ -11,6 +11,7 @@
 #import "ApolloBannedProfile.h"
 #import "ApolloProfileSocialLinks.h"
 #import "ApolloAccountCredentials.h"
+#import "ApolloWebSessionStore.h"
 
 static NSString *const ApolloUserAvatarsToggleChangedNotification = @"ApolloUserAvatarsToggleChangedNotification";
 static NSString *const ApolloProfileTabAvatarIconChangedNotification = @"ApolloProfileTabAvatarIconChangedNotification";
@@ -1356,7 +1357,7 @@ static UITableView *ApolloFindTableView(UIViewController *viewController) {
     return (UITableView *)ApolloFindSubviewOfClass(viewController.view, [UITableView class]);
 }
 
-static NSString *ApolloUsernameFromProfileViewController(UIViewController *viewController) {
+NSString *ApolloUsernameFromProfileViewController(UIViewController *viewController) {
     NSArray<NSString *> *preferredIvars = @[@"username", @"userName", @"_username", @"account", @"user", @"profile", @"viewModel"];
     for (NSString *ivarName in preferredIvars) {
         id value = ApolloObjectIvarValue(viewController, ivarName);
@@ -2708,6 +2709,25 @@ static void ApolloPinAccountToCurrentDefaultCredentialsIfNeeded(id currentUser) 
     @try { username = [currentUser valueForKey:@"username"]; }
     @catch (__unused NSException *e) { return; }
     if (![username isKindOfClass:[NSString class]] || username.length == 0) return;
+
+    // Auth modes are mutually exclusive per account: completing an interactive
+    // OAuth (API-key) sign-in is an explicit choice of API-key auth for this
+    // username, so drop any web-session entry it may still carry (e.g. a
+    // previous keyless sign-in under the same name). Without this the stale
+    // entry permanently wins at the transport chokepoint and badges the
+    // account "web session" in the switcher. Identity-bound: the flag only
+    // consumes for a username that was absent from BOTH the account blobs and
+    // web-session index when the OAuth callback armed it. The harvest path
+    // also cancels any unfinished OAuth attempt before keyless synthesis, so
+    // the heavy routine traffic through these hooks — NSKeyedUnarchiver
+    // decodes of RedditAccounts2 (which fire -setCurrentUser: per stored
+    // account), background identity refreshes, keyless synthesis — can never
+    // spend the flag or remove a healthy session.
+    if (ApolloTakeInteractiveOAuthSignInForNewUsername(username) && ApolloWebSessionFor(username) != nil) {
+        ApolloWebSessionRemove(username);
+        ApolloLog(@"[AccountCredentials] u/%@ signed in with an API key — removed its stale web session (now an OAuth account)", username);
+    }
+
     if (ApolloAccountCredentialsFor(username) != nil) return;
 
     ApolloAccountCredentialsSet(username, sRedditClientId, sRedditClientSecret, sRedirectURI);
