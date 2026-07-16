@@ -173,6 +173,15 @@ static const NSTimeInterval kApolloAIGenerationTimeout = 90.0;
 #else
 static const NSTimeInterval kApolloAIGenerationTimeout = 30.0;
 #endif
+// Cloud models get a longer leash than on-device: reasoning models that can't
+// disable thinking (Gemini 2.5 Pro, several OpenRouter-hosted models)
+// legitimately take 30s+ before their first visible token, and the cloud
+// bridge's own 60s inter-chunk timeout should get to fire first — it produces
+// a specific error card instead of this watchdog's generic "took too long".
+static NSTimeInterval ApolloAIGenerationTimeoutSeconds(void) {
+    BOOL cloud = sAISummaryProvider.length > 0 && ![sAISummaryProvider isEqualToString:@"apple"];
+    return cloud ? MAX(kApolloAIGenerationTimeout, 75.0) : kApolloAIGenerationTimeout;
+}
 // Bumped to 3 for the cache-entry timestamp format (age-based expiry). Older
 // caches lack timestamps and are simply dropped on first launch (regenerable).
 static NSString *const kApolloAICacheVersion = @"3";
@@ -2148,6 +2157,8 @@ static NSString *ApolloAIFriendlyError(NSError *error) {
             return @"The AI provider rejected the request. Check your API key (and account credits) in Apollo AI settings.";
         case 12: // cloud only: unreachable / bad request / bad model
             return @"Couldn't reach the AI service. Check your connection and provider settings, then try again.";
+        case 13: // cloud only: reasoning consumed the whole response
+            return @"The model spent its entire response thinking instead of answering. Try a different model in Apollo AI settings.";
         default:
             break;
     }
@@ -2324,7 +2335,7 @@ static void ApolloAIScheduleCommentGeneration(UIViewController *vc) {
 
 static void ApolloAIScheduleGenerationTimeout(NSString *fullName, BOOL isPost, NSString *requestID) {
     if (fullName.length == 0 || requestID.length == 0) return;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kApolloAIGenerationTimeout * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ApolloAIGenerationTimeoutSeconds() * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         NSMutableSet *inFlight = isPost ? sPostInFlight : sCommentInFlight;
         NSMutableDictionary *requestIDs = isPost ? sPostRequestIDs : sCommentRequestIDs;

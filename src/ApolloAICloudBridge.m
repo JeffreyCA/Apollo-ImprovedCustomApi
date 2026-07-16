@@ -18,6 +18,7 @@ static const NSInteger kCloudErrorCancelled = 6;
 static const NSInteger kCloudErrorContextWindow = 8;
 static const NSInteger kCloudErrorAuth = 11;
 static const NSInteger kCloudErrorService = 12;
+static const NSInteger kCloudErrorReasoningOnly = 13;
 
 #pragma mark - Provider configuration
 
@@ -77,6 +78,8 @@ static NSURL *CloudEndpointURL(void) {
 @property (nonatomic, strong) NSMutableData *errorBody;      // raw body when HTTP status != 200
 @property (nonatomic, assign) NSInteger httpStatus;
 @property (nonatomic, copy) NSString *retryAfterHeader;
+@property (nonatomic, copy) NSString *lastPartialVisible; // last partial actually delivered
+@property (nonatomic, copy) NSString *finishReason;       // finish_reason from the final chunk, if any
 @property (nonatomic, assign) BOOL retried;
 @property (nonatomic, assign) BOOL finished;
 @property (nonatomic, copy) void (^onPartial)(NSString *partial);
@@ -113,9 +116,13 @@ static NSURL *CloudEndpointURL(void) {
         delegateQueue.underlyingQueue = _stateQueue;
         NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
         // For a streaming response the request timeout is the inter-chunk idle
-        // timeout — 30s matches the summary module's own generation watchdog.
-        config.timeoutIntervalForRequest = 30.0;
-        config.timeoutIntervalForResource = 90.0;
+        // timeout. It must outlast a whole thinking phase, not just a network
+        // hiccup: Gemini streams NOTHING while a reasoning model thinks
+        // (thoughts are excluded from its OpenAI-compat stream, but arrive
+        // before any content), whereas OpenRouter keeps the stream warm with
+        // keep-alive comments regardless.
+        config.timeoutIntervalForRequest = 60.0;
+        config.timeoutIntervalForResource = 180.0;
         _session = [NSURLSession sessionWithConfiguration:config delegate:self delegateQueue:delegateQueue];
         _requestsByIdentifier = [NSMutableDictionary dictionary];
         _requestsByTask = [NSMutableDictionary dictionary];
@@ -187,12 +194,42 @@ maximumResponseTokens:(NSInteger)maximumResponseTokens
         [messages addObject:@{@"role": @"system", @"content": instructions}];
     }
     [messages addObject:@{@"role": @"user", @"content": text ?: @""}];
-    NSDictionary *payload = @{
+    // Reasoning/thinking tokens count against max_tokens on both OpenRouter and
+    // Gemini, so the caller's ~80-110-token visible-summary budget starves any
+    // thinking model: it burns the whole cap reasoning and the actual summary
+    // arrives empty ("In 1") or truncated mid-thought. The prompt instructions
+    // are what bound the visible length; max_tokens is only a runaway cap, so
+    // give it generous headroom. Custom gets a smaller cap: local servers
+    // (Ollama / llama.cpp / vLLM) reject prompt+max_tokens beyond the loaded
+    // model's context window, and 2k stays inside even a 4k-context model.
+    BOOL isCustom = [sAISummaryProvider isEqualToString:@"custom"];
+    NSInteger tokenBudget = MAX(isCustom ? 2048 : 4096, maximumResponseTokens * 8);
+
+    NSMutableDictionary *payload = [NSMutableDictionary dictionaryWithDictionary:@{
         @"model": model,
         @"messages": messages,
-        @"max_tokens": @(maximumResponseTokens),
+        @"max_tokens": @(tokenBudget),
         @"stream": @YES,
-    };
+    }];
+    if ([sAISummaryProvider isEqualToString:@"openrouter"]) {
+        // Keep reasoning out of the response entirely: some hosts (notably free
+        // tiers) otherwise stream chain-of-thought as ordinary content deltas.
+        // "exclude" is the one universally-supported reasoning control — it
+        // never *enables* reasoning on hybrid models (unlike "effort", whose
+        // presence implies enabled:true) and, unlike effort:"none", is not
+        // rejected by mandatory-reasoning models.
+        payload[@"reasoning"] = @{@"exclude": @YES};
+    } else if ([sAISummaryProvider isEqualToString:@"gemini"]) {
+        // Turn thinking off where Gemini permits it — only the 2.5 Flash family
+        // does; 2.5 Pro and Gemini 3 reject "none" outright, so gate on the
+        // model and let those think inside the enlarged max_tokens instead
+        // (their thoughts stay out of the OpenAI-compat stream by default).
+        NSString *normalizedModel = [model lowercaseString];
+        if ([normalizedModel hasPrefix:@"models/"]) normalizedModel = [normalizedModel substringFromIndex:7];
+        if ([normalizedModel hasPrefix:@"gemini-2.5-flash"]) {
+            payload[@"reasoning_effort"] = @"none";
+        }
+    }
     NSError *jsonError;
     NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&jsonError];
     if (!body) {
@@ -335,7 +372,69 @@ static BOOL CloudMessageSuggestsContextOverflow(NSString *message) {
     [self finishState:state final:nil errorCode:code message:message];
 }
 
+#pragma mark Reasoning-in-content stripping
+
+// Reasoning models can leak chain-of-thought into message content instead of a
+// separate reasoning field (free-tier OpenRouter hosts, local servers behind
+// the custom provider). Two shapes exist in the wild: a tagged block
+// (<think>…</think> — DeepSeek R1 family, Qwen, Nemotron), and reasoning that
+// ends with a bare closing tag because the opening tag is baked into the
+// model's chat template so it never appears in output. Content is accumulated
+// raw; this derives what the user should actually see. Streaming-safe: an
+// as-yet-unclosed tagged block (or a chunk boundary landing inside the tag
+// literal, "<thi") is hidden until more of the stream arrives. The one
+// unfixable-client-side shape — untagged reasoning with the closing tag still
+// to come — can only show transiently in partials; the final text snaps to the
+// post-tag answer, and the reasoning:{exclude:true} request parameter keeps
+// OpenRouter from sending any of these shapes in the first place.
+static NSString *CloudVisibleTextFromRaw(NSString *raw) {
+    if (raw.length == 0) return raw;
+    NSString *visible = raw;
+    // Everything before the LAST closing tag is reasoning (this also disposes
+    // of any properly-opened block preceding it).
+    for (NSString *close in @[@"</think>", @"</thinking>"]) {
+        NSRange r = [visible rangeOfString:close
+                                   options:NSCaseInsensitiveSearch | NSBackwardsSearch];
+        if (r.location != NSNotFound) visible = [visible substringFromIndex:NSMaxRange(r)];
+    }
+    // A block whose closing tag hasn't arrived (yet): hide from the opener on.
+    for (NSString *open in @[@"<think>", @"<thinking>"]) {
+        NSRange r = [visible rangeOfString:open options:NSCaseInsensitiveSearch];
+        if (r.location != NSNotFound) visible = [visible substringToIndex:r.location];
+    }
+    // A chunk boundary can land inside the tag literal itself: hide a trailing
+    // "<", "<th", … that is a strict prefix of an opening tag.
+    NSRange lastAngle = [visible rangeOfString:@"<" options:NSBackwardsSearch];
+    if (lastAngle.location != NSNotFound) {
+        NSString *tail = [[visible substringFromIndex:lastAngle.location] lowercaseString];
+        if (tail.length < @"<thinking>".length &&
+            ([@"<think>" hasPrefix:tail] || [@"<thinking>" hasPrefix:tail])) {
+            visible = [visible substringToIndex:lastAngle.location];
+        }
+    }
+    return [visible stringByTrimmingCharactersInSet:
+            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
 #pragma mark SSE parsing (_stateQueue via the session delegate queue)
+
+// _stateQueue only. The stream ended without an error: deliver the visible
+// (reasoning-stripped) text, or a specific failure when nothing visible came.
+- (void)finishStreamForState:(ApolloAICloudRequest *)state {
+    NSString *visible = CloudVisibleTextFromRaw(state.accumulated);
+    if (visible.length > 0) {
+        [self finishState:state final:visible errorCode:0 message:nil];
+    } else if (state.accumulated.length > 0 || [state.finishReason isEqualToString:@"length"]) {
+        // Either the content was all chain-of-thought, or the model hit the
+        // max_tokens cap while still thinking (Gemini reports finish_reason
+        // "length" with empty content in that case).
+        [self finishState:state final:nil errorCode:kCloudErrorReasoningOnly
+                  message:@"model spent the whole response reasoning"];
+    } else {
+        [self finishState:state final:nil errorCode:kCloudErrorService
+                  message:@"empty response from model"];
+    }
+}
 
 - (void)processSSELine:(NSString *)line forState:(ApolloAICloudRequest *)state {
     if (line.length == 0 || [line hasPrefix:@":"]) return; // keep-alive comment
@@ -343,11 +442,7 @@ static BOOL CloudMessageSuggestsContextOverflow(NSString *message) {
     NSString *payload = [[line substringFromIndex:5] stringByTrimmingCharactersInSet:
                          [NSCharacterSet whitespaceCharacterSet]];
     if ([payload isEqualToString:@"[DONE]"]) {
-        if (state.accumulated.length > 0) {
-            [self finishState:state final:[state.accumulated copy] errorCode:0 message:nil];
-        } else {
-            [self finishState:state final:nil errorCode:kCloudErrorService message:@"empty response from model"];
-        }
+        [self finishStreamForState:state];
         return;
     }
     NSData *data = [payload dataUsingEncoding:NSUTF8StringEncoding];
@@ -371,15 +466,26 @@ static BOOL CloudMessageSuggestsContextOverflow(NSString *message) {
 
     NSArray *choices = chunk[@"choices"];
     if (![choices isKindOfClass:[NSArray class]] || choices.count == 0) return; // usage/keep-alive chunk
-    NSDictionary *delta = [choices[0] isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)choices[0])[@"delta"] : nil;
+    NSDictionary *choice = [choices[0] isKindOfClass:[NSDictionary class]] ? choices[0] : nil;
+    id finishReason = choice[@"finish_reason"];
+    if ([finishReason isKindOfClass:[NSString class]]) state.finishReason = finishReason;
+    NSDictionary *delta = choice[@"delta"];
     id content = [delta isKindOfClass:[NSDictionary class]] ? delta[@"content"] : nil;
+    // Note: delta.reasoning / delta.reasoning_details / delta.reasoning_content
+    // are deliberately ignored — chain-of-thought is never user-visible.
     if (![content isKindOfClass:[NSString class]] || [(NSString *)content length] == 0) return; // role-only chunk
     [state.accumulated appendString:content];
 
     if (state.onPartial) {
-        NSString *cumulative = [state.accumulated copy]; // FM contract: partials are cumulative
-        void (^onPartial)(NSString *) = state.onPartial;
-        dispatch_async(dispatch_get_main_queue(), ^{ onPartial(cumulative); });
+        // FM contract: partials are cumulative. Deliver the reasoning-stripped
+        // view, and only when it changed — while a <think> block streams, the
+        // visible text sits unchanged (often empty) and there is nothing to say.
+        NSString *visible = CloudVisibleTextFromRaw(state.accumulated);
+        if (visible.length > 0 && ![visible isEqualToString:state.lastPartialVisible]) {
+            state.lastPartialVisible = visible;
+            void (^onPartial)(NSString *) = state.onPartial;
+            dispatch_async(dispatch_get_main_queue(), ^{ onPartial(visible); });
+        }
     }
 }
 
@@ -444,12 +550,8 @@ didReceiveResponse:(NSURLResponse *)response
         [self handleHTTPFailureForState:state];
         return;
     }
-    // Clean close without an explicit [DONE]: content received counts as success.
-    if (state.accumulated.length > 0) {
-        [self finishState:state final:[state.accumulated copy] errorCode:0 message:nil];
-    } else {
-        [self finishState:state final:nil errorCode:kCloudErrorService message:@"empty response from model"];
-    }
+    // Clean close without an explicit [DONE]: same handling as [DONE].
+    [self finishStreamForState:state];
 }
 
 @end

@@ -14,6 +14,8 @@
 //    8  = input too long for the model's context window
 //    11 = auth/billing rejected (bad API key, out of credits)  [cloud-only]
 //    12 = service unreachable / bad request / bad model         [cloud-only]
+//    13 = model spent the whole response on internal reasoning,
+//         leaving no visible summary                            [cloud-only]
 //  Code 9 (transient, retried in an unbounded loop by the caller) is never
 //  emitted: a persistent HTTP 429/5xx would loop forever against a paid API.
 //  Transient HTTP errors get ONE internal retry, then fail as code 12.
