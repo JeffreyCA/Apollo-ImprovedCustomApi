@@ -101,6 +101,15 @@ NSArray *ApolloWebJSONRescueFlairList(NSHTTPURLResponse *response);
 // the web-session account's token_v2, not Apollo's own OAuth credential.
 BOOL ApolloWebJSONRequestIsInternal(NSURL *url);
 
+// A token_v2-derived OAuth bearer for `username` (or the active web-session
+// account when nil/empty), minting a fresh token when the stored one is stale
+// (see ApolloWebJSONRescueFlairList above for why token_v2 works there).
+// Returns nil when the account has no stored web session — i.e. for API-key
+// accounts, which authenticate with Apollo's own bearer instead. Synchronous,
+// bounded by short timeouts — background queues only. Callers must mark their
+// request with ApolloWebJSONProbeURL so the transport hooks leave it alone.
+NSString *ApolloWebJSONKeylessOAuthBearer(NSString *username);
+
 // Hydrates the legacy single-session globals from the keychain, migrating any
 // legacy NSUserDefaults cookie value, then any legacy single-global session,
 // into the per-account ApolloWebSessionStore (see that file's harvest path for

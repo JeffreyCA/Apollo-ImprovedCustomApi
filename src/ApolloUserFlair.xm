@@ -1102,7 +1102,14 @@ static NSDictionary *ApolloUserFlairParseTemplateLimits(id templates) {
 static void ApolloUserFlairStoreTemplateLimits(NSString *subreddit, NSDictionary *byTemplate) {
     NSString *key = subreddit.lowercaseString;
     if (key.length == 0 || !byTemplate) return;
-    @synchronized (ApolloUserFlairTemplateLimitsCache()) { ApolloUserFlairTemplateLimitsCache()[key] = byTemplate; }
+    @synchronized (ApolloUserFlairTemplateLimitsCache()) {
+        // Never downgrade real limits to the empty marker: concurrent editor opens can
+        // race a slow no-answer fetch against one that found templates, and last-write-
+        // wins would pin the /10 default for the rest of the session.
+        NSDictionary *existing = ApolloUserFlairTemplateLimitsCache()[key];
+        if (byTemplate.count == 0 && existing.count > 0) return;
+        ApolloUserFlairTemplateLimitsCache()[key] = byTemplate;
+    }
 }
 
 static BOOL ApolloUserFlairHasTemplateLimits(NSString *subreddit) {
@@ -1126,10 +1133,60 @@ static NSUInteger ApolloUserFlairMaxEmojisForTemplate(NSString *subreddit, NSStr
     return kApolloUserFlairMaxEmojis;
 }
 
+// One synchronous GET of `url` with `bearer`, parsed into templateID -> limits (nil on
+// any failure). `outDefinitive` reports whether Reddit itself answered the flair
+// question — i.e. whether an empty result may be cached as "asked, nothing usable".
+// That requires the answer to have come from oauth.reddit.com (on a keyless account
+// the transport layer can reroute this request to cookie auth on www, whose 403/HTML
+// answers are transport artifacts, not flair config — see ApolloWebJSONNoteResponse's
+// block-page handling) AND to look like a real API answer: a JSON array for 200, or a
+// JSON body for 403 ("flair self-assign off"; Reddit's transient rate-limit block
+// pages are text/html). Background queues only — bounded by the request timeout.
+static NSDictionary *ApolloUserFlairFetchTemplateLimits(NSURL *url, NSString *bearer, NSInteger *outStatus, BOOL *outDefinitive) {
+    if (outStatus) *outStatus = 0;
+    if (outDefinitive) *outDefinitive = NO;
+    if (!url || bearer.length == 0) return nil;
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    [req setValue:[@"Bearer " stringByAppendingString:bearer] forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"Apollo iOS" forHTTPHeaderField:@"User-Agent"];
+    req.HTTPShouldHandleCookies = NO;
+    req.timeoutInterval = 15;
+    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+    __block NSData *body = nil;
+    __block NSHTTPURLResponse *http = nil;
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *error) {
+        body = data;
+        if ([resp isKindOfClass:[NSHTTPURLResponse class]]) http = (NSHTTPURLResponse *)resp;
+        dispatch_semaphore_signal(sema);
+    }] resume];
+    if (dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, 18 * NSEC_PER_SEC)) != 0) return nil;
+    NSInteger status = http.statusCode;
+    if (outStatus) *outStatus = status;
+    // http.URL reflects any pre-flight rewrite, so this is the host that ANSWERED.
+    BOOL fromOAuth = [http.URL.host.lowercaseString isEqualToString:@"oauth.reddit.com"];
+    if (status == 403 && fromOAuth) {
+        NSString *contentType = [http.allHeaderFields[@"Content-Type"] description].lowercaseString;
+        if (outDefinitive) *outDefinitive = [contentType containsString:@"json"];
+        return nil;
+    }
+    if (status != 200 || body.length == 0) return nil;
+    id json = [NSJSONSerialization JSONObjectWithData:body options:0 error:NULL];
+    if (outDefinitive) *outDefinitive = fromOAuth && [json isKindOfClass:[NSArray class]];
+    return ApolloUserFlairParseTemplateLimits(json);
+}
+
 // Ensure the per-template limits for a subreddit are cached, fetching user_flair_v2 once
 // if needed. Lazy: the editor calls this on open. `completion` always runs on the main
-// queue. The result is cached (including an empty marker for 403/none) so reopening the
-// editor doesn't refetch; a pure network failure is left uncached so it can retry.
+// queue. The result is cached (including an empty marker when Reddit answered but had
+// nothing usable) so reopening the editor doesn't refetch; a pure network failure is
+// left uncached so it can retry.
+//
+// Two transports, because the endpoint is OAuth-only: Apollo's own bearer works
+// directly for API-key accounts, but on a keyless (web-session) account the WebJSON
+// layer reroutes that first request to cookie auth on www — which user_flair_v2
+// rejects — so we rescue with the session's token_v2 cookie, itself a valid OAuth
+// bearer on oauth.reddit.com (same trick as ApolloWebJSONRescueFlairList). The rescue
+// request is probe-marked so the transport hooks don't reroute it again.
 static void ApolloUserFlairEnsureTemplateLimits(NSString *subreddit, void (^completion)(void)) {
     void (^done)(void) = ^{
         if (!completion) return;
@@ -1137,25 +1194,42 @@ static void ApolloUserFlairEnsureTemplateLimits(NSString *subreddit, void (^comp
         else dispatch_async(dispatch_get_main_queue(), completion);
     };
     if (ApolloUserFlairHasTemplateLimits(subreddit)) { done(); return; }
-    NSString *token = [sLatestRedditBearerToken copy];
     NSString *enc = [subreddit stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]] ?: subreddit;
-    if (token.length == 0 || enc.length == 0) { done(); return; }
-    NSString *urlStr = [NSString stringWithFormat:@"https://oauth.reddit.com/r/%@/api/user_flair_v2?raw_json=1", enc];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlStr]];
-    [req setValue:[@"Bearer " stringByAppendingString:token] forHTTPHeaderField:@"Authorization"];
-    [req setValue:@"Apollo iOS" forHTTPHeaderField:@"User-Agent"];
-    req.timeoutInterval = 20;
-    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *error) {
-        id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
-        NSDictionary *byTemplate = ApolloUserFlairParseTemplateLimits(json);
+    if (enc.length == 0) { done(); return; }
+    NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"https://oauth.reddit.com/r/%@/api/user_flair_v2?raw_json=1", enc]];
+    // Everything below blocks on semaphores (fetches, and possibly a token_v2 mint
+    // inside ApolloWebJSONKeylessOAuthBearer) — keep it off the main thread and off
+    // NSURLSession's own serial delegate queue.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSInteger status = 0;
+        BOOL definitive = NO;
+        NSDictionary *byTemplate = nil;
+        NSString *apolloBearer = [sLatestRedditBearerToken copy];
+        if (apolloBearer.length) {
+            byTemplate = ApolloUserFlairFetchTemplateLimits(url, apolloBearer, &status, &definitive);
+            if (!byTemplate.count) {
+                ApolloLog(@"[UserFlair] limits fetch r/%@ primary HTTP %ld — %@", subreddit, (long)status,
+                    definitive ? @"no usable templates" : @"trying token_v2 rescue");
+            }
+        }
+        if (!byTemplate.count) {
+            NSString *webBearer = ApolloWebJSONKeylessOAuthBearer(nil);
+            if (webBearer.length) {
+                // The rescue's verdict supersedes the primary's: if it errors out
+                // (definitive becomes NO), the sub stays uncached and retries later.
+                byTemplate = ApolloUserFlairFetchTemplateLimits(ApolloWebJSONProbeURL(url), webBearer, &status, &definitive);
+                ApolloLog(@"[UserFlair] limits rescue r/%@ HTTP %ld templates=%lu (token_v2 bearer)",
+                    subreddit, (long)status, (unsigned long)byTemplate.count);
+            }
+        }
         if (byTemplate.count) {
             ApolloUserFlairStoreTemplateLimits(subreddit, byTemplate);
             ApolloLog(@"[UserFlair] template emoji limits r/%@: %lu templates", subreddit, (unsigned long)byTemplate.count);
-        } else if (resp) {
+        } else if (definitive) {
             ApolloUserFlairStoreTemplateLimits(subreddit, @{}); // definitive: no usable limits
         }
         done();
-    }] resume];
+    });
 }
 
 #pragma mark Emoji grid cell
@@ -1379,7 +1453,8 @@ static void ApolloUserFlairEnsureTemplateLimits(NSString *subreddit, void (^comp
             (unsigned long)emojiCount, (unsigned long)self.maxEmojis];
     }
     self.counterLabel.textColor = (overText || overEmoji) ? [UIColor systemRedColor] : [UIColor secondaryLabelColor];
-    self.saveItem.enabled = !overText && !overEmoji;
+    // Save stays tappable while over a limit — a greyed-out button doesn't tell the
+    // user WHY they can't save; saveTapped explains the community's rule instead.
     [self refreshPreview];
 }
 
@@ -1458,6 +1533,48 @@ static void ApolloUserFlairEnsureTemplateLimits(NSString *subreddit, void (^comp
 - (void)cancelTapped { [self finishAndDismiss]; }
 
 - (void)saveTapped {
+    NSString *text = self.textField.text ?: @"";
+    // Saving past a limit is legal but useless-to-misleading: Reddit silently won't
+    // display emoji beyond the community's cap, and rejects text past 64 chars. The
+    // counter already went red — this explains WHY before anything is committed.
+    NSUInteger textLen = 0;
+    NSUInteger emojiCount = [self emojiCountInText:text textLength:&textLen];
+    BOOL overText = textLen > kApolloUserFlairMaxLength;
+    BOOL overEmoji = emojiCount > self.maxEmojis;
+    if (overText || overEmoji) {
+        NSMutableArray<NSString *> *reasons = [NSMutableArray array];
+        if (overEmoji && self.maxEmojis == 0) {
+            [reasons addObject:[NSString stringWithFormat:
+                @"r/%@ only allows plain text in user flair — emoji won't be displayed.", self.subreddit]];
+        } else if (overEmoji) {
+            [reasons addObject:[NSString stringWithFormat:
+                @"r/%@ allows up to %lu emoji in user flair, and this flair uses %lu. Reddit won't display the extra emoji.",
+                self.subreddit, (unsigned long)self.maxEmojis, (unsigned long)emojiCount]];
+        }
+        if (overText) {
+            [reasons addObject:[NSString stringWithFormat:
+                @"Flair text is limited to %lu characters, and this flair uses %lu. Reddit may reject the save.",
+                (unsigned long)kApolloUserFlairMaxLength, (unsigned long)textLen]];
+        }
+        ApolloLog(@"[UserFlair] save over-limit prompt subreddit=%@ emoji=%lu/%lu textLen=%lu",
+            self.subreddit, (unsigned long)emojiCount, (unsigned long)self.maxEmojis, (unsigned long)textLen);
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Over This Community's Flair Limit"
+                                                                       message:[reasons componentsJoinedByString:@"\n\n"]
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        __weak typeof(self) weakSelf = self;
+        [alert addAction:[UIAlertAction actionWithTitle:@"Save Anyway" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+            [weakSelf commitAndDismiss];
+        }]];
+        UIAlertAction *keepEditing = [UIAlertAction actionWithTitle:@"Keep Editing" style:UIAlertActionStyleCancel handler:nil];
+        [alert addAction:keepEditing];
+        alert.preferredAction = keepEditing;
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    [self commitAndDismiss];
+}
+
+- (void)commitAndDismiss {
     NSString *text = self.textField.text ?: @"";
     ApolloUserFlairEditSession *session = self.session;
     ApolloLog(@"[UserFlair] save tapped subreddit=%@ templateID=%@ textLen=%lu",

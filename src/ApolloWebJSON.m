@@ -1628,6 +1628,14 @@ static NSString *ApolloWebJSONMintTokenV2ForAccount(NSString *username) {
     }
 }
 
+NSString *ApolloWebJSONKeylessOAuthBearer(NSString *username) {
+    NSString *user = username.length ? username : ApolloActiveWebSessionUsername();
+    if (user.length == 0) return nil;
+    ApolloWebSessionEntry *session = ApolloWebSessionFor(user);
+    if (session.cookieHeader.length == 0) return nil;
+    return ApolloWebJSONUsableTokenV2ForSession(session) ?: ApolloWebJSONMintTokenV2ForAccount(user);
+}
+
 NSArray *ApolloWebJSONRescueFlairList(NSHTTPURLResponse *response) {
     NSURL *failedURL = response.URL;
     if (!failedURL) return nil;
