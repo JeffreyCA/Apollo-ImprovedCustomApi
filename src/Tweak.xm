@@ -359,7 +359,8 @@ static BOOL ApolloIsSingleItemValetQuery(NSDictionary *query) {
 // cache keeps the tight websession-cookie read loop from re-enumerating on every call; any Valet
 // write invalidates it so a later read reflects the newest value (incl. a genuine sign-out).
 static os_unfair_lock sRecoverLock = OS_UNFAIR_LOCK_INIT;
-static NSMutableDictionary<NSString *, NSData *> *sRecoverCache; // "service\naccount" -> newest data
+static NSMutableDictionary<NSString *, NSData *> *sRecoverCache;      // "service\naccount" -> newest data
+static NSMutableDictionary<NSString *, NSString *> *sRecoverGroupCache; // "service\naccount" -> its access group
 static CFAbsoluteTime sRecoverCacheBuiltAt = 0;
 static const CFTimeInterval kRecoverCacheTTL = 1.5;
 
@@ -372,6 +373,7 @@ static void ApolloRebuildRecoverCacheLocked(void) {
         (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
     };
     NSMutableDictionary<NSString *, NSData *> *cache = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSString *> *groups = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSDate *> *newest = [NSMutableDictionary dictionary];
     CFTypeRef result = NULL;
     OSStatus st = ApolloRealSecItemCopyMatching(q, &result);
@@ -391,6 +393,8 @@ static void ApolloRebuildRecoverCacheLocked(void) {
             // sign-out blob) wins over an older duplicate.
             if (!prev || [mod compare:prev] != NSOrderedAscending) {
                 cache[key] = data;
+                id grp = item[(__bridge id)kSecAttrAccessGroup];
+                groups[key] = [grp isKindOfClass:[NSString class]] ? grp : @"?";
                 newest[key] = mod;
             }
         }
@@ -398,6 +402,7 @@ static void ApolloRebuildRecoverCacheLocked(void) {
         CFRelease(result);
     }
     sRecoverCache = cache;
+    sRecoverGroupCache = groups;
     sRecoverCacheBuiltAt = CFAbsoluteTimeGetCurrent();
 }
 
@@ -407,7 +412,10 @@ static void ApolloInvalidateRecoverCache(void) {
     os_unfair_lock_unlock(&sRecoverLock);
 }
 
-static OSStatus ApolloValetRecoverRead(NSDictionary *query, CFTypeRef *result) {
+// outGroup (optional) receives the access group the recovered item actually lives in, so a
+// [KeychainRecover] log can compare it against the group Valet's scoped query targeted — the
+// direct confirmation of the "account split across access groups" root cause.
+static OSStatus ApolloValetRecoverRead(NSDictionary *query, CFTypeRef *result, NSString **outGroup) {
     NSString *service = query[(__bridge id)kSecAttrService];
     NSString *account = query[(__bridge id)kSecAttrAccount];
     if (![service isKindOfClass:[NSString class]] || ![account isKindOfClass:[NSString class]]) return errSecItemNotFound;
@@ -417,6 +425,7 @@ static OSStatus ApolloValetRecoverRead(NSDictionary *query, CFTypeRef *result) {
         ApolloRebuildRecoverCacheLocked();
     }
     NSData *data = sRecoverCache[key];
+    if (outGroup) *outGroup = sRecoverGroupCache[key];
     os_unfair_lock_unlock(&sRecoverLock);
     if (!data) return errSecItemNotFound;
     return ApolloMirrorServe(query, data, result);
@@ -545,6 +554,45 @@ static NSString *ApolloProtectedDataString(void) {
     return [app isProtectedDataAvailable] ? @"unlocked" : @"LOCKED";
 }
 
+// Every physical copy of the account item across access groups, with each copy's group, byte
+// length, protection class, and synchronizable flag. This is the direct test of the root-cause
+// theory: if the account is split across drawers, this shows >1 copy in different groups (and/or
+// a copy whose group differs from what Valet's scoped query targets). One enumeration; only runs
+// at snapshot time (lifecycle transitions), so it's low-frequency.
+static NSString *ApolloAccountsBlobGroupBreakdown(void) {
+    NSDictionary *q = @{
+        (__bridge id)kSecClass:              (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecMatchLimit:         (__bridge id)kSecMatchLimitAll,
+        (__bridge id)kSecReturnAttributes:   @YES,
+        (__bridge id)kSecReturnData:         @YES,
+        (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
+    };
+    CFTypeRef result = NULL;
+    OSStatus st = ApolloRealSecItemCopyMatching(q, &result);
+    if (st != errSecSuccess || !result) {
+        if (result) CFRelease(result);
+        return [NSString stringWithFormat:@"enum-status=%d", (int)st];
+    }
+    NSArray *found = (__bridge_transfer NSArray *)result;
+    NSMutableArray<NSString *> *copies = [NSMutableArray array];
+    for (NSDictionary *item in found) {
+        NSString *service = item[(__bridge id)kSecAttrService];
+        NSString *account = item[(__bridge id)kSecAttrAccount];
+        if (![service isKindOfClass:[NSString class]] || ![service containsString:kValetServiceSubstring]) continue;
+        if (![account isKindOfClass:[NSString class]] || ![account containsString:@"RedditAccounts2"]) continue;
+        id grp = item[(__bridge id)kSecAttrAccessGroup];
+        id acc = item[(__bridge id)kSecAttrAccessible];
+        NSData *data = item[(__bridge id)kSecValueData];
+        long len = [data isKindOfClass:[NSData class]] ? (long)data.length : -1;
+        BOOL sync = [item[(__bridge id)kSecAttrSynchronizable] boolValue];
+        [copies addObject:[NSString stringWithFormat:@"{grp=%@ len=%ld prot=%@ sync=%d}",
+                           [grp isKindOfClass:[NSString class]] ? grp : @"?", len,
+                           [acc isKindOfClass:[NSString class]] ? acc : @"?", sync]];
+    }
+    return [NSString stringWithFormat:@"copies=%lu %@",
+            (unsigned long)copies.count, [copies componentsJoinedByString:@" "]];
+}
+
 static void ApolloLogAccountSnapshot(NSString *reason) {
     // Defaults mirror (group suite): what Apollo's own loader reads. Length distinguishes a
     // populated archive from an empty/absent one without unarchiving; the account stats separate
@@ -565,6 +613,8 @@ static void ApolloLogAccountSnapshot(NSString *reason) {
     ApolloLoginDiag(@"[AccountSnapshot] %@ | device=%@ | keychain: len=%ld status=%d accessible=%@ | defaults: len=%ld index=%ld accounts=%ld withUser=%ld | mirror: len=%ld | active=%@",
                     reason, ApolloProtectedDataString(), kcLen, (int)kcStatus, accessible ?: @"?",
                     defaultsLen, (long)index, (long)acctCount, (long)acctWithUser, mirrorLen, active ?: @"(nil)");
+    // The access-group breakdown (root-cause confirmation) — separate line to keep both legible.
+    ApolloLoginDiag(@"[AccountBlobGroups] %@ | %@", reason, ApolloAccountsBlobGroupBreakdown());
 }
 
 // Fixes apollo-reborn#567: an iCloud-synced Valet item can miss a plain read
@@ -775,10 +825,16 @@ static OSStatus SecItemCopyMatching_replacement(CFDictionaryRef query, CFTypeRef
     // enumerated value so Valet's read succeeds and AccountManager never issues the wiping
     // empty write. This is the read-side counterpart of the write-side self-heal.
     if (status == errSecItemNotFound && ApolloIsSingleItemValetQuery(strippedQuery)) {
-        OSStatus recovered = ApolloValetRecoverRead(strippedQuery, result);
+        NSString *foundGroup = nil;
+        OSStatus recovered = ApolloValetRecoverRead(strippedQuery, result, &foundGroup);
         if (recovered == errSecSuccess) {
-            ApolloLoginDiag(@"[KeychainRecover] scoped read missed but enumeration found item; served recovered value account=%@",
-                            strippedQuery[(__bridge id)kSecAttrAccount]);
+            // The group Valet's original (pre-strip) query targeted vs the group the item
+            // actually lives in — a mismatch is the direct proof of the access-group split.
+            id queriedGroup = ((__bridge NSDictionary *)query)[(__bridge id)kSecAttrAccessGroup];
+            ApolloLoginDiag(@"[KeychainRecover] scoped read missed but enumeration found item; served recovered value account=%@ queriedGroup=%@ foundGroup=%@",
+                            strippedQuery[(__bridge id)kSecAttrAccount],
+                            [queriedGroup isKindOfClass:[NSString class]] ? queriedGroup : @"(stripped/none)",
+                            foundGroup ?: @"?");
             return errSecSuccess;
         }
     }
