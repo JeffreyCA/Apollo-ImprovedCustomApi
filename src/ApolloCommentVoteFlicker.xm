@@ -318,7 +318,9 @@ static void ApolloVFHandleModelUpdate(id note, void (^origCall)(void)) {
     // cell has settled so that fast path also has a ready vote cover.
     __weak id weakCell = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        ApolloTranslationPrimeVoteBodySnapshot(weakCell);
+        id strongCell = weakCell;
+        if (!strongCell || ![sApolloVFVisibleCells containsObject:strongCell]) return;
+        ApolloTranslationPrimeVoteBodySnapshot(strongCell);
     });
 }
 - (void)didExitVisibleState {

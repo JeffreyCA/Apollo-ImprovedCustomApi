@@ -17,8 +17,9 @@ BOOL ApolloTranslationReapplySynchronouslyForVoteReconfigure(id cellNode);
 // with ApolloTranslationRemoveVoteBodyCover after the replacement settles.
 id ApolloTranslationInstallVoteBodyCover(id cellNode);
 void ApolloTranslationRemoveVoteBodyCover(id coverToken);
-// Warms the same snapshot cache without presenting a cover. Safe to call for
-// every visible comment; it is an exact no-op outside translated mode or when
-// this cell/fullname already has a snapshot.
+// Warms the same snapshot cache and briefly presents the identical cover so
+// Core Animation commits its layer before a vote. Safe to call for every
+// visible comment; it is an exact no-op outside translated mode or when this
+// cell/fullname already has a ready cover.
 void ApolloTranslationPrimeVoteBodySnapshot(id cellNode);
 void ApolloTranslationDiscardVoteBodySnapshot(id cellNode);

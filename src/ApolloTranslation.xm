@@ -314,12 +314,17 @@ static void ApolloApplyTranslationToTitleNode(id titleNode, id textNode, NSStrin
 static BOOL sApolloPrimingVoteBodySnapshot = NO;
 static void ApolloScheduleVoteBodySnapshotPrime(id commentCellNode) {
     if (!commentCellNode || objc_getAssociatedObject(commentCellNode, kApolloVoteBodySnapshotPrimeScheduledKey)) return;
+    NSObject *primeToken = [NSObject new];
     objc_setAssociatedObject(commentCellNode, kApolloVoteBodySnapshotPrimeScheduledKey,
-                             @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                             primeToken, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     __weak id weakCell = commentCellNode;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         id strongCell = weakCell;
         if (!strongCell) return;
+        // didExitVisibleState/discard cancels this token. Identity (rather
+        // than a BOOL) also prevents an older block from consuming a newer
+        // schedule after a rapid exit/re-entry or cell reuse.
+        if (objc_getAssociatedObject(strongCell, kApolloVoteBodySnapshotPrimeScheduledKey) != primeToken) return;
         objc_setAssociatedObject(strongCell, kApolloVoteBodySnapshotPrimeScheduledKey,
                                  nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         // A real translation/style write supersedes any snapshot previously
@@ -4103,7 +4108,7 @@ id ApolloTranslationInstallVoteBodyCover(id commentCellNode) {
     NSString *translated = nil;
     UIView *cellView = nil;
     UIWindow *window = nil;
-    UIScrollView *scrollContainer = nil;
+    UIView *coverContainer = nil;
     @try {
         comment = ApolloCommentFromCellNode(commentCellNode);
         fullName = ApolloCommentFullName(comment);
@@ -4115,8 +4120,9 @@ id ApolloTranslationInstallVoteBodyCover(id commentCellNode) {
             window = cellView.window;
             UIView *ancestor = cellView.superview;
             while (ancestor && ancestor != window) {
-                if ([ancestor isKindOfClass:[UIScrollView class]]) {
-                    scrollContainer = (UIScrollView *)ancestor;
+                if ([ancestor isKindOfClass:[UITableViewCell class]]) {
+                    UITableViewCell *tableCell = (UITableViewCell *)ancestor;
+                    coverContainer = tableCell.contentView ?: tableCell;
                     break;
                 }
                 ancestor = ancestor.superview;
@@ -4126,7 +4132,7 @@ id ApolloTranslationInstallVoteBodyCover(id commentCellNode) {
         ApolloTranslationVerboseLog(@"[Translation/vote] body cover setup failed cell=%p exception=%@", commentCellNode, e.name);
     }
     if (!comment || fullName.length == 0 || translated.length == 0 ||
-        !cellView || !window || !scrollContainer) return nil;
+        !cellView || !window || !coverContainer) return nil;
 
     NSDictionary *cachedSnapshot = objc_getAssociatedObject(commentCellNode, kApolloVoteBodySnapshotKey);
     CGFloat cachedCellWidth = [[cachedSnapshot objectForKey:@"cellWidth"] doubleValue];
@@ -4265,22 +4271,21 @@ id ApolloTranslationInstallVoteBodyCover(id commentCellNode) {
     } else {
         cover.image = frozenImage;
     }
-    // Keep the cover in the table's scrolling coordinate space, not the
-    // window. A window-level cover stayed fixed on screen while the cell
-    // moved, producing a duplicated "stuck" comment. The cell itself is not
-    // a safe container either: Apollo briefly shrinks its bounds during the
-    // vote reconfigure, which clips the bottom of a tall translated body.
-    // The scroll view follows scrolling while remaining stable through both
-    // the body-node replacement and that transient cell resize.
-    cover.frame = [cellView convertRect:bodyFrameInCell toView:scrollContainer];
+    // Host the cover in Texture's stable UITableViewCell wrapper. It follows
+    // scrolling and UIKit's context-menu lift, remains below the nav bar's
+    // scroll-edge glass, and stays full-height while Apollo briefly resizes
+    // the inner CommentCellNode view during a vote rebuild.
+    cover.frame = [cellView convertRect:bodyFrameInCell toView:coverContainer];
     cover.backgroundColor = frozenBackgroundColor;
     cover.opaque = YES;
     cover.userInteractionEnabled = NO;
     cover.accessibilityElementsHidden = YES;
-    // Keep Texture's asynchronously-created replacement body below the cover.
-    cover.layer.zPosition = CGFLOAT_MAX / 4.0;
+    // Normal sibling order is sufficient inside this cell-only container.
+    // An extreme z-position here can outrank iOS 26's scroll-edge glass.
+    cover.layer.zPosition = 0.0;
     [UIView performWithoutAnimation:^{
-        if (cover.superview != scrollContainer) [scrollContainer addSubview:cover];
+        if (cover.superview != coverContainer) [coverContainer addSubview:cover];
+        else [coverContainer bringSubviewToFront:cover];
         cover.alpha = 1.0;
     }];
     if (sApolloPrimingVoteBodySnapshot) {
@@ -4350,6 +4355,10 @@ void ApolloTranslationPrimeVoteBodySnapshot(id commentCellNode) {
 
 void ApolloTranslationDiscardVoteBodySnapshot(id commentCellNode) {
     if (!commentCellNode) return;
+    // Cancel a translation-write prime that has not fired yet. Without this,
+    // its delayed block can recreate an offscreen cover after cleanup.
+    objc_setAssociatedObject(commentCellNode, kApolloVoteBodySnapshotPrimeScheduledKey,
+                             nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     UIView *cover = objc_getAssociatedObject(commentCellNode, kApolloVoteBodyCoverViewKey);
     [cover removeFromSuperview];
     objc_setAssociatedObject(commentCellNode, kApolloVoteBodyCoverViewKey,
@@ -5107,6 +5116,36 @@ static id ApolloCommentCellNodeForTextNode(id textNode) {
         @catch (__unused NSException *e) { break; }
     }
     return nil;
+}
+
+// Vote rebuilds attach their fresh body node back to the real table-backed
+// CommentCellNode before the deferred preempt runs. Apollo also builds
+// temporary CommentCellNode copies for context-menu previews, but those live
+// in a window transition container instead of a UITableViewCell. Translating
+// those copies after UIKit has measured the preview at the original-language
+// height makes the preview overflow and appear to jump up the screen.
+static BOOL ApolloCommentCellNodeIsBackedByActiveCommentsTable(id commentCellNode, UIViewController *commentsVC) {
+    if (!commentCellNode || !commentsVC || ![NSThread isMainThread]) return NO;
+    @try {
+        UITableView *commentsTable = GetCommentsTableView(commentsVC);
+        if (!commentsTable) return NO;
+        if ([commentCellNode respondsToSelector:@selector(isNodeLoaded)] &&
+            !((BOOL (*)(id, SEL))objc_msgSend)(commentCellNode, @selector(isNodeLoaded))) return NO;
+        UIView *view = [commentCellNode respondsToSelector:@selector(view)]
+            ? ((UIView *(*)(id, SEL))objc_msgSend)(commentCellNode, @selector(view)) : nil;
+        UITableViewCell *tableCell = nil;
+        for (UIView *ancestor = view; ancestor; ancestor = ancestor.superview) {
+            if (!tableCell && [ancestor isKindOfClass:[UITableViewCell class]]) {
+                tableCell = (UITableViewCell *)ancestor;
+            }
+            if ([ancestor isKindOfClass:[UITableView class]]) {
+                UITableView *table = (UITableView *)ancestor;
+                return tableCell && table == commentsTable && tableCell.window == commentsTable.window &&
+                    [commentsTable indexPathForCell:tableCell] != nil;
+            }
+        }
+    } @catch (__unused NSException *e) {}
+    return NO;
 }
 
 // Compact "🌐 Show translation" affordance appended under the ORIGINAL text when
@@ -6974,6 +7013,12 @@ static BOOL ApolloPreemptUnownedCommentTextNode(id textNode, NSAttributedString 
     // the owning model from this fresh node so identical bodies cannot borrow
     // another comment's translation cache or per-item pin state.
     id cellNode = ApolloCommentCellNodeForTextNode(textNode);
+    // Fresh body nodes also exist in Apollo's separately-measured context-menu
+    // preview controller. Only adopt a node in the active comments table. A
+    // detached vote replacement falls through to the deferred retry below and
+    // passes this check once Apollo attaches it to the real row; a preview
+    // clone never does, so its already-measured height stays coherent.
+    if (!ApolloCommentCellNodeIsBackedByActiveCommentsTable(cellNode, vc)) return NO;
     RDKComment *comment = cellNode ? ApolloCommentFromCellNode(cellNode) : nil;
     NSString *fullName = comment ? ApolloCommentFullName(comment) : nil;
     if (fullName.length == 0) return NO;
@@ -7052,13 +7097,17 @@ static void ApolloScheduleDeferredCommentPreempt(id textNode, NSAttributedString
         @catch (__unused NSException *e) { return; }
         if (![current isKindOfClass:[NSAttributedString class]] ||
             ![current.string isEqualToString:incomingText]) return; // text moved on
+        id cellNode = ApolloCommentCellNodeForTextNode(node);
+        if (!ApolloCommentCellNodeIsBackedByActiveCommentsTable(cellNode, vc)) {
+            ApolloTranslationVerboseLog(@"[Translation/vote] deferred preempt: skipping non-table comment clone node=%p", node);
+            return;
+        }
         NSAttributedString *swap = nil;
         if (!ApolloPreemptUnownedCommentTextNode(node, current, &swap) || !swap) return;
         objc_setAssociatedObject(node, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         @try { ((void (*)(id, SEL, id))objc_msgSend)(node, @selector(setAttributedText:), swap); }
         @catch (__unused NSException *e) {}
         objc_setAssociatedObject(node, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        id cellNode = ApolloCommentCellNodeForTextNode(node);
         if (cellNode) ApolloTranslationHealCellDisplaySync(cellNode);
         ApolloTranslationVerboseLog(@"[Translation/vote] deferred preempt: rebuilt node=%p swapped after attach", node);
     });
