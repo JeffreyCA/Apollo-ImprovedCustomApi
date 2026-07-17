@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         Open in Apollo (Apollo-Reborn)
 // @namespace    https://github.com/Apollo-Reborn/Apollo-Reborn
-// @version      1.0.0
-// @description  Open Reddit links in the Apollo app on iOS. Auto-redirects reddit.com pages to the apollo:// scheme, and rewrites Reddit links on search-result pages so they open in Apollo too.
+// @version      1.1.0
+// @description  Open Reddit links in Apollo on iOS through Apollo Reborn's Universal Link, without a custom-scheme confirmation popup.
 // @author       Apollo-Reborn
 // @match        *://*.reddit.com/*
+// @match        *://*.redd.it/*
 // @match        *://www.google.com/*
 // @match        *://www.bing.com/*
 // @match        *://duckduckgo.com/*
@@ -19,9 +20,9 @@
 // App Store (a Safari extension). Like Apollo's own extension, it is Safari-only
 // on iOS: Chrome/Firefox/etc. on iOS can't run extensions or userscript managers.
 //
-// The reddit-redirect logic mirrors ApolloURLByConvertingResolvedURLToApolloScheme
-// in the tweak (src/ApolloCommon.m): keep the full path + query and let Apollo
-// parse it, so comment permalinks, profiles, and /s/ share links all work.
+// The redirect carries the complete Reddit URL in a URL-encoded query item. The
+// tweak validates it and then passes it to Apollo's native URL parser, so comment
+// permalinks, profiles, redd.it links, and /s/ share links all work.
 //
 // The search-result rewriting idea is borrowed from AnthonyGress's userscript:
 // https://github.com/AnthonyGress/Open-In-Apollo (reimplemented here, with /s/
@@ -30,7 +31,10 @@
 (function () {
     "use strict";
 
-    // Returns an apollo:// URL for a reddit content link, or null otherwise.
+    var universalLinkOrigin = "https://open.apolloreborn.app";
+    var fallbackMarker = "apollo_reborn_no_open";
+
+    // Returns an Apollo Reborn Universal Link for a Reddit content link.
     function toApolloURL(href) {
         var url;
         try {
@@ -40,11 +44,18 @@
         }
 
         var host = url.hostname.toLowerCase();
-        if (host === "reddit.com" || host.endsWith(".reddit.com")) {
-            host = "reddit.com";
-        } else if (host === "redd.it" || host.endsWith(".redd.it")) {
-            // Keep the redd.it host as-is; Apollo's handler accepts it too.
-        } else {
+        if (!(host === "reddit.com" || host.endsWith(".reddit.com") ||
+              host === "redd.it" || host.endsWith(".redd.it"))) {
+            return null;
+        }
+
+        if (url.searchParams.has(fallbackMarker)) {
+            url.searchParams.delete(fallbackMarker);
+            try {
+                window.history.replaceState(null, "", url.href);
+            } catch (e) {
+                // Cosmetic only; returning null is what prevents a fallback loop.
+            }
             return null;
         }
 
@@ -53,7 +64,8 @@
             return null;
         }
 
-        return "apollo://" + host + path + (url.search || "");
+        url.protocol = "https:";
+        return universalLinkOrigin + "/open?url=" + encodeURIComponent(url.href);
     }
 
     // Some search engines wrap result links in a redirector. Unwrap the common

@@ -141,9 +141,21 @@ Notifications can be delivered two ways — pick the one that matches your Apple
 
 There are a few ways to open Reddit links in Apollo, depending on your browser and which IPA variant you installed.
 
-### Safari — built-in extension (zero setup)
+### Safari — built-in extension with the Apollo Reborn Opener
 
-Apollo's bundled **"Open in Apollo"** Safari extension now works again on sideloaded builds (it previously got stranded on an `openinapollo.com` interstitial). Enable it under **Settings > Safari > Extensions > Open in Apollo**, allow it on `reddit.com`, and Reddit links will open straight in Apollo. Available on the **standard** and **Liquid Glass** IPA variants (the extension is removed from the *no-extensions* variants).
+Apollo's bundled **"Open in Apollo"** Safari extension redirects Reddit pages to
+`https://open.apolloreborn.app/open?url=…`. The separately installed Apollo
+Reborn Opener owns that Universal Link and forwards it to Apollo from native
+code, avoiding Safari's `apollo://` confirmation.
+Enable the extension under **Settings > Safari > Extensions > Open in Apollo**
+and allow it on `reddit.com` and `redd.it`. It is included in the **standard**
+and **Liquid Glass** IPA variants.
+
+> [!IMPORTANT]
+> Install the project-signed Apollo Reborn Opener once before enabling automatic
+> redirects. Apollo itself can keep any sideloaded bundle ID and signing team;
+> it does not need an Associated Domains entitlement. Without the opener, the
+> Worker safely returns to Reddit instead of looping.
 
 ### Safari — userscript (works with any variant)
 
@@ -152,7 +164,8 @@ If you installed a **no-extensions** variant, or you're on a jailbreak/`.deb` in
 1. Install the free [**Userscripts**](https://apps.apple.com/app/userscripts/id1463298887) app (a Safari extension) and enable it for `reddit.com` in **Settings > Safari > Extensions**.
 2. Open [`userscript/open-in-apollo.user.js`](userscript/open-in-apollo.user.js) in Safari, tap the **aA** menu → **Userscripts**, and install it.
 
-It auto-redirects Reddit pages to Apollo and rewrites Reddit links on Google/Bing/DuckDuckGo results. (Search-result rewriting is inspired by [AnthonyGress's userscript](https://github.com/AnthonyGress/Open-In-Apollo), which also works.)
+It uses the same opener Universal Link and rewrites Reddit links on
+Google/Bing/DuckDuckGo results.
 
 ### Any other browser (Chrome, Firefox, Edge, Brave) — share sheet
 
@@ -160,9 +173,11 @@ Apollo's bundled **"Open in Apollo"** share-sheet action is fixed in this build 
 
 > ⚠️ **Depends on how you install.** The action runs inside an app extension, which on **iOS 26** only launches if your installer sets the appex's *main-binary* code-signing flag. **AltStore and SideStore do this** (confirmed), as do Xcode and Apple's `codesign` (`scripts/resign-ipa-codesign.sh` re-signs an IPA this way for direct `ideviceinstaller`/Configurator install). **Sideloadly and Feather currently do not** — with them the extension is killed at launch and the action silently does nothing. If you installed with one of those, use the **Shortcut** below; it's signer-independent.
 
-#### Fallback — "Open in Apollo" Shortcut (works on any install)
+#### Fallback — "Open in Apollo" Shortcut (works on any install, with system confirmation)
 
-A one-time **Shortcut** does the same thing from the share sheet on any browser. It rewrites the `reddit.com` URL to Apollo's `apollo://` scheme and runs **Open URLs** — the one launch path iOS always allows from the share sheet (no private APIs; works on any sideload or jailbreak).
+A one-time **Shortcut** rewrites the `reddit.com` URL to Apollo's `apollo://`
+scheme and runs **Open URLs**. It remains signer-independent, but because it uses
+a custom scheme iOS may show its system **Open in Apollo?** confirmation.
 
 <details>
 <summary><b>Build the "Open in Apollo" shortcut</b> (about a minute)</summary>
