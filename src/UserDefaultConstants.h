@@ -87,6 +87,9 @@ static NSString *const UDKeyUseProfileAvatarTabIcon = @"UseProfileAvatarTabIcon"
 // See ApolloUserAvatars.xm and ApolloProfileSocialLinks.m. Default YES.
 static NSString *const UDKeyShowDetailedProfiles = @"ShowDetailedProfiles";
 static NSString *const UDKeyShowSubredditHeaders = @"ShowSubredditHeaders";
+// Backing values for the single Community Highlights picker. Keeping the old
+// keys maps existing settings naturally: both YES = Full, master only = Partial,
+// master NO = Off.
 static NSString *const UDKeyCommunityHighlights = @"CommunityHighlights";
 static NSString *const UDKeyCommunityHighlightsWeb = @"CommunityHighlightsWeb";
 static NSString *const UDKeyAutoHideTabBarShowOnIdle = @"AutoHideTabBarShowOnIdle";

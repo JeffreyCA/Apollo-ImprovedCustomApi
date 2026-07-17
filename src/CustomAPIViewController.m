@@ -48,6 +48,15 @@ typedef NS_ENUM(NSInteger, SectionIndex) {
     SectionCount
 };
 
+// The settings UI presents Community Highlights as one three-way choice while
+// the runtime keeps the two existing booleans for compatibility with backups
+// and preferences from builds that exposed separate switches.
+typedef NS_ENUM(NSInteger, ApolloCommunityHighlightsMode) {
+    ApolloCommunityHighlightsModeOff = 0,
+    ApolloCommunityHighlightsModePartial,
+    ApolloCommunityHighlightsModeFull,
+};
+
 // Row indices within SectionNotificationBackend. The Bark rows are always
 // visible: on builds without a push entitlement Bark is the only delivery
 // path, and on entitled builds it's an optional alternative transport (the
@@ -370,6 +379,83 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (NSString *)preferredGIFFallbackFormatText {
     return (sPreferredGIFFallbackFormat == 0) ? @"GIF" : @"MP4";
+}
+
+- (ApolloCommunityHighlightsMode)communityHighlightsMode {
+    if (!sCommunityHighlights) return ApolloCommunityHighlightsModeOff;
+    return sCommunityHighlightsWeb ? ApolloCommunityHighlightsModeFull : ApolloCommunityHighlightsModePartial;
+}
+
+- (NSString *)communityHighlightsModeText {
+    switch ([self communityHighlightsMode]) {
+        case ApolloCommunityHighlightsModeFull:    return @"Full";
+        case ApolloCommunityHighlightsModePartial: return @"Partial";
+        case ApolloCommunityHighlightsModeOff:
+        default:                                   return @"Off";
+    }
+}
+
+- (NSInteger)subredditLogicalRowForVisibleRow:(NSInteger)row {
+    // Modern Dividers (logical row 1) is the only conditional row now. When it
+    // is hidden, every later visible row is shifted up by one.
+    return (!sSubredditListEnhancements && row >= 1) ? row + 1 : row;
+}
+
+- (NSInteger)visibleSubredditRowForLogicalRow:(NSInteger)row {
+    return (!sSubredditListEnhancements && row > 1) ? row - 1 : row;
+}
+
+- (void)setCommunityHighlightsMode:(ApolloCommunityHighlightsMode)mode {
+    if (mode < ApolloCommunityHighlightsModeOff || mode > ApolloCommunityHighlightsModeFull) {
+        mode = ApolloCommunityHighlightsModeOff;
+    }
+
+    BOOL enabled = (mode != ApolloCommunityHighlightsModeOff);
+    BOOL full = (mode == ApolloCommunityHighlightsModeFull);
+    if (sCommunityHighlights == enabled && sCommunityHighlightsWeb == full) return;
+
+    sCommunityHighlights = enabled;
+    sCommunityHighlightsWeb = full;
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setBool:enabled forKey:UDKeyCommunityHighlights];
+    [defaults setBool:full forKey:UDKeyCommunityHighlightsWeb];
+
+    NSInteger visibleRow = [self visibleSubredditRowForLogicalRow:3];
+    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:visibleRow inSection:SectionSubreddits];
+    if ([[self.tableView indexPathsForVisibleRows] containsObject:indexPath]) {
+        [self.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+    }
+
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloCommunityHighlightsToggleChangedNotification" object:nil];
+}
+
+- (void)presentCommunityHighlightsModeSheetFromSourceView:(UIView *)sourceView {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Community Highlights"
+                                                                   message:@"Full loads every available highlight. Partial uses Reddit's API and shows up to two."
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    ApolloCommunityHighlightsMode current = [self communityHighlightsMode];
+
+    NSString *fullTitle = (current == ApolloCommunityHighlightsModeFull) ? @"Full (Current)" : @"Full";
+    NSString *partialTitle = (current == ApolloCommunityHighlightsModePartial) ? @"Partial (Current)" : @"Partial";
+    NSString *offTitle = (current == ApolloCommunityHighlightsModeOff) ? @"Off (Current)" : @"Off";
+
+    [sheet addAction:[UIAlertAction actionWithTitle:fullTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [self setCommunityHighlightsMode:ApolloCommunityHighlightsModeFull];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:partialTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [self setCommunityHighlightsMode:ApolloCommunityHighlightsModePartial];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:offTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [self setCommunityHighlightsMode:ApolloCommunityHighlightsModeOff];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+
+    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
+    if (popover && sourceView) {
+        popover.sourceView = sourceView;
+        popover.sourceRect = sourceView.bounds;
+    }
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 
 - (BOOL)apollo_supportsAutoHideTabBarIdleSetting {
@@ -881,7 +967,9 @@ typedef NS_ENUM(NSInteger, Tag) {
         // Play Inline" toggle. The hold-speed picker (row 11) shows only while its
         // toggle is on.
         case SectionMedia: return 11 + (sVideoHoldSpeedEnabled ? 1 : 0);
-        case SectionSubreddits: return 10 - (sSubredditListEnhancements ? 0 : 1) - (sCommunityHighlights ? 0 : 1);
+        // One Community Highlights picker replaces the old master + web switches.
+        // Modern Dividers remains the only conditional row in this section.
+        case SectionSubreddits: return 9 - (sSubredditListEnhancements ? 0 : 1);
         case SectionNotificationBackend: return kNotifBackendRowCount;
         case SectionPrivacy: return 1; // Anonymous Install Count toggle
         case SectionAbout: return 6; // GitHub + Reddit + Thanks To + Export Logs + Privacy Policy + Version
@@ -1544,17 +1632,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (UITableViewCell *)subredditCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
-    // Sub-options are hidden when their parent toggle is off: Modern Dividers (logical 1)
-    // under "Subreddit List Enhancements", and "Load All Highlights (Web)" (logical 4)
-    // under "Community Highlights". Map the display row to its logical case by walking the
-    // logical rows in order and skipping any that are currently hidden.
-    BOOL hideDividers = !sSubredditListEnhancements;
-    BOOL hideWeb = !sCommunityHighlights;
-    NSInteger logicalRow = -1;
-    for (NSInteger visible = -1; visible < row; ) {
-        logicalRow++;
-        if (!((logicalRow == 1 && hideDividers) || (logicalRow == 4 && hideWeb))) visible++;
-    }
+    NSInteger logicalRow = [self subredditLogicalRowForVisibleRow:row];
     switch (logicalRow) {
         case 0:
             return [self switchCellWithIdentifier:@"Cell_Sub_Enhancements"
@@ -1571,41 +1649,43 @@ typedef NS_ENUM(NSInteger, Tag) {
                                             label:@"Show Subreddit Headers"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders]
                                            action:@selector(subredditHeadersSwitchToggled:)];
-        case 3:
-            return [self switchCellWithIdentifier:@"Cell_Sub_Highlights"
-                                            label:@"Community Highlights"
-                                               on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlights]
-                                           action:@selector(communityHighlightsSwitchToggled:)];
+        case 3: {
+            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Sub_HighlightsMode"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"Cell_Sub_HighlightsMode"];
+                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            }
+            cell.textLabel.text = @"Community Highlights";
+            cell.detailTextLabel.text = [self communityHighlightsModeText];
+            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+            return cell;
+        }
         case 4:
-            return [self switchCellWithIdentifier:@"Cell_Sub_HighlightsWeb"
-                                            label:@"Load All Highlights (Web)"
-                                               on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlightsWeb]
-                                           action:@selector(communityHighlightsWebSwitchToggled:)];
-        case 5:
             return [self textFieldCellWithIdentifier:@"Cell_Sub_TrendLimit"
                                                label:@"Trending Subreddits Limit"
                                          placeholder:@"(unlimited)"
                                                 text:sTrendingSubredditsLimit
                                                  tag:TagTrendingLimit
                                            numerical:YES];
-        case 6:
+        case 5:
             return [self stackedTextFieldCellWithIdentifier:@"Cell_Sub_Trending"
                                                       label:@"Trending Source"
                                                 placeholder:defaultTrendingSubredditsSource
                                                        text:sTrendingSubredditsSource
                                                         tag:TagTrendingSubredditsSource];
-        case 7:
+        case 6:
             return [self stackedTextFieldCellWithIdentifier:@"Cell_Sub_Random"
                                                       label:@"Random Source"
                                                 placeholder:defaultRandomSubredditsSource
                                                        text:sRandomSubredditsSource
                                                         tag:TagRandomSubredditsSource];
-        case 8:
+        case 7:
             return [self switchCellWithIdentifier:@"Cell_Sub_RandNSFW"
                                             label:@"Show RandNSFW in Search"
                                                on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowRandNsfw]
                                            action:@selector(randNsfwSwitchToggled:)];
-        case 9:
+        case 8:
             return [self stackedTextFieldCellWithIdentifier:@"Cell_Sub_RandNSFW_Source"
                                                       label:@"RandNSFW Source"
                                                 placeholder:@"(empty)"
@@ -2103,6 +2183,12 @@ typedef NS_ENUM(NSInteger, Tag) {
         } else if (indexPath.row == 11) {
             [self presentVideoHoldSpeedSheetFromSourceView:cell];
         }
+    } else if (indexPath.section == SectionSubreddits) {
+        NSInteger logicalRow = [self subredditLogicalRowForVisibleRow:indexPath.row];
+        if (logicalRow == 3) {
+            UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+            [self presentCommunityHighlightsModeSheetFromSourceView:cell];
+        }
     } else if (indexPath.section == SectionNotificationBackend) {
         NSInteger row = indexPath.row;
         if (row == kNotifBackendRowTestConnection) {
@@ -2225,6 +2311,9 @@ typedef NS_ENUM(NSInteger, Tag) {
     if (indexPath.section == SectionMedia) {
         return (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 ||
                 indexPath.row == 3 || indexPath.row == 11);
+    }
+    if (indexPath.section == SectionSubreddits) {
+        return [self subredditLogicalRowForVisibleRow:indexPath.row] == 3;
     }
     if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 || indexPath.row == 3 || indexPath.row == 4)) return YES;
     if (indexPath.section == SectionNotificationBackend) {
@@ -2761,30 +2850,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     sShowSubredditHeaders = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sShowSubredditHeaders forKey:UDKeyShowSubredditHeaders];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloSubredditHeaderToggleChangedNotification" object:nil];
-}
-
-- (void)communityHighlightsSwitchToggled:(UISwitch *)sender {
-    BOOL wasOn = sCommunityHighlights;
-    sCommunityHighlights = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sCommunityHighlights forKey:UDKeyCommunityHighlights];
-    if (sCommunityHighlights != wasOn) {
-        // The "Load All Highlights (Web)" sub-row (logical 4) only exists while this master
-        // toggle is on; its display index drops by 1 when the Modern Dividers row (logical 1)
-        // is itself hidden (enhancements off). Mirrors the Enhancements toggle's row anim.
-        NSArray<NSIndexPath *> *webPaths = @[[NSIndexPath indexPathForRow:(sSubredditListEnhancements ? 4 : 3) inSection:SectionSubreddits]];
-        if (sCommunityHighlights) {
-            [self.tableView insertRowsAtIndexPaths:webPaths withRowAnimation:UITableViewRowAnimationFade];
-        } else {
-            [self.tableView deleteRowsAtIndexPaths:webPaths withRowAnimation:UITableViewRowAnimationFade];
-        }
-    }
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloCommunityHighlightsToggleChangedNotification" object:nil];
-}
-
-- (void)communityHighlightsWebSwitchToggled:(UISwitch *)sender {
-    sCommunityHighlightsWeb = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sCommunityHighlightsWeb forKey:UDKeyCommunityHighlightsWeb];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloCommunityHighlightsToggleChangedNotification" object:nil];
 }
 
 - (void)textPostThumbnailsSwitchToggled:(UISwitch *)sender {
