@@ -186,6 +186,25 @@ static OSStatus ApolloRealSecItemDelete(NSDictionary *q) {
     return ((OSStatus (*)(CFDictionaryRef))SecItemDelete_orig)((__bridge CFDictionaryRef)q);
 }
 
+// One enumeration of every generic-password keychain item (all access groups, synced included),
+// returned as attribute+data dicts (nil on failure; the status is reported via outStatus). Shared
+// by the recovery cache, the destructive-write guard, and the account diagnostics so they don't
+// each re-declare the same MatchLimitAll query.
+static NSArray<NSDictionary *> *ApolloCopyAllGenericPasswords(OSStatus *outStatus) {
+    NSDictionary *q = @{
+        (__bridge id)kSecClass:              (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecMatchLimit:         (__bridge id)kSecMatchLimitAll,
+        (__bridge id)kSecReturnAttributes:   @YES,
+        (__bridge id)kSecReturnData:         @YES,
+        (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
+    };
+    CFTypeRef result = NULL;
+    OSStatus st = ApolloRealSecItemCopyMatching(q, &result);
+    if (outStatus) *outStatus = st;
+    if (st != errSecSuccess || !result) { if (result) CFRelease(result); return nil; }
+    return (__bridge_transfer NSArray *)result;
+}
+
 // A login-persistence diagnostic line: into os_log (current-session export) AND the cross-launch
 // buffer in the container (survives force-quit, so the session that signed the user out is still
 // in Export Debug Logs). Used by every [KeychainTrace]/[AccountSnapshot]/[KeychainSelfHeal]/
@@ -371,48 +390,34 @@ static CFAbsoluteTime sRecoverCacheBuiltAt = 0;
 static const CFTimeInterval kRecoverCacheTTL = 1.5;
 
 static void ApolloRebuildRecoverCacheLocked(void) {
-    NSDictionary *q = @{
-        (__bridge id)kSecClass:              (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecMatchLimit:         (__bridge id)kSecMatchLimitAll,
-        (__bridge id)kSecReturnAttributes:   @YES,
-        (__bridge id)kSecReturnData:         @YES,
-        (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
-    };
     NSMutableDictionary<NSString *, NSData *> *cache = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSString *> *groups = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSDictionary *> *attrs = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSDate *> *newest = [NSMutableDictionary dictionary];
-    CFTypeRef result = NULL;
-    OSStatus st = ApolloRealSecItemCopyMatching(q, &result);
-    if (st == errSecSuccess && result) {
-        NSArray *found = (__bridge_transfer NSArray *)result;
-        for (NSDictionary *item in found) {
-            NSString *service = item[(__bridge id)kSecAttrService];
-            NSString *account = item[(__bridge id)kSecAttrAccount];
-            NSData *data = item[(__bridge id)kSecValueData];
-            if (![service isKindOfClass:[NSString class]] || ![account isKindOfClass:[NSString class]]) continue;
-            if (![data isKindOfClass:[NSData class]]) continue;
-            NSString *key = [NSString stringWithFormat:@"%@\n%@", service, account];
-            id modAttr = item[(__bridge id)kSecAttrModificationDate];
-            NSDate *mod = [modAttr isKindOfClass:[NSDate class]] ? modAttr : [NSDate distantPast];
-            NSDate *prev = newest[key];
-            // Keep the newest by modification date so a genuine later write (incl. an empty
-            // sign-out blob) wins over an older duplicate.
-            if (!prev || [mod compare:prev] != NSOrderedAscending) {
-                cache[key] = data;
-                id grp = item[(__bridge id)kSecAttrAccessGroup];
-                groups[key] = [grp isKindOfClass:[NSString class]] ? grp : @"?";
-                // Keep the item's attributes (never its value) so [KeychainAttrDiff] can print
-                // what the item actually is beside what Valet asked for. The enumeration already
-                // fetched these; we were throwing them away.
-                NSMutableDictionary *itemAttrs = [item mutableCopy];
-                [itemAttrs removeObjectForKey:(__bridge id)kSecValueData];
-                attrs[key] = itemAttrs;
-                newest[key] = mod;
-            }
+    for (NSDictionary *item in ApolloCopyAllGenericPasswords(NULL)) {
+        NSString *service = item[(__bridge id)kSecAttrService];
+        NSString *account = item[(__bridge id)kSecAttrAccount];
+        NSData *data = item[(__bridge id)kSecValueData];
+        if (![service isKindOfClass:[NSString class]] || ![account isKindOfClass:[NSString class]]) continue;
+        if (![data isKindOfClass:[NSData class]]) continue;
+        NSString *key = [NSString stringWithFormat:@"%@\n%@", service, account];
+        id modAttr = item[(__bridge id)kSecAttrModificationDate];
+        NSDate *mod = [modAttr isKindOfClass:[NSDate class]] ? modAttr : [NSDate distantPast];
+        NSDate *prev = newest[key];
+        // Keep the newest by modification date so a genuine later write (incl. an empty
+        // sign-out blob) wins over an older duplicate.
+        if (!prev || [mod compare:prev] != NSOrderedAscending) {
+            cache[key] = data;
+            id grp = item[(__bridge id)kSecAttrAccessGroup];
+            groups[key] = [grp isKindOfClass:[NSString class]] ? grp : @"?";
+            // Keep the item's attributes (never its value) so [KeychainAttrDiff] can print
+            // what the item actually is beside what Valet asked for. The enumeration already
+            // fetched these; we were throwing them away.
+            NSMutableDictionary *itemAttrs = [item mutableCopy];
+            [itemAttrs removeObjectForKey:(__bridge id)kSecValueData];
+            attrs[key] = itemAttrs;
+            newest[key] = mod;
         }
-    } else if (result) {
-        CFRelease(result);
     }
     sRecoverCache = cache;
     sRecoverGroupCache = groups;
@@ -499,19 +504,8 @@ static BOOL ApolloWasAccountServed(NSString *account) {
 
 // Largest existing copy of this account item across all access groups (via enumeration), or -1.
 static long ApolloExistingAccountBlobMaxLen(NSString *service, NSString *account) {
-    NSDictionary *q = @{
-        (__bridge id)kSecClass:              (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecMatchLimit:         (__bridge id)kSecMatchLimitAll,
-        (__bridge id)kSecReturnAttributes:   @YES,
-        (__bridge id)kSecReturnData:         @YES,
-        (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
-    };
-    CFTypeRef result = NULL;
-    OSStatus st = ApolloRealSecItemCopyMatching(q, &result);
-    if (st != errSecSuccess || !result) { if (result) CFRelease(result); return -1; }
-    NSArray *found = (__bridge_transfer NSArray *)result;
     long maxLen = -1;
-    for (NSDictionary *item in found) {
+    for (NSDictionary *item in ApolloCopyAllGenericPasswords(NULL)) {
         if (![item[(__bridge id)kSecAttrService] isEqual:service]) continue;
         if (![item[(__bridge id)kSecAttrAccount] isEqual:account]) continue;
         NSData *data = item[(__bridge id)kSecValueData];
@@ -691,11 +685,12 @@ static void ApolloHealAccessibleMismatch(NSDictionary *sentQuery, NSDictionary *
 }
 
 // One trace line per Valet keychain operation. `op` is the call name; `extra` is optional
-// trailing context (byte lengths, route taken). ALL Valet traffic is traced — not just the
-// account blob — so the canary Valet.canAccessKeychain() writes/reads (its master gate: a NO
-// there skips the whole account load) and any account-adjacent item are captured too. Valet
-// traffic is low-frequency, so this doesn't flood.
-static BOOL ApolloTraceAllValet(void) { return YES; }
+// trailing context (byte lengths, route taken). Now that the root cause is known and fixed,
+// tracing is scoped to the account blob only: the all-Valet firehose (every websession cookie,
+// canary, and Ultra/Pro read) was for the investigation, and it also put usernames
+// (websession:<user>:cookie) into the cross-launch buffer. Set back to YES only when actively
+// re-investigating a keychain issue.
+static BOOL ApolloTraceAllValet(void) { return NO; }
 
 static void ApolloKeychainTrace(NSString *op, NSDictionary *query, OSStatus status, NSString *extra) {
     BOOL isAccounts = ApolloIsAccountsBlobQuery(query);
@@ -723,18 +718,10 @@ static NSString *const kApolloGroupSuite = @"group.com.christianselig.apollo";
 // after idling". Enumerates generic passwords and filters, so no exact Valet service string
 // is needed. -34018 distinguishes an entitlement rejection from a genuine not-found.
 static long ApolloRealAccountsBlobLength(OSStatus *outStatus, NSString **outAccessible) {
-    NSDictionary *q = @{
-        (__bridge id)kSecClass:            (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecMatchLimit:       (__bridge id)kSecMatchLimitAll,
-        (__bridge id)kSecReturnAttributes: @YES,
-        (__bridge id)kSecReturnData:       @YES,
-        (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
-    };
-    CFTypeRef result = NULL;
-    OSStatus st = ApolloRealSecItemCopyMatching(q, &result);
+    OSStatus st = errSecSuccess;
+    NSArray *found = ApolloCopyAllGenericPasswords(&st);
     if (outStatus) *outStatus = st;
-    if (st != errSecSuccess || !result) { if (result) CFRelease(result); return (st == errSecItemNotFound) ? -1 : -2; }
-    NSArray *found = (__bridge_transfer NSArray *)result;
+    if (!found) return (st == errSecItemNotFound) ? -1 : -2;
     long len = -1;
     for (NSDictionary *item in found) {
         NSString *service = item[(__bridge id)kSecAttrService];
@@ -778,20 +765,9 @@ static NSString *ApolloProtectedDataString(void) {
 // a copy whose group differs from what Valet's scoped query targets). One enumeration; only runs
 // at snapshot time (lifecycle transitions), so it's low-frequency.
 static NSString *ApolloAccountsBlobGroupBreakdown(void) {
-    NSDictionary *q = @{
-        (__bridge id)kSecClass:              (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecMatchLimit:         (__bridge id)kSecMatchLimitAll,
-        (__bridge id)kSecReturnAttributes:   @YES,
-        (__bridge id)kSecReturnData:         @YES,
-        (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
-    };
-    CFTypeRef result = NULL;
-    OSStatus st = ApolloRealSecItemCopyMatching(q, &result);
-    if (st != errSecSuccess || !result) {
-        if (result) CFRelease(result);
-        return [NSString stringWithFormat:@"enum-status=%d", (int)st];
-    }
-    NSArray *found = (__bridge_transfer NSArray *)result;
+    OSStatus st = errSecSuccess;
+    NSArray *found = ApolloCopyAllGenericPasswords(&st);
+    if (!found) return [NSString stringWithFormat:@"enum-status=%d", (int)st];
     NSMutableArray<NSString *> *copies = [NSMutableArray array];
     for (NSDictionary *item in found) {
         NSString *service = item[(__bridge id)kSecAttrService];
@@ -819,31 +795,13 @@ NSString *ApolloDebugAccountKeychainReport(void) {
     return breakdown;
 }
 
-// Best-effort: try to create a genuine cross-access-group DUPLICATE of the account item, to
-// reproduce the real root cause (not a mock) on a device whose signing entitles a second
-// keychain group. Reads the current item via enumeration, then writes a copy into candidate
-// groups using the UN-stripped real SecItemAdd (our normal hook strips the group, so this must
-// bypass it). Logs each attempt's status: 0 = duplicate created, -34018 = not entitled to that
-// group (so this device can't exhibit the split via it), -25299 = a copy already there. Returns
-// a summary for display. Only meaningful with an account signed in.
 // Locate Apollo's live 2RedditAccounts2 item with its attributes and data, via the real
 // (un-hooked) enumeration. Returns nil if there's no signed-in account to work with.
 static NSDictionary *ApolloDebugFindAccountsItem(OSStatus *outStatus) {
-    NSDictionary *q = @{
-        (__bridge id)kSecClass:              (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecMatchLimit:         (__bridge id)kSecMatchLimitAll,
-        (__bridge id)kSecReturnAttributes:   @YES,
-        (__bridge id)kSecReturnData:         @YES,
-        (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
-    };
-    CFTypeRef result = NULL;
-    OSStatus st = ApolloRealSecItemCopyMatching(q, &result);
+    OSStatus st = errSecSuccess;
+    NSArray *found = ApolloCopyAllGenericPasswords(&st);
     if (outStatus) *outStatus = st;
-    if (st != errSecSuccess || !result) {
-        if (result) CFRelease(result);
-        return nil;
-    }
-    NSArray *found = (__bridge_transfer NSArray *)result;
+    if (!found) return nil;
     for (NSDictionary *item in found) {
         NSString *service = item[(__bridge id)kSecAttrService];
         NSString *account = item[(__bridge id)kSecAttrAccount];
@@ -950,86 +908,6 @@ NSString *ApolloDebugPoisonAccountAccessibility(void) {
     ApolloLoginDiag(@"[DebugPoison] %@", [report stringByReplacingOccurrencesOfString:@"\n" withString:@" | "]);
     return report;
 }
-
-NSString *ApolloDebugCreateCrossGroupAccountDuplicate(void) {
-    // 1. Find the current account item + its access group + data.
-    NSDictionary *q = @{
-        (__bridge id)kSecClass:              (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecMatchLimit:         (__bridge id)kSecMatchLimitAll,
-        (__bridge id)kSecReturnAttributes:   @YES,
-        (__bridge id)kSecReturnData:         @YES,
-        (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
-    };
-    CFTypeRef result = NULL;
-    OSStatus st = ApolloRealSecItemCopyMatching(q, &result);
-    if (st != errSecSuccess || !result) {
-        if (result) CFRelease(result);
-        return [NSString stringWithFormat:@"No account item to duplicate (enum status=%d). Sign in first.", (int)st];
-    }
-    NSArray *found = (__bridge_transfer NSArray *)result;
-    NSDictionary *acctItem = nil;
-    for (NSDictionary *item in found) {
-        NSString *service = item[(__bridge id)kSecAttrService];
-        NSString *account = item[(__bridge id)kSecAttrAccount];
-        if ([service isKindOfClass:[NSString class]] && [service containsString:kValetServiceSubstring] &&
-            [account isKindOfClass:[NSString class]] && [account containsString:@"RedditAccounts2"] &&
-            [item[(__bridge id)kSecValueData] isKindOfClass:[NSData class]]) {
-            acctItem = item;
-            break;
-        }
-    }
-    if (!acctItem) return @"No 2RedditAccounts2 item found in the keychain. Sign in first.";
-
-    NSString *service = acctItem[(__bridge id)kSecAttrService];
-    NSString *account = acctItem[(__bridge id)kSecAttrAccount];
-    NSData *data = acctItem[(__bridge id)kSecValueData];
-    NSString *currentGroup = [acctItem[(__bridge id)kSecAttrAccessGroup] isKindOfClass:[NSString class]]
-                                 ? acctItem[(__bridge id)kSecAttrAccessGroup] : nil;
-
-    // 2. Candidate second groups, derived from the current group's team prefix. The app group's
-    //    keychain form and a synthetic sibling both make plausible "second drawer" targets; which
-    //    (if any) the signer entitles varies by install method.
-    NSMutableArray<NSString *> *candidates = [NSMutableArray array];
-    NSString *prefix = nil;
-    if (currentGroup.length) {
-        NSRange dot = [currentGroup rangeOfString:@"."];
-        if (dot.location != NSNotFound) prefix = [currentGroup substringToIndex:dot.location];
-    }
-    if (prefix.length) {
-        [candidates addObject:[NSString stringWithFormat:@"%@.group.com.christianselig.apollo", prefix]];
-        [candidates addObject:[NSString stringWithFormat:@"%@.com.christianselig.Apollo", prefix]];
-        [candidates addObject:[NSString stringWithFormat:@"%@.com.christianselig.Apollo.debugdup", prefix]];
-    }
-
-    NSMutableString *report = [NSMutableString stringWithFormat:@"Current group: %@\ndata: %lu bytes\n",
-                               currentGroup ?: @"?", (unsigned long)data.length];
-    if (candidates.count == 0) {
-        [report appendString:@"Could not derive a team prefix — cannot attempt a second group."];
-        ApolloLoginDiag(@"[DebugDup] %@", report);
-        return report;
-    }
-    for (NSString *grp in candidates) {
-        if ([grp isEqualToString:currentGroup]) { [report appendFormat:@"\n%@ — skipped (== current)", grp]; continue; }
-        NSDictionary *add = @{
-            (__bridge id)kSecClass:           (__bridge id)kSecClassGenericPassword,
-            (__bridge id)kSecAttrService:     service,
-            (__bridge id)kSecAttrAccount:     account,
-            (__bridge id)kSecAttrAccessGroup: grp,
-            (__bridge id)kSecAttrAccessible:  (__bridge id)kSecAttrAccessibleAfterFirstUnlock,
-            (__bridge id)kSecValueData:       data,
-        };
-        OSStatus as = ApolloRealSecItemAdd(add, NULL); // un-stripped: keep the explicit group
-        NSString *note = as == errSecSuccess ? @"DUPLICATE CREATED"
-                       : as == errSecDuplicateItem ? @"already present here"
-                       : as == -34018 ? @"not entitled to this group"
-                       : @"failed";
-        [report appendFormat:@"\n%@ -> status=%d (%@)", grp, (int)as, note];
-    }
-    ApolloInvalidateRecoverCache();
-    ApolloLoginDiag(@"[DebugDup] %@", [report stringByReplacingOccurrencesOfString:@"\n" withString:@" | "]);
-    return report;
-}
-
 static void ApolloLogAccountSnapshot(NSString *reason) {
     // Defaults mirror (group suite): what Apollo's own loader reads. Length distinguishes a
     // populated archive from an empty/absent one without unarchiving; the account stats separate
