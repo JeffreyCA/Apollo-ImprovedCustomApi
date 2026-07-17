@@ -134,9 +134,10 @@ NSArray<NSDictionary *> *ApolloKeychainMirrorItemsForBackup(void);
 // session that actually signed the user out. Safe to call from any thread; never logs secrets.
 void ApolloAppendLoginDiag(NSString *line);
 
-// Dev-only login-persistence debug (see Tweak.xm). A report of where the account keychain item
-// lives (access group/size/protection per copy), and a best-effort attempt to create a real
-// cross-access-group duplicate to reproduce the root cause. Both also write to the diag log.
+// Dev-only login-persistence debug (see Tweak.xm): a report of where the account keychain item
+// lives (each copy's access group / size / protection class), and a FLEX-gated action that
+// poisons/restores the account item's protection class to reproduce the -25300 on demand. Both
+// also write to the diag log.
 NSString *ApolloDebugAccountKeychainReport(void);
 NSString *ApolloDebugPoisonAccountAccessibility(void);
 __END_DECLS
