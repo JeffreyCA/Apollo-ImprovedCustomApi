@@ -3125,9 +3125,14 @@ static NSArray<NSDictionary *> *ApolloCaptureValetKeychainItems(void) {
             if (![data isKindOfClass:[NSData class]]) continue;
             NSString *account = item[(__bridge id)kSecAttrAccount];
             NSString *acct = [account isKindOfClass:[NSString class]] ? account : @"";
-            byKey[[NSString stringWithFormat:@"%@\n%@", service, acct]] = @{
-                @"service": service, @"account": acct, @"data": data,
-            };
+            // Keep the protection class in the backup: a replay that drops it lands the item as
+            // kSecAttrAccessibleWhenUnlocked, which Valet's AfterFirstUnlock read can never see.
+            // The query above already fetches it. Backups predating this have no "accessible" key;
+            // ApolloReplayValetKeychainItems falls back to AfterFirstUnlock for those.
+            id accessible = item[(__bridge id)kSecAttrAccessible];
+            NSMutableDictionary *entry = [@{ @"service": service, @"account": acct, @"data": data } mutableCopy];
+            if ([accessible isKindOfClass:[NSString class]]) entry[@"accessible"] = accessible;
+            byKey[[NSString stringWithFormat:@"%@\n%@", service, acct]] = entry;
         }
     } else if (result) {
         CFRelease(result);
@@ -3142,6 +3147,9 @@ static NSArray<NSDictionary *> *ApolloCaptureValetKeychainItems(void) {
         NSData *data = item[@"data"];
         if (![service isKindOfClass:[NSString class]] || ![service containsString:kValetServiceSubstring]) continue;
         if (![data isKindOfClass:[NSData class]]) continue;
+        // Mirror entries carry no protection class (the container mirror only stores
+        // service/account/data), so a mirror-only item restores as AfterFirstUnlock — correct for
+        // the keychain-broken devices the mirror exists for.
         NSString *acct = [item[@"account"] isKindOfClass:[NSString class]] ? item[@"account"] : @"";
         byKey[[NSString stringWithFormat:@"%@\n%@", service, acct]] = @{
             @"service": service, @"account": acct, @"data": data,
@@ -3165,6 +3173,15 @@ static void ApolloReplayValetKeychainItems(NSArray<NSDictionary *> *items) {
             (__bridge id)kSecAttrAccount:  (item[@"account"] ?: @""),
         };
         NSMutableDictionary *add = [identity mutableCopy];
+        // MANDATORY — see ApolloWebJSONWriteValetItem for the full rationale. Without it,
+        // SecItemAdd defaults the item to kSecAttrAccessibleWhenUnlocked while Valet reads with
+        // AfterFirstUnlock, so the read misses an item that provably exists and AccountManager
+        // wipes the account. Prefer the class the item was captured with; fall back to
+        // AfterFirstUnlock, which is what Apollo's account valet uses and the safe floor for a
+        // credential that must be readable during background token refresh.
+        id accessible = item[@"accessible"];
+        add[(__bridge id)kSecAttrAccessible] = [accessible isKindOfClass:[NSString class]]
+            ? accessible : (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
         add[(__bridge id)kSecValueData] = data;
         OSStatus st = SecItemAdd((__bridge CFDictionaryRef)add, NULL);
         if (st == errSecDuplicateItem) {
