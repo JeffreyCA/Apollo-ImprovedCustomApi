@@ -631,6 +631,65 @@ static NSString *ApolloKeychainAttrSummary(NSDictionary *d) {
             [service isKindOfClass:[NSString class]] ? service : @"(unset)"];
 }
 
+// Repair a wrong protection class in place, at the one moment we can prove it is wrong: the
+// enumeration recovery just found an item that Valet's scoped read could not see.
+//
+// Why the item can't fix itself: nothing ever deletes 2RedditAccounts2 (sign-out writes an empty
+// array over it), so it is created once per device+access group and every later write is an
+// update — and the existing writers pass only kSecValueData, so the class it was born with is the
+// class it dies with. Two writers created it without one, leaving it kSecAttrAccessibleWhenUnlocked
+// while Valet reads AfterFirstUnlock. Fixing those writers protects new installs and does nothing
+// for anyone already affected; this is what reaches them.
+//
+// kSecAttrAccessible *is* updatable, and a search query built from the item's OWN attributes —
+// including its wrong class — matches exactly where Valet's cannot. So the repair needs no delete.
+// That is deliberate: a failed heal then leaves the status quo (recovery keeps serving the value)
+// instead of risking a window with no item and an account that can't be put back.
+//
+// Once this succeeds, Valet's scoped read finds the item directly and recovery never fires again
+// on this device — the enumeration path becomes a one-time repair rather than a permanent tax on
+// every read.
+static os_unfair_lock sHealLock = OS_UNFAIR_LOCK_INIT;
+static NSMutableSet<NSString *> *sHealAttempted;
+
+static void ApolloHealAccessibleMismatch(NSDictionary *sentQuery, NSDictionary *foundAttrs) {
+    id wanted = sentQuery[(__bridge id)kSecAttrAccessible];
+    id actual = foundAttrs[(__bridge id)kSecAttrAccessible];
+    // No class pinned by the reader, or nothing to reconcile.
+    if (![wanted isKindOfClass:[NSString class]]) return;
+    if (![actual isKindOfClass:[NSString class]] || [actual isEqual:wanted]) return;
+
+    NSString *service = foundAttrs[(__bridge id)kSecAttrService];
+    NSString *account = foundAttrs[(__bridge id)kSecAttrAccount];
+    if (![service isKindOfClass:[NSString class]] || ![account isKindOfClass:[NSString class]]) return;
+
+    // Once per key per session: a persistent failure must not thrash the web-session read loop.
+    NSString *key = [NSString stringWithFormat:@"%@\n%@", service, account];
+    os_unfair_lock_lock(&sHealLock);
+    if (!sHealAttempted) sHealAttempted = [NSMutableSet set];
+    BOOL firstAttempt = ![sHealAttempted containsObject:key];
+    if (firstAttempt) [sHealAttempted addObject:key];
+    os_unfair_lock_unlock(&sHealLock);
+    if (!firstAttempt) return;
+
+    NSMutableDictionary *search = [NSMutableDictionary dictionary];
+    search[(__bridge id)kSecClass] = (__bridge id)kSecClassGenericPassword;
+    search[(__bridge id)kSecAttrService] = service;
+    search[(__bridge id)kSecAttrAccount] = account;
+    search[(__bridge id)kSecAttrAccessible] = actual;
+    id group = foundAttrs[(__bridge id)kSecAttrAccessGroup];
+    if ([group isKindOfClass:[NSString class]]) search[(__bridge id)kSecAttrAccessGroup] = group;
+    search[(__bridge id)kSecAttrSynchronizable] = (__bridge id)kSecAttrSynchronizableAny;
+
+    OSStatus st = ApolloRealSecItemUpdate(search, @{(__bridge id)kSecAttrAccessible: wanted});
+    ApolloLoginDiag(@"[KeychainHeal] account=%@ %@ -> %@ status=%d — %@",
+                    account, ApolloAccessibleName(actual), ApolloAccessibleName(wanted), (int)st,
+                    st == errSecSuccess ? @"repaired; scoped reads should succeed from here"
+                                        : @"left as-is; recovery still serving the value");
+    // The cache holds the pre-heal attributes; drop it so the next read sees the repaired item.
+    if (st == errSecSuccess) ApolloInvalidateRecoverCache();
+}
+
 // One trace line per Valet keychain operation. `op` is the call name; `extra` is optional
 // trailing context (byte lengths, route taken). ALL Valet traffic is traced — not just the
 // account blob — so the canary Valet.canAccessKeychain() writes/reads (its master gate: a NO
@@ -1229,6 +1288,10 @@ static OSStatus SecItemCopyMatching_replacement(CFDictionaryRef query, CFTypeRef
             ApolloLoginDiag(@"[KeychainAttrDiff] QUERY %@", ApolloKeychainAttrSummary((__bridge NSDictionary *)query));
             ApolloLoginDiag(@"[KeychainAttrDiff] SENT  %@", ApolloKeychainAttrSummary(strippedQuery));
             ApolloLoginDiag(@"[KeychainAttrDiff] FOUND %@", ApolloKeychainAttrSummary(foundAttrs));
+            // The value is already served, so this is pure repair: the one moment we can prove the
+            // item's protection class is wrong is the moment a read filtered on it missed while an
+            // unfiltered enumeration didn't. Fixing it here is what retires this whole path.
+            ApolloHealAccessibleMismatch(strippedQuery, foundAttrs);
             if (IsAccountsFamilyQuery(strippedQuery)) ApolloMarkAccountServed(strippedQuery[(__bridge id)kSecAttrAccount]);
             return errSecSuccess;
         }
