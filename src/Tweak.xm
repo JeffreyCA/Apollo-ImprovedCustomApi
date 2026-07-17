@@ -860,25 +860,6 @@ static NSMutableDictionary *ApolloSelfHealSearchQuery(NSDictionary *query) {
     return searchQuery;
 }
 
-// The existing item's kSecAttrAccessible (protection class), read broadened so a synced/shadow
-// copy still yields it. Returns nil if unreadable — the caller supplies a background-safe
-// default. Used to preserve accessibility across a delete+recreate.
-static id ApolloExistingItemAccessible(NSDictionary *strippedQuery) {
-    NSMutableDictionary *readQuery = ApolloSelfHealSearchQuery(strippedQuery);
-    readQuery[(__bridge id)kSecAttrSynchronizable] = (__bridge id)kSecAttrSynchronizableAny;
-    readQuery[(__bridge id)kSecReturnAttributes] = @YES;
-    readQuery[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
-    CFTypeRef out = NULL;
-    id accessible = nil;
-    if (ApolloRealSecItemCopyMatching(readQuery, &out) == errSecSuccess && out) {
-        if (CFGetTypeID(out) == CFDictionaryGetTypeID()) {
-            accessible = ((__bridge NSDictionary *)out)[(__bridge id)kSecAttrAccessible];
-        }
-        CFRelease(out);
-    }
-    return accessible;
-}
-
 // Updating in place (vs. delete+recreate) keeps a synced item synced instead of
 // deleting it from every device on the account.
 static BOOL ApolloUpdateStaleKeychainItem(NSDictionary *query) {
@@ -1146,22 +1127,21 @@ static OSStatus SecItemUpdate_replacement(CFDictionaryRef query, CFDictionaryRef
         if (status == errSecItemNotFound) {
             NSData *value = attrs[(__bridge id)kSecValueData];
             if ([value isKindOfClass:[NSData class]]) {
-                // Preserve the item's protection class across the delete+recreate. Dropping it
-                // would default to kSecAttrAccessibleWhenUnlocked, which cannot be read while the
-                // device is locked — exactly the background token-refresh window where users
-                // report getting signed out. Capture the original if readable; otherwise use
-                // AfterFirstUnlock, which allows background reads and is the safe floor for an
-                // account credential.
-                id accessible = ApolloExistingItemAccessible(strippedQuery)
-                                ?: (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
+                // Recreate with AfterFirstUnlock, ALWAYS — never preserve the old item's class.
+                // An earlier revision copied the existing item's kSecAttrAccessible here, which we
+                // now know can faithfully preserve the poisoned WhenUnlocked class that made the
+                // item unreadable in the first place (see #681/#682: two writers omitted the
+                // attribute and securityd defaulted it). Every Valet service this gate can reach
+                // encodes AfterFirstUnlock in its service string, so that IS the item's correct
+                // class — and it stays readable during background token refresh.
                 ApolloDeleteStaleKeychainItem(strippedQuery);
                 NSMutableDictionary *add = ApolloSelfHealSearchQuery(strippedQuery);
                 [add removeObjectForKey:(__bridge id)kSecAttrSynchronizable];
-                add[(__bridge id)kSecAttrAccessible] = accessible;
+                add[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
                 add[(__bridge id)kSecValueData] = value;
                 status = ApolloRealSecItemAdd(add, NULL);
-                ApolloLoginDiag(@"[KeychainSelfHeal] update->add recreate service=%@ account=%@ accessible=%@ status=%d",
-                                service, account, accessible, (int)status);
+                ApolloLoginDiag(@"[KeychainSelfHeal] update->add recreate service=%@ account=%@ accessible=AfterFirstUnlock status=%d",
+                                service, account, (int)status);
             }
         }
     }
