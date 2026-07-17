@@ -1496,8 +1496,32 @@ static BOOL ApolloNativeActionMenuCanFallbackPresent(id presenter, id actionCont
 %end
 
 %hook _TtC6Apollo22ModQueueViewController
+- (void)modQueueFilterNodeTapped {
+    id filterNode = ApolloReadObjectIvar(self, "modQueueFilterNode");
+    UIView *filterNodeView = ApolloNativeActionMenuViewForObject(filterNode);
+    BOOL filterNodeDispatchActive = sApolloNativeActionMenuCaptureDepth > 0
+        && sApolloNativeActionMenuSourceView == filterNodeView;
+    id source = filterNodeDispatchActive
+        ? filterNode
+        : ApolloReadObjectIvar(self, "filterBarButtonItem");
+    ApolloNativeActionMenuBeginCapture(source, self);
+    %orig;
+    ApolloNativeActionMenuEndCapture();
+}
+
 - (void)titleViewButtonTappedWithSender:(id)sender {
     ApolloNativeActionMenuBeginCapture(sender, self);
+    %orig;
+    ApolloNativeActionMenuEndCapture();
+}
+%end
+
+%hook _TtC6Apollo18ModQueueFilterNode
+- (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
+    // The nav-bar item and bottom filter node call the same no-argument action.
+    // Texture dispatches the node's target synchronously from this method, so
+    // preserve the actual touched node for the nested controller hook above.
+    ApolloNativeActionMenuBeginCapture(self, self);
     %orig;
     ApolloNativeActionMenuEndCapture();
 }
