@@ -2425,6 +2425,14 @@ typedef NS_ENUM(NSInteger, Tag) {
         [self presentLoginPersistenceDebugResult:ApolloDebugCreateCrossGroupAccountDuplicate() title:@"Cross-group duplicate"];
     }]];
 
+    // Rewrites the account item's protection class to WhenUnlocked, keeping the blob byte-for-byte
+    // so the OAuth token stays valid. Toggles: run it once to poison, again to restore.
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Poison account protection class (real -25300)"
+                                              style:UIAlertActionStyleDestructive
+                                            handler:^(UIAlertAction *a) {
+        [self presentLoginPersistenceDebugResult:ApolloDebugPoisonAccountAccessibility() title:@"Poison protection class"];
+    }]];
+
     if (forceMiss || noRecover) {
         [sheet addAction:[UIAlertAction actionWithTitle:@"Clear all fault flags"
                                                   style:UIAlertActionStyleDefault

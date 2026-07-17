@@ -767,6 +767,131 @@ NSString *ApolloDebugAccountKeychainReport(void) {
 // bypass it). Logs each attempt's status: 0 = duplicate created, -34018 = not entitled to that
 // group (so this device can't exhibit the split via it), -25299 = a copy already there. Returns
 // a summary for display. Only meaningful with an account signed in.
+// Locate Apollo's live 2RedditAccounts2 item with its attributes and data, via the real
+// (un-hooked) enumeration. Returns nil if there's no signed-in account to work with.
+static NSDictionary *ApolloDebugFindAccountsItem(OSStatus *outStatus) {
+    NSDictionary *q = @{
+        (__bridge id)kSecClass:              (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecMatchLimit:         (__bridge id)kSecMatchLimitAll,
+        (__bridge id)kSecReturnAttributes:   @YES,
+        (__bridge id)kSecReturnData:         @YES,
+        (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
+    };
+    CFTypeRef result = NULL;
+    OSStatus st = ApolloRealSecItemCopyMatching(q, &result);
+    if (outStatus) *outStatus = st;
+    if (st != errSecSuccess || !result) {
+        if (result) CFRelease(result);
+        return nil;
+    }
+    NSArray *found = (__bridge_transfer NSArray *)result;
+    for (NSDictionary *item in found) {
+        NSString *service = item[(__bridge id)kSecAttrService];
+        NSString *account = item[(__bridge id)kSecAttrAccount];
+        if ([service isKindOfClass:[NSString class]] && [service containsString:kValetServiceSubstring] &&
+            [account isKindOfClass:[NSString class]] && [account containsString:@"RedditAccounts2"] &&
+            [item[(__bridge id)kSecValueData] isKindOfClass:[NSData class]]) {
+            return item;
+        }
+    }
+    return nil;
+}
+
+// Dev-only: reproduce the suspected Mode A origin on a healthy device by rewriting the accounts
+// item with the WRONG protection class, preserving its data byte-for-byte.
+//
+// Why this is the test worth running: Valet reads the accounts item with
+// kSecAttrAccessibleAfterFirstUnlock (confirmed on-device by the [KeychainAttrDiff] QUERY line),
+// and accessibility is NOT part of a generic password's primary key — service + account + access
+// group are. So an item stored WhenUnlocked is invisible to that scoped read (-25300) while still
+// colliding on add (-25299): exactly the field signature, from one wrong attribute. If this
+// reproduces the wipe, the origin is any write path that omits kSecAttrAccessible — and
+// ApolloReplayValetKeychainItems (settings restore) is one.
+//
+// The blob is preserved exactly, so the live OAuth token stays valid — unlike a sign-out, which
+// revokes it server-side. Only the protection class changes: a genuine single-variable test.
+// Everything here uses the ApolloReal* wrappers so it bypasses our own hooks (which would strip
+// the group and trigger the self-heal, defeating the point).
+NSString *ApolloDebugPoisonAccountAccessibility(void) {
+    OSStatus enumStatus = errSecSuccess;
+    NSDictionary *acctItem = ApolloDebugFindAccountsItem(&enumStatus);
+    if (!acctItem) {
+        return [NSString stringWithFormat:@"No 2RedditAccounts2 item found (enum status=%d). Sign in first.", (int)enumStatus];
+    }
+
+    NSString *service = acctItem[(__bridge id)kSecAttrService];
+    NSString *account = acctItem[(__bridge id)kSecAttrAccount];
+    NSData *data = acctItem[(__bridge id)kSecValueData];
+    NSString *group = [acctItem[(__bridge id)kSecAttrAccessGroup] isKindOfClass:[NSString class]]
+                          ? acctItem[(__bridge id)kSecAttrAccessGroup] : nil;
+    id current = acctItem[(__bridge id)kSecAttrAccessible];
+    NSString *wasAccessible = ApolloAccessibleName(current);
+
+    // Toggle: poison a healthy item, restore a poisoned one. Same action either way, so a run that
+    // signs you out is always undoable by running it again.
+    BOOL poisoned = [current isEqual:(__bridge id)kSecAttrAccessibleWhenUnlocked];
+    id target = poisoned ? (__bridge id)kSecAttrAccessibleAfterFirstUnlock
+                         : (__bridge id)kSecAttrAccessibleWhenUnlocked;
+
+    NSMutableString *report = [NSMutableString stringWithFormat:
+        @"Found: %lu bytes\ngroup: %@\naccessible: %@\naction: %@\n",
+        (unsigned long)data.length, group ?: @"?", wasAccessible,
+        poisoned ? @"RESTORE -> AfterFirstUnlock" : @"POISON -> WhenUnlocked"];
+
+    if (data.length < 1000) {
+        [report appendString:@"\nBlob looks empty/tiny — sign in before poisoning, or you'll just "
+                             @"poison an empty array and learn nothing."];
+        return report;
+    }
+
+    // Delete the real item. Sign-out never does this (it writes a 219-byte empty array via
+    // UPDATE, confirmed in [KeychainTrace]), which is exactly why the restore path could never
+    // recreate — and therefore never re-poison — the item.
+    NSMutableDictionary *del = [NSMutableDictionary dictionary];
+    del[(__bridge id)kSecClass] = (__bridge id)kSecClassGenericPassword;
+    del[(__bridge id)kSecAttrService] = service;
+    del[(__bridge id)kSecAttrAccount] = account;
+    if (group) del[(__bridge id)kSecAttrAccessGroup] = group;
+    del[(__bridge id)kSecAttrSynchronizable] = (__bridge id)kSecAttrSynchronizableAny;
+    OSStatus ds = ApolloRealSecItemDelete(del);
+    [report appendFormat:@"\ndelete -> status=%d", (int)ds];
+
+    if (ds != errSecSuccess) {
+        [report appendString:@"\n\nDelete failed — nothing changed, account intact."];
+        ApolloLoginDiag(@"[DebugPoison] %@", [report stringByReplacingOccurrencesOfString:@"\n" withString:@" | "]);
+        return report;
+    }
+
+    // Re-add the identical data under the target protection class.
+    NSMutableDictionary *add = [NSMutableDictionary dictionary];
+    add[(__bridge id)kSecClass] = (__bridge id)kSecClassGenericPassword;
+    add[(__bridge id)kSecAttrService] = service;
+    add[(__bridge id)kSecAttrAccount] = account;
+    if (group) add[(__bridge id)kSecAttrAccessGroup] = group;
+    add[(__bridge id)kSecAttrAccessible] = target;
+    add[(__bridge id)kSecValueData] = data;
+    OSStatus as = ApolloRealSecItemAdd(add, NULL);
+    [report appendFormat:@"\nre-add as %@ -> status=%d", ApolloAccessibleName(target), (int)as];
+
+    if (as != errSecSuccess) {
+        // The item is deleted at this point — put it back as it was rather than leaving the user
+        // signed out with no way to undo from the UI.
+        add[(__bridge id)kSecAttrAccessible] = current ?: (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
+        OSStatus rs = ApolloRealSecItemAdd(add, NULL);
+        [report appendFormat:@"\nre-add FAILED; rolled back to %@ -> status=%d", wasAccessible, (int)rs];
+    } else if (poisoned) {
+        [report appendString:@"\n\nRestored. Force-quit and relaunch; the account should load normally."];
+    } else {
+        [report appendString:@"\n\nPoisoned. Force-quit and relaunch with fault flags OFF.\n"
+                             @"A [KeychainRecover] with no [FaultInjection] above it = a REAL miss "
+                             @"= confirmed. Run this action again to restore."];
+    }
+
+    ApolloInvalidateRecoverCache();
+    ApolloLoginDiag(@"[DebugPoison] %@", [report stringByReplacingOccurrencesOfString:@"\n" withString:@" | "]);
+    return report;
+}
+
 NSString *ApolloDebugCreateCrossGroupAccountDuplicate(void) {
     // 1. Find the current account item + its access group + data.
     NSDictionary *q = @{

@@ -139,4 +139,5 @@ void ApolloAppendLoginDiag(NSString *line);
 // cross-access-group duplicate to reproduce the root cause. Both also write to the diag log.
 NSString *ApolloDebugAccountKeychainReport(void);
 NSString *ApolloDebugCreateCrossGroupAccountDuplicate(void);
+NSString *ApolloDebugPoisonAccountAccessibility(void);
 __END_DECLS
