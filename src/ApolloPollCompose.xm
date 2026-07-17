@@ -109,8 +109,20 @@ static void ApolloPollComposeApplyPendingPostType(id composeVC) {
     if (pending.length == 0 || CFAbsoluteTimeGetCurrent() - sApolloPollPendingPostTypeSetAt > 30.0) return;
     UISegmentedControl *control = ApolloPollComposeIvar(composeVC, "postTypeSegmentedControl");
     if (![control isKindOfClass:UISegmentedControl.class]) return;
+
+    // Match the picked type against the compose sheet's segment titles
+    // case-insensitively, and treat "Photo"/"Image" as synonyms. Apollo titles
+    // its image segment "Photo" (confirmed against the binary), but matching by
+    // exact display string is fragile: a rebrand or future build could relabel
+    // it "Image", and the quick-pick must still land on the right segment
+    // instead of silently opening compose on the default type.
+    NSString *wanted = pending.lowercaseString;
+    NSArray<NSString *> *accepted =
+        ([wanted isEqualToString:@"photo"] || [wanted isEqualToString:@"image"]) ? @[@"photo", @"image"]
+                                                                                 : @[wanted];
     for (NSInteger index = 0; index < control.numberOfSegments; index++) {
-        if (![[control titleForSegmentAtIndex:index] isEqualToString:pending]) continue;
+        NSString *segTitle = [control titleForSegmentAtIndex:index].lowercaseString;
+        if (segTitle.length == 0 || ![accepted containsObject:segTitle]) continue;
         if (control.selectedSegmentIndex != index) {
             control.selectedSegmentIndex = index;
             // Fires Apollo's own postTypeSegmentedControlValueChanged: (and,
@@ -119,11 +131,31 @@ static void ApolloPollComposeApplyPendingPostType(id composeVC) {
         }
         return;
     }
+    // No segment matched — leave the sheet on its default type rather than
+    // guessing an index, but surface the miss so a title/label drift can't fail
+    // silently the way it would with a bare exact-string match.
+    ApolloLog(@"[PollCompose] quick-pick '%@' matched no compose segment title — left default type", pending);
 }
 
 static UIViewController *ApolloPollComposeVisibleViewController(void) {
     for (UIWindow *window in ApolloAllWindows()) if (window.isKeyWindow) return window.visibleViewController;
     return ApolloAllWindows().firstObject.visibleViewController;
+}
+
+// Loads one of the tweak's bundled custom post-type symbols. These are SF
+// Symbols custom-symbol exports compiled into ApolloPollSymbols.bundle
+// (Assets.car), staged inside ApolloReborn.bundle. Resolved once and cached;
+// returns nil when the bundle is unavailable so callers fall back to a stock
+// SF Symbol.
+static UIImage *ApolloPollComposeSymbol(NSString *symbolName) {
+    static NSBundle *symbols = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *path = ApolloBundledResourcePath(@"ApolloPollSymbols", @"bundle");
+        symbols = path ? [NSBundle bundleWithPath:path] : nil;
+        if (!symbols) ApolloLog(@"[PollCompose] ApolloPollSymbols.bundle not found — using SF Symbol fallbacks");
+    });
+    return symbols ? [UIImage imageNamed:symbolName inBundle:symbols compatibleWithTraitCollection:nil] : nil;
 }
 
 // The ControlGroup-style inline icon row that replaces the "Submit Post" menu
@@ -133,7 +165,14 @@ static UIViewController *ApolloPollComposeVisibleViewController(void) {
 // RDK predates polls, so there is no allow_polls flag to check — Poll shows
 // for any signed-in account and the server's error surfaces if a sub
 // disallows them (same as the compose sheet's Poll segment).
+//
+// The whole picker is gated on the experimental Polls feature: with Polls off,
+// this returns nil so Apollo's plain "Submit Post" row is left exactly as-is.
+// The Photo/Link/Text speed-up isn't poll-specific, but shipping it to every
+// install would be a stock-behavior change outside the feature flag, so it
+// rides the Polls gate rather than silently replacing the default row.
 UIMenu *ApolloSubmitPostTypesMenu(__unused id actionController, void (^selectRow)(void)) {
+    if (!ApolloPollsFeatureEnabled()) return nil;
     id subreddit = ApolloPollComposeIvar(ApolloPollComposeVisibleViewController(), "currentSubreddit");
     NSInteger submissionType = 1;
     BOOL allowImages = YES;
@@ -146,16 +185,22 @@ UIMenu *ApolloSubmitPostTypesMenu(__unused id actionController, void (^selectRow
     }
     BOOL linkAllowed = submissionType != 3;
     BOOL textAllowed = submissionType != 2;
-    struct { NSString *title; NSString *symbol; BOOL available; } entries[] = {
-        { @"Photo", @"photo",          linkAllowed && allowImages },
-        { @"Link",  @"link",           linkAllowed },
-        { @"Text",  @"text.alignleft", textAllowed },
-        // Poll is only offered when the experimental Polls feature is enabled;
-        // the Photo/Link/Text speed-up stays regardless (it isn't poll-specific).
-        { @"Poll",  @"chart.bar",      ApolloPollsFeatureEnabled() && ApolloActiveAccountUsername().length > 0 },
+    // Custom SF Symbols (…badge.plus) ship in ApolloPollSymbols.bundle; each
+    // falls back to a stock SF Symbol if the bundle can't be loaded.
+    struct { NSString *title; NSString *customSymbol; NSString *fallback; BOOL available; } entries[] = {
+        { @"Photo", @"custom.photo.badge.plus",                         @"photo",          linkAllowed && allowImages },
+        { @"Link",  @"custom.link.badge.plus",                          @"link",           linkAllowed },
+        { @"Text",  @"custom.text.page.badge.plus",                     @"text.alignleft", textAllowed },
+        // Feature gate already passed above; Poll just needs a signed-in account.
+        { @"Poll",  @"custom.chart.bar.horizontal.page.fill.badge.plus", @"chart.bar",     ApolloActiveAccountUsername().length > 0 },
     };
-    UIAction *(^makeAction)(NSString *, NSString *) = ^(NSString *title, NSString *symbol) {
-        return [UIAction actionWithTitle:title image:[UIImage systemImageNamed:symbol]
+    UIImageSymbolConfiguration *iconConfig =
+        [UIImageSymbolConfiguration configurationWithPointSize:22.0 weight:UIImageSymbolWeightRegular];
+    UIAction *(^makeAction)(NSString *, NSString *, NSString *) = ^(NSString *title, NSString *custom, NSString *fallback) {
+        UIImage *image = ApolloPollComposeSymbol(custom) ?: [UIImage systemImageNamed:fallback];
+        image = [[image imageByApplyingSymbolConfiguration:iconConfig]
+                    imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        return [UIAction actionWithTitle:title image:image
                               identifier:nil handler:^(__unused UIAction *action) {
             ApolloPollComposeSetPendingPostType(title);
             selectRow();
@@ -163,14 +208,16 @@ UIMenu *ApolloSubmitPostTypesMenu(__unused id actionController, void (^selectRow
     };
     NSMutableArray<UIAction *> *nativeActions = [NSMutableArray array];
     for (size_t i = 0; i < 3; i++) {
-        if (entries[i].available) [nativeActions addObject:makeAction(entries[i].title, entries[i].symbol)];
+        if (entries[i].available) [nativeActions addObject:makeAction(entries[i].title, entries[i].customSymbol, entries[i].fallback)];
     }
-    UIAction *pollAction = entries[3].available ? makeAction(entries[3].title, entries[3].symbol) : nil;
+    UIAction *pollAction = entries[3].available ? makeAction(entries[3].title, entries[3].customSymbol, entries[3].fallback) : nil;
     if (nativeActions.count + (pollAction ? 1 : 0) < 2) return nil;
 
-    // Small elements fit all four post types on one compact icon row. This is
-    // still a native UIMenu (keyboard/VoiceOver included), but consumes half
-    // the vertical space of the medium 2x2 treatment.
+    // Small elements keep all four post types on one clean, compact icon row
+    // (no labels, no vertical bulk). Medium was worse: it shows labels and only
+    // fits three per row, dropping Poll onto a lopsided second row. The custom
+    // badge-plus glyphs read clearly at this size, so the row stays legible
+    // while staying a single native UIMenu (keyboard/VoiceOver come free).
     NSMutableArray<UIAction *> *actions = [nativeActions mutableCopy];
     if (pollAction) [actions addObject:pollAction];
     UIMenu *iconRow = [UIMenu menuWithTitle:@"" image:nil identifier:nil
@@ -459,13 +506,28 @@ UIMenu *ApolloSubmitPostTypesMenu(__unused id actionController, void (^selectRow
             NSString *postURL = [postURLObject isKindOfClass:NSString.class] ? postURLObject : nil;
             if (error || status != 200 || errors.count > 0 || postURL.length == 0) {
                 // api_type=json errors are [code, human message, field] triples.
-                NSString *message = error.localizedDescription;
+                NSString *serverMessage = nil;
                 id first = errors.firstObject;
-                if ([first isKindOfClass:NSArray.class] && [first count] > 1 && [first[1] isKindOfClass:NSString.class]) message = first[1];
+                if ([first isKindOfClass:NSArray.class] && [first count] > 1 && [first[1] isKindOfClass:NSString.class]) serverMessage = first[1];
+                NSString *message = serverMessage ?: error.localizedDescription;
                 if (status == 429) message = @"Reddit is rate limiting posts. Wait a moment before trying again.";
-                else if (status == 401 || status == 403) {
+                else if (status == 401) {
+                    // Only a 401 is a definite authentication failure — remove the
+                    // stored session so the user is prompted to sign in again.
                     ApolloWebSessionRemove(self.username);
                     message = @"The Reddit web session expired. Sign in again and retry.";
+                }
+                else if (status == 403) {
+                    // A 403 from /api/submit_poll_post.json is very reachable
+                    // without the session being bad: the subreddit disallows
+                    // polls, the user is banned/muted, lacks the karma to post,
+                    // or the subreddit is restricted. Do NOT remove the session —
+                    // for a keyless account this is its primary API-key-free
+                    // transport, and ApolloWebSessionRemove would sign it out of
+                    // the whole cookie transport, not just polls. Mirror
+                    // ApolloPollVoting.xm's 403 handling and surface Reddit's own
+                    // reason instead.
+                    message = serverMessage ?: @"Reddit did not authorize this poll. You may not be allowed to post polls in this subreddit.";
                 }
                 else if (status >= 500) message = @"Reddit is temporarily unavailable. Try again later.";
                 ApolloLog(@"[PollCompose] submit failed status=%ld code=%ld", (long)status, (long)error.code);

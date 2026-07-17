@@ -45,6 +45,9 @@ static const NSTimeInterval kFarFutureCookieInterval = 10000.0 * 24 * 60 * 60;
 @property (nonatomic) NSUInteger harvestAttempts;
 @property (nonatomic, copy) NSString *requiredUsername;
 @property (nonatomic, copy) void (^sessionCompletion)(BOOL success);
+// Fires sessionCompletion once (any dismissal path); declared here so
+// viewDidDisappear: (above its definition) sees the selector under -Werror.
+- (void)_fireSessionCompletion:(BOOL)success;
 @end
 
 // How many times the harvest may defer back to the 2s auth poll while waiting
@@ -226,6 +229,20 @@ static const NSTimeInterval kReharvestTimeout = 25.0;
     [super viewDidDisappear:animated];
     [self.authPollTimer invalidate];
     self.authPollTimer = nil;
+
+    // Safety net for the completion contract. The nav sheet is presented at the
+    // default pageSheet detent with no isModalInPresentation / adaptive-dismiss
+    // delegate, so a swipe-down leaves through neither Cancel nor a successful
+    // harvest — _fireSessionCompletion: would never run. A success has already
+    // nil-ed the block by now, so a still-set block here means the sheet was
+    // dismissed interactively: honor it as a cancel. Without this the caller
+    // keeps a phantom optimistic vote + a permanently reserved in-flight key
+    // (voting) or a stuck "Post" spinner (compose).
+    if (self.sessionCompletion) {
+        ApolloLog(@"[WebJSON] Web login sheet dismissed without finishing — treating as cancel");
+        self.finished = YES;
+        [self _fireSessionCompletion:NO];
+    }
 }
 
 #pragma mark - Shared probe/harvest helpers (login VC + silent re-harvester)
@@ -573,15 +590,24 @@ static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStor
     self.navigationItem.rightBarButtonItem.menu = menu;
 }
 
+// Fire the one-shot session completion exactly once, whichever way the login VC
+// leaves — Cancel, a successful harvest, or an interactive sheet swipe-dismiss.
+// Nil-ing the block makes every later call a no-op, so the caller's cancel work
+// (vote: end-in-flight + rollback; compose: clear the submitting spinner) runs
+// once and only once, and a success can never be clobbered by a later cancel.
+- (void)_fireSessionCompletion:(BOOL)success {
+    void (^completion)(BOOL) = self.sessionCompletion;
+    if (!completion) return;
+    self.sessionCompletion = nil;
+    completion(success);
+}
+
 - (void)_cancelTapped {
     ApolloLog(@"[WebJSON] User cancelled web session login");
     self.finished = YES;
     [self.authPollTimer invalidate];
     self.authPollTimer = nil;
-    if (self.sessionCompletion) {
-        self.sessionCompletion(NO);
-        self.sessionCompletion = nil;
-    }
+    [self _fireSessionCompletion:NO];
     [self _dismiss];
 }
 
@@ -594,10 +620,7 @@ static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStor
 // leaving them with a silently-blank account tab. Otherwise (account already
 // present / synthesis skipped) just dismiss with no prompt.
 - (void)_finishWithUser:(NSString *)username accountSynthesized:(BOOL)synthesized {
-    if (self.sessionCompletion) {
-        self.sessionCompletion(YES);
-        self.sessionCompletion = nil;
-    }
+    [self _fireSessionCompletion:YES];
     if (!synthesized) { [self _dismiss]; return; }
 
     // Mark the pending state up front; clearing happens at next launch (%ctor).
