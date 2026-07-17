@@ -3977,6 +3977,8 @@ static BOOL ApolloCellNodeStillShowsCachedTranslation(id commentCellNode) {
     return ApolloTextMatchesSourceOrVisualDisplay(current.string, ApolloStripInlineMediaTokens(translated));
 }
 
+static BOOL ApolloCommentCellNodeIsBackedByActiveCommentsTable(id commentCellNode, UIViewController *commentsVC);
+
 static void ApolloScheduleCachedTranslationReapplyForCellNode(id commentCellNode) {
     if (!commentCellNode || !sEnableBulkTranslation) return;
     if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
@@ -3996,6 +3998,15 @@ static void ApolloScheduleCachedTranslationReapplyForCellNode(id commentCellNode
             return;
         }
         objc_setAssociatedObject(strong, kApolloReapplyScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // Context-menu previews use freshly-built CommentCellNodes outside the
+        // comments table. Reapplying a cached translation after UIKit measured
+        // one of those detached nodes changes its height mid-presentation and
+        // creates the overlapping/jumping copy reported in #676. Vote rebuilds
+        // are attached to the real visible table cell before this block fires.
+        if (!ApolloCommentCellNodeIsBackedByActiveCommentsTable(strong, sVisibleCommentsViewController)) {
+            ApolloTranslationVerboseLog(@"[Translation/vote] commentReapply: skipping non-table cellNode=%p", strong);
+            return;
+        }
         ApolloReapplyCachedTranslationForCellNode(strong);
     });
 }
