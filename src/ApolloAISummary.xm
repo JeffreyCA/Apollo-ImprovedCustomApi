@@ -3183,9 +3183,17 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
 - (void)modelObjectUpdatedNotificationReceived:(id)notification {
     %orig;
     if (!sEnableAISummaries) return;
+    // Logos `self` is __unsafe_unretained; section controllers are torn down during
+    // the very model-update storms this hook fires in (collapse deletions, live
+    // updates). A raw capture here is the same use-after-free that crashed the
+    // translation module's cell hooks (#630 round 5) — take a weak reference.
+    __weak id weakSelf = (id)self;
     dispatch_async(dispatch_get_main_queue(), ^{
+        id sectionController = weakSelf;
+        if (!sectionController) return;
         UIViewController *vc = sVisibleCommentsController;
-        id comment = MSHookIvar<id>((id)self, "comment");
+        Ivar commentIvar = class_getInstanceVariable(object_getClass(sectionController), "comment");
+        id comment = commentIvar ? object_getIvar(sectionController, commentIvar) : nil;
         if (!vc || !ApolloAICommentIsEligible(comment)) return;
         ApolloAICaptureCommentForController(comment, vc);
         ApolloAIScheduleCommentGeneration(vc);
@@ -3199,9 +3207,14 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
 - (void)didLoad {
     %orig;
     if (!sEnableAISummaries) return;
+    // Weak capture: comment cells die during collapse/scroll churn before the main
+    // queue drains (#630 round-5 crash mechanism).
+    __weak __typeof__(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
+        __typeof__(self) cellNode = weakSelf;
+        if (!cellNode) return;
         UIViewController *vc = sVisibleCommentsController;
-        id comment = ApolloAICommentFromCellNode((id)self);
+        id comment = ApolloAICommentFromCellNode((id)cellNode);
         if (!vc || !comment) return;
         ApolloAICaptureCommentForController(comment, vc);
         ApolloAIScheduleCommentGeneration(vc);
@@ -3211,9 +3224,12 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
 - (void)didEnterPreloadState {
     %orig;
     if (!sEnableAISummaries) return;
+    __weak __typeof__(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
+        __typeof__(self) cellNode = weakSelf;
+        if (!cellNode) return;
         UIViewController *vc = sVisibleCommentsController;
-        id comment = ApolloAICommentFromCellNode((id)self);
+        id comment = ApolloAICommentFromCellNode((id)cellNode);
         if (!vc || !comment) return;
         ApolloAICaptureCommentForController(comment, vc);
         ApolloAIScheduleCommentGeneration(vc);

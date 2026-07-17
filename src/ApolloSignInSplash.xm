@@ -6,18 +6,15 @@
 // -signInSplashViewSignInButtonTappedWithSender:, which normally goes straight
 // to the OAuth/API-key sign-in flow.
 //
-// When API-Key-Free Mode is enabled we intercept that tap and present the
-// two-way chooser (same sheet as the account switcher's "Add Account") so the
-// user can pick either OAuth or the keyless web-session path. The "Create
-// Account" button is left untouched.
+// We intercept that tap and present the two-way chooser (same sheet as the
+// account switcher's "Add Account") so the user can pick either OAuth or the
+// keyless web-session path. Not gated on the Web JSON master flag: the mode is
+// chosen per account at sign-in, and a keyless harvest enables the transport
+// flag itself. The "Create Account" button is left untouched.
 
 %hook _TtC6Apollo21ProfileViewController
 
 - (void)signInSplashViewSignInButtonTappedWithSender:(id)sender {
-    if (!sWebJSONEnabled) {
-        %orig;
-        return;
-    }
     UIViewController *host = (UIViewController *)self;
     ApolloWebSessionPresentSignInChooser(host, ^{ %orig; });
 }
@@ -27,10 +24,6 @@
 %hook _TtC6Apollo19InboxViewController
 
 - (void)signInSplashViewSignInButtonTappedWithSender:(id)sender {
-    if (!sWebJSONEnabled) {
-        %orig;
-        return;
-    }
     UIViewController *host = (UIViewController *)self;
     ApolloWebSessionPresentSignInChooser(host, ^{ %orig; });
 }

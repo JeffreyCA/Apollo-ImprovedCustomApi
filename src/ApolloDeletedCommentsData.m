@@ -56,6 +56,7 @@ static NSString *ApolloDeletedCommentsCommentFullName(NSDictionary *data);
 static NSString *ApolloDeletedCommentsReasonForArchived(NSDictionary *archived);
 static BOOL ApolloDeletedCommentsBodyLooksDeleted(NSString *body);
 static void ApolloDeletedCommentsWarmArcticCacheForLink(NSString *linkFullName, NSString *source);
+static BOOL ApolloDeletedCommentsIsMoreChildrenRequest(NSURLRequest *request);
 
 #pragma mark - RecoveredCommentRegistry
 
@@ -161,6 +162,61 @@ NSString *ApolloDeletedCommentsDeletedPlaceholderReason(NSString *fullName) {
     }
 }
 
+// ---- "(Unrecoverable)" classification ----
+//
+// A comment is UNRECOVERABLE when the Arctic archive answered GENUINELY and
+// definitively lacks a usable copy: either the archive's own copy is redacted
+// ([removed]/[deleted] — it crawled the comment after removal), or the comment
+// is absent from a coverage-complete tree (no "more" folding, well under the
+// fetch limit) and old enough (>1h) that ingestion lag can't explain the
+// absence. Transient failures / rate limits never reach the marking sites —
+// they never produce a stored cache entry (see the transient handling in
+// ApolloDeletedCommentsFetchArcticComments). Marks are session-lifetime and
+// self-heal: a later genuine fetch that DOES find the comment clears the mark
+// in ApolloDeletedCommentsStoreArchivedCommentsByFullName.
+static NSMutableSet<NSString *> *sApolloDeletedCommentsUnrecoverableFullNames = nil;
+// linkFullName -> { commentFullName: @(created_utc) } for every placeholder the
+// mark walk saw in that link's responses — lets a LATE genuine answer diff
+// "placeholders we showed" against "comments the archive has".
+static NSMutableDictionary<NSString *, NSMutableDictionary *> *sApolloDeletedCommentsPlaceholderInfoByLink = nil;
+
+void ApolloDeletedCommentsMarkCommentUnrecoverable(NSString *fullName) {
+    if (![fullName isKindOfClass:[NSString class]] || fullName.length == 0) return;
+    @synchronized(ApolloDeletedCommentsRegistryLock()) {
+        if (!sApolloDeletedCommentsUnrecoverableFullNames) sApolloDeletedCommentsUnrecoverableFullNames = [NSMutableSet set];
+        [sApolloDeletedCommentsUnrecoverableFullNames addObject:fullName];
+    }
+}
+
+BOOL ApolloDeletedCommentsIsUnrecoverableComment(NSString *fullName) {
+    if (![fullName isKindOfClass:[NSString class]] || fullName.length == 0) return NO;
+    @synchronized(ApolloDeletedCommentsRegistryLock()) {
+        return [sApolloDeletedCommentsUnrecoverableFullNames containsObject:fullName];
+    }
+}
+
+static void ApolloDeletedCommentsNotePlaceholderForLink(NSString *linkFullName, NSString *commentFullName, double createdUTC) {
+    if (linkFullName.length == 0 || commentFullName.length == 0) return;
+    @synchronized(ApolloDeletedCommentsRegistryLock()) {
+        if (!sApolloDeletedCommentsPlaceholderInfoByLink) sApolloDeletedCommentsPlaceholderInfoByLink = [NSMutableDictionary dictionary];
+        NSMutableDictionary *info = sApolloDeletedCommentsPlaceholderInfoByLink[linkFullName];
+        if (!info) {
+            info = [NSMutableDictionary dictionary];
+            sApolloDeletedCommentsPlaceholderInfoByLink[linkFullName] = info;
+        }
+        info[commentFullName] = @(createdUTC);
+    }
+}
+
+// Definitive-absence gate shared by the parse-time walk and the store-time
+// diff: coverage must be complete AND the comment must be old enough that
+// "Arctic hasn't ingested it yet" is off the table. created<=0 (unknown age)
+// deliberately fails the gate.
+static BOOL ApolloDeletedCommentsAbsenceIsDefinitive(BOOL coverageComplete, double createdUTC) {
+    if (!coverageComplete || createdUTC <= 0) return NO;
+    return [[NSDate date] timeIntervalSince1970] - createdUTC > 3600.0;
+}
+
 static void ApolloDeletedCommentsStoreArchivedCommentsByFullName(NSDictionary<NSString *, NSDictionary *> *comments) {
     if (comments.count == 0) return;
     @synchronized(ApolloDeletedCommentsRegistryLock()) {
@@ -171,6 +227,8 @@ static void ApolloDeletedCommentsStoreArchivedCommentsByFullName(NSDictionary<NS
             NSDictionary *archived = [comments[fullName] isKindOfClass:[NSDictionary class]] ? comments[fullName] : nil;
             if ([fullName isKindOfClass:[NSString class]] && fullName.length > 0 && archived) {
                 sApolloDeletedCommentsArchivedByFullName[fullName] = archived;
+                // Self-heal the "(Unrecoverable)" mark: the archive found it after all.
+                [sApolloDeletedCommentsUnrecoverableFullNames removeObject:fullName];
             }
         }
     }
@@ -335,14 +393,62 @@ static NSString *ApolloDeletedCommentsLinkFullNameFromRedditURL(NSURL *url) {
 
 static NSString *ApolloDeletedCommentsRecentObservedLinkFullName(void) {
     if (sApolloDeletedCommentsLastObservedLinkFullName.length == 0 || !sApolloDeletedCommentsLastObservedLinkDate) return nil;
-    if ([[NSDate date] timeIntervalSinceDate:sApolloDeletedCommentsLastObservedLinkDate] > 45.0) return nil;
+    // 30 minutes, was 45 seconds. morechildren URLs carry no link id, so this
+    // fallback is the ONLY thread attribution "load more comments" ever gets —
+    // and on a long AskHistorians read the user easily sits in one thread past
+    // 45s before tapping it. An expired window meant the whole morechildren
+    // response skipped the transform: no placeholder marking, no un-collapse,
+    // native collapsed [removed] stubs (#630 round-9 "don't expand until I
+    // scroll"). Misattribution risk from the longer window is benign: the mark/
+    // un-collapse walk is link-agnostic, and archive lookups are keyed by the
+    // comment fullname, so the wrong link can only mean a MISSED patch (same as
+    // no transform), never a false one. Observation of any newer thread
+    // re-stamps this immediately, and morechildren observations below slide the
+    // window while the user keeps loading.
+    if ([[NSDate date] timeIntervalSinceDate:sApolloDeletedCommentsLastObservedLinkDate] > 1800.0) return nil;
     return sApolloDeletedCommentsLastObservedLinkFullName;
+}
+
+// morechildren requests carry no link id in the URL — but their POST body does
+// (form-encoded link_id=t3_xxx; some builds send JSON). Deterministic
+// attribution beats the observed-thread fallback whenever the body is
+// readable, so try it first for these requests.
+static NSString *ApolloDeletedCommentsLinkFullNameFromRequestBody(NSURLRequest *request) {
+    NSData *bodyData = request.HTTPBody;
+    if (bodyData.length == 0 || bodyData.length > 65536) return nil;
+    NSString *text = [[NSString alloc] initWithData:bodyData encoding:NSUTF8StringEncoding];
+    if (text.length == 0) return nil;
+
+    if ([text hasPrefix:@"{"]) {
+        id root = [NSJSONSerialization JSONObjectWithData:bodyData options:0 error:nil];
+        if ([root isKindOfClass:[NSDictionary class]]) {
+            NSString *value = [((NSDictionary *)root)[@"link_id"] isKindOfClass:[NSString class]] ? ((NSDictionary *)root)[@"link_id"] : nil;
+            return ApolloDeletedCommentsNormalizeLinkID(value);
+        }
+        return nil;
+    }
+
+    for (NSString *pair in [text componentsSeparatedByString:@"&"]) {
+        NSRange eq = [pair rangeOfString:@"="];
+        if (eq.location == NSNotFound) continue;
+        NSString *name = [[pair substringToIndex:eq.location] stringByRemovingPercentEncoding] ?: [pair substringToIndex:eq.location];
+        NSString *lowered = name.lowercaseString;
+        if (![lowered isEqualToString:@"link_id"] && ![lowered isEqualToString:@"link"]) continue;
+        NSString *value = [[pair substringFromIndex:NSMaxRange(eq)] stringByRemovingPercentEncoding] ?: [pair substringFromIndex:NSMaxRange(eq)];
+        NSString *fullName = ApolloDeletedCommentsNormalizeLinkID(value);
+        if (fullName.length > 0) return fullName;
+    }
+    return nil;
 }
 
 static NSString *ApolloDeletedCommentsLinkFullNameForRequest(NSURLRequest *request) {
     NSString *fullName = ApolloDeletedCommentsLinkFullNameFromRedditURL(request.URL);
     if (fullName.length > 0) return fullName;
     if (!ApolloDeletedCommentsIsRedditHost(request.URL.host)) return nil;
+    if (ApolloDeletedCommentsIsMoreChildrenRequest(request)) {
+        fullName = ApolloDeletedCommentsLinkFullNameFromRequestBody(request);
+        if (fullName.length > 0) return fullName;
+    }
     return ApolloDeletedCommentsRecentObservedLinkFullName();
 }
 
@@ -378,10 +484,45 @@ static BOOL ApolloDeletedCommentsShouldTransformTask(NSURLSessionTask *task) {
            ApolloDeletedCommentsShouldTransformRequest(task.currentRequest);
 }
 
+// Whether this request's link attribution is CERTAIN — resolved from the URL
+// or (for morechildren) the POST body's link_id — rather than the fuzzy
+// observed-thread fallback. The "(Unrecoverable)" classification marks a
+// comment absent-from-the-archive as definitively gone, and that mark is
+// global (keyed by comment fullname); a fallback-misattributed response
+// (thread A's morechildren credited to thread B) would make A's comments look
+// absent from B's archive and falsely mark them. So absence-based marking runs
+// ONLY when attribution is authoritative. (The archived-but-redacted case is
+// attribution-proof: a fullname can't appear in the wrong link's map.)
+static BOOL ApolloDeletedCommentsRequestAttributionIsAuthoritative(NSURLRequest *request) {
+    if (ApolloDeletedCommentsLinkFullNameFromRedditURL(request.URL).length > 0) return YES;
+    if (ApolloDeletedCommentsIsMoreChildrenRequest(request) &&
+        ApolloDeletedCommentsLinkFullNameFromRequestBody(request).length > 0) return YES;
+    return NO;
+}
+
 void ApolloDeletedCommentsHandleRequestObservation(NSURLRequest *request, NSString *source) {
     if (!ApolloDeletedCommentsFeatureActive()) return;
     NSString *fullName = ApolloDeletedCommentsLinkFullNameFromRedditURL(request.URL);
-    if (fullName.length == 0) return;
+    if (fullName.length == 0 && ApolloDeletedCommentsIsMoreChildrenRequest(request)) {
+        // morechildren URLs carry no link id, but their POST body does — a
+        // deterministic attribution that also re-stamps the observed thread so
+        // the fallback window stays live for the whole reading session.
+        fullName = ApolloDeletedCommentsLinkFullNameFromRequestBody(request);
+    }
+    if (fullName.length == 0) {
+        // Still unattributed (unreadable body). Slide the observed-thread
+        // window instead of letting it lapse: the user is demonstrably still
+        // loading comments in SOME thread, and the fallback pointing at the
+        // last full-comments request is the best attribution available.
+        // Without this, back-to-back "load more" taps spaced past the TTL each
+        // arrive unattributed and skip the transform.
+        if (ApolloDeletedCommentsRequestLooksLikeCommentsPayload(request) &&
+            ApolloDeletedCommentsIsRedditHost(request.URL.host) &&
+            sApolloDeletedCommentsLastObservedLinkFullName.length > 0) {
+            sApolloDeletedCommentsLastObservedLinkDate = [NSDate date];
+        }
+        return;
+    }
 
     // Track EVERY observed thread (not just gated ones) so the 45s
     // morechildren fallback in ApolloDeletedCommentsLinkFullNameForRequest
@@ -398,9 +539,10 @@ void ApolloDeletedCommentsHandleRequestObservation(NSURLRequest *request, NSStri
     // Only gated threads warm the archive and notify.
     if (!ApolloDeletedCommentsActiveForLink(fullName)) return;
 
-    if (!ApolloDeletedCommentsIsMoreChildrenRequest(request)) {
-        ApolloDeletedCommentsWarmArcticCacheForLink(fullName, source ?: @"request observation");
-    }
+    // morechildren warms too (used to be excluded): the warm no-ops when the
+    // cache is valid, so this only fires when the thread's entry expired (600s
+    // TTL) or never landed — exactly the case where "load more" needs it.
+    ApolloDeletedCommentsWarmArcticCacheForLink(fullName, source ?: @"request observation");
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:ApolloDeletedCommentsObservedThreadNotification
@@ -432,6 +574,11 @@ static BOOL ApolloDeletedCommentsBodyLooksDeleted(NSString *body) {
     if ([trimmed isEqualToString:@"user deleted comment"]) return YES;
     if ([trimmed rangeOfString:@"removed by moderator"].location != NSNotFound && trimmed.length < 80) return YES;
     if ([trimmed rangeOfString:@"user deleted comment"].location != NSNotFound && trimmed.length < 80) return YES;
+    // Newer Reddit placeholder for comments removed as part of a whole-thread removal.
+    // Served as an italic markdown body like "*Moderator removed thread* 🧨", so match
+    // by substring (the wrapper asterisks/emoji vary) with the same short-body guard.
+    if ([trimmed rangeOfString:@"moderator removed thread"].location != NSNotFound && trimmed.length < 80) return YES;
+    if ([trimmed rangeOfString:@"moderators removed"].location != NSNotFound && trimmed.length < 80) return YES;
     return NO;
 }
 
@@ -598,12 +745,55 @@ NSString *ApolloDeletedCommentsRedditBodyHTML(NSString *body) {
     return ApolloDeletedCommentsEscapeHTML(html);
 }
 
-static void ApolloDeletedCommentsSetRecoveredBody(NSMutableDictionary *data, NSString *body) {
+// Prefer the archive's OWN markdown-rendered HTML (Arctic md2html=true, or Reddit) over the
+// local regex converter, which only knows http(s) links and **bold** and silently drops
+// italics, blockquotes, lists, code, strikethrough, superscript, spoilers, etc. Arctic's
+// body_html is raw tags with entity-escaped content (i.e. the post-unescape form). Apollo
+// unescapes a comment's body_html exactly once before parsing, so we escape it a single time
+// here to match Reddit's own body_html wire format. Falls back to the regex converter when the
+// archive has no usable HTML.
+// Arctic's md2html percent-encodes hrefs a second time when the source URL was already
+// encoded (e.g. wiki/Malgr%C3%A9-elles becomes href="...Malgr%25C3%25A9-elles"), which
+// breaks the link target and the tweak's link previews. Repair each href containing %25
+// by decoding it once — but only when the decoded URL literally appears in the raw
+// markdown body, so URLs that genuinely contain %25 are left alone.
+static NSString *ApolloDeletedCommentsRepairDoubleEncodedHrefs(NSString *html, NSString *rawBody) {
+    if (html.length == 0 || rawBody.length == 0) return html;
+    if ([html rangeOfString:@"%25"].location == NSNotFound) return html;
+
+    NSRegularExpression *hrefRe = [NSRegularExpression regularExpressionWithPattern:@"href=\"([^\"]+)\"" options:0 error:nil];
+    NSMutableString *repaired = [html mutableCopy];
+    NSArray<NSTextCheckingResult *> *matches = [hrefRe matchesInString:html options:0 range:NSMakeRange(0, html.length)];
+    for (NSInteger i = (NSInteger)matches.count - 1; i >= 0; i--) {
+        NSRange urlRange = [matches[i] rangeAtIndex:1];
+        NSString *url = [html substringWithRange:urlRange];
+        if ([url rangeOfString:@"%25"].location == NSNotFound) continue;
+        NSString *decoded = [url stringByReplacingOccurrencesOfString:@"%25" withString:@"%"];
+        if (![rawBody containsString:decoded]) continue;
+        [repaired replaceCharactersInRange:urlRange withString:decoded];
+    }
+    return repaired;
+}
+
+static NSString *ApolloDeletedCommentsModelBodyHTMLForArchive(NSDictionary *archived, NSString *fallbackBody) {
+    NSString *archivedHTML = [archived[@"body_html"] isKindOfClass:[NSString class]] ? archived[@"body_html"] : nil;
+    if (archivedHTML.length > 0) {
+        NSString *archivedText = ApolloDeletedCommentsUnescapedHTMLText(archivedHTML);
+        if (!ApolloDeletedCommentsBodyLooksDeleted(archivedText)) {
+            NSString *rawBody = [archived[@"body"] isKindOfClass:[NSString class]] ? archived[@"body"] : fallbackBody;
+            archivedHTML = ApolloDeletedCommentsRepairDoubleEncodedHrefs(archivedHTML, rawBody);
+            return ApolloDeletedCommentsEscapeHTML(archivedHTML);
+        }
+    }
+    return ApolloDeletedCommentsRedditBodyHTML(fallbackBody);
+}
+
+static void ApolloDeletedCommentsSetRecoveredBody(NSMutableDictionary *data, NSDictionary *archived, NSString *body) {
     NSString *trimmed = ApolloDeletedCommentsTrimmedString(body);
     if (trimmed.length == 0) return;
 
     data[@"body"] = trimmed;
-    NSString *bodyHTML = ApolloDeletedCommentsRedditBodyHTML(trimmed);
+    NSString *bodyHTML = ApolloDeletedCommentsModelBodyHTMLForArchive(archived, trimmed);
     if (bodyHTML.length > 0) data[@"body_html"] = bodyHTML;
 }
 
@@ -646,11 +836,28 @@ BOOL ApolloDeletedCommentsApplyRecoveredArchivedCommentToObject(id comment, NSDi
     if (fullName.length == 0 || body.length == 0 || ApolloDeletedCommentsBodyLooksDeleted(body)) return NO;
 
     NSString *author = [archived[@"author"] isKindOfClass:[NSString class]] ? archived[@"author"] : nil;
-    NSString *bodyHTML = ApolloDeletedCommentsRedditBodyHTML(body);
+    NSString *bodyHTML = ApolloDeletedCommentsModelBodyHTMLForArchive(archived, body);
     NSString *resolvedReason = reason.length > 0 ? reason : ApolloDeletedCommentsReasonForArchived(archived);
 
-    ApolloDeletedCommentsSetObjectValue(comment, @selector(setBody:), body);
-    if (bodyHTML.length > 0) ApolloDeletedCommentsSetObjectValue(comment, @selector(setBodyHTML:), bodyHTML);
+    // Tap-to-reveal parity with the two JSON patch paths (which route through
+    // HideRecoveredBodyForTapToReveal): a hidden comment's MODEL must never
+    // hold the full recovered body, even transiently. This object path used to
+    // write the tall body first and rely on the UI's later synchronize pass to
+    // re-hide it — any Texture background measure landing inside that window
+    // baked a full-body row height under a one-line chip, one of the giant
+    // black gaps of #630 round 9.
+    NSString *hiddenLabel = nil;
+    if (sTapToRevealDeletedComments && !ApolloDeletedCommentsIsCommentRevealed(fullName)) {
+        hiddenLabel = ApolloDeletedCommentsDisplayLabelForReason(resolvedReason);
+    }
+    if (hiddenLabel.length > 0) {
+        ApolloDeletedCommentsSetObjectValue(comment, @selector(setBody:), hiddenLabel);
+        NSString *labelHTML = ApolloDeletedCommentsRedditBodyHTML(hiddenLabel);
+        if (labelHTML.length > 0) ApolloDeletedCommentsSetObjectValue(comment, @selector(setBodyHTML:), labelHTML);
+    } else {
+        ApolloDeletedCommentsSetObjectValue(comment, @selector(setBody:), body);
+        if (bodyHTML.length > 0) ApolloDeletedCommentsSetObjectValue(comment, @selector(setBodyHTML:), bodyHTML);
+    }
     if (author.length > 0) ApolloDeletedCommentsSetObjectValue(comment, @selector(setAuthor:), author);
     if ([archived[@"score"] respondsToSelector:@selector(longLongValue)]) {
         ApolloDeletedCommentsSetObjectLongLongValue(comment, @selector(setScore:), [archived[@"score"] longLongValue]);
@@ -684,14 +891,18 @@ static void ApolloDeletedCommentsApplyRecoveredMetadata(NSMutableDictionary *dat
     ApolloDeletedCommentsRegisterRecoveredBody(author, body, reason);
 }
 
-static void ApolloDeletedCommentsApplyPlaceholderMetadata(NSMutableDictionary *data, NSString *reason) {
+static void ApolloDeletedCommentsApplyPlaceholderMetadata(NSMutableDictionary *data, NSString *reason, NSString *linkFullName) {
     NSString *fullName = ApolloDeletedCommentsCommentFullName(data);
     data[ApolloDeletedCommentsPlaceholderMarkerKey] = @YES;
     data[ApolloDeletedCommentsPlaceholderReasonKey] = reason.length > 0 ? reason : ApolloDeletedCommentsReasonModeratorRemoved;
     ApolloDeletedCommentsRegisterDeletedPlaceholder(fullName, reason);
+    if (linkFullName.length > 0 && fullName.length > 0) {
+        double created = [data[@"created_utc"] respondsToSelector:@selector(doubleValue)] ? [data[@"created_utc"] doubleValue] : 0;
+        ApolloDeletedCommentsNotePlaceholderForLink(linkFullName, fullName, created);
+    }
 }
 
-static NSUInteger ApolloDeletedCommentsMarkDeletedPlaceholdersInJSONNode(id node) {
+static NSUInteger ApolloDeletedCommentsMarkDeletedPlaceholdersInJSONNode(id node, NSString *linkFullName) {
     if (!node) return 0;
     NSUInteger marked = 0;
     if ([node isKindOfClass:[NSMutableDictionary class]]) {
@@ -701,15 +912,28 @@ static NSUInteger ApolloDeletedCommentsMarkDeletedPlaceholdersInJSONNode(id node
         if ([kind isEqualToString:@"t1"] && data && ApolloDeletedCommentsCommentDataLooksDeleted(data)) {
             NSString *body = [data[@"body"] isKindOfClass:[NSString class]] ? data[@"body"] : nil;
             NSString *bodyHTML = [data[@"body_html"] isKindOfClass:[NSString class]] ? data[@"body_html"] : nil;
-            ApolloDeletedCommentsApplyPlaceholderMetadata(data, ApolloDeletedCommentsReasonForCurrentBody(body, bodyHTML));
+            ApolloDeletedCommentsApplyPlaceholderMetadata(data, ApolloDeletedCommentsReasonForCurrentBody(body, bodyHTML), linkFullName);
+            // Clear the server's removal-collapse HERE, in the pass that runs on EVERY
+            // comments response — not only in the Arctic-gated patch walk. That walk is
+            // skipped whenever the archive hasn't answered yet (big payloads, cooldowns,
+            // the 2s hold timing out), which is exactly the situation on 🧨 mass-removal
+            // threads — so their placeholders arrived still collapsed and only expanded
+            // when the late per-cell path caught them on screen (#630 round 6).
+            // Only the VISUAL flags: collapsed_reason/_code stay intact because they can
+            // be a comment's sole removal signal (empty body + live author), and the
+            // recovery walk re-evaluates CommentDataLooksDeleted from them later —
+            // nulling them here would make that walk skip the comment. The recovery
+            // path's ClearRemovalMetadata still nulls them once a body is restored.
+            data[@"collapsed"] = @NO;
+            data[@"collapsed_because_crowd_control"] = @NO;
             marked++;
         }
         for (id value in [dict allValues]) {
-            marked += ApolloDeletedCommentsMarkDeletedPlaceholdersInJSONNode(value);
+            marked += ApolloDeletedCommentsMarkDeletedPlaceholdersInJSONNode(value, linkFullName);
         }
     } else if ([node isKindOfClass:[NSArray class]]) {
         for (id value in (NSArray *)node) {
-            marked += ApolloDeletedCommentsMarkDeletedPlaceholdersInJSONNode(value);
+            marked += ApolloDeletedCommentsMarkDeletedPlaceholdersInJSONNode(value, linkFullName);
         }
     }
     return marked;
@@ -732,14 +956,21 @@ static void ApolloDeletedCommentsClearRemovalMetadata(NSMutableDictionary *data)
     data[@"collapsed_reason_code"] = [NSNull null];
 }
 
-static void ApolloDeletedCommentsFlattenArcticChildren(NSArray *children, NSMutableDictionary<NSString *, NSDictionary *> *commentsByFullName) {
+static void ApolloDeletedCommentsFlattenArcticChildren(NSArray *children, NSMutableDictionary<NSString *, NSDictionary *> *commentsByFullName, BOOL *sawMoreStub) {
     if (![children isKindOfClass:[NSArray class]]) return;
     for (id child in children) {
         if (![child isKindOfClass:[NSDictionary class]]) continue;
         NSDictionary *entry = (NSDictionary *)child;
         NSString *kind = [entry[@"kind"] isKindOfClass:[NSString class]] ? entry[@"kind"] : nil;
         NSDictionary *data = [entry[@"data"] isKindOfClass:[NSDictionary class]] ? entry[@"data"] : nil;
-        if (![kind isEqualToString:@"t1"] || !data) continue;
+        if (![kind isEqualToString:@"t1"] || !data) {
+            // Arctic folds subtrees beyond start_depth/start_breadth into
+            // kind:"more" stubs whose children list is PARTIAL (probed: a
+            // count=6 stub listed only 2 ids) — so any stub means the tree's
+            // coverage is incomplete and absence proves nothing.
+            if ([kind isEqualToString:@"more"] && sawMoreStub) *sawMoreStub = YES;
+            continue;
+        }
 
         NSString *fullName = ApolloDeletedCommentsCommentFullName(data);
         if (fullName.length > 0) commentsByFullName[fullName] = data;
@@ -747,11 +978,12 @@ static void ApolloDeletedCommentsFlattenArcticChildren(NSArray *children, NSMuta
         NSDictionary *replies = [data[@"replies"] isKindOfClass:[NSDictionary class]] ? data[@"replies"] : nil;
         NSDictionary *replyData = [replies[@"data"] isKindOfClass:[NSDictionary class]] ? replies[@"data"] : nil;
         NSArray *replyChildren = [replyData[@"children"] isKindOfClass:[NSArray class]] ? replyData[@"children"] : nil;
-        ApolloDeletedCommentsFlattenArcticChildren(replyChildren, commentsByFullName);
+        ApolloDeletedCommentsFlattenArcticChildren(replyChildren, commentsByFullName, sawMoreStub);
     }
 }
 
-static NSDictionary<NSString *, NSDictionary *> *ApolloDeletedCommentsArcticCommentMapFromRoot(id root) {
+static NSDictionary<NSString *, NSDictionary *> *ApolloDeletedCommentsArcticCommentMapFromRoot(id root, BOOL *outCoverageComplete) {
+    if (outCoverageComplete) *outCoverageComplete = NO;
     NSArray *children = nil;
     if ([root isKindOfClass:[NSDictionary class]]) {
         id data = ((NSDictionary *)root)[@"data"];
@@ -765,7 +997,12 @@ static NSDictionary<NSString *, NSDictionary *> *ApolloDeletedCommentsArcticComm
     if (![children isKindOfClass:[NSArray class]]) return nil;
 
     NSMutableDictionary *comments = [NSMutableDictionary dictionary];
-    ApolloDeletedCommentsFlattenArcticChildren(children, comments);
+    BOOL sawMoreStub = NO;
+    ApolloDeletedCommentsFlattenArcticChildren(children, comments, &sawMoreStub);
+    // Complete coverage = the archive gave the whole tree: no folded stubs and
+    // comfortably under the fetch's limit=5000 (near it, tail truncation is
+    // plausible). Only then is "absent from the map" evidence of non-archival.
+    if (outCoverageComplete) *outCoverageComplete = !sawMoreStub && comments.count < 4500;
     return comments.count > 0 ? comments : nil;
 }
 
@@ -854,7 +1091,20 @@ static NSDictionary<NSString *, NSDictionary *> *ApolloDeletedCommentsCachedArct
     }
 }
 
-static void ApolloDeletedCommentsStoreArcticComments(NSString *linkFullName, NSDictionary<NSString *, NSDictionary *> *comments, NSTimeInterval ttl) {
+// Whether the link's CURRENT (unexpired) genuine answer covered the whole
+// tree. NO when there is no entry — callers must pair this with a non-nil
+// CachedArcticComments before treating absence as definitive.
+static BOOL ApolloDeletedCommentsCachedArcticCoverageComplete(NSString *linkFullName) {
+    if (linkFullName.length == 0) return NO;
+    @synchronized(ApolloDeletedCommentsArcticLock()) {
+        NSDictionary *entry = sApolloDeletedCommentsArcticCache[linkFullName];
+        NSDate *expires = [entry[ApolloDeletedCommentsArcticCacheExpiryKey] isKindOfClass:[NSDate class]] ? entry[ApolloDeletedCommentsArcticCacheExpiryKey] : nil;
+        if (!entry || !expires || [expires timeIntervalSinceNow] <= 0.0) return NO;
+        return [entry[@"coverage"] boolValue];
+    }
+}
+
+static void ApolloDeletedCommentsStoreArcticComments(NSString *linkFullName, NSDictionary<NSString *, NSDictionary *> *comments, NSTimeInterval ttl, BOOL coverageComplete) {
     if (linkFullName.length == 0 || ttl <= 0.0) return;
     NSDictionary *storedComments = comments ?: @{};
     ApolloDeletedCommentsStoreArchivedCommentsByFullName(storedComments);
@@ -863,15 +1113,81 @@ static void ApolloDeletedCommentsStoreArcticComments(NSString *linkFullName, NSD
         sApolloDeletedCommentsArcticCache[linkFullName] = @{
             ApolloDeletedCommentsArcticCacheCommentsKey: storedComments,
             ApolloDeletedCommentsArcticCacheExpiryKey: [NSDate dateWithTimeIntervalSinceNow:ttl],
+            @"coverage": @(coverageComplete),
         };
     }
-    if (storedComments.count > 0) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [[NSNotificationCenter defaultCenter] postNotificationName:ApolloDeletedCommentsArcticCacheUpdatedNotification
-                                                                object:nil
-                                                              userInfo:@{@"linkFullName": linkFullName, @"comments": storedComments}];
-        });
+
+    // Late "(Unrecoverable)" classification: this genuine answer arrived after
+    // some of the link's placeholders already rendered. Diff them against the
+    // archive map. Two definitive shapes: PRESENT but the archive's own copy is
+    // redacted (needs no coverage — the archive answered for this exact
+    // comment), or ABSENT from a coverage-complete tree and old enough that
+    // ingestion lag is off the table. Recoverable ones already self-healed in
+    // StoreArchivedCommentsByFullName above.
+    {
+        NSDictionary *placeholderInfo = nil;
+        @synchronized(ApolloDeletedCommentsRegistryLock()) {
+            placeholderInfo = [sApolloDeletedCommentsPlaceholderInfoByLink[linkFullName] copy];
+        }
+        NSMutableArray<NSString *> *markedNames = [NSMutableArray array];
+        for (NSString *fullName in placeholderInfo) {
+            NSDictionary *archived = [storedComments[fullName] isKindOfClass:[NSDictionary class]] ? storedComments[fullName] : nil;
+            if (archived) {
+                NSString *archivedBody = ApolloDeletedCommentsTrimmedString([archived[@"body"] isKindOfClass:[NSString class]] ? archived[@"body"] : nil);
+                if (archivedBody.length > 0 && !ApolloDeletedCommentsBodyLooksDeleted(archivedBody)) continue;
+                ApolloDeletedCommentsMarkCommentUnrecoverable(fullName);
+                [markedNames addObject:fullName];
+                continue;
+            }
+            if (!ApolloDeletedCommentsAbsenceIsDefinitive(coverageComplete, [placeholderInfo[fullName] doubleValue])) continue;
+            ApolloDeletedCommentsMarkCommentUnrecoverable(fullName);
+            [markedNames addObject:fullName];
+        }
+        if (markedNames.count > 0) {
+            ApolloLog(@"[DeletedComments] Marked %lu placeholder(s) unrecoverable for %@ (archive answered definitively): %@",
+                      (unsigned long)markedNames.count, linkFullName, [markedNames componentsJoinedByString:@", "]);
+        }
     }
+
+    // Post even for EMPTY genuine answers: the UI needs the nudge to stamp
+    // "(Unrecoverable)" onto placeholder chips that will never get a body.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:ApolloDeletedCommentsArcticCacheUpdatedNotification
+                                                            object:nil
+                                                          userInfo:@{@"linkFullName": linkFullName, @"comments": storedComments}];
+    });
+}
+
+// One-shot re-warm once the current Arctic cooldown lapses. Without it, a
+// cooldown at thread-open time means the thread's placeholders stay bodyless
+// until the user leaves and re-enters — "rate limiting" was the reporter's own
+// (partially correct) theory in #630 round 9. Bounded: one pending re-warm per
+// link, max 5 attempts per link per session, and the fired warm re-checks the
+// cache + cooldown itself.
+static NSMutableDictionary<NSString *, NSNumber *> *sApolloDeletedCommentsRewarmAttemptsByLink = nil;
+static NSMutableSet<NSString *> *sApolloDeletedCommentsPendingRewarmLinks = nil;
+static void ApolloDeletedCommentsScheduleArcticRewarmAfterCooldown(NSString *linkFullName, NSString *reason) {
+    if (linkFullName.length == 0) return;
+    NSDate *until = nil;
+    @synchronized(ApolloDeletedCommentsArcticLock()) {
+        until = sApolloDeletedCommentsArcticCooldownUntil;
+        if (!sApolloDeletedCommentsPendingRewarmLinks) sApolloDeletedCommentsPendingRewarmLinks = [NSMutableSet set];
+        if (!sApolloDeletedCommentsRewarmAttemptsByLink) sApolloDeletedCommentsRewarmAttemptsByLink = [NSMutableDictionary dictionary];
+        if ([sApolloDeletedCommentsPendingRewarmLinks containsObject:linkFullName]) return;
+        NSUInteger attempts = [sApolloDeletedCommentsRewarmAttemptsByLink[linkFullName] unsignedIntegerValue];
+        if (attempts >= 5) return;
+        sApolloDeletedCommentsRewarmAttemptsByLink[linkFullName] = @(attempts + 1);
+        [sApolloDeletedCommentsPendingRewarmLinks addObject:linkFullName];
+    }
+    NSTimeInterval delay = MAX(1.0, [until timeIntervalSinceNow] + 1.0);
+    NSString *captured = [linkFullName copy];
+    ApolloLog(@"[DeletedComments] Scheduling Arctic re-warm for %@ in %.0fs (%@)", captured, delay, reason ?: @"cooldown");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        @synchronized(ApolloDeletedCommentsArcticLock()) {
+            [sApolloDeletedCommentsPendingRewarmLinks removeObject:captured];
+        }
+        ApolloDeletedCommentsWarmArcticCacheForLink(captured, @"post-cooldown retry");
+    });
 }
 
 static void ApolloDeletedCommentsFinishInflightArcticFetch(NSString *linkFullName, NSDictionary<NSString *, NSDictionary *> *comments) {
@@ -917,9 +1233,18 @@ static void ApolloDeletedCommentsFetchArcticComments(NSString *linkFullName, voi
     components.queryItems = @[
         [NSURLQueryItem queryItemWithName:@"link_id" value:linkFullName],
         [NSURLQueryItem queryItemWithName:@"limit" value:@"5000"],
-        [NSURLQueryItem queryItemWithName:@"start_depth" value:@"20"],
-        [NSURLQueryItem queryItemWithName:@"start_breadth" value:@"50"],
-        [NSURLQueryItem queryItemWithName:@"md2html" value:@"false"],
+        // Raise the collapse thresholds. Arctic folds comments beyond start_depth /
+        // start_breadth into bodyless "kind: more" stubs, and those can never be
+        // recovered — on a popular post with many top-level comments the 51st+ (at the
+        // old breadth=50) or anything past depth 20 silently dropped out. Keep it capped
+        // overall by limit=5000 so mega-threads stay bounded.
+        [NSURLQueryItem queryItemWithName:@"start_depth" value:@"50"],
+        [NSURLQueryItem queryItemWithName:@"start_breadth" value:@"500"],
+        // Have Arctic render markdown -> HTML server-side. Its body_html then carries the
+        // full formatting (links, bold, italics, quotes, lists, code, strikethrough) that
+        // we feed to Apollo's native renderer; the old local regex converter only produced
+        // links + bold.
+        [NSURLQueryItem queryItemWithName:@"md2html" value:@"true"],
     ];
     NSURL *url = components.URL;
     if (!url) {
@@ -931,16 +1256,53 @@ static void ApolloDeletedCommentsFetchArcticComments(NSString *linkFullName, voi
     urlRequest.timeoutInterval = 10.0;
 
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:urlRequest completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        NSDictionary *comments = nil;
         NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
         ApolloDeletedCommentsRecordArcticResponse(http, error);
-        if (!error && data.length > 0) {
-            if (!http || (http.statusCode >= 200 && http.statusCode < 300)) {
-                id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                comments = ApolloDeletedCommentsArcticCommentMapFromRoot(root);
+
+        // Separate a GENUINE tree (data is an array — possibly empty) from a TRANSIENT
+        // failure: a network error, a non-2xx status, or Arctic's app-level throttle body
+        // {"data":null,"error":"Timeout. Maybe slow down a bit"} which it returns with
+        // HTTP 200. A transient failure must NOT be cached as an empty result: an empty
+        // cache entry is non-nil, so CachedArcticComments serves it for the whole empty-TTL
+        // window and both FetchArcticComments and WarmArcticCacheForLink treat that as
+        // "already fetched" — permanently masking comments that DO exist in the archive
+        // until the entry expires. That is the "same comments repeatedly fail to load" bug.
+        BOOL transient = NO;
+        BOOL coverageComplete = NO;
+        NSDictionary *comments = nil;
+        if (error || (http && !(http.statusCode >= 200 && http.statusCode < 300)) || data.length == 0) {
+            transient = YES;
+        } else {
+            id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            BOOL hasAppError = [root isKindOfClass:[NSDictionary class]] &&
+                               ((NSDictionary *)root)[@"error"] &&
+                               ((NSDictionary *)root)[@"error"] != [NSNull null];
+            BOOL dataIsArray = [root isKindOfClass:[NSDictionary class]] &&
+                               [((NSDictionary *)root)[@"data"] isKindOfClass:[NSArray class]];
+            if (hasAppError || !dataIsArray) {
+                transient = YES;
+                // The app-level throttle comes back as HTTP 200, so RecordArcticResponse
+                // did not start a cooldown — back off here so we stop hammering.
+                if (hasAppError) ApolloDeletedCommentsArcticBeginCooldown(ApolloDeletedCommentsArcticErrorCooldown, @"arctic app error");
+            } else {
+                comments = ApolloDeletedCommentsArcticCommentMapFromRoot(root, &coverageComplete);
             }
         }
-        ApolloDeletedCommentsStoreArcticComments(linkFullName, comments ?: @{}, comments.count > 0 ? ApolloDeletedCommentsArcticSuccessCacheTTL : ApolloDeletedCommentsArcticEmptyCacheTTL);
+
+        if (transient) {
+            // Leave the cache untouched so the next thread observation retries (after any
+            // cooldown); just release the waiters so nothing hangs. If this failure began
+            // a cooldown, queue one automatic re-warm for when it lapses — otherwise a
+            // rate-limited thread open leaves permanently bodyless placeholders until the
+            // user leaves and re-enters the thread.
+            ApolloDeletedCommentsFinishInflightArcticFetch(linkFullName, @{});
+            if (ApolloDeletedCommentsArcticIsCoolingDown()) {
+                ApolloDeletedCommentsScheduleArcticRewarmAfterCooldown(linkFullName, @"transient failure");
+            }
+            return;
+        }
+
+        ApolloDeletedCommentsStoreArcticComments(linkFullName, comments ?: @{}, comments.count > 0 ? ApolloDeletedCommentsArcticSuccessCacheTTL : ApolloDeletedCommentsArcticEmptyCacheTTL, coverageComplete);
         ApolloDeletedCommentsFinishInflightArcticFetch(linkFullName, comments ?: @{});
     }];
     [task resume];
@@ -949,7 +1311,10 @@ static void ApolloDeletedCommentsFetchArcticComments(NSString *linkFullName, voi
 static void ApolloDeletedCommentsWarmArcticCacheForLink(NSString *linkFullName, NSString *source) {
     if (linkFullName.length == 0) return;
     if (ApolloDeletedCommentsCachedArcticComments(linkFullName) != nil) return;
-    if (ApolloDeletedCommentsArcticIsCoolingDown()) return;
+    if (ApolloDeletedCommentsArcticIsCoolingDown()) {
+        ApolloDeletedCommentsScheduleArcticRewarmAfterCooldown(linkFullName, source);
+        return;
+    }
 
 #ifdef APOLLO_DELETED_COMMENTS_TESTING
     (void)source;
@@ -996,7 +1361,7 @@ static NSMutableDictionary *ApolloDeletedCommentsThingFromArchived(NSDictionary 
     data[@"id"] = identifier;
     data[@"name"] = fullName ?: [@"t1_" stringByAppendingString:identifier];
     data[@"author"] = author.length > 0 ? author : @"[deleted]";
-    ApolloDeletedCommentsSetRecoveredBody(data, body);
+    ApolloDeletedCommentsSetRecoveredBody(data, archived, body);
     data[@"parent_id"] = [archived[@"parent_id"] isKindOfClass:[NSString class]] ? archived[@"parent_id"] : @"";
     data[@"link_id"] = [archived[@"link_id"] isKindOfClass:[NSString class]] ? archived[@"link_id"] : @"";
     data[@"subreddit"] = [archived[@"subreddit"] isKindOfClass:[NSString class]] ? archived[@"subreddit"] : @"";
@@ -1031,6 +1396,13 @@ typedef struct {
     NSUInteger recoverableCount;
     NSUInteger unrecoverableCount;
     NSUInteger insertedFromMoreCount;
+    // INPUT: whether the arctic map covered the whole tree (no "more" folding,
+    // under the fetch limit). Gates the definitive-absence classification.
+    BOOL coverageComplete;
+    // INPUT: whether this response's link attribution is certain (URL or POST
+    // body, not the observed-thread fallback). Also gates absence-based marking
+    // so a misattributed response can't falsely mark another thread's comments.
+    BOOL attributionAuthoritative;
 } ApolloDeletedCommentsPatchStats;
 
 static NSUInteger ApolloDeletedCommentsPatchRedditJSONNode(id node, NSDictionary<NSString *, NSDictionary *> *arcticComments, NSMutableSet<NSString *> *visibleNames, ApolloDeletedCommentsPatchStats *stats) {
@@ -1051,13 +1423,28 @@ static NSUInteger ApolloDeletedCommentsPatchRedditJSONNode(id node, NSDictionary
             NSString *currentBodyHTML = [data[@"body_html"] isKindOfClass:[NSString class]] ? data[@"body_html"] : nil;
             BOOL currentLooksDeleted = ApolloDeletedCommentsCommentDataLooksDeleted(data);
             if (currentLooksDeleted && stats) stats->deletedLookingCount++;
+            if (currentLooksDeleted) {
+                // Reddit's server marks removed comments collapsed. Clear that up
+                // front for EVERY deleted-looking comment — not just ones whose
+                // archive already answered — so the row always renders expanded with
+                // its placeholder/reason chip, and a late-arriving archive only has
+                // to fill the body in. Before this, a slow Arctic response (bigger
+                // md2html payloads) left these as bare collapsed [deleted] stubs the
+                // user had to expand by hand (#620 round 2 regression). Collapse
+                // state is only ever server-removal here: user collapses happen
+                // in-app after parse, never in the wire JSON.
+                data[@"collapsed"] = @NO;
+                data[@"collapsed_because_crowd_control"] = @NO;
+                data[@"collapsed_reason"] = [NSNull null];
+                data[@"collapsed_reason_code"] = [NSNull null];
+            }
             if (currentLooksDeleted && archivedBody.length > 0 && !ApolloDeletedCommentsBodyLooksDeleted(archivedBody)) {
                 if (stats) stats->recoverableCount++;
                 NSString *author = [archived[@"author"] isKindOfClass:[NSString class]] ? archived[@"author"] : nil;
                 if (fullName.length > 0) {
                     ApolloDeletedCommentsStoreArchivedCommentsByFullName(@{fullName: archived});
                 }
-                ApolloDeletedCommentsSetRecoveredBody(data, archivedBody);
+                ApolloDeletedCommentsSetRecoveredBody(data, archived, archivedBody);
                 if (author.length > 0) data[@"author"] = author;
                 if ([archived[@"created_utc"] respondsToSelector:@selector(doubleValue)]) data[@"created_utc"] = archived[@"created_utc"];
                 if ([archived[@"score"] respondsToSelector:@selector(integerValue)]) data[@"score"] = archived[@"score"];
@@ -1067,8 +1454,43 @@ static NSUInteger ApolloDeletedCommentsPatchRedditJSONNode(id node, NSDictionary
                 ApolloDeletedCommentsHideRecoveredBodyForTapToReveal(data, reason);
                 ApolloLog(@"[DeletedComments] Recovered visible deleted comment %@", fullName ?: @"unknown");
                 patched++;
-            } else if (currentLooksDeleted && stats) {
-                stats->unrecoverableCount++;
+            } else if (currentLooksDeleted) {
+                if (stats) stats->unrecoverableCount++;
+                // "(Unrecoverable)" classification — the archive answered
+                // genuinely (only genuine maps reach this walk) and cannot
+                // restore this comment. Two definitive shapes: the archive HAS
+                // the comment but its own copy is redacted (crawled after
+                // removal), or the comment is absent from a coverage-complete
+                // tree and old enough that ingestion lag is off the table.
+                BOOL definitive = NO;
+                if (fullName.length > 0) {
+                    if (archived) {
+                        definitive = YES;
+                    } else if (stats && stats->coverageComplete && stats->attributionAuthoritative) {
+                        double created = [data[@"created_utc"] respondsToSelector:@selector(doubleValue)] ? [data[@"created_utc"] doubleValue] : 0;
+                        definitive = ApolloDeletedCommentsAbsenceIsDefinitive(YES, created);
+                    }
+                }
+                if (definitive) {
+                    ApolloDeletedCommentsMarkCommentUnrecoverable(fullName);
+                    // Evidence no longer needed: the archive has answered and
+                    // recovery will never happen. Two things keep Apollo
+                    // rendering its own collapsed "Moderator removed thread"
+                    // banner over our expanded placeholder row (the 🧨 rows
+                    // that "don't expand" in #620/#630): the removal metadata
+                    // AND the removal-phrase body text itself. Clear both —
+                    // the reason chip (now with the "(Unrecoverable)" suffix)
+                    // carries the same information, expanded and consistent
+                    // with every other removed comment. Every future response
+                    // re-delivers the original fields, so nothing is lost.
+                    ApolloDeletedCommentsClearRemovalMetadata(data);
+                    NSString *label = ApolloDeletedCommentsDisplayLabelForReason(ApolloDeletedCommentsReasonForCurrentBody(currentBody, currentBodyHTML));
+                    if (label.length > 0) {
+                        data[@"body"] = label;
+                        NSString *labelHTML = ApolloDeletedCommentsRedditBodyHTML(label);
+                        if (labelHTML.length > 0) data[@"body_html"] = labelHTML;
+                    }
+                }
             }
         }
 
@@ -1141,12 +1563,18 @@ static NSUInteger ApolloDeletedCommentsPatchRedditJSONNode(id node, NSDictionary
 
 static NSUInteger ApolloDeletedCommentsPatchRootWithCachedComments(id root,
                                                                    NSString *linkFullName,
-                                                                   NSDictionary<NSString *, NSDictionary *> *comments) {
-    if (!root || comments.count == 0) return 0;
+                                                                   NSDictionary<NSString *, NSDictionary *> *comments,
+                                                                   BOOL coverageComplete,
+                                                                   BOOL attributionAuthoritative) {
+    // comments may be a genuine-but-EMPTY map (Arctic archived nothing for the
+    // thread) — the walk still runs for the unrecoverable classification.
+    if (!root || !comments) return 0;
 
     NSMutableSet<NSString *> *visibleNames = [NSMutableSet set];
     ApolloDeletedCommentsCollectVisibleCommentNames(root, visibleNames);
     ApolloDeletedCommentsPatchStats stats = {0};
+    stats.coverageComplete = coverageComplete;
+    stats.attributionAuthoritative = attributionAuthoritative;
     NSUInteger patched = ApolloDeletedCommentsPatchRedditJSONNode(root, comments, visibleNames, &stats);
     if (patched > 0) {
         ApolloLog(@"[DeletedComments] Applied cached recovery for %@ (%lu comments, visible=%lu, unrecoverable=%lu, insertedMore=%lu)",
@@ -1177,13 +1605,22 @@ static NSData *__attribute__((unused)) ApolloDeletedCommentsPatchResponseImmedia
         return data;
     }
 
-    NSUInteger changed = ApolloDeletedCommentsMarkDeletedPlaceholdersInJSONNode(root);
+    // Only feed the per-link placeholder registry (which drives store-time
+    // absence marking) when attribution is certain — a fallback-misattributed
+    // response must not record thread A's placeholders under thread B.
+    BOOL authoritative = ApolloDeletedCommentsRequestAttributionIsAuthoritative(request);
+    NSUInteger changed = ApolloDeletedCommentsMarkDeletedPlaceholdersInJSONNode(root, authoritative ? linkFullName : nil);
     NSDictionary<NSString *, NSDictionary *> *cached = ApolloDeletedCommentsCachedArcticComments(linkFullName);
-    if (cached.count > 0) {
-        changed += ApolloDeletedCommentsPatchRootWithCachedComments(root, linkFullName, cached);
+    if (cached) {
+        // Non-nil INCLUDES the genuine-but-empty tree: the walk still runs so
+        // the "(Unrecoverable)" classification covers threads Arctic archived
+        // nothing for. With an empty map the recovery/insert legs are no-ops.
+        changed += ApolloDeletedCommentsPatchRootWithCachedComments(root, linkFullName, cached,
+                                                                    ApolloDeletedCommentsCachedArcticCoverageComplete(linkFullName),
+                                                                    authoritative);
     }
 
-    if (cached == nil && changed > 0 && !ApolloDeletedCommentsIsMoreChildrenRequest(request)) {
+    if (cached == nil && changed > 0) {
 #ifndef APOLLO_DELETED_COMMENTS_TESTING
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             ApolloDeletedCommentsFetchArcticComments(linkFullName, ^(__unused NSDictionary<NSString *, NSDictionary *> *comments) {});
@@ -1208,17 +1645,26 @@ static void ApolloDeletedCommentsPatchResponseAsync(NSData *data, NSURLRequest *
         return;
     }
 
-    NSUInteger changed = ApolloDeletedCommentsMarkDeletedPlaceholdersInJSONNode(root);
+    BOOL authoritative = ApolloDeletedCommentsRequestAttributionIsAuthoritative(request);
+    NSUInteger changed = ApolloDeletedCommentsMarkDeletedPlaceholdersInJSONNode(root, authoritative ? linkFullName : nil);
     NSDictionary<NSString *, NSDictionary *> *cached = ApolloDeletedCommentsCachedArcticComments(linkFullName);
-    if (cached.count > 0) {
-        changed += ApolloDeletedCommentsPatchRootWithCachedComments(root, linkFullName, cached);
+    if (cached) {
+        // Non-nil includes genuine-but-empty — run the walk so the
+        // "(Unrecoverable)" classification still happens (see Immediate).
+        changed += ApolloDeletedCommentsPatchRootWithCachedComments(root, linkFullName, cached,
+                                                                    ApolloDeletedCommentsCachedArcticCoverageComplete(linkFullName),
+                                                                    authoritative);
         completion(ApolloDeletedCommentsSerializedResponseData(root, data, changed));
         return;
     }
 
+    // morechildren now WAITS like initial loads do (used to bail immediately):
+    // the tap already shows a native spinner, so the bounded 2s hold is
+    // invisible — and inserted rows measuring ONCE with their final recovered
+    // bodies eliminates the whole late-apply height-divergence class behind
+    // the clipped rows / black gaps of #630 round 9.
     BOOL shouldWaitForArctic = changed > 0 &&
                                cached == nil &&
-                               !ApolloDeletedCommentsIsMoreChildrenRequest(request) &&
                                !ApolloDeletedCommentsArcticIsCoolingDown();
     if (!shouldWaitForArctic) {
         completion(ApolloDeletedCommentsSerializedResponseData(root, data, changed));
@@ -1238,8 +1684,16 @@ static void ApolloDeletedCommentsPatchResponseAsync(NSData *data, NSURLRequest *
         }
 
         NSUInteger finalChanged = changed;
-        if (comments.count > 0) {
-            finalChanged += ApolloDeletedCommentsPatchRootWithCachedComments(root, linkFullName, comments);
+        // Re-read the cache instead of trusting the completion payload: the
+        // fetch stores BEFORE completing, and @{} here can mean either a
+        // transient failure (no classification allowed) or a genuine empty
+        // tree (classification wanted) — only the cache distinguishes them.
+        NSDictionary<NSString *, NSDictionary *> *genuine = ApolloDeletedCommentsCachedArcticComments(linkFullName);
+        if (!genuine && comments.count > 0) genuine = comments;
+        if (genuine) {
+            finalChanged += ApolloDeletedCommentsPatchRootWithCachedComments(root, linkFullName, genuine,
+                                                                             ApolloDeletedCommentsCachedArcticCoverageComplete(linkFullName),
+                                                                             authoritative);
         }
         completion(ApolloDeletedCommentsSerializedResponseData(root, data, finalChanged));
     };
@@ -1260,9 +1714,7 @@ static void ApolloDeletedCommentsPatchResponseAsync(NSData *data, NSURLRequest *
 ApolloDeletedCommentsURLSessionCompletion ApolloDeletedCommentsMaybeWrapCompletion(NSURLRequest *request, ApolloDeletedCommentsURLSessionCompletion completion) {
     if (!completion || !ApolloDeletedCommentsShouldTransformRequest(request)) return completion;
 
-    if (!ApolloDeletedCommentsIsMoreChildrenRequest(request)) {
-        ApolloDeletedCommentsWarmArcticCacheForLink(ApolloDeletedCommentsLinkFullNameForRequest(request), @"completion wrapper");
-    }
+    ApolloDeletedCommentsWarmArcticCacheForLink(ApolloDeletedCommentsLinkFullNameForRequest(request), @"completion wrapper");
 
     ApolloDeletedCommentsURLSessionCompletion wrapped = ^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error || data.length == 0) {
@@ -1373,9 +1825,7 @@ static void ApolloDeletedCommentsInstallResponseTransformerForDelegate(id delega
 
 void ApolloDeletedCommentsInstallDelegateTransformerIfNeeded(NSURLSession *session, NSURLRequest *request) {
     if (!ApolloDeletedCommentsShouldTransformRequest(request)) return;
-    if (!ApolloDeletedCommentsIsMoreChildrenRequest(request)) {
-        ApolloDeletedCommentsWarmArcticCacheForLink(ApolloDeletedCommentsLinkFullNameForRequest(request), @"delegate transformer");
-    }
+    ApolloDeletedCommentsWarmArcticCacheForLink(ApolloDeletedCommentsLinkFullNameForRequest(request), @"delegate transformer");
     ApolloDeletedCommentsInstallResponseTransformerForDelegate(session.delegate);
 }
 
@@ -1407,7 +1857,7 @@ NSString *ApolloDeletedCommentsTestDisplayLabelForReason(NSString *reason) {
 }
 
 NSUInteger ApolloDeletedCommentsTestMarkDeletedPlaceholdersInRoot(id root) {
-    return ApolloDeletedCommentsMarkDeletedPlaceholdersInJSONNode(root);
+    return ApolloDeletedCommentsMarkDeletedPlaceholdersInJSONNode(root, nil);
 }
 
 NSData *ApolloDeletedCommentsTestPatchResponseImmediate(NSData *data, NSURLRequest *request) {

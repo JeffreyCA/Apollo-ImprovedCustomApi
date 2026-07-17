@@ -56,6 +56,10 @@ NSString *ApolloWebsiteNameFromHost(NSString *host);
 // nil if neither path yields a usable string.
 NSString *ApolloGetLinkButtonNodeURLString(id linkButtonNode);
 void ApolloPresentWebURLFromViewController(UIViewController *presenter, NSURL *url);
+// Route a reddit URL through Apollo's own AppDelegate URL handler (native post/
+// subreddit/user views). Returns NO if the handler is unavailable — fall back to
+// ApolloPresentWebURLFromViewController.
+BOOL ApolloRouteURLThroughApp(NSURL *url);
 
 // Returns all UIWindows across every connected UIWindowScene.
 // Use instead of the deprecated UIApplication.windows property.
@@ -135,4 +139,21 @@ BOOL ApolloPollsFeatureEnabled(void);
 // sheet's segmented control when it appears. Called from
 // ApolloNativeActionMenuBuildMenu when it hits actionKind 51 (Submit Post).
 UIMenu *ApolloSubmitPostTypesMenu(id actionController, void (^selectRow)(void));
+
+// Container keychain mirror (Tweak.xm): the Valet items the real keychain could not persist
+// on a keychain-broken sideload, so a backup taken there still carries the signed-in account.
+// Returns an array of { "service", "account", "data" } dicts (empty when the mirror is dormant).
+NSArray<NSDictionary *> *ApolloKeychainMirrorItemsForBackup(void);
+
+// Append a login-persistence diagnostic line to the cross-launch buffer in the app container.
+// Mirrors the line into a file that survives force-quit, so Export Debug Logs carries the
+// session that actually signed the user out. Safe to call from any thread; never logs secrets.
+void ApolloAppendLoginDiag(NSString *line);
+
+// Dev-only login-persistence debug (see Tweak.xm): a report of where the account keychain item
+// lives (each copy's access group / size / protection class), and a FLEX-gated action that
+// poisons/restores the account item's protection class to reproduce the -25300 on demand. Both
+// also write to the diag log.
+NSString *ApolloDebugAccountKeychainReport(void);
+NSString *ApolloDebugPoisonAccountAccessibility(void);
 __END_DECLS
