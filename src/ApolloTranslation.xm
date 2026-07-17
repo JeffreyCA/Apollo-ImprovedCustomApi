@@ -5,6 +5,7 @@
 #import <objc/message.h>
 #include <dlfcn.h>
 #include <float.h>
+#include <math.h>
 #include <string.h>
 
 #import "ApolloCommon.h"
@@ -36,6 +37,18 @@
 
 static const void *kApolloOriginalAttributedTextKey = &kApolloOriginalAttributedTextKey;
 static const void *kApolloTranslatedTextNodeKey = &kApolloTranslatedTextNodeKey;
+// Last fully-composited translated body bitmap + cell-relative frame. Apollo
+// can leave the replacement body's logical text and visible backing image out
+// of sync after repeated votes, so later vote windows need a known-good visual
+// fallback rather than depending on whichever body node currently wins lookup.
+static const void *kApolloVoteBodySnapshotKey = &kApolloVoteBodySnapshotKey;
+static const void *kApolloVoteBodySnapshotPrimeScheduledKey = &kApolloVoteBodySnapshotPrimeScheduledKey;
+static const void *kApolloVoteBodyCoverViewKey = &kApolloVoteBodyCoverViewKey;
+static const void *kApolloPersistentVoteBodyCoverKey = &kApolloPersistentVoteBodyCoverKey;
+// Counts overlapping vote windows separately from the brief invisible-layer
+// warm-up. A rapid second vote can begin before the first delayed removal; the
+// first completion must not hide the cover while the second rebuild is active.
+static const void *kApolloVoteBodyCoverActiveCountKey = &kApolloVoteBodyCoverActiveCountKey;
 static const void *kApolloCellTranslationKeyKey = &kApolloCellTranslationKeyKey;
 static const void *kApolloThreadTranslatedModeKey = &kApolloThreadTranslatedModeKey;
 // Set when the user explicitly toggled away from a translated thread (so we
@@ -296,6 +309,29 @@ static void ApolloAppendTranslateAffordanceForCellNode(id cellNode, RDKComment *
 static void ApolloShowOriginalWithRetranslateAffordanceForCellNode(id cellNode, RDKComment *comment, id textNode);
 static BOOL ApolloAttributedStringEndsWithMarker(NSAttributedString *attr);
 static void ApolloApplyTranslationToTitleNode(id titleNode, id textNode, NSString *sourceText, NSString *translatedText);
+// Main-thread-only flag used to reuse the normal snapshot builder without
+// briefly installing its cover while warming the cache after translation.
+static BOOL sApolloPrimingVoteBodySnapshot = NO;
+static void ApolloScheduleVoteBodySnapshotPrime(id commentCellNode) {
+    if (!commentCellNode || objc_getAssociatedObject(commentCellNode, kApolloVoteBodySnapshotPrimeScheduledKey)) return;
+    objc_setAssociatedObject(commentCellNode, kApolloVoteBodySnapshotPrimeScheduledKey,
+                             @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak id weakCell = commentCellNode;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        id strongCell = weakCell;
+        if (!strongCell) return;
+        objc_setAssociatedObject(strongCell, kApolloVoteBodySnapshotPrimeScheduledKey,
+                                 nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // A real translation/style write supersedes any snapshot previously
+        // cached for this cell, even when it happens to have the same fullname.
+        objc_setAssociatedObject(strongCell, kApolloVoteBodySnapshotKey,
+                                 nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        sApolloPrimingVoteBodySnapshot = YES;
+        @try { ApolloTranslationInstallVoteBodyCover(strongCell); }
+        @catch (__unused NSException *e) {}
+        sApolloPrimingVoteBodySnapshot = NO;
+    });
+}
 // A feed post title the user tapped to pin back to ORIGINAL; gates the title
 // apply path so a re-translation pass won't swap it back until they toggle again.
 static const void *kApolloTitlePinnedOriginalKey = &kApolloTitlePinnedOriginalKey;
@@ -1919,6 +1955,12 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     }
     // Already showing the translation? No-op.
     if (textMatchesTranslation && !textMatchesBody) {
+        NSDictionary *snapshot = objc_getAssociatedObject(commentCellNode, kApolloVoteBodySnapshotKey);
+        NSString *snapshotFullName = [snapshot objectForKey:@"fullName"];
+        NSString *commentFullName = ApolloCommentFullName(comment);
+        if (commentFullName.length > 0 && ![snapshotFullName isEqualToString:commentFullName]) {
+            ApolloScheduleVoteBodySnapshotPrime(commentCellNode);
+        }
         return;
     }
 
@@ -1956,6 +1998,12 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     // nothing to do.
     if ([current.string isEqualToString:displayAttr.string]) {
         ApolloTranslationVerboseLog(@"[Translation/vote] apply: display identical — exact no-op cell=%p", commentCellNode);
+        NSDictionary *snapshot = objc_getAssociatedObject(commentCellNode, kApolloVoteBodySnapshotKey);
+        NSString *snapshotFullName = [snapshot objectForKey:@"fullName"];
+        NSString *commentFullName = ApolloCommentFullName(comment);
+        if (commentFullName.length > 0 && ![snapshotFullName isEqualToString:commentFullName]) {
+            ApolloScheduleVoteBodySnapshotPrime(commentCellNode);
+        }
         return;
     }
 
@@ -2006,6 +2054,10 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
         if (textMatchesBody) ApolloIndexTranslatedCommentBody(current.string, fullName);
     }
     ApolloMarkVisibleTranslationApplied(comment.body, translatedText);
+    // Warm a fully-independent body bitmap after Texture has committed this
+    // translation. The vote handler can then install it without rasterizing
+    // from a surface that Apollo is about to clear in the same frame.
+    ApolloScheduleVoteBodySnapshotPrime(commentCellNode);
 }
 
 static void ApolloRestoreOriginalForCellNode(id commentCellNode, RDKComment *comment) {
@@ -4036,6 +4088,259 @@ static void ApolloScheduleCachedTranslationReapplyForHeaderCellNode(id headerCel
         objc_setAssociatedObject(strong, kApolloHeaderReapplyScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         ApolloReapplyCachedTranslationForHeaderCellNode(strong);
     });
+}
+
+// Texture can commit a stale original-language backing image even while the
+// rebuilt node's attributedText already contains the translation. Preserve
+// the exact translated pixels that are on screen before Apollo starts the
+// rebuild, then let the vote module remove this body-only cover after its
+// settle window. The byline/score is outside this view, so it remains live.
+id ApolloTranslationInstallVoteBodyCover(id commentCellNode) {
+    if (!commentCellNode || !sEnableBulkTranslation ||
+        !ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return nil;
+    RDKComment *comment = nil;
+    NSString *fullName = nil;
+    NSString *translated = nil;
+    UIView *cellView = nil;
+    UIWindow *window = nil;
+    @try {
+        comment = ApolloCommentFromCellNode(commentCellNode);
+        fullName = ApolloCommentFullName(comment);
+        translated = fullName.length > 0 ? ApolloCachedCommentTranslationForFullName(fullName) : nil;
+        if ([commentCellNode respondsToSelector:@selector(isNodeLoaded)] &&
+            ((BOOL (*)(id, SEL))objc_msgSend)(commentCellNode, @selector(isNodeLoaded)) &&
+            [commentCellNode respondsToSelector:@selector(view)]) {
+            cellView = ((id (*)(id, SEL))objc_msgSend)(commentCellNode, @selector(view));
+            window = cellView.window;
+        }
+    } @catch (NSException *e) {
+        ApolloTranslationVerboseLog(@"[Translation/vote] body cover setup failed cell=%p exception=%@", commentCellNode, e.name);
+    }
+    if (!comment || fullName.length == 0 || translated.length == 0 || !cellView || !window) return nil;
+
+    NSDictionary *cachedSnapshot = objc_getAssociatedObject(commentCellNode, kApolloVoteBodySnapshotKey);
+    CGFloat cachedCellWidth = [[cachedSnapshot objectForKey:@"cellWidth"] doubleValue];
+    if (![[cachedSnapshot objectForKey:@"fullName"] isEqualToString:fullName] ||
+        fabs(cachedCellWidth - CGRectGetWidth(cellView.bounds)) > 0.5) {
+        cachedSnapshot = nil;
+    }
+
+    UIImage *frozenImage = nil;
+    UIColor *frozenBackgroundColor = nil;
+    CGRect bodyFrameInCell = CGRectNull;
+    id textNode = nil;
+    BOOL usedCachedSnapshot = NO;
+    if (cachedSnapshot) {
+        frozenImage = [cachedSnapshot objectForKey:@"image"];
+        bodyFrameInCell = [[cachedSnapshot objectForKey:@"frame"] CGRectValue];
+        frozenBackgroundColor = [cachedSnapshot objectForKey:@"backgroundColor"];
+        usedCachedSnapshot = frozenImage != nil && !CGRectIsEmpty(bodyFrameInCell) && !CGRectIsNull(bodyFrameInCell);
+    }
+    // The normal vote path should only attach the snapshot primed after the
+    // translation settled. Live capture remains as a first-vote fallback for
+    // the narrow window before that prime has fired.
+    if (!usedCachedSnapshot) @try {
+        // Resolve the current body first. Apollo replaces this node on every
+        // vote; the associated node is retained only as a detached fallback.
+        textNode = ApolloBestCommentTextNode(commentCellNode, comment);
+        id associatedNode = objc_getAssociatedObject(commentCellNode, kApolloTranslatedTextNodeKey);
+        NSArray *candidates = textNode
+            ? (associatedNode && associatedNode != textNode ? @[textNode, associatedNode] : @[textNode])
+            : (associatedNode ? @[associatedNode] : @[]);
+        UIView *bodyView = nil;
+        for (id candidate in candidates) {
+            if (![candidate respondsToSelector:@selector(isNodeLoaded)] ||
+                !((BOOL (*)(id, SEL))objc_msgSend)(candidate, @selector(isNodeLoaded)) ||
+                ![candidate respondsToSelector:@selector(view)]) continue;
+            UIView *candidateView = ((id (*)(id, SEL))objc_msgSend)(candidate, @selector(view));
+            if (!candidateView || candidateView.window != window || CGRectIsEmpty(candidateView.bounds) ||
+                ![candidateView isDescendantOfView:cellView]) continue;
+            NSAttributedString *shown = [candidate respondsToSelector:@selector(attributedText)]
+                ? ((id (*)(id, SEL))objc_msgSend)(candidate, @selector(attributedText)) : nil;
+            BOOL isBody = [shown isKindOfClass:[NSAttributedString class]] &&
+                (ApolloTextQualifiesAsBodyCandidate(shown.string, comment.body) ||
+                 ApolloTextQualifiesAsBodyCandidate(shown.string, translated));
+            BOOL isTranslatedBody = [shown isKindOfClass:[NSAttributedString class]] &&
+                ApolloTextQualifiesAsBodyCandidate(shown.string, translated);
+            // Never prime from Apollo's original-language replacement. A vote
+            // in the small window before translation settles is better left
+            // uncovered than deliberately frozen in the wrong language.
+            if (!isBody || !isTranslatedBody) continue;
+            textNode = candidate;
+            bodyView = candidateView;
+            break;
+        }
+
+        if (bodyView) {
+            CGRect bodyFrameInWindow = [bodyView convertRect:bodyView.bounds toView:window];
+            bodyFrameInCell = [bodyView convertRect:bodyView.bounds toView:cellView];
+            if (!CGRectIsEmpty(bodyFrameInWindow) && !CGRectIsEmpty(bodyFrameInCell)) {
+                // Texture has already committed the correct translated body
+                // backing image before the vote. Do not use
+                // drawViewHierarchyInRect: here: it asks Texture/UIKit to
+                // render again and can itself capture half-finished glyph tiles.
+                id contents = bodyView.layer.contents;
+                // ASTextNode's backing image is intentionally transparent.
+                // Resolve the first real ancestor background so the cover is
+                // opaque; otherwise the stale Portuguese glyphs underneath
+                // remain visible through its clear pixels.
+                for (UIView *ancestor = bodyView; ancestor; ancestor = ancestor.superview) {
+                    UIColor *candidate = ancestor.backgroundColor;
+                    if (!candidate) continue;
+                    candidate = [candidate resolvedColorWithTraitCollection:bodyView.traitCollection];
+                    if (CGColorGetAlpha(candidate.CGColor) >= 0.99) {
+                        frozenBackgroundColor = candidate;
+                        break;
+                    }
+                }
+                if (!frozenBackgroundColor) {
+                    frozenBackgroundColor = [[UIColor systemBackgroundColor]
+                        resolvedColorWithTraitCollection:bodyView.traitCollection];
+                }
+                if (contents && CFGetTypeID((__bridge CFTypeRef)contents) == CGImageGetTypeID()) {
+                    CGImageRef contentsImage = (__bridge CGImageRef)contents;
+                    // Texture's layer.contentsScale is not reliable here (it
+                    // is often 1 while the backing image is screen-scale).
+                    // Derive scale from actual pixels to avoid a visibly soft
+                    // cover caused by a 3x downsample followed by a 3x upscale.
+                    CGFloat pixelScaleX = (CGFloat)CGImageGetWidth(contentsImage) / CGRectGetWidth(bodyView.bounds);
+                    CGFloat pixelScaleY = (CGFloat)CGImageGetHeight(contentsImage) / CGRectGetHeight(bodyView.bounds);
+                    CGFloat contentsScale = MIN(pixelScaleX, pixelScaleY);
+                    if (!isfinite(contentsScale) || contentsScale <= 0.0) contentsScale = window.screen.scale;
+                    UIImage *backingImage = [UIImage imageWithCGImage:(__bridge CGImageRef)contents
+                                                                 scale:contentsScale
+                                                           orientation:UIImageOrientationUp];
+                    // A retained Texture CGImage can still reference a backing
+                    // surface that Texture clears/reuses during the rebuild.
+                    // Rasterizing it into our own bitmap severs that lifetime:
+                    // every cached cover owns stable pixels thereafter.
+                    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
+                    format.scale = contentsScale;
+                    format.opaque = YES;
+                    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc]
+                        initWithSize:bodyView.bounds.size format:format];
+                    frozenImage = [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *context) {
+                        [frozenBackgroundColor setFill];
+                        UIRectFill(bodyView.bounds);
+                        [backingImage drawInRect:bodyView.bounds];
+                    }];
+                }
+                if (frozenImage) {
+                    cachedSnapshot = @{
+                        @"fullName": fullName,
+                        @"image": frozenImage,
+                        @"frame": [NSValue valueWithCGRect:bodyFrameInCell],
+                        @"backgroundColor": frozenBackgroundColor,
+                        @"cellWidth": @(CGRectGetWidth(cellView.bounds)),
+                    };
+                    objc_setAssociatedObject(commentCellNode, kApolloVoteBodySnapshotKey,
+                                             cachedSnapshot, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
+            }
+        }
+    } @catch (NSException *e) {
+        ApolloTranslationVerboseLog(@"[Translation/vote] live body capture failed cell=%p exception=%@", commentCellNode, e.name);
+    }
+
+    if (!frozenImage || CGRectIsEmpty(bodyFrameInCell) || CGRectIsNull(bodyFrameInCell)) {
+        ApolloTranslationVerboseLog(@"[Translation/vote] body cover skipped: no live or cached snapshot cell=%p", commentCellNode);
+        return nil;
+    }
+    UIImageView *cover = objc_getAssociatedObject(commentCellNode, kApolloVoteBodyCoverViewKey);
+    if (![cover isKindOfClass:[UIImageView class]]) {
+        cover = [[UIImageView alloc] initWithImage:frozenImage];
+        objc_setAssociatedObject(cover, kApolloPersistentVoteBodyCoverKey,
+                                 @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(commentCellNode, kApolloVoteBodyCoverViewKey,
+                                 cover, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else {
+        cover.image = frozenImage;
+    }
+    cover.frame = [cellView convertRect:bodyFrameInCell toView:window];
+    cover.backgroundColor = frozenBackgroundColor;
+    cover.opaque = YES;
+    cover.userInteractionEnabled = NO;
+    cover.accessibilityElementsHidden = YES;
+    // Window child order normally suffices; the explicit z-position also
+    // keeps Texture's asynchronously-created backing layers below the cover.
+    cover.layer.zPosition = CGFLOAT_MAX / 4.0;
+    [UIView performWithoutAnimation:^{
+        if (cover.superview != window) [window addSubview:cover];
+        cover.alpha = 1.0;
+    }];
+    if (sApolloPrimingVoteBodySnapshot) {
+        // Commit the already-correct cover while the real body is stable, so
+        // Core Animation uploads its bitmap before any vote. Keeping the view
+        // attached at alpha zero means the vote only flips opacity on an
+        // existing layer; no first-frame view/layer/image commit remains.
+        __weak UIImageView *weakCover = cover;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UIImageView *strongCover = weakCover;
+            if (!strongCover || [objc_getAssociatedObject(strongCover, kApolloVoteBodyCoverActiveCountKey) unsignedIntegerValue] > 0) return;
+            [UIView performWithoutAnimation:^{ strongCover.alpha = 0.0; }];
+        });
+        ApolloTranslationVerboseLog(@"[Translation/vote] primed translated body snapshot cell=%p frame=%@",
+                                    commentCellNode, NSStringFromCGRect(bodyFrameInCell));
+        return nil;
+    }
+    NSUInteger activeCount = [objc_getAssociatedObject(cover, kApolloVoteBodyCoverActiveCountKey) unsignedIntegerValue];
+    objc_setAssociatedObject(cover, kApolloVoteBodyCoverActiveCountKey,
+                             @(activeCount + 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloTranslationVerboseLog(@"[Translation/vote] installed %@ translated body cover cell=%p node=%p frame=%@",
+                                usedCachedSnapshot ? @"cached" : @"live", commentCellNode, textNode,
+                                NSStringFromCGRect(cover.frame));
+    return cover;
+}
+
+void ApolloTranslationRemoveVoteBodyCover(id coverToken) {
+    if (![coverToken isKindOfClass:[UIView class]]) return;
+    UIView *cover = (UIView *)coverToken;
+    NSUInteger activeCount = [objc_getAssociatedObject(cover, kApolloVoteBodyCoverActiveCountKey) unsignedIntegerValue];
+    if (activeCount > 1) {
+        objc_setAssociatedObject(cover, kApolloVoteBodyCoverActiveCountKey,
+                                 @(activeCount - 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    objc_setAssociatedObject(cover, kApolloVoteBodyCoverActiveCountKey,
+                             nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if ([objc_getAssociatedObject(cover, kApolloPersistentVoteBodyCoverKey) boolValue]) {
+        [UIView performWithoutAnimation:^{ cover.alpha = 0.0; }];
+    } else {
+        [cover removeFromSuperview];
+    }
+}
+
+void ApolloTranslationPrimeVoteBodySnapshot(id commentCellNode) {
+    if (!commentCellNode) return;
+    if (![NSThread isMainThread]) {
+        __weak id weakCell = commentCellNode;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ApolloTranslationPrimeVoteBodySnapshot(weakCell);
+        });
+        return;
+    }
+    @try {
+        RDKComment *comment = ApolloCommentFromCellNode(commentCellNode);
+        NSString *fullName = ApolloCommentFullName(comment);
+        NSDictionary *snapshot = objc_getAssociatedObject(commentCellNode, kApolloVoteBodySnapshotKey);
+        UIView *cover = objc_getAssociatedObject(commentCellNode, kApolloVoteBodyCoverViewKey);
+        if (fullName.length > 0 && [[snapshot objectForKey:@"fullName"] isEqualToString:fullName] && cover.superview) return;
+        sApolloPrimingVoteBodySnapshot = YES;
+        ApolloTranslationInstallVoteBodyCover(commentCellNode);
+        sApolloPrimingVoteBodySnapshot = NO;
+    } @catch (__unused NSException *e) {
+        sApolloPrimingVoteBodySnapshot = NO;
+    }
+}
+
+void ApolloTranslationDiscardVoteBodySnapshot(id commentCellNode) {
+    if (!commentCellNode) return;
+    UIView *cover = objc_getAssociatedObject(commentCellNode, kApolloVoteBodyCoverViewKey);
+    [cover removeFromSuperview];
+    objc_setAssociatedObject(commentCellNode, kApolloVoteBodyCoverViewKey,
+                             nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(commentCellNode, kApolloVoteBodySnapshotKey,
+                             nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 // Synchronous vote-path reapply, called by the vote-flicker module right

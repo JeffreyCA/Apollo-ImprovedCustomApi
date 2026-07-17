@@ -258,11 +258,14 @@ static void ApolloVFRequeryNodeHeights(id self, SEL _cmd) {
 static void ApolloVFHandleModelUpdate(id note, void (^origCall)(void)) {
     ApolloVFNeutralizeCarriedOverCollapse(note);
     NSArray *cells = ApolloVFCellsForUpdatedModel(note);
+    NSMutableArray *translatedBodyCovers = [NSMutableArray array];
     for (ASDisplayNode *cell in cells) {
         @try {
             if ([cell respondsToSelector:@selector(setNeverShowPlaceholders:)]) {
                 cell.neverShowPlaceholders = YES;
             }
+            id cover = ApolloTranslationInstallVoteBodyCover(cell);
+            if (cover) [translatedBodyCovers addObject:cover];
         } @catch (__unused NSException *e) {}
     }
     if (cells.count > 0) {
@@ -292,11 +295,37 @@ static void ApolloVFHandleModelUpdate(id note, void (^origCall)(void)) {
         }
         ApolloVFEnsureSynchronousDisplay(cells, "next-turn");
     });
+    // The deferred translation preempt lands on the next main turn and the
+    // replacement body's synchronous flush is complete by the following
+    // frame. Keep the exact old translated pixels over the BODY ONLY for a
+    // few extra frames, then remove them without animation. Score/byline
+    // changes remain visible throughout because they sit outside the cover.
+    if (translatedBodyCovers.count > 0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            for (id cover in translatedBodyCovers) {
+                ApolloTranslationRemoveVoteBodyCover(cover);
+            }
+        });
+    }
 }
 
 %hook _TtC6Apollo15CommentCellNode
-- (void)didEnterVisibleState { %orig; ApolloVFTrackCell(self, YES); }
-- (void)didExitVisibleState  { %orig; ApolloVFTrackCell(self, NO);  }
+- (void)didEnterVisibleState {
+    %orig;
+    ApolloVFTrackCell(self, YES);
+    // Cached translations can be installed by the global text-node preempt
+    // before the normal translation apply function ever runs. Prime after the
+    // cell has settled so that fast path also has a ready vote cover.
+    __weak id weakCell = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        ApolloTranslationPrimeVoteBodySnapshot(weakCell);
+    });
+}
+- (void)didExitVisibleState {
+    %orig;
+    ApolloVFTrackCell(self, NO);
+    ApolloTranslationDiscardVoteBodySnapshot(self);
+}
 %end
 
 %hook _TtC6Apollo22CommentsHeaderCellNode

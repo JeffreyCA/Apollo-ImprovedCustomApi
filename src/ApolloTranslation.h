@@ -11,3 +11,14 @@ NSString *ApolloRichPreviewTranslatedTextIfAvailable(NSURL *url, NSString *field
 // untranslated text a vote's node rebuild briefly leaves behind. Exact-gate
 // no-op when the body already shows the translation.
 BOOL ApolloTranslationReapplySynchronouslyForVoteReconfigure(id cellNode);
+
+// Preserves the exact on-screen translated comment body while Apollo replaces
+// its Texture node during a vote. The returned opaque token must be removed
+// with ApolloTranslationRemoveVoteBodyCover after the replacement settles.
+id ApolloTranslationInstallVoteBodyCover(id cellNode);
+void ApolloTranslationRemoveVoteBodyCover(id coverToken);
+// Warms the same snapshot cache without presenting a cover. Safe to call for
+// every visible comment; it is an exact no-op outside translated mode or when
+// this cell/fullname already has a snapshot.
+void ApolloTranslationPrimeVoteBodySnapshot(id cellNode);
+void ApolloTranslationDiscardVoteBodySnapshot(id cellNode);
