@@ -309,8 +309,8 @@ static void ApolloAppendTranslateAffordanceForCellNode(id cellNode, RDKComment *
 static void ApolloShowOriginalWithRetranslateAffordanceForCellNode(id cellNode, RDKComment *comment, id textNode);
 static BOOL ApolloAttributedStringEndsWithMarker(NSAttributedString *attr);
 static void ApolloApplyTranslationToTitleNode(id titleNode, id textNode, NSString *sourceText, NSString *translatedText);
-// Main-thread-only flag used to reuse the normal snapshot builder without
-// briefly installing its cover while warming the cache after translation.
+// Main-thread-only flag used to reuse the normal snapshot builder while
+// briefly presenting an identical body-only cover to precommit its layer.
 static BOOL sApolloPrimingVoteBodySnapshot = NO;
 static void ApolloScheduleVoteBodySnapshotPrime(id commentCellNode) {
     if (!commentCellNode || objc_getAssociatedObject(commentCellNode, kApolloVoteBodySnapshotPrimeScheduledKey)) return;
@@ -4103,6 +4103,7 @@ id ApolloTranslationInstallVoteBodyCover(id commentCellNode) {
     NSString *translated = nil;
     UIView *cellView = nil;
     UIWindow *window = nil;
+    UIScrollView *scrollContainer = nil;
     @try {
         comment = ApolloCommentFromCellNode(commentCellNode);
         fullName = ApolloCommentFullName(comment);
@@ -4112,11 +4113,20 @@ id ApolloTranslationInstallVoteBodyCover(id commentCellNode) {
             [commentCellNode respondsToSelector:@selector(view)]) {
             cellView = ((id (*)(id, SEL))objc_msgSend)(commentCellNode, @selector(view));
             window = cellView.window;
+            UIView *ancestor = cellView.superview;
+            while (ancestor && ancestor != window) {
+                if ([ancestor isKindOfClass:[UIScrollView class]]) {
+                    scrollContainer = (UIScrollView *)ancestor;
+                    break;
+                }
+                ancestor = ancestor.superview;
+            }
         }
     } @catch (NSException *e) {
         ApolloTranslationVerboseLog(@"[Translation/vote] body cover setup failed cell=%p exception=%@", commentCellNode, e.name);
     }
-    if (!comment || fullName.length == 0 || translated.length == 0 || !cellView || !window) return nil;
+    if (!comment || fullName.length == 0 || translated.length == 0 ||
+        !cellView || !window || !scrollContainer) return nil;
 
     NSDictionary *cachedSnapshot = objc_getAssociatedObject(commentCellNode, kApolloVoteBodySnapshotKey);
     CGFloat cachedCellWidth = [[cachedSnapshot objectForKey:@"cellWidth"] doubleValue];
@@ -4172,9 +4182,8 @@ id ApolloTranslationInstallVoteBodyCover(id commentCellNode) {
         }
 
         if (bodyView) {
-            CGRect bodyFrameInWindow = [bodyView convertRect:bodyView.bounds toView:window];
             bodyFrameInCell = [bodyView convertRect:bodyView.bounds toView:cellView];
-            if (!CGRectIsEmpty(bodyFrameInWindow) && !CGRectIsEmpty(bodyFrameInCell)) {
+            if (!CGRectIsEmpty(bodyFrameInCell)) {
                 // Texture has already committed the correct translated body
                 // backing image before the vote. Do not use
                 // drawViewHierarchyInRect: here: it asks Texture/UIKit to
@@ -4256,16 +4265,22 @@ id ApolloTranslationInstallVoteBodyCover(id commentCellNode) {
     } else {
         cover.image = frozenImage;
     }
-    cover.frame = [cellView convertRect:bodyFrameInCell toView:window];
+    // Keep the cover in the table's scrolling coordinate space, not the
+    // window. A window-level cover stayed fixed on screen while the cell
+    // moved, producing a duplicated "stuck" comment. The cell itself is not
+    // a safe container either: Apollo briefly shrinks its bounds during the
+    // vote reconfigure, which clips the bottom of a tall translated body.
+    // The scroll view follows scrolling while remaining stable through both
+    // the body-node replacement and that transient cell resize.
+    cover.frame = [cellView convertRect:bodyFrameInCell toView:scrollContainer];
     cover.backgroundColor = frozenBackgroundColor;
     cover.opaque = YES;
     cover.userInteractionEnabled = NO;
     cover.accessibilityElementsHidden = YES;
-    // Window child order normally suffices; the explicit z-position also
-    // keeps Texture's asynchronously-created backing layers below the cover.
+    // Keep Texture's asynchronously-created replacement body below the cover.
     cover.layer.zPosition = CGFLOAT_MAX / 4.0;
     [UIView performWithoutAnimation:^{
-        if (cover.superview != window) [window addSubview:cover];
+        if (cover.superview != scrollContainer) [scrollContainer addSubview:cover];
         cover.alpha = 1.0;
     }];
     if (sApolloPrimingVoteBodySnapshot) {
