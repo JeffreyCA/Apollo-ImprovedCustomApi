@@ -4038,6 +4038,33 @@ static void ApolloScheduleCachedTranslationReapplyForHeaderCellNode(id headerCel
     });
 }
 
+// Synchronous vote-path reapply, called by the vote-flicker module right
+// BEFORE each of its synchronous display flushes for a vote-reconfigured
+// cell. Those flushes exist to kill the #627 blank frame, but they also
+// faithfully paint whatever the body node holds at that instant — and a
+// vote rebuilds the body node with the UNTRANSLATED original, which the
+// detached-node preempt can only correct one runloop turn later. When a
+// flush lands inside that gap, the original language gets painted for a
+// frame or two. Settling the text here first closes the gap: if the body
+// already shows the translation this is a cheap exact-gate no-op (so the
+// usual pre-reset flush never writes and never arms the recently-applied
+// guard — and since that guard is content-scoped now, even an early write
+// cannot strand a later reset the way the first version of this call did).
+BOOL ApolloTranslationReapplySynchronouslyForVoteReconfigure(id cellNode) {
+    if (!cellNode || !sEnableBulkTranslation) return NO;
+    if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return NO;
+    NSString *className = NSStringFromClass([cellNode class]);
+    @try {
+        if ([className containsString:@"CommentsHeaderCellNode"]) {
+            return ApolloReapplyCachedTranslationForHeaderCellNode(cellNode);
+        }
+        if ([className containsString:@"CommentCellNode"]) {
+            return ApolloReapplyCachedTranslationForCellNode(cellNode);
+        }
+    } @catch (__unused NSException *e) {}
+    return NO;
+}
+
 #pragma mark - Phase C: post selftext translation driver
 
 static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *fallbackLink, BOOL forceTranslation) {

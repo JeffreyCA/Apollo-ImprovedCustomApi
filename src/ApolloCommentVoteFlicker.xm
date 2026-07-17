@@ -45,6 +45,7 @@
 #import <objc/message.h>
 
 #import "ApolloCommon.h"
+#import "ApolloTranslation.h"
 
 @interface ASDisplayNode : NSObject
 @property (nonatomic) BOOL neverShowPlaceholders;
@@ -269,17 +270,26 @@ static void ApolloVFHandleModelUpdate(id note, void (^origCall)(void)) {
     }
     origCall();
     if (cells.count == 0) return;
-    // NOTE: do NOT reapply the cached translation synchronously here. The
-    // reconfigure resets the body to the untranslated original ~15ms LATER
-    // (async), and an early reapply stamps the translation module's
-    // recently-applied guard — which then blocks the scheduled reapply that
-    // would restore the text after that reset, leaving the original language
-    // on screen and its (shorter) row height to be committed for real. The
-    // module's own +10ms scheduled reapply lands after the reset and restores
-    // cleanly; the height quiesce above keeps the interim measure from ever
-    // being committed.
+    // Settle the translation right before EACH flush: these synchronous
+    // flushes exist to kill the blank frame, but they paint whatever the body
+    // holds — and a vote rebuilds the body node with the untranslated
+    // original ~a turn later, which the detached-node preempt can only
+    // correct after attach. A flush landing inside that gap painted the
+    // original language for a frame or two ("sometimes it flickers"). The
+    // settle call is an exact-gate no-op when the text is already right, so
+    // the usual pre-reset flush stays write-free — and the module's
+    // recently-applied guard is content-scoped now, so even a pre-reset
+    // write cannot strand the post-reset restore (the round-2 failure mode).
+    for (ASDisplayNode *cell in cells) {
+        @try { ApolloTranslationReapplySynchronouslyForVoteReconfigure(cell); }
+        @catch (__unused NSException *e) {}
+    }
     ApolloVFEnsureSynchronousDisplay(cells, "post-reconfigure");
     dispatch_async(dispatch_get_main_queue(), ^{
+        for (ASDisplayNode *cell in cells) {
+            @try { ApolloTranslationReapplySynchronouslyForVoteReconfigure(cell); }
+            @catch (__unused NSException *e) {}
+        }
         ApolloVFEnsureSynchronousDisplay(cells, "next-turn");
     });
 }
