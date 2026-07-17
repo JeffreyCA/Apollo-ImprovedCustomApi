@@ -366,6 +366,7 @@ static BOOL ApolloIsSingleItemValetQuery(NSDictionary *query) {
 static os_unfair_lock sRecoverLock = OS_UNFAIR_LOCK_INIT;
 static NSMutableDictionary<NSString *, NSData *> *sRecoverCache;      // "service\naccount" -> newest data
 static NSMutableDictionary<NSString *, NSString *> *sRecoverGroupCache; // "service\naccount" -> its access group
+static NSMutableDictionary<NSString *, NSDictionary *> *sRecoverAttrCache; // "service\naccount" -> its attributes (never the value)
 static CFAbsoluteTime sRecoverCacheBuiltAt = 0;
 static const CFTimeInterval kRecoverCacheTTL = 1.5;
 
@@ -379,6 +380,7 @@ static void ApolloRebuildRecoverCacheLocked(void) {
     };
     NSMutableDictionary<NSString *, NSData *> *cache = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSString *> *groups = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSDictionary *> *attrs = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSDate *> *newest = [NSMutableDictionary dictionary];
     CFTypeRef result = NULL;
     OSStatus st = ApolloRealSecItemCopyMatching(q, &result);
@@ -400,6 +402,12 @@ static void ApolloRebuildRecoverCacheLocked(void) {
                 cache[key] = data;
                 id grp = item[(__bridge id)kSecAttrAccessGroup];
                 groups[key] = [grp isKindOfClass:[NSString class]] ? grp : @"?";
+                // Keep the item's attributes (never its value) so [KeychainAttrDiff] can print
+                // what the item actually is beside what Valet asked for. The enumeration already
+                // fetched these; we were throwing them away.
+                NSMutableDictionary *itemAttrs = [item mutableCopy];
+                [itemAttrs removeObjectForKey:(__bridge id)kSecValueData];
+                attrs[key] = itemAttrs;
                 newest[key] = mod;
             }
         }
@@ -408,6 +416,7 @@ static void ApolloRebuildRecoverCacheLocked(void) {
     }
     sRecoverCache = cache;
     sRecoverGroupCache = groups;
+    sRecoverAttrCache = attrs;
     sRecoverCacheBuiltAt = CFAbsoluteTimeGetCurrent();
 }
 
@@ -420,7 +429,10 @@ static void ApolloInvalidateRecoverCache(void) {
 // outGroup (optional) receives the access group the recovered item actually lives in, so a
 // [KeychainRecover] log can compare it against the group Valet's scoped query targeted — the
 // direct confirmation of the "account split across access groups" root cause.
-static OSStatus ApolloValetRecoverRead(NSDictionary *query, CFTypeRef *result, NSString **outGroup) {
+// outAttrs (optional) receives the item's full attribute set (no value data), so [KeychainAttrDiff]
+// can name *which* attribute made the scoped read miss — the access group is only one candidate,
+// and nothing so far has measured the others on a real affected device.
+static OSStatus ApolloValetRecoverRead(NSDictionary *query, CFTypeRef *result, NSString **outGroup, NSDictionary **outAttrs) {
     NSString *service = query[(__bridge id)kSecAttrService];
     NSString *account = query[(__bridge id)kSecAttrAccount];
     if (![service isKindOfClass:[NSString class]] || ![account isKindOfClass:[NSString class]]) return errSecItemNotFound;
@@ -431,6 +443,7 @@ static OSStatus ApolloValetRecoverRead(NSDictionary *query, CFTypeRef *result, N
     }
     NSData *data = sRecoverCache[key];
     if (outGroup) *outGroup = sRecoverGroupCache[key];
+    if (outAttrs) *outAttrs = sRecoverAttrCache[key];
     os_unfair_lock_unlock(&sRecoverLock);
     if (!data) return errSecItemNotFound;
     return ApolloMirrorServe(query, data, result);
@@ -575,6 +588,47 @@ static NSString *ApolloSyncDispositionString(NSDictionary *query) {
 static long ApolloValueDataLength(NSDictionary *dict) {
     id value = dict[(__bridge id)kSecValueData];
     return [value isKindOfClass:[NSData class]] ? (long)[(NSData *)value length] : -1;
+}
+
+// kSecAttrAccessible values are opaque short codes ("ak", "ck", …). Name the ones we know and
+// pass anything newer through raw, so a log stays readable without lying about what it saw.
+static NSString *ApolloAccessibleName(id v) {
+    if (![v isKindOfClass:[NSString class]]) return @"(unset)";
+    if ([v isEqual:(__bridge id)kSecAttrAccessibleWhenUnlocked])                   return @"WhenUnlocked";
+    if ([v isEqual:(__bridge id)kSecAttrAccessibleAfterFirstUnlock])               return @"AfterFirstUnlock";
+    if ([v isEqual:(__bridge id)kSecAttrAccessibleWhenUnlockedThisDeviceOnly])     return @"WhenUnlockedThisDeviceOnly";
+    if ([v isEqual:(__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]) return @"AfterFirstUnlockThisDeviceOnly";
+    if ([v isEqual:(__bridge id)kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly])  return @"WhenPasscodeSetThisDeviceOnly";
+    return (NSString *)v;
+}
+
+// Every attribute that can make a scoped read miss an item an unfiltered enumeration can see.
+// Printed for the query and for the found item; whichever field differs is why the read missed,
+// and therefore what wrote the item wrong in the first place — the one thing about this bug that
+// has never been measured, only inferred. Deliberately excludes kSecValueData: the existing
+// diagnostics log statuses, lengths, dispositions and group names, never secrets, and this holds
+// that line.
+static NSString *ApolloKeychainAttrSummary(NSDictionary *d) {
+    if (!d) return @"(none)";
+    static NSDateFormatter *fmt;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        fmt = [[NSDateFormatter alloc] init];
+        fmt.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss'Z'";
+        fmt.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"UTC"];
+        fmt.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    });
+    id group    = d[(__bridge id)kSecAttrAccessGroup];
+    id service  = d[(__bridge id)kSecAttrService];
+    id created  = d[(__bridge id)kSecAttrCreationDate];
+    id modified = d[(__bridge id)kSecAttrModificationDate];
+    return [NSString stringWithFormat:@"group=%@ accessible=%@ sync=%@ created=%@ modified=%@ service=%@",
+            [group isKindOfClass:[NSString class]] ? group : @"(unset)",
+            ApolloAccessibleName(d[(__bridge id)kSecAttrAccessible]),
+            ApolloSyncDispositionString(d),
+            [created isKindOfClass:[NSDate class]] ? [fmt stringFromDate:created] : @"?",
+            [modified isKindOfClass:[NSDate class]] ? [fmt stringFromDate:modified] : @"?",
+            [service isKindOfClass:[NSString class]] ? service : @"(unset)"];
 }
 
 // One trace line per Valet keychain operation. `op` is the call name; `extra` is optional
@@ -1029,7 +1083,8 @@ static OSStatus SecItemCopyMatching_replacement(CFDictionaryRef query, CFTypeRef
     // (The dev-only "disable recovery" toggle skips this so the raw wipe can be observed.)
     if (status == errSecItemNotFound && ApolloIsSingleItemValetQuery(strippedQuery) && !ApolloDebugDisableRecovery()) {
         NSString *foundGroup = nil;
-        OSStatus recovered = ApolloValetRecoverRead(strippedQuery, result, &foundGroup);
+        NSDictionary *foundAttrs = nil;
+        OSStatus recovered = ApolloValetRecoverRead(strippedQuery, result, &foundGroup, &foundAttrs);
         if (recovered == errSecSuccess) {
             // The group Valet's original (pre-strip) query targeted vs the group the item
             // actually lives in — a mismatch is the direct proof of the access-group split.
@@ -1038,6 +1093,17 @@ static OSStatus SecItemCopyMatching_replacement(CFDictionaryRef query, CFTypeRef
                             strippedQuery[(__bridge id)kSecAttrAccount],
                             [queriedGroup isKindOfClass:[NSString class]] ? queriedGroup : @"(stripped/none)",
                             foundGroup ?: @"?");
+            // The decisive pair. QUERY is what Valet issued before the strip; SENT is what actually
+            // missed; FOUND is what the item really is. The field that differs between SENT and
+            // FOUND is the reason for the -25300, and thus the origin of the poisoned item.
+            // The access group is only the leading suspect — kSecAttrAccessible and the exact
+            // service string are equally capable of this and have never been checked, because a
+            // read filters on them while SecItemAdd's duplicate check does not (service + account
+            // + access group are the primary key), which is exactly how one item produces both
+            // -25300 and -25299.
+            ApolloLoginDiag(@"[KeychainAttrDiff] QUERY %@", ApolloKeychainAttrSummary((__bridge NSDictionary *)query));
+            ApolloLoginDiag(@"[KeychainAttrDiff] SENT  %@", ApolloKeychainAttrSummary(strippedQuery));
+            ApolloLoginDiag(@"[KeychainAttrDiff] FOUND %@", ApolloKeychainAttrSummary(foundAttrs));
             if (IsAccountsFamilyQuery(strippedQuery)) ApolloMarkAccountServed(strippedQuery[(__bridge id)kSecAttrAccount]);
             return errSecSuccess;
         }
