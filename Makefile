@@ -84,6 +84,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloUserFlair.xm \
     $(SRC_DIR)/ApolloFlairColors.xm \
     $(SRC_DIR)/ApolloNativeActionMenus.xm \
+    $(SRC_DIR)/ApolloModernAwards.xm \
     $(SRC_DIR)/ApolloHostedVideo.m \
     $(SRC_DIR)/ApolloSportsClipResolver.m \
     $(SRC_DIR)/ApolloSportsClips.xm \
