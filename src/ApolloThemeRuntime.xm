@@ -231,11 +231,22 @@ static BOOL TextSinkMayUseTheme(id object, uintptr_t caller);
 // design, not the active theme's). Both the sink hooks and the refresh walk
 // skip them.
 static const void *kApolloThemeFontPinnedKey = &kApolloThemeFontPinnedKey;
+static const void *kApolloThemeBackgroundColorPassthroughKey = &kApolloThemeBackgroundColorPassthroughKey;
 
 void ApolloThemeRuntimeSetFontPinned(id view, BOOL pinned) {
     if (!view) return;
     objc_setAssociatedObject(view, kApolloThemeFontPinnedKey,
                              pinned ? @YES : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+void ApolloThemeRuntimeSetBackgroundColorPassthrough(id view, BOOL enabled) {
+    if (!view) return;
+    objc_setAssociatedObject(view, kApolloThemeBackgroundColorPassthroughKey,
+                             enabled ? @YES : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static BOOL BackgroundColorPassthrough(id view) {
+    return view && [objc_getAssociatedObject(view, kApolloThemeBackgroundColorPassthroughKey) boolValue];
 }
 
 static BOOL FontPinned(id view) {
@@ -1490,6 +1501,10 @@ static ASImageNodeTintColorModificationBlockFn ASImageNodeTintColorModificationB
 %hook _TtC6Apollo24ApolloSearchBarTextField
 
 - (void)setBackgroundColor:(UIColor *)color {
+    if (BackgroundColorPassthrough(self)) {
+        %orig(color);
+        return;
+    }
     UIColor *raised = ApolloThemeRuntimeColor(ApolloThemeTokenTertiaryBackground);
     %orig(raised ?: color);
 }
