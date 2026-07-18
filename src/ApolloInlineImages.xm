@@ -151,6 +151,24 @@ static char kApolloImageURLKey;                // NSURL on the imageNode AND mir
 static char kApolloOriginalImageURLKey;        // NSURL for tap/long-press when different from the loaded URL (e.g. album URL)
 static char kApolloHostMarkdownNodeKey;        // ApolloWeakHostBox (zeroing-weak) to the host MarkdownNode/LinkButtonNode
 static char kApolloAspectRatioKey;             // NSNumber height/width — NIL if unknown (no URL params yet, no DIDLOAD yet)
+
+// URL → known aspect ratio, surviving node recreation. The per-node
+// kApolloAspectRatioKey dies with its node, so every cell rebuild (vote
+// reconfigure, row reload, collapse/expand) re-measured the row with the
+// image OMITTED (nil ratio → hidden) and grew it post-hoc after DIDLOAD —
+// a visible hide→pop on content the app has already sized once. Keyed by
+// the node's stable cache-key URL string (normalized/album URL — NOT the
+// loaded URL, which changes for albums and proxies). NSCache: tiny values,
+// safe eviction under pressure.
+static NSCache<NSString *, NSNumber *> *ApolloKnownImageRatios(void) {
+    static NSCache<NSString *, NSNumber *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [NSCache new];
+        cache.countLimit = 512;
+    });
+    return cache;
+}
 static char kApolloLastDisplayBoundsKey;       // NSValue CGSize — bounds when the last display pass started (#673 stale-backing heal)
 static char kApolloLongPressInstalledKey;      // NSNumber BOOL — gate for one-shot UIContextMenuInteraction install
 static char kApolloPlayOverlayViewKey;         // ApolloPlayOverlayContainer (play button OR pause badge), also used as install gate
@@ -1934,6 +1952,13 @@ static BOOL ApolloPresentOrResolveImageChestAlbumURL(NSURL *url, UIView *sourceV
 - (void)updateAspectRatioForImageNode:(id)imageNode imageSize:(CGSize)size {
     if (size.width <= 0 || size.height <= 0) return;
     CGFloat newRatio = size.height / size.width;
+    // Persist by stable URL so the NEXT node built for this image measures at
+    // the right height immediately instead of re-running the hide→grow dance
+    // on every cell rebuild.
+    NSString *stableKey = objc_getAssociatedObject(imageNode, &kApolloImageCacheKey);
+    if ([stableKey isKindOfClass:[NSString class]] && stableKey.length > 0) {
+        [ApolloKnownImageRatios() setObject:@(newRatio) forKey:stableKey];
+    }
     NSNumber *cur = objc_getAssociatedObject(imageNode, &kApolloAspectRatioKey);
     if (cur && fabs(newRatio - [cur doubleValue]) < 0.01) return;
     objc_setAssociatedObject(imageNode, &kApolloAspectRatioKey, @(newRatio), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -3491,9 +3516,18 @@ static ASNetworkImageNode *ApolloMakeInlineImageNode(NSURL *normalizedURL,
     [[imageNode style] setValue:@(ApolloASStackLayoutAlignSelfStretch) forKey:@"alignSelf"];
 
     CGFloat ratio = ApolloAspectRatioFromURL(normalizedURL);
+    if (ratio <= 0) {
+        // A previous node instance already loaded this image and recorded its
+        // real ratio — reuse it so a rebuilt cell measures the row
+        // correctly on the FIRST pass instead of hiding the image and growing
+        // the row post-DIDLOAD. Same trust level as didLoadImage: itself.
+        NSNumber *known = [ApolloKnownImageRatios() objectForKey:normalizedURL.absoluteString ?: @""];
+        if (known) ratio = known.doubleValue;
+    }
     // kApolloAspectRatioKey is only set when we have real ratio info (URL
-    // query params now, or didLoadImage later). Nil means "unknown" → the
-    // wrapper omits the image from layout to avoid wrong-ratio races.
+    // query params now, a prior load's cached ratio, or didLoadImage later).
+    // Nil means "unknown" → the wrapper omits the image from layout to avoid
+    // wrong-ratio races.
 
     // Stable cache key — the per-MarkdownNode reuse cache and the GC
     // both key on this. For Imgur albums the loaded URL changes when

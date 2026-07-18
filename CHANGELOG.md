@@ -13,7 +13,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixes
 
-- Fix **inline comment images** rendering tiny inside a full-height row after collapsing and re-expanding a comment (#675: @icpryde)
+- Fix **inline comment images** rendering tiny inside a full-height row after collapsing and re-expanding a comment, and the row flicker/reload loop when voting on a comment with an inline image (#675: @icpryde)
 
 ## [v3.4.1] - 2026-07-15
 
