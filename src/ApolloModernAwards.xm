@@ -4,6 +4,7 @@
 #import <objc/runtime.h>
 
 #import "ApolloCommon.h"
+#import "ApolloState.h"
 #import "ApolloThemeRuntime.h"
 #import "ApolloWebSessionStore.h"
 
@@ -21,6 +22,114 @@
 
 static const void *kApolloModernAwardControllerKey = &kApolloModernAwardControllerKey;
 static const void *kApolloModernAwardNavigationBarKey = &kApolloModernAwardNavigationBarKey;
+
+static UIImage *ApolloModernAwardSnapshot(UIViewController *host) {
+    UINavigationController *navigation = host.navigationController;
+    id<UIViewControllerTransitionCoordinator> transition = host.transitionCoordinator;
+    UIViewController *fromController =
+        [transition viewControllerForKey:UITransitionContextFromViewControllerKey];
+    // A long-press action menu can temporarily make UIKit's already-blurred
+    // context-menu window key. Prefer the window that actually owns Apollo's
+    // comments transition so the captured rows remain recognizable.
+    UIView *view = fromController.view;
+    if (!view) view = navigation.view.window ?: navigation.view;
+    if (!view) {
+        for (UIWindow *window in ApolloAllWindows()) {
+            if (window.isKeyWindow && !window.hidden && window.alpha > 0.01) {
+                view = window;
+                break;
+            }
+        }
+    }
+    if (!view) {
+        NSArray<UIViewController *> *stack = navigation.viewControllers;
+        UIViewController *source = stack.count > 1 ? stack[stack.count - 2] : host.presentingViewController;
+        view = source.view;
+    }
+    CGSize size = view.bounds.size;
+    if (!view || CGSizeEqualToSize(size, CGSizeZero)) return nil;
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.opaque = YES;
+    UIGraphicsImageRenderer *renderer =
+        [[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
+    return [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *context) {
+        [view drawViewHierarchyInRect:(CGRect){CGPointZero, size}
+                   afterScreenUpdates:NO];
+    }];
+}
+
+static NSURL *ApolloModernAwardValidatedIconURL(id raw) {
+    if (![raw isKindOfClass:[NSString class]] || [(NSString *)raw length] > 2048) return nil;
+    NSURL *URL = [NSURL URLWithString:raw];
+    NSString *host = URL.host.lowercaseString;
+    BOOL assetHost = [host isEqualToString:@"i.redd.it"] || [host hasSuffix:@".redd.it"] ||
+        [host isEqualToString:@"redditstatic.com"] || [host hasSuffix:@".redditstatic.com"] ||
+        [host isEqualToString:@"redditmedia.com"] || [host hasSuffix:@".redditmedia.com"];
+    return ([URL.scheme.lowercaseString isEqualToString:@"https"] && assetHost) ? URL : nil;
+}
+
+static NSString *ApolloModernAwardSafeString(id raw, NSUInteger maximumLength) {
+    if (![raw isKindOfClass:[NSString class]]) return nil;
+    NSString *value = [(NSString *)raw stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return value.length > 0 && value.length <= maximumLength ? value : nil;
+}
+
+static void ApolloModernAwardApplyToThing(id thing, NSDictionary *selection) {
+    if (!thing || !sModernAwardsEnabled) return;
+    NSString *identifier = ApolloModernAwardSafeString(selection[@"id"], 128);
+    NSString *name = ApolloModernAwardSafeString(selection[@"name"], 128) ?: @"Reddit Award";
+    NSURL *iconURL = ApolloModernAwardValidatedIconURL(selection[@"icon"]);
+    if (identifier.length == 0) identifier = [@"modern-" stringByAppendingString:name.lowercaseString];
+
+    NSArray *existing = nil;
+    @try { existing = [thing valueForKey:@"awards"]; } @catch (__unused id exception) {}
+    NSMutableArray *awards = [existing isKindOfClass:[NSArray class]] ?
+        [existing mutableCopy] : [NSMutableArray array];
+    for (id award in awards) {
+        NSString *current = nil;
+        @try { current = [award valueForKey:@"identifier"]; } @catch (__unused id exception) {}
+        if ([current isEqualToString:identifier]) {
+            @try {
+                NSInteger count = [[award valueForKey:@"count"] integerValue];
+                [award setValue:@(MAX(1, count + 1)) forKey:@"count"];
+            } @catch (__unused id exception) {}
+            @try { [thing setValue:[awards copy] forKey:@"awards"]; } @catch (__unused id exception) {}
+            [[NSNotificationCenter defaultCenter]
+                postNotificationName:@"com.christianselig.ModelObjectUpdated" object:thing];
+            return;
+        }
+    }
+
+    Class awardClass = NSClassFromString(@"RDKAward");
+    id award = awardClass ? [awardClass new] : nil;
+    if (!award) return;
+    @try {
+        [award setValue:identifier forKey:@"identifier"];
+        [award setValue:name forKey:@"name"];
+        [award setValue:@1 forKey:@"count"];
+        [award setValue:@YES forKey:@"isEnabled"];
+        if (iconURL) {
+            [award setValue:iconURL forKey:@"largeIconURL"];
+            [award setValue:@128 forKey:@"largeIconWidth"];
+            Class iconClass = NSClassFromString(@"RDKAwardIcon");
+            id icon = iconClass ? [iconClass new] : nil;
+            if (icon) {
+                [icon setValue:iconURL forKey:@"url"];
+                [icon setValue:@128 forKey:@"width"];
+                [icon setValue:@128 forKey:@"height"];
+                [award setValue:@[icon] forKey:@"resizedIcons"];
+            }
+        }
+        [awards addObject:award];
+        [thing setValue:[awards copy] forKey:@"awards"];
+    } @catch (id exception) {
+        ApolloLog(@"[ModernAwards] couldn't update Apollo award model: %@", exception);
+        return;
+    }
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:@"com.christianselig.ModelObjectUpdated" object:thing];
+}
 
 static NSString *ApolloModernAwardFullName(id thing) {
     if (!thing || ![thing respondsToSelector:@selector(fullName)]) return nil;
@@ -90,6 +199,7 @@ static NSString *ApolloModernAwardBridgeScript(void) {
         "if(window.__apolloModernAwardsInstalled)return;"
         "window.__apolloModernAwardsInstalled=true;"
         "var send=function(type,extra){try{window.webkit.messageHandlers.apolloModernAwards.postMessage(Object.assign({type:type},extra||{}));}catch(_){}};"
+        "var selected={};"
         "var operation=function(input,init){"
             "var url=String((input&&input.url)||input||'');"
             "var body=String((init&&init.body)||'');"
@@ -99,7 +209,7 @@ static NSString *ApolloModernAwardBridgeScript(void) {
         "if(originalFetch){window.fetch=function(input,init){"
             "var isAward=operation(input,init),promise=originalFetch.apply(this,arguments);"
             "if(isAward){promise.then(function(response){"
-                "if(response&&response.ok)send('awarded');"
+                "if(response&&response.ok)send('awarded',{selection:selected});"
                 "else send('awardError',{status:(response&&response.status)||0});"
             "}).catch(function(error){send('awardError',{message:String(error||'Request failed')});});}"
             "return promise;"
@@ -107,6 +217,13 @@ static NSString *ApolloModernAwardBridgeScript(void) {
         "document.addEventListener('click',function(event){"
             "var target=event.target;"
             "var path=event.composedPath?event.composedPath():[target];"
+            "var choice=path.find(function(node){return node&&node.getAttribute&&(node.getAttribute('data-award-id')||node.getAttribute('award-id'));});"
+            "if(choice){"
+                "var image=(choice.querySelector&&choice.querySelector('img'))||path.find(function(node){return node&&node.tagName==='IMG';});"
+                "var id=choice.getAttribute('data-award-id')||choice.getAttribute('award-id')||'';"
+                "var name=choice.getAttribute('aria-label')||choice.getAttribute('title')||(image&&(image.alt||image.getAttribute('aria-label')))||'';"
+                "selected={id:String(id).slice(0,128),name:String(name).slice(0,128),icon:String((image&&(image.currentSrc||image.src))||'').slice(0,2048)};"
+            "}"
             "var showAll=path.find(function(node){return node.matches&&node.matches('award-selection-sheet button:not([data-award-id])');});"
             "if(showAll&&location.pathname.indexOf('/svc/shreddit/award-dialog/')===0){"
                 "event.preventDefault();event.stopImmediatePropagation();"
@@ -114,11 +231,11 @@ static NSString *ApolloModernAwardBridgeScript(void) {
             "}"
             "if(target&&target.closest&&target.closest('button[aria-label=\"Close\"]'))send('close');"
         "},true);"
-        "document.addEventListener('award_content',function(){send('awarded');},true);"
-        "document.addEventListener('award-content',function(){send('awarded');},true);"
+        "document.addEventListener('award_content',function(){send('awarded',{selection:selected});},true);"
+        "document.addEventListener('award-content',function(){send('awarded',{selection:selected});},true);"
         "var announced=false,signedOut=false;"
         "var inspect=function(){"
-            "var dialog=document.querySelector('#award-dialog,[dialog-id=\"award-dialog\"],[role=\"dialog\"]');"
+            "var dialog=document.querySelector('award-dialog[page=\"selection-sheet\"],award-dialog,#award-dialog,[dialog-id=\"award-dialog\"]');"
             "if(dialog&&!announced){announced=true;send('ready');}"
             "var text=(document.body&&document.body.innerText)||'';"
             "if(!signedOut&&/Already a redditor\\?|Log In to continue/i.test(text)){signedOut=true;send('signedOut');}"
@@ -126,6 +243,8 @@ static NSString *ApolloModernAwardBridgeScript(void) {
         "new MutationObserver(inspect).observe(document.documentElement,{childList:true,subtree:true});"
         "document.addEventListener('DOMContentLoaded',inspect);"
         "setTimeout(inspect,0);"
+        "var missing=0;setInterval(function(){var dialog=document.querySelector('award-dialog[page=\"selection-sheet\"],award-dialog,#award-dialog,[dialog-id=\"award-dialog\"]');"
+            "if(announced&&!dialog){missing++;if(missing===4)send('close');}else missing=0;},250);"
     "})();";
 }
 
@@ -151,7 +270,14 @@ static NSString *ApolloModernAwardOpenFullPickerScript(NSString *fullName) {
         "var timer=setInterval(function(){"
             "ticks++;"
             "var full=document.querySelector('award-dialog[page=\\\"selection-sheet\\\"] award-selection-sheet');"
-            "if(full){clearInterval(timer);window.webkit.messageHandlers.apolloModernAwards.postMessage({type:'fullReady'});return;}"
+            "if(full){clearInterval(timer);"
+                "var sheet=full.closest('rpl-dialog-sheet')||full.closest('[role=\"dialog\"]')||full;"
+                "var rect=sheet.getBoundingClientRect();"
+                "window.webkit.messageHandlers.apolloModernAwards.postMessage({"
+                    "type:'fullReady',sheetTag:(sheet.tagName||'').toLowerCase(),"
+                    "sheetLeft:rect.left,sheetTop:rect.top,sheetWidth:rect.width,sheetHeight:rect.height,"
+                    "viewportWidth:window.innerWidth,viewportHeight:window.innerHeight"
+                "});return;}"
             "if(!started){"
                 "var target=exactTarget();"
                 "targetFound=targetFound||!!target;"
@@ -356,28 +482,108 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
 @property (nonatomic, weak) UIViewController *hostController;
 @property (nonatomic, copy) NSString *thingFullName;
 @property (nonatomic, strong) NSURL *thingPermalink;
+@property (nonatomic, strong) id thingToAward;
+@property (nonatomic, strong) UIImage *backgroundSnapshot;
+@property (nonatomic, strong) UIImageView *backgroundView;
 @property (nonatomic, strong) ApolloWebSessionEntry *session;
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic, strong) UIView *loadingView;
 @property (nonatomic, strong) ApolloModernAwardErrorView *errorView;
+@property (nonatomic, strong) UIButton *nativeCloseButton;
+@property (nonatomic, copy) NSDictionary *pickerGeometry;
 @property (nonatomic) BOOL receivedReady;
 @property (nonatomic) BOOL receivedAward;
 @property (nonatomic) BOOL showingFullPicker;
 @property (nonatomic) NSUInteger loadGeneration;
 - (instancetype)initWithThingFullName:(NSString *)fullName
                             permalink:(NSURL *)permalink
+                                thing:(id)thing
+                             snapshot:(UIImage *)snapshot
                                   host:(UIViewController *)host;
 @end
 
 @implementation ApolloModernAwardWebController
 
+- (void)applyPickerGeometry {
+    NSDictionary *geometry = self.pickerGeometry;
+    if (!self.webView || geometry.count == 0) return;
+    CGFloat viewportWidth = [geometry[@"viewportWidth"] doubleValue];
+    CGFloat sheetLeft = [geometry[@"sheetLeft"] doubleValue];
+    CGFloat sheetTop = [geometry[@"sheetTop"] doubleValue];
+    CGFloat sheetWidth = [geometry[@"sheetWidth"] doubleValue];
+    CGRect bounds = self.webView.bounds;
+    if (viewportWidth <= 0.0 || sheetWidth <= 0.0 || CGRectIsEmpty(bounds)) return;
+
+    // Reddit's page and its award sheet share one WKWebView. Clip that view to
+    // only the live sheet, allowing Apollo's captured comments/post screen to
+    // remain the visible backdrop without copying Reddit's catalog or UI.
+    CGFloat scale = CGRectGetWidth(bounds) / viewportWidth;
+    CGFloat top = MAX(0.0, sheetTop * scale - 2.0);
+    CGFloat left = MAX(0.0, sheetLeft * scale - 16.0);
+    CGFloat width = MIN(CGRectGetWidth(bounds) - left, sheetWidth * scale + 32.0);
+    BOOL edgeToEdgeSheet = width >= CGRectGetWidth(bounds) * 0.85;
+    if (edgeToEdgeSheet) {
+        left = 0.0;
+        width = CGRectGetWidth(bounds);
+    }
+    CGRect sheetRect = CGRectMake(left, top, width, MAX(0.0, CGRectGetHeight(bounds) - top));
+    UIBezierPath *visiblePath = [UIBezierPath bezierPathWithRoundedRect:sheetRect
+                                                           cornerRadius:20.0];
+    if (edgeToEdgeSheet) {
+        // Reddit draws its grabber just above the sheet's content box.
+        CGRect handleRect = CGRectMake(CGRectGetMidX(bounds) - 24.0,
+                                       MAX(0.0, top - 14.0), 48.0, 6.0);
+        [visiblePath appendPath:[UIBezierPath bezierPathWithRoundedRect:handleRect
+                                                           cornerRadius:3.0]];
+    }
+    CAShapeLayer *mask = [CAShapeLayer layer];
+    mask.frame = bounds;
+    mask.path = visiblePath.CGPath;
+    self.webView.layer.mask = mask;
+
+    if (!self.nativeCloseButton) {
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+        button.accessibilityLabel = @"Close";
+        button.tintColor = UIColor.whiteColor;
+        button.backgroundColor = [UIColor.blackColor colorWithAlphaComponent:0.48];
+        button.layer.cornerRadius = 18.0;
+        UIImage *image = nil;
+        if (@available(iOS 13.0, *)) {
+            image = [UIImage systemImageNamed:@"xmark"
+                             withConfiguration:[UIImageSymbolConfiguration
+                                 configurationWithPointSize:16.0
+                                                    weight:UIImageSymbolWeightSemibold]];
+        }
+        if (image) [button setImage:image forState:UIControlStateNormal];
+        else [button setTitle:@"×" forState:UIControlStateNormal];
+        [button addTarget:self action:@selector(dismissHost)
+         forControlEvents:UIControlEventTouchUpInside];
+        [self.view addSubview:button];
+        self.nativeCloseButton = button;
+    }
+    CGFloat closeX = edgeToEdgeSheet ? CGRectGetWidth(bounds) - 52.0 :
+        CGRectGetMaxX(sheetRect) - 44.0;
+    self.nativeCloseButton.frame = CGRectMake(closeX, top + 14.0, 36.0, 36.0);
+    self.nativeCloseButton.hidden = NO;
+    [self.view bringSubviewToFront:self.nativeCloseButton];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    [self applyPickerGeometry];
+}
+
 - (instancetype)initWithThingFullName:(NSString *)fullName
                             permalink:(NSURL *)permalink
+                                thing:(id)thing
+                             snapshot:(UIImage *)snapshot
                                   host:(UIViewController *)host {
     if ((self = [super initWithNibName:nil bundle:nil])) {
         _thingFullName = [fullName copy];
         _thingPermalink = permalink;
+        _thingToAward = thing;
+        _backgroundSnapshot = snapshot;
         _hostController = host;
         _session = ApolloActiveWebSession();
     }
@@ -386,12 +592,26 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
 
 - (void)loadView {
     self.view = [[UIView alloc] initWithFrame:CGRectZero];
-    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.view.backgroundColor = UIColor.clearColor;
+    self.backgroundView = [[UIImageView alloc] initWithImage:self.backgroundSnapshot];
+    self.backgroundView.frame = self.view.bounds;
+    self.backgroundView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.backgroundView.contentMode = UIViewContentModeScaleAspectFill;
+    [self.view addSubview:self.backgroundView];
+    UIView *dimmingView = [[UIView alloc] initWithFrame:self.view.bounds];
+    dimmingView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    dimmingView.backgroundColor = [UIColor.blackColor colorWithAlphaComponent:0.42];
+    [self.view addSubview:dimmingView];
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
     [self buildLoadingView];
+    if (!sModernAwardsEnabled) {
+        [self showErrorTitle:@"Modern awards are turned off"
+                      detail:@"Enable Modern Reddit Awards in Apollo Reborn settings to use this feature."];
+        return;
+    }
     if (self.session.cookieHeader.length == 0) {
         [self showErrorTitle:@"API-Key-Free sign-in required"
                       detail:@"Reddit only allows its new awards through a first-party web session. Sign in with Apollo Reborn's API-Key-Free option for this account, then try again."];
@@ -435,7 +655,10 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
     [self.webView.configuration.userContentController
         removeScriptMessageHandlerForName:@"apolloModernAwards"];
     [self.webView removeFromSuperview];
+    self.webView.layer.mask = nil;
     self.webView = nil;
+    self.pickerGeometry = nil;
+    self.nativeCloseButton.hidden = YES;
 }
 
 - (void)buildWebViewAndLoad {
@@ -460,13 +683,15 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
     self.webView.UIDelegate = self;
     self.webView.opaque = NO;
     self.webView.backgroundColor = UIColor.clearColor;
-    self.webView.scrollView.backgroundColor = UIColor.systemBackgroundColor;
+    self.webView.scrollView.backgroundColor = UIColor.clearColor;
     self.webView.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
     self.webView.customUserAgent =
         @"Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 "
          "(KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
     self.webView.alpha = 0.0;
-    [self.view insertSubview:self.webView atIndex:0];
+    // Snapshot + dimming layer are the backdrop; Reddit's isolated dialog must be above
+    // them, while Apollo's loading/error chrome remains above the web surface.
+    [self.view insertSubview:self.webView belowSubview:self.loadingView];
 
     NSArray<NSHTTPCookie *> *cookies =
         ApolloModernAwardCookiesFromHeader(self.session.cookieHeader);
@@ -635,7 +860,17 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
     } else if ([type isEqualToString:@"showAll"]) {
         dispatch_async(dispatch_get_main_queue(), ^{ [self loadFullPicker]; });
     } else if ([type isEqualToString:@"fullReady"]) {
-        ApolloLog(@"[ModernAwards] full picker ready for %@", self.thingFullName);
+        ApolloLog(@"[ModernAwards] full picker ready for %@ sheet=%@ rect=(%@,%@ %@x%@) viewport=%@x%@",
+                  self.thingFullName,
+                  payload[@"sheetTag"] ?: @"unknown",
+                  payload[@"sheetLeft"] ?: @0,
+                  payload[@"sheetTop"] ?: @0,
+                  payload[@"sheetWidth"] ?: @0,
+                  payload[@"sheetHeight"] ?: @0,
+                  payload[@"viewportWidth"] ?: @0,
+                  payload[@"viewportHeight"] ?: @0);
+        self.pickerGeometry = payload;
+        [self applyPickerGeometry];
         [self revealWebView];
     } else if ([type isEqualToString:@"fullError"]) {
         ApolloLog(@"[ModernAwards] full picker unavailable for %@ target=%@ tag=%@ children=%@ scrolled=%@ route=%@ started=%@ routeFailed=%@ control=%@ loader=%@ names=%@ requested=%@ failed=%@",
@@ -664,12 +899,18 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
         if (self.receivedAward) return;
         self.receivedAward = YES;
         ApolloLog(@"[ModernAwards] Reddit accepted award for %@", self.thingFullName);
+        NSDictionary *selection = [payload[@"selection"] isKindOfClass:[NSDictionary class]] ?
+            payload[@"selection"] : @{};
+        ApolloModernAwardApplyToThing(self.thingToAward, selection);
         [[NSNotificationCenter defaultCenter]
             postNotificationName:@"ApolloModernAwardGrantedNotification"
-            object:nil
+            object:self.thingToAward
             userInfo:@{@"thingFullName": self.thingFullName ?: @""}];
-        // Keep the web surface alive for Reddit's own success animation. Its
-        // close control dismisses the Apollo wrapper through the bridge above.
+        // Leave Reddit's success animation visible briefly, then always return
+        // to the exact Apollo controller and scroll position underneath.
+        __weak typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1600 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{ [weakSelf dismissHost]; });
     } else if ([type isEqualToString:@"awardError"]) {
         ApolloLog(@"[ModernAwards] Reddit award request failed for %@ status=%@",
                   self.thingFullName, payload[@"status"] ?: @"unknown");
@@ -678,6 +919,7 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     ApolloLog(@"[ModernAwards] main page finished host=%@", webView.URL.host ?: @"unknown");
+    [webView evaluateJavaScript:ApolloModernAwardAppearanceScript() completionHandler:nil];
     if (self.showingFullPicker) {
         [webView evaluateJavaScript:ApolloModernAwardOpenFullPickerScript(self.thingFullName)
                   completionHandler:^(id result, NSError *error) {
@@ -685,7 +927,6 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
                                  error.localizedDescription);
         }];
     } else {
-        [webView evaluateJavaScript:ApolloModernAwardAppearanceScript() completionHandler:nil];
         [self revealWebView];
     }
 }
@@ -785,6 +1026,9 @@ static ApolloModernAwardWebController *ApolloModernAwardControllerForHost(
 %hook _TtC6Apollo26AwardGiftingViewController
 
 - (void)viewDidLoad {
+    // Capture the currently visible Apollo post/comments before the retired
+    // gifting controller loads and replaces it in the navigation stack.
+    UIImage *backgroundSnapshot = ApolloModernAwardSnapshot((UIViewController *)self);
     %orig;
 
     id thing = nil;
@@ -813,6 +1057,8 @@ static ApolloModernAwardWebController *ApolloModernAwardControllerForHost(
     ApolloModernAwardWebController *controller =
         [[ApolloModernAwardWebController alloc] initWithThingFullName:fullName
                                                            permalink:permalink
+                                                               thing:thing
+                                                            snapshot:backgroundSnapshot
                                                                  host:host];
     objc_setAssociatedObject(host, kApolloModernAwardControllerKey,
                              controller, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -826,8 +1072,19 @@ static ApolloModernAwardWebController *ApolloModernAwardControllerForHost(
 }
 
 - (void)viewWillAppear:(BOOL)animated {
+    ApolloModernAwardWebController *controller =
+        ApolloModernAwardControllerForHost((UIViewController *)self);
+    if (controller) {
+        // viewWillAppear runs before the push transition, while the transition's
+        // exact Apollo comments/post source controller is still available.
+        UIImage *snapshot = ApolloModernAwardSnapshot((UIViewController *)self);
+        if (snapshot) {
+            controller.backgroundSnapshot = snapshot;
+            controller.backgroundView.image = snapshot;
+        }
+    }
     %orig;
-    if (!ApolloModernAwardControllerForHost((UIViewController *)self)) return;
+    if (!controller) return;
     UINavigationController *navigationController =
         ((UIViewController *)self).navigationController;
     if (!navigationController) return;
@@ -854,6 +1111,56 @@ static ApolloModernAwardWebController *ApolloModernAwardControllerForHost(
             setNavigationBarHidden:wasHidden.boolValue animated:NO];
     }
     %orig;
+}
+
+%end
+
+%hook _TtC6Apollo15CommentCellNode
+
+- (void)awardsNodeTappedWithSender:(id)sender {
+    if (!sModernAwardsEnabled || !sModernAwardsTapDetails) return;
+    %orig;
+}
+
+%end
+
+%hook _TtC6Apollo19CompactPostCellNode
+
+- (void)awardsNodeTappedWithSender:(id)sender {
+    if (!sModernAwardsEnabled || !sModernAwardsTapDetails) return;
+    %orig;
+}
+
+%end
+
+%hook _TtC6Apollo22CommentsHeaderCellNode
+
+- (void)awardsNodeTappedWithSender:(id)sender {
+    if (!sModernAwardsEnabled || !sModernAwardsTapDetails) return;
+    %orig;
+}
+
+%end
+
+%hook _TtC6Apollo17LargePostCellNode
+
+- (void)awardsNodeTappedWithSender:(id)sender {
+    if (!sModernAwardsEnabled || !sModernAwardsTapDetails) return;
+    %orig;
+}
+
+%end
+
+// Apollo already lays this node out in a dedicated award strip; returning an
+// empty Texture spec removes that strip completely when the master is off.
+struct ApolloModernAwardSizeRange { CGSize min; CGSize max; };
+
+%hook _TtC6Apollo10AwardsNode
+
+- (id)layoutSpecThatFits:(struct ApolloModernAwardSizeRange)constrainedSize {
+    if (sModernAwardsEnabled) return %orig;
+    Class layoutSpec = NSClassFromString(@"ASLayoutSpec");
+    return layoutSpec ? [layoutSpec new] : %orig;
 }
 
 %end

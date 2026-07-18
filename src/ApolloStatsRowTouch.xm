@@ -122,6 +122,7 @@ typedef NS_ENUM(NSInteger, SRTStatKind) {
     SRTStatKindAge,           // release = "Posted … Ago" detail (Popup/Overlay mode)
     SRTStatKindEdited,        // release = "Edited … Ago" detail (Popup/Overlay mode)
     SRTStatKindTranslation,   // release = toggle title translated ⇄ original
+    SRTStatKindAwards,        // release = Apollo's award details view
 };
 
 @interface ApolloSRTTarget : NSObject
@@ -129,6 +130,8 @@ typedef NS_ENUM(NSInteger, SRTStatKind) {
 @property (nonatomic, assign) CGRect rect;      // in cellView coords
 @property (nonatomic, copy) NSString *caption;
 @property (nonatomic, weak) UILabel *markerLabel;   // translation targets only
+@property (nonatomic, weak) id actionOwner;         // cell that owns awardsNodeTapped:
+@property (nonatomic, weak) id actionSender;        // the native AwardsNode
 @end
 @implementation ApolloSRTTarget
 @end
@@ -145,6 +148,7 @@ static BOOL SRTKindTapEnabled(SRTStatKind kind) {
         case SRTStatKindAge:         return sInfoRowPopupMode || sInfoRowOverlayMode;
         case SRTStatKindEdited:      return sInfoRowPopupMode || sInfoRowOverlayMode;
         case SRTStatKindTranslation: return sInfoRowTapTranslation;
+        case SRTStatKindAwards:      return sModernAwardsEnabled && sModernAwardsTapDetails;
     }
     return YES;
 }
@@ -187,6 +191,7 @@ static NSArray<ApolloSRTTarget *> *SRTTargetsForCell(id cell, UIView *cellView) 
         {"commentsInfoNode",           SRTStatKindComments,   @"Comments"},
         {"ageButtonNode",              SRTStatKindAge,        @"Posted"},
         {"editedButtonNode",           SRTStatKindEdited,     @"Edited"},
+        {"awardsNode",                SRTStatKindAwards,      @"Awards"},
     };
     NSMutableArray<ApolloSRTTarget *> *out = [NSMutableArray array];
     for (int i = 0; i < (int)(sizeof(specs) / sizeof(specs[0])); i++) {
@@ -201,6 +206,10 @@ static NSArray<ApolloSRTTarget *> *SRTTargetsForCell(id cell, UIView *cellView) 
         if (rect.size.width < 1.0 || rect.size.height < 1.0) continue;
         ApolloSRTTarget *t = [ApolloSRTTarget new];
         t.kind = specs[i].kind; t.rect = rect; t.caption = specs[i].caption;
+        if (specs[i].kind == SRTStatKindAwards) {
+            t.actionOwner = cell;
+            t.actionSender = node;
+        }
         [out addObject:t];
     }
     // Optional 🌐 translation marker (a UILabel overlaid by the translation module).
@@ -605,6 +614,14 @@ static void SRTActivateTarget(id cell, UIView *cellView, ApolloSRTTarget *target
         case SRTStatKindTranslation:
             SRTToggleTranslationForMarker(target.markerLabel);
             break;
+        case SRTStatKindAwards: {
+            SEL selector = @selector(awardsNodeTappedWithSender:);
+            if ([target.actionOwner respondsToSelector:selector]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(target.actionOwner, selector,
+                                                      target.actionSender);
+            }
+            break;
+        }
     }
 }
 

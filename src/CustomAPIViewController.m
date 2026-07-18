@@ -956,7 +956,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         // disclosure row (row 7). Includes the keep-search-in-place,
         // follow-live-comments, iPad-tab-bar-bottom and icon-row-magnifier
         // toggles. No conditional rows remain, so the count is constant.
-        case SectionGeneral: return 13;   // magnifier row moved to the Info Row sub-screen
+        case SectionGeneral: return 15;   // includes the two modern-awards switches
         case SectionInfoRow: return 1;
         case SectionApolloAI: return 1;
         case SectionInlineMedia: return 1;
@@ -1489,6 +1489,25 @@ typedef NS_ENUM(NSInteger, Tag) {
             toggleSwitch.enabled = supported;
             cell.textLabel.enabled = supported;
             cell.detailTextLabel.enabled = supported;
+            return cell;
+        }
+        case 13:
+            return [self switchCellWithIdentifier:@"Cell_Gen_ModernAwards"
+                                            label:@"Modern Reddit Awards"
+                                           detail:@"Use Reddit's current award picker and show awards in Apollo."
+                                               on:sModernAwardsEnabled
+                                           action:@selector(modernAwardsSwitchToggled:)];
+        case 14: {
+            UITableViewCell *cell = [self switchCellWithIdentifier:@"Cell_Gen_ModernAwardsDetails"
+                                                             label:@"Tap Awards for Details"
+                                                            detail:@"Award icons stay visible when this is off."
+                                                                on:sModernAwardsTapDetails
+                                                            action:@selector(modernAwardsDetailsSwitchToggled:)];
+            UISwitch *toggle = [cell.accessoryView isKindOfClass:[UISwitch class]] ?
+                (UISwitch *)cell.accessoryView : nil;
+            toggle.enabled = sModernAwardsEnabled;
+            cell.textLabel.enabled = sModernAwardsEnabled;
+            cell.detailTextLabel.enabled = sModernAwardsEnabled;
             return cell;
         }
         // The "Magnify Info Row on Hold" toggle moved to the Info Row sub-screen
@@ -2862,6 +2881,23 @@ typedef NS_ENUM(NSInteger, Tag) {
     sEnableFlairColors = on;
     [[NSUserDefaults standardUserDefaults] setBool:on forKey:UDKeyEnableFlairColors];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloFlairColorsChangedNotification object:nil];
+}
+
+- (void)modernAwardsSwitchToggled:(UISwitch *)sender {
+    sModernAwardsEnabled = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sModernAwardsEnabled
+                                            forKey:UDKeyModernAwardsEnabled];
+    [self.tableView reloadRowsAtIndexPaths:@[
+        [NSIndexPath indexPathForRow:14 inSection:SectionGeneral]
+    ] withRowAnimation:UITableViewRowAnimationNone];
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:@"ApolloModernAwardsSettingsChangedNotification" object:nil];
+}
+
+- (void)modernAwardsDetailsSwitchToggled:(UISwitch *)sender {
+    sModernAwardsTapDetails = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sModernAwardsTapDetails
+                                            forKey:UDKeyModernAwardsTapDetails];
 }
 
 - (void)randNsfwSwitchToggled:(UISwitch *)sender {

@@ -150,6 +150,10 @@ static NSString *const UDKeyInfoRowTapComments = @"InfoRowTapComments";
 static NSString *const UDKeyInfoRowPopupMode = @"InfoRowPopupMode";       // %/time/edited → popup alert
 static NSString *const UDKeyInfoRowOverlayMode = @"InfoRowOverlayMode";   // %/time/edited → transient overlay
 static NSString *const UDKeyInfoRowTapTranslation = @"InfoRowTapTranslation";
+// Reddit's current first-party award flow. The master controls the picker and
+// award rendering; the details switch leaves icons visible but makes taps inert.
+static NSString *const UDKeyModernAwardsEnabled = @"ModernAwardsEnabled";
+static NSString *const UDKeyModernAwardsTapDetails = @"ModernAwardsTapDetails";
 static NSString *const UDKeyLiveCommentsFollow = @"LiveCommentsFollow";
 // Per-POST comment sort memory (issue #555). When ON, changing a post's comment sort
 // is remembered for that post (capped LRU mapping below) and restored when its

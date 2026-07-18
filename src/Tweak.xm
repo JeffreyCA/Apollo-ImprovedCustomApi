@@ -2684,6 +2684,8 @@ static void initializeRandomSources() {
                                     UDKeyInfoRowPopupMode: @YES,
                                     UDKeyInfoRowOverlayMode: @NO,
                                     UDKeyInfoRowTapTranslation: @YES,
+                                    UDKeyModernAwardsEnabled: @YES,
+                                    UDKeyModernAwardsTapDetails: @YES,
                                     UDKeyLiveCommentsFollow: @YES,
                                     UDKeyPerPostCommentSort: @NO,
                                     UDKeyEnableBulkTranslation: @NO,
@@ -2838,6 +2840,8 @@ static void initializeRandomSources() {
     // it (ApolloInfoTapFired / SRTActivateTarget check it first).
     if (sInfoRowPopupMode && sInfoRowOverlayMode) sInfoRowPopupMode = NO;
     sInfoRowTapTranslation = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyInfoRowTapTranslation];
+    sModernAwardsEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernAwardsEnabled];
+    sModernAwardsTapDetails = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernAwardsTapDetails];
     sLiveCommentsFollow = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyLiveCommentsFollow];
     sPerPostCommentSort = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPerPostCommentSort];
     // Both sort memories on = stale state from an older build or a restored backup;
