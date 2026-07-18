@@ -734,6 +734,205 @@ static void HideApolloStatusBarBackgroundView(UINavigationController *navControl
 @interface _UINavigationBarTitleControl : UIControl
 @end
 
+// Apollo's JumpBar is a custom, bare titleView. Give it a genuine Regular
+// Liquid Glass capsule and let UIKit's glass renderer provide the native
+// contrast treatment. No background sampling or forced foreground colors are
+// used here.
+static char kApolloNavigationTitleGlassControllerKey;
+
+static UIView *ApolloFindJumpBar(UIView *root) {
+    if (!root) return nil;
+    if ([NSStringFromClass(root.class) isEqualToString:@"Apollo.JumpBar"]) return root;
+    for (UIView *subview in root.subviews) {
+        UIView *match = ApolloFindJumpBar(subview);
+        if (match) return match;
+    }
+    return nil;
+}
+
+static id ApolloJumpBarObjectIvar(UIView *jumpBar, const char *name) {
+    if (!jumpBar || !name) return nil;
+    Ivar ivar = class_getInstanceVariable(jumpBar.class, name);
+    return ivar ? object_getIvar(jumpBar, ivar) : nil;
+}
+
+static void ApolloCollectNavigationTitleContent(UIView *root,
+                                                UIView *excluded,
+                                                NSMutableArray<UIView *> *content) {
+    for (UIView *subview in root.subviews) {
+        if (subview == excluded || subview.hidden || subview.alpha < 0.01) continue;
+
+        if ([subview isKindOfClass:UILabel.class] ||
+            [subview isKindOfClass:UIImageView.class] ||
+            [subview isKindOfClass:UITextField.class]) {
+            [content addObject:subview];
+        }
+        ApolloCollectNavigationTitleContent(subview, excluded, content);
+    }
+}
+
+@interface ApolloNavigationTitleGlassController : NSObject
+@property (nonatomic, weak) UIView *titleControl;
+@property (nonatomic, weak) UIView *glassHostView;
+@property (nonatomic, strong) UIVisualEffectView *glassView;
+@property (nonatomic) BOOL refreshScheduled;
+- (instancetype)initWithTitleControl:(UIView *)titleControl;
+- (void)scheduleTargetRefresh;
+- (void)invalidate;
+@end
+
+@implementation ApolloNavigationTitleGlassController
+
+- (instancetype)initWithTitleControl:(UIView *)titleControl {
+    self = [super init];
+    if (!self) return nil;
+
+    _titleControl = titleControl;
+    return self;
+}
+
+- (void)dealloc {
+    [self invalidate];
+}
+
+- (void)invalidate {
+    [self.glassView removeFromSuperview];
+    self.glassView = nil;
+    self.glassHostView = nil;
+}
+
+- (UIVisualEffectView *)newRegularGlassView {
+    Class glassEffectClass = objc_getClass("UIGlassEffect");
+    SEL effectSelector = NSSelectorFromString(@"effectWithStyle:");
+    if (!glassEffectClass || ![glassEffectClass respondsToSelector:effectSelector]) return nil;
+
+    UIVisualEffect *effect = ((id (*)(id, SEL, NSInteger))objc_msgSend)(
+        glassEffectClass, effectSelector, 0 /* UIGlassEffectStyleRegular */);
+    if (![effect isKindOfClass:UIVisualEffect.class]) return nil;
+
+    UIVisualEffectView *glassView = [[UIVisualEffectView alloc] initWithEffect:effect];
+    glassView.userInteractionEnabled = NO;
+    glassView.clipsToBounds = YES;
+
+    Class cornerClass = objc_getClass("UICornerConfiguration");
+    SEL capsuleSelector = NSSelectorFromString(@"capsuleConfiguration");
+    SEL setCornerSelector = NSSelectorFromString(@"setCornerConfiguration:");
+    if (cornerClass && [cornerClass respondsToSelector:capsuleSelector] &&
+        [glassView respondsToSelector:setCornerSelector]) {
+        id capsule = ((id (*)(id, SEL))objc_msgSend)(cornerClass, capsuleSelector);
+        ((void (*)(id, SEL, id))objc_msgSend)(glassView, setCornerSelector, capsule);
+    }
+    return glassView;
+}
+
+- (CGRect)glassFrameForHostView:(UIView *)hostView candidateViews:(NSArray<UIView *> *)candidateViews {
+    CGRect contentFrame = CGRectNull;
+    for (UIView *view in candidateViews) {
+        if (![view isKindOfClass:UIView.class] || view.hidden || view.alpha < 0.01 ||
+            CGRectIsEmpty(view.bounds)) continue;
+        CGRect frame = [view convertRect:view.bounds toView:hostView];
+        contentFrame = CGRectIsNull(contentFrame) ? frame : CGRectUnion(contentFrame, frame);
+    }
+
+    if (CGRectIsNull(contentFrame) || CGRectIsEmpty(contentFrame)) return CGRectNull;
+
+    CGRect frame = CGRectInset(contentFrame, -14.0, -8.0);
+    // UINavigationBar title controls are often only as wide as their label.
+    // Permit overhang so the capsule retains real padding instead of collapsing
+    // to a plain title label's intrinsic width and height.
+
+    CGFloat scale = hostView.window.screen.scale ?: UIScreen.mainScreen.scale;
+    frame.origin.x = round(frame.origin.x * scale) / scale;
+    frame.origin.y = round(frame.origin.y * scale) / scale;
+    frame.size.width = round(frame.size.width * scale) / scale;
+    frame.size.height = round(frame.size.height * scale) / scale;
+    return frame;
+}
+
+- (void)updateGlassForHostView:(UIView *)hostView candidateViews:(NSArray<UIView *> *)candidateViews {
+    CGRect targetFrame = [self glassFrameForHostView:hostView candidateViews:candidateViews];
+    if (CGRectIsNull(targetFrame) || CGRectIsEmpty(targetFrame)) {
+        [self.glassView removeFromSuperview];
+        self.glassView = nil;
+        self.glassHostView = nil;
+        return;
+    }
+
+    if (self.glassHostView != hostView) {
+        [self.glassView removeFromSuperview];
+        self.glassView = nil;
+        self.glassHostView = hostView;
+    }
+    if (!self.glassView) {
+        self.glassView = [self newRegularGlassView];
+        if (!self.glassView) return;
+        self.glassView.frame = targetFrame;
+        self.glassView.alpha = 0;
+        [hostView insertSubview:self.glassView atIndex:0];
+        [UIView animateWithDuration:0.18 animations:^{ self.glassView.alpha = 1; }];
+        ApolloLog(@"[NavigationTitleGlass] installed %@ capsule frame=%@",
+                  NSStringFromClass(hostView.class), NSStringFromCGRect(self.glassView.frame));
+        return;
+    }
+
+    [hostView sendSubviewToBack:self.glassView];
+    if (CGRectEqualToRect(self.glassView.frame, targetFrame)) return;
+    [UIView animateWithDuration:0.24
+                          delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{ self.glassView.frame = targetFrame; }
+                     completion:nil];
+}
+
+- (void)refreshTargets {
+    UIView *jumpBar = ApolloFindJumpBar(self.titleControl);
+    UIView *hostView = jumpBar ?: self.titleControl;
+    NSMutableArray<UIView *> *glassCandidates = [NSMutableArray array];
+
+    if (jumpBar) {
+        const char *ivarNames[] = {
+            "nameLabel", "secondaryLabel", "suggestionLabel", "arrowImageView", "searchTextField"
+        };
+        for (NSUInteger i = 0; i < sizeof(ivarNames) / sizeof(ivarNames[0]); i++) {
+            id candidate = ApolloJumpBarObjectIvar(jumpBar, ivarNames[i]);
+            if ([candidate isKindOfClass:UIView.class]) [glassCandidates addObject:candidate];
+        }
+    } else {
+        // Plain titles, profile titles, and Apollo's dual-label title buttons
+        // all ultimately expose their visible label/image content here.
+        ApolloCollectNavigationTitleContent(self.titleControl, self.glassView, glassCandidates);
+    }
+
+    [self updateGlassForHostView:hostView candidateViews:glassCandidates];
+}
+
+- (void)scheduleTargetRefresh {
+    if (self.refreshScheduled) return;
+    self.refreshScheduled = YES;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ApolloNavigationTitleGlassController *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        strongSelf.refreshScheduled = NO;
+        [strongSelf refreshTargets];
+    });
+}
+
+@end
+
+static void ApolloUpdateNavigationTitleGlass(UIView *titleControl) {
+    if (!IsLiquidGlass() || !titleControl.window) return;
+
+    ApolloNavigationTitleGlassController *controller =
+        objc_getAssociatedObject(titleControl, &kApolloNavigationTitleGlassControllerKey);
+    if (!controller) {
+        controller = [[ApolloNavigationTitleGlassController alloc] initWithTitleControl:titleControl];
+        objc_setAssociatedObject(titleControl, &kApolloNavigationTitleGlassControllerKey,
+                                 controller, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    [controller scheduleTargetRefresh];
+}
+
 static void ApolloRecenterTitleControl(UIView *titleControl) {
     if (!titleControl.window || !titleControl.superview) return;
 
@@ -824,9 +1023,35 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
 
 %hook _UINavigationBarTitleControl
 
+- (void)didMoveToWindow {
+    %orig;
+    if (!IsLiquidGlass()) return;
+    if (!self.window) {
+        ApolloNavigationTitleGlassController *controller =
+            objc_getAssociatedObject(self, &kApolloNavigationTitleGlassControllerKey);
+        [controller invalidate];
+        objc_setAssociatedObject(self, &kApolloNavigationTitleGlassControllerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ApolloUpdateNavigationTitleGlass(self);
+    });
+}
+
 - (void)layoutSubviews {
     %orig;
     if (!IsLiquidGlass()) return;
+    // Refresh outside layoutSubviews so capsule sizing cannot feed back into
+    // UIKit's navigation-bar layout pass.
+    ApolloNavigationTitleGlassController *controller =
+        objc_getAssociatedObject(self, &kApolloNavigationTitleGlassControllerKey);
+    if (controller) {
+        [controller scheduleTargetRefresh];
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ApolloUpdateNavigationTitleGlass(self);
+        });
+    }
     // Bulk translation adds a new right nav bar item which often causes the title overlap.
     // Skip adjustment for now until we can find a more robust solution that works with the dynamic item changes.
     if (sEnableBulkTranslation) return;

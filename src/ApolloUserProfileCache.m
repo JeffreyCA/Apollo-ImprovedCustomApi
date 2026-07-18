@@ -39,6 +39,11 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
         _bannerURL = bannerURL;
         _defaultSnoo = defaultSnoo;
         _fetchedAt = fetchedAt ?: [NSDate date];
+        _linkKarma = -1;
+        _commentKarma = -1;
+        _createdUTC = 0.0;
+        _userIsSubscriber = NO;
+        _followStateKnown = NO;
     }
     return self;
 }
@@ -205,6 +210,10 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
     dict[@"hasSnoovatar"] = @(info.hasSnoovatar);
     dict[@"isSuspended"] = @(info.isSuspended);
     dict[@"suspensionChecked"] = @(info.suspensionChecked);
+    dict[@"linkKarma"] = @(info.linkKarma);
+    dict[@"commentKarma"] = @(info.commentKarma);
+    dict[@"createdUTC"] = @(info.createdUTC);
+    if (info.followStateKnown) dict[@"userIsSubscriber"] = @(info.userIsSubscriber);
     dict[@"fetchedAt"] = @([info.fetchedAt timeIntervalSince1970]);
     return dict;
 }
@@ -234,6 +243,8 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
         fetchedAt = [NSDate distantPast];
         suspensionChecked = NO;
     }
+    // Entries cached before stat capture lack karma/created; force one refetch to gain them.
+    if (!dict[@"createdUTC"]) fetchedAt = [NSDate distantPast];
     ApolloUserProfileInfo *info = [[ApolloUserProfileInfo alloc] initWithUsername:username iconURL:iconURL bannerURL:bannerURL defaultSnoo:defaultSnoo fetchedAt:fetchedAt];
     info.snoovatarURL = snoovatarURL;
     info.decoratorURL = decoratorURL;
@@ -243,6 +254,10 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
     info.hasSnoovatar = hasSnoovatar;
     info.isSuspended = isSuspended;
     info.suspensionChecked = suspensionChecked;
+    if (dict[@"linkKarma"]) info.linkKarma = [dict[@"linkKarma"] integerValue];
+    if (dict[@"commentKarma"]) info.commentKarma = [dict[@"commentKarma"] integerValue];
+    if (dict[@"createdUTC"]) info.createdUTC = [dict[@"createdUTC"] doubleValue];
+    if (dict[@"userIsSubscriber"]) { info.userIsSubscriber = [dict[@"userIsSubscriber"] boolValue]; info.followStateKnown = YES; }
     return info;
 }
 
@@ -336,6 +351,23 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
     return diskInfo;
 }
 
+// Optimistically record a follow toggle so the profile header keeps the new state
+// across re-navigation without a full about.json refetch (Reddit is slow to reflect
+// the change in `user_is_subscriber`, so an immediate refetch would revert the pill).
+- (void)updateFollowState:(BOOL)following forUsername:(NSString *)username {
+    NSString *key = [self normalizedUsername:username];
+    if (!key) return;
+    dispatch_async(self.queue, ^{
+        ApolloUserProfileInfo *info = self.diskInfo[key] ?: [self.infoCache objectForKey:key];
+        if (!info) return;
+        info.userIsSubscriber = following;
+        info.followStateKnown = YES;
+        self.diskInfo[key] = info;
+        [self.infoCache setObject:info forKey:key];
+        [self saveDiskCacheLocked];
+    });
+}
+
 - (NSString *)escapedUsernameForPath:(NSString *)username {
     NSMutableCharacterSet *allowed = [[NSCharacterSet alphanumericCharacterSet] mutableCopy];
     [allowed addCharactersInString:@"_-" ];
@@ -409,6 +441,19 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
     info.hasSnoovatar = snoovatarURL != nil;
     info.isSuspended = isSuspended;
     info.suspensionChecked = YES;
+    id linkKarma = dataDict[@"link_karma"];
+    id commentKarma = dataDict[@"comment_karma"];
+    id createdUTC = dataDict[@"created_utc"];
+    if ([linkKarma respondsToSelector:@selector(integerValue)]) info.linkKarma = [linkKarma integerValue];
+    if ([commentKarma respondsToSelector:@selector(integerValue)]) info.commentKarma = [commentKarma integerValue];
+    if ([createdUTC respondsToSelector:@selector(doubleValue)]) info.createdUTC = [createdUTC doubleValue];
+    // Follow state: `data.subreddit.user_is_subscriber` is YES when the logged-in
+    // account follows this user (following == subscribing to their u_ profile).
+    id userIsSubscriber = subreddit[@"user_is_subscriber"];
+    if ([userIsSubscriber respondsToSelector:@selector(boolValue)]) {
+        info.userIsSubscriber = [userIsSubscriber boolValue];
+        info.followStateKnown = YES;
+    }
     return info;
 }
 
