@@ -10,6 +10,7 @@
 #import "ApolloWebJSON.h"
 #import "ApolloAccountCredentials.h"
 #import "ApolloState.h"
+#import "ApolloBadgeBookStrip.h"
 #import "ApolloUserProfileCache.h"
 #import "ApolloLinkPreviewCache.h"
 #import "ApolloDeletedCommentsSettingsViewController.h"
@@ -41,6 +42,7 @@ typedef NS_ENUM(NSInteger, SectionIndex) {
     SectionInlineMedia,   // single row -> InlineMediaSettingsViewController
     SectionLinkPreviews,
     SectionMedia,
+    SectionBadgeBook,     // single toggle -> profile Badge Book (achievements + trophies)
     SectionSubreddits,
     SectionNotificationBackend,
     SectionPrivacy,
@@ -967,6 +969,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         // Play Inline" toggle. The hold-speed picker (row 11) shows only while its
         // toggle is on.
         case SectionMedia: return 11 + (sVideoHoldSpeedEnabled ? 1 : 0);
+        case SectionBadgeBook: return 1;
         // One Community Highlights picker replaces the old master + web switches.
         // Modern Dividers remains the only conditional row in this section.
         case SectionSubreddits: return 9 - (sSubredditListEnhancements ? 0 : 1);
@@ -989,6 +992,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionInlineMedia: return @"Inline Media";
         case SectionLinkPreviews: return @"Rich Link Previews";
         case SectionMedia: return @"Media";
+        case SectionBadgeBook: return @"Badge Book";
         case SectionSubreddits: return @"Subreddits";
         case SectionNotificationBackend: return @"Notification Backend";
         case SectionPrivacy: return @"Privacy";
@@ -1008,6 +1012,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionInlineMedia: cell = [self inlineMediaCellForTableView:tableView]; break;
         case SectionLinkPreviews: cell = [self linkPreviewsCellForTableView:tableView]; break;
         case SectionMedia: cell = [self mediaCellForRow:indexPath.row tableView:tableView]; break;
+        case SectionBadgeBook: cell = [self badgeBookCellForTableView:tableView]; break;
         case SectionSubreddits: cell = [self subredditCellForRow:indexPath.row tableView:tableView]; break;
         case SectionNotificationBackend: cell = [self notificationBackendCellForRow:indexPath.row tableView:tableView]; break;
         case SectionPrivacy: cell = [self privacyCellForRow:indexPath.row tableView:tableView]; break;
@@ -1821,6 +1826,15 @@ typedef NS_ENUM(NSInteger, Tag) {
                                    action:@selector(usageHeartbeatSwitchToggled:)];
 }
 
+- (UITableViewCell *)badgeBookCellForTableView:(UITableView *)tableView {
+    // Single toggle: the profile Badge Book (achievements + Trophy Case). The
+    // explanatory text is the section footer — see footerAttributedTextForSection:.
+    return [self switchCellWithIdentifier:@"Cell_BadgeBook_Enabled"
+                                    label:@"Show Badge Book on Profiles"
+                                       on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBadgeBookEnabled]
+                                   action:@selector(badgeBookSwitchToggled:)];
+}
+
 - (UITableViewCell *)aboutCellForRow:(NSInteger)row tableView:(UITableView *)tableView {
     switch (row) {
         case 0: return [self subtitleCellWithIdentifier:@"Cell_About_GitHub"
@@ -2023,6 +2037,10 @@ typedef NS_ENUM(NSInteger, Tag) {
     } else if (section == SectionMedia) {
         text = [[NSMutableAttributedString alloc]
             initWithString:@"Media Upload Host selects where Apollo uploads media attached to posts and comments.\n\nComment Link Host uploads images added to a comment or reply to Imgur or Img Chest and inserts a plain link instead of a native Reddit image, so they work even in subreddits that don't allow images in comments. Apollo still shows the linked image inline.\n\nProxying routes Imgur image requests through DuckDuckGo to bypass regional blocks; albums and uploads are unsupported by the proxy.\n\nSports Clip Links Play Inline makes highlight-clip links (streamff, streamin, streamain, bangr, dubz, dropr, MLB clips) play as inline videos like Streamable, instead of a link card. Clips removed from those sites show a video error."
+            attributes:plainAttrs];
+    } else if (section == SectionBadgeBook) {
+        text = [[NSMutableAttributedString alloc]
+            initWithString:@"Adds a Badge Book to profiles: a preview strip in the header that opens the full Achievements catalogue (earned and locked, by category) and the user's Trophy Case. Works for your own profile and anyone else's. The catalogue and its icons are bundled, so it opens instantly; each profile's earned badges are read from Reddit's public profile pages on first view and cached."
             attributes:plainAttrs];
     } else if (section == SectionNotificationBackend) {
         text = [[NSMutableAttributedString alloc]
@@ -2981,6 +2999,15 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSUserDefaults standardUserDefaults] setBool:sShowDetailedProfiles forKey:UDKeyShowDetailedProfiles];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloUserAvatarsToggleChangedNotification" object:nil];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloSocialLinksToggleChangedNotification object:nil];
+}
+
+- (void)badgeBookSwitchToggled:(UISwitch *)sender {
+    // Master switch for the profile Badge Book. The cached flag is read by the
+    // header strip (ApolloBadgeBookStrip.m); the notification makes any on-screen
+    // strip re-measure and (re)load or collapse live, no relaunch.
+    sBadgeBookEnabled = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sBadgeBookEnabled forKey:UDKeyBadgeBookEnabled];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloBadgeBookToggleChangedNotification object:nil];
 }
 
 - (void)promptClearAllCachesFromSourceView:(UIView *)sourceView {

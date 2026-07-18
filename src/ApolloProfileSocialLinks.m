@@ -329,6 +329,12 @@ static NSArray<ApolloSocialLink *> *ApolloSLLinksFromJSON(NSArray *raw) {
     return store;
 }
 
+// Exported for other scrape features (Badge Book) — one shared store means the
+// bot-challenge clearance cookie is earned once and reused.
+WKWebsiteDataStore *ApolloSharedScrapeDataStore(void) {
+    return [ApolloSLWebFetch apollo_scrapeDataStore];
+}
+
 - (void)startForUsername:(NSString *)username completion:(void (^)(NSArray<ApolloSocialLink *> *))done {
     // WKWebView must be created/used on the main thread.
     if (![NSThread isMainThread]) {

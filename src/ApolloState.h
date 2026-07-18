@@ -56,6 +56,7 @@ extern BOOL sUseProfileAvatarTabIcon;
 // inside this header, so it is gated on this same flag. Default ON via
 // registerDefaults. See ApolloUserAvatars.xm and ApolloProfileSocialLinks.{h,m}.
 extern BOOL sShowDetailedProfiles;
+extern BOOL sBadgeBookEnabled;
 extern BOOL sShowSubredditHeaders;
 // Backing booleans for the single Community Highlights mode picker:
 //   Off     = both NO

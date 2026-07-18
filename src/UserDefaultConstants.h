@@ -91,6 +91,11 @@ static NSString *const UDKeyUseProfileAvatarTabIcon = @"UseProfileAvatarTabIcon"
 // (UDKeyShowUserAvatars), which governs the inline avatars next to usernames.
 // See ApolloUserAvatars.xm and ApolloProfileSocialLinks.m. Default YES.
 static NSString *const UDKeyShowDetailedProfiles = @"ShowDetailedProfiles";
+// Master toggle for the profile "Badge Book" — the in-header preview strip and the
+// full Achievements / Trophy Case screen (ApolloBadgeBookStrip.m,
+// ApolloBadgeBookViewController.m). Off → no strip, no scraping, no entry point.
+// Default YES.
+static NSString *const UDKeyBadgeBookEnabled = @"BadgeBookEnabled";
 static NSString *const UDKeyShowSubredditHeaders = @"ShowSubredditHeaders";
 // Backing values for the single Community Highlights picker. Keeping the old
 // keys maps existing settings naturally: both YES = Full, master only = Partial,

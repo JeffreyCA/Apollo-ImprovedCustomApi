@@ -30,6 +30,7 @@ BOOL sProxyImgurDDG = NO;
 BOOL sShowUserAvatars = NO;
 BOOL sUseProfileAvatarTabIcon = NO;
 BOOL sShowDetailedProfiles = YES;   // effective default ON via registerDefaults (UDKeyShowDetailedProfiles)
+BOOL sBadgeBookEnabled = YES;       // effective default ON via registerDefaults (UDKeyBadgeBookEnabled)
 BOOL sShowSubredditHeaders = NO;
 BOOL sCommunityHighlights = NO;
 BOOL sCommunityHighlightsWeb = NO;

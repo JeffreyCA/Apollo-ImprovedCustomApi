@@ -10,6 +10,7 @@
 #import "ApolloSubredditInfoCache.h"
 #import "ApolloBannedProfile.h"
 #import "ApolloProfileSocialLinks.h"
+#import "ApolloBadgeBookStrip.h"
 #import "ApolloAccountCredentials.h"
 #import "ApolloWebSessionStore.h"
 
@@ -75,6 +76,7 @@ static const void *kApolloProfileTabAvatarImageMarkerKey = &kApolloProfileTabAva
 @property(nonatomic, strong) UIButton *editProfileButton;
 @property(nonatomic, strong) UILabel *aboutLabel;
 @property(nonatomic, strong) ApolloProfileSocialLinksView *socialLinksView;
+@property(nonatomic, strong) ApolloBadgeBookStripView *badgeBookView;
 @property(nonatomic, weak) UIViewController *hostViewController;
 @property(nonatomic, copy) NSString *username;
 // The avatar/snoovatar and banner URLs the most recent profile info applied to this
@@ -189,6 +191,18 @@ static void ApolloProfileScheduleTabAvatarRefresh(NSString *reason);
             if (strongSelf.heightInvalidationBlock) strongSelf.heightInvalidationBlock();
         };
         [self addSubview:_socialLinksView];
+
+        // Badge Book band — sits below the bio; previews earned achievements/trophies
+        // and opens the full book. Self-manages its data and re-measures the header
+        // when its rendered height changes (same contract as the social band).
+        _badgeBookView = [[ApolloBadgeBookStripView alloc] init];
+        _badgeBookView.heightChangedBlock = ^{
+            ApolloProfileHeaderView *strongSelf = weakSelf;
+            if (!strongSelf) return;
+            [strongSelf setNeedsLayout];
+            if (strongSelf.heightInvalidationBlock) strongSelf.heightInvalidationBlock();
+        };
+        [self addSubview:_badgeBookView];
     }
     return self;
 }
@@ -235,6 +249,7 @@ static CGFloat const ApolloProfileAboutSideInset = 20.0;
 static CGFloat const ApolloProfileAboutMaxHeight = 220.0; // ~10 lines @ footnote font, covers 200+ chars at full width
 static CGFloat const ApolloProfileBottomPadding = 16.0;
 static CGFloat const ApolloProfileSocialAboutGap = 8.0;   // gap below the social band, above the bio
+static CGFloat const ApolloProfileAboutBadgeGap = 10.0;   // gap below the bio, above the badge-book band
 
 - (CGRect)apollo_avatarFrame {
     CGFloat borderSize = ApolloProfileAvatarDiameter + 6.0;
@@ -296,15 +311,33 @@ static CGFloat const ApolloProfileSocialAboutGap = 8.0;   // gap below the socia
     return socialY;
 }
 
-- (CGFloat)preferredHeightForWidth:(CGFloat)width {
+// Bottom of the bio block (the y where content below the bio begins).
+- (CGFloat)apollo_contentBottomBeforeBadgeForWidth:(CGFloat)width {
     CGFloat aboutWidth = MAX(120.0, width - ApolloProfileAboutSideInset * 2.0);
     CGFloat aboutHeight = [self apollo_aboutHeightForWidth:aboutWidth];
     CGFloat aboutY = [self apollo_aboutYForWidth:width];
-    if (aboutHeight <= 0.0) {
-        // No about text — header just needs to clear the avatar / labels.
-        return aboutY + ApolloProfileBottomPadding;
+    return (aboutHeight <= 0.0) ? aboutY : (aboutY + aboutHeight);
+}
+
+// Height the badge-book band wants (0 when off / no username).
+- (CGFloat)apollo_badgeHeightForWidth:(CGFloat)width {
+    if (!self.badgeBookView) return 0.0;
+    CGFloat bandWidth = MAX(120.0, width - ApolloProfileAboutSideInset * 2.0);
+    return [self.badgeBookView preferredHeightForWidth:bandWidth];
+}
+
+// The badge band sits below the bio (which sits below the social band / avatar).
+- (CGFloat)apollo_badgeYForWidth:(CGFloat)width {
+    return [self apollo_contentBottomBeforeBadgeForWidth:width] + ApolloProfileAboutBadgeGap;
+}
+
+- (CGFloat)preferredHeightForWidth:(CGFloat)width {
+    CGFloat contentBottom = [self apollo_contentBottomBeforeBadgeForWidth:width];
+    CGFloat badgeH = [self apollo_badgeHeightForWidth:width];
+    if (badgeH > 0.0) {
+        return [self apollo_badgeYForWidth:width] + badgeH + ApolloProfileBottomPadding;
     }
-    return aboutY + aboutHeight + ApolloProfileBottomPadding;
+    return contentBottom + ApolloProfileBottomPadding;
 }
 
 - (void)layoutSubviews {
@@ -345,6 +378,11 @@ static CGFloat const ApolloProfileSocialAboutGap = 8.0;   // gap below the socia
     CGFloat aboutHeight = [self apollo_aboutHeightForWidth:aboutWidth];
     CGFloat aboutY = [self apollo_aboutYForWidth:width];
     self.aboutLabel.frame = CGRectMake(ApolloProfileAboutSideInset, aboutY, aboutWidth, aboutHeight);
+
+    CGFloat badgeH = [self apollo_badgeHeightForWidth:width];
+    CGFloat badgeY = [self apollo_badgeYForWidth:width];
+    self.badgeBookView.frame = CGRectMake(ApolloProfileAboutSideInset, badgeY, aboutWidth, badgeH);
+    self.badgeBookView.hidden = (badgeH <= 0.0);
 }
 
 - (void)apollo_editProfileTapped {
@@ -369,6 +407,8 @@ static CGFloat const ApolloProfileSocialAboutGap = 8.0;   // gap below the socia
     // Feed the social-links band the username so it can load/render (no-op if the
     // username is unchanged; the band re-measures the header when links arrive).
     self.socialLinksView.username = username;
+    // Same for the badge-book band (previews earned achievements/trophies).
+    self.badgeBookView.username = username;
     [self setNeedsLayout];
     if (self.heightInvalidationBlock) {
         self.heightInvalidationBlock();
@@ -1705,6 +1745,7 @@ static void ApolloProfileInstallOrUpdateHeader(id viewControllerObject) {
     }
     header.hostViewController = viewController;
     header.socialLinksView.hostViewController = viewController;
+    header.badgeBookView.hostViewController = viewController;
     header.username = username;
     [header apollo_updateEditProfileButtonColors];
     __weak UIViewController *weakProfileController = viewController;
@@ -2511,6 +2552,7 @@ static void ApolloAvatarApplySubredditIconToSharePreview(id postInfo, NSString *
     ApolloLog(@"[UserAvatars] Pull-to-refresh forcing avatar/banner refetch for u/%@", username);
     ApolloProfileLoadImages(header, username, YES);
     [header.socialLinksView refresh];
+    [header.badgeBookView refresh];
 }
 
 - (void)redditAccountChangedWithNotification:(id)notification {
