@@ -71,6 +71,7 @@
 #import "ApolloState.h"
 #import "ApolloCommon.h"
 #import "ApolloWebSessionStore.h"
+#import "ApolloModernAwards.h"
 
 // Minimal surface of Apollo's RedditKit classes used here. Real definitions live
 // in Headers/ObjC/{RDKClient,RDKOAuthCredential,RDKAccessToken}.h (not on the
@@ -781,7 +782,9 @@ void ApolloWebJSONRepairPoisonedAccountBlobs(void) {
 - (id)responseObjectForResponse:(id)response data:(id)data error:(id *)error {
     id serializerData = data;
     if (sWebJSONEnabled) {
-        @try { serializerData = ApolloWebJSONFixupListingMediaResponseData(response, data); }
+        @try { serializerData = ApolloModernAwardsMergeCachedResponseData(response, serializerData); }
+        @catch (NSException *e) { ApolloLog(@"[ModernAwards] response merge failed: %@", e); }
+        @try { serializerData = ApolloWebJSONFixupListingMediaResponseData(response, serializerData); }
         @catch (NSException *e) { ApolloLog(@"[WebJSON] listing-media fixup failed: %@", e); }
     }
     id obj = %orig(response, serializerData, error);

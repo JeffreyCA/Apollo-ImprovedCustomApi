@@ -4,6 +4,7 @@
 #import <objc/runtime.h>
 
 #import "ApolloCommon.h"
+#import "ApolloModernAwards.h"
 #import "ApolloState.h"
 #import "ApolloThemeRuntime.h"
 #import "ApolloWebSessionStore.h"
@@ -22,6 +23,75 @@
 
 static const void *kApolloModernAwardControllerKey = &kApolloModernAwardControllerKey;
 static const void *kApolloModernAwardNavigationBarKey = &kApolloModernAwardNavigationBarKey;
+static NSString *const kApolloModernAwardCacheDefaultsKey = @"ApolloModernAwardCacheV1";
+
+static NSString *ApolloModernAwardFullName(id thing);
+
+static NSObject *ApolloModernAwardStateLock(void) {
+    static NSObject *lock = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
+static NSMutableDictionary<NSString *, NSArray<NSDictionary *> *> *ApolloModernAwardCache(void) {
+    static NSMutableDictionary<NSString *, NSArray<NSDictionary *> *> *cache = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSDictionary *stored = [[NSUserDefaults standardUserDefaults]
+            dictionaryForKey:kApolloModernAwardCacheDefaultsKey];
+        cache = [stored isKindOfClass:[NSDictionary class]] ? [stored mutableCopy] :
+            [NSMutableDictionary dictionary];
+    });
+    return cache;
+}
+
+static NSHashTable *ApolloModernAwardKnownThings(void) {
+    static NSHashTable *things = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ things = [NSHashTable weakObjectsHashTable]; });
+    return things;
+}
+
+static id ApolloModernAwardObjectIvar(id object, const char *name) {
+    if (!object || !name) return nil;
+    Ivar ivar = class_getInstanceVariable([object class], name);
+    if (!ivar) return nil;
+    @try { return object_getIvar(object, ivar); }
+    @catch (__unused NSException *exception) { return nil; }
+}
+
+// Apollo's post and comments screens are backed by ASTableView subclasses.
+// Rebuilding only the visible tables after a successful award lets Apollo
+// recreate its native PostInfoNode/AwardsNode immediately, while preserving
+// the exact scroll position the user left beneath the transparent picker.
+static void ApolloModernAwardReloadVisibleTables(UIView *rootView) {
+    if (!rootView) return;
+    if ([rootView isKindOfClass:[UITableView class]]) {
+        UITableView *tableView = (UITableView *)rootView;
+        if (tableView.hidden || tableView.alpha <= 0.01 || !tableView.window) return;
+        CGPoint contentOffset = tableView.contentOffset;
+        [UIView performWithoutAnimation:^{
+            [tableView reloadData];
+            [tableView layoutIfNeeded];
+            [tableView setContentOffset:contentOffset animated:NO];
+        }];
+
+        // Texture may finish measuring the rebuilt award node on the next main
+        // pass. Restore once more after that measurement so adding an award
+        // never nudges a post or comment out from under the user.
+        __weak UITableView *weakTableView = tableView;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UITableView *strongTableView = weakTableView;
+            if (!strongTableView.window) return;
+            [strongTableView setContentOffset:contentOffset animated:NO];
+        });
+        return;
+    }
+    for (UIView *subview in rootView.subviews) {
+        ApolloModernAwardReloadVisibleTables(subview);
+    }
+}
 
 static UIImage *ApolloModernAwardSnapshot(UIViewController *host) {
     UINavigationController *navigation = host.navigationController;
@@ -75,39 +145,56 @@ static NSString *ApolloModernAwardSafeString(id raw, NSUInteger maximumLength) {
     return value.length > 0 && value.length <= maximumLength ? value : nil;
 }
 
-static void ApolloModernAwardApplyToThing(id thing, NSDictionary *selection) {
-    if (!thing || !sModernAwardsEnabled) return;
+static NSDictionary *ApolloModernAwardRecord(NSDictionary *selection, NSInteger fallbackCount) {
+    if (![selection isKindOfClass:[NSDictionary class]]) return nil;
     NSString *identifier = ApolloModernAwardSafeString(selection[@"id"], 128);
     NSString *name = ApolloModernAwardSafeString(selection[@"name"], 128) ?: @"Reddit Award";
     NSURL *iconURL = ApolloModernAwardValidatedIconURL(selection[@"icon"]);
-    if (identifier.length == 0) identifier = [@"modern-" stringByAppendingString:name.lowercaseString];
-
-    NSArray *existing = nil;
-    @try { existing = [thing valueForKey:@"awards"]; } @catch (__unused id exception) {}
-    NSMutableArray *awards = [existing isKindOfClass:[NSArray class]] ?
-        [existing mutableCopy] : [NSMutableArray array];
-    for (id award in awards) {
-        NSString *current = nil;
-        @try { current = [award valueForKey:@"identifier"]; } @catch (__unused id exception) {}
-        if ([current isEqualToString:identifier]) {
-            @try {
-                NSInteger count = [[award valueForKey:@"count"] integerValue];
-                [award setValue:@(MAX(1, count + 1)) forKey:@"count"];
-            } @catch (__unused id exception) {}
-            @try { [thing setValue:[awards copy] forKey:@"awards"]; } @catch (__unused id exception) {}
-            [[NSNotificationCenter defaultCenter]
-                postNotificationName:@"com.christianselig.ModelObjectUpdated" object:thing];
-            return;
+    NSInteger count = [selection[@"count"] respondsToSelector:@selector(integerValue)] ?
+        [selection[@"count"] integerValue] : fallbackCount;
+    count = MAX(1, count);
+    if (identifier.length == 0) {
+        NSMutableString *slug = [NSMutableString string];
+        NSCharacterSet *allowed = NSCharacterSet.alphanumericCharacterSet;
+        for (NSUInteger index = 0; index < name.length && slug.length < 96; index++) {
+            unichar character = [name characterAtIndex:index];
+            if ([allowed characterIsMember:character]) [slug appendFormat:@"%C", character];
+            else if (![slug hasSuffix:@"-"]) [slug appendString:@"-"];
         }
+        identifier = [@"modern-" stringByAppendingString:slug.lowercaseString ?: @"award"];
     }
+    NSMutableDictionary *record = [@{
+        @"id": identifier,
+        @"name": name,
+        @"count": @(count),
+    } mutableCopy];
+    if (iconURL) record[@"icon"] = iconURL.absoluteString;
+    return [record copy];
+}
 
+static BOOL ApolloModernAwardRecordMatchesAward(NSDictionary *record, id award) {
+    NSString *recordID = record[@"id"];
+    NSString *recordName = record[@"name"];
+    NSString *awardID = nil;
+    NSString *awardName = nil;
+    @try {
+        awardID = [award valueForKey:@"identifier"];
+        awardName = [award valueForKey:@"name"];
+    } @catch (__unused NSException *exception) {}
+    return (recordID.length > 0 && [recordID isEqualToString:awardID]) ||
+        (recordName.length > 0 &&
+         [recordName caseInsensitiveCompare:awardName ?: @""] == NSOrderedSame);
+}
+
+static id ApolloModernAwardCreateAward(NSDictionary *record) {
     Class awardClass = NSClassFromString(@"RDKAward");
     id award = awardClass ? [awardClass new] : nil;
-    if (!award) return;
+    if (!award) return nil;
+    NSURL *iconURL = ApolloModernAwardValidatedIconURL(record[@"icon"]);
     @try {
-        [award setValue:identifier forKey:@"identifier"];
-        [award setValue:name forKey:@"name"];
-        [award setValue:@1 forKey:@"count"];
+        [award setValue:record[@"id"] forKey:@"identifier"];
+        [award setValue:record[@"name"] ?: @"Reddit Award" forKey:@"name"];
+        [award setValue:@(MAX(1, [record[@"count"] integerValue])) forKey:@"count"];
         [award setValue:@YES forKey:@"isEnabled"];
         if (iconURL) {
             [award setValue:iconURL forKey:@"largeIconURL"];
@@ -121,22 +208,299 @@ static void ApolloModernAwardApplyToThing(id thing, NSDictionary *selection) {
                 [award setValue:@[icon] forKey:@"resizedIcons"];
             }
         }
-        [awards addObject:award];
-        [thing setValue:[awards copy] forKey:@"awards"];
-    } @catch (id exception) {
+    } @catch (NSException *exception) {
+        ApolloLog(@"[ModernAwards] couldn't construct native award: %@", exception);
+        return nil;
+    }
+    return award;
+}
+
+static NSArray *ApolloModernAwardMergedAwards(id thing, NSArray *incoming) {
+    NSString *fullName = ApolloModernAwardFullName(thing);
+    if (fullName.length == 0) return [incoming isKindOfClass:[NSArray class]] ? incoming : @[];
+    NSArray<NSDictionary *> *records = nil;
+    @synchronized (ApolloModernAwardStateLock()) {
+        records = [ApolloModernAwardCache()[fullName] copy];
+    }
+    if (records.count == 0) return [incoming isKindOfClass:[NSArray class]] ? incoming : @[];
+    ApolloLog(@"[ModernAwards] merging %lu cached award(s) into %@ (current=%lu)",
+              (unsigned long)records.count, fullName,
+              (unsigned long)([incoming isKindOfClass:[NSArray class]] ? incoming.count : 0));
+
+    NSMutableArray *awards = [incoming isKindOfClass:[NSArray class]] ?
+        [incoming mutableCopy] : [NSMutableArray array];
+    for (NSDictionary *record in records) {
+        id match = nil;
+        for (id award in awards) {
+            if (ApolloModernAwardRecordMatchesAward(record, award)) { match = award; break; }
+        }
+        if (!match) {
+            id award = ApolloModernAwardCreateAward(record);
+            if (award) [awards addObject:award];
+            continue;
+        }
+        @try {
+            NSInteger count = MAX([[match valueForKey:@"count"] integerValue],
+                                  [record[@"count"] integerValue]);
+            [match setValue:@(MAX(1, count)) forKey:@"count"];
+            NSURL *iconURL = ApolloModernAwardValidatedIconURL(record[@"icon"]);
+            if (iconURL && ![match valueForKey:@"largeIconURL"]) {
+                [match setValue:iconURL forKey:@"largeIconURL"];
+                [match setValue:@128 forKey:@"largeIconWidth"];
+                Class iconClass = NSClassFromString(@"RDKAwardIcon");
+                id icon = iconClass ? [iconClass new] : nil;
+                if (icon) {
+                    [icon setValue:iconURL forKey:@"url"];
+                    [icon setValue:@128 forKey:@"width"];
+                    [icon setValue:@128 forKey:@"height"];
+                    [match setValue:@[icon] forKey:@"resizedIcons"];
+                }
+            }
+        } @catch (__unused NSException *exception) {}
+    }
+    return [awards copy];
+}
+
+static void ApolloModernAwardRememberThing(id thing) {
+    if (!thing || ApolloModernAwardFullName(thing).length == 0) return;
+    @synchronized (ApolloModernAwardStateLock()) {
+        [ApolloModernAwardKnownThings() addObject:thing];
+    }
+}
+
+static void ApolloModernAwardApplyCachedToThing(id thing, BOOL notify) {
+    if (!thing || !sModernAwardsEnabled) return;
+    ApolloModernAwardRememberThing(thing);
+    NSString *fullName = ApolloModernAwardFullName(thing);
+    NSArray *records = nil;
+    @synchronized (ApolloModernAwardStateLock()) {
+        records = ApolloModernAwardCache()[fullName];
+    }
+    if (records.count == 0) return;
+    NSArray *existing = nil;
+    @try { existing = [thing valueForKey:@"awards"]; }
+    @catch (__unused NSException *exception) {}
+    NSArray *merged = ApolloModernAwardMergedAwards(thing, existing);
+    @try { [thing setValue:merged forKey:@"awards"]; }
+    @catch (NSException *exception) {
         ApolloLog(@"[ModernAwards] couldn't update Apollo award model: %@", exception);
         return;
     }
-    [[NSNotificationCenter defaultCenter]
-        postNotificationName:@"com.christianselig.ModelObjectUpdated" object:thing];
+    ApolloLog(@"[ModernAwards] applied %lu native award(s) to %@",
+              (unsigned long)merged.count, fullName);
+    if (notify) {
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:@"com.christianselig.ModelObjectUpdated" object:thing];
+    }
+}
+
+static void ApolloModernAwardRecordSelections(NSString *fullName, id awardedThing,
+                                               NSArray<NSDictionary *> *selections,
+                                               BOOL increment) {
+    if (fullName.length == 0 || selections.count == 0) return;
+    NSMutableArray<NSDictionary *> *records = nil;
+    @synchronized (ApolloModernAwardStateLock()) {
+        records = [ApolloModernAwardCache()[fullName] mutableCopy] ?: [NSMutableArray array];
+        for (NSDictionary *selection in selections) {
+            NSDictionary *candidate = ApolloModernAwardRecord(selection, 1);
+            if (!candidate) continue;
+            NSUInteger matchIndex = NSNotFound;
+            for (NSUInteger index = 0; index < records.count; index++) {
+                NSDictionary *record = records[index];
+                BOOL sameID = [record[@"id"] isEqualToString:candidate[@"id"]];
+                BOOL sameName = [record[@"name"] caseInsensitiveCompare:
+                    candidate[@"name"] ?: @""] == NSOrderedSame;
+                if (sameID || sameName) { matchIndex = index; break; }
+            }
+            NSInteger desiredCount = [candidate[@"count"] integerValue];
+            if (matchIndex != NSNotFound) {
+                NSDictionary *old = records[matchIndex];
+                NSInteger oldCount = [old[@"count"] integerValue];
+                desiredCount = MAX(desiredCount, increment ? oldCount + 1 : oldCount);
+                if (!candidate[@"icon"] && old[@"icon"]) {
+                    NSMutableDictionary *withIcon = [candidate mutableCopy];
+                    withIcon[@"icon"] = old[@"icon"];
+                    candidate = [withIcon copy];
+                }
+            }
+            if (increment) {
+                NSArray *currentAwards = nil;
+                @try { currentAwards = [awardedThing valueForKey:@"awards"]; }
+                @catch (__unused NSException *exception) {}
+                for (id award in currentAwards) {
+                    if (ApolloModernAwardRecordMatchesAward(candidate, award)) {
+                        desiredCount = MAX(desiredCount,
+                            [[award valueForKey:@"count"] integerValue] + 1);
+                        break;
+                    }
+                }
+            }
+            NSMutableDictionary *stored = [candidate mutableCopy];
+            stored[@"count"] = @(MAX(1, desiredCount));
+            if (matchIndex == NSNotFound) [records addObject:[stored copy]];
+            else records[matchIndex] = [stored copy];
+        }
+        ApolloModernAwardCache()[fullName] = [records copy];
+        [[NSUserDefaults standardUserDefaults]
+            setObject:[ApolloModernAwardCache() copy]
+               forKey:kApolloModernAwardCacheDefaultsKey];
+    }
+
+    NSArray *knownThings = nil;
+    @synchronized (ApolloModernAwardStateLock()) {
+        knownThings = ApolloModernAwardKnownThings().allObjects;
+    }
+    NSMutableArray *matchingThings = [NSMutableArray array];
+    if (awardedThing) [matchingThings addObject:awardedThing];
+    for (id thing in knownThings) {
+        if ([ApolloModernAwardFullName(thing) isEqualToString:fullName] &&
+            ![matchingThings containsObject:thing]) {
+            [matchingThings addObject:thing];
+        }
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (id thing in matchingThings) ApolloModernAwardApplyCachedToThing(thing, YES);
+    });
+}
+
+static NSDictionary *ApolloModernAwardLegacyJSON(NSDictionary *record) {
+    NSString *identifier = ApolloModernAwardSafeString(record[@"id"], 128);
+    NSString *name = ApolloModernAwardSafeString(record[@"name"], 128) ?: @"Reddit Award";
+    if (identifier.length == 0) return nil;
+    NSMutableDictionary *JSON = [@{
+        @"id": identifier,
+        @"name": name,
+        @"count": @(MAX(1, [record[@"count"] integerValue])),
+        @"is_enabled": @YES,
+    } mutableCopy];
+    NSURL *iconURL = ApolloModernAwardValidatedIconURL(record[@"icon"]);
+    if (iconURL) {
+        JSON[@"icon_url"] = iconURL.absoluteString;
+        JSON[@"icon_width"] = @128;
+        JSON[@"resized_icons"] = @[@{
+            @"url": iconURL.absoluteString,
+            @"width": @128,
+            @"height": @128,
+        }];
+    }
+    return [JSON copy];
+}
+
+static BOOL ApolloModernAwardMergeIntoJSONNode(id node) {
+    __block BOOL changed = NO;
+    if ([node isKindOfClass:[NSMutableArray class]]) {
+        for (id child in (NSArray *)node) {
+            if (ApolloModernAwardMergeIntoJSONNode(child)) changed = YES;
+        }
+        return changed;
+    }
+    if (![node isKindOfClass:[NSMutableDictionary class]]) return NO;
+
+    NSMutableDictionary *dictionary = node;
+    NSString *kind = [dictionary[@"kind"] isKindOfClass:[NSString class]] ?
+        dictionary[@"kind"] : nil;
+    NSMutableDictionary *thingData =
+        [dictionary[@"data"] isKindOfClass:[NSMutableDictionary class]] ?
+            dictionary[@"data"] : nil;
+    if (([kind isEqualToString:@"t1"] || [kind isEqualToString:@"t3"]) && thingData) {
+        NSString *fullName = [thingData[@"name"] isKindOfClass:[NSString class]] ?
+            thingData[@"name"] : nil;
+        NSString *identifier = [thingData[@"id"] isKindOfClass:[NSString class]] ?
+            thingData[@"id"] : nil;
+        if (fullName.length == 0 && identifier.length > 0) {
+            fullName = [NSString stringWithFormat:@"%@_%@", kind, identifier];
+        }
+        NSArray<NSDictionary *> *records = nil;
+        @synchronized (ApolloModernAwardStateLock()) {
+            records = [ApolloModernAwardCache()[fullName] copy];
+        }
+        if (records.count > 0) {
+            NSMutableArray *awardings =
+                [thingData[@"all_awardings"] isKindOfClass:[NSArray class]] ?
+                    [thingData[@"all_awardings"] mutableCopy] : [NSMutableArray array];
+            for (NSDictionary *record in records) {
+                NSDictionary *legacy = ApolloModernAwardLegacyJSON(record);
+                if (!legacy) continue;
+                NSUInteger matchIndex = NSNotFound;
+                for (NSUInteger index = 0; index < awardings.count; index++) {
+                    NSDictionary *existing = [awardings[index] isKindOfClass:[NSDictionary class]] ?
+                        awardings[index] : nil;
+                    BOOL sameID = [existing[@"id"] isEqualToString:legacy[@"id"]];
+                    BOOL sameName = [existing[@"name"] caseInsensitiveCompare:
+                        legacy[@"name"] ?: @""] == NSOrderedSame;
+                    if (sameID || sameName) { matchIndex = index; break; }
+                }
+                if (matchIndex == NSNotFound) {
+                    [awardings addObject:legacy];
+                } else {
+                    NSMutableDictionary *merged = [awardings[matchIndex] mutableCopy];
+                    [merged addEntriesFromDictionary:legacy];
+                    NSInteger count = MAX([awardings[matchIndex][@"count"] integerValue],
+                                          [legacy[@"count"] integerValue]);
+                    merged[@"count"] = @(MAX(1, count));
+                    awardings[matchIndex] = [merged copy];
+                }
+            }
+            thingData[@"all_awardings"] = [awardings copy];
+            ApolloLog(@"[ModernAwards] merged %lu cached award(s) into Reddit JSON for %@",
+                      (unsigned long)records.count, fullName);
+            changed = YES;
+        }
+    }
+
+    for (id value in dictionary.allValues) {
+        if (value == thingData) continue;
+        if (ApolloModernAwardMergeIntoJSONNode(value)) changed = YES;
+    }
+    if (thingData) {
+        for (id value in thingData.allValues) {
+            if (ApolloModernAwardMergeIntoJSONNode(value)) changed = YES;
+        }
+    }
+    return changed;
+}
+
+NSData *ApolloModernAwardsMergeCachedResponseData(NSURLResponse *response, NSData *data) {
+    if (!sModernAwardsEnabled || ![data isKindOfClass:[NSData class]] || data.length == 0) {
+        return data;
+    }
+    if (![response isKindOfClass:[NSHTTPURLResponse class]]) return data;
+    NSURL *URL = ((NSHTTPURLResponse *)response).URL;
+    NSString *host = URL.host.lowercaseString;
+    if (![host isEqualToString:@"www.reddit.com"] &&
+        ![host isEqualToString:@"oauth.reddit.com"]) return data;
+    @synchronized (ApolloModernAwardStateLock()) {
+        if (ApolloModernAwardCache().count == 0) return data;
+    }
+    id root = [NSJSONSerialization JSONObjectWithData:data
+                                              options:NSJSONReadingMutableContainers
+                                                error:NULL];
+    if (!root || !ApolloModernAwardMergeIntoJSONNode(root)) return data;
+    NSData *merged = [NSJSONSerialization dataWithJSONObject:root options:0 error:NULL];
+    return merged ?: data;
 }
 
 static NSString *ApolloModernAwardFullName(id thing) {
-    if (!thing || ![thing respondsToSelector:@selector(fullName)]) return nil;
-    id value = ((id (*)(id, SEL))objc_msgSend)(thing, @selector(fullName));
-    if (![value isKindOfClass:[NSString class]]) return nil;
-    NSString *fullName = [(NSString *)value stringByTrimmingCharactersInSet:
-        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (!thing) return nil;
+    id value = [thing respondsToSelector:@selector(fullName)] ?
+        ((id (*)(id, SEL))objc_msgSend)(thing, @selector(fullName)) : nil;
+    NSString *fullName = [value isKindOfClass:[NSString class]] ?
+        [(NSString *)value stringByTrimmingCharactersInSet:
+            NSCharacterSet.whitespaceAndNewlineCharacterSet] : nil;
+    if (fullName.length == 0 && [thing respondsToSelector:@selector(identifier)]) {
+        id rawIdentifier = ((id (*)(id, SEL))objc_msgSend)(thing, @selector(identifier));
+        NSString *identifier = [rawIdentifier isKindOfClass:[NSString class]] ?
+            [(NSString *)rawIdentifier stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet] : nil;
+        Class linkClass = NSClassFromString(@"RDKLink");
+        Class commentClass = NSClassFromString(@"RDKComment");
+        if (identifier.length > 0 && linkClass && [thing isKindOfClass:linkClass]) {
+            fullName = [@"t3_" stringByAppendingString:identifier];
+        } else if (identifier.length > 0 && commentClass &&
+                   [thing isKindOfClass:commentClass]) {
+            fullName = [@"t1_" stringByAppendingString:identifier];
+        }
+    }
     BOOL supportedPrefix = [fullName hasPrefix:@"t1_"] || [fullName hasPrefix:@"t3_"];
     if (!supportedPrefix || fullName.length <= 3) return nil;
     NSCharacterSet *invalid = [NSCharacterSet.alphanumericCharacterSet invertedSet];
@@ -193,23 +557,68 @@ static NSArray<NSHTTPCookie *> *ApolloModernAwardCookiesFromHeader(NSString *hea
 }
 
 static NSString *ApolloModernAwardBridgeScript(void) {
-    // Only operation names and UI lifecycle signals cross this bridge. Cookies,
-    // request bodies, messages, and award choices remain entirely in Reddit.
+    // Only lifecycle signals and the selected award's public catalog metadata
+    // cross this bridge. Cookies, request bodies, anonymity, and messages remain
+    // entirely inside Reddit's first-party implementation.
     return @"(function(){"
         "if(window.__apolloModernAwardsInstalled)return;"
         "window.__apolloModernAwardsInstalled=true;"
         "var send=function(type,extra){try{window.webkit.messageHandlers.apolloModernAwards.postMessage(Object.assign({type:type},extra||{}));}catch(_){}};"
-        "var selected={};"
+        "var selected={},selectedNode=null;"
+        "var allNodes=function(root){"
+            "var output=[],queue=root?[root]:[],seen=new Set();"
+            "while(queue.length&&output.length<800){var node=queue.shift();if(!node||seen.has(node))continue;seen.add(node);output.push(node);"
+                "if(node.shadowRoot)queue.push(node.shadowRoot);"
+                "if(node.children)for(var child of node.children)queue.push(child);"
+            "}return output;"
+        "};"
+        "var redditAsset=function(raw){try{var value=String(raw||'').trim();if(!value)return '';"
+            "var url=new URL(value,location.origin),host=url.hostname.toLowerCase();"
+            "return url.protocol==='https:'&&(/(^|\\.)redd\\.it$/.test(host)||/(^|\\.)redditstatic\\.com$/.test(host)||/(^|\\.)redditmedia\\.com$/.test(host))?url.href:'';"
+        "}catch(_){return '';}};"
+        "var imageURL=function(root,path){var nodes=(path||[]).concat(allNodes(root));"
+            "for(var node of nodes){if(!node)continue;var values=[node.currentSrc,node.src];"
+                "if(node.getAttribute){values.push(node.getAttribute('src'),node.getAttribute('data-src'),node.getAttribute('icon-url'),node.getAttribute('image-url'),node.getAttribute('asset-url'));"
+                    "var srcset=node.getAttribute('srcset');if(srcset)values.push(srcset.split(',')[0].trim().split(/\\s+/)[0]);}"
+                "for(var value of values){var asset=redditAsset(value);if(asset)return asset;}"
+                "try{var background=getComputedStyle(node).backgroundImage||'';var match=background.match(/url\\([\"']?([^\"')]+)[\"']?\\)/);var asset=redditAsset(match&&match[1]);if(asset)return asset;}catch(_){}"
+            "}return '';"
+        "};"
+        "var labelFor=function(root,path){var nodes=[root].concat(path||[]).concat(allNodes(root));"
+            "for(var node of nodes){if(!node)continue;var values=[];if(node.getAttribute)values.push(node.getAttribute('aria-label'),node.getAttribute('title'),node.getAttribute('data-award-name'),node.getAttribute('data-name'),node.getAttribute('alt'));"
+                "values.push(node.alt);for(var value of values){value=String(value||'').trim();if(value&&value.length<=128&&!/^(award|select|image)$/i.test(value))return value;}"
+            "}return '';"
+        "};"
+        "var idFor=function(root,path){var nodes=[root].concat(path||[]);for(var node of nodes){if(!node)continue;var values=[];"
+            "if(node.getAttribute)values.push(node.getAttribute('data-award-id'),node.getAttribute('award-id'),node.getAttribute('data-id'),node.getAttribute('thing-id'));"
+            "values.push(node.awardId,node.awardID);for(var value of values){value=String(value||'').trim();if(value&&value.length<=128)return value;}}return '';};"
+        "var metadataFor=function(root,path){if(!root)return {};var id=idFor(root,path),name=labelFor(root,path),icon=imageURL(root,path),metadata={};"
+            "if(id)metadata.id=id;if(name)metadata.name=name.replace(/^give\\s+/i,'').trim();if(icon)metadata.icon=icon;"
+            "var text=String(root.innerText||root.textContent||'');var countMatch=text.match(/(?:^|\\s)(\\d{1,6})(?:\\s|$)/);if(countMatch)metadata.count=parseInt(countMatch[1],10)||1;return metadata;"
+        "};"
+        "window.__apolloModernAwardAllNodes=allNodes;window.__apolloModernAwardMetadataFor=metadataFor;"
+        "var remember=function(root,path){if(!root)return;var metadata=metadataFor(root,path);"
+            "if(metadata.id)selected.id=metadata.id;if(metadata.name)selected.name=metadata.name;if(metadata.icon)selected.icon=metadata.icon;selectedNode=root;"
+        "};"
+        "var refreshSelected=function(){if(selectedNode)remember(selectedNode,[]);var sheet=document.querySelector('award-selection-sheet');if(!sheet)return selected;"
+            "var nodes=allNodes(sheet),active=nodes.find(function(node){return node&&node.getAttribute&&(node.getAttribute('aria-pressed')==='true'||node.getAttribute('aria-selected')==='true'||node.getAttribute('data-selected')==='true'||node.hasAttribute('selected'));});"
+            "if(active)remember(active,[]);var buttons=nodes.filter(function(node){return node&&node.matches&&node.matches('button,[role=button]');});"
+            "var submit=buttons.find(function(node){return /^give\\s+/i.test(String(node.innerText||node.textContent||'').trim());});"
+            "if(submit){var submitName=String(submit.innerText||submit.textContent||'').trim().replace(/^give\\s+/i,'').trim();if(submitName&&submitName.length<=128)selected.name=submitName;}"
+            "if(!selected.icon&&selected.name){var named=nodes.find(function(node){var label=labelFor(node,[]);return label&&label.toLowerCase().indexOf(selected.name.toLowerCase())!==-1&&imageURL(node,[]);});if(named)remember(named,[]);}"
+            "return selected;"
+        "};"
         "var operation=function(input,init){"
             "var url=String((input&&input.url)||input||'');"
             "var body=String((init&&init.body)||'');"
             "return /CreateAwardOrder|createAwardOrder/.test(url+' '+body);"
         "};"
+        "var requestAwardID=function(init){var body=String((init&&init.body)||'');var match=body.match(/[\"'](?:awardId|award_id|awardID)[\"']\\s*:\\s*[\"']([^\"']{1,128})/i);return match?match[1]:'';};"
         "var originalFetch=window.fetch;"
         "if(originalFetch){window.fetch=function(input,init){"
-            "var isAward=operation(input,init),promise=originalFetch.apply(this,arguments);"
+            "var isAward=operation(input,init),requestID=isAward?requestAwardID(init):'',promise=originalFetch.apply(this,arguments);"
             "if(isAward){promise.then(function(response){"
-                "if(response&&response.ok)send('awarded',{selection:selected});"
+                "if(response&&response.ok){refreshSelected();if(requestID&&!selected.id)selected.id=requestID;send('awarded',{selection:selected});}"
                 "else send('awardError',{status:(response&&response.status)||0});"
             "}).catch(function(error){send('awardError',{message:String(error||'Request failed')});});}"
             "return promise;"
@@ -217,12 +626,11 @@ static NSString *ApolloModernAwardBridgeScript(void) {
         "document.addEventListener('click',function(event){"
             "var target=event.target;"
             "var path=event.composedPath?event.composedPath():[target];"
-            "var choice=path.find(function(node){return node&&node.getAttribute&&(node.getAttribute('data-award-id')||node.getAttribute('award-id'));});"
-            "if(choice){"
-                "var image=(choice.querySelector&&choice.querySelector('img'))||path.find(function(node){return node&&node.tagName==='IMG';});"
-                "var id=choice.getAttribute('data-award-id')||choice.getAttribute('award-id')||'';"
-                "var name=choice.getAttribute('aria-label')||choice.getAttribute('title')||(image&&(image.alt||image.getAttribute('aria-label')))||'';"
-                "selected={id:String(id).slice(0,128),name:String(name).slice(0,128),icon:String((image&&(image.currentSrc||image.src))||'').slice(0,2048)};"
+            "var sheet=path.find(function(node){return node&&node.tagName==='AWARD-SELECTION-SHEET';})||document.querySelector('award-selection-sheet');"
+            "var interactive=path.find(function(node){return node&&node.matches&&node.matches('button,[role=button],label,[data-award-id],[award-id]');});"
+            "if(sheet&&interactive){var text=String(interactive.innerText||interactive.textContent||'').trim();var icon=imageURL(interactive,path);"
+                "if(icon&&!/^give\\s+/i.test(text))remember(interactive,path);"
+                "if(/^give\\s+/i.test(text)){var submitName=text.replace(/^give\\s+/i,'').trim();if(submitName&&submitName.length<=128)selected.name=submitName;refreshSelected();}"
             "}"
             "var showAll=path.find(function(node){return node.matches&&node.matches('award-selection-sheet button:not([data-award-id])');});"
             "if(showAll&&location.pathname.indexOf('/svc/shreddit/award-dialog/')===0){"
@@ -231,8 +639,8 @@ static NSString *ApolloModernAwardBridgeScript(void) {
             "}"
             "if(target&&target.closest&&target.closest('button[aria-label=\"Close\"]'))send('close');"
         "},true);"
-        "document.addEventListener('award_content',function(){send('awarded',{selection:selected});},true);"
-        "document.addEventListener('award-content',function(){send('awarded',{selection:selected});},true);"
+        "document.addEventListener('award_content',function(){send('awarded',{selection:refreshSelected()});},true);"
+        "document.addEventListener('award-content',function(){send('awarded',{selection:refreshSelected()});},true);"
         "var announced=false,signedOut=false;"
         "var inspect=function(){"
             "var dialog=document.querySelector('award-dialog[page=\"selection-sheet\"],award-dialog,#award-dialog,[dialog-id=\"award-dialog\"]');"
@@ -257,7 +665,7 @@ static NSString *ApolloModernAwardOpenFullPickerScript(NSString *fullName) {
         "window.__apolloModernAwardsOpeningFull=true;"
         "var fullName='%@',started=false,ticks=0,targetFound=false,scrolled=false,controlFound=false,"
             "loaderFound=false,loaderRequested=false,loaderFailed=false,targetTag='',targetTags='',loaderNames='',"
-            "routeFound=false,routeStarted=false,routeFailed=false;"
+            "routeFound=false,routeStarted=false,routeFailed=false,existingReported=false;"
         "var exactTarget=function(){"
             "var roots='shreddit-post,shreddit-comment,article,[data-testid=\\\"post-container\\\"]';"
             "var direct=[document.getElementById(fullName),document.getElementById(fullName.substring(3))];"
@@ -286,6 +694,15 @@ static NSString *ApolloModernAwardOpenFullPickerScript(NSString *fullName) {
                     "targetTags=Array.from(new Set(Array.from(target.querySelectorAll('*')).map(function(node){"
                         "return (node.tagName||'').toLowerCase();"
                     "}).filter(function(tag){return /award|comment|faceplate|overflow/.test(tag);}))).slice(0,24).join(',');"
+                "}"
+                "if(target&&!existingReported&&window.__apolloModernAwardAllNodes&&window.__apolloModernAwardMetadataFor){"
+                    "var existing=[],seenAssets=new Set();"
+                    "for(var node of window.__apolloModernAwardAllNodes(target)){"
+                        "if(!node||!node.getAttribute)continue;var descriptor=((node.tagName||'')+' '+(node.id||'')+' '+(node.className||'')+' '+(node.getAttribute('aria-label')||'')+' '+(node.getAttribute('data-testid')||'')).toLowerCase();"
+                        "if(descriptor.indexOf('award')===-1)continue;var metadata=window.__apolloModernAwardMetadataFor(node,[]);"
+                        "if(!metadata.icon||seenAssets.has(metadata.icon))continue;seenAssets.add(metadata.icon);existing.push(metadata);if(existing.length===12)break;"
+                    "}"
+                    "if(existing.length||ticks>10){existingReported=true;if(existing.length)window.webkit.messageHandlers.apolloModernAwards.postMessage({type:'existingAwards',awards:existing});}"
                 "}"
                 "if(target&&(!scrolled||ticks%%10===0)){"
                     "scrolled=true;"
@@ -485,6 +902,7 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
 @property (nonatomic, strong) id thingToAward;
 @property (nonatomic, strong) UIImage *backgroundSnapshot;
 @property (nonatomic, strong) UIImageView *backgroundView;
+@property (nonatomic, strong) UIView *dimmingView;
 @property (nonatomic, strong) ApolloWebSessionEntry *session;
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
@@ -495,6 +913,7 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
 @property (nonatomic) BOOL receivedReady;
 @property (nonatomic) BOOL receivedAward;
 @property (nonatomic) BOOL showingFullPicker;
+@property (nonatomic) BOOL overlayPresentation;
 @property (nonatomic) NSUInteger loadGeneration;
 - (instancetype)initWithThingFullName:(NSString *)fullName
                             permalink:(NSURL *)permalink
@@ -598,10 +1017,10 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
     self.backgroundView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.backgroundView.contentMode = UIViewContentModeScaleAspectFill;
     [self.view addSubview:self.backgroundView];
-    UIView *dimmingView = [[UIView alloc] initWithFrame:self.view.bounds];
-    dimmingView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    dimmingView.backgroundColor = [UIColor.blackColor colorWithAlphaComponent:0.42];
-    [self.view addSubview:dimmingView];
+    self.dimmingView = [[UIView alloc] initWithFrame:self.view.bounds];
+    self.dimmingView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.dimmingView.backgroundColor = [UIColor.blackColor colorWithAlphaComponent:0.42];
+    [self.view addSubview:self.dimmingView];
 }
 
 - (void)viewDidLoad {
@@ -836,6 +1255,24 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
 
 - (void)dismissHost {
     UIViewController *host = self.hostController;
+    if (self.overlayPresentation || self.presentingViewController) {
+        NSString *fullName = [self.thingFullName copy];
+        id thingToAward = self.thingToAward;
+        [self dismissViewControllerAnimated:YES completion:^{
+            ApolloModernAwardApplyCachedToThing(thingToAward, YES);
+            NSArray *knownThings = nil;
+            @synchronized (ApolloModernAwardStateLock()) {
+                knownThings = ApolloModernAwardKnownThings().allObjects;
+            }
+            for (id thing in knownThings) {
+                if ([ApolloModernAwardFullName(thing) isEqualToString:fullName]) {
+                    ApolloModernAwardApplyCachedToThing(thing, YES);
+                }
+            }
+            ApolloModernAwardReloadVisibleTables(host.view);
+        }];
+        return;
+    }
     if (!host) return;
     if ([host respondsToSelector:@selector(cancelBarButtonItemTappedWithSender:)]) {
         ((void (*)(id, SEL, id))objc_msgSend)(
@@ -859,6 +1296,21 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
         if (!self.showingFullPicker) [self revealWebView];
     } else if ([type isEqualToString:@"showAll"]) {
         dispatch_async(dispatch_get_main_queue(), ^{ [self loadFullPicker]; });
+    } else if ([type isEqualToString:@"existingAwards"]) {
+        NSArray *awards = [payload[@"awards"] isKindOfClass:[NSArray class]] ?
+            payload[@"awards"] : @[];
+        NSMutableArray<NSDictionary *> *safeAwards = [NSMutableArray array];
+        NSUInteger iconCount = 0;
+        for (id award in awards) {
+            if (![award isKindOfClass:[NSDictionary class]]) continue;
+            [safeAwards addObject:award];
+            if (ApolloModernAwardValidatedIconURL(award[@"icon"])) iconCount++;
+        }
+        ApolloLog(@"[ModernAwards] recovered %lu existing award(s), %lu with icons for %@",
+                  (unsigned long)safeAwards.count, (unsigned long)iconCount,
+                  self.thingFullName);
+        ApolloModernAwardRecordSelections(self.thingFullName, self.thingToAward,
+                                           safeAwards, NO);
     } else if ([type isEqualToString:@"fullReady"]) {
         ApolloLog(@"[ModernAwards] full picker ready for %@ sheet=%@ rect=(%@,%@ %@x%@) viewport=%@x%@",
                   self.thingFullName,
@@ -901,7 +1353,12 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
         ApolloLog(@"[ModernAwards] Reddit accepted award for %@", self.thingFullName);
         NSDictionary *selection = [payload[@"selection"] isKindOfClass:[NSDictionary class]] ?
             payload[@"selection"] : @{};
-        ApolloModernAwardApplyToThing(self.thingToAward, selection);
+        ApolloLog(@"[ModernAwards] selected metadata id=%@ name=%@ icon=%@",
+                  [selection[@"id"] isKindOfClass:[NSString class]] && [selection[@"id"] length] > 0 ? @"yes" : @"no",
+                  [selection[@"name"] isKindOfClass:[NSString class]] && [selection[@"name"] length] > 0 ? @"yes" : @"no",
+                  ApolloModernAwardValidatedIconURL(selection[@"icon"]) ? @"yes" : @"no");
+        ApolloModernAwardRecordSelections(self.thingFullName, self.thingToAward,
+                                           selection.count > 0 ? @[selection] : @[], YES);
         [[NSNotificationCenter defaultCenter]
             postNotificationName:@"ApolloModernAwardGrantedNotification"
             object:self.thingToAward
@@ -1023,6 +1480,44 @@ static ApolloModernAwardWebController *ApolloModernAwardControllerForHost(
     return objc_getAssociatedObject(host, kApolloModernAwardControllerKey);
 }
 
+// Apollo's retired flow pushes AwardGiftingViewController onto the navigation
+// stack. Replacing that controller's contents worked functionally, but UIKit
+// still animated an entire screenshot-like page into view before Reddit's
+// sheet loaded. Intercept only that one push and present transparently over the
+// live source controller instead; the comments/post view never moves.
+%hook UINavigationController
+
+- (void)pushViewController:(UIViewController *)viewController animated:(BOOL)animated {
+    Class giftingClass = NSClassFromString(@"_TtC6Apollo26AwardGiftingViewController");
+    if (sModernAwardsEnabled && giftingClass &&
+        [viewController isKindOfClass:giftingClass]) {
+        id thing = ApolloModernAwardObjectIvar(viewController, "thingToAward");
+        NSString *fullName = ApolloModernAwardFullName(thing);
+        UIViewController *source = self.topViewController;
+        if (fullName.length > 0 && source && source.view.window) {
+            ApolloModernAwardRememberThing(thing);
+            ApolloModernAwardWebController *controller =
+                [[ApolloModernAwardWebController alloc]
+                    initWithThingFullName:fullName
+                    permalink:ApolloModernAwardPermalink(thing)
+                    thing:thing
+                    snapshot:nil
+                    host:source];
+            controller.overlayPresentation = YES;
+            controller.modalPresentationStyle = UIModalPresentationOverFullScreen;
+            controller.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [source presentViewController:controller animated:YES completion:nil];
+            });
+            ApolloLog(@"[ModernAwards] presented live overlay for %@", fullName);
+            return;
+        }
+    }
+    %orig;
+}
+
+%end
+
 %hook _TtC6Apollo26AwardGiftingViewController
 
 - (void)viewDidLoad {
@@ -1111,6 +1606,48 @@ static ApolloModernAwardWebController *ApolloModernAwardControllerForHost(
             setNavigationBarHidden:wasHidden.boolValue animated:NO];
     }
     %orig;
+}
+
+%end
+
+// Keep live model duplicates synchronized after a successful award. Initial
+// model construction is handled above at the response-data boundary.
+%hook RDKThing
+
+- (void)setFullName:(NSString *)fullName {
+    %orig;
+    ApolloModernAwardRememberThing(self);
+    // Mantle can assign `awards` before `fullName`. Merge synchronously as soon
+    // as the identifier arrives so Apollo sees the award while it is building
+    // PostInfoNode/AwardsNode, rather than after the header layout is complete.
+    ApolloModernAwardApplyCachedToThing(self, NO);
+}
+
+- (void)setIdentifier:(NSString *)identifier {
+    %orig;
+    ApolloModernAwardRememberThing(self);
+    // API-key-free JSON currently leaves RDKThing.fullName nil but still
+    // supplies identifier. RDKLink/RDKComment class identity is sufficient to
+    // reconstruct Reddit's stable t3_/t1_ fullname at this point.
+    ApolloModernAwardApplyCachedToThing(self, NO);
+}
+
+%end
+
+%hook RDKLink
+
+- (void)setAwards:(NSArray *)awards {
+    ApolloModernAwardRememberThing(self);
+    %orig(ApolloModernAwardMergedAwards(self, awards));
+}
+
+%end
+
+%hook RDKComment
+
+- (void)setAwards:(NSArray *)awards {
+    ApolloModernAwardRememberThing(self);
+    %orig(ApolloModernAwardMergedAwards(self, awards));
 }
 
 %end
