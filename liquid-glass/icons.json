@@ -15,7 +15,7 @@
     },
     {
       "id": "helios", "title": "Helios",
-      "coverIconIDs": ["helios-ultra-halo", "helios-cryo", "helios"],
+      "coverIconIDs": ["helios-legacy", "helios-cryo", "helios"],
       "description": "Icons inspired by the Hyper Suit 4000 icon from Apollo, and the Modern icons by paulo1manso.",
       "author": "IllIIllIllIllII"
     },
@@ -90,6 +90,8 @@
     
     { "id": "helios",                   "displayName": "Helios",              "designer": "IllIIllIllIllII", "group": "helios" },
     { "id": "helios-halo",              "displayName": "Helios Halo",         "designer": "IllIIllIllIllII", "group": "helios" },
+    { "id": "helios-legacy",            "displayName": "Helios Legacy",       "designer": "IllIIllIllIllII", "group": "helios" },
+    { "id": "helios-tribute",           "displayName": "Helios Tribute",      "designer": "IllIIllIllIllII", "group": "helios" },
     { "id": "helios-cryo",              "displayName": "Helios Cryo",         "designer": "IllIIllIllIllII", "group": "helios" },
     { "id": "helios-cryo-halo",         "displayName": "Helios Cryo Halo",    "designer": "IllIIllIllIllII", "group": "helios" },
     { "id": "helios-parallax",          "displayName": "Helios Parallax",     "designer": "IllIIllIllIllII", "group": "helios" },

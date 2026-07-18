@@ -77,6 +77,8 @@ static const LGIconRowEntry kLGGroupEntries_classics[] = {
 static const LGIconRowEntry kLGGroupEntries_helios[] = {
     { "helios", "Helios", "IllIIllIllIllII" },
     { "helios-halo", "Helios Halo", "IllIIllIllIllII" },
+    { "helios-legacy", "Helios Legacy", "IllIIllIllIllII" },
+    { "helios-tribute", "Helios Tribute", "IllIIllIllIllII" },
     { "helios-cryo", "Helios Cryo", "IllIIllIllIllII" },
     { "helios-cryo-halo", "Helios Cryo Halo", "IllIIllIllIllII" },
     { "helios-parallax", "Helios Parallax", "IllIIllIllIllII" },
@@ -108,7 +110,7 @@ static const char *const kLGGroupCover_classics[] = {
 };
 
 static const char *const kLGGroupCover_helios[] = {
-    "helios-ultra-halo",
+    "helios-legacy",
     "helios-cryo",
     "helios",
 };
@@ -122,7 +124,7 @@ static const char *const kLGGroupCover_concepts[] = {
 static const LGIconGroupDef kLGIconGroups[] = {
     { "original", "Original", "The original Apollo icon in Liquid Glass, crafted by the community.", "", kLGGroupEntries_original, 5, kLGGroupCover_original, 3 },
     { "classics", "Classics", "Dozens of colorful variants and one-off designs from the original Apollo app, recreated in Liquid Glass.", "jryng, bajader, lilacvibes", kLGGroupEntries_classics, 44, kLGGroupCover_classics, 3 },
-    { "helios", "Helios", "Icons inspired by the Hyper Suit 4000 icon from Apollo, and the Modern icons by paulo1manso.", "IllIIllIllIllII", kLGGroupEntries_helios, 8, kLGGroupCover_helios, 3 },
+    { "helios", "Helios", "Icons inspired by the Hyper Suit 4000 icon from Apollo, and the Modern icons by paulo1manso.", "IllIIllIllIllII", kLGGroupEntries_helios, 10, kLGGroupCover_helios, 3 },
     { "concepts", "Concepts", "A mix of standalone icon concepts, including small thematic sets too short for their own pack.", "", kLGGroupEntries_concepts, 7, kLGGroupCover_concepts, 3 },
 };
 
