@@ -2068,11 +2068,17 @@ static void ApolloLPApplyStyleSize(id style, CGSize size) {
 
 static void ApolloLPClearStyleSize(id style) {
     if (!style) return;
-    @try {
-        [style setValue:nil forKey:@"preferredSize"];
-    } @catch (__unused NSException *exception) {
-        ApolloLPApplyStyleSize(style, CGSizeZero);
-    }
+    // Never KVC-nil a struct-typed key: `setValue:nil forKey:@"preferredSize"`
+    // reaches -[NSObject setNilValueForKey:], which THROWS NSInvalidArgumentException
+    // unconditionally (CGSize has no nil form), so the old @try here threw and
+    // caught an ObjC exception on EVERY compact-card measure — the @catch arm
+    // (preferredSize = zero) was the de facto behavior all along. Worse, the row
+    // is measured while Texture layout has the main-thread stack nearly
+    // exhausted, and raising the exception there (reason string formatting +
+    // unwind) crossed the stack guard — the 07-18 sort-switch SIGSEGV crashes
+    // (KERN_PROTECTION_FAILURE in __CFStringChangeSizeMultiple/_Unwind_RaiseException
+    // right above setNilValueForKey:). Set the zero size directly instead.
+    ApolloLPApplyStyleSize(style, CGSizeZero);
 }
 
 static void ApolloLPResetStyle(id style) {
@@ -4197,6 +4203,125 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
     return ApolloBannedProfileWrapLinkButtonSpecWithBannedHint(linkButtonNode, nativeSpec, redditUsername);
 }
 
+// ========================== Stack-guard sentinel ==========================
+// The 07-18 device crashes (Apollo-2026-07-18-025209/025258.ips) died from
+// MAIN-THREAD STACK EXHAUSTION during a comment-section batch table update
+// (switching the comment sort; the pre-#686 report was a vote update): SIGSEGV
+// on the stack guard page with the whole 1MB main stack consumed under a
+// shallow ~80-frame chain — every visible frame is <2KB static, so something
+// content-scaled dynamically ate ~900KB inside one row measure. The immediate
+// straw was the always-throwing KVC nil-clear (fixed in ApolloLPClearStyleSize:
+// exception-reason formatting + unwind need tens of KB the guard page no longer
+// had). This sentinel is the second layer of defense, plus the diagnostic that
+// names the real stack hog if exhaustion ever recurs:
+//  - at row-measure entry points, cheaply check main-thread stack headroom;
+//  - if a rich card is about to be built on a starving stack, render the
+//    native link spec for that pass instead (a later, healthy measure builds
+//    the card normally — same upgrade path used by every other bail here);
+//  - append ONE frame-pointer-walk attribution (any frame gap >=32KB, with
+//    dladdr symbols) to the persistent login-diag file, so the exhaustion
+//    shows up in the user's exported debug log with the guilty frame named,
+//    even if the process dies right after.
+#import <pthread.h>
+#import <dlfcn.h>
+
+// Remaining-stack floor below which a rich-card build is unsafe. The crash
+// reports show ordinary measures surviving with ~30KB left until the KVC throw
+// needed more; 160KB gives the whole remaining layout pass (nested stack specs,
+// text kit, our card specs) comfortable margin while being far beyond anything
+// ordinary content consumes at this depth (sim baseline: ~35KB TOTAL).
+static const size_t kApolloLPStackHeadroomFloor = 160 * 1024;
+
+static BOOL ApolloLPMainStackNearlyExhausted(size_t *usedOut, size_t *sizeOut) {
+    if (pthread_main_np() == 0) return NO; // crashes are main-thread; bg layout threads size themselves
+    pthread_t me = pthread_self();
+    uintptr_t top = (uintptr_t)pthread_get_stackaddr_np(me);
+    size_t size = pthread_get_stacksize_np(me);
+    uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
+    if (size == 0 || sp <= top - size || sp >= top) return NO;
+    size_t used = top - sp;
+    if (usedOut) *usedOut = used;
+    if (sizeOut) *sizeOut = size;
+    return (size - used) < kApolloLPStackHeadroomFloor;
+}
+
+// Walk the frame-pointer chain and attribute any gap >=32KB to the function
+// that owns it. Rate-limited: the full walk + dladdr + diag-file append runs at
+// most once per minute (the cheap headroom check above is the everyday cost).
+static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size) {
+    static CFAbsoluteTime sLastDump = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (sLastDump != 0 && now - sLastDump < 60.0) return;
+    sLastDump = now;
+
+    pthread_t me = pthread_self();
+    uintptr_t top = (uintptr_t)pthread_get_stackaddr_np(me);
+    uintptr_t bottom = top - pthread_get_stacksize_np(me);
+    NSMutableString *bigs = [NSMutableString string];
+    uintptr_t cur = (uintptr_t)__builtin_frame_address(0);
+    int frames = 0;
+    while (frames < 1024 && cur >= bottom && cur + 16 <= top) {
+        uintptr_t next = *(uintptr_t *)cur;
+        uintptr_t ret  = *(uintptr_t *)(cur + 8);
+        if (next <= cur || next >= top || next < bottom) break;
+        uintptr_t delta = next - cur;
+        if (delta >= 32 * 1024) {
+            Dl_info info = {0};
+            const char *sym = "?", *img = "?";
+            uintptr_t off = 0;
+            if (dladdr((void *)ret, &info)) {
+                sym = info.dli_sname ?: "?";
+                img = info.dli_fname ? (strrchr(info.dli_fname, '/') ? strrchr(info.dli_fname, '/') + 1 : info.dli_fname) : "?";
+                off = info.dli_saddr ? (ret - (uintptr_t)info.dli_saddr) : 0;
+            }
+            [bigs appendFormat:@" | %luKB under %s`%s+0x%lx",
+                               (unsigned long)(delta / 1024), img, sym, (unsigned long)off];
+        }
+        cur = next;
+        frames++;
+    }
+    NSString *line = [NSString stringWithFormat:@"[StackGuard] %s: main stack %lu/%luKB used, %d frames%@",
+                      where, (unsigned long)(used / 1024), (unsigned long)(size / 1024), frames,
+                      bigs.length ? bigs : @" (no frame gap >=32KB)"];
+    ApolloLog(@"%@", line);
+    ApolloAppendLoginDiag(line);
+}
+
+// Row-measure entry: purely observational (a height must be returned either
+// way), but this is the earliest point the exhaustion is visible when the hog
+// sits below the ASDK layout recursion.
+%hook ASTableView
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    size_t diagUsed = 0, diagSize = 0;
+    if (ApolloLPMainStackNearlyExhausted(&diagUsed, &diagSize)) {
+        ApolloLPStackGuardReport("heightForRow", diagUsed, diagSize);
+    }
+    return %orig;
+}
+%end
+
+// Wide-spec probe: ASStackLayoutSpec's layout stack-allocates per child, so a
+// runaway children array (a re-append loop) would eat stack with no extra
+// frames. A legitimate comment body stays well under this.
+%hook ASStackLayoutSpec
+- (id)calculateLayoutThatFits:(struct CDStruct_90e057aa)constrainedSize {
+    NSArray *probeChildren = [(id)self respondsToSelector:@selector(children)] ? [(id)self children] : nil;
+    if (probeChildren.count >= 300) {
+        static CFAbsoluteTime sLastWideLog = 0;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (sLastWideLog == 0 || now - sLastWideLog >= 10.0) {
+            sLastWideLog = now;
+            NSString *line = [NSString stringWithFormat:@"[StackGuard] wide ASStackLayoutSpec: children=%lu",
+                              (unsigned long)probeChildren.count];
+            ApolloLog(@"%@", line);
+            ApolloAppendLoginDiag(line);
+        }
+    }
+    return %orig;
+}
+%end
+// ======================== END stack-guard sentinel ========================
+
 %hook _TtC6Apollo14LinkButtonNode
 
 // Release the per-card bitmap pins when the card leaves the preload range, and
@@ -4232,6 +4357,17 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
 }
 
 - (id)layoutSpecThatFits:(struct CDStruct_90e057aa)constrainedSize {
+    // Stack-guard sentinel: never start a rich-card build on a starving main
+    // stack (the 07-18 sort-switch crash geometry). The native spec is the
+    // cheapest correct layout; a later, healthy measure upgrades to the card.
+    {
+        size_t guardUsed = 0, guardSize = 0;
+        if (ApolloLPMainStackNearlyExhausted(&guardUsed, &guardSize)) {
+            ApolloLPStackGuardReport("LinkButtonNode.layoutSpecThatFits", guardUsed, guardSize);
+            ApolloLPRestoreHostShell((ASDisplayNode *)self);
+            return %orig;
+        }
+    }
     NSString *urlString = ApolloGetLinkButtonNodeURLString(self);
     NSURL *url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
     ApolloLPPrefetchRedditUserProfileIfNeeded(url);
