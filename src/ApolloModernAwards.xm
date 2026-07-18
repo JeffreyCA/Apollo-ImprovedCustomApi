@@ -136,7 +136,9 @@ static NSString *ApolloModernAwardOpenFullPickerScript(NSString *fullName) {
     return [NSString stringWithFormat:@"(function(){"
         "if(window.__apolloModernAwardsOpeningFull)return;"
         "window.__apolloModernAwardsOpeningFull=true;"
-        "var fullName='%@',started=false,ticks=0;"
+        "var fullName='%@',started=false,ticks=0,targetFound=false,scrolled=false,controlFound=false,"
+            "loaderFound=false,loaderRequested=false,loaderFailed=false,targetTag='',targetTags='',loaderNames='',"
+            "routeFound=false,routeStarted=false,routeFailed=false;"
         "var exactTarget=function(){"
             "var roots='shreddit-post,shreddit-comment,article,[data-testid=\\\"post-container\\\"]';"
             "var direct=[document.getElementById(fullName),document.getElementById(fullName.substring(3))];"
@@ -152,15 +154,122 @@ static NSString *ApolloModernAwardOpenFullPickerScript(NSString *fullName) {
             "if(full){clearInterval(timer);window.webkit.messageHandlers.apolloModernAwards.postMessage({type:'fullReady'});return;}"
             "if(!started){"
                 "var target=exactTarget();"
-                "var nodes=target?[target].concat(Array.from(target.querySelectorAll('*'))):[];"
+                "targetFound=targetFound||!!target;"
+                "if(target&&!targetTag){"
+                    "targetTag=target.tagName||'';"
+                    "targetTags=Array.from(new Set(Array.from(target.querySelectorAll('*')).map(function(node){"
+                        "return (node.tagName||'').toLowerCase();"
+                    "}).filter(function(tag){return /award|comment|faceplate|overflow/.test(tag);}))).slice(0,24).join(',');"
+                "}"
+                "if(target&&(!scrolled||ticks%%10===0)){"
+                    "scrolled=true;"
+                    "try{target.scrollIntoView({block:'center',inline:'nearest'});}catch(_){target.scrollIntoView();}"
+                "}"
+                // Both post and comment controls eventually call Reddit's
+                // programmatic AwardDialog faceplate route. Activate that same
+                // first-party route directly when present. This avoids relying
+                // on a private controller property that Reddit removed from the
+                // current full comment action row.
+                "var routeParts=Array.from(document.querySelectorAll('faceplate-partial,faceplate-iframe'));"
+                "var awardRoute=routeParts.find(function(node){"
+                    "return /awarddialog|award-dialog/i.test((node.getAttribute('name')||'')+' '+(node.getAttribute('src')||''));"
+                "});"
+                "routeFound=routeFound||!!awardRoute;"
+                "if(awardRoute&&typeof awardRoute.load==='function'){"
+                    "var routeName=awardRoute.getAttribute('name')||'';"
+                    "var routeLoader=Array.from(document.querySelectorAll('faceplate-loader')).find(function(loader){"
+                        "return loader.getAttribute('name')===routeName;"
+                    "});"
+                    "if(!routeLoader||typeof routeLoader.load==='function'){"
+                        "started=true;routeStarted=true;"
+                        "try{"
+                            "var routeURL=new URL(String(awardRoute.src||awardRoute.getAttribute('src')||''),location.origin);"
+                            "routeURL.pathname=routeURL.pathname.replace(/(?:%%3A|:)thingId/i,fullName);"
+                            "routeURL.searchParams.set('skipQuickGivePopover','true');"
+                            "if(routeLoader)routeLoader.loading='programmatic';"
+                            "awardRoute.loading='programmatic';"
+                            "if('renderMode' in awardRoute)awardRoute.renderMode='contents';"
+                            "awardRoute.src=routeURL.pathname+routeURL.search;"
+                            "var routeLoads=[];"
+                            "if(routeLoader)routeLoads.push(routeLoader.load());"
+                            "routeLoads.push(awardRoute.load());"
+                            "Promise.allSettled(routeLoads).then(function(results){"
+                                "if(results.some(function(result){return result.status==='rejected';}))routeFailed=true;"
+                            "});"
+                        "}catch(_){started=false;routeFailed=true;}"
+                    "}"
+                "}"
+                // Comment actions are wrapped in a lazy faceplate-loader. The
+                // target permalink can sit several screens below a long post,
+                // and a hidden WKWebView does not reliably trip its observer.
+                // Reddit no longer gives this loader a stable name, so hydrate
+                // only loaders physically contained by the exact t1 target.
+                "if(!started&&target&&!loaderRequested){"
+                    "var loaders=Array.from(target.querySelectorAll('faceplate-loader')).filter(function(loader){"
+                        "return loader.closest('shreddit-comment')===target;"
+                    "});"
+                    "loaderFound=loaderFound||loaders.length>0;"
+                    "loaderNames=loaders.map(function(loader){return loader.getAttribute('name')||'(unnamed)';}).join(',');"
+                    "for(var loader of loaders){"
+                        "if(typeof loader.load!=='function')continue;"
+                        "loaderRequested=true;"
+                        "try{"
+                            "loader.loading='programmatic';"
+                            "var loading=loader.load();"
+                            "if(loading&&typeof loading.catch==='function')loading.catch(function(){loaderFailed=true;});"
+                        "}catch(_){loaderFailed=true;}"
+                    "}"
+                "}"
+                "var nodes=[];"
+                "var collect=function(root){"
+                    "if(!root||nodes.indexOf(root)!==-1)return;"
+                    "nodes.push(root);"
+                    "var children=root.querySelectorAll?Array.from(root.querySelectorAll('*')):[];"
+                    "for(var child of children){"
+                        "if(nodes.indexOf(child)===-1)nodes.push(child);"
+                        "if(child.shadowRoot)collect(child.shadowRoot);"
+                    "}"
+                "};"
+                "collect(target);"
                 "var overflow=nodes.find(function(node){return typeof node.clickAwardButton==='function';});"
-                "if(overflow){"
+                "var hasController=function(node){"
+                    "return !!node.awardController&&typeof node.awardController.activateDialog==='function';"
+                "};"
+                "var controllerMatches=function(node){"
+                    "if(!hasController(node))return false;"
+                    "var id='';"
+                    "try{id=String(node.commentId||node.thingId||(node.getAttribute&&"
+                        "(node.getAttribute('comment-id')||node.getAttribute('thing-id')||node.getAttribute('thingid')))||'');}catch(_){}"
+                    "return id===fullName||id===fullName.substring(3);"
+                "};"
+                // A controller inside the exact target already has an
+                // unambiguous owner even if Reddit does not expose its ID.
+                "var commentControl=nodes.find(hasController);"
+                // Reddit may portal the hydrated comment action component away
+                // from its shreddit-comment. Search all light/shadow DOM only
+                // for a controller whose own ID exactly matches our comment.
+                "if(!commentControl&&fullName.indexOf('t1_')===0&&ticks%%5===0){"
+                    "collect(document);"
+                    "commentControl=nodes.find(controllerMatches);"
+                "}"
+                "controlFound=controlFound||!!overflow||!!commentControl;"
+                "if(!started&&(overflow||commentControl)){"
                     "started=true;"
-                    "try{overflow.clickAwardButton({skipQuickGivePopover:true});}"
+                    "try{"
+                        "if(overflow)overflow.clickAwardButton({skipQuickGivePopover:true});"
+                        "else commentControl.awardController.activateDialog({skipQuickGivePopover:true});"
+                    "}"
                     "catch(_){clearInterval(timer);window.webkit.messageHandlers.apolloModernAwards.postMessage({type:'fullError'});return;}"
                 "}"
             "}"
-            "if(ticks>=100){clearInterval(timer);window.webkit.messageHandlers.apolloModernAwards.postMessage({type:'fullError'});}"
+            "if(ticks>=150){"
+                "clearInterval(timer);"
+                "window.webkit.messageHandlers.apolloModernAwards.postMessage({"
+                    "type:'fullError',targetFound:targetFound,scrolled:scrolled,controlFound:controlFound,"
+                    "loaderFound:loaderFound,loaderRequested:loaderRequested,loaderFailed:loaderFailed,loaderNames:loaderNames,"
+                    "targetTag:targetTag,targetTags:targetTags,routeFound:routeFound,routeStarted:routeStarted,routeFailed:routeFailed"
+                "});"
+            "}"
         "},200);"
     "})();", fullName];
 }
@@ -367,10 +476,21 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
         return;
     }
 
-    NSString *escaped = [self.thingFullName
-        stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet];
-    NSURL *URL = [NSURL URLWithString:[NSString stringWithFormat:
-        @"https://www.reddit.com/svc/shreddit/award-dialog/%@", escaped]];
+    NSURL *URL = self.thingPermalink;
+    if (URL) {
+        // A full-screen Apollo controller should open Reddit's complete picker,
+        // not its tiny feed popover. The post/comment page owns the supported
+        // transition into that picker and retains the success animation.
+        self.showingFullPicker = YES;
+        self.webView.customUserAgent =
+            @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+             "(KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+    } else {
+        NSString *escaped = [self.thingFullName
+            stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet];
+        URL = [NSURL URLWithString:[NSString stringWithFormat:
+            @"https://www.reddit.com/svc/shreddit/award-dialog/%@", escaped]];
+    }
     NSMutableURLRequest *request = [NSMutableURLRequest
         requestWithURL:URL
         cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
@@ -389,11 +509,12 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
         typeof(self) self = weakSelf;
         if (!self || !self.webView) return;
-        ApolloLog(@"[ModernAwards] loading first-party dialog for %@ with %lu cookies",
+        ApolloLog(@"[ModernAwards] loading %@ award flow for %@ with %lu cookies",
+                  self.showingFullPicker ? @"full" : @"compact fallback",
                   self.thingFullName, (unsigned long)cookies.count);
         [self.webView loadRequest:request];
     });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 25 * NSEC_PER_SEC),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
         typeof(self) self = weakSelf;
         if (!self || generation != self.loadGeneration || self.receivedReady ||
@@ -517,7 +638,20 @@ static NSString *ApolloModernAwardAppearanceScript(void) {
         ApolloLog(@"[ModernAwards] full picker ready for %@", self.thingFullName);
         [self revealWebView];
     } else if ([type isEqualToString:@"fullError"]) {
-        ApolloLog(@"[ModernAwards] full picker target not found for %@", self.thingFullName);
+        ApolloLog(@"[ModernAwards] full picker unavailable for %@ target=%@ tag=%@ children=%@ scrolled=%@ route=%@ started=%@ routeFailed=%@ control=%@ loader=%@ names=%@ requested=%@ failed=%@",
+                  self.thingFullName,
+                  payload[@"targetFound"] ?: @NO,
+                  payload[@"targetTag"] ?: @"unknown",
+                  payload[@"targetTags"] ?: @"unknown",
+                  payload[@"scrolled"] ?: @NO,
+                  payload[@"routeFound"] ?: @NO,
+                  payload[@"routeStarted"] ?: @NO,
+                  payload[@"routeFailed"] ?: @NO,
+                  payload[@"controlFound"] ?: @NO,
+                  payload[@"loaderFound"] ?: @NO,
+                  payload[@"loaderNames"] ?: @"unknown",
+                  payload[@"loaderRequested"] ?: @NO,
+                  payload[@"loaderFailed"] ?: @NO);
         [self showErrorTitle:@"Couldn't open all Reddit awards"
                       detail:@"Reddit's page loaded, but its award control was unavailable. Tap Try Again to reload the flow."];
     } else if ([type isEqualToString:@"close"]) {
