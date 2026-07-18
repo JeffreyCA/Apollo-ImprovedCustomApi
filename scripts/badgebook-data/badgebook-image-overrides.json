@@ -1,0 +1,24 @@
+{
+ "_comment": "Real badge art for achievements whose reddit_badges.json image_url serves only the faint 'ghost' placeholder (Reddit serves real art only on profiles that earned the badge). Harvested 2026-07-18 from earned <achievement-badge url=...> tiles on live achievements pages. Runtime also passes through per-user earned art URLs for anything still missing here.",
+ "image_url_overrides": {
+  "rising-star": "https://preview.redd.it/1ldib3n5f1hd1.png?width=300&height=300&auto=webp&s=e86d2b91610b8c4882793b28e36c6210ca8830c6",
+  "16": "https://preview.redd.it/5ei7p59bdt1d1.png?width=300&height=300&auto=webp&s=2ea022fdfb42bebcdf8fddd6ecccfdd3e74b1ec7",
+  "17": "https://preview.redd.it/fz5zb69bdt1d1.png?width=300&height=300&auto=webp&s=98b1bfa1f02d0c470d412b89ff850cd265359417",
+  "18": "https://preview.redd.it/hnw7g59bdt1d1.png?width=300&height=300&auto=webp&s=6a599fc4e7e14f555d7a562a32c3c594efd840b1",
+  "19": "https://preview.redd.it/fzybw59bdt1d1.png?width=300&height=300&auto=webp&s=1cc6a29ed8c46b9527d908849c2f5a31c8a2647e",
+  "75-day-streak": "https://preview.redd.it/hz2y5231vs1d1.png?width=300&height=300&auto=webp&s=944d8f9b7cae9a12b41e33849ce29731c7311f5a",
+  "100-day-streak": "https://preview.redd.it/16itpg51vs1d1.png?width=300&height=300&auto=webp&s=bf8dab1c78d865284ef0d3e218bb9825d51ec82b",
+  "150-day-streak": "https://preview.redd.it/mhy48431vs1d1.png?width=300&height=300&auto=webp&s=5f4b82e32de59ed29485ca8d72163c00497f438c",
+  "200-day-streak": "https://preview.redd.it/xwfmnf31vs1d1.png?width=300&height=300&auto=webp&s=52e09fe8272dc8be0cdb149b4ce02bc7ab154f9e",
+  "300-day-streak": "https://preview.redd.it/rl96x531vs1d1.png?width=300&height=300&auto=webp&s=385c64377d04a85993a2320fce34c4470f2d853c",
+  "365-day-streak": "https://preview.redd.it/z35e2m38heid1.png?width=300&height=300&auto=webp&s=e63c9078572a4b615f2fc8fabc3f7440480344ab",
+  "400-day-streak": "https://preview.redd.it/lrixhs72df3e1.png?width=300&height=300&auto=webp&s=caf857f267c127e5514414c34d85a0650d2ed064",
+  "500-day-streak": "https://preview.redd.it/xlrp60uwq4ke1.png?width=300&height=300&auto=webp&s=848b36447b8149adcb22ad16fb55410b0b900ea5",
+  "600-day-streak": "https://preview.redd.it/nr4txy7m4fbf1.png?width=300&height=300&auto=webp&s=bc242e3279f164b6c5d22dc38637a0819bc619a1",
+  "banana-master": "https://preview.redd.it/8pqto7faa6pd1.png?width=300&height=300&auto=webp&s=4e22445e5d3ef79072abe994108523511d1bcb37",
+  "sharing-enthusiast": "https://preview.redd.it/htfushoyd1hd1.png?width=300&height=300&auto=webp&s=5492847aaae7ddd08d14e19f4d3c1bb6170e3a9b",
+  "sharing-advocate": "https://preview.redd.it/k42k0601e1hd1.png?width=300&height=300&auto=webp&s=450663fa3c6cb2bb8f6ada0ac3a98d506f83d6a2",
+  "sharing-pro": "https://preview.redd.it/w3gkxm44e1hd1.png?width=300&height=300&auto=webp&s=f7a8001a829b0b891a32fd9b06ddb9b61c280e17",
+  "quality-comment": "https://preview.redd.it/xiaje1nu71hd1.png?width=300&height=300&auto=webp&s=2053c3f6a46029f51c6cde8e5c9b967c423729ee"
+ }
+}
