@@ -1,5 +1,6 @@
 #import "CustomAPIViewController.h"
 #import "ApolloCommon.h"
+#import "ApolloWhatsNew.h"
 #import "ApolloNotificationBackend.h"
 #import "ApolloBarkNotifications.h"
 #import "ApolloPushNotifications.h"
@@ -972,9 +973,11 @@ typedef NS_ENUM(NSInteger, Tag) {
         case SectionSubreddits: return 9 - (sSubredditListEnhancements ? 0 : 1);
         case SectionNotificationBackend: return kNotifBackendRowCount;
         case SectionPrivacy: return 1; // Anonymous Install Count toggle
-        // GitHub + Reddit + Thanks To + Export Logs + Privacy Policy + Version, plus a dev-only
-        // "Login Persistence Debug" row when FLEX (developer mode) is enabled.
-        case SectionAbout: return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFLEX] ? 7 : 6;
+        // GitHub + Reddit + Thanks To + Export Logs + Privacy Policy + Version, plus two dev-only
+        // rows ("Login Persistence Debug", TEMPORARY "What's New Debug") when FLEX (developer
+        // mode) is enabled. TODO: remove the What's New Debug row (and ApolloWhatsNewPresentForDebug)
+        // once the real gated flow has shipped and this is no longer needed for testing.
+        case SectionAbout: return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFLEX] ? 8 : 6;
         default: return 0;
     }
 }
@@ -1894,6 +1897,16 @@ typedef NS_ENUM(NSInteger, Tag) {
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
             return cell;
         }
+        case 7: { // TEMPORARY dev-only, only present when FLEX is enabled (see numberOfRowsInSection)
+            UITableViewCell *cell = [self.tableView dequeueReusableCellWithIdentifier:@"Cell_About_WhatsNewDebug"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Cell_About_WhatsNewDebug"];
+            }
+            cell.textLabel.text = @"🔧 What's New Debug";
+            [self apollo_applyAccentActionTextColorToCell:cell];
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            return cell;
+        }
         default: return [[UITableViewCell alloc] init];
     }
 }
@@ -2188,6 +2201,8 @@ typedef NS_ENUM(NSInteger, Tag) {
             [self presentURLInApolloBrowser:[NSURL URLWithString:@"https://apolloreborn.app/privacy"]];
         } else if (indexPath.row == 6) {
             [self presentLoginPersistenceDebugSheetFromIndexPath:indexPath];
+        } else if (indexPath.row == 7) {
+            ApolloWhatsNewPresentForDebug();
         }
     } else if (indexPath.section == SectionMedia) {
         UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
@@ -2334,7 +2349,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     if (indexPath.section == SectionSubreddits) {
         return [self subredditLogicalRowForVisibleRow:indexPath.row] == 3;
     }
-    if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 || indexPath.row == 3 || indexPath.row == 4 || indexPath.row == 6)) return YES;
+    if (indexPath.section == SectionAbout && (indexPath.row == 0 || indexPath.row == 1 || indexPath.row == 2 || indexPath.row == 3 || indexPath.row == 4 || indexPath.row == 6 || indexPath.row == 7)) return YES;
     if (indexPath.section == SectionNotificationBackend) {
         return (indexPath.row == kNotifBackendRowTestConnection || indexPath.row == kNotifBackendRowTestBark);
     }

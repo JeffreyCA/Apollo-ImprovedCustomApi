@@ -373,3 +373,9 @@ static NSString *const ApolloLinkPreviewModeDidChangeNotification = @"ApolloLink
 // Posted by the Inline Media settings screen when size/alignment changes so
 // visible comments re-measure their inline media immediately.
 static NSString *const ApolloInlineMediaLayoutDidChangeNotification = @"ApolloInlineMediaLayoutDidChangeNotification";
+
+// The last TWEAK_VERSION (without the leading "v") the What's New sheet was
+// shown for, or confirmed not needed on a fresh install. Deliberately never
+// registered with a default value — an absent key is how ApolloWhatsNew.xm
+// tells a fresh install apart from an upgrade. See ApolloWhatsNew.xm.
+static NSString *const UDKeyLastSeenWhatsNewVersion = @"LastSeenWhatsNewVersion";
