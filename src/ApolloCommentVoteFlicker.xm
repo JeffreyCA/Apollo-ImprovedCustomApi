@@ -242,7 +242,13 @@ static void ApolloVFRequeryNodeHeights(id self, SEL _cmd) {
                 UIView *strongSelf = weakSelf;
                 if (!strongSelf) return;
                 objc_setAssociatedObject(strongSelf, &kApolloVFRequeryDeferredKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                if (!strongSelf.window) return;
+                // Run the deferred requery even off-window: dropping it
+                // left the table's committed row heights permanently stale —
+                // any row that grew during the quiesce (e.g. an inline image
+                // getting its ratio) stayed short until something else happened
+                // to re-query. requeryNodeHeights is a pure recompute and safe
+                // off-window; the quiesce's only job is to SKIP the mid-vote
+                // intermediate measure, never to lose the final one.
                 @try { orig_ApolloVFRequeryNodeHeights(strongSelf, _cmd); } @catch (__unused NSException *e) {}
             });
         }

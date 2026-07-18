@@ -3567,6 +3567,12 @@ static NSString *ApolloTranslationFailureCooldownKey(NSString *cacheKey) {
     return [NSString stringWithFormat:@"%@|%@", provider, cacheKey ?: @""];
 }
 
+// userInfo marker on errors replayed from the cooldown cache, so downstream
+// logging can tell "the provider just failed" from "the cached failure was
+// handed back to yet another rebuilt cell" — inside a cell-rebuild storm the
+// latter fired the same failure log several times a second.
+static NSString *const kApolloTranslationCooldownReplayKey = @"ApolloTranslationCooldownReplay";
+
 static NSError *ApolloRecentTranslationFailure(NSString *cacheKey) {
     if (cacheKey.length == 0 || !sTranslationFailureCooldowns) return nil;
     NSString *failureKey = ApolloTranslationFailureCooldownKey(cacheKey);
@@ -3576,7 +3582,9 @@ static NSError *ApolloRecentTranslationFailure(NSString *cacheKey) {
         NSNumber *timestamp = [record[@"timestamp"] isKindOfClass:[NSNumber class]] ? record[@"timestamp"] : nil;
         NSError *error = [record[@"error"] isKindOfClass:[NSError class]] ? record[@"error"] : nil;
         if (timestamp && error && now - timestamp.doubleValue < kApolloTranslationFailureRetryDelay) {
-            return error;
+            NSMutableDictionary *info = [error.userInfo mutableCopy] ?: [NSMutableDictionary dictionary];
+            info[kApolloTranslationCooldownReplayKey] = @YES;
+            return [NSError errorWithDomain:error.domain code:error.code userInfo:info];
         }
         if (record) [sTranslationFailureCooldowns removeObjectForKey:failureKey];
     }
@@ -3906,7 +3914,10 @@ static void ApolloMaybeTranslateCommentCellNode(id commentCellNode, BOOL forceTr
         if (![currentKey isEqualToString:cacheKey]) return;
 
         if (![translated isKindOfClass:[NSString class]] || translated.length == 0) {
-            if (error) {
+            // Log fresh provider failures once; cooldown replays (the cached
+            // error handed to every rebuilt cell for the next 15s) are noise
+            // that floods the log inside cell-rebuild storms.
+            if (error && ![error.userInfo[kApolloTranslationCooldownReplayKey] boolValue]) {
                 ApolloLog(@"[Translation] Failed to translate comment: %@", error.localizedDescription ?: @"unknown error");
             }
             return;
