@@ -891,6 +891,33 @@ static BOOL ApolloLPNetworkImageNodeHasImage(ASNetworkImageNode *imageNode) {
     return [image isKindOfClass:[UIImage class]] && image.size.width > 0.0 && image.size.height > 0.0;
 }
 
+static char kApolloLPDisplaySizedImageCacheKey;
+static char kApolloLPDisplaySizedImagePendingKey;
+static const void *kApolloLPImageResizeQueueSpecificKey = &kApolloLPImageResizeQueueSpecificKey;
+
+static dispatch_queue_t ApolloLPImageResizeQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("com.apolloreborn.linkpreview.resize",
+                                      dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
+                                                                              QOS_CLASS_UTILITY,
+                                                                              0));
+        dispatch_queue_set_specific(queue,
+                                    kApolloLPImageResizeQueueSpecificKey,
+                                    (void *)kApolloLPImageResizeQueueSpecificKey,
+                                    NULL);
+    });
+    return queue;
+}
+
+static BOOL ApolloLPImageNeedsDisplayResize(UIImage *image) {
+    if (![image isKindOfClass:[UIImage class]]) return NO;
+    CGFloat w = image.size.width * image.scale;
+    CGFloat h = image.size.height * image.scale;
+    return w > 0.0 && h > 0.0 && MAX(w, h) > 1000.0;
+}
+
 // Cap the pixel size of any bitmap the card machinery holds on to. Cards render at
 // most ~screen width x ~200pt; og:image heroes are frequently 2000px+ wide, which
 // decode to 8-12MB each — and the fallback path pins them in defaultImage, where
@@ -902,23 +929,108 @@ static UIImage *ApolloLPDisplaySizedImage(UIImage *image) {
     CGFloat w = image.size.width * image.scale, h = image.size.height * image.scale;
     CGFloat longest = MAX(w, h);
     if (longest <= maxDim || w <= 0 || h <= 0) return image;
-    CGFloat ratio = maxDim / longest;
-    CGSize target = CGSizeMake(floor(w * ratio), floor(h * ratio));
-    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
-    format.scale = 1.0;
-    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:target format:format];
-    UIImage *scaled = [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *ctx) {
-        [image drawInRect:CGRectMake(0, 0, target.width, target.height)];
-    }];
+    UIImage *cached = objc_getAssociatedObject(image, &kApolloLPDisplaySizedImageCacheKey);
+    if ([cached isKindOfClass:[UIImage class]]) return cached;
+
+    // UIGraphicsImageRenderer reaches vImageConvert_AnyToAny, which needs a
+    // meaningful amount of stack. This helper used to run directly inside
+    // LinkButtonNode.layoutSpecThatFits:. When a vote made Texture synchronously
+    // remeasure a deeply nested comment row, the main thread had only ~27 KB of
+    // stack left and the renderer hit the guard page (EXC_BAD_ACCESS / "Thread
+    // stack size exceeded"). Keep raster work on a fresh utility queue even for
+    // the synchronous fallback-apply path, and memoize it per source UIImage.
+    __block UIImage *scaled = nil;
+    dispatch_block_t resize = ^{
+        @autoreleasepool {
+            UIImage *existing = objc_getAssociatedObject(image, &kApolloLPDisplaySizedImageCacheKey);
+            if ([existing isKindOfClass:[UIImage class]]) {
+                scaled = existing;
+                return;
+            }
+            CGFloat ratio = maxDim / longest;
+            CGSize target = CGSizeMake(floor(w * ratio), floor(h * ratio));
+            @try {
+                UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+                format.scale = 1.0;
+                UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:target format:format];
+                scaled = [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *ctx) {
+                    [image drawInRect:CGRectMake(0, 0, target.width, target.height)];
+                }];
+            } @catch (__unused NSException *exception) {
+                scaled = nil;
+            }
+            if (scaled) {
+                objc_setAssociatedObject(image,
+                                         &kApolloLPDisplaySizedImageCacheKey,
+                                         scaled,
+                                         OBJC_ASSOCIATION_RETAIN);
+            }
+        }
+    };
+    if (dispatch_get_specific(kApolloLPImageResizeQueueSpecificKey)) {
+        resize();
+    } else {
+        dispatch_sync(ApolloLPImageResizeQueue(), resize);
+    }
     return scaled ?: image;
 }
 
 static void ApolloLPRememberRenderedImageForURL(ASNetworkImageNode *imageNode, NSURL *imageURL) {
     if (!imageURL.absoluteString.length || !ApolloLPNetworkImageNodeHasImage(imageNode)) return;
-    UIImage *image = ApolloLPDisplaySizedImage(imageNode.image);
-    NSUInteger cost = (NSUInteger)(image.size.width * image.size.height * image.scale * image.scale * 4.0);
-    [ApolloLPFallbackImageCache() setObject:image forKey:imageURL.absoluteString cost:cost];
-    ApolloLPMaybeKickFaceScanForNode(imageNode, imageURL, image);
+    NSString *key = imageURL.absoluteString;
+    UIImage *sourceImage = imageNode.image;
+    UIImage *cachedImage = [ApolloLPFallbackImageCache() objectForKey:key];
+    if (cachedImage) {
+        ApolloLPMaybeKickFaceScanForNode(imageNode, imageURL, cachedImage);
+        return;
+    }
+
+    if (!ApolloLPImageNeedsDisplayResize(sourceImage)) {
+        NSUInteger cost = (NSUInteger)(sourceImage.size.width * sourceImage.size.height * sourceImage.scale * sourceImage.scale * 4.0);
+        [ApolloLPFallbackImageCache() setObject:sourceImage forKey:key cost:cost];
+        ApolloLPMaybeKickFaceScanForNode(imageNode, imageURL, sourceImage);
+        return;
+    }
+
+    // layoutSpecThatFits: calls this path on every measurement. Never wait for
+    // an oversized bitmap to rasterize there: one queued resize feeds the cache,
+    // while the ASNetworkImageNode keeps displaying its already-loaded image.
+    @synchronized (sourceImage) {
+        UIImage *scaled = objc_getAssociatedObject(sourceImage, &kApolloLPDisplaySizedImageCacheKey);
+        if ([scaled isKindOfClass:[UIImage class]]) {
+            NSUInteger cost = (NSUInteger)(scaled.size.width * scaled.size.height * scaled.scale * scaled.scale * 4.0);
+            [ApolloLPFallbackImageCache() setObject:scaled forKey:key cost:cost];
+            ApolloLPMaybeKickFaceScanForNode(imageNode, imageURL, scaled);
+            return;
+        }
+        if ([objc_getAssociatedObject(sourceImage, &kApolloLPDisplaySizedImagePendingKey) boolValue]) return;
+        objc_setAssociatedObject(sourceImage,
+                                 &kApolloLPDisplaySizedImagePendingKey,
+                                 @YES,
+                                 OBJC_ASSOCIATION_RETAIN);
+    }
+
+    __weak ASNetworkImageNode *weakImageNode = imageNode;
+    NSURL *imageURLCopy = imageURL;
+    dispatch_async(ApolloLPImageResizeQueue(), ^{
+        UIImage *scaled = ApolloLPDisplaySizedImage(sourceImage);
+        @synchronized (sourceImage) {
+            objc_setAssociatedObject(sourceImage,
+                                     &kApolloLPDisplaySizedImagePendingKey,
+                                     nil,
+                                     OBJC_ASSOCIATION_RETAIN);
+        }
+        if (scaled != sourceImage) {
+            NSUInteger cost = (NSUInteger)(scaled.size.width * scaled.size.height * scaled.scale * scaled.scale * 4.0);
+            [ApolloLPFallbackImageCache() setObject:scaled forKey:key cost:cost];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ASNetworkImageNode *strongImageNode = weakImageNode;
+            if (strongImageNode && scaled != sourceImage) {
+                ApolloLPMaybeKickFaceScanForNode(strongImageNode, imageURLCopy, scaled);
+            }
+        });
+    });
 }
 
 static void ApolloLPSetNetworkImageURLPreservingImage(ASNetworkImageNode *imageNode, NSURL *imageURL) {
