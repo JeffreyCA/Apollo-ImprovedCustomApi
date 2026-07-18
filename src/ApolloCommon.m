@@ -6,6 +6,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <OSLog/OSLog.h>
+#import <os/lock.h>
 
 #pragma mark - Logging
 
@@ -19,6 +20,79 @@ os_log_t ApolloFixLog(void) {
         sProcessStartDate = [NSDate date];
     });
     return log;
+}
+
+#pragma mark - Persistent login diagnostics (cross-launch)
+
+// The os_log export (ApolloCollectLogs) only sees the current process, so a force-quit
+// sign-out discards the session that actually wiped the account. To make that case
+// diagnosable, the login-persistence tags ([KeychainTrace], [AccountSnapshot],
+// [KeychainSelfHeal], [KeychainMirror]) are ALSO appended to a file in the app container that
+// survives relaunch. The exporter prepends this file, so a user's Export Debug Logs carries the
+// prior session even after a force-quit. Bounded to a tail so it can't grow without limit;
+// file-protected at rest (it can contain account-item byte lengths, never values or tokens).
+static NSString *ApolloLoginDiagLogPath(void) {
+    return [[NSHomeDirectory() stringByAppendingPathComponent:@"Library"]
+                stringByAppendingPathComponent:@"ApolloLoginDiag.log"];
+}
+
+static const NSUInteger kApolloLoginDiagMaxBytes = 256 * 1024; // ~256KB tail is plenty of sessions
+// When trimming, drop back to this (not just under the cap) so the next ~64KB of lines don't each
+// re-trigger a full read+rewrite of the file. Without the headroom, once the buffer is at capacity
+// every single append would rewrite the whole file — expensive on the keychain hot path.
+static const NSUInteger kApolloLoginDiagTrimTo = 192 * 1024;
+
+void ApolloAppendLoginDiag(NSString *line) {
+    if (![line isKindOfClass:[NSString class]] || line.length == 0) return;
+    static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+    static NSDateFormatter *fmt = nil;
+    os_unfair_lock_lock(&lock);
+    if (!fmt) {
+        fmt = [[NSDateFormatter alloc] init];
+        fmt.dateFormat = @"MM-dd HH:mm:ss.SSS";
+        fmt.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    }
+    NSString *stamped = [NSString stringWithFormat:@"[%@] %@\n", [fmt stringFromDate:[NSDate date]], line];
+    NSString *path = ApolloLoginDiagLogPath();
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    @try {
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (!fh) {
+            [fm createFileAtPath:path contents:nil
+                      attributes:@{NSFileProtectionKey: NSFileProtectionCompleteUntilFirstUserAuthentication}];
+            fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        }
+        if (fh) {
+            unsigned long long end = [fh seekToEndOfFile];
+            [fh writeData:[stamped dataUsingEncoding:NSUTF8StringEncoding]];
+            [fh closeFile];
+            // Trim to the tail when it grows past the cap: reload, keep the last N bytes from a
+            // line boundary, rewrite. Cheap because it only fires occasionally.
+            if (end + stamped.length > kApolloLoginDiagMaxBytes) {
+                NSData *all = [NSData dataWithContentsOfFile:path];
+                if (all.length > kApolloLoginDiagMaxBytes) {
+                    NSData *tail = [all subdataWithRange:NSMakeRange(all.length - kApolloLoginDiagTrimTo, kApolloLoginDiagTrimTo)];
+                    NSString *tailStr = [[NSString alloc] initWithData:tail encoding:NSUTF8StringEncoding];
+                    NSRange nl = [tailStr rangeOfString:@"\n"];
+                    if (nl.location != NSNotFound && nl.location + 1 < tailStr.length) {
+                        tailStr = [tailStr substringFromIndex:nl.location + 1];
+                    }
+                    [tailStr writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                }
+            }
+        }
+    } @catch (__unused NSException *e) {
+        // Diagnostics must never take the app down; a lost line is acceptable.
+    }
+    os_unfair_lock_unlock(&lock);
+}
+
+// The prior/persistent diagnostics tail, for the exporter to prepend. Empty string if none.
+static NSString *ApolloPersistentLoginDiagnostics(void) {
+    NSString *contents = [NSString stringWithContentsOfFile:ApolloLoginDiagLogPath()
+                                                   encoding:NSUTF8StringEncoding error:nil];
+    return contents.length ? contents : @"";
 }
 
 static NSString *ApolloCollectLogsFiltered(BOOL aiOnly) {
@@ -55,13 +129,23 @@ static NSString *ApolloCollectLogsFiltered(BOOL aiOnly) {
             }
         }
 
-        if (filteredEntries.count == 0) {
+        // The cross-launch login-diagnostics tail (prior sessions too) — prepended for the full
+        // log so a force-quit sign-out is still diagnosable. Not included in the AI-only export.
+        NSString *persistent = aiOnly ? @"" : ApolloPersistentLoginDiagnostics();
+
+        if (filteredEntries.count == 0 && persistent.length == 0) {
             return aiOnly
                 ? @"No Apollo AI log entries found since app launch."
                 : @"No [ApolloFix] log entries found since app launch.";
         }
 
         NSMutableString *output = [NSMutableString new];
+        if (persistent.length) {
+            [output appendString:@"===== Persistent login diagnostics (spans previous sessions; survives force-quit) =====\n"];
+            [output appendString:persistent];
+            if (![persistent hasSuffix:@"\n"]) [output appendString:@"\n"];
+            [output appendString:@"===== Current session ([ApolloFix] os_log) =====\n"];
+        }
         [output appendFormat:@"%@ — %@ (%lu entries)\n\n",
             aiOnly ? @"Apollo AI Logs" : @"ApolloFix Logs",
             [NSDateFormatter localizedStringFromDate:[NSDate date]
