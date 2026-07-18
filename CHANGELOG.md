@@ -6,16 +6,67 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
+- Revamp **Settings** with task-focused sections, unified search, direct navigation to individual options, and dedicated feature-request and privacy-conscious bug-report flows (#637: @jordanearle)
+- Add native **Reddit Polls** voting and creation behind an opt-in setting, using a separate per-account web session when needed (#643: @jordanearle)
+- Redesign **Detailed Profiles** with immersive banners, prominent avatars, glass stat cards, and improved Social Links (#655: @jordanearle)
+- Add modern **Reddit Chat** for API-Key-Free accounts, with an opt-in option for API-key accounts that preserves Apollo's legacy Direct Chat (#658: @icpryde)
+
+## [v3.4.2] - 2026-07-17
+
+### Features
+
+- Add the **Synthwave** Liquid Glass app icon to the in-app icon picker (#663: @IllIIllIllIllII)
+
+### Fixes
+
+- Fix the **Reddit account** being signed out after force-quitting or backgrounding the app on sideloaded installs — the account's keychain item was written with the wrong protection class and became invisible to Apollo's own read, which then overwrote it as empty; the item is now created correctly, repaired in place on affected devices, and served from an enumeration fallback so the account survives (#677, #681, #682: @jordanearle, @DeltAndy123)
+- Play more short-clip host links inline: add **streama.in** and **streamff.link** aliases and follow the moved **dubz** and **streamff** CDNs (#665: @icpryde)
+- Speed up loading of the full **Community Highlights** list (#661: @icpryde)
+- Fix **Video Hold Speed** staying stuck at the hold speed after scrubbing a fullscreen video (#667: @icpryde)
+- Fix the **Mod Queue** filter menu anchoring to the wrong spot on Liquid Glass builds (#679: @JeffreyCA)
+- Fix **Search** tab suggestion padding and the **Random Subreddit** icon's stroke weight (#680: @icpryde)
+- Fix the **Apollo Classic** Liquid Glass icon on iOS 27 (#666: @IllIIllIllIllII)
+
+## [v3.4.1] - 2026-07-15
+
+### Features
+
+- Add the **Apollo Classic** Liquid Glass app icon to the in-app icon picker (#660: @IllIIllIllIllII)
 - Add a **Remember Post Sort** toggle in **Settings > General > Comments** that restores the comment sort you last picked for a post when you reopen it (#570: @icpryde)
 - Add a **Tap to Play** mode for inline GIFs and a new **Inline Media** settings sub-screen that gathers the Inline Media Previews, Alignment, and Autoplay controls plus a new **Inline Media Size** slider (#602: @icpryde)
 - Play short-clip host links — **streamff, streamin, streamain, dubz, dropr, bangr, and MLB** clips — inline as real videos with autoplay, fullscreen, mute, and PiP, just like Streamable posts (#596: @icpryde)
+- Replace **Hide Bars on Scroll** with a **Left / Right / Off** picker for the collapsed Liquid Glass tab bar (#645: @icpryde)
+- Make the **account switcher** and **Custom API** settings reflect each account's actual sign-in mode and credentials instead of showing one global state (#603: @icpryde)
+- Add an **Info Row** settings screen to choose which post-stat icons respond to taps or the magnifier, switch detail icons between popups and compact overlays, and disable full date/time reveals (#613: @icpryde)
+- Add optional separate **Light Mode** and **Dark Mode** assignments in Theme Manager, with sun/moon indicators for each theme's active appearances (#651: @jordanearle)
+- Add **Hidden Content Recovery** to profiles so you can find hidden, removed, or deleted posts and comments and view archived copies when live content is gone (#633: @ostechgit)
+- Enable viewing and changing **user flair** while using API-Key-Free mode (#653: @icpryde)
 
 ### Fixes
 
 - Fix the **Reddit account** being silently wiped seconds after sign-in on devices where iCloud Keychain sync is active (#579: @ostechgit)
-- Fix **inline GIF autoplay** not being honored under Never / WiFi Only for GIFs on slow hosts, and paused GIFs losing their play overlay and opening the media viewer when tapped (#602: @icpryde)
-- Fix converted **native menus** on Liquid Glass builds using the old fade animation instead of the iOS 26 glass morph that blooms the menu out of the tapped button (#600: @icpryde)
+- Fix **inline GIF autoplay** not being honored under Never / WiFi Only for GIFs on slow hosts, paused GIFs losing their play overlay and opening the media viewer when tapped, and the Inline Media Size slider freezing or triggering swipe-back (#602, #611: @icpryde)
+- Fix **Inline Media** crashes from repeated album links and leaving posts during resolution, reduce relayout lag, and show the fullscreen PiP button for inline and Markdown-linked videos (#638: @JeffreyCA)
+- Remove the obsolete **"Subscribe to r/ApolloApp?"** prompt shown after a first sign-in (#614: @icpryde)
+- Fix **X/Twitter links** ignoring the selected browser and always opening system Safari instead of In-App Safari when configured (#625: @icpryde)
+- Fix **Color Flairs** reverting to grey with the wrong text color after returning from the background (#624: @icpryde)
+- Fix **Discussion so far** AI summaries getting stuck on "Summarizing..." in Tap to Summarize mode (#610: @icpryde)
+- Fix the iOS 26 **media-post composer** freezing when opening the "Text (optional)" editor (#623: @icpryde)
+- Fix custom themes applying the wrong colours to separators and search fields, losing monospace in code blocks, and breaking italics with rounded fonts (#640, #648: @DeltAndy123, @jordanearle)
+- Fix the **Helios Cryo Halo** Liquid Glass icon and alphabetize the Helios icon group (#617: @IllIIllIllIllII)
+- Fix the anonymous install count's monthly identity and opt-out state resetting when the app is reinstalled (#612: @jordanearle)
+- Fix **Translation** markers appearing at inconsistent sizes, showing for languages on the Don't Translate list, or disappearing after collapsing and reopening an original-language comment (#616, #628: @icpryde)
+- Fix tapping a post's **comment count** opening at the top before jumping down, so it now lands directly at the action bar (#626: @icpryde)
 - Fix **Tag Filters** double-blurring media on top of Apollo's own "tap to view" overlay when **Blur mature (18+) images and media** is enabled, including compact NSFW thumbnails (#585: @JeffreyCA)
+- Improve **Recently Read Posts** so revisited posts move to the top and the screen refreshes in place when you return, while fixing stale, resurrected, or crashing rows during refresh and deletion (#632: @JeffreyCA)
+- Fix bulk **Hide Read Posts** and unhide actions silently skipping 50 posts when processing more than 50 at once (#650: @icpryde)
+- Fix notification-backend account registration failing when Reddit credentials were omitted from upload-task request bodies (#642: @nickclyde)
+- Improve feed scrolling smoothness by reducing repeated translation, link-preview, and flair work as rows enter the viewport (#652: @icpryde)
+- Fix comments flashing blank when voting or returning from the app switcher, including translated comments briefly reverting or changing height (#627: @icpryde)
+- Fix long posts failing to translate and improve Apple's language detection for clearly foreign short post bodies (#629: @icpryde)
+- Improve **Deleted Comments** recovery reliability and coverage, render recovered Markdown correctly, and stop row-height updates from animating against comment collapse (#630: @icpryde)
+- Fix **Auto Hide Read Posts** ignoring Popular and All when **Disable in Subreddits** is enabled (#649: @icpryde)
+- Fix direct Reddit images appearing as link cards instead of inline images in API-Key-Free feeds (#654: @icpryde)
 
 ## [v3.4.0] - 2026-07-08
 
@@ -54,6 +105,8 @@ All notable changes to this project will be documented in this file.
 
 - Fix muted **Picture-in-Picture** videos pausing background music when **Enable PiP When Leaving App** is on — PiP now only claims the audio session for deliberately unmuted playback and hands it back when dismissed (#569: @JeffreyCA)
 - Fix the **modmail conversation** layout under iOS 26 Liquid Glass so text no longer bleeds behind the status bar and the tab bar no longer overlaps the compose bar (#543: @icpryde)
+- Fix **Hide Bars on Scroll** stuttering on legacy navigation bars before they collapse (#598: @icpryde)
+- Fix converted **native menus** on Liquid Glass builds using the old fade animation instead of the iOS 26 glass morph that blooms the menu out of the tapped button (#600: @icpryde)
 - Fix **Redgifs posts** on the modern `v3.redgifs.com` host showing a dead link card instead of an inline video player (#568: @icpryde)
 - Fix **multi-image Img Chest album posts** producing a dead `imgur.com/a/…` link instead of an Img Chest album, and render the album cover inline in the feed (#554: @icpryde)
 - Fix **Show Deleted Comments** freezing the app on heavily-moderated threads, and deleted comment text rendering larger than regular comments (#541: @icpryde)
@@ -649,6 +702,8 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v3.4.2]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.4.1...v1.15.11_3.4.2
+[v3.4.1]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.4.0...v1.15.11_3.4.1
 [v3.4.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.3.0...v1.15.11_3.4.0
 [v3.3.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.2.0...v1.15.11_3.3.0
 [v3.2.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.1.1...v1.15.11_3.2.0

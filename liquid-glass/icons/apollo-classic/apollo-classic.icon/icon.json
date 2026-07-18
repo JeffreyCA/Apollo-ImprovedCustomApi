@@ -35,10 +35,25 @@
       "blur-material" : null,
       "layers" : [
         {
+          "fill" : {
+            "solid" : "extended-gray:1.00000,1.00000"
+          },
+          "hidden" : false,
+          "image-name" : "Helmet Apollo Cropped.svg",
+          "name" : "Helmet Apollo Cropped",
+          "position" : {
+            "scale" : 1.25,
+            "translation-in-points" : [
+              7.335254031078193,
+              -80
+            ]
+          }
+        },
+        {
           "fill-specializations" : [
             {
               "value" : {
-                "solid" : "display-p3:0.14243,0.12755,0.35924,1.00000"
+                "solid" : "display-p3:0.19542,0.11370,0.36379,1.00000"
               }
             },
             {
@@ -50,140 +65,58 @@
           ],
           "glass" : true,
           "hidden" : false,
-          "image-name" : "AntennaApollo.svg",
-          "name" : "AntennaApollo",
+          "image-name" : "Antenna Apollo Cropped.svg",
+          "name" : "Antenna Apollo Cropped",
           "position" : {
-            "scale" : 0.58,
+            "scale" : 0.6,
             "translation-in-points" : [
-              -2.375,
-              17.4
-            ]
-          }
-        },
-        {
-          "blend-mode-specializations" : [
-            {
-              "appearance" : "dark",
-              "value" : "normal"
-            }
-          ],
-          "fill-specializations" : [
-            {
-              "value" : {
-                "solid" : "extended-gray:1.00000,1.00000"
-              }
-            },
-            {
-              "appearance" : "dark",
-              "value" : {
-                "automatic-gradient" : "extended-gray:1.00000,1.00000"
-              }
-            }
-          ],
-          "hidden" : false,
-          "image-name" : "HelmetApollo.svg",
-          "name" : "HelmetApollo",
-          "opacity-specializations" : [
-            {
-              "appearance" : "dark",
-              "value" : 1
-            }
-          ],
-          "position" : {
-            "scale" : 1.27,
-            "translation-in-points" : [
-              2,
-              -80
+              1.2732320762362406,
+              -180
             ]
           }
         },
         {
           "fill" : {
-            "solid" : "display-p3:1.00000,0.05369,0.13934,1.00000"
+            "solid" : "display-p3:0.91676,0.20327,0.25801,1.00000"
           },
-          "glass" : true,
           "hidden" : false,
-          "image-name" : "EyesApollo.svg",
-          "name" : "EyesApollo",
+          "image-name" : "Eyes Apollo.svg",
+          "name" : "Eyes Apollo",
           "position" : {
-            "scale" : 0.57,
+            "scale" : 0.56,
             "translation-in-points" : [
-              1,
-              6
+              7,
+              154.31484375
             ]
           }
         },
         {
-          "blend-mode-specializations" : [
-            {
-              "appearance" : "dark",
-              "value" : "normal"
-            }
-          ],
-          "fill-specializations" : [
-            {
-              "value" : {
-                "solid" : "extended-gray:1.00000,1.00000"
-              }
-            },
-            {
-              "appearance" : "dark",
-              "value" : {
-                "automatic-gradient" : "extended-gray:1.00000,1.00000"
-              }
-            }
-          ],
+          "fill" : {
+            "solid" : "extended-gray:1.00000,1.00000"
+          },
           "hidden" : false,
-          "image-name" : "FaceApollo.svg",
-          "name" : "FaceApollo",
-          "opacity-specializations" : [
-            {
-              "appearance" : "dark",
-              "value" : 1
-            }
-          ],
+          "image-name" : "Face Apollo Cropped.svg",
+          "name" : "Face Apollo Cropped",
           "position" : {
-            "scale" : 1.7,
+            "scale" : 1.68,
             "translation-in-points" : [
-              0,
-              8
+              4.587096171932899,
+              171.15625
             ]
           }
         },
         {
-          "blend-mode-specializations" : [
-            {
-              "appearance" : "dark",
-              "value" : "normal"
-            }
-          ],
-          "fill-specializations" : [
-            {
-              "value" : {
-                "solid" : "extended-gray:1.00000,1.00000"
-              }
-            },
-            {
-              "appearance" : "dark",
-              "value" : {
-                "automatic-gradient" : "extended-gray:1.00000,1.00000"
-              }
-            }
-          ],
+          "fill" : {
+            "solid" : "extended-gray:1.00000,1.00000"
+          },
           "hidden" : false,
-          "image-name" : "BodyApollo.svg",
-          "name" : "BodyApollo",
-          "opacity-specializations" : [
-            {
-              "appearance" : "dark",
-              "value" : 1
-            }
-          ],
+          "image-name" : "Body Apollo.svg",
+          "name" : "Body Apollo",
           "position" : {
             "scale" : 1,
             "translation-in-points" : [
-              3.578125,
-              433.3671875
+              4.353877319933076,
+              430.4866749402855
             ]
           }
         },
@@ -305,6 +238,7 @@
           }
         }
       ],
+      "lighting" : "individual",
       "shadow" : {
         "kind" : "neutral",
         "opacity" : 0.5

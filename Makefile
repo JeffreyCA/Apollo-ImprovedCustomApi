@@ -86,6 +86,9 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloIPadTabBarBottom.xm \
     $(SRC_DIR)/settings/ApolloSettings.xm \
     $(SRC_DIR)/ApolloRecentlyRead.xm \
+    $(SRC_DIR)/ApolloHiddenContentData.m \
+    $(SRC_DIR)/ApolloHiddenContentViewController.m \
+    $(SRC_DIR)/ApolloHiddenContentMenu.xm \
     $(SRC_DIR)/ApolloHideLinksBatchFix.xm \
     $(SRC_DIR)/ApolloSavedCategories.xm \
     $(SRC_DIR)/ApolloSwiftIvarBridge.swift \
@@ -132,6 +135,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloThemeQRScanViewController.m \
     $(SRC_DIR)/ApolloSearchInPlace.xm \
     $(SRC_DIR)/ApolloSearchHeaderOverlapFix.xm \
+    $(SRC_DIR)/ApolloSearchTabFixes.xm \
     $(SRC_DIR)/ApolloImageChestResolver.m \
     $(SRC_DIR)/ApolloImgChestUpload.m \
     $(SRC_DIR)/ApolloLinkPreviewModel.m \

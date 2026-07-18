@@ -48,6 +48,26 @@
 // Orientation: the right-third test projects the touch onto the video's displayed
 // left→right axis, so it stays correct when Apollo transform-rotates the content
 // to landscape on the portrait-locked screen, and under pinch-zoom.
+//
+// Interplay with Apollo's press-drag SCRUB gesture (the sticky-2× bug):
+//   Apollo scrubs video via a pan recognizer whose action is
+//   -[MediaViewerController scrollViewScrubbed:]. On .began it snapshots
+//   `player.rate` into the `initialRate` ivar and pauses (setRate:0); every
+//   .changed seeks relative to `initialSeconds`; on .ended/.cancelled/.failed it
+//   resumes with `playImmediatelyAtRate:initialRate` (verified in the binary at
+//   0x10036330c / 0x10036354c inside the scrollViewScrubbed: helper).
+//   If a hold was engaged when the scrub began, that snapshot captured OUR
+//   boosted rate — so after the finger lifted, Apollo re-applied the hold speed
+//   over our restore and the video stayed fast forever (each later hold then
+//   captured prevRate == holdSpeed and faithfully re-stuck it).
+//   Fix, two sides of the same coin:
+//     • scrollViewScrubbed: .began → release an engaged hold BEFORE %orig, so
+//       Apollo's snapshot sees the clean pre-hold rate. Scrubbing always wins
+//       over the hold — dragging means the user wants to scrub, not speed up.
+//     • While a scrub is in flight (.began→.ended), never engage a new hold: a
+//       quick sub-tolerance drag can start the pan without cancelling our
+//       pending hold, and engaging mid-scrub would capture preHoldRate == 0
+//       (the scrub's pause) and fight the seek.
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"   // sVideoHoldSpeedEnabled, sVideoHoldSpeed, ApolloSanitizedHoldSpeed
@@ -303,6 +323,7 @@ static void CollectContextMenuInteractions(UIView *view,
 @property (nonatomic, strong) NSArray<UIView *> *suppressedInteractionViews;
 @property (nonatomic, assign) BOOL inZone;     // current touch began in the right third
 @property (nonatomic, assign) BOOL active;     // hold speed currently engaged
+@property (nonatomic, assign) BOOL scrubbing;  // Apollo's scrub gesture is in flight
 @property (nonatomic, assign) float preHoldRate;
 // Fires a single confirmation tap when the hold speed engages. Pre-warmed on touch-down.
 @property (nonatomic, strong) UIImpactFeedbackGenerator *hapticGenerator;
@@ -312,6 +333,7 @@ static void CollectContextMenuInteractions(UIView *view,
 // feed/comments copy stuck at the hold speed.
 @property (nonatomic, strong) AVPlayer *engagedPlayer;
 - (void)installOnView:(UIView *)view;
+- (void)releaseHoldWithReason:(NSString *)reason;
 @end
 
 @implementation ApolloHoldSpeedHandler
@@ -410,6 +432,11 @@ static void CollectContextMenuInteractions(UIView *view,
 
 - (void)holdElapsedAt:(CGPoint)windowPoint {
     if (!self.inZone || self.active) return;
+    // Never engage while Apollo is scrubbing: the scrub paused the player
+    // (rate 0), so we'd capture preHoldRate=0 and un-pause mid-seek. A fast
+    // drag under kHoldMoveTolerance can start the scrub pan without cancelling
+    // the pending hold, so this gate is reachable.
+    if (self.scrubbing) { ApolloLog(@"VideoHoldSpeed: engage skipped — scrub in progress"); return; }
     AVPlayer *player = MediaViewerPlayer(self.mediaViewer);
     if (!player) { ApolloLog(@"VideoHoldSpeed: holdElapsed — no player"); return; }
 
@@ -435,6 +462,13 @@ static void CollectContextMenuInteractions(UIView *view,
 - (void)touchUp {
     [self restoreMenu];
     self.inZone = NO;
+    [self releaseHoldWithReason:@"touch-up"];
+}
+
+// Restore the boosted player and drop the hold. Shared by the normal touch-up
+// path and the scrub-begin hook (which must restore BEFORE Apollo snapshots
+// the rate it will resume with after the scrub).
+- (void)releaseHoldWithReason:(NSString *)reason {
     if (!self.active) return;
     self.active = NO;
     // Restore the SAME player we sped up — not one re-resolved from the media
@@ -445,7 +479,7 @@ static void CollectContextMenuInteractions(UIView *view,
     [self.engagedPlayer setRate:self.preHoldRate];
     self.engagedPlayer = nil;
     [self hideOverlay];
-    ApolloLog(@"VideoHoldSpeed: released (restored rate=%.2f)", self.preHoldRate);
+    ApolloLog(@"VideoHoldSpeed: released via %@ (restored rate=%.2f)", reason, self.preHoldRate);
 }
 
 // Safety net: if the handler is deallocated mid-hold (e.g. the media viewer is
@@ -541,6 +575,31 @@ static void InstallHoldSpeed(UIViewController *mvc) {
 - (void)viewDidLayoutSubviews {
     %orig;
     InstallHoldSpeed((UIViewController *)self);   // retry if -viewDidAppear: ran too early
+}
+
+// Apollo's press-drag scrub. On .began the original snapshots player.rate into
+// its `initialRate` ivar (and pauses); on .ended/.cancelled/.failed it resumes
+// with playImmediatelyAtRate:initialRate. If a hold is engaged when the scrub
+// starts, release it BEFORE %orig so that snapshot sees the clean pre-hold rate
+// — otherwise Apollo re-applies the hold speed after the finger lifts and the
+// video stays fast permanently (the "scrub + hold sticks 2×" bug).
+- (void)scrollViewScrubbed:(UIGestureRecognizer *)gestureRecognizer {
+    ApolloHoldSpeedHandler *handler = objc_getAssociatedObject(self, &kHoldSpeedHandlerKey);
+    UIGestureRecognizerState state = gestureRecognizer.state;
+    if (state == UIGestureRecognizerStateBegan) {
+        handler.scrubbing = YES;
+        [handler releaseHoldWithReason:@"scrub-begin"];
+    }
+    %orig;
+    if (state == UIGestureRecognizerStateEnded ||
+        state == UIGestureRecognizerStateCancelled ||
+        state == UIGestureRecognizerStateFailed) {
+        handler.scrubbing = NO;
+        // Diagnostic: the rate Apollo just resumed with — if this ever reads as
+        // the hold speed while the hold isn't engaged, the sticky bug is back.
+        ApolloLog(@"VideoHoldSpeed: scrub ended (player rate=%.2f)",
+                  MediaViewerPlayer((UIViewController *)self).rate);
+    }
 }
 
 %end

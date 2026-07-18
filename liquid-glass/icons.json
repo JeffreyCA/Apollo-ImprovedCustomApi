@@ -10,7 +10,7 @@
       { "id": "jryng",                    "displayName": "OG",                  "designer": "jryng", "group": "community" },
       { "id": "metalnakls",               "displayName": "metalnakls",          "designer": "metalnakls", "group": "community" },
       { "id": "harunatsu",                "displayName": "harunatsu",           "designer": "harunatsu91202024", "group": "community" },
-      
+      { "id": "apollo-classic",           "displayName": "Apollo Classic",      "designer": "IllIIllIllIllII", "group": "community" },
       
       { "id": "jryng-morty",              "displayName": "Wubalubadubdub",      "designer": "jryng", "group": "new-variants" },
       { "id": "jryng-duck",               "displayName": "Wilson",              "designer": "jryng", "group": "new-variants" },
@@ -67,6 +67,7 @@
       { "id": "bajader-glitched",         "displayName": "Glitched",            "designer": "bajader", "group": "custom" },
       { "id": "paulo1manso-modern",       "displayName": "Modern",              "designer": "paulo1manso", "group": "custom" },
       { "id": "paulo1manso-modern-alt",   "displayName": "Modern Alt",          "designer": "paulo1manso", "group": "custom" },
+      { "id": "synthwave",                "displayName": "Synthwave",           "designer": "IllIIllIllIllII", "group": "custom" },
       { "id": "helios",                   "displayName": "Helios",              "designer": "IllIIllIllIllII", "group": "custom" },
       { "id": "helios-halo",              "displayName": "Helios Halo",         "designer": "IllIIllIllIllII", "group": "custom" },
       { "id": "helios-cryo",              "displayName": "Helios Cryo",         "designer": "IllIIllIllIllII", "group": "custom" },
@@ -74,6 +75,5 @@
       { "id": "helios-parallax",          "displayName": "Helios Parallax",     "designer": "IllIIllIllIllII", "group": "custom" },
       { "id": "helios-parallax-halo",     "displayName": "Helios Parallax Halo","designer": "IllIIllIllIllII", "group": "custom" },
       { "id": "helios-ultra",             "displayName": "Helios Ultra",        "designer": "IllIIllIllIllII", "group": "custom" },
-      { "id": "helios-ultra-halo",        "displayName": "Helios Ultra Halo",   "designer": "IllIIllIllIllII", "group": "custom" },
-      { "id": "apollo-classic",           "displayName": "Apollo Classic",      "designer": "IllIIllIllIllII", "group": "community" }]
+      { "id": "helios-ultra-halo",        "displayName": "Helios Ultra Halo",   "designer": "IllIIllIllIllII", "group": "custom" }]
 }

@@ -309,6 +309,10 @@ void ApolloRedditCaptureBearerTokenFromRequest(NSURLRequest *request, NSString *
     ApolloRedditCaptureBearerTokenFromAuthorization([request valueForHTTPHeaderField:@"Authorization"], source);
 }
 
+NSString *ApolloLatestRedditBearerToken(void) {
+    return sLatestRedditBearerToken.length > 0 ? [sLatestRedditBearerToken copy] : nil;
+}
+
 // MARK: - Asset map
 
 static void ApolloRecordRedditUploadedMediaAssetID(NSURL *imageURL, NSString *assetID) {

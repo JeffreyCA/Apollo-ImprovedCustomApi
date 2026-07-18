@@ -5,20 +5,30 @@
 //   streamin.link/.me/.one/.fun/.top — mp4 is predictable from the clip id:
 //     https://w-cdn.streamin.top/uploads/<id>.mp4 (page og:video carries the
 //     same URL plus a cosmetic ?age cache-buster). Poster b-cdn…/images/<id>.jpg.
-//   streamff.pro/.com — page is a JS SPA and its og:video is broken (points at
-//     the page itself). Authoritative: GET https://ffedge.streamff.com/share/<id>
-//     -> JSON array, [0].external_url; https://storage.streamff.com/<id>.mp4 is
-//     the stable primary copy. Dead clips: API returns [] at ~2 months, and
-//     10-28-day-old clips 302 to a Cloudflare abuse-placeholder mp4 that would
-//     "play" — detected via the probe's final-URL host.
-//   streamain.com — highest-volume host. Video URL is unrelated to the page id;
-//     GET https://streamain.com/embed/<id> (small static HTML) and read the
-//     data-link="…" attribute of its <video> tag.
-//   bangr.im — og:video = https://cdn.bangr.im/videos/<id>.mp4 (cleanest host);
-//     predictable URL used as fallback if the page fetch fails.
-//   dubz.link/.co — no og:video; predictable https://cdn.squeelab.com/guest/
-//     videos/<id>.mp4 (the page's <video src> carries a #t=0.1 fragment). NOTE:
-//     this CDN ignores Range headers, so the probe uses HEAD only.
+//   streamff.pro/.com/.link — page is a JS SPA and its og:video is broken
+//     (points at the page itself). Authoritative: GET
+//     https://ffedge.streamff.com/share/<id> -> JSON array, [0].external_url.
+//     As of 2026-07 the backing store moved (external_url now points at
+//     cdn.hostedhost.top) and https://storage.streamff.com/<id>.mp4 404s even
+//     for live clips, so external_url is probed first and storage kept only as
+//     a legacy fallback. The site's own share button emits both /v/<id> and
+//     /c/<id> paths. Dead clips: API returns [] at ~2 months, and some expired
+//     clips 302 to a Cloudflare abuse-placeholder mp4 that would "play" —
+//     detected via the probe's final-URL host.
+//   streamain.com (alias streama.in, its official short/share domain — 301s to
+//     streamain.com with the same id) — highest-volume host. Video URL is
+//     unrelated to the page id; GET https://streamain.com/embed/<id> (small
+//     static HTML) and read the data-link="…" attribute of its <video> tag.
+//   bangr.im — og:video = https://cdn.bangr.im/videos/<id>.mp4; predictable URL
+//     used as fallback if the page fetch fails. NOTE: site AND CDN return
+//     410 Gone as of 2026-07-16 (deliberate shutdown); entry kept in case the
+//     domain resurrects — dead clips already surface the player's error state.
+//   dubz.link/.co — no og:video; predictable CDN URL. Mid-2026 the CDN moved
+//     from cdn.squeelab.com/guest/videos/<id>.mp4 to
+//     cdn.makevos.com/videos/<id>.mp4 and the two serve DISJOINT id sets (new
+//     clips only on makevos, pre-move clips only on squeelab), so both are
+//     probed, current CDN first. NOTE: squeelab ignores Range headers, so the
+//     probe uses HEAD only.
 //   dropr.co — og:video -> cdn.dropr.co/<unrelated-16hex>.(mp4|mov); a dead or
 //     still-encoding clip serves an og:video-less "Video is processing" page.
 //   bdata-producedclips.mlb.com / mlb-cuts-diamond.mlb.com — the post URL IS
@@ -55,7 +65,9 @@ static SCHostKind SCKindForHost(NSString *host) {
             @"streamin.top":  @(SCHostStreamin),
             @"streamff.pro":  @(SCHostStreamff),
             @"streamff.com":  @(SCHostStreamff),
+            @"streamff.link": @(SCHostStreamff),
             @"streamain.com": @(SCHostStreamain),
+            @"streama.in":    @(SCHostStreamain),
             @"bangr.im":      @(SCHostBangr),
             @"dubz.link":     @(SCHostDubz),
             @"dubz.co":       @(SCHostDubz),
@@ -99,12 +111,12 @@ static NSString *const kSCStreamablePatternWithQuery =
 static NSString *const kSCWidenedStreamablePattern =
     @"^(?:(?:https?:)?//)?(?:www\\.)?(?:"
     @"streamable\\.com/(?:edit/)?"
-    @"|streamff\\.(?:pro|com)/v/"
+    @"|streamff\\.(?:pro|com|link)/[vc]/"
     @"|streamin\\.(?:link|me|one|fun|top)/v/"
     @"|bangr\\.im/v/"
     @"|dubz\\.(?:link|co|live)/(?:[vc]/)?"
     @"|dropr\\.co/v/"
-    @"|streamain\\.com/(?:[a-z]{2}/)?"
+    @"|(?:streamain\\.com|streama\\.in)/(?:[a-z]{2}/)?"
     @"|bdata-producedclips\\.mlb\\.com/"
     @")([\\w-]+)(?:\\.mp4)?(?:/watch)?/?(?:\\?.*)?$";
 
@@ -334,16 +346,30 @@ static void SCResolveStreamin(NSString *clipID, void (^completion)(NSDictionary 
     SCFinishWithCandidate(@"streamin", mp4, poster, 0, 0, 0, completion);
 }
 
-// dubz: predictable; CDN is squeelab.com.
+// dubz: predictable from the clip id, but the CDN moved mid-2026 from
+// cdn.squeelab.com to cdn.makevos.com and the two serve DISJOINT id sets (new
+// clips exist only on makevos, pre-move clips only on squeelab) — probe the
+// current CDN first, then the legacy one.
 static void SCResolveDubz(NSString *clipID, void (^completion)(NSDictionary *)) {
-    NSURL *mp4 = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.squeelab.com/guest/videos/%@.mp4", clipID]];
-    NSURL *poster = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.squeelab.com/guest/thumbnails/%@.jpg", clipID]];
-    SCFinishWithCandidate(@"dubz", mp4, poster, 0, 0, 0, completion);
+    NSURL *mp4 = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.makevos.com/videos/%@.mp4", clipID]];
+    NSURL *poster = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.makevos.com/thumbnails/%@.jpg", clipID]];
+    SCProbeVideoURL(mp4, ^(BOOL ok) {
+        if (ok) {
+            ApolloLog(@"[SportsClips] dubz resolved mp4=%@ poster=yes", mp4.absoluteString);
+            completion(SCStreamableJSON(mp4, poster, 0, 0, 0));
+            return;
+        }
+        NSURL *legacyMp4 = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.squeelab.com/guest/videos/%@.mp4", clipID]];
+        NSURL *legacyPoster = [NSURL URLWithString:[NSString stringWithFormat:@"https://cdn.squeelab.com/guest/thumbnails/%@.jpg", clipID]];
+        SCFinishWithCandidate(@"dubz(legacy)", legacyMp4, legacyPoster, 0, 0, 0, completion);
+    });
 }
 
-// streamff: the share API is authoritative (also the dead-clip signal); the
-// storage.streamff.com copy is preferred because external_url occasionally
-// points at a smaller re-encode under a different id.
+// streamff: the share API is authoritative (also the dead-clip signal).
+// external_url is the primary copy — since ~2026-07 the backing store lives at
+// cdn.hostedhost.top and the old storage.streamff.com path 404s even for live
+// clips, so storage is only a legacy fallback for the rare entry without an
+// external_url.
 static void SCResolveStreamff(NSString *clipID, void (^completion)(NSDictionary *)) {
     NSURL *api = [NSURL URLWithString:[NSString stringWithFormat:@"https://ffedge.streamff.com/share/%@", clipID]];
     SCFetch(api, @"GET", ^(NSData *data, NSHTTPURLResponse *http) {
@@ -358,15 +384,18 @@ static void SCResolveStreamff(NSString *clipID, void (^completion)(NSDictionary 
         }
         NSURL *poster = SCURLFromString([info[@"thumbnail"] isKindOfClass:[NSString class]] ? info[@"thumbnail"] : nil)
             ?: [NSURL URLWithString:[NSString stringWithFormat:@"https://storage.streamff.com/%@.jpg", clipID]];
-        NSURL *primary = [NSURL URLWithString:[NSString stringWithFormat:@"https://storage.streamff.com/%@.mp4", clipID]];
-        NSURL *fallback = SCURLFromString([info[@"external_url"] isKindOfClass:[NSString class]] ? info[@"external_url"] : nil);
+        NSURL *primary = SCURLFromString([info[@"external_url"] isKindOfClass:[NSString class]] ? info[@"external_url"] : nil);
+        NSURL *legacy = [NSURL URLWithString:[NSString stringWithFormat:@"https://storage.streamff.com/%@.mp4", clipID]];
+        if (!primary) {
+            SCFinishWithCandidate(@"streamff(storage)", legacy, poster, 0, 0, 0, completion);
+            return;
+        }
         SCProbeVideoURL(primary, ^(BOOL ok) {
             if (ok) {
+                ApolloLog(@"[SportsClips] streamff resolved mp4=%@ poster=yes", primary.absoluteString);
                 completion(SCStreamableJSON(primary, poster, 0, 0, 0));
-            } else if (fallback) {
-                SCFinishWithCandidate(@"streamff(external_url)", fallback, poster, 0, 0, 0, completion);
             } else {
-                completion(nil);
+                SCFinishWithCandidate(@"streamff(storage)", legacy, poster, 0, 0, 0, completion);
             }
         });
     });

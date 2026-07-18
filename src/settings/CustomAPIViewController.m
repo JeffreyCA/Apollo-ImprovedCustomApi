@@ -717,13 +717,32 @@ typedef NS_ENUM(NSInteger, Tag) {
                                      title:@"Export Debug Logs"
                                     action:^{ [weakSelf exportLogs]; }];
 
+    // Dev-only fault injection for the login-persistence recovery path (broken-keychain
+    // simulation, keychain report, protection-class poisoning). Only visible with FLEX
+    // (developer mode) on; see -flexSwitchToggled: for the visibility refresh.
+    ApolloSettingsRow *loginPersistenceDebug =
+        [ApolloSettingsRow valueRowWithID:@"adv.loginPersistenceDebug"
+                                    title:@"🔧 Login Persistence Debug"
+                                   detail:^NSString * { return [weakSelf loginPersistenceDebugStatusText]; }
+                                 onSelect:^{
+            [weakSelf presentLoginPersistenceDebugSheetFromSourceView:[weakSelf cellForRowID:@"adv.loginPersistenceDebug"]];
+        }];
+    loginPersistenceDebug.visible = ^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFLEX]; };
+    loginPersistenceDebug.configure = ^(UITableViewCell *cell) {
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        BOOL forceMiss = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDebugForceAccountReadMiss];
+        BOOL noRecover = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyDebugDisableKeychainRecovery];
+        cell.detailTextLabel.textColor = (forceMiss || noRecover) ? [UIColor systemRedColor] : [UIColor secondaryLabelColor];
+    };
+
     backend.iconSystemName    = @"bell.badge.fill";              backend.iconTileColor    = [UIColor systemRedColor];
     flex.iconSystemName       = @"ant.fill";                     flex.iconTileColor       = [UIColor systemGrayColor];
     exportLogs.iconSystemName = @"square.and.arrow.up.on.square.fill"; exportLogs.iconTileColor = [UIColor systemGrayColor];
+    loginPersistenceDebug.iconSystemName = @"wrench.and.screwdriver.fill"; loginPersistenceDebug.iconTileColor = [UIColor systemGrayColor];
 
     return [ApolloSettingsSection sectionWithTitle:@"Advanced"
                                             footer:@"Notification backend, developer tools and diagnostics."
-                                              rows:@[ backend, flex, exportLogs ]];
+                                              rows:@[ backend, flex, exportLogs, loginPersistenceDebug ]];
 }
 
 - (ApolloSettingsSection *)buildDataSection {
@@ -1470,24 +1489,22 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf subredditHeadersSwitchToggled:sender]; }];
 
+    // Off / Partial / Full replaces the old master + "Load All Highlights (Web)"
+    // switch pair with one picker (see -communityHighlightsModeText).
     ApolloSettingsRow *highlights =
-        [ApolloSettingsRow switchRowWithID:@"sub.highlights"
-                                     title:@"Community Highlights"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlights]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf communityHighlightsSwitchToggled:sender]; }];
-
-    ApolloSettingsRow *highlightsWeb =
-        [ApolloSettingsRow switchRowWithID:@"sub.highlightsWeb"
-                                     title:@"Load All Highlights (Web)"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlightsWeb]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf communityHighlightsWebSwitchToggled:sender]; }];
-    // Sub-option: only exists while Community Highlights is on.
-    highlightsWeb.visible = ^BOOL { return sCommunityHighlights; };
+        [ApolloSettingsRow valueRowWithID:@"sub.highlights"
+                                    title:@"Community Highlights"
+                                   detail:^NSString * { return [weakSelf communityHighlightsModeText]; }
+                                 onSelect:^{
+            [weakSelf presentCommunityHighlightsModeSheetFromSourceView:[weakSelf cellForRowID:@"sub.highlights"]];
+        }];
+    highlights.configure = ^(UITableViewCell *cell) {
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    };
 
     return [ApolloSettingsSection sectionWithTitle:nil
                                             footer:@"Enhance the subreddit list and community pages with dividers, headers and highlights."
-                                              rows:@[ enhancements, modernDividers, headers, highlights,
-                                                      highlightsWeb ]];
+                                              rows:@[ enhancements, modernDividers, headers, highlights ]];
 }
 
 - (ApolloSettingsSection *)buildSubredditsSourcesSection {
@@ -2381,6 +2398,84 @@ typedef NS_ENUM(NSInteger, Tag) {
     }];
 }
 
+#pragma mark - Login Persistence Debug (dev-only, FLEX-gated)
+
+- (NSString *)loginPersistenceDebugStatusText {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL forceMiss = [defaults boolForKey:UDKeyDebugForceAccountReadMiss];
+    BOOL noRecover = [defaults boolForKey:UDKeyDebugDisableKeychainRecovery];
+    return [NSString stringWithFormat:@"force-miss %@ · recovery %@",
+            forceMiss ? @"ON" : @"off", noRecover ? @"OFF" : @"on"];
+}
+
+- (void)presentLoginPersistenceDebugResult:(NSString *)text title:(NSString *)title {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:text preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Copy" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        UIPasteboard.generalPasteboard.string = text;
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)presentLoginPersistenceDebugSheetFromSourceView:(UIView *)sourceView {
+    __weak typeof(self) weakSelf = self;
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL forceMiss = [defaults boolForKey:UDKeyDebugForceAccountReadMiss];
+    BOOL noRecover = [defaults boolForKey:UDKeyDebugDisableKeychainRecovery];
+
+    UIAlertController *sheet = [UIAlertController
+        alertControllerWithTitle:@"Login Persistence Debug"
+                         message:@"Dev-only fault injection. This simulates the broken-keychain read on THIS device to exercise the fix — a pass here is a regression check, not field confirmation. \"Disable recovery\" + \"force read-miss\" will actually sign you out (reproduces the bug)."
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:(forceMiss ? @"✓ Force account read-miss (ON)" : @"Force account read-miss (off)")
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        [defaults setBool:!forceMiss forKey:UDKeyDebugForceAccountReadMiss];
+        [weakSelf reloadRowWithID:@"adv.loginPersistenceDebug"];
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:(noRecover ? @"✓ Disable recovery — watch the wipe (ON)" : @"Disable recovery — watch the wipe (off)")
+                                              style:(noRecover ? UIAlertActionStyleDestructive : UIAlertActionStyleDefault)
+                                            handler:^(UIAlertAction *a) {
+        [defaults setBool:!noRecover forKey:UDKeyDebugDisableKeychainRecovery];
+        [weakSelf reloadRowWithID:@"adv.loginPersistenceDebug"];
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Dump account keychain report"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+        [weakSelf presentLoginPersistenceDebugResult:ApolloDebugAccountKeychainReport() title:@"Account keychain report"];
+    }]];
+
+    // Rewrites the account item's protection class to WhenUnlocked, keeping the blob byte-for-byte
+    // so the OAuth token stays valid. Toggles: run it once to poison, again to restore.
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Poison account protection class (real -25300)"
+                                              style:UIAlertActionStyleDestructive
+                                            handler:^(UIAlertAction *a) {
+        [weakSelf presentLoginPersistenceDebugResult:ApolloDebugPoisonAccountAccessibility() title:@"Poison protection class"];
+    }]];
+
+    if (forceMiss || noRecover) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Clear all fault flags"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *a) {
+            [defaults setBool:NO forKey:UDKeyDebugForceAccountReadMiss];
+            [defaults setBool:NO forKey:UDKeyDebugDisableKeychainRecovery];
+            [weakSelf reloadRowWithID:@"adv.loginPersistenceDebug"];
+        }]];
+    }
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+
+    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
+    if (popover && sourceView) {
+        popover.sourceView = sourceView;
+        popover.sourceRect = sourceView.bounds;
+    }
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
 #pragma mark - Troubleshooting VC
 
 - (void)pushTroubleshootingViewController {
@@ -2720,6 +2815,8 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)flexSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyEnableFLEX];
+    // The Login Persistence Debug row only exists while developer mode is on.
+    [self visibilityDidChange];
 }
 
 - (void)webJSONSwitchToggled:(UISwitch *)sender {
@@ -2872,23 +2969,37 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloSubredditHeaderToggleChangedNotification" object:nil];
 }
 
-- (void)communityHighlightsSwitchToggled:(UISwitch *)sender {
-    BOOL wasOn = sCommunityHighlights;
-    sCommunityHighlights = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sCommunityHighlights forKey:UDKeyCommunityHighlights];
-    if (sCommunityHighlights != wasOn) {
-        // The "Load All Highlights (Web)" sub-row only exists while this master
-        // toggle is on. The form layer computes its position (which shifts when
-        // Modern Dividers is itself hidden) from the visibility diff.
-        [self visibilityDidChange];
-    }
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloCommunityHighlightsToggleChangedNotification" object:nil];
+- (NSString *)communityHighlightsModeText {
+    if (!sCommunityHighlights) return @"Off";
+    return sCommunityHighlightsWeb ? @"Full" : @"Partial";
 }
 
-- (void)communityHighlightsWebSwitchToggled:(UISwitch *)sender {
-    sCommunityHighlightsWeb = sender.isOn;
+// mode: 0 = Off, 1 = Partial (REST API, up to 2), 2 = Full (web harvest, up to 6).
+// Backed by the same two booleans other builds' preferences/backups already use
+// (see ApolloState.h) so no migration is needed.
+- (void)setCommunityHighlightsMode:(NSInteger)mode {
+    BOOL enabled = (mode != 0);
+    BOOL full = (mode == 2);
+    if (sCommunityHighlights == enabled && sCommunityHighlightsWeb == full) return;
+
+    sCommunityHighlights = enabled;
+    sCommunityHighlightsWeb = full;
+    [[NSUserDefaults standardUserDefaults] setBool:sCommunityHighlights forKey:UDKeyCommunityHighlights];
     [[NSUserDefaults standardUserDefaults] setBool:sCommunityHighlightsWeb forKey:UDKeyCommunityHighlightsWeb];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloCommunityHighlightsToggleChangedNotification" object:nil];
+    [self reloadRowWithID:@"sub.highlights"];
+}
+
+// Title + options + "(Current)" only — shared picker (option index == mode).
+- (void)presentCommunityHighlightsModeSheetFromSourceView:(UIView *)sourceView {
+    __weak typeof(self) weakSelf = self;
+    NSInteger current = !sCommunityHighlights ? 0 : (sCommunityHighlightsWeb ? 2 : 1);
+    ApolloSettingsPresentPicker(self, sourceView, @"Community Highlights",
+                                @[@"Off", @"Partial", @"Full"],
+                                current,
+                                ^(NSInteger pickedIndex) {
+        [weakSelf setCommunityHighlightsMode:pickedIndex];
+    });
 }
 
 - (void)textPostThumbnailsSwitchToggled:(UISwitch *)sender {

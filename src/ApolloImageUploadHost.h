@@ -10,6 +10,10 @@ extern "C" {
 BOOL ApolloIsAuthorizationHeader(NSString *field);
 void ApolloRedditCaptureBearerTokenFromAuthorization(NSString *authorization, NSString *source);
 void ApolloRedditCaptureBearerTokenFromRequest(NSURLRequest *request, NSString *source);
+// Most-recently-observed Reddit OAuth bearer token (nil if none captured yet), for
+// callers that need to make their own authenticated oauth.reddit.com requests
+// (e.g. ApolloHiddenContentData).
+NSString *ApolloLatestRedditBearerToken(void);
 
 // Request rewriting. Returns nil if the request should be passed through unchanged.
 NSURLRequest *ApolloRedditMaybeRewriteSubmitRequest(NSURLRequest *request);
