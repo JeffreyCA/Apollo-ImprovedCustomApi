@@ -43,6 +43,7 @@ BOOL sInfoRowTapComments = YES;    // effective default ON via registerDefaults 
 BOOL sInfoRowPopupMode = YES;      // info icons (%/time/edited) → popup alert; default ON (UDKeyInfoRowPopupMode)
 BOOL sInfoRowOverlayMode = NO;     // info icons → transient overlay; default OFF (UDKeyInfoRowOverlayMode)
 BOOL sInfoRowTapTranslation = YES; // effective default ON via registerDefaults (UDKeyInfoRowTapTranslation)
+NSInteger sScrollEdgeEffectStyle = ApolloScrollEdgeEffectStyleAutomatic;
 BOOL sModernSubredditDividers = YES;
 BOOL sSubredditListEnhancements = YES;
 BOOL sEnableFlairColors = NO;

@@ -1217,9 +1217,47 @@ typedef NS_ENUM(NSInteger, Tag) {
         }
                                   onSelect:nil];
 
+    // Overrides UIScrollView's top/bottom edge glass (iOS 26+). Liquid Glass
+    // only — hidden otherwise rather than shown-disabled, since the row has
+    // nothing to preview/explain on a non-Glass device.
+    ApolloSettingsRow *scrollEdgeEffect =
+        [ApolloSettingsRow valueRowWithID:@"gen.scrollEdgeEffect"
+                                    title:@"Scroll Edge Effect"
+                                   detail:^NSString * { return [weakSelf scrollEdgeEffectStyleText]; }
+                                 onSelect:^{
+            [weakSelf presentScrollEdgeEffectStyleSheetFromSourceView:[weakSelf cellForRowID:@"gen.scrollEdgeEffect"]];
+        }];
+    scrollEdgeEffect.configure = ^(UITableViewCell *cell) { cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator; };
+    scrollEdgeEffect.visible = ^BOOL { return IsLiquidGlass(); };
+
     return [ApolloSettingsSection sectionWithTitle:nil
                                             footer:@"Liquid Glass chrome behaviors."
-                                              rows:@[ tabBarIdle, keepSearchInPlace, iPadTabBarBottom ]];
+                                              rows:@[ tabBarIdle, keepSearchInPlace, iPadTabBarBottom, scrollEdgeEffect ]];
+}
+
+- (NSString *)scrollEdgeEffectStyleText {
+    switch (sScrollEdgeEffectStyle) {
+        case ApolloScrollEdgeEffectStyleSoft:   return @"Soft";
+        case ApolloScrollEdgeEffectStyleHard:   return @"Hard";
+        case ApolloScrollEdgeEffectStyleHidden: return @"Hidden";
+        default:                                return @"Automatic";
+    }
+}
+
+- (void)setScrollEdgeEffectStyle:(NSInteger)style {
+    sScrollEdgeEffectStyle = style;
+    [[NSUserDefaults standardUserDefaults] setInteger:sScrollEdgeEffectStyle forKey:UDKeyScrollEdgeEffectStyle];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloScrollEdgeEffectStyleChangedNotification" object:nil];
+    [self reloadRowWithID:@"gen.scrollEdgeEffect"];
+}
+
+- (void)presentScrollEdgeEffectStyleSheetFromSourceView:(UIView *)sourceView {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsPresentPicker(self, sourceView, @"Scroll Edge Effect",
+                                @[@"Automatic", @"Soft", @"Hard", @"Hidden"],
+                                sScrollEdgeEffectStyle, ^(NSInteger pickedIndex) {
+        [weakSelf setScrollEdgeEffectStyle:pickedIndex];
+    });
 }
 
 - (ApolloSettingsRow *)buildApolloAIRow {
