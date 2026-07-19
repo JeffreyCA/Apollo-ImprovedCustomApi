@@ -603,11 +603,11 @@ static void recenterCancelButton(void) {
     ApolloApplyScrollEdgeEffectStyleToViewController((UIViewController *)self);
     // UIKit finishes associating navigation/tab chrome with the content scroll
     // view after viewDidAppear on iOS 27. Reapply after that deferred pass so its
-    // hard default cannot replace the user's choice.
+    // hard default cannot replace the user's choice. (A same-runloop-turn
+    // dispatch_async re-check used to sit here too — dropped, since it ran
+    // before UIKit had done anything the immediate call above hadn't already
+    // covered; only the genuinely-deferred iOS-27 recheck below earns its cost.)
     __weak UIViewController *weakController = (UIViewController *)self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        ApolloApplyScrollEdgeEffectStyleToViewController(weakController);
-    });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(250 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
         ApolloApplyScrollEdgeEffectStyleToViewController(weakController);
     });

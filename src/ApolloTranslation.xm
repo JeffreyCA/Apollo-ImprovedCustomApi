@@ -8370,8 +8370,13 @@ static void ApolloReapplyTranslationOnAppResume(void) {
     %orig(items, animated);
     // Subreddit headers (ApolloSubredditHeaders.xm) size the nav title against
     // where this cluster ends up — re-check now that it just changed,
-    // independent of the globe merge below.
-    ApolloSubredditForceAllTitleRelayouts();
+    // independent of the globe merge below. Gated on sShowSubredditHeaders
+    // (skip the cost entirely when the feature's off) and on
+    // sApplyingGlobeMerge (this setter re-enters itself via
+    // ApolloApplyGlobeMergeForNavItem below — the outer call already forced
+    // the relayout, so the reentrant one would just repeat the same
+    // whole-window subview walk for no reason).
+    if (sShowSubredditHeaders && !sApplyingGlobeMerge) ApolloSubredditForceAllTitleRelayouts();
     if (sApplyingGlobeMerge) return;
     if (IsLiquidGlass() && objc_getAssociatedObject(self, kApolloGlobeMergeButtonKey)) {
         ApolloApplyGlobeMergeForNavItem(self);
@@ -8380,7 +8385,7 @@ static void ApolloReapplyTranslationOnAppResume(void) {
 
 - (void)setRightBarButtonItem:(UIBarButtonItem *)item animated:(BOOL)animated {
     %orig(item, animated);
-    ApolloSubredditForceAllTitleRelayouts();
+    if (sShowSubredditHeaders && !sApplyingGlobeMerge) ApolloSubredditForceAllTitleRelayouts();
     if (sApplyingGlobeMerge) return;
     if (IsLiquidGlass() && objc_getAssociatedObject(self, kApolloGlobeMergeButtonKey)) {
         ApolloApplyGlobeMergeForNavItem(self);

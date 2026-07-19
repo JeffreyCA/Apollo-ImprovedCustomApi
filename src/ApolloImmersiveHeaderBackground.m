@@ -167,10 +167,22 @@ static UIImage *ApolloImmersiveCachedBackdrop(UIImage *banner, BOOL create) {
     UIImage *backdrop = [cache objectForKey:banner];
     if (!backdrop && create) {
         backdrop = ApolloImmersiveGaussianBlurredImage(banner);
-        if (backdrop) [cache setObject:backdrop forKey:banner cost:ApolloImmersiveImageByteCost(backdrop)];
+        // NSCache retains `banner` itself as the key (needed for correct
+        // pointer-identity lookups — a lighter non-retaining wrapper key would
+        // risk a dangling/reused-address match against an unrelated image
+        // later), so its bytes count toward the real memory this cache holds
+        // alive just as much as the blurred value's do. Cost the key too, or
+        // totalCostLimit only ever sees a fraction of what's actually retained
+        // and a handful of large custom banners can sail past the stated budget.
+        if (backdrop) {
+            NSUInteger cost = ApolloImmersiveImageByteCost(backdrop) + ApolloImmersiveImageByteCost(banner);
+            [cache setObject:backdrop forKey:banner cost:cost];
+        }
     }
     return backdrop;
 }
+
+static const void *kApolloImmersiveBackdropPendingKey = &kApolloImmersiveBackdropPendingKey;
 
 @interface ApolloImmersiveHeaderBackgroundView ()
 @property(nonatomic, strong) UIView *contentContainer;
@@ -249,11 +261,21 @@ static UIImage *ApolloImmersiveCachedBackdrop(UIImage *banner, BOOL create) {
         self.sharpView.image = banner;
         UIImage *cachedBackdrop = ApolloImmersiveCachedBackdrop(banner, NO);
         self.backdropView.image = cachedBackdrop;
-        if (banner && !cachedBackdrop) {
+        // Guard against redoing the (downsample + Gaussian blur) work when a
+        // second, content-identical-but-pointer-distinct UIImage instance for
+        // the same logical banner arrives while the first blur is still in
+        // flight — plausible in practice, since a subreddit header applies a
+        // synchronously-cached image first and a separately-fetched instance
+        // moments later. Mirrors ApolloImmersiveBannerIsLightAsync's identical
+        // pending-flag pattern above.
+        BOOL alreadyPending = [objc_getAssociatedObject(banner, kApolloImmersiveBackdropPendingKey) boolValue];
+        if (banner && !cachedBackdrop && !alreadyPending) {
+            objc_setAssociatedObject(banner, kApolloImmersiveBackdropPendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             __weak ApolloImmersiveHeaderBackgroundView *weakSelf = self;
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
                 UIImage *backdrop = ApolloImmersiveCachedBackdrop(banner, YES);
                 dispatch_async(dispatch_get_main_queue(), ^{
+                    objc_setAssociatedObject(banner, kApolloImmersiveBackdropPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                     ApolloImmersiveHeaderBackgroundView *strongSelf = weakSelf;
                     if (!strongSelf || strongSelf.sourceBanner != banner) return;
                     strongSelf.backdropView.image = backdrop;
