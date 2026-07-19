@@ -571,6 +571,10 @@ static void recenterCancelButton(void) {
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
+    // Hopper: Home/Profile/Comments inherit this controller, whose hierarchy
+    // contains both an ASTableView and a full-screen interceptingScrollView.
+    // Apply to the complete subtree after Apollo has prepared the controller.
+    ApolloApplyScrollEdgeEffectStyleToViewController((UIViewController *)self);
     if (!IsLiquidGlass() || MSHookIvar<BOOL>(self, "searchBarShouldStickToKeyboard")) return;
     id field = ApolloObjectIvar(self, "searchTextField");
     NSString *txt = [field isKindOfClass:[UITextField class]] ? [(UITextField *)field text] : nil;
@@ -596,6 +600,17 @@ static void recenterCancelButton(void) {
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
+    ApolloApplyScrollEdgeEffectStyleToViewController((UIViewController *)self);
+    // UIKit finishes associating navigation/tab chrome with the content scroll
+    // view after viewDidAppear on iOS 27. Reapply after that deferred pass so its
+    // hard default cannot replace the user's choice.
+    __weak UIViewController *weakController = (UIViewController *)self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ApolloApplyScrollEdgeEffectStyleToViewController(weakController);
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(250 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+        ApolloApplyScrollEdgeEffectStyleToViewController(weakController);
+    });
     if (!IsLiquidGlass() || MSHookIvar<BOOL>(self, "searchBarShouldStickToKeyboard")) return;
     UINavigationBar *nb = [(UIViewController *)self navigationController].navigationBar;
 
