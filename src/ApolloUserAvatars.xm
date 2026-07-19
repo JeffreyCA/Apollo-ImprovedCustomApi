@@ -522,7 +522,7 @@ static UIImage *ApolloProfileTintedSymbol(NSString *name, CGFloat pointSize, UIC
         _aboutLabel.userInteractionEnabled = YES;
         [_aboutLabel addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_toggleAboutExpanded)]];
 
-        ApolloIdentityHeaderApplyTextStyles(_displayNameLabel, _usernameLabel, _aboutLabel);
+        [self apollo_applyIdentityTextStyles];
         _aboutLabel.numberOfLines = ApolloProfileAboutCollapsedLines;
         _aboutLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     }
@@ -620,6 +620,21 @@ static CGFloat const ApolloProfileActionsButtonGap = 10.0;  // gap between Follo
 static CGFloat const ApolloProfileActionsStackGap = 8.0;    // gap between rows when stacked (large Dynamic Type)
 static CGFloat const ApolloProfileBadgeStripHeight = 54.0;  // Badge Book placeholder strip
 static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the badge strip
+static CGFloat const ApolloProfileEditButtonWidth = 64.0;   // shared with layoutSubviews' editProfileButton frame
+
+// Classic density: avatar left-aligned, inline with the name/username column
+// (Apollo's original profile layout) instead of centered above a stacked name.
+static CGFloat const ApolloProfileClassicAvatarNameGap = 12.0; // gap between avatar and the name column
+static CGFloat const ApolloProfileClassicEditGap = 12.0;       // gap between the name column and the Edit pill
+static CGFloat const ApolloProfileClassicRowBottomGap = 16.0;  // gap below the avatar/name row, above the bio
+
+// Immersive's 28pt Title1 name is sized to sit centered under a full-width
+// banner; inline beside a 96pt avatar it reads oversized, so Classic uses a
+// smaller (still Dynamic Type-scaled) name font instead.
+static UIFont *ApolloProfileClassicNameFont(void) {
+    UIFont *base = [UIFont systemFontOfSize:20.0 weight:UIFontWeightBold];
+    return [[UIFontMetrics metricsForTextStyle:UIFontTextStyleHeadline] scaledFontForFont:base];
+}
 
 // Banner region height for THIS profile: 0 when the viewer turned the banner off,
 // a shorter strip in Compact density, the full height in Immersive. Everything else
@@ -629,8 +644,76 @@ static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the bad
     return sProfileHeaderImmersive ? ApolloIdentityHeaderBannerHeight() : 104.0;
 }
 
+// Font/alignment only — no frames — so this is cheap and idempotent enough to
+// call from every layoutSubviews pass, letting a live density toggle restyle
+// the header without recreating it. numberOfLines is deliberately left alone:
+// aboutLabel's is separately driven by expand/collapse state elsewhere.
+- (void)apollo_applyIdentityTextStyles {
+    if (sProfileHeaderImmersive) {
+        ApolloIdentityHeaderApplyTextStyles(self.displayNameLabel, self.usernameLabel, self.aboutLabel);
+        return;
+    }
+    // Natural (not hardcoded Left) so text still reads correctly against the
+    // RTL-mirrored frames apollo_applyClassicIdentityOverrides: computes below.
+    self.displayNameLabel.font = ApolloProfileClassicNameFont();
+    self.displayNameLabel.textAlignment = NSTextAlignmentNatural;
+    self.displayNameLabel.adjustsFontForContentSizeCategory = YES;
+
+    self.usernameLabel.font = ApolloIdentityHeaderSubnameFont();
+    self.usernameLabel.textAlignment = NSTextAlignmentNatural;
+    self.usernameLabel.adjustsFontForContentSizeCategory = YES;
+
+    self.aboutLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    self.aboutLabel.textAlignment = NSTextAlignmentNatural;
+    self.aboutLabel.adjustsFontForContentSizeCategory = YES;
+}
+
 - (ApolloIdentityHeaderLayout)apollo_identityForWidth:(CGFloat)width {
-    return ApolloIdentityHeaderLayoutMakeWithBanner(width, [self apollo_bannerHeight]);
+    ApolloIdentityHeaderLayout identity = ApolloIdentityHeaderLayoutMakeWithBanner(width, [self apollo_bannerHeight]);
+    if (!sProfileHeaderImmersive) {
+        [self apollo_applyClassicIdentityOverrides:&identity forWidth:width];
+    }
+    return identity;
+}
+
+// Classic density keeps the avatar leading (left margin in LTR, mirrored in
+// RTL) with the name/username inline beside it instead of centered above a
+// stacked name. Only geometry changes — avatarFrame moves to the leading
+// margin, name/subname sit on its trailing side (vertically centered against
+// the avatar), and bodyX/bodyY are recomputed so the bio/social/badge/stat
+// cascade below picks up the new alignment and starts below whichever of the
+// avatar or the name column reaches further down.
+- (void)apollo_applyClassicIdentityOverrides:(ApolloIdentityHeaderLayout *)identity forWidth:(CGFloat)width {
+    CGFloat margin = ApolloIdentityHeaderSideInset();
+    CGFloat diameter = ApolloIdentityHeaderAvatarDiameter();
+    BOOL rtl = self.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft;
+    CGFloat avatarX = rtl ? (width - margin - diameter) : margin;
+    CGRect avatarFrame = CGRectMake(avatarX, identity->avatarFrame.origin.y, diameter, diameter);
+
+    CGFloat nameHeight = ceil(ApolloProfileClassicNameFont().lineHeight) + 2.0;
+    CGFloat subnameHeight = ceil(ApolloIdentityHeaderSubnameFont().lineHeight) + 2.0;
+    CGFloat stackHeight = nameHeight + subnameHeight;
+
+    // The Edit pill (own profile only) claims the row's outer top corner
+    // (mirrors with RTL too — see editButtonX in layoutSubviews) — reserve
+    // its width so the name/subname text never runs under it.
+    CGFloat editReserve = self.editProfileButton.hidden ? 0.0 : (ApolloProfileEditButtonWidth + ApolloProfileClassicEditGap);
+    CGFloat nameX = rtl ? (margin + editReserve) : (CGRectGetMaxX(avatarFrame) + ApolloProfileClassicAvatarNameGap);
+    CGFloat nameRight = rtl ? (avatarFrame.origin.x - ApolloProfileClassicAvatarNameGap) : (width - margin - editReserve);
+    CGFloat nameWidth = MAX(60.0, nameRight - nameX);
+
+    CGFloat stackY = avatarFrame.origin.y + (diameter - stackHeight) / 2.0;
+    CGRect nameFrame = CGRectMake(nameX, stackY, nameWidth, nameHeight);
+    CGRect subnameFrame = CGRectMake(nameX, CGRectGetMaxY(nameFrame) + 1.0, nameWidth, subnameHeight);
+
+    identity->avatarFrame = avatarFrame;
+    identity->nameFrame = nameFrame;
+    identity->subnameFrame = subnameFrame;
+    // bodyX is a frame origin (always the rect's left edge, even in RTL) — in
+    // RTL the body column hugs the right margin instead, so its origin sits
+    // `bodyWidth` in from that margin rather than at `margin` itself.
+    identity->bodyX = rtl ? (width - margin - identity->bodyWidth) : margin;
+    identity->bodyY = MAX(CGRectGetMaxY(avatarFrame), CGRectGetMaxY(subnameFrame)) + ApolloProfileClassicRowBottomGap;
 }
 
 // Unclamped — the height the bio text actually needs at this width. Used both
@@ -683,7 +766,13 @@ static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the bad
 // stack, above the body. Only meaningful when showsUserActions is YES.
 - (CGFloat)apollo_actionsYForWidth:(CGFloat)width {
     ApolloIdentityHeaderLayout identity = [self apollo_identityForWidth:width];
-    return identity.bodyY - [self apollo_subnameLiftForLayout:identity];
+    CGFloat lifted = identity.bodyY - [self apollo_subnameLiftForLayout:identity];
+    // apollo_subnameLiftForLayout: assumes the subname row is the layout's
+    // bottom-most element, which holds in the centered/stacked Immersive
+    // layout (avatar sits above name/subname) but not in Classic's inline
+    // layout, where the 96pt avatar is often taller than the name/subname
+    // column beside it — never lift content up past the avatar's own bottom.
+    return MAX(lifted, CGRectGetMaxY(identity.avatarFrame) + 14.0);
 }
 
 // Whether the Follow/Message pair is too wide to sit side by side at this
@@ -728,8 +817,9 @@ static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the bad
 // apply=NO just measures (returns the bottom Y); apply=YES also sets every frame, so
 // preferredHeightForWidth and layoutSubviews can never drift apart.
 - (CGFloat)apollo_layoutBodyForWidth:(CGFloat)width apply:(BOOL)apply {
-    CGFloat bodyWidth = [self apollo_identityForWidth:width].bodyWidth;
-    CGFloat bodyX = floor((width - bodyWidth) / 2.0);
+    ApolloIdentityHeaderLayout identity = [self apollo_identityForWidth:width];
+    CGFloat bodyWidth = identity.bodyWidth;
+    CGFloat bodyX = identity.bodyX;
     CGFloat y = [self apollo_socialYForWidth:width];  // start below name/username/actions
 
     // Bio + more/less toggle
@@ -757,6 +847,9 @@ static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the bad
             if (apply) {
                 [self.aboutToggleButton setTitle:(self.aboutExpanded ? @"less" : @"more") forState:UIControlStateNormal];
                 self.aboutToggleButton.frame = CGRectMake(bodyX, y, bodyWidth, ApolloProfileAboutToggleHeight);
+                self.aboutToggleButton.contentHorizontalAlignment = sProfileHeaderImmersive
+                    ? UIControlContentHorizontalAlignmentCenter
+                    : UIControlContentHorizontalAlignmentLeading;
             }
             y += ApolloProfileAboutToggleHeight;
         }
@@ -804,6 +897,10 @@ static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the bad
 
 - (void)layoutSubviews {
     [super layoutSubviews];
+    // Cheap and idempotent (font/alignment only, no frame writes) — reapplied
+    // every pass so a live density toggle updates text styling immediately,
+    // without needing the header view to be torn down and recreated.
+    [self apollo_applyIdentityTextStyles];
     CGFloat width = self.bounds.size.width;
     ApolloIdentityHeaderLayout identity = [self apollo_identityForWidth:width];
     self.bannerImageView.frame = identity.bannerFrame;
@@ -823,7 +920,7 @@ static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the bad
 
     self.snoovatarImageView.frame = CGRectInset(identity.avatarFrame, -10.0, -10.0);
 
-    CGFloat editButtonWidth = self.editProfileButton.hidden ? 0.0 : 64.0;
+    CGFloat editButtonWidth = self.editProfileButton.hidden ? 0.0 : ApolloProfileEditButtonWidth;
     CGFloat editButtonHeight = 30.0;
     BOOL editRTL = self.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft;
     CGFloat editButtonX = editRTL ? 20.0 : (width - editButtonWidth - 20.0);
@@ -851,7 +948,7 @@ static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the bad
             // (or push rowX negative, clipping a tap target) — stack full
             // width instead, primary action on top either direction.
             CGFloat bodyWidth = identity.bodyWidth;
-            CGFloat bodyX = floor((width - bodyWidth) / 2.0);
+            CGFloat bodyX = identity.bodyX;
             self.followButton.frame = CGRectMake(bodyX, rowY, bodyWidth, rowHeight);
             self.followButton.layer.cornerRadius = corner;
             self.followGlassView.frame = self.followButton.bounds;
@@ -864,7 +961,9 @@ static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the bad
             self.messageGlassView.layer.cornerRadius = corner;
         } else {
             CGFloat totalWidth = followWidth + ApolloProfileActionsButtonGap + messageWidth;
-            CGFloat rowX = floor((width - totalWidth) / 2.0);
+            // Immersive centers the row as its own group below the handle;
+            // Classic left-aligns it with the rest of the body content instead.
+            CGFloat rowX = sProfileHeaderImmersive ? floor((width - totalWidth) / 2.0) : identity.bodyX;
             CGFloat leadingX = rowX;
             CGFloat trailingX = rowX + (rtl ? messageWidth : followWidth) + ApolloProfileActionsButtonGap;
             // RTL mirrors reading order, not just position: Follow (the
@@ -2733,6 +2832,25 @@ static void ApolloProfileRefreshViewControllersInTree(UIViewController *viewCont
             objc_setAssociatedObject(viewController, kApolloProfileUsernameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
         }
         ApolloProfileInstallOrUpdateHeader(viewController);
+        // A viewer-preference toggle (Stat Cards/Social Links/Trophy Case/
+        // Follow&Message/Avatar Style) doesn't change the username, so the
+        // install/update call above takes its "already installed" branch and
+        // never re-reads those flags — they're only applied from
+        // applyProfileInfo:/ApolloProfileSetSnoovatarMode, which otherwise run
+        // just once per profile load (or on an actual username change). Without
+        // this, a toggle only visibly took effect after a pull-to-refresh.
+        // Re-apply the already-cached info (no network fetch, cheap) so the
+        // change shows immediately on whatever profile is currently visible.
+        ApolloProfileHeaderView *header = objc_getAssociatedObject(viewController, kApolloProfileHeaderViewKey);
+        NSString *headerUsername = header.username;
+        if (header && headerUsername.length > 0) {
+            ApolloUserProfileInfo *cachedInfo = [[ApolloUserProfileCache sharedCache] cachedInfoForUsername:headerUsername];
+            if (cachedInfo) {
+                [header applyProfileInfo:cachedInfo fallbackUsername:headerUsername];
+                BOOL showSnoovatar = cachedInfo.hasSnoovatar && cachedInfo.snoovatarURL != nil && sProfileAvatarStyle == 0;
+                ApolloProfileSetSnoovatarMode(header, showSnoovatar);
+            }
+        }
         if (refreshCount) (*refreshCount)++;
     }
 

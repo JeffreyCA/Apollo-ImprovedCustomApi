@@ -25,6 +25,10 @@ CGFloat ApolloIdentityHeaderBottomPadding(void) {
     return ApolloIdentityBottomPadding;
 }
 
+CGFloat ApolloIdentityHeaderSideInset(void) {
+    return ApolloIdentitySideInset;
+}
+
 // Fonts come from UIFontMetrics so adjustsFontForContentSizeCategory actually
 // works (it is a no-op on plain systemFontOfSize: fonts). Not cached — the
 // scaled result depends on the current content size category.
@@ -67,6 +71,7 @@ ApolloIdentityHeaderLayout ApolloIdentityHeaderLayoutMakeWithBanner(CGFloat widt
         .subnameFrame = subnameFrame,
         .bodyY = CGRectGetMaxY(subnameFrame) + 10.0,
         .bodyWidth = bodyWidth,
+        .bodyX = bodyX,
     };
     return layout;
 }
