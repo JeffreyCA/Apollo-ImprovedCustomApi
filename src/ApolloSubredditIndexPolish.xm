@@ -26,6 +26,10 @@ static char kApolloSubredditSelectionTableKey;
 static char kApolloSubredditHeaderSeparatorKey;
 static char kApolloSubredditHeaderGradientLayerKey;
 static char kApolloSubredditHeaderLoggedKey;
+// Section index this header is currently displayed for (stamped in willDisplayHeaderView)
+// plus the last pinned verdict, so the setFrame: hook only repaints on transitions.
+static char kApolloSubredditHeaderSectionKey;
+static char kApolloSubredditHeaderPinnedStateKey;
 static char kApolloSubredditMultiredditsSectionKey;
 static char kApolloSubredditMultiredditChildStyledKey;
 
@@ -34,6 +38,7 @@ static NSString * const ApolloSubredditIndexFavoriteSubredditsKey = @"FavoriteSu
 static void (*orig_ApolloRedditListWillDisplayHeader)(id self, SEL _cmd, UITableView *tableView, UIView *view, NSInteger section) = NULL;
 static void (*orig_ApolloRedditListWillDisplayCell)(id self, SEL _cmd, UITableView *tableView, UITableViewCell *cell, NSIndexPath *indexPath) = NULL;
 static void (*orig_ApolloSubredditHeaderLayoutSubviews)(id self, SEL _cmd) = NULL;
+static void (*orig_ApolloSubredditHeaderSetFrame)(id self, SEL _cmd, CGRect frame) = NULL;
 
 static const CGFloat ApolloSubredditIndexSlotHeight = 14.0;
 static const CGFloat ApolloSubredditIndexTouchWidth = 56.0;
@@ -1505,6 +1510,34 @@ static void ApolloSubredditIndexPrepareCellForDisplay(UITableView *tableView, UI
     ApolloSubredditIndexApplyMultiredditChildStyleIfNeeded(tableView, cell, indexPath);
 }
 
+// A plain-style section header is "pinned" (floating over rows under the nav bar) whenever the
+// table has lifted it above its resting slot — the top of its own section's rect. While pinned,
+// the modern header must stay transparent so only the title + accent line float over the rows
+// scrolling beneath; the opaque surface fill (see below) is only for headers at rest.
+static BOOL ApolloSubredditIndexHeaderIsPinned(UIView *header, UITableView *tableView) {
+    if (!header || !tableView) return NO;
+    NSNumber *sectionNumber = objc_getAssociatedObject(header, &kApolloSubredditHeaderSectionKey);
+    if (!sectionNumber) return NO;
+    NSInteger section = sectionNumber.integerValue;
+    if (section < 0 || section >= tableView.numberOfSections) return NO;
+    CGFloat restingY = CGRectGetMinY([tableView rectForSection:section]);
+    return CGRectGetMinY(header.frame) - restingY > 0.5;
+}
+
+// Resting modern headers get an opaque surface colour matching the rows: it fills the gap a
+// transparent header would leave over a mismatched table background (#450), and at rest it is
+// visually indistinguishable from a transparent header. Pinned headers must NOT keep it — an
+// opaque band floating over the rows reads as a solid stripe (the pinned-FAVORITES regression).
+static void ApolloSubredditIndexApplyHeaderSurfaceForPinnedState(UIView *header, UITableView *tableView, BOOL pinned) {
+    objc_setAssociatedObject(header, &kApolloSubredditHeaderPinnedStateKey, @(pinned), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (pinned) {
+        header.backgroundColor = [UIColor clearColor];
+        return;
+    }
+    UIColor *surfaceColor = ApolloSubredditIndexThemeListBackgroundColor(tableView, header);
+    header.backgroundColor = ApolloSubredditIndexColorIsVisible(surfaceColor) ? surfaceColor : tableView.backgroundColor;
+}
+
 static void ApolloSubredditIndexStyleHeaderView(UIView *header, UITableView *tableView) {
     if (!sSubredditListEnhancements) return;
     if (!header || !tableView) return;
@@ -1581,11 +1614,35 @@ static void ApolloSubredditIndexStyleHeaderView(UIView *header, UITableView *tab
     }
 
     // Fill the gap a transparent modern header would otherwise leave by giving the header its
-    // own opaque surface colour (matching the rows). This replaces the old approach of colouring
-    // the whole scroll view, which tripped the iOS 26 nav-bar glass reflection (#450). The header
-    // is a subview below the first row, so it never reaches the nav bar's reflected band.
-    UIColor *surfaceColor = ApolloSubredditIndexThemeListBackgroundColor(tableView, header);
-    header.backgroundColor = ApolloSubredditIndexColorIsVisible(surfaceColor) ? surfaceColor : tableView.backgroundColor;
+    // own opaque surface colour (matching the rows) — but only while it rests in its section
+    // slot. This replaces the old approach of colouring the whole scroll view, which tripped the
+    // iOS 26 nav-bar glass reflection (#450). The header is a subview below the first row, so it
+    // never reaches the nav bar's reflected band. While pinned it goes transparent instead (the
+    // setFrame: hook handles the transitions mid-scroll); see
+    // ApolloSubredditIndexApplyHeaderSurfaceForPinnedState.
+    ApolloSubredditIndexApplyHeaderSurfaceForPinnedState(header, tableView, ApolloSubredditIndexHeaderIsPinned(header, tableView));
+}
+
+// The table repositions a pinning/unpinning header exclusively through setFrame:, so this is
+// the one reliable per-scroll entry point for the rest-vs-pinned background swap. Cheap: bails
+// unless the header is one we styled, and only repaints when the pinned verdict flips.
+static void ApolloSubredditIndexHeaderSetFrameHook(id self, SEL _cmd, CGRect frame) {
+    if (orig_ApolloSubredditHeaderSetFrame) {
+        orig_ApolloSubredditHeaderSetFrame(self, _cmd, frame);
+    }
+
+    if (!sSubredditListEnhancements || !sModernSubredditDividers) return;
+    if (![self isKindOfClass:[UIView class]]) return;
+    UIView *header = (UIView *)self;
+    if (!objc_getAssociatedObject(header, &kApolloSubredditHeaderSectionKey)) return;
+
+    UITableView *tableView = ApolloSubredditIndexTableForView(header);
+    if (![objc_getAssociatedObject(tableView, &kApolloSubredditIndexTableKey) boolValue]) return;
+
+    BOOL pinned = ApolloSubredditIndexHeaderIsPinned(header, tableView);
+    NSNumber *lastPinned = objc_getAssociatedObject(header, &kApolloSubredditHeaderPinnedStateKey);
+    if (lastPinned && lastPinned.boolValue == pinned) return;
+    ApolloSubredditIndexApplyHeaderSurfaceForPinnedState(header, tableView, pinned);
 }
 
 static void ApolloSubredditIndexHeaderLayoutSubviewsHook(id self, SEL _cmd) {
@@ -1605,6 +1662,10 @@ static void ApolloSubredditIndexWillDisplayHeaderHook(id self, SEL _cmd, UITable
     if (orig_ApolloRedditListWillDisplayHeader) {
         orig_ApolloRedditListWillDisplayHeader(self, _cmd, tableView, view, section);
     }
+    // Stamp the section (headers are reused) and drop the cached pinned verdict so the
+    // setFrame: hook re-evaluates for the new slot.
+    objc_setAssociatedObject(view, &kApolloSubredditHeaderSectionKey, @(section), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(view, &kApolloSubredditHeaderPinnedStateKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloSubredditIndexStyleHeaderView(view, tableView);
     ApolloSubredditIndexTrackMultiredditsSection(tableView, view, section);
 }
@@ -1699,6 +1760,45 @@ static void ApolloSubredditIndexInstallHeaderLayoutHook(void) {
     const char *types = method_getTypeEncoding(inheritedMethod) ?: "v@:";
     BOOL added = class_addMethod(cls, selector, (IMP)ApolloSubredditIndexHeaderLayoutSubviewsHook, types);
     ApolloLog(@"[SubredditIndex] header layout hook installed via add=%d on %@", added, NSStringFromClass(cls));
+}
+
+static void ApolloSubredditIndexInstallHeaderSetFrameHook(void) {
+    Class cls = objc_getClass("Apollo.RecreatedTableSectionHeaderView");
+    if (!cls) cls = NSClassFromString(@"Apollo.RecreatedTableSectionHeaderView");
+    if (!cls) {
+        ApolloLog(@"[SubredditIndex] header setFrame hook skipped: RecreatedTableSectionHeaderView missing");
+        return;
+    }
+
+    SEL selector = @selector(setFrame:);
+    Method ownMethod = NULL;
+    unsigned int methodCount = 0;
+    Method *methods = class_copyMethodList(cls, &methodCount);
+    for (unsigned int idx = 0; idx < methodCount; idx++) {
+        if (method_getName(methods[idx]) == selector) {
+            ownMethod = methods[idx];
+            break;
+        }
+    }
+    free(methods);
+
+    if (ownMethod) {
+        orig_ApolloSubredditHeaderSetFrame = (void (*)(id, SEL, CGRect))method_getImplementation(ownMethod);
+        method_setImplementation(ownMethod, (IMP)ApolloSubredditIndexHeaderSetFrameHook);
+        ApolloLog(@"[SubredditIndex] header setFrame hook installed via replace on %@", NSStringFromClass(cls));
+        return;
+    }
+
+    Method inheritedMethod = class_getInstanceMethod(cls, selector);
+    if (!inheritedMethod) {
+        ApolloLog(@"[SubredditIndex] header setFrame hook skipped: inherited setFrame: missing on %@", NSStringFromClass(cls));
+        return;
+    }
+
+    orig_ApolloSubredditHeaderSetFrame = (void (*)(id, SEL, CGRect))method_getImplementation(inheritedMethod);
+    const char *types = method_getTypeEncoding(inheritedMethod) ?: "v@:{CGRect={CGPoint=dd}{CGSize=dd}}";
+    BOOL added = class_addMethod(cls, selector, (IMP)ApolloSubredditIndexHeaderSetFrameHook, types);
+    ApolloLog(@"[SubredditIndex] header setFrame hook installed via add=%d on %@", added, NSStringFromClass(cls));
 }
 
 %hook UITableView
@@ -1955,6 +2055,7 @@ static void ApolloSubredditIndexApplyRedditListCellPolishOnce(UITableViewCell *c
     ApolloSubredditIndexInstallHeaderHook();
     ApolloSubredditIndexInstallCellDisplayHook();
     ApolloSubredditIndexInstallHeaderLayoutHook();
+    ApolloSubredditIndexInstallHeaderSetFrameHook();
     [[NSNotificationCenter defaultCenter] addObserverForName:ApolloModernSubredditDividersChangedNotification
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
