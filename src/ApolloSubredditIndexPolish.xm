@@ -1912,11 +1912,48 @@ static void ApolloSubredditIndexInstallHeaderSetFrameHook(void) {
     ApolloLog(@"[SubredditIndex] header setFrame hook installed via add=%d on %@", added, NSStringFromClass(cls));
 }
 
+// Classic mode draws the NATIVE A–Z index (the modern custom overlay lives on the
+// table's superview, above everything). UIKit adds each floating section header to
+// the table's subviews as it scrolls in — after the index view — so the opaque
+// header bands cover the letters as they pass. Keep the letters on top by re-raising
+// the index whenever a header sits above it. Scoped to the subreddit list; a no-op
+// pass is a cheap subview scan, and reordering doesn't invalidate layout.
+static void ApolloSubredditIndexRaiseNativeIndexAboveHeaders(UITableView *tableView) {
+    if (!tableView) return;
+    if (![sApolloSubredditKnownTables containsObject:tableView] &&
+        !ApolloSubredditIndexTableAlreadyRecognised(tableView)) return;
+
+    NSArray<UIView *> *subviews = tableView.subviews;
+    UIView *indexView = nil;
+    NSUInteger indexPosition = NSNotFound;
+    for (NSUInteger position = 0; position < subviews.count; position++) {
+        UIView *subview = subviews[position];
+        if ([NSStringFromClass(subview.class) rangeOfString:@"TableViewIndex"].location != NSNotFound) {
+            indexView = subview;
+            indexPosition = position;
+            break;
+        }
+    }
+    if (!indexView) return;
+
+    Class recreatedHeaderClass = objc_getClass("Apollo.RecreatedTableSectionHeaderView");
+    Class headerFooterClass = ApolloSubredditIndexTableHeaderFooterViewClass();
+    for (NSUInteger position = indexPosition + 1; position < subviews.count; position++) {
+        UIView *subview = subviews[position];
+        if ((recreatedHeaderClass && [subview isKindOfClass:recreatedHeaderClass]) ||
+            (headerFooterClass && [subview isKindOfClass:headerFooterClass])) {
+            [tableView bringSubviewToFront:indexView];
+            return;
+        }
+    }
+}
+
 %hook UITableView
 
 - (void)layoutSubviews {
     %orig;
     ApolloSubredditIndexInstallOrUpdate((UITableView *)self);
+    ApolloSubredditIndexRaiseNativeIndexAboveHeaders((UITableView *)self);
 }
 
 - (void)reloadData {
