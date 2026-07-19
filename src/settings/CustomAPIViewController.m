@@ -1113,11 +1113,11 @@ typedef NS_ENUM(NSInteger, Tag) {
                                               rows:@[ readThumbnails, readPostMax, filterNSFWRR ]];
 }
 
-// The "Open in App" screen (Bluesky / GitHub / Steam) now lives in native
-// General → Open Links — see ApolloSettingsNativeInjections.xm. Its old
-// YouTube toggle and Default Browser picker were dropped outright: they
-// wrote Apollo's own keys, and the native rows ("Open Videos in YouTube
-// App", "Open Links in") are shown again in General → Other.
+// The "Open in App" screen now lives in native General → Open Links — see
+// ApolloSettingsNativeInjections.xm. Besides the Bluesky / GitHub / Steam
+// toggles it mirrors Apollo's own YouTube switch and "Open Links in" browser
+// picker against their native keys; the native General → Other rows are
+// hidden (registration in the same file).
 
 // Compact state shown below the Info Row disclosure. This is derived from the
 // same globals as the destination form, so returning from that screen only
@@ -1496,6 +1496,23 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf iconOnlyTabBarSwitchToggled:sender]; }];
 
+    // Mirror of Apollo's native "Hide Username on Tab Bar" switch (relocated
+    // here from General → Other, which now hides it — see
+    // ApolloSettingsNativeInjections.xm). Same key, and the native change
+    // notification is posted so Apollo relabels the profile tab live. While
+    // Icon-Only Tab Bar is on, every tab label is already hidden, so this
+    // narrower option shows off + disabled — the same treatment
+    // ApolloTabBarTitles.xm gives the native row.
+    ApolloSettingsRow *hideUsernameTab =
+        [ApolloSettingsRow switchRowWithID:@"profiles.hideUsernameTab"
+                                     title:@"Hide Username on Tab Bar"
+                                      isOn:^BOOL {
+            return !sHideTabBarTitles &&
+                   [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyNativeHideUsernameOnTabBar];
+        }
+                                  onToggle:^(UISwitch *sender) { [weakSelf hideUsernameTabSwitchToggled:sender]; }];
+    hideUsernameTab.enabled = ^BOOL { return !sHideTabBarTitles; };
+
     // Single toggle for Reborn's detailed profile page: banner, large
     // avatar/snoovatar, display name, bio, and the Social Links band (all of
     // which live in the custom header). Off → Apollo's compact stock profile.
@@ -1506,8 +1523,8 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onToggle:^(UISwitch *sender) { [weakSelf showDetailedProfilesSwitchToggled:sender]; }];
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Customize profile pictures, profile pages and the tab bar. Icon-Only Tab Bar hides the text labels while keeping each icon's accessibility name."
-                                              rows:@[ userAvatars, profileTabAvatar, iconOnlyTabBar, detailedProfiles ]];
+                                            footer:@"Customize profile pictures, profile pages and the tab bar. Icon-Only Tab Bar hides every tab's text label (Hide Username on Tab Bar only hides yours), while keeping each icon's accessibility name."
+                                              rows:@[ userAvatars, profileTabAvatar, iconOnlyTabBar, hideUsernameTab, detailedProfiles ]];
 }
 
 // Subreddits group screen (ApolloSubredditsSettingsViewController), two
@@ -3076,7 +3093,18 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (void)iconOnlyTabBarSwitchToggled:(UISwitch *)sender {
+    // Enabling also clears the native Hide Username key (see
+    // ApolloSetHideTabBarTitlesEnabled), so the sibling row below must re-read
+    // its switch state and enablement either way.
     ApolloSetHideTabBarTitlesEnabled(sender.isOn);
+    [self reloadRowWithID:@"profiles.hideUsernameTab"];
+}
+
+- (void)hideUsernameTabSwitchToggled:(UISwitch *)sender {
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyNativeHideUsernameOnTabBar];
+    // Apollo natively observes this and relabels the profile tab immediately.
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:ApolloNativeHideUsernameOnTabBarChangedNotification object:nil];
 }
 
 - (void)showDetailedProfilesSwitchToggled:(UISwitch *)sender {
