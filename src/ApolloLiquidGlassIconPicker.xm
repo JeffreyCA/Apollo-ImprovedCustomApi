@@ -3,6 +3,7 @@
 #import <objc/message.h>
 #import "ApolloCommon.h"
 #import "ApolloThemeRuntime.h"
+#import "settings/ApolloSettingsTableViewController.h"
 
 // MARK: - Liquid Glass App Icon Picker
 //

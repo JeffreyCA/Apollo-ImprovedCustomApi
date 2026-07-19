@@ -3,8 +3,9 @@
 // Renders image URLs inside Apollo's selftext / comment markdown bodies as
 // actual inline images, replacing the URL text in-place. Tap opens
 // MediaViewer (via Apollo's tappedLinkAttribute path); long-press shows
-// Copy Link / Share / Open in Safari (UIContextMenuInteraction wins over
-// Apollo's cell-level menu since it's installed on the deeper view).
+// Copy Link / Share / Open in Safari / Inline Media Settings
+// (UIContextMenuInteraction wins over Apollo's cell-level menu since it's
+// installed on the deeper view).
 //
 
 #import "ApolloCommon.h"
@@ -13,6 +14,7 @@
 #import "ApolloState.h"
 #import "Tweak.h"
 #import "UserDefaultConstants.h"
+#import "settings/ApolloSettingsRouter.h"
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -1898,7 +1900,19 @@ static BOOL ApolloPresentOrResolveImageChestAlbumURL(NSURL *url, UIView *sourceV
                                              handler:^(__kindof UIAction *a) {
             [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
         }];
-        return [UIMenu menuWithTitle:@"" children:@[copy, share, open]];
+        // Contextual entry point (settings IA): jump straight to the Inline
+        // Media settings screen from the media it governs. Its own inline
+        // group so the menu shows a separator above it.
+        UIAction *settings = [UIAction actionWithTitle:@"Inline Media Settings"
+                                                  image:[UIImage systemImageNamed:@"gearshape"]
+                                              identifier:nil
+                                                 handler:^(__kindof UIAction *a) {
+            ApolloSettingsRouteOpen(@"inline-media");
+        }];
+        UIMenu *settingsGroup = [UIMenu menuWithTitle:@"" image:nil identifier:nil
+                                              options:UIMenuOptionsDisplayInline
+                                             children:@[settings]];
+        return [UIMenu menuWithTitle:@"" children:@[copy, share, open, settingsGroup]];
     }];
 }
 

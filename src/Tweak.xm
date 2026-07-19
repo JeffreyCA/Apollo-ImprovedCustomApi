@@ -21,7 +21,7 @@
 #import "ApolloBarkNotifications.h"
 #import "ApolloState.h"
 #import "Tweak.h"
-#import "CustomAPIViewController.h"
+#import "settings/CustomAPIViewController.h"
 #import "Version.h"
 #import "UserDefaultConstants.h"
 #import "ApolloPostFilterStore.h"
@@ -1530,8 +1530,15 @@ static const char kARCompletion = '\0';
         for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
             if (scene.activationState == UISceneActivationStateForegroundActive
                     && [scene isKindOfClass:[UIWindowScene class]]) {
-                window = ((UIWindowScene *)scene).keyWindow ?: ((UIWindowScene *)scene).windows.firstObject;
-                break;
+                NSArray<UIWindow *> *sceneWindows = ((UIWindowScene *)scene).windows;
+                for (UIWindow *candidate in sceneWindows) {
+                    if (candidate.isKeyWindow) {
+                        window = candidate;
+                        break;
+                    }
+                }
+                window = window ?: sceneWindows.firstObject;
+                if (window) break;
             }
         }
     }
@@ -2910,6 +2917,7 @@ static void initializeRandomSources() {
     // installed below — in the simulator the keychain is virtualized by those
     // hooks, so reading before they're in place returns nothing.
     sWebJSONEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyWebJSONEnabled];
+    sPollsFeatureEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPollsEnabled];
     // Surface a revoked/expired cookie (detected response-side in
     // ApolloWebJSONNoteResponse) as a re-login prompt wherever the user is.
     [[NSNotificationCenter defaultCenter] addObserverForName:ApolloWebJSONSessionExpiredNotification

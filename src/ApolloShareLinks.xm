@@ -370,19 +370,26 @@ static BOOL ApolloOpensLinksInSystemBrowser(void) {
     return [token isEqualToString:@"external-safari"];
 }
 
+// UIWindowScene.keyWindow is iOS 15-only, while the tweak still supports iOS
+// 14. Walk the scene windows through the shared compatibility helper and use
+// UIWindow.isKeyWindow, which is available at our deployment floor.
+static UIWindow *ApolloSharePresentationWindow(void) {
+    UIWindow *fallback = nil;
+    for (UIWindow *window in ApolloAllWindows()) {
+        if (window.hidden || window.alpha <= 0.01) continue;
+        if (window.isKeyWindow) return window;
+        fallback = fallback ?: window;
+    }
+    return fallback;
+}
+
 // Present `url` in Apollo's in-app browser (the same SFSafariViewController
 // subclass Apollo uses for "In-App Safari"), falling back to a plain external open
 // if it can't be presented so the link is never silently dropped. Main thread only.
 static void ApolloPresentInAppSafari(NSURL *url) {
     if (![url isKindOfClass:[NSURL class]]) return;
 
-    UIViewController *presenter = nil;
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if ([scene isKindOfClass:[UIWindowScene class]]) {
-            UIWindow *keyWindow = ((UIWindowScene *)scene).keyWindow;
-            if (keyWindow) presenter = [keyWindow visibleViewController];
-        }
-    }
+    UIViewController *presenter = [ApolloSharePresentationWindow() visibleViewController];
 
     UIViewController *safariVC = nil;
     Class apolloSafariClass = objc_getClass("_TtC6Apollo26ApolloSafariViewController");
@@ -510,17 +517,7 @@ static NSString *ApolloNormalizeLinkURLString(NSString *urlString) {
 
 // Present loading alert on top of current view controller
 static UIViewController *PresentResolvingShareLinkAlert() {
-    __block UIWindow *lastKeyWindow = nil;
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if ([scene isKindOfClass:[UIWindowScene class]]) {
-            UIWindowScene *windowScene = (UIWindowScene *)scene;
-            if (windowScene.keyWindow) {
-                lastKeyWindow = windowScene.keyWindow;
-            }
-        }
-    }
-
-    UIViewController *visibleViewController = lastKeyWindow.visibleViewController;
+    UIViewController *visibleViewController = [ApolloSharePresentationWindow() visibleViewController];
     UIAlertController *alertController = [UIAlertController alertControllerWithTitle:nil message:@"Resolving share link..." preferredStyle:UIAlertControllerStyleAlert];
 
     [visibleViewController presentViewController:alertController animated:YES completion:nil];

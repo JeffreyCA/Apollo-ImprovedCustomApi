@@ -762,7 +762,17 @@ static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderat
         BOOL destructive = ApolloNativeActionMenuTitleIsDestructive(title);
         UIAction *action = ApolloNativeActionMenuAction(title, subtitle, image, actionTintColor, opensModeratorMenu, destructive, NO, enabled, actionController, (NSInteger)i);
         if (action) {
-            [children addObject:action];
+            UIMenuElement *element = action;
+            // actionKind 51 = Submit Post: swap the plain row for the quick
+            // post-type group (Photo/Link/Text/Poll) when one is available.
+            if (actionKind == 51 && enabled) {
+                NSInteger row = (NSInteger)i;
+                UIMenu *postTypes = ApolloSubmitPostTypesMenu(actionController, ^{
+                    ApolloNativeActionMenuSelectRow(actionController, row);
+                });
+                if (postTypes) element = postTypes;
+            }
+            [children addObject:element];
         }
     }
 

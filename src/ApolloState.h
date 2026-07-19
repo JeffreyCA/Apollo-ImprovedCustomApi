@@ -277,6 +277,12 @@ static inline BOOL IsAppleTranslationSupported(void) {
 // authenticated with a WKWebView-harvested session cookie instead of a bearer
 // token. Dormant escape hatch for Reddit API-key revocation waves. Default NO.
 extern BOOL sWebJSONEnabled;
+// Native Polls (ApolloPollVoting.xm / ApolloPollCompose.xm): master gate for
+// the experimental poll voting + creation feature. Default NO. Cached here (not
+// re-read from NSUserDefaults per call) because the poll node's layoutSubviews
+// hook checks it; loaded at launch and updated live by the Polls settings
+// toggle. Read through ApolloPollsFeatureEnabled() (ApolloCommon.h).
+extern BOOL sPollsFeatureEnabled;
 // Serialized "name=value; name=value" Cookie header harvested from a
 // www.reddit.com web login (must include reddit_session). nil until the user
 // completes the Web Session Login flow. Persisted in the keychain (it's a full

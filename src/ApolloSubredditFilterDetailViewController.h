@@ -5,7 +5,7 @@
 // onto Apollo's native Filters & Blocks screen. Edits the keyword list and flair
 // list for one subreddit via ApolloPostFilterStore.
 
-#import "ApolloSettingsTableViewController.h"
+#import "settings/ApolloSettingsTableViewController.h"
 
 @interface ApolloSubredditFilterDetailViewController : ApolloSettingsTableViewController
 

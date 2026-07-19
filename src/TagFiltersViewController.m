@@ -3,7 +3,6 @@
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
 
-extern NSString *const ApolloTagFiltersChangedNotification;
 NSString *const ApolloTagFiltersChangedNotification = @"ApolloTagFiltersChangedNotification";
 
 typedef NS_ENUM(NSInteger, TagFiltersSection) {
@@ -153,12 +152,18 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"Tag Filters";
+    self.title = self.overridesOnly ? @"Per-Subreddit Overrides" : @"Tag Filters";
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self.tableView reloadData];
+}
+
+// overridesOnly maps the visible single section onto TagFiltersSectionOverrides;
+// the full screen passes sections through unchanged.
+- (NSInteger)modelSectionFor:(NSInteger)section {
+    return self.overridesOnly ? TagFiltersSectionOverrides : section;
 }
 
 #pragma mark - Helpers
@@ -174,21 +179,27 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
 
 #pragma mark - Section / row counts
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return TagFiltersSectionCount; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    return self.overridesOnly ? 1 : TagFiltersSectionCount;
+}
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    section = [self modelSectionFor:section];
     if (section == TagFiltersSectionGeneral) return 3;  // Enable / NSFW / Spoiler
     if (section == TagFiltersSectionOverrides) return [self overrideSubreddits].count + 1; // + "Add"
     return 0;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    section = [self modelSectionFor:section];
+    if (self.overridesOnly) return nil; // the nav title already says it
     if (section == TagFiltersSectionGeneral) return @"General";
     if (section == TagFiltersSectionOverrides) return @"Per-Subreddit Overrides";
     return nil;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    section = [self modelSectionFor:section];
     if (section == TagFiltersSectionGeneral) {
         return @"Filtered posts are covered with a frosted blur over the post's title and thumbnail. Tap the blur to confirm and reveal the post. Brand Affiliate is unavailable because Apollo does not store that tag.";
     }
@@ -214,7 +225,8 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.section == TagFiltersSectionGeneral) {
+    NSInteger section = [self modelSectionFor:indexPath.section];
+    if (section == TagFiltersSectionGeneral) {
         switch (indexPath.row) {
             case 0:
                 return [self switchCellLabel:@"Enable Tag Filters" on:sTagFilterEnabled enabled:YES action:@selector(enableChanged:)];
@@ -223,7 +235,7 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
         }
     }
 
-    if (indexPath.section == TagFiltersSectionOverrides) {
+    if (section == TagFiltersSectionOverrides) {
         NSArray<NSString *> *subs = [self overrideSubreddits];
         if ((NSUInteger)indexPath.row < subs.count) {
             NSString *sub = subs[indexPath.row];
@@ -279,7 +291,7 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 
-    if (indexPath.section == TagFiltersSectionOverrides) {
+    if ([self modelSectionFor:indexPath.section] == TagFiltersSectionOverrides) {
         NSArray<NSString *> *subs = [self overrideSubreddits];
         if ((NSUInteger)indexPath.row < subs.count) {
             TagFilterSubredditDetailViewController *detail = [[TagFilterSubredditDetailViewController alloc] initWithSubreddit:subs[indexPath.row]];
@@ -293,7 +305,7 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
 }
 
 - (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.section != TagFiltersSectionOverrides) return NO;
+    if ([self modelSectionFor:indexPath.section] != TagFiltersSectionOverrides) return NO;
     return (NSUInteger)indexPath.row < [self overrideSubreddits].count;
 }
 

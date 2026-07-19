@@ -1,5 +1,7 @@
 #import <UIKit/UIKit.h>
 
+@class WKWebView;
+
 NS_ASSUME_NONNULL_BEGIN
 
 // WKWebView login to www.reddit.com that harvests the reddit_session cookie
@@ -28,6 +30,13 @@ NS_ASSUME_NONNULL_BEGIN
 // adding.
 + (instancetype)loginControllerForAdditionalAccount;
 
+// Poll voting needs a web session for an account that may otherwise use OAuth.
+// This variant requires the web login to match `username` (preventing the
+// shared WebKit cookie jar from authenticating the wrong Reddit account) and
+// reports whether a matching session was harvested.
++ (instancetype)loginControllerForUsername:(NSString *)username
+                                completion:(void (^)(BOOL success))completion;
+
 // Presents (from the topmost view controller) a one-shot "session expired"
 // alert for `username` offering to re-harvest its cookie, then launches the
 // login flow (clearing the dead session first, same as
@@ -52,6 +61,19 @@ NS_ASSUME_NONNULL_BEGIN
 // snapshot staleness). Concurrent attempts for the same username are coalesced:
 // later callers' completions are dropped and the first attempt's outcome stands.
 + (void)attemptSilentReharvestForUsername:(NSString *)username completion:(void (^)(BOOL success))completion;
+
+// "Grab it once": harvests the reddit.com web session that `webView` is CURRENTLY
+// logged into, storing it POLL-ONLY (ApolloWebSessionSetPollOnly — invisible to
+// the API-Key-Free transport spine, so it never reroutes a healthy OAuth
+// account). Probes /api/me.json in the webview for the username + modhash, then
+// sweeps its .reddit.com cookies. Best-effort and non-blocking: `completion` is
+// called on the main thread with the harvested (lowercased) username, or nil if
+// the webview is anonymous / nothing usable was found — callers MUST proceed
+// regardless (this is opportunistic, never on the critical path). Wired into the
+// tweak's WKWebView OAuth sign-in (ApolloWebAuthViewController) so Polls and
+// API-Key-Free features are set up the moment the user signs in, no second login.
++ (void)harvestPollSessionFromWebView:(WKWebView *)webView
+                           completion:(void (^_Nullable)(NSString *_Nullable username))completion;
 
 @end
 
