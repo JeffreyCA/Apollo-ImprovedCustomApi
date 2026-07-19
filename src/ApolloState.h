@@ -51,6 +51,18 @@ extern BOOL sUseProfileAvatarTabIcon;
 // Hide the visible main-tab labels while retaining/restoring the underlying
 // UITabBarItem titles. Opt-in; default OFF via registerDefaults.
 extern BOOL sHideTabBarTitles;
+#ifdef __cplusplus
+extern "C" {
+#endif
+// Central setter used by the settings UI. Enabling icon-only mode also clears
+// Apollo's narrower "Hide Username on Tab Bar" preference because every tab
+// title is already hidden, then refreshes both settings surfaces live.
+void ApolloSetHideTabBarTitlesEnabled(BOOL enabled);
+// Repairs a persisted both-on state during launch or settings restore.
+void ApolloNormalizeNativeHideUsernameForIconOnlyTabBar(void);
+#ifdef __cplusplus
+}
+#endif
 // When ON (default), profile pages show Reborn's detailed profile — the banner,
 // large avatar/snoovatar, display name, bio, and the Social Links band (Buy Me a
 // Coffee, Instagram, X, …). When OFF, profiles revert to Apollo's compact stock

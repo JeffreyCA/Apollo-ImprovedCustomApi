@@ -3076,9 +3076,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (void)iconOnlyTabBarSwitchToggled:(UISwitch *)sender {
-    sHideTabBarTitles = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sHideTabBarTitles forKey:UDKeyHideTabBarTitles];
-    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloTabBarTitlesChangedNotification object:nil];
+    ApolloSetHideTabBarTitlesEnabled(sender.isOn);
 }
 
 - (void)showDetailedProfilesSwitchToggled:(UISwitch *)sender {
