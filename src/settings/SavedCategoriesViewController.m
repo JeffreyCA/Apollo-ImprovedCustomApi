@@ -1,4 +1,4 @@
-#import "SavedCategoriesViewController.h"
+#import "settings/SavedCategoriesViewController.h"
 
 static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
 

@@ -1,4 +1,4 @@
-#import "ApolloSettingsTableViewController.h"
+#import "settings/ApolloSettingsTableViewController.h"
 
 #import "ApolloCommon.h"
 #import "ApolloThemeRuntime.h"

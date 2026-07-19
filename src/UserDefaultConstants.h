@@ -74,7 +74,7 @@ static NSString *const UDKeyProxyImgurDDG = @"ProxyImgurDDG";
 static NSString *const UDKeyImageUploadProvider = @"ImageUploadProvider";
 // Secondary host for images added in the COMMENT/REPLY editor (CommentLinkHost
 // enum). Off (default) keeps comment uploads on the Media Upload Host above;
-// Imgur/Img Chest route comment-editor uploads there and post the result as a
+// Imgur/Image Chest route comment-editor uploads there and post the result as a
 // plain link (no native Reddit media) so they work in subreddits that disallow
 // image/GIF comments. See ApolloMarkdownToolbarGif.xm + ApolloImageUploadHost.xm.
 static NSString *const UDKeyCommentLinkHost = @"CommentLinkHost";
@@ -127,7 +127,7 @@ static NSString *const UDKeyIconRowMagnifier = @"IconRowMagnifier";
 // Per-icon "is this info-row icon tappable" switches, exposed on the Info Row
 // settings sub-screen. Each defaults ON (registerDefaults) so behaviour matches
 // the shipped tweak. When a switch is OFF the icon does nothing on a direct tap
-// AND is skipped by the magnifier loupe (excluded from its target list):
+// and remains visible in the magnifier loupe, but releasing on it does nothing:
 //   Upvote     — the ↑ score (activated via the loupe; % ratio is unaffected).
 //   Comments   — the direct comment-bubble tap that jumps to the comments; OFF
 //                reverts to a stock tap (opens the post at the top).

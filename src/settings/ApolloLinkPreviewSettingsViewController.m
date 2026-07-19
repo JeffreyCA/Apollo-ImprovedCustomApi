@@ -1,23 +1,9 @@
-#import "ApolloLinkPreviewSettingsViewController.h"
+#import "settings/ApolloLinkPreviewSettingsViewController.h"
 
 #import "ApolloCommon.h"
+#import "ApolloSettingsForm.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
-
-typedef NS_ENUM(NSInteger, ApolloLPSettingsSection) {
-    ApolloLPSettingsSectionPreview = 0, // Live sample cards (full + compact)
-    ApolloLPSettingsSectionModes,       // Body + Comments preview modes
-    ApolloLPSettingsSectionColor,       // Card color picker + quick swatches + reset
-    ApolloLPSettingsSectionCount,
-};
-
-// Rows within the Color section. The reset row only exists while a custom color
-// is set; numberOfRowsInSection reflects that.
-typedef NS_ENUM(NSInteger, ApolloLPColorRow) {
-    ApolloLPColorRowPicker = 0,
-    ApolloLPColorRowSwatches,
-    ApolloLPColorRowReset,
-};
 
 // Vivid quick-pick palette (Apple system colors). These write the same hex the
 // full picker would, so the two paths stay consistent. Kept to nine so the row
@@ -218,18 +204,105 @@ static NSArray<NSString *> *ApolloLPQuickSwatchHexes(void) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Rich Link Previews";
-    // The preview cell is taller than a stock row and self-sizes from its content.
+    // The preview cell is taller than a stock row and self-sizes from its
+    // content (the form's heightForRow falls through to tableView.rowHeight).
     self.tableView.estimatedRowHeight = 60.0;
     self.tableView.rowHeight = UITableViewAutomaticDimension;
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self.tableView reloadData];
 }
 
 - (void)refreshPreview {
     [self.previewView applyCardColorHex:sLinkPreviewCardColorHex];
 }
 
-- (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];
-    [self.tableView reloadData];
+#pragma mark - Form
+
+- (NSArray<ApolloSettingsSection *> *)buildForm {
+    __weak __typeof(self) weakSelf = self;
+
+    // ---- Card Preview ----
+
+    // Escape hatch (custom row): bespoke live-preview card cell; exact
+    // construction kept in -previewCell.
+    ApolloSettingsRow *preview =
+        [ApolloSettingsRow customRowWithID:@"preview"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            return [weakSelf previewCell]
+                ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        }
+                                  onSelect:nil];
+
+    // ---- Previews (modes) ----
+
+    ApolloSettingsRow *body =
+        [ApolloSettingsRow valueRowWithID:@"body"
+                                    title:@"Body"
+                                   detail:^NSString * { return [weakSelf modeTextForMode:sLinkPreviewBodyMode]; }
+                                 onSelect:^{
+            [weakSelf presentModeSheetForBody:YES fromCell:[weakSelf cellForRowID:@"body"]];
+        }];
+    // Value rows carry no accessory by default; these two keep their original
+    // chevron even though they present a sheet rather than pushing.
+    body.configure = ^(UITableViewCell *cell) {
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    };
+
+    ApolloSettingsRow *comments =
+        [ApolloSettingsRow valueRowWithID:@"comments"
+                                    title:@"Comments"
+                                   detail:^NSString * { return [weakSelf modeTextForMode:sLinkPreviewCommentsMode]; }
+                                 onSelect:^{
+            [weakSelf presentModeSheetForBody:NO fromCell:[weakSelf cellForRowID:@"comments"]];
+        }];
+    comments.configure = ^(UITableViewCell *cell) {
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    };
+
+    // ---- Card Color ----
+
+    // Escape hatch (custom row): the Color row draws a swatch chip into
+    // imageView, which must not leak into the shared Value1 reuse pool; exact
+    // construction kept in -colorPickerCell.
+    ApolloSettingsRow *color =
+        [ApolloSettingsRow customRowWithID:@"color"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            return [weakSelf colorPickerCell]
+                ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        }
+                                  onSelect:^{ [weakSelf presentCardColorPicker]; }];
+
+    // Escape hatch (custom row): quick-swatch button strip; exact construction
+    // kept in -swatchPickerCell.
+    ApolloSettingsRow *swatches =
+        [ApolloSettingsRow customRowWithID:@"swatches"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            return [weakSelf swatchPickerCell]
+                ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        }
+                                  onSelect:nil];
+
+    // The reset row only exists while a custom color is set.
+    ApolloSettingsRow *reset =
+        [ApolloSettingsRow buttonRowWithID:@"reset"
+                                     title:@"Use Default (No Color)"
+                                    action:^{ [weakSelf applyCardColorHex:@""]; }];
+    reset.visible = ^BOOL { return [weakSelf hasCustomColor]; };
+
+    return @[
+        [ApolloSettingsSection sectionWithTitle:@"Card Preview"
+                                         footer:@"Sample full and compact cards — they update live as you change the color below."
+                                           rows:@[ preview ]],
+        [ApolloSettingsSection sectionWithTitle:@"Previews"
+                                         footer:@"Off hides the card, Compact shows a small thumbnail row, Full shows a large hero image card."
+                                           rows:@[ body, comments ]],
+        [ApolloSettingsSection sectionWithTitle:@"Card Color"
+                                         footer:@"The card is painted the exact color you pick, the same in light and dark mode, with title and description text automatically set to black or white for contrast. Default keeps the standard neutral card."
+                                           rows:@[ color, swatches, reset ]],
+    ];
 }
 
 #pragma mark - State helpers
@@ -287,8 +360,10 @@ static NSArray<NSString *> *ApolloLPQuickSwatchHexes(void) {
 - (void)applyCardColorHex:(NSString *)hex {
     [self storeCardColorHex:hex];
     [self broadcastChangeForArea:@"card-color"];
-    [self refreshPreview];
-    [self.tableView reloadData];
+    [self refreshPreview];                // persistent preview view, no reload needed
+    [self visibilityDidChange];           // reset row tracks hasCustomColor
+    [self reloadRowWithID:@"color"];      // swatch chip + #hex detail
+    [self reloadRowWithID:@"swatches"];   // selected-swatch border
 }
 
 - (void)setLinkPreviewMode:(NSInteger)mode body:(BOOL)body {
@@ -301,7 +376,7 @@ static NSArray<NSString *> *ApolloLPQuickSwatchHexes(void) {
         [[NSUserDefaults standardUserDefaults] setInteger:mode forKey:UDKeyLinkPreviewCommentsMode];
     }
     [self broadcastChangeForArea:body ? @"body" : @"comments"];
-    [self.tableView reloadData];
+    [self reloadRowWithID:body ? @"body" : @"comments"];
 }
 
 #pragma mark - Actions
@@ -321,6 +396,9 @@ static NSArray<NSString *> *ApolloLPQuickSwatchHexes(void) {
     [self presentViewController:picker animated:YES completion:nil];
 }
 
+// Kept bespoke rather than ApolloSettingsPresentPicker: this sheet carries an
+// explanatory message body, and its handler fires even when the current mode is
+// re-picked (re-broadcasting the area) — the shared picker supports neither.
 - (void)presentModeSheetForBody:(BOOL)body fromCell:(UITableViewCell *)cell {
     NSInteger currentMode = body ? sLinkPreviewBodyMode : sLinkPreviewCommentsMode;
     NSString *title = body ? @"Body Link Previews" : @"Comment Link Previews";
@@ -351,8 +429,8 @@ static NSArray<NSString *> *ApolloLPQuickSwatchHexes(void) {
 
 - (void)colorPickerViewControllerDidSelectColor:(UIColorPickerViewController *)viewController {
     // Fires continuously while dragging. Update the live preview (visible above
-    // the picker sheet) immediately; defer the heavier feed broadcast + full
-    // table refresh (Color row swatch + #hex) to didFinish.
+    // the picker sheet) immediately; defer the heavier feed broadcast + row
+    // refresh (Color row swatch + #hex, reset row visibility) to didFinish.
     [self storeCardColorHex:ApolloHexStringFromColor(viewController.selectedColor)];
     [self refreshPreview];
 }
@@ -361,52 +439,7 @@ static NSArray<NSString *> *ApolloLPQuickSwatchHexes(void) {
     [self applyCardColorHex:ApolloHexStringFromColor(viewController.selectedColor)];
 }
 
-#pragma mark - Table
-
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return ApolloLPSettingsSectionCount;
-}
-
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    switch (section) {
-        case ApolloLPSettingsSectionPreview: return 1;
-        case ApolloLPSettingsSectionModes: return 2;
-        case ApolloLPSettingsSectionColor: return [self hasCustomColor] ? 3 : 2;
-        default: return 0;
-    }
-}
-
-- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    switch (section) {
-        case ApolloLPSettingsSectionPreview: return @"Card Preview";
-        case ApolloLPSettingsSectionModes: return @"Previews";
-        case ApolloLPSettingsSectionColor: return @"Card Color";
-        default: return nil;
-    }
-}
-
-- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    if (section == ApolloLPSettingsSectionPreview) {
-        return @"Sample full and compact cards — they update live as you change the color below.";
-    }
-    if (section == ApolloLPSettingsSectionModes) {
-        return @"Off hides the card, Compact shows a small thumbnail row, Full shows a large hero image card.";
-    }
-    if (section == ApolloLPSettingsSectionColor) {
-        return @"The card is painted the exact color you pick, the same in light and dark mode, with title and description text automatically set to black or white for contrast. Default keeps the standard neutral card.";
-    }
-    return nil;
-}
-
-- (UITableViewCell *)modeCellForBody:(BOOL)body {
-    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
-    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-    cell.textLabel.text = body ? @"Body" : @"Comments";
-    cell.detailTextLabel.text = [self modeTextForMode:body ? sLinkPreviewBodyMode : sLinkPreviewCommentsMode];
-    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-    return cell;
-}
+#pragma mark - Bespoke cells (form custom rows)
 
 - (UITableViewCell *)colorPickerCell {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
@@ -462,14 +495,6 @@ static NSArray<NSString *> *ApolloLPQuickSwatchHexes(void) {
     return cell;
 }
 
-- (UITableViewCell *)resetCell {
-    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-    cell.textLabel.text = @"Use Default (No Color)";
-    cell.textLabel.textColor = self.view.tintColor;
-    return cell;
-}
-
 - (UITableViewCell *)previewCell {
     UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
@@ -488,41 +513,6 @@ static NSArray<NSString *> *ApolloLPQuickSwatchHexes(void) {
     ]];
     [self.previewView applyCardColorHex:sLinkPreviewCardColorHex];
     return cell;
-}
-
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (indexPath.section == ApolloLPSettingsSectionPreview) {
-        return [self previewCell];
-    }
-    if (indexPath.section == ApolloLPSettingsSectionModes) {
-        return [self modeCellForBody:(indexPath.row == 0)];
-    }
-    if (indexPath.section == ApolloLPSettingsSectionColor) {
-        switch (indexPath.row) {
-            case ApolloLPColorRowPicker:   return [self colorPickerCell];
-            case ApolloLPColorRowSwatches: return [self swatchPickerCell];
-            case ApolloLPColorRowReset:    return [self resetCell];
-            default: break;
-        }
-    }
-    return [[UITableViewCell alloc] init];
-}
-
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-
-    if (indexPath.section == ApolloLPSettingsSectionModes) {
-        [self presentModeSheetForBody:(indexPath.row == 0) fromCell:cell];
-        return;
-    }
-    if (indexPath.section == ApolloLPSettingsSectionColor) {
-        if (indexPath.row == ApolloLPColorRowPicker) {
-            [self presentCardColorPicker];
-        } else if (indexPath.row == ApolloLPColorRowReset) {
-            [self applyCardColorHex:@""];
-        }
-    }
 }
 
 @end

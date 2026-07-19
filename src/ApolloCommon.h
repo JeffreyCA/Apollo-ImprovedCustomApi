@@ -65,6 +65,11 @@ BOOL ApolloRouteURLThroughApp(NSURL *url);
 // Use instead of the deprecated UIApplication.windows property.
 NSArray<UIWindow *> *ApolloAllWindows(void);
 
+// Apollo's main ApolloTabBarController, found via the scene/app delegate's
+// tabBarController ivar or by walking window root VCs. Returns nil while the
+// UI is still coming up (e.g. cold launch from a URL) — callers should retry.
+UIViewController *ApolloMainTabBarController(void);
+
 // Returns YES for Apple's out-of-process share/compose controllers that the
 // tweak must never traverse or mutate. Their class names end in
 // "ComposeViewController" (e.g. MFMessageComposeViewController), so loose

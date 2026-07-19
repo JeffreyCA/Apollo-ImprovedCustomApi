@@ -4,7 +4,8 @@
 #import "ApolloGiphyClient.h"
 #import "ApolloState.h"
 #import "ApolloSubredditInfoCache.h"
-#import "CustomAPIViewController.h"
+#import "settings/CustomAPIViewController.h"
+#import "settings/ApolloSettingsRouter.h"
 #import "GiphyPickerViewController.h"
 #import "UserDefaultConstants.h"
 
@@ -1397,11 +1398,15 @@ static void ApolloMarkdownGifTrackPendingInjectionBlock(UIViewController *compos
 static void ApolloMarkdownGifPresentMissingAPIKeyAlert(UIViewController *composeController) {
     if (!composeController) return;
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Giphy API Key Required"
-                                                                   message:@"Add your free Giphy API key in Settings → API Keys to browse and post GIFs. Get one at developers.giphy.com."
+                                                                   message:@"Add your free Giphy API key in Settings → Apollo Reborn → Accounts & API Keys to browse and post GIFs. Get one at developers.giphy.com."
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Open API Keys" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        CustomAPIViewController *apiVC = [[CustomAPIViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        // Route registry so this lands on the Accounts & API Keys screen itself,
+        // not the hub (post-IA the key fields are one level down from the hub).
+        // Presented modally — the settings tab can't be navigated under a composer.
+        UIViewController *apiVC = ApolloSettingsRouteInstantiate(@"accounts-api-keys")
+            ?: [[CustomAPIViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:apiVC];
         nav.modalPresentationStyle = UIModalPresentationFormSheet;
         sApolloMarkdownGifTapTarget.presentedAPIKeysNav = nav;

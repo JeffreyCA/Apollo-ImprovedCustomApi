@@ -789,6 +789,37 @@ NSArray<UIWindow *> *ApolloAllWindows(void) {
     return windows;
 }
 
+static UIViewController *ApolloTabBarControllerIvarOn(id object) {
+    if (!object) return nil;
+    @try {
+        Ivar ivar = class_getInstanceVariable([object class], "tabBarController");
+        id value = ivar ? object_getIvar(object, ivar) : nil;
+        return [value isKindOfClass:[UIViewController class]] ? value : nil;
+    } @catch (NSException *exception) {
+        ApolloLog(@"[Common] Failed reading tabBarController ivar on %@: %@", object, exception);
+        return nil;
+    }
+}
+
+UIViewController *ApolloMainTabBarController(void) {
+    UIApplication *application = UIApplication.sharedApplication;
+
+    for (UIScene *scene in application.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+
+        UIViewController *fromDelegate = ApolloTabBarControllerIvarOn([(UIWindowScene *)scene delegate]);
+        if (fromDelegate) return fromDelegate;
+
+        for (UIWindow *window in [(UIWindowScene *)scene windows]) {
+            UIViewController *root = window.rootViewController;
+            if ([root isKindOfClass:UITabBarController.class]) return root;
+            if ([root.presentedViewController isKindOfClass:UITabBarController.class]) return root.presentedViewController;
+        }
+    }
+
+    return ApolloTabBarControllerIvarOn(application.delegate);
+}
+
 #pragma mark - Color Helpers
 
 UIColor *ApolloColorFromHexString(NSString *hex) {

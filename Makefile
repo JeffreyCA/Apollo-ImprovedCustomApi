@@ -28,7 +28,16 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloAutoHideMetaFeeds.xm \
     $(SRC_DIR)/Tweak.xm \
     $(SRC_DIR)/ApolloCommon.m \
-    $(SRC_DIR)/ApolloSettingsTableViewController.m \
+    $(SRC_DIR)/settings/ApolloSettingsTableViewController.m \
+    $(SRC_DIR)/settings/ApolloSettingsForm.m \
+    $(SRC_DIR)/settings/ApolloContributors.m \
+    $(SRC_DIR)/settings/ApolloBackupRestore.m \
+    $(SRC_DIR)/settings/ApolloThanksToViewController.m \
+    $(SRC_DIR)/settings/ApolloBuyUsACoffeeViewController.m \
+    $(SRC_DIR)/settings/ApolloReportViewController.m \
+    $(SRC_DIR)/settings/ApolloSettingsRouter.m \
+    $(SRC_DIR)/settings/ApolloSettingsSearch.m \
+    $(SRC_DIR)/ApolloToast.m \
     $(SRC_DIR)/ApolloRedditMediaUpload.m \
     $(SRC_DIR)/ApolloNotificationBackend.m \
     $(SRC_DIR)/ApolloUsageHeartbeat.m \
@@ -66,6 +75,8 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloStatsRowTouch.xm \
     $(SRC_DIR)/ApolloCommentVoteFlicker.xm \
     $(SRC_DIR)/ApolloLiveCommentsFollow.xm \
+    $(SRC_DIR)/settings/ApolloSettingsGeneralTable.xm \
+    $(SRC_DIR)/settings/ApolloSettingsNativeInjections.xm \
     $(SRC_DIR)/ApolloPerPostCommentSort.xm \
     $(SRC_DIR)/ApolloLiquidGlass.xm \
     $(SRC_DIR)/ApolloLiquidGlassIconPicker.xm \
@@ -73,7 +84,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloAutoHideTabBar.xm \
     $(SRC_DIR)/ApolloTabBarCollapseSide.xm \
     $(SRC_DIR)/ApolloIPadTabBarBottom.xm \
-    $(SRC_DIR)/ApolloSettings.xm \
+    $(SRC_DIR)/settings/ApolloSettings.xm \
     $(SRC_DIR)/ApolloRecentlyRead.xm \
     $(SRC_DIR)/ApolloHiddenContentData.m \
     $(SRC_DIR)/ApolloHiddenContentViewController.m \
@@ -146,23 +157,22 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloWebSessionStore.m \
     $(SRC_DIR)/ApolloPollVoting.xm \
     $(SRC_DIR)/ApolloPollCompose.xm \
-    $(SRC_DIR)/ApolloPollSettingsViewController.m \
+    $(SRC_DIR)/settings/ApolloPollSettingsViewController.m \
     $(SRC_DIR)/ApolloSimDebugTap.xm \
     $(SRC_DIR)/ApolloManualSignInViewController.m \
     $(SRC_DIR)/ApolloAccountCredentials.m \
     $(SRC_DIR)/ApolloAccountSwitcherViewController.xm \
     $(SRC_DIR)/ApolloSignInSplash.xm \
     $(SRC_DIR)/ApolloHideSubscribePrompt.xm \
-    $(SRC_DIR)/CustomAPIViewController.m \
-    $(SRC_DIR)/ApolloAISettingsViewController.m \
-    $(SRC_DIR)/ApolloDeletedCommentsSettingsViewController.m \
-    $(SRC_DIR)/ApolloLinkPreviewSettingsViewController.m \
-    $(SRC_DIR)/InlineMediaSettingsViewController.m \
-    $(SRC_DIR)/InfoRowSettingsViewController.m \
-    $(SRC_DIR)/ApolloOpenInAppViewController.m \
-    $(SRC_DIR)/ApolloHideNativeOpenInAppRows.xm \
-    $(SRC_DIR)/TranslationSettingsViewController.m \
-    $(SRC_DIR)/SavedCategoriesViewController.m \
+    $(SRC_DIR)/settings/CustomAPIViewController.m \
+    $(SRC_DIR)/settings/ApolloAISettingsViewController.m \
+    $(SRC_DIR)/settings/ApolloDeletedCommentsSettingsViewController.m \
+    $(SRC_DIR)/settings/ApolloLinkPreviewSettingsViewController.m \
+    $(SRC_DIR)/settings/InlineMediaSettingsViewController.m \
+    $(SRC_DIR)/settings/InfoRowSettingsViewController.m \
+    $(SRC_DIR)/settings/ApolloOpenInAppViewController.m \
+    $(SRC_DIR)/settings/TranslationSettingsViewController.m \
+    $(SRC_DIR)/settings/SavedCategoriesViewController.m \
     $(SRC_DIR)/TagFiltersViewController.m \
     $(SRC_DIR)/ApolloPostFilterStore.m \
     $(SRC_DIR)/ApolloPostFilters.xm \
@@ -236,6 +246,10 @@ ApolloReborn_SWIFTFLAGS += -DAPOLLO_SIM_BUILD
 # warnings into -Werror failures. Silence them rather than rewriting working
 # device-targeted call sites just for the sim build.
 ApolloReborn_CFLAGS += -Wno-deprecated-declarations
+# Sim-only dev helper: env-gated (APOLLO_OPEN_ROUTE) route opener for hands-off
+# screenshots. Only ever compiled into the simulator build, never the device/
+# release build (this branch is under the APOLLO_SIM_BUILD ifeq).
+ApolloReborn_FILES += $(SRC_DIR)/ApolloSimOpenRoute.m
 else
 ApolloReborn_OBJ_FILES = $(shell find $(FFMPEG_KIT_DIR) -name '*.a')
 
