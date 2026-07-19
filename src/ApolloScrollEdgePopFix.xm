@@ -31,31 +31,35 @@
 @interface ApolloScrollEdgeEffectView : UIView
 @end
 
-// Resolve the view controller a (candidate) edge-effect view renders for, walking
-// the responder chain. Returns nil when the view is not attached to a VC.
-static UIViewController *ApolloEdgeFixOwningViewController(UIView *view) {
+// Resolve the navigation controller whose stack hosts `view`, walking the FULL
+// responder chain for the UINavigationController itself rather than trusting a
+// view controller's parent link: popViewController severs the outgoing VC's
+// navigationController reference immediately, while UIKit keeps writing to that
+// VC's edge-effect views on every frame of the interactive transition — the nav
+// controller is still in the popped view's responder chain via the transition
+// container (UIViewControllerWrapperView -> UINavigationTransitionView ->
+// UILayoutContainerView -> UINavigationController), so the chain walk keeps
+// working exactly when the parent link does not.
+static UINavigationController *ApolloEdgeFixNavControllerForView(UIView *view) {
+    UINavigationController *fallback = nil;
     UIResponder *responder = view;
     while ((responder = responder.nextResponder)) {
-        if ([responder isKindOfClass:[UIViewController class]]) {
-            return (UIViewController *)responder;
+        if ([responder isKindOfClass:[UINavigationController class]]) {
+            return (UINavigationController *)responder;
         }
-        if ([responder isKindOfClass:[UIWindow class]]) break;
+        if (!fallback && [responder isKindOfClass:[UIViewController class]]) {
+            fallback = ((UIViewController *)responder).navigationController;
+        }
     }
-    return nil;
+    return fallback;
 }
 
-// YES while the navigation controller owning `view` is mid interactive pop —
+// YES while the navigation controller hosting `view` is mid interactive pop —
 // either the transition coordinator reports an interactive transition, or the
 // system edge-pan recognizer is actively tracking (Began/Changed covers the
 // window before the coordinator exists).
 static BOOL ApolloEdgeFixInteractivePopInFlight(UIView *view) {
-    UIViewController *owner = ApolloEdgeFixOwningViewController(view);
-    if (!owner) return NO;
-
-    UINavigationController *nav = owner.navigationController;
-    if (!nav && [owner isKindOfClass:[UINavigationController class]]) {
-        nav = (UINavigationController *)owner;
-    }
+    UINavigationController *nav = ApolloEdgeFixNavControllerForView(view);
     if (!nav) return NO;
 
     id<UIViewControllerTransitionCoordinator> coordinator = nav.transitionCoordinator;
@@ -65,22 +69,74 @@ static BOOL ApolloEdgeFixInteractivePopInFlight(UIView *view) {
     return state == UIGestureRecognizerStateBegan || state == UIGestureRecognizerStateChanged;
 }
 
+// The interactive-pop preflight phase (small drag that never commits the pop)
+// runs with NO transition coordinator, the pop recognizer still in Possible, and
+// UIKit tearing down + recreating the edge-effect views already at alpha 0 — so
+// navigation-state checks alone cannot see it. A screen-edge touch brackets that
+// whole phase exactly: track touches that BEGAN in the horizontal edge zones at
+// the window level, and treat "edge touch down (plus a short settle grace after
+// lift)" as swipe-back-possibly-in-progress.
+static NSMutableSet *sApolloEdgeTouches;
+static CFTimeInterval sApolloEdgeTouchLastEnd;
+
+static BOOL ApolloEdgeFixEdgeTouchActive(void) {
+    if (sApolloEdgeTouches.count > 0) return YES;
+    return (CACurrentMediaTime() - sApolloEdgeTouchLastEnd) < 0.6;
+}
+
 %group ScrollEdgePopFix
+
+%hook UIWindow
+
+- (void)sendEvent:(UIEvent *)event {
+    if (event.type == UIEventTypeTouches) {
+        for (UITouch *touch in event.allTouches) {
+            if (touch.phase == UITouchPhaseBegan) {
+                CGPoint point = [touch locationInView:self];
+                CGFloat width = self.bounds.size.width;
+                if (point.x <= 40.0 || point.x >= width - 40.0) {
+                    if (!sApolloEdgeTouches) sApolloEdgeTouches = [NSMutableSet new];
+                    [sApolloEdgeTouches addObject:[NSValue valueWithNonretainedObject:touch]];
+                }
+            } else if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
+                NSValue *key = [NSValue valueWithNonretainedObject:touch];
+                if ([sApolloEdgeTouches containsObject:key]) {
+                    [sApolloEdgeTouches removeObject:key];
+                    if (sApolloEdgeTouches.count == 0) sApolloEdgeTouchLastEnd = CACurrentMediaTime();
+                }
+            }
+        }
+    }
+    %orig;
+}
+
+%end
+
 
 %hook ApolloScrollEdgeEffectView
 
 - (void)setAlpha:(CGFloat)alpha {
     UIView *effectView = (UIView *)self;
-    if (alpha < 0.999 && effectView.superview && ApolloEdgeFixInteractivePopInFlight(effectView)) {
+    if (alpha < 0.999 &&
+        (ApolloEdgeFixInteractivePopInFlight(effectView) || ApolloEdgeFixEdgeTouchActive())) {
         static BOOL sLoggedOnce = NO;
         if (!sLoggedOnce) {
             sLoggedOnce = YES;
-            ApolloLog(@"[ScrollEdgePopFix] Blocked scroll-edge fade-out (alpha %.2f) during interactive pop", (double)alpha);
+            ApolloLog(@"[ScrollEdgePopFix] Blocked scroll-edge fade-out (alpha %.2f) during swipe-back", (double)alpha);
         }
         %orig(1.0);
         return;
     }
     %orig;
+}
+
+- (void)didMoveToWindow {
+    %orig;
+    UIView *effectView = (UIView *)self;
+    if (effectView.window && effectView.alpha < 0.999 &&
+        (ApolloEdgeFixInteractivePopInFlight(effectView) || ApolloEdgeFixEdgeTouchActive())) {
+        effectView.alpha = 1.0;
+    }
 }
 
 %end
