@@ -1,110 +1,140 @@
-// ApolloScrollEdgePopFix — keep Liquid Glass scroll-edge fades alive during the
-// interactive swipe-back gesture.
+// ApolloScrollEdgePopFix — keep the Liquid Glass scroll-edge fades alive across navigation
+// transitions.
 //
-// On iOS 26, UIKit masks content scrolled under the floating nav pills (and above
-// the bottom bar/home-indicator pocket) with per-scroll-view `UIKit.ScrollEdgeEffectView`
-// layers (progressive blur + dimming backdrop). The moment an interactive pop begins,
-// UIKit's transition code fades the OUTGOING view's edge-effect views to alpha 0 —
-// on a stock pre-26 app the opaque bar background hides that, but Apollo's glass
-// build has no bar background (the tweak hides Apollo's own statusBarBackgroundView
-// strip on Liquid Glass), so the instant you start a swipe-back every row scrolled
-// under the top pills and the bottom pocket flashes fully readable, then snaps back
-// when the gesture is released. Verified via view-hierarchy dumps: mid-gesture the
-// outgoing table's top ScrollEdgeEffectView is alpha=0.00, at rest alpha=1.00,
-// with everything else (hidden flags, subview stack) unchanged.
+// THE SYMPTOM
+// On iOS 26 the blurred/dimmed bands that mask content scrolling under the floating nav
+// pills (top) and above the bottom bar pocket vanish the moment a navigation pop starts —
+// whether you drag the swipe-back gesture (even a small drag-and-hold that never commits)
+// or just tap the back button. For the whole slide the outgoing screen renders raw text
+// over the status bar and under the bottom edge, then snaps back to normal once it settles.
 //
-// Fix: while the view's navigation controller is running an INTERACTIVE transition
-// (or its interactive pop gesture is actively tracking), refuse alpha writes below 1
-// on ScrollEdgeEffectView instances that belong to that navigation stack. UIKit
-// re-syncs the alpha itself once the gesture ends, on both the cancel and the
-// completion path, so there is nothing to restore afterwards.
+// THE MECHANISM (measured in the simulator, not inferred)
+// Each scroll view gets its edge effects from a `_UIScrollEdgeEffectViewInteraction`, which
+// parks the `UIKit.ScrollEdgeEffectView`s in a container view inside the scroll view. That
+// interaction recomputes its "pocket" geometry on every layout pass, and when the resulting
+// rect comes out empty it does not fade the effect — it *detaches the container outright*
+// (`updatePocket:contentRect:velocity:isTracking:shouldAnimateVisibility:` -> removeFromSuperview).
 //
-// The class is Swift ("UIKit.ScrollEdgeEffectView" at runtime, no ObjC header), so
-// the hook binds through %init(ClassName=objc_getClass(...)) instead of a static
-// Logos class token.
+// A pop sets the outgoing view controller's view frame to its final off-screen position
+// immediately and animates the layer from there (this is how UIKit animates, interactive or
+// not). The next layout pass therefore computes an empty pocket rect and tears the effects
+// down — while the layer is still mid-slide and fully visible for another ~300ms. Per-frame
+// instrumentation of the outgoing VC:
+//
+//     t=0.013  frame=(0,0 402x874)    effects=4
+//     t=0.060  frame=(402,0 402x874)  effects=0   <- still on screen, effects already gone
+//
+// This is why the previous approach (clamping `-[ScrollEdgeEffectView setAlpha:]` to 1 while
+// a swipe-back looked to be in progress) could never work: the clamp fired, but alpha was
+// never the lever. The views were being removed from the hierarchy, and the `alpha=0` that
+// approach chased belonged to the *incoming* controller, where 0 is correct — that feed sits
+// at scroll-top with nothing to mask. Forcing it to 1 risked a phantom dim band.
+//
+// THE FIX
+// While a navigation transition is in flight, refuse to let a pocket container be detached
+// from a scroll view that is still in a window. UIKit retries on later layout passes (a
+// handful of times, not per frame), and once the transition completes we stop refusing and
+// nudge the affected scroll views to lay out, so UIKit settles the state itself.
+//
+// Keeping UIKit's own effect views alive means the masking during the slide is the real
+// thing — no material to match, no colour to tune, nothing that can drift from the system
+// look on a future iOS.
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "ApolloCommon.h"
 
-// Placeholder interface for the Swift class; the real Class is supplied at %init.
-@interface ApolloScrollEdgeEffectView : UIView
-@end
+// Resolved once at %ctor; nil on anything that isn't iOS 26 Liquid Glass.
+static Class sEdgeEffectViewClass;
 
-// Resolve the navigation controller whose stack hosts `view`, walking the FULL
-// responder chain for the UINavigationController itself rather than trusting a
-// view controller's parent link: popViewController severs the outgoing VC's
-// navigationController reference immediately, while UIKit keeps writing to that
-// VC's edge-effect views on every frame of the interactive transition — the nav
-// controller is still in the popped view's responder chain via the transition
-// container (UIViewControllerWrapperView -> UINavigationTransitionView ->
-// UILayoutContainerView -> UINavigationController), so the chain walk keeps
-// working exactly when the parent link does not.
-static UINavigationController *ApolloEdgeFixNavControllerForView(UIView *view) {
-    UINavigationController *fallback = nil;
-    UIResponder *responder = view;
-    while ((responder = responder.nextResponder)) {
-        if ([responder isKindOfClass:[UINavigationController class]]) {
-            return (UINavigationController *)responder;
-        }
-        if (!fallback && [responder isKindOfClass:[UIViewController class]]) {
-            fallback = ((UIViewController *)responder).navigationController;
-        }
+// Non-zero while at least one navigation transition is running. Checked first on the
+// (very hot) removeFromSuperview path, so the cost off-transition is one load + branch.
+static NSUInteger sTransitionsInFlight;
+
+// Bumped every time the count drops to zero, so a late safety timeout can tell whether the
+// transition it was armed for is still the current one.
+static NSUInteger sTransitionGeneration;
+
+// Scroll views whose pocket container we refused to detach, held weakly — after the
+// transition they need one layout pass for UIKit to reach the right answer on its own.
+static NSHashTable<UIScrollView *> *sProtectedScrollViews;
+
+static void ApolloEdgeArmSafetyTimeout(UINavigationController *nav, NSUInteger generation);
+
+static void ApolloEdgeEndTransition(NSUInteger generation) {
+    if (generation != sTransitionGeneration || sTransitionsInFlight == 0) return;
+    if (--sTransitionsInFlight > 0) return;
+
+    sTransitionGeneration++;
+    // Let UIKit re-derive pocket state now that we are no longer interfering. Whatever it
+    // decides (keep them, drop them) is correct once the geometry has settled.
+    for (UIScrollView *scrollView in sProtectedScrollViews) {
+        [scrollView setNeedsLayout];
     }
-    return fallback;
+    [sProtectedScrollViews removeAllObjects];
 }
 
-// YES while the navigation controller hosting `view` is mid interactive pop —
-// either the transition coordinator reports an interactive transition, or the
-// system edge-pan recognizer is actively tracking (Began/Changed covers the
-// window before the coordinator exists).
-static BOOL ApolloEdgeFixInteractivePopInFlight(UIView *view) {
-    UINavigationController *nav = ApolloEdgeFixNavControllerForView(view);
-    if (!nav) return NO;
+// Re-arms itself for as long as the navigation controller still reports a live transition,
+// so a held gesture stays protected while a genuinely finished one always gets released.
+static void ApolloEdgeArmSafetyTimeout(UINavigationController *nav, NSUInteger generation) {
+    __weak UINavigationController *weakNav = nav;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (generation != sTransitionGeneration || sTransitionsInFlight == 0) return;
+        UINavigationController *strongNav = weakNav;
+        if (strongNav && strongNav.transitionCoordinator) {
+            ApolloEdgeArmSafetyTimeout(strongNav, generation);   // still being dragged
+            return;
+        }
+        ApolloEdgeEndTransition(generation);
+    });
+}
+
+static void ApolloEdgeBeginTransition(UINavigationController *nav) {
+    sTransitionsInFlight++;
+    NSUInteger generation = sTransitionGeneration;
 
     id<UIViewControllerTransitionCoordinator> coordinator = nav.transitionCoordinator;
-    if (coordinator && coordinator.interactive) return YES;
+    if (coordinator) {
+        // Fires for completed AND cancelled transitions, which is exactly the lifetime we want.
+        [coordinator animateAlongsideTransition:nil
+                                     completion:^(id<UIViewControllerTransitionCoordinatorContext> ctx) {
+            ApolloEdgeEndTransition(generation);
+        }];
+    } else {
+        // Non-animated navigation: nothing to protect beyond this turn of the runloop.
+        dispatch_async(dispatch_get_main_queue(), ^{ ApolloEdgeEndTransition(generation); });
+    }
 
-    UIGestureRecognizerState state = nav.interactivePopGestureRecognizer.state;
-    return state == UIGestureRecognizerStateBegan || state == UIGestureRecognizerStateChanged;
+    // Safety net: a stuck counter would suppress legitimate pocket teardown app-wide, so a
+    // transition must never be able to protect views forever. It re-arms rather than firing
+    // blind, because holding the swipe-back gesture part-way — exactly what this fix is for —
+    // legitimately keeps a transition open for as long as the user cares to hold it.
+    ApolloEdgeArmSafetyTimeout(nav, generation);
 }
 
-// The interactive-pop preflight phase (small drag that never commits the pop)
-// runs with NO transition coordinator, the pop recognizer still in Possible, and
-// UIKit tearing down + recreating the edge-effect views already at alpha 0 — so
-// navigation-state checks alone cannot see it. A screen-edge touch brackets that
-// whole phase exactly: track touches that BEGAN in the horizontal edge zones at
-// the window level, and treat "edge touch down (plus a short settle grace after
-// lift)" as swipe-back-possibly-in-progress.
-static NSMutableSet *sApolloEdgeTouches;
-static CFTimeInterval sApolloEdgeTouchLastEnd;
-
-static BOOL ApolloEdgeFixEdgeTouchActive(void) {
-    if (sApolloEdgeTouches.count > 0) return YES;
-    return (CACurrentMediaTime() - sApolloEdgeTouchLastEnd) < 0.6;
+// A pocket container is any view holding ScrollEdgeEffectViews directly. Pointer compare
+// against the resolved Class rather than a string compare — this runs on a hot path.
+static BOOL ApolloEdgeIsPocketContainer(UIView *view) {
+    for (UIView *subview in view.subviews) {
+        if (object_getClass(subview) == sEdgeEffectViewClass) return YES;
+    }
+    return NO;
 }
 
 %group ScrollEdgePopFix
 
-%hook UIWindow
+%hook UIView
 
-- (void)sendEvent:(UIEvent *)event {
-    if (event.type == UIEventTypeTouches) {
-        for (UITouch *touch in event.allTouches) {
-            if (touch.phase == UITouchPhaseBegan) {
-                CGPoint point = [touch locationInView:self];
-                CGFloat width = self.bounds.size.width;
-                if (point.x <= 40.0 || point.x >= width - 40.0) {
-                    if (!sApolloEdgeTouches) sApolloEdgeTouches = [NSMutableSet new];
-                    [sApolloEdgeTouches addObject:[NSValue valueWithNonretainedObject:touch]];
-                }
-            } else if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
-                NSValue *key = [NSValue valueWithNonretainedObject:touch];
-                if ([sApolloEdgeTouches containsObject:key]) {
-                    [sApolloEdgeTouches removeObject:key];
-                    if (sApolloEdgeTouches.count == 0) sApolloEdgeTouchLastEnd = CACurrentMediaTime();
-                }
-            }
+- (void)removeFromSuperview {
+    if (sTransitionsInFlight > 0) {
+        UIView *superview = self.superview;
+        // Only interfere while the scroll view is genuinely still on screen. A view that has
+        // left the window is being torn down for real and must be allowed to go.
+        if ([superview isKindOfClass:[UIScrollView class]] && superview.window &&
+            ApolloEdgeIsPocketContainer(self)) {
+            [sProtectedScrollViews addObject:(UIScrollView *)superview];
+            return;
         }
     }
     %orig;
@@ -112,31 +142,32 @@ static BOOL ApolloEdgeFixEdgeTouchActive(void) {
 
 %end
 
+%hook UINavigationController
 
-%hook ApolloScrollEdgeEffectView
-
-- (void)setAlpha:(CGFloat)alpha {
-    UIView *effectView = (UIView *)self;
-    if (alpha < 0.999 &&
-        (ApolloEdgeFixInteractivePopInFlight(effectView) || ApolloEdgeFixEdgeTouchActive())) {
-        static BOOL sLoggedOnce = NO;
-        if (!sLoggedOnce) {
-            sLoggedOnce = YES;
-            ApolloLog(@"[ScrollEdgePopFix] Blocked scroll-edge fade-out (alpha %.2f) during swipe-back", (double)alpha);
-        }
-        %orig(1.0);
-        return;
-    }
-    %orig;
+- (UIViewController *)popViewControllerAnimated:(BOOL)animated {
+    UIViewController *popped = %orig;
+    // Covers the back button, programmatic pops, AND the interactive swipe-back — UIKit
+    // routes the gesture through here too, the moment the drag is recognised.
+    if (popped) ApolloEdgeBeginTransition(self);
+    return popped;
 }
 
-- (void)didMoveToWindow {
+- (NSArray<UIViewController *> *)popToViewController:(UIViewController *)viewController animated:(BOOL)animated {
+    NSArray<UIViewController *> *popped = %orig;
+    if (popped.count) ApolloEdgeBeginTransition(self);
+    return popped;
+}
+
+- (NSArray<UIViewController *> *)popToRootViewControllerAnimated:(BOOL)animated {
+    NSArray<UIViewController *> *popped = %orig;
+    if (popped.count) ApolloEdgeBeginTransition(self);
+    return popped;
+}
+
+// A push slides the outgoing screen partway off to the left, so it has the same exposure.
+- (void)pushViewController:(UIViewController *)viewController animated:(BOOL)animated {
     %orig;
-    UIView *effectView = (UIView *)self;
-    if (effectView.window && effectView.alpha < 0.999 &&
-        (ApolloEdgeFixInteractivePopInFlight(effectView) || ApolloEdgeFixEdgeTouchActive())) {
-        effectView.alpha = 1.0;
-    }
+    if (animated) ApolloEdgeBeginTransition(self);
 }
 
 %end
@@ -145,11 +176,14 @@ static BOOL ApolloEdgeFixEdgeTouchActive(void) {
 
 %ctor {
     if (!IsLiquidGlass()) return;
-    Class effectViewClass = objc_getClass("UIKit.ScrollEdgeEffectView");
-    if (!effectViewClass) {
-        ApolloLog(@"[ScrollEdgePopFix] UIKit.ScrollEdgeEffectView class missing; fix inactive");
+
+    sEdgeEffectViewClass = objc_getClass("UIKit.ScrollEdgeEffectView");
+    if (!sEdgeEffectViewClass) {
+        ApolloLog(@"[ScrollEdgePopFix] UIKit.ScrollEdgeEffectView missing; fix inactive");
         return;
     }
-    %init(ScrollEdgePopFix, ApolloScrollEdgeEffectView = effectViewClass);
-    ApolloLog(@"[ScrollEdgePopFix] hook installed on UIKit.ScrollEdgeEffectView");
+
+    sProtectedScrollViews = [NSHashTable weakObjectsHashTable];
+    %init(ScrollEdgePopFix);
+    ApolloLog(@"[ScrollEdgePopFix] hook installed (pocket containers held through nav transitions)");
 }
