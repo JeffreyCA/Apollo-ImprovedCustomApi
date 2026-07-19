@@ -114,6 +114,9 @@ extern BOOL sPerPostCommentSort;
 extern BOOL sModernSubredditDividers;
 // Master toggle for subreddit list enhancements (see UDKeySubredditListEnhancements).
 extern BOOL sSubredditListEnhancements;
+// Hide the description subtitles under the subreddit list's built-in feed rows
+// (see UDKeyHideSubredditListDescriptions). Independent of the enhancements master.
+extern BOOL sHideSubredditListDescriptions;
 
 // Color post (link) flairs and user/author flairs using Reddit's assigned
 // colors (filled pill + matching text color). When NO, Apollo's default grey

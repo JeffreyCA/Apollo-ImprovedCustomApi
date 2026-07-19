@@ -45,6 +45,7 @@ BOOL sInfoRowOverlayMode = NO;     // info icons → transient overlay; default 
 BOOL sInfoRowTapTranslation = YES; // effective default ON via registerDefaults (UDKeyInfoRowTapTranslation)
 BOOL sModernSubredditDividers = YES;
 BOOL sSubredditListEnhancements = YES;
+BOOL sHideSubredditListDescriptions = NO;
 BOOL sEnableFlairColors = NO;
 BOOL sEnableInlineImages = NO;
 BOOL sEnableChatMedia = NO;   // effective default YES via registerDefaults (UDKeyEnableChatMedia)

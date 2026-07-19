@@ -36,6 +36,12 @@ static NSString *const UDKeySubredditListEnhancements = @"SubredditListEnhanceme
 static NSString *const UDKeyHiddenModeratorSubreddits = @"HiddenModeratorSubreddits";
 static NSString *const UDKeyModernSubredditDividers = @"ModernSubredditDividers";
 static NSString *const ApolloModernSubredditDividersChangedNotification = @"ApolloModernSubredditDividersChangedNotification";
+// Hides the description subtitles under the subreddit list's built-in feed rows
+// (Home, Popular Posts, All Posts, Moderator Posts). Independent of the
+// enhancements master — applies in both the classic and modern list styles.
+// Default NO. See ApolloSubredditIndexPolish.xm.
+static NSString *const UDKeyHideSubredditListDescriptions = @"HideSubredditListDescriptions";
+static NSString *const ApolloHideSubredditListDescriptionsChangedNotification = @"ApolloHideSubredditListDescriptionsChangedNotification";
 // Color post (link) and user/author flairs with Reddit's assigned colors. Default NO.
 static NSString *const UDKeyEnableFlairColors = @"EnableFlairColors";
 static NSString *const ApolloFlairColorsChangedNotification = @"ApolloFlairColorsChangedNotification";

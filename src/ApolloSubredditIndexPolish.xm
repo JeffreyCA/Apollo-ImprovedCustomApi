@@ -1721,7 +1721,73 @@ static void ApolloSubredditIndexInstallHeaderLayoutHook(void) {
 
 %end
 
+// --- Hide Feed Descriptions ------------------------------------------------
+// The built-in feed rows (Home, Popular Posts, All Posts, Moderator Posts) are
+// the only rows in the subreddit list that use _TtC6Apollo27ApolloSubtitleTableViewCell
+// (regular subreddit rows are RedditListTableViewCell), so inside
+// RedditListViewController's data source that cell class alone identifies them.
+// Clearing detailTextLabel.text right after Apollo configures the cell — before
+// the table's self-sizing pass — both removes the description and lets the row
+// height collapse naturally. The original string is stashed on the cell so the
+// toggle can restore it even if Apollo only set the text once per cell.
+
+static char kApolloSubredditDescriptionStashKey;
+// Weak registry of tables these cells were vended for. The generic refresh
+// helper (ApolloSubredditIndexRefreshTablesInView) is gated on the enhancements
+// master and only walks attached views, but this toggle must also refresh a
+// classic-mode list and one sitting in a deselected tab's detached hierarchy.
+static NSHashTable<UITableView *> *sApolloSubredditDescriptionTables = nil;
+
+static Class ApolloSubredditIndexSubtitleCellClass(void) {
+    static Class cls = Nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cls = NSClassFromString(@"_TtC6Apollo27ApolloSubtitleTableViewCell");
+    });
+    return cls;
+}
+
+static void ApolloSubredditIndexApplyDescriptionPreference(UITableView *tableView, UITableViewCell *cell) {
+    Class subtitleCellClass = ApolloSubredditIndexSubtitleCellClass();
+    if (!subtitleCellClass || ![cell isKindOfClass:subtitleCellClass]) return;
+
+    if (!sApolloSubredditDescriptionTables) sApolloSubredditDescriptionTables = [NSHashTable weakObjectsHashTable];
+    if (tableView) [sApolloSubredditDescriptionTables addObject:tableView];
+
+    UILabel *detailLabel = cell.detailTextLabel;
+    if (!detailLabel) return;
+
+    if (sHideSubredditListDescriptions) {
+        if (detailLabel.text.length > 0) {
+            objc_setAssociatedObject(cell, &kApolloSubredditDescriptionStashKey, detailLabel.text, OBJC_ASSOCIATION_COPY_NONATOMIC);
+            detailLabel.text = nil;
+        }
+    } else if (detailLabel.text.length == 0) {
+        // Apollo didn't repopulate the subtitle on this configure pass (cached
+        // per-row cell), so bring back the string we cleared earlier.
+        NSString *stashed = objc_getAssociatedObject(cell, &kApolloSubredditDescriptionStashKey);
+        if (stashed.length > 0) detailLabel.text = stashed;
+    }
+}
+
+static void ApolloSubredditIndexReloadDescriptionTables(void) {
+    for (UITableView *tableView in sApolloSubredditDescriptionTables.allObjects) {
+        NSDictionary *anchor = ApolloSubredditIndexCaptureScrollAnchor(tableView);
+        [UIView performWithoutAnimation:^{
+            [tableView reloadData];
+            [tableView layoutIfNeeded];
+            ApolloSubredditIndexRestoreScrollAnchor(tableView, anchor);
+        }];
+    }
+}
+
 %hook _TtC6Apollo24RedditListViewController
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    UITableViewCell *cell = %orig;
+    ApolloSubredditIndexApplyDescriptionPreference(tableView, cell);
+    return cell;
+}
 
 - (void)favoriteSubredditButtonTapped:(id)sender {
     UIView *senderView = [sender isKindOfClass:[UIView class]] ? (UIView *)sender : nil;
@@ -1895,6 +1961,15 @@ static void ApolloSubredditIndexApplyRedditListCellPolishOnce(UITableViewCell *c
                                                   usingBlock:^(__unused NSNotification *notification) {
         ApolloSubredditIndexRefreshAllVisibleTables();
         ApolloLog(@"[SubredditIndex] divider-style-changed modern=%d", sModernSubredditDividers);
+    }];
+    [[NSNotificationCenter defaultCenter] addObserverForName:ApolloHideSubredditListDescriptionsChangedNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *notification) {
+        ApolloSubredditIndexReloadDescriptionTables();
+        ApolloLog(@"[SubredditIndex] feed-descriptions-changed hide=%d tables=%lu",
+                  sHideSubredditListDescriptions,
+                  (unsigned long)sApolloSubredditDescriptionTables.allObjects.count);
     }];
     ApolloLog(@"[SubredditIndex] polish active modernDividers=%d", sModernSubredditDividers);
 }
