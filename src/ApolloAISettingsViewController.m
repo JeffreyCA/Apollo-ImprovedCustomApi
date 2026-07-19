@@ -5,6 +5,8 @@
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
 
+#import <math.h>
+
 typedef NS_ENUM(NSInteger, ApolloAISettingsSection) {
     ApolloAISettingsSectionGeneral = 0,
     ApolloAISettingsSectionSummaries,
@@ -12,6 +14,33 @@ typedef NS_ENUM(NSInteger, ApolloAISettingsSection) {
     ApolloAISettingsSectionMaintenance,
     ApolloAISettingsSectionCount,
 };
+
+typedef NS_ENUM(NSInteger, ApolloAISummarySettingsRow) {
+    ApolloAISummarySettingsRowPostToggle = 0,
+    ApolloAISummarySettingsRowPostThreshold,
+    ApolloAISummarySettingsRowPostDetail,
+    ApolloAISummarySettingsRowCommentToggle,
+    ApolloAISummarySettingsRowCommentDetail,
+    ApolloAISummarySettingsRowTapToSummarize,
+    ApolloAISummarySettingsRowAutoExpand,
+    ApolloAISummarySettingsRowCount,
+};
+
+@interface ApolloAISettingsSlider : UISlider
+@property (nonatomic, weak) UILabel *apollo_valueLabel;
+@end
+
+@implementation ApolloAISettingsSlider
+@end
+
+static NSString *ApolloAISettingsDetailText(ApolloAISummaryDetail detail) {
+    switch (detail) {
+        case ApolloAISummaryDetailBrief: return @"Brief";
+        case ApolloAISummaryDetailInDepth: return @"In-depth";
+        case ApolloAISummaryDetailBalanced:
+        default: return @"Balanced";
+    }
+}
 
 // ObjC surface exported by ApolloFoundationModels.swift. Resolve it dynamically
 // so this settings screen remains loadable when the build SDK does not contain
@@ -52,6 +81,93 @@ typedef NS_ENUM(NSInteger, ApolloAISettingsSection) {
     return cell;
 }
 
+// A compact detent-slider row: the current value is shown beside the title and
+// every available stop is labelled below the track. The control stores indices
+// (rather than the word values themselves), so snapping is identical for the
+// six-stop threshold and the three-stop detail controls.
+- (UITableViewCell *)sliderCellWithLabel:(NSString *)label
+                               valueText:(NSString *)valueText
+                           selectedIndex:(NSInteger)selectedIndex
+                              tickLabels:(NSArray<NSString *> *)tickLabels
+                                 enabled:(BOOL)enabled
+                                  action:(SEL)action {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                                   reuseIdentifier:nil];
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+
+    UILabel *title = [[UILabel alloc] init];
+    title.text = label;
+    title.font = [UIFont systemFontOfSize:17.0];
+    title.enabled = enabled;
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:title];
+
+    UILabel *value = [[UILabel alloc] init];
+    value.text = valueText;
+    value.font = [UIFont monospacedDigitSystemFontOfSize:15.0 weight:UIFontWeightRegular];
+    value.textColor = [UIColor secondaryLabelColor];
+    value.textAlignment = NSTextAlignmentRight;
+    value.alpha = enabled ? 1.0 : 0.45;
+    value.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:value];
+
+    ApolloAISettingsSlider *slider = [[ApolloAISettingsSlider alloc] init];
+    slider.minimumValue = 0.0f;
+    slider.maximumValue = (float)MAX(0, (NSInteger)tickLabels.count - 1);
+    slider.value = (float)selectedIndex;
+    slider.enabled = enabled;
+    slider.continuous = YES;
+    slider.accessibilityLabel = label;
+    slider.accessibilityValue = valueText;
+    slider.apollo_valueLabel = value;
+    slider.translatesAutoresizingMaskIntoConstraints = NO;
+    [slider addTarget:self action:action forControlEvents:UIControlEventValueChanged];
+    [cell.contentView addSubview:slider];
+
+    NSMutableArray<UILabel *> *tickViews = [NSMutableArray arrayWithCapacity:tickLabels.count];
+    for (NSString *tickText in tickLabels) {
+        UILabel *tick = [[UILabel alloc] init];
+        tick.text = tickText;
+        tick.font = [UIFont systemFontOfSize:10.0 weight:UIFontWeightRegular];
+        tick.textColor = [UIColor tertiaryLabelColor];
+        tick.textAlignment = NSTextAlignmentCenter;
+        tick.alpha = enabled ? 1.0 : 0.45;
+        [tickViews addObject:tick];
+    }
+    UIStackView *ticks = [[UIStackView alloc] initWithArrangedSubviews:tickViews];
+    ticks.axis = UILayoutConstraintAxisHorizontal;
+    ticks.distribution = UIStackViewDistributionFillEqually;
+    ticks.userInteractionEnabled = NO;
+    ticks.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:ticks];
+
+    UILayoutGuide *margins = cell.contentView.layoutMarginsGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [title.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+        [title.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:8.0],
+        [value.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor],
+        [value.centerYAnchor constraintEqualToAnchor:title.centerYAnchor],
+        [value.leadingAnchor constraintGreaterThanOrEqualToAnchor:title.trailingAnchor constant:8.0],
+        [slider.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor constant:8.0],
+        [slider.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor constant:-8.0],
+        [slider.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:2.0],
+        [ticks.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+        [ticks.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor],
+        [ticks.topAnchor constraintEqualToAnchor:slider.bottomAnchor constant:-3.0],
+        [ticks.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-6.0],
+    ]];
+    return cell;
+}
+
+- (NSInteger)snappedIndexForSlider:(ApolloAISettingsSlider *)slider {
+    NSInteger index = (NSInteger)lroundf(slider.value);
+    index = MAX((NSInteger)slider.minimumValue, MIN(index, (NSInteger)slider.maximumValue));
+    if ((NSInteger)lroundf(slider.value) != index || fabsf(slider.value - (float)index) > 0.001f) {
+        [slider setValue:(float)index animated:NO];
+    }
+    return index;
+}
+
 - (NSInteger)modelAvailabilityStatus {
     Class bridgeClass = NSClassFromString(@"ApolloFoundationModels");
     if (!bridgeClass || ![bridgeClass respondsToSelector:@selector(shared)]) return 4;
@@ -86,7 +202,7 @@ typedef NS_ENUM(NSInteger, ApolloAISettingsSection) {
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
         case ApolloAISettingsSectionGeneral: return 1;
-        case ApolloAISettingsSectionSummaries: return 4;
+        case ApolloAISettingsSectionSummaries: return ApolloAISummarySettingsRowCount;
         case ApolloAISettingsSectionAvailability: return 1;
         case ApolloAISettingsSectionMaintenance: return 2;
         default: return 0;
@@ -108,7 +224,7 @@ typedef NS_ENUM(NSInteger, ApolloAISettingsSection) {
         return @"Summaries are generated entirely on-device using Apple Intelligence — no post or comment text is sent to an external AI service. Summarizing a linked article does fetch that page from its source website, which happens automatically when you open a thread unless Tap to Summarize is on.";
     }
     if (section == ApolloAISettingsSectionSummaries) {
-        return @"Tap to Summarize generates only the card you tap, and opens it once it's ready. Open Summaries Automatically instead generates enabled summaries when you open a thread and expands them on their own. These two are alternatives, so turning one on turns the other off.";
+        return @"Minimum Post Length applies to Reddit text-post bodies; linked articles remain eligible independently. Brief gives the essentials, Balanced matches the standard summary, and In-depth adds useful context without reproducing the source. Tap to Summarize and Open Summaries Automatically are alternatives, so turning one on turns the other off.";
     }
     if (section == ApolloAISettingsSectionAvailability) {
         return @"Availability is diagnostic. On some iOS versions, sideloaded apps may report Apple Intelligence as disabled even when generation still works.";
@@ -131,28 +247,51 @@ typedef NS_ENUM(NSInteger, ApolloAISettingsSection) {
 
     if (indexPath.section == ApolloAISettingsSectionSummaries) {
         BOOL enabled = sEnableAISummaries;
+        BOOL postEnabled = enabled && sEnableAIPostSummaries;
+        BOOL commentEnabled = enabled && sEnableAICommentSummaries;
         switch (indexPath.row) {
-            case 0:
+            case ApolloAISummarySettingsRowPostToggle:
                 return [self switchCellWithLabel:@"Post/Link Summaries"
-                                              on:[defaults boolForKey:UDKeyEnableAIPostSummaries]
+                                              on:sEnableAIPostSummaries
                                          enabled:enabled
                                           action:@selector(postSummariesSwitchChanged:)];
-            case 1:
+            case ApolloAISummarySettingsRowPostThreshold:
+                return [self sliderCellWithLabel:@"Minimum Post Length"
+                                       valueText:[NSString stringWithFormat:@"%ld words", (long)sAIPostWordThreshold]
+                                   selectedIndex:(sAIPostWordThreshold / 50) - 1
+                                      tickLabels:@[@"50", @"100", @"150", @"200", @"250", @"300"]
+                                         enabled:postEnabled
+                                          action:@selector(postThresholdSliderChanged:)];
+            case ApolloAISummarySettingsRowPostDetail:
+                return [self sliderCellWithLabel:@"Post/Link Detail"
+                                       valueText:ApolloAISettingsDetailText(sAIPostSummaryDetail)
+                                   selectedIndex:sAIPostSummaryDetail
+                                      tickLabels:@[@"Brief", @"Balanced", @"In-depth"]
+                                         enabled:postEnabled
+                                          action:@selector(postDetailSliderChanged:)];
+            case ApolloAISummarySettingsRowCommentToggle:
                 return [self switchCellWithLabel:@"Comment Summaries"
-                                              on:[defaults boolForKey:UDKeyEnableAICommentSummaries]
+                                              on:sEnableAICommentSummaries
                                          enabled:enabled
                                           action:@selector(commentSummariesSwitchChanged:)];
-            case 2:
+            case ApolloAISummarySettingsRowCommentDetail:
+                return [self sliderCellWithLabel:@"Discussion Detail"
+                                       valueText:ApolloAISettingsDetailText(sAICommentSummaryDetail)
+                                   selectedIndex:sAICommentSummaryDetail
+                                      tickLabels:@[@"Brief", @"Balanced", @"In-depth"]
+                                         enabled:commentEnabled
+                                          action:@selector(commentDetailSliderChanged:)];
+            case ApolloAISummarySettingsRowTapToSummarize:
                 // Mutually exclusive with Open Summaries Automatically: one is
                 // "tap to generate (and open)", the other is "auto-generate and
-                // auto-open" — they're alternatives, so each greys the other out.
+                // auto-open" — they are alternatives, so each greys the other out.
                 return [self switchCellWithLabel:@"Tap to Summarize"
-                                              on:[defaults boolForKey:UDKeyEnableTapToSummarize]
+                                              on:sEnableTapToSummarize
                                          enabled:(enabled && !sEnableAIAutoExpandSummaries)
                                           action:@selector(tapToSummarizeSwitchChanged:)];
-            case 3:
+            case ApolloAISummarySettingsRowAutoExpand:
                 return [self switchCellWithLabel:@"Open Summaries Automatically"
-                                              on:[defaults boolForKey:UDKeyEnableAIAutoExpandSummaries]
+                                              on:sEnableAIAutoExpandSummaries
                                          enabled:(enabled && !sEnableTapToSummarize)
                                           action:@selector(autoExpandSwitchChanged:)];
             default:
@@ -183,6 +322,16 @@ typedef NS_ENUM(NSInteger, ApolloAISettingsSection) {
     }
 
     return [[UITableViewCell alloc] init];
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == ApolloAISettingsSectionSummaries &&
+        (indexPath.row == ApolloAISummarySettingsRowPostThreshold ||
+         indexPath.row == ApolloAISummarySettingsRowPostDetail ||
+         indexPath.row == ApolloAISummarySettingsRowCommentDetail)) {
+        return 94.0;
+    }
+    return 44.0;
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -235,11 +384,38 @@ typedef NS_ENUM(NSInteger, ApolloAISettingsSection) {
 - (void)postSummariesSwitchChanged:(UISwitch *)sender {
     sEnableAIPostSummaries = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sEnableAIPostSummaries forKey:UDKeyEnableAIPostSummaries];
+    [self reloadSummaryControls];
 }
 
 - (void)commentSummariesSwitchChanged:(UISwitch *)sender {
     sEnableAICommentSummaries = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sEnableAICommentSummaries forKey:UDKeyEnableAICommentSummaries];
+    [self reloadSummaryControls];
+}
+
+- (void)postThresholdSliderChanged:(ApolloAISettingsSlider *)slider {
+    NSInteger index = [self snappedIndexForSlider:slider];
+    sAIPostWordThreshold = (index + 1) * 50;
+    NSString *text = [NSString stringWithFormat:@"%ld words", (long)sAIPostWordThreshold];
+    slider.apollo_valueLabel.text = text;
+    slider.accessibilityValue = text;
+    [[NSUserDefaults standardUserDefaults] setInteger:sAIPostWordThreshold forKey:UDKeyAIPostWordThreshold];
+}
+
+- (void)postDetailSliderChanged:(ApolloAISettingsSlider *)slider {
+    sAIPostSummaryDetail = (ApolloAISummaryDetail)[self snappedIndexForSlider:slider];
+    NSString *text = ApolloAISettingsDetailText(sAIPostSummaryDetail);
+    slider.apollo_valueLabel.text = text;
+    slider.accessibilityValue = text;
+    [[NSUserDefaults standardUserDefaults] setInteger:sAIPostSummaryDetail forKey:UDKeyAIPostSummaryDetail];
+}
+
+- (void)commentDetailSliderChanged:(ApolloAISettingsSlider *)slider {
+    sAICommentSummaryDetail = (ApolloAISummaryDetail)[self snappedIndexForSlider:slider];
+    NSString *text = ApolloAISettingsDetailText(sAICommentSummaryDetail);
+    slider.apollo_valueLabel.text = text;
+    slider.accessibilityValue = text;
+    [[NSUserDefaults standardUserDefaults] setInteger:sAICommentSummaryDetail forKey:UDKeyAICommentSummaryDetail];
 }
 
 - (void)tapToSummarizeSwitchChanged:(UISwitch *)sender {

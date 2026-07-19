@@ -2701,6 +2701,9 @@ static void initializeRandomSources() {
                                     UDKeyEnableAISummaries: @NO,
                                     UDKeyEnableAIPostSummaries: @YES,
                                     UDKeyEnableAICommentSummaries: @YES,
+                                    UDKeyAIPostWordThreshold: @150,
+                                    UDKeyAIPostSummaryDetail: @(ApolloAISummaryDetailBalanced),
+                                    UDKeyAICommentSummaryDetail: @(ApolloAISummaryDetailBalanced),
                                     UDKeyEnableTapToSummarize: @NO,
                                     UDKeyEnableAIAutoExpandSummaries: @NO,
                                     UDKeyPictureInPictureEnabled: @NO,
@@ -2758,6 +2761,23 @@ static void initializeRandomSources() {
     sEnableAISummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAISummaries];
     sEnableAIPostSummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAIPostSummaries];
     sEnableAICommentSummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAICommentSummaries];
+    sAIPostWordThreshold = [standardDefaults integerForKey:UDKeyAIPostWordThreshold];
+    if (sAIPostWordThreshold < 50 || sAIPostWordThreshold > 300 || sAIPostWordThreshold % 50 != 0) {
+        sAIPostWordThreshold = 150;
+        [standardDefaults setInteger:sAIPostWordThreshold forKey:UDKeyAIPostWordThreshold];
+    }
+    sAIPostSummaryDetail = (ApolloAISummaryDetail)[standardDefaults integerForKey:UDKeyAIPostSummaryDetail];
+    if (sAIPostSummaryDetail < ApolloAISummaryDetailBrief ||
+        sAIPostSummaryDetail > ApolloAISummaryDetailInDepth) {
+        sAIPostSummaryDetail = ApolloAISummaryDetailBalanced;
+        [standardDefaults setInteger:sAIPostSummaryDetail forKey:UDKeyAIPostSummaryDetail];
+    }
+    sAICommentSummaryDetail = (ApolloAISummaryDetail)[standardDefaults integerForKey:UDKeyAICommentSummaryDetail];
+    if (sAICommentSummaryDetail < ApolloAISummaryDetailBrief ||
+        sAICommentSummaryDetail > ApolloAISummaryDetailInDepth) {
+        sAICommentSummaryDetail = ApolloAISummaryDetailBalanced;
+        [standardDefaults setInteger:sAICommentSummaryDetail forKey:UDKeyAICommentSummaryDetail];
+    }
     sEnableTapToSummarize = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableTapToSummarize];
     sEnableAIAutoExpandSummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAIAutoExpandSummaries];
     // "Tap to Summarize" and "Open Summaries Automatically" are mutually exclusive in

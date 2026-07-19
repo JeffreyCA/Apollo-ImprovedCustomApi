@@ -140,6 +140,18 @@ extern BOOL sEnableAICommentSummaries;  // the "Discussion so far" summary
 extern BOOL sEnableTapToSummarize;      // generate only on tap (off = automatic)
 extern BOOL sEnableAIAutoExpandSummaries; // auto-open a summary card once it's ready (off = stay collapsed)
 
+// AI summary tuning shared by the settings UI and generation pipeline.
+// The threshold applies only to a Reddit self-post body; external article
+// summaries remain eligible independently of the self-text length.
+typedef NS_ENUM(NSInteger, ApolloAISummaryDetail) {
+    ApolloAISummaryDetailBrief = 0,
+    ApolloAISummaryDetailBalanced = 1,
+    ApolloAISummaryDetailInDepth = 2,
+};
+extern NSInteger sAIPostWordThreshold;              // 50...300, step 50
+extern ApolloAISummaryDetail sAIPostSummaryDetail;  // post / link / both
+extern ApolloAISummaryDetail sAICommentSummaryDetail;
+
 // Horizontal alignment for inline media containers narrower than the row width
 // (tall portrait images, height-capped images). Has no effect on full-width media.
 typedef NS_ENUM(NSInteger, ApolloInlineImageAlignment) {
