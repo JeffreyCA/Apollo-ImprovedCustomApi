@@ -168,6 +168,34 @@ static NSString *ApolloShareLinkRewriteStringForCurrentHost(NSString *string) {
     return rewritten.absoluteString ?: string;
 }
 
+static BOOL ApolloShareLinkItemHasSupportedRedditURL(id item) {
+    if ([item isKindOfClass:[NSURL class]]) {
+        NSURLComponents *components = [NSURLComponents componentsWithURL:(NSURL *)item resolvingAgainstBaseURL:NO];
+        return ApolloShareLinkIsRedditWebHost(components.host);
+    }
+    if ([item isKindOfClass:[NSString class]]) {
+        NSURL *url = [NSURL URLWithString:(NSString *)item];
+        if (![url isKindOfClass:[NSURL class]] || url.scheme.length == 0 || url.host.length == 0) return NO;
+        NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+        return ApolloShareLinkIsRedditWebHost(components.host);
+    }
+    return NO;
+}
+
+static BOOL ApolloShareLinkItemSourceShouldWrap(id<UIActivityItemSource> source) {
+    id placeholder = nil;
+    @try {
+        placeholder = [source activityViewControllerPlaceholderItem:nil];
+    } @catch (__unused NSException *e) {}
+    if (ApolloShareLinkItemHasSupportedRedditURL(placeholder)) return YES;
+
+    id copyItem = nil;
+    @try {
+        copyItem = [source activityViewController:nil itemForActivityType:UIActivityTypeCopyToPasteboard];
+    } @catch (__unused NSException *e) {}
+    return ApolloShareLinkItemHasSupportedRedditURL(copyItem);
+}
+
 static id ApolloShareLinkRewriteActivityItemForCurrentHost(id item, BOOL wrapItemSources);
 
 @interface ApolloShareHostRewritingItemSource : NSObject <UIActivityItemSource>
@@ -240,6 +268,8 @@ static id ApolloShareLinkRewriteActivityItemForCurrentHost(id item, BOOL wrapIte
     if (wrapItemSources &&
         ![item isKindOfClass:[ApolloShareHostRewritingItemSource class]] &&
         [item conformsToProtocol:@protocol(UIActivityItemSource)]) {
+        if (!ApolloShareLinkItemSourceShouldWrap((id<UIActivityItemSource>)item)) return item;
+
         ApolloShareHostRewritingItemSource *source = [[ApolloShareHostRewritingItemSource alloc] init];
         source.originalItemSource = (id<UIActivityItemSource>)item;
         return source;
@@ -479,7 +509,7 @@ static BOOL ApolloShareLinkAlreadyHasLinkSource(NSArray *items) {
     // and the link-source check keeps us from double-appending onto the video path's
     // own sheet.
     id vc = sActiveShareVC;
-    NSArray *rewrittenActivityItems = ApolloShareLinkRewriteActivityItemsForCurrentHost(activityItems, vc != nil);
+    NSArray *rewrittenActivityItems = ApolloShareLinkRewriteActivityItemsForCurrentHost(activityItems, YES);
     if (vc && sActiveShareIncludeLink && !ApolloShareLinkAlreadyHasLinkSource(rewrittenActivityItems)) {
         NSURL *url = ApolloShareLinkURLForVC(vc);
         if ([url isKindOfClass:[NSURL class]]) {
