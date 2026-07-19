@@ -2677,6 +2677,7 @@ static void initializeRandomSources() {
                                     UDKeyCommentLinkHost: @(CommentLinkHostOff),
                                     UDKeyShowUserAvatars: @NO,
                                     UDKeyUseProfileAvatarTabIcon: @NO,
+                                    UDKeyHideTabBarTitles: @NO,
                                     UDKeyShowDetailedProfiles: @YES,
                                     UDKeyShowSubredditHeaders: @NO,
                                     UDKeyCommunityHighlights: @NO,
@@ -2825,6 +2826,7 @@ static void initializeRandomSources() {
     if (sCommentLinkHost < CommentLinkHostOff || sCommentLinkHost > CommentLinkHostImgChest) sCommentLinkHost = CommentLinkHostOff;
     sShowUserAvatars = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars];
     sUseProfileAvatarTabIcon = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon];
+    sHideTabBarTitles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles];
     sShowDetailedProfiles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowDetailedProfiles];
     sShowSubredditHeaders = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders];
     sCommunityHighlights = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlights];

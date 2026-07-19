@@ -48,6 +48,9 @@ float ApolloSanitizedHoldSpeed(float value);
 extern BOOL sProxyImgurDDG;
 extern BOOL sShowUserAvatars;
 extern BOOL sUseProfileAvatarTabIcon;
+// Hide the visible main-tab labels while retaining/restoring the underlying
+// UITabBarItem titles. Opt-in; default OFF via registerDefaults.
+extern BOOL sHideTabBarTitles;
 // When ON (default), profile pages show Reborn's detailed profile — the banner,
 // large avatar/snoovatar, display name, bio, and the Social Links band (Buy Me a
 // Coffee, Instagram, X, …). When OFF, profiles revert to Apollo's compact stock

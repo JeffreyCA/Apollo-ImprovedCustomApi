@@ -79,6 +79,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/settings/ApolloSettingsNativeInjections.xm \
     $(SRC_DIR)/ApolloPerPostCommentSort.xm \
     $(SRC_DIR)/ApolloLiquidGlass.xm \
+    $(SRC_DIR)/ApolloTabBarTitles.xm \
     $(SRC_DIR)/ApolloLiquidGlassIconPicker.xm \
     $(SRC_DIR)/ApolloModmailLayout.xm \
     $(SRC_DIR)/ApolloAutoHideTabBar.xm \

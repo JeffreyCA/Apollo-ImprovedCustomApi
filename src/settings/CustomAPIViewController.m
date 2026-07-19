@@ -1490,6 +1490,12 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf profileTabAvatarSwitchToggled:sender]; }];
 
+    ApolloSettingsRow *iconOnlyTabBar =
+        [ApolloSettingsRow switchRowWithID:@"profiles.iconOnlyTabBar"
+                                     title:@"Icon-Only Tab Bar"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf iconOnlyTabBarSwitchToggled:sender]; }];
+
     // Single toggle for Reborn's detailed profile page: banner, large
     // avatar/snoovatar, display name, bio, and the Social Links band (all of
     // which live in the custom header). Off → Apollo's compact stock profile.
@@ -1500,8 +1506,8 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onToggle:^(UISwitch *sender) { [weakSelf showDetailedProfilesSwitchToggled:sender]; }];
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Show profile pictures, and open Reborn's detailed profile pages with a banner, bio and social links."
-                                              rows:@[ userAvatars, profileTabAvatar, detailedProfiles ]];
+                                            footer:@"Customize profile pictures, profile pages and the tab bar. Icon-Only Tab Bar hides the text labels while keeping each icon's accessibility name."
+                                              rows:@[ userAvatars, profileTabAvatar, iconOnlyTabBar, detailedProfiles ]];
 }
 
 // Subreddits group screen (ApolloSubredditsSettingsViewController), two
@@ -3067,6 +3073,12 @@ typedef NS_ENUM(NSInteger, Tag) {
     sUseProfileAvatarTabIcon = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sUseProfileAvatarTabIcon forKey:UDKeyUseProfileAvatarTabIcon];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloProfileTabAvatarIconChangedNotification" object:nil];
+}
+
+- (void)iconOnlyTabBarSwitchToggled:(UISwitch *)sender {
+    sHideTabBarTitles = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sHideTabBarTitles forKey:UDKeyHideTabBarTitles];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloTabBarTitlesChangedNotification object:nil];
 }
 
 - (void)showDetailedProfilesSwitchToggled:(UISwitch *)sender {

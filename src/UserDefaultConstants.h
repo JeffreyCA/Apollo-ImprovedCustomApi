@@ -83,6 +83,12 @@ static NSString *const UDKeyCommentLinkHost = @"CommentLinkHost";
 static NSString *const ApolloCommentLinkHostChangedNotification = @"ApolloCommentLinkHostChangedNotification";
 static NSString *const UDKeyShowUserAvatars = @"ShowUserAvatars";
 static NSString *const UDKeyUseProfileAvatarTabIcon = @"UseProfileAvatarTabIcon";
+// When ON, the main tab bar removes its visible text labels and lets UIKit lay
+// out a clean icon-only navigation menu. The original titles remain available
+// to accessibility and are restored live when the setting is turned off.
+// Default OFF. See ApolloTabBarTitles.xm.
+static NSString *const UDKeyHideTabBarTitles = @"HideTabBarTitles";
+static NSString *const ApolloTabBarTitlesChangedNotification = @"ApolloTabBarTitlesChangedNotification";
 // When ON (default), profile pages show Reborn's detailed profile — the banner,
 // large avatar/snoovatar, display name, bio, and the Social Links band. When OFF,
 // the profile page reverts to Apollo's compact stock layout: the detailed header is
