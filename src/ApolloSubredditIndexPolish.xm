@@ -30,6 +30,20 @@ static char kApolloSubredditHeaderLoggedKey;
 // plus the last pinned verdict, so the setFrame: hook only repaints on transitions.
 static char kApolloSubredditHeaderSectionKey;
 static char kApolloSubredditHeaderPinnedStateKey;
+// Live revert support: turning the Enhancements master OFF must restore the native
+// look without a relaunch. Native values are captured once, right before the first
+// enhancement mutation, and replayed by the restore pass.
+static char kApolloSubredditTableNativeStateKey;   // NSDictionary: insets/style/index colors
+static char kApolloSubredditCellNativeStateKey;    // NSDictionary: margins/spacing/backgrounds
+static char kApolloSubredditHeaderNativeStateKey;  // NSDictionary: header/label chrome
+static char kApolloSubredditHeaderStyledKey;       // we styled this header; restore needed
+
+// Weak registry of every table RedditListViewController vended cells for. Unlike a
+// window walk this reaches a list sitting in a deselected tab's detached hierarchy,
+// and it works with the enhancements master off.
+static NSHashTable<UITableView *> *sApolloSubredditKnownTables = nil;
+
+static void ApolloSubredditIndexRestoreCellNativeState(UITableViewCell *cell);
 static char kApolloSubredditMultiredditsSectionKey;
 static char kApolloSubredditMultiredditChildStyledKey;
 
@@ -164,7 +178,23 @@ static BOOL ApolloSubredditIndexLooksLikeSubredditsTable(UITableView *tableView,
     return hasA && (hasZ || hasHash);
 }
 
+// Capture the table's native separator/margin/index chrome exactly once, before the
+// enhancement suite first mutates it, so the master toggle can revert live.
+static void ApolloSubredditIndexCaptureTableNativeState(UITableView *tableView) {
+    if (!tableView) return;
+    if (objc_getAssociatedObject(tableView, &kApolloSubredditTableNativeStateKey)) return;
+    NSMutableDictionary *state = [NSMutableDictionary dictionary];
+    state[@"separatorInset"] = [NSValue valueWithUIEdgeInsets:tableView.separatorInset];
+    state[@"separatorStyle"] = @(tableView.separatorStyle);
+    state[@"layoutMargins"] = [NSValue valueWithUIEdgeInsets:tableView.layoutMargins];
+    state[@"sectionIndexColor"] = tableView.sectionIndexColor ?: (id)[NSNull null];
+    state[@"sectionIndexBackgroundColor"] = tableView.sectionIndexBackgroundColor ?: (id)[NSNull null];
+    state[@"sectionIndexTrackingBackgroundColor"] = tableView.sectionIndexTrackingBackgroundColor ?: (id)[NSNull null];
+    objc_setAssociatedObject(tableView, &kApolloSubredditTableNativeStateKey, state, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 static void ApolloSubredditIndexApplySeparatorInsets(UITableView *tableView) {
+    ApolloSubredditIndexCaptureTableNativeState(tableView);
     UIEdgeInsets inset = tableView.separatorInset;
     if (inset.right < ApolloSubredditIndexRightInset) {
         inset.right = ApolloSubredditIndexRightInset;
@@ -184,6 +214,7 @@ static void ApolloSubredditIndexApplySeparatorInsets(UITableView *tableView) {
 }
 
 static void ApolloSubredditIndexHideNativeIndex(UITableView *tableView) {
+    ApolloSubredditIndexCaptureTableNativeState(tableView);
     tableView.sectionIndexColor = [UIColor clearColor];
     tableView.sectionIndexBackgroundColor = [UIColor clearColor];
     tableView.sectionIndexTrackingBackgroundColor = [UIColor clearColor];
@@ -351,8 +382,27 @@ static BOOL ApolloSubredditIndexStarControlFrameIsPlausible(UIControl *control, 
     return plausibleSize && rightSide;
 }
 
+// Capture the cell's native chrome exactly once, before the enhancement suite first
+// mutates it (margins here, stack spacing in the row polish, backgrounds in the
+// multireddit child styling — all of which stash into this same dictionary).
+static NSMutableDictionary *ApolloSubredditIndexCaptureCellNativeState(UITableViewCell *cell) {
+    if (!cell) return nil;
+    NSMutableDictionary *state = objc_getAssociatedObject(cell, &kApolloSubredditCellNativeStateKey);
+    if (state) return state;
+    state = [NSMutableDictionary dictionary];
+    state[@"separatorInset"] = [NSValue valueWithUIEdgeInsets:cell.separatorInset];
+    state[@"layoutMargins"] = [NSValue valueWithUIEdgeInsets:cell.layoutMargins];
+    state[@"contentMargins"] = [NSValue valueWithUIEdgeInsets:cell.contentView.layoutMargins];
+    state[@"cellBackgroundColor"] = cell.backgroundColor ?: (id)[NSNull null];
+    state[@"contentBackgroundColor"] = cell.contentView.backgroundColor ?: (id)[NSNull null];
+    state[@"cellOpaque"] = @(cell.opaque);
+    objc_setAssociatedObject(cell, &kApolloSubredditCellNativeStateKey, state, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return state;
+}
+
 static void ApolloSubredditIndexApplyCellMarginsOnce(UITableViewCell *cell) {
     if ([objc_getAssociatedObject(cell, &kApolloSubredditCellMarginsAppliedKey) boolValue]) return;
+    ApolloSubredditIndexCaptureCellNativeState(cell);
 
     UIEdgeInsets inset = cell.separatorInset;
     if (inset.right < ApolloSubredditIndexRightInset) {
@@ -1161,40 +1211,6 @@ static void ApolloSubredditIndexInstallOrUpdate(UITableView *tableView) {
     }
 }
 
-static void ApolloSubredditIndexRefreshTablesInView(UIView *view) {
-    if (!sSubredditListEnhancements) return;
-    if (!view) return;
-
-    if ([view isKindOfClass:[UITableView class]]) {
-        UITableView *tableView = (UITableView *)view;
-        if (ApolloSubredditIndexShouldInspectTable(tableView)) {
-            NSArray<NSString *> *titles = ApolloSubredditIndexTitlesForTable(tableView);
-            BOOL isSubredditTable = ApolloSubredditIndexLooksLikeSubredditsTable(tableView, titles);
-            if (isSubredditTable) {
-                objc_setAssociatedObject(tableView, &kApolloSubredditIndexTableKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                NSDictionary *anchor = ApolloSubredditIndexCaptureScrollAnchor(tableView);
-                ApolloSubredditIndexApplySeparatorInsets(tableView);
-                [UIView performWithoutAnimation:^{
-                    [tableView reloadData];
-                    [tableView layoutIfNeeded];
-                    ApolloSubredditIndexInstallOrUpdate(tableView);
-                    ApolloSubredditIndexRestoreScrollAnchor(tableView, anchor);
-                }];
-            }
-        }
-    }
-
-    for (UIView *subview in view.subviews) {
-        ApolloSubredditIndexRefreshTablesInView(subview);
-    }
-}
-
-static void ApolloSubredditIndexRefreshAllVisibleTables(void) {
-    for (UIWindow *window in ApolloAllWindows()) {
-        ApolloSubredditIndexRefreshTablesInView(window);
-    }
-}
-
 static BOOL ApolloSubredditIndexEnsureSubredditTable(UITableView *tableView) {
     if (!sSubredditListEnhancements) return NO;
     if (!tableView) return NO;
@@ -1333,6 +1349,7 @@ static void ApolloSubredditIndexApplyCellSelectionChrome(UITableViewCell *cell, 
     // Separator style belongs to the enhancement/divider suite — only touch it when that suite owns
     // this table. In classic mode we leave Apollo's native separators untouched.
     if (ApolloSubredditIndexEnsureSubredditTable(tableView)) {
+        ApolloSubredditIndexCaptureTableNativeState(tableView);
         UITableViewCellSeparatorStyle separatorStyle = sModernSubredditDividers ? UITableViewCellSeparatorStyleNone : UITableViewCellSeparatorStyleSingleLine;
         if (tableView.separatorStyle != separatorStyle) {
             tableView.separatorStyle = separatorStyle;
@@ -1469,6 +1486,11 @@ static void ApolloSubredditIndexApplyMultiredditChildStyle(UITableView *tableVie
     UIView *lineView = ApolloSubredditIndexMultiredditChildLineView(cell);
     if (!lineView) return;
 
+    NSMutableDictionary *nativeState = ApolloSubredditIndexCaptureCellNativeState(cell);
+    if (nativeState && !nativeState[@"multiredditLineColor"]) {
+        nativeState[@"multiredditLineColor"] = lineView.backgroundColor ?: (id)[NSNull null];
+    }
+
     cell.backgroundColor = [UIColor clearColor];
     cell.contentView.backgroundColor = [UIColor clearColor];
     cell.opaque = NO;
@@ -1510,6 +1532,66 @@ static void ApolloSubredditIndexPrepareCellForDisplay(UITableView *tableView, UI
     ApolloSubredditIndexApplyMultiredditChildStyleIfNeeded(tableView, cell, indexPath);
 }
 
+static void ApolloSubredditIndexUnhideVisualEffectViews(UIView *view) {
+    if (!view) return;
+    if ([view isKindOfClass:[UIVisualEffectView class]]) view.hidden = NO;
+    for (UIView *subview in view.subviews) {
+        ApolloSubredditIndexUnhideVisualEffectViews(subview);
+    }
+}
+
+// Undo everything the modern header styling did to this instance: injected gradient
+// separator, hidden effect views, background fills and label chrome (from the state
+// captured before the first styling pass). Apollo re-sets the title text and layout
+// on the next configure/layout pass. No-op unless we actually styled this header.
+static void ApolloSubredditIndexRestoreHeaderNativeChrome(UIView *header) {
+    if (!header) return;
+    if (![objc_getAssociatedObject(header, &kApolloSubredditHeaderStyledKey) boolValue]) return;
+    objc_setAssociatedObject(header, &kApolloSubredditHeaderStyledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(header, &kApolloSubredditHeaderPinnedStateKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    UIView *separator = objc_getAssociatedObject(header, &kApolloSubredditHeaderSeparatorKey);
+    [separator removeFromSuperview];
+    objc_setAssociatedObject(header, &kApolloSubredditHeaderSeparatorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    ApolloSubredditIndexUnhideVisualEffectViews(header);
+
+    NSDictionary *state = objc_getAssociatedObject(header, &kApolloSubredditHeaderNativeStateKey);
+    if (state) {
+        id headerBg = state[@"headerBackgroundColor"];
+        header.backgroundColor = [headerBg isKindOfClass:[UIColor class]] ? headerBg : nil;
+        header.opaque = [state[@"headerOpaque"] boolValue];
+
+        UILabel *label = ApolloSubredditIndexHeaderLabelInView(header);
+        if (label) {
+            UIFont *font = [state[@"labelFont"] isKindOfClass:[UIFont class]] ? state[@"labelFont"] : nil;
+            if (font) label.font = font;
+            UIColor *textColor = [state[@"labelTextColor"] isKindOfClass:[UIColor class]] ? state[@"labelTextColor"] : nil;
+            if (textColor) label.textColor = textColor;
+            NSNumber *alpha = state[@"labelAlpha"];
+            if (alpha) label.alpha = alpha.doubleValue;
+        }
+
+        Class headerFooterClass = ApolloSubredditIndexTableHeaderFooterViewClass();
+        if (headerFooterClass && [header isKindOfClass:headerFooterClass]) {
+            UITableViewHeaderFooterView *headerFooter = (UITableViewHeaderFooterView *)header;
+            if ([state[@"hadBackgroundView"] boolValue]) {
+                id backgroundViewColor = state[@"backgroundViewColor"];
+                headerFooter.backgroundView.backgroundColor = [backgroundViewColor isKindOfClass:[UIColor class]] ? backgroundViewColor : nil;
+            } else {
+                // ClearHeaderChrome installed this stand-in; the native header had none.
+                headerFooter.backgroundView = nil;
+            }
+            id contentBg = state[@"contentBackgroundColor"];
+            headerFooter.contentView.backgroundColor = [contentBg isKindOfClass:[UIColor class]] ? contentBg : nil;
+            headerFooter.contentView.opaque = [state[@"contentOpaque"] boolValue];
+        }
+    }
+
+    [header setNeedsLayout];
+    [header setNeedsDisplay];
+}
+
 // A plain-style section header is "pinned" (floating over rows under the nav bar) whenever the
 // table has lifted it above its resting slot — the top of its own section's rect. While pinned,
 // the modern header must stay transparent so only the title + accent line float over the rows
@@ -1539,7 +1621,12 @@ static void ApolloSubredditIndexApplyHeaderSurfaceForPinnedState(UIView *header,
 }
 
 static void ApolloSubredditIndexStyleHeaderView(UIView *header, UITableView *tableView) {
-    if (!sSubredditListEnhancements) return;
+    if (!sSubredditListEnhancements) {
+        // Master off: instead of leaving stale modern chrome on a reused header,
+        // put the instance back to its native look (no-op unless we styled it).
+        ApolloSubredditIndexRestoreHeaderNativeChrome(header);
+        return;
+    }
     if (!header || !tableView) return;
     if (![objc_getAssociatedObject(tableView, &kApolloSubredditIndexTableKey) boolValue]) {
         if (!ApolloSubredditIndexShouldInspectTable(tableView)) return;
@@ -1554,11 +1641,35 @@ static void ApolloSubredditIndexStyleHeaderView(UIView *header, UITableView *tab
     NSString *text = [[label.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] uppercaseString];
     if (!ApolloSubredditIndexStringLooksLikeHeaderTitle(text)) return;
 
-    UIView *separator = objc_getAssociatedObject(header, &kApolloSubredditHeaderSeparatorKey);
     if (!sModernSubredditDividers) {
-        separator.hidden = YES;
+        // Dividers off means native headers; also strips stale modern chrome from a
+        // header that was styled while dividers were on.
+        ApolloSubredditIndexRestoreHeaderNativeChrome(header);
         return;
     }
+
+    // Capture the native chrome once before the first styling pass, so the master
+    // (or dividers) toggle can put this instance back without a relaunch.
+    if (!objc_getAssociatedObject(header, &kApolloSubredditHeaderNativeStateKey)) {
+        NSMutableDictionary *nativeState = [NSMutableDictionary dictionary];
+        nativeState[@"headerBackgroundColor"] = header.backgroundColor ?: (id)[NSNull null];
+        nativeState[@"headerOpaque"] = @(header.opaque);
+        nativeState[@"labelFont"] = label.font ?: (id)[NSNull null];
+        nativeState[@"labelTextColor"] = label.textColor ?: (id)[NSNull null];
+        nativeState[@"labelAlpha"] = @(label.alpha);
+        Class headerFooterClass = ApolloSubredditIndexTableHeaderFooterViewClass();
+        if (headerFooterClass && [header isKindOfClass:headerFooterClass]) {
+            UITableViewHeaderFooterView *headerFooter = (UITableViewHeaderFooterView *)header;
+            nativeState[@"hadBackgroundView"] = @(headerFooter.backgroundView != nil);
+            nativeState[@"backgroundViewColor"] = headerFooter.backgroundView.backgroundColor ?: (id)[NSNull null];
+            nativeState[@"contentBackgroundColor"] = headerFooter.contentView.backgroundColor ?: (id)[NSNull null];
+            nativeState[@"contentOpaque"] = @(headerFooter.contentView.opaque);
+        }
+        objc_setAssociatedObject(header, &kApolloSubredditHeaderNativeStateKey, nativeState, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    objc_setAssociatedObject(header, &kApolloSubredditHeaderStyledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    UIView *separator = objc_getAssociatedObject(header, &kApolloSubredditHeaderSeparatorKey);
 
     ApolloSubredditIndexClearHeaderChrome(header, label);
 
@@ -1832,11 +1943,6 @@ static void ApolloSubredditIndexInstallHeaderSetFrameHook(void) {
 // toggle can restore it even if Apollo only set the text once per cell.
 
 static char kApolloSubredditDescriptionStashKey;
-// Weak registry of tables these cells were vended for. The generic refresh
-// helper (ApolloSubredditIndexRefreshTablesInView) is gated on the enhancements
-// master and only walks attached views, but this toggle must also refresh a
-// classic-mode list and one sitting in a deselected tab's detached hierarchy.
-static NSHashTable<UITableView *> *sApolloSubredditDescriptionTables = nil;
 
 static Class ApolloSubredditIndexSubtitleCellClass(void) {
     static Class cls = Nil;
@@ -1850,9 +1956,6 @@ static Class ApolloSubredditIndexSubtitleCellClass(void) {
 static void ApolloSubredditIndexApplyDescriptionPreference(UITableView *tableView, UITableViewCell *cell) {
     Class subtitleCellClass = ApolloSubredditIndexSubtitleCellClass();
     if (!subtitleCellClass || ![cell isKindOfClass:subtitleCellClass]) return;
-
-    if (!sApolloSubredditDescriptionTables) sApolloSubredditDescriptionTables = [NSHashTable weakObjectsHashTable];
-    if (tableView) [sApolloSubredditDescriptionTables addObject:tableView];
 
     UILabel *detailLabel = cell.detailTextLabel;
     if (!detailLabel) return;
@@ -1871,7 +1974,7 @@ static void ApolloSubredditIndexApplyDescriptionPreference(UITableView *tableVie
 }
 
 static void ApolloSubredditIndexReloadDescriptionTables(void) {
-    for (UITableView *tableView in sApolloSubredditDescriptionTables.allObjects) {
+    for (UITableView *tableView in sApolloSubredditKnownTables.allObjects) {
         NSDictionary *anchor = ApolloSubredditIndexCaptureScrollAnchor(tableView);
         [UIView performWithoutAnimation:^{
             [tableView reloadData];
@@ -1881,10 +1984,86 @@ static void ApolloSubredditIndexReloadDescriptionTables(void) {
     }
 }
 
+// --- Live enhancement master revert -----------------------------------------
+// Turning Subreddit List Enhancements OFF used to leave stale modern chrome (accent
+// headers, hidden separators, the custom A–Z overlay, star proxies, widened margins)
+// until the app relaunched: the refresh path was gated on the now-off master, and the
+// persistent table tag kept the cell layoutSubviews hooks re-applying styling. This
+// pass puts a known table back to its captured native state and drops the tag so the
+// styling hooks disengage — while keeping the #452 tap-highlight fix, which is meant
+// to work in classic mode too.
+static void ApolloSubredditIndexRevertTableToNative(UITableView *tableView) {
+    if (!tableView) return;
+
+    if ([objc_getAssociatedObject(tableView, &kApolloSubredditIndexTableKey) boolValue]) {
+        objc_setAssociatedObject(tableView, &kApolloSubredditSelectionTableKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(tableView, &kApolloSubredditIndexTableKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    ApolloSubredditIndexOverlayView *overlay = objc_getAssociatedObject(tableView, &kApolloSubredditIndexOverlayKey);
+    [overlay removeFromSuperview];
+    objc_setAssociatedObject(tableView, &kApolloSubredditIndexOverlayKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    NSDictionary *state = objc_getAssociatedObject(tableView, &kApolloSubredditTableNativeStateKey);
+    if (state) {
+        tableView.separatorInset = [state[@"separatorInset"] UIEdgeInsetsValue];
+        tableView.separatorStyle = (UITableViewCellSeparatorStyle)[state[@"separatorStyle"] integerValue];
+        tableView.layoutMargins = [state[@"layoutMargins"] UIEdgeInsetsValue];
+        id indexColor = state[@"sectionIndexColor"];
+        tableView.sectionIndexColor = [indexColor isKindOfClass:[UIColor class]] ? indexColor : nil;
+        id indexBackground = state[@"sectionIndexBackgroundColor"];
+        tableView.sectionIndexBackgroundColor = [indexBackground isKindOfClass:[UIColor class]] ? indexBackground : nil;
+        id indexTracking = state[@"sectionIndexTrackingBackgroundColor"];
+        tableView.sectionIndexTrackingBackgroundColor = [indexTracking isKindOfClass:[UIColor class]] ? indexTracking : nil;
+    }
+
+    for (UITableViewCell *cell in tableView.visibleCells) {
+        ApolloSubredditIndexRestoreCellNativeState(cell);
+    }
+    NSInteger sectionCount = tableView.numberOfSections;
+    for (NSInteger section = 0; section < sectionCount; section++) {
+        ApolloSubredditIndexRestoreHeaderNativeChrome([tableView headerViewForSection:section]);
+    }
+
+    NSDictionary *anchor = ApolloSubredditIndexCaptureScrollAnchor(tableView);
+    [UIView performWithoutAnimation:^{
+        [tableView reloadData];
+        [tableView layoutIfNeeded];
+        ApolloSubredditIndexRestoreScrollAnchor(tableView, anchor);
+    }];
+}
+
+// Master/dividers changed: re-style or revert every known list, including ones in a
+// deselected tab's detached hierarchy (which a window walk would miss).
+static void ApolloSubredditIndexApplyEnhancementStateToKnownTables(void) {
+    for (UITableView *tableView in sApolloSubredditKnownTables.allObjects) {
+        if (sSubredditListEnhancements) {
+            NSDictionary *anchor = ApolloSubredditIndexCaptureScrollAnchor(tableView);
+            ApolloSubredditIndexApplySeparatorInsets(tableView);
+            [UIView performWithoutAnimation:^{
+                [tableView reloadData];
+                [tableView layoutIfNeeded];
+                ApolloSubredditIndexInstallOrUpdate(tableView);
+                ApolloSubredditIndexRestoreScrollAnchor(tableView, anchor);
+            }];
+        } else {
+            ApolloSubredditIndexRevertTableToNative(tableView);
+        }
+    }
+}
+
 %hook _TtC6Apollo24RedditListViewController
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = %orig;
+    if (tableView) {
+        if (!sApolloSubredditKnownTables) sApolloSubredditKnownTables = [NSHashTable weakObjectsHashTable];
+        [sApolloSubredditKnownTables addObject:tableView];
+    }
+    if (!sSubredditListEnhancements) {
+        // Master off: strip any enhancement residue from a reused cell before display.
+        ApolloSubredditIndexRestoreCellNativeState(cell);
+    }
     ApolloSubredditIndexApplyDescriptionPreference(tableView, cell);
     return cell;
 }
@@ -1992,8 +2171,48 @@ static UIStackView *ApolloSubredditIndexRedditListMainStackView(UITableViewCell 
     return [value isKindOfClass:[UIStackView class]] ? (UIStackView *)value : nil;
 }
 
+// Undo every master-gated cell mutation from the captured native state: star proxy,
+// widened margins/insets, stack spacing, and the multireddit child recolor. The #452
+// selection chrome is deliberately left alone — it applies in classic mode too.
+// Idempotent, so it can run on every classic-mode display pass of a reused cell.
+static void ApolloSubredditIndexRestoreCellNativeState(UITableViewCell *cell) {
+    if (!cell) return;
+    ApolloSubredditIndexRemoveStarProxyFromCell(cell);
+
+    NSDictionary *state = objc_getAssociatedObject(cell, &kApolloSubredditCellNativeStateKey);
+    if (state) {
+        cell.separatorInset = [state[@"separatorInset"] UIEdgeInsetsValue];
+        cell.layoutMargins = [state[@"layoutMargins"] UIEdgeInsetsValue];
+        cell.contentView.layoutMargins = [state[@"contentMargins"] UIEdgeInsetsValue];
+        id cellBackground = state[@"cellBackgroundColor"];
+        cell.backgroundColor = [cellBackground isKindOfClass:[UIColor class]] ? cellBackground : nil;
+        id contentBackground = state[@"contentBackgroundColor"];
+        cell.contentView.backgroundColor = [contentBackground isKindOfClass:[UIColor class]] ? contentBackground : nil;
+        cell.opaque = [state[@"cellOpaque"] boolValue];
+
+        NSNumber *stackSpacing = state[@"stackSpacing"];
+        if (stackSpacing) {
+            UIStackView *mainStack = ApolloSubredditIndexRedditListMainStackView(cell);
+            if (mainStack) mainStack.spacing = stackSpacing.doubleValue;
+        }
+
+        id lineColor = state[@"multiredditLineColor"];
+        if ([lineColor isKindOfClass:[UIColor class]]) {
+            UIView *lineView = ApolloSubredditIndexMultiredditChildLineView(cell);
+            lineView.backgroundColor = lineColor;
+            lineView.layer.backgroundColor = ((UIColor *)lineColor).CGColor;
+        }
+    }
+
+    objc_setAssociatedObject(cell, &kApolloSubredditCellMarginsAppliedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(cell, &kApolloSubredditRowPolishAppliedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(cell, &kApolloSubredditMultiredditChildStyledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [cell setNeedsLayout];
+}
+
 static void ApolloSubredditIndexApplyRedditListCellPolishOnce(UITableViewCell *cell, BOOL skipLeadingMarginClamp) {
     if ([objc_getAssociatedObject(cell, &kApolloSubredditRowPolishAppliedKey) boolValue]) return;
+    NSMutableDictionary *nativeState = ApolloSubredditIndexCaptureCellNativeState(cell);
 
     if (!skipLeadingMarginClamp) {
         UIEdgeInsets margins = cell.contentView.layoutMargins;
@@ -2005,6 +2224,7 @@ static void ApolloSubredditIndexApplyRedditListCellPolishOnce(UITableViewCell *c
 
     UIStackView *mainStack = ApolloSubredditIndexRedditListMainStackView(cell);
     if (mainStack && mainStack.spacing < ApolloSubredditRowIconTextGap) {
+        if (nativeState && !nativeState[@"stackSpacing"]) nativeState[@"stackSpacing"] = @(mainStack.spacing);
         mainStack.spacing = ApolloSubredditRowIconTextGap;
     }
 
@@ -2060,8 +2280,11 @@ static void ApolloSubredditIndexApplyRedditListCellPolishOnce(UITableViewCell *c
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(__unused NSNotification *notification) {
-        ApolloSubredditIndexRefreshAllVisibleTables();
-        ApolloLog(@"[SubredditIndex] divider-style-changed modern=%d", sModernSubredditDividers);
+        ApolloSubredditIndexApplyEnhancementStateToKnownTables();
+        ApolloLog(@"[SubredditIndex] enhancement-state-changed enhancements=%d modern=%d tables=%lu",
+                  sSubredditListEnhancements,
+                  sModernSubredditDividers,
+                  (unsigned long)sApolloSubredditKnownTables.allObjects.count);
     }];
     [[NSNotificationCenter defaultCenter] addObserverForName:ApolloHideSubredditListDescriptionsChangedNotification
                                                       object:nil
@@ -2070,7 +2293,7 @@ static void ApolloSubredditIndexApplyRedditListCellPolishOnce(UITableViewCell *c
         ApolloSubredditIndexReloadDescriptionTables();
         ApolloLog(@"[SubredditIndex] feed-descriptions-changed hide=%d tables=%lu",
                   sHideSubredditListDescriptions,
-                  (unsigned long)sApolloSubredditDescriptionTables.allObjects.count);
+                  (unsigned long)sApolloSubredditKnownTables.allObjects.count);
     }];
     ApolloLog(@"[SubredditIndex] polish active modernDividers=%d", sModernSubredditDividers);
 }
