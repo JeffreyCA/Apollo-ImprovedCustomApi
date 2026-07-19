@@ -91,6 +91,13 @@ static NSString *const UDKeyUseProfileAvatarTabIcon = @"UseProfileAvatarTabIcon"
 // (UDKeyShowUserAvatars), which governs the inline avatars next to usernames.
 // See ApolloUserAvatars.xm and ApolloProfileSocialLinks.m. Default YES.
 static NSString *const UDKeyShowDetailedProfiles = @"ShowDetailedProfiles";
+static NSString *const UDKeyProfileHeaderImmersive = @"ProfileHeaderImmersive";
+static NSString *const UDKeyProfileShowBanner = @"ProfileShowBanner";
+static NSString *const UDKeyProfileShowStatCards = @"ProfileShowStatCards";
+static NSString *const UDKeyProfileShowSocialLinks = @"ProfileShowSocialLinks";
+static NSString *const UDKeyProfileShowTrophyCase = @"ProfileShowTrophyCase";
+static NSString *const UDKeyProfileShowActions = @"ProfileShowActions";
+static NSString *const UDKeyProfileAvatarStyle = @"ProfileAvatarStyle";
 static NSString *const UDKeyShowSubredditHeaders = @"ShowSubredditHeaders";
 // Backing values for the single Community Highlights picker. Keeping the old
 // keys maps existing settings naturally: both YES = Full, master only = Partial,

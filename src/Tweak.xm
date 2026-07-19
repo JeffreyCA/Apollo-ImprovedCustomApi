@@ -2678,6 +2678,13 @@ static void initializeRandomSources() {
                                     UDKeyShowUserAvatars: @NO,
                                     UDKeyUseProfileAvatarTabIcon: @NO,
                                     UDKeyShowDetailedProfiles: @YES,
+                                    UDKeyProfileHeaderImmersive: @YES,
+                                    UDKeyProfileShowBanner: @YES,
+                                    UDKeyProfileShowStatCards: @YES,
+                                    UDKeyProfileShowSocialLinks: @YES,
+                                    UDKeyProfileShowTrophyCase: @YES,
+                                    UDKeyProfileShowActions: @YES,
+                                    UDKeyProfileAvatarStyle: @0,
                                     UDKeyShowSubredditHeaders: @NO,
                                     UDKeyCommunityHighlights: @NO,
                                     UDKeyCommunityHighlightsWeb: @NO,
@@ -2826,6 +2833,13 @@ static void initializeRandomSources() {
     sShowUserAvatars = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars];
     sUseProfileAvatarTabIcon = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon];
     sShowDetailedProfiles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowDetailedProfiles];
+    sProfileHeaderImmersive = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileHeaderImmersive];
+    sProfileShowBanner = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowBanner];
+    sProfileShowStatCards = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowStatCards];
+    sProfileShowSocialLinks = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowSocialLinks];
+    sProfileShowTrophyCase = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowTrophyCase];
+    sProfileShowActions = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowActions];
+    sProfileAvatarStyle = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyProfileAvatarStyle];
     sShowSubredditHeaders = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders];
     sCommunityHighlights = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlights];
     sCommunityHighlightsWeb = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlightsWeb];

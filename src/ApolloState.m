@@ -30,6 +30,15 @@ BOOL sProxyImgurDDG = NO;
 BOOL sShowUserAvatars = NO;
 BOOL sUseProfileAvatarTabIcon = NO;
 BOOL sShowDetailedProfiles = YES;   // effective default ON via registerDefaults (UDKeyShowDetailedProfiles)
+BOOL sProfileHeaderImmersive = YES; // New (immersive melt) vs Classic (flat); default ON (UDKeyProfileHeaderImmersive)
+// Profile customization — viewer preferences for every profile they view. All show-*
+// default ON; avatar style 0=Full snoovatar, 1=Circle, 2=Square (default Full).
+BOOL sProfileShowBanner = YES;
+BOOL sProfileShowStatCards = YES;
+BOOL sProfileShowSocialLinks = YES;
+BOOL sProfileShowTrophyCase = YES;
+BOOL sProfileShowActions = YES;   // Follow / Message row on other-user profiles
+NSInteger sProfileAvatarStyle = 0;
 BOOL sShowSubredditHeaders = NO;
 BOOL sCommunityHighlights = NO;
 BOOL sCommunityHighlightsWeb = NO;
