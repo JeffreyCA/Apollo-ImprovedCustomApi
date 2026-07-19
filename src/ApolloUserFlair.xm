@@ -1,5 +1,7 @@
 #import "ApolloCommon.h"
+#import "ApolloOwnCommentFlair.h"
 #import "ApolloState.h"
+#import "ApolloUserFlair.h"
 #import "ApolloWebJSON.h"
 #import "ApolloWebSessionStore.h"
 #import <WebKit/WebKit.h>
@@ -1960,6 +1962,38 @@ static NSArray *ApolloUserFlairPiecesFromFlairText(NSString *flairText, NSString
     return ApolloUserFlairPiecesFromFlairTextWithEmojiMap(flairText, map);
 }
 
+#pragma mark - Exports for ApolloOwnCommentFlair
+
+// Thin wrappers over the static builders above. ApolloOwnCommentFlair.xm restores
+// the poster's own flair on a just-posted comment and needs to turn a stored
+// flair_text back into RDKFlair pieces; everything else in this file stays static.
+
+id ApolloUserFlairBuildTextPiece(NSString *text) {
+    return ApolloUserFlairMakeTextFlair(text);
+}
+
+id ApolloUserFlairBuildEmojiPiece(NSString *emojiLabel, NSString *imageURL) {
+    return ApolloUserFlairMakeEmojiFlair(emojiLabel, imageURL);
+}
+
+NSArray *ApolloUserFlairBuildPiecesForText(NSString *flairText, NSString *subreddit) {
+    return ApolloUserFlairPiecesFromFlairText(flairText, subreddit.lowercaseString);
+}
+
+void ApolloUserFlairEnsureEmojisForSubreddit(NSString *subreddit, void (^completion)(void)) {
+    if (!completion) return;
+    if (subreddit.length == 0) { completion(); return; }
+
+    NSString *key = subreddit.lowercaseString;
+    NSArray *cached = nil;
+    BOOL partial = NO;
+    @synchronized (ApolloUserFlairEmojiListCache()) { cached = ApolloUserFlairEmojiListCache()[key]; }
+    @synchronized (ApolloUserFlairPartialEmojiCacheKeys()) { partial = [ApolloUserFlairPartialEmojiCacheKeys() containsObject:key]; }
+    if (cached && !partial) { completion(); return; }
+
+    ApolloUserFlairFetchEmojis(subreddit, ^(__unused NSArray *emojis) { completion(); });
+}
+
 #pragma mark - API-key-free old-Reddit flair bridge
 
 // Reddit's OAuth-only GET /r/<sub>/api/user_flair_v2 is what Apollo normally
@@ -2896,18 +2930,34 @@ static BOOL ApolloUserFlairPresenterHasFlairSelector(UIViewController *presenter
                                   text:(NSString *)text
                             templateID:(NSString *)templateID
                             completion:(id)completion {
-    if (!ApolloWebJSONHasUsableSession()) return %orig;
+    // Remember what the user just applied, so the next comment they post in this
+    // subreddit renders it immediately — Reddit's comment-create response never
+    // carries author_flair_* (see ApolloOwnCommentFlair.xm). Recorded from inside
+    // the completion, and only on success: a rejected save must not leave us
+    // believing in a flair the account doesn't actually have. Wrapping is safe on
+    // both branches because both take the same void (^)(NSError *) completion.
+    void (^originalCompletion)(NSError *) = completion;
+    id wrapped = ^(NSError *error) {
+        if (!error) ApolloOwnCommentFlairRecordSetFlair(subreddit, text);
+        if (originalCompletion) originalCompletion(error);
+    };
+    if (!ApolloWebJSONHasUsableSession()) return %orig(subreddit, text, templateID, wrapped);
     return ApolloUserFlairPerformWebUpdate(@"/api/selectflair", subreddit, @{
         @"flair_template_id": templateID ?: @"",
         @"text": text ?: @"",
-    }, completion);
+    }, wrapped);
 }
 
 - (id)setShowUserFlair:(BOOL)show subredditName:(NSString *)subreddit completion:(id)completion {
-    if (!ApolloWebJSONHasUsableSession()) return %orig;
+    void (^originalCompletion)(NSError *) = completion;
+    id wrapped = ^(NSError *error) {
+        if (!error) ApolloOwnCommentFlairRecordShowFlair(subreddit, show);
+        if (originalCompletion) originalCompletion(error);
+    };
+    if (!ApolloWebJSONHasUsableSession()) return %orig(show, subreddit, wrapped);
     return ApolloUserFlairPerformWebUpdate(@"/api/setflairenabled", subreddit, @{
         @"flair_enabled": show ? @"true" : @"false",
-    }, completion);
+    }, wrapped);
 }
 
 %end

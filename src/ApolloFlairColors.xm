@@ -32,6 +32,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloOwnCommentFlair.h"
 #import "UserDefaultConstants.h"
 #import <math.h>
 #import <objc/message.h>
@@ -498,20 +499,24 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
 + (id)modelOfClass:(Class)modelClass fromJSONDictionary:(NSDictionary *)JSONDictionary error:(NSError **)error {
     id model = %orig;
     ApolloFlairRecoverForModel(model, JSONDictionary);
+    ApolloOwnCommentFlairInspectModel(model);
     return model;
 }
 
 // Listing/array funnel — JSON array and model array are index-parallel.
 + (id)modelsOfClass:(Class)modelClass fromJSONArray:(NSArray *)JSONArray error:(NSError **)error {
     id models = %orig;
-    if ([models isKindOfClass:[NSArray class]] && [JSONArray isKindOfClass:[NSArray class]] &&
-        [(NSArray *)models count] == JSONArray.count) {
+    if ([models isKindOfClass:[NSArray class]]) {
         NSArray *modelArray = (NSArray *)models;
+        BOOL parallel = [JSONArray isKindOfClass:[NSArray class]] && modelArray.count == JSONArray.count;
         for (NSUInteger i = 0; i < modelArray.count; i++) {
-            id json = JSONArray[i];
-            if ([json isKindOfClass:[NSDictionary class]]) {
-                ApolloFlairRecoverForModel(modelArray[i], (NSDictionary *)json);
+            if (parallel) {
+                id json = JSONArray[i];
+                if ([json isKindOfClass:[NSDictionary class]])
+                    ApolloFlairRecoverForModel(modelArray[i], (NSDictionary *)json);
             }
+            // Reads the model itself, so it does not need the parallel JSON.
+            ApolloOwnCommentFlairInspectModel(modelArray[i]);
         }
     }
     return models;
@@ -520,6 +525,7 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
 - (id)modelFromJSONDictionary:(NSDictionary *)JSONDictionary error:(NSError **)error {
     id model = %orig;
     ApolloFlairRecoverForModel(model, JSONDictionary);
+    ApolloOwnCommentFlairInspectModel(model);
     return model;
 }
 
