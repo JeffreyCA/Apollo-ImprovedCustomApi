@@ -8368,6 +8368,10 @@ static void ApolloReapplyTranslationOnAppResume(void) {
 
 - (void)setRightBarButtonItems:(NSArray<UIBarButtonItem *> *)items animated:(BOOL)animated {
     %orig(items, animated);
+    // Subreddit headers (ApolloSubredditHeaders.xm) size the nav title against
+    // where this cluster ends up — re-check now that it just changed,
+    // independent of the globe merge below.
+    ApolloSubredditForceAllTitleRelayouts();
     if (sApplyingGlobeMerge) return;
     if (IsLiquidGlass() && objc_getAssociatedObject(self, kApolloGlobeMergeButtonKey)) {
         ApolloApplyGlobeMergeForNavItem(self);
@@ -8376,6 +8380,7 @@ static void ApolloReapplyTranslationOnAppResume(void) {
 
 - (void)setRightBarButtonItem:(UIBarButtonItem *)item animated:(BOOL)animated {
     %orig(item, animated);
+    ApolloSubredditForceAllTitleRelayouts();
     if (sApplyingGlobeMerge) return;
     if (IsLiquidGlass() && objc_getAssociatedObject(self, kApolloGlobeMergeButtonKey)) {
         ApolloApplyGlobeMergeForNavItem(self);

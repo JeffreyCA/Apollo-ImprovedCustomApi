@@ -813,6 +813,38 @@ static UIView *ApolloSubredditFindSubviewOfClass(UIView *root, Class cls) {
     return nil;
 }
 
+static void ApolloSubredditCollectSubviewsOfClass(UIView *root, Class cls, NSMutableArray<UIView *> *results) {
+    if (!root || !cls) return;
+    if ([root isKindOfClass:cls]) [results addObject:root];
+    for (UIView *subview in root.subviews) {
+        ApolloSubredditCollectSubviewsOfClass(subview, cls, results);
+    }
+}
+
+// Forces every currently-visible nav title to re-run its layout (and, for
+// subreddit headers, ApolloLiquidGlass.xm's content-sizing check) right now.
+// Called from ApolloTranslation.xm's existing setRightBarButtonItem(s): hook
+// on UINavigationItem — measured directly (not assumed) that Apollo rebuilds
+// its trailing bar-button cluster via that exact setter while a subreddit is
+// still loading, and that title measurements taken right after that setter
+// fires are consistently the final, settled ones. Sweeping every window's
+// title controls (rather than resolving the one nav bar that owns this
+// specific nav item, which UINavigationItem has no public back-reference for)
+// is simpler and safe: this only fires when Apollo actually changes bar
+// items, not on every layout pass.
+void ApolloSubredditForceAllTitleRelayouts(void) {
+    Class titleControlClass = NSClassFromString(@"_UINavigationBarTitleControl");
+    if (!titleControlClass) return;
+    for (UIWindow *window in ApolloAllWindows()) {
+        NSMutableArray<UIView *> *titleControls = [NSMutableArray array];
+        ApolloSubredditCollectSubviewsOfClass(window, titleControlClass, titleControls);
+        for (UIView *titleControl in titleControls) {
+            [titleControl setNeedsLayout];
+            [titleControl layoutIfNeeded];
+        }
+    }
+}
+
 static UITableView *ApolloSubredditFindTableView(UIViewController *viewController) {
     if ([viewController respondsToSelector:@selector(tableView)]) {
         UITableView *(*msgSend)(id, SEL) = (UITableView *(*)(id, SEL))objc_msgSend;
@@ -1516,6 +1548,13 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
 
     ApolloLog(@"[SubredditHeaders] install vc=%p subreddit=%@", viewController, subredditName);
 
+    // The subreddit name (and thus ApolloSubredditTitleShouldTruncate's
+    // eligibility) only becomes known here, asynchronously, well after the nav
+    // title control's own layout has already settled once. Nothing else
+    // re-triggers that layout at this exact moment (setRightBarButtonItem(s):
+    // covers the icon cluster changing later, but not this), so force it now.
+    ApolloSubredditForceAllTitleRelayouts();
+
     CGFloat width = tableView.bounds.size.width > 0 ? tableView.bounds.size.width : UIScreen.mainScreen.bounds.size.width;
     if (!header) {
         header = ApolloSubredditCreateHeader(width);
@@ -1891,6 +1930,21 @@ static BOOL ApolloSubredditShouldBlockOffset(UITableView *tableView, CGPoint new
 }
 
 %end
+
+// Cheap, synchronous eligibility check — mirrors the same gates
+// ApolloSubredditInstallOrUpdateHeader itself uses (skip check,
+// PostsViewController kind, a resolvable subreddit name) but without waiting
+// on that function's own async header-view construction, so it's safe to
+// call from every title layout pass. Used by ApolloLiquidGlass.xm to decide
+// whether to size the JumpBar to its content instead of leaving it at
+// Apollo's fixed native width.
+BOOL ApolloSubredditTitleShouldTruncate(UIViewController *viewController) {
+    if (!viewController || !sShowSubredditHeaders) return NO;
+    if (ApolloSubredditShouldSkipViewController(viewController)) return NO;
+    if (sPostsViewControllerClass && ![viewController isKindOfClass:sPostsViewControllerClass]) return NO;
+    NSString *name = ApolloSubredditNameFromViewController(viewController);
+    return name.length > 0;
+}
 
 %ctor {
     sPostsViewControllerClass = objc_getClass("_TtC6Apollo19PostsViewController");

@@ -136,6 +136,16 @@ void ApolloApplyScrollEdgeEffectStyle(UIScrollView *scrollView);
 // ASTableView. Applying at the controller level mirrors SwiftUI's inherited
 // NavigationStack modifier and reaches both views.
 void ApolloApplyScrollEdgeEffectStyleToViewController(UIViewController *viewController);
+// Whether the nav title for this view controller should size its JumpBar to
+// its actual content (with truncation if still too wide) instead of Apollo's
+// fixed native width (ApolloSubredditHeaders.xm's subreddit feeds).
+// Positioning stays on the existing centering formula, unchanged, everywhere.
+BOOL ApolloSubredditTitleShouldTruncate(UIViewController *viewController);
+// Forces every visible nav title to re-run its layout right now. Called from
+// ApolloTranslation.xm's UINavigationItem setRightBarButtonItem(s): hook —
+// measured to reliably correlate with the icon cluster's final, settled
+// position (see ApolloSubredditTitleShouldTruncate's comment).
+void ApolloSubredditForceAllTitleRelayouts(void);
 extern BOOL sModernSubredditDividers;
 // Master toggle for subreddit list enhancements (see UDKeySubredditListEnhancements).
 extern BOOL sSubredditListEnhancements;
