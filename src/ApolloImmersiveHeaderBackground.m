@@ -36,12 +36,13 @@ UIVisualEffect *ApolloImmersiveGlassEffect(UIColor *tintColor, CGFloat tintAlpha
 }
 
 static const void *kApolloImmersiveBannerIsLightKey = &kApolloImmersiveBannerIsLightKey;
+static const void *kApolloImmersiveBannerIsLightPendingKey = &kApolloImmersiveBannerIsLightPendingKey;
 
-BOOL ApolloImmersiveBannerIsLight(UIImage *banner) {
-    if (!banner) return NO;
-    NSNumber *cached = objc_getAssociatedObject(banner, kApolloImmersiveBannerIsLightKey);
-    if (cached) return cached.boolValue;
-
+// Reads every pixel of the top half of the source image (via the 1x1 downscale
+// trick) — cheap for a typical banner, but a visible hitch on the main thread
+// for a large custom one. Callers must not run this on the main thread except
+// through the cached fast path in ApolloImmersiveBannerIsLight.
+static BOOL ApolloImmersiveComputeBannerIsLight(UIImage *banner) {
     CGImageRef cgImage = banner.CGImage;
     if (!cgImage) return NO;
     // Only the top strip matters — that's what sits under the status bar,
@@ -68,13 +69,70 @@ BOOL ApolloImmersiveBannerIsLight(UIImage *banner) {
         light = luminance > 0.62;
     }
     if (topStrip) CGImageRelease(topStrip);
-    objc_setAssociatedObject(banner, kApolloImmersiveBannerIsLightKey, @(light), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return light;
+}
+
+BOOL ApolloImmersiveBannerIsLight(UIImage *banner) {
+    if (!banner) return NO;
+    NSNumber *cached = objc_getAssociatedObject(banner, kApolloImmersiveBannerIsLightKey);
+    return cached.boolValue;
+}
+
+void ApolloImmersiveBannerIsLightAsync(UIImage *banner, void (^completion)(BOOL isLight)) {
+    if (!banner) {
+        if (completion) completion(NO);
+        return;
+    }
+    NSNumber *cached = objc_getAssociatedObject(banner, kApolloImmersiveBannerIsLightKey);
+    if (cached) {
+        if (completion) completion(cached.boolValue);
+        return;
+    }
+    // Already computing (a second caller arrived while the first is in
+    // flight) — let the first caller's completion land; this one just keeps
+    // whatever default it already applied until the next natural re-style.
+    if ([objc_getAssociatedObject(banner, kApolloImmersiveBannerIsLightPendingKey) boolValue]) return;
+    objc_setAssociatedObject(banner, kApolloImmersiveBannerIsLightPendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        BOOL light = ApolloImmersiveComputeBannerIsLight(banner);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            objc_setAssociatedObject(banner, kApolloImmersiveBannerIsLightKey, @(light), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(banner, kApolloImmersiveBannerIsLightPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            if (completion) completion(light);
+        });
+    });
+}
+
+// The blur (sigma 28) destroys detail well beyond what a downsampled source
+// preserves, so blurring at full CDN/network resolution just burns memory and
+// CPU for no visible gain. Cap the longest side before handing off to Core
+// Image; the result is later scaled back up by the (aspect-fill) backdrop
+// image view same as any other bitmap.
+static CGFloat const ApolloImmersiveBackdropMaxDimension = 640.0;
+// Defense-in-depth alongside countLimit below — bounds the cache by actual
+// decoded bytes, not just entry count, so a handful of huge banners can't
+// blow past a reasonable memory budget.
+static NSUInteger const ApolloImmersiveBackdropCacheByteBudget = 32 * 1024 * 1024;
+
+static UIImage *ApolloImmersiveDownsampledImage(UIImage *image, CGFloat maxDimension) {
+    CGSize size = image.size;
+    CGFloat maxSide = MAX(size.width, size.height);
+    if (maxSide <= maxDimension || maxSide <= 0.0) return image;
+    CGFloat scale = maxDimension / maxSide;
+    CGSize targetSize = CGSizeMake(MAX(1.0, round(size.width * scale)), MAX(1.0, round(size.height * scale)));
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.scale = 1.0; // blurred output doesn't need retina-density source data
+    format.opaque = NO;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:targetSize format:format];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *rendererContext) {
+        [image drawInRect:CGRectMake(0.0, 0.0, targetSize.width, targetSize.height)];
+    }];
 }
 
 static UIImage *ApolloImmersiveGaussianBlurredImage(UIImage *image) {
     if (!image) return nil;
-    CIImage *input = [[CIImage alloc] initWithImage:image];
+    UIImage *downsampled = ApolloImmersiveDownsampledImage(image, ApolloImmersiveBackdropMaxDimension);
+    CIImage *input = [[CIImage alloc] initWithImage:downsampled];
     if (!input) return image;
     CIImage *blurred = [[input imageByClampingToExtent]
         imageByApplyingGaussianBlurWithSigma:ApolloImmersiveBackdropBlurSigma];
@@ -91,6 +149,12 @@ static UIImage *ApolloImmersiveGaussianBlurredImage(UIImage *image) {
     return result;
 }
 
+static NSUInteger ApolloImmersiveImageByteCost(UIImage *image) {
+    if (!image) return 0;
+    CGFloat scale = MAX((CGFloat)1.0, image.scale);
+    return (NSUInteger)(image.size.width * scale * image.size.height * scale * 4.0);
+}
+
 static UIImage *ApolloImmersiveCachedBackdrop(UIImage *banner, BOOL create) {
     if (!banner) return nil;
     static NSCache<UIImage *, UIImage *> *cache = nil;
@@ -98,11 +162,12 @@ static UIImage *ApolloImmersiveCachedBackdrop(UIImage *banner, BOOL create) {
     dispatch_once(&once, ^{
         cache = [[NSCache alloc] init];
         cache.countLimit = 12;
+        cache.totalCostLimit = ApolloImmersiveBackdropCacheByteBudget;
     });
     UIImage *backdrop = [cache objectForKey:banner];
     if (!backdrop && create) {
         backdrop = ApolloImmersiveGaussianBlurredImage(banner);
-        if (backdrop) [cache setObject:backdrop forKey:banner];
+        if (backdrop) [cache setObject:backdrop forKey:banner cost:ApolloImmersiveImageByteCost(backdrop)];
     }
     return backdrop;
 }
@@ -243,13 +308,23 @@ static UIImage *ApolloImmersiveCachedBackdrop(UIImage *banner, BOOL create) {
 
     // The veil starts fully clear beneath the sharp banner, reaches a strong
     // wash where the name/bio text sits, and hits solid page color at the
-    // header's bottom edge. Everything is expressed as fractions of the whole
-    // background (which spans the table's bounds).
-    CGFloat meltSpan = MAX(1.0, extendedHeight - regionHeight);
-    CGFloat seam = (regionHeight - ApolloImmersiveSharpFeatherHeight) / totalHeight;
-    CGFloat wash = (regionHeight + 0.35 * meltSpan) / totalHeight;
-    CGFloat deep = (regionHeight + 0.70 * meltSpan) / totalHeight;
-    CGFloat end = extendedHeight / totalHeight;
+    // header's bottom edge. Proportions are derived from the *design* region/
+    // extended heights (not the viewport-clamped locals above) so a header
+    // taller than the current viewport — iPad split view, expanded Dynamic
+    // Type, a long bio — still shows a graceful gradient instead of wash/
+    // deep/end collapsing onto the same clamped point; each location is then
+    // clamped into ascending [0,1] order for the gradient layer.
+    CGFloat rawRegionHeight = MAX(0.0, self.regionHeight);
+    CGFloat rawExtendedHeight = MAX(rawRegionHeight, self.extendedHeight);
+    CGFloat meltSpan = MAX(1.0, rawExtendedHeight - rawRegionHeight);
+    CGFloat seam = (rawRegionHeight - ApolloImmersiveSharpFeatherHeight) / totalHeight;
+    CGFloat wash = (rawRegionHeight + 0.35 * meltSpan) / totalHeight;
+    CGFloat deep = (rawRegionHeight + 0.70 * meltSpan) / totalHeight;
+    CGFloat end = rawExtendedHeight / totalHeight;
+    CGFloat locSeam = MIN(1.0, MAX(0.0, seam));
+    CGFloat locWash = MIN(1.0, MAX(locSeam, wash));
+    CGFloat locDeep = MIN(1.0, MAX(locWash, deep));
+    CGFloat locEnd = MIN(1.0, MAX(locDeep, end));
     self.veilLayer.frame = self.contentContainer.bounds;
     self.veilLayer.colors = @[(id)[pageColor colorWithAlphaComponent:0.0].CGColor,
                               (id)[pageColor colorWithAlphaComponent:0.0].CGColor,
@@ -257,8 +332,7 @@ static UIImage *ApolloImmersiveCachedBackdrop(UIImage *banner, BOOL create) {
                               (id)[pageColor colorWithAlphaComponent:0.88].CGColor,
                               (id)pageColor.CGColor,
                               (id)pageColor.CGColor];
-    self.veilLayer.locations = @[@0.0, @(MAX(0.0, seam)), @(MIN(1.0, wash)),
-                                 @(MIN(1.0, deep)), @(MIN(1.0, end)), @1.0];
+    self.veilLayer.locations = @[@0.0, @(locSeam), @(locWash), @(locDeep), @(locEnd), @1.0];
 
     CGFloat scrimHeight = MIN(totalHeight, self.topInset + 32.0);
     self.chromeScrimLayer.frame = CGRectMake(0.0, 0.0, width, MAX(1.0, scrimHeight));

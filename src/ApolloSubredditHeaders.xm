@@ -88,6 +88,13 @@ typedef NS_ENUM(NSInteger, ApolloSubredditHeaderAssetKind) {
 @property(nonatomic) BOOL subscriptionStateKnown;
 @property(nonatomic) BOOL subscribed;
 @property(nonatomic) BOOL subscriptionRequestInFlight;
+// Grace window so a fresh tap's optimistic state wins over the native
+// `currentSubreddit.isSubscriber` re-sync (see apollo_applySubscriptionState:
+// known: callers in ApolloSubredditInstallOrUpdateHeader) until a fetch has
+// had a real chance to catch up — mirrors ApolloUserAvatars.xm's
+// followIntentDate/followIntentValue for the profile Follow button.
+@property(nonatomic, strong) NSDate *subscribeIntentDate;
+@property(nonatomic) BOOL subscribeIntentValue;
 @property(nonatomic, copy) NSString *memberCountText;
 @property(nonatomic, copy) void (^heightInvalidationBlock)(void);
 - (void)applyInfo:(ApolloSubredditInfo *)info fallbackSubredditName:(NSString *)subredditName;
@@ -107,7 +114,8 @@ typedef NS_ENUM(NSInteger, ApolloSubredditHeaderAssetKind) {
 @end
 
 static void ApolloSubredditLoadImages(ApolloSubredditHeaderView *header, NSString *subredditName, BOOL forceRefresh);
-static void ApolloSubredditApplyBannerForHeader(ApolloSubredditHeaderView *header, NSString *subredditName, ApolloSubredditInfo *info);
+static void ApolloSubredditApplyBannerForHeader(ApolloSubredditHeaderView *header, NSString *subredditName,
+                                                 ApolloSubredditInfo *info, BOOL infoFetchFailed);
 static void ApolloSubredditApplyIconForHeader(ApolloSubredditHeaderView *header, NSString *subredditName, ApolloSubredditInfo *info);
 static void ApolloSubredditDismissHeaderPickersForViewController(UIViewController *viewController);
 static void ApolloSubredditRefreshBannerForSubreddit(NSString *subredditName);
@@ -312,9 +320,14 @@ static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSStrin
     subnameFrame.origin.y -= lift;
     self.nameLabel.frame = subnameFrame;
 
-    CGFloat buttonWidth = 84.0;
+    // Grows for Dynamic Type and the longer "Joining…"/"Leaving…" titles
+    // instead of clipping inside a fixed pill — same pattern as the profile
+    // header's followButton sizing.
+    CGFloat buttonWidth = MAX(84.0, ceil(self.subscribeButton.intrinsicContentSize.width) + 36.0);
     CGFloat buttonHeight = 30.0;
-    self.subscribeButton.frame = CGRectMake(width - buttonWidth - 20.0,
+    BOOL subscribeRTL = self.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft;
+    CGFloat buttonX = subscribeRTL ? 20.0 : (width - buttonWidth - 20.0);
+    self.subscribeButton.frame = CGRectMake(buttonX,
                                             CGRectGetMidY(identity.avatarFrame) - buttonHeight / 2.0,
                                             buttonWidth, buttonHeight);
     self.subscribeButton.layer.cornerRadius = buttonHeight / 2.0;
@@ -381,7 +394,11 @@ static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSStrin
     self.subscribeButton.enabled = known && !self.subscriptionRequestInFlight;
     UIColor *accent = ApolloThemeAccentColor() ?: self.tintColor ?: UIColor.systemBlueColor;
     [self apollo_applySubscriptionGlassWithAccent:accent];
-    UIColor *onAccent = ApolloColorIsLight(accent) ? UIColor.blackColor : UIColor.whiteColor;
+    // Resolve against the real trait context before reading components —
+    // ApolloThemeAccentColor() can be a dynamic-provider color, and ambient
+    // resolution can pick the wrong light/dark variant (project convention).
+    UIColor *resolvedAccent = [accent resolvedColorWithTraitCollection:self.traitCollection];
+    UIColor *onAccent = ApolloColorIsLight(resolvedAccent) ? UIColor.blackColor : UIColor.whiteColor;
     [self.subscribeButton setTitleColor:onAccent forState:UIControlStateNormal];
     [self.subscribeButton setTitleColor:[onAccent colorWithAlphaComponent:0.58]
                                  forState:UIControlStateHighlighted];
@@ -437,21 +454,40 @@ static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSStrin
 
     NSString *subredditName = [self.subredditName copy];
     __weak typeof(self) weakSelf = self;
-    void (^completion)(void) = ^{
+    // RDKClient mutation completions are `^(NSError *error)` (confirmed by the
+    // equivalent follow/unfollow completion in ApolloUserAvatars.xm); reading
+    // it lets a failed subscribe/unsubscribe roll back instead of leaving the
+    // button and member count permanently wrong.
+    void (^completion)(NSError *error) = ^(NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             ApolloSubredditHeaderView *strongSelf = weakSelf;
             if (!strongSelf || ![strongSelf.subredditName isEqualToString:subredditName]) return;
             strongSelf.subscriptionRequestInFlight = NO;
-            [strongSelf apollo_applySubscriptionState:desiredState known:YES];
-            NSInteger count = [[ApolloSubredditInfoCache sharedCache]
-                cachedInfoForSubreddit:subredditName].subscriberCount;
-            if (count >= 0) {
-                count = MAX(0, count + (desiredState ? 1 : -1));
-                strongSelf.memberCountText = ApolloSubredditFormattedMemberCount(count);
-                [strongSelf apollo_updateSubname];
+            BOOL succeeded = ![error isKindOfClass:[NSError class]];
+            BOOL finalState = succeeded ? desiredState : oldState;
+            if (!succeeded) {
+                ApolloLog(@"[SubredditHeaders] subscription %@ u/%@ failed, rolling back error=%@",
+                          desiredState ? @"subscribe" : @"unsubscribe", subredditName, error);
             }
-            [[ApolloSubredditInfoCache sharedCache] refetchInfoForSubreddit:subredditName
-                                                                  completion:^(__unused ApolloSubredditInfo *info) {}];
+            // Grace window: our own confirmed outcome (success or rollback)
+            // wins over the native currentSubreddit.isSubscriber re-sync that
+            // ApolloSubredditInstallOrUpdateHeader runs on every layout pass,
+            // which reads a stale ivar our name-based RDKClient call never
+            // updates directly.
+            strongSelf.subscribeIntentValue = finalState;
+            strongSelf.subscribeIntentDate = [NSDate date];
+            [strongSelf apollo_applySubscriptionState:finalState known:YES];
+            if (succeeded) {
+                NSInteger count = [[ApolloSubredditInfoCache sharedCache]
+                    cachedInfoForSubreddit:subredditName].subscriberCount;
+                if (count >= 0) {
+                    count = MAX(0, count + (desiredState ? 1 : -1));
+                    strongSelf.memberCountText = ApolloSubredditFormattedMemberCount(count);
+                    [strongSelf apollo_updateSubname];
+                }
+                [[ApolloSubredditInfoCache sharedCache] refetchInfoForSubreddit:subredditName
+                                                                      completion:^(__unused ApolloSubredditInfo *info) {}];
+            }
         });
     };
     ((id (*)(id, SEL, id, id))objc_msgSend)(client, selector, subredditName, [completion copy]);
@@ -586,7 +622,7 @@ static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSStrin
                     if (assetKind == ApolloSubredditHeaderAssetKindIcon) {
                         ApolloSubredditApplyIconForHeader(header, subredditName, info);
                     } else {
-                        ApolloSubredditApplyBannerForHeader(header, subredditName, info);
+                        ApolloSubredditApplyBannerForHeader(header, subredditName, info, NO);
                     }
                     [header setNeedsLayout];
                     [header layoutIfNeeded];
@@ -904,7 +940,8 @@ static void ApolloSubredditDismissHeaderPickersForViewController(UIViewControlle
     objc_setAssociatedObject(viewController, kApolloSubredditIconPickerCoordinatorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
-static void ApolloSubredditApplyBannerForHeader(ApolloSubredditHeaderView *header, NSString *subredditName, ApolloSubredditInfo *info) {
+static void ApolloSubredditApplyBannerForHeader(ApolloSubredditHeaderView *header, NSString *subredditName,
+                                                 ApolloSubredditInfo *info, BOOL infoFetchFailed) {
     if (!header || subredditName.length == 0) return;
 
     ApolloSubredditCustomBannerCache *customCache = [ApolloSubredditCustomBannerCache sharedCache];
@@ -934,7 +971,12 @@ static void ApolloSubredditApplyBannerForHeader(ApolloSubredditHeaderView *heade
         NSURL *bannerURL = info.bannerURL;
         [imageCache requestImageForURL:bannerURL completion:^(UIImage *image) {
             ApolloSubredditHeaderView *strongHeader = weakHeader;
-            if (!strongHeader || strongHeader.usesCustomBanner) return;
+            // The header can be repointed to a different subreddit while this
+            // fetch is in flight (fast back-and-forth navigation reuses the
+            // same header instance) — without this check a slow fetch for the
+            // previous subreddit would silently paint over the new one.
+            if (!strongHeader || !ApolloSubredditNamesEqual(strongHeader.subredditName, subredditName)) return;
+            if (strongHeader.usesCustomBanner) return;
             if ([[ApolloSubredditCustomBannerCache sharedCache] hasCustomBannerForSubreddit:subredditName]) return;
             if (image) {
                 strongHeader.bannerImageView.image = image;
@@ -947,7 +989,11 @@ static void ApolloSubredditApplyBannerForHeader(ApolloSubredditHeaderView *heade
         return;
     }
 
-    if (info) {
+    if (info || infoFetchFailed) {
+        // A successful fetch with no banner configured, or a definitively
+        // failed info fetch (private/quarantined/banned/deleted subreddit,
+        // network error) — either way, stop showing the loading placeholder
+        // forever and fall back to the default banner.
         ApolloSubredditApplyDefaultBanner(header);
     } else {
         ApolloSubredditApplyLoadingBanner(header);
@@ -980,7 +1026,9 @@ static void ApolloSubredditApplyIconForHeader(ApolloSubredditHeaderView *header,
         NSURL *iconURL = info.iconURL;
         [imageCache requestImageForURL:iconURL completion:^(UIImage *image) {
             ApolloSubredditHeaderView *strongHeader = weakHeader;
-            if (!strongHeader || strongHeader.usesCustomIcon) return;
+            // Same reused-header guard as the banner completion above.
+            if (!strongHeader || !ApolloSubredditNamesEqual(strongHeader.subredditName, subredditName)) return;
+            if (strongHeader.usesCustomIcon) return;
             if ([[ApolloSubredditCustomIconCache sharedCache] hasCustomIconForSubreddit:subredditName]) return;
             if (image) {
                 strongHeader.iconImageView.image = image;
@@ -1010,18 +1058,22 @@ static void ApolloSubredditLoadImages(ApolloSubredditHeaderView *header, NSStrin
 
     void (^applyInfo)(ApolloSubredditInfo *) = ^(ApolloSubredditInfo *info) {
         if (!info) {
-            ApolloSubredditApplyBannerForHeader(header, subredditName, nil);
+            // The only caller that reaches this block with a nil info is the
+            // request/refetch completion below (the cachedInfo path always
+            // passes a non-nil object) — so nil here means the fetch
+            // definitively failed, not just "hasn't started yet".
+            ApolloSubredditApplyBannerForHeader(header, subredditName, nil, YES);
             ApolloSubredditApplyIconForHeader(header, subredditName, nil);
             return;
         }
         [header applyInfo:info fallbackSubredditName:subredditName];
         ApolloSubredditApplyIconForHeader(header, subredditName, info);
-        ApolloSubredditApplyBannerForHeader(header, subredditName, info);
+        ApolloSubredditApplyBannerForHeader(header, subredditName, info, NO);
     };
 
     if (cachedInfo) applyInfo(cachedInfo);
     else {
-        ApolloSubredditApplyBannerForHeader(header, subredditName, nil);
+        ApolloSubredditApplyBannerForHeader(header, subredditName, nil, NO);
         ApolloSubredditApplyIconForHeader(header, subredditName, nil);
     }
 
@@ -1221,8 +1273,19 @@ static void ApolloSubredditStyleSearchBar(UIViewController *viewController) {
     // (r/science's white banner made the whole search bar invisible). Sample
     // the banner and pick the readable side.
     ApolloSubredditHeaderView *headerView = objc_getAssociatedObject(viewController, kApolloSubredditHeaderViewKey);
-    BOOL lightBanner = ApolloImmersiveBannerIsLight(headerView.bannerImageView.image);
+    UIImage *bannerImage = headerView.bannerImageView.image;
+    BOOL lightBanner = ApolloImmersiveBannerIsLight(bannerImage);
     UIColor *fieldForeground = lightBanner ? UIColor.blackColor : UIColor.whiteColor;
+    // The sample reads every pixel of the banner, so a not-yet-sampled image
+    // uses the (dark-banner) default above immediately, then this restyles
+    // itself once the background computation lands — only if it actually
+    // changes the answer, so a correctly-guessed default doesn't recurse.
+    __weak UIViewController *weakStyleViewController = viewController;
+    ApolloImmersiveBannerIsLightAsync(bannerImage, ^(BOOL computedLight) {
+        if (computedLight == lightBanner) return;
+        UIViewController *strongStyleViewController = weakStyleViewController;
+        if (strongStyleViewController) ApolloSubredditStyleSearchBar(strongStyleViewController);
+    });
     if ([field isKindOfClass:[UITextField class]]) {
         UITextField *textField = (UITextField *)field;
         textField.textColor = fieldForeground;
@@ -1529,15 +1592,31 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
         header.usesCustomBanner = NO;
         header.subscriptionStateKnown = NO;
         header.subscriptionRequestInFlight = NO;
+        // A reused header must not carry a previous subreddit's tap intent
+        // into this one — same class of bug as the profile header's
+        // followIntentDate not being cleared on a username change.
+        header.subscribeIntentDate = nil;
         ApolloSubredditApplyLoadingBanner(header);
         [header applyInfo:nil fallbackSubredditName:subredditName];
         ApolloSubredditLoadImages(header, subredditName, NO);
     }
     if (!header.subscriptionRequestInFlight) {
-        id currentSubreddit = ApolloSubredditTypedIvar(viewController, @"currentSubreddit", objc_getClass("RDKSubreddit"));
-        if ([currentSubreddit respondsToSelector:@selector(isSubscriber)]) {
-            BOOL subscribed = ((BOOL (*)(id, SEL))objc_msgSend)(currentSubreddit, @selector(isSubscriber));
-            [header apollo_applySubscriptionState:subscribed known:YES];
+        BOOL recentIntent = header.subscribeIntentDate &&
+            [[NSDate date] timeIntervalSinceDate:header.subscribeIntentDate] < 30.0;
+        if (recentIntent) {
+            // Our own tap-confirmed state wins over the native ivar for a
+            // grace window — subscribeToSubredditWithName: is name-based and
+            // has no confirmed path that updates this VC's already-cached
+            // currentSubreddit object, so reading it right after a successful
+            // tap can otherwise flip the button straight back.
+            [header apollo_applySubscriptionState:header.subscribeIntentValue known:YES];
+        } else {
+            header.subscribeIntentDate = nil;
+            id currentSubreddit = ApolloSubredditTypedIvar(viewController, @"currentSubreddit", objc_getClass("RDKSubreddit"));
+            if ([currentSubreddit respondsToSelector:@selector(isSubscriber)]) {
+                BOOL subscribed = ((BOOL (*)(id, SEL))objc_msgSend)(currentSubreddit, @selector(isSubscriber));
+                [header apollo_applySubscriptionState:subscribed known:YES];
+            }
         }
     }
 
@@ -1567,7 +1646,7 @@ static void ApolloSubredditRefreshBannerInTree(UIViewController *viewController,
         ApolloSubredditHeaderView *header = objc_getAssociatedObject(viewController, kApolloSubredditHeaderViewKey);
         if (header) {
             ApolloSubredditInfo *info = [[ApolloSubredditInfoCache sharedCache] cachedInfoForSubreddit:subredditName];
-            ApolloSubredditApplyBannerForHeader(header, subredditName, info);
+            ApolloSubredditApplyBannerForHeader(header, subredditName, info, NO);
         }
     }
 
