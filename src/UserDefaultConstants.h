@@ -288,6 +288,12 @@ static NSString *const UDKeyPostFilterNameSubstrings = @"PostFilterNameSubstring
 // Web JSON spike (see ApolloWebJSON.m). Master switch for re-pointing
 // whitelisted listing reads at cookie-authenticated www.reddit.com JSON.
 static NSString *const UDKeyWebJSONEnabled = @"WebJSONEnabled";
+// Native Polls (ApolloPollVoting.xm / ApolloPollCompose.xm). Off by default —
+// an experimental feature that lets you vote in and create polls via a
+// per-account reddit.com web session (harvested once, then silent). Independent
+// of UDKeyWebJSONEnabled: turning polls on does NOT reroute the request
+// pipeline; it only unlocks the poll tap handler and the compose "Poll" type.
+static NSString *const UDKeyPollsEnabled = @"PollsEnabled";
 // Legacy NSUserDefaults location of the harvested "name=value; ..." Cookie
 // header. The cookie is now stored in the keychain (ApolloWebJSON.m); this key
 // is retained only so ApolloWebJSONLoadPersistedCredentials can migrate an older

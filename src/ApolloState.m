@@ -82,6 +82,7 @@ NSString *sLibreTranslateAPIKey = nil;
 NSArray<NSString *> *sTranslationSkipLanguages = nil;
 
 BOOL sWebJSONEnabled = NO;
+BOOL sPollsFeatureEnabled = NO;
 NSString *sWebSessionCookieHeader = nil;
 NSString *sWebSessionModhash = nil;
 NSString *sWebSessionUsername = nil;

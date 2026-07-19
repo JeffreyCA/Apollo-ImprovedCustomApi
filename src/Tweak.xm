@@ -2917,6 +2917,7 @@ static void initializeRandomSources() {
     // installed below — in the simulator the keychain is virtualized by those
     // hooks, so reading before they're in place returns nothing.
     sWebJSONEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyWebJSONEnabled];
+    sPollsFeatureEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPollsEnabled];
     // Surface a revoked/expired cookie (detected response-side in
     // ApolloWebJSONNoteResponse) as a re-login prompt wherever the user is.
     [[NSNotificationCenter defaultCenter] addObserverForName:ApolloWebJSONSessionExpiredNotification

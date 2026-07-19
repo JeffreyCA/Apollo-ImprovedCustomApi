@@ -5,6 +5,7 @@
 #import "ApolloPushNotifications.h"
 #import "ApolloUsageHeartbeat.h"
 #import "InlineMediaSettingsViewController.h"
+#import "settings/ApolloPollSettingsViewController.h"
 #import "InfoRowSettingsViewController.h"
 #import "ApolloWebSessionLoginViewController.h"
 #import "settings/ApolloAISettingsViewController.h"
@@ -479,6 +480,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self reloadRowWithID:@"ai.settings"];
     [self reloadRowWithID:@"inlineMedia.settings"];
     [self reloadRowWithID:@"linkPreviews.settings"];
+    [self reloadRowWithID:@"polls.settings"];
     // The Setup section footer (onboarding nudge) collapses once a Reddit key
     // exists, which may have just been entered on the pushed API Keys screen.
     // Section 0 is Setup on the hub; reloading it re-evaluates the footer.
@@ -674,6 +676,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             return [[ApolloInterfaceSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
     ApolloSettingsRow *linkPreviews = [self buildLinkPreviewsRow];
+    ApolloSettingsRow *polls = [self buildPollsRow];
     ApolloSettingsRow *apolloAI = [self buildApolloAIRow];
 
     posts.iconSystemName        = @"newspaper.fill";              posts.iconTileColor        = [UIColor systemOrangeColor];
@@ -683,12 +686,13 @@ typedef NS_ENUM(NSInteger, Tag) {
     profiles.iconSystemName     = @"person.crop.circle.fill";     profiles.iconTileColor     = [UIColor systemTealColor];
     interface_.iconSystemName   = @"slider.horizontal.3";         interface_.iconTileColor   = [UIColor systemPurpleColor];
     linkPreviews.iconSystemName = @"link";                        linkPreviews.iconTileColor = [UIColor systemBlueColor];
+    polls.iconSystemName        = @"chart.bar.fill";              polls.iconTileColor        = [UIColor systemYellowColor];
     apolloAI.iconSystemName     = @"sparkles";                    apolloAI.iconTileColor     = [UIColor systemIndigoColor];
 
     return [ApolloSettingsSection sectionWithTitle:@"Features"
                                             footer:@"Fine-tune posts, comments, media, subreddits, profiles and the interface."
                                               rows:@[ posts, comments, media, subreddits, profiles, interface_,
-                                                      linkPreviews, apolloAI ]];
+                                                      linkPreviews, polls, apolloAI ]];
 }
 
 - (ApolloSettingsSection *)buildAdvancedSection {
@@ -1328,6 +1332,42 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onSelect:^{ [weakSelf openLinkPreviewSettings]; }];
 
     return linkPreviews;
+}
+
+- (ApolloSettingsRow *)buildPollsRow {
+    __weak typeof(self) weakSelf = self;
+
+    ApolloSettingsRow *polls =
+        [ApolloSettingsRow customRowWithID:@"polls.settings"
+                                      cell:^UITableViewCell *(UITableView *tableView, __unused ApolloSettingsRow *row) {
+            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"Cell_Polls"];
+            if (!cell) {
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"Cell_Polls"];
+                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            }
+            cell.textLabel.text = @"Polls";
+            cell.detailTextLabel.text = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPollsEnabled] ? @"On" : @"Off";
+            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+            cell.detailTextLabel.numberOfLines = 0;
+            cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+            return cell;
+        }
+                                  onSelect:^{ [weakSelf openPollSettings]; }];
+
+    return polls;
+}
+
+- (void)openPollSettings {
+    ApolloPollSettingsViewController *vc =
+        [[ApolloPollSettingsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    if (self.navigationController) {
+        [self.navigationController pushViewController:vc animated:YES];
+    } else {
+        UINavigationController *navigation =
+            [[UINavigationController alloc] initWithRootViewController:vc];
+        [self presentViewController:navigation animated:YES completion:nil];
+    }
 }
 
 // Media group screen (ApolloMediaSettingsViewController), four sections:
