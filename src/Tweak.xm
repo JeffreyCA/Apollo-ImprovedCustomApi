@@ -2682,7 +2682,6 @@ static void initializeRandomSources() {
                                     UDKeyProfileShowBanner: @YES,
                                     UDKeyProfileShowStatCards: @YES,
                                     UDKeyProfileShowSocialLinks: @YES,
-                                    UDKeyProfileShowTrophyCase: @YES,
                                     UDKeyProfileShowActions: @YES,
                                     UDKeyProfileAvatarStyle: @0,
                                     UDKeyShowSubredditHeaders: @NO,
@@ -2837,7 +2836,6 @@ static void initializeRandomSources() {
     sProfileShowBanner = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowBanner];
     sProfileShowStatCards = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowStatCards];
     sProfileShowSocialLinks = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowSocialLinks];
-    sProfileShowTrophyCase = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowTrophyCase];
     sProfileShowActions = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowActions];
     sProfileAvatarStyle = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyProfileAvatarStyle];
     sShowSubredditHeaders = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders];

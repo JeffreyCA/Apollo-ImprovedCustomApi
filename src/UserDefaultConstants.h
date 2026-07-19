@@ -95,7 +95,6 @@ static NSString *const UDKeyProfileHeaderImmersive = @"ProfileHeaderImmersive";
 static NSString *const UDKeyProfileShowBanner = @"ProfileShowBanner";
 static NSString *const UDKeyProfileShowStatCards = @"ProfileShowStatCards";
 static NSString *const UDKeyProfileShowSocialLinks = @"ProfileShowSocialLinks";
-static NSString *const UDKeyProfileShowTrophyCase = @"ProfileShowTrophyCase";
 static NSString *const UDKeyProfileShowActions = @"ProfileShowActions";
 static NSString *const UDKeyProfileAvatarStyle = @"ProfileAvatarStyle";
 static NSString *const UDKeyShowSubredditHeaders = @"ShowSubredditHeaders";

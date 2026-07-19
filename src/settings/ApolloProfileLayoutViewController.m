@@ -134,16 +134,6 @@
             [weakSelf apollo_persistAndApply];
         }];
 
-    ApolloSettingsRow *trophyCase =
-        [ApolloSettingsRow switchRowWithID:@"showTrophyCase"
-                                     title:@"Trophy Case"
-                                      isOn:^BOOL { return sProfileShowTrophyCase; }
-                                  onToggle:^(UISwitch *sender) {
-            sProfileShowTrophyCase = sender.isOn;
-            [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyProfileShowTrophyCase];
-            [weakSelf apollo_persistAndApply];
-        }];
-
     ApolloSettingsRow *actions =
         [ApolloSettingsRow switchRowWithID:@"showActions"
                                      title:@"Follow & Message"
@@ -157,7 +147,7 @@
     ApolloSettingsSection *showSection =
         [ApolloSettingsSection sectionWithTitle:@"Show on Profiles"
                                          footer:@"Turn off the bands you don't need to make every profile shorter — the menu surfaces sooner."
-                                           rows:@[ banner, statCards, socialLinks, trophyCase, actions ]];
+                                           rows:@[ banner, statCards, socialLinks, actions ]];
 
     return @[ layoutSection, showSection ];
 }

@@ -1562,7 +1562,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     if (!sProfileShowBanner) [hidden addObject:@"Banner"];
     if (!sProfileShowStatCards) [hidden addObject:@"Stat Cards"];
     if (!sProfileShowSocialLinks) [hidden addObject:@"Social Links"];
-    if (!sProfileShowTrophyCase) [hidden addObject:@"Trophy Case"];
     if (!sProfileShowActions) [hidden addObject:@"Follow & Message"];
     if (hidden.count > 0) {
         [parts addObject:[NSString stringWithFormat:@"%@ off", [hidden componentsJoinedByString:@", "]]];

@@ -69,7 +69,6 @@ static const void *kApolloProfileTabAppliedImageKey = &kApolloProfileTabAppliedI
 static const void *kApolloProfileTabAvatarImageMarkerKey = &kApolloProfileTabAvatarImageMarkerKey;
 
 @class ApolloProfileStatCard;
-@class ApolloProfileBadgeStripView;
 
 @interface ApolloProfileHeaderView : UIView
 @property(nonatomic, strong) UIImageView *bannerImageView;
@@ -100,8 +99,6 @@ static const void *kApolloProfileTabAvatarImageMarkerKey = &kApolloProfileTabAva
 @property(nonatomic) BOOL aboutExpanded;
 @property(nonatomic, strong) UIButton *aboutToggleButton;
 @property(nonatomic, strong) ApolloProfileSocialLinksView *socialLinksView;
-// Badge Book placeholder strip (real feature: PR #689), shown on every profile.
-@property(nonatomic, strong) ApolloProfileBadgeStripView *badgeStrip;
 // Glass stat cards (post karma / comment karma / account age). `statCards` holds
 // the visible subset in display order; cards with no data stay hidden and out of
 // the row, so the layout centres however many actually have values.
@@ -293,94 +290,6 @@ static UIImage *ApolloProfileTintedSymbol(NSString *name, CGFloat pointSize, UIC
 
 @end
 
-// Badge Book placeholder strip (real feature: PR #689). A tappable row — "Trophy Case"
-// with a preview of accent-tinted badge dots + chevron — that reserves the IA slot and
-// shows the intent on every profile. Wired to a no-op until the real Badge Book lands.
-@interface ApolloProfileBadgeStripView : UIView
-@property(nonatomic, copy) void (^tapHandler)(void);
-@end
-
-@implementation ApolloProfileBadgeStripView {
-    UILabel *_titleLabel;
-    UILabel *_chevronLabel;
-    NSArray<UIView *> *_dots;
-}
-
-- (instancetype)initWithFrame:(CGRect)frame {
-    self = [super initWithFrame:frame];
-    if (!self) return nil;
-    self.backgroundColor = [UIColor.secondarySystemFillColor colorWithAlphaComponent:0.5];
-    self.layer.cornerRadius = 14.0;
-    self.layer.cornerCurve = kCACornerCurveContinuous;
-
-    _titleLabel = [[UILabel alloc] init];
-    _titleLabel.text = @"Trophy Case";
-    _titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
-    _titleLabel.textColor = [UIColor labelColor];
-    [self addSubview:_titleLabel];
-
-    NSMutableArray<UIView *> *dots = [NSMutableArray array];
-    for (NSUInteger i = 0; i < 5; i++) {
-        UIView *dot = [[UIView alloc] init];
-        dot.layer.cornerCurve = kCACornerCurveContinuous;
-        [self addSubview:dot];
-        [dots addObject:dot];
-    }
-    _dots = dots;
-
-    _chevronLabel = [[UILabel alloc] init];
-    _chevronLabel.text = @"›"; // ›
-    _chevronLabel.font = [UIFont systemFontOfSize:22.0 weight:UIFontWeightMedium];
-    _chevronLabel.textColor = [UIColor tertiaryLabelColor];
-    _chevronLabel.textAlignment = NSTextAlignmentCenter;
-    [self addSubview:_chevronLabel];
-
-    self.isAccessibilityElement = YES;
-    self.accessibilityLabel = @"Trophy Case and badges";
-    self.accessibilityTraits = UIAccessibilityTraitButton;
-    [self addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_tapped)]];
-    [self apollo_applyColors];
-    return self;
-}
-
-- (void)apollo_tapped {
-    if (self.tapHandler) self.tapHandler();
-}
-
-- (void)apollo_applyColors {
-    UIColor *accent = ApolloThemeAccentColor() ?: self.tintColor ?: [UIColor systemBlueColor];
-    for (NSUInteger i = 0; i < _dots.count; i++) {
-        // Fade the preview dots out toward the trailing edge, like a "+more" ramp.
-        _dots[i].backgroundColor = [accent colorWithAlphaComponent:MAX(0.12, 0.42 - i * 0.06)];
-    }
-    self.backgroundColor = [UIColor.secondarySystemFillColor colorWithAlphaComponent:0.5];
-    _titleLabel.textColor = [UIColor labelColor];
-}
-
-- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
-    [super traitCollectionDidChange:previousTraitCollection];
-    [self apollo_applyColors];
-}
-
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    CGFloat h = self.bounds.size.height;
-    CGFloat w = self.bounds.size.width;
-    [_titleLabel sizeToFit];
-    _titleLabel.frame = CGRectMake(16.0, floor((h - _titleLabel.bounds.size.height) / 2.0),
-                                   _titleLabel.bounds.size.width, _titleLabel.bounds.size.height);
-    _chevronLabel.frame = CGRectMake(w - 26.0, 0.0, 16.0, h);
-    CGFloat dotD = 22.0, gap = 7.0;
-    CGFloat x = w - 34.0 - (_dots.count * (dotD + gap));
-    for (UIView *dot in _dots) {
-        dot.frame = CGRectMake(x, floor((h - dotD) / 2.0), dotD, dotD);
-        dot.layer.cornerRadius = dotD / 2.0;
-        x += dotD + gap;
-    }
-}
-
-@end
-
 @implementation ApolloProfileHeaderView
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -493,11 +402,6 @@ static UIImage *ApolloProfileTintedSymbol(NSString *name, CGFloat pointSize, UIC
             if (strongSelf.heightInvalidationBlock) strongSelf.heightInvalidationBlock();
         };
         [self addSubview:_socialLinksView];
-
-        // Badge Book placeholder strip (real feature: PR #689). Shown on every profile.
-        _badgeStrip = [[ApolloProfileBadgeStripView alloc] init];
-        _badgeStrip.tapHandler = ^{ ApolloLog(@"[UserAvatars] Badge Book strip tapped (placeholder)"); };
-        [self addSubview:_badgeStrip];
 
         // Glass stat cards. Created up front (hidden) and populated in applyProfileInfo.
         _postKarmaCard = [[ApolloProfileStatCard alloc] init];
@@ -618,8 +522,6 @@ static CGFloat const ApolloProfileActionsRowHeight = 42.0;  // Follow / Message 
 static CGFloat const ApolloProfileActionsBottomGap = 16.0;  // gap below the action row, above the body
 static CGFloat const ApolloProfileActionsButtonGap = 10.0;  // gap between Follow and Message
 static CGFloat const ApolloProfileActionsStackGap = 8.0;    // gap between rows when stacked (large Dynamic Type)
-static CGFloat const ApolloProfileBadgeStripHeight = 54.0;  // Badge Book placeholder strip
-static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the badge strip
 static CGFloat const ApolloProfileEditButtonWidth = 64.0;   // shared with layoutSubviews' editProfileButton frame
 
 // Classic density: avatar left-aligned, inline with the name/username column
@@ -864,12 +766,10 @@ static UIFont *ApolloProfileClassicNameFont(void) {
         y += socialH;
     }
 
-    // Badge Book strip (placeholder) — on every profile
-    if (self.badgeStrip && !self.badgeStrip.hidden) {
-        y += ApolloProfileBadgeTopGap;
-        if (apply) self.badgeStrip.frame = CGRectMake(bodyX, y, bodyWidth, ApolloProfileBadgeStripHeight);
-        y += ApolloProfileBadgeStripHeight;
-    }
+    // Badge Book strip attaches here, between social links and the stat cards
+    // — see PR #689 (achievements + Trophy Case). No placeholder shipped in
+    // this PR; #689 adds its own view/property/settings toggle and should
+    // insert its height/frame block at this exact point in the sequence.
 
     // Glass stat cards
     NSUInteger cardCount = self.statCards.count;
@@ -1103,7 +1003,6 @@ static UIFont *ApolloProfileClassicNameFont(void) {
     self.displayNameLabel.hidden = self.displayNameLabel.text.length == 0;
     self.usernameLabel.hidden = self.usernameLabel.text.length == 0;
     self.aboutLabel.hidden = self.aboutLabel.text.length == 0;
-    self.badgeStrip.hidden = !sProfileShowTrophyCase;  // Trophy Case viewer switch
     [self apollo_applyStats:info];
     // Feed the social-links band the username so it can load/render (no-op if the
     // username is unchanged; the band re-measures the header when links arrive).
@@ -2832,8 +2731,8 @@ static void ApolloProfileRefreshViewControllersInTree(UIViewController *viewCont
             objc_setAssociatedObject(viewController, kApolloProfileUsernameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
         }
         ApolloProfileInstallOrUpdateHeader(viewController);
-        // A viewer-preference toggle (Stat Cards/Social Links/Trophy Case/
-        // Follow&Message/Avatar Style) doesn't change the username, so the
+        // A viewer-preference toggle (Stat Cards/Social Links/Follow&Message/
+        // Avatar Style) doesn't change the username, so the
         // install/update call above takes its "already installed" branch and
         // never re-reads those flags — they're only applied from
         // applyProfileInfo:/ApolloProfileSetSnoovatarMode, which otherwise run

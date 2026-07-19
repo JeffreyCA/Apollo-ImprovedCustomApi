@@ -63,7 +63,6 @@ extern BOOL sProfileHeaderImmersive;
 extern BOOL sProfileShowBanner;
 extern BOOL sProfileShowStatCards;
 extern BOOL sProfileShowSocialLinks;
-extern BOOL sProfileShowTrophyCase;
 extern BOOL sProfileShowActions;
 extern NSInteger sProfileAvatarStyle; // 0 Full snoovatar, 1 Circle, 2 Square
 extern BOOL sShowSubredditHeaders;

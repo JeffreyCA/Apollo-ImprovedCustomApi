@@ -36,7 +36,6 @@ BOOL sProfileHeaderImmersive = YES; // New (immersive melt) vs Classic (flat); d
 BOOL sProfileShowBanner = YES;
 BOOL sProfileShowStatCards = YES;
 BOOL sProfileShowSocialLinks = YES;
-BOOL sProfileShowTrophyCase = YES;
 BOOL sProfileShowActions = YES;   // Follow / Message row on other-user profiles
 NSInteger sProfileAvatarStyle = 0;
 BOOL sShowSubredditHeaders = NO;
