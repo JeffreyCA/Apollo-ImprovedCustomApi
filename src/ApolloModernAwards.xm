@@ -26,6 +26,7 @@ static const void *kApolloModernAwardNavigationBarKey = &kApolloModernAwardNavig
 static NSString *const kApolloModernAwardCacheDefaultsKey = @"ApolloModernAwardCacheV1";
 
 static NSString *ApolloModernAwardFullName(id thing);
+static NSURL *ApolloModernAwardPermalink(id thing);
 
 static NSObject *ApolloModernAwardStateLock(void) {
     static NSObject *lock = nil;
@@ -492,13 +493,60 @@ static NSString *ApolloModernAwardFullName(id thing) {
         NSString *identifier = [rawIdentifier isKindOfClass:[NSString class]] ?
             [(NSString *)rawIdentifier stringByTrimmingCharactersInSet:
                 NSCharacterSet.whitespaceAndNewlineCharacterSet] : nil;
+        id rawKind = [thing respondsToSelector:@selector(kindName)] ?
+            ((id (*)(id, SEL))objc_msgSend)(thing, @selector(kindName)) : nil;
+        NSString *kind = [rawKind isKindOfClass:[NSString class]] ?
+            [(NSString *)rawKind lowercaseString] : nil;
         Class linkClass = NSClassFromString(@"RDKLink");
         Class commentClass = NSClassFromString(@"RDKComment");
-        if (identifier.length > 0 && linkClass && [thing isKindOfClass:linkClass]) {
-            fullName = [@"t3_" stringByAppendingString:identifier];
-        } else if (identifier.length > 0 && commentClass &&
-                   [thing isKindOfClass:commentClass]) {
+        NSString *className = NSStringFromClass([thing class]).lowercaseString;
+        BOOL looksLikeComment = (commentClass && [thing isKindOfClass:commentClass]) ||
+            [className containsString:@"comment"] ||
+            [thing respondsToSelector:@selector(linkID)] ||
+            [thing respondsToSelector:@selector(parentID)];
+        BOOL looksLikePost = (linkClass && [thing isKindOfClass:linkClass]) ||
+            [className containsString:@"link"] || [className containsString:@"post"];
+
+        if (identifier.length > 0 && ([kind isEqualToString:@"t1"] ||
+                                      [kind isEqualToString:@"comment"] ||
+                                      looksLikeComment)) {
             fullName = [@"t1_" stringByAppendingString:identifier];
+        } else if (identifier.length > 0 && ([kind isEqualToString:@"t3"] ||
+                                             [kind isEqualToString:@"link"] ||
+                                             [kind isEqualToString:@"post"] ||
+                                             looksLikePost)) {
+            fullName = [@"t3_" stringByAppendingString:identifier];
+        } else if (identifier.length > 0) {
+            // API-key-free post models can arrive as a plain RDKThing: the id
+            // is populated while both name and kind are nil. Comments retain
+            // linkID/parentID, so an otherwise untyped award target is the
+            // post represented by its Reddit identifier.
+            fullName = [@"t3_" stringByAppendingString:identifier];
+            ApolloLog(@"[ModernAwards] recovered untyped post identifier from %@",
+                      NSStringFromClass([thing class]));
+        }
+    }
+
+    // Some restored models lose the identifier mapping as well but retain
+    // Reddit's permalink. Recover the post id from /comments/<id>/, or the
+    // trailing comment id for a comment-shaped target.
+    if (fullName.length == 0) {
+        NSURL *permalink = ApolloModernAwardPermalink(thing);
+        NSArray<NSString *> *components = permalink.pathComponents;
+        NSUInteger commentsIndex = [components indexOfObject:@"comments"];
+        if (commentsIndex != NSNotFound && commentsIndex + 1 < components.count) {
+            NSString *postID = components[commentsIndex + 1].lowercaseString;
+            NSString *className = NSStringFromClass([thing class]).lowercaseString;
+            BOOL looksLikeComment = [className containsString:@"comment"] ||
+                [thing respondsToSelector:@selector(linkID)] ||
+                [thing respondsToSelector:@selector(parentID)];
+            NSString *lastComponent = permalink.path.lastPathComponent.lowercaseString;
+            if (looksLikeComment && lastComponent.length > 0 &&
+                ![lastComponent isEqualToString:postID]) {
+                fullName = [@"t1_" stringByAppendingString:lastComponent];
+            } else if (postID.length > 0) {
+                fullName = [@"t3_" stringByAppendingString:postID];
+            }
         }
     }
     BOOL supportedPrefix = [fullName hasPrefix:@"t1_"] || [fullName hasPrefix:@"t3_"];
@@ -1512,6 +1560,27 @@ static ApolloModernAwardWebController *ApolloModernAwardControllerForHost(
             ApolloLog(@"[ModernAwards] presented live overlay for %@", fullName);
             return;
         }
+        ApolloLog(@"[ModernAwards] blocked legacy spinner: target %@ has no usable identifier",
+                  NSStringFromClass([thing class]));
+        UIViewController *presenter = source;
+        if (!presenter.view.window && self.view.window) {
+            presenter = self;
+        }
+        if (presenter.view.window) {
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:@"Couldn't identify this Reddit item"
+                                 message:@"Reload the post or comments, then try Give Award again."
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Close"
+                                                      style:UIAlertActionStyleCancel
+                                                    handler:nil]];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [presenter presentViewController:alert animated:YES completion:nil];
+            });
+        }
+        // Reddit retired this controller, so never push it even if there is no
+        // active presenter available for the explanatory alert.
+        return;
     }
     %orig;
 }
@@ -1532,7 +1601,28 @@ static ApolloModernAwardWebController *ApolloModernAwardControllerForHost(
     } @catch (__unused id exception) {}
     NSString *fullName = ApolloModernAwardFullName(thing);
     if (fullName.length == 0) {
-        ApolloLog(@"[ModernAwards] no usable fullname; leaving original UI intact");
+        ApolloLog(@"[ModernAwards] no usable identifier in fallback controller for %@",
+                  NSStringFromClass([thing class]));
+        @try {
+            UIActivityIndicatorView *legacySpinner =
+                MSHookIvar<UIActivityIndicatorView *>(self, "spinner");
+            [legacySpinner stopAnimating];
+            legacySpinner.hidden = YES;
+            NSTimer *timer = MSHookIvar<NSTimer *>(self, "balanceRefreshingTimer");
+            [timer invalidate];
+        } @catch (__unused id exception) {}
+
+        UIViewController *host = (UIViewController *)self;
+        ApolloModernAwardErrorView *errorView =
+            [[ApolloModernAwardErrorView alloc] initWithFrame:host.view.bounds];
+        errorView.titleLabel.text = @"Couldn't identify this Reddit item";
+        errorView.detailLabel.text =
+            @"Reload the post or comments, then try Give Award again.";
+        errorView.retryButton.hidden = YES;
+        [errorView.closeButton addTarget:host
+                                  action:@selector(cancelBarButtonItemTappedWithSender:)
+                        forControlEvents:UIControlEventTouchUpInside];
+        [host.view addSubview:errorView];
         return;
     }
 
