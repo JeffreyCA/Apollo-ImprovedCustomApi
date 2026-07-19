@@ -60,6 +60,19 @@ extern BOOL sUseProfileAvatarTabIcon;
 // registerDefaults. See ApolloUserAvatars.xm and ApolloProfileSocialLinks.{h,m}.
 extern BOOL sShowDetailedProfiles;
 extern BOOL sShowSubredditHeaders;
+// New (Immersive, melt/ambient backdrop) vs Classic (same content, flat) —
+// only meaningful while sShowSubredditHeaders is YES. Mirrors
+// sProfileHeaderImmersive's semantics for subreddits. See ApolloSubredditHeaders.xm.
+extern BOOL sSubredditHeaderImmersive;
+// Per-section show switches on the subreddit header (banner / Join button /
+// display name) — same "turn off the bands you don't need" pattern as the
+// profile header's per-section switches.
+extern BOOL sSubredditShowBanner;
+extern BOOL sSubredditShowJoinButton;
+// Whether the community's big bold title (e.g. "Reddit Science") shows above
+// the r/name line. Direct on/off choice rather than the old auto-hide-if-
+// similar-to-r/name heuristic, so behavior is predictable across subreddits.
+extern BOOL sSubredditShowDisplayName;
 // Backing booleans for the single Community Highlights mode picker:
 //   Off     = both NO
 //   Partial = sCommunityHighlights YES, sCommunityHighlightsWeb NO

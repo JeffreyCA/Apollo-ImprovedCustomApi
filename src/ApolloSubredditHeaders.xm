@@ -14,6 +14,7 @@
 #import "ApolloImmersiveHeaderBackground.h"
 #import "ApolloIdentityHeaderLayout.h"
 #import "ApolloThemeRuntime.h"
+#import "settings/ApolloSubredditLayoutViewController.h"
 
 // Mirrors the profile-banner pattern in ApolloUserAvatars.xm exactly:
 // - Only hooks `_TtC6Apollo19PostsViewController`.
@@ -81,6 +82,8 @@ typedef NS_ENUM(NSInteger, ApolloSubredditHeaderAssetKind) {
 @property(nonatomic, strong) UIButton *subscribeButton;
 @property(nonatomic, strong) UIVisualEffectView *subscribeGlassView;
 @property(nonatomic, strong) UILabel *aboutLabel;
+@property(nonatomic, strong) UIButton *aboutToggleButton;
+@property(nonatomic) BOOL aboutExpanded;
 @property(nonatomic, weak) UIViewController *hostViewController;
 @property(nonatomic, copy) NSString *subredditName;
 @property(nonatomic) BOOL usesCustomBanner;
@@ -145,21 +148,27 @@ static void ApolloSubredditRestoreSearchBar(UIViewController *viewController);
 // 0.30 was nearly invisible against bright/noisy banners.
 static CGFloat const ApolloSubredditControlGlassTintAlpha = 0.62;
 
-static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSString *subredditName) {
-    if (displayName.length == 0) return YES;
-    if (subredditName.length == 0) return NO;
-    NSString *canonical = [[displayName.lowercaseString
-        stringByReplacingOccurrencesOfString:@" " withString:@""]
-        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if ([canonical hasPrefix:@"/r/"]) canonical = [canonical substringFromIndex:3];
-    if ([canonical hasPrefix:@"r/"]) canonical = [canonical substringFromIndex:2];
-    NSString *slug = [subredditName.lowercaseString stringByReplacingOccurrencesOfString:@" " withString:@""];
-    return [canonical isEqualToString:slug];
-}
+static CGFloat const ApolloSubredditActionBottomGap = 16.0;  // gap below the Join pill, above the body
+static CGFloat const ApolloSubredditActionRowHeight = 42.0;  // Join pill height — matches the profile header's Follow pill
+// Shorter than the profile header's banner (150pt) — a subreddit's icon/name
+// don't need as much vertical room as a profile's avatar/bio showcase, and
+// Jordan's own read on the first pass was "what a waste of space."
+static CGFloat const ApolloSubredditBannerHeight = 104.0;
+static CGFloat const ApolloSubredditAboutMaxHeight = 220.0;
+static CGFloat const ApolloSubredditAboutToggleHeight = 22.0;
+static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
+// Effectively-invisible-but-not-quite-zero alpha for the banner image view
+// when the ambient backdrop is covering it — matches this codebase's own
+// convention for "still here, just not drawn" views (e.g. the hidden WKWebView
+// scrapers). A literal 0.0 alpha drops the view from VoiceOver's accessibility
+// tree entirely, silently taking its "change banner photo" action with it even
+// though the tap gesture underneath is still very much live.
+static CGFloat const ApolloSubredditFadedBannerAlpha = 0.011;
 
 @implementation ApolloSubredditHeaderView {
-    // Memoized about-text height; layoutSubviews fires often while scrolling, so
-    // avoid re-measuring the about string every pass. Keyed on text/font/width.
+    // Memoized about-text NATURAL (unbounded) height; layoutSubviews fires often
+    // while scrolling, so avoid re-measuring the about string every pass. Keyed
+    // on text/font/width. Collapsed/expanded heights derive from this cheaply.
     CGFloat _cachedAboutHeight;
     CGFloat _cachedAboutWidth;
     NSString *_cachedAboutText;
@@ -177,6 +186,7 @@ static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSStrin
         _bannerImageView.clipsToBounds = YES;
         _bannerImageView.userInteractionEnabled = YES;
         _bannerImageView.isAccessibilityElement = YES;
+        _bannerImageView.accessibilityTraits = UIAccessibilityTraitButton;
         _bannerImageView.accessibilityLabel = @"Subreddit banner";
         _bannerImageView.accessibilityHint = @"Double tap to change banner photo";
         UITapGestureRecognizer *bannerTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_bannerTapped)];
@@ -189,6 +199,7 @@ static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSStrin
         _iconImageView.clipsToBounds = YES;
         _iconImageView.userInteractionEnabled = YES;
         _iconImageView.isAccessibilityElement = YES;
+        _iconImageView.accessibilityTraits = UIAccessibilityTraitButton;
         _iconImageView.accessibilityLabel = @"Subreddit icon";
         _iconImageView.accessibilityHint = @"Double tap to change subreddit icon";
         UITapGestureRecognizer *iconTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_iconTapped)];
@@ -209,8 +220,16 @@ static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSStrin
         _nameLabel.adjustsFontForContentSizeCategory = YES;
         [self addSubview:_nameLabel];
 
+        // Matches the profile header's Follow pill (16.5 semibold) — was
+        // 15pt bold at a shorter 30pt height, and read as noticeably smaller
+        // sitting next to it. Scaled via UIFontMetrics, not plain
+        // systemFontOfSize: — adjustsFontForContentSizeCategory is a no-op on
+        // an unscaled font (see ApolloIdentityHeaderNameFont's comment), so
+        // without this the pill's own label would be the one piece of text in
+        // the header that ignores Dynamic Type.
         _subscribeButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        _subscribeButton.titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightBold];
+        UIFont *subscribeBaseFont = [UIFont systemFontOfSize:16.5 weight:UIFontWeightSemibold];
+        _subscribeButton.titleLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleHeadline] scaledFontForFont:subscribeBaseFont];
         _subscribeButton.titleLabel.adjustsFontForContentSizeCategory = YES;
         _subscribeButton.layer.cornerCurve = kCACornerCurveContinuous;
         [_subscribeButton addTarget:self action:@selector(apollo_subscribeTapped)
@@ -218,17 +237,27 @@ static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSStrin
         [self addSubview:_subscribeButton];
         [self apollo_applySubscriptionState:NO known:NO];
 
+        // Same treatment as the profile header's bio: body-size type, collapsed
+        // to a few lines with a "more"/"less" toggle instead of a small,
+        // hard-capped footnote.
         _aboutLabel = [[UILabel alloc] init];
         _aboutLabel.textColor = [UIColor labelColor];
         _aboutLabel.adjustsFontForContentSizeCategory = YES;
+        _aboutLabel.userInteractionEnabled = YES;
+        [_aboutLabel addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_toggleAboutExpanded)]];
         [self addSubview:_aboutLabel];
 
         ApolloIdentityHeaderApplyTextStyles(_displayNameLabel, _nameLabel, _aboutLabel);
-        // Community descriptions are boilerplate on repeat visits; unlike a
-        // profile bio they don't earn body-size type or unlimited lines. The
-        // full text stays reachable through the sidebar.
-        _aboutLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
-        _aboutLabel.numberOfLines = 4;
+        _aboutLabel.numberOfLines = ApolloSubredditAboutCollapsedLines;
+
+        _aboutToggleButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        [_aboutToggleButton setTitle:@"more" forState:UIControlStateNormal];
+        _aboutToggleButton.accessibilityLabel = @"Show more";
+        _aboutToggleButton.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+        _aboutToggleButton.titleLabel.adjustsFontForContentSizeCategory = YES;
+        _aboutToggleButton.hidden = YES;
+        [_aboutToggleButton addTarget:self action:@selector(apollo_toggleAboutExpanded) forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:_aboutToggleButton];
     }
     return self;
 }
@@ -241,7 +270,11 @@ static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSStrin
     [self apollo_applySubscriptionState:self.subscribed known:self.subscriptionStateKnown];
 }
 
-- (CGFloat)apollo_aboutHeightForWidth:(CGFloat)width {
+// Full, unbounded natural height of the about text — memoized since
+// layoutSubviews fires often while scrolling. Used both as the input to the
+// (capped) "does this truncate" check below and as the real expanded-state
+// height, so a "more" tap shows ALL of the bio, not just up to an arbitrary cap.
+- (CGFloat)apollo_aboutNaturalHeightForWidth:(CGFloat)width {
     NSString *text = self.aboutLabel.text;
     if (self.aboutLabel.hidden || text.length == 0 || width <= 0.0) return 0.0;
 
@@ -250,21 +283,40 @@ static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSStrin
         return _cachedAboutHeight;
     }
 
-    UIFont *measureFont = font ?: [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    UIFont *measureFont = font ?: [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     CGRect rect = [text boundingRectWithSize:CGSizeMake(width, CGFLOAT_MAX)
                                      options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                                   attributes:@{NSFontAttributeName: measureFont}
                                      context:nil];
-    // Cap at the label's visible line count (it truncates beyond that), so the
-    // header never reserves space for text that isn't shown.
-    CGFloat lineCap = ceil(measureFont.lineHeight * MAX(1, self.aboutLabel.numberOfLines)) + 2.0;
-    CGFloat height = MIN(lineCap, MAX(18.0, ceil(rect.size.height)));
+    CGFloat height = MAX(18.0, ceil(rect.size.height));
 
     _cachedAboutText = text;
     _cachedAboutFont = font;
     _cachedAboutWidth = width;
     _cachedAboutHeight = height;
     return height;
+}
+
+- (CGFloat)apollo_aboutFullHeightForWidth:(CGFloat)width {
+    return MIN(ApolloSubredditAboutMaxHeight, [self apollo_aboutNaturalHeightForWidth:width]);
+}
+
+- (CGFloat)apollo_aboutCollapsedHeightForWidth:(CGFloat)width {
+    CGFloat fullHeight = [self apollo_aboutFullHeightForWidth:width];
+    if (fullHeight <= 0.0) return 0.0;
+    CGFloat capHeight = ceil(self.aboutLabel.font.lineHeight * ApolloSubredditAboutCollapsedLines) + 1.0;
+    return MIN(fullHeight, capHeight);
+}
+
+// Whether the collapsed bio actually hides text (drives the "more" toggle).
+- (BOOL)apollo_aboutTruncatesForWidth:(CGFloat)width {
+    CGFloat naturalHeight = [self apollo_aboutNaturalHeightForWidth:width];
+    return naturalHeight > [self apollo_aboutCollapsedHeightForWidth:width] + 0.5;
+}
+
+- (CGFloat)apollo_aboutHeightForWidth:(CGFloat)width {
+    return self.aboutExpanded ? [self apollo_aboutNaturalHeightForWidth:width]
+                              : [self apollo_aboutCollapsedHeightForWidth:width];
 }
 
 // When the display name is redundant with r/name it is dropped and everything
@@ -276,13 +328,78 @@ static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSStrin
     return CGRectGetMinY(identity.subnameFrame) - CGRectGetMinY(identity.nameFrame);
 }
 
+- (ApolloIdentityHeaderLayout)apollo_identityForWidth:(CGFloat)width {
+    return ApolloIdentityHeaderLayoutMakeWithBanner(width, sSubredditShowBanner ? ApolloSubredditBannerHeight : 0.0);
+}
+
+// Y of the centered Join pill: right below the name/subname stack, above the
+// body. Only meaningful when sSubredditShowJoinButton is YES.
+- (CGFloat)apollo_actionYForWidth:(CGFloat)width {
+    ApolloIdentityHeaderLayout identity = [self apollo_identityForWidth:width];
+    return identity.bodyY - [self apollo_nameRowLiftForLayout:identity];
+}
+
+// Single source of truth for the post-name body stack, in order: Join pill →
+// about text → more/less toggle. apply=NO just measures (returns the bottom
+// Y); apply=YES also sets every frame, so preferredHeightForWidth and
+// layoutSubviews can never drift apart — mirrors the profile header's
+// identical apollo_layoutBodyForWidth:apply: pattern.
+- (CGFloat)apollo_layoutBodyForWidth:(CGFloat)width apply:(BOOL)apply {
+    ApolloIdentityHeaderLayout identity = [self apollo_identityForWidth:width];
+    CGFloat bodyWidth = identity.bodyWidth;
+    CGFloat bodyX = identity.bodyX;
+    CGFloat y = [self apollo_actionYForWidth:width];
+
+    if (apply) {
+        self.subscribeButton.hidden = !sSubredditShowJoinButton;
+        self.subscribeGlassView.hidden = !sSubredditShowJoinButton;
+    }
+    if (sSubredditShowJoinButton) {
+        CGFloat buttonHeight = ApolloSubredditActionRowHeight;
+        if (apply) {
+            // Grows for Dynamic Type and the longer "Joining…"/"Leaving…"
+            // titles instead of clipping inside a fixed pill.
+            CGFloat buttonWidth = MIN(bodyWidth, MAX(148.0, ceil(self.subscribeButton.intrinsicContentSize.width) + 52.0));
+            self.subscribeButton.frame = CGRectMake(floor((width - buttonWidth) / 2.0), y, buttonWidth, buttonHeight);
+            self.subscribeButton.layer.cornerRadius = buttonHeight / 2.0;
+            self.subscribeGlassView.frame = self.subscribeButton.bounds;
+            self.subscribeGlassView.layer.cornerRadius = buttonHeight / 2.0;
+        }
+        y += buttonHeight + ApolloSubredditActionBottomGap;
+    }
+
+    CGFloat aboutHeight = [self apollo_aboutHeightForWidth:bodyWidth];
+    BOOL showToggle = aboutHeight > 0.0 && ([self apollo_aboutTruncatesForWidth:bodyWidth] || self.aboutExpanded);
+    if (apply) {
+        self.aboutLabel.frame = CGRectMake(bodyX, y, bodyWidth, aboutHeight);
+        self.aboutToggleButton.hidden = !showToggle;
+        self.aboutLabel.isAccessibilityElement = YES;
+        if (showToggle) {
+            self.aboutLabel.accessibilityTraits = self.aboutLabel.accessibilityTraits | UIAccessibilityTraitButton;
+            self.aboutLabel.accessibilityHint = self.aboutExpanded ? @"Double tap to show less" : @"Double tap to show more";
+        } else {
+            self.aboutLabel.accessibilityTraits = self.aboutLabel.accessibilityTraits & ~UIAccessibilityTraitButton;
+            self.aboutLabel.accessibilityHint = nil;
+        }
+    }
+    if (aboutHeight > 0.0) {
+        y += aboutHeight;
+        if (showToggle) {
+            if (apply) {
+                [self.aboutToggleButton setTitle:(self.aboutExpanded ? @"less" : @"more") forState:UIControlStateNormal];
+                self.aboutToggleButton.accessibilityLabel = self.aboutExpanded ? @"Show less" : @"Show more";
+                self.aboutToggleButton.frame = CGRectMake(bodyX, y, bodyWidth, ApolloSubredditAboutToggleHeight);
+                self.aboutToggleButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+            }
+            y += ApolloSubredditAboutToggleHeight;
+        }
+    }
+
+    return y;
+}
+
 - (CGFloat)preferredHeightForWidth:(CGFloat)width {
-    ApolloIdentityHeaderLayout identity = ApolloIdentityHeaderLayoutMake(width);
-    CGFloat aboutY = identity.bodyY - [self apollo_nameRowLiftForLayout:identity];
-    CGFloat aboutWidth = identity.bodyWidth;
-    CGFloat aboutHeight = [self apollo_aboutHeightForWidth:aboutWidth];
-    if (aboutHeight <= 0.0) return aboutY + ApolloIdentityHeaderBottomPadding();
-    return aboutY + aboutHeight + ApolloIdentityHeaderBottomPadding();
+    return [self apollo_layoutBodyForWidth:width apply:NO] + ApolloIdentityHeaderBottomPadding();
 }
 
 - (void)layoutSubviews {
@@ -290,19 +407,20 @@ static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSStrin
 
     NSArray<UIView *> *expectedSubviews = @[self.bannerImageView, self.iconImageView,
                                             self.displayNameLabel, self.nameLabel,
-                                            self.subscribeButton, self.aboutLabel];
+                                            self.subscribeButton, self.aboutLabel,
+                                            self.aboutToggleButton];
     for (UIView *subview in expectedSubviews) {
         if (subview && subview.superview != self) {
             [self addSubview:subview];
         }
     }
-    self.bannerImageView.hidden = NO;
+    self.bannerImageView.hidden = !sSubredditShowBanner;
     self.iconImageView.hidden = NO;
     self.displayNameLabel.hidden = self.displayNameLabel.text.length == 0;
     self.nameLabel.hidden = self.nameLabel.text.length == 0;
     self.aboutLabel.hidden = self.aboutLabel.text.length == 0;
     BOOL ambientInstalled = objc_getAssociatedObject(self.hostViewController, kApolloSubredditAmbientViewKey) != nil;
-    self.bannerImageView.alpha = ambientInstalled ? 0.0 : 1.0;
+    self.bannerImageView.alpha = ambientInstalled ? ApolloSubredditFadedBannerAlpha : 1.0;
     self.iconImageView.alpha = 1.0;
     self.displayNameLabel.alpha = 1.0;
     self.nameLabel.alpha = 1.0;
@@ -310,7 +428,7 @@ static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSStrin
     self.aboutLabel.alpha = 1.0;
 
     CGFloat width = self.bounds.size.width;
-    ApolloIdentityHeaderLayout identity = ApolloIdentityHeaderLayoutMake(width);
+    ApolloIdentityHeaderLayout identity = [self apollo_identityForWidth:width];
     CGFloat lift = [self apollo_nameRowLiftForLayout:identity];
     self.bannerImageView.frame = identity.bannerFrame;
     self.iconImageView.frame = identity.avatarFrame;
@@ -320,42 +438,25 @@ static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSStrin
     subnameFrame.origin.y -= lift;
     self.nameLabel.frame = subnameFrame;
 
-    // Grows for Dynamic Type and the longer "Joining…"/"Leaving…" titles
-    // instead of clipping inside a fixed pill — same pattern as the profile
-    // header's followButton sizing.
-    CGFloat buttonWidth = MAX(84.0, ceil(self.subscribeButton.intrinsicContentSize.width) + 36.0);
-    CGFloat buttonHeight = 30.0;
-    BOOL subscribeRTL = self.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft;
-    CGFloat buttonX = subscribeRTL ? 20.0 : (width - buttonWidth - 20.0);
-    self.subscribeButton.frame = CGRectMake(buttonX,
-                                            CGRectGetMidY(identity.avatarFrame) - buttonHeight / 2.0,
-                                            buttonWidth, buttonHeight);
-    self.subscribeButton.layer.cornerRadius = buttonHeight / 2.0;
-    self.subscribeGlassView.frame = self.subscribeButton.bounds;
-    self.subscribeGlassView.layer.cornerRadius = buttonHeight / 2.0;
-
-    CGFloat aboutY = identity.bodyY - lift;
-    CGFloat aboutWidth = identity.bodyWidth;
-    CGFloat aboutHeight = [self apollo_aboutHeightForWidth:aboutWidth];
-    self.aboutLabel.frame = CGRectMake(floor((width - aboutWidth) / 2.0), aboutY, aboutWidth, aboutHeight);
+    // Join pill → about text → more/less toggle, in one sequential pass.
+    [self apollo_layoutBodyForWidth:width apply:YES];
 
     [self bringSubviewToFront:self.iconImageView];
     [self bringSubviewToFront:self.displayNameLabel];
     [self bringSubviewToFront:self.nameLabel];
     [self bringSubviewToFront:self.subscribeButton];
     [self bringSubviewToFront:self.aboutLabel];
+    [self bringSubviewToFront:self.aboutToggleButton];
 }
 
 - (void)applyInfo:(ApolloSubredditInfo *)info fallbackSubredditName:(NSString *)subredditName {
     CGFloat width = self.bounds.size.width > 0 ? self.bounds.size.width : UIScreen.mainScreen.bounds.size.width;
     CGFloat heightBefore = [self preferredHeightForWidth:width];
 
-    // The community name already appears in the nav title, the search
-    // placeholder, and the r/name subname line. Only show the big display
-    // name when it actually says something different (e.g. "Reddit Science"
-    // for r/science); otherwise drop it and reclaim the row.
-    NSString *displayName = info.displayName;
-    if (ApolloSubredditDisplayNameIsRedundant(displayName, subredditName)) displayName = nil;
+    // Whether the big display name (e.g. "Reddit Science") shows above the
+    // r/name line is a direct viewer choice (sSubredditShowDisplayName), not
+    // an automatic "is it different enough from r/name" guess.
+    NSString *displayName = sSubredditShowDisplayName ? info.displayName : nil;
     self.displayNameLabel.text = displayName.length > 0 ? displayName : nil;
     self.aboutLabel.text = info.aboutText.length > 0 ? info.aboutText : nil;
     self.memberCountText = info && info.subscriberCount >= 0
@@ -402,6 +503,7 @@ static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSStrin
     [self.subscribeButton setTitleColor:onAccent forState:UIControlStateNormal];
     [self.subscribeButton setTitleColor:[onAccent colorWithAlphaComponent:0.58]
                                  forState:UIControlStateHighlighted];
+    [self.aboutToggleButton setTitleColor:resolvedAccent forState:UIControlStateNormal];
 }
 
 - (void)apollo_applySubscriptionGlassWithAccent:(UIColor *)accent {
@@ -428,6 +530,15 @@ static BOOL ApolloSubredditDisplayNameIsRedundant(NSString *displayName, NSStrin
     self.subscribeGlassView.layer.cornerCurve = kCACornerCurveContinuous;
     self.subscribeGlassView.clipsToBounds = YES;
     self.subscribeGlassView.alpha = self.subscribeButton.enabled ? 1.0 : 0.55;
+}
+
+- (void)apollo_toggleAboutExpanded {
+    CGFloat aboutWidth = [self apollo_identityForWidth:self.bounds.size.width].bodyWidth;
+    if (!self.aboutExpanded && ![self apollo_aboutTruncatesForWidth:aboutWidth]) return;
+    self.aboutExpanded = !self.aboutExpanded;
+    self.aboutLabel.numberOfLines = self.aboutExpanded ? 0 : ApolloSubredditAboutCollapsedLines;
+    [self setNeedsLayout];
+    if (self.heightInvalidationBlock) self.heightInvalidationBlock();
 }
 
 - (void)apollo_subscribeTapped {
@@ -1196,7 +1307,12 @@ static void ApolloSubredditSyncAmbient(ApolloSubredditHeaderView *header) {
     if (chromeHeight <= 0.0) chromeHeight = viewController.view.safeAreaInsets.top;
     CGFloat width = tableView.bounds.size.width > 0 ? tableView.bounds.size.width
         : UIScreen.mainScreen.bounds.size.width;
-    CGFloat regionHeight = chromeHeight + ApolloIdentityHeaderBannerHeight();
+    // Must match apollo_identityForWidth:'s actual banner height (subreddit's
+    // own compact constant, respecting the Show Banner toggle) — the shared
+    // ApolloIdentityHeaderBannerHeight() default (150pt) is the profile
+    // header's full banner and no longer matches this header's real banner
+    // frame, which would misalign the melt's sharp/blur region boundary.
+    CGFloat regionHeight = chromeHeight + (sSubredditShowBanner ? ApolloSubredditBannerHeight : 0.0);
     CGFloat extendedHeight = chromeHeight + [header preferredHeightForWidth:width];
     static BOOL sLoggedRegionDiagnostics = NO;
     if (!sLoggedRegionDiagnostics) {
@@ -1242,7 +1358,7 @@ static void ApolloSubredditInstallAmbient(UIViewController *viewController, UITa
         tableView.backgroundView = ambient;
     }
     ambient.frame = tableView.bounds;
-    header.bannerImageView.alpha = 0.0;
+    header.bannerImageView.alpha = ApolloSubredditFadedBannerAlpha;
     ApolloSubredditSyncAmbient(header);
 }
 
@@ -1548,13 +1664,6 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
 
     ApolloLog(@"[SubredditHeaders] install vc=%p subreddit=%@", viewController, subredditName);
 
-    // The subreddit name (and thus ApolloSubredditTitleShouldTruncate's
-    // eligibility) only becomes known here, asynchronously, well after the nav
-    // title control's own layout has already settled once. Nothing else
-    // re-triggers that layout at this exact moment (setRightBarButtonItem(s):
-    // covers the icon cluster changing later, but not this), so force it now.
-    ApolloSubredditForceAllTitleRelayouts();
-
     CGFloat width = tableView.bounds.size.width > 0 ? tableView.bounds.size.width : UIScreen.mainScreen.bounds.size.width;
     if (!header) {
         header = ApolloSubredditCreateHeader(width);
@@ -1625,6 +1734,15 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
     NSString *storedSubredditName = objc_getAssociatedObject(viewController, kApolloSubredditNameKey);
     BOOL subredditChanged = ![storedSubredditName isEqualToString:subredditName];
     if (subredditChanged) {
+        // The subreddit name (and thus ApolloSubredditTitleShouldTruncate's
+        // eligibility) only becomes known here, asynchronously, well after the
+        // nav title control's own layout has already settled once. Nothing
+        // else re-triggers that layout at this exact moment
+        // (setRightBarButtonItem(s): covers the icon cluster changing later,
+        // but not this), so force it now — gated on subredditChanged since
+        // this walks every window's entire view tree and this function runs
+        // on every viewDidLayoutSubviews pass, not just when the name resolves.
+        ApolloSubredditForceAllTitleRelayouts();
         objc_setAssociatedObject(viewController, kApolloSubredditNameKey, subredditName, OBJC_ASSOCIATION_COPY_NONATOMIC);
         header.iconImageView.image = ApolloSubredditPlaceholderIcon();
         header.usesCustomIcon = NO;
@@ -1635,6 +1753,8 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
         // into this one — same class of bug as the profile header's
         // followIntentDate not being cleared on a username change.
         header.subscribeIntentDate = nil;
+        header.aboutExpanded = NO;
+        header.aboutLabel.numberOfLines = ApolloSubredditAboutCollapsedLines;
         ApolloSubredditApplyLoadingBanner(header);
         [header applyInfo:nil fallbackSubredditName:subredditName];
         ApolloSubredditLoadImages(header, subredditName, NO);
@@ -1668,7 +1788,13 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
             objc_setAssociatedObject(tableView, kApolloSubredditRewrapInProgressKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
     }
-    ApolloSubredditInstallAmbient(viewController, tableView, header, wrappedHeader);
+    // New (Immersive) gets the melt/ambient backdrop; Classic is the same
+    // content, flat — mirrors the profile header's Density switch exactly.
+    if (sSubredditHeaderImmersive) {
+        ApolloSubredditInstallAmbient(viewController, tableView, header, wrappedHeader);
+    } else {
+        ApolloSubredditRemoveAmbient(viewController, tableView);
+    }
     ApolloSubredditStyleSearchBar(viewController);
     } @finally {
         objc_setAssociatedObject(viewController, kApolloSubredditInstallInProgressKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1950,6 +2076,12 @@ BOOL ApolloSubredditTitleShouldTruncate(UIViewController *viewController) {
     sPostsViewControllerClass = objc_getClass("_TtC6Apollo19PostsViewController");
 
     [[NSNotificationCenter defaultCenter] addObserverForName:@"ApolloSubredditHeaderToggleChangedNotification"
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *note) {
+        ApolloSubredditRefreshVisibleControllers();
+    }];
+    [[NSNotificationCenter defaultCenter] addObserverForName:ApolloSubredditLayoutToggleChangedNotification
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(__unused NSNotification *note) {

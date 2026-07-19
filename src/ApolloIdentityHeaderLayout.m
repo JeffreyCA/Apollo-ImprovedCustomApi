@@ -25,6 +25,10 @@ CGFloat ApolloIdentityHeaderBottomPadding(void) {
     return ApolloIdentityBottomPadding;
 }
 
+CGFloat ApolloIdentityHeaderSideInset(void) {
+    return ApolloIdentitySideInset;
+}
+
 // Fonts come from UIFontMetrics so adjustsFontForContentSizeCategory actually
 // works (it is a no-op on plain systemFontOfSize: fonts). Not cached — the
 // scaled result depends on the current content size category.
@@ -38,11 +42,14 @@ UIFont *ApolloIdentityHeaderSubnameFont(void) {
     return [[UIFontMetrics metricsForTextStyle:UIFontTextStyleSubheadline] scaledFontForFont:base];
 }
 
-ApolloIdentityHeaderLayout ApolloIdentityHeaderLayoutMake(CGFloat width) {
+ApolloIdentityHeaderLayout ApolloIdentityHeaderLayoutMakeWithBanner(CGFloat width, CGFloat bannerHeight) {
+    bannerHeight = MAX(0.0, bannerHeight);
     CGFloat bodyWidth = MIN(ApolloIdentityBodyMaxWidth,
                             MAX(120.0, width - ApolloIdentitySideInset * 2.0));
     CGFloat bodyX = floor((width - bodyWidth) / 2.0);
-    CGFloat avatarY = ApolloIdentityBannerHeight - ApolloIdentityAvatarOverlap;
+    // The avatar overlaps the banner's bottom edge; with a short or absent banner
+    // it can't sit above the header, so it bottoms out at a small top pad.
+    CGFloat avatarY = MAX(14.0, bannerHeight - ApolloIdentityAvatarOverlap);
     CGRect avatarFrame = CGRectMake(floor((width - ApolloIdentityAvatarDiameter) / 2.0),
                                     avatarY,
                                     ApolloIdentityAvatarDiameter,
@@ -58,14 +65,19 @@ ApolloIdentityHeaderLayout ApolloIdentityHeaderLayoutMake(CGFloat width) {
                                      bodyWidth,
                                      subnameHeight);
     ApolloIdentityHeaderLayout layout = {
-        .bannerFrame = CGRectMake(0.0, 0.0, width, ApolloIdentityBannerHeight),
+        .bannerFrame = CGRectMake(0.0, 0.0, width, bannerHeight),
         .avatarFrame = avatarFrame,
         .nameFrame = nameFrame,
         .subnameFrame = subnameFrame,
         .bodyY = CGRectGetMaxY(subnameFrame) + 10.0,
         .bodyWidth = bodyWidth,
+        .bodyX = bodyX,
     };
     return layout;
+}
+
+ApolloIdentityHeaderLayout ApolloIdentityHeaderLayoutMake(CGFloat width) {
+    return ApolloIdentityHeaderLayoutMakeWithBanner(width, ApolloIdentityBannerHeight);
 }
 
 void ApolloIdentityHeaderApplyTextStyles(UILabel *nameLabel,

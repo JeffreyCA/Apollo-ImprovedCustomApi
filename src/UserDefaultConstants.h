@@ -92,6 +92,12 @@ static NSString *const UDKeyUseProfileAvatarTabIcon = @"UseProfileAvatarTabIcon"
 // See ApolloUserAvatars.xm and ApolloProfileSocialLinks.m. Default YES.
 static NSString *const UDKeyShowDetailedProfiles = @"ShowDetailedProfiles";
 static NSString *const UDKeyShowSubredditHeaders = @"ShowSubredditHeaders";
+// New (Immersive, with the melt/ambient backdrop) vs Classic (same content,
+// flat) — mirrors UDKeyProfileHeaderImmersive's semantics for subreddits.
+static NSString *const UDKeySubredditHeaderImmersive = @"SubredditHeaderImmersive";
+static NSString *const UDKeySubredditShowBanner = @"SubredditShowBanner";
+static NSString *const UDKeySubredditShowJoinButton = @"SubredditShowJoinButton";
+static NSString *const UDKeySubredditShowDisplayName = @"SubredditShowDisplayName";
 // Backing values for the single Community Highlights picker. Keeping the old
 // keys maps existing settings naturally: both YES = Full, master only = Partial,
 // master NO = Off.
