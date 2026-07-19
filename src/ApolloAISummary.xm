@@ -256,10 +256,10 @@ static const NSTimeInterval kApolloAIGenerationTimeout = 90.0;
 static const NSTimeInterval kApolloAIGenerationTimeout = 30.0;
 #endif
 
-// Version 4 records the detail level used for each cached summary. This prevents
-// an old Brief result from being shown after the user chooses In-depth (or vice
-// versa); earlier cache versions are regenerable and are discarded on load.
-static NSString *const kApolloAICacheVersion = @"4";
+// Version 5 records both the selected detail and the generation backend/model.
+// This prevents a summary from one cloud model being reused after the user
+// switches providers or models. Earlier caches are regenerable and discarded.
+static NSString *const kApolloAICacheVersion = @"5";
 
 #pragma mark - Per-session caches / in-flight guard
 
@@ -269,17 +269,48 @@ static NSMutableDictionary<NSString *, NSString *> *sCommentSummaryCache;
 // fullName -> ApolloAISummaryDetail used to generate the cached text.
 static NSMutableDictionary<NSString *, NSNumber *> *sPostSummaryDetails;
 static NSMutableDictionary<NSString *, NSNumber *> *sCommentSummaryDetails;
+// fullName -> stable provider/model identity used to generate the cached text.
+// The raw defaults keys intentionally keep this PR compatible before and after
+// the separate cloud-provider PR lands; absent keys resolve to Apple on-device.
+static NSMutableDictionary<NSString *, NSString *> *sPostSummaryProfiles;
+static NSMutableDictionary<NSString *, NSString *> *sCommentSummaryProfiles;
+
+static NSString *ApolloAICurrentGenerationProfile(void) {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSString *provider = [defaults stringForKey:@"AISummaryProvider"];
+    if (![provider isEqualToString:@"openrouter"] &&
+        ![provider isEqualToString:@"gemini"] &&
+        ![provider isEqualToString:@"custom"]) {
+        return @"apple";
+    }
+
+    NSString *model = nil;
+    NSString *endpoint = @"";
+    if ([provider isEqualToString:@"openrouter"]) {
+        model = [defaults stringForKey:@"OpenRouterAIModel"];
+        if (model.length == 0) model = @"meta-llama/llama-3.3-70b-instruct:free";
+    } else if ([provider isEqualToString:@"gemini"]) {
+        model = [defaults stringForKey:@"GeminiAIModel"];
+        if (model.length == 0) model = @"gemini-2.5-flash";
+    } else {
+        model = [defaults stringForKey:@"CustomAIModel"] ?: @"";
+        endpoint = [defaults stringForKey:@"CustomAIBaseURL"] ?: @"";
+    }
+    return [NSString stringWithFormat:@"%@|%@|%@", provider, model, endpoint];
+}
 
 static BOOL ApolloAIPostCacheMatchesCurrentDetail(NSString *fullName) {
     return sPostSummaryCache[fullName].length > 0 &&
         [sPostSummaryDetails[fullName] integerValue] ==
-            ApolloAISanitizedDetail(sAIPostSummaryDetail);
+            ApolloAISanitizedDetail(sAIPostSummaryDetail) &&
+        [sPostSummaryProfiles[fullName] isEqualToString:ApolloAICurrentGenerationProfile()];
 }
 
 static BOOL ApolloAICommentCacheMatchesCurrentDetail(NSString *fullName) {
     return sCommentSummaryCache[fullName].length > 0 &&
         [sCommentSummaryDetails[fullName] integerValue] ==
-            ApolloAISanitizedDetail(sAICommentSummaryDetail);
+            ApolloAISanitizedDetail(sAICommentSummaryDetail) &&
+        [sCommentSummaryProfiles[fullName] isEqualToString:ApolloAICurrentGenerationProfile()];
 }
 // fullName -> unix time (seconds) the post/comment summary was last generated.
 // Drives age-based cache expiry so old (and stale-discussion) summaries are
@@ -426,6 +457,8 @@ static void ApolloAIPruneExpiredSummaries(void) {
         [sPostSummaryMode removeObjectForKey:name];
         [sPostSummaryDetails removeObjectForKey:name];
         [sCommentSummaryDetails removeObjectForKey:name];
+        [sPostSummaryProfiles removeObjectForKey:name];
+        [sCommentSummaryProfiles removeObjectForKey:name];
         [sCommentSummarySourceCounts removeObjectForKey:name];
         [sCommentSummarySignatures removeObjectForKey:name];
         [sSummaryTimestamps removeObjectForKey:name];
@@ -476,12 +509,16 @@ static void ApolloAILoadPersistedSummaries(void) {
     NSDictionary *postModes = root[@"postModes"];
     NSDictionary *postDetails = root[@"postDetails"];
     NSDictionary *commentDetails = root[@"commentDetails"];
+    NSDictionary *postProfiles = root[@"postProfiles"];
+    NSDictionary *commentProfiles = root[@"commentProfiles"];
     NSDictionary *timestamps = root[@"timestamps"];
     if ([post isKindOfClass:[NSDictionary class]]) [sPostSummaryCache addEntriesFromDictionary:post];
     if ([comment isKindOfClass:[NSDictionary class]]) [sCommentSummaryCache addEntriesFromDictionary:comment];
     if ([postModes isKindOfClass:[NSDictionary class]]) [sPostSummaryMode addEntriesFromDictionary:postModes];
     if ([postDetails isKindOfClass:[NSDictionary class]]) [sPostSummaryDetails addEntriesFromDictionary:postDetails];
     if ([commentDetails isKindOfClass:[NSDictionary class]]) [sCommentSummaryDetails addEntriesFromDictionary:commentDetails];
+    if ([postProfiles isKindOfClass:[NSDictionary class]]) [sPostSummaryProfiles addEntriesFromDictionary:postProfiles];
+    if ([commentProfiles isKindOfClass:[NSDictionary class]]) [sCommentSummaryProfiles addEntriesFromDictionary:commentProfiles];
     if ([sourceCounts isKindOfClass:[NSDictionary class]]) [sCommentSummarySourceCounts addEntriesFromDictionary:sourceCounts];
     if ([signatures isKindOfClass:[NSDictionary class]]) [sCommentSummarySignatures addEntriesFromDictionary:signatures];
     if ([timestamps isKindOfClass:[NSDictionary class]]) [sSummaryTimestamps addEntriesFromDictionary:timestamps];
@@ -501,6 +538,8 @@ static void ApolloAIPersistSummaries(void) {
     NSDictionary *postModeSnapshot = [sPostSummaryMode copy];
     NSDictionary *postDetailSnapshot = [sPostSummaryDetails copy];
     NSDictionary *commentDetailSnapshot = [sCommentSummaryDetails copy];
+    NSDictionary *postProfileSnapshot = [sPostSummaryProfiles copy];
+    NSDictionary *commentProfileSnapshot = [sCommentSummaryProfiles copy];
     NSDictionary *timestampSnapshot = [sSummaryTimestamps copy];
     dispatch_async(ApolloAIPersistQueue(), ^{
         NSMutableDictionary *post = [postSnapshot mutableCopy];
@@ -525,6 +564,8 @@ static void ApolloAIPersistSummaries(void) {
             @"postModes": postModeSnapshot ?: @{},
             @"postDetails": postDetailSnapshot ?: @{},
             @"commentDetails": commentDetailSnapshot ?: @{},
+            @"postProfiles": postProfileSnapshot ?: @{},
+            @"commentProfiles": commentProfileSnapshot ?: @{},
             @"timestamps": timestamps,
         };
         [root writeToFile:ApolloAISummariesCachePath() atomically:YES];
@@ -538,6 +579,8 @@ static void ApolloAIEnsureState(void) {
         sCommentSummaryCache = [NSMutableDictionary dictionary];
         sPostSummaryDetails = [NSMutableDictionary dictionary];
         sCommentSummaryDetails = [NSMutableDictionary dictionary];
+        sPostSummaryProfiles = [NSMutableDictionary dictionary];
+        sCommentSummaryProfiles = [NSMutableDictionary dictionary];
         sSummaryTimestamps = [NSMutableDictionary dictionary];
         sCardExpanded = [NSMutableDictionary dictionary];
         sLinkSummaryPosts = [NSMutableSet set];
@@ -582,6 +625,8 @@ NSUInteger ApolloAIClearSummaryCache(void) {
     [sCommentSummaryCache removeAllObjects];
     [sPostSummaryDetails removeAllObjects];
     [sCommentSummaryDetails removeAllObjects];
+    [sPostSummaryProfiles removeAllObjects];
+    [sCommentSummaryProfiles removeAllObjects];
     [sSummaryTimestamps removeAllObjects];
     [sCardExpanded removeAllObjects];
     [sPostSummaryMode removeAllObjects];
@@ -2671,6 +2716,7 @@ static void ApolloAISummarizeArticleText(NSString *fullName, NSString *requestID
                                          ApolloAISummaryDetail detail) {
     ApolloFoundationModels *bridge = ApolloAIBridge();
     if (!bridge || fullName.length == 0 || text.length == 0) return;
+    NSString *generationProfile = ApolloAICurrentGenerationProfile();
     ApolloLog(@"[AISummary] generating link/article summary for %@ (%lu chars)…", fullName, (unsigned long)text.length);
     [bridge prepareSession:requestID instructions:instructions];
     [bridge summarize:text
@@ -2726,6 +2772,7 @@ maximumResponseTokens:responseTokens
                 sPostSummaryCache[fullName] = final;
                 sPostSummaryMode[fullName] = @(ApolloAIDesiredPostMode(fullName));
                 sPostSummaryDetails[fullName] = @(detail);
+                sPostSummaryProfiles[fullName] = generationProfile;
                 ApolloAIStampSummary(fullName);
                 ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateReady, final);
                 if (ApolloAIAnyHeaderExpanded(fullName, YES)) {
@@ -2838,6 +2885,7 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
     // store the captured value, even if the user changes settings mid-request.
     ApolloAISummaryDetail postDetail = ApolloAISanitizedDetail(sAIPostSummaryDetail);
     ApolloAISummaryDetail commentDetail = ApolloAISanitizedDetail(sAICommentSummaryDetail);
+    NSString *generationProfile = ApolloAICurrentGenerationProfile();
 
     id link = ApolloAILinkFromController(vc);
     if (!link) { ApolloLog(@"[AISummary] no RDKLink on controller %@", [vc class]); return; }
@@ -2895,7 +2943,7 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
 
     NSInteger desiredMode = ApolloAIDesiredPostMode(fullName);
     BOOL cacheValid = (haveBody || haveArticle) &&
-        sPostSummaryCache[fullName].length > 0 &&
+        ApolloAIPostCacheMatchesCurrentDetail(fullName) &&
         [sPostSummaryMode[fullName] integerValue] == desiredMode &&
         [sPostSummaryDetails[fullName] integerValue] == postDetail;
     NSString *postTapKey = [@"post|" stringByAppendingString:fullName];
@@ -2936,6 +2984,7 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
             [sPostSummaryCache removeObjectForKey:fullName];
             [sPostSummaryMode removeObjectForKey:fullName];
             [sPostSummaryDetails removeObjectForKey:fullName];
+            [sPostSummaryProfiles removeObjectForKey:fullName];
             ApolloAIPersistSummaries();
         }
         if (haveArticle) {
@@ -3000,6 +3049,7 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
                         sPostSummaryCache[fullName] = final;
                         sPostSummaryMode[fullName] = @(ApolloAIDesiredPostMode(fullName));
                         sPostSummaryDetails[fullName] = @(postDetail);
+                        sPostSummaryProfiles[fullName] = generationProfile;
                         ApolloAIStampSummary(fullName);
                         ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateReady, final);
                         if (ApolloAIAnyHeaderExpanded(fullName, YES)) {
@@ -3036,11 +3086,11 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
     // Gated by the "Comment Summaries" sub-toggle.
     if (sEnableAICommentSummaries) {
     NSString *cachedCommentSummary = sCommentSummaryCache[fullName];
-    BOOL commentCacheValid = cachedCommentSummary.length > 0 &&
-        [sCommentSummaryDetails[fullName] integerValue] == commentDetail;
+    BOOL commentCacheValid = ApolloAICommentCacheMatchesCurrentDetail(fullName);
     if (cachedCommentSummary.length > 0 && !commentCacheValid) {
         [sCommentSummaryCache removeObjectForKey:fullName];
         [sCommentSummaryDetails removeObjectForKey:fullName];
+        [sCommentSummaryProfiles removeObjectForKey:fullName];
         [sCommentSummarySourceCounts removeObjectForKey:fullName];
         [sCommentSummarySignatures removeObjectForKey:fullName];
         cachedCommentSummary = nil;
@@ -3132,6 +3182,7 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
                         }
                         sCommentSummaryCache[fullName] = final;
                         sCommentSummaryDetails[fullName] = @(commentDetail);
+                        sCommentSummaryProfiles[fullName] = generationProfile;
                         ApolloAIStampSummary(fullName);
                         sCommentSummarySourceCounts[fullName] = @(commentCount);
                         if (commentSignature.length > 0) {
