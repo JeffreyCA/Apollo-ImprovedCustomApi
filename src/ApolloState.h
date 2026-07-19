@@ -1,5 +1,8 @@
 #import <Foundation/Foundation.h>
 
+@class UIScrollView;
+@class UIViewController;
+
 extern NSString *sRedditClientId;
 extern NSString *sRedditClientSecret;
 extern NSString *sImgurClientId;
@@ -118,6 +121,28 @@ extern BOOL sLiveCommentsFollow;
 // sort last picked inside it; other posts keep Apollo's native sort chain. Opt-in;
 // default OFF via registerDefaults. See ApolloPerPostCommentSort.xm.
 extern BOOL sPerPostCommentSort;
+
+// Override for UIScrollView top/bottom scroll edge effects on iOS 26+ Liquid Glass.
+// iOS 26 defaults to Soft; iOS 27 betas default to Hard, which some users find
+// jarring. See ApolloScrollEdgeEffect.xm.
+typedef NS_ENUM(NSInteger, ApolloScrollEdgeEffectStyle) {
+    ApolloScrollEdgeEffectStyleAutomatic = 0,
+    ApolloScrollEdgeEffectStyleSoft      = 1,
+    ApolloScrollEdgeEffectStyleHard      = 2,
+    ApolloScrollEdgeEffectStyleHidden    = 3,
+};
+extern NSInteger sScrollEdgeEffectStyle;
+// Applies sScrollEdgeEffectStyle to a scroll view's top/bottom edge effects (no-op pre-iOS 26
+// or when not Liquid Glass). Called from UIScrollView's didMoveToWindow hook in
+// ApolloAutoHideTabBar.xm — kept here to avoid a second %hook UIScrollView didMoveToWindow,
+// which the Logos internal generator silently drops as a duplicate symbol.
+void ApolloApplyScrollEdgeEffectStyle(UIScrollView *scrollView);
+// Applies the selected style to every scroll view owned by an Apollo list
+// controller. Home, Profile, Comments, and similar screens all inherit Apollo's
+// ASTableViewController, which layers an intercepting UIScrollView over its
+// ASTableView. Applying at the controller level mirrors SwiftUI's inherited
+// NavigationStack modifier and reaches both views.
+void ApolloApplyScrollEdgeEffectStyleToViewController(UIViewController *viewController);
 extern BOOL sModernSubredditDividers;
 // Master toggle for subreddit list enhancements (see UDKeySubredditListEnhancements).
 extern BOOL sSubredditListEnhancements;

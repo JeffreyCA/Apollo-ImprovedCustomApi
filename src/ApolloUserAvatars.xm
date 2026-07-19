@@ -617,6 +617,7 @@ static CGFloat const ApolloProfileAboutToggleHeight = 22.0; // the "more"/"less"
 static CGFloat const ApolloProfileActionsRowHeight = 42.0;  // Follow / Message pill height
 static CGFloat const ApolloProfileActionsBottomGap = 16.0;  // gap below the action row, above the body
 static CGFloat const ApolloProfileActionsButtonGap = 10.0;  // gap between Follow and Message
+static CGFloat const ApolloProfileActionsStackGap = 8.0;    // gap between rows when stacked (large Dynamic Type)
 static CGFloat const ApolloProfileBadgeStripHeight = 54.0;  // Badge Book placeholder strip
 static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the badge strip
 
@@ -632,7 +633,12 @@ static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the bad
     return ApolloIdentityHeaderLayoutMakeWithBanner(width, [self apollo_bannerHeight]);
 }
 
-- (CGFloat)apollo_aboutFullHeightForWidth:(CGFloat)width {
+// Unclamped — the height the bio text actually needs at this width. Used both
+// as the input to the (capped) "does this truncate" check below and as the
+// real expanded-state height, since a "more" tap should show ALL of the bio,
+// not just up to an arbitrary cap (long bios, or a normal-length bio grown by
+// Dynamic Type, both need more than ApolloProfileAboutMaxHeight).
+- (CGFloat)apollo_aboutNaturalHeightForWidth:(CGFloat)width {
     if (self.aboutLabel.hidden || self.aboutLabel.text.length == 0 || width <= 0.0) return 0.0;
 
     CGSize constrained = CGSizeMake(width, CGFLOAT_MAX);
@@ -640,7 +646,11 @@ static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the bad
                                                      options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                                                   attributes:@{NSFontAttributeName: self.aboutLabel.font}
                                                      context:nil];
-    return MIN(ApolloProfileAboutMaxHeight, MAX(18.0, ceil(rect.size.height)));
+    return MAX(18.0, ceil(rect.size.height));
+}
+
+- (CGFloat)apollo_aboutFullHeightForWidth:(CGFloat)width {
+    return MIN(ApolloProfileAboutMaxHeight, [self apollo_aboutNaturalHeightForWidth:width]);
 }
 
 - (CGFloat)apollo_aboutCollapsedHeightForWidth:(CGFloat)width {
@@ -652,12 +662,12 @@ static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the bad
 
 // Whether the collapsed bio actually hides text (drives the "more" toggle).
 - (BOOL)apollo_aboutTruncatesForWidth:(CGFloat)width {
-    CGFloat fullHeight = [self apollo_aboutFullHeightForWidth:width];
-    return fullHeight > [self apollo_aboutCollapsedHeightForWidth:width] + 0.5;
+    CGFloat naturalHeight = [self apollo_aboutNaturalHeightForWidth:width];
+    return naturalHeight > [self apollo_aboutCollapsedHeightForWidth:width] + 0.5;
 }
 
 - (CGFloat)apollo_aboutHeightForWidth:(CGFloat)width {
-    return self.aboutExpanded ? [self apollo_aboutFullHeightForWidth:width]
+    return self.aboutExpanded ? [self apollo_aboutNaturalHeightForWidth:width]
                               : [self apollo_aboutCollapsedHeightForWidth:width];
 }
 
@@ -676,9 +686,26 @@ static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the bad
     return identity.bodyY - [self apollo_subnameLiftForLayout:identity];
 }
 
-// Vertical space the action row consumes (row + bottom gap), or 0 when absent.
-- (CGFloat)apollo_actionsOffset {
-    return self.showsUserActions ? (ApolloProfileActionsRowHeight + ApolloProfileActionsBottomGap) : 0.0;
+// Whether the Follow/Message pair is too wide to sit side by side at this
+// width — happens at large accessibility Dynamic Type sizes, where the Follow
+// pill's intrinsicContentSize can grow past what's left for Message. Falls
+// back to a stacked layout instead of clipping/overlapping the tap targets.
+- (BOOL)apollo_actionsNeedStackingForWidth:(CGFloat)width {
+    if (!self.showsUserActions) return NO;
+    CGFloat followWidth = MAX(148.0, ceil(self.followButton.intrinsicContentSize.width) + 52.0);
+    CGFloat messageWidth = 58.0;
+    CGFloat totalWidth = followWidth + ApolloProfileActionsButtonGap + messageWidth;
+    CGFloat bodyWidth = [self apollo_identityForWidth:width].bodyWidth;
+    return totalWidth > bodyWidth;
+}
+
+// Vertical space the action row consumes (row(s) + bottom gap), or 0 when absent.
+- (CGFloat)apollo_actionsOffsetForWidth:(CGFloat)width {
+    if (!self.showsUserActions) return 0.0;
+    CGFloat rowsHeight = [self apollo_actionsNeedStackingForWidth:width]
+        ? (ApolloProfileActionsRowHeight * 2.0 + ApolloProfileActionsStackGap)
+        : ApolloProfileActionsRowHeight;
+    return rowsHeight + ApolloProfileActionsBottomGap;
 }
 
 // The y-coordinate where the post-name content (the social band, else the bio)
@@ -686,7 +713,7 @@ static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the bad
 // displayName/username stack reaches further down (plus the action row when this
 // is another user's profile). No empty space is wasted beneath the picture.
 - (CGFloat)apollo_socialYForWidth:(CGFloat)width {
-    return [self apollo_actionsYForWidth:width] + [self apollo_actionsOffset];
+    return [self apollo_actionsYForWidth:width] + [self apollo_actionsOffsetForWidth:width];
 }
 
 // Height the social-links band wants at this header width (0 when off / no links).
@@ -711,6 +738,18 @@ static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the bad
     if (apply) {
         self.aboutLabel.frame = CGRectMake(bodyX, y, bodyWidth, aboutHeight);
         self.aboutToggleButton.hidden = !showToggle;
+        // The bio's tap gesture only does anything when the toggle is
+        // showing — mark it as a VoiceOver button (with the "more"/"less"
+        // hint) only then, so the tap target is discoverable without being
+        // announced as interactive on a bio that doesn't truncate.
+        self.aboutLabel.isAccessibilityElement = YES;
+        if (showToggle) {
+            self.aboutLabel.accessibilityTraits = self.aboutLabel.accessibilityTraits | UIAccessibilityTraitButton;
+            self.aboutLabel.accessibilityHint = self.aboutExpanded ? @"Double tap to show less" : @"Double tap to show more";
+        } else {
+            self.aboutLabel.accessibilityTraits = self.aboutLabel.accessibilityTraits & ~UIAccessibilityTraitButton;
+            self.aboutLabel.accessibilityHint = nil;
+        }
     }
     if (aboutHeight > 0.0) {
         y += aboutHeight;
@@ -786,7 +825,9 @@ static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the bad
 
     CGFloat editButtonWidth = self.editProfileButton.hidden ? 0.0 : 64.0;
     CGFloat editButtonHeight = 30.0;
-    self.editProfileButton.frame = CGRectMake(width - editButtonWidth - 20.0,
+    BOOL editRTL = self.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft;
+    CGFloat editButtonX = editRTL ? 20.0 : (width - editButtonWidth - 20.0);
+    self.editProfileButton.frame = CGRectMake(editButtonX,
                                               CGRectGetMidY(identity.avatarFrame) - editButtonHeight / 2.0,
                                               editButtonWidth, editButtonHeight);
     self.editProfileButton.layer.cornerRadius = editButtonHeight / 2.0;
@@ -800,21 +841,49 @@ static CGFloat const ApolloProfileBadgeTopGap = 12.0;       // gap above the bad
         CGFloat rowHeight = ApolloProfileActionsRowHeight;
         CGFloat rowY = [self apollo_actionsYForWidth:width];
         CGFloat corner = rowHeight / 2.0;
+        BOOL rtl = self.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft;
 
         CGFloat followWidth = MAX(148.0, ceil(self.followButton.intrinsicContentSize.width) + 52.0);
         CGFloat messageWidth = 58.0; // icon pill — wider than tall for a comfortable tap target
-        CGFloat totalWidth = followWidth + ApolloProfileActionsButtonGap + messageWidth;
-        CGFloat rowX = floor((width - totalWidth) / 2.0);
 
-        self.followButton.frame = CGRectMake(rowX, rowY, followWidth, rowHeight);
-        self.followButton.layer.cornerRadius = corner;
-        self.followGlassView.frame = self.followButton.bounds;
-        self.followGlassView.layer.cornerRadius = corner;
+        if ([self apollo_actionsNeedStackingForWidth:width]) {
+            // Large accessibility Dynamic Type: side by side would overflow
+            // (or push rowX negative, clipping a tap target) — stack full
+            // width instead, primary action on top either direction.
+            CGFloat bodyWidth = identity.bodyWidth;
+            CGFloat bodyX = floor((width - bodyWidth) / 2.0);
+            self.followButton.frame = CGRectMake(bodyX, rowY, bodyWidth, rowHeight);
+            self.followButton.layer.cornerRadius = corner;
+            self.followGlassView.frame = self.followButton.bounds;
+            self.followGlassView.layer.cornerRadius = corner;
 
-        self.messageButton.frame = CGRectMake(rowX + followWidth + ApolloProfileActionsButtonGap, rowY, messageWidth, rowHeight);
-        self.messageButton.layer.cornerRadius = corner;
-        self.messageGlassView.frame = self.messageButton.bounds;
-        self.messageGlassView.layer.cornerRadius = corner;
+            CGFloat messageY = rowY + rowHeight + ApolloProfileActionsStackGap;
+            self.messageButton.frame = CGRectMake(bodyX, messageY, bodyWidth, rowHeight);
+            self.messageButton.layer.cornerRadius = corner;
+            self.messageGlassView.frame = self.messageButton.bounds;
+            self.messageGlassView.layer.cornerRadius = corner;
+        } else {
+            CGFloat totalWidth = followWidth + ApolloProfileActionsButtonGap + messageWidth;
+            CGFloat rowX = floor((width - totalWidth) / 2.0);
+            CGFloat leadingX = rowX;
+            CGFloat trailingX = rowX + (rtl ? messageWidth : followWidth) + ApolloProfileActionsButtonGap;
+            // RTL mirrors reading order, not just position: Follow (the
+            // primary action) sits at the reading-first spot, which is the
+            // trailing (right) edge in RTL instead of the leading (left) one.
+            UIButton *leadingButton = rtl ? self.messageButton : self.followButton;
+            UIButton *trailingButton = rtl ? self.followButton : self.messageButton;
+            CGFloat leadingWidth = rtl ? messageWidth : followWidth;
+            CGFloat trailingWidth = rtl ? followWidth : messageWidth;
+
+            leadingButton.frame = CGRectMake(leadingX, rowY, leadingWidth, rowHeight);
+            leadingButton.layer.cornerRadius = corner;
+            trailingButton.frame = CGRectMake(trailingX, rowY, trailingWidth, rowHeight);
+            trailingButton.layer.cornerRadius = corner;
+            self.followGlassView.frame = self.followButton.bounds;
+            self.followGlassView.layer.cornerRadius = corner;
+            self.messageGlassView.frame = self.messageButton.bounds;
+            self.messageGlassView.layer.cornerRadius = corner;
+        }
     }
 
     // Bio → social links → badge strip → stat cards, in one sequential pass.
@@ -2383,21 +2452,47 @@ static UIView *ApolloProfileNavTitleLabelInView(UIView *rootView, NSString *user
     return nil;
 }
 
+static const void *kApolloProfileNavTitleFadeTargetKey = &kApolloProfileNavTitleFadeTargetKey;
+
 // The view whose alpha the cross-fade drives: the _UINavigationBarTitleControl
 // hosting the title label when there is one (so the Liquid Glass title capsule
 // fades with the text), else the label itself.
+//
+// This runs on every scrollViewDidScroll: (60-120/sec during a fling), and the
+// lookup is an unbounded recursive subview walk of the whole nav bar plus a
+// string match per candidate label — expensive to repeat every frame. Cache
+// the resolved view on the controller and only re-walk when it's no longer
+// parented under this nav bar (Apollo occasionally rebuilds the title view,
+// e.g. on a nav-bar style change).
 static UIView *ApolloProfileNavTitleFadeTargetForController(UIViewController *viewController) {
     ApolloProfileHeaderView *header = objc_getAssociatedObject(viewController, kApolloProfileHeaderViewKey);
     if (!header || header.username.length == 0) return nil;
     UINavigationBar *navigationBar = viewController.navigationController.navigationBar;
+    if (!navigationBar) return nil;
+
+    UIView *cached = objc_getAssociatedObject(viewController, kApolloProfileNavTitleFadeTargetKey);
+    if (cached) {
+        UIView *walk = cached.superview;
+        while (walk && walk != navigationBar) walk = walk.superview;
+        if (walk == navigationBar) return cached;
+    }
+
     UIView *label = ApolloProfileNavTitleLabelInView(navigationBar, header.username);
-    if (!label) return nil;
+    if (!label) {
+        objc_setAssociatedObject(viewController, kApolloProfileNavTitleFadeTargetKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return nil;
+    }
+    UIView *target = label;
     UIView *candidate = label.superview;
     while (candidate && candidate != navigationBar) {
-        if ([NSStringFromClass(candidate.class) containsString:@"TitleControl"]) return candidate;
+        if ([NSStringFromClass(candidate.class) containsString:@"TitleControl"]) {
+            target = candidate;
+            break;
+        }
         candidate = candidate.superview;
     }
-    return label;
+    objc_setAssociatedObject(viewController, kApolloProfileNavTitleFadeTargetKey, target, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return target;
 }
 
 // Large-title choreography: while the header's big display name is on screen the
@@ -2419,6 +2514,10 @@ static void ApolloProfileApplyNavTitleFade(UIViewController *viewController, UIS
         alpha = MIN(1.0, MAX(0.0, (visibleTop - fadeStart) / fadeSpan));
     }
     if (fabs(target.alpha - alpha) > 0.001) target.alpha = alpha;
+    // An alpha-0 title is still hit-testable/VoiceOver-visible by default,
+    // which would expose a duplicate (invisible) title alongside the header's
+    // own name — hide it from the accessibility tree while faded out.
+    target.accessibilityElementsHidden = alpha <= 0.01;
 }
 
 // Re-derive the fade from the table's current offset (appear/layout paths, where
@@ -2456,6 +2555,7 @@ static void ApolloProfileRemoveHeader(id viewControllerObject, UITableView *tabl
     if ([viewControllerObject isKindOfClass:[UIViewController class]]) {
         UIView *fadeTarget = ApolloProfileNavTitleFadeTargetForController((UIViewController *)viewControllerObject);
         if (fadeTarget) fadeTarget.alpha = 1.0;
+        objc_setAssociatedObject(viewControllerObject, kApolloProfileNavTitleFadeTargetKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
     UIView *wrappedHeader = objc_getAssociatedObject(viewControllerObject, kApolloProfileWrappedHeaderKey);
@@ -2598,6 +2698,10 @@ static void ApolloProfileInstallOrUpdateHeader(id viewControllerObject) {
         // from that user can't match and stamp onto the freshly-repointed header.
         header.currentProfileImageURL = nil;
         header.currentBannerURL = nil;
+        // A reused header must not carry the previous user's optimistic Follow
+        // grace window into this one, or a tap on user A can show "Following"
+        // on user B for up to 30s if the header is repointed in between.
+        header.followIntentDate = nil;
         [header applyProfileInfo:nil fallbackUsername:username];
         ApolloProfileSetSnoovatarMode(header, NO);
         ApolloProfileLoadImages(header, username, NO);
@@ -3025,27 +3129,49 @@ static void ApolloProfileSetUserFollowed(NSString *username, BOOL follow, Apollo
     NSString *name = ApolloAvatarNormalizedUsername(username);
     if (name.length == 0) return;
 
+    __weak ApolloProfileHeaderView *weakHeader = header;
+    // Reverts the optimistic pill flip apollo_followTapped already applied,
+    // for every failure path below (missing client/selector, or the RDKClient
+    // call itself failing). Guards against the header having been repointed
+    // to a different user in the meantime — same class of bug as the
+    // followIntentDate reset in the username-change block above.
+    void (^rollback)(void) = ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ApolloProfileHeaderView *strongHeader = weakHeader;
+            if (!strongHeader) return;
+            if (![ApolloAvatarNormalizedUsername(strongHeader.username) isEqualToString:name]) return;
+            BOOL revertedState = !follow;
+            strongHeader.followIntentValue = revertedState;
+            strongHeader.followIntentDate = [NSDate date];
+            [strongHeader apollo_setFollowing:revertedState];
+            [[ApolloUserProfileCache sharedCache] updateFollowState:revertedState forUsername:name];
+        });
+    };
+
     Class clientClass = objc_getClass("RDKClient");
     if (!clientClass || ![clientClass respondsToSelector:@selector(sharedClient)]) {
         ApolloLog(@"[UserAvatars] Follow: no RDKClient for u/%@", name);
+        rollback();
         return;
     }
     id client = ((id (*)(id, SEL))objc_msgSend)(clientClass, @selector(sharedClient));
     SEL sel = follow ? @selector(followUserWithName:completion:) : @selector(unfollowUserWithName:completion:);
     if (!client || ![client respondsToSelector:sel]) {
         ApolloLog(@"[UserAvatars] Follow: RDKClient can't %@ u/%@", follow ? @"follow" : @"unfollow", name);
+        rollback();
         return;
     }
 
     ApolloLog(@"[UserAvatars] Follow: %@ u/%@", follow ? @"following" : @"unfollowing", name);
-    // Completion logs the outcome for diagnosis. RDKClient mutation completions are
-    // `^(NSError *error)`; if Apollo ever passes more, the extra args are ignored and
-    // reading only `error` is safe. The optimistic pill + cached state remain the
-    // source of truth for the session regardless of what comes back.
+    // RDKClient mutation completions are `^(NSError *error)`; if Apollo ever
+    // passes more, the extra args are ignored and reading only `error` is
+    // safe. A failure rolls the optimistic pill back instead of leaving it
+    // permanently wrong with no user-visible feedback.
     void (^completion)(NSError *error) = ^(NSError *error) {
+        BOOL succeeded = ![error isKindOfClass:[NSError class]];
         ApolloLog(@"[UserAvatars] Follow: %@ u/%@ completed error=%@",
-                  follow ? @"follow" : @"unfollow", name,
-                  [error isKindOfClass:[NSError class]] ? error : @"none");
+                  follow ? @"follow" : @"unfollow", name, succeeded ? @"none" : error);
+        if (!succeeded) rollback();
     };
     ((id (*)(id, SEL, id, id))objc_msgSend)(client, sel, name, completion);
 

@@ -16,6 +16,7 @@
 #import "ApolloLinkPreviewCache.h"
 #import "settings/ApolloDeletedCommentsSettingsViewController.h"
 #import "settings/ApolloLinkPreviewSettingsViewController.h"
+#import "settings/ApolloProfileLayoutViewController.h"
 #import "ApolloSubredditCustomBannerCache.h"
 #import "ApolloSubredditCustomIconCache.h"
 #import "ApolloSubredditInfoCache.h"
@@ -481,6 +482,9 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self reloadRowWithID:@"inlineMedia.settings"];
     [self reloadRowWithID:@"linkPreviews.settings"];
     [self reloadRowWithID:@"polls.settings"];
+    // Refresh the Profile Layout summary after returning from that screen
+    // (Density/Avatar/band switches may have just changed).
+    [self reloadRowWithID:@"media.profileLayout"];
     // The Setup section footer (onboarding nudge) collapses once a Reddit key
     // exists, which may have just been entered on the pushed API Keys screen.
     // Section 0 is Setup on the hub; reloading it re-evaluates the footer.
@@ -1217,9 +1221,47 @@ typedef NS_ENUM(NSInteger, Tag) {
         }
                                   onSelect:nil];
 
+    // Overrides UIScrollView's top/bottom edge glass (iOS 26+). Liquid Glass
+    // only — hidden otherwise rather than shown-disabled, since the row has
+    // nothing to preview/explain on a non-Glass device.
+    ApolloSettingsRow *scrollEdgeEffect =
+        [ApolloSettingsRow valueRowWithID:@"gen.scrollEdgeEffect"
+                                    title:@"Scroll Edge Effect"
+                                   detail:^NSString * { return [weakSelf scrollEdgeEffectStyleText]; }
+                                 onSelect:^{
+            [weakSelf presentScrollEdgeEffectStyleSheetFromSourceView:[weakSelf cellForRowID:@"gen.scrollEdgeEffect"]];
+        }];
+    scrollEdgeEffect.configure = ^(UITableViewCell *cell) { cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator; };
+    scrollEdgeEffect.visible = ^BOOL { return IsLiquidGlass(); };
+
     return [ApolloSettingsSection sectionWithTitle:nil
                                             footer:@"Liquid Glass chrome behaviors."
-                                              rows:@[ tabBarIdle, keepSearchInPlace, iPadTabBarBottom ]];
+                                              rows:@[ tabBarIdle, keepSearchInPlace, iPadTabBarBottom, scrollEdgeEffect ]];
+}
+
+- (NSString *)scrollEdgeEffectStyleText {
+    switch (sScrollEdgeEffectStyle) {
+        case ApolloScrollEdgeEffectStyleSoft:   return @"Soft";
+        case ApolloScrollEdgeEffectStyleHard:   return @"Hard";
+        case ApolloScrollEdgeEffectStyleHidden: return @"Hidden";
+        default:                                return @"Automatic";
+    }
+}
+
+- (void)setScrollEdgeEffectStyle:(NSInteger)style {
+    sScrollEdgeEffectStyle = style;
+    [[NSUserDefaults standardUserDefaults] setInteger:sScrollEdgeEffectStyle forKey:UDKeyScrollEdgeEffectStyle];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloScrollEdgeEffectStyleChangedNotification" object:nil];
+    [self reloadRowWithID:@"gen.scrollEdgeEffect"];
+}
+
+- (void)presentScrollEdgeEffectStyleSheetFromSourceView:(UIView *)sourceView {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsPresentPicker(self, sourceView, @"Scroll Edge Effect",
+                                @[@"Automatic", @"Soft", @"Hard", @"Hidden"],
+                                sScrollEdgeEffectStyle, ^(NSInteger pickedIndex) {
+        [weakSelf setScrollEdgeEffectStyle:pickedIndex];
+    });
 }
 
 - (ApolloSettingsRow *)buildApolloAIRow {
@@ -1490,18 +1532,42 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf profileTabAvatarSwitchToggled:sender]; }];
 
-    // Single toggle for Reborn's detailed profile page: banner, large
-    // avatar/snoovatar, display name, bio, and the Social Links band (all of
-    // which live in the custom header). Off → Apollo's compact stock profile.
-    ApolloSettingsRow *detailedProfiles =
-        [ApolloSettingsRow switchRowWithID:@"media.detailedProfiles"
-                                     title:@"Show Detailed Profiles"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowDetailedProfiles]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf showDetailedProfilesSwitchToggled:sender]; }];
+    // Pushes the dedicated Profile Layout screen (Density + Avatar pickers,
+    // per-band show switches). Supersedes the old flat "Show Detailed
+    // Profiles" switch — sShowDetailedProfiles is now driven entirely from
+    // there (forced YES whenever Density/Avatar changes; New vs Classic is
+    // the real on/off for the melt backdrop, not this flag).
+    ApolloSettingsRow *profileLayout =
+        [self hubDisclosureRowWithID:@"media.profileLayout"
+                                title:@"Profile Layout"
+                             subtitle:^NSString * { return [weakSelf profileLayoutSummaryText]; }
+                                 push:^UIViewController * {
+            return [[ApolloProfileLayoutViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        }];
 
     return [ApolloSettingsSection sectionWithTitle:nil
                                             footer:@"Show profile pictures, and open Reborn's detailed profile pages with a banner, bio and social links."
-                                              rows:@[ userAvatars, profileTabAvatar, detailedProfiles ]];
+                                              rows:@[ userAvatars, profileTabAvatar, profileLayout ]];
+}
+
+- (NSString *)profileLayoutSummaryText {
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    [parts addObject:sProfileHeaderImmersive ? @"New (Immersive)" : @"Classic (Compact)"];
+    switch (sProfileAvatarStyle) {
+        case 1:  [parts addObject:@"Circle Avatar"]; break;
+        case 2:  [parts addObject:@"Square Avatar"]; break;
+        default: break; // Full is the default, not worth calling out
+    }
+    NSMutableArray<NSString *> *hidden = [NSMutableArray array];
+    if (!sProfileShowBanner) [hidden addObject:@"Banner"];
+    if (!sProfileShowStatCards) [hidden addObject:@"Stat Cards"];
+    if (!sProfileShowSocialLinks) [hidden addObject:@"Social Links"];
+    if (!sProfileShowTrophyCase) [hidden addObject:@"Trophy Case"];
+    if (!sProfileShowActions) [hidden addObject:@"Follow & Message"];
+    if (hidden.count > 0) {
+        [parts addObject:[NSString stringWithFormat:@"%@ off", [hidden componentsJoinedByString:@", "]]];
+    }
+    return [parts componentsJoinedByString:@" · "];
 }
 
 // Subreddits group screen (ApolloSubredditsSettingsViewController), two
@@ -3069,17 +3135,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloProfileTabAvatarIconChangedNotification" object:nil];
 }
 
-- (void)showDetailedProfilesSwitchToggled:(UISwitch *)sender {
-    // One toggle for the whole detailed profile (header + banner + avatar + bio +
-    // social links). The avatars-toggle notification is observed in ApolloUserAvatars.xm
-    // and re-walks visible profile controllers, installing or tearing down the header
-    // per the new value; the social-links notification refreshes the band (gated on the
-    // same flag). Both apply live, no relaunch.
-    sShowDetailedProfiles = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sShowDetailedProfiles forKey:UDKeyShowDetailedProfiles];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloUserAvatarsToggleChangedNotification" object:nil];
-    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloSocialLinksToggleChangedNotification object:nil];
-}
 
 - (void)promptClearAllCachesFromSourceView:(UIView *)sourceView {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Clear Tweak Caches?"

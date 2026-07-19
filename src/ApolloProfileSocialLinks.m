@@ -266,6 +266,35 @@ static NSMutableDictionary *ApolloSLFetchers(void) {
     return d;
 }
 
+// Rapid browsing across many distinct profiles (each spawning its own hidden
+// WKWebView, live for up to ~17-34s) could otherwise pile up unbounded
+// WebContent processes with no cap beyond same-username dedup. Bound the
+// number running at once; anything past that queues FIFO.
+static NSUInteger const kSLMaxConcurrentScrapes = 3;
+
+static NSMutableArray<NSDictionary *> *ApolloSLQueuedScrapes(void) {
+    static NSMutableArray *q; static dispatch_once_t once;
+    dispatch_once(&once, ^{ q = [NSMutableArray array]; });
+    return q;
+}
+
+// username(lower) -> NSDate of the most recent total scrape failure (nil
+// result — both the authenticated attempt and the logged-out fallback
+// walled, or any other total failure). Failures are deliberately NOT cached
+// in ApolloSLLinksCache (nil means "try again", not "no links"), but retrying
+// the full two-WKWebView sequence on every single profile visit under a
+// persistent block is pure waste — back off for a short window instead.
+static NSMutableDictionary<NSString *, NSDate *> *ApolloSLRecentFailures(void) {
+    static NSMutableDictionary *d; static dispatch_once_t once;
+    dispatch_once(&once, ^{ d = [NSMutableDictionary dictionary]; });
+    return d;
+}
+static const NSTimeInterval kSLFailureBackoff = 5 * 60.0;
+
+static void ApolloSLClearRecentFailure(NSString *key) {
+    [ApolloSLRecentFailures() removeObjectForKey:key];
+}
+
 // Build ApolloSocialLink objects from the scraper's parsed JSON dicts.
 static NSArray<ApolloSocialLink *> *ApolloSLLinksFromJSON(NSArray *raw) {
     NSMutableArray<ApolloSocialLink *> *links = [NSMutableArray array];
@@ -481,12 +510,35 @@ static dispatch_queue_t ApolloSLDiskQueue(void) {
     return q;
 }
 
+// Max distinct profiles kept in the disk mirror. Unlike ApolloUserProfileCache
+// (image bytes on disk), each entry here is a few small strings, so this is a
+// generous cap purely to keep the plist and its every-save full-file rewrite
+// from growing unbounded across the app's entire lifetime.
+static NSUInteger const kSLDiskCacheMaxEntries = 500;
+
 // Main-thread in-memory mirror of the on-disk dict: username(lower) -> {ts, links:[{url,title}]}.
+// The dictionary itself is created synchronously (so dispatch_once never blocks
+// a caller), but its contents load asynchronously — the first access (in
+// practice the main thread, on the first profile view of a launch) doesn't
+// block on a synchronous file read; it just sees an empty/cold store until
+// the load lands, same experience as any other cache miss.
 static NSMutableDictionary *ApolloSLDiskStore(void) {
     static NSMutableDictionary *store; static dispatch_once_t once;
     dispatch_once(&once, ^{
-        NSDictionary *onDisk = [NSDictionary dictionaryWithContentsOfFile:ApolloSLDiskCachePath()];
-        store = [onDisk isKindOfClass:[NSDictionary class]] ? [onDisk mutableCopy] : [NSMutableDictionary dictionary];
+        store = [NSMutableDictionary dictionary];
+        dispatch_async(ApolloSLDiskQueue(), ^{
+            NSDictionary *onDisk = [NSDictionary dictionaryWithContentsOfFile:ApolloSLDiskCachePath()];
+            if (![onDisk isKindOfClass:[NSDictionary class]]) return;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                // A save or remove may have already touched `store` (a fresh
+                // scrape while the load was in flight) — don't let the disk
+                // snapshot stomp anything newer than itself.
+                for (NSString *diskKey in onDisk) {
+                    if (store[diskKey]) continue;
+                    store[diskKey] = onDisk[diskKey];
+                }
+            });
+        });
     });
     return store;
 }
@@ -505,6 +557,21 @@ static NSArray<ApolloSocialLink *> *ApolloSLDiskLinks(NSString *key, NSTimeInter
     return ApolloSLLinksFromJSON(rawLinks);
 }
 
+// LRU-by-timestamp prune, same pattern as ApolloUserProfileCache's disk cache.
+static void ApolloSLPruneDiskStoreIfNeeded(void) {
+    NSMutableDictionary *store = ApolloSLDiskStore();
+    if (store.count <= kSLDiskCacheMaxEntries) return;
+    NSArray<NSString *> *sorted = [store.allKeys sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        NSTimeInterval ta = [store[a][@"ts"] doubleValue];
+        NSTimeInterval tb = [store[b][@"ts"] doubleValue];
+        if (ta == tb) return NSOrderedSame;
+        return ta > tb ? NSOrderedAscending : NSOrderedDescending; // newest first
+    }];
+    for (NSUInteger i = kSLDiskCacheMaxEntries; i < sorted.count; i++) {
+        [store removeObjectForKey:sorted[i]];
+    }
+}
+
 static void ApolloSLDiskSave(NSString *key, NSArray<ApolloSocialLink *> *links) {
     NSMutableArray *raw = [NSMutableArray array];
     for (ApolloSocialLink *l in links) {
@@ -512,6 +579,7 @@ static void ApolloSLDiskSave(NSString *key, NSArray<ApolloSocialLink *> *links) 
         [raw addObject:@{@"url": l.urlString, @"title": l.title ?: @""}];
     }
     ApolloSLDiskStore()[key] = @{@"ts": @([NSDate date].timeIntervalSince1970), @"links": raw};
+    ApolloSLPruneDiskStoreIfNeeded();
     ApolloSLDiskFlush();
 }
 
@@ -530,8 +598,42 @@ static BOOL ApolloSLLinksEqual(NSArray<ApolloSocialLink *> *a, NSArray<ApolloSoc
     return YES;
 }
 
-// Run the WKWebView scrape (coalescing concurrent requests for the same user), caching
-// success into both memory and disk. done(links) fires on the main queue.
+static void ApolloSLDrainQueueIfNeeded(void);
+
+static void ApolloSLBeginScrape(NSString *username, NSString *key) {
+    ApolloSLWebFetch *fetch = [[ApolloSLWebFetch alloc] init];
+    ApolloSLFetchers()[key] = fetch;
+    [fetch startForUsername:username completion:^(NSArray<ApolloSocialLink *> *links) {
+        if (links) {  // success (incl. empty "none") → cache in memory + persist to disk
+            [ApolloSLLinksCache() setObject:links forKey:key];
+            ApolloSLDiskSave(key, links);
+            ApolloSLClearRecentFailure(key);
+        } else {
+            ApolloSLRecentFailures()[key] = [NSDate date];
+        }
+        NSArray *toNotify = ApolloSLPending()[key];
+        [ApolloSLPending() removeObjectForKey:key];
+        [ApolloSLFetchers() removeObjectForKey:key];
+        for (void (^waiter)(NSArray *) in toNotify) waiter(links);
+        ApolloSLDrainQueueIfNeeded();
+    }];
+}
+
+static void ApolloSLDrainQueueIfNeeded(void) {
+    while (ApolloSLFetchers().count < kSLMaxConcurrentScrapes && ApolloSLQueuedScrapes().count > 0) {
+        NSDictionary *next = ApolloSLQueuedScrapes().firstObject;
+        [ApolloSLQueuedScrapes() removeObjectAtIndex:0];
+        NSString *key = next[@"key"];
+        // Every waiter for this key may have already left (e.g. all the bands
+        // that wanted it were deallocated) — nothing to notify, skip starting it.
+        if (!ApolloSLPending()[key]) continue;
+        ApolloSLBeginScrape(next[@"username"], key);
+    }
+}
+
+// Run the WKWebView scrape (coalescing concurrent requests for the same user, and
+// capping how many distinct-user scrapes run at once — see kSLMaxConcurrentScrapes),
+// caching success into both memory and disk. done(links) fires on the main queue.
 static void ApolloSLStartScrape(NSString *username, NSString *key, void (^done)(NSArray<ApolloSocialLink *> *links)) {
     NSMutableArray *waiters = ApolloSLPending()[key];
     if (waiters) { if (done) [waiters addObject:[done copy]]; return; }
@@ -539,23 +641,17 @@ static void ApolloSLStartScrape(NSString *username, NSString *key, void (^done)(
     if (done) [waiters addObject:[done copy]];
     ApolloSLPending()[key] = waiters;
 
-    ApolloSLWebFetch *fetch = [[ApolloSLWebFetch alloc] init];
-    ApolloSLFetchers()[key] = fetch;
-    [fetch startForUsername:username completion:^(NSArray<ApolloSocialLink *> *links) {
-        if (links) {  // success (incl. empty "none") → cache in memory + persist to disk
-            [ApolloSLLinksCache() setObject:links forKey:key];
-            ApolloSLDiskSave(key, links);
-        }
-        NSArray *toNotify = ApolloSLPending()[key];
-        [ApolloSLPending() removeObjectForKey:key];
-        [ApolloSLFetchers() removeObjectForKey:key];
-        for (void (^waiter)(NSArray *) in toNotify) waiter(links);
-    }];
+    if (ApolloSLFetchers().count >= kSLMaxConcurrentScrapes) {
+        [ApolloSLQueuedScrapes() addObject:@{@"username": username, @"key": key}];
+        return;
+    }
+    ApolloSLBeginScrape(username, key);
 }
 
 // completion(links) on the main queue. Fires immediately from cache (memory, else disk)
 // and MAY fire a second time if a stale disk entry re-scrapes and the links changed.
-// links is a (possibly empty) array on success, or nil on failure (not cached, so retries).
+// links is a (possibly empty) array on success, or nil on failure (not cached, so retries
+// — but backed off for kSLFailureBackoff after a total failure; see ApolloSLRecentFailures).
 static void ApolloSLFetchLinks(NSString *username, void (^completion)(NSArray<ApolloSocialLink *> *links)) {
     NSString *key = username.lowercaseString ?: @"";
     if (key.length == 0) { if (completion) completion(nil); return; }
@@ -572,7 +668,9 @@ static void ApolloSLFetchLinks(NSString *username, void (^completion)(NSArray<Ap
         [ApolloSLLinksCache() setObject:disk forKey:key];
         if (completion) completion(disk);
         BOOL stale = ([NSDate date].timeIntervalSince1970 - ts) > kSLStaleAfter;
-        if (stale) {
+        NSDate *recentFailure = ApolloSLRecentFailures()[key];
+        BOOL recentlyFailed = recentFailure && [[NSDate date] timeIntervalSinceDate:recentFailure] < kSLFailureBackoff;
+        if (stale && !recentlyFailed) {
             ApolloSLStartScrape(username, key, ^(NSArray<ApolloSocialLink *> *fresh) {
                 if (fresh && !ApolloSLLinksEqual(fresh, disk) && completion) completion(fresh);
             });
@@ -580,7 +678,15 @@ static void ApolloSLFetchLinks(NSString *username, void (^completion)(NSArray<Ap
         return;
     }
 
-    // 3) Cold — scrape now.
+    // 3) A recent total failure (walled network, offline, etc.) — back off
+    //    instead of re-running the full scrape sequence on every visit.
+    NSDate *recentFailure = ApolloSLRecentFailures()[key];
+    if (recentFailure && [[NSDate date] timeIntervalSinceDate:recentFailure] < kSLFailureBackoff) {
+        if (completion) completion(nil);
+        return;
+    }
+
+    // 4) Cold — scrape now.
     ApolloSLStartScrape(username, key, completion);
 }
 
@@ -720,7 +826,22 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
         ApolloPresentWebURLFromViewController(opener, url);
         return;
     }
-    // Non-web schemes (mailto:, tel:, app links) — hand off to the system.
+    // These links are scraped from another (possibly hostile) user's profile
+    // page — only hand off schemes an actual social/contact link would use.
+    // ApolloSLTypeForHost's own type map is entirely http(s) hosts plus
+    // "mailto:", so anything outside this small set is an unexpected/crafted
+    // scheme (e.g. some other installed app's custom deep link) rather than
+    // a legitimate social link, and is silently ignored instead of handed to
+    // -openURL:.
+    static NSSet<NSString *> *allowedNonWebSchemes;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        allowedNonWebSchemes = [NSSet setWithArray:@[@"mailto", @"tel", @"telprompt", @"sms", @"facetime", @"facetime-audio"]];
+    });
+    if (![allowedNonWebSchemes containsObject:scheme]) {
+        ApolloLog(@"[SocialLinks] blocked open of disallowed scheme=%@", scheme ?: @"(none)");
+        return;
+    }
     [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
 }
 
@@ -781,6 +902,12 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
 @property (nonatomic, strong) UILabel *headerLabel;     // "Social Links"
 @property (nonatomic, strong) NSMutableArray<ApolloSLPillView *> *pillViews;  // <=3 links
 @property (nonatomic, strong) UIView *badgeRow;         // >3 links: icon badges, tap -> sheet
+// Set by -refresh: the sticky "never let empty wipe shown links" guard in
+// -reload exists to kill background-revalidation flicker, but that means an
+// explicit pull-to-refresh could never notice the user removed every link on
+// Reddit. One-shot: consumed by the very next reload completion regardless
+// of outcome, so it can't leak into a later background revalidation.
+@property (nonatomic) BOOL trustNextResult;
 @end
 
 @implementation ApolloProfileSocialLinksView
@@ -848,6 +975,8 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
     if (self.loadedUsername && [self.loadedUsername caseInsensitiveCompare:self.username] == NSOrderedSame) return;
 
     NSString *want = self.username;
+    BOOL trustResult = self.trustNextResult;
+    self.trustNextResult = NO;
     __weak typeof(self) weakSelf = self;  // don't keep the band alive past the scrape
     ApolloSLFetchLinks(want, ^(NSArray<ApolloSocialLink *> *links) {
         typeof(self) strongSelf = weakSelf;
@@ -857,11 +986,14 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
         // Sticky: once links are showing for this user, never let a later empty/failed
         // scrape wipe them — only a fresh NON-empty result replaces them. This kills the
         // "appear then disappear" flicker when a re-scrape momentarily comes back empty.
+        // Bypassed once for an explicit -refresh (trustResult), so pull-to-refresh can
+        // actually notice the user removed every link on Reddit — a confirmed-empty
+        // result (links non-nil) still wins over stale UI even if links were showing.
         if (links.count > 0) {
             strongSelf.links = links;
             strongSelf.loadedUsername = want;
-        } else if (links != nil && strongSelf.links.count == 0) {
-            strongSelf.links = @[];           // confirmed none, nothing shown yet
+        } else if (links != nil && (trustResult || strongSelf.links.count == 0)) {
+            strongSelf.links = @[];           // confirmed none — cleared or nothing shown yet
             strongSelf.loadedUsername = want; // don't re-scrape a confirmed-empty profile
         } else {
             return; // nil failure, or empty while links are already shown → keep current
@@ -877,7 +1009,9 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
     NSString *key = self.username.lowercaseString;
     [ApolloSLLinksCache() removeObjectForKey:key];
     ApolloSLDiskRemove(key);  // force a fresh scrape, not the persisted copy
+    ApolloSLClearRecentFailure(key); // explicit retry bypasses the failure backoff too
     self.loadedUsername = nil;
+    self.trustNextResult = YES;
     [self reload];
 }
 
