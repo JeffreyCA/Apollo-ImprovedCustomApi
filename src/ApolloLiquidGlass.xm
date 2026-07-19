@@ -998,6 +998,12 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
     // and treat controls / labels / image views / visual-effect bubbles as edges.
     CGFloat leftLimit = 0;
     CGFloat rightLimit = CGRectGetWidth(bar.bounds);
+    // Whether a real sibling was actually found on each side, as opposed to
+    // leftLimit/rightLimit just sitting at their empty-bar defaults above —
+    // the centering formula below needs to tell "nothing here" apart from
+    // "content here, and it happens to reach the edge."
+    BOOL foundLeftContent = NO;
+    BOOL foundRightContent = NO;
     NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:bar];
     while (queue.count > 0) {
         UIView *v = queue.firstObject;
@@ -1019,8 +1025,10 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
             CGRect sibInBar = [child.superview convertRect:child.frame toView:bar];
             if (CGRectGetMaxX(sibInBar) <= CGRectGetMinX(frameInBar) + 0.5) {
                 leftLimit = MAX(leftLimit, CGRectGetMaxX(sibInBar));
+                foundLeftContent = YES;
             } else if (CGRectGetMinX(sibInBar) + 0.5 >= CGRectGetMaxX(frameInBar)) {
                 rightLimit = MIN(rightLimit, CGRectGetMinX(sibInBar));
+                foundRightContent = YES;
             }
         }
     }
@@ -1072,16 +1080,23 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
     CGFloat minCenter = leftLimit + halfWidth + kEdgePadding;
     CGFloat maxCenter = rightLimit - halfWidth - kEdgePadding;
 
-    // Center on the midpoint of the space actually free between the bar's
-    // leading and trailing content (leftLimit/rightLimit), not the bar's own
-    // geometric midpoint (CGRectGetMidX(bar.bounds)) — a wider trailing
-    // cluster (e.g. a 3-icon moderator capsule vs. a single back button)
-    // shifts the bar's own midpoint well past the true available middle, so
-    // the title always crowded whichever side reserved more space.
+    // Only deviate from the bar's true geometric midpoint when BOTH sides
+    // actually carry sibling content — that's the specific case (e.g. a
+    // single back button facing a 3-icon moderator capsule) where a wider
+    // trailing cluster pulls the visual balance point away from true center,
+    // and centering on the midpoint of the free space between the two edges
+    // corrects for it. With content on only one side (a plain back button,
+    // nothing trailing) or neither (no bar items at all), that same midpoint
+    // math instead drags the title toward whichever side is empty for no
+    // visual reason — a bare back button doesn't need to be "balanced
+    // against," so those bars should just stay at true center like every
+    // other screen already expects.
+    CGFloat barCenter = CGRectGetMidX(bar.bounds);
     CGFloat contentCenter = (leftLimit + rightLimit) / 2.0;
+    CGFloat preferredCenter = (foundLeftContent && foundRightContent) ? contentCenter : barCenter;
     CGFloat targetCenter = (minCenter > maxCenter)
         ? unadjustedCenter   // bar too cramped — leave UIKit's layout alone
-        : MIN(MAX(contentCenter, minCenter), maxCenter);
+        : MIN(MAX(preferredCenter, minCenter), maxCenter);
 
     CGFloat newTx = targetCenter - unadjustedCenter;
     if (fabs(newTx - existingTx) < 0.5) return;
