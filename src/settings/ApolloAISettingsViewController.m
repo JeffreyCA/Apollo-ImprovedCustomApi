@@ -7,16 +7,75 @@
 #import "UserDefaultConstants.h"
 
 #import <math.h>
+#import <QuartzCore/QuartzCore.h>
 
 // A UISlider that carries a weak pointer to the value label shown beside its
 // title, so the value-changed handler can update the text without re-reading
 // the whole row. Used by the detent-slider rows below (post length + detail).
 @interface ApolloAISettingsSlider : UISlider
 @property (nonatomic, weak) UILabel *apollo_valueLabel;
+@property (nonatomic, strong) UISelectionFeedbackGenerator *apollo_feedback;
+@property (nonatomic) NSInteger apollo_lastSnappedIndex;
+@property (nonatomic) NSInteger apollo_pendingIndex;
+@property (nonatomic) NSInteger apollo_pendingStreak;
+@property (nonatomic) CFTimeInterval apollo_lastFeedbackTime;
 @end
 
 @implementation ApolloAISettingsSlider
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        _apollo_feedback = [[UISelectionFeedbackGenerator alloc] init];
+    }
+    return self;
+}
+
+// iOS 26 adds a private fluid-slider interaction whose feedback conductor
+// vibrates continuously while the thumb moves. These are discrete detent
+// sliders, so suppress that interaction and provide one selection tap ourselves
+// only after a new stop has been confirmed.
+- (void)addInteraction:(id<UIInteraction>)interaction {
+    if ([NSStringFromClass([interaction class]) containsString:@"FluidSliderInteraction"]) return;
+    [super addInteraction:interaction];
+}
+
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (!self.window) return;
+    for (id<UIInteraction> interaction in [self.interactions copy]) {
+        if ([NSStringFromClass([interaction class]) containsString:@"FluidSliderInteraction"]) {
+            [self removeInteraction:interaction];
+        }
+    }
+    for (NSString *selectorName in @[@"_setModulationFeedbackGenerator:", @"_setEdgeFeedbackGenerator:"]) {
+        SEL selector = NSSelectorFromString(selectorName);
+        if (![self respondsToSelector:selector]) continue;
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [self performSelector:selector withObject:nil];
+        #pragma clang diagnostic pop
+    }
+}
+
+- (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    self.apollo_lastSnappedIndex = (NSInteger)lroundf(self.value);
+    self.apollo_pendingIndex = self.apollo_lastSnappedIndex;
+    self.apollo_pendingStreak = 0;
+    [self.apollo_feedback prepare];
+    return [super beginTrackingWithTouch:touch withEvent:event];
+}
 @end
+
+// Keep a held finger from oscillating between neighboring stops. The 0.15
+// index-unit dead band is much wider than normal fingertip jitter while still
+// making deliberate movement feel immediate.
+static NSInteger ApolloAISettingsHystereticIndex(float raw, NSInteger current,
+                                                  NSInteger minimum, NSInteger maximum) {
+    current = MAX(minimum, MIN(current, maximum));
+    while (current < maximum && raw > (float)current + 0.65f) current++;
+    while (current > minimum && raw < (float)current - 0.65f) current--;
+    return current;
+}
 
 static NSString *ApolloAISettingsDetailText(ApolloAISummaryDetail detail) {
     switch (detail) {
@@ -269,6 +328,8 @@ typedef NS_ENUM(NSInteger, ApolloAISummaryMode) {
     slider.minimumValue = 0.0f;
     slider.maximumValue = (float)MAX(0, (NSInteger)tickLabels.count - 1);
     slider.value = (float)selectedIndex;
+    slider.apollo_lastSnappedIndex = selectedIndex;
+    slider.apollo_pendingIndex = selectedIndex;
     slider.enabled = enabled;
     slider.continuous = YES;
     slider.accessibilityLabel = label;
@@ -314,12 +375,35 @@ typedef NS_ENUM(NSInteger, ApolloAISummaryMode) {
 }
 
 - (NSInteger)snappedIndexForSlider:(ApolloAISettingsSlider *)slider {
-    NSInteger index = (NSInteger)lroundf(slider.value);
-    index = MAX((NSInteger)slider.minimumValue, MIN(index, (NSInteger)slider.maximumValue));
-    if ((NSInteger)lroundf(slider.value) != index || fabsf(slider.value - (float)index) > 0.001f) {
-        [slider setValue:(float)index animated:NO];
+    NSInteger minimum = (NSInteger)slider.minimumValue;
+    NSInteger maximum = (NSInteger)slider.maximumValue;
+    NSInteger candidate = ApolloAISettingsHystereticIndex(slider.value,
+                                                           slider.apollo_lastSnappedIndex,
+                                                           minimum, maximum);
+    if (candidate == slider.apollo_lastSnappedIndex) {
+        slider.apollo_pendingIndex = candidate;
+        slider.apollo_pendingStreak = 0;
+    } else if (candidate == slider.apollo_pendingIndex) {
+        slider.apollo_pendingStreak++;
+    } else {
+        slider.apollo_pendingIndex = candidate;
+        slider.apollo_pendingStreak = 1;
     }
-    return index;
+
+    CFTimeInterval now = CACurrentMediaTime();
+    BOOL lockedOut = (now - slider.apollo_lastFeedbackTime) < 0.15;
+    BOOL confirmed = candidate != slider.apollo_lastSnappedIndex &&
+        slider.apollo_pendingStreak >= 2 && !lockedOut;
+    if (confirmed) {
+        slider.apollo_lastSnappedIndex = candidate;
+        slider.apollo_pendingStreak = 0;
+        slider.apollo_lastFeedbackTime = now;
+        [slider.apollo_feedback selectionChanged];
+        [slider.apollo_feedback prepare];
+    }
+
+    [slider setValue:(float)slider.apollo_lastSnappedIndex animated:confirmed];
+    return slider.apollo_lastSnappedIndex;
 }
 
 - (void)postThresholdSliderChanged:(ApolloAISettingsSlider *)slider {
