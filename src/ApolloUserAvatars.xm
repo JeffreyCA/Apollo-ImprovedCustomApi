@@ -594,7 +594,6 @@ static UIFont *ApolloProfileClassicNameFont(void) {
 
     CGFloat nameHeight = ceil(ApolloProfileClassicNameFont().lineHeight) + 2.0;
     CGFloat subnameHeight = ceil(ApolloIdentityHeaderSubnameFont().lineHeight) + 2.0;
-    CGFloat stackHeight = nameHeight + subnameHeight;
 
     // The Edit pill (own profile only) claims the row's outer top corner
     // (mirrors with RTL too — see editButtonX in layoutSubviews) — reserve
@@ -604,7 +603,16 @@ static UIFont *ApolloProfileClassicNameFont(void) {
     CGFloat nameRight = rtl ? (avatarFrame.origin.x - ApolloProfileClassicAvatarNameGap) : (width - margin - editReserve);
     CGFloat nameWidth = MAX(60.0, nameRight - nameX);
 
-    CGFloat stackY = avatarFrame.origin.y + (diameter - stackHeight) / 2.0;
+    // Top-aligned to the banner's bottom edge, not centered on the avatar's
+    // full height. ApolloIdentityAvatarOverlap is exactly half the avatar's
+    // diameter, so the avatar's own vertical center sits precisely on that
+    // seam — centering the name/subname stack around the same point split it
+    // across both halves, with the name's top few points rendering over the
+    // banner art instead of cleanly on the solid background below. Starting
+    // flush at the seam keeps the whole stack on the background at any
+    // Dynamic Type size (a centered stack would grow back upward into the
+    // banner once stackHeight exceeded the ~48pt visible/below-banner half).
+    CGFloat stackY = CGRectGetHeight(identity->bannerFrame);
     CGRect nameFrame = CGRectMake(nameX, stackY, nameWidth, nameHeight);
     CGRect subnameFrame = CGRectMake(nameX, CGRectGetMaxY(nameFrame) + 1.0, nameWidth, subnameHeight);
 
