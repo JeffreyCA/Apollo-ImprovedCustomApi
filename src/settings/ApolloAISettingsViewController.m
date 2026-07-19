@@ -8,6 +8,72 @@
 
 #import <math.h>
 #import <QuartzCore/QuartzCore.h>
+#import <objc/runtime.h>
+
+static UIViewController *ApolloAISettingsViewControllerForView(UIView *view) {
+    UIResponder *responder = view;
+    while (responder) {
+        if ([responder isKindOfClass:[UIViewController class]]) {
+            return (UIViewController *)responder;
+        }
+        responder = responder.nextResponder;
+    }
+    return nil;
+}
+
+// Apollo installs a full-width back-swipe recognizer above settings screens.
+// Claim touches that begin on an enabled slider so that recognizer cannot
+// cancel UIControl tracking before the detent confirmation guard sees a second
+// movement frame. This mirrors Inline Media's device-proven slider handling.
+@interface ApolloAISettingsSliderClaimGesture : UIGestureRecognizer
+@property (nonatomic, weak) UITouch *apollo_claimedTouch;
+@end
+
+@implementation ApolloAISettingsSliderClaimGesture
+- (instancetype)initWithTarget:(id)target action:(SEL)action {
+    if ((self = [super initWithTarget:target action:action])) {
+        self.cancelsTouchesInView = NO;
+        self.delaysTouchesBegan = NO;
+        self.delaysTouchesEnded = NO;
+    }
+    return self;
+}
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.state != UIGestureRecognizerStatePossible) return;
+    UISlider *slider = [self.view isKindOfClass:[UISlider class]] ? (UISlider *)self.view : nil;
+    if (slider && !slider.isEnabled) {
+        self.state = UIGestureRecognizerStateFailed;
+        return;
+    }
+    self.apollo_claimedTouch = touches.anyObject;
+    self.state = UIGestureRecognizerStateBegan;
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.apollo_claimedTouch && ![touches containsObject:self.apollo_claimedTouch]) return;
+    if (self.state == UIGestureRecognizerStateBegan || self.state == UIGestureRecognizerStateChanged) {
+        self.state = UIGestureRecognizerStateChanged;
+    }
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.apollo_claimedTouch && ![touches containsObject:self.apollo_claimedTouch]) return;
+    if (self.state == UIGestureRecognizerStateBegan || self.state == UIGestureRecognizerStateChanged) {
+        self.state = UIGestureRecognizerStateEnded;
+    }
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.apollo_claimedTouch && ![touches containsObject:self.apollo_claimedTouch]) return;
+    self.state = UIGestureRecognizerStateCancelled;
+}
+
+- (void)reset {
+    [super reset];
+    self.apollo_claimedTouch = nil;
+}
+@end
 
 // A UISlider that carries a weak pointer to the value label shown beside its
 // title, so the value-changed handler can update the text without re-reading
@@ -19,15 +85,49 @@
 @property (nonatomic) NSInteger apollo_pendingIndex;
 @property (nonatomic) NSInteger apollo_pendingStreak;
 @property (nonatomic) CFTimeInterval apollo_lastFeedbackTime;
+@property (nonatomic, strong) ApolloAISettingsSliderClaimGesture *apollo_claimGesture;
+@property (nonatomic, strong) NSHashTable<UIGestureRecognizer *> *apollo_wiredBackGestures;
 @end
+
+static NSInteger ApolloAISettingsHystereticIndex(float raw, NSInteger current,
+                                                  NSInteger minimum, NSInteger maximum);
 
 @implementation ApolloAISettingsSlider
 
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
         _apollo_feedback = [[UISelectionFeedbackGenerator alloc] init];
+        _apollo_wiredBackGestures = [NSHashTable weakObjectsHashTable];
+        _apollo_claimGesture = [[ApolloAISettingsSliderClaimGesture alloc] initWithTarget:nil action:NULL];
+        [self addGestureRecognizer:_apollo_claimGesture];
     }
     return self;
+}
+
+- (void)apollo_wireSwipeBackFailureRequirements {
+    if (!self.apollo_claimGesture) return;
+
+    UIGestureRecognizer *pop =
+        ApolloAISettingsViewControllerForView(self).navigationController.interactivePopGestureRecognizer;
+    if (pop && ![self.apollo_wiredBackGestures containsObject:pop]) {
+        [pop requireGestureRecognizerToFail:self.apollo_claimGesture];
+        [self.apollo_wiredBackGestures addObject:pop];
+    }
+
+    for (UIView *view = self.superview; view; view = view.superview) {
+        UIGestureRecognizer *scrollPan = [view isKindOfClass:[UIScrollView class]]
+            ? ((UIScrollView *)view).panGestureRecognizer : nil;
+        for (UIGestureRecognizer *gesture in view.gestureRecognizers) {
+            if (gesture == self.apollo_claimGesture || gesture == scrollPan || gesture == pop) continue;
+            if ([self.apollo_wiredBackGestures containsObject:gesture]) continue;
+            NSString *className = NSStringFromClass([gesture class]);
+            BOOL panLike = [gesture isKindOfClass:[UIPanGestureRecognizer class]] ||
+                [className containsString:@"ParallaxTransition"];
+            if (!panLike) continue;
+            [gesture requireGestureRecognizerToFail:self.apollo_claimGesture];
+            [self.apollo_wiredBackGestures addObject:gesture];
+        }
+    }
 }
 
 // iOS 26 adds a private fluid-slider interaction whose feedback conductor
@@ -55,14 +155,90 @@
         [self performSelector:selector withObject:nil];
         #pragma clang diagnostic pop
     }
+    [self apollo_wireSwipeBackFailureRequirements];
+}
+
+- (void)apollo_applyTouch:(UITouch *)touch {
+    CGRect track = [self trackRectForBounds:self.bounds];
+    CGFloat width = MAX(1.0, CGRectGetWidth(track));
+    CGFloat fraction = ([touch locationInView:self].x - CGRectGetMinX(track)) / width;
+    fraction = MIN(1.0, MAX(0.0, fraction));
+    float raw = self.minimumValue + fraction * (self.maximumValue - self.minimumValue);
+    NSInteger minimum = (NSInteger)self.minimumValue;
+    NSInteger maximum = (NSInteger)self.maximumValue;
+    NSInteger candidate = ApolloAISettingsHystereticIndex(raw,
+                                                            self.apollo_lastSnappedIndex,
+                                                            minimum, maximum);
+
+    // Match Inline Media's detent handling: confirm a crossing from the touch
+    // position itself instead of letting UISlider move continuously and then
+    // snapping it backward from the value-changed callback. Resetting the stock
+    // slider during tracking prevented it from ever progressing to another stop.
+    if (candidate == self.apollo_lastSnappedIndex) {
+        self.apollo_pendingIndex = candidate;
+        self.apollo_pendingStreak = 0;
+    } else if (candidate == self.apollo_pendingIndex) {
+        self.apollo_pendingStreak++;
+    } else {
+        self.apollo_pendingIndex = candidate;
+        self.apollo_pendingStreak = 1;
+    }
+
+    CFTimeInterval now = CACurrentMediaTime();
+    BOOL lockedOut = (now - self.apollo_lastFeedbackTime) < 0.15;
+    BOOL confirmed = candidate != self.apollo_lastSnappedIndex &&
+        self.apollo_pendingStreak >= 2 && !lockedOut;
+    if (!confirmed) return;
+
+    self.apollo_lastSnappedIndex = candidate;
+    self.apollo_pendingStreak = 0;
+    self.apollo_lastFeedbackTime = now;
+    [self setValue:(float)candidate animated:YES];
+    [self.apollo_feedback selectionChanged];
+    [self.apollo_feedback prepare];
+    [self sendActionsForControlEvents:UIControlEventValueChanged];
 }
 
 - (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    [self apollo_wireSwipeBackFailureRequirements];
     self.apollo_lastSnappedIndex = (NSInteger)lroundf(self.value);
     self.apollo_pendingIndex = self.apollo_lastSnappedIndex;
     self.apollo_pendingStreak = 0;
     [self.apollo_feedback prepare];
-    return [super beginTrackingWithTouch:touch withEvent:event];
+    [self apollo_applyTouch:touch];
+    return YES;
+}
+
+- (BOOL)continueTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    [self apollo_applyTouch:touch];
+    return YES;
+}
+@end
+
+// UITableView normally delays and may cancel a control's touches once its pan
+// recognizer sees movement. Scope immediate, non-cancellable delivery to these
+// sliders so the rest of the AI settings screen keeps normal scrolling.
+@interface ApolloAISettingsTableView : UITableView
+@end
+
+@implementation ApolloAISettingsTableView
+static BOOL ApolloAISettingsViewIsInSlider(UIView *view) {
+    for (UIView *candidate = view; candidate; candidate = candidate.superview) {
+        if ([candidate isKindOfClass:[ApolloAISettingsSlider class]]) return YES;
+    }
+    return NO;
+}
+
+- (BOOL)touchesShouldBegin:(NSSet<UITouch *> *)touches
+                 withEvent:(UIEvent *)event
+             inContentView:(UIView *)view {
+    if (ApolloAISettingsViewIsInSlider(view)) return YES;
+    return [super touchesShouldBegin:touches withEvent:event inContentView:view];
+}
+
+- (BOOL)touchesShouldCancelInContentView:(UIView *)view {
+    if (ApolloAISettingsViewIsInSlider(view)) return NO;
+    return [super touchesShouldCancelInContentView:view];
 }
 @end
 
@@ -112,6 +288,10 @@ typedef NS_ENUM(NSInteger, ApolloAISummaryMode) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Apollo AI";
+    if (![self.tableView isKindOfClass:[ApolloAISettingsTableView class]]) {
+        object_setClass(self.tableView, [ApolloAISettingsTableView class]);
+    }
+    self.tableView.delaysContentTouches = NO;
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -377,33 +557,8 @@ typedef NS_ENUM(NSInteger, ApolloAISummaryMode) {
 - (NSInteger)snappedIndexForSlider:(ApolloAISettingsSlider *)slider {
     NSInteger minimum = (NSInteger)slider.minimumValue;
     NSInteger maximum = (NSInteger)slider.maximumValue;
-    NSInteger candidate = ApolloAISettingsHystereticIndex(slider.value,
-                                                           slider.apollo_lastSnappedIndex,
-                                                           minimum, maximum);
-    if (candidate == slider.apollo_lastSnappedIndex) {
-        slider.apollo_pendingIndex = candidate;
-        slider.apollo_pendingStreak = 0;
-    } else if (candidate == slider.apollo_pendingIndex) {
-        slider.apollo_pendingStreak++;
-    } else {
-        slider.apollo_pendingIndex = candidate;
-        slider.apollo_pendingStreak = 1;
-    }
-
-    CFTimeInterval now = CACurrentMediaTime();
-    BOOL lockedOut = (now - slider.apollo_lastFeedbackTime) < 0.15;
-    BOOL confirmed = candidate != slider.apollo_lastSnappedIndex &&
-        slider.apollo_pendingStreak >= 2 && !lockedOut;
-    if (confirmed) {
-        slider.apollo_lastSnappedIndex = candidate;
-        slider.apollo_pendingStreak = 0;
-        slider.apollo_lastFeedbackTime = now;
-        [slider.apollo_feedback selectionChanged];
-        [slider.apollo_feedback prepare];
-    }
-
-    [slider setValue:(float)slider.apollo_lastSnappedIndex animated:confirmed];
-    return slider.apollo_lastSnappedIndex;
+    NSInteger index = (NSInteger)lroundf(slider.value);
+    return MAX(minimum, MIN(index, maximum));
 }
 
 - (void)postThresholdSliderChanged:(ApolloAISettingsSlider *)slider {
