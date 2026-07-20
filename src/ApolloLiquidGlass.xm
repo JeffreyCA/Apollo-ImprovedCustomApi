@@ -781,6 +781,17 @@ static id ApolloJumpBarObjectIvar(UIView *jumpBar, const char *name) {
     return ivar ? object_getIvar(jumpBar, ivar) : nil;
 }
 
+// Whether the JumpBar is in "type a subreddit name" mode. Apollo swaps the name
+// label and disclosure arrow out for searchTextField, but it does NOT clear the
+// label's text — it only hides it — so anything measuring that label has to
+// check this first or it sizes the bar to invisible content.
+static BOOL ApolloJumpBarIsSearching(UIView *jumpBar) {
+    id searchField = ApolloJumpBarObjectIvar(jumpBar, "searchTextField");
+    if (![searchField isKindOfClass:UIView.class]) return NO;
+    UIView *field = (UIView *)searchField;
+    return !field.hidden && field.alpha > 0.01;
+}
+
 static void ApolloCollectNavigationTitleContent(UIView *root,
                                                 UIView *excluded,
                                                 NSMutableArray<UIView *> *content) {
@@ -851,20 +862,48 @@ static void ApolloCollectNavigationTitleContent(UIView *root,
 }
 
 - (CGRect)glassFrameForHostView:(UIView *)hostView candidateViews:(NSArray<UIView *> *)candidateViews {
-    CGRect contentFrame = CGRectNull;
-    for (UIView *view in candidateViews) {
-        if (![view isKindOfClass:UIView.class] || view.hidden || view.alpha < 0.01 ||
-            CGRectIsEmpty(view.bounds)) continue;
-        CGRect frame = [view convertRect:view.bounds toView:hostView];
-        contentFrame = CGRectIsNull(contentFrame) ? frame : CGRectUnion(contentFrame, frame);
+    const CGFloat kVerticalPadding = 8.0;
+    CGRect frame;
+
+    if (ApolloJumpBarIsSearching(hostView)) {
+        // Search mode: Apollo re-sizes searchTextField to fit the text on every
+        // keystroke, so a capsule hugging it grew and shrank under the caret,
+        // and any capsule narrower than the text let the text spill out of it.
+        // Pin it to the whole bar instead — which is what it now is: a search
+        // field spanning the gap between the leading and trailing bar buttons.
+        CGRect bounds = hostView.bounds;
+        if (CGRectGetWidth(bounds) <= 0 || CGRectGetHeight(bounds) <= 0) return CGRectNull;
+        id field = ApolloJumpBarObjectIvar(hostView, "searchTextField");
+        CGFloat lineHeight = 0;
+        if ([field isKindOfClass:UITextField.class]) {
+            lineHeight = ceil(((UITextField *)field).font.lineHeight);
+        }
+        if (lineHeight <= 0) lineHeight = 20.0;
+        // Same height the content path below produces, so opening search
+        // changes the capsule's width without also resizing its height.
+        CGFloat height = MIN(CGRectGetHeight(bounds), lineHeight + kVerticalPadding * 2.0);
+        const CGFloat kSearchSideInset = 8.0;
+        frame = CGRectMake(kSearchSideInset,
+                           (CGRectGetHeight(bounds) - height) / 2.0,
+                           MAX(0.0, CGRectGetWidth(bounds) - kSearchSideInset * 2.0),
+                           height);
+        if (CGRectIsEmpty(frame)) return CGRectNull;
+    } else {
+        CGRect contentFrame = CGRectNull;
+        for (UIView *view in candidateViews) {
+            if (![view isKindOfClass:UIView.class] || view.hidden || view.alpha < 0.01 ||
+                CGRectIsEmpty(view.bounds)) continue;
+            CGRect viewFrame = [view convertRect:view.bounds toView:hostView];
+            contentFrame = CGRectIsNull(contentFrame) ? viewFrame : CGRectUnion(contentFrame, viewFrame);
+        }
+
+        if (CGRectIsNull(contentFrame) || CGRectIsEmpty(contentFrame)) return CGRectNull;
+
+        // UINavigationBar title controls are often only as wide as their label.
+        // Permit overhang so the capsule retains real padding instead of
+        // collapsing to a plain title label's intrinsic width and height.
+        frame = CGRectInset(contentFrame, -14.0, -kVerticalPadding);
     }
-
-    if (CGRectIsNull(contentFrame) || CGRectIsEmpty(contentFrame)) return CGRectNull;
-
-    CGRect frame = CGRectInset(contentFrame, -14.0, -8.0);
-    // UINavigationBar title controls are often only as wide as their label.
-    // Permit overhang so the capsule retains real padding instead of collapsing
-    // to a plain title label's intrinsic width and height.
 
     CGFloat scale = hostView.window.screen.scale ?: UIScreen.mainScreen.scale;
     frame.origin.x = round(frame.origin.x * scale) / scale;
@@ -1046,7 +1085,21 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
     if (topVC && ApolloSubredditTitleShouldTruncate(topVC)) {
         UIView *jumpBar = ApolloFindJumpBar(titleControl);
         CGFloat availableWidth = (rightLimit - kEdgePadding) - (leftLimit + kEdgePadding);
-        if (jumpBar && availableWidth > 0) {
+        if (jumpBar && ApolloJumpBarIsSearching(jumpBar)) {
+            // Search mode: the visible content is the text field, not the name
+            // label measured below — which Apollo hides but leaves populated,
+            // so it still measures as if it were on screen. Sizing to it froze
+            // the bar at the name's width while UIKit had already widened the
+            // title control for editing, leaving the field (and the capsule
+            // around it) centred inside a stale, too-narrow bar. Hand the width
+            // back to Apollo's own layout for as long as editing lasts.
+            CGFloat fullWidth = CGRectGetWidth(titleControl.bounds);
+            if (fullWidth > 0 && fabs(CGRectGetWidth(jumpBar.frame) - fullWidth) > 0.5) {
+                CGRect jumpBarFrame = jumpBar.frame;
+                jumpBarFrame.size.width = fullWidth;
+                jumpBar.frame = jumpBarFrame;
+            }
+        } else if (jumpBar && availableWidth > 0) {
             id nameLabel = ApolloJumpBarObjectIvar(jumpBar, "nameLabel");
             id arrowImageView = ApolloJumpBarObjectIvar(jumpBar, "arrowImageView");
             CGFloat naturalWidth = 0;
@@ -1144,6 +1197,35 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
     // Skip adjustment for now until we can find a more robust solution that works with the dynamic item changes.
     if (sEnableBulkTranslation) return;
     ApolloRecenterTitleControl(self);
+}
+
+%end
+
+// MARK: - JumpBar search-mode capsule tracking
+//
+// The capsule is only re-measured from _UINavigationBarTitleControl's own
+// layout pass, and that pass does not fire when search mode opens or closes:
+// Apollo swaps the name label for searchTextField and resizes it from the
+// JumpBar's layout, inside a title control whose bounds never change. The
+// capsule therefore kept whatever geometry it had before the swap. Re-measuring
+// from the JumpBar's own layout is what actually tracks it.
+
+%hook _TtC6Apollo7JumpBar
+
+- (void)layoutSubviews {
+    %orig;
+    if (!IsLiquidGlass()) return;
+    // Schedule only — never size the capsule from inside a layout pass (the
+    // glass view is our own subview of this bar). The controller's refresh is
+    // already coalesced and no-ops when the frame is unchanged.
+    for (UIView *view = ((UIView *)self).superview; view != nil; view = view.superview) {
+        if ([NSStringFromClass(view.class) isEqualToString:@"_UINavigationBarTitleControl"]) {
+            ApolloNavigationTitleGlassController *controller =
+                objc_getAssociatedObject(view, &kApolloNavigationTitleGlassControllerKey);
+            [controller scheduleTargetRefresh];
+            return;
+        }
+    }
 }
 
 %end

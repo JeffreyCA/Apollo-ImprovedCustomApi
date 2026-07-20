@@ -171,6 +171,11 @@ NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
         dict[@"allowsImageComments"] = @(info.allowsImageComments);
         dict[@"allowsGifComments"] = @(info.allowsGifComments);
     }
+    // Written only when known, so a reloaded entry that never carried the flag
+    // stays nil (unknown) rather than decoding as a definite "not subscribed."
+    if (info.userIsSubscriber != nil) {
+        dict[@"userIsSubscriber"] = @(info.userIsSubscriber.boolValue);
+    }
     return dict;
 }
 
@@ -203,6 +208,10 @@ NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
     info.commentMediaInfoAvailable = [dict[@"commentMediaInfoAvailable"] boolValue];
     info.allowsImageComments = [dict[@"allowsImageComments"] boolValue];
     info.allowsGifComments = [dict[@"allowsGifComments"] boolValue];
+    id storedSubscriberFlag = dict[@"userIsSubscriber"];
+    if ([storedSubscriberFlag isKindOfClass:[NSNumber class]]) {
+        info.userIsSubscriber = @([storedSubscriberFlag boolValue]);
+    }
     return info;
 }
 
@@ -323,6 +332,14 @@ NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
                                                     bannerURL:bannerURL
                                               subscriberCount:subscriberCount
                                                     fetchedAt:[NSDate date]];
+
+    // Only present on an authenticated fetch; leaving it nil otherwise is what
+    // lets callers tell "not subscribed" apart from "nobody asked reddit as
+    // this user." Reddit sends a JSON bool, which lands as an NSNumber.
+    id subscriberFlag = dataDict[@"user_is_subscriber"];
+    if ([subscriberFlag isKindOfClass:[NSNumber class]]) {
+        info.userIsSubscriber = @([subscriberFlag boolValue]);
+    }
 
     // `allowed_media_in_comments` is an array of permitted media kinds for
     // comments. Absent/empty means no media is allowed. Values seen in the wild:

@@ -58,6 +58,11 @@ static const void *kApolloSubredditSearchOriginalBackgroundKey = &kApolloSubredd
 static const void *kApolloSubredditSearchOriginalTextColorKey = &kApolloSubredditSearchOriginalTextColorKey;
 static const void *kApolloSubredditSearchOriginalPlaceholderKey = &kApolloSubredditSearchOriginalPlaceholderKey;
 static const void *kApolloSubredditSearchOriginalTintKey = &kApolloSubredditSearchOriginalTintKey;
+// What our own restyle last pushed into the field (as opposed to the
+// kApolloSubredditSearchOriginal* keys, which hold Apollo's untouched values) —
+// lets a repeat pass with an unchanged banner/placeholder do nothing.
+static const void *kApolloSubredditSearchAppliedForegroundKey = &kApolloSubredditSearchAppliedForegroundKey;
+static const void *kApolloSubredditSearchAppliedPlaceholderKey = &kApolloSubredditSearchAppliedPlaceholderKey;
 
 static Class sPostsViewControllerClass = Nil;
 
@@ -149,7 +154,14 @@ static void ApolloSubredditRestoreSearchBar(UIViewController *viewController);
 static CGFloat const ApolloSubredditControlGlassTintAlpha = 0.62;
 
 static CGFloat const ApolloSubredditActionBottomGap = 16.0;  // gap below the Join pill, above the body
-static CGFloat const ApolloSubredditActionRowHeight = 42.0;  // Join pill height — matches the profile header's Follow pill
+static CGFloat const ApolloSubredditActionRowHeight = 42.0;  // Join pill height at default type — matches the profile header's Follow pill
+// Vertical breathing room around the pill's scaled title. 42pt around the
+// default-size (~20pt) line, kept as the growth rate for larger type.
+static CGFloat const ApolloSubredditActionRowVerticalPadding = 22.0;
+static CGFloat const ApolloSubredditAboutTogglePadding = 4.0;
+// Dimming applied to a control that is present but not tappable (subscription
+// state not yet known, or a subscribe/unsubscribe request in flight).
+static CGFloat const ApolloSubredditDisabledControlAlpha = 0.55;
 // Shorter than the profile header's banner (150pt) — a subreddit's icon/name
 // don't need as much vertical room as a profile's avatar/bio showcase, and
 // Jordan's own read on the first pass was "what a waste of space."
@@ -173,6 +185,16 @@ static CGFloat const ApolloSubredditFadedBannerAlpha = 0.011;
     CGFloat _cachedAboutWidth;
     NSString *_cachedAboutText;
     UIFont *_cachedAboutFont;
+    // Last accent actually pushed into the pill's fill/title colors, in
+    // RESOLVED (non-dynamic) form so a light/dark flip compares unequal and
+    // re-applies. apollo_applySubscriptionState:known: runs on every install
+    // pass (i.e. every viewDidLayoutSubviews), so without this the button
+    // rebuilt a fresh UIGlassEffect and re-set its title colors continuously.
+    UIColor *_appliedAccent;
+    // Whether the last accent apply took the no-Liquid-Glass fallback (solid
+    // fill, no glass subview) — lets the memo tell "already applied as a solid
+    // fill" apart from "never applied."
+    BOOL _appliedSolidFill;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -235,7 +257,6 @@ static CGFloat const ApolloSubredditFadedBannerAlpha = 0.011;
         [_subscribeButton addTarget:self action:@selector(apollo_subscribeTapped)
                    forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:_subscribeButton];
-        [self apollo_applySubscriptionState:NO known:NO];
 
         // Same treatment as the profile header's bio: body-size type, collapsed
         // to a few lines with a "more"/"less" toggle instead of a small,
@@ -258,6 +279,11 @@ static CGFloat const ApolloSubredditFadedBannerAlpha = 0.011;
         _aboutToggleButton.hidden = YES;
         [_aboutToggleButton addTarget:self action:@selector(apollo_toggleAboutExpanded) forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:_aboutToggleButton];
+
+        // Last, not right after the pill is built: this seeds the accent memo,
+        // and it also colours the about toggle — which has to exist by then or
+        // the memo would mark that accent applied while the toggle never got it.
+        [self apollo_applySubscriptionState:NO known:NO];
     }
     return self;
 }
@@ -295,6 +321,23 @@ static CGFloat const ApolloSubredditFadedBannerAlpha = 0.011;
     _cachedAboutWidth = width;
     _cachedAboutHeight = height;
     return height;
+}
+
+// The pill's and toggle's titles are Dynamic-Type-scaled and unclamped, so a
+// flat 42pt/22pt row clips the text inside the pill (glass path sets
+// clipsToBounds) or spills it outside the fill (fallback path) at accessibility
+// sizes. Grow both with the scaled font, keeping the default-size constants as
+// the floor — mirrors the about label deriving its own cap from lineHeight.
+- (CGFloat)apollo_subscribeButtonHeight {
+    CGFloat lineHeight = ceil(self.subscribeButton.titleLabel.font.lineHeight);
+    if (lineHeight <= 0.0) return ApolloSubredditActionRowHeight;
+    return MAX(ApolloSubredditActionRowHeight, lineHeight + ApolloSubredditActionRowVerticalPadding);
+}
+
+- (CGFloat)apollo_aboutToggleHeight {
+    CGFloat lineHeight = ceil(self.aboutToggleButton.titleLabel.font.lineHeight);
+    if (lineHeight <= 0.0) return ApolloSubredditAboutToggleHeight;
+    return MAX(ApolloSubredditAboutToggleHeight, lineHeight + ApolloSubredditAboutTogglePadding);
 }
 
 - (CGFloat)apollo_aboutFullHeightForWidth:(CGFloat)width {
@@ -355,7 +398,7 @@ static CGFloat const ApolloSubredditFadedBannerAlpha = 0.011;
         self.subscribeGlassView.hidden = !sSubredditShowJoinButton;
     }
     if (sSubredditShowJoinButton) {
-        CGFloat buttonHeight = ApolloSubredditActionRowHeight;
+        CGFloat buttonHeight = [self apollo_subscribeButtonHeight];
         if (apply) {
             // Grows for Dynamic Type and the longer "Joining…"/"Leaving…"
             // titles instead of clipping inside a fixed pill.
@@ -385,13 +428,14 @@ static CGFloat const ApolloSubredditFadedBannerAlpha = 0.011;
     if (aboutHeight > 0.0) {
         y += aboutHeight;
         if (showToggle) {
+            CGFloat toggleHeight = [self apollo_aboutToggleHeight];
             if (apply) {
                 [self.aboutToggleButton setTitle:(self.aboutExpanded ? @"less" : @"more") forState:UIControlStateNormal];
                 self.aboutToggleButton.accessibilityLabel = self.aboutExpanded ? @"Show less" : @"Show more";
-                self.aboutToggleButton.frame = CGRectMake(bodyX, y, bodyWidth, ApolloSubredditAboutToggleHeight);
+                self.aboutToggleButton.frame = CGRectMake(bodyX, y, bodyWidth, toggleHeight);
                 self.aboutToggleButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
             }
-            y += ApolloSubredditAboutToggleHeight;
+            y += toggleHeight;
         }
     }
 
@@ -424,7 +468,10 @@ static CGFloat const ApolloSubredditFadedBannerAlpha = 0.011;
     self.iconImageView.alpha = 1.0;
     self.displayNameLabel.alpha = 1.0;
     self.nameLabel.alpha = 1.0;
-    self.subscribeButton.alpha = 1.0;
+    // Force-unhide pass (see below): restore the pill to whatever its CURRENT
+    // interaction state calls for, not unconditionally to full strength — a
+    // hard 1.0 here would wipe the disabled dimming on the next layout.
+    self.subscribeButton.alpha = self.subscribeButton.enabled ? 1.0 : ApolloSubredditDisabledControlAlpha;
     self.aboutLabel.alpha = 1.0;
 
     CGFloat width = self.bounds.size.width;
@@ -491,29 +538,62 @@ static CGFloat const ApolloSubredditFadedBannerAlpha = 0.011;
     NSString *title = self.subscriptionRequestInFlight
         ? (subscribed ? @"Leaving…" : @"Joining…")
         : (subscribed ? @"Joined" : @"Join");
-    [self.subscribeButton setTitle:title forState:UIControlStateNormal];
-    self.subscribeButton.enabled = known && !self.subscriptionRequestInFlight;
+    // Re-setting an identical title still invalidates the button's intrinsic
+    // content size; this runs on every install pass, so skip the no-op.
+    if (![title isEqualToString:[self.subscribeButton titleForState:UIControlStateNormal]]) {
+        [self.subscribeButton setTitle:title forState:UIControlStateNormal];
+    }
+    BOOL enabled = known && !self.subscriptionRequestInFlight;
+    self.subscribeButton.enabled = enabled;
+    // The disabled affordance belongs on the BUTTON, not on subscribeGlassView:
+    // without Liquid Glass there IS no glass view (the accent is painted as a
+    // solid fill and the view is torn down), so dimming only the glass left
+    // every pre-iOS-26 device drawing a full-strength, fully-interactive-looking
+    // pill while taps were silently swallowed — both before the subscription
+    // state is known and for the whole subscribe/unsubscribe round trip.
+    self.subscribeButton.alpha = enabled ? 1.0 : ApolloSubredditDisabledControlAlpha;
+
     UIColor *accent = ApolloThemeAccentColor() ?: self.tintColor ?: UIColor.systemBlueColor;
-    [self apollo_applySubscriptionGlassWithAccent:accent];
     // Resolve against the real trait context before reading components —
     // ApolloThemeAccentColor() can be a dynamic-provider color, and ambient
     // resolution can pick the wrong light/dark variant (project convention).
+    // Resolving also gives the memo below something comparable: the dynamic
+    // provider is rebuilt per call and never compares equal to itself.
     UIColor *resolvedAccent = [accent resolvedColorWithTraitCollection:self.traitCollection];
-    UIColor *onAccent = ApolloColorIsLight(resolvedAccent) ? UIColor.blackColor : UIColor.whiteColor;
-    [self.subscribeButton setTitleColor:onAccent forState:UIControlStateNormal];
-    [self.subscribeButton setTitleColor:[onAccent colorWithAlphaComponent:0.58]
-                                 forState:UIControlStateHighlighted];
-    [self.aboutToggleButton setTitleColor:resolvedAccent forState:UIControlStateNormal];
+    BOOL accentChanged = ![resolvedAccent isEqual:_appliedAccent];
+    [self apollo_applySubscriptionGlassWithAccent:resolvedAccent];
+    if (accentChanged) {
+        UIColor *onAccent = ApolloColorIsLight(resolvedAccent) ? UIColor.blackColor : UIColor.whiteColor;
+        [self.subscribeButton setTitleColor:onAccent forState:UIControlStateNormal];
+        [self.subscribeButton setTitleColor:[onAccent colorWithAlphaComponent:0.58]
+                                     forState:UIControlStateHighlighted];
+        [self.aboutToggleButton setTitleColor:resolvedAccent forState:UIControlStateNormal];
+    }
+    _appliedAccent = resolvedAccent;
 }
 
 - (void)apollo_applySubscriptionGlassWithAccent:(UIColor *)accent {
+    // Called from every install pass. Constructing a UIGlassEffect and
+    // reassigning it churns effect objects for no visual change, so bail when
+    // the accent is unchanged AND the view state still matches what that
+    // accent produced last time (glass attached, or the solid fill applied).
+    BOOL stillApplied = self.subscribeGlassView
+        ? (self.subscribeGlassView.superview == self.subscribeButton)
+        : _appliedSolidFill;
+    if (stillApplied && [accent isEqual:_appliedAccent]) return;
+
     UIVisualEffect *effect = ApolloImmersiveGlassEffect(accent, ApolloSubredditControlGlassTintAlpha, YES);
     if (!effect) {
         self.subscribeButton.backgroundColor = [accent colorWithAlphaComponent:0.92];
+        // Match the glass path so an oversized title clips at the pill's
+        // rounded edge instead of spilling outside the fill.
+        self.subscribeButton.clipsToBounds = YES;
         [self.subscribeGlassView removeFromSuperview];
         self.subscribeGlassView = nil;
+        _appliedSolidFill = YES;
         return;
     }
+    _appliedSolidFill = NO;
     self.subscribeButton.backgroundColor = UIColor.clearColor;
     self.subscribeButton.clipsToBounds = YES;
     if (!self.subscribeGlassView || self.subscribeGlassView.superview != self.subscribeButton) {
@@ -529,7 +609,6 @@ static CGFloat const ApolloSubredditFadedBannerAlpha = 0.011;
     self.subscribeGlassView.layer.cornerRadius = self.subscribeButton.layer.cornerRadius;
     self.subscribeGlassView.layer.cornerCurve = kCACornerCurveContinuous;
     self.subscribeGlassView.clipsToBounds = YES;
-    self.subscribeGlassView.alpha = self.subscribeButton.enabled ? 1.0 : 0.55;
 }
 
 - (void)apollo_toggleAboutExpanded {
@@ -852,6 +931,124 @@ static id ApolloSubredditTypedIvar(id object, NSString *name, Class expectedClas
         }
     }
     return nil;
+}
+
+// MARK: - Subscription state resolution
+//
+// The Join pill is only tappable once we know whether the user already
+// subscribes. That answer used to come from ONE source — the view controller's
+// `currentSubreddit` ivar — which is populated asynchronously and, on at least
+// one real navigation path (tapping a subreddit name in a post's byline),
+// never lands at all. The pill then stayed disabled forever: before the
+// disabled state had a visual treatment it looked perfectly normal while
+// silently swallowing every tap. These fallbacks answer the same question
+// without depending on that ivar.
+
+// Tier 1: the VC's own RDKSubreddit. Free when it's there, and the freshest
+// thing available — but only trusted when its name matches the subreddit we're
+// actually drawing, since a recycled controller can still hold the previous
+// one. A missing name on either side is not treated as a mismatch.
+static BOOL ApolloSubredditSubscribedFromCurrentSubreddit(UIViewController *viewController,
+                                                          NSString *subredditName,
+                                                          BOOL *outSubscribed) {
+    id currentSubreddit = ApolloSubredditTypedIvar(viewController, @"currentSubreddit", objc_getClass("RDKSubreddit"));
+    if (![currentSubreddit respondsToSelector:@selector(isSubscriber)]) return NO;
+    if ([currentSubreddit respondsToSelector:@selector(name)]) {
+        NSString *ivarName = ((NSString * (*)(id, SEL))objc_msgSend)(currentSubreddit, @selector(name));
+        if (ivarName.length > 0 && subredditName.length > 0 &&
+            !ApolloSubredditNamesEqual(ivarName, subredditName)) {
+            return NO;
+        }
+    }
+    *outSubscribed = ((BOOL (*)(id, SEL))objc_msgSend)(currentSubreddit, @selector(isSubscriber));
+    return YES;
+}
+
+// Tier 3: the signed-in account's own subscription list. Only a POSITIVE match
+// counts: the list can legitimately be empty or half-loaded early in a launch,
+// and answering "not subscribed" from an incomplete list would put a wrong
+// "Join" on a subreddit the user is already in. Absence just means "still
+// unknown", which leaves the pill in the state it was already in.
+static BOOL ApolloSubredditSubscribedFromAccountList(NSString *subredditName, BOOL *outSubscribed) {
+    if (subredditName.length == 0) return NO;
+    Class clientClass = objc_getClass("RDKClient");
+    if (![clientClass respondsToSelector:@selector(sharedClient)]) return NO;
+    id client = ((id (*)(id, SEL))objc_msgSend)(clientClass, @selector(sharedClient));
+    if (![client respondsToSelector:@selector(currentUser)]) return NO;
+    id currentUser = ((id (*)(id, SEL))objc_msgSend)(client, @selector(currentUser));
+    if (![currentUser respondsToSelector:@selector(subscribedSubreddits)]) return NO;
+    id subscribed = ((id (*)(id, SEL))objc_msgSend)(currentUser, @selector(subscribedSubreddits));
+    if (![subscribed isKindOfClass:[NSArray class]]) return NO;
+
+    for (id entry in (NSArray *)subscribed) {
+        // Entries are RDKSubreddit objects, but mirror ApolloHideModSubreddits'
+        // defensive shape and accept a bare name string too.
+        NSString *name = nil;
+        if ([entry isKindOfClass:[NSString class]]) {
+            name = entry;
+        } else if ([entry respondsToSelector:@selector(name)]) {
+            name = ((NSString * (*)(id, SEL))objc_msgSend)(entry, @selector(name));
+        }
+        if (name.length > 0 && ApolloSubredditNamesEqual(name, subredditName)) {
+            *outSubscribed = YES;
+            return YES;
+        }
+    }
+    return NO;
+}
+
+// Resolves the subscription state from the best source that actually knows.
+// Returns NO when none of them do, which keeps the pill in its "not yet known"
+// (visibly disabled) state rather than guessing.
+static BOOL ApolloSubredditResolveSubscribed(UIViewController *viewController,
+                                             NSString *subredditName,
+                                             BOOL *outSubscribed) {
+    if (!outSubscribed) return NO;
+    if (ApolloSubredditSubscribedFromCurrentSubreddit(viewController, subredditName, outSubscribed)) {
+        return YES;
+    }
+    // Tier 2: `user_is_subscriber` from the subreddit's own about.json, which
+    // this header already fetches and disk-caches for the banner/description.
+    // Per-subreddit and authoritative in BOTH directions (unlike tier 3), and
+    // refetched right after our own subscribe/unsubscribe. nil = the fetch was
+    // unauthenticated or predates the field, i.e. unknown.
+    NSNumber *infoFlag = [[ApolloSubredditInfoCache sharedCache]
+        cachedInfoForSubreddit:subredditName].userIsSubscriber;
+    if (infoFlag != nil) {
+        *outSubscribed = infoFlag.boolValue;
+        return YES;
+    }
+    return ApolloSubredditSubscribedFromAccountList(subredditName, outSubscribed);
+}
+
+// Pushes the resolved state into the header, honouring the same in-flight and
+// recent-tap grace rules the install pass uses. Safe to call from any pass;
+// it no-ops when nothing knows better than the header already does.
+static void ApolloSubredditRefreshSubscriptionState(ApolloSubredditHeaderView *header,
+                                                    UIViewController *viewController) {
+    if (!header || header.subscriptionRequestInFlight) return;
+    NSString *subredditName = header.subredditName;
+
+    BOOL recentIntent = header.subscribeIntentDate &&
+        [[NSDate date] timeIntervalSinceDate:header.subscribeIntentDate] < 30.0;
+    if (recentIntent) {
+        // Our own tap-confirmed state wins over every source below for a grace
+        // window — subscribeToSubredditWithName: is name-based and has no
+        // confirmed path that updates this VC's already-cached currentSubreddit
+        // object, so reading it right after a successful tap can otherwise flip
+        // the button straight back.
+        [header apollo_applySubscriptionState:header.subscribeIntentValue known:YES];
+        return;
+    }
+    header.subscribeIntentDate = nil;
+
+    BOOL subscribed = NO;
+    if (!ApolloSubredditResolveSubscribed(viewController, subredditName, &subscribed)) return;
+    if (!header.subscriptionStateKnown) {
+        ApolloLog(@"[SubredditHeaders] subscription state resolved subreddit=%@ subscribed=%d",
+                  subredditName ?: @"nil", subscribed);
+    }
+    [header apollo_applySubscriptionState:subscribed known:YES];
 }
 
 // PostsType is a Swift enum stored inline in the `currentPostsType` ivar; its
@@ -1212,6 +1409,11 @@ static void ApolloSubredditLoadImages(ApolloSubredditHeaderView *header, NSStrin
         [header applyInfo:info fallbackSubredditName:subredditName];
         ApolloSubredditApplyIconForHeader(header, subredditName, info);
         ApolloSubredditApplyBannerForHeader(header, subredditName, info, NO);
+        // This info carries `user_is_subscriber`, which is the fallback the
+        // Join pill needs when the view controller's currentSubreddit ivar
+        // never lands — apply it as soon as the fetch returns instead of
+        // waiting for whatever layout pass happens to come next.
+        ApolloSubredditRefreshSubscriptionState(header, header.hostViewController);
     };
 
     if (cachedInfo) applyInfo(cachedInfo);
@@ -1436,25 +1638,40 @@ static void ApolloSubredditStyleSearchBar(UIViewController *viewController) {
     });
     if ([field isKindOfClass:[UITextField class]]) {
         UITextField *textField = (UITextField *)field;
-        textField.textColor = fieldForeground;
+        // This runs on every install pass, so only re-colour (and rebuild the
+        // attributed placeholder) when the readable side or the placeholder
+        // text itself actually changed.
         NSString *placeholder = textField.placeholder;
-        if (placeholder.length) {
-            textField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:placeholder
-                                                                               attributes:@{
-                NSForegroundColorAttributeName: [fieldForeground colorWithAlphaComponent:0.78]
-            }];
+        id appliedForeground = objc_getAssociatedObject(field, kApolloSubredditSearchAppliedForegroundKey);
+        id appliedPlaceholder = objc_getAssociatedObject(field, kApolloSubredditSearchAppliedPlaceholderKey);
+        BOOL foregroundChanged = ![fieldForeground isEqual:appliedForeground];
+        BOOL placeholderChanged = (placeholder.length > 0) && ![placeholder isEqualToString:appliedPlaceholder];
+        if (foregroundChanged || placeholderChanged) {
+            textField.textColor = fieldForeground;
+            if (placeholder.length) {
+                textField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:placeholder
+                                                                                   attributes:@{
+                    NSForegroundColorAttributeName: [fieldForeground colorWithAlphaComponent:0.78]
+                }];
+            }
+            textField.tintColor = fieldForeground;
+            objc_setAssociatedObject(field, kApolloSubredditSearchAppliedForegroundKey,
+                                     fieldForeground, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(field, kApolloSubredditSearchAppliedPlaceholderKey,
+                                     placeholder, OBJC_ASSOCIATION_COPY_NONATOMIC);
         }
-        textField.tintColor = fieldForeground;
     }
 
     CGFloat radius = field.layer.cornerRadius > 0.0 ? field.layer.cornerRadius : 12.0;
     field.clipsToBounds = YES;
     field.layer.cornerRadius = radius;
     field.layer.cornerCurve = kCACornerCurveContinuous;
-    UIVisualEffect *effect = ApolloImmersiveGlassEffect(nil, 0.0, NO)
-        ?: [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
     UIVisualEffectView *glassView = objc_getAssociatedObject(field, kApolloSubredditSearchGlassViewKey);
     if (!glassView || glassView.superview != field) {
+        // Built once per field: unlike the Join pill's, this effect carries no
+        // accent tint, so there is nothing about it to refresh on later passes.
+        UIVisualEffect *effect = ApolloImmersiveGlassEffect(nil, 0.0, NO)
+            ?: [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
         [glassView removeFromSuperview];
         glassView = [[UIVisualEffectView alloc] initWithEffect:effect];
         glassView.userInteractionEnabled = NO;
@@ -1462,8 +1679,6 @@ static void ApolloSubredditStyleSearchBar(UIViewController *viewController) {
         [field insertSubview:glassView atIndex:0];
         objc_setAssociatedObject(field, kApolloSubredditSearchGlassViewKey,
                                  glassView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    } else {
-        glassView.effect = effect;
     }
     glassView.frame = field.bounds;
     glassView.layer.cornerRadius = radius;
@@ -1493,6 +1708,10 @@ static void ApolloSubredditRestoreSearchBar(UIViewController *viewController) {
     objc_setAssociatedObject(field, kApolloSubredditSearchOriginalTextColorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(field, kApolloSubredditSearchOriginalPlaceholderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(field, kApolloSubredditSearchOriginalTintKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // Drop the applied-state memo too — the field is back to Apollo's own
+    // styling, so a later restyle must not think its work is already done.
+    objc_setAssociatedObject(field, kApolloSubredditSearchAppliedForegroundKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(field, kApolloSubredditSearchAppliedPlaceholderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 static void ApolloSubredditTearDownHeader(UIViewController *viewController, BOOL restoreNativeHeader) {
@@ -1759,25 +1978,7 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
         [header applyInfo:nil fallbackSubredditName:subredditName];
         ApolloSubredditLoadImages(header, subredditName, NO);
     }
-    if (!header.subscriptionRequestInFlight) {
-        BOOL recentIntent = header.subscribeIntentDate &&
-            [[NSDate date] timeIntervalSinceDate:header.subscribeIntentDate] < 30.0;
-        if (recentIntent) {
-            // Our own tap-confirmed state wins over the native ivar for a
-            // grace window — subscribeToSubredditWithName: is name-based and
-            // has no confirmed path that updates this VC's already-cached
-            // currentSubreddit object, so reading it right after a successful
-            // tap can otherwise flip the button straight back.
-            [header apollo_applySubscriptionState:header.subscribeIntentValue known:YES];
-        } else {
-            header.subscribeIntentDate = nil;
-            id currentSubreddit = ApolloSubredditTypedIvar(viewController, @"currentSubreddit", objc_getClass("RDKSubreddit"));
-            if ([currentSubreddit respondsToSelector:@selector(isSubscriber)]) {
-                BOOL subscribed = ((BOOL (*)(id, SEL))objc_msgSend)(currentSubreddit, @selector(isSubscriber));
-                [header apollo_applySubscriptionState:subscribed known:YES];
-            }
-        }
-    }
+    ApolloSubredditRefreshSubscriptionState(header, viewController);
 
     if (wrappedHeader && header) {
         CGRect frameBeforeMetadata = wrappedHeader.frame;

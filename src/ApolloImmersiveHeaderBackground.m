@@ -256,6 +256,22 @@ static const void *kApolloImmersiveBackdropPendingKey = &kApolloImmersiveBackdro
        regionHeight:(CGFloat)regionHeight
      extendedHeight:(CGFloat)extendedHeight
            topInset:(CGFloat)topInset {
+    UIColor *resolvedPageColor = pageColor ?: UIColor.systemBackgroundColor;
+    CGFloat newRegionHeight = MAX(0.0, regionHeight);
+    CGFloat newExtendedHeight = MAX(newRegionHeight, extendedHeight);
+    CGFloat newTopInset = MAX(0.0, topInset);
+    // Callers drive this from their host's layout pass, so it re-arrives
+    // unchanged constantly (every viewDidLayoutSubviews, and again for each
+    // scroll-driven chrome-height animation frame). Bail before setNeedsLayout
+    // when nothing that feeds the gradients/frames actually moved.
+    if (banner == self.sourceBanner &&
+        newRegionHeight == self.regionHeight &&
+        newExtendedHeight == self.extendedHeight &&
+        newTopInset == self.topInset &&
+        (resolvedPageColor == self.pageColor || [resolvedPageColor isEqual:self.pageColor])) {
+        return;
+    }
+
     if (banner != self.sourceBanner) {
         self.sourceBanner = banner;
         self.sharpView.image = banner;
@@ -284,16 +300,25 @@ static const void *kApolloImmersiveBackdropPendingKey = &kApolloImmersiveBackdro
             });
         }
     }
-    self.pageColor = pageColor ?: UIColor.systemBackgroundColor;
-    self.regionHeight = MAX(0.0, regionHeight);
-    self.extendedHeight = MAX(self.regionHeight, extendedHeight);
-    self.topInset = MAX(0.0, topInset);
+    self.pageColor = resolvedPageColor;
+    self.regionHeight = newRegionHeight;
+    self.extendedHeight = newExtendedHeight;
+    self.topInset = newTopInset;
     [self setNeedsLayout];
 }
 
 - (void)setContentTranslation:(CGFloat)contentTranslation {
+    // A single scroll frame reaches us twice — once through the scroll view's
+    // own -setContentOffset:, once through the delegate's scrollViewDidScroll:
+    // — with the same offset. Both call sites are kept (each covers scrolls the
+    // other can miss); the duplicate is absorbed here instead, so the transform
+    // is only touched when the parallax actually moves. Compares the CLAMPED
+    // value so rubber-banding above the top doesn't re-set an identity
+    // transform every frame either.
     _contentTranslation = contentTranslation;
-    self.contentContainer.transform = CGAffineTransformMakeTranslation(0.0, -MAX(0.0, contentTranslation));
+    CGAffineTransform desired = CGAffineTransformMakeTranslation(0.0, -MAX(0.0, contentTranslation));
+    if (CGAffineTransformEqualToTransform(self.contentContainer.transform, desired)) return;
+    self.contentContainer.transform = desired;
 }
 
 - (void)layoutSubviews {
