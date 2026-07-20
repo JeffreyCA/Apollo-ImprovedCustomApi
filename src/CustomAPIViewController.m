@@ -11,6 +11,7 @@
 #import "ApolloAccountCredentials.h"
 #import "ApolloState.h"
 #import "ApolloBadgeBookStrip.h"
+#import "ApolloBadgeBookCatalog.h"
 #import "ApolloUserProfileCache.h"
 #import "ApolloLinkPreviewCache.h"
 #import "ApolloDeletedCommentsSettingsViewController.h"
@@ -3008,6 +3009,9 @@ typedef NS_ENUM(NSInteger, Tag) {
     sBadgeBookEnabled = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sBadgeBookEnabled forKey:UDKeyBadgeBookEnabled];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloBadgeBookToggleChangedNotification object:nil];
+    // Launch skipped the prewarm when the feature was off; start it now so the
+    // first profile visited after flipping this on still blits ready bitmaps.
+    if (sBadgeBookEnabled) ApolloBadgeBookPrewarmImages();
 }
 
 - (void)promptClearAllCachesFromSourceView:(UIView *)sourceView {

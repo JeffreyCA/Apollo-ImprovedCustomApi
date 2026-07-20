@@ -25,6 +25,7 @@ static CGFloat const kBBIconGap     = 6.0;
 @property(nonatomic, strong) ApolloUserBadges *badges;
 @property(nonatomic, copy) NSString *loadedUsername;   // guards async completions
 @property(nonatomic) NSUInteger previewTotal;          // full count (icon views are capped)
+@property(nonatomic) NSUInteger iconGeneration;        // guards async icon decodes across rebuilds
 @end
 
 @implementation ApolloBadgeBookStripView
@@ -47,7 +48,9 @@ static CGFloat const kBBIconGap     = 6.0;
 
         _chevron = [[UIImageView alloc] init];
         _chevron.contentMode = UIViewContentModeScaleAspectFit;
-        _chevron.image = [UIImage systemImageNamed:@"chevron.right"];
+        // Mirrors itself in RTL, matching the disclosure chevrons this row is
+        // meant to read like (layoutSubviews mirrors the positions to match).
+        _chevron.image = [[UIImage systemImageNamed:@"chevron.right"] imageFlippedForRightToLeftLayoutDirection];
         _chevron.tintColor = [UIColor tertiaryLabelColor];
         [self addSubview:_chevron];
 
@@ -59,6 +62,13 @@ static CGFloat const kBBIconGap     = 6.0;
 
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_tapped)];
         [self addGestureRecognizer:tap];
+
+        // The whole band is one tap target, so it's one accessibility element —
+        // otherwise VoiceOver walks the glyph/title/chevron as separate, silent,
+        // non-interactive bits with no hint that the row opens anything.
+        self.isAccessibilityElement = YES;
+        self.accessibilityTraits = UIAccessibilityTraitButton;
+        [self apollo_updateAccessibility];
 
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(apollo_toggleChanged)
                                                      name:ApolloBadgeBookToggleChangedNotification object:nil];
@@ -138,6 +148,7 @@ static CGFloat const kBBIconGap     = 6.0;
 - (void)apollo_rebuildIcons {
     for (UIImageView *v in self.iconViews) [v removeFromSuperview];
     [self.iconViews removeAllObjects];
+    self.iconGeneration++;   // strand any decode still in flight for the old set
 
     // The band fits ~8 icons at most — never build a view per collectible (a
     // heavily-decorated profile can have 90+). The "+N" chip covers the rest.
@@ -148,21 +159,46 @@ static CGFloat const kBBIconGap     = 6.0;
     if (preview.count > kMaxIconViews) {
         preview = [preview subarrayWithRange:NSMakeRange(0, kMaxIconViews)];
     }
+    NSUInteger generation = self.iconGeneration;
     for (ApolloBadgeItem *item in preview) {
         UIImageView *iv = [[UIImageView alloc] init];
         iv.contentMode = UIViewContentModeScaleAspectFit;
-        UIImage *bundled = [item bundledImage];
-        if (bundled) {
-            iv.image = bundled;
-        } else if (item.imageURLString.length) {
-            // Rare uncatalogued trophy — leave blank; the full book loads it. Keeping
-            // the strip network-free stays instant.
-            iv.image = [UIImage systemImageNamed:@"trophy.fill"];
-            iv.tintColor = [UIColor tertiaryLabelColor];
+        // Warm cache -> assigned inline. Cold -> decoded off-main and filled in;
+        // this runs inside a data-arrival callback that immediately re-measures the
+        // header, so it must not read 16 icon files off disk on the main thread.
+        UIImage *warm = [item cachedBundledImage];
+        if (warm) {
+            iv.image = warm;
+        } else if (item.imageFile.length) {
+            __weak typeof(self) ws = self;
+            __weak UIImageView *wiv = iv;
+            [item loadBundledImage:^(UIImage *image) {
+                typeof(self) ss = ws; if (!ss || ss.iconGeneration != generation) return;
+                if (image) wiv.image = image;
+                else [ss apollo_applyFallbackGlyphTo:wiv forItem:item];
+            }];
+        } else {
+            [self apollo_applyFallbackGlyphTo:iv forItem:item];
         }
         [self addSubview:iv];
         [self.iconViews addObject:iv];
     }
+    [self apollo_updateAccessibility];
+}
+
+// Rare uncatalogued trophy — a generic glyph; the full book loads the real art.
+// Keeping the strip network-free is what keeps it instant.
+- (void)apollo_applyFallbackGlyphTo:(UIImageView *)iv forItem:(ApolloBadgeItem *)item {
+    if (!iv || item.imageURLString.length == 0) return;
+    iv.image = [UIImage systemImageNamed:@"trophy.fill"];
+    iv.tintColor = [UIColor tertiaryLabelColor];
+}
+
+- (void)apollo_updateAccessibility {
+    self.accessibilityLabel = self.previewTotal > 0
+        ? [NSString stringWithFormat:@"Badge Book, %lu badges", (unsigned long)self.previewTotal]
+        : @"Badge Book";
+    self.accessibilityHint = @"Shows this redditor's achievements and trophy case.";
 }
 
 #pragma mark Layout
@@ -179,19 +215,31 @@ static CGFloat const kBBIconGap     = 6.0;
     CGFloat w = self.bounds.size.width;
     if (h <= 0.0) return;
 
+    // Everything below is laid out in LEADING coordinates (x grows away from the
+    // leading edge) and mirrored on the way into each frame, so the whole band —
+    // glyph, title, icon flow, "+N" chip, chevron — flips with the rest of Apollo
+    // in an RTL locale.
+    BOOL rtl = (self.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft);
+    CGRect (^place)(CGRect) = ^CGRect(CGRect r) {
+        if (rtl) r.origin.x = w - CGRectGetMaxX(r);
+        return r;
+    };
+
     CGFloat glyph = 20.0;
-    self.leadingGlyph.frame = CGRectMake(0.0, (h - glyph) / 2.0, glyph, glyph);
+    CGRect glyphFrame = CGRectMake(0.0, (h - glyph) / 2.0, glyph, glyph);
+    self.leadingGlyph.frame = place(glyphFrame);
 
     CGSize titleSize = [self.titleLabel sizeThatFits:CGSizeMake(w, h)];
-    CGFloat titleX = CGRectGetMaxX(self.leadingGlyph.frame) + 8.0;
-    self.titleLabel.frame = CGRectMake(titleX, 0.0, MIN(titleSize.width, 160.0), h);
+    CGRect titleFrame = CGRectMake(CGRectGetMaxX(glyphFrame) + 8.0, 0.0, MIN(titleSize.width, 160.0), h);
+    self.titleLabel.frame = place(titleFrame);
 
     CGFloat chevronSize = 13.0;
-    self.chevron.frame = CGRectMake(w - chevronSize, (h - chevronSize) / 2.0, chevronSize, chevronSize);
+    CGRect chevronFrame = CGRectMake(w - chevronSize, (h - chevronSize) / 2.0, chevronSize, chevronSize);
+    self.chevron.frame = place(chevronFrame);
 
     // Icons flow between the title and the chevron.
-    CGFloat iconsLeft = CGRectGetMaxX(self.titleLabel.frame) + 12.0;
-    CGFloat iconsRight = CGRectGetMinX(self.chevron.frame) - 8.0;
+    CGFloat iconsLeft = CGRectGetMaxX(titleFrame) + 12.0;
+    CGFloat iconsRight = CGRectGetMinX(chevronFrame) - 8.0;
     CGFloat available = iconsRight - iconsLeft;
     CGFloat iconY = (h - kBBIconSize) / 2.0;
 
@@ -207,7 +255,7 @@ static CGFloat const kBBIconGap     = 6.0;
         UIImageView *iv = self.iconViews[i];
         if (i < shown) {
             iv.hidden = NO;
-            iv.frame = CGRectMake(x, iconY, kBBIconSize, kBBIconSize);
+            iv.frame = place(CGRectMake(x, iconY, kBBIconSize, kBBIconSize));
             x += kBBIconSize + kBBIconGap;
         } else {
             iv.hidden = YES;
@@ -220,7 +268,9 @@ static CGFloat const kBBIconGap     = 6.0;
         self.overflowLabel.text = [NSString stringWithFormat:@"+%ld", (long)remaining];
         [self.overflowLabel sizeToFit];
         CGFloat oy = (h - self.overflowLabel.bounds.size.height) / 2.0;
-        self.overflowLabel.frame = CGRectMake(x, oy, MIN(self.overflowLabel.bounds.size.width, iconsRight - x), self.overflowLabel.bounds.size.height);
+        self.overflowLabel.frame = place(CGRectMake(x, oy,
+                                                    MIN(self.overflowLabel.bounds.size.width, iconsRight - x),
+                                                    self.overflowLabel.bounds.size.height));
     } else {
         self.overflowLabel.hidden = YES;
     }

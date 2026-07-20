@@ -63,8 +63,9 @@ static NSCache<NSString *, UIImage *> *ApolloBadgeBookImageCache(void) {
 
 // Fully-decoded bundled icon. Decoding is forced at load time (ImageIO
 // kCGImageSourceShouldCacheImmediately) so the cached UIImage never lazily
-// decompresses during a scroll — combined with ApolloBadgeBookPrewarmImages(),
-// the grid only ever blits ready bitmaps. Thread-safe (NSCache + ImageIO).
+// decompresses during a scroll. Thread-safe (NSCache + ImageIO), but BLOCKING on
+// a cache miss (file read + decode) — main-thread callers must go through
+// cachedBundledImage/loadBundledImage: instead.
 - (UIImage *)bundledImage {
     if (self.imageFile.length == 0) return nil;
     UIImage *cached = [ApolloBadgeBookImageCache() objectForKey:self.imageFile];
@@ -84,6 +85,25 @@ static NSCache<NSString *, UIImage *> *ApolloBadgeBookImageCache(void) {
     CGImageRelease(cg);
     [ApolloBadgeBookImageCache() setObject:image forKey:self.imageFile];
     return image;
+}
+
+- (UIImage *)cachedBundledImage {
+    if (self.imageFile.length == 0) return nil;
+    return [ApolloBadgeBookImageCache() objectForKey:self.imageFile];
+}
+
+// The prewarm gives most callers a warm cache, but it can't be relied on: it is
+// itself asynchronous, and a cold launch straight into a profile races it. So
+// every UI path goes through here and simply never decodes on main.
+- (void)loadBundledImage:(void (^)(UIImage *))completion {
+    if (!completion) return;
+    if (self.imageFile.length == 0) { completion(nil); return; }
+    UIImage *cached = [ApolloBadgeBookImageCache() objectForKey:self.imageFile];
+    if (cached) { completion(cached); return; }
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        UIImage *image = [self bundledImage];
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(image); });
+    });
 }
 
 @end

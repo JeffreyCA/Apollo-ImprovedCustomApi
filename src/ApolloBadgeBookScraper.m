@@ -94,6 +94,53 @@ static void ApolloBBDictSetIfPresent(NSMutableDictionary *d, NSString *key, NSSt
     if (value.length) d[key] = value;
 }
 
+// Browsing a busy thread writes one small file per unique username, and an
+// expired entry was only ever skipped on read — never deleted. Sweep once per
+// launch (piggybacked on the first save, already on a background queue): drop
+// anything past the TTL, then cap the directory to the most recently written
+// entries so even a heavy browsing session can't grow it without bound.
+static NSUInteger const kApolloBBDiskMaxFiles = 150;
+
+static void ApolloBBDiskSweepOnce(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *dir = ApolloBBDiskDir();
+        NSArray<NSString *> *names = [fm contentsOfDirectoryAtPath:dir error:nil];
+        if (names.count == 0) return;
+
+        NSDate *now = [NSDate date];
+        NSMutableArray<NSDictionary *> *live = [NSMutableArray array];
+        NSUInteger expired = 0;
+        for (NSString *name in names) {
+            NSString *path = [dir stringByAppendingPathComponent:name];
+            NSDate *modified = [fm attributesOfItemAtPath:path error:nil].fileModificationDate;
+            if (modified && [now timeIntervalSinceDate:modified] > kApolloBBDiskTTL) {
+                [fm removeItemAtPath:path error:nil];
+                expired++;
+                continue;
+            }
+            [live addObject:@{ @"path": path, @"date": modified ?: now }];
+        }
+
+        NSUInteger overflow = 0;
+        if (live.count > kApolloBBDiskMaxFiles) {
+            [live sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+                return [b[@"date"] compare:a[@"date"]];   // newest first
+            }];
+            for (NSUInteger i = kApolloBBDiskMaxFiles; i < live.count; i++) {
+                [fm removeItemAtPath:live[i][@"path"] error:nil];
+                overflow++;
+            }
+        }
+        if (expired || overflow) {
+            ApolloLog(@"[BadgeBook] disk cache swept: %lu expired, %lu over cap, %lu kept",
+                      (unsigned long)expired, (unsigned long)overflow,
+                      (unsigned long)MIN(live.count, kApolloBBDiskMaxFiles));
+        }
+    });
+}
+
 static void ApolloBBDiskSave(ApolloUserBadges *result) {
     if (!result || (!result.trophiesResolved && !result.achievementsResolved)) return;
     NSString *key = result.username.lowercaseString;
@@ -124,6 +171,7 @@ static void ApolloBBDiskSave(ApolloUserBadges *result) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSData *data = [NSJSONSerialization dataWithJSONObject:doc options:0 error:nil];
         if (data) [data writeToFile:ApolloBBDiskPath(key) atomically:YES];
+        ApolloBBDiskSweepOnce();
     });
 }
 
@@ -593,6 +641,8 @@ typedef NS_ENUM(NSInteger, ApolloBBPhase) {
 @property(nonatomic) int polls;
 @property(nonatomic) int emptyAfterLoaded;
 @property(nonatomic) BOOL sawPage;
+@property(nonatomic) BOOL holdsSlot;    // owns one of the concurrent-fallback slots
+@property(nonatomic) BOOL finished;
 @end
 
 @implementation ApolloBBWebFetch
@@ -601,6 +651,31 @@ typedef NS_ENUM(NSInteger, ApolloBBPhase) {
 // Reddit's JS bot-challenge typically clears in ~5-10s and then auto-redirects to
 // the real page, so a short window could give up mid-challenge.
 static int const kApolloBBMaxPolls = 14;
+
+// A fallback scrape puts a full-window, live-rendering WKWebView into the REAL
+// key window and loads reddit.com in it for up to ~60s (two phases). Visiting a
+// handful of profiles on a network that trips the fallback would otherwise stand
+// up that many at once, all rendering behind whatever the user is scrolling. Only
+// one runs at a time; the rest queue.
+static int const kApolloBBMaxConcurrentWebFetches = 1;
+static int sApolloBBActiveWebFetches = 0;   // main thread only
+// Waiting scrapes, oldest first. Drained NEWEST first: by the time a slot frees
+// up, the newest request is the profile the user is actually looking at, and the
+// older ones are screens they scrolled past. Bounded so a long browsing session
+// on a fallback-tripping network can't build an endless backlog — the oldest
+// entries are dropped (and answered with what they have, i.e. nothing).
+static NSUInteger const kApolloBBMaxQueuedWebFetches = 6;
+
+static NSMutableArray<ApolloBBWebFetch *> *ApolloBBWebFetchQueue(void) {
+    static NSMutableArray *q; static dispatch_once_t once;
+    dispatch_once(&once, ^{ q = [NSMutableArray array]; });
+    return q;
+}
+
+// Belt-and-braces: the poll loop is bounded, but a WKWebView that never answers
+// evaluateJavaScript would hold the single slot forever and stall every queued
+// scrape behind it. 3s + 14 polls x 2s per phase, x2 phases, plus slack.
+static NSTimeInterval const kApolloBBWebFetchWatchdog = 90.0;
 
 - (void)startForUsername:(NSString *)username completion:(void (^)(ApolloUserBadges *))done {
     if (![NSThread isMainThread]) {
@@ -620,6 +695,34 @@ static int const kApolloBBMaxPolls = 14;
     if (self.startPhase == ApolloBBPhaseAchievements && ![ApolloBadgeBookCatalog shared].isLoaded) {
         [self finish];
         return;
+    }
+
+    // Wait for a free slot before touching the window at all — a queued scrape
+    // costs nothing until it actually starts.
+    if (!self.holdsSlot) {
+        if (sApolloBBActiveWebFetches >= kApolloBBMaxConcurrentWebFetches) {
+            NSMutableArray<ApolloBBWebFetch *> *queue = ApolloBBWebFetchQueue();
+            if (![queue containsObject:self]) [queue addObject:self];
+            ApolloLog(@"[BadgeBook][web] u/%@ queued behind %d active fallback scrape(s) (%lu waiting)",
+                      username, sApolloBBActiveWebFetches, (unsigned long)queue.count);
+            while (queue.count > kApolloBBMaxQueuedWebFetches) {
+                ApolloBBWebFetch *oldest = queue.firstObject;
+                [queue removeObjectAtIndex:0];
+                ApolloLog(@"[BadgeBook][web] u/%@ dropped from the fallback queue (backlog full)", oldest.username);
+                [oldest finish];   // answers its waiters rather than stranding them
+            }
+            return;
+        }
+        sApolloBBActiveWebFetches++;
+        self.holdsSlot = YES;
+        __weak typeof(self) ws = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kApolloBBWebFetchWatchdog * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            typeof(self) ss = ws;
+            if (!ss || ss.finished) return;
+            ApolloLog(@"[BadgeBook][web] u/%@ watchdog fired — abandoning fallback scrape", ss.username);
+            [ss finish];
+        });
     }
 
     UIWindow *win = nil;
@@ -859,7 +962,28 @@ static int const kApolloBBMaxPolls = 14;
 #pragma mark Finish
 
 - (void)finish {
+    if (self.finished) return;
+    self.finished = YES;
     if (self.web) { self.web.navigationDelegate = nil; [self.web stopLoading]; [self.web removeFromSuperview]; self.web = nil; }
+    // Release the slot BEFORE the completion so a waiting scrape starts straight
+    // away rather than a callback-chain later.
+    NSMutableArray<ApolloBBWebFetch *> *queue = ApolloBBWebFetchQueue();
+    [queue removeObject:self];
+    if (self.holdsSlot) {
+        self.holdsSlot = NO;
+        sApolloBBActiveWebFetches = MAX(0, sApolloBBActiveWebFetches - 1);
+        // One slot freed -> start one waiter, newest first. Hopped through the
+        // runloop because a queued start that fails immediately calls finish
+        // again, which would re-enter this block.
+        ApolloBBWebFetch *next = queue.lastObject;
+        if (next) {
+            [queue removeLastObject];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (next.finished) return;
+                [next startForUsername:next.username completion:next.done];
+            });
+        }
+    }
     ApolloUserBadges *result = self.result;
     void (^d)(ApolloUserBadges *) = self.done; self.done = nil;
     if (d) d(result);

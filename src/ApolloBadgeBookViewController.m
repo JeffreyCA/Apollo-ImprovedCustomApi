@@ -171,6 +171,14 @@ static UIImage *ApolloBBPlaceholderCircleImage(UIColor *fill, UITraitCollection 
 
 #pragma mark - Cell
 
+// Two lines of caption2 at the CURRENT content size category. Hardcoding this
+// clipped every title in the grid at accessibility text sizes, so both the label
+// and the cell height (sizeForItemAtIndexPath) derive from it.
+static CGFloat ApolloBBTitleHeight(void) {
+    UIFont *font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption2];
+    return ceil(font.lineHeight * 2.0) + 2.0;
+}
+
 @interface ApolloBadgeCell : UICollectionViewCell
 @property(nonatomic, strong) UIImageView *iconView;
 @property(nonatomic, strong) UILabel *titleLabel;
@@ -183,7 +191,13 @@ static UIImage *ApolloBBPlaceholderCircleImage(UIColor *fill, UITraitCollection 
 - (void)applyItem:(ApolloBadgeItem *)item state:(ApolloBadgeState)state accent:(UIColor *)accent artURL:(NSString *)artURL;
 @end
 
-@implementation ApolloBadgeCell
+@implementation ApolloBadgeCell {
+    // Last-applied inputs, replayed on an appearance change (see below).
+    ApolloBadgeItem *_appliedItem;
+    ApolloBadgeState _appliedState;
+    UIColor *_appliedAccent;
+    NSString *_appliedArtURL;
+}
 
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
@@ -219,7 +233,7 @@ static UIImage *ApolloBBPlaceholderCircleImage(UIColor *fill, UITraitCollection 
     [super layoutSubviews];
     CGFloat w = self.contentView.bounds.size.width;
     CGFloat h = self.contentView.bounds.size.height;
-    CGFloat labelH = 30.0;
+    CGFloat labelH = ApolloBBTitleHeight();
     CGFloat iconBox = MAX(0.0, MIN(w, h - labelH - 4.0));
     CGFloat iconX = (w - iconBox) / 2.0;
     self.iconView.frame = CGRectMake(iconX, 0.0, iconBox, iconBox);
@@ -235,10 +249,23 @@ static UIImage *ApolloBBPlaceholderCircleImage(UIColor *fill, UITraitCollection 
 }
 
 - (void)applyItem:(ApolloBadgeItem *)item state:(ApolloBadgeState)state accent:(UIColor *)accent artURL:(NSString *)artURL {
+    // Remembered so a light/dark flip can re-render the (rasterized, non-dynamic)
+    // placeholder circle without waiting for the cell to be recycled.
+    _appliedItem = item;
+    _appliedState = state;
+    _appliedAccent = accent;
+    _appliedArtURL = [artURL copy];
+
     self.titleLabel.text = item.title;
     BOOL locked = (state == ApolloBadgeStateLocked);
     UIImage *placeholder = ApolloBBPlaceholderCircleImage(self.placeholderFillColor ?: [UIColor secondarySystemFillColor],
                                                           self.traitCollection);
+
+    // For achievements the catalogue image_url may be Reddit's near-invisible
+    // "ghost" placeholder — only the per-user art URL from the achievements
+    // page is trustworthy. Trophies' scraped/API URLs are always real art.
+    NSString *remote = artURL.length ? artURL
+        : (item.kind == ApolloBadgeKindTrophy ? item.imageURLString : nil);
 
     if (locked) {
         self.iconView.image = placeholder;
@@ -246,25 +273,27 @@ static UIImage *ApolloBBPlaceholderCircleImage(UIColor *fill, UITraitCollection 
         self.loadingImageKey = nil;
     } else {
         self.lockGlyph.hidden = YES;
-        UIImage *bundled = [item bundledImage];
-        // For achievements the catalogue image_url may be Reddit's near-invisible
-        // "ghost" placeholder — only the per-user art URL from the achievements
-        // page is trustworthy. Trophies' scraped/API URLs are always real art.
-        NSString *remote = artURL.length ? artURL
-            : (item.kind == ApolloBadgeKindTrophy ? item.imageURLString : nil);
-        if (bundled) {
-            self.iconView.image = bundled;
+        UIImage *warm = [item cachedBundledImage];
+        if (warm) {
+            self.iconView.image = warm;
             self.loadingImageKey = nil;
-        } else if (remote.length) {
+        } else if (item.imageFile.length) {
+            // Cold cache (prewarm still running, or an evicted entry): decode off
+            // the main thread rather than stalling this scroll frame on file I/O.
             self.iconView.image = placeholder;   // never a blank tile while loading
-            NSString *key = remote;
+            NSString *key = [@"bundled:" stringByAppendingString:item.imageFile];
             self.loadingImageKey = key;
             __weak typeof(self) ws = self;
-            ApolloBBLoadRemoteImage(key, 64.0, ^(UIImage *image) {
-                typeof(self) ss = ws; if (!ss || !image) return;
+            [item loadBundledImage:^(UIImage *image) {
+                typeof(self) ss = ws; if (!ss) return;
                 if (![ss.loadingImageKey isEqualToString:key]) return;  // cell reused
-                ss.iconView.image = image;
-            });
+                if (image) { ss.iconView.image = image; ss.loadingImageKey = nil; return; }
+                // Bundled file missing — fall through to the remote art if any.
+                if (remote.length) [ss apollo_loadRemoteArt:remote];
+            }];
+        } else if (remote.length) {
+            self.iconView.image = placeholder;
+            [self apollo_loadRemoteArt:remote];
         } else {
             self.iconView.image = placeholder;
             self.loadingImageKey = nil;
@@ -287,6 +316,27 @@ static UIImage *ApolloBBPlaceholderCircleImage(UIColor *fill, UITraitCollection 
     }
 }
 
+- (void)apollo_loadRemoteArt:(NSString *)remote {
+    NSString *key = remote;
+    self.loadingImageKey = key;
+    __weak typeof(self) ws = self;
+    ApolloBBLoadRemoteImage(key, 64.0, ^(UIImage *image) {
+        typeof(self) ss = ws; if (!ss || !image) return;
+        if (![ss.loadingImageKey isEqualToString:key]) return;  // cell reused
+        ss.iconView.image = image;
+    });
+}
+
+// The placeholder circle is a bitmap baked from a resolved fill color, so unlike
+// every semantic-colored label around it, it does NOT follow a live appearance
+// change. Re-apply the cell to regenerate it at the new appearance.
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    if (!_appliedItem) return;
+    if (![self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previous]) return;
+    [self applyItem:_appliedItem state:_appliedState accent:_appliedAccent artURL:_appliedArtURL];
+}
+
 - (void)prepareForReuse {
     [super prepareForReuse];
     self.iconView.image = nil;
@@ -294,11 +344,20 @@ static UIImage *ApolloBBPlaceholderCircleImage(UIColor *fill, UITraitCollection 
     self.statusBadge.hidden = YES;
     self.lockGlyph.hidden = YES;
     self.loadingImageKey = nil;
+    _appliedItem = nil;
+    _appliedArtURL = nil;
 }
 
 @end
 
 #pragma mark - Section header
+
+// Same reasoning as ApolloBBTitleHeight: a fixed 42pt header truncated the
+// category name at large text sizes.
+static CGFloat ApolloBBHeaderHeight(void) {
+    UIFont *font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+    return MAX(42.0, ceil(font.lineHeight) + 16.0);
+}
 
 @interface ApolloBadgeSectionHeader : UICollectionReusableView
 @property(nonatomic, strong) UILabel *titleLabel;
@@ -327,7 +386,9 @@ static UIImage *ApolloBBPlaceholderCircleImage(UIColor *fill, UITraitCollection 
     [super layoutSubviews];
     CGFloat inset = 16.0;
     CGFloat w = self.bounds.size.width;
-    CGFloat countW = 120.0;
+    CGFloat h = self.bounds.size.height;
+    // Only as wide as the count actually needs, so the category name keeps the rest.
+    CGFloat countW = MIN(ceil([self.countLabel sizeThatFits:CGSizeMake(w, h)].width) + 4.0, floor(w * 0.45));
     self.titleLabel.frame = CGRectMake(inset, 0.0, w - inset * 2.0 - countW, self.bounds.size.height);
     self.countLabel.frame = CGRectMake(w - inset - countW, 0.0, countW, self.bounds.size.height);
 }
@@ -362,6 +423,17 @@ static UIImage *ApolloBBPlaceholderCircleImage(UIColor *fill, UITraitCollection 
     CAEmitterLayer *_sparkles;
     CMMotionManager *_motion;
     BOOL _panActive;
+    BOOL _iconShowsPlaceholder;   // placeholder circle is a bitmap; regenerate on appearance flips
+}
+
+// Apple asks for ONE CMMotionManager per app — each instance stands up its own
+// sensor session. Tapping in and out of a few cards was tearing down and
+// re-creating a full 60Hz device-motion session every time, purely for a
+// decorative tilt. One shared, lazily-created manager instead.
+static CMMotionManager *ApolloBBSharedMotionManager(void) {
+    static CMMotionManager *shared; static dispatch_once_t once;
+    dispatch_once(&once, ^{ shared = [[CMMotionManager alloc] init]; });
+    return shared;
 }
 
 - (instancetype)initWithItem:(ApolloBadgeItem *)item state:(ApolloBadgeState)state accent:(UIColor *)accent
@@ -375,6 +447,47 @@ static UIImage *ApolloBBPlaceholderCircleImage(UIColor *fill, UITraitCollection 
 
 - (BOOL)apollo_isEarnedLook {
     return _item.kind == ApolloBadgeKindTrophy || _state == ApolloBadgeStateEarned;
+}
+
+// The accent is a dynamic-provider color. Anything that bakes it into a CGColor
+// (the holo ring's gradient, the sparkle emitter cell) must resolve it against
+// real in-hierarchy traits first — ambient resolution picks the wrong light/dark
+// variant whenever Apollo's theme overrides the window style.
+- (UIColor *)apollo_resolvedAccent {
+    UIColor *accent = _accent ?: [UIColor systemBlueColor];
+    UITraitCollection *traits = (_card.window ? _card.traitCollection : self.view.traitCollection);
+    return traits ? [accent resolvedColorWithTraitCollection:traits] : accent;
+}
+
+// Ring colors are CGColors, so they don't follow a live appearance change on
+// their own — re-derived from viewDidLoad, viewDidAppear (card in the window by
+// then) and any subsequent trait flip.
+- (void)apollo_applyHoloRingColors {
+    if (!_holoRing) return;
+    UIColor *accent = [self apollo_resolvedAccent];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _holoRing.colors = @[
+        (id)accent.CGColor,
+        (id)[UIColor systemTealColor].CGColor,
+        (id)[UIColor systemPurpleColor].CGColor,
+        (id)[UIColor systemPinkColor].CGColor,
+        (id)[UIColor systemOrangeColor].CGColor,
+        (id)[UIColor systemYellowColor].CGColor,
+        (id)accent.CGColor,
+    ];
+    [CATransaction commit];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    if (![self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previous]) return;
+    [self apollo_applyHoloRingColors];
+    // Same story as the grid cell: the placeholder circle is a baked bitmap.
+    if (_iconShowsPlaceholder) {
+        _iconView.image = ApolloBBPlaceholderCircleImage(ApolloBBElevatedColor(_surface ?: [UIColor secondarySystemGroupedBackgroundColor]),
+                                                         self.view.traitCollection);
+    }
 }
 
 - (void)viewDidLoad {
@@ -428,16 +541,6 @@ static UIImage *ApolloBBPlaceholderCircleImage(UIColor *fill, UITraitCollection 
         ring.frame = CGRectMake(0.0, 0.0, kRingSize, kRingSize);
         ring.startPoint = CGPointMake(0.5, 0.5);
         ring.endPoint = CGPointMake(1.0, 0.5);
-        UIColor *accent = _accent ?: [UIColor systemBlueColor];
-        ring.colors = @[
-            (id)accent.CGColor,
-            (id)[UIColor systemTealColor].CGColor,
-            (id)[UIColor systemPurpleColor].CGColor,
-            (id)[UIColor systemPinkColor].CGColor,
-            (id)[UIColor systemOrangeColor].CGColor,
-            (id)[UIColor systemYellowColor].CGColor,
-            (id)accent.CGColor,
-        ];
         CAShapeLayer *ringMask = [CAShapeLayer layer];
         CGFloat inset = 5.0;
         ringMask.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(ring.bounds, inset, inset)].CGPath;
@@ -447,6 +550,7 @@ static UIImage *ApolloBBPlaceholderCircleImage(UIColor *fill, UITraitCollection 
         ring.mask = ringMask;
         [ringHost.layer addSublayer:ring];
         _holoRing = ring;
+        [self apollo_applyHoloRingColors];
 
         CABasicAnimation *spin = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
         spin.fromValue = @0.0;
@@ -465,22 +569,44 @@ static UIImage *ApolloBBPlaceholderCircleImage(UIColor *fill, UITraitCollection 
     UIImageView *lockGlyph = nil;
     if (locked) {
         icon.image = placeholder;
+        _iconShowsPlaceholder = YES;
         lockGlyph = [[UIImageView alloc] init];
         lockGlyph.contentMode = UIViewContentModeScaleAspectFit;
         lockGlyph.image = [UIImage systemImageNamed:@"lock.fill"];
         lockGlyph.tintColor = [UIColor secondaryLabelColor];
         lockGlyph.translatesAutoresizingMaskIntoConstraints = NO;
     } else {
-        UIImage *bundled = [_item bundledImage];
+        UIImage *warm = [_item cachedBundledImage];
         NSString *remote = _artURL.length ? _artURL
             : (_item.kind == ApolloBadgeKindTrophy ? _item.imageURLString : nil);
-        if (bundled) {
-            icon.image = bundled;
+        if (warm) {
+            icon.image = warm;
+        } else if (_item.imageFile.length) {
+            // Cold cache: decode off-main rather than blocking the push animation.
+            icon.image = placeholder;
+            _iconShowsPlaceholder = YES;
+            __weak typeof(self) ws = self;
+            [_item loadBundledImage:^(UIImage *image) {
+                typeof(self) ss = ws; if (!ss) return;
+                if (image) { icon.image = image; ss->_iconShowsPlaceholder = NO; return; }
+                if (remote.length) {
+                    ApolloBBLoadRemoteImage(remote, 140.0, ^(UIImage *art) {
+                        typeof(self) ss2 = ws; if (!ss2 || !art) return;
+                        icon.image = art; ss2->_iconShowsPlaceholder = NO;
+                    });
+                }
+            }];
         } else if (remote.length) {
             icon.image = placeholder;
-            ApolloBBLoadRemoteImage(remote, 140.0, ^(UIImage *image) { if (image) icon.image = image; });
+            _iconShowsPlaceholder = YES;
+            __weak typeof(self) ws = self;
+            ApolloBBLoadRemoteImage(remote, 140.0, ^(UIImage *image) {
+                typeof(self) ss = ws; if (!ss || !image) return;
+                icon.image = image; ss->_iconShowsPlaceholder = NO;
+            });
         } else {
             icon.image = placeholder;
+            _iconShowsPlaceholder = YES;
         }
     }
     [card addSubview:icon];
@@ -655,6 +781,7 @@ static UIImage *ApolloBBPlaceholderCircleImage(UIColor *fill, UITraitCollection 
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+    [self apollo_applyHoloRingColors];   // card is in the window now — real traits
     [self apollo_installShine];
     if ([self apollo_isEarnedLook]) [self apollo_burstSparkles];
     [self apollo_startMotionTilt];
@@ -725,8 +852,7 @@ static UIImage *ApolloBBPlaceholderCircleImage(UIColor *fill, UITraitCollection 
     cell.alphaSpeed = -1.0;
     cell.spin = 2.0;
     cell.spinRange = 4.0;
-    UIColor *accent = _accent ?: [UIColor systemBlueColor];
-    cell.color = [accent colorWithAlphaComponent:0.95].CGColor;
+    cell.color = [[self apollo_resolvedAccent] colorWithAlphaComponent:0.95].CGColor;
     emitter.emitterCells = @[cell];
     [_card.layer addSublayer:emitter];
     _sparkles = emitter;
@@ -780,10 +906,14 @@ static UIImage *ApolloBBPlaceholderCircleImage(UIColor *fill, UITraitCollection 
 }
 
 - (void)apollo_startMotionTilt {
-    CMMotionManager *motion = [[CMMotionManager alloc] init];
+    CMMotionManager *motion = ApolloBBSharedMotionManager();
     if (!motion.isDeviceMotionAvailable) return;   // simulator / no sensors
+    // Hand the shared session to whichever card is on screen now.
+    if (motion.isDeviceMotionActive) [motion stopDeviceMotionUpdates];
     _motion = motion;
-    motion.deviceMotionUpdateInterval = 1.0 / 60.0;
+    // 30Hz is plenty for a card that only ever rotates a few degrees, and halves
+    // the sensor callbacks versus the old 60Hz.
+    motion.deviceMotionUpdateInterval = 1.0 / 30.0;
     __weak typeof(self) ws = self;
     __block BOOL hasBase = NO;
     __block double baseRoll = 0.0, basePitch = 0.0;
@@ -874,7 +1004,7 @@ static NSString *const kHeaderID = @"header";
     layout.sectionInset = UIEdgeInsetsMake(12.0, 16.0, 24.0, 16.0);
     layout.minimumInteritemSpacing = 10.0;
     layout.minimumLineSpacing = 14.0;
-    layout.headerReferenceSize = CGSizeMake(0.0, 42.0);
+    layout.headerReferenceSize = CGSizeMake(0.0, ApolloBBHeaderHeight());
 
     self.collectionView = [[UICollectionView alloc] initWithFrame:self.view.bounds collectionViewLayout:layout];
     self.collectionView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -921,6 +1051,15 @@ static NSString *const kHeaderID = @"header";
     NSString *user = [note.object isKindOfClass:[NSString class]] ? note.object : nil;
     if (![user.lowercaseString isEqualToString:self.username.lowercaseString]) return;
     [self apollo_startFetch];   // warm cache → synchronous updated result
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    // Cell height is derived from the current text size, so the flow layout has to
+    // re-measure when the user changes it while the book is on screen.
+    if (![previous.preferredContentSizeCategory isEqualToString:self.traitCollection.preferredContentSizeCategory]) {
+        [self.collectionView.collectionViewLayout invalidateLayout];
+    }
 }
 
 - (void)viewDidLayoutSubviews {
@@ -1066,14 +1205,16 @@ static NSString *const kHeaderID = @"header";
     CGFloat target = 104.0;  // preferred cell width
     NSInteger cols = MAX(3, (NSInteger)floor((available + spacing) / (target + spacing)));
     CGFloat w = floor((available - spacing * (cols - 1)) / cols);
-    return CGSizeMake(w, w + 30.0);   // icon (≈w) + 2-line label
+    // icon (≈w) + 2 lines of title AT THE CURRENT TEXT SIZE — the cell has to grow
+    // with Dynamic Type or large accessibility sizes clip every title in the grid.
+    return CGSizeMake(w, w + ApolloBBTitleHeight());
 }
 
 - (CGSize)collectionView:(UICollectionView *)collectionView layout:(UICollectionViewLayout *)layout
 referenceSizeForHeaderInSection:(NSInteger)section {
     if (self.mode == ApolloBadgeBookModeAchievements && [self achievementsForSection:section].count == 0) return CGSizeZero;
     if (self.mode == ApolloBadgeBookModeTrophies && self.userBadges.trophies.count == 0) return CGSizeZero;
-    return CGSizeMake(collectionView.bounds.size.width, 42.0);
+    return CGSizeMake(collectionView.bounds.size.width, ApolloBBHeaderHeight());
 }
 
 - (void)collectionView:(UICollectionView *)collectionView didSelectItemAtIndexPath:(NSIndexPath *)indexPath {

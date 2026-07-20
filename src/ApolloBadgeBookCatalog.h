@@ -40,9 +40,17 @@ typedef NS_ENUM(NSInteger, ApolloBadgeKind) {
 // For a live trophy that isn't in the bundled catalogue, we still want to show it.
 @property(nonatomic) BOOL isLiveUncatalogued;
 
-// The best available image for this item: the bundled downscaled icon if present,
-// else nil (caller should fall back to async-loading imageURLString).
+// The bundled downscaled icon, decoded. BLOCKING: reads the file and forces an
+// ImageIO decode when the cache is cold, so this must never be called from the
+// main thread — use cachedBundledImage/loadBundledImage: there.
 - (nullable UIImage *)bundledImage;
+// Already-decoded icon, or nil if the cache is cold. Never touches disk, so it is
+// safe from a cell/layout path on the main thread.
+- (nullable UIImage *)cachedBundledImage;
+// cachedBundledImage when warm (completion runs synchronously, before returning),
+// else a background decode with the completion on the main queue. Called exactly
+// once; the image is nil when the item has no bundled art or the file is missing.
+- (void)loadBundledImage:(void (^)(UIImage *_Nullable image))completion;
 @end
 
 @interface ApolloBadgeBookCatalog : NSObject
