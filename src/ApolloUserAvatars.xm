@@ -114,6 +114,16 @@ static const void *kApolloProfileTabAvatarImageMarkerKey = &kApolloProfileTabAva
 // load has superseded the URL they were fetching before stamping a stale image.
 @property(nonatomic, copy) NSURL *currentProfileImageURL;
 @property(nonatomic, copy) NSURL *currentBannerURL;
+// Monotonic counter bumped every time a synthetic (no-banner) backdrop build is
+// kicked off. Its off-thread blur/composite compares the token back on main so a
+// slow build can't stamp itself over a newer backdrop — or over a real banner
+// that a second profile-info pass has since applied.
+@property(nonatomic) NSUInteger backdropToken;
+// Memoised bio text measurement — see apollo_aboutNaturalHeightForWidth:.
+@property(nonatomic, copy) NSString *aboutMeasuredText;
+@property(nonatomic, strong) UIFont *aboutMeasuredFont;
+@property(nonatomic) CGFloat aboutMeasuredWidth;
+@property(nonatomic) CGFloat aboutMeasuredHeight;
 @property(nonatomic, copy) void (^heightInvalidationBlock)(void);
 - (void)applyProfileInfo:(ApolloUserProfileInfo *)info fallbackUsername:(NSString *)username;
 - (CGFloat)preferredHeightForWidth:(CGFloat)width;
@@ -290,6 +300,39 @@ static UIImage *ApolloProfileTintedSymbol(NSString *name, CGFloat pointSize, UIC
 
 @end
 
+// Action-pill title fonts. These have to come from UIFontMetrics: setting
+// adjustsFontForContentSizeCategory on a label whose font is a plain
+// systemFontOfSize: is a silent no-op (such a font carries no text-style
+// metadata for UIKit to rescale), which is why the Edit/Follow/Message pills
+// used to stay pinned at 15/16.5pt while the name/username/bio around them —
+// which do go through UIFontMetrics/preferredFontForTextStyle — grew.
+static UIFont *ApolloProfileEditButtonFont(void) {
+    UIFont *base = [UIFont systemFontOfSize:15.0 weight:UIFontWeightBold];
+    return [[UIFontMetrics metricsForTextStyle:UIFontTextStyleSubheadline] scaledFontForFont:base];
+}
+
+static UIFont *ApolloProfileFollowButtonFont(void) {
+    UIFont *base = [UIFont systemFontOfSize:16.5 weight:UIFontWeightSemibold];
+    return [[UIFontMetrics metricsForTextStyle:UIFontTextStyleBody] scaledFontForFont:base];
+}
+
+// Pill geometry derives from those (now genuinely scaling) fonts, the same way
+// the identity layout sizes nameFrame/subnameFrame from their fonts' lineHeight.
+// Fixed 30/42pt pills would clip their own titles at large accessibility sizes.
+// Both bottom out at the original constants, so the default-size layout — and
+// every screenshot of it — is byte-identical to before.
+static CGFloat ApolloProfileEditButtonHeight(void) {
+    return MAX(30.0, ceil(ApolloProfileEditButtonFont().lineHeight) + 12.0);
+}
+
+static CGFloat ApolloProfileActionsRowHeight(void) {
+    return MAX(42.0, ceil(ApolloProfileFollowButtonFont().lineHeight) + 22.0);
+}
+
+// The resolved accent a button's glass was last built from, stamped on the glass
+// view itself so a restyle with an unchanged accent can skip rebuilding it.
+static const void *kApolloProfileGlassAccentKey = &kApolloProfileGlassAccentKey;
+
 @implementation ApolloProfileHeaderView
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -349,7 +392,7 @@ static UIImage *ApolloProfileTintedSymbol(NSString *name, CGFloat pointSize, UIC
         // nearly invisible where it floats over banner art.
         _editProfileButton = [UIButton buttonWithType:UIButtonTypeCustom];
         [_editProfileButton setTitle:@"Edit" forState:UIControlStateNormal];
-        _editProfileButton.titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightBold];
+        _editProfileButton.titleLabel.font = ApolloProfileEditButtonFont();
         _editProfileButton.titleLabel.adjustsFontForContentSizeCategory = YES;
         _editProfileButton.layer.cornerCurve = kCACornerCurveContinuous;
         [_editProfileButton addTarget:self action:@selector(apollo_editProfileTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -360,7 +403,7 @@ static UIImage *ApolloProfileTintedSymbol(NSString *name, CGFloat pointSize, UIC
         // someone else's profile.
         _followButton = [UIButton buttonWithType:UIButtonTypeCustom];
         [_followButton setTitle:@"Follow" forState:UIControlStateNormal];
-        _followButton.titleLabel.font = [UIFont systemFontOfSize:16.5 weight:UIFontWeightSemibold];
+        _followButton.titleLabel.font = ApolloProfileFollowButtonFont();
         _followButton.titleLabel.adjustsFontForContentSizeCategory = YES;
         _followButton.layer.cornerCurve = kCACornerCurveContinuous;
         _followButton.hidden = YES;
@@ -370,7 +413,8 @@ static UIImage *ApolloProfileTintedSymbol(NSString *name, CGFloat pointSize, UIC
         _messageButton = [UIButton buttonWithType:UIButtonTypeCustom];
         if (![UIImage respondsToSelector:@selector(systemImageNamed:)]) {
             [_messageButton setTitle:@"Message" forState:UIControlStateNormal];
-            _messageButton.titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightBold];
+            _messageButton.titleLabel.font = ApolloProfileEditButtonFont();
+            _messageButton.titleLabel.adjustsFontForContentSizeCategory = YES;
         }
         // The envelope glyph is set (colour baked in) in apollo_updateEditProfileButtonColors
         // so it always matches the accent's on-colour, rather than relying on tintColor
@@ -439,6 +483,15 @@ static UIImage *ApolloProfileTintedSymbol(NSString *name, CGFloat pointSize, UIC
     self.usernameLabel.textColor = [UIColor secondaryLabelColor];
     self.aboutLabel.textColor = [UIColor labelColor];
     [self apollo_updateEditProfileButtonColors];
+    // Now that every font in the header genuinely scales, a text-size change moves
+    // real geometry (label heights, pill heights, the bio's line count) — so the
+    // tableHeaderView has to be re-measured, not just re-laid-out at the old height.
+    if (previousTraitCollection &&
+        ![previousTraitCollection.preferredContentSizeCategory
+            isEqualToString:self.traitCollection.preferredContentSizeCategory]) {
+        [self setNeedsLayout];
+        if (self.heightInvalidationBlock) self.heightInvalidationBlock();
+    }
 }
 
 - (void)tintColorDidChange {
@@ -462,23 +515,39 @@ static UIImage *ApolloProfileTintedSymbol(NSString *name, CGFloat pointSize, UIC
 - (UIVisualEffectView *)apollo_styleGlassButton:(UIButton *)button
                                         existing:(UIVisualEffectView *)glassView
                                           accent:(UIColor *)accentColor {
-    UIVisualEffect *effect = ApolloImmersiveGlassEffect(accentColor, 0.62, YES);
-    if (!effect) {
-        button.backgroundColor = [accentColor colorWithAlphaComponent:0.92];
-        [glassView removeFromSuperview];
-        return nil;
+    // Building a UIGlassEffect is real compositor work on iOS 26, and this runs on
+    // every install/update, trait change, tint change, window move and safe-area
+    // change — nearly always with an unchanged accent. Skip the rebuild when the
+    // glass this button already wears came from the same colour. The comparison
+    // uses the RESOLVED accent: ApolloThemeAccentColor() hands back a freshly
+    // built dynamic-provider color every call (never -isEqual: to the previous
+    // one), and resolving also makes a light/dark flip a genuine cache miss.
+    UIColor *accentKey = [accentColor resolvedColorWithTraitCollection:button.traitCollection] ?: accentColor;
+    BOOL reusable = glassView && glassView.superview == button
+        && [objc_getAssociatedObject(glassView, kApolloProfileGlassAccentKey) isEqual:accentKey];
+    if (!reusable) {
+        UIVisualEffect *effect = ApolloImmersiveGlassEffect(accentColor, 0.62, YES);
+        if (!effect) {
+            button.backgroundColor = [accentColor colorWithAlphaComponent:0.92];
+            [glassView removeFromSuperview];
+            return nil;
+        }
+        button.backgroundColor = UIColor.clearColor;
+        button.clipsToBounds = YES;
+        if (!glassView || glassView.superview != button) {
+            [glassView removeFromSuperview];
+            glassView = [[UIVisualEffectView alloc] initWithEffect:effect];
+            glassView.userInteractionEnabled = NO;
+            glassView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            [button insertSubview:glassView atIndex:0];
+        } else {
+            glassView.effect = effect;
+        }
+        objc_setAssociatedObject(glassView, kApolloProfileGlassAccentKey, accentKey,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    button.backgroundColor = UIColor.clearColor;
-    button.clipsToBounds = YES;
-    if (!glassView || glassView.superview != button) {
-        [glassView removeFromSuperview];
-        glassView = [[UIVisualEffectView alloc] initWithEffect:effect];
-        glassView.userInteractionEnabled = NO;
-        glassView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [button insertSubview:glassView atIndex:0];
-    } else {
-        glassView.effect = effect;
-    }
+    // Geometry and z-ordering are re-applied unconditionally — they're cheap, and
+    // the ordering fixup below still has to run after a setImage: on a cache hit.
     glassView.frame = button.bounds;
     glassView.layer.cornerRadius = button.layer.cornerRadius;
     glassView.layer.cornerCurve = kCACornerCurveContinuous;
@@ -504,7 +573,10 @@ static UIImage *ApolloProfileTintedSymbol(NSString *name, CGFloat pointSize, UIC
     }
     // Envelope icon: composited to the exact on-accent colour (see ApolloProfileTintedSymbol),
     // matching the Follow title. AlwaysOriginal, so tintColor never re-colours it.
-    UIImage *envelope = ApolloProfileTintedSymbol(@"envelope.fill", 19.0, onAccent);
+    // Point size tracks the Follow title's text style so the glyph grows with the
+    // pill it sits in rather than shrinking away inside it at large text sizes.
+    CGFloat glyphPoint = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleBody] scaledValueForValue:19.0];
+    UIImage *envelope = ApolloProfileTintedSymbol(@"envelope.fill", glyphPoint, onAccent);
     if (envelope) [self.messageButton setImage:envelope forState:UIControlStateNormal];
 
     self.editGlassView = [self apollo_styleGlassButton:self.editProfileButton existing:self.editGlassView accent:accentColor];
@@ -518,11 +590,10 @@ static UIImage *ApolloProfileTintedSymbol(NSString *name, CGFloat pointSize, UIC
 static CGFloat const ApolloProfileAboutMaxHeight = 220.0; // ~10 lines @ footnote font, covers 200+ chars at full width
 static CGFloat const ApolloProfileSocialAboutGap = 8.0;   // gap below the social band, above the bio
 static CGFloat const ApolloProfileAboutToggleHeight = 22.0; // the "more"/"less" caption row under a truncated bio
-static CGFloat const ApolloProfileActionsRowHeight = 42.0;  // Follow / Message pill height
 static CGFloat const ApolloProfileActionsBottomGap = 16.0;  // gap below the action row, above the body
 static CGFloat const ApolloProfileActionsButtonGap = 10.0;  // gap between Follow and Message
 static CGFloat const ApolloProfileActionsStackGap = 8.0;    // gap between rows when stacked (large Dynamic Type)
-static CGFloat const ApolloProfileEditButtonWidth = 64.0;   // shared with layoutSubviews' editProfileButton frame
+static CGFloat const ApolloProfileEditButtonMinWidth = 64.0; // floor for the Edit pill; it grows with its scaled title
 
 // Classic density: avatar left-aligned, inline with the name/username column
 // (Apollo's original profile layout) instead of centered above a stacked name.
@@ -570,12 +641,27 @@ static UIFont *ApolloProfileClassicNameFont(void) {
     self.aboutLabel.adjustsFontForContentSizeCategory = YES;
 }
 
+// Building this runs several UIFontMetrics scalings, so it is computed ONCE per
+// measure/layout entry point (preferredHeightForWidth, layoutSubviews) and then
+// threaded through the helpers below as a parameter. Every helper used to call
+// this itself, which put a dozen-plus redundant font scalings into a single
+// header-update cycle — and left open the possibility of two helpers in the same
+// pass disagreeing about the geometry.
 - (ApolloIdentityHeaderLayout)apollo_identityForWidth:(CGFloat)width {
     ApolloIdentityHeaderLayout identity = ApolloIdentityHeaderLayoutMakeWithBanner(width, [self apollo_bannerHeight]);
     if (!sProfileHeaderImmersive) {
         [self apollo_applyClassicIdentityOverrides:&identity forWidth:width];
     }
     return identity;
+}
+
+// Edit pill width: wide enough for its (now Dynamic Type-scaled) title, never
+// narrower than the original 64pt. 0 when the pill isn't shown, so callers can
+// use it directly as the width to reserve.
+- (CGFloat)apollo_editButtonWidth {
+    if (self.editProfileButton.hidden) return 0.0;
+    return MAX(ApolloProfileEditButtonMinWidth,
+               ceil(self.editProfileButton.intrinsicContentSize.width) + 28.0);
 }
 
 // Classic density keeps the avatar leading (left margin in LTR, mirrored in
@@ -598,7 +684,8 @@ static UIFont *ApolloProfileClassicNameFont(void) {
     // The Edit pill (own profile only) claims the row's outer top corner
     // (mirrors with RTL too — see editButtonX in layoutSubviews) — reserve
     // its width so the name/subname text never runs under it.
-    CGFloat editReserve = self.editProfileButton.hidden ? 0.0 : (ApolloProfileEditButtonWidth + ApolloProfileClassicEditGap);
+    CGFloat editWidth = [self apollo_editButtonWidth];
+    CGFloat editReserve = (editWidth > 0.0) ? (editWidth + ApolloProfileClassicEditGap) : 0.0;
     CGFloat nameX = rtl ? (margin + editReserve) : (CGRectGetMaxX(avatarFrame) + ApolloProfileClassicAvatarNameGap);
     CGFloat nameRight = rtl ? (avatarFrame.origin.x - ApolloProfileClassicAvatarNameGap) : (width - margin - editReserve);
     CGFloat nameWidth = MAX(60.0, nameRight - nameX);
@@ -634,34 +721,52 @@ static UIFont *ApolloProfileClassicNameFont(void) {
 - (CGFloat)apollo_aboutNaturalHeightForWidth:(CGFloat)width {
     if (self.aboutLabel.hidden || self.aboutLabel.text.length == 0 || width <= 0.0) return 0.0;
 
+    // Memoised on (text, font, width) — the only inputs. A full text-layout pass
+    // over the bio is expensive, and the truncation check, the collapsed height,
+    // the full height and the expanded height all want the same number, twice
+    // over (once measuring for preferredHeightForWidth, once applying frames in
+    // layoutSubviews). Without this it ran six times per header update.
+    NSString *text = self.aboutLabel.text;
+    UIFont *font = self.aboutLabel.font;
+    if (self.aboutMeasuredWidth == width && self.aboutMeasuredFont == font &&
+        [self.aboutMeasuredText isEqualToString:text]) {
+        return self.aboutMeasuredHeight;
+    }
+
     CGSize constrained = CGSizeMake(width, CGFLOAT_MAX);
-    CGRect rect = [self.aboutLabel.text boundingRectWithSize:constrained
-                                                     options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
-                                                  attributes:@{NSFontAttributeName: self.aboutLabel.font}
-                                                     context:nil];
-    return MAX(18.0, ceil(rect.size.height));
+    CGRect rect = [text boundingRectWithSize:constrained
+                                     options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                  attributes:@{NSFontAttributeName: font}
+                                     context:nil];
+    CGFloat height = MAX(18.0, ceil(rect.size.height));
+    self.aboutMeasuredText = text;
+    self.aboutMeasuredFont = font;
+    self.aboutMeasuredWidth = width;
+    self.aboutMeasuredHeight = height;
+    return height;
 }
 
-- (CGFloat)apollo_aboutFullHeightForWidth:(CGFloat)width {
-    return MIN(ApolloProfileAboutMaxHeight, [self apollo_aboutNaturalHeightForWidth:width]);
+// The remaining about-height helpers all derive from that one measurement, so
+// they take it as a parameter rather than each re-deriving it.
+- (CGFloat)apollo_aboutFullHeightForNatural:(CGFloat)naturalHeight {
+    return MIN(ApolloProfileAboutMaxHeight, naturalHeight);
 }
 
-- (CGFloat)apollo_aboutCollapsedHeightForWidth:(CGFloat)width {
-    CGFloat fullHeight = [self apollo_aboutFullHeightForWidth:width];
+- (CGFloat)apollo_aboutCollapsedHeightForNatural:(CGFloat)naturalHeight {
+    CGFloat fullHeight = [self apollo_aboutFullHeightForNatural:naturalHeight];
     if (fullHeight <= 0.0) return 0.0;
     CGFloat capHeight = ceil(self.aboutLabel.font.lineHeight * ApolloProfileAboutCollapsedLines) + 1.0;
     return MIN(fullHeight, capHeight);
 }
 
 // Whether the collapsed bio actually hides text (drives the "more" toggle).
-- (BOOL)apollo_aboutTruncatesForWidth:(CGFloat)width {
-    CGFloat naturalHeight = [self apollo_aboutNaturalHeightForWidth:width];
-    return naturalHeight > [self apollo_aboutCollapsedHeightForWidth:width] + 0.5;
+- (BOOL)apollo_aboutTruncatesForNatural:(CGFloat)naturalHeight {
+    return naturalHeight > [self apollo_aboutCollapsedHeightForNatural:naturalHeight] + 0.5;
 }
 
-- (CGFloat)apollo_aboutHeightForWidth:(CGFloat)width {
-    return self.aboutExpanded ? [self apollo_aboutNaturalHeightForWidth:width]
-                              : [self apollo_aboutCollapsedHeightForWidth:width];
+- (CGFloat)apollo_aboutHeightForNatural:(CGFloat)naturalHeight {
+    return self.aboutExpanded ? naturalHeight
+                              : [self apollo_aboutCollapsedHeightForNatural:naturalHeight];
 }
 
 // When the u/username line is hidden (redundant with the display name), everything
@@ -674,8 +779,7 @@ static UIFont *ApolloProfileClassicNameFont(void) {
 
 // Y of the other-user action row (Follow / Message): right below the name/username
 // stack, above the body. Only meaningful when showsUserActions is YES.
-- (CGFloat)apollo_actionsYForWidth:(CGFloat)width {
-    ApolloIdentityHeaderLayout identity = [self apollo_identityForWidth:width];
+- (CGFloat)apollo_actionsYForLayout:(ApolloIdentityHeaderLayout)identity {
     CGFloat lifted = identity.bodyY - [self apollo_subnameLiftForLayout:identity];
     // apollo_subnameLiftForLayout: assumes the subname row is the layout's
     // bottom-most element, which holds in the centered/stacked Immersive
@@ -689,21 +793,31 @@ static UIFont *ApolloProfileClassicNameFont(void) {
 // width — happens at large accessibility Dynamic Type sizes, where the Follow
 // pill's intrinsicContentSize can grow past what's left for Message. Falls
 // back to a stacked layout instead of clipping/overlapping the tap targets.
-- (BOOL)apollo_actionsNeedStackingForWidth:(CGFloat)width {
+- (BOOL)apollo_actionsNeedStackingForLayout:(ApolloIdentityHeaderLayout)identity {
     if (!self.showsUserActions) return NO;
-    CGFloat followWidth = MAX(148.0, ceil(self.followButton.intrinsicContentSize.width) + 52.0);
-    CGFloat messageWidth = 58.0;
-    CGFloat totalWidth = followWidth + ApolloProfileActionsButtonGap + messageWidth;
-    CGFloat bodyWidth = [self apollo_identityForWidth:width].bodyWidth;
-    return totalWidth > bodyWidth;
+    CGFloat totalWidth = [self apollo_followButtonWidth] + ApolloProfileActionsButtonGap + [self apollo_messageButtonWidth];
+    return totalWidth > identity.bodyWidth;
+}
+
+// Follow/Message pill widths — single source of truth for both the stacking
+// decision above and the frames layoutSubviews assigns. Follow grows with its
+// scaled title; the Message pill is an icon target that stays wider than the
+// (now font-derived) row height so its capsule never turns into a circle.
+- (CGFloat)apollo_followButtonWidth {
+    return MAX(148.0, ceil(self.followButton.intrinsicContentSize.width) + 52.0);
+}
+
+- (CGFloat)apollo_messageButtonWidth {
+    return MAX(58.0, ApolloProfileActionsRowHeight() + 16.0);
 }
 
 // Vertical space the action row consumes (row(s) + bottom gap), or 0 when absent.
-- (CGFloat)apollo_actionsOffsetForWidth:(CGFloat)width {
+- (CGFloat)apollo_actionsOffsetForLayout:(ApolloIdentityHeaderLayout)identity {
     if (!self.showsUserActions) return 0.0;
-    CGFloat rowsHeight = [self apollo_actionsNeedStackingForWidth:width]
-        ? (ApolloProfileActionsRowHeight * 2.0 + ApolloProfileActionsStackGap)
-        : ApolloProfileActionsRowHeight;
+    CGFloat rowHeight = ApolloProfileActionsRowHeight();
+    CGFloat rowsHeight = [self apollo_actionsNeedStackingForLayout:identity]
+        ? (rowHeight * 2.0 + ApolloProfileActionsStackGap)
+        : rowHeight;
     return rowsHeight + ApolloProfileActionsBottomGap;
 }
 
@@ -711,30 +825,30 @@ static UIFont *ApolloProfileClassicNameFont(void) {
 // starts — full-width, below whichever of the avatar/snoovatar or the
 // displayName/username stack reaches further down (plus the action row when this
 // is another user's profile). No empty space is wasted beneath the picture.
-- (CGFloat)apollo_socialYForWidth:(CGFloat)width {
-    return [self apollo_actionsYForWidth:width] + [self apollo_actionsOffsetForWidth:width];
+- (CGFloat)apollo_socialYForLayout:(ApolloIdentityHeaderLayout)identity {
+    return [self apollo_actionsYForLayout:identity] + [self apollo_actionsOffsetForLayout:identity];
 }
 
-// Height the social-links band wants at this header width (0 when off / no links).
-- (CGFloat)apollo_socialHeightForWidth:(CGFloat)width {
+// Height the social-links band wants at this body width (0 when off / no links).
+- (CGFloat)apollo_socialHeightForBodyWidth:(CGFloat)bodyWidth {
     if (!self.socialLinksView) return 0.0;
-    CGFloat bandWidth = [self apollo_identityForWidth:width].bodyWidth;
-    return [self.socialLinksView preferredHeightForWidth:bandWidth];
+    return [self.socialLinksView preferredHeightForWidth:bodyWidth];
 }
 
 // Single source of truth for the post-actions body stack, in order:
 //   bio → (more/less) → social links → badge strip → stat cards.
 // apply=NO just measures (returns the bottom Y); apply=YES also sets every frame, so
 // preferredHeightForWidth and layoutSubviews can never drift apart.
-- (CGFloat)apollo_layoutBodyForWidth:(CGFloat)width apply:(BOOL)apply {
-    ApolloIdentityHeaderLayout identity = [self apollo_identityForWidth:width];
+- (CGFloat)apollo_layoutBodyForLayout:(ApolloIdentityHeaderLayout)identity apply:(BOOL)apply {
     CGFloat bodyWidth = identity.bodyWidth;
     CGFloat bodyX = identity.bodyX;
-    CGFloat y = [self apollo_socialYForWidth:width];  // start below name/username/actions
+    CGFloat y = [self apollo_socialYForLayout:identity];  // start below name/username/actions
 
-    // Bio + more/less toggle
-    CGFloat aboutHeight = [self apollo_aboutHeightForWidth:bodyWidth];
-    BOOL showToggle = aboutHeight > 0.0 && ([self apollo_aboutTruncatesForWidth:bodyWidth] || self.aboutExpanded);
+    // Bio + more/less toggle — measured once, shared by the height and the
+    // truncation check (both used to trigger their own text-layout passes).
+    CGFloat aboutNatural = [self apollo_aboutNaturalHeightForWidth:bodyWidth];
+    CGFloat aboutHeight = [self apollo_aboutHeightForNatural:aboutNatural];
+    BOOL showToggle = aboutHeight > 0.0 && ([self apollo_aboutTruncatesForNatural:aboutNatural] || self.aboutExpanded);
     if (apply) {
         self.aboutLabel.frame = CGRectMake(bodyX, y, bodyWidth, aboutHeight);
         self.aboutToggleButton.hidden = !showToggle;
@@ -766,7 +880,7 @@ static UIFont *ApolloProfileClassicNameFont(void) {
     }
 
     // Social links band
-    CGFloat socialH = [self apollo_socialHeightForWidth:width];
+    CGFloat socialH = [self apollo_socialHeightForBodyWidth:bodyWidth];
     if (apply) self.socialLinksView.hidden = (socialH <= 0.0);
     if (socialH > 0.0) {
         y += ApolloProfileSocialAboutGap;
@@ -786,12 +900,16 @@ static UIFont *ApolloProfileClassicNameFont(void) {
         if (apply) {
             CGFloat totalGap = ApolloProfileStatsCardGap * (cardCount - 1);
             CGFloat cardW = floor((bodyWidth - totalGap) / cardCount);
-            CGFloat cardX = bodyX;
+            // RTL mirrors reading order, exactly like the Follow/Message row above:
+            // statCards[0] (post karma) is the card that reads first, which is the
+            // trailing (right) slot in RTL. The last physical slot still absorbs the
+            // floor() rounding remainder so the row ends flush with the body column.
+            BOOL rtl = self.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft;
             for (NSUInteger i = 0; i < cardCount; i++) {
-                ApolloProfileStatCard *card = self.statCards[i];
-                CGFloat thisWidth = (i == cardCount - 1) ? (bodyX + bodyWidth - cardX) : cardW;
-                card.frame = CGRectMake(cardX, y, thisWidth, ApolloProfileStatsRowHeight);
-                cardX += cardW + ApolloProfileStatsCardGap;
+                NSUInteger slot = rtl ? (cardCount - 1 - i) : i;
+                CGFloat cardX = bodyX + (CGFloat)slot * (cardW + ApolloProfileStatsCardGap);
+                CGFloat thisWidth = (slot == cardCount - 1) ? (bodyX + bodyWidth - cardX) : cardW;
+                self.statCards[i].frame = CGRectMake(cardX, y, thisWidth, ApolloProfileStatsRowHeight);
             }
         }
         y += ApolloProfileStatsRowHeight;
@@ -800,7 +918,8 @@ static UIFont *ApolloProfileClassicNameFont(void) {
 }
 
 - (CGFloat)preferredHeightForWidth:(CGFloat)width {
-    return [self apollo_layoutBodyForWidth:width apply:NO] + ApolloIdentityHeaderBottomPadding();
+    ApolloIdentityHeaderLayout identity = [self apollo_identityForWidth:width];
+    return [self apollo_layoutBodyForLayout:identity apply:NO] + ApolloIdentityHeaderBottomPadding();
 }
 
 - (void)layoutSubviews {
@@ -828,8 +947,8 @@ static UIFont *ApolloProfileClassicNameFont(void) {
 
     self.snoovatarImageView.frame = CGRectInset(identity.avatarFrame, -10.0, -10.0);
 
-    CGFloat editButtonWidth = self.editProfileButton.hidden ? 0.0 : ApolloProfileEditButtonWidth;
-    CGFloat editButtonHeight = 30.0;
+    CGFloat editButtonWidth = [self apollo_editButtonWidth];
+    CGFloat editButtonHeight = ApolloProfileEditButtonHeight();
     BOOL editRTL = self.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft;
     CGFloat editButtonX = editRTL ? 20.0 : (width - editButtonWidth - 20.0);
     self.editProfileButton.frame = CGRectMake(editButtonX,
@@ -843,15 +962,15 @@ static UIFont *ApolloProfileClassicNameFont(void) {
 
     // Other-user action row: [ Follow ] [ ✉ ], centred as a group below the handle.
     if (self.showsUserActions) {
-        CGFloat rowHeight = ApolloProfileActionsRowHeight;
-        CGFloat rowY = [self apollo_actionsYForWidth:width];
+        CGFloat rowHeight = ApolloProfileActionsRowHeight();
+        CGFloat rowY = [self apollo_actionsYForLayout:identity];
         CGFloat corner = rowHeight / 2.0;
         BOOL rtl = self.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft;
 
-        CGFloat followWidth = MAX(148.0, ceil(self.followButton.intrinsicContentSize.width) + 52.0);
-        CGFloat messageWidth = 58.0; // icon pill — wider than tall for a comfortable tap target
+        CGFloat followWidth = [self apollo_followButtonWidth];
+        CGFloat messageWidth = [self apollo_messageButtonWidth]; // icon pill — wider than tall for a comfortable tap target
 
-        if ([self apollo_actionsNeedStackingForWidth:width]) {
+        if ([self apollo_actionsNeedStackingForLayout:identity]) {
             // Large accessibility Dynamic Type: side by side would overflow
             // (or push rowX negative, clipping a tap target) — stack full
             // width instead, primary action on top either direction.
@@ -894,7 +1013,7 @@ static UIFont *ApolloProfileClassicNameFont(void) {
     }
 
     // Bio → social links → badge strip → stat cards, in one sequential pass.
-    [self apollo_layoutBodyForWidth:width apply:YES];
+    [self apollo_layoutBodyForLayout:identity apply:YES];
 }
 
 - (void)apollo_editProfileTapped {
@@ -903,7 +1022,7 @@ static UIFont *ApolloProfileClassicNameFont(void) {
 
 - (void)apollo_toggleAboutExpanded {
     CGFloat aboutWidth = [self apollo_identityForWidth:self.bounds.size.width].bodyWidth;
-    if (!self.aboutExpanded && ![self apollo_aboutTruncatesForWidth:aboutWidth]) return;
+    if (!self.aboutExpanded && ![self apollo_aboutTruncatesForNatural:[self apollo_aboutNaturalHeightForWidth:aboutWidth]]) return;
     self.aboutExpanded = !self.aboutExpanded;
     self.aboutLabel.numberOfLines = self.aboutExpanded ? 0 : ApolloProfileAboutCollapsedLines;
     [self setNeedsLayout];
@@ -2132,6 +2251,14 @@ static UIImage *ApolloProfileCompositeBackdrop(UIImage *blurredAvatar, UIImage *
 static void ApolloProfileApplySyntheticBanner(ApolloProfileHeaderView *header, ApolloUserProfileInfo *info, UIImage *avatarImage) {
     if (!header || info.bannerURL || !sProfileShowBanner) return;
     NSString *targetUsername = ApolloAvatarNormalizedUsername(header.username);
+    // Newest backdrop request wins. `info` was captured at dispatch time and its
+    // bannerURL is nil for the whole life of this call, so re-checking it below
+    // proves nothing — a second applyInfo pass for the SAME user (a stale cache
+    // entry replaced by a fresh fetch, or a banner just added on reddit.com) can
+    // land a real banner while this blur+composite is still running. Compare a
+    // token and the header's live currentBannerURL instead, mirroring the
+    // supersession guards the real-banner completions use.
+    NSUInteger token = ++header.backdropToken;
 
     UIColor *accent = ApolloThemeAccentColor() ?: header.tintColor ?: UIColor.systemBlueColor;
     UIColor *resolved = [accent resolvedColorWithTraitCollection:header.traitCollection];
@@ -2147,7 +2274,9 @@ static void ApolloProfileApplySyntheticBanner(ApolloProfileHeaderView *header, A
         }
         if (!banner) return;
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (info.bannerURL) return;
+            if (token != header.backdropToken) return;   // a newer backdrop pass started
+            if (header.currentBannerURL) return;         // a real banner is current now
+            if (!sProfileShowBanner) return;             // banners switched off meanwhile
             if (!ApolloAvatarUsernameMatches(header.username, targetUsername)) return;
             header.bannerImageView.image = banner;
             ApolloProfileSyncAmbient(header);
