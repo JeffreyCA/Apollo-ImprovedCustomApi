@@ -315,7 +315,7 @@ static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *contr
 - (void)updateStatusMessage {
     if (self.missingAPIKey) {
         self.statusLabel.hidden = NO;
-        self.statusLabel.text = @"Add your Giphy API key in Apollo Settings → API Keys.";
+        self.statusLabel.text = @"Add your Giphy API key in Settings → Apollo Reborn → Accounts & API Keys.";
         self.collectionView.hidden = YES;
         return;
     }

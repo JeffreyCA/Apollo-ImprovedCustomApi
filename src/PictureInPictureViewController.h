@@ -1,4 +1,4 @@
-#import "ApolloSettingsTableViewController.h"
+#import "settings/ApolloSettingsTableViewController.h"
 
 // Settings page for Picture-in-Picture. Subclasses ApolloSettingsTableViewController
 // so the view and cells inherit Apollo's main app theme colour scheme (instead of

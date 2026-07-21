@@ -3604,6 +3604,25 @@ static void ApolloLPTriggerPlaceholderContextRelayout(ASDisplayNode *node, NSStr
 static void ApolloLPRunOverflowHeightCheck(ASDisplayNode *node, NSString *host, NSInteger remainingAttempts) {
     if (!node) return;
     @try {
+        // V26: only police rows whose height this module actually owns.
+        // A LinkButtonNode for an inline-media URL (i.imgur.com/*.jpeg etc.) is
+        // collapsed to a zero-size spec by ApolloInlineImages — its row height
+        // belongs to that module's aspect-ratio pipeline. But Apollo's native
+        // pill layout can still leave ~47pt of stale subview frames on the
+        // collapsed stub, and the union below would read them as a phantom
+        // "overflow=47pt" that a row reload can never fix (the reload rebuilds
+        // the same stub) — on a vote this looped reload → rebuild → reload
+        // forever, visibly flickering the comment. Bail by URL
+        // ownership, which is deterministic; genuine V18 subjects (twitter/
+        // bsky/site cards) are never inline-media URLs.
+        {
+            NSURL *ownURL = objc_getAssociatedObject(node, &kApolloLinkPreviewURLKey);
+            if (!ownURL) {
+                NSString *ownURLString = ApolloGetLinkButtonNodeURLString(node);
+                if (ownURLString.length > 0) ownURL = [NSURL URLWithString:ownURLString];
+            }
+            if (ownURL && ApolloLPShouldDeferToInlineMedia(ownURL)) return;
+        }
         BOOL loaded = [node respondsToSelector:@selector(isNodeLoaded)] && [node isNodeLoaded];
         UIView *nodeView = loaded ? ApolloLPViewForNode(node) : nil;
         UIView *cellView = nil;

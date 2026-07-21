@@ -1,4 +1,5 @@
 #import "ApolloCommon.h"
+#import "settings/ApolloSettingsRouter.h"
 #import <objc/message.h>
 #import <objc/runtime.h>
 
@@ -12,6 +13,14 @@ static NSString *ApolloQuickActionNameFromURL(NSURL *url) {
     NSString *path = [[url.path lowercaseString] stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]];
     if (path.length == 0) return nil;
 
+    // apollo://reborn/settings/<route-id> opens a specific Reborn settings
+    // screen (route ids live in ApolloSettingsRouter). Only claim registered
+    // routes — claiming a URL we can't perform swallows it.
+    if ([path hasPrefix:@"settings/"]) {
+        NSString *routeId = [path substringFromIndex:@"settings/".length];
+        return ApolloSettingsRouteExists(routeId) ? path : nil;
+    }
+
     // Only the actions we actually route below. Popular/All are opened by the
     // widget via Apollo's native apollo://reddit.com/r/popular|all URLs (host
     // "reddit.com", not "reborn"), so we must NOT claim them here — claiming a
@@ -23,42 +32,6 @@ static NSString *ApolloQuickActionNameFromURL(NSURL *url) {
         [path isEqualToString:@"settings"]) {
         return path;
     }
-
-    return nil;
-}
-
-static id ApolloQuickActionsIvarObject(id object, const char *name) {
-    if (!object || !name) return nil;
-
-    @try {
-        Ivar ivar = class_getInstanceVariable([object class], name);
-        return ivar ? object_getIvar(object, ivar) : nil;
-    } @catch (NSException *exception) {
-        ApolloLog(@"[QuickActions] Failed reading ivar %s on %@: %@", name, object, exception);
-        return nil;
-    }
-}
-
-static id ApolloQuickActionsTabBarController(void) {
-    UIApplication *application = UIApplication.sharedApplication;
-
-    for (UIScene *scene in application.connectedScenes) {
-        if (![scene isKindOfClass:UIWindowScene.class]) continue;
-
-        id sceneDelegate = [(UIWindowScene *)scene delegate];
-        id tabBarController = ApolloQuickActionsIvarObject(sceneDelegate, "tabBarController");
-        if (tabBarController) return tabBarController;
-
-        for (UIWindow *window in [(UIWindowScene *)scene windows]) {
-            UIViewController *root = window.rootViewController;
-            if ([root isKindOfClass:UITabBarController.class]) return root;
-            if ([root.presentedViewController isKindOfClass:UITabBarController.class]) return root.presentedViewController;
-        }
-    }
-
-    id appDelegate = application.delegate;
-    id tabBarController = ApolloQuickActionsIvarObject(appDelegate, "tabBarController");
-    if (tabBarController) return tabBarController;
 
     return nil;
 }
@@ -136,9 +109,14 @@ static BOOL ApolloQuickActionsOpenHomeFeed(id tabBarController) {
 }
 
 static BOOL ApolloQuickActionsPerformNow(NSString *action) {
-    id tabBarController = ApolloQuickActionsTabBarController();
+    id tabBarController = ApolloMainTabBarController();
     if (!tabBarController) {
         return NO;
+    }
+
+    // "settings/<route-id>" pushes a Reborn settings screen (deep link).
+    if ([action hasPrefix:@"settings/"]) {
+        return ApolloSettingsRouteOpenNow([action substringFromIndex:@"settings/".length]);
     }
 
     // "home" opens the actual front-page feed (posts), not the picker list.

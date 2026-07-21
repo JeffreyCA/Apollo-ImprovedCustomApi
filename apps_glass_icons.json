@@ -2,7 +2,7 @@
   "apps": [
     {
       "bundleIdentifier": "com.christianselig.Apollo",
-      "buildVersion": "292",
+      "buildVersion": "293",
       "developerName": "Christian Selig (& Apollo-Reborn contributors)",
       "iconURL": "https://apolloreborn.app/assets/icon.png",
       "tintColor": "#F0542D",
@@ -41,6 +41,15 @@
       "name": "Apollo for Reddit - GLASS Icons",
       "subtitle": "Apollo-Reborn build with the Liquid Glass icon catalog only",
       "versions": [
+        {
+          "version": "3.4.2",
+          "buildVersion": "293",
+          "marketingVersion": "3.4.2",
+          "date": "2026-07-17T17:35:23Z",
+          "localizedDescription": "Liquid Glass icons-only build.\n\nFeatures\r\n- Add the Synthwave Liquid Glass app icon to the in-app icon picker (#663: @IllIIllIllIllII)\r\n\r\nFixes\r\n- Fix the Reddit account being signed out after force-quitting or backgrounding the app on sideloaded installs — the account's keychain item was written with the wrong protection class and became invisible to Apollo's own read, which then overwrote it as empty; the item is now created correctly, repaired in place on affected devices, and served from an enumeration fallback so the account survives (#677, #681, #682: @jordanearle, @DeltAndy123)\r\n- Play more short-clip host links inline: add streama.in and streamff.link aliases and follow the moved dubz and streamff CDNs (#665: @icpryde)\r\n- Speed up loading of the full Community Highlights list (#661: @icpryde)\r\n- Fix Video Hold Speed staying stuck at the hold speed after scrubbing a fullscreen video (#667: @icpryde)\r\n- Fix the Mod Queue filter menu anchoring to the wrong spot on Liquid Glass builds (#679: @JeffreyCA)\r\n- Fix Search tab suggestion padding and the Random Subreddit icon's stroke weight (#680: @icpryde)\r\n- Fix the Apollo Classic Liquid Glass icon on iOS 27 (#666: @IllIIllIllIllII)",
+          "downloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.4.2/Apollo-Reborn-3.4.2-GLASSICONS.ipa",
+          "size": 114404199
+        },
         {
           "version": "3.4.1",
           "buildVersion": "292",
@@ -96,12 +105,12 @@
           "size": 139226812
         }
       ],
-      "version": "3.4.1",
-      "marketingVersion": "3.4.1",
-      "versionDate": "2026-07-15T21:45:52Z",
-      "versionDescription": "Liquid Glass icons-only build.\n\nFeatures\n- Add the Apollo Classic Liquid Glass app icon to the in-app icon picker (#660: @IllIIllIllIllII)\n- Add a Remember Post Sort toggle in Settings > General > Comments that restores the comment sort you last picked for a post when you reopen it (#570: @icpryde)\n- Add a Tap to Play mode for inline GIFs and a new Inline Media settings sub-screen that gathers the Inline Media Previews, Alignment, and Autoplay controls plus a new Inline Media Size slider (#602: @icpryde)\n- Play short-clip host links — streamff, streamin, streamain, dubz, dropr, bangr, and MLB clips — inline as real videos with autoplay, fullscreen, mute, and PiP, just like Streamable posts (#596: @icpryde)\n- Replace Hide Bars on Scroll with a Left / Right / Off picker for the collapsed Liquid Glass tab bar (#645: @icpryde)\n- Make the account switcher and Custom API settings reflect each account's actual sign-in mode and credentials instead of showing one global state (#603: @icpryde)\n- Add Hidden Content Recovery to profiles so you can find hidden, removed, or deleted posts and comments and view archived copies when live content is gone (#633: @ostechgit)\n- Enable viewing and changing user flair while using API-Key-Free mode (#653: @icpryde)\n\nFixes\n- Fix the Reddit account being silently wiped seconds after sign-in on devices where iCloud Keychain sync is active (#579: @ostechgit)\n- Fix inline GIF autoplay not being honored under Never / WiFi Only for GIFs on slow hosts, and paused GIFs losing their play overlay and opening the media viewer when tapped (#602: @icpryde)\n- Fix converted native menus on Liquid Glass builds using the old fade animation instead of the iOS 26 glass morph that blooms the menu out of the tapped button (#600: @icpryde)\n- Fix Tag Filters double-blurring media on top of Apollo's own \"tap to view\" overlay when Blur mature (18+) images and media is enabled, including compact NSFW thumbnails (#585: @JeffreyCA)\n- Improve Recently Read Posts so revisited posts move to the top and the screen refreshes in place when you return, while fixing stale, resurrected, or crashing rows during refresh and deletion (#632: @JeffreyCA)\n- Fix bulk Hide Read Posts and unhide actions silently skipping 50 posts when processing more than 50 at once (#650: @icpryde)\n- Fix notification-backend account registration failing when Reddit credentials were omitted from upload-task request bodies (#642: @nickclyde)\n- Improve feed scrolling smoothness by reducing repeated translation, link-preview, and flair work as rows enter the viewport (#652: @icpryde)\n- Fix comments flashing blank when voting or returning from the app switcher, including translated comments briefly reverting or changing height (#627: @icpryde)\n- Fix long posts failing to translate and improve Apple's language detection for clearly foreign short post bodies (#629: @icpryde)\n- Improve Deleted Comments recovery reliability and coverage, render recovered Markdown correctly, and stop row-height updates from animating against comment collapse (#630: @icpryde)\n- Fix Auto Hide Read Posts ignoring Popular and All when Disable in Subreddits is enabled (#649: @icpryde)\n- Fix direct Reddit images appearing as link cards instead of inline images in API-Key-Free feeds (#654: @icpryde)",
-      "downloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.4.1/Apollo-Reborn-3.4.1-GLASSICONS.ipa",
-      "size": 114302557
+      "version": "3.4.2",
+      "marketingVersion": "3.4.2",
+      "versionDate": "2026-07-17T17:35:23Z",
+      "versionDescription": "Liquid Glass icons-only build.\n\nFeatures\r\n- Add the Synthwave Liquid Glass app icon to the in-app icon picker (#663: @IllIIllIllIllII)\r\n\r\nFixes\r\n- Fix the Reddit account being signed out after force-quitting or backgrounding the app on sideloaded installs — the account's keychain item was written with the wrong protection class and became invisible to Apollo's own read, which then overwrote it as empty; the item is now created correctly, repaired in place on affected devices, and served from an enumeration fallback so the account survives (#677, #681, #682: @jordanearle, @DeltAndy123)\r\n- Play more short-clip host links inline: add streama.in and streamff.link aliases and follow the moved dubz and streamff CDNs (#665: @icpryde)\r\n- Speed up loading of the full Community Highlights list (#661: @icpryde)\r\n- Fix Video Hold Speed staying stuck at the hold speed after scrubbing a fullscreen video (#667: @icpryde)\r\n- Fix the Mod Queue filter menu anchoring to the wrong spot on Liquid Glass builds (#679: @JeffreyCA)\r\n- Fix Search tab suggestion padding and the Random Subreddit icon's stroke weight (#680: @icpryde)\r\n- Fix the Apollo Classic Liquid Glass icon on iOS 27 (#666: @IllIIllIllIllII)",
+      "downloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.4.2/Apollo-Reborn-3.4.2-GLASSICONS.ipa",
+      "size": 114404199
     }
   ],
   "news": [
@@ -158,6 +167,15 @@
       "tintColor": "#F0542D",
       "imageURL": "https://raw.githubusercontent.com/Apollo-Reborn/Apollo-Reborn/main/img/lg-icons.jpg",
       "url": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/tag/v1.15.11_3.4.1"
+    },
+    {
+      "title": "Apollo v1.15.11 / Apollo-Reborn v3.4.2 (GLASS Icons)",
+      "identifier": "v1.15.11_3.4.2",
+      "caption": "Apollo-Reborn update available",
+      "date": "2026-07-17T17:35:23Z",
+      "tintColor": "#F0542D",
+      "imageURL": "https://raw.githubusercontent.com/Apollo-Reborn/Apollo-Reborn/main/img/lg-icons.jpg",
+      "url": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/tag/v1.15.11_3.4.2"
     }
   ],
   "iconURL": "https://apolloreborn.app/assets/icon.png",

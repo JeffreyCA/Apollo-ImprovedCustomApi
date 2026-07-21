@@ -65,6 +65,11 @@ BOOL ApolloRouteURLThroughApp(NSURL *url);
 // Use instead of the deprecated UIApplication.windows property.
 NSArray<UIWindow *> *ApolloAllWindows(void);
 
+// Apollo's main ApolloTabBarController, found via the scene/app delegate's
+// tabBarController ivar or by walking window root VCs. Returns nil while the
+// UI is still coming up (e.g. cold launch from a URL) — callers should retry.
+UIViewController *ApolloMainTabBarController(void);
+
 // Returns YES for Apple's out-of-process share/compose controllers that the
 // tweak must never traverse or mutate. Their class names end in
 // "ComposeViewController" (e.g. MFMessageComposeViewController), so loose
@@ -123,6 +128,22 @@ void ApolloInjectPublicStickyAsSubredditIfNeeded(NSMutableArray *children, NSStr
 // ActionController is tagged on first build so re-builds re-inject and other
 // menus can't claim the item.
 void ApolloInjectDeletedCommentsMenuItemIfNeeded(NSMutableArray *children, NSString *menuTitle, id actionController);
+
+// Whether the experimental native Polls feature (voting + creation) is enabled.
+// Off by default; toggled from Settings → Polls (UDKeyPollsEnabled). All poll
+// entry points — the poll-node tap handler, remembered-vote reconciliation, the
+// compose "Poll" post type, and the quick-menu Poll entry — gate on this, so
+// with it off the tweak leaves Apollo's stock behavior completely untouched.
+BOOL ApolloPollsFeatureEnabled(void);
+
+// ApolloPollCompose: quick post-type picker for the subreddit "..." menu.
+// Returns an inline UIMenu (ControlGroup-style icon row: Photo/Link/Text/Poll,
+// filtered by the current subreddit's submission rules) that replaces the
+// plain "Submit Post" row, or nil to keep the stock row. `selectRow` re-fires
+// the original Submit Post action; the tapped type is applied to the compose
+// sheet's segmented control when it appears. Called from
+// ApolloNativeActionMenuBuildMenu when it hits actionKind 51 (Submit Post).
+UIMenu *ApolloSubmitPostTypesMenu(id actionController, void (^selectRow)(void));
 
 // Container keychain mirror (Tweak.xm): the Valet items the real keychain could not persist
 // on a keychain-broken sideload, so a backup taken there still carries the signed-in account.

@@ -11,6 +11,10 @@ All notable changes to this project will be documented in this file.
 - Redesign **Detailed Profiles** with immersive banners, prominent avatars, glass stat cards, and improved Social Links (#655: @jordanearle)
 - Add modern **Reddit Chat** for API-Key-Free accounts, with an opt-in option for API-key accounts that preserves Apollo's legacy Direct Chat (#658: @icpryde)
 
+### Fixes
+
+- Fix **inline comment images** rendering tiny inside a full-height row after collapsing and re-expanding a comment, and the row flicker/reload loop when voting on a comment with an inline image (#675: @icpryde)
+
 ## [v3.4.2] - 2026-07-17
 
 ### Features

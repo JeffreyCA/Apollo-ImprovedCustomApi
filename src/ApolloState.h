@@ -48,6 +48,21 @@ float ApolloSanitizedHoldSpeed(float value);
 extern BOOL sProxyImgurDDG;
 extern BOOL sShowUserAvatars;
 extern BOOL sUseProfileAvatarTabIcon;
+// Hide the visible main-tab labels while retaining/restoring the underlying
+// UITabBarItem titles. Opt-in; default OFF via registerDefaults.
+extern BOOL sHideTabBarTitles;
+#ifdef __cplusplus
+extern "C" {
+#endif
+// Central setter used by the settings UI. Enabling icon-only mode also clears
+// Apollo's narrower "Hide Username on Tab Bar" preference because every tab
+// title is already hidden, then refreshes both settings surfaces live.
+void ApolloSetHideTabBarTitlesEnabled(BOOL enabled);
+// Repairs a persisted both-on state during launch or settings restore.
+void ApolloNormalizeNativeHideUsernameForIconOnlyTabBar(void);
+#ifdef __cplusplus
+}
+#endif
 // When ON (default), profile pages show Reborn's detailed profile — the banner,
 // large avatar/snoovatar, display name, bio, and the Social Links band (Buy Me a
 // Coffee, Instagram, X, …). When OFF, profiles revert to Apollo's compact stock
@@ -278,6 +293,12 @@ static inline BOOL IsAppleTranslationSupported(void) {
 // authenticated with a WKWebView-harvested session cookie instead of a bearer
 // token. Dormant escape hatch for Reddit API-key revocation waves. Default NO.
 extern BOOL sWebJSONEnabled;
+// Native Polls (ApolloPollVoting.xm / ApolloPollCompose.xm): master gate for
+// the experimental poll voting + creation feature. Default NO. Cached here (not
+// re-read from NSUserDefaults per call) because the poll node's layoutSubviews
+// hook checks it; loaded at launch and updated live by the Polls settings
+// toggle. Read through ApolloPollsFeatureEnabled() (ApolloCommon.h).
+extern BOOL sPollsFeatureEnabled;
 // Serialized "name=value; name=value" Cookie header harvested from a
 // www.reddit.com web login (must include reddit_session). nil until the user
 // completes the Web Session Login flow. Persisted in the keychain (it's a full

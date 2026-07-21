@@ -29,6 +29,7 @@ float sVideoHoldSpeed = 2.0f;        // effective default 2.0× via registerDefa
 BOOL sProxyImgurDDG = NO;
 BOOL sShowUserAvatars = NO;
 BOOL sUseProfileAvatarTabIcon = NO;
+BOOL sHideTabBarTitles = NO;
 BOOL sShowDetailedProfiles = YES;   // effective default ON via registerDefaults (UDKeyShowDetailedProfiles)
 BOOL sBadgeBookEnabled = YES;       // effective default ON via registerDefaults (UDKeyBadgeBookEnabled)
 BOOL sShowSubredditHeaders = NO;
@@ -83,6 +84,7 @@ NSString *sLibreTranslateAPIKey = nil;
 NSArray<NSString *> *sTranslationSkipLanguages = nil;
 
 BOOL sWebJSONEnabled = NO;
+BOOL sPollsFeatureEnabled = NO;
 NSString *sWebSessionCookieHeader = nil;
 NSString *sWebSessionModhash = nil;
 NSString *sWebSessionUsername = nil;
