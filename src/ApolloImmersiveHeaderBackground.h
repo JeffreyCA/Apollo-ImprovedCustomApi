@@ -28,6 +28,11 @@ FOUNDATION_EXPORT UIColor *ApolloImmersiveResolvedPageColor(UIColor *fallback);
 // trigger the computation for a banner that hasn't been sampled yet.
 FOUNDATION_EXPORT BOOL ApolloImmersiveBannerIsLight(UIImage *banner);
 
+// Associates a stable logical identity (normally the image URL) with a banner.
+// Pointer-distinct UIImage instances carrying the same key share luminance and
+// blurred-backdrop work. Call this before either API below.
+FOUNDATION_EXPORT void ApolloImmersiveSetBannerCacheKey(UIImage *banner, NSString *cacheKey);
+
 // Same check, computed off the main thread for a not-yet-sampled banner
 // (the sample reads every pixel of the source image, which can be a visible
 // hitch on the main thread for a large custom banner). `completion` fires on

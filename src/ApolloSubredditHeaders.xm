@@ -5,6 +5,7 @@
 
 #import "ApolloState.h"
 #import "ApolloCommon.h"
+#import "ApolloAccountCredentials.h"
 #import "ApolloSubredditCustomBannerCache.h"
 #import "ApolloSubredditCustomIconCache.h"
 #import "ApolloSubredditDefaultAssets.h"
@@ -22,8 +23,8 @@
 //   native Apollo header content in a wrapper UIView, which becomes the
 //   new tableHeaderView.
 // - No scroll fighting, force-top, or pinning. The shared UIScrollView hook
-//   observes the managed table's final offset only so the ambient artwork
-//   travels with its header content.
+//   only blocks Apollo's one "skip table header" programmatic offset; the
+//   PostsViewController delegate updates ambient artwork once per scroll.
 // - Subreddit-name detection requires either a real ivar/property on the
 //   controller or a slug-shaped navigation title; we never match by
 //   class-name substring so global search-results VCs don't get a header.
@@ -42,7 +43,7 @@ static const void *kApolloSubredditManagedTableKey = &kApolloSubredditManagedTab
 static const void *kApolloSubredditTableManagedHeaderKey = &kApolloSubredditTableManagedHeaderKey;
 // Guard so the setTableHeaderView re-wrap can call %orig without recursing.
 static const void *kApolloSubredditRewrapInProgressKey = &kApolloSubredditRewrapInProgressKey;
-// Weak-ish ownership path back to the live PostsViewController; used so the
+// Zeroing-weak ownership path back to the live PostsViewController; used so the
 // table hook can keep controller/bookkeeping aligned when Apollo swaps the
 // native header during search transitions.
 static const void *kApolloSubredditManagedViewControllerKey = &kApolloSubredditManagedViewControllerKey;
@@ -50,6 +51,8 @@ static const void *kApolloSubredditTeardownMarkerKey = &kApolloSubredditTeardown
 static const void *kApolloSubredditBannerPickerCoordinatorKey = &kApolloSubredditBannerPickerCoordinatorKey;
 static const void *kApolloSubredditIconPickerCoordinatorKey = &kApolloSubredditIconPickerCoordinatorKey;
 static const void *kApolloSubredditInstallInProgressKey = &kApolloSubredditInstallInProgressKey;
+static const void *kApolloSubredditInstallScheduledKey = &kApolloSubredditInstallScheduledKey;
+static const void *kApolloSubredditRepairScheduledKey = &kApolloSubredditRepairScheduledKey;
 static const void *kApolloSubredditAmbientViewKey = &kApolloSubredditAmbientViewKey;
 static const void *kApolloSubredditOriginalTableBackgroundKey = &kApolloSubredditOriginalTableBackgroundKey;
 static const void *kApolloSubredditOriginalTableBackgroundViewKey = &kApolloSubredditOriginalTableBackgroundViewKey;
@@ -63,8 +66,11 @@ static const void *kApolloSubredditSearchOriginalTintKey = &kApolloSubredditSear
 // lets a repeat pass with an unchanged banner/placeholder do nothing.
 static const void *kApolloSubredditSearchAppliedForegroundKey = &kApolloSubredditSearchAppliedForegroundKey;
 static const void *kApolloSubredditSearchAppliedPlaceholderKey = &kApolloSubredditSearchAppliedPlaceholderKey;
+static const void *kApolloSubredditSearchFieldKey = &kApolloSubredditSearchFieldKey;
+static const void *kApolloSubredditNavigationOwnerKey = &kApolloSubredditNavigationOwnerKey;
 
 static Class sPostsViewControllerClass = Nil;
+static BOOL sApolloSubredditRefreshVisibleScheduled = NO;
 
 typedef NS_ENUM(NSInteger, ApolloSubredditHeaderAssetKind) {
     ApolloSubredditHeaderAssetKindBanner = 0,
@@ -72,6 +78,13 @@ typedef NS_ENUM(NSInteger, ApolloSubredditHeaderAssetKind) {
 };
 
 @class ApolloSubredditHeaderView;
+
+@interface ApolloSubredditWeakControllerBox : NSObject
+@property(nonatomic, weak) UIViewController *viewController;
+@end
+
+@implementation ApolloSubredditWeakControllerBox
+@end
 
 @interface ApolloSubredditHeaderPickerCoordinator : NSObject <PHPickerViewControllerDelegate>
 @property(nonatomic, weak) ApolloSubredditHeaderView *headerView;
@@ -140,7 +153,8 @@ static void ApolloSubredditSyncAssociations(UITableView *tableView,
                                             UIView *originalHeader);
 static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewController);
 static void ApolloSubredditTearDownHeader(UIViewController *viewController, BOOL restoreNativeHeader);
-static void ApolloSubredditScheduleRepairPasses(UIViewController *viewController, NSString *reason);
+static void ApolloSubredditScheduleRepairPass(UIViewController *viewController, NSString *reason);
+static void ApolloSubredditScheduleInstallIfNeeded(UIViewController *viewController);
 static void ApolloSubredditSyncAmbient(ApolloSubredditHeaderView *header);
 static void ApolloSubredditInstallAmbient(UIViewController *viewController, UITableView *tableView,
                                           ApolloSubredditHeaderView *header, UIView *wrappedHeader);
@@ -627,9 +641,12 @@ static CGFloat const ApolloSubredditFadedBannerAlpha = 0.011;
     self.subscriptionRequestInFlight = YES;
     [self apollo_applySubscriptionState:oldState known:YES];
 
-    Class clientClass = objc_getClass("RDKClient");
-    id client = clientClass && [clientClass respondsToSelector:@selector(sharedClient)]
-        ? ((id (*)(id, SEL))objc_msgSend)(clientClass, @selector(sharedClient)) : nil;
+    // RDKClient.sharedClient is Apollo's application-only/bootstrap account,
+    // not the signed-in account selected in AccountManager. It can perform
+    // anonymous reads but its /api/subscribe requests are unauthenticated and
+    // silently leave membership unchanged. Resolve the exact live account
+    // client that Apollo owns instead.
+    id client = ApolloActiveAccountClient();
     SEL selector = desiredState ? @selector(subscribeToSubredditWithName:completion:)
                                 : NSSelectorFromString(@"unsubscribeFromSubredditWithName:completion:");
     if (!client || ![client respondsToSelector:selector]) {
@@ -638,16 +655,17 @@ static CGFloat const ApolloSubredditFadedBannerAlpha = 0.011;
     if (!client || ![client respondsToSelector:selector]) {
         self.subscriptionRequestInFlight = NO;
         [self apollo_applySubscriptionState:oldState known:YES];
-        ApolloLog(@"[SubredditHeaders] subscription client unavailable subreddit=%@", self.subredditName);
+        ApolloLog(@"[SubredditHeaders] active subscription client unavailable subreddit=%@ account=%@",
+                  self.subredditName, ApolloActiveAccountUsername() ?: @"none");
         return;
     }
 
     NSString *subredditName = [self.subredditName copy];
     __weak typeof(self) weakSelf = self;
-    // RDKClient mutation completions are `^(NSError *error)` (confirmed by the
-    // equivalent follow/unfollow completion in ApolloUserAvatars.xm); reading
-    // it lets a failed subscribe/unsubscribe roll back instead of leaving the
-    // button and member count permanently wrong.
+    // RDKClient mutation completions are `^(NSError *error)`. Verified from
+    // Apollo's native subscribe/unsubscribe implementations: both forward the
+    // block to basicPostTaskWithPath:, whose success/failure wrappers invoke it
+    // with nil or the NSError respectively.
     void (^completion)(NSError *error) = ^(NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             ApolloSubredditHeaderView *strongSelf = weakSelf;
@@ -971,9 +989,8 @@ static BOOL ApolloSubredditSubscribedFromCurrentSubreddit(UIViewController *view
 // unknown", which leaves the pill in the state it was already in.
 static BOOL ApolloSubredditSubscribedFromAccountList(NSString *subredditName, BOOL *outSubscribed) {
     if (subredditName.length == 0) return NO;
-    Class clientClass = objc_getClass("RDKClient");
-    if (![clientClass respondsToSelector:@selector(sharedClient)]) return NO;
-    id client = ((id (*)(id, SEL))objc_msgSend)(clientClass, @selector(sharedClient));
+    id client = ApolloActiveAccountClient();
+    if (!client) return NO;
     if (![client respondsToSelector:@selector(currentUser)]) return NO;
     id currentUser = ((id (*)(id, SEL))objc_msgSend)(client, @selector(currentUser));
     if (![currentUser respondsToSelector:@selector(subscribedSubreddits)]) return NO;
@@ -1121,36 +1138,24 @@ static UIView *ApolloSubredditFindSubviewOfClass(UIView *root, Class cls) {
     return nil;
 }
 
-static void ApolloSubredditCollectSubviewsOfClass(UIView *root, Class cls, NSMutableArray<UIView *> *results) {
-    if (!root || !cls) return;
-    if ([root isKindOfClass:cls]) [results addObject:root];
-    for (UIView *subview in root.subviews) {
-        ApolloSubredditCollectSubviewsOfClass(subview, cls, results);
-    }
-}
+// Apollo's UINavigationItem has no public owner back-reference. Installation
+// records one weakly so bar-button mutations can invalidate only the title
+// they affect instead of walking every window and forcing synchronous layout.
+void ApolloSubredditRequestTitleRelayout(UINavigationItem *navigationItem) {
+    ApolloSubredditWeakControllerBox *box =
+        objc_getAssociatedObject(navigationItem, kApolloSubredditNavigationOwnerKey);
+    UIViewController *viewController = box.viewController;
+    if (!viewController || !ApolloSubredditTitleShouldTruncate(viewController)) return;
 
-// Forces every currently-visible nav title to re-run its layout (and, for
-// subreddit headers, ApolloLiquidGlass.xm's content-sizing check) right now.
-// Called from ApolloTranslation.xm's existing setRightBarButtonItem(s): hook
-// on UINavigationItem — measured directly (not assumed) that Apollo rebuilds
-// its trailing bar-button cluster via that exact setter while a subreddit is
-// still loading, and that title measurements taken right after that setter
-// fires are consistently the final, settled ones. Sweeping every window's
-// title controls (rather than resolving the one nav bar that owns this
-// specific nav item, which UINavigationItem has no public back-reference for)
-// is simpler and safe: this only fires when Apollo actually changes bar
-// items, not on every layout pass.
-void ApolloSubredditForceAllTitleRelayouts(void) {
+    UINavigationBar *navigationBar = viewController.navigationController.navigationBar;
     Class titleControlClass = NSClassFromString(@"_UINavigationBarTitleControl");
-    if (!titleControlClass) return;
-    for (UIWindow *window in ApolloAllWindows()) {
-        NSMutableArray<UIView *> *titleControls = [NSMutableArray array];
-        ApolloSubredditCollectSubviewsOfClass(window, titleControlClass, titleControls);
-        for (UIView *titleControl in titleControls) {
-            [titleControl setNeedsLayout];
-            [titleControl layoutIfNeeded];
-        }
-    }
+    UIView *titleControl = ApolloSubredditFindSubviewOfClass(navigationBar, titleControlClass);
+    if (!titleControl) return;
+
+    __weak UIView *weakTitleControl = titleControl;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [weakTitleControl setNeedsLayout];
+    });
 }
 
 static UITableView *ApolloSubredditFindTableView(UIViewController *viewController) {
@@ -1395,25 +1400,28 @@ static void ApolloSubredditLoadImages(ApolloSubredditHeaderView *header, NSStrin
 
     ApolloSubredditInfoCache *cache = [ApolloSubredditInfoCache sharedCache];
     ApolloSubredditInfo *cachedInfo = [cache cachedInfoForSubreddit:subredditName];
+    __weak ApolloSubredditHeaderView *weakHeader = header;
 
     void (^applyInfo)(ApolloSubredditInfo *) = ^(ApolloSubredditInfo *info) {
+        ApolloSubredditHeaderView *strongHeader = weakHeader;
+        if (!strongHeader || !ApolloSubredditNamesEqual(strongHeader.subredditName, subredditName)) return;
         if (!info) {
             // The only caller that reaches this block with a nil info is the
             // request/refetch completion below (the cachedInfo path always
             // passes a non-nil object) — so nil here means the fetch
             // definitively failed, not just "hasn't started yet".
-            ApolloSubredditApplyBannerForHeader(header, subredditName, nil, YES);
-            ApolloSubredditApplyIconForHeader(header, subredditName, nil);
+            ApolloSubredditApplyBannerForHeader(strongHeader, subredditName, nil, YES);
+            ApolloSubredditApplyIconForHeader(strongHeader, subredditName, nil);
             return;
         }
-        [header applyInfo:info fallbackSubredditName:subredditName];
-        ApolloSubredditApplyIconForHeader(header, subredditName, info);
-        ApolloSubredditApplyBannerForHeader(header, subredditName, info, NO);
+        [strongHeader applyInfo:info fallbackSubredditName:subredditName];
+        ApolloSubredditApplyIconForHeader(strongHeader, subredditName, info);
+        ApolloSubredditApplyBannerForHeader(strongHeader, subredditName, info, NO);
         // This info carries `user_is_subscriber`, which is the fallback the
         // Join pill needs when the view controller's currentSubreddit ivar
         // never lands — apply it as soon as the fetch returns instead of
         // waiting for whatever layout pass happens to come next.
-        ApolloSubredditRefreshSubscriptionState(header, header.hostViewController);
+        ApolloSubredditRefreshSubscriptionState(strongHeader, strongHeader.hostViewController);
     };
 
     if (cachedInfo) applyInfo(cachedInfo);
@@ -1477,7 +1485,14 @@ static void ApolloSubredditSyncAssociations(UITableView *tableView,
     if (tableView) {
         objc_setAssociatedObject(tableView, kApolloSubredditManagedTableKey, wrappedHeader ? @YES : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(tableView, kApolloSubredditTableManagedHeaderKey, header, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey, viewController, OBJC_ASSOCIATION_ASSIGN);
+        ApolloSubredditWeakControllerBox *owner =
+            objc_getAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey);
+        if (!owner && viewController) {
+            owner = [[ApolloSubredditWeakControllerBox alloc] init];
+            objc_setAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey,
+                                     owner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        owner.viewController = viewController;
     }
     if (viewController) {
         objc_setAssociatedObject(viewController, kApolloSubredditHeaderViewKey, header, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1523,7 +1538,27 @@ static void ApolloSubredditSyncAmbient(ApolloSubredditHeaderView *header) {
                   viewController.view.safeAreaInsets.top, tableView.adjustedContentInset.top,
                   regionHeight, extendedHeight);
     }
-    [ambient applyBanner:header.bannerImageView.image
+    UIImage *banner = header.bannerImageView.image;
+    if (banner) {
+        NSString *workKey = nil;
+        if (header.usesCustomBanner) {
+            // A newly-selected custom image must not reuse the previous custom
+            // image's backdrop merely because the subreddit name is unchanged.
+            workKey = [NSString stringWithFormat:@"subreddit-custom:%@:%p",
+                       header.subredditName.lowercaseString ?: @"unknown", banner];
+        } else {
+            ApolloSubredditInfo *info = [[ApolloSubredditInfoCache sharedCache]
+                cachedInfoForSubreddit:header.subredditName];
+            workKey = info.bannerURL.absoluteString;
+            if (workKey.length == 0) {
+                // Default/placeholder assets can vary with appearance. Pointer
+                // identity is safer than sharing a stale blur between variants.
+                workKey = [NSString stringWithFormat:@"subreddit-fallback:%p", banner];
+            }
+        }
+        ApolloImmersiveSetBannerCacheKey(banner, workKey);
+    }
+    [ambient applyBanner:banner
                pageColor:pageColor
             regionHeight:regionHeight
           extendedHeight:extendedHeight
@@ -1588,14 +1623,19 @@ static void ApolloSubredditUpdateAmbientScroll(UIViewController *viewController,
 
 static UIView *ApolloSubredditFindSearchFieldForViewController(UIViewController *viewController) {
     Class fieldClass = NSClassFromString(@"Apollo.ApolloSearchBarTextField");
-    if (!fieldClass) return nil;
-    UIView *field = ApolloSubredditFindSubviewOfClass(viewController.view, fieldClass);
-    if (field && field.window) return field;
-    for (UIWindow *window in ApolloAllWindows()) {
-        field = ApolloSubredditFindSubviewOfClass(window, fieldClass);
-        if (field && field.window) return field;
+    if (!viewController || !fieldClass || !viewController.isViewLoaded) return nil;
+    UIView *cachedField = objc_getAssociatedObject(viewController, kApolloSubredditSearchFieldKey);
+    if ([cachedField isKindOfClass:fieldClass] &&
+        [cachedField isDescendantOfView:viewController.view]) {
+        return cachedField;
     }
-    return nil;
+    objc_setAssociatedObject(viewController, kApolloSubredditSearchFieldKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UIView *field = ApolloSubredditFindSubviewOfClass(viewController.view, fieldClass);
+    if (field) {
+        objc_setAssociatedObject(viewController, kApolloSubredditSearchFieldKey,
+                                 field, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return field;
 }
 
 static void ApolloSubredditStyleSearchBar(UIViewController *viewController) {
@@ -1712,6 +1752,7 @@ static void ApolloSubredditRestoreSearchBar(UIViewController *viewController) {
     // styling, so a later restyle must not think its work is already done.
     objc_setAssociatedObject(field, kApolloSubredditSearchAppliedForegroundKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(field, kApolloSubredditSearchAppliedPlaceholderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(viewController, kApolloSubredditSearchFieldKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 static void ApolloSubredditTearDownHeader(UIViewController *viewController, BOOL restoreNativeHeader) {
@@ -1725,6 +1766,13 @@ static void ApolloSubredditTearDownHeader(UIViewController *viewController, BOOL
     UIView *originalHeader = objc_getAssociatedObject(viewController, kApolloSubredditOriginalHeaderKey);
     ApolloSubredditRemoveAmbient(viewController, tableView);
     ApolloSubredditRestoreSearchBar(viewController);
+    UINavigationItem *navigationItem = viewController.navigationItem;
+    ApolloSubredditWeakControllerBox *navigationOwner =
+        objc_getAssociatedObject(navigationItem, kApolloSubredditNavigationOwnerKey);
+    if (navigationOwner.viewController == viewController) {
+        objc_setAssociatedObject(navigationItem, kApolloSubredditNavigationOwnerKey,
+                                 nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
 
     ApolloLog(@"[SubredditHeaders] teardown vc=%p restoreNative=%d subreddit=%@",
               viewController, restoreNativeHeader, objc_getAssociatedObject(viewController, kApolloSubredditNameKey) ?: @"nil");
@@ -1752,7 +1800,7 @@ static void ApolloSubredditTearDownHeader(UIViewController *viewController, BOOL
     if (tableView) {
         objc_setAssociatedObject(tableView, kApolloSubredditManagedTableKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(tableView, kApolloSubredditTableManagedHeaderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        objc_setAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(tableView, kApolloSubredditRewrapInProgressKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
@@ -1760,27 +1808,77 @@ static void ApolloSubredditTearDownHeader(UIViewController *viewController, BOOL
     objc_setAssociatedObject(viewController, kApolloSubredditWrappedHeaderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(viewController, kApolloSubredditOriginalHeaderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(viewController, kApolloSubredditNameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(viewController, kApolloSubredditInstallScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(viewController, kApolloSubredditRepairScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
 }
 
-static void ApolloSubredditScheduleRepairPasses(UIViewController *viewController, NSString *reason) {
+// Cheap structural predicate for lifecycle callbacks. The initial PR rebuilt,
+// relaid out, restyled, and rescanned subscription state from five separate VC
+// callbacks; viewDidLayoutSubviews alone can run many times during one scroll or
+// navigation transition. Once the wrapper is healthy, those callbacks now cost
+// a few pointer/frame comparisons and stop here.
+static BOOL ApolloSubredditNeedsInstall(UIViewController *viewController) {
+    if (!viewController) return NO;
+    if (ApolloSubredditShouldSkipViewController(viewController)) return NO;
+    UITableView *tableView = ApolloSubredditFindTableView(viewController);
+    ApolloSubredditHeaderView *header = objc_getAssociatedObject(viewController, kApolloSubredditHeaderViewKey);
+    UIView *wrappedHeader = objc_getAssociatedObject(viewController, kApolloSubredditWrappedHeaderKey);
+
+    if (!sShowSubredditHeaders) return wrappedHeader != nil;
+    NSString *subredditName = ApolloSubredditNameFromViewController(viewController);
+    // Most PostsViewControllers are home/profile/multireddit feeds. Do not
+    // schedule a doomed install on every layout pass for those screens.
+    if (subredditName.length == 0) return wrappedHeader != nil;
+    if (!tableView || !header || !wrappedHeader) return YES;
+    if (tableView.tableHeaderView != wrappedHeader || header.superview != wrappedHeader) return YES;
+    if (header.hidden || wrappedHeader.hidden || header.alpha < 0.99 || wrappedHeader.alpha < 0.99) return YES;
+
+    NSString *installedName = objc_getAssociatedObject(viewController, kApolloSubredditNameKey);
+    if (![installedName isEqualToString:subredditName]) return YES;
+
+    CGFloat width = tableView.bounds.size.width;
+    if (width > 0 && fabs(CGRectGetWidth(wrappedHeader.frame) - width) > 0.5) return YES;
+
+    BOOL hasAmbient = objc_getAssociatedObject(viewController, kApolloSubredditAmbientViewKey) != nil;
+    return hasAmbient != sSubredditHeaderImmersive;
+}
+
+static void ApolloSubredditScheduleInstallIfNeeded(UIViewController *viewController) {
+    if (!viewController || !ApolloSubredditNeedsInstall(viewController)) return;
+    if ([objc_getAssociatedObject(viewController, kApolloSubredditInstallScheduledKey) boolValue]) return;
+    objc_setAssociatedObject(viewController, kApolloSubredditInstallScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    __weak UIViewController *weakViewController = viewController;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *strongViewController = weakViewController;
+        if (!strongViewController) return;
+        objc_setAssociatedObject(strongViewController, kApolloSubredditInstallScheduledKey,
+                                 nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (ApolloSubredditNeedsInstall(strongViewController)) {
+            ApolloSubredditInstallOrUpdateHeader(strongViewController);
+        }
+    });
+}
+
+static void ApolloSubredditScheduleRepairPass(UIViewController *viewController, NSString *reason) {
     if (!viewController || !sShowSubredditHeaders) return;
     if (ApolloSubredditShouldSkipViewController(viewController)) {
         ApolloLog(@"[SubredditHeaders] repair skipped vc=%p reason=%@", viewController, reason ?: @"unknown");
         return;
     }
+    if ([objc_getAssociatedObject(viewController, kApolloSubredditRepairScheduledKey) boolValue]) return;
+    objc_setAssociatedObject(viewController, kApolloSubredditRepairScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    NSArray<NSNumber *> *delays = @[@0.0, @0.08, @0.20, @0.45];
     __weak UIViewController *weakViewController = viewController;
-    for (NSNumber *delay in delays) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            UIViewController *strongViewController = weakViewController;
-            if (!strongViewController || !sShowSubredditHeaders) return;
-            if (ApolloSubredditShouldSkipViewController(strongViewController)) return;
-            ApolloSubredditInstallOrUpdateHeader(strongViewController);
-        });
-    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *strongViewController = weakViewController;
+        if (!strongViewController) return;
+        objc_setAssociatedObject(strongViewController, kApolloSubredditRepairScheduledKey,
+                                 nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (!sShowSubredditHeaders || ApolloSubredditShouldSkipViewController(strongViewController)) return;
+        ApolloSubredditInstallOrUpdateHeader(strongViewController);
+    });
 }
 
 #pragma mark - Install / restore
@@ -1854,7 +1952,7 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
         objc_setAssociatedObject(viewController, kApolloSubredditNameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
         objc_setAssociatedObject(tableView, kApolloSubredditManagedTableKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(tableView, kApolloSubredditTableManagedHeaderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        objc_setAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return;
     }
 
@@ -1876,7 +1974,7 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
             objc_setAssociatedObject(viewController, kApolloSubredditNameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
             objc_setAssociatedObject(tableView, kApolloSubredditManagedTableKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             objc_setAssociatedObject(tableView, kApolloSubredditTableManagedHeaderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            objc_setAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey, nil, OBJC_ASSOCIATION_ASSIGN);
+            objc_setAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         return;
     }
@@ -1901,6 +1999,14 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
 
     header.hostViewController = viewController;
     header.subredditName = subredditName;
+    ApolloSubredditWeakControllerBox *navigationOwner =
+        objc_getAssociatedObject(viewController.navigationItem, kApolloSubredditNavigationOwnerKey);
+    if (!navigationOwner) {
+        navigationOwner = [[ApolloSubredditWeakControllerBox alloc] init];
+        objc_setAssociatedObject(viewController.navigationItem, kApolloSubredditNavigationOwnerKey,
+                                 navigationOwner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    navigationOwner.viewController = viewController;
     __weak UIViewController *weakViewController = viewController;
     header.heightInvalidationBlock = ^{
         UIViewController *strongViewController = weakViewController;
@@ -1955,13 +2061,10 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
     if (subredditChanged) {
         // The subreddit name (and thus ApolloSubredditTitleShouldTruncate's
         // eligibility) only becomes known here, asynchronously, well after the
-        // nav title control's own layout has already settled once. Nothing
-        // else re-triggers that layout at this exact moment
-        // (setRightBarButtonItem(s): covers the icon cluster changing later,
-        // but not this), so force it now — gated on subredditChanged since
-        // this walks every window's entire view tree and this function runs
-        // on every viewDidLayoutSubviews pass, not just when the name resolves.
-        ApolloSubredditForceAllTitleRelayouts();
+        // nav title control's own layout has already settled once. Invalidate
+        // this controller's title only; the relayout is deferred so it cannot
+        // feed back into an active navigation-bar layout pass.
+        ApolloSubredditRequestTitleRelayout(viewController.navigationItem);
         objc_setAssociatedObject(viewController, kApolloSubredditNameKey, subredditName, OBJC_ASSOCIATION_COPY_NONATOMIC);
         header.iconImageView.image = ApolloSubredditPlaceholderIcon();
         header.usesCustomIcon = NO;
@@ -1978,7 +2081,12 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
         [header applyInfo:nil fallbackSubredditName:subredditName];
         ApolloSubredditLoadImages(header, subredditName, NO);
     }
-    ApolloSubredditRefreshSubscriptionState(header, viewController);
+    // Once one of the sources has resolved the state, do not rescan the active
+    // account's complete subscription list on every viewDidLayoutSubviews pass.
+    // Account/subscription notifications below explicitly invalidate it.
+    if (!header.subscriptionStateKnown) {
+        ApolloSubredditRefreshSubscriptionState(header, viewController);
+    }
 
     if (wrappedHeader && header) {
         CGRect frameBeforeMetadata = wrappedHeader.frame;
@@ -2085,7 +2193,13 @@ static void ApolloSubredditRefreshViewControllersInTree(UIViewController *viewCo
 }
 
 static void ApolloSubredditRefreshVisibleControllers(void) {
+    // Info/highlights/settings notifications often arrive in a burst after one
+    // network response. Collapse them into one controller-tree walk and one
+    // install per visible header for this run-loop turn.
+    if (sApolloSubredditRefreshVisibleScheduled) return;
+    sApolloSubredditRefreshVisibleScheduled = YES;
     dispatch_async(dispatch_get_main_queue(), ^{
+        sApolloSubredditRefreshVisibleScheduled = NO;
         NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:64];
         for (UIWindow *window in ApolloAllWindows()) {
             ApolloSubredditRefreshViewControllersInTree(window.rootViewController, visited);
@@ -2135,19 +2249,18 @@ static void ApolloSubredditRefreshVisibleControllers(void) {
     ApolloSubredditSyncAssociations(self, viewController, ourHeader, wrapper, tableHeaderView);
     %orig(wrapper);
     if (viewController) {
-        ApolloSubredditScheduleRepairPasses(viewController, @"setTableHeaderView");
+        ApolloSubredditScheduleRepairPass(viewController, @"setTableHeaderView");
     }
 }
 
-- (void)layoutSubviews {
-    %orig;
-}
 - (void)reloadData {
     %orig;
     if (![objc_getAssociatedObject(self, kApolloSubredditManagedTableKey) boolValue]) return;
-    UIViewController *viewController = objc_getAssociatedObject(self, kApolloSubredditManagedViewControllerKey);
+    ApolloSubredditWeakControllerBox *owner =
+        objc_getAssociatedObject(self, kApolloSubredditManagedViewControllerKey);
+    UIViewController *viewController = owner.viewController;
     if (viewController) {
-        ApolloSubredditScheduleRepairPasses(viewController, @"reloadData");
+        ApolloSubredditScheduleRepairPass(viewController, @"reloadData");
     }
 }
 
@@ -2178,11 +2291,6 @@ static BOOL ApolloSubredditShouldBlockOffset(UITableView *tableView, CGPoint new
         return;
     }
     %orig;
-    if ([self isKindOfClass:[UITableView class]] &&
-        [objc_getAssociatedObject(self, kApolloSubredditManagedTableKey) boolValue]) {
-        UIViewController *viewController = objc_getAssociatedObject(self, kApolloSubredditManagedViewControllerKey);
-        ApolloSubredditUpdateAmbientScroll(viewController, self);
-    }
 }
 
 - (void)setContentOffset:(CGPoint)contentOffset animated:(BOOL)animated {
@@ -2191,11 +2299,6 @@ static BOOL ApolloSubredditShouldBlockOffset(UITableView *tableView, CGPoint new
         return;
     }
     %orig;
-    if ([self isKindOfClass:[UITableView class]] &&
-        [objc_getAssociatedObject(self, kApolloSubredditManagedTableKey) boolValue]) {
-        UIViewController *viewController = objc_getAssociatedObject(self, kApolloSubredditManagedViewControllerKey);
-        ApolloSubredditUpdateAmbientScroll(viewController, self);
-    }
 }
 
 %end
@@ -2207,9 +2310,6 @@ static BOOL ApolloSubredditShouldBlockOffset(UITableView *tableView, CGPoint new
     %orig(active);
     if (wasActive && !active && sShowSubredditHeaders) {
         ApolloSubredditRefreshVisibleControllers();
-        dispatch_async(dispatch_get_main_queue(), ^{
-            ApolloSubredditRefreshVisibleControllers();
-        });
     }
 }
 
@@ -2219,7 +2319,7 @@ static BOOL ApolloSubredditShouldBlockOffset(UITableView *tableView, CGPoint new
 
 - (void)viewDidLoad {
     %orig;
-    ApolloSubredditInstallOrUpdateHeader((UIViewController *)self);
+    ApolloSubredditScheduleInstallIfNeeded((UIViewController *)self);
 }
 
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView {
@@ -2229,22 +2329,40 @@ static BOOL ApolloSubredditShouldBlockOffset(UITableView *tableView, CGPoint new
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig(animated);
-    ApolloSubredditInstallOrUpdateHeader((UIViewController *)self);
+    ApolloSubredditScheduleInstallIfNeeded((UIViewController *)self);
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig(animated);
-    ApolloSubredditInstallOrUpdateHeader((UIViewController *)self);
+    ApolloSubredditScheduleInstallIfNeeded((UIViewController *)self);
 }
 
 - (void)viewDidLayoutSubviews {
     %orig;
-    ApolloSubredditInstallOrUpdateHeader((UIViewController *)self);
+    ApolloSubredditScheduleInstallIfNeeded((UIViewController *)self);
 }
 
 - (void)safeAreaInsetsDidChange {
     %orig;
-    ApolloSubredditInstallOrUpdateHeader((UIViewController *)self);
+    ApolloSubredditScheduleInstallIfNeeded((UIViewController *)self);
+}
+
+- (void)redditAccountChangedWithNotification:(id)notification {
+    %orig(notification);
+    ApolloSubredditHeaderView *header =
+        objc_getAssociatedObject(self, kApolloSubredditHeaderViewKey);
+    header.subscriptionStateKnown = NO;
+    header.subscribeIntentDate = nil;
+    ApolloSubredditScheduleRepairPass((UIViewController *)self, @"account changed");
+}
+
+- (void)subscribedSubredditsUpdatedWithNotification:(id)notification {
+    %orig(notification);
+    ApolloSubredditHeaderView *header =
+        objc_getAssociatedObject(self, kApolloSubredditHeaderViewKey);
+    if (!header || header.subscriptionRequestInFlight) return;
+    header.subscriptionStateKnown = NO;
+    ApolloSubredditRefreshSubscriptionState(header, (UIViewController *)self);
 }
 
 - (void)viewDidDisappear:(BOOL)animated {

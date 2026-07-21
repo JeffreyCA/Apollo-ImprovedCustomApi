@@ -141,12 +141,17 @@ static void ApolloApplyAdaptiveTabBarAppearance(UITabBar *tabBar, NSString *reas
             changed = YES;
         }
 
-        if ([tabBar respondsToSelector:@selector(scrollEdgeAppearance)]) {
-            UITabBarAppearance *scrollEdgeAppearance = tabBar.scrollEdgeAppearance;
+        SEL scrollEdgeSelector = NSSelectorFromString(@"scrollEdgeAppearance");
+        SEL setScrollEdgeSelector = NSSelectorFromString(@"setScrollEdgeAppearance:");
+        if ([tabBar respondsToSelector:scrollEdgeSelector] &&
+            [tabBar respondsToSelector:setScrollEdgeSelector]) {
+            UITabBarAppearance *scrollEdgeAppearance =
+                ((id (*)(id, SEL))objc_msgSend)(tabBar, scrollEdgeSelector);
             BOOL scrollEdgeChanged = NO;
             UITabBarAppearance *adaptiveScrollEdgeAppearance = ApolloAdaptiveTabBarAppearance(scrollEdgeAppearance, &scrollEdgeChanged);
             if (scrollEdgeChanged) {
-                tabBar.scrollEdgeAppearance = adaptiveScrollEdgeAppearance;
+                ((void (*)(id, SEL, id))objc_msgSend)(tabBar, setScrollEdgeSelector,
+                                                      adaptiveScrollEdgeAppearance);
                 changed = YES;
             }
         }
@@ -807,13 +812,24 @@ static void ApolloCollectNavigationTitleContent(UIView *root,
     }
 }
 
+static void ApolloRecenterTitleControl(UIView *titleControl);
+
 @interface ApolloNavigationTitleGlassController : NSObject
 @property (nonatomic, weak) UIView *titleControl;
 @property (nonatomic, weak) UIView *glassHostView;
 @property (nonatomic, strong) UIVisualEffectView *glassView;
 @property (nonatomic) BOOL refreshScheduled;
+@property (nonatomic) BOOL observationValid;
+@property (nonatomic) CGRect observedTitleFrame;
+@property (nonatomic) CGRect observedTitleBounds;
+@property (nonatomic) NSUInteger observedTitleSubviewCount;
+@property (nonatomic, weak) UIView *observedJumpBar;
+@property (nonatomic) CGRect observedJumpBarBounds;
+@property (nonatomic) NSUInteger observedJumpBarSubviewCount;
+@property (nonatomic) BOOL observedSearching;
 - (instancetype)initWithTitleControl:(UIView *)titleControl;
 - (void)scheduleTargetRefresh;
+- (void)scheduleTargetRefreshIfNeeded;
 - (void)invalidate;
 @end
 
@@ -835,6 +851,7 @@ static void ApolloCollectNavigationTitleContent(UIView *root,
     [self.glassView removeFromSuperview];
     self.glassView = nil;
     self.glassHostView = nil;
+    self.observationValid = NO;
 }
 
 - (UIVisualEffectView *)newRegularGlassView {
@@ -931,27 +948,31 @@ static void ApolloCollectNavigationTitleContent(UIView *root,
         self.glassView = [self newRegularGlassView];
         if (!self.glassView) return;
         self.glassView.frame = targetFrame;
-        self.glassView.alpha = 0;
         [hostView insertSubview:self.glassView atIndex:0];
-        [UIView animateWithDuration:0.18 animations:^{ self.glassView.alpha = 1; }];
         ApolloLog(@"[NavigationTitleGlass] installed %@ capsule frame=%@",
                   NSStringFromClass(hostView.class), NSStringFromCGRect(self.glassView.frame));
         return;
     }
 
-    [hostView sendSubviewToBack:self.glassView];
+    if (hostView.subviews.firstObject != self.glassView) {
+        [hostView sendSubviewToBack:self.glassView];
+    }
     if (CGRectEqualToRect(self.glassView.frame, targetFrame)) return;
-    [UIView animateWithDuration:0.24
-                          delay:0
-                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
-                     animations:^{ self.glassView.frame = targetFrame; }
-                     completion:nil];
+    // UIKit already animates the containing navigation transition. A second,
+    // independently timed frame animation made the capsule visibly trail the
+    // title and continuously retarget during interactive pushes.
+    self.glassView.frame = targetFrame;
 }
 
 - (void)refreshTargets {
     UIView *jumpBar = ApolloFindJumpBar(self.titleControl);
     UIView *hostView = jumpBar ?: self.titleControl;
     NSMutableArray<UIView *> *glassCandidates = [NSMutableArray array];
+
+    // Recenter outside layoutSubviews. It can resize JumpBar and transform the
+    // title control, both of which are layout-driving writes that must not feed
+    // back into UIKit's active navigation-bar pass.
+    if (!sEnableBulkTranslation) ApolloRecenterTitleControl(self.titleControl);
 
     if (jumpBar) {
         const char *ivarNames[] = {
@@ -968,6 +989,15 @@ static void ApolloCollectNavigationTitleContent(UIView *root,
     }
 
     [self updateGlassForHostView:hostView candidateViews:glassCandidates];
+
+    self.observedTitleFrame = self.titleControl.frame;
+    self.observedTitleBounds = self.titleControl.bounds;
+    self.observedTitleSubviewCount = self.titleControl.subviews.count;
+    self.observedJumpBar = jumpBar;
+    self.observedJumpBarBounds = jumpBar.bounds;
+    self.observedJumpBarSubviewCount = jumpBar.subviews.count;
+    self.observedSearching = ApolloJumpBarIsSearching(jumpBar);
+    self.observationValid = YES;
 }
 
 - (void)scheduleTargetRefresh {
@@ -980,6 +1010,21 @@ static void ApolloCollectNavigationTitleContent(UIView *root,
         strongSelf.refreshScheduled = NO;
         [strongSelf refreshTargets];
     });
+}
+
+- (void)scheduleTargetRefreshIfNeeded {
+    UIView *titleControl = self.titleControl;
+    if (!titleControl) return;
+    UIView *jumpBar = ApolloFindJumpBar(titleControl);
+    BOOL unchanged = self.observationValid &&
+        CGRectEqualToRect(self.observedTitleFrame, titleControl.frame) &&
+        CGRectEqualToRect(self.observedTitleBounds, titleControl.bounds) &&
+        self.observedTitleSubviewCount == titleControl.subviews.count &&
+        self.observedJumpBar == jumpBar &&
+        CGRectEqualToRect(self.observedJumpBarBounds, jumpBar.bounds) &&
+        self.observedJumpBarSubviewCount == jumpBar.subviews.count &&
+        self.observedSearching == ApolloJumpBarIsSearching(jumpBar);
+    if (!unchanged) [self scheduleTargetRefresh];
 }
 
 @end
@@ -1187,16 +1232,12 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
     ApolloNavigationTitleGlassController *controller =
         objc_getAssociatedObject(self, &kApolloNavigationTitleGlassControllerKey);
     if (controller) {
-        [controller scheduleTargetRefresh];
+        [controller scheduleTargetRefreshIfNeeded];
     } else {
         dispatch_async(dispatch_get_main_queue(), ^{
             ApolloUpdateNavigationTitleGlass(self);
         });
     }
-    // Bulk translation adds a new right nav bar item which often causes the title overlap.
-    // Skip adjustment for now until we can find a more robust solution that works with the dynamic item changes.
-    if (sEnableBulkTranslation) return;
-    ApolloRecenterTitleControl(self);
 }
 
 %end
@@ -1222,7 +1263,7 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
         if ([NSStringFromClass(view.class) isEqualToString:@"_UINavigationBarTitleControl"]) {
             ApolloNavigationTitleGlassController *controller =
                 objc_getAssociatedObject(view, &kApolloNavigationTitleGlassControllerKey);
-            [controller scheduleTargetRefresh];
+            [controller scheduleTargetRefreshIfNeeded];
             return;
         }
     }

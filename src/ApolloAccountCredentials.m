@@ -8,6 +8,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <os/lock.h>
+#include <string.h>
 
 @implementation ApolloAccountCredentialEntry
 
@@ -115,13 +116,74 @@ NSString *ApolloSecretForClientId(NSString *clientId) {
 // also turned up zero callers, consistent with it never being reassigned at
 // runtime outside of NSKeyedUnarchiver's KVC-based decode).
 //
-// Resolve from disk instead: AccountManager persists `CurrentRedditAccountIndex`
+// For username-only lookup, resolve from disk instead: AccountManager persists
+// `CurrentRedditAccountIndex`
 // into the shared-group defaults whenever the active account changes, and
 // `RedditAccounts2` is the index-aligned NSKeyedArchiver([RDKClient]) array (see
 // ApolloWebJSONIdentity.xm's synthesis code for the full on-disk format notes).
 // This mirrors ApolloWebSessionStore.m's cold-start fallback, elevated here to
 // the primary (only) mechanism since the live signal can't be trusted at all.
 static NSString *const kApolloAccountCredsGroupSuite = @"group.com.christianselig.apollo";
+
+// Apollo.AccountManager does not expose its Swift `accounts` array or
+// `currentAccountIndex` through ObjC. The live manager still registers both
+// fields as ivars, though, and this Apollo build uses the standard native Swift
+// Array representation: the ivar is one pointer to ContiguousArrayStorage,
+// whose count/capacity/elements begin at words 2/3/4. Reading the manager's live
+// array is important here. Unarchiving RedditAccounts2 would create a second
+// RDKClient with copied credentials, while mutations must travel through the
+// exact client Apollo owns and keeps refreshed in-process.
+//
+// Keep every assumption guarded. If a future Apollo/Swift runtime changes the
+// layout, this returns nil and callers fail closed instead of messaging an
+// invalid pointer.
+id ApolloActiveAccountClient(void) {
+    Class managerClass = objc_getClass("_TtC6Apollo14AccountManager");
+    SEL sharedSelector = NSSelectorFromString(@"shared");
+    if (!managerClass || ![managerClass respondsToSelector:sharedSelector]) return nil;
+
+    id manager = ((id (*)(id, SEL))objc_msgSend)(managerClass, sharedSelector);
+    if (!manager) return nil;
+    Ivar accountsIvar = class_getInstanceVariable(managerClass, "accounts");
+    Ivar currentIndexIvar = class_getInstanceVariable(managerClass, "currentAccountIndex");
+    if (!accountsIvar || !currentIndexIvar) return nil;
+
+    // Hopper: Optional<Int> is stored as the Int word followed by an
+    // extra-inhabitant byte; bit 0 set at +8 means nil. This is the same check
+    // AccountManager's own subscription-refresh path performs before indexing.
+    NSInteger index = 0;
+    uint8_t indexIsNil = 1;
+    uint8_t *managerBytes = (uint8_t *)(__bridge void *)manager;
+    ptrdiff_t currentIndexOffset = ivar_getOffset(currentIndexIvar);
+    memcpy(&index, managerBytes + currentIndexOffset, sizeof(index));
+    memcpy(&indexIsNil, managerBytes + currentIndexOffset + sizeof(NSInteger), sizeof(indexIsNil));
+    if ((indexIsNil & 0x1) != 0 || index < 0) return nil;
+
+    uintptr_t storageWord = 0;
+    memcpy(&storageWord, managerBytes + ivar_getOffset(accountsIvar), sizeof(storageWord));
+    // Native Swift arrays use the low three bits of the storage word for flags;
+    // AccountManager's own code masks them before reading count/elements.
+    void *storage = (void *)(storageWord & ~(uintptr_t)0x7);
+    if (!storage) return nil;
+    Class storageClass = object_getClass((__bridge id)storage);
+    const char *storageClassName = storageClass ? class_getName(storageClass) : NULL;
+    if (!storageClassName || strstr(storageClassName, "ContiguousArrayStorage") == NULL) return nil;
+
+    uintptr_t count = 0;
+    memcpy(&count, (uint8_t *)storage + (2 * sizeof(uintptr_t)), sizeof(count));
+    if (count == 0 || count > 64) return nil;
+
+    if ((uintptr_t)index >= count) return nil;
+
+    void *rawClient = NULL;
+    size_t elementOffset = (4 + (NSUInteger)index) * sizeof(uintptr_t);
+    memcpy(&rawClient, (uint8_t *)storage + elementOffset, sizeof(rawClient));
+    if (!rawClient) return nil;
+    id client = (__bridge id)rawClient;
+    Class clientClass = objc_getClass("RDKClient");
+    if (!clientClass || ![client isKindOfClass:clientClass]) return nil;
+    return client;
+}
 
 static id ApolloAccountCredsUnarchive(NSData *data) {
     if (![data isKindOfClass:[NSData class]]) return nil;

@@ -35,8 +35,45 @@ UIVisualEffect *ApolloImmersiveGlassEffect(UIColor *tintColor, CGFloat tintAlpha
     return effect;
 }
 
-static const void *kApolloImmersiveBannerIsLightKey = &kApolloImmersiveBannerIsLightKey;
-static const void *kApolloImmersiveBannerIsLightPendingKey = &kApolloImmersiveBannerIsLightPendingKey;
+static const void *kApolloImmersiveBannerCacheKey = &kApolloImmersiveBannerCacheKey;
+
+static NSObject *ApolloImmersiveWorkLock(void) {
+    static NSObject *lock = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
+void ApolloImmersiveSetBannerCacheKey(UIImage *banner, NSString *cacheKey) {
+    if (!banner || cacheKey.length == 0) return;
+    objc_setAssociatedObject(banner, kApolloImmersiveBannerCacheKey, [cacheKey copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
+}
+
+static NSString *ApolloImmersiveWorkKey(UIImage *banner) {
+    if (!banner) return nil;
+    NSString *logicalKey = objc_getAssociatedObject(banner, kApolloImmersiveBannerCacheKey);
+    if (logicalKey.length > 0) return logicalKey;
+    // Images with no known URL/custom-asset identity still coalesce for every
+    // consumer of this exact instance.
+    return [NSString stringWithFormat:@"image:%p", banner];
+}
+
+static NSCache<NSString *, NSNumber *> *ApolloImmersiveBrightnessCache(void) {
+    static NSCache<NSString *, NSNumber *> *cache = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [NSCache new];
+        cache.countLimit = 64;
+    });
+    return cache;
+}
+
+static NSMutableDictionary<NSString *, NSMutableArray<void (^)(BOOL)> *> *ApolloImmersiveBrightnessWaiters(void) {
+    static NSMutableDictionary *waiters = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ waiters = [NSMutableDictionary dictionary]; });
+    return waiters;
+}
 
 // Reads every pixel of the top half of the source image (via the 1x1 downscale
 // trick) — cheap for a typical banner, but a visible hitch on the main thread
@@ -74,7 +111,7 @@ static BOOL ApolloImmersiveComputeBannerIsLight(UIImage *banner) {
 
 BOOL ApolloImmersiveBannerIsLight(UIImage *banner) {
     if (!banner) return NO;
-    NSNumber *cached = objc_getAssociatedObject(banner, kApolloImmersiveBannerIsLightKey);
+    NSNumber *cached = [ApolloImmersiveBrightnessCache() objectForKey:ApolloImmersiveWorkKey(banner)];
     return cached.boolValue;
 }
 
@@ -83,22 +120,46 @@ void ApolloImmersiveBannerIsLightAsync(UIImage *banner, void (^completion)(BOOL 
         if (completion) completion(NO);
         return;
     }
-    NSNumber *cached = objc_getAssociatedObject(banner, kApolloImmersiveBannerIsLightKey);
+    NSString *key = ApolloImmersiveWorkKey(banner);
+    NSNumber *cached = [ApolloImmersiveBrightnessCache() objectForKey:key];
     if (cached) {
         if (completion) completion(cached.boolValue);
         return;
     }
-    // Already computing (a second caller arrived while the first is in
-    // flight) — let the first caller's completion land; this one just keeps
-    // whatever default it already applied until the next natural re-style.
-    if ([objc_getAssociatedObject(banner, kApolloImmersiveBannerIsLightPendingKey) boolValue]) return;
-    objc_setAssociatedObject(banner, kApolloImmersiveBannerIsLightPendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    BOOL shouldStartWork = NO;
+    @synchronized (ApolloImmersiveWorkLock()) {
+        cached = [ApolloImmersiveBrightnessCache() objectForKey:key];
+        if (!cached) {
+            NSMutableArray<void (^)(BOOL)> *waiters = ApolloImmersiveBrightnessWaiters()[key];
+            if (waiters) {
+                if (completion) [waiters addObject:[completion copy]];
+            } else {
+                waiters = [NSMutableArray array];
+                if (completion) [waiters addObject:[completion copy]];
+                ApolloImmersiveBrightnessWaiters()[key] = waiters;
+                shouldStartWork = YES;
+            }
+        }
+    }
+    // Never invoke client code while holding the shared work lock; a completion
+    // is allowed to synchronously request another banner style.
+    if (cached) {
+        if (completion) completion(cached.boolValue);
+        return;
+    }
+    if (!shouldStartWork) return;
+
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         BOOL light = ApolloImmersiveComputeBannerIsLight(banner);
         dispatch_async(dispatch_get_main_queue(), ^{
-            objc_setAssociatedObject(banner, kApolloImmersiveBannerIsLightKey, @(light), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            objc_setAssociatedObject(banner, kApolloImmersiveBannerIsLightPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            if (completion) completion(light);
+            NSArray<void (^)(BOOL)> *waiters = nil;
+            @synchronized (ApolloImmersiveWorkLock()) {
+                [ApolloImmersiveBrightnessCache() setObject:@(light) forKey:key];
+                waiters = [ApolloImmersiveBrightnessWaiters()[key] copy];
+                [ApolloImmersiveBrightnessWaiters() removeObjectForKey:key];
+            }
+            for (void (^waiter)(BOOL) in waiters) waiter(light);
         });
     });
 }
@@ -155,34 +216,78 @@ static NSUInteger ApolloImmersiveImageByteCost(UIImage *image) {
     return (NSUInteger)(image.size.width * scale * image.size.height * scale * 4.0);
 }
 
-static UIImage *ApolloImmersiveCachedBackdrop(UIImage *banner, BOOL create) {
-    if (!banner) return nil;
-    static NSCache<UIImage *, UIImage *> *cache = nil;
+static NSCache<NSString *, UIImage *> *ApolloImmersiveBackdropCache(void) {
+    static NSCache<NSString *, UIImage *> *cache = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         cache = [[NSCache alloc] init];
         cache.countLimit = 12;
         cache.totalCostLimit = ApolloImmersiveBackdropCacheByteBudget;
     });
-    UIImage *backdrop = [cache objectForKey:banner];
-    if (!backdrop && create) {
-        backdrop = ApolloImmersiveGaussianBlurredImage(banner);
-        // NSCache retains `banner` itself as the key (needed for correct
-        // pointer-identity lookups — a lighter non-retaining wrapper key would
-        // risk a dangling/reused-address match against an unrelated image
-        // later), so its bytes count toward the real memory this cache holds
-        // alive just as much as the blurred value's do. Cost the key too, or
-        // totalCostLimit only ever sees a fraction of what's actually retained
-        // and a handful of large custom banners can sail past the stated budget.
-        if (backdrop) {
-            NSUInteger cost = ApolloImmersiveImageByteCost(backdrop) + ApolloImmersiveImageByteCost(banner);
-            [cache setObject:backdrop forKey:banner cost:cost];
-        }
-    }
-    return backdrop;
+    return cache;
 }
 
-static const void *kApolloImmersiveBackdropPendingKey = &kApolloImmersiveBackdropPendingKey;
+static NSMutableDictionary<NSString *, NSMutableArray<void (^)(UIImage *)> *> *ApolloImmersiveBackdropWaiters(void) {
+    static NSMutableDictionary *waiters = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ waiters = [NSMutableDictionary dictionary]; });
+    return waiters;
+}
+
+static UIImage *ApolloImmersiveCachedBackdrop(UIImage *banner) {
+    return banner ? [ApolloImmersiveBackdropCache() objectForKey:ApolloImmersiveWorkKey(banner)] : nil;
+}
+
+static void ApolloImmersiveRequestBackdrop(UIImage *banner, void (^completion)(UIImage *backdrop)) {
+    if (!banner) {
+        if (completion) completion(nil);
+        return;
+    }
+    NSString *key = ApolloImmersiveWorkKey(banner);
+    UIImage *cached = [ApolloImmersiveBackdropCache() objectForKey:key];
+    if (cached) {
+        if (completion) completion(cached);
+        return;
+    }
+
+    BOOL shouldStartWork = NO;
+    @synchronized (ApolloImmersiveWorkLock()) {
+        cached = [ApolloImmersiveBackdropCache() objectForKey:key];
+        if (!cached) {
+            NSMutableArray<void (^)(UIImage *)> *waiters = ApolloImmersiveBackdropWaiters()[key];
+            if (waiters) {
+                if (completion) [waiters addObject:[completion copy]];
+            } else {
+                waiters = [NSMutableArray array];
+                if (completion) [waiters addObject:[completion copy]];
+                ApolloImmersiveBackdropWaiters()[key] = waiters;
+                shouldStartWork = YES;
+            }
+        }
+    }
+    if (cached) {
+        if (completion) completion(cached);
+        return;
+    }
+    if (!shouldStartWork) return;
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        UIImage *backdrop = ApolloImmersiveGaussianBlurredImage(banner);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSArray<void (^)(UIImage *)> *waiters = nil;
+            @synchronized (ApolloImmersiveWorkLock()) {
+                if (backdrop) {
+                    [ApolloImmersiveBackdropCache() setObject:backdrop
+                                                       forKey:key
+                                                         cost:ApolloImmersiveImageByteCost(backdrop)];
+                }
+                waiters = [ApolloImmersiveBackdropWaiters()[key] copy];
+                [ApolloImmersiveBackdropWaiters() removeObjectForKey:key];
+            }
+            for (void (^waiter)(UIImage *) in waiters) waiter(backdrop);
+        });
+    });
+}
 
 @interface ApolloImmersiveHeaderBackgroundView ()
 @property(nonatomic, strong) UIView *contentContainer;
@@ -194,6 +299,7 @@ static const void *kApolloImmersiveBackdropPendingKey = &kApolloImmersiveBackdro
 @property(nonatomic, strong) CAGradientLayer *chromeScrimLayer;
 @property(nonatomic, strong) UIColor *pageColor;
 @property(nonatomic, strong) UIImage *sourceBanner;
+@property(nonatomic, copy) NSString *sourceBannerKey;
 @property(nonatomic, assign) CGFloat regionHeight;
 @property(nonatomic, assign) CGFloat extendedHeight;
 @property(nonatomic, assign) CGFloat topInset;
@@ -274,29 +380,18 @@ static const void *kApolloImmersiveBackdropPendingKey = &kApolloImmersiveBackdro
 
     if (banner != self.sourceBanner) {
         self.sourceBanner = banner;
+        self.sourceBannerKey = ApolloImmersiveWorkKey(banner);
         self.sharpView.image = banner;
-        UIImage *cachedBackdrop = ApolloImmersiveCachedBackdrop(banner, NO);
+        UIImage *cachedBackdrop = ApolloImmersiveCachedBackdrop(banner);
         self.backdropView.image = cachedBackdrop;
-        // Guard against redoing the (downsample + Gaussian blur) work when a
-        // second, content-identical-but-pointer-distinct UIImage instance for
-        // the same logical banner arrives while the first blur is still in
-        // flight — plausible in practice, since a subreddit header applies a
-        // synchronously-cached image first and a separately-fetched instance
-        // moments later. Mirrors ApolloImmersiveBannerIsLightAsync's identical
-        // pending-flag pattern above.
-        BOOL alreadyPending = [objc_getAssociatedObject(banner, kApolloImmersiveBackdropPendingKey) boolValue];
-        if (banner && !cachedBackdrop && !alreadyPending) {
-            objc_setAssociatedObject(banner, kApolloImmersiveBackdropPendingKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (banner && !cachedBackdrop) {
             __weak ApolloImmersiveHeaderBackgroundView *weakSelf = self;
-            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-                UIImage *backdrop = ApolloImmersiveCachedBackdrop(banner, YES);
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    objc_setAssociatedObject(banner, kApolloImmersiveBackdropPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                    ApolloImmersiveHeaderBackgroundView *strongSelf = weakSelf;
-                    if (!strongSelf || strongSelf.sourceBanner != banner) return;
-                    strongSelf.backdropView.image = backdrop;
-                    [strongSelf setNeedsLayout];
-                });
+            NSString *expectedKey = self.sourceBannerKey;
+            ApolloImmersiveRequestBackdrop(banner, ^(UIImage *backdrop) {
+                ApolloImmersiveHeaderBackgroundView *strongSelf = weakSelf;
+                if (!strongSelf || ![strongSelf.sourceBannerKey isEqualToString:expectedKey]) return;
+                strongSelf.backdropView.image = backdrop;
+                [strongSelf setNeedsLayout];
             });
         }
     }

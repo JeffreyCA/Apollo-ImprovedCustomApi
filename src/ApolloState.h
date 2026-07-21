@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 
 @class UIScrollView;
+@class UINavigationItem;
 @class UIViewController;
 
 extern NSString *sRedditClientId;
@@ -154,11 +155,10 @@ void ApolloApplyScrollEdgeEffectStyleToViewController(UIViewController *viewCont
 // fixed native width (ApolloSubredditHeaders.xm's subreddit feeds).
 // Positioning stays on the existing centering formula, unchanged, everywhere.
 BOOL ApolloSubredditTitleShouldTruncate(UIViewController *viewController);
-// Forces every visible nav title to re-run its layout right now. Called from
-// ApolloTranslation.xm's UINavigationItem setRightBarButtonItem(s): hook —
-// measured to reliably correlate with the icon cluster's final, settled
-// position (see ApolloSubredditTitleShouldTruncate's comment).
-void ApolloSubredditForceAllTitleRelayouts(void);
+// Schedules a layout pass only for the subreddit title owned by this nav item.
+// ApolloTranslation.xm calls this after Apollo replaces its trailing item
+// cluster; unrelated windows and navigation stacks are never traversed.
+void ApolloSubredditRequestTitleRelayout(UINavigationItem *navigationItem);
 extern BOOL sModernSubredditDividers;
 // Master toggle for subreddit list enhancements (see UDKeySubredditListEnhancements).
 extern BOOL sSubredditListEnhancements;
