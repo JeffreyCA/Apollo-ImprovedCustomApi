@@ -89,7 +89,11 @@ static NSURL *ApolloWebJSONURLWithFragment(NSURL *url, NSString *fragment) {
     return c.URL ?: url;
 }
 
-static BOOL ApolloWebJSONURLIsProbe(NSURL *url) {
+// Exported (ApolloWebJSON.h): Tweak.xm's _onqueue_resume hook uses this to leave
+// probe-tagged requests entirely alone — including their User-Agent, which the
+// scrape paths set to desktop Safari deliberately (the app UA makes Reddit
+// render device=mobile, dropping the server-side markup the scrapers parse).
+BOOL ApolloWebJSONURLIsProbe(NSURL *url) {
     return [url.fragment isEqualToString:kApolloWebJSONProbeMarker];
 }
 

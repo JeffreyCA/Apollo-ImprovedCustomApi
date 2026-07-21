@@ -203,6 +203,12 @@ BOOL ApolloWebJSONDiskAccountHasRealCredential(NSString *username);
 // (e.g. ApolloRedditMediaUpload.m) issue themselves with the cookie already set.
 NSURL *ApolloWebJSONProbeURL(NSURL *url);
 
+// YES when `url` carries the probe fragment — i.e. it's one of our own
+// self-authored requests (session probes, upload leases, scrape GETs). Such
+// requests must pass through the network hooks completely untouched: no Web
+// JSON rewrite, no User-Agent stamping (they pick their UA deliberately).
+BOOL ApolloWebJSONURLIsProbe(NSURL *url);
+
 #ifdef __cplusplus
 }
 #endif

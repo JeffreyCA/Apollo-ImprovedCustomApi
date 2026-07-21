@@ -2174,6 +2174,16 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
             [self setValue:mutableRequest forKey:@"_currentRequest"];
         }
     } else if ([requestURL.host isEqualToString:@"oauth.reddit.com"] || [requestURL.host isEqualToString:@"www.reddit.com"]) {
+        // Probe-tagged requests (fragment marker) are our OWN self-authored
+        // traffic — session probes, upload leases, the social-links scrape GETs.
+        // They authenticate themselves and pick their User-Agent deliberately
+        // (stamping the app UA here made Reddit render device=mobile, which
+        // drops the server-side markup the scrapers parse) — leave them alone.
+        if (ApolloWebJSONURLIsProbe(requestURL)) {
+            %orig;
+            return;
+        }
+
         // Web JSON spike: when the flag is on, whitelisted listing reads are
         // re-pointed at cookie-authenticated www.reddit.com/...json instead of
         // the oauth host (see ApolloWebJSON.m). Returns nil when off/not
