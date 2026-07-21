@@ -3,6 +3,7 @@
 #import "ApolloCommon.h"
 #import "ApolloSettingsForm.h"
 #import "UserDefaultConstants.h"
+#import "settings/ApolloLinkCompanionViewController.h"
 
 // This screen gathers every "open links in an app" preference in one place:
 // Reborn's own per-service deep-link toggles (Bluesky/GitHub/Steam), plus
@@ -132,6 +133,20 @@ static NSString *ApolloOpenInAppBrowserLabelForToken(NSString *token) {
                                    detail:^NSString * { return ApolloOpenInAppBrowserLabelForToken(ApolloOpenInAppCurrentBrowserToken()); }
                                  onSelect:^{ [weakSelf presentBrowserPicker]; }];
 
+    // The inverse direction — Safari → Apollo — via the bundled Open in Apollo
+    // extension and the Link Companion helper app. The row wears the
+    // Companion's real app icon (embedded PNG) rather than a symbol tile.
+    ApolloSettingsRow *linkCompanion =
+        [ApolloSettingsRow disclosureRowWithID:@"link-companion"
+                                         title:@"Open Reddit Links in Apollo"
+                                        detail:nil
+                                          push:^UIViewController *{
+            return [[ApolloLinkCompanionViewController alloc] init];
+        }];
+    linkCompanion.configure = ^(UITableViewCell *cell) {
+        cell.imageView.image = ApolloLinkCompanionIcon(29.0);
+    };
+
     return @[
         [ApolloSettingsSection sectionWithTitle:@"Apps"
                                          footer:@"When enabled, links to these services open directly in their app (if installed) instead of a web view."
@@ -139,6 +154,9 @@ static NSString *ApolloOpenInAppBrowserLabelForToken(NSString *token) {
         [ApolloSettingsSection sectionWithTitle:@"Browser"
                                          footer:@"Choose where every other web link opens. In-App Safari opens links inside Apollo; Safari and the other browsers appear as they're installed. This is Apollo's own setting, relocated here."
                                            rows:@[ browser ]],
+        [ApolloSettingsSection sectionWithTitle:@"Safari"
+                                         footer:@"Make Reddit links tapped in Safari open directly in Apollo, with the free Link Companion helper app."
+                                           rows:@[ linkCompanion ]],
     ];
 }
 
