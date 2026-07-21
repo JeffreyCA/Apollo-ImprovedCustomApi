@@ -20,6 +20,10 @@
 // re-laying out for a band toggle); the social-links notification refreshes
 // that band.
 - (void)apollo_persistAndApply {
+    // Defensive normalization for installs upgraded from the retired master
+    // switch. Every visible layout control operates on an enabled header.
+    sShowDetailedProfiles = YES;
+    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:UDKeyShowDetailedProfiles];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloUserAvatarsToggleChangedNotification" object:nil];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloSocialLinksToggleChangedNotification object:nil];
 }

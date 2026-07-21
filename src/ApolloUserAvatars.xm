@@ -52,6 +52,8 @@ static const void *kApolloProfileWrappedHeaderKey = &kApolloProfileWrappedHeader
 static const void *kApolloProfileOriginalHeaderKey = &kApolloProfileOriginalHeaderKey;
 static const void *kApolloProfileUsernameKey = &kApolloProfileUsernameKey;
 static const void *kApolloProfileWrapperMarkerKey = &kApolloProfileWrapperMarkerKey;
+static const void *kApolloProfileInstallSignatureKey = &kApolloProfileInstallSignatureKey;
+static const void *kApolloProfileInstallScheduledKey = &kApolloProfileInstallScheduledKey;
 static const void *kApolloProfileUsernameCopyInteractionKey = &kApolloProfileUsernameCopyInteractionKey;
 static const void *kApolloProfileUsernameCopyValueKey = &kApolloProfileUsernameCopyValueKey;
 static const void *kApolloProfileUsernameCopyLoggedKey = &kApolloProfileUsernameCopyLoggedKey;
@@ -93,6 +95,9 @@ static const void *kApolloProfileTabAvatarImageMarkerKey = &kApolloProfileTabAva
 // `user_is_subscriber`) can't revert it. Cleared/aged out afterward.
 @property(nonatomic, strong) NSDate *followIntentDate;
 @property(nonatomic) BOOL followIntentValue;
+@property(nonatomic) NSUInteger followMutationGeneration;
+@property(nonatomic, copy) NSString *lastProfileInfoSignature;
+@property(nonatomic) NSUInteger contentGeneration;
 @property(nonatomic, strong) UILabel *aboutLabel;
 // Bio truncation: collapsed shows 3 lines; when the full text is longer a
 // "more" toggle appears below and expands it inline (up to the safety cap).
@@ -150,6 +155,7 @@ static void ApolloProfileUpdateAmbientScroll(id viewControllerObject, UIScrollVi
 static void ApolloProfileSyncNavTitleFade(UIViewController *viewController);
 static void ApolloProfileSetUserFollowed(NSString *username, BOOL follow, ApolloProfileHeaderView *header);
 static void ApolloProfileOpenMessageComposer(NSString *username);
+static void ApolloProfileScheduleInstallOrUpdateHeader(id viewControllerObject);
 
 // Height of the glass stat-card row, the inter-card gap, and the gap above the row.
 static CGFloat const ApolloProfileStatsRowHeight = 66.0;
@@ -442,6 +448,7 @@ static const void *kApolloProfileGlassAccentKey = &kApolloProfileGlassAccentKey;
         _socialLinksView.heightChangedBlock = ^{
             ApolloProfileHeaderView *strongSelf = weakSelf;
             if (!strongSelf) return;
+            strongSelf.contentGeneration++;
             [strongSelf setNeedsLayout];
             if (strongSelf.heightInvalidationBlock) strongSelf.heightInvalidationBlock();
         };
@@ -1039,12 +1046,14 @@ static UIFont *ApolloProfileClassicNameFont(void) {
 
 - (void)apollo_followTapped {
     NSString *username = ApolloAvatarNormalizedUsername(self.username);
-    if (username.length == 0) return;
+    if (username.length == 0 || !self.followButton.enabled) return;
     BOOL wantFollow = !self.isFollowing;
     // Optimistic flip so the pill responds instantly, and record the intent so a late
     // about.json fetch can't revert it within the grace window (see applyProfileInfo).
     self.followIntentDate = [NSDate date];
     self.followIntentValue = wantFollow;
+    self.followMutationGeneration++;
+    self.followButton.enabled = NO;
     [self apollo_setFollowing:wantFollow];
     ApolloProfileSetUserFollowed(username, wantFollow, self);
 }
@@ -1088,6 +1097,15 @@ static UIFont *ApolloProfileClassicNameFont(void) {
 }
 
 - (void)applyProfileInfo:(ApolloUserProfileInfo *)info fallbackUsername:(NSString *)username {
+    NSString *infoSignature = [NSString stringWithFormat:@"%@|%@|%@|%lld|%lld|%.0f|%d|%d|%d|%d",
+        username ?: @"", info.displayName ?: @"", info.aboutText ?: @"",
+        (long long)info.linkKarma, (long long)info.commentKarma, info.createdUTC,
+        info.followStateKnown, info.userIsSubscriber, sProfileShowStatCards, sProfileShowActions];
+    if ([self.lastProfileInfoSignature isEqualToString:infoSignature]) return;
+    self.lastProfileInfoSignature = infoSignature;
+    self.contentGeneration++;
+    CGFloat layoutWidth = self.bounds.size.width > 1.0 ? self.bounds.size.width : UIScreen.mainScreen.bounds.size.width;
+    CGFloat previousHeight = [self preferredHeightForWidth:layoutWidth];
     NSString *displayName = info.displayName.length > 0 ? info.displayName : username;
     // "corderjones" + "u/corderjones" is the same string twice — drop the handle
     // line when it adds nothing over the display name (the body lifts to fill it).
@@ -1135,7 +1153,8 @@ static UIFont *ApolloProfileClassicNameFont(void) {
     // username is unchanged; the band re-measures the header when links arrive).
     self.socialLinksView.username = username;
     [self setNeedsLayout];
-    if (self.heightInvalidationBlock) {
+    CGFloat updatedHeight = [self preferredHeightForWidth:layoutWidth];
+    if (self.heightInvalidationBlock && fabs(updatedHeight - previousHeight) > 0.5) {
         self.heightInvalidationBlock();
     }
 }
@@ -2152,6 +2171,8 @@ static UIImage *ApolloProfilePlaceholderAvatar(void) {
 }
 
 static void ApolloProfileSetSnoovatarMode(ApolloProfileHeaderView *header, BOOL showSnoovatar) {
+    BOOL currentlyShowing = !header.snoovatarImageView.hidden;
+    if (currentlyShowing == showSnoovatar) return;
     header.snoovatarImageView.hidden = !showSnoovatar;
     header.avatarBorderView.hidden = showSnoovatar;
     header.avatarImageView.hidden = showSnoovatar;
@@ -2263,6 +2284,10 @@ static void ApolloProfileApplySyntheticBanner(ApolloProfileHeaderView *header, A
     UIColor *accent = ApolloThemeAccentColor() ?: header.tintColor ?: UIColor.systemBlueColor;
     UIColor *resolved = [accent resolvedColorWithTraitCollection:header.traitCollection];
     if (resolved) accent = resolved;
+    NSString *syntheticCacheKey = [NSString stringWithFormat:@"profile-synthetic:%@:%@:%@",
+        targetUsername ?: @"unknown",
+        (info.snoovatarURL ?: info.iconURL).absoluteString ?: @"no-avatar",
+        accent.description ?: @"accent"];
     BOOL avatarUsable = avatarImage.CGImage && !info.defaultSnoo;
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -2278,6 +2303,7 @@ static void ApolloProfileApplySyntheticBanner(ApolloProfileHeaderView *header, A
             if (header.currentBannerURL) return;         // a real banner is current now
             if (!sProfileShowBanner) return;             // banners switched off meanwhile
             if (!ApolloAvatarUsernameMatches(header.username, targetUsername)) return;
+            ApolloImmersiveSetBannerCacheKey(banner, syntheticCacheKey);
             header.bannerImageView.image = banner;
             ApolloProfileSyncAmbient(header);
         });
@@ -2352,6 +2378,7 @@ static void ApolloProfileLoadImages(ApolloProfileHeaderView *header, NSString *u
         } else if (info.bannerURL) {
             UIImage *banner = [cache cachedImageForURL:info.bannerURL];
             if (banner) {
+                ApolloImmersiveSetBannerCacheKey(banner, info.bannerURL.absoluteString);
                 header.bannerImageView.image = banner;
                 ApolloProfileSyncAmbient(header);
             } else {
@@ -2360,6 +2387,7 @@ static void ApolloProfileLoadImages(ApolloProfileHeaderView *header, NSString *u
                     if (!loadedImage) return;
                     if (!ApolloAvatarUsernameMatches(header.username, targetUsername)) return;
                     if (!ApolloProfileURLsMatch(header.currentBannerURL, bannerURL)) return;
+                    ApolloImmersiveSetBannerCacheKey(loadedImage, bannerURL.absoluteString);
                     header.bannerImageView.image = loadedImage;
                     ApolloProfileSyncAmbient(header);
                 }];
@@ -2367,7 +2395,6 @@ static void ApolloProfileLoadImages(ApolloProfileHeaderView *header, NSString *u
         }
     };
 
-    if (cachedInfo) applyInfo(cachedInfo);
     if (forceRefresh) {
         [cache refetchInfoForUsername:username completion:applyInfo];
     } else {
@@ -2784,12 +2811,26 @@ static void ApolloProfileInstallOrUpdateHeader(id viewControllerObject) {
     header.hostViewController = viewController;
     header.socialLinksView.hostViewController = viewController;
     header.username = username;
+
+    CGFloat expectedHeight = [header preferredHeightForWidth:width];
+    CGFloat chromeHeight = tableView.adjustedContentInset.top;
+    NSString *installSignature = [NSString stringWithFormat:@"%@|%.2f|%.2f|%.2f|%p|%lu|%d%d%d%d%d|%ld|%ld",
+        username, width, expectedHeight, chromeHeight, header.bannerImageView.image,
+        (unsigned long)header.contentGeneration, sProfileHeaderImmersive, sProfileShowBanner,
+        sProfileShowStatCards, sProfileShowSocialLinks, sProfileShowActions,
+        (long)sProfileAvatarStyle, (long)viewController.traitCollection.userInterfaceStyle];
+    NSString *previousInstallSignature = objc_getAssociatedObject(viewControllerObject, kApolloProfileInstallSignatureKey);
+    if (wrappedHeader && tableView.tableHeaderView == wrappedHeader &&
+        [previousInstallSignature isEqualToString:installSignature]) {
+        ApolloProfileSyncNavTitleFade(viewController);
+        return;
+    }
     [header apollo_updateEditProfileButtonColors];
     __weak UIViewController *weakProfileController = viewController;
     header.heightInvalidationBlock = ^{
         UIViewController *strongProfileController = weakProfileController;
         if (strongProfileController) {
-            ApolloProfileInstallOrUpdateHeader(strongProfileController);
+            ApolloProfileScheduleInstallOrUpdateHeader(strongProfileController);
         }
     };
 
@@ -2837,6 +2878,8 @@ static void ApolloProfileInstallOrUpdateHeader(id viewControllerObject) {
         // grace window into this one, or a tap on user A can show "Following"
         // on user B for up to 30s if the header is repointed in between.
         header.followIntentDate = nil;
+        header.followMutationGeneration++;
+        header.followButton.enabled = YES;
         [header applyProfileInfo:nil fallbackUsername:username];
         ApolloProfileSetSnoovatarMode(header, NO);
         ApolloProfileLoadImages(header, username, NO);
@@ -2853,6 +2896,22 @@ static void ApolloProfileInstallOrUpdateHeader(id viewControllerObject) {
     // Appear/layout paths rebuild nav title views at alpha 1; re-derive the
     // cross-fade from the current offset so the title doesn't pop back in at rest.
     ApolloProfileSyncNavTitleFade(viewController);
+    objc_setAssociatedObject(viewControllerObject, kApolloProfileInstallSignatureKey,
+                             installSignature, OBJC_ASSOCIATION_COPY_NONATOMIC);
+}
+
+static void ApolloProfileScheduleInstallOrUpdateHeader(id viewControllerObject) {
+    if (!viewControllerObject || [objc_getAssociatedObject(viewControllerObject, kApolloProfileInstallScheduledKey) boolValue]) return;
+    objc_setAssociatedObject(viewControllerObject, kApolloProfileInstallScheduledKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak id weakController = viewControllerObject;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        id strongController = weakController;
+        if (!strongController) return;
+        objc_setAssociatedObject(strongController, kApolloProfileInstallScheduledKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloProfileInstallOrUpdateHeader(strongController);
+    });
 }
 
 static void ApolloProfileRefreshViewControllersInTree(UIViewController *viewController, NSString *username, NSHashTable *visited, NSUInteger *refreshCount) {
@@ -2867,7 +2926,7 @@ static void ApolloProfileRefreshViewControllersInTree(UIViewController *viewCont
         if (username.length > 0) {
             objc_setAssociatedObject(viewController, kApolloProfileUsernameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
         }
-        ApolloProfileInstallOrUpdateHeader(viewController);
+        ApolloProfileScheduleInstallOrUpdateHeader(viewController);
         // A viewer-preference toggle (Stat Cards/Social Links/Follow&Message/
         // Avatar Style) doesn't change the username, so the
         // install/update call above takes its "already installed" branch and
@@ -3284,35 +3343,34 @@ static void ApolloProfileSetUserFollowed(NSString *username, BOOL follow, Apollo
     if (name.length == 0) return;
 
     __weak ApolloProfileHeaderView *weakHeader = header;
+    NSUInteger mutationGeneration = header.followMutationGeneration;
     // Reverts the optimistic pill flip apollo_followTapped already applied,
     // for every failure path below (missing client/selector, or the RDKClient
     // call itself failing). Guards against the header having been repointed
     // to a different user in the meantime — same class of bug as the
     // followIntentDate reset in the username-change block above.
-    void (^rollback)(void) = ^{
+    void (^finish)(BOOL) = ^(BOOL succeeded) {
         dispatch_async(dispatch_get_main_queue(), ^{
             ApolloProfileHeaderView *strongHeader = weakHeader;
             if (!strongHeader) return;
             if (![ApolloAvatarNormalizedUsername(strongHeader.username) isEqualToString:name]) return;
-            BOOL revertedState = !follow;
-            strongHeader.followIntentValue = revertedState;
-            strongHeader.followIntentDate = [NSDate date];
-            [strongHeader apollo_setFollowing:revertedState];
-            [[ApolloUserProfileCache sharedCache] updateFollowState:revertedState forUsername:name];
+            if (strongHeader.followMutationGeneration != mutationGeneration) return;
+            strongHeader.followButton.enabled = YES;
+            if (!succeeded) {
+                BOOL revertedState = !follow;
+                strongHeader.followIntentValue = revertedState;
+                strongHeader.followIntentDate = [NSDate date];
+                [strongHeader apollo_setFollowing:revertedState];
+                [[ApolloUserProfileCache sharedCache] updateFollowState:revertedState forUsername:name];
+            }
         });
     };
 
-    Class clientClass = objc_getClass("RDKClient");
-    if (!clientClass || ![clientClass respondsToSelector:@selector(sharedClient)]) {
-        ApolloLog(@"[UserAvatars] Follow: no RDKClient for u/%@", name);
-        rollback();
-        return;
-    }
-    id client = ((id (*)(id, SEL))objc_msgSend)(clientClass, @selector(sharedClient));
+    id client = ApolloActiveAccountClient();
     SEL sel = follow ? @selector(followUserWithName:completion:) : @selector(unfollowUserWithName:completion:);
     if (!client || ![client respondsToSelector:sel]) {
-        ApolloLog(@"[UserAvatars] Follow: RDKClient can't %@ u/%@", follow ? @"follow" : @"unfollow", name);
-        rollback();
+        ApolloLog(@"[UserAvatars] Follow: active account client can't %@ u/%@", follow ? @"follow" : @"unfollow", name);
+        finish(NO);
         return;
     }
 
@@ -3325,7 +3383,7 @@ static void ApolloProfileSetUserFollowed(NSString *username, BOOL follow, Apollo
         BOOL succeeded = ![error isKindOfClass:[NSError class]];
         ApolloLog(@"[UserAvatars] Follow: %@ u/%@ completed error=%@",
                   follow ? @"follow" : @"unfollow", name, succeeded ? @"none" : error);
-        if (!succeeded) rollback();
+        finish(succeeded);
     };
     ((id (*)(id, SEL, id, id))objc_msgSend)(client, sel, name, completion);
 
@@ -3663,7 +3721,7 @@ static void ApolloAvatarApplySubredditIconToSharePreview(id postInfo, NSString *
 
 - (void)viewDidLoad {
     %orig;
-    ApolloProfileInstallOrUpdateHeader(self);
+    ApolloProfileScheduleInstallOrUpdateHeader(self);
     ApolloProfileInstallUsernameCopyInteraction((UIViewController *)self, @"viewDidLoad");
     ApolloProfileApplyTabAvatarForController(((UIViewController *)self).tabBarController);
 }
@@ -3675,27 +3733,27 @@ static void ApolloAvatarApplySubredditIconToSharePreview(id postInfo, NSString *
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
-    ApolloProfileInstallOrUpdateHeader(self);
+    ApolloProfileScheduleInstallOrUpdateHeader(self);
     ApolloProfileInstallUsernameCopyInteraction((UIViewController *)self, @"viewWillAppear");
     ApolloProfileApplyTabAvatarForController(((UIViewController *)self).tabBarController);
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    ApolloProfileInstallOrUpdateHeader(self);
+    ApolloProfileScheduleInstallOrUpdateHeader(self);
     ApolloProfileInstallUsernameCopyInteraction((UIViewController *)self, @"viewDidAppear");
     ApolloProfileApplyTabAvatarForController(((UIViewController *)self).tabBarController);
 }
 
 - (void)viewDidLayoutSubviews {
     %orig;
-    ApolloProfileInstallOrUpdateHeader(self);
+    ApolloProfileScheduleInstallOrUpdateHeader(self);
     ApolloProfileInstallUsernameCopyInteraction((UIViewController *)self, @"viewDidLayoutSubviews");
 }
 
 - (void)safeAreaInsetsDidChange {
     %orig;
-    ApolloProfileInstallOrUpdateHeader(self);
+    ApolloProfileScheduleInstallOrUpdateHeader(self);
 }
 
 - (void)refreshControlActivatedWithSender:(id)sender {
@@ -3983,7 +4041,7 @@ static void ApolloPinAccountToCurrentDefaultCredentialsIfNeeded(id currentUser) 
 
 - (void)viewDidLoad {
     %orig;
-    ApolloProfileInstallOrUpdateHeader(self);
+    ApolloProfileScheduleInstallOrUpdateHeader(self);
     ApolloProfileRefreshControllersForUsername(nil);
 }
 
@@ -3994,25 +4052,25 @@ static void ApolloPinAccountToCurrentDefaultCredentialsIfNeeded(id currentUser) 
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
-    ApolloProfileInstallOrUpdateHeader(self);
+    ApolloProfileScheduleInstallOrUpdateHeader(self);
     ApolloProfileRefreshControllersForUsername(nil);
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    ApolloProfileInstallOrUpdateHeader(self);
+    ApolloProfileScheduleInstallOrUpdateHeader(self);
     ApolloProfileRefreshControllersForUsername(nil);
 }
 
 - (void)viewDidLayoutSubviews {
     %orig;
-    ApolloProfileInstallOrUpdateHeader(self);
+    ApolloProfileScheduleInstallOrUpdateHeader(self);
     ApolloProfileInstallUsernameCopyInteraction((UIViewController *)self, @"viewDidLayoutSubviews");
 }
 
 - (void)safeAreaInsetsDidChange {
     %orig;
-    ApolloProfileInstallOrUpdateHeader(self);
+    ApolloProfileScheduleInstallOrUpdateHeader(self);
 }
 
 - (void)tableView:(id)tableView didSelectRowAtIndexPath:(id)indexPath {

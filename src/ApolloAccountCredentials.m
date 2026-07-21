@@ -8,6 +8,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <os/lock.h>
+#include <string.h>
 
 @implementation ApolloAccountCredentialEntry
 
@@ -122,6 +123,49 @@ NSString *ApolloSecretForClientId(NSString *clientId) {
 // This mirrors ApolloWebSessionStore.m's cold-start fallback, elevated here to
 // the primary (only) mechanism since the live signal can't be trusted at all.
 static NSString *const kApolloAccountCredsGroupSuite = @"group.com.christianselig.apollo";
+
+// Apollo.AccountManager's Swift accounts/currentAccountIndex properties are
+// not ObjC-visible, but their guarded ivar layouts are stable in this Apollo
+// build. Return the exact in-process RDKClient that Apollo owns; unarchiving
+// RedditAccounts2 would create a credential copy unsuitable for mutations.
+id ApolloActiveAccountClient(void) {
+    Class managerClass = objc_getClass("_TtC6Apollo14AccountManager");
+    SEL sharedSelector = NSSelectorFromString(@"shared");
+    if (!managerClass || ![managerClass respondsToSelector:sharedSelector]) return nil;
+
+    id manager = ((id (*)(id, SEL))objc_msgSend)(managerClass, sharedSelector);
+    Ivar accountsIvar = class_getInstanceVariable(managerClass, "accounts");
+    Ivar currentIndexIvar = class_getInstanceVariable(managerClass, "currentAccountIndex");
+    if (!manager || !accountsIvar || !currentIndexIvar) return nil;
+
+    NSInteger index = 0;
+    uint8_t indexIsNil = 1;
+    uint8_t *managerBytes = (uint8_t *)(__bridge void *)manager;
+    ptrdiff_t currentIndexOffset = ivar_getOffset(currentIndexIvar);
+    memcpy(&index, managerBytes + currentIndexOffset, sizeof(index));
+    memcpy(&indexIsNil, managerBytes + currentIndexOffset + sizeof(NSInteger), sizeof(indexIsNil));
+    if ((indexIsNil & 0x1) != 0 || index < 0) return nil;
+
+    uintptr_t storageWord = 0;
+    memcpy(&storageWord, managerBytes + ivar_getOffset(accountsIvar), sizeof(storageWord));
+    void *storage = (void *)(storageWord & ~(uintptr_t)0x7);
+    if (!storage) return nil;
+    Class storageClass = object_getClass((__bridge id)storage);
+    const char *storageClassName = storageClass ? class_getName(storageClass) : NULL;
+    if (!storageClassName || strstr(storageClassName, "ContiguousArrayStorage") == NULL) return nil;
+
+    uintptr_t count = 0;
+    memcpy(&count, (uint8_t *)storage + (2 * sizeof(uintptr_t)), sizeof(count));
+    if (count == 0 || count > 64 || (uintptr_t)index >= count) return nil;
+
+    void *rawClient = NULL;
+    size_t elementOffset = (4 + (NSUInteger)index) * sizeof(uintptr_t);
+    memcpy(&rawClient, (uint8_t *)storage + elementOffset, sizeof(rawClient));
+    if (!rawClient) return nil;
+    id client = (__bridge id)rawClient;
+    Class clientClass = objc_getClass("RDKClient");
+    return clientClass && [client isKindOfClass:clientClass] ? client : nil;
+}
 
 static id ApolloAccountCredsUnarchive(NSData *data) {
     if (![data isKindOfClass:[NSData class]]) return nil;

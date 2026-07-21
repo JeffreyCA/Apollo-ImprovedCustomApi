@@ -74,6 +74,11 @@ NSString *ApolloEffectiveRedirectURI(void);
 // ([[RDKClient sharedClient] currentUser].username), or nil if none/unavailable.
 NSString * _Nullable ApolloActiveAccountUsername(void);
 
+// The live RDKClient selected by Apollo's AccountManager, or nil when there is
+// no signed-in account. RDKClient.sharedClient is Apollo's application-only
+// bootstrap client and must not be used for account mutations.
+id _Nullable ApolloActiveAccountClient(void);
+
 // Login-persistence diagnostics: count of persisted accounts and how many carry a currentUser.
 void ApolloPersistedAccountStats(NSInteger *outCount, NSInteger *outWithUser);
 
