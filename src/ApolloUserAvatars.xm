@@ -2395,6 +2395,10 @@ static void ApolloProfileLoadImages(ApolloProfileHeaderView *header, NSString *u
         }
     };
 
+    // Paint fresh cached data synchronously so a newly-installed header reaches
+    // its real height before the first frame. requestInfoForUsername: may deliver
+    // the same object again; applyProfileInfo's signature guard makes that a no-op.
+    if (cachedInfo) applyInfo(cachedInfo);
     if (forceRefresh) {
         [cache refetchInfoForUsername:username completion:applyInfo];
     } else {
@@ -2812,13 +2816,15 @@ static void ApolloProfileInstallOrUpdateHeader(id viewControllerObject) {
     header.socialLinksView.hostViewController = viewController;
     header.username = username;
 
-    CGFloat expectedHeight = [header preferredHeightForWidth:width];
     CGFloat chromeHeight = tableView.adjustedContentInset.top;
-    NSString *installSignature = [NSString stringWithFormat:@"%@|%.2f|%.2f|%.2f|%p|%lu|%d%d%d%d%d|%ld|%ld",
-        username, width, expectedHeight, chromeHeight, header.bannerImageView.image,
+    NSString *(^currentInstallSignature)(void) = ^NSString *{
+        return [NSString stringWithFormat:@"%@|%.2f|%.2f|%.2f|%p|%lu|%d%d%d%d%d|%ld|%ld",
+        username, width, [header preferredHeightForWidth:width], chromeHeight, header.bannerImageView.image,
         (unsigned long)header.contentGeneration, sProfileHeaderImmersive, sProfileShowBanner,
         sProfileShowStatCards, sProfileShowSocialLinks, sProfileShowActions,
         (long)sProfileAvatarStyle, (long)viewController.traitCollection.userInterfaceStyle];
+    };
+    NSString *installSignature = currentInstallSignature();
     NSString *previousInstallSignature = objc_getAssociatedObject(viewControllerObject, kApolloProfileInstallSignatureKey);
     if (wrappedHeader && tableView.tableHeaderView == wrappedHeader &&
         [previousInstallSignature isEqualToString:installSignature]) {
@@ -2880,9 +2886,20 @@ static void ApolloProfileInstallOrUpdateHeader(id viewControllerObject) {
         header.followIntentDate = nil;
         header.followMutationGeneration++;
         header.followButton.enabled = YES;
-        [header applyProfileInfo:nil fallbackUsername:username];
+        CGRect frameBeforeCachedInfo = wrappedHeader.frame;
+        // Prefer the cache immediately instead of first painting placeholder
+        // content and replacing it a few instructions later. A cold profile
+        // still gets the username-only placeholder until its request returns.
+        ApolloUserProfileInfo *cachedInfo = [[ApolloUserProfileCache sharedCache] cachedInfoForUsername:username];
+        [header applyProfileInfo:cachedInfo fallbackUsername:username];
         ApolloProfileSetSnoovatarMode(header, NO);
         ApolloProfileLoadImages(header, username, NO);
+        // A cache hit above updates content synchronously. Commit its height in
+        // this same transaction so the placeholder geometry is never displayed.
+        ApolloProfileLayoutWrappedHeader(wrappedHeader, header, originalHeader, width);
+        if (!CGRectEqualToRect(frameBeforeCachedInfo, wrappedHeader.frame)) {
+            tableView.tableHeaderView = wrappedHeader;
+        }
         ApolloLog(@"[UserAvatars] Loading profile header images class=%@ vc=%p username=%@", className, viewControllerObject, username);
     }
     // New (Immersive) → the melt compositor (blurred banner behind the identity).
@@ -2897,7 +2914,7 @@ static void ApolloProfileInstallOrUpdateHeader(id viewControllerObject) {
     // cross-fade from the current offset so the title doesn't pop back in at rest.
     ApolloProfileSyncNavTitleFade(viewController);
     objc_setAssociatedObject(viewControllerObject, kApolloProfileInstallSignatureKey,
-                             installSignature, OBJC_ASSOCIATION_COPY_NONATOMIC);
+                             currentInstallSignature(), OBJC_ASSOCIATION_COPY_NONATOMIC);
 }
 
 static void ApolloProfileScheduleInstallOrUpdateHeader(id viewControllerObject) {

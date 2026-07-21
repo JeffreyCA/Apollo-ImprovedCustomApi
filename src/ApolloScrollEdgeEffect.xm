@@ -40,6 +40,13 @@ static id ApolloScrollEdgeEffectStyleObjectForMode(NSInteger mode) {
 static BOOL sLoggedScrollEdgeEffectDiagnostics = NO;
 static BOOL sLoggedScrollEdgeEffectSetterOverride = NO;
 
+// Logos otherwise emits a compile-time UIScrollEdgeEffect type reference,
+// which is availability-annotated for iOS 26 even though this module resolves
+// the class dynamically. Hook an unannotated alias and bind it only when the
+// runtime class exists so iOS 14-25 retain no hard dependency or warnings.
+@interface ApolloRuntimeScrollEdgeEffect : NSObject
+@end
+
 static void ApolloApplyScrollEdgeEffectToEdge(UIScrollView *scrollView, SEL edgeSelector, NSInteger mode) {
     if (![scrollView respondsToSelector:edgeSelector]) return;
     id effect = ((id (*)(id, SEL))objc_msgSend)(scrollView, edgeSelector);
@@ -118,7 +125,9 @@ static void ApolloApplyScrollEdgeEffectStyleToAllScrollViews(void) {
 // an inherited environment value on NavigationStack; Apollo is UIKit, so the
 // equivalent app-wide enforcement point is UIScrollEdgeEffect's style setter.
 // This also covers scroll views created after the setting changes.
-%hook UIScrollEdgeEffect
+%group ApolloScrollEdgeEffectRuntimeHooks
+
+%hook ApolloRuntimeScrollEdgeEffect
 
 - (void)setStyle:(id)style {
     NSInteger mode = sScrollEdgeEffectStyle;
@@ -145,7 +154,14 @@ static void ApolloApplyScrollEdgeEffectStyleToAllScrollViews(void) {
 
 %end
 
+%end
+
 %ctor {
+    Class edgeEffectClass = objc_getClass("UIScrollEdgeEffect");
+    if (edgeEffectClass) {
+        %init(ApolloScrollEdgeEffectRuntimeHooks,
+              ApolloRuntimeScrollEdgeEffect = edgeEffectClass);
+    }
     ApolloLog(@"[ScrollEdgeEffect] module loaded, mode=%ld liquidGlass=%d", (long)sScrollEdgeEffectStyle, IsLiquidGlass());
     [[NSNotificationCenter defaultCenter] addObserverForName:ApolloScrollEdgeEffectStyleChangedNotification
                                                        object:nil
