@@ -4,7 +4,10 @@ These files repair Apollo's bundled "Open in Apollo" Safari Web Extension
 (`Apollofari.appex`). They are copied **over** the originals inside the appex at
 IPA-package time by [`scripts/modules/fix-safari-extension.sh`](../scripts/modules/fix-safari-extension.sh),
 which is invoked from [`scripts/build_release_variants.sh`](../scripts/build_release_variants.sh)
-for the extension-bearing variants. (The Apollo-Reborn tweak dylib can't touch
+for the extension-bearing release variants, from `patch.sh --fix-safari-extension`
+(the **Build IPA** GitHub Action passes it automatically unless `no_extensions`
+is set), and standalone via [`scripts/fix-safari-extension.sh`](../scripts/fix-safari-extension.sh)
+for an already-built IPA. (The Apollo-Reborn tweak dylib can't touch
 the extension at runtime — it runs in Safari's separate process — so the fix
 ships as a static asset overlay.)
 

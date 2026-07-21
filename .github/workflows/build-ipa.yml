@@ -3,6 +3,8 @@ name: Build IPA
 # Build a sideload-ready Apollo IPA on GitHub Actions. Optionally injects the
 # tweak (inject_tweak / no_extensions) and applies patch.sh patches
 # (liquid_glass, liquid_glass_icons, url_schemes, remove_code_signature).
+# Extension-bearing builds always get the Safari extension repair
+# (patch.sh --fix-safari-extension).
 #
 # IMPORTANT: The Apollo IPA you provide MUST be DECRYPTED. App Store IPAs are
 # FairPlay-encrypted and will crash on launch after injection/patching.
@@ -239,6 +241,14 @@ jobs:
           fi
           if [ "${{ github.event.inputs.remove_code_signature }}" == "true" ]; then
             CMD_ARGS="${CMD_ARGS} --remove-code-signature"
+            NEEDS_PATCH="true"
+          fi
+          # Always repair the bundled "Open in Apollo" Safari extension when the
+          # IPA keeps its extensions — the stock one strands users on
+          # openinapollo.com (see safari-extension/README.md). The module skips
+          # gracefully if the IPA has no Apollofari.appex.
+          if [ "${{ github.event.inputs.no_extensions }}" != "true" ]; then
+            CMD_ARGS="${CMD_ARGS} --fix-safari-extension"
             NEEDS_PATCH="true"
           fi
 

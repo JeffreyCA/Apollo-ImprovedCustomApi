@@ -228,17 +228,18 @@ Resulting `Info.plist` entry:
 `patch.sh` and the **Build IPA** GitHub Action apply optional patches to a stock Apollo IPA. By default they do **not** inject the tweak (the Action has an `inject_tweak` toggle for that) - locally use [Sideloadly](#sideloadly) or [`build-ipa.sh`](#build-injected-ipa-locally) to inject.
 
 ```bash
-./patch.sh <path_to_ipa> [--liquid-glass | --liquid-glass-icons] [--url-schemes <schemes>] [--remove-code-signature] [-o <output>]
+./patch.sh <path_to_ipa> [--liquid-glass | --liquid-glass-icons] [--fix-safari-extension] [--url-schemes <schemes>] [--remove-code-signature] [-o <output>]
 ```
 
 Available patches:
 
 - **`--liquid-glass`** - enables the iOS 26 Liquid Glass UI and installs a pack of Liquid Glass icons that can be switched between in the tweak's in-app icon picker.
 - **`--liquid-glass-icons`** - installs the Liquid Glass icon catalog **only**, without the iOS 26 UI chrome (skips the `vtool` build-version bump that opts the app into the iOS 26 runtime, so legacy UIKit behaviors like the bottom-tab swipe gesture are preserved). Mutually exclusive with `--liquid-glass`.
+- **`--fix-safari-extension`** - repairs the bundled "Open in Apollo" Safari Web Extension (`Apollofari.appex`), whose stock version strands sideloaded users on openinapollo.com (see [`safari-extension/README.md`](safari-extension/README.md)). Official release IPAs already include this; use it when patching an IPA yourself.
 - **`--url-schemes <list>`** - adds comma-separated URL schemes to `CFBundleURLTypes` (see [Custom Redirect URI](#custom-redirect-uri), obsolete on v3.1.0+).
 - **`--remove-code-signature`** - strips the existing code signature.
 
-To run via GitHub Actions, fork this repo and trigger **Actions** > **Build IPA**. It can inject the tweak (`inject_tweak`), strip extensions (`no_extensions`), apply Liquid Glass (`liquid_glass`) or Liquid Glass icons only (`liquid_glass_icons`), add URL schemes, and remove the code signature in one run, from an Apollo IPA URL.
+To run via GitHub Actions, fork this repo and trigger **Actions** > **Build IPA**. It can inject the tweak (`inject_tweak`), strip extensions (`no_extensions`), apply Liquid Glass (`liquid_glass`) or Liquid Glass icons only (`liquid_glass_icons`), add URL schemes, and remove the code signature in one run, from an Apollo IPA URL. The Safari extension repair is applied automatically whenever extensions are kept.
 
 ## Sideloadly
 

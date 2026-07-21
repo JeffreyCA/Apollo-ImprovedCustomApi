@@ -17,6 +17,7 @@ on:
       - 'src/**'                              # tweak source
       - 'widgets/**'                          # injected Reborn widget extension
       - 'openin-extension/**'                 # injected OpenIn dylib subproject
+      - 'safari-extension/**'                 # Safari extension overlay assets
       - 'scripts/**'                          # variant build scripts
       - 'patch.sh'                            # IPA patcher
       - 'build-ipa.sh'                        # injection entry point
