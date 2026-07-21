@@ -5787,6 +5787,8 @@ static void ApolloDetachGlobeFromContainer(UIButton *globe) {
     [container setNeedsLayout];
 }
 
+static BOOL ApolloButtonGlyphPads(UIButton *btn, CGFloat *outLeft, CGFloat *outRight);
+
 // Place the globe correctly for this nav item (idempotent). If Apollo has a
 // multi-button trailing container, inject the globe as its leading button so
 // every icon is one evenly-spaced group (issue #393). Otherwise fall back to a
@@ -5827,20 +5829,22 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
         // first button ~10pt in) — inheriting it would leave a gap before the
         // globe, so we re-place the leading edge to match the trailing inset.
         CGFloat leadingX = CGFLOAT_MAX, rightEdge = 0.0, firstBtnWidth = 0.0;
+        UIButton *lastBtn = nil;
         for (UIView *sub in container.subviews) {
             if (![sub isKindOfClass:[UIButton class]]) continue;
             if (CGRectGetMinX(sub.frame) < leadingX) {
                 leadingX = CGRectGetMinX(sub.frame);
                 firstBtnWidth = CGRectGetWidth(sub.frame);  // the button the globe sits before
             }
-            rightEdge = MAX(rightEdge, CGRectGetMaxX(sub.frame));
+            if (CGRectGetMaxX(sub.frame) > rightEdge) {
+                rightEdge = CGRectGetMaxX(sub.frame);
+                lastBtn = (UIButton *)sub;
+            }
         }
         if (leadingX == CGFLOAT_MAX) leadingX = 0.0;
         CGFloat contW = container.frame.size.width;
         CGFloat trailInset = (contW > rightEdge) ? (contW - rightEdge) : 0.0;
         trailInset = MAX(0.0, MIN(trailInset, 20.0));
-        CGFloat globeX = trailInset;                    // symmetric leading inset
-        CGFloat shift  = globeX + gw - leadingX;        // first Apollo button lands flush after the globe
 
         // Center the glyph, then nudge it toward the next icon by HALF that
         // icon's extra slot width beyond a normal ~38pt slot. The mod badge sits
@@ -5852,6 +5856,25 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
         nudge = MAX(0.0, MIN(nudge, kApolloGlobeMergeGlyphNudge));
         globe.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
         globe.imageEdgeInsets = UIEdgeInsetsMake(0.0, nudge, 0.0, -nudge);
+
+        // Symmetric container insets alone still read lopsided: the globe's
+        // 34pt slot only carries ~5pt of glyph centering while the trailing
+        // ••• slot centers a 25pt icon in 38-44pt (~7-10pt of air). Match the
+        // GLYPH-to-capsule-edge padding on both sides instead — the same rule
+        // the no-globe normalization below applies — by starting the globe
+        // slot at the difference. Falls back to bare symmetric insets if
+        // either glyph can't be measured.
+        CGFloat globeX = trailInset;
+        globe.frame = CGRectMake(0.0, 0.0, gw, h);  // size it so glyph pads resolve
+        CGFloat gGlyphL = 0.0, gGlyphR = 0.0, lastGlyphL = 0.0, lastGlyphR = 0.0;
+        if (lastBtn &&
+            ApolloButtonGlyphPads(globe, &gGlyphL, &gGlyphR) &&
+            ApolloButtonGlyphPads(lastBtn, &lastGlyphL, &lastGlyphR)) {
+            CGFloat glyphAware = trailInset + lastGlyphR - gGlyphL;
+            globeX = MAX(trailInset, MIN(glyphAware, trailInset + 12.0));
+        }
+        CGFloat shift = globeX + gw - leadingX;         // first Apollo button lands flush after the globe
+
         for (UIView *sub in container.subviews) {
             if (![sub isKindOfClass:[UIButton class]]) continue;
             CGRect f = sub.frame;
@@ -5903,6 +5926,8 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
     }
 }
 
+static void ApolloNormalizeTrailingPillPaddingForNavItem(UINavigationItem *navItem);
+
 // Remove the globe entirely (translation gated off): detach from any container,
 // drop any standalone item, and clear tracking.
 static void ApolloRemoveGlobeMergeForNavItem(UINavigationItem *navItem) {
@@ -5921,6 +5946,109 @@ static void ApolloRemoveGlobeMergeForNavItem(UINavigationItem *navItem) {
     }
     objc_setAssociatedObject(navItem, kApolloGlobeStandaloneItemKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(navItem, kApolloGlobeMergeButtonKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // The stock container is asymmetric inside the glass capsule; with the
+    // globe gone, give it the same symmetric padding treatment.
+    if (IsLiquidGlass()) ApolloNormalizeTrailingPillPaddingForNavItem(navItem);
+}
+
+// MARK: - Liquid Glass trailing-pill padding normalization (no globe)
+//
+// Even with no globe merged, Apollo's hand-packed trailing container renders
+// lopsided inside the iOS 26 glass capsule: the container hugs its buttons
+// with zero insets and each button keeps its pre-LG slot width (trophy 34pt /
+// more 44pt on feeds, sort 34 / more 38 in comments), so the FIRST slot's
+// tightly-packed glyph sits ~2-4pt from the capsule's left edge while the
+// LAST slot's centered ••• glyph gets ~7-10pt on the right. Pre-26 nothing
+// outlined the group, so the imbalance was invisible; the Liquid Glass pill
+// makes it read as the first icon touching the edge. Measure the
+// glyph-to-capsule-edge padding on both sides and shift/widen the container
+// so they match — the same symmetric treatment the globe merge applies to
+// the merged group. Skipped whenever a globe is tracked for the nav item
+// (the merge owns that layout, and its look is already tuned).
+
+// Glyph padding of a button inside its slot. Prefers the laid-out imageView
+// frame; falls back to centering math from the image size for buttons that
+// haven't laid out yet. Returns NO for image-less (e.g. text) buttons —
+// callers should leave those containers alone.
+static BOOL ApolloButtonGlyphPads(UIButton *btn, CGFloat *outLeft, CGFloat *outRight) {
+    CGFloat w = btn.bounds.size.width;
+    if (w < 1.0) return NO;
+    [btn layoutIfNeeded];
+    CGRect iv = btn.imageView.frame;
+    if (iv.size.width > 0.5) {
+        *outLeft = CGRectGetMinX(iv);
+        *outRight = w - CGRectGetMaxX(iv);
+        return YES;
+    }
+    UIImage *img = [btn imageForState:UIControlStateNormal];
+    if (img && img.size.width > 0.5 && img.size.width <= w) {
+        CGFloat pad = (w - img.size.width) * 0.5;
+        CGFloat shift = (btn.imageEdgeInsets.left - btn.imageEdgeInsets.right) * 0.5;
+        *outLeft = pad + shift;
+        *outRight = pad - shift;
+        return YES;
+    }
+    return NO;
+}
+
+// Marks containers we've already measured (symmetric or shifted). Apollo
+// builds a FRESH container UIView every time it re-packs its buttons, so
+// once-per-container is exactly the right cadence — and it hard-stops any
+// repeat-shift accumulation if some container re-derives its own subview
+// frames and defeats the measured-delta exit below.
+static const void *kApolloTrailingPadNormalizedKey = &kApolloTrailingPadNormalizedKey;
+
+static void ApolloNormalizeTrailingPillPaddingForNavItem(UINavigationItem *navItem) {
+    if (!navItem) return;
+    UIView *container = ApolloFindTrailingButtonContainer(navItem, nil);
+    if (!container) return;
+    if (objc_getAssociatedObject(container, kApolloTrailingPadNormalizedKey)) return;
+
+    // Locate the first and last button by geometry (Apollo chains slots with
+    // CGRectGetMaxX, so subview order matches, but don't rely on it).
+    UIButton *first = nil, *last = nil;
+    CGFloat leadingX = CGFLOAT_MAX, rightEdge = -CGFLOAT_MAX;
+    for (UIView *sub in container.subviews) {
+        if (![sub isKindOfClass:[UIButton class]]) continue;
+        if (CGRectGetMinX(sub.frame) < leadingX) { leadingX = CGRectGetMinX(sub.frame); first = (UIButton *)sub; }
+        if (CGRectGetMaxX(sub.frame) > rightEdge) { rightEdge = CGRectGetMaxX(sub.frame); last = (UIButton *)sub; }
+    }
+    if (!first || !last) return;
+
+    CGFloat glyphL = 0.0, glyphR = 0.0, lastL = 0.0, lastR = 0.0;
+    if (!ApolloButtonGlyphPads(first, &glyphL, &glyphR)) return;
+    if (!ApolloButtonGlyphPads(last, &lastL, &lastR)) return;
+
+    CGFloat contW = container.frame.size.width;
+    CGFloat trailInset = (contW > rightEdge) ? (contW - rightEdge) : 0.0;
+    CGFloat leftVisual = leadingX + glyphL;
+    CGFloat rightVisual = trailInset + lastR;
+
+    // Measurement succeeded — mark the container so re-set events don't
+    // re-measure (and can never re-shift) this same container object.
+    objc_setAssociatedObject(container, kApolloTrailingPadNormalizedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    // Shift right to grow the lean side; never shift the first button below
+    // x=0 (the capsule clips the container), and cap runaway values from any
+    // exotic screen we haven't seen.
+    CGFloat shift = rightVisual - leftVisual;
+    shift = MAX(shift, -leadingX);
+    shift = MIN(shift, 12.0);
+    if (fabs(shift) < 0.5) return;  // symmetric enough already
+
+    for (UIView *sub in container.subviews) {
+        if (![sub isKindOfClass:[UIButton class]]) continue;
+        CGRect f = sub.frame;
+        f.origin.x += shift;
+        sub.frame = f;
+    }
+    // Trailing inset is preserved (width moves with the buttons), so only the
+    // leading side changes and the bar item re-measures the wider container.
+    CGRect cf = container.frame;
+    cf.size.width = MAX(0.0, cf.size.width + shift);
+    container.frame = cf;
+    container.bounds = CGRectMake(0.0, 0.0, cf.size.width, cf.size.height);
+    [container setNeedsLayout];
 }
 
 static void ApolloUpdateTranslationUIForController(id controller) {
@@ -8359,26 +8487,36 @@ static void ApolloReapplyTranslationOnAppResume(void) {
     }
 }
 
-// Liquid Glass globe-merge re-injection. Apollo rebuilds its combined trailing
+// Liquid Glass trailing-container upkeep. Apollo rebuilds its combined trailing
 // button container on various events (mod-status load, trait changes, etc.) and
 // re-sets it via setRightBarButtonItem(s):. When a nav item is flagged for the
 // globe merge, re-inject the globe into the freshly-built container after each
-// set. sApplyingGlobeMerge guards against our own re-set recursing.
+// set; otherwise normalize the stock container's capsule padding (it ships
+// lopsided under Liquid Glass). sApplyingGlobeMerge guards against our own
+// re-set recursing.
 %hook UINavigationItem
 
 - (void)setRightBarButtonItems:(NSArray<UIBarButtonItem *> *)items animated:(BOOL)animated {
     %orig(items, animated);
     if (sApplyingGlobeMerge) return;
-    if (IsLiquidGlass() && objc_getAssociatedObject(self, kApolloGlobeMergeButtonKey)) {
+    if (!IsLiquidGlass()) return;
+    if (objc_getAssociatedObject(self, kApolloGlobeMergeButtonKey)) {
         ApolloApplyGlobeMergeForNavItem(self);
+    } else {
+        // No globe on this nav item — still make the stock container sit
+        // symmetrically in its glass capsule.
+        ApolloNormalizeTrailingPillPaddingForNavItem(self);
     }
 }
 
 - (void)setRightBarButtonItem:(UIBarButtonItem *)item animated:(BOOL)animated {
     %orig(item, animated);
     if (sApplyingGlobeMerge) return;
-    if (IsLiquidGlass() && objc_getAssociatedObject(self, kApolloGlobeMergeButtonKey)) {
+    if (!IsLiquidGlass()) return;
+    if (objc_getAssociatedObject(self, kApolloGlobeMergeButtonKey)) {
         ApolloApplyGlobeMergeForNavItem(self);
+    } else {
+        ApolloNormalizeTrailingPillPaddingForNavItem(self);
     }
 }
 

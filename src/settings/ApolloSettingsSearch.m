@@ -225,6 +225,14 @@ static NSArray<ApolloSettingsSearchEntry *> *ApolloSettingsSearchBuildIndex(UITr
         // in General → Other. Keeping the snapshot entry would return a result
         // that can no longer be found or flashed after navigation.
         if ([row[0] isEqualToString:@"Always Offer Translate"]) continue;
+        // Reborn hides these three native General → Other rows and relocates
+        // them onto its own screens (Open in App / Profiles) against the same
+        // native keys — see ApolloSettingsNativeInjections.xm. The moved rows
+        // are indexed from the live Reborn screen crawl above, so the snapshot
+        // entries would navigate to a row that no longer exists.
+        if ([row[0] isEqualToString:@"Open Links in"]) continue;
+        if ([row[0] isEqualToString:@"Open Videos in YouTube App"]) continue;
+        if ([row[0] isEqualToString:@"Hide Username on Tab Bar"]) continue;
         // Reborn owns the prominent Feature Requests entry (Apollo Reborn →
         // About → Fider board), already indexed from the live Reborn crawl.
         // The native About row now just opens a new-vs-archived chooser, so a
@@ -587,141 +595,8 @@ static void ApolloSettingsSearchOpenEntry(UIViewController *settingsVC, ApolloSe
 
 #pragma mark - Attach
 
-#pragma mark - Pull to search
-
-// The nav-bar search field is always visible, but a deliberate downward pull on
-// the settings list also opens it — with a playful affordance drawn in the gap
-// the pull reveals: a magnifying glass that scales + fills in with pull
-// progress, a "Pull to search → Release to search" caption, and a soft haptic
-// as it arms. Overscroll is read off the table's own pan recognizer (no
-// scroll-delegate hooking), so Apollo's scrolling is untouched.
-static const CGFloat kPullActivateThreshold = 78.0;  // overscroll to arm (past this, release opens search)
-static const CGFloat kPullRevealStart       = 6.0;   // overscroll before the affordance starts fading in
-
-@interface ApolloSettingsSearchPullToActivate : NSObject
-@property (nonatomic, weak) UISearchController *searchController;
-@property (nonatomic, weak) UIScrollView *scrollView;
-@property (nonatomic, strong) UIView *affordance;
-@property (nonatomic, strong) UIImageView *glassIcon;
-@property (nonatomic, strong) UILabel *caption;
-@property (nonatomic, strong) UIImpactFeedbackGenerator *haptic;
-@property (nonatomic) CGFloat peakOverscroll;
-@property (nonatomic) BOOL armed;   // haptic + "release" state latched once per pull
-@end
-
-@implementation ApolloSettingsSearchPullToActivate
-
-// Build the pull affordance and pin it in the gap just under the search bar
-// (the container's safe-area top, which sits below the always-visible nav
-// field). It starts invisible and is revealed by the pull.
-- (void)installAffordanceInContainer:(UIView *)container {
-    UIView *host = [[UIView alloc] init];
-    host.translatesAutoresizingMaskIntoConstraints = NO;
-    host.userInteractionEnabled = NO;
-    host.alpha = 0.0;
-
-    UIImageView *glass = [[UIImageView alloc] initWithImage:
-        [UIImage systemImageNamed:@"magnifyingglass"
-                withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:20.0
-                                                                                  weight:UIImageSymbolWeightSemibold]]];
-    glass.translatesAutoresizingMaskIntoConstraints = NO;
-    glass.tintColor = [UIColor secondaryLabelColor];
-    [host addSubview:glass];
-
-    UILabel *label = [[UILabel alloc] init];
-    label.translatesAutoresizingMaskIntoConstraints = NO;
-    label.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
-    label.textColor = [UIColor secondaryLabelColor];
-    label.text = @"Pull to search";
-    [host addSubview:label];
-
-    [container addSubview:host];
-    UILayoutGuide *safe = container.safeAreaLayoutGuide;
-    [NSLayoutConstraint activateConstraints:@[
-        [host.topAnchor constraintEqualToAnchor:safe.topAnchor constant:6.0],
-        [host.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
-        [host.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
-        [glass.centerXAnchor constraintEqualToAnchor:host.centerXAnchor],
-        [glass.topAnchor constraintEqualToAnchor:host.topAnchor],
-        [label.centerXAnchor constraintEqualToAnchor:host.centerXAnchor],
-        [label.topAnchor constraintEqualToAnchor:glass.bottomAnchor constant:6.0],
-        [label.bottomAnchor constraintEqualToAnchor:host.bottomAnchor],
-    ]];
-    self.affordance = host;
-    self.glassIcon = glass;
-    self.caption = label;
-    self.haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-}
-
-// Map pull progress onto the affordance: fade + scale the glass in, tint + relabel
-// once armed, and fire the haptic on the arming edge.
-- (void)renderOverscroll:(CGFloat)overscroll {
-    CGFloat progress = 0.0;
-    if (overscroll > kPullRevealStart) {
-        progress = (overscroll - kPullRevealStart) / (kPullActivateThreshold - kPullRevealStart);
-        progress = MAX(0.0, MIN(1.0, progress));
-    }
-    self.affordance.alpha = progress;
-    CGFloat scale = 0.6 + 0.4 * progress;
-    self.glassIcon.transform = CGAffineTransformMakeScale(scale, scale);
-
-    BOOL armed = overscroll >= kPullActivateThreshold;
-    if (armed != self.armed) {
-        self.armed = armed;
-        self.caption.text = armed ? @"Release to search" : @"Pull to search";
-        UIColor *accent = [self.searchController.searchResultsUpdater
-                              respondsToSelector:@selector(apollo_themeAccentColor)]
-            ? [(id)self.searchController.searchResultsUpdater apollo_themeAccentColor] : nil;
-        UIColor *tint = armed ? (accent ?: [UIColor systemBlueColor]) : [UIColor secondaryLabelColor];
-        [UIView animateWithDuration:0.15 animations:^{
-            self.glassIcon.tintColor = tint;
-            self.caption.textColor = tint;
-        }];
-        if (armed) { [self.haptic impactOccurred]; [self.haptic prepare]; }
-    }
-}
-
-- (void)handlePan:(UIPanGestureRecognizer *)pan {
-    UIScrollView *sv = self.scrollView;
-    UISearchController *sc = self.searchController;
-    if (!sv || !sc) return;
-    if (sc.active) { self.affordance.alpha = 0.0; return; }
-
-    CGFloat overscroll = -(sv.contentOffset.y + sv.adjustedContentInset.top);
-    switch (pan.state) {
-        case UIGestureRecognizerStateBegan:
-            self.peakOverscroll = 0;
-            self.armed = NO;
-            [self.haptic prepare];
-            break;
-        case UIGestureRecognizerStateChanged:
-            if (overscroll > self.peakOverscroll) self.peakOverscroll = overscroll;
-            [self renderOverscroll:overscroll];
-            break;
-        case UIGestureRecognizerStateEnded:
-        case UIGestureRecognizerStateCancelled: {
-            BOOL shouldActivate = self.peakOverscroll >= kPullActivateThreshold && !sc.active;
-            self.peakOverscroll = 0;
-            self.armed = NO;
-            [UIView animateWithDuration:0.2 animations:^{ self.affordance.alpha = 0.0; }];
-            if (shouldActivate) {
-                // Defer past the rubber-band settle so presenting the results
-                // controller isn't fighting the scroll animation.
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    sc.active = YES;
-                    [sc.searchBar becomeFirstResponder];
-                });
-            }
-            break;
-        }
-        default:
-            break;
-    }
-}
-@end
 
 static char kApolloSettingsSearchAttachedKey;
-static char kApolloSettingsSearchPullKey;
 
 void ApolloSettingsSearchAttach(UIViewController *settingsVC) {
     if (!settingsVC || objc_getAssociatedObject(settingsVC, &kApolloSettingsSearchAttachedKey)) return;
@@ -737,22 +612,18 @@ void ApolloSettingsSearchAttach(UIViewController *settingsVC) {
     results.searchController = searchController;
 
     settingsVC.navigationItem.searchController = searchController;
-    settingsVC.navigationItem.hidesSearchBarWhenScrolling = NO;
+    // Native iOS behavior: the search bar lives in the large-title area and
+    // scrolls away as the list scrolls up, revealing again on a scroll to the
+    // top — rather than staying pinned under the nav bar.
+    settingsVC.navigationItem.hidesSearchBarWhenScrolling = YES;
     settingsVC.definesPresentationContext = YES;
 
     objc_setAssociatedObject(settingsVC, &kApolloSettingsSearchAttachedKey, searchController, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-    // Pull-to-search: a downward overscroll reveals the animated affordance and,
-    // on release past the threshold, opens search.
-    UITableView *rootTable = ApolloSearchTableInViewController(settingsVC);
-    if (rootTable) {
-        ApolloSettingsSearchPullToActivate *pull = [[ApolloSettingsSearchPullToActivate alloc] init];
-        pull.searchController = searchController;
-        pull.scrollView = rootTable;
-        [pull installAffordanceInContainer:settingsVC.view];
-        [rootTable.panGestureRecognizer addTarget:pull action:@selector(handlePan:)];
-        objc_setAssociatedObject(settingsVC, &kApolloSettingsSearchPullKey, pull, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
+    // No custom pull-to-search affordance: with hidesSearchBarWhenScrolling the
+    // system already reveals the bar on a scroll to the top, so a bespoke
+    // overscroll gesture would fight that native reveal (it used to exist only
+    // because the bar was pinned and never moved).
 
     ApolloLog(@"[SettingsSearch] attached to %@", settingsVC);
 }

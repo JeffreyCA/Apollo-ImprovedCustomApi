@@ -29,6 +29,7 @@ float sVideoHoldSpeed = 2.0f;        // effective default 2.0× via registerDefa
 BOOL sProxyImgurDDG = NO;
 BOOL sShowUserAvatars = NO;
 BOOL sUseProfileAvatarTabIcon = NO;
+BOOL sHideTabBarTitles = NO;
 BOOL sShowDetailedProfiles = YES;   // effective default ON via registerDefaults (UDKeyShowDetailedProfiles)
 BOOL sProfileHeaderImmersive = YES; // New (immersive melt) vs Classic (flat); default ON (UDKeyProfileHeaderImmersive)
 // Profile customization — viewer preferences for every profile they view. All show-*

@@ -51,6 +51,19 @@ void ApolloGeneralTableInjectSelectableRow(NSString *anchorTitle,
                                                                        UITableViewCell *donor),
                                            void (^onSelect)(UIViewController *vc));
 
+// Reconfigure a native row whenever Eureka supplies its cell. This leaves the
+// native form and index-path geometry untouched; it is intended for small
+// cross-feature state adjustments such as disabling a redundant switch. The
+// title is matched with ApolloGeneralTableCellHasTitle().
+void ApolloGeneralTableConfigureNativeRow(NSString *title,
+                                          void (^configure)(UIViewController *vc,
+                                                            UITableViewCell *cell));
+
+// Re-run all registered native-row configurators for the currently visible
+// General cells. Off-screen rows are configured the next time Eureka supplies
+// their cell.
+void ApolloGeneralTableRefreshNativeRowConfigurations(void);
+
 // The live General-screen instance, if any (weak-backed; nil once it's gone).
 UIViewController *ApolloGeneralTableActiveVC(void);
 

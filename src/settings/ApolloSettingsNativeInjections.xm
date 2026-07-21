@@ -11,10 +11,20 @@
 //   Other      → "Saved Categories"      (under its master switch,
 //                                         "Allow Save Categories")
 //
+// It also registers the General-screen row HIDES for native rows Reborn
+// relocates onto its own screens (each still driving the same native defaults
+// key, so nothing behavioral moves — only where the control lives):
+//
+//   "Open Links in"               → Open in App (browser picker mirror)
+//   "Open Videos in YouTube App"  → Open in App (YouTube switch mirror)
+//   "Hide Username on Tab Bar"    → Apollo Reborn → Profiles (below Icon-Only
+//                                   Tab Bar, which supersedes it while active)
+//
 // Geometry is owned by settings/ApolloSettingsGeneralTable.xm — this file only
-// registers factories + selection handlers, and each push goes through the
-// route registry so "how do I get to screen X" stays one table. Fail-soft by
-// construction: an anchor that stops matching just means no row.
+// registers factories + selection handlers + hide matchers, and each push goes
+// through the route registry so "how do I get to screen X" stays one table.
+// Fail-soft by construction: an anchor or hide title that stops matching just
+// means the native screen keeps that row.
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -92,4 +102,13 @@ static const void *kApolloInjSavedCategoriesKey = &kApolloInjSavedCategoriesKey;
                                        @"Allow Save Categories",
                                        kApolloInjSavedCategoriesKey,
                                        @"saved-categories");
+
+    // Native rows relocated onto Reborn screens (see the header comment). The
+    // mirrors read/write the same native keys, so hiding these is pure
+    // deduplication — none of them is used as an injection anchor above.
+    ApolloGeneralTableHideRows(^BOOL(UITableViewCell *cell) {
+        return ApolloGeneralTableCellHasTitle(cell, @"Open Links in")
+            || ApolloGeneralTableCellHasTitle(cell, @"Open Videos in YouTube App")
+            || ApolloGeneralTableCellHasTitle(cell, @"Hide Username on Tab Bar");
+    });
 }
