@@ -11,10 +11,18 @@ BOOL ApolloImgChestUploadAvailable(void);
 /// Upload one image to ImgChest as a new hidden single-image post.
 /// On success, completion gets the file's direct CDN link. The upload is
 /// recorded in the registry (token = link's last path component, the same
-/// value the synthetic Imgur response uses as id/deletehash) and the bytes
-/// are cached briefly so a following Imgur album-creation request can
+/// value the synthetic Imgur response uses as id/deletehash) and an owned
+/// file is cached briefly so a following Imgur album-creation request can
 /// combine the images into one multi-image ImgChest post.
 void ApolloImgChestUploadData(NSData *data,
+                              NSString *filename,
+                              NSString *mimeType,
+                              void (^completion)(NSURL *_Nullable directLink, NSError *_Nullable error));
+
+/// File-backed variant used by NSURLSession's fromFile: interception. The
+/// source is copied into tweak-owned cache storage before upload, so callers
+/// remain free to remove their temporary file after this function returns.
+void ApolloImgChestUploadFile(NSURL *fileURL,
                               NSString *filename,
                               NSString *mimeType,
                               void (^completion)(NSURL *_Nullable directLink, NSError *_Nullable error));

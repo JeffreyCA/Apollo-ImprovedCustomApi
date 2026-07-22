@@ -22,12 +22,12 @@ typedef void (^ApolloGiphyFetchCompletion)(NSArray<ApolloGiphyGIF *> *gifs, BOOL
 + (void)downloadGIFData:(ApolloGiphyGIF *)gif
              completion:(ApolloGiphyDownloadCompletion)completion;
 
-+ (void)fetchTrendingWithOffset:(NSUInteger)offset
-                     completion:(ApolloGiphyFetchCompletion)completion;
++ (nullable NSURLSessionDataTask *)fetchTrendingWithOffset:(NSUInteger)offset
+                                                completion:(ApolloGiphyFetchCompletion)completion;
 
-+ (void)searchWithQuery:(NSString *)query
-                 offset:(NSUInteger)offset
-             completion:(ApolloGiphyFetchCompletion)completion;
++ (nullable NSURLSessionDataTask *)searchWithQuery:(NSString *)query
+                                            offset:(NSUInteger)offset
+                                        completion:(ApolloGiphyFetchCompletion)completion;
 
 @end
 

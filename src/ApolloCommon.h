@@ -6,7 +6,7 @@
 // Uses a dedicated subsystem so OSLogStore can efficiently filter our entries.
 #define ApolloLog(fmt, ...) do { \
     NSString *logMessage = [NSString stringWithFormat:@"[ApolloFix] " fmt, ##__VA_ARGS__]; \
-    os_log_with_type(ApolloFixLog(), OS_LOG_TYPE_DEFAULT, "%{public}s", [logMessage UTF8String]); \
+    os_log_with_type(ApolloFixLog(), OS_LOG_TYPE_DEBUG, "%{public}s", [logMessage UTF8String]); \
 } while(0)
 
 __BEGIN_DECLS

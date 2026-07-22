@@ -2,8 +2,9 @@
 
 @interface ShareUrlTask : NSObject
 
-@property (atomic, strong) dispatch_group_t dispatchGroup;
-@property (atomic, strong) NSString *resolvedURL;
+@property (atomic, strong) NSURLSessionDataTask *activeTask;
+@property (atomic, strong) NSMutableArray *pendingCompletions;
+@property (atomic, copy) NSString *resolvedURL;
 @end
 
 @interface RDKClient : NSObject

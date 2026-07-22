@@ -3285,17 +3285,21 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
         BOOL chestForCommentLink = commentLinkImgChest;
         NSString *chestFilename = fileURL.lastPathComponent.length > 0 ? fileURL.lastPathComponent : @"apollo-upload.jpg";
         NSString *chestMIMEType = ApolloMediaMIMETypeForFilename(chestFilename, [request valueForHTTPHeaderField:@"Content-Type"]);
-        NSData *chestData = [NSData dataWithContentsOfURL:fileURL];
-        if (!ApolloImgChestUploadAvailable() || ApolloMediaMIMETypeIsVideo(chestMIMEType) || chestData.length == 0) {
+        NSNumber *chestFileSize = nil;
+        [fileURL getResourceValue:&chestFileSize forKey:NSURLFileSizeKey error:nil];
+        if (![chestFileSize isKindOfClass:[NSNumber class]]) {
+            chestFileSize = [[[NSFileManager defaultManager] attributesOfItemAtPath:fileURL.path error:nil] objectForKey:NSFileSize];
+        }
+        if (!ApolloImgChestUploadAvailable() || ApolloMediaMIMETypeIsVideo(chestMIMEType) || chestFileSize.unsignedLongLongValue == 0) {
             ApolloLog(@"[ImgChestUpload] %@ — falling back to Imgur (fromFile)",
                       !ApolloImgChestUploadAvailable() ? @"no ImgChest API key"
-                          : (chestData.length == 0 ? @"could not read file" : @"video uploads not supported by ImgChest"));
+                          : (chestFileSize.unsignedLongLongValue == 0 ? @"missing or empty file" : @"video uploads not supported by ImgChest"));
             return %orig;
         }
         NSURL *requestURL = request.URL;
-        ApolloLog(@"[ImgChestUpload] Intercepting Imgur file upload (%lu bytes, %@)", (unsigned long)chestData.length, chestFilename);
+        ApolloLog(@"[ImgChestUpload] Intercepting Imgur file upload (%@ bytes, %@)", chestFileSize, chestFilename);
         void (^chestWrapped)(NSData *, NSURLResponse *, NSError *) = ^(__unused NSData *d, __unused NSURLResponse *r, __unused NSError *e) {
-            ApolloImgChestUploadData(chestData, chestFilename, chestMIMEType, ^(NSURL *link, NSError *uploadError) {
+            ApolloImgChestUploadFile(fileURL, chestFilename, chestMIMEType, ^(NSURL *link, NSError *uploadError) {
                 if (!link) {
                     completionHandler(nil, nil, uploadError);
                     return;

@@ -196,11 +196,23 @@ static Class ApolloFLAnimatedImageViewClass(void) {
     return c;
 }
 
-// url -> loaded media (an FLAnimatedImage for animated gifs, else a UIImage).
-static NSMutableDictionary *ApolloChatMediaCache(void) {
-    static NSMutableDictionary *m; static dispatch_once_t once;
-    dispatch_once(&once, ^{ m = [NSMutableDictionary dictionary]; });
-    return m;
+// URL -> loaded media (an FLAnimatedImage for animated GIFs, else UIImage).
+// NSCache makes decoded residency pressure-aware and bounds the normal case.
+static NSCache<NSString *, id> *ApolloChatMediaCache(void) {
+    static NSCache<NSString *, id> *cache; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [NSCache new];
+        cache.totalCostLimit = 64 * 1024 * 1024;
+        cache.countLimit = 60;
+    });
+    return cache;
+}
+
+static NSUInteger ApolloChatApproximateBitmapCost(UIImage *image) {
+    CGImageRef cgImage = image.CGImage;
+    if (cgImage) return CGImageGetBytesPerRow(cgImage) * CGImageGetHeight(cgImage);
+    CGFloat scale = image.scale > 0 ? image.scale : UIScreen.mainScreen.scale;
+    return (NSUInteger)ceil(image.size.width * scale) * (NSUInteger)ceil(image.size.height * scale) * 4;
 }
 
 // Draw a (possibly multi-codepoint) emoji string into a transparent image. Used to render a
@@ -232,10 +244,10 @@ static NSURL *ApolloChatEmojiStickerURL(NSString *emoji) {
     NSURL *url = enc.length ? [NSURL URLWithString:[@"x-apollo-emoji:///" stringByAppendingString:enc]] : nil;
     if (!url) return nil;
     NSString *key = url.absoluteString;
-    if (!ApolloChatMediaCache()[key]) {
+    if (![ApolloChatMediaCache() objectForKey:key]) {
         UIImage *img = ApolloChatRasterizeEmoji(emoji);
         if (!img) return nil;
-        ApolloChatMediaCache()[key] = img;
+        [ApolloChatMediaCache() setObject:img forKey:key cost:ApolloChatApproximateBitmapCost(img)];
     }
     return url;
 }
@@ -279,12 +291,13 @@ static void ApolloChatClearMedia(UIImageView *iv) {
 // (animated) or a decoded UIImage (static). Completion runs on the main queue.
 static void ApolloChatLoadMedia(NSURL *url, void (^completion)(id media)) {
     NSString *key = url.absoluteString;
-    id cached = ApolloChatMediaCache()[key];
+    id cached = [ApolloChatMediaCache() objectForKey:key];
     if (cached) { if (completion) completion(cached); return; }
     NSURLSessionDataTask *t = [NSURLSession.sharedSession dataTaskWithURL:url
                                                        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        NSHTTPURLResponse *http = [resp isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)resp : nil;
         id media = nil;
-        if (data.length) {
+        if (!err && http.statusCode >= 200 && http.statusCode < 300 && data.length > 0) {
             Class fl = ApolloFLAnimatedImageClass();
             if (fl && ApolloDataIsGIF(data)) {
                 id (*initFn)(id, SEL, NSData *, NSUInteger, BOOL) =
@@ -294,14 +307,11 @@ static void ApolloChatLoadMedia(NSURL *url, void (^completion)(id media)) {
             }
             if (!media) media = [UIImage imageWithData:data];   // png/jpg/webp, or gif fallback
         }
-        // The expensive decode above runs on NSURLSession's background queue, but the cache WRITE is
-        // hopped onto the main queue: ApolloChatMediaCache is a plain NSMutableDictionary read (and
-        // written for emoji stickers) from cellForItem on the main thread, and several image loads can
-        // complete concurrently on different background queues. Mutating it off-main races those reads
-        // and can corrupt the dictionary / crash during a rehash, so every cache mutation happens on
-        // the one (main) thread. (Reported by @nickclyde in review.)
+        // Decode off-main, then preserve the existing main-queue completion
+        // contract. Missing/inaccurate MIME headers are intentionally tolerated;
+        // HTTP success plus a real image decode is the acceptance test.
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (media) ApolloChatMediaCache()[key] = media;
+            if (media) [ApolloChatMediaCache() setObject:media forKey:key cost:data.length];
             if (completion) completion(media);
         });
     }];
@@ -313,10 +323,13 @@ static void ApolloChatLoadMedia(NSURL *url, void (^completion)(id media)) {
 // Persistent URL -> bubble CGSize cache. Lets re-renders during scroll size the
 // bubble deterministically (independent of async image-load timing), so a recycled
 // cell never flashes a mis-sized (white-cropped) image.
-static NSMutableDictionary *ApolloChatSizeByURL(void) {
-    static NSMutableDictionary *m; static dispatch_once_t once;
-    dispatch_once(&once, ^{ m = [NSMutableDictionary dictionary]; });
-    return m;
+static NSCache<NSString *, NSValue *> *ApolloChatSizeByURL(void) {
+    static NSCache<NSString *, NSValue *> *cache; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [NSCache new];
+        cache.countLimit = 500;
+    });
+    return cache;
 }
 
 // Deferred, coalesced layout invalidation. invalidateLayout called synchronously from
@@ -524,8 +537,8 @@ static void ApolloChatRenderImageInCell(id vc, id cell, NSURL *url, NSIndexPath 
     iv.frame = container.bounds;
     objc_setAssociatedObject(cell, &kApolloChatImgURLKey, urlStr, OBJC_ASSOCIATION_COPY_NONATOMIC);
 
-    id cachedMedia = ApolloChatMediaCache()[urlStr];
-    NSValue *knownSize = ApolloChatSizeByURL()[urlStr];
+    id cachedMedia = [ApolloChatMediaCache() objectForKey:urlStr];
+    NSValue *knownSize = [ApolloChatSizeByURL() objectForKey:urlStr];
     // Unicode emoji (our synthetic x-apollo-emoji:// scheme) render at normal text-emoji size with
     // built-in (rasterized) padding; Reddit snoomoji art renders larger and is inset within the
     // bubble so the tightly-cropped art sits centered with breathing room instead of edge-cramped.
@@ -565,7 +578,7 @@ static void ApolloChatRenderImageInCell(id vc, id cell, NSURL *url, NSIndexPath 
         ApolloChatMessageLabel(cell).hidden = YES;
         if (!knownSize) {
             NSValue *mv = [NSValue valueWithCGSize:(sticker ? ApolloChatStickerSize((UIImage *)cachedMedia, stickerH) : ApolloChatMediaSize((UIImage *)cachedMedia))];
-            ApolloChatSizeByURL()[urlStr] = mv;
+            [ApolloChatSizeByURL() setObject:mv forKey:urlStr];
             applySize(cell, mv);
             ApolloChatScheduleReflow(collectionView);
         }
@@ -580,7 +593,7 @@ static void ApolloChatRenderImageInCell(id vc, id cell, NSURL *url, NSIndexPath 
         if (!media || !sIV || !sCell) return;
         if (![objc_getAssociatedObject(sCell, &kApolloChatImgURLKey) isEqualToString:urlStr]) return; // recycled
         NSValue *mv = [NSValue valueWithCGSize:(sticker ? ApolloChatStickerSize((UIImage *)media, stickerH) : ApolloChatMediaSize((UIImage *)media))];
-        ApolloChatSizeByURL()[urlStr] = mv;
+        [ApolloChatSizeByURL() setObject:mv forKey:urlStr];
         objc_setAssociatedObject(sCell, &kApolloChatImgMediaSizeKey, mv, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if (weakCV) ApolloChatSizeMap(weakCV)[ipKey] = mv;
         ApolloChatSetMedia(sIV, media);

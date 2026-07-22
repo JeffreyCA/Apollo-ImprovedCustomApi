@@ -3,6 +3,8 @@
 #import "ApolloCommon.h"
 #import "ApolloState.h"
 
+static const NSTimeInterval kApolloImageChestFailureCacheLifetime = 60.0;
+
 static NSString *ApolloImageChestCacheKeyForURL(NSURL *url) {
     NSString *postID = ApolloImageChestPostIDFromURL(url);
     return postID.length > 0 ? [@"imgchest:" stringByAppendingString:postID] : nil;
@@ -66,6 +68,16 @@ static NSMutableDictionary<NSString *, NSMutableArray *> *ApolloImageChestResolv
     static dispatch_once_t once;
     dispatch_once(&once, ^{ pending = [NSMutableDictionary dictionary]; });
     return pending;
+}
+
+// Must be called while holding ApolloImageChestResolverLock(). Successful
+// dictionaries remain cached for the process lifetime; only failures expire.
+static BOOL ApolloImageChestFreshFailureForKey(NSString *cacheKey) {
+    id cached = ApolloImageChestResolverCache()[cacheKey];
+    if (![cached isKindOfClass:[NSDate class]]) return NO;
+    if ([[NSDate date] timeIntervalSinceDate:(NSDate *)cached] < kApolloImageChestFailureCacheLifetime) return YES;
+    [ApolloImageChestResolverCache() removeObjectForKey:cacheKey];
+    return NO;
 }
 
 static NSString *ApolloImageChestHTMLEntityDecode(NSString *string) {
@@ -184,7 +196,7 @@ static NSDictionary *ApolloImageChestResultFromHTMLData(NSData *data, NSString *
 static void ApolloDeliverImageChestResolution(NSString *cacheKey, NSDictionary *result) {
     NSArray *callbacks = nil;
     @synchronized (ApolloImageChestResolverLock()) {
-        ApolloImageChestResolverCache()[cacheKey] = result ?: (id)[NSNull null];
+        ApolloImageChestResolverCache()[cacheKey] = result ?: (id)[NSDate date];
         callbacks = [ApolloImageChestResolverPending()[cacheKey] copy];
         [ApolloImageChestResolverPending() removeObjectForKey:cacheKey];
     }
@@ -211,7 +223,7 @@ BOOL ApolloImageChestCachedFailureExists(NSURL *url) {
     if (cacheKey.length == 0) return NO;
 
     @synchronized (ApolloImageChestResolverLock()) {
-        return ApolloImageChestResolverCache()[cacheKey] == [NSNull null];
+        return ApolloImageChestFreshFailureForKey(cacheKey);
     }
 }
 
@@ -299,7 +311,7 @@ void ApolloImageChestResolveURL(NSURL *url, void (^completion)(NSDictionary *res
         id cached = ApolloImageChestResolverCache()[cacheKey];
         if ([cached isKindOfClass:[NSDictionary class]]) {
             cachedResult = cached;
-        } else if (cached == [NSNull null]) {
+        } else if (ApolloImageChestFreshFailureForKey(cacheKey)) {
             hasCachedFailure = YES;
         } else {
             NSMutableArray *pending = ApolloImageChestResolverPending()[cacheKey];

@@ -167,9 +167,12 @@ static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *contr
 @property (nonatomic, assign) NSUInteger nextOffset;
 @property (nonatomic, assign) BOOL missingAPIKey;
 @property (nonatomic, strong) dispatch_block_t debouncedSearchBlock;
+@property (nonatomic, strong) NSURLSessionDataTask *activeTask;
+@property (nonatomic, assign) NSUInteger requestGeneration;
 @property (nonatomic, strong) UIColor *themeAccentColor;
 @property (nonatomic, strong) UIColor *themeBackgroundColor;
 @property (nonatomic, strong) UIColor *themeCellBackgroundColor;
+- (void)invalidateActiveRequest;
 
 @end
 
@@ -309,7 +312,28 @@ static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *contr
 }
 
 - (void)cancelTapped {
+    [self invalidateActiveRequest];
     [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)dealloc {
+    [_activeTask cancel];
+    if (_debouncedSearchBlock) dispatch_block_cancel(_debouncedSearchBlock);
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    if (self.isBeingDismissed || self.isMovingFromParentViewController || self.navigationController.isBeingDismissed) {
+        [self invalidateActiveRequest];
+    }
+}
+
+- (void)invalidateActiveRequest {
+    self.requestGeneration++;
+    [self.activeTask cancel];
+    self.activeTask = nil;
+    self.loading = NO;
+    [self.loadingIndicator stopAnimating];
 }
 
 - (void)updateStatusMessage {
@@ -334,6 +358,7 @@ static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *contr
 }
 
 - (void)reloadFromBeginning {
+    [self invalidateActiveRequest];
     if ([ApolloGiphyClient configuredAPIKey].length == 0) {
         self.missingAPIKey = YES;
         self.gifs = @[];
@@ -359,16 +384,21 @@ static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *contr
         [self.loadingIndicator startAnimating];
     }
 
+    NSString *query = [self.activeQuery copy] ?: @"";
     NSUInteger offset = append ? self.nextOffset : 0;
+    NSUInteger generation = self.requestGeneration;
     __weak typeof(self) weakSelf = self;
     ApolloGiphyFetchCompletion handler = ^(NSArray<ApolloGiphyGIF *> *gifs, BOOL hasMore, NSError *error) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) return;
+        if (generation != strongSelf.requestGeneration || ![query isEqualToString:strongSelf.activeQuery ?: @""]) return;
 
+        strongSelf.activeTask = nil;
         strongSelf.loading = NO;
         [strongSelf.loadingIndicator stopAnimating];
 
         if (error) {
+            if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) return;
             ApolloLog(@"[MarkdownGif] giphy fetch failed: %@", error.localizedDescription);
             if (!append) {
                 strongSelf.gifs = @[];
@@ -386,15 +416,15 @@ static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *contr
             strongSelf.gifs = gifs;
         }
         strongSelf.hasMore = hasMore;
-        strongSelf.nextOffset = strongSelf.gifs.count;
+        strongSelf.nextOffset = offset + gifs.count;
         [strongSelf.collectionView reloadData];
         [strongSelf updateStatusMessage];
     };
 
-    if (self.activeQuery.length > 0) {
-        [ApolloGiphyClient searchWithQuery:self.activeQuery offset:offset completion:handler];
+    if (query.length > 0) {
+        self.activeTask = [ApolloGiphyClient searchWithQuery:query offset:offset completion:handler];
     } else {
-        [ApolloGiphyClient fetchTrendingWithOffset:offset completion:handler];
+        self.activeTask = [ApolloGiphyClient fetchTrendingWithOffset:offset completion:handler];
     }
 }
 
@@ -402,6 +432,7 @@ static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *contr
 
 - (void)updateSearchResultsForSearchController:(UISearchController *)searchController {
     NSString *query = searchController.searchBar.text ?: @"";
+    [self invalidateActiveRequest];
     if (self.debouncedSearchBlock) {
         dispatch_block_cancel(self.debouncedSearchBlock);
         self.debouncedSearchBlock = nil;
@@ -419,6 +450,10 @@ static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *contr
 }
 
 - (void)searchBarCancelButtonClicked:(UISearchBar *)searchBar {
+    if (self.debouncedSearchBlock) {
+        dispatch_block_cancel(self.debouncedSearchBlock);
+        self.debouncedSearchBlock = nil;
+    }
     self.activeQuery = @"";
     [self reloadFromBeginning];
 }
@@ -441,6 +476,7 @@ static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *contr
 - (void)collectionView:(UICollectionView *)collectionView didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
     if (indexPath.item >= self.gifs.count) return;
     ApolloGiphyGIF *gif = self.gifs[indexPath.item];
+    [self invalidateActiveRequest];
     void (^handler)(ApolloGiphyGIF *) = [self.onSelectGIF copy];
     self.onSelectGIF = nil;
 

@@ -1392,6 +1392,144 @@ static NSArray *const blockedUrls = @[
 
 // Cache storing subreddit list source URLs -> response body
 static NSCache<NSString *, NSString *> *subredditListCache;
+static const NSUInteger kApolloSubredditSourceMaximumBytes = 1024 * 1024;
+
+static NSObject *ApolloSubredditSourceCacheLock(void) {
+    static NSObject *lock;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
+static NSString *ApolloSubredditSourceCachePath(void) {
+    return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches/ApolloRebornSubredditSources.plist"];
+}
+
+static NSArray<NSString *> *ApolloConfiguredSubredditSources(void) {
+    NSMutableArray<NSString *> *sources = [NSMutableArray arrayWithCapacity:3];
+    for (id candidate in @[sTrendingSubredditsSource ?: @"", sRandomSubredditsSource ?: @"", sRandNsfwSubredditsSource ?: @""]) {
+        if ([candidate isKindOfClass:[NSString class]] && [candidate length] > 0 && ![sources containsObject:candidate]) {
+            [sources addObject:candidate];
+        }
+    }
+    return sources;
+}
+
+static NSArray<NSString *> *ApolloSubredditLinesFromContent(NSString *content) {
+    if (![content isKindOfClass:[NSString class]] || content.length == 0) return @[];
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    for (NSString *line in [content componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length > 0) [lines addObject:trimmed];
+    }
+    return lines;
+}
+
+static BOOL ApolloSubredditContentIsValid(NSString *content) {
+    if (![content isKindOfClass:[NSString class]]) return NO;
+    if ([content lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > kApolloSubredditSourceMaximumBytes) return NO;
+    return ApolloSubredditLinesFromContent(content).count > 0;
+}
+
+// Persist only currently configured URLs. This both stores last-known-good
+// content and prunes settings values that have since been replaced.
+static void ApolloPersistSubredditSourceContent(NSString *source, NSString *content) {
+    @synchronized (ApolloSubredditSourceCacheLock()) {
+        NSDictionary *stored = [NSDictionary dictionaryWithContentsOfFile:ApolloSubredditSourceCachePath()];
+        NSMutableDictionary<NSString *, NSString *> *pruned = [NSMutableDictionary dictionary];
+        NSArray<NSString *> *configuredSources = ApolloConfiguredSubredditSources();
+        for (NSString *configured in configuredSources) {
+            NSString *value = [stored[configured] isKindOfClass:[NSString class]] ? stored[configured] : nil;
+            if (ApolloSubredditContentIsValid(value)) pruned[configured] = value;
+        }
+        // A settings edit can happen while an old request is in flight. Do not
+        // let that late response put an obsolete URL back on disk.
+        if ([configuredSources containsObject:source] && ApolloSubredditContentIsValid(content)) pruned[source] = content;
+        [pruned writeToFile:ApolloSubredditSourceCachePath() atomically:YES];
+    }
+}
+
+static void ApolloSeedSubredditSourceMemoryCache(void) {
+    @synchronized (ApolloSubredditSourceCacheLock()) {
+        NSDictionary *stored = [NSDictionary dictionaryWithContentsOfFile:ApolloSubredditSourceCachePath()];
+        NSMutableDictionary<NSString *, NSString *> *pruned = [NSMutableDictionary dictionary];
+        for (NSString *source in ApolloConfiguredSubredditSources()) {
+            NSString *content = [stored[source] isKindOfClass:[NSString class]] ? stored[source] : nil;
+            if (!ApolloSubredditContentIsValid(content)) continue;
+            [subredditListCache setObject:content forKey:source];
+            pruned[source] = content;
+        }
+        if (![pruned isEqualToDictionary:stored ?: @{}]) {
+            [pruned writeToFile:ApolloSubredditSourceCachePath() atomically:YES];
+        }
+    }
+}
+
+static NSMutableSet<NSString *> *ApolloSubredditSourcesInFlight(void) {
+    static NSMutableSet<NSString *> *sources;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ sources = [NSMutableSet set]; });
+    return sources;
+}
+
+static void ApolloRefreshSubredditSource(NSString *source) {
+    if (![source isKindOfClass:[NSString class]] || source.length == 0) return;
+    NSURL *url = [NSURL URLWithString:source];
+    NSString *scheme = url.scheme.lowercaseString;
+    if (!url || url.host.length == 0 ||
+        (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"])) {
+        ApolloLog(@"[SubredditSources] refresh skipped invalid HTTP(S) source");
+        return;
+    }
+
+    @synchronized (ApolloSubredditSourceCacheLock()) {
+        if ([ApolloSubredditSourcesInFlight() containsObject:source]) return;
+        [ApolloSubredditSourcesInFlight() addObject:source];
+    }
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
+                                                            cachePolicy:NSURLRequestUseProtocolCachePolicy
+                                                        timeoutInterval:5.0];
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
+                                                                 completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        if (error || http.statusCode < 200 || http.statusCode >= 300 ||
+            data.length == 0 || data.length > kApolloSubredditSourceMaximumBytes) {
+            ApolloLog(@"[SubredditSources] refresh rejected host=%@ status=%ld bytes=%lu err=%@",
+                      url.host ?: @"(invalid)", (long)http.statusCode, (unsigned long)data.length,
+                      error.localizedDescription ?: @"nil");
+        } else {
+            NSString *content = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            if (!ApolloSubredditContentIsValid(content)) {
+                ApolloLog(@"[SubredditSources] refresh rejected invalid list host=%@ bytes=%lu",
+                          url.host ?: @"(invalid)", (unsigned long)data.length);
+            } else {
+                [subredditListCache setObject:content forKey:source];
+                ApolloPersistSubredditSourceContent(source, content);
+                ApolloLog(@"[SubredditSources] refreshed host=%@ entries=%lu",
+                          url.host ?: @"(invalid)", (unsigned long)ApolloSubredditLinesFromContent(content).count);
+            }
+        }
+
+        // Keep this source marked in flight through validation and persistence;
+        // otherwise a hook miss in that small window can start a duplicate task.
+        @synchronized (ApolloSubredditSourceCacheLock()) {
+            [ApolloSubredditSourcesInFlight() removeObject:source];
+        }
+    }];
+    [task resume];
+}
+
+static NSString *ApolloCachedSubredditSourceContent(NSString *source) {
+    if (![source isKindOfClass:[NSString class]] || source.length == 0) return nil;
+    NSString *content = [subredditListCache objectForKey:source];
+    if (!content) ApolloRefreshSubredditSource(source);
+    return content;
+}
+
+static void ApolloRefreshAllSubredditSources(void) {
+    for (NSString *source in ApolloConfiguredSubredditSources()) ApolloRefreshSubredditSource(source);
+}
 // Replace Reddit API client ID. Resolved per-account (see
 // ApolloAccountCredentials.{h,m}): a pending add-account choice, else the
 // active account's stored override, else the global default — instead of
@@ -1598,7 +1736,6 @@ static const char kARCompletion = '\0';
 -(NSURL *)URLForResource:(NSString *)name withExtension:(NSString *)ext {
     NSURL *url = %orig;
     if ([name isEqualToString:@"trending-subreddits"] && [ext isEqualToString:@"plist"]) {
-        NSURL *subredditListURL = [NSURL URLWithString:sTrendingSubredditsSource];
         NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
         // ex: 2023-9-28 (28th September 2023)
         [formatter setDateFormat:@"yyyy-M-d"];
@@ -1627,36 +1764,16 @@ static const char kARCompletion = '\0';
             return [NSURL fileURLWithPath:tempPath];
         };
 
-        __block NSError *error = nil;
-        __block NSString *subredditListContent = nil;
-
-        // Try fetching the subreddit list from the source URL, with timeout of 5 seconds
-        // FIXME: Blocks the UI during the splash screen
-        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-        NSURLRequest *request = [NSURLRequest requestWithURL:subredditListURL cachePolicy:NSURLRequestUseProtocolCachePolicy timeoutInterval:5.0];
-        NSURLSession *session = [NSURLSession sharedSession];
-        NSURLSessionDataTask *dataTask = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *e) {
-            if (e) {
-                error = e;
-            } else {
-                NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
-                if (httpResponse.statusCode == 200) {
-                    subredditListContent = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-                }
-            }
-            dispatch_semaphore_signal(semaphore);
-        }];
-        [dataTask resume];
-        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-
-        // Use fallback dict if there was an error
-        if (error || ![subredditListContent length]) {
+        // The bundle lookup is a launch-time path. Never wait here: use the
+        // launch-seeded last-known-good value, or Apollo's bundled plist while
+        // an asynchronous refresh fills the cache for the next lookup.
+        NSString *subredditListContent = ApolloCachedSubredditSourceContent(sTrendingSubredditsSource);
+        if (![subredditListContent length]) {
             return writeDict(fallbackDict);
         }
 
         // Parse into array
-        NSMutableArray<NSString *> *subreddits = [[subredditListContent componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]] mutableCopy];
-        [subreddits filterUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
+        NSMutableArray<NSString *> *subreddits = [ApolloSubredditLinesFromContent(subredditListContent) mutableCopy];
         if (subreddits.count == 0) {
             return writeDict(fallbackDict);
         }
@@ -1827,33 +1944,21 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
         return %orig;
     }
 
-    NSError *error = nil;
-    // Check cache
-    NSString *subredditListContent = [subredditListCache objectForKey:subredditListURL.absoluteString];
-    bool updateCache = false;
-
-    if (!subredditListContent) {
-        // Not in cache, so fetch subreddit list from source URL
-        // FIXME: The current implementation blocks the UI, but the prefetching in initializeRandomSources() should help
-        subredditListContent = [NSString stringWithContentsOfURL:subredditListURL encoding:NSUTF8StringEncoding error:&error];
-        if (error) {
-            return %orig;
-        }
-        updateCache = true;
-    }
+    // A request hook must stay nonblocking. A miss starts a refresh for later
+    // requests and immediately lets Apollo's untouched request path continue.
+    // That legacy path is not expected to provide a working Reddit random
+    // redirect anymore; it is simply the requested no-cache fallback.
+    NSString *subredditListContent = ApolloCachedSubredditSourceContent(subredditListURL.absoluteString);
+    if (!subredditListContent) return %orig;
 
     // Parse the content into a list of strings
-    NSArray<NSString *> *subreddits = [subredditListContent componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-    subreddits = [subreddits filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
+    NSArray<NSString *> *subreddits = ApolloSubredditLinesFromContent(subredditListContent);
     if (subreddits.count == 0) {
         return %orig;
     }
 
-    if (updateCache) {
-        [subredditListCache setObject:subredditListContent forKey:subredditListURL.absoluteString];
-    }
-
-    // Pick a random subreddit, then modify the request URL to use that subreddit, simulating a 302 redirect in Reddit's original API behaviour
+    // Pick a random subreddit and synthesize the destination locally; neither
+    // Reddit's endpoint nor Apollo's untouched random path is functional now.
     NSString *randomSubreddit = subreddits[arc4random_uniform((uint32_t)subreddits.count)];
     NSString *urlString = [url absoluteString];
     NSString *newUrlString = [urlString stringByReplacingOccurrencesOfString:@"/random/" withString:[NSString stringWithFormat:@"/%@/", randomSubreddit]];
@@ -2610,32 +2715,6 @@ static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *contr
 }
 %end
 
-// Pre-fetches random subreddit lists in background
-static void initializeRandomSources() {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSArray *sources = @[sRandNsfwSubredditsSource, sRandomSubredditsSource];
-        for (NSString *source in sources) {
-            if (![source length]) {
-                continue;
-            }
-            NSURL *subredditListURL = [NSURL URLWithString:source];
-            NSError *error = nil;
-            NSString *subredditListContent = [NSString stringWithContentsOfURL:subredditListURL encoding:NSUTF8StringEncoding error:&error];
-            if (error) {
-                continue;
-            }
-
-            NSArray<NSString *> *subreddits = [subredditListContent componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-            subreddits = [subreddits filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
-            if (subreddits.count == 0) {
-                continue;
-            }
-
-            [subredditListCache setObject:subredditListContent forKey:subredditListURL.absoluteString];
-        }
-    });
-}
-
 // MARK: - Constructor
 %ctor {
     subredditListCache = [NSCache new];
@@ -3045,6 +3124,11 @@ static void initializeRandomSources() {
     sTrendingSubredditsSource = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTrendingSubredditsSource];
     sTrendingSubredditsLimit = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyTrendingSubredditsLimit];
 
+    // Seed before Logos hooks become live so launch-time bundle/request hooks
+    // can answer immediately, then refresh all configured sources in parallel.
+    ApolloSeedSubredditSourceMemoryCache();
+    ApolloRefreshAllSubredditSources();
+
     %init;
 
     ApolloMarkdownGifInstall();
@@ -3114,8 +3198,6 @@ static void initializeRandomSources() {
             [[%c(FLEXManager) performSelector:@selector(sharedManager)] performSelector:@selector(showExplorer)];
         });
     }
-
-    initializeRandomSources();
 
     // Web JSON keychain hydration — must run after the SecItem fishhooks above so
     // the simulator's virtualized keychain is in place (see the deferral note

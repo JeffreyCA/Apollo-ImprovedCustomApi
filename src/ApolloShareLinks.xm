@@ -39,8 +39,7 @@ static NSCache<NSString *, ShareUrlTask *> *cache;
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _dispatchGroup = NULL;
-        _resolvedURL = NULL;
+        _pendingCompletions = [NSMutableArray array];
     }
     return self;
 }
@@ -526,8 +525,9 @@ static UIViewController *PresentResolvingShareLinkAlert() {
 
 // Strip tracking parameters from resolved share URL
 static NSURL *RemoveShareTrackingParams(NSURL *url) {
+    if (![url isKindOfClass:[NSURL class]]) return nil;
     NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
-    NSMutableArray *queryItems = [NSMutableArray arrayWithArray:components.queryItems];
+    NSMutableArray *queryItems = [NSMutableArray arrayWithArray:components.queryItems ?: @[]];
     [queryItems filterUsingPredicate:[NSPredicate predicateWithFormat:@"name == %@", @"context"]];
     if (queryItems.count > 0) {
         components.queryItems = queryItems;
@@ -535,6 +535,30 @@ static NSURL *RemoveShareTrackingParams(NSURL *url) {
         components.query = nil;
     }
     return components.URL;
+}
+
+// Resolve a task exactly once and release every waiter on the main queue. The
+// original share link is passed for all transport/HTTP/timeout failures, so a
+// failed resolution never strands a tap behind the resolving alert.
+static void CompleteShareURLResolveTask(ShareUrlTask *task, NSString *resolvedURL) {
+    if (!task || resolvedURL.length == 0) return;
+
+    NSArray<void (^)(NSString *)> *callbacks = nil;
+    NSURLSessionDataTask *activeTask = nil;
+    @synchronized (task) {
+        if (task.resolvedURL.length > 0) return;
+        task.resolvedURL = resolvedURL;
+        activeTask = task.activeTask;
+        task.activeTask = nil;
+        callbacks = [task.pendingCompletions copy];
+        [task.pendingCompletions removeAllObjects];
+    }
+
+    if (activeTask.state == NSURLSessionTaskStateRunning) [activeTask cancel];
+    if (callbacks.count == 0) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (void (^callback)(NSString *) in callbacks) callback(resolvedURL);
+    });
 }
 
 // Start async task to resolve share URL
@@ -547,31 +571,36 @@ static void StartShareURLResolveTask(NSURL *url) {
         return;
     }
     NSString *cacheKey = NormalizeShareURLCacheKey(urlString);
-    __block ShareUrlTask *task;
-    task = [cache objectForKey:cacheKey];
+    ShareUrlTask *task = [cache objectForKey:cacheKey];
     if (task) {
         return;
     }
 
-    dispatch_group_t dispatch_group = dispatch_group_create();
     task = [[ShareUrlTask alloc] init];
-    task.dispatchGroup = dispatch_group;
     [cache setObject:task forKey:cacheKey];
 
-    dispatch_group_enter(task.dispatchGroup);
-    NSURLSessionTask *getTask = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-        if (!error) {
-            NSURL *redirectedURL = [(NSHTTPURLResponse *)response URL];
-            NSURL *cleanedURL = RemoveShareTrackingParams(redirectedURL);
-            NSString *cleanUrlString = [cleanedURL absoluteString];
-            task.resolvedURL = cleanUrlString;
-        } else {
-            task.resolvedURL = urlString;
-        }
-        dispatch_group_leave(task.dispatchGroup);
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
+                                                            cachePolicy:NSURLRequestUseProtocolCachePolicy
+                                                        timeoutInterval:10.0];
+    // The bounded timeout below breaks activeTask's temporary retain cycle and
+    // also keeps this state alive if NSCache evicts it under memory pressure.
+    ShareUrlTask *resolveTask = task;
+    NSURLSessionDataTask *getTask = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(__unused NSData *data, NSURLResponse *response, NSError *error) {
+        NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        NSURL *redirectedURL = (!error && http.statusCode >= 200 && http.statusCode < 300) ? http.URL : nil;
+        NSString *resolved = RemoveShareTrackingParams(redirectedURL).absoluteString;
+        CompleteShareURLResolveTask(resolveTask, resolved.length > 0 ? resolved : urlString);
     }];
-
+    task.activeTask = getTask;
     [getTask resume];
+
+    // NSURLRequest's timeout is the transport policy; this deadline is also a
+    // UI guarantee. It makes slow connectivity and unusual redirect behavior
+    // release the alert no later than ten seconds.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        CompleteShareURLResolveTask(resolveTask, urlString);
+    });
 }
 
 // Asynchronously wait for share URL to resolve
@@ -599,29 +628,25 @@ static void TryResolveShareUrl(NSString *urlString, void (^successHandler)(NSStr
         }
     }
 
-    if (task.resolvedURL) {
-        successHandler(task.resolvedURL);
-        return;
-    } else {
-        // Wait for task to finish and show loading alert to not block main thread
-        UIViewController *shareAlertController = PresentResolvingShareLinkAlert();
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            if (!task.dispatchGroup) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [shareAlertController dismissViewControllerAnimated:YES completion:^{
-                        ignoreHandler();
-                    }];
-                });
-                return;
-            }
-            dispatch_group_wait(task.dispatchGroup, DISPATCH_TIME_FOREVER);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [shareAlertController dismissViewControllerAnimated:YES completion:^{
-                    successHandler(task.resolvedURL);
-                }];
-            });
-        });
+    __block NSString *resolvedURL = nil;
+    UIViewController *shareAlertController = nil;
+    @synchronized (task) {
+        resolvedURL = task.resolvedURL;
+        if (!resolvedURL) {
+            shareAlertController = PresentResolvingShareLinkAlert();
+            __weak UIViewController *weakAlert = shareAlertController;
+            [task.pendingCompletions addObject:^(NSString *resolved) {
+                UIViewController *alert = weakAlert;
+                void (^finish)(void) = ^{ successHandler(resolved.length > 0 ? resolved : urlString); };
+                if (alert.presentingViewController) {
+                    [alert dismissViewControllerAnimated:YES completion:finish];
+                } else {
+                    finish();
+                }
+            }];
+        }
     }
+    if (resolvedURL) successHandler(resolvedURL);
 }
 
 // Tappable text link in an inbox item (*not* the links in the PM chat bubbles)
