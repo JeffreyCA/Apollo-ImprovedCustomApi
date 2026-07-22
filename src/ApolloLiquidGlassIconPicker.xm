@@ -65,7 +65,7 @@ static const CGFloat kLGGridWideThresholdLarge  = 800.0;
 
 // Pack card (main screen row) — fixed-pixel fan of sample icons, since a
 // table row is always roughly device-width rather than divided into columns.
-static const CGFloat   kLGPackCardHeight  = 88.0;
+static const CGFloat   kLGPackCardHeight  = 94.0;
 static const NSInteger kLGFanCount        = 3;
 static const CGFloat   kLGFanThumbSide    = 40.0;
 static const CGFloat   kLGFanCorner       = 9.0;
