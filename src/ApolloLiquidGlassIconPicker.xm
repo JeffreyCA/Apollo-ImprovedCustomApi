@@ -137,20 +137,40 @@ static BOOL LGIsDarkAppearance(UIView *view) {
 
 #pragma mark - Theme background helpers
 
-// Apollo's own theme system (both user-authored custom themes and its 18
-// built-in stock themes) recolors table/cell backgrounds throughout the
-// app's settings screens. Our injected cells never picked that up: the
-// willDisplayCell hook deliberately skips Apollo's own styling pass for our
-// sections (it doesn't know our custom cell types), so without this they'd
-// always show the plain system background regardless of the active theme.
-// Mirrors the same ApolloThemeAccentColor() ?: ... ?: fallback chain already
-// used throughout this file for accent color.
-static UIColor *LGThemedPageBackgroundColor(void) {
-    return ApolloThemeRuntimeColor(ApolloThemeTokenBackground) ?: UIColor.systemGroupedBackgroundColor;
+// ApolloThemeRuntimeColor() only resolves while the tweak's own custom-theme
+// runtime is active — it knows nothing about Apollo's stock themes (e.g.
+// Sunset) or Pure Black Dark Mode, so falling back to a plain system color
+// under those looked reasonable but was wrong. Sample an already-themed
+// native cell instead, same trick as apollo_themeCellBackgroundColor in
+// ApolloSettingsTableViewController.m.
+static UIColor *LGNativeCellBackgroundColor(UITableView *sourceTable) {
+    // NSClassFromString: these two classes are declared later in this file.
+    Class packCardClass = NSClassFromString(@"LGPackCardCell");
+    Class featuredClass = NSClassFromString(@"LGFeaturedIconCell");
+    for (UITableViewCell *cell in sourceTable.visibleCells) {
+        if ((packCardClass && [cell isKindOfClass:packCardClass]) ||
+            (featuredClass && [cell isKindOfClass:featuredClass])) continue;
+        UIColor *color = cell.backgroundColor ?: cell.contentView.backgroundColor;
+        if (color) return color;
+    }
+    return nil;
 }
 
-static UIColor *LGThemedCardBackgroundColor(void) {
-    return ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryBackground) ?: UIColor.secondarySystemGroupedBackgroundColor;
+// A table's backgroundColor is set once for the whole table, so it's
+// already correct as soon as sourceTable exists.
+static UIColor *LGThemedPageBackgroundColor(UITableView *sourceTable) {
+    return sourceTable.backgroundColor
+        ?: ApolloThemeRuntimeColor(ApolloThemeTokenBackground)
+        ?: UIColor.systemGroupedBackgroundColor;
+}
+
+// sourceTable should be an already-rendered table one level up the nav
+// stack (see ApolloInheritedSettingsThemeSourceTableView), not the table
+// currently being built — otherwise there's no native cell yet to sample.
+static UIColor *LGThemedCardBackgroundColor(UITableView *sourceTable) {
+    return LGNativeCellBackgroundColor(sourceTable)
+        ?: ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryBackground)
+        ?: UIColor.secondarySystemGroupedBackgroundColor;
 }
 
 // UIApplication.alternateIconName is unreliable on some sideloading
@@ -593,7 +613,7 @@ static inline NSIndexPath *LGRewriteForActiveScope(UITableView *tv, NSIndexPath 
 #pragma mark - Icon grid cell (pack contents screen)
 
 @interface LGIconGridCell : UICollectionViewCell
-- (void)configureWithRow:(const LGIconRow *)row selected:(BOOL)selected accentColor:(UIColor *)accentColor;
+- (void)configureWithRow:(const LGIconRow *)row selected:(BOOL)selected accentColor:(UIColor *)accentColor cardBackgroundColor:(UIColor *)cardBackgroundColor;
 @end
 
 @implementation LGIconGridCell {
@@ -610,7 +630,7 @@ static inline NSIndexPath *LGRewriteForActiveScope(UITableView *tv, NSIndexPath 
 
     self.contentView.layer.cornerRadius = kLGCardCorner;
     self.contentView.layer.cornerCurve = kCACornerCurveContinuous;
-    self.contentView.backgroundColor = LGThemedCardBackgroundColor();
+    self.contentView.backgroundColor = LGThemedCardBackgroundColor(nil); // placeholder, overwritten by configureWithRow:
     self.contentView.clipsToBounds = YES;
 
     _defaultFan = [[LGIconFanView alloc] initWithAccessibilityLabel:@"Default appearance"];
@@ -672,9 +692,9 @@ static inline NSIndexPath *LGRewriteForActiveScope(UITableView *tv, NSIndexPath 
     return self;
 }
 
-- (void)configureWithRow:(const LGIconRow *)row selected:(BOOL)selected accentColor:(UIColor *)accentColor {
+- (void)configureWithRow:(const LGIconRow *)row selected:(BOOL)selected accentColor:(UIColor *)accentColor cardBackgroundColor:(UIColor *)cardBackgroundColor {
     if (!row) return;
-    self.contentView.backgroundColor = LGThemedCardBackgroundColor();
+    self.contentView.backgroundColor = cardBackgroundColor ?: LGThemedCardBackgroundColor(nil);
     NSString *iconID = row->iconID;
     UIImage *defaultLight = LGPreviewImage(iconID, @"default");
     UIImage *defaultDark  = LGPreviewImage(iconID, @"dark");
@@ -731,7 +751,7 @@ static CGFloat LGMeasuredGridCellHeight(CGFloat columnWidth) {
 
     // Representative content — both labels populated, same as any real row.
     LGIconRow templateRow = (LGIconRow){ @"template", @"Template Name", @"Template Author" };
-    [sTemplateCell configureWithRow:&templateRow selected:NO accentColor:UIColor.systemBlueColor];
+    [sTemplateCell configureWithRow:&templateRow selected:NO accentColor:UIColor.systemBlueColor cardBackgroundColor:nil];
 
     CGSize fitting = [sTemplateCell systemLayoutSizeFittingSize:CGSizeMake(columnWidth, UILayoutFittingCompressedSize.height)
                                    withHorizontalFittingPriority:UILayoutPriorityRequired
@@ -744,7 +764,7 @@ static CGFloat LGMeasuredGridCellHeight(CGFloat columnWidth) {
 #pragma mark - Pack card (main screen row)
 
 @interface LGPackCardCell : UITableViewCell
-- (void)configureWithGroup:(const LGRuntimeGroup *)group;
+- (void)configureWithGroup:(const LGRuntimeGroup *)group cardBackgroundColor:(UIColor *)cardBackgroundColor;
 @end
 
 @implementation LGPackCardCell {
@@ -839,9 +859,9 @@ static CGFloat LGMeasuredGridCellHeight(CGFloat columnWidth) {
     return self;
 }
 
-- (void)configureWithGroup:(const LGRuntimeGroup *)group {
+- (void)configureWithGroup:(const LGRuntimeGroup *)group cardBackgroundColor:(UIColor *)cardBackgroundColor {
     if (!group) return;
-    self.backgroundColor = LGThemedCardBackgroundColor();
+    self.backgroundColor = cardBackgroundColor ?: LGThemedCardBackgroundColor(nil);
     _titleLabel.text = group->title;
 
     NSString *countText = [NSString stringWithFormat:@"%ld icon%@", (long)group->count, group->count == 1 ? @"" : @"s"];
@@ -874,7 +894,7 @@ static CGFloat LGMeasuredGridCellHeight(CGFloat columnWidth) {
 // checkmark accessory, matching Apollo's own icon-list rows. Tapping applies
 // the icon directly; there's no subscreen to push.
 @interface LGFeaturedIconCell : UITableViewCell
-- (void)configureWithRow:(const LGIconRow *)row selected:(BOOL)selected accentColor:(UIColor *)accentColor;
+- (void)configureWithRow:(const LGIconRow *)row selected:(BOOL)selected accentColor:(UIColor *)accentColor cardBackgroundColor:(UIColor *)cardBackgroundColor;
 @end
 
 @implementation LGFeaturedIconCell {
@@ -916,9 +936,9 @@ static CGFloat LGMeasuredGridCellHeight(CGFloat columnWidth) {
     return self;
 }
 
-- (void)configureWithRow:(const LGIconRow *)row selected:(BOOL)selected accentColor:(UIColor *)accentColor {
+- (void)configureWithRow:(const LGIconRow *)row selected:(BOOL)selected accentColor:(UIColor *)accentColor cardBackgroundColor:(UIColor *)cardBackgroundColor {
     if (!row) return;
-    self.backgroundColor = LGThemedCardBackgroundColor();
+    self.backgroundColor = cardBackgroundColor ?: LGThemedCardBackgroundColor(nil);
     UIImage *light = LGPreviewImage(row->iconID, @"default");
     UIImage *dark  = LGPreviewImage(row->iconID, @"dark");
     BOOL isDark = LGIsDarkAppearance(self);
@@ -1024,6 +1044,7 @@ static void LGApplyAlternateIcon(UIView *hostView, NSString *iconID, void (^comp
 
 @implementation LGGroupIconsViewController {
     NSInteger _gi;
+    UIColor *_cardBackgroundColor;
 }
 
 - (instancetype)initWithGroupIndex:(NSInteger)groupIndex {
@@ -1118,7 +1139,13 @@ static void LGApplyAlternateIcon(UIView *hostView, NSString *iconID, void (^comp
     self.view.tintColor = accent;
     self.collectionView.tintColor = accent;
     self.navigationController.navigationBar.tintColor = accent;
-    self.collectionView.backgroundColor = LGThemedPageBackgroundColor();
+
+    // Cast is safe: the function only reads navigationController.viewControllers,
+    // not anything table-specific on self. Finds the App Icon pack list one
+    // level up, already rendered before this screen was pushed.
+    UITableView *sourceTable = ApolloInheritedSettingsThemeSourceTableView((UITableViewController *)(id)self);
+    _cardBackgroundColor = LGThemedCardBackgroundColor(sourceTable);
+    self.collectionView.backgroundColor = LGThemedPageBackgroundColor(sourceTable);
 }
 
 - (NSInteger)collectionView:(UICollectionView *)collectionView numberOfItemsInSection:(NSInteger)section {
@@ -1134,7 +1161,7 @@ static void LGApplyAlternateIcon(UIView *hostView, NSString *iconID, void (^comp
         NSString *activeID = LGActiveIconID();
         BOOL selected = activeID != nil && [row->iconID isEqualToString:activeID];
         UIColor *accent = ApolloThemeAccentColor() ?: self.view.tintColor ?: UIColor.systemBlueColor;
-        [cell configureWithRow:row selected:selected accentColor:accent];
+        [cell configureWithRow:row selected:selected accentColor:accent cardBackgroundColor:_cardBackgroundColor];
     }
     return cell;
 }
@@ -1251,7 +1278,10 @@ static UITableView *LGRememberedTableView(id viewController) {
             NSString *activeID = LGActiveIconID();
             BOOL selected = activeID != nil && [row->iconID isEqualToString:activeID];
             UIColor *accent = ApolloThemeAccentColor() ?: tableView.tintColor ?: UIColor.systemBlueColor;
-            [cell configureWithRow:row selected:selected accentColor:accent];
+            // Sample from the main Settings screen one level up, not this
+            // table — our rows are inserted before any native ones exist to sample.
+            UITableView *sourceTable = ApolloInheritedSettingsThemeSourceTableView((UITableViewController *)(id)self);
+            [cell configureWithRow:row selected:selected accentColor:accent cardBackgroundColor:LGThemedCardBackgroundColor(sourceTable)];
         }
         return cell;
     }
@@ -1260,7 +1290,8 @@ static UITableView *LGRememberedTableView(id viewController) {
         if (!cell || ![cell isKindOfClass:[LGPackCardCell class]])
             cell = [[LGPackCardCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:kLGPackCardReuseID];
         NSInteger gi = LGNonEmptyGroupIndexAt(indexPath.row);
-        [cell configureWithGroup:LGGroupAt(gi)];
+        UITableView *sourceTable = ApolloInheritedSettingsThemeSourceTableView((UITableViewController *)(id)self);
+        [cell configureWithGroup:LGGroupAt(gi) cardBackgroundColor:LGThemedCardBackgroundColor(sourceTable)];
         return cell;
     }
     if (LGAlternateIconsAvailable()) {
