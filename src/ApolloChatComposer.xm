@@ -160,8 +160,8 @@ void ApolloChatClearImageUpload(void) {
 static void ApolloChatPromptImgChestSetup(UIViewController *vc) {
     if (![vc isKindOfClass:[UIViewController class]]) return;
     UIAlertController *a = [UIAlertController
-        alertControllerWithTitle:@"ImgChest API Key Needed"
-                         message:@"To send images in chat, add a free ImgChest API key in Apollo's settings (Media → ImgChest API Key). Reddit can't reliably host images in private messages, so chat images upload to ImgChest instead."
+        alertControllerWithTitle:@"Image Chest API Key Needed"
+                         message:@"To send images in chat, add a free Image Chest API key under Settings → Apollo Reborn → Accounts & API Keys. Reddit can't reliably host images in private messages, so chat images upload to Image Chest instead."
                   preferredStyle:UIAlertControllerStyleAlert];
     [a addAction:[UIAlertAction actionWithTitle:@"Get a Free Key" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
         [[UIApplication sharedApplication] openURL:[NSURL URLWithString:@"https://imgchest.com/"] options:@{} completionHandler:nil];

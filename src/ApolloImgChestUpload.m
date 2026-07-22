@@ -211,7 +211,7 @@ static NSData *ApolloImgChestMultipartBody(NSString *boundary,
 static NSError *ApolloImgChestError(NSString *message) {
     return [NSError errorWithDomain:@"ApolloImgChestUpload"
                                code:-1
-                           userInfo:@{NSLocalizedDescriptionKey: message ?: @"ImgChest upload failed"}];
+                           userInfo:@{NSLocalizedDescriptionKey: message ?: @"Image Chest upload failed"}];
 }
 
 // POST /v1/post with the given image parts. completion(postDictionary, error)
@@ -219,7 +219,7 @@ static NSError *ApolloImgChestError(NSString *message) {
 static void ApolloImgChestCreatePost(NSArray<NSDictionary *> *imageParts,
                                      void (^completion)(NSDictionary *_Nullable post, NSError *_Nullable error)) {
     if (!ApolloImgChestUploadAvailable()) {
-        completion(nil, ApolloImgChestError(@"No ImgChest API key configured"));
+        completion(nil, ApolloImgChestError(@"No Image Chest API key configured"));
         return;
     }
     NSString *boundary = [NSString stringWithFormat:@"apollo-imgchest-%@", [NSUUID UUID].UUIDString];
@@ -240,7 +240,7 @@ static void ApolloImgChestCreatePost(NSArray<NSDictionary *> *imageParts,
             NSString *message = [json[@"message"] isKindOfClass:[NSString class]] ? json[@"message"] : nil;
             ApolloLog(@"[ImgChestUpload] create post failed status=%ld err=%@ msg=%@ bytes=%lu",
                       (long)http.statusCode, error.localizedDescription ?: @"nil", message ?: @"nil", (unsigned long)data.length);
-            completion(nil, error ?: ApolloImgChestError(message ?: @"ImgChest upload failed"));
+            completion(nil, error ?: ApolloImgChestError(message ?: @"Image Chest upload failed"));
             return;
         }
         completion(post, nil);
@@ -289,7 +289,7 @@ void ApolloImgChestUploadData(NSData *data,
         NSString *postID = [post[@"id"] isKindOfClass:[NSString class]] ? post[@"id"] : nil;
         NSURL *link = ApolloImgChestFirstImageLink(post);
         if (!postID || !link) {
-            completion(nil, error ?: ApolloImgChestError(@"ImgChest response missing link"));
+            completion(nil, error ?: ApolloImgChestError(@"Image Chest response missing link"));
             return;
         }
         // The synthetic Imgur response derives id/deletehash from the link's
@@ -395,7 +395,7 @@ ApolloImgChestAlbumResponder ApolloImgChestAlbumCreationResponderForRequest(NSUR
                 ? post[@"link"]
                 : (postID ? [@"https://imgchest.com/p/" stringByAppendingString:postID] : nil);
             if (!postID || !postLink) {
-                reply(nil, nil, error ?: ApolloImgChestError(@"ImgChest album creation failed"));
+                reply(nil, nil, error ?: ApolloImgChestError(@"Image Chest album creation failed"));
                 return;
             }
 

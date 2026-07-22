@@ -3132,7 +3132,7 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
                     // The comment-body rewrite unwraps Apollo's `![img](...)` embed
                     // around this exact URL back to a plain link at send time.
                     ApolloCommentLinkRecordUploadedURL(link.absoluteString);
-                    ApolloCommentLinkShowUploadedToast(@"Img Chest");
+                    ApolloCommentLinkShowUploadedToast(@"Image Chest");
                 }
                 NSData *synthetic = ApolloSyntheticImgurUploadResponseData(sendLink, chestMIMEType);
                 NSHTTPURLResponse *fake = [[NSHTTPURLResponse alloc] initWithURL:requestURL
@@ -3145,7 +3145,7 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
         return %orig(ApolloRedditUploadFastFailRequest(), bodyData ?: [NSData data], chestWrapped);
     }
 
-    // Comment Link Host = Imgur (or Img Chest unavailable / video, with an Imgur
+    // Comment Link Host = Imgur (or Image Chest unavailable / video, with an Imgur
     // client id configured): let Apollo's own Imgur upload run untouched — even
     // when the Media Upload Host is Reddit or the keyless cookie path would
     // normally claim it — and record the returned link so the comment-body
@@ -3307,7 +3307,7 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
                     // The comment-body rewrite unwraps Apollo's `![img](...)` embed
                     // around this exact URL back to a plain link at send time.
                     ApolloCommentLinkRecordUploadedURL(link.absoluteString);
-                    ApolloCommentLinkShowUploadedToast(@"Img Chest");
+                    ApolloCommentLinkShowUploadedToast(@"Image Chest");
                 }
                 NSData *synthetic = ApolloSyntheticImgurUploadResponseData(sendLink, chestMIMEType);
                 NSHTTPURLResponse *fake = [[NSHTTPURLResponse alloc] initWithURL:requestURL
@@ -3320,7 +3320,7 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
         return %orig(ApolloRedditUploadFastFailRequest(), fileURL, chestWrapped);
     }
 
-    // Comment Link Host = Imgur (or Img Chest unavailable / video, with an Imgur
+    // Comment Link Host = Imgur (or Image Chest unavailable / video, with an Imgur
     // client id configured): see the fromData: hook — pass the upload through to
     // Apollo's own Imgur path and record the returned link for the plain-link
     // comment-body rewrite.
@@ -3473,7 +3473,7 @@ static NSURL *ApolloUploadsMediaURLFromEntry(NSDictionary *entry) {
 
 static NSString *ApolloUploadsProviderNameForURL(NSURL *url) {
     NSString *host = url.host.lowercaseString ?: @"";
-    if ([host containsString:@"imgchest"]) return @"Img Chest";
+    if ([host containsString:@"imgchest"]) return @"Image Chest";
     if ([host containsString:@"redd.it"] || [host containsString:@"reddit"]) return @"Reddit";
     if ([host containsString:@"imgur"]) return @"Imgur";
     return host.length > 0 ? host : nil;
@@ -3667,12 +3667,12 @@ static void ApolloUploadsApplyDetail(UITableViewCell *cell, NSString *key, NSStr
 }
 
 // The native footer only mentions Imgur, but with the upload-host options the
-// list can also contain Reddit and Img Chest uploads.
+// list can also contain Reddit and Image Chest uploads.
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     NSString *original = %orig;
     if (original.length == 0) return original;
-    return @"Media you've uploaded from Apollo — to Imgur, Reddit, or Img Chest depending on your Media Upload Host. "
-           @"Deleting removes Imgur and Img Chest uploads from their host; Reddit uploads are only removed from this list.";
+    return @"Media you've uploaded from Apollo — to Imgur, Reddit, or Image Chest depending on your Media Upload Host. "
+           @"Deleting removes Imgur and Image Chest uploads from their host; Reddit uploads are only removed from this list.";
 }
 
 %end

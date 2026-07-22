@@ -25,11 +25,19 @@
 
 extern NSString *const ApolloAICloudBridgeErrorDomain;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Effective model for the active cloud provider: the user's stored model if
 // set, else the per-provider default (nil for "custom", which has no default).
 // Exposed so settings can show the default as a placeholder.
 NSString *ApolloAICloudDefaultModelForProvider(NSString *provider);
 NSString *ApolloAICloudEffectiveModel(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 @interface ApolloAICloudBridge : NSObject
 

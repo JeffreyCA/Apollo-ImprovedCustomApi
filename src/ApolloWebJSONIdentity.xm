@@ -313,6 +313,18 @@ static void ApolloWebJSONWriteValetItem(NSString *account, NSData *data) {
         (__bridge id)kSecAttrAccount: account,
     };
     NSMutableDictionary *add = [identity mutableCopy];
+    // MANDATORY. Valet encodes its accessibility into the service name above
+    // (…_AccessibleAfterFirstUnlock) AND passes kSecAttrAccessible on every read. Omit it here
+    // and SecItemAdd defaults the item to kSecAttrAccessibleWhenUnlocked, which a read filters on
+    // but SecItemAdd's duplicate check does NOT (service + account + access group are the primary
+    // key). The item then misses Valet's read (-25300) while still colliding on add (-25299), and
+    // AccountManager, finding no accounts, writes an empty array over the good one.
+    //
+    // This is unrecoverable without an explicit heal: nothing ever deletes 2RedditAccounts2 (sign
+    // out writes an empty array over it), so the item is created exactly once per device and every
+    // later write is an update — and an update never changes the protection class. Whichever
+    // writer creates it first decides its fate permanently.
+    add[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
     add[(__bridge id)kSecValueData] = data;
     OSStatus st = SecItemAdd((__bridge CFDictionaryRef)add, NULL);
     if (st == errSecDuplicateItem) {

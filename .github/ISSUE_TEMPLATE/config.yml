@@ -1,14 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: ✨ Feature Requests
+    url: https://request.apolloreborn.app/
+    about: Submit new feature requests and vote on existing ideas.
   - name: 💬 r/ApolloReborn Community
     url: https://www.reddit.com/r/ApolloReborn/
     about: Ask questions, get help, and discuss with the community. (Do not directly discuss API key workarounds using alternative apps in this subreddit.)
-  - name: 📦 IPA Sources
-    url: https://apolloreborn.app/#download
-    about: Pre-built IPAs and AltStore/SideStore/Feather sources.
-  - name: 🐞 Original Apollo Bug Tracker
-    url: https://github.com/christianselig/apollo-bugs/issues
-    about: Bug tracker for the original Apollo app. Search issues here to see if a bug existed in the original app or is new to Apollo Reborn (don't report bugs in the original bug tracker).
-  - name: 🤝 Contributing Guide
-    url: https://github.com/Apollo-Reborn/Apollo-Reborn/blob/main/CONTRIBUTING.md
-    about: Want to build or contribute? Start here.
