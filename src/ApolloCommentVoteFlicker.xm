@@ -187,28 +187,68 @@ static void ApolloVFRealizeUpdatedCommentsInfo(id postInfo, const char *stage) {
 // crowd-controlled threads (reported against translated threads because
 // foreign-language subs are where both crowd control and translation are on).
 //
-// Neutralize the flag on the incoming copy when it is merely CARRIED OVER
-// (old model and copy both say collapsed) rather than deliberately flipped:
-// Apollo's own collapse toggle never routes through this notification (it
-// splices + rebuilds directly), so a carried-over YES here can only be stale
-// server state the visible row never rendered. The write goes straight to the
-// ivar so no setCollapsed: hooks (cover views, settle windows) fire for what
-// is a pure metadata correction.
+// Neutralize the flag on the incoming copy ONLY when the visible row is
+// actually RENDERED EXPANDED: an expanded row whose replacement model says
+// collapsed can only be latent server state (or our own setStickied: hook
+// re-asserting on the copy) — Apollo's own collapse toggle never routes
+// through this notification (it splices + rebuilds directly). A row that is
+// rendered collapsed, on the other hand, is a DELIBERATE collapse — the user's
+// manual toggle, a blocked/AutoMod collapse, or the tweak's own Collapse
+// Pinned Comments feature (ApolloCommentsCollapse.xm forces _collapsed on
+// stickied comments) — and clearing the copy's flag there would pop the row
+// open on vote. Gate on the rendered presentation, not the model flags.
+//
+// The rendered state is probed structurally: CommentCellNode's byline layout
+// switches its trailing accessories on comment.collapsed — the collapsed
+// presentation carries totalCollapsedChildrenIndicator (the child-count
+// badge) and collapseDisclosureIndicator, the expanded one carries the
+// age/more-options cluster instead. Either indicator live in the hierarchy ⇒
+// the row is rendered collapsed. The write goes straight to the ivar so no
+// setCollapsed: hooks (cover views, settle windows) fire for what is a pure
+// metadata correction.
+static BOOL ApolloVFAccessoryNodeIsLive(id node) {
+    if (!node) return NO;
+    @try {
+        if (![node respondsToSelector:@selector(isNodeLoaded)] ||
+            !((BOOL (*)(id, SEL))objc_msgSend)(node, @selector(isNodeLoaded))) return NO;
+        // Probe at the LAYER level: these indicator nodes are layer-backed
+        // (no UIView — -view returns nil for them), and a layer probe also
+        // covers view-backed nodes uniformly.
+        CALayer *layer = [node respondsToSelector:@selector(layer)]
+            ? ((CALayer *(*)(id, SEL))objc_msgSend)(node, @selector(layer)) : nil;
+        if (!layer.superlayer || layer.hidden) return NO;
+        CGRect f = layer.frame;
+        return f.size.width > 0.5 && f.size.height > 0.5;
+    } @catch (__unused NSException *e) { return NO; }
+}
+
+static BOOL ApolloVFCellRendersCollapsed(id cell) {
+    return ApolloVFAccessoryNodeIsLive(ApolloVFIvar(cell, "totalCollapsedChildrenIndicator")) ||
+           ApolloVFAccessoryNodeIsLive(ApolloVFIvar(cell, "collapseDisclosureIndicator"));
+}
+
 static void ApolloVFNeutralizeCarriedOverCollapse(id note) {
     @try {
         id oldModel = [note isKindOfClass:[NSNotification class]] ? [(NSNotification *)note object] : nil;
         id newModel = [note isKindOfClass:[NSNotification class]] ? [(NSNotification *)note userInfo][@"newModel"] : nil;
         Class commentClass = objc_getClass("RDKComment");
         if (!commentClass || ![oldModel isKindOfClass:commentClass] || ![newModel isKindOfClass:commentClass]) return;
-        if (![oldModel respondsToSelector:@selector(collapsed)] ||
-            ![newModel respondsToSelector:@selector(collapsed)]) return;
-        BOOL oldCollapsed = ((BOOL (*)(id, SEL))objc_msgSend)(oldModel, @selector(collapsed));
+        if (![newModel respondsToSelector:@selector(collapsed)]) return;
         BOOL newCollapsed = ((BOOL (*)(id, SEL))objc_msgSend)(newModel, @selector(collapsed));
-        if (!newCollapsed || !oldCollapsed) return; // absent, or a deliberate flip — leave it alone
+        if (!newCollapsed) return; // nothing to neutralize
+        NSArray *cells = ApolloVFCellsForUpdatedModel(note);
+        if (cells.count == 0) return; // no visible row — nothing can flicker, and an
+                                      // off-screen pinned/collapsed comment keeps its flag
+        for (id cell in cells) {
+            if (ApolloVFCellRendersCollapsed(cell)) {
+                ApolloLog(@"[VoteFlicker] kept collapse on updated comment — row is rendered collapsed (deliberate)");
+                return;
+            }
+        }
         Ivar collapsedIvar = class_getInstanceVariable([newModel class], "_collapsed");
         if (!collapsedIvar) return;
         *(BOOL *)((uint8_t *)(__bridge void *)newModel + ivar_getOffset(collapsedIvar)) = NO;
-        ApolloLog(@"[VoteFlicker] cleared carried-over server collapse on updated comment (crowd-control flag)");
+        ApolloLog(@"[VoteFlicker] cleared carried-over server collapse on updated comment (row renders expanded)");
     } @catch (__unused NSException *e) {}
 }
 
