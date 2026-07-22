@@ -39,10 +39,36 @@
 // Nothing is blocked, frozen, or hidden from UIKit, and Apollo's animator and swipe gesture
 // are untouched.
 //
-// KNOWN REMAINING ISSUE: on a cancelled gesture (drag a little, let go) the top band still
-// flicks see-through for a moment as the view snaps back. The bottom edge is unaffected. See
-// the PR description for the full list of what has already been ruled out — in particular the
-// nav bar's element rect never collapses, and clamping it does nothing.
+// THE CANCELLED-GESTURE FLICK (solved; mechanism confirmed against decompiled UIKitCore 23B85)
+// On a cancelled swipe the top band used to flick fully see-through for ~6 frames while every
+// effect view read alpha=1/opacity=1/no animations. Cause: `cancelInteractiveTransition` kicks
+// off a short layout storm — UINavigationBar's _cancelInteractiveTransition tears down and
+// rebuilds the transient item's title/button views (which are themselves pocket ELEMENTS), and
+// every snap-back frame-set fires _UIScrollPocketRegistrationInteraction geometry invalidation,
+// zeroing the stored pocket rects and element frame caches. Each ensuing layout pass then
+// recomputes pocket state from mid-flight model geometry:
+//   - -[UIScrollView _updatePockets] → updatePocket:… can remove/hide the pocket AND its
+//     backgroundCapture (the captureOnly CABackdropLayer at the BACK of the scroll content
+//     whose texture the dim band replays by group name — kill it and the replay renders
+//     transparent while its own properties stay nominal);
+//   - ScrollEdgeEffectView.layoutSubviews rebuilds the PocketMask's ShadowLayer pool from
+//     freshly-converted element rects; with the bar content mid-teardown those come out
+//     empty/displaced, so the blur (which is masked BY NAME via a portal of PocketMask) and
+//     the dim composite to nothing — no alpha involved anywhere, which is why every previous
+//     alpha-side probe and clamp came back clean.
+// Only the top edge has these extra kill switches (bar-height-mismatch → zero element rect,
+// the bar visibility _setActive: gate, and the bar-content element teardown); the bottom band
+// doesn't even use the capture/replay pair. Hence "bottom is fine, top flicks".
+//
+// The fix: while the transition is in flight, FREEZE the pocket recompute for the outgoing
+// subtree — no-op -[UIScrollView _updatePockets] and -[ScrollEdgeEffectView layoutSubviews]
+// for the outgoing controller's scroll views. The pocket state is correct the moment the
+// transition starts, every input UIKit would recompute from during the storm is garbage, and
+// the correct result of every one of those passes is "nothing changes" — so skipping them is
+// exact, not approximate. On transition end the frozen views get setNeedsLayout and UIKit
+// resettles everything itself from clean geometry. (Earlier attempts froze ONLY
+// _updatePockets and still flickered — the mask rebuild in layoutSubviews was the unpatched
+// half of the storm.)
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -57,6 +83,9 @@
 static const NSUInteger kApolloEdgeTop = 1;
 static const NSUInteger kApolloEdgeBottom = 4;
 
+// UIKit.ScrollEdgeEffectView, resolved once in the ctor (Swift-side class).
+static Class sScrollEdgeEffectViewClass;
+
 // Non-zero while at least one navigation transition is running.
 static NSUInteger sTransitionsInFlight;
 
@@ -66,6 +95,24 @@ static NSUInteger sTransitionGeneration;
 
 // Scroll views we redirected, held weakly, so the override is always cleared afterwards.
 static NSHashTable<UIScrollView *> *sRedirectedScrollViews;
+
+// Scroll views whose pocket recompute is frozen for the duration of the transition. Weak, and
+// only consulted while sTransitionsInFlight is non-zero, so a stale entry can never freeze
+// anything outside a transition window.
+static NSHashTable<UIScrollView *> *sFrozenScrollViews;
+
+static BOOL ApolloEdgePocketsFrozenFor(UIScrollView *scrollView) {
+    return sTransitionsInFlight > 0 && scrollView && [sFrozenScrollViews containsObject:scrollView];
+}
+
+// An effect view lives in a touch-passthrough container directly inside its scroll view; walk
+// up until we hit one.
+static UIScrollView *ApolloEdgeOwningScrollView(UIView *view) {
+    for (UIView *v = view.superview; v; v = v.superview) {
+        if ([v isKindOfClass:[UIScrollView class]]) return (UIScrollView *)v;
+    }
+    return nil;
+}
 
 static void ApolloEdgeCollectScrollViews(UIView *view, NSMutableArray<UIScrollView *> *out) {
     if ([view isKindOfClass:[UIScrollView class]]) [out addObject:(UIScrollView *)view];
@@ -79,6 +126,7 @@ static void ApolloEdgeRedirectGeometry(UIView *outgoingView, UIView *stableView)
         [scrollView _setOverrideGeometryView:stableView forEdge:kApolloEdgeTop];
         [scrollView _setOverrideGeometryView:stableView forEdge:kApolloEdgeBottom];
         [sRedirectedScrollViews addObject:scrollView];
+        [sFrozenScrollViews addObject:scrollView];
     }
 }
 
@@ -95,6 +143,20 @@ static void ApolloEdgeEndTransition(NSUInteger generation) {
         [scrollView _setOverrideGeometryView:nil forEdge:kApolloEdgeBottom];
     }
     [sRedirectedScrollViews removeAllObjects];
+    // Unfreeze and let UIKit resettle the pocket stack itself from clean, settled geometry —
+    // one recompute with correct inputs replaces the storm of recomputes with garbage inputs.
+    for (UIScrollView *scrollView in sFrozenScrollViews) {
+        [scrollView setNeedsLayout];
+        for (UIView *container in scrollView.subviews) {
+            for (UIView *sub in container.subviews) {
+                if ([sub isKindOfClass:sScrollEdgeEffectViewClass]) {
+                    [container setNeedsLayout];
+                    [sub setNeedsLayout];
+                }
+            }
+        }
+    }
+    [sFrozenScrollViews removeAllObjects];
 }
 
 // Re-arms for as long as the navigation controller still reports a live transition, so a held
@@ -145,6 +207,31 @@ static void ApolloEdgeBeginTransition(UINavigationController *nav, UIViewControl
 
 %group ScrollEdgePopFix
 
+// The pocket recompute entry point, run on every scroll-view layout pass. During the cancel
+// storm it re-derives pocket existence/visibility/frames from mid-flight model geometry and
+// can remove or hide the pocket and its backgroundCapture. Frozen views skip it wholesale.
+%hook UIScrollView
+
+- (void)_updatePockets {
+    if (ApolloEdgePocketsFrozenFor(self)) return;
+    %orig;
+}
+
+%end
+
+// ScrollEdgeEffectView.layoutSubviews rebuilds the PocketMask ShadowLayer pool (the blur's
+// mask, referenced by the blur filter BY NAME) and the luma subrect from live model-space
+// conversions. With the nav bar's transient content mid-teardown those rebuilds come out
+// empty, which blanks the band without touching any alpha. Same freeze, same window.
+%hook ScrollEdgeEffectView
+
+- (void)layoutSubviews {
+    if (ApolloEdgePocketsFrozenFor(ApolloEdgeOwningScrollView(self))) return;
+    %orig;
+}
+
+%end
+
 %hook UINavigationController
 
 - (UIViewController *)popViewControllerAnimated:(BOOL)animated {
@@ -182,14 +269,21 @@ static void ApolloEdgeBeginTransition(UINavigationController *nav, UIViewControl
 %ctor {
     if (!IsLiquidGlass()) return;
 
-    // Everything rests on this private hook; without it stay inert rather than reaching for a
-    // cruder lever that lies to UIKit about its own view hierarchy.
-    if (![UIScrollView instancesRespondToSelector:@selector(_setOverrideGeometryView:forEdge:)]) {
-        ApolloLog(@"[ScrollEdgePopFix] -[UIScrollView _setOverrideGeometryView:forEdge:] missing; fix inactive");
+    // Everything rests on these private hooks; without them stay inert rather than reaching
+    // for a cruder lever that lies to UIKit about its own view hierarchy.
+    if (![UIScrollView instancesRespondToSelector:@selector(_setOverrideGeometryView:forEdge:)] ||
+        ![UIScrollView instancesRespondToSelector:@selector(_updatePockets)]) {
+        ApolloLog(@"[ScrollEdgePopFix] UIScrollView pocket SPI missing; fix inactive");
+        return;
+    }
+    sScrollEdgeEffectViewClass = objc_getClass("UIKit.ScrollEdgeEffectView");
+    if (!sScrollEdgeEffectViewClass) {
+        ApolloLog(@"[ScrollEdgePopFix] UIKit.ScrollEdgeEffectView missing; fix inactive");
         return;
     }
 
     sRedirectedScrollViews = [NSHashTable weakObjectsHashTable];
-    %init(ScrollEdgePopFix);
-    ApolloLog(@"[ScrollEdgePopFix] hook installed (pocket geometry redirected during nav transitions)");
+    sFrozenScrollViews = [NSHashTable weakObjectsHashTable];
+    %init(ScrollEdgePopFix, ScrollEdgeEffectView = sScrollEdgeEffectViewClass);
+    ApolloLog(@"[ScrollEdgePopFix] hook installed (pocket recompute frozen + geometry redirected during nav transitions)");
 }
