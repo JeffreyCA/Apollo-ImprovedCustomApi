@@ -325,16 +325,26 @@ static void ApolloOwnFlairArmSubmit(NSString *subreddit) {
 
 // The live arm covering this subreddit, if any. Never removes it — see the note
 // on ApolloOwnFlairArm.
+//
+// Prefers an arm that has not spent its backfill: two comments posted into the
+// same subreddit within the TTL each append their own arm, and always returning
+// the first (by then patched) one would starve the second comment's claim. A
+// patched match is still returned when it is the only match — the caller relies
+// on arm != nil to keep suppressing the "no flair here" negative for the arm's
+// whole TTL, not just until its backfill is used.
 static ApolloOwnFlairArm *ApolloOwnFlairMatchArm(NSString *subreddit) {
     @synchronized (ApolloOwnFlairArms()) {
         ApolloOwnFlairPruneArms_locked();
+        ApolloOwnFlairArm *patchedMatch = nil;
         for (ApolloOwnFlairArm *arm in ApolloOwnFlairArms()) {
             NSString *armed = arm.subreddit;
-            if (armed.length == 0 || (subreddit.length > 0 && [armed caseInsensitiveCompare:subreddit] == NSOrderedSame))
-                return arm;
+            if (armed.length == 0 || (subreddit.length > 0 && [armed caseInsensitiveCompare:subreddit] == NSOrderedSame)) {
+                if (!arm.patched) return arm;
+                if (!patchedMatch) patchedMatch = arm;
+            }
         }
+        return patchedMatch;
     }
-    return nil;
 }
 
 // Claims the single backfill this arm is allowed. Returns NO if already used.
