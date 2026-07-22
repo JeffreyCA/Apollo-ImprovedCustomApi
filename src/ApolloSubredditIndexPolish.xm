@@ -2071,10 +2071,16 @@ static void ApolloSubredditIndexRevertTableToNative(UITableView *tableView) {
 }
 
 // Master/dividers changed: re-style or revert every known list, including ones in a
-// deselected tab's detached hierarchy (which a window walk would miss).
+// deselected tab's detached hierarchy (which a window walk would miss). The registry
+// holds every RedditListViewController table, recognised or not — a list too short for
+// LooksLikeSubredditsTable (under 10 index titles, or no "A" entry) must not take the
+// apply branch, or ApplySeparatorInsets strips its separators while InstallOrUpdate
+// bails on the structural check and never draws the modern chrome in their place.
+// Unrecognised tables fall through to the revert branch, a no-op when nothing was
+// ever captured on them.
 static void ApolloSubredditIndexApplyEnhancementStateToKnownTables(void) {
     for (UITableView *tableView in sApolloSubredditKnownTables.allObjects) {
-        if (sSubredditListEnhancements) {
+        if (sSubredditListEnhancements && ApolloSubredditIndexEnsureSubredditTable(tableView)) {
             NSDictionary *anchor = ApolloSubredditIndexCaptureScrollAnchor(tableView);
             ApolloSubredditIndexApplySeparatorInsets(tableView);
             [UIView performWithoutAnimation:^{
