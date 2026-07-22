@@ -319,7 +319,11 @@ typedef NS_ENUM(NSInteger, ApolloAISummaryMode) {
                                   onToggle:^(UISwitch *sender) {
             sEnableAIPostSummaries = sender.isOn;
             [[NSUserDefaults standardUserDefaults] setBool:sEnableAIPostSummaries forKey:UDKeyEnableAIPostSummaries];
-            [weakSelf reloadSummaryControls];
+            // Only the rows that hang off this toggle — reloading this row too
+            // would swap the cell out from under the mid-flip UISwitch and
+            // restart its knob animation (see -masterToggled:).
+            [weakSelf reloadRowWithID:@"postThreshold"];
+            [weakSelf reloadRowWithID:@"postDetail"];
         }];
     postSummaries.enabled = ^BOOL { return sEnableAISummaries; };
 
@@ -360,7 +364,9 @@ typedef NS_ENUM(NSInteger, ApolloAISummaryMode) {
                                   onToggle:^(UISwitch *sender) {
             sEnableAICommentSummaries = sender.isOn;
             [[NSUserDefaults standardUserDefaults] setBool:sEnableAICommentSummaries forKey:UDKeyEnableAICommentSummaries];
-            [weakSelf reloadSummaryControls];
+            // Discussion detail is the only row that depends on this toggle;
+            // never reload the toggled row itself (see -masterToggled:).
+            [weakSelf reloadRowWithID:@"commentDetail"];
         }];
     commentSummaries.enabled = ^BOOL { return sEnableAISummaries; };
 
@@ -459,10 +465,13 @@ typedef NS_ENUM(NSInteger, ApolloAISummaryMode) {
     }
 }
 
-// Every Summaries row's on/enabled state depends on the shared globals, so
-// re-read them all after any of them changes. The slider rows' enablement
-// tracks their owning toggle (post length + detail follow Post Summaries,
-// discussion detail follows Comment Summaries), so they reload here too.
+// Every Summaries row's enabled state hangs off the master switch, so re-read
+// them all when it flips. The master's own row (enableAI) must stay out of this
+// list — reloadRowWithID: physically swaps the cell, and doing that to the row
+// whose UISwitch is mid-flip tears the animating switch out of the hierarchy
+// and crossfades in a replacement already snapped to the end state (the
+// "double switch" glitch). Same rule for the sub-toggles: their handlers
+// reload only their dependent slider rows, never themselves.
 - (void)reloadSummaryControls {
     [self reloadRowWithID:@"postSummaries"];
     [self reloadRowWithID:@"postThreshold"];
