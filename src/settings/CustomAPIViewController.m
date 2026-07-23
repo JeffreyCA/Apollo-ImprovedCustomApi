@@ -14,6 +14,7 @@
 #import "ApolloState.h"
 #import "ApolloBadgeBookStrip.h"     // ApolloBadgeBookToggleChangedNotification
 #import "ApolloBadgeBookCatalog.h"   // ApolloBadgeBookPrewarmImages()
+#import "ApolloBadgeBookScraper.h"   // ApolloBadgeBookInvalidate() — Clear Tweak Caches
 #import "ApolloUserProfileCache.h"
 #import "ApolloLinkPreviewCache.h"
 #import "settings/ApolloDeletedCommentsSettingsViewController.h"
@@ -3143,13 +3144,14 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)promptClearAllCachesFromSourceView:(UIView *)sourceView {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Clear Tweak Caches?"
-                                                                   message:@"This removes cached profile pictures, banners, link previews, and remembered banned-profile dismissals."
+                                                                   message:@"This removes cached profile pictures, banners, link previews, badge books, and remembered banned-profile dismissals."
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Clear" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
         [[ApolloUserProfileCache sharedCache] clearAllCaches];
         [[ApolloLinkPreviewCache sharedCache] flushCache];
         [[ApolloSubredditInfoCache sharedCache] clearAllCaches];
+        ApolloBadgeBookInvalidate(nil);   // per-user earned/trophy state, memory + disk
         ApolloBannedProfileClearDismissedOverlays();
         // Re-broadcast the avatars-toggle notification so visible profile headers reload immediately.
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloUserAvatarsToggleChangedNotification" object:nil];

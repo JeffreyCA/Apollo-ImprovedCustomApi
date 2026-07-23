@@ -3,7 +3,9 @@
 #import "ApolloBadgeBookScraper.h"
 #import "ApolloCommon.h"
 #import "ApolloThemeRuntime.h"
+#import "ApolloAccountCredentials.h"   // ApolloActiveAccountUsername() — locked-note wording
 #import <ImageIO/ImageIO.h>
+#import <objc/message.h>
 #import <CoreMotion/CoreMotion.h>
 #import <QuartzCore/QuartzCore.h>
 
@@ -16,23 +18,31 @@
 // becomes a main-thread decode or a memory spike.
 static NSCache<NSString *, UIImage *> *ApolloBBRemoteImageCache(void) {
     static NSCache *cache; static dispatch_once_t once;
-    dispatch_once(&once, ^{ cache = [[NSCache alloc] init]; cache.countLimit = 120; });
+    dispatch_once(&once, ^{
+        cache = [[NSCache alloc] init];
+        cache.countLimit = 120;
+        cache.totalCostLimit = 16 * 1024 * 1024;   // decoded thumbs; evictable under pressure
+    });
     return cache;
 }
 
 static void ApolloBBLoadRemoteImage(NSString *urlString, CGFloat pointSize, void (^completion)(UIImage *)) {
     if (urlString.length == 0) { if (completion) completion(nil); return; }
-    UIImage *cached = [ApolloBBRemoteImageCache() objectForKey:urlString];
-    if (cached) { if (completion) completion(cached); return; }
-
     CGFloat scale = UIScreen.mainScreen.scale;
     CGFloat maxPixels = MAX(64.0, pointSize * scale);
+    // Keyed by URL AND decode size: the grid warms 64pt thumbs, and serving one
+    // of those to the 132pt detail card is a visibly soft upscale at 3x.
+    NSString *cacheKey = [NSString stringWithFormat:@"%.0f|%@", maxPixels, urlString];
+    UIImage *cached = [ApolloBBRemoteImageCache() objectForKey:cacheKey];
+    if (cached) { if (completion) completion(cached); return; }
+
     NSURL *url = [NSURL URLWithString:urlString];
     if (!url) { if (completion) completion(nil); return; }
 
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url
                                                             completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
         UIImage *image = nil;
+        NSUInteger cost = 0;
         if (data.length) {
             CGImageSourceRef src = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
             if (src) {
@@ -43,11 +53,15 @@ static void ApolloBBLoadRemoteImage(NSString *urlString, CGFloat pointSize, void
                     (id)kCGImageSourceThumbnailMaxPixelSize: @(maxPixels),
                 };
                 CGImageRef cg = CGImageSourceCreateThumbnailAtIndex(src, 0, (__bridge CFDictionaryRef)opts);
-                if (cg) { image = [UIImage imageWithCGImage:cg scale:scale orientation:UIImageOrientationUp]; CGImageRelease(cg); }
+                if (cg) {
+                    image = [UIImage imageWithCGImage:cg scale:scale orientation:UIImageOrientationUp];
+                    cost = CGImageGetBytesPerRow(cg) * CGImageGetHeight(cg);
+                    CGImageRelease(cg);
+                }
                 CFRelease(src);
             }
         }
-        if (image) [ApolloBBRemoteImageCache() setObject:image forKey:urlString];
+        if (image) [ApolloBBRemoteImageCache() setObject:image forKey:cacheKey cost:cost];
         dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(image); });
     }];
     [task resume];
@@ -405,7 +419,8 @@ static CGFloat ApolloBBHeaderHeight(void) {
 // everywhere, plus device motion when available (real hardware).
 @interface ApolloBadgeDetailViewController : UIViewController
 - (instancetype)initWithItem:(ApolloBadgeItem *)item state:(ApolloBadgeState)state accent:(UIColor *)accent
-                  background:(UIColor *)background surface:(UIColor *)surface artURL:(NSString *)artURL;
+                  background:(UIColor *)background surface:(UIColor *)surface artURL:(NSString *)artURL
+                    username:(NSString *)username;
 @end
 
 @implementation ApolloBadgeDetailViewController {
@@ -415,6 +430,7 @@ static CGFloat ApolloBBHeaderHeight(void) {
     UIColor *_background;
     UIColor *_surface;
     NSString *_artURL;
+    NSString *_username;          // whose book this badge came from (locked copy)
     UIView *_card;
     UIView *_shineHost;          // clips the moving shine to the card
     CAGradientLayer *_shine;
@@ -437,10 +453,12 @@ static CMMotionManager *ApolloBBSharedMotionManager(void) {
 }
 
 - (instancetype)initWithItem:(ApolloBadgeItem *)item state:(ApolloBadgeState)state accent:(UIColor *)accent
-                  background:(UIColor *)background surface:(UIColor *)surface artURL:(NSString *)artURL {
+                  background:(UIColor *)background surface:(UIColor *)surface artURL:(NSString *)artURL
+                    username:(NSString *)username {
     if ((self = [super init])) {
         _item = item; _state = state; _accent = accent;
         _background = background; _surface = surface; _artURL = [artURL copy];
+        _username = [username copy];
     }
     return self;
 }
@@ -662,7 +680,18 @@ static CMMotionManager *ApolloBBSharedMotionManager(void) {
         lockedNote.numberOfLines = 0;
         lockedNote.textAlignment = NSTextAlignmentCenter;
         lockedNote.textColor = [UIColor secondaryLabelColor];
-        lockedNote.text = @"You haven't earned this badge yet.";
+        // The book opens for anyone's profile, and locked state is the VIEWED
+        // user's — "You" is only right when that's the signed-in account.
+        NSString *activeUser = ApolloActiveAccountUsername();
+        BOOL viewingOwn = (_username.length && activeUser.length &&
+                           [activeUser caseInsensitiveCompare:_username] == NSOrderedSame);
+        if (viewingOwn) {
+            lockedNote.text = @"You haven't earned this badge yet.";
+        } else if (_username.length) {
+            lockedNote.text = [NSString stringWithFormat:@"u/%@ hasn't earned this badge yet.", _username];
+        } else {
+            lockedNote.text = @"This badge hasn't been earned yet.";
+        }
         lockedNote.translatesAutoresizingMaskIntoConstraints = NO;
         [card addSubview:lockedNote];
     }
@@ -998,7 +1027,21 @@ static NSString *const kHeaderID = @"header";
                                       forState:UIControlStateSelected];
     }
     [self.segmented addTarget:self action:@selector(apollo_modeChanged) forControlEvents:UIControlEventValueChanged];
-    self.navigationItem.titleView = self.segmented;
+    if (IsLiquidGlass()) {
+        // The Liquid Glass nav bar wraps an INTERACTIVE (UIControl) titleView in
+        // its own padded glass platter capsule — and an iOS 26 UISegmentedControl
+        // already draws its own glass track, so the two nest as a "double glass"
+        // outline (reported on-device, #689). Hosting the control inside a plain
+        // non-control container opts out of the platter while keeping the
+        // control's own glass; a UIStackView forwards the intrinsic size the bar
+        // needs (a bare UIView wrapper collapses to zero and vanishes). Verified
+        // in the glass sim: platter alone gone, and the selected segment regains
+        // the accent tint the platter glass was muting.
+        UIStackView *host = [[UIStackView alloc] initWithArrangedSubviews:@[self.segmented]];
+        self.navigationItem.titleView = host;
+    } else {
+        self.navigationItem.titleView = self.segmented;
+    }
 
     UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
     layout.sectionInset = UIEdgeInsetsMake(12.0, 16.0, 24.0, 16.0);
@@ -1231,7 +1274,8 @@ referenceSizeForHeaderInSection:(NSInteger)section {
     ApolloBadgeDetailViewController *detail =
         [[ApolloBadgeDetailViewController alloc] initWithItem:item state:state accent:ApolloBBAccent(self.view)
                                                    background:self.themeBackground surface:self.themeSurface
-                                                       artURL:[self artURLForItem:item state:state]];
+                                                       artURL:[self artURLForItem:item state:state]
+                                                     username:self.username];
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:detail];
     detail.title = @"";
     detail.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemClose target:self action:@selector(apollo_dismissDetail)];
@@ -1284,12 +1328,49 @@ static UIViewController *ApolloBBSimTopVC(void) {
     return vc;
 }
 
+// Descend containers to the visible CONTENT controller (the pushed screen), so
+// commands can target Apollo's real nav stack rather than the tab/nav shells.
+static UIViewController *ApolloBBSimContentVC(void) {
+    UIViewController *vc = ApolloBBSimTopVC();
+    while (1) {
+        if ([vc isKindOfClass:[UITabBarController class]]) vc = ((UITabBarController *)vc).selectedViewController;
+        else if ([vc isKindOfClass:[UINavigationController class]]) vc = ((UINavigationController *)vc).topViewController;
+        else break;
+    }
+    return vc;
+}
+
 static void ApolloBBSimHandleCommand(NSString *raw) {
     NSArray<NSString *> *parts = [raw componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     parts = [parts filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
     if (parts.count == 0) return;
     UIViewController *top = ApolloBBSimTopVC();
     if (!top) return;
+
+    // "dumpnav" — write the presented nav bar's recursive view hierarchy to
+    // /tmp for Liquid Glass chrome diagnosis (private views don't show in the
+    // accessibility tree idb exposes).
+    if ([parts[0] isEqualToString:@"dumpnav"]) {
+        UIViewController *content = ApolloBBSimContentVC();
+        UINavigationController *nav = content.navigationController
+            ?: ([top isKindOfClass:[UINavigationController class]] ? (UINavigationController *)top : top.navigationController);
+        UIView *bar = nav.navigationBar ?: top.view.window;
+        SEL sel = NSSelectorFromString(@"recursiveDescription");
+        NSString *desc = bar ? ((NSString *(*)(id, SEL))objc_msgSend)(bar, sel) : @"(no bar)";
+        [desc writeToFile:@"/tmp/apollofix-navdump.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        ApolloLog(@"[BadgeBook][sim] nav dump written (%lu chars)", (unsigned long)desc.length);
+        return;
+    }
+
+    // "push <user>" — push the book onto the CURRENT nav stack (the same path a
+    // strip tap takes), instead of the modal wrapper below. This is the config
+    // where Apollo's own themed navigation bar hosts the segmented titleView.
+    if ([parts[0] isEqualToString:@"push"] && parts.count >= 2) {
+        UIViewController *content = ApolloBBSimContentVC();
+        ApolloBadgeBookPresentForUsername(parts[1], content);
+        ApolloLog(@"[BadgeBook][sim] pushed book for u/%@ onto %@", parts[1], NSStringFromClass([content class]));
+        return;
+    }
 
     if ([parts[0] isEqualToString:@"seed"] && parts.count >= 3) {
         NSString *user = parts[1];
@@ -1328,7 +1409,8 @@ static void ApolloBBSimHandleCommand(NSString *raw) {
                                                            accent:ApolloBBAccent(top.view)
                                                        background:sampled
                                                           surface:(sampled ? ApolloBBElevatedColor(sampled) : nil)
-                                                           artURL:nil];
+                                                           artURL:nil
+                                                         username:user];
         UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:detail];
         if (@available(iOS 15.0, *)) {
             UISheetPresentationController *sheet = nav.sheetPresentationController;

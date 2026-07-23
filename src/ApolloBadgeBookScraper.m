@@ -59,12 +59,25 @@ static NSMutableDictionary<NSString *, NSMutableArray *> *ApolloBBPending(void) 
     dispatch_once(&once, ^{ d = [NSMutableDictionary dictionary]; });
     return d;
 }
-// Retains in-flight fetchers so they aren't deallocated mid-load.
-static NSMutableDictionary *ApolloBBFetchers(void) {
-    static NSMutableDictionary *d; static dispatch_once_t once;
-    dispatch_once(&once, ^{ d = [NSMutableDictionary dictionary]; });
-    return d;
+// Retains in-flight WebView fetchers so they aren't deallocated mid-load. A SET,
+// not a per-username dictionary: two fetches for the same user can overlap
+// (pull-to-refresh supersedes a fetch whose fallback is still running), and a
+// keyed store would let one overwrite/remove the other's only strong reference —
+// deallocating a live scrape, orphaning its hidden WKWebView in the window, and
+// leaking the single fallback slot. Each fetch owns exactly its own membership.
+static NSMutableSet *ApolloBBFetchers(void) {
+    static NSMutableSet *s; static dispatch_once_t once;
+    dispatch_once(&once, ^{ s = [NSMutableSet set]; });
+    return s;
 }
+// Bumped by ApolloBadgeBookInvalidate (main thread, like all fetch state). Every
+// fetch stamps itself with the value at start; a late leg (or the up-to-90s
+// WebView fallback) of a superseded fetch checks the stamp before re-pinning its
+// stale result into the cache/disk over a newer fetch's delivery. Global rather
+// than per-user: an invalidate racing an unrelated user's in-flight fetch only
+// costs that fetch its cache pin (its waiters are still answered), never
+// correctness.
+static NSUInteger sApolloBBGeneration = 0;
 
 #pragma mark - Disk cache (TTL)
 
@@ -141,8 +154,22 @@ static void ApolloBBDiskSweepOnce(void) {
     });
 }
 
+// A result is complete when every leg that CAN resolve has. Without the bundled
+// catalogue the achievements leg never runs (nothing to join against), so
+// completeness is trophies alone there — otherwise no one would ever get a disk
+// cache on a broken install.
+static BOOL ApolloBBResultComplete(ApolloUserBadges *result) {
+    if (!result) return NO;
+    BOOL achievementsComplete = result.achievementsResolved || ![ApolloBadgeBookCatalog shared].isLoaded;
+    return result.trophiesResolved && achievementsComplete;
+}
+
 static void ApolloBBDiskSave(ApolloUserBadges *result) {
-    if (!result || (!result.trophiesResolved && !result.achievementsResolved)) return;
+    // Only COMPLETE results persist. A partial (one leg failed permanently) would
+    // otherwise be served from disk for the whole 6h TTL with no retry of the
+    // failed half — partials stay in the session cache only, so the next visit
+    // re-attempts the network.
+    if (!ApolloBBResultComplete(result)) return;
     NSString *key = result.username.lowercaseString;
     if (key.length == 0) return;
 
@@ -209,6 +236,10 @@ static ApolloUserBadges *ApolloBBDiskLoad(NSString *key, double *outAgeHours) {
     result.trophies = trophies;
     result.achievementsResolved = [doc[@"achResolved"] boolValue];
     result.trophiesResolved = [doc[@"troResolved"] boolValue];
+    // Saves are gated on completeness, but files written by earlier builds (or
+    // with a catalogue that has since appeared) may be partial — treat those as
+    // misses so the failed leg gets retried instead of served stale for 6h.
+    if (!ApolloBBResultComplete(result)) return nil;
     if (outAgeHours) *outAgeHours = age / 3600.0;
     return result;
 }
@@ -1022,12 +1053,15 @@ void ApolloBadgeBookFetch(NSString *rawUsername, void (^completion)(ApolloUserBa
         ApolloBBPending()[key] = waiters;
 
         CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+        NSUInteger const generation = sApolloBBGeneration;
 
         void (^deliver)(ApolloUserBadges *) = ^(ApolloUserBadges *result) {
-            if (result) [ApolloBBCache() setObject:result forKey:key];
+            // Waiters are ALWAYS answered (their data is network-fresh even if an
+            // invalidate raced this fetch) — only the cache pin is generation-gated,
+            // so a superseded fetch can't reinstate what Invalidate just dropped.
+            if (result && generation == sApolloBBGeneration) [ApolloBBCache() setObject:result forKey:key];
             NSArray *toNotify = ApolloBBPending()[key];
             [ApolloBBPending() removeObjectForKey:key];
-            [ApolloBBFetchers() removeObjectForKey:key];
             for (void (^waiter)(ApolloUserBadges *) in toNotify) waiter(result);
         };
 
@@ -1049,8 +1083,21 @@ void ApolloBadgeBookFetch(NSString *rawUsername, void (^completion)(ApolloUserBa
                               username, CFAbsoluteTimeGetCurrent() - t0,
                               result.trophiesResolved, result.achievementsResolved);
                     deliver(result);
-                    ApolloBBDiskSave(result);
+                    if (generation == sApolloBBGeneration) ApolloBBDiskSave(result);
                 }
+                return;
+            }
+            // Late-leg merge. If an invalidate (pull-to-refresh) superseded this
+            // fetch, a newer fetch owns the cache now — repinning this result
+            // object would clobber the refreshed data with the stale object. Skip
+            // every write, but STILL post the notification: observers re-pull and
+            // either find the newer fetch's cache or start a fresh fetch — without
+            // this, a refresh that joined this (then-undelivered) fetch's waiters
+            // would be left showing its first leg only, with no retry signal.
+            if (generation != sApolloBBGeneration) {
+                ApolloLog(@"[BadgeBook] u/%@ late leg from a superseded fetch — dropped (observers nudged)", username);
+                [[NSNotificationCenter defaultCenter] postNotificationName:ApolloBadgeBookUserUpdatedNotification
+                                                                    object:username];
                 return;
             }
             [ApolloBBCache() setObject:result forKey:key];   // re-pin in case of eviction
@@ -1079,7 +1126,7 @@ void ApolloBadgeBookFetch(NSString *rawUsername, void (^completion)(ApolloUserBa
             ApolloLog(@"[BadgeBook][perf] u/%@ direct path incomplete after %.2fs (needTrophies=%d needAchievements=%d) — WebView fallback",
                       username, CFAbsoluteTimeGetCurrent() - t0, needTrophies, needAchievements);
             ApolloBBWebFetch *fetch = [[ApolloBBWebFetch alloc] init];
-            ApolloBBFetchers()[key] = fetch;
+            [ApolloBBFetchers() addObject:fetch];
             if (!needTrophies) {
                 fetch.presetTrophies = result.trophies;
                 fetch.startPhase = ApolloBBPhaseAchievements;
@@ -1087,7 +1134,7 @@ void ApolloBadgeBookFetch(NSString *rawUsername, void (^completion)(ApolloUserBa
                 fetch.startPhase = ApolloBBPhaseTrophies;
             }
             [fetch startForUsername:username completion:^(ApolloUserBadges *late) {
-                [ApolloBBFetchers() removeObjectForKey:key];
+                [ApolloBBFetchers() removeObject:fetch];
                 if (late.trophiesResolved && !result.trophiesResolved) {
                     result.trophies = late.trophies;
                     result.trophiesResolved = YES;
@@ -1192,6 +1239,7 @@ void ApolloBadgeBookFetch(NSString *rawUsername, void (^completion)(ApolloUserBa
 }
 
 void ApolloBadgeBookInvalidate(NSString *username) {
+    sApolloBBGeneration++;   // strand any in-flight fetch's late cache writes
     NSString *norm = ApolloBBNormalizeUsername(username);
     NSFileManager *fm = [NSFileManager defaultManager];
     if (norm.length == 0) {

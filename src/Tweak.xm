@@ -32,7 +32,6 @@
 #import "ApolloWebSessionStore.h"
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloAccountCredentials.h"
-#import "ApolloBadgeBookCatalog.h"
 
 // MARK: - Sideload Fixes
 
@@ -2832,17 +2831,10 @@ static void initializeRandomSources() {
     ApolloNormalizeNativeHideUsernameForIconOnlyTabBar();
     sShowDetailedProfiles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowDetailedProfiles];
     sBadgeBookEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBadgeBookEnabled];
-    // Decode the bundled badge icons well before any profile needs them. Kicked
-    // from here (not from the first strip/grid that wants an image) so the
-    // background pass actually finishes ahead of the UI instead of racing it —
-    // delayed a few seconds so it never competes with launch work, and low-QoS
-    // inside ApolloBadgeBookPrewarmImages().
-    if (sBadgeBookEnabled) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            ApolloBadgeBookPrewarmImages();
-        });
-    }
+    // No launch-time icon prewarm: sessions that never open a profile shouldn't
+    // pay for decoded badge bitmaps. The strip (on first preview data) and the
+    // book (viewDidLoad) both call ApolloBadgeBookPrewarmImages() themselves, and
+    // every render path tolerates a cold cache (async off-main decode).
     sShowSubredditHeaders = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders];
     sCommunityHighlights = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlights];
     sCommunityHighlightsWeb = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlightsWeb];

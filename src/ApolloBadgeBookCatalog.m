@@ -52,7 +52,13 @@ static NSCache<NSString *, UIImage *> *ApolloBadgeBookImageCache(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         cache = [[NSCache alloc] init];
-        cache.countLimit = 400;   // whole catalogue fits; icons are ~7KB each
+        // The ~7KB PNG8 files decode to 32bpp bitmaps — a 200px icon holds
+        // ~160KB once decoded, so the full 291-icon catalogue would pin ~46MB.
+        // Insertions carry the decoded byte count as their cost, and the cost
+        // limit keeps the resident set bounded (and evictable under pressure)
+        // on the iOS 14-era 2GB devices this tweak still supports.
+        cache.countLimit = 400;
+        cache.totalCostLimit = 32 * 1024 * 1024;
     });
     return cache;
 }
@@ -82,8 +88,9 @@ static NSCache<NSString *, UIImage *> *ApolloBadgeBookImageCache(void) {
     CFRelease(src);
     if (!cg) return nil;
     UIImage *image = [UIImage imageWithCGImage:cg];
+    NSUInteger cost = CGImageGetBytesPerRow(cg) * CGImageGetHeight(cg);   // decoded size, not file size
     CGImageRelease(cg);
-    [ApolloBadgeBookImageCache() setObject:image forKey:self.imageFile];
+    [ApolloBadgeBookImageCache() setObject:image forKey:self.imageFile cost:cost];
     return image;
 }
 
@@ -117,8 +124,12 @@ void ApolloBadgeBookPrewarmImages(void) {
             CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
             ApolloBadgeBookCatalog *cat = [ApolloBadgeBookCatalog shared];
             NSUInteger n = 0;
+            // Achievements only: that grid renders the ENTIRE catalogue at once,
+            // so its 79 icons must all be ready. The trophy grid only ever shows
+            // the viewed user's own trophies (a handful of the 233 bundled), so
+            // those decode on demand — prewarming them would triple the decoded
+            // footprint for icons that mostly never render.
             for (ApolloBadgeItem *item in cat.achievements) if ([item bundledImage]) n++;
-            for (ApolloBadgeItem *item in cat.trophies) if ([item bundledImage]) n++;
             ApolloLog(@"[BadgeBook][perf] prewarmed %lu bundled icons in %.0fms",
                       (unsigned long)n, (CFAbsoluteTimeGetCurrent() - t0) * 1000.0);
         });
