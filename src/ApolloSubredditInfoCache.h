@@ -33,6 +33,12 @@ FOUNDATION_EXPORT NSString *ApolloSubredditFormattedMemberCount(NSInteger subscr
 // cache had no bearer token, and absent on entries cached before this field
 // was captured. Callers must treat nil as unknown, never as "not subscribed".
 @property(nonatomic, strong, nullable) NSNumber *userIsSubscriber;
+// The (lowercased) username of the account whose authenticated fetch produced
+// userIsSubscriber. The flag is ACCOUNT-SPECIFIC while the rest of this entry
+// is shared and persists for days, so callers must treat the flag as unknown
+// unless this matches the currently active account. Absent on entries cached
+// before this field existed — which correctly reads as unknown.
+@property(nonatomic, copy, nullable) NSString *userIsSubscriberAccount;
 
 - (instancetype)initWithSubredditName:(NSString *)subredditName
                           displayName:(NSString *)displayName

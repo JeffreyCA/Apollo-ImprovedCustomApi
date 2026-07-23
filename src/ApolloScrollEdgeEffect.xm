@@ -56,11 +56,19 @@ static void ApolloApplyScrollEdgeEffectToEdge(UIScrollView *scrollView, SEL edge
     BOOL hasSetHidden = [effect respondsToSelector:setHiddenSelector];
     if (hasSetHidden) {
         if (mode == ApolloScrollEdgeEffectStyleHidden) {
-            // Remember only the visibility changes made by this feature. When the
-            // user switches away from Hidden, restore those effects without
-            // un-hiding edges that UIKit intentionally keeps disabled.
-            objc_setAssociatedObject(effect, &kApolloScrollEdgeEffectForcedHiddenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            ((void (*)(id, SEL, BOOL))objc_msgSend)(effect, setHiddenSelector, YES);
+            // Remember only the visibility changes made BY THIS FEATURE: stamp
+            // an effect solely when this call actually flips it visible→hidden.
+            // An effect that is already hidden either belongs to UIKit/Apollo
+            // (never stamp — restoring must not un-hide an edge they keep
+            // disabled) or was stamped by an earlier pass of ours (stamp is
+            // already present and stays).
+            SEL isHiddenSelector = NSSelectorFromString(@"isHidden");
+            BOOL alreadyHidden = [effect respondsToSelector:isHiddenSelector] &&
+                ((BOOL (*)(id, SEL))objc_msgSend)(effect, isHiddenSelector);
+            if (!alreadyHidden) {
+                objc_setAssociatedObject(effect, &kApolloScrollEdgeEffectForcedHiddenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(effect, setHiddenSelector, YES);
+            }
         } else if (objc_getAssociatedObject(effect, &kApolloScrollEdgeEffectForcedHiddenKey)) {
             objc_setAssociatedObject(effect, &kApolloScrollEdgeEffectForcedHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             ((void (*)(id, SEL, BOOL))objc_msgSend)(effect, setHiddenSelector, NO);
@@ -145,7 +153,16 @@ static void ApolloApplyScrollEdgeEffectStyleToAllScrollViews(void) {
 
 - (void)setHidden:(BOOL)hidden {
     if (IsLiquidGlass() && sScrollEdgeEffectStyle == ApolloScrollEdgeEffectStyleHidden) {
-        objc_setAssociatedObject(self, &kApolloScrollEdgeEffectForcedHiddenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (hidden) {
+            // UIKit/Apollo hides this edge of its own accord — that intent must
+            // survive a later switch away from Hidden, so clear any stamp from
+            // an earlier override of ours rather than adding one.
+            objc_setAssociatedObject(self, &kApolloScrollEdgeEffectForcedHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        } else {
+            // The caller wanted it visible and we are overriding — exactly the
+            // change the restore path should undo later.
+            objc_setAssociatedObject(self, &kApolloScrollEdgeEffectForcedHiddenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
         %orig(YES);
         return;
     }

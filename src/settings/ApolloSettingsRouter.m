@@ -14,6 +14,7 @@
 #import "settings/InfoRowSettingsViewController.h"
 #import "settings/InlineMediaSettingsViewController.h"
 #import "settings/SavedCategoriesViewController.h"
+#import "settings/ApolloSubredditLayoutViewController.h"
 #import "settings/TranslationSettingsViewController.h"
 
 typedef UIViewController *(^ApolloSettingsRouteBuilder)(void);
@@ -60,6 +61,7 @@ static void ApolloSettingsRouterEnsureRegistry(void) {
         add(@"comments", @"Comments", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloCommentsSettingsViewController class]));
         add(@"media", @"Media", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloMediaSettingsViewController class]));
         add(@"subreddits", @"Subreddits", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloSubredditsSettingsViewController class]));
+        add(@"subreddit-layout", @"Subreddit Layout", @"Apollo Reborn → Features → Subreddits", ApolloSettingsInsetGrouped([ApolloSubredditLayoutViewController class]));
         add(@"profiles", @"Profiles", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloProfilesSettingsViewController class]));
         add(@"interface", @"Interface", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloInterfaceSettingsViewController class]));
         add(@"notification-backend", @"Notification Backend", @"Apollo Reborn → Advanced", ApolloSettingsInsetGrouped([ApolloNotificationBackendViewController class]));

@@ -1028,12 +1028,21 @@ static BOOL ApolloSubredditResolveSubscribed(UIViewController *viewController,
     // this header already fetches and disk-caches for the banner/description.
     // Per-subreddit and authoritative in BOTH directions (unlike tier 3), and
     // refetched right after our own subscribe/unsubscribe. nil = the fetch was
-    // unauthenticated or predates the field, i.e. unknown.
-    NSNumber *infoFlag = [[ApolloSubredditInfoCache sharedCache]
-        cachedInfoForSubreddit:subredditName].userIsSubscriber;
-    if (infoFlag != nil) {
-        *outSubscribed = infoFlag.boolValue;
-        return YES;
+    // unauthenticated or predates the field, i.e. unknown. The flag is
+    // ACCOUNT-SPECIFIC while the cache entry is shared and persists for days,
+    // so it only counts when it was fetched AS the currently active account —
+    // an unstamped (pre-stamp build) or other-account flag reads as unknown,
+    // falling through to tier 3 rather than showing another account's answer.
+    ApolloSubredditInfo *cachedInfo = [[ApolloSubredditInfoCache sharedCache]
+        cachedInfoForSubreddit:subredditName];
+    if (cachedInfo.userIsSubscriber != nil) {
+        NSString *flagAccount = cachedInfo.userIsSubscriberAccount;
+        NSString *activeAccount = ApolloActiveAccountUsername();
+        if (flagAccount.length > 0 && activeAccount.length > 0 &&
+            [flagAccount caseInsensitiveCompare:activeAccount] == NSOrderedSame) {
+            *outSubscribed = cachedInfo.userIsSubscriber.boolValue;
+            return YES;
+        }
     }
     return ApolloSubredditSubscribedFromAccountList(subredditName, outSubscribed);
 }
@@ -1544,16 +1553,20 @@ static void ApolloSubredditSyncAmbient(ApolloSubredditHeaderView *header) {
         if (header.usesCustomBanner) {
             // A newly-selected custom image must not reuse the previous custom
             // image's backdrop merely because the subreddit name is unchanged.
-            workKey = [NSString stringWithFormat:@"subreddit-custom:%@:%p",
-                       header.subredditName.lowercaseString ?: @"unknown", banner];
+            // Instance identity, NOT the raw pointer — a recycled heap address
+            // would alias the new image to the dead one's cached blur.
+            workKey = [NSString stringWithFormat:@"subreddit-custom:%@:%@",
+                       header.subredditName.lowercaseString ?: @"unknown",
+                       ApolloImmersiveBannerInstanceIdentity(banner)];
         } else {
             ApolloSubredditInfo *info = [[ApolloSubredditInfoCache sharedCache]
                 cachedInfoForSubreddit:header.subredditName];
             workKey = info.bannerURL.absoluteString;
             if (workKey.length == 0) {
-                // Default/placeholder assets can vary with appearance. Pointer
+                // Default/placeholder assets can vary with appearance. Instance
                 // identity is safer than sharing a stale blur between variants.
-                workKey = [NSString stringWithFormat:@"subreddit-fallback:%p", banner];
+                workKey = [NSString stringWithFormat:@"subreddit-fallback:%@",
+                           ApolloImmersiveBannerInstanceIdentity(banner)];
             }
         }
         ApolloImmersiveSetBannerCacheKey(banner, workKey);
@@ -2342,7 +2355,11 @@ static BOOL ApolloSubredditShouldBlockOffset(UITableView *tableView, CGPoint new
     ApolloSubredditScheduleInstallIfNeeded((UIViewController *)self);
 }
 
-- (void)safeAreaInsetsDidChange {
+// viewSafeAreaInsetsDidChange is the UIViewController-side callback —
+// safeAreaInsetsDidChange (its earlier name here) is a UIView method that
+// UIKit never sends to a view controller, so the reinstall on rotation /
+// split-view / chrome-height changes silently never ran.
+- (void)viewSafeAreaInsetsDidChange {
     %orig;
     ApolloSubredditScheduleInstallIfNeeded((UIViewController *)self);
 }
