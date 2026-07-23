@@ -260,13 +260,14 @@ static void OpenAccountManager(void) {
     }
     lastOpen = now;
 
-    __block UIWindow *lastKeyWindow = nil;
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-        if ([scene isKindOfClass:[UIWindowScene class]]) {
-            UIWindowScene *windowScene = (UIWindowScene *)scene;
-            if (windowScene.keyWindow) {
-                lastKeyWindow = windowScene.keyWindow;
-            }
+    UIWindow *lastKeyWindow = nil;
+    for (UIWindow *window in ApolloAllWindows()) {
+        if (window.isKeyWindow) {
+            lastKeyWindow = window;
+            break;
+        }
+        if (!lastKeyWindow && !window.hidden && window.alpha > 0.01) {
+            lastKeyWindow = window;
         }
     }
 

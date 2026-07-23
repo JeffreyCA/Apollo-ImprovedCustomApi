@@ -36,6 +36,12 @@ static NSString *const UDKeySubredditListEnhancements = @"SubredditListEnhanceme
 static NSString *const UDKeyHiddenModeratorSubreddits = @"HiddenModeratorSubreddits";
 static NSString *const UDKeyModernSubredditDividers = @"ModernSubredditDividers";
 static NSString *const ApolloModernSubredditDividersChangedNotification = @"ApolloModernSubredditDividersChangedNotification";
+// Hides the description subtitles under the subreddit list's built-in feed rows
+// (Home, Popular Posts, All Posts, Moderator Posts). Independent of the
+// enhancements master — applies in both the classic and modern list styles.
+// Default NO. See ApolloSubredditIndexPolish.xm.
+static NSString *const UDKeyHideSubredditListDescriptions = @"HideSubredditListDescriptions";
+static NSString *const ApolloHideSubredditListDescriptionsChangedNotification = @"ApolloHideSubredditListDescriptionsChangedNotification";
 // Color post (link) and user/author flairs with Reddit's assigned colors. Default NO.
 static NSString *const UDKeyEnableFlairColors = @"EnableFlairColors";
 static NSString *const ApolloFlairColorsChangedNotification = @"ApolloFlairColorsChangedNotification";
@@ -56,6 +62,22 @@ static NSString *const UDKeyOpenLinksInSteamApp = @"OpenLinksInSteamApp";
 // be gathered in one place and hidden from Apollo's own General settings. We
 // read/write the same key Apollo uses, so the two stay in sync.
 static NSString *const UDKeyOpenVideosInYouTubeApp = @"OpenVideosInYouTubeApp";
+// Apollo NATIVE key backing its "Open Links in" browser picker (String token;
+// missing = the in-app default). Verified tokens, recovered by driving the
+// native picker in the sim and reading back the persisted value:
+//   in-app-safari (In-App Safari), external-safari (Safari), chrome, firefox,
+//   firefox-focus, edge, dolphin, brave, duckduckgo, icab
+// Reborn's "Open in App" screen mirrors this key (same gather-and-hide pattern
+// as UDKeyOpenVideosInYouTubeApp above; the token literal is also read in
+// ApolloShareLinks.xm's ApolloOpensLinksInSystemBrowser()).
+static NSString *const UDKeyNativeOpenLinksIn = @"OpenLinksIn";
+// Apollo NATIVE key + change notification for its "Hide Username on Tab Bar"
+// switch. Apollo observes the notification (hideUsernameOnTabBarChangedWithNotification:)
+// and re-lays-out the profile tab live, so mirrors must post it after writing
+// the key. Reborn's Profiles settings screen mirrors this row (gather-and-hide);
+// ApolloTabBarTitles.xm clears the key while Icon-Only Tab Bar is active.
+static NSString *const UDKeyNativeHideUsernameOnTabBar = @"HideUsernameOnTabBar";
+static NSString *const ApolloNativeHideUsernameOnTabBarChangedNotification = @"com.christianselig.HideUsernameOnTabBarChanged";
 // Reborn "Open in App" deep-link toggles — open these services' links in their
 // app via Universal Links (see ApolloShareLinks.xm). Default OFF (opt-in). The
 // key string literals are duplicated in ApolloShareLinks.xm; keep them in sync.
@@ -74,7 +96,7 @@ static NSString *const UDKeyProxyImgurDDG = @"ProxyImgurDDG";
 static NSString *const UDKeyImageUploadProvider = @"ImageUploadProvider";
 // Secondary host for images added in the COMMENT/REPLY editor (CommentLinkHost
 // enum). Off (default) keeps comment uploads on the Media Upload Host above;
-// Imgur/Img Chest route comment-editor uploads there and post the result as a
+// Imgur/Image Chest route comment-editor uploads there and post the result as a
 // plain link (no native Reddit media) so they work in subreddits that disallow
 // image/GIF comments. See ApolloMarkdownToolbarGif.xm + ApolloImageUploadHost.xm.
 static NSString *const UDKeyCommentLinkHost = @"CommentLinkHost";
@@ -83,6 +105,12 @@ static NSString *const UDKeyCommentLinkHost = @"CommentLinkHost";
 static NSString *const ApolloCommentLinkHostChangedNotification = @"ApolloCommentLinkHostChangedNotification";
 static NSString *const UDKeyShowUserAvatars = @"ShowUserAvatars";
 static NSString *const UDKeyUseProfileAvatarTabIcon = @"UseProfileAvatarTabIcon";
+// When ON, the main tab bar removes its visible text labels and lets UIKit lay
+// out a clean icon-only navigation menu. The original titles remain available
+// to accessibility and are restored live when the setting is turned off.
+// Default OFF. See ApolloTabBarTitles.xm.
+static NSString *const UDKeyHideTabBarTitles = @"HideTabBarTitles";
+static NSString *const ApolloTabBarTitlesChangedNotification = @"ApolloTabBarTitlesChangedNotification";
 // When ON (default), profile pages show Reborn's detailed profile — the banner,
 // large avatar/snoovatar, display name, bio, and the Social Links band. When OFF,
 // the profile page reverts to Apollo's compact stock layout: the detailed header is
@@ -127,7 +155,7 @@ static NSString *const UDKeyIconRowMagnifier = @"IconRowMagnifier";
 // Per-icon "is this info-row icon tappable" switches, exposed on the Info Row
 // settings sub-screen. Each defaults ON (registerDefaults) so behaviour matches
 // the shipped tweak. When a switch is OFF the icon does nothing on a direct tap
-// AND is skipped by the magnifier loupe (excluded from its target list):
+// and remains visible in the magnifier loupe, but releasing on it does nothing:
 //   Upvote     — the ↑ score (activated via the loupe; % ratio is unaffected).
 //   Comments   — the direct comment-bubble tap that jumps to the comments; OFF
 //                reverts to a stock tap (opens the post at the top).
@@ -216,6 +244,12 @@ static NSString *const UDKeyEnableAISummaries = @"EnableAISummaries";
 // turning the master on keeps the original behaviour (post + comment summaries).
 static NSString *const UDKeyEnableAIPostSummaries = @"EnableAIPostSummaries";       // post / link / both
 static NSString *const UDKeyEnableAICommentSummaries = @"EnableAICommentSummaries"; // discussion
+// User-selectable AI summary tuning. Text posts must meet the word threshold
+// (50...300 in 50-word steps; default 150). Post/link and discussion detail are
+// stored independently as ApolloAISummaryDetail values (Brief/Balanced/In-depth).
+static NSString *const UDKeyAIPostWordThreshold = @"AIPostWordThreshold";
+static NSString *const UDKeyAIPostSummaryDetail = @"AIPostSummaryDetail";
+static NSString *const UDKeyAICommentSummaryDetail = @"AICommentSummaryDetail";
 // When on, summaries are generated only when the user taps the card (rather than
 // automatically on open). Off by default. Cached summaries still show instantly.
 static NSString *const UDKeyEnableTapToSummarize = @"EnableTapToSummarize";
@@ -288,6 +322,12 @@ static NSString *const UDKeyPostFilterNameSubstrings = @"PostFilterNameSubstring
 // Web JSON spike (see ApolloWebJSON.m). Master switch for re-pointing
 // whitelisted listing reads at cookie-authenticated www.reddit.com JSON.
 static NSString *const UDKeyWebJSONEnabled = @"WebJSONEnabled";
+// Native Polls (ApolloPollVoting.xm / ApolloPollCompose.xm). Off by default —
+// an experimental feature that lets you vote in and create polls via a
+// per-account reddit.com web session (harvested once, then silent). Independent
+// of UDKeyWebJSONEnabled: turning polls on does NOT reroute the request
+// pipeline; it only unlocks the poll tap handler and the compose "Poll" type.
+static NSString *const UDKeyPollsEnabled = @"PollsEnabled";
 // Legacy NSUserDefaults location of the harvested "name=value; ..." Cookie
 // header. The cookie is now stored in the keychain (ApolloWebJSON.m); this key
 // is retained only so ApolloWebJSONLoadPersistedCredentials can migrate an older

@@ -21,7 +21,7 @@
 #import "ApolloBarkNotifications.h"
 #import "ApolloState.h"
 #import "Tweak.h"
-#import "CustomAPIViewController.h"
+#import "settings/CustomAPIViewController.h"
 #import "Version.h"
 #import "UserDefaultConstants.h"
 #import "ApolloPostFilterStore.h"
@@ -1530,8 +1530,15 @@ static const char kARCompletion = '\0';
         for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
             if (scene.activationState == UISceneActivationStateForegroundActive
                     && [scene isKindOfClass:[UIWindowScene class]]) {
-                window = ((UIWindowScene *)scene).keyWindow ?: ((UIWindowScene *)scene).windows.firstObject;
-                break;
+                NSArray<UIWindow *> *sceneWindows = ((UIWindowScene *)scene).windows;
+                for (UIWindow *candidate in sceneWindows) {
+                    if (candidate.isKeyWindow) {
+                        window = candidate;
+                        break;
+                    }
+                }
+                window = window ?: sceneWindows.firstObject;
+                if (window) break;
             }
         }
     }
@@ -2167,6 +2174,16 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
             [self setValue:mutableRequest forKey:@"_currentRequest"];
         }
     } else if ([requestURL.host isEqualToString:@"oauth.reddit.com"] || [requestURL.host isEqualToString:@"www.reddit.com"]) {
+        // Probe-tagged requests (fragment marker) are our OWN self-authored
+        // traffic — session probes, upload leases, the social-links scrape GETs.
+        // They authenticate themselves and pick their User-Agent deliberately
+        // (stamping the app UA here made Reddit render device=mobile, which
+        // drops the server-side markup the scrapers parse) — leave them alone.
+        if (ApolloWebJSONURLIsProbe(requestURL)) {
+            %orig;
+            return;
+        }
+
         // Web JSON spike: when the flag is on, whitelisted listing reads are
         // re-pointed at cookie-authenticated www.reddit.com/...json instead of
         // the oauth host (see ApolloWebJSON.m). Returns nil when off/not
@@ -2670,6 +2687,7 @@ static void initializeRandomSources() {
                                     UDKeyCommentLinkHost: @(CommentLinkHostOff),
                                     UDKeyShowUserAvatars: @NO,
                                     UDKeyUseProfileAvatarTabIcon: @NO,
+                                    UDKeyHideTabBarTitles: @NO,
                                     UDKeyShowDetailedProfiles: @YES,
                                     UDKeyShowSubredditHeaders: @NO,
                                     UDKeyCommunityHighlights: @NO,
@@ -2701,6 +2719,9 @@ static void initializeRandomSources() {
                                     UDKeyEnableAISummaries: @NO,
                                     UDKeyEnableAIPostSummaries: @YES,
                                     UDKeyEnableAICommentSummaries: @YES,
+                                    UDKeyAIPostWordThreshold: @150,
+                                    UDKeyAIPostSummaryDetail: @(ApolloAISummaryDetailBalanced),
+                                    UDKeyAICommentSummaryDetail: @(ApolloAISummaryDetailBalanced),
                                     UDKeyEnableTapToSummarize: @NO,
                                     UDKeyEnableAIAutoExpandSummaries: @NO,
                                     UDKeyPictureInPictureEnabled: @NO,
@@ -2758,6 +2779,23 @@ static void initializeRandomSources() {
     sEnableAISummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAISummaries];
     sEnableAIPostSummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAIPostSummaries];
     sEnableAICommentSummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAICommentSummaries];
+    sAIPostWordThreshold = [standardDefaults integerForKey:UDKeyAIPostWordThreshold];
+    if (sAIPostWordThreshold < 50 || sAIPostWordThreshold > 300 || sAIPostWordThreshold % 50 != 0) {
+        sAIPostWordThreshold = 150;
+        [standardDefaults setInteger:sAIPostWordThreshold forKey:UDKeyAIPostWordThreshold];
+    }
+    sAIPostSummaryDetail = (ApolloAISummaryDetail)[standardDefaults integerForKey:UDKeyAIPostSummaryDetail];
+    if (sAIPostSummaryDetail < ApolloAISummaryDetailBrief ||
+        sAIPostSummaryDetail > ApolloAISummaryDetailInDepth) {
+        sAIPostSummaryDetail = ApolloAISummaryDetailBalanced;
+        [standardDefaults setInteger:sAIPostSummaryDetail forKey:UDKeyAIPostSummaryDetail];
+    }
+    sAICommentSummaryDetail = (ApolloAISummaryDetail)[standardDefaults integerForKey:UDKeyAICommentSummaryDetail];
+    if (sAICommentSummaryDetail < ApolloAISummaryDetailBrief ||
+        sAICommentSummaryDetail > ApolloAISummaryDetailInDepth) {
+        sAICommentSummaryDetail = ApolloAISummaryDetailBalanced;
+        [standardDefaults setInteger:sAICommentSummaryDetail forKey:UDKeyAICommentSummaryDetail];
+    }
     sEnableTapToSummarize = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableTapToSummarize];
     sEnableAIAutoExpandSummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAIAutoExpandSummaries];
     // "Tap to Summarize" and "Open Summaries Automatically" are mutually exclusive in
@@ -2818,6 +2856,8 @@ static void initializeRandomSources() {
     if (sCommentLinkHost < CommentLinkHostOff || sCommentLinkHost > CommentLinkHostImgChest) sCommentLinkHost = CommentLinkHostOff;
     sShowUserAvatars = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars];
     sUseProfileAvatarTabIcon = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon];
+    sHideTabBarTitles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles];
+    ApolloNormalizeNativeHideUsernameForIconOnlyTabBar();
     sShowDetailedProfiles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowDetailedProfiles];
     sShowSubredditHeaders = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders];
     sCommunityHighlights = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlights];
@@ -2849,6 +2889,7 @@ static void initializeRandomSources() {
     }
     sModernSubredditDividers = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers];
     sSubredditListEnhancements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditListEnhancements];
+    sHideSubredditListDescriptions = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideSubredditListDescriptions];
     sEnableFlairColors = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFlairColors];
     sEnableBulkTranslation = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableBulkTranslation];
     sAutoTranslateOnAppear = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoTranslateOnAppear];
@@ -2910,6 +2951,7 @@ static void initializeRandomSources() {
     // installed below — in the simulator the keychain is virtualized by those
     // hooks, so reading before they're in place returns nothing.
     sWebJSONEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyWebJSONEnabled];
+    sPollsFeatureEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPollsEnabled];
     // Surface a revoked/expired cookie (detected response-side in
     // ApolloWebJSONNoteResponse) as a re-login prompt wherever the user is.
     [[NSNotificationCenter defaultCenter] addObserverForName:ApolloWebJSONSessionExpiredNotification

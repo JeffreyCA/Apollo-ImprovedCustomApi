@@ -801,14 +801,28 @@ void ApolloWebJSONRepairPoisonedAccountBlobs(void) {
                 ApolloLog(@"[WebJSON] Stubbed empty invited-moderators list (no cookie-compatible endpoint)");
             }
         } @catch (NSException *e) { ApolloLog(@"[WebJSON] invited-moderators stub failed: %@", e); }
-        // Flair-template lists are OAuth-only (www 404s for cookie auth) — see
-        // ApolloWebJSONShouldStubFlairList. Empty list = no flair options in
-        // the composer, instead of a hung Submit drawer.
+        // Flair-template lists reject cookie auth on www (404) — but the
+        // session's own token_v2 cookie is a valid OAuth bearer for them, so
+        // recover the real list from oauth.reddit.com before falling back to
+        // an empty one (no flair options, but the Submit drawer still loads
+        // instead of hanging). Either way the 404's validation error is
+        // cleared, which is also what keeps RDK's 401/404 retry machinery out
+        // of the picture. This serializer runs on AFNetworking's background
+        // processing queue, so the rescue's bounded synchronous fetches are
+        // safe here. See ApolloWebJSONRescueFlairList.
         @try {
-            if (ApolloWebJSONShouldStubFlairList(response)) {
-                obj = @[];
+            if (ApolloWebJSONShouldStubFlairList(response) && ![obj isKindOfClass:[NSArray class]]) {
+                NSArray *rescued = nil;
+                @try { rescued = ApolloWebJSONRescueFlairList((NSHTTPURLResponse *)response); }
+                @catch (NSException *e) { ApolloLog(@"[WebJSON] flair rescue failed: %@", e); }
+                obj = rescued ?: @[];
                 if (error) *error = nil;
-                ApolloLog(@"[WebJSON] Stubbed empty flair list for %@ (OAuth-only endpoint)", ((NSHTTPURLResponse *)response).URL.path);
+                if (rescued) {
+                    ApolloLog(@"[WebJSON] Recovered %lu flair template(s) for %@ via web-session bearer",
+                              (unsigned long)rescued.count, ((NSHTTPURLResponse *)response).URL.path);
+                } else {
+                    ApolloLog(@"[WebJSON] Stubbed empty flair list for %@ (no usable web bearer)", ((NSHTTPURLResponse *)response).URL.path);
+                }
             }
         } @catch (NSException *e) { ApolloLog(@"[WebJSON] flair-list stub failed: %@", e); }
     }
