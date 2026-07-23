@@ -102,7 +102,6 @@ static const void *kApolloHLOriginalHeaderKey  = &kApolloHLOriginalHeaderKey; //
 static const void *kApolloHLSubredditKey       = &kApolloHLSubredditKey;      // NSString subreddit currently shown
 static const void *kApolloHLSignatureKey       = &kApolloHLSignatureKey;      // NSString carousel-content signature
 static const void *kApolloHLManagedTableKey    = &kApolloHLManagedTableKey;   // BOOL on the UITableView
-static const void *kApolloHLManagedVCKey       = &kApolloHLManagedVCKey;      // weak-ish VC on the table
 static const void *kApolloHLRewrapInProgressKey = &kApolloHLRewrapInProgressKey; // BOOL guard on the table
 static const void *kApolloHLWrapperMarkerKey   = &kApolloHLWrapperMarkerKey;  // BOOL on the wrapper view
 static const void *kApolloHLTeardownMarkerKey  = &kApolloHLTeardownMarkerKey; // BOOL on the VC
@@ -1039,6 +1038,7 @@ static void ApolloHLToggleCollapsed(NSString *sub); // fwd (defined after ApplyI
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, copy) NSString *signature;
 @property (nonatomic, copy) NSString *subreddit; // for the collapse toggle
+@property (nonatomic, weak) UIViewController *hostViewController;
 @end
 @implementation ApolloHLCarouselView
 // Tapping the title row toggles (and persists) the collapsed state for this sub.
@@ -1320,7 +1320,7 @@ static void ApolloHLRestoreStandaloneHeader(UIViewController *vc) {
     }
     if (tableView) {
         objc_setAssociatedObject(tableView, kApolloHLManagedTableKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(tableView, kApolloHLManagedVCKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        objc_setAssociatedObject(tableView, kApolloHLCarouselKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(tableView, kApolloHLRewrapInProgressKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     objc_setAssociatedObject(vc, kApolloHLCarouselKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1426,13 +1426,16 @@ static void ApolloHLInstallCarousel(UIViewController *vc, UITableView *tableView
         tableView.tableHeaderView = wrapper;
         objc_setAssociatedObject(tableView, kApolloHLRewrapInProgressKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(tableView, kApolloHLManagedTableKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(tableView, kApolloHLManagedVCKey, vc, OBJC_ASSOCIATION_ASSIGN);
+        objc_setAssociatedObject(tableView, kApolloHLCarouselKey,
+                                 objc_getAssociatedObject(vc, kApolloHLCarouselKey),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return;
     }
 
     // Build fresh.
     ApolloHLCarouselView *carousel = ApolloHLBuildCarousel(subreddit, items, width);
     if (!carousel) return;
+    carousel.hostViewController = vc;
 
     UIView *currentHeader = tableView.tableHeaderView;
     // On a REBUILD (collapse toggle, web upgrade) the live header is already OUR
@@ -1450,7 +1453,7 @@ static void ApolloHLInstallCarousel(UIViewController *vc, UITableView *tableView
     objc_setAssociatedObject(vc, kApolloHLSignatureKey, signature, OBJC_ASSOCIATION_COPY_NONATOMIC);
 
     objc_setAssociatedObject(tableView, kApolloHLManagedTableKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(tableView, kApolloHLManagedVCKey, vc, OBJC_ASSOCIATION_ASSIGN);
+    objc_setAssociatedObject(tableView, kApolloHLCarouselKey, carousel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     objc_setAssociatedObject(tableView, kApolloHLRewrapInProgressKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     tableView.tableHeaderView = newWrapper;
@@ -2063,7 +2066,8 @@ static void ApolloHLCollapseOrphanSeparators(UIViewController *vc) {
     %orig;
     if (!sCommunityHighlights || sShowSubredditHeaders) return;
     if (![objc_getAssociatedObject(self, kApolloHLManagedTableKey) boolValue]) return;
-    UIViewController *vc = objc_getAssociatedObject(self, kApolloHLManagedVCKey);
+    ApolloHLCarouselView *carousel = objc_getAssociatedObject(self, kApolloHLCarouselKey);
+    UIViewController *vc = carousel.hostViewController;
     if (!vc) return;
     NSString *installed = objc_getAssociatedObject(vc, kApolloHLSubredditKey); // carousel's sub
     if (installed.length == 0) return;
@@ -2092,8 +2096,8 @@ static void ApolloHLCollapseOrphanSeparators(UIViewController *vc) {
     if (tableHeaderView && objc_getAssociatedObject(tableHeaderView, kApolloHLWrapperMarkerKey)) { %orig; return; }
     if (!sCommunityHighlights || sShowSubredditHeaders) { %orig; return; }
 
-    UIViewController *vc = objc_getAssociatedObject(self, kApolloHLManagedVCKey);
-    ApolloHLCarouselView *carousel = objc_getAssociatedObject(vc, kApolloHLCarouselKey);
+    ApolloHLCarouselView *carousel = objc_getAssociatedObject(self, kApolloHLCarouselKey);
+    UIViewController *vc = carousel.hostViewController;
     if (!vc || !carousel) { %orig; return; }
 
     // Re-wrap: stack our carousel above whatever Apollo is installing.

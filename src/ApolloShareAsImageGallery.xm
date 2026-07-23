@@ -61,34 +61,15 @@ static id ApolloShareIvarObject(id obj, const char *name) {
     return value;
 }
 
-// Writes an object into a Swift STRONG ivar with balanced ARC ownership.
-//
-// object_setIvar() stores the raw pointer but does NOT add the +1 retain that a
-// Swift `strong` ivar slot is expected to own. When the host object is later
-// deallocated, Swift's deinit releases every strong ivar — including ours —
-// which over-releases the value we stored and produces a delayed EXC_BAD_ACCESS.
-//
-// To balance that future release we CFRetain the new value (so the slot truly
-// owns +1), and CFRelease whatever was already in the slot (we're taking over
-// its ownership). This mirrors what an ARC strong-property setter does.
-//
-// NOTE: this balance intentionally relies on object_setIvar performing a RAW
-// store (no ARC retain/release) for these Swift `strong` ivars, which holds
-// while the runtime reports their memory management as "unknown". If a future
-// Swift/ObjC runtime ever reports them as strong, object_setIvar would itself
-// objc_storeStrong (retain new / release old), and the CFRetain/CFRelease here
-// would over-release `previous`. Re-check this assumption if it ever regresses
-// across iOS versions.
+// Swift-emitted object ivars can report unknown ownership to the Objective-C
+// runtime. Use the strong-default setter so known strong/weak metadata is
+// honored and an unknown slot still retains the new value and releases the old.
 static void ApolloShareSetIvarObject(id obj, const char *name, id value) {
     if (!obj || !name) return;
     Ivar ivar = class_getInstanceVariable(object_getClass(obj), name);
     if (!ivar) return;
-    @try {
-        id previous = object_getIvar(obj, ivar);
-        if (value) CFRetain((__bridge CFTypeRef)value);   // slot now owns +1 on the new value
-        object_setIvar(obj, ivar, value);
-        if (previous) CFRelease((__bridge CFTypeRef)previous); // release the value we replaced
-    } @catch (__unused NSException *e) {}
+    @try { object_setIvarWithStrongDefault(obj, ivar, value); }
+    @catch (__unused NSException *e) {}
 }
 
 // Swift Bool ivars are a single byte at the ivar offset; object_setIvar can't

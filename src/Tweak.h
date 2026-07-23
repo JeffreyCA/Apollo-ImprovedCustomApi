@@ -1,12 +1,5 @@
 #import <Foundation/Foundation.h>
 
-@interface ShareUrlTask : NSObject
-
-@property (atomic, strong) NSURLSessionDataTask *activeTask;
-@property (atomic, strong) NSMutableArray *pendingCompletions;
-@property (atomic, copy) NSString *resolvedURL;
-@end
-
 @interface RDKClient : NSObject
 + (instancetype)sharedClient;
 - (id)currentUser;

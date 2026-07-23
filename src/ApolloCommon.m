@@ -7,6 +7,66 @@
 #import <objc/runtime.h>
 #import <OSLog/OSLog.h>
 #import <os/lock.h>
+#import <Security/Security.h>
+
+#pragma mark - Security dictionaries
+
+CFDictionaryRef ApolloCreateGenericPasswordIdentity(CFStringRef service,
+                                                     CFStringRef account) {
+    const void *keys[] = { kSecClass, kSecAttrService, kSecAttrAccount };
+    const void *values[] = { kSecClassGenericPassword, service, account };
+    return CFDictionaryCreate(kCFAllocatorDefault, keys, values, 3,
+                              &kCFTypeDictionaryKeyCallBacks,
+                              &kCFTypeDictionaryValueCallBacks);
+}
+
+CFDictionaryRef ApolloCreateGenericPasswordDataQuery(CFStringRef service,
+                                                      CFStringRef account) {
+    // kSecMatchLimitOne is the default, so spelling it out only makes the
+    // dictionary larger and costs another retain/hash during construction.
+    const void *keys[] = { kSecClass, kSecAttrService, kSecAttrAccount, kSecReturnData };
+    const void *values[] = { kSecClassGenericPassword, service, account, kCFBooleanTrue };
+    return CFDictionaryCreate(kCFAllocatorDefault, keys, values, 4,
+                              &kCFTypeDictionaryKeyCallBacks,
+                              &kCFTypeDictionaryValueCallBacks);
+}
+
+static CFDictionaryRef ApolloCreateGenericPasswordDataAdd(CFStringRef service,
+                                                           CFStringRef account,
+                                                           NSData *data,
+                                                           CFStringRef accessible) CF_RETURNS_RETAINED {
+    const void *keys[] = {
+        kSecClass, kSecAttrService, kSecAttrAccount, kSecValueData, kSecAttrAccessible,
+    };
+    const void *values[] = {
+        kSecClassGenericPassword, service, account, (__bridge CFDataRef)data, accessible,
+    };
+    return CFDictionaryCreate(kCFAllocatorDefault, keys, values, 5,
+                              &kCFTypeDictionaryKeyCallBacks,
+                              &kCFTypeDictionaryValueCallBacks);
+}
+
+OSStatus ApolloUpsertGenericPasswordData(CFStringRef service,
+                                         CFStringRef account,
+                                         NSData *data,
+                                         CFStringRef accessible) {
+    CFDictionaryRef identity = ApolloCreateGenericPasswordIdentity(service, account);
+    NSDictionary *update = @{ (__bridge id)kSecValueData: data };
+    OSStatus status = SecItemUpdate(identity, (__bridge CFDictionaryRef)update);
+    if (status == errSecItemNotFound) {
+        CFDictionaryRef add =
+            ApolloCreateGenericPasswordDataAdd(service, account, data, accessible);
+        status = SecItemAdd(add, NULL);
+        CFRelease(add);
+        // Another writer may have inserted the item between our update and
+        // add. Retry the update once so that benign race still succeeds.
+        if (status == errSecDuplicateItem) {
+            status = SecItemUpdate(identity, (__bridge CFDictionaryRef)update);
+        }
+    }
+    CFRelease(identity);
+    return status;
+}
 
 #pragma mark - Logging
 
@@ -169,6 +229,159 @@ NSString *ApolloCollectLogs(void) {
 
 NSString *ApolloCollectAILogs(void) {
     return ApolloCollectLogsFiltered(YES);
+}
+
+#pragma mark - Bounded data requests
+
+static NSString *const kApolloBoundedDataErrorDomain = @"ApolloBoundedData";
+
+@interface ApolloBoundedDataRecord : NSObject
+@property (nonatomic) NSUInteger maximumBytes;
+@property (nonatomic, strong) NSMutableData *data;
+@property (nonatomic, strong) NSHTTPURLResponse *response;
+@property (nonatomic, strong) NSError *failure;
+@property (nonatomic, copy) ApolloBoundedDataResponseValidator responseValidator;
+@property (nonatomic, strong) dispatch_queue_t completionQueue;
+@property (nonatomic, copy) ApolloBoundedDataCompletion completion;
+@end
+
+@implementation ApolloBoundedDataRecord
+@end
+
+@interface ApolloBoundedDataCoordinator : NSObject <NSURLSessionDataDelegate>
+@property (nonatomic, strong) NSURLSession *session;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, ApolloBoundedDataRecord *> *records;
++ (instancetype)sharedCoordinator;
+- (NSURLSessionDataTask *)startRequest:(NSURLRequest *)request
+                          maximumBytes:(NSUInteger)maximumBytes
+                     responseValidator:(ApolloBoundedDataResponseValidator)responseValidator
+                       completionQueue:(dispatch_queue_t)completionQueue
+                            completion:(ApolloBoundedDataCompletion)completion;
+@end
+
+@implementation ApolloBoundedDataCoordinator
+
++ (instancetype)sharedCoordinator {
+    static ApolloBoundedDataCoordinator *coordinator;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ coordinator = [ApolloBoundedDataCoordinator new]; });
+    return coordinator;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _records = [NSMutableDictionary dictionary];
+        NSOperationQueue *queue = [NSOperationQueue new];
+        queue.name = @"com.apolloreborn.bounded-data";
+        queue.maxConcurrentOperationCount = 1;
+        queue.qualityOfService = NSQualityOfServiceUtility;
+        NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
+        _session = [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:queue];
+    }
+    return self;
+}
+
+- (NSError *)errorWithCode:(NSInteger)code description:(NSString *)description {
+    return [NSError errorWithDomain:kApolloBoundedDataErrorDomain
+                               code:code
+                           userInfo:@{NSLocalizedDescriptionKey: description ?: @"The response could not be loaded"}];
+}
+
+- (NSURLSessionDataTask *)startRequest:(NSURLRequest *)request
+                          maximumBytes:(NSUInteger)maximumBytes
+                     responseValidator:(ApolloBoundedDataResponseValidator)responseValidator
+                       completionQueue:(dispatch_queue_t)completionQueue
+                            completion:(ApolloBoundedDataCompletion)completion {
+    if (![request isKindOfClass:[NSURLRequest class]] || !request.URL || maximumBytes == 0 || !completion) {
+        if (completion) {
+            dispatch_async(completionQueue ?: dispatch_get_main_queue(), ^{
+                completion(nil, nil, [self errorWithCode:1 description:@"Invalid bounded-data request"]);
+            });
+        }
+        return nil;
+    }
+
+    NSURLSessionDataTask *task = [self.session dataTaskWithRequest:request];
+    ApolloBoundedDataRecord *record = [ApolloBoundedDataRecord new];
+    record.maximumBytes = maximumBytes;
+    record.data = [NSMutableData data];
+    record.responseValidator = [responseValidator copy];
+    record.completionQueue = completionQueue ?: dispatch_get_main_queue();
+    record.completion = [completion copy];
+    @synchronized (self) { self.records[@(task.taskIdentifier)] = record; }
+    [task resume];
+    return task;
+}
+
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask
+ didReceiveResponse:(NSURLResponse *)response
+  completionHandler:(void (^)(NSURLSessionResponseDisposition disposition))completionHandler {
+    ApolloBoundedDataRecord *record = nil;
+    @synchronized (self) { record = self.records[@(dataTask.taskIdentifier)]; }
+    NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+    record.response = http;
+
+    NSError *failure = nil;
+    if (!record || !http || http.statusCode < 200 || http.statusCode >= 300) {
+        failure = [self errorWithCode:2 description:@"The server returned an HTTP error"];
+    } else if (response.expectedContentLength > 0 &&
+               (unsigned long long)response.expectedContentLength > record.maximumBytes) {
+        failure = [self errorWithCode:3 description:@"The response exceeded its size limit"];
+    } else if (record.responseValidator) {
+        failure = record.responseValidator(http);
+    }
+
+    if (failure) {
+        record.failure = failure;
+        completionHandler(NSURLSessionResponseCancel);
+        return;
+    }
+    completionHandler(NSURLSessionResponseAllow);
+}
+
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
+    ApolloBoundedDataRecord *record = nil;
+    @synchronized (self) { record = self.records[@(dataTask.taskIdentifier)]; }
+    if (!record || record.failure || data.length == 0) return;
+    if (data.length > record.maximumBytes - MIN(record.data.length, record.maximumBytes)) {
+        record.failure = [self errorWithCode:4 description:@"The response exceeded its size limit"];
+        [dataTask cancel];
+        return;
+    }
+    [record.data appendData:data];
+}
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+    ApolloBoundedDataRecord *record = nil;
+    @synchronized (self) {
+        NSNumber *key = @(task.taskIdentifier);
+        record = self.records[key];
+        [self.records removeObjectForKey:key];
+    }
+    if (!record) return;
+
+    NSData *result = !record.failure && !error ? [record.data copy] : nil;
+    NSError *finalError = record.failure ?: error;
+    ApolloBoundedDataCompletion completion = record.completion;
+    NSHTTPURLResponse *response = record.response;
+    dispatch_async(record.completionQueue ?: dispatch_get_main_queue(), ^{
+        completion(result, response, finalError);
+    });
+}
+
+@end
+
+NSURLSessionDataTask *ApolloStartBoundedDataRequest(NSURLRequest *request,
+                                                    NSUInteger maximumBytes,
+                                                    ApolloBoundedDataResponseValidator responseValidator,
+                                                    dispatch_queue_t completionQueue,
+                                                    ApolloBoundedDataCompletion completion) {
+    return [[ApolloBoundedDataCoordinator sharedCoordinator] startRequest:request
+                                                              maximumBytes:maximumBytes
+                                                         responseValidator:responseValidator
+                                                           completionQueue:completionQueue
+                                                                completion:completion];
 }
 
 // Get the SDK version from the main binary's LC_BUILD_VERSION load command

@@ -25,7 +25,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-#define ChatsFilterLog(fmt, ...) ApolloLog(@"[ChatsFilter] " fmt, ##__VA_ARGS__)
+#define ChatsFilterLog(fmt, ...) ApolloLogDebug(@"[ChatsFilter] " fmt, ##__VA_ARGS__)
 
 static NSInteger sMessagesSection = -1;     // detected section index of the "Messages" row
 static NSInteger sMessagesRow = -1;         // detected row index of "Messages" within that section
@@ -119,7 +119,7 @@ static void ApolloWarnIfUnhandledRowDelegates(id vc) {
         ];
         for (NSString *sel in risky) {
             if ([vc respondsToSelector:NSSelectorFromString(sel)])
-                ChatsFilterLog(@"WARNING: InboxListViewController now implements %@ — the Direct Chat row shift may mis-index it; remap it too.", sel);
+                ApolloLog(@"[ChatsFilter] WARNING: InboxListViewController now implements %@ — the Direct Chat row shift may mis-index it; remap it too.", sel);
         }
     });
 }
@@ -601,5 +601,5 @@ static void ApolloInboxCellApplyAvatar(id cellNode) {
 %end
 
 %ctor {
-    ChatsFilterLog(@"module loaded");
+    ApolloLog(@"[ChatsFilter] module loaded");
 }

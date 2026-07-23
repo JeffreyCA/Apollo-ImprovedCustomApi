@@ -1,18 +1,49 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <os/log.h>
+#import <Security/SecBase.h>
 
 // On iOS 26, NSLog redacts strings, so use os_log: https://developer.apple.com/documentation/ios-ipados-release-notes/ios-ipados-26-release-notes#NSLog
 // Uses a dedicated subsystem so OSLogStore can efficiently filter our entries.
-#define ApolloLog(fmt, ...) do { \
+#define ApolloLogWithType(type, fmt, ...) do { \
     NSString *logMessage = [NSString stringWithFormat:@"[ApolloFix] " fmt, ##__VA_ARGS__]; \
-    os_log_with_type(ApolloFixLog(), OS_LOG_TYPE_DEBUG, "%{public}s", [logMessage UTF8String]); \
+    os_log_with_type(ApolloFixLog(), type, "%{public}s", [logMessage UTF8String]); \
 } while(0)
+#define ApolloLog(fmt, ...) ApolloLogWithType(OS_LOG_TYPE_DEFAULT, fmt, ##__VA_ARGS__)
+#define ApolloLogDebug(fmt, ...) ApolloLogWithType(OS_LOG_TYPE_DEBUG, fmt, ##__VA_ARGS__)
 
 __BEGIN_DECLS
 os_log_t ApolloFixLog(void);
 NSString *ApolloCollectLogs(void);
 NSString *ApolloCollectAILogs(void);
+
+// One-shot immutable Security dictionaries for the generic-password shapes
+// shared by the tweak. Callers own the returned dictionary.
+CFDictionaryRef ApolloCreateGenericPasswordIdentity(CFStringRef service,
+                                                     CFStringRef account) CF_RETURNS_RETAINED;
+CFDictionaryRef ApolloCreateGenericPasswordDataQuery(CFStringRef service,
+                                                      CFStringRef account) CF_RETURNS_RETAINED;
+OSStatus ApolloUpsertGenericPasswordData(CFStringRef service,
+                                         CFStringRef account,
+                                         NSData *data,
+                                         CFStringRef accessible);
+
+// Starts a data request whose response is bounded before and during transfer.
+// HTTP errors and an advertised/actual body larger than maximumBytes fail the
+// task. responseValidator may reject a 2xx response (for example by MIME type)
+// before any bytes are accepted. Completion is delivered exactly once on
+// completionQueue (the main queue when nil), including cancellation.
+typedef NSError *(^ApolloBoundedDataResponseValidator)(NSHTTPURLResponse *response);
+typedef void (^ApolloBoundedDataCompletion)(NSData *data,
+                                            NSHTTPURLResponse *response,
+                                            NSError *error);
+NSURLSessionDataTask *ApolloStartBoundedDataRequest(
+    NSURLRequest *request,
+    NSUInteger maximumBytes,
+    ApolloBoundedDataResponseValidator responseValidator,
+    dispatch_queue_t completionQueue,
+    ApolloBoundedDataCompletion completion);
+
 BOOL IsLiquidGlass(void);
 NSURL *ApolloURLByConvertingResolvedURLToApolloScheme(NSURL *url);
 BOOL ApolloRouteResolvedURLViaApolloScheme(NSURL *resolvedURL);

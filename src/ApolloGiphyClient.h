@@ -12,15 +12,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
-typedef void (^ApolloGiphyDownloadCompletion)(NSData *_Nullable data, NSError *_Nullable error);
-typedef void (^ApolloGiphyFetchCompletion)(NSArray<ApolloGiphyGIF *> *gifs, BOOL hasMore, NSError *_Nullable error);
+typedef void (^ApolloGiphyFetchCompletion)(NSArray<ApolloGiphyGIF *> *gifs, BOOL hasMore,
+                                           NSUInteger nextOffset, NSError *_Nullable error);
 
 @interface ApolloGiphyClient : NSObject
 
 + (NSString *)configuredAPIKey;
-
-+ (void)downloadGIFData:(ApolloGiphyGIF *)gif
-             completion:(ApolloGiphyDownloadCompletion)completion;
 
 + (nullable NSURLSessionDataTask *)fetchTrendingWithOffset:(NSUInteger)offset
                                                 completion:(ApolloGiphyFetchCompletion)completion;

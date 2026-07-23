@@ -960,7 +960,10 @@ static BOOL ApolloExistingKeychainItemHasSameValue(NSDictionary *strippedQuery) 
 
     CFTypeRef existing = NULL;
     OSStatus status = ApolloCopyExistingKeychainItem(dataQuery, &existing);
-    if (status != errSecSuccess || !existing) return NO;
+    if (status != errSecSuccess || !existing) {
+        if (existing) CFRelease(existing);
+        return NO;
+    }
     // A query with kSecReturnAttributes/Ref would return a dictionary/ref instead of
     // bare data here -- guard so that shape isn't mistaken for a value mismatch crash.
     id existingValue = (__bridge_transfer id)existing;
@@ -1415,12 +1418,28 @@ static NSArray<NSString *> *ApolloConfiguredSubredditSources(void) {
     return sources;
 }
 
+static BOOL ApolloSubredditNameIsValid(NSString *name) {
+    static NSRegularExpression *nameExpression;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // Modern community names use 3–21 ASCII letters/digits/underscores,
+        // but Reddit's bundled ecosystem still includes grandfathered two-
+        // character names (for example r/de and r/it) plus r/reddit.com.
+        // Keep those real compatibility cases without accepting any general
+        // path, query, fragment, or other punctuation from a remote source.
+        nameExpression = [NSRegularExpression regularExpressionWithPattern:@"^(?:[A-Za-z0-9][A-Za-z0-9_]{1,20}|reddit\\.com)$"
+                                                                    options:NSRegularExpressionCaseInsensitive error:nil];
+    });
+    if (![name isKindOfClass:[NSString class]] || name.length == 0) return NO;
+    return [nameExpression firstMatchInString:name options:0 range:NSMakeRange(0, name.length)] != nil;
+}
+
 static NSArray<NSString *> *ApolloSubredditLinesFromContent(NSString *content) {
     if (![content isKindOfClass:[NSString class]] || content.length == 0) return @[];
     NSMutableArray<NSString *> *lines = [NSMutableArray array];
     for (NSString *line in [content componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
         NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (trimmed.length > 0) [lines addObject:trimmed];
+        if (ApolloSubredditNameIsValid(trimmed)) [lines addObject:trimmed];
     }
     return lines;
 }
@@ -1428,7 +1447,14 @@ static NSArray<NSString *> *ApolloSubredditLinesFromContent(NSString *content) {
 static BOOL ApolloSubredditContentIsValid(NSString *content) {
     if (![content isKindOfClass:[NSString class]]) return NO;
     if ([content lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > kApolloSubredditSourceMaximumBytes) return NO;
-    return ApolloSubredditLinesFromContent(content).count > 0;
+    NSUInteger nonemptyLineCount = 0;
+    for (NSString *line in [content componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length == 0) continue;
+        nonemptyLineCount++;
+        if (!ApolloSubredditNameIsValid(trimmed)) return NO;
+    }
+    return nonemptyLineCount > 0;
 }
 
 // Persist only currently configured URLs. This both stores last-known-good
@@ -1472,6 +1498,16 @@ static NSMutableSet<NSString *> *ApolloSubredditSourcesInFlight(void) {
     return sources;
 }
 
+static dispatch_queue_t ApolloSubredditSourceCompletionQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("com.apolloreborn.subreddit-sources", DISPATCH_QUEUE_SERIAL);
+        dispatch_set_target_queue(queue, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    });
+    return queue;
+}
+
 static void ApolloRefreshSubredditSource(NSString *source) {
     if (![source isKindOfClass:[NSString class]] || source.length == 0) return;
     NSURL *url = [NSURL URLWithString:source];
@@ -1490,34 +1526,30 @@ static void ApolloRefreshSubredditSource(NSString *source) {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
                                                             cachePolicy:NSURLRequestUseProtocolCachePolicy
                                                         timeoutInterval:5.0];
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
-                                                                 completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-        if (error || http.statusCode < 200 || http.statusCode >= 300 ||
-            data.length == 0 || data.length > kApolloSubredditSourceMaximumBytes) {
-            ApolloLog(@"[SubredditSources] refresh rejected host=%@ status=%ld bytes=%lu err=%@",
-                      url.host ?: @"(invalid)", (long)http.statusCode, (unsigned long)data.length,
-                      error.localizedDescription ?: @"nil");
+    ApolloStartBoundedDataRequest(request, kApolloSubredditSourceMaximumBytes, nil,
+                                  ApolloSubredditSourceCompletionQueue(),
+                                  ^(NSData *data, NSHTTPURLResponse *response, NSError *error) {
+        NSString *content = !error && data.length > 0
+            ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+        if (!error && ApolloSubredditContentIsValid(content)) {
+            [subredditListCache setObject:content forKey:source];
+            ApolloPersistSubredditSourceContent(source, content);
+            ApolloLog(@"[SubredditSources] refreshed host=%@ entries=%lu",
+                      url.host ?: @"(invalid)",
+                      (unsigned long)ApolloSubredditLinesFromContent(content).count);
         } else {
-            NSString *content = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-            if (!ApolloSubredditContentIsValid(content)) {
-                ApolloLog(@"[SubredditSources] refresh rejected invalid list host=%@ bytes=%lu",
-                          url.host ?: @"(invalid)", (unsigned long)data.length);
-            } else {
-                [subredditListCache setObject:content forKey:source];
-                ApolloPersistSubredditSourceContent(source, content);
-                ApolloLog(@"[SubredditSources] refreshed host=%@ entries=%lu",
-                          url.host ?: @"(invalid)", (unsigned long)ApolloSubredditLinesFromContent(content).count);
-            }
+            ApolloLog(@"[SubredditSources] refresh rejected host=%@ status=%ld bytes=%lu err=%@",
+                      url.host ?: @"(invalid)", (long)response.statusCode,
+                      (unsigned long)data.length,
+                      error.localizedDescription ?: @"invalid UTF-8 or subreddit name");
         }
 
-        // Keep this source marked in flight through validation and persistence;
-        // otherwise a hook miss in that small window can start a duplicate task.
+        // Keep the source single-flight through validation and last-known-good
+        // persistence so a hook miss cannot race a duplicate request into place.
         @synchronized (ApolloSubredditSourceCacheLock()) {
             [ApolloSubredditSourcesInFlight() removeObject:source];
         }
-    }];
-    [task resume];
+    });
 }
 
 static NSString *ApolloCachedSubredditSourceContent(NSString *source) {
@@ -1818,7 +1850,7 @@ static const char kARCompletion = '\0';
         uint8_t bytes[] = {0x30, 0x01, 0x00};
         [[NSData dataWithBytes:bytes length:sizeof(bytes)] writeToFile:dummyPath atomically:YES];
     }
-    ApolloLog(@"[StoreKit] Spoofing appStoreReceiptURL -> %@", dummyPath);
+    ApolloLogDebug(@"[StoreKit] Spoofing appStoreReceiptURL -> %@", dummyPath);
     return [NSURL fileURLWithPath:dummyPath];
 }
 %end
@@ -2020,10 +2052,18 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
         imgChestAlbumResponder = ApolloImgChestAlbumCreationResponderForRequest(request);
     }
     if (completionHandler && imgChestAlbumResponder) {
-        void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(__unused NSData *data, __unused NSURLResponse *response, __unused NSError *error) {
-            imgChestAlbumResponder(completionHandler);
+        __block __weak NSURLSessionDataTask *proxyTask = nil;
+        void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+            if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) {
+                completionHandler(data, response, error);
+                return;
+            }
+            ApolloImgChestUploadOperation *operation = imgChestAlbumResponder(completionHandler);
+            ApolloImgChestAssociateOperationWithTask(operation, proxyTask);
         };
-        return %orig(ApolloLocalFastFailRequest(@"apollo-imgchest-album"), wrappedHandler);
+        NSURLSessionDataTask *task = %orig(ApolloLocalFastFailRequest(@"apollo-imgchest-album"), wrappedHandler);
+        proxyTask = task;
+        return task;
     }
 
     // Manage Uploads (issue #414): deletes of uploads this tweak created are
@@ -2706,10 +2746,10 @@ static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *contr
 // and fire repeatedly without the App Store's rate limiting. Suppress both APIs.
 %hook SKStoreReviewController
 + (void)requestReview {
-    ApolloLog(@"[StoreKit] Suppressing SKStoreReviewController requestReview");
+    ApolloLogDebug(@"[StoreKit] Suppressing SKStoreReviewController requestReview");
 }
 + (void)requestReviewInScene:(UIWindowScene *)windowScene {
-    ApolloLog(@"[StoreKit] Suppressing SKStoreReviewController requestReviewInScene:");
+    ApolloLogDebug(@"[StoreKit] Suppressing SKStoreReviewController requestReviewInScene:");
 }
 %end
 

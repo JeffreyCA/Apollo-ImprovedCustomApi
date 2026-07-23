@@ -1147,10 +1147,10 @@ static void ApolloSubredditIndexInstallStarProxyForCell(UITableViewCell *cell, U
 
     if (![objc_getAssociatedObject(cell, &kApolloSubredditStarProxyLoggedKey) boolValue]) {
         objc_setAssociatedObject(cell, &kApolloSubredditStarProxyLoggedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        ApolloLog(@"[SubredditIndex] star-proxy-installed subreddit=%@ frame=%@ native=%@",
-                  proxy.subredditName ?: @"(unknown)",
-                  NSStringFromCGRect(proxy.frame),
-                  NSStringFromClass([nativeControl class]));
+        ApolloLogDebug(@"[SubredditIndex] star-proxy-installed subreddit=%@ frame=%@ native=%@",
+                       proxy.subredditName ?: @"(unknown)",
+                       NSStringFromCGRect(proxy.frame),
+                       NSStringFromClass([nativeControl class]));
     }
 }
 
@@ -1204,10 +1204,10 @@ static void ApolloSubredditIndexInstallOrUpdate(UITableView *tableView) {
 
     if (![objc_getAssociatedObject(tableView, &kApolloSubredditIndexLoggedKey) boolValue]) {
         objc_setAssociatedObject(tableView, &kApolloSubredditIndexLoggedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        ApolloLog(@"[SubredditIndex] installed titles=%lu table=%@ vc=%@",
-                  (unsigned long)titles.count,
-                  tableView,
-                  NSStringFromClass([ApolloSubredditIndexOwningViewController(tableView) class]));
+        ApolloLogDebug(@"[SubredditIndex] installed titles=%lu table=%@ vc=%@",
+                       (unsigned long)titles.count,
+                       tableView,
+                       NSStringFromClass([ApolloSubredditIndexOwningViewController(tableView) class]));
     }
 }
 
@@ -1721,7 +1721,7 @@ static void ApolloSubredditIndexStyleHeaderView(UIView *header, UITableView *tab
 
     if (![objc_getAssociatedObject(tableView, &kApolloSubredditHeaderLoggedKey) boolValue]) {
         objc_setAssociatedObject(tableView, &kApolloSubredditHeaderLoggedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        ApolloLog(@"[SubredditIndex] styled-header class=%@ title=%@", NSStringFromClass([header class]), text);
+        ApolloLogDebug(@"[SubredditIndex] styled-header class=%@ title=%@", NSStringFromClass([header class]), text);
     }
 
     // Fill the gap a transparent modern header would otherwise leave by giving the header its

@@ -70,7 +70,6 @@ enum {
 // we only add a trailing row).
 static const void *kApolloPFBlockedExpandedKey   = &kApolloPFBlockedExpandedKey;   // NSNumber BOOL on the VC
 static const void *kApolloPFBlockedNativeCountKey = &kApolloPFBlockedNativeCountKey; // NSNumber on the VC (rows incl. Add)
-static const void *kApolloPFBlockedTableKey       = &kApolloPFBlockedTableKey;       // UITableView (ASSIGN) on the VC
 
 // Our "Blocked Users (N)" toggle is row 0 of the blocked section and Apollo's own
 // rows follow at display index 1..nativeCount (so it all reads as ONE rounded group).
@@ -145,7 +144,6 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
         if (native > 0 && section == native - 1) {
             NSInteger n = %orig; // Apollo's own count (blocked users + "Add User")
             objc_setAssociatedObject(self, kApolloPFBlockedNativeCountKey, @(n), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            objc_setAssociatedObject(self, kApolloPFBlockedTableKey, tableView, OBJC_ASSOCIATION_ASSIGN);
             // Collapsed: just our toggle (1). Expanded: toggle + Apollo's n rows.
             return [objc_getAssociatedObject(self, kApolloPFBlockedExpandedKey) boolValue] ? (n + 1) : 1;
         }
@@ -465,7 +463,7 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
     [[NSUserDefaults standardUserDefaults] setBool:sw.on forKey:UDKeyTagFilterEnabled];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloTagFiltersChangedNotification object:nil];
     // Re-gate the NSFW/Spoiler/Overrides rows' enabled look.
-    UITableView *t = objc_getAssociatedObject(self, kApolloPFBlockedTableKey);
+    UITableView *t = [(UITableViewController *)(id)self tableView];
     if ([t isKindOfClass:[UITableView class]]) {
         NSInteger section = [self apollo_pfNativeSectionCount:t] + 2;
         @try { [t reloadSections:[NSIndexSet indexSetWithIndex:section] withRowAnimation:UITableViewRowAnimationNone]; } @catch (__unused id e) {}
@@ -588,7 +586,7 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
 - (void)setEditing:(BOOL)editing animated:(BOOL)animated {
     %orig;
     if (editing && ![objc_getAssociatedObject(self, kApolloPFBlockedExpandedKey) boolValue]) {
-        UITableView *t = objc_getAssociatedObject(self, kApolloPFBlockedTableKey);
+        UITableView *t = [(UITableViewController *)(id)self tableView];
         if ([t isKindOfClass:[UITableView class]]) [self apollo_pfSetBlockedExpanded:YES table:t];
     }
 }

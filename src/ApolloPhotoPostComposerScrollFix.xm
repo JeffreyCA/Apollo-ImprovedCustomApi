@@ -59,7 +59,6 @@ static char kApolloMediaComposerBodyTextViewKey;
 static char kApolloMediaComposerBodyTextStorageKey;
 static char kApolloMediaComposerBodyLoggedInstallKey;
 static char kApolloMediaComposerBodyTextViewMarkerKey;
-static char kApolloMediaComposerBodyTextViewControllerBoxKey;
 static char kApolloMediaComposerBodyLoggedRedirectKey;
 static char kApolloMediaComposerBodyLoggedCaptureKey;
 static char kApolloMediaComposerBodyRowTargetKey;
@@ -80,7 +79,6 @@ static char kApolloMediaComposerBodyToolbarRestrictionsLoggedKey;
 static char kApolloMediaComposerBodyToolbarButtonOriginalAlphaKey;
 static char kApolloMediaComposerBodyToolbarRetriesScheduledKey;
 static char kApolloMediaComposerBodyEditorFreshOpenKey;
-static char kApolloMediaComposerNativeBodyEditorOwnerKey;
 static char kApolloMediaComposerNativeBodyEditorSavedKey;
 static char kApolloMediaComposerBodyDoneItemKey;
 static char kApolloMediaComposerBodyCancelItemKey;
@@ -105,6 +103,8 @@ static NSMutableSet<NSString *> *sApolloMediaComposerLoggedTextCandidates = nil;
 static NSMutableArray<NSMutableDictionary *> *sApolloMediaComposerPendingVideoContexts = nil;
 static __weak UIViewController *sApolloMediaComposerActiveBodyController = nil;
 static __weak UIViewController *sApolloMediaComposerLastBodyOwnerController = nil;
+static __weak UIViewController *sApolloMediaComposerNativeBodyEditor = nil;
+static __weak UIViewController *sApolloMediaComposerNativeBodyEditorOwner = nil;
 static __strong NSString *sApolloMediaComposerLastBodyText = nil;
 static NSTimeInterval sApolloMediaComposerLastBodyTextAt = 0.0;
 static BOOL sApolloMediaComposerSawBodyOwnerController = NO;
@@ -148,13 +148,6 @@ static void ApolloMediaComposerConfigureNativeBodyEditor(UIViewController *edito
 static void ApolloMediaComposerSaveNativeBodyEditor(UIViewController *editor, NSString *reason, BOOL updatePreview);
 static void ApolloMediaComposerApplyNativeEditorToolbarRestrictions(UIViewController *editor, UIViewController *ownerController, NSString *reason);
 static void ApolloMediaComposerScheduleNativeEditorToolbarRetries(UIViewController *editor, UIViewController *ownerController);
-
-@interface ApolloMediaComposerWeakControllerBox : NSObject
-@property (nonatomic, weak) UIViewController *controller;
-@end
-
-@implementation ApolloMediaComposerWeakControllerBox
-@end
 
 @interface ApolloMediaComposerBodyTextDelegate : NSObject <UITextViewDelegate>
 @property (nonatomic, weak) UIViewController *controller;
@@ -1366,10 +1359,12 @@ static BOOL ApolloMediaComposerTextViewIsBodyEditor(UITextView *textView) {
 static UIViewController *ApolloMediaComposerControllerForBodyTextView(UITextView *textView) {
     if (!ApolloMediaComposerTextViewIsBodyEditor(textView)) return nil;
 
-    ApolloMediaComposerWeakControllerBox *box = objc_getAssociatedObject(textView, &kApolloMediaComposerBodyTextViewControllerBoxKey);
-    UIViewController *controller = box.controller;
-    if (!controller && [textView.delegate isKindOfClass:[ApolloMediaComposerBodyTextDelegate class]]) {
+    UIViewController *controller = nil;
+    if ([textView.delegate isKindOfClass:[ApolloMediaComposerBodyTextDelegate class]]) {
         controller = ((ApolloMediaComposerBodyTextDelegate *)textView.delegate).controller;
+    }
+    if (!controller && textView.tag == ApolloMediaComposerBodyTextViewTag()) {
+        controller = sApolloMediaComposerNativeBodyEditorOwner;
     }
     if (!controller) controller = sApolloMediaComposerActiveBodyController;
     return ApolloMediaComposerCanonicalBodyController(controller) ?: controller;
@@ -1461,8 +1456,8 @@ static void ApolloMediaComposerStoreBodyText(UIViewController *controller, NSStr
 }
 
 static UIViewController *ApolloMediaComposerOwnerForNativeBodyEditor(UIViewController *editor) {
-    ApolloMediaComposerWeakControllerBox *box = objc_getAssociatedObject(editor, &kApolloMediaComposerNativeBodyEditorOwnerKey);
-    UIViewController *ownerController = [box isKindOfClass:[ApolloMediaComposerWeakControllerBox class]] ? box.controller : nil;
+    UIViewController *ownerController =
+        editor == sApolloMediaComposerNativeBodyEditor ? sApolloMediaComposerNativeBodyEditorOwner : nil;
     return ApolloMediaComposerCanonicalBodyController(ownerController) ?: ownerController;
 }
 
@@ -1498,10 +1493,7 @@ static void ApolloMediaComposerSeedNativeBodyEditorTextView(UIViewController *ed
     UITextView *textView = ApolloMediaComposerNativeBodyTextView(editor);
     if (!textView || !ownerController) return;
 
-    ApolloMediaComposerWeakControllerBox *controllerBox = [ApolloMediaComposerWeakControllerBox new];
-    controllerBox.controller = ownerController;
     objc_setAssociatedObject(textView, &kApolloMediaComposerBodyTextViewMarkerKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(textView, &kApolloMediaComposerBodyTextViewControllerBoxKey, controllerBox, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(ownerController, &kApolloMediaComposerBodyTextViewKey, textView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     textView.tag = ApolloMediaComposerBodyTextViewTag();
 
@@ -1954,10 +1946,7 @@ static NSUInteger ApolloMediaComposerMarkNativeBodyTextViewsInView(UIView *rootV
 
     if (!bestTextView || bestScore < 40) return 0;
 
-    ApolloMediaComposerWeakControllerBox *controllerBox = [ApolloMediaComposerWeakControllerBox new];
-    controllerBox.controller = ownerController;
     objc_setAssociatedObject(bestTextView, &kApolloMediaComposerBodyTextViewMarkerKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(bestTextView, &kApolloMediaComposerBodyTextViewControllerBoxKey, controllerBox, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(ownerController, &kApolloMediaComposerBodyTextViewKey, bestTextView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     NSNumber *seeded = objc_getAssociatedObject(bestTextView, &kApolloMediaComposerBodyTextViewSeededKey);
@@ -2258,9 +2247,8 @@ static void ApolloMediaComposerOpenIndependentBodyEditor(UIViewController *contr
         return;
     }
 
-    ApolloMediaComposerWeakControllerBox *controllerBox = [ApolloMediaComposerWeakControllerBox new];
-    controllerBox.controller = ownerController;
-    objc_setAssociatedObject(editor, &kApolloMediaComposerNativeBodyEditorOwnerKey, controllerBox, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    sApolloMediaComposerNativeBodyEditor = editor;
+    sApolloMediaComposerNativeBodyEditorOwner = ownerController;
     objc_setAssociatedObject(editor, &kApolloMediaComposerNativeBodyEditorSavedKey, nil, OBJC_ASSOCIATION_ASSIGN);
     @try { [editor setValue:bodyText ?: @"" forKey:@"startingText"]; } @catch (__unused NSException *e) {}
     @try { [editor setValue:@YES forKey:@"showKeyboardOnAppearanceForTextEntryView"]; } @catch (__unused NSException *e) {}
@@ -2439,7 +2427,6 @@ static void ApolloMediaComposerClearBodyStateForController(UIViewController *con
             objc_setAssociatedObject(textView, &kApolloMediaComposerBodyTextViewSeedingKey, nil, OBJC_ASSOCIATION_ASSIGN);
         }
         objc_setAssociatedObject(textView, &kApolloMediaComposerBodyTextViewMarkerKey, nil, OBJC_ASSOCIATION_ASSIGN);
-        objc_setAssociatedObject(textView, &kApolloMediaComposerBodyTextViewControllerBoxKey, nil, OBJC_ASSOCIATION_ASSIGN);
         objc_setAssociatedObject(textView, &kApolloMediaComposerBodyTextViewSeededKey, nil, OBJC_ASSOCIATION_ASSIGN);
         objc_setAssociatedObject(textView, &kApolloMediaComposerBodyTextViewSeedingKey, nil, OBJC_ASSOCIATION_ASSIGN);
     }

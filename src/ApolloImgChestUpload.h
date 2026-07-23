@@ -5,6 +5,11 @@ __BEGIN_DECLS
 
 typedef void (^ApolloImgChestReply)(NSData *_Nullable data, NSURLResponse *_Nullable response, NSError *_Nullable error);
 
+@interface ApolloImgChestUploadOperation : NSObject
+@property (atomic, readonly, getter=isCancelled) BOOL cancelled;
+- (void)cancel;
+@end
+
 /// YES when an ImgChest API token is configured — uploads require it.
 BOOL ApolloImgChestUploadAvailable(void);
 
@@ -14,18 +19,18 @@ BOOL ApolloImgChestUploadAvailable(void);
 /// value the synthetic Imgur response uses as id/deletehash) and an owned
 /// file is cached briefly so a following Imgur album-creation request can
 /// combine the images into one multi-image ImgChest post.
-void ApolloImgChestUploadData(NSData *data,
-                              NSString *filename,
-                              NSString *mimeType,
-                              void (^completion)(NSURL *_Nullable directLink, NSError *_Nullable error));
+ApolloImgChestUploadOperation *ApolloImgChestUploadData(NSData *data,
+                                                         NSString *filename,
+                                                         NSString *mimeType,
+                                                         void (^completion)(NSURL *_Nullable directLink, NSError *_Nullable error));
 
 /// File-backed variant used by NSURLSession's fromFile: interception. The
 /// source is copied into tweak-owned cache storage before upload, so callers
 /// remain free to remove their temporary file after this function returns.
-void ApolloImgChestUploadFile(NSURL *fileURL,
-                              NSString *filename,
-                              NSString *mimeType,
-                              void (^completion)(NSURL *_Nullable directLink, NSError *_Nullable error));
+ApolloImgChestUploadOperation *ApolloImgChestUploadFile(NSURL *fileURL,
+                                                         NSString *filename,
+                                                         NSString *mimeType,
+                                                         void (^completion)(NSURL *_Nullable directLink, NSError *_Nullable error));
 
 /// Map a CDN image link this tweak just uploaded (cdn.imgchest.com/files/<id>.<ext>) to its short
 /// ImgChest post URL (imgchest.com/p/<post>), via the upload registry. nil if not one of our uploads.
@@ -43,8 +48,14 @@ NSURL *_Nullable ApolloImgChestPostURLForAlbumID(NSString *albumID);
 /// all cached ImgChest uploads, returns a block that asynchronously creates
 /// the combined ImgChest post and replies with a synthetic Imgur album
 /// response (link = imgchest.com/p/<post>). Returns nil when not applicable.
-typedef void (^ApolloImgChestAlbumResponder)(ApolloImgChestReply reply);
+typedef ApolloImgChestUploadOperation *_Nonnull (^ApolloImgChestAlbumResponder)(ApolloImgChestReply reply);
 ApolloImgChestAlbumResponder _Nullable ApolloImgChestAlbumCreationResponderForRequest(NSURLRequest *request);
+
+/// Connect the real asynchronous ImgChest work to Apollo's returned proxy task.
+/// The global NSURLSessionTask cancellation hook calls the companion helper.
+void ApolloImgChestAssociateOperationWithTask(ApolloImgChestUploadOperation *_Nullable operation,
+                                               NSURLSessionTask *_Nullable task);
+void ApolloImgChestCancelOperationAssociatedWithTask(NSURLSessionTask *_Nullable task);
 
 /// Manage Uploads (issue #414): YES when `request` is an Imgur delete whose
 /// deletehash belongs to an upload recorded by this tweak (any provider).

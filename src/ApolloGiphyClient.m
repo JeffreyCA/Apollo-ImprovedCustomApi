@@ -1,7 +1,18 @@
 #import "ApolloGiphyClient.h"
+#import "ApolloCommon.h"
 #import "UserDefaultConstants.h"
 
 static const NSUInteger kApolloGiphyPageSize = 25;
+static const NSUInteger kApolloGiphyMaximumAPIBytes = 2 * 1024 * 1024;
+
+static dispatch_queue_t ApolloGiphyParseQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("com.apolloreborn.giphy-parse", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
 
 @implementation ApolloGiphyGIF
 @end
@@ -18,34 +29,6 @@ static const NSUInteger kApolloGiphyPageSize = 25;
     NSString *urlString = dict[@"url"];
     if (![urlString isKindOfClass:[NSString class]] || urlString.length == 0) return nil;
     return [NSURL URLWithString:urlString];
-}
-
-+ (void)downloadGIFData:(ApolloGiphyGIF *)gif completion:(ApolloGiphyDownloadCompletion)completion {
-    if (!completion) return;
-    if (!gif.downloadURL) {
-        completion(nil, [NSError errorWithDomain:@"ApolloGiphy" code:4 userInfo:@{NSLocalizedDescriptionKey: @"GIF download URL unavailable"}]);
-        return;
-    }
-
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:gif.downloadURL completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (error) {
-                completion(nil, error);
-                return;
-            }
-            NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-            if (http && http.statusCode >= 400) {
-                completion(nil, [NSError errorWithDomain:@"ApolloGiphy" code:http.statusCode userInfo:@{NSLocalizedDescriptionKey: @"GIF download failed"}]);
-                return;
-            }
-            if (data.length == 0) {
-                completion(nil, [NSError errorWithDomain:@"ApolloGiphy" code:5 userInfo:@{NSLocalizedDescriptionKey: @"GIF download returned empty data"}]);
-                return;
-            }
-            completion(data, nil);
-        });
-    }];
-    [task resume];
 }
 
 + (NSURL *)requestURLForPath:(NSString *)path queryItems:(NSArray<NSURLQueryItem *> *)extraItems {
@@ -99,18 +82,19 @@ static const NSUInteger kApolloGiphyPageSize = 25;
 }
 
 + (void)parseResponseData:(NSData *)data
+          requestedOffset:(NSUInteger)requestedOffset
                completion:(ApolloGiphyFetchCompletion)completion {
     if (!completion) return;
 
     if (data.length == 0) {
-        completion(@[], NO, [NSError errorWithDomain:@"ApolloGiphy" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Empty response"}]);
+        completion(@[], NO, requestedOffset, [NSError errorWithDomain:@"ApolloGiphy" code:1 userInfo:@{NSLocalizedDescriptionKey: @"Empty response"}]);
         return;
     }
 
     NSError *jsonError = nil;
     id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
     if (jsonError || ![root isKindOfClass:[NSDictionary class]]) {
-        completion(@[], NO, jsonError ?: [NSError errorWithDomain:@"ApolloGiphy" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Invalid JSON"}]);
+        completion(@[], NO, requestedOffset, jsonError ?: [NSError errorWithDomain:@"ApolloGiphy" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Invalid JSON"}]);
         return;
     }
 
@@ -118,7 +102,7 @@ static const NSUInteger kApolloGiphyPageSize = 25;
     NSNumber *status = meta[@"status"];
     if (status.integerValue != 200) {
         NSString *message = [meta[@"msg"] isKindOfClass:[NSString class]] ? meta[@"msg"] : @"Giphy request failed";
-        completion(@[], NO, [NSError errorWithDomain:@"ApolloGiphy" code:status.integerValue userInfo:@{NSLocalizedDescriptionKey: message}]);
+        completion(@[], NO, requestedOffset, [NSError errorWithDomain:@"ApolloGiphy" code:status.integerValue userInfo:@{NSLocalizedDescriptionKey: message}]);
         return;
     }
 
@@ -130,57 +114,71 @@ static const NSUInteger kApolloGiphyPageSize = 25;
     }
 
     NSDictionary *pagination = [root[@"pagination"] isKindOfClass:[NSDictionary class]] ? root[@"pagination"] : nil;
-    NSNumber *totalCount = pagination[@"total_count"];
-    NSNumber *offset = pagination[@"offset"];
-    NSNumber *count = pagination[@"count"];
+    NSNumber *totalCount = [pagination[@"total_count"] isKindOfClass:[NSNumber class]] ? pagination[@"total_count"] : nil;
+    NSNumber *offset = [pagination[@"offset"] isKindOfClass:[NSNumber class]] ? pagination[@"offset"] : nil;
+    NSNumber *count = [pagination[@"count"] isKindOfClass:[NSNumber class]] ? pagination[@"count"] : nil;
     BOOL hasMore = NO;
-    if (totalCount && offset && count) {
-        hasMore = (offset.integerValue + count.integerValue) < totalCount.integerValue;
+    NSUInteger nextOffset = requestedOffset;
+    if (totalCount && offset && count && totalCount.integerValue >= 0 &&
+        offset.integerValue >= 0 && count.integerValue >= 0) {
+        NSUInteger reportedOffset = offset.unsignedIntegerValue;
+        NSUInteger reportedCount = count.unsignedIntegerValue;
+        nextOffset = reportedOffset > NSUIntegerMax - reportedCount
+            ? NSUIntegerMax : reportedOffset + reportedCount;
+        hasMore = reportedCount > 0 && nextOffset < totalCount.unsignedIntegerValue;
     } else {
-        hasMore = gifs.count >= kApolloGiphyPageSize;
+        nextOffset = requestedOffset > NSUIntegerMax - dataArray.count
+            ? NSUIntegerMax : requestedOffset + dataArray.count;
+        hasMore = dataArray.count >= kApolloGiphyPageSize;
     }
 
-    completion(gifs, hasMore, nil);
+    completion(gifs, hasMore, nextOffset, nil);
 }
 
-+ (NSURLSessionDataTask *)performGET:(NSURL *)url completion:(ApolloGiphyFetchCompletion)completion {
++ (NSURLSessionDataTask *)performGET:(NSURL *)url requestedOffset:(NSUInteger)requestedOffset
+                          completion:(ApolloGiphyFetchCompletion)completion {
     if (!completion) return nil;
     if ([self configuredAPIKey].length == 0) {
-        completion(@[], NO, [NSError errorWithDomain:@"ApolloGiphy" code:401 userInfo:@{NSLocalizedDescriptionKey: @"Giphy API key not configured"}]);
+        completion(@[], NO, requestedOffset, [NSError errorWithDomain:@"ApolloGiphy" code:401 userInfo:@{NSLocalizedDescriptionKey: @"Giphy API key not configured"}]);
         return nil;
     }
     if (!url) {
-        completion(@[], NO, [NSError errorWithDomain:@"ApolloGiphy" code:3 userInfo:@{NSLocalizedDescriptionKey: @"Invalid request URL"}]);
+        completion(@[], NO, requestedOffset, [NSError errorWithDomain:@"ApolloGiphy" code:3 userInfo:@{NSLocalizedDescriptionKey: @"Invalid request URL"}]);
         return nil;
     }
 
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.timeoutInterval = 20.0;
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
+    ApolloBoundedDataResponseValidator validator = ^NSError *(NSHTTPURLResponse *response) {
+        NSString *mime = response.MIMEType.lowercaseString;
+        if ([mime isEqualToString:@"application/json"] || [mime isEqualToString:@"text/json"]) return nil;
+        return [NSError errorWithDomain:@"ApolloGiphy" code:7
+                               userInfo:@{NSLocalizedDescriptionKey: @"Giphy returned an unexpected response"}];
+    };
+    return ApolloStartBoundedDataRequest(request, kApolloGiphyMaximumAPIBytes, validator,
+                                         ApolloGiphyParseQueue(),
+        ^(NSData *data, __unused NSHTTPURLResponse *response, NSError *error) {
             if (error) {
-                completion(@[], NO, error);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    completion(@[], NO, requestedOffset, error);
+                });
                 return;
             }
-            NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-            if (http.statusCode < 200 || http.statusCode >= 300) {
-                NSInteger code = http ? http.statusCode : 6;
-                completion(@[], NO, [NSError errorWithDomain:@"ApolloGiphy" code:code
-                                                     userInfo:@{NSLocalizedDescriptionKey: @"Giphy request failed"}]);
-                return;
-            }
-            [self parseResponseData:data completion:completion];
+            [self parseResponseData:data requestedOffset:requestedOffset
+                         completion:^(NSArray<ApolloGiphyGIF *> *gifs, BOOL hasMore,
+                                      NSUInteger nextOffset, NSError *parseError) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    completion(gifs, hasMore, nextOffset, parseError);
+                });
+            }];
         });
-    }];
-    [task resume];
-    return task;
 }
 
 + (NSURLSessionDataTask *)fetchTrendingWithOffset:(NSUInteger)offset completion:(ApolloGiphyFetchCompletion)completion {
     NSURL *url = [self requestURLForPath:@"trending" queryItems:@[
         [NSURLQueryItem queryItemWithName:@"offset" value:[NSString stringWithFormat:@"%lu", (unsigned long)offset]],
     ]];
-    return [self performGET:url completion:completion];
+    return [self performGET:url requestedOffset:offset completion:completion];
 }
 
 + (NSURLSessionDataTask *)searchWithQuery:(NSString *)query offset:(NSUInteger)offset completion:(ApolloGiphyFetchCompletion)completion {
@@ -193,7 +191,7 @@ static const NSUInteger kApolloGiphyPageSize = 25;
         [NSURLQueryItem queryItemWithName:@"q" value:trimmed],
         [NSURLQueryItem queryItemWithName:@"offset" value:[NSString stringWithFormat:@"%lu", (unsigned long)offset]],
     ]];
-    return [self performGET:url completion:completion];
+    return [self performGET:url requestedOffset:offset completion:completion];
 }
 
 @end

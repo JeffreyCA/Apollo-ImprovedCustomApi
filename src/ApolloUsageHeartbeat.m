@@ -50,9 +50,9 @@ static NSString *const kStateDisabledKey  = @"disabled"; // legacy opt-out mirro
 // already trusts the Keychain to survive re-signs for login sessions, so the
 // seed inherits that same durability (and in the one case it doesn't survive, a
 // re-sign under a different Apple ID, the user is logged out anyway).
-static NSString *const kHeartbeatKeychainService       = @"com.christianselig.Apollo.heartbeat";
-static NSString *const kHeartbeatKeychainSeedAccount    = @"deviceSeed";
-static NSString *const kHeartbeatKeychainOptOutAccount  = @"optOut";
+static CFStringRef const kHeartbeatKeychainService       = CFSTR("com.christianselig.Apollo.heartbeat");
+static CFStringRef const kHeartbeatKeychainSeedAccount    = CFSTR("deviceSeed");
+static CFStringRef const kHeartbeatKeychainOptOutAccount  = CFSTR("optOut");
 
 static NSString *ApolloHeartbeatStatePath(void) {
     static NSString *path;
@@ -102,36 +102,32 @@ static NSString *ApolloHeartbeatVersion(void) {
 
 // ── Device seed (Keychain) ───────────────────────────────────────────────────
 static NSData *ApolloHeartbeatKeychainReadSeed(void) {
-    NSDictionary *query = @{
-        (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: kHeartbeatKeychainService,
-        (__bridge id)kSecAttrAccount: kHeartbeatKeychainSeedAccount,
-        (__bridge id)kSecReturnData:  (__bridge id)kCFBooleanTrue,
-        (__bridge id)kSecMatchLimit:  (__bridge id)kSecMatchLimitOne,
-    };
+    CFDictionaryRef query =
+        ApolloCreateGenericPasswordDataQuery(kHeartbeatKeychainService,
+                                             kHeartbeatKeychainSeedAccount);
     CFTypeRef result = NULL;
-    OSStatus st = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-    if (st != errSecSuccess || !result) return nil;
+    OSStatus st = SecItemCopyMatching(query, &result);
+    CFRelease(query);
+    if (st != errSecSuccess || !result) {
+        if (result) CFRelease(result);
+        return nil;
+    }
+    if (CFGetTypeID(result) != CFDataGetTypeID()) {
+        CFRelease(result);
+        ApolloLog(@"[heartbeat] keychain seed read returned a non-data value");
+        return nil;
+    }
     return (__bridge_transfer NSData *)result;
 }
 
 static void ApolloHeartbeatKeychainWriteSeed(NSData *seed) {
-    NSDictionary *match = @{
-        (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: kHeartbeatKeychainService,
-        (__bridge id)kSecAttrAccount: kHeartbeatKeychainSeedAccount,
-    };
-    NSDictionary *update = @{ (__bridge id)kSecValueData: seed };
-    OSStatus st = SecItemUpdate((__bridge CFDictionaryRef)match, (__bridge CFDictionaryRef)update);
-    if (st == errSecItemNotFound) {
-        NSMutableDictionary *add = [match mutableCopy];
-        add[(__bridge id)kSecValueData] = seed;
-        // AfterFirstUnlock: readable once the device has been unlocked since boot,
-        // matching ApolloWebSessionStore so a foreground beat isn't blocked by a
-        // still-locked keychain right after a reboot.
-        add[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
-        st = SecItemAdd((__bridge CFDictionaryRef)add, NULL);
-    }
+    // AfterFirstUnlock: readable once the device has been unlocked since boot,
+    // matching ApolloWebSessionStore so a foreground beat isn't blocked by a
+    // still-locked keychain right after a reboot.
+    OSStatus st = ApolloUpsertGenericPasswordData(kHeartbeatKeychainService,
+                                                   kHeartbeatKeychainSeedAccount,
+                                                   seed,
+                                                   kSecAttrAccessibleAfterFirstUnlock);
     if (st != errSecSuccess) ApolloLog(@"[heartbeat] keychain seed write failed (OSStatus %d)", (int)st);
 }
 
@@ -188,27 +184,30 @@ static NSString *ApolloMonthlyToken(NSMutableDictionary *state, NSString *month,
 // bug where someone who turned the heartbeat OFF, deleted the app, and
 // reinstalled came back silently opted IN (the on-by-default state).
 static BOOL ApolloHeartbeatKeychainReadOptOut(void) {
-    NSDictionary *query = @{
-        (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: kHeartbeatKeychainService,
-        (__bridge id)kSecAttrAccount: kHeartbeatKeychainOptOutAccount,
-        (__bridge id)kSecMatchLimit:  (__bridge id)kSecMatchLimitOne,
-    };
-    return SecItemCopyMatching((__bridge CFDictionaryRef)query, NULL) == errSecSuccess;
+    CFDictionaryRef query =
+        ApolloCreateGenericPasswordIdentity(kHeartbeatKeychainService,
+                                            kHeartbeatKeychainOptOutAccount);
+    BOOL optedOut = SecItemCopyMatching(query, NULL) == errSecSuccess;
+    CFRelease(query);
+    return optedOut;
 }
 
 static void ApolloHeartbeatKeychainWriteOptOut(BOOL optedOut) {
-    NSDictionary *match = @{
-        (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: kHeartbeatKeychainService,
-        (__bridge id)kSecAttrAccount: kHeartbeatKeychainOptOutAccount,
-    };
-    if (!optedOut) { SecItemDelete((__bridge CFDictionaryRef)match); return; }
-    NSMutableDictionary *add = [match mutableCopy];
-    add[(__bridge id)kSecValueData]      = [@"1" dataUsingEncoding:NSUTF8StringEncoding];
-    add[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
-    OSStatus st = SecItemAdd((__bridge CFDictionaryRef)add, NULL);
-    if (st != errSecSuccess && st != errSecDuplicateItem)
+    if (!optedOut) {
+        CFDictionaryRef match =
+            ApolloCreateGenericPasswordIdentity(kHeartbeatKeychainService,
+                                                kHeartbeatKeychainOptOutAccount);
+        SecItemDelete(match);
+        CFRelease(match);
+        return;
+    }
+    const UInt8 marker = '1';
+    NSData *markerData = [NSData dataWithBytes:&marker length:sizeof(marker)];
+    OSStatus st = ApolloUpsertGenericPasswordData(kHeartbeatKeychainService,
+                                                   kHeartbeatKeychainOptOutAccount,
+                                                   markerData,
+                                                   kSecAttrAccessibleAfterFirstUnlock);
+    if (st != errSecSuccess)
         ApolloLog(@"[heartbeat] keychain opt-out write failed (OSStatus %d)", (int)st);
 }
 

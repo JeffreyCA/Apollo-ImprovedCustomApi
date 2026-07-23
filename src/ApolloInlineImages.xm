@@ -19,7 +19,9 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <ImageIO/ImageIO.h>
 #import <Photos/Photos.h>
+#import <limits.h>
 #import <math.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -149,9 +151,9 @@ static char kApolloCachedOrigChildrenKey;      // NSArray (held strongly so elem
 static char kApolloProvisionalDecompKey;       // NSNumber(BOOL): decomposition built while comment mediaMetadata was unreachable (don't cache)
 static char kApolloImageNodesByURLKey;         // NSMutableDictionary<NSString URL, ASNetworkImageNode> per-MarkdownNode reuse cache
 static char kApolloImageCacheKey;              // NSString stable cache key (set even before deferred image URLs resolve)
+static char kApolloInlineMediaLeafKey;         // NSNumber BOOL — permanent identity marker for tweak-created image/video leaves
 static char kApolloImageURLKey;                // NSURL on the imageNode AND mirrored on the imageNode's view
 static char kApolloOriginalImageURLKey;        // NSURL for tap/long-press when different from the loaded URL (e.g. album URL)
-static char kApolloHostMarkdownNodeKey;        // ApolloWeakHostBox (zeroing-weak) to the host MarkdownNode/LinkButtonNode
 static char kApolloAspectRatioKey;             // NSNumber height/width — NIL if unknown (no URL params yet, no DIDLOAD yet)
 
 // URL → known aspect ratio, surviving node recreation. The per-node
@@ -185,53 +187,29 @@ static char kApolloInlineGIFOverlayReassertKey; // NSNumber BOOL — a play-over
 static char kApolloStackedCardSyncerKey;       // ApolloStackedCardSyncer — keeps the multi-image card peeking behind imageNode
 static char kApolloImageChestItemsKey;         // NSArray<NSDictionary *> direct ImageChest CDN image entries for album pager
 
-// Zeroing-weak holder for the host association. This used to be an
-// OBJC_ASSOCIATION_ASSIGN raw pointer, but the host can be deallocated before
-// the image node (comments table teardown / cell rebuild while an album
-// resolve is still in flight), and any `id`-typed read of a dangling ASSIGN
-// slot crashes in objc_retain. A retained box holding a weak reference reads
-// back as nil instead, from any thread, at any time.
-@interface ApolloWeakHostBox : NSObject
-@property (nonatomic, weak) ASDisplayNode *host;
-@end
-@implementation ApolloWeakHostBox
-@end
-
-static void ApolloSetInlineHostForNode(id node, ASDisplayNode *host) {
-    if (!node) return;
-    if (!host) {
-        objc_setAssociatedObject(node, &kApolloHostMarkdownNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        return;
-    }
-    ApolloWeakHostBox *box = [ApolloWeakHostBox new];
-    box.host = host;
-    objc_setAssociatedObject(node, &kApolloHostMarkdownNodeKey, box, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-
 static ASDisplayNode *ApolloInlineHostForNode(id node) {
-    if (!node) return nil;
-    ApolloWeakHostBox *box = objc_getAssociatedObject(node, &kApolloHostMarkdownNodeKey);
-    return [box isKindOfClass:[ApolloWeakHostBox class]] ? box.host : nil;
+    ASDisplayNode *cursor =
+        [node respondsToSelector:@selector(supernode)] ? [node supernode] : nil;
+    for (NSUInteger depth = 0; cursor && depth < 24; depth++, cursor = cursor.supernode) {
+        NSString *className = NSStringFromClass(cursor.class);
+        if ([className containsString:@"MarkdownNode"] ||
+            [className containsString:@"LinkButtonNode"]) {
+            return cursor;
+        }
+    }
+    return nil;
 }
 
-// NOTE: with the weak box this flips to NO once the host deallocates (the
-// ASSIGN version stayed "YES" on a dangling slot). That's the semantics the
-// call sites want: a hostless image node is no longer inline-hosted.
 static inline BOOL ApolloImageNodeHasInlineHost(id node) {
     return ApolloInlineHostForNode(node) != nil;
 }
 
-// "Is this one of OUR inline media leaves?" — for lifetime-scoped hooks that
-// must keep working after the host association is gone. The host box is wiped
-// by ApolloClearInlineGIFNodeState (which the clearImage hook runs when a
-// collapse drops the node out of the tree and Texture purges its image), but
-// the decomposition can hand the SAME node instance back on re-expand — so a
-// host-based check would skip exactly the nodes the #673 stale-backing heal
-// exists for. kApolloImageCacheKey is stamped once at creation and never
-// cleared; video-thumbnail leaves don't carry it, so fall back to the host.
+// Lifetime hooks must still recognize our leaves after Texture detaches them
+// from the supernode tree during collapse/reuse. This marker is stamped once
+// at creation and intentionally survives image/GIF state cleanup so the same
+// cached node remains eligible when a later clearImage or re-expand occurs.
 static inline BOOL ApolloIsInlineMediaLeafNode(id node) {
-    if (objc_getAssociatedObject(node, &kApolloImageCacheKey) != nil) return YES;
-    return ApolloImageNodeHasInlineHost(node);
+    return [objc_getAssociatedObject(node, &kApolloInlineMediaLeafKey) boolValue];
 }
 
 static void ApolloApplyInlineGIFPlaybackPolicyWithCover(ASNetworkImageNode *imageNode, UIImage *cover, NSUInteger retryIndex);
@@ -239,7 +217,8 @@ static void ApolloStartInlineGIFPlayback(ASNetworkImageNode *imageNode);
 static void ApolloStopInlineGIFPlayback(ASNetworkImageNode *imageNode);
 static BOOL ApolloResumeInlineGIFPlaybackIfPossible(ASNetworkImageNode *imageNode);
 static void ApolloClearInlineGIFNodeState(ASNetworkImageNode *node);
-static void ApolloScheduleCoalescedHostRelayout(ASNetworkImageNode *imageNode);
+static void ApolloScheduleCoalescedHostRelayout(ASNetworkImageNode *imageNode,
+                                                ASDisplayNode *fallbackHost);
 static NSUInteger ApolloInlineGIFGenerationForNode(id node);
 static NSUInteger ApolloInlineGIFBumpGeneration(id node);
 static BOOL ApolloInlineGIFGenerationMatches(id node, NSUInteger generation);
@@ -384,6 +363,21 @@ static NSMutableDictionary<NSString *, id> *ApolloImgurResolverCache(void) {
     dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
     return cache;
 }
+static NSMutableOrderedSet<NSString *> *ApolloImgurResolverCacheOrder(void) {
+    static NSMutableOrderedSet<NSString *> *order; static dispatch_once_t once;
+    dispatch_once(&once, ^{ order = [NSMutableOrderedSet orderedSet]; });
+    return order;
+}
+static NSMutableDictionary<NSString *, NSDate *> *ApolloImgurResolverFailures(void) {
+    static NSMutableDictionary<NSString *, NSDate *> *failures; static dispatch_once_t once;
+    dispatch_once(&once, ^{ failures = [NSMutableDictionary dictionary]; });
+    return failures;
+}
+static NSMutableOrderedSet<NSString *> *ApolloImgurResolverFailureOrder(void) {
+    static NSMutableOrderedSet<NSString *> *order; static dispatch_once_t once;
+    dispatch_once(&once, ^{ order = [NSMutableOrderedSet orderedSet]; });
+    return order;
+}
 static NSMutableDictionary<NSString *, NSMutableArray *> *ApolloImgurResolverPending(void) {
     static NSMutableDictionary<NSString *, NSMutableArray *> *pending; static dispatch_once_t once;
     dispatch_once(&once, ^{ pending = [NSMutableDictionary dictionary]; });
@@ -393,11 +387,39 @@ static const NSTimeInterval kApolloResolverFailureCacheLifetime = 60.0;
 
 // Must be called while holding ApolloImgurResolverLock().
 static BOOL ApolloImgurFreshFailureForKey(NSString *cacheKey) {
-    id cached = ApolloImgurResolverCache()[cacheKey];
+    NSDate *cached = ApolloImgurResolverFailures()[cacheKey];
     if (![cached isKindOfClass:[NSDate class]]) return NO;
-    if ([[NSDate date] timeIntervalSinceDate:(NSDate *)cached] < kApolloResolverFailureCacheLifetime) return YES;
-    [ApolloImgurResolverCache() removeObjectForKey:cacheKey];
+    if ([[NSDate date] timeIntervalSinceDate:cached] < kApolloResolverFailureCacheLifetime) return YES;
+    [ApolloImgurResolverFailures() removeObjectForKey:cacheKey];
+    [ApolloImgurResolverFailureOrder() removeObject:cacheKey];
     return NO;
+}
+
+static void ApolloImgurStoreResolution(NSString *cacheKey, NSDictionary *result) {
+    if (result) {
+        ApolloImgurResolverCache()[cacheKey] = result;
+        [ApolloImgurResolverCacheOrder() removeObject:cacheKey];
+        [ApolloImgurResolverCacheOrder() addObject:cacheKey];
+        [ApolloImgurResolverFailures() removeObjectForKey:cacheKey];
+        [ApolloImgurResolverFailureOrder() removeObject:cacheKey];
+        while (ApolloImgurResolverCacheOrder().count > 256) {
+            NSString *oldest = ApolloImgurResolverCacheOrder().firstObject;
+            [ApolloImgurResolverCacheOrder() removeObjectAtIndex:0];
+            [ApolloImgurResolverCache() removeObjectForKey:oldest];
+        }
+        return;
+    }
+
+    [ApolloImgurResolverCache() removeObjectForKey:cacheKey];
+    [ApolloImgurResolverCacheOrder() removeObject:cacheKey];
+    ApolloImgurResolverFailures()[cacheKey] = [NSDate date];
+    [ApolloImgurResolverFailureOrder() removeObject:cacheKey];
+    [ApolloImgurResolverFailureOrder() addObject:cacheKey];
+    while (ApolloImgurResolverFailureOrder().count > 128) {
+        NSString *oldest = ApolloImgurResolverFailureOrder().firstObject;
+        [ApolloImgurResolverFailureOrder() removeObjectAtIndex:0];
+        [ApolloImgurResolverFailures() removeObjectForKey:oldest];
+    }
 }
 
 // Build a renderable i.imgur.com URL from an Imgur API image dict.
@@ -502,7 +524,7 @@ static NSArray<NSURL *> *ApolloImgurAPIEndpointsForURL(NSURL *url) {
 static void ApolloDeliverImgurResolution(NSString *cacheKey, NSDictionary *result) {
     NSArray *callbacks = nil;
     @synchronized (ApolloImgurResolverLock()) {
-        ApolloImgurResolverCache()[cacheKey] = result ?: (id)[NSDate date];
+        ApolloImgurStoreResolution(cacheKey, result);
         callbacks = [ApolloImgurResolverPending()[cacheKey] copy];
         [ApolloImgurResolverPending() removeObjectForKey:cacheKey];
     }
@@ -541,8 +563,8 @@ static void ApolloFetchImgurEndpointAtIndex(NSArray<NSURL *> *endpoints, NSUInte
             ApolloFetchImgurEndpointAtIndex(endpoints, index + 1, cacheKey);
             return;
         }
-        ApolloLog(@"[InlineImages] Imgur resolved key=%@ url=%@ size=%@x%@",
-                  cacheKey, result[@"url"], result[@"width"] ?: @"?", result[@"height"] ?: @"?");
+        ApolloLogDebug(@"[InlineImages] Imgur resolved key=%@ url=%@ size=%@x%@",
+                       cacheKey, result[@"url"], result[@"width"] ?: @"?", result[@"height"] ?: @"?");
         ApolloDeliverImgurResolution(cacheKey, result);
     }];
     [task resume];
@@ -593,7 +615,7 @@ static void ApolloResolveImgurURL(NSURL *url, void (^completion)(NSDictionary *r
         return;
     }
     if (shouldStartFetch) {
-        ApolloLog(@"[InlineImages] Imgur resolve START key=%@ endpoints=%lu", cacheKey, (unsigned long)endpoints.count);
+        ApolloLogDebug(@"[InlineImages] Imgur resolve START key=%@ endpoints=%lu", cacheKey, (unsigned long)endpoints.count);
         ApolloFetchImgurEndpointAtIndex(endpoints, 0, cacheKey);
     }
 }
@@ -792,18 +814,39 @@ static NSURL *ApolloDashURLFromMediaMetadata(NSDictionary *mediaMetadata, NSURL 
 
 // MARK: - DASH poster extraction (for Reddit hosted video permalinks)
 
-// Cache: assetID → UIImage (process-lifetime success) | NSDate (60s failure)
-// Pending callbacks coalesce concurrent fetches for the same asset.
-static NSMutableDictionary *sApolloDashPosterCache;
+// Successful decoded posters are pressure-aware and costed by bitmap bytes.
+// Failures retain their existing 60-second expiry, while the strong pending
+// table and explicit pump coalesce equal work and cap distinct pipelines.
+static NSCache<NSString *, UIImage *> *sApolloDashPosterCache;
+static NSMutableDictionary<NSString *, NSDate *> *sApolloDashPosterFailures;
+static NSMutableOrderedSet<NSString *> *sApolloDashPosterFailureOrder;
 static NSMutableDictionary<NSString *, NSMutableArray *> *sApolloDashPosterPending;
+static NSMutableArray *sApolloDashPosterQueuedStarts;
+static NSUInteger sApolloDashPosterActiveCount;
 static dispatch_queue_t sApolloDashPosterQueue;
+static const NSUInteger kApolloDashPosterMaximumConcurrentPipelines = 2;
 static void ApolloDashPosterInit(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        sApolloDashPosterCache = [NSMutableDictionary dictionary];
+        sApolloDashPosterCache = [NSCache new];
+        sApolloDashPosterCache.totalCostLimit = 32 * 1024 * 1024;
+        sApolloDashPosterCache.countLimit = 40;
+        sApolloDashPosterFailures = [NSMutableDictionary dictionary];
+        sApolloDashPosterFailureOrder = [NSMutableOrderedSet orderedSet];
         sApolloDashPosterPending = [NSMutableDictionary dictionary];
+        sApolloDashPosterQueuedStarts = [NSMutableArray array];
         sApolloDashPosterQueue = dispatch_queue_create("ca.jeffrey.apollo.dashposter", DISPATCH_QUEUE_SERIAL);
     });
+}
+
+static void ApolloDashPosterPump(void) {
+    while (sApolloDashPosterActiveCount < kApolloDashPosterMaximumConcurrentPipelines &&
+           sApolloDashPosterQueuedStarts.count > 0) {
+        dispatch_block_t start = [sApolloDashPosterQueuedStarts.firstObject copy];
+        [sApolloDashPosterQueuedStarts removeObjectAtIndex:0];
+        sApolloDashPosterActiveCount++;
+        if (start) start();
+    }
 }
 
 // Find the lowest-bitrate video MP4 Representation in a DASH MPD. Reddit
@@ -854,7 +897,7 @@ static BOOL ApolloImageIsMostlyBlack(UIImage *img) {
 // fade in from a logo/black intro, so frame at t=0 is usually black.
 // Calls back on main queue with the UIImage (or nil on failure).
 // Coalesces concurrent calls for the same assetID.
-static void ApolloFetchDashPoster(NSString *assetID, NSURL *dashURL,
+static void ApolloFetchDashPoster(NSString *assetID, NSURL *dashURL, CGSize targetPixelSize,
                                    void (^completion)(UIImage *poster)) {
     if (!assetID.length || !dashURL || !completion) {
         if (completion) completion(nil);
@@ -862,38 +905,64 @@ static void ApolloFetchDashPoster(NSString *assetID, NSURL *dashURL,
     }
     ApolloDashPosterInit();
     void (^cb)(UIImage *) = [completion copy];
+    NSUInteger targetWidth = MAX((NSUInteger)1, (NSUInteger)ceil(targetPixelSize.width / 64.0) * 64);
+    NSUInteger targetHeight = MAX((NSUInteger)1, (NSUInteger)ceil(targetPixelSize.height / 64.0) * 64);
+    NSString *cacheKey = [NSString stringWithFormat:@"%@:%lux%lu", assetID,
+                          (unsigned long)targetWidth, (unsigned long)targetHeight];
 
     dispatch_async(sApolloDashPosterQueue, ^{
-        id cached = sApolloDashPosterCache[assetID];
-        if ([cached isKindOfClass:[NSDate class]] &&
-            [[NSDate date] timeIntervalSinceDate:(NSDate *)cached] >= kApolloResolverFailureCacheLifetime) {
-            [sApolloDashPosterCache removeObjectForKey:assetID];
-            cached = nil;
+        UIImage *cached = [sApolloDashPosterCache objectForKey:cacheKey];
+        NSDate *failureDate = sApolloDashPosterFailures[cacheKey];
+        if (failureDate && [[NSDate date] timeIntervalSinceDate:failureDate] >= kApolloResolverFailureCacheLifetime) {
+            [sApolloDashPosterFailures removeObjectForKey:cacheKey];
+            [sApolloDashPosterFailureOrder removeObject:cacheKey];
+            failureDate = nil;
         }
         if (cached) {
-            UIImage *out = [cached isKindOfClass:[UIImage class]] ? (UIImage *)cached : nil;
-            dispatch_async(dispatch_get_main_queue(), ^{ cb(out); });
+            dispatch_async(dispatch_get_main_queue(), ^{ cb(cached); });
             return;
         }
-        NSMutableArray *pending = sApolloDashPosterPending[assetID];
+        if (failureDate) {
+            dispatch_async(dispatch_get_main_queue(), ^{ cb(nil); });
+            return;
+        }
+        NSMutableArray *pending = sApolloDashPosterPending[cacheKey];
         if (pending) { [pending addObject:cb]; return; }
-        sApolloDashPosterPending[assetID] = [NSMutableArray arrayWithObject:cb];
+        sApolloDashPosterPending[cacheKey] = [NSMutableArray arrayWithObject:cb];
 
         void (^deliver)(UIImage *) = ^(UIImage *result) {
             dispatch_async(sApolloDashPosterQueue, ^{
-                sApolloDashPosterCache[assetID] = result ?: (id)[NSDate date];
-                NSArray *cbs = [sApolloDashPosterPending[assetID] copy];
-                [sApolloDashPosterPending removeObjectForKey:assetID];
+                if (result) {
+                    CGImageRef cgImage = result.CGImage;
+                    NSUInteger cost = cgImage ? CGImageGetBytesPerRow(cgImage) * CGImageGetHeight(cgImage) : 1;
+                    [sApolloDashPosterCache setObject:result forKey:cacheKey cost:cost];
+                    [sApolloDashPosterFailures removeObjectForKey:cacheKey];
+                    [sApolloDashPosterFailureOrder removeObject:cacheKey];
+                } else {
+                    sApolloDashPosterFailures[cacheKey] = [NSDate date];
+                    [sApolloDashPosterFailureOrder removeObject:cacheKey];
+                    [sApolloDashPosterFailureOrder addObject:cacheKey];
+                    while (sApolloDashPosterFailureOrder.count > 128) {
+                        NSString *oldest = sApolloDashPosterFailureOrder.firstObject;
+                        [sApolloDashPosterFailureOrder removeObjectAtIndex:0];
+                        [sApolloDashPosterFailures removeObjectForKey:oldest];
+                    }
+                }
+                NSArray *cbs = [sApolloDashPosterPending[cacheKey] copy];
+                [sApolloDashPosterPending removeObjectForKey:cacheKey];
+                if (sApolloDashPosterActiveCount > 0) sApolloDashPosterActiveCount--;
+                ApolloDashPosterPump();
                 dispatch_async(dispatch_get_main_queue(), ^{
                     for (void (^c)(UIImage *) in cbs) c(result);
                 });
             });
         };
 
-        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:dashURL
-                                                           cachePolicy:NSURLRequestUseProtocolCachePolicy
-                                                       timeoutInterval:8.0];
-        NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+        dispatch_block_t startPipeline = ^{
+            NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:dashURL
+                                                               cachePolicy:NSURLRequestUseProtocolCachePolicy
+                                                           timeoutInterval:8.0];
+            NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
             completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
             NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]]
                 ? ((NSHTTPURLResponse *)response).statusCode : 0;
@@ -918,6 +987,7 @@ static void ApolloFetchDashPoster(NSString *assetID, NSURL *dashURL,
                 }
                 AVAssetImageGenerator *gen = [[AVAssetImageGenerator alloc] initWithAsset:asset];
                 gen.appliesPreferredTrackTransform = YES;
+                gen.maximumSize = CGSizeMake(targetWidth, targetHeight);
                 gen.requestedTimeToleranceBefore = CMTimeMakeWithSeconds(0.5, 600);
                 gen.requestedTimeToleranceAfter = CMTimeMakeWithSeconds(0.5, 600);
 
@@ -963,8 +1033,11 @@ static void ApolloFetchDashPoster(NSString *assetID, NSURL *dashURL,
                     }
                 }];
             }];
-        }];
-        [task resume];
+            }];
+            [task resume];
+        };
+        [sApolloDashPosterQueuedStarts addObject:[startPipeline copy]];
+        ApolloDashPosterPump();
     });
 }
 
@@ -1042,6 +1115,278 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
     return queue;
 }
 
+static const unsigned long long kApolloAlbumMaximumItemBytes = 50ULL * 1024ULL * 1024ULL;
+static const unsigned long long kApolloAlbumMaximumViewerBytes = 150ULL * 1024ULL * 1024ULL;
+static const unsigned long long kApolloAlbumSaveSafetyBytes = 50ULL * 1024ULL * 1024ULL;
+static const unsigned long long kApolloAlbumMaximumSourcePixels = 80ULL * 1000ULL * 1000ULL;
+static const unsigned long long kApolloAlbumMaximumSourceDimension = 32768;
+static const size_t kApolloAlbumMaximumAnimatedFrames = 500;
+static NSString *const kApolloAlbumDownloadErrorDomain = @"ApolloAlbumDownload";
+
+static BOOL ApolloAlbumImageSourceDimensionsAreSafe(CFDictionaryRef properties) {
+    if (!properties) return NO;
+    CFNumberRef widthNumber = (CFNumberRef)CFDictionaryGetValue(properties, kCGImagePropertyPixelWidth);
+    CFNumberRef heightNumber = (CFNumberRef)CFDictionaryGetValue(properties, kCGImagePropertyPixelHeight);
+    long long widthValue = 0;
+    long long heightValue = 0;
+    BOOL valid = widthNumber && CFGetTypeID(widthNumber) == CFNumberGetTypeID() &&
+        heightNumber && CFGetTypeID(heightNumber) == CFNumberGetTypeID() &&
+        CFNumberGetValue(widthNumber, kCFNumberLongLongType, &widthValue) &&
+        CFNumberGetValue(heightNumber, kCFNumberLongLongType, &heightValue);
+    if (!valid || widthValue <= 0 || heightValue <= 0) return NO;
+    unsigned long long width = (unsigned long long)widthValue;
+    unsigned long long height = (unsigned long long)heightValue;
+    return width <= kApolloAlbumMaximumSourceDimension &&
+        height <= kApolloAlbumMaximumSourceDimension &&
+        height <= kApolloAlbumMaximumSourcePixels / width;
+}
+
+static BOOL ApolloAlbumImageSourceIsSafe(CGImageSourceRef source) {
+    if (!source) return NO;
+    size_t frameCount = CGImageSourceGetCount(source);
+    if (frameCount == 0 || frameCount > kApolloAlbumMaximumAnimatedFrames) return NO;
+    for (size_t index = 0; index < frameCount; index++) {
+        CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, index, NULL);
+        if (!properties) return NO;
+        BOOL dimensionsAreSafe = ApolloAlbumImageSourceDimensionsAreSafe(properties);
+        CFRelease(properties);
+        if (!dimensionsAreSafe) return NO;
+    }
+    return YES;
+}
+
+static CFDictionaryRef ApolloAlbumCreateThumbnailOptions(NSUInteger maximumPixelSize) CF_RETURNS_RETAINED {
+    NSInteger maximumPixelValue = (NSInteger)maximumPixelSize;
+    CFNumberRef maximumPixelNumber = CFNumberCreate(kCFAllocatorDefault, kCFNumberNSIntegerType,
+                                                     &maximumPixelValue);
+    const void *keys[] = {
+        kCGImageSourceCreateThumbnailFromImageAlways,
+        kCGImageSourceCreateThumbnailWithTransform,
+        kCGImageSourceShouldCacheImmediately,
+        kCGImageSourceThumbnailMaxPixelSize,
+    };
+    const void *values[] = {
+        kCFBooleanTrue, kCFBooleanTrue, kCFBooleanTrue, maximumPixelNumber,
+    };
+    CFDictionaryRef options = CFDictionaryCreate(kCFAllocatorDefault, keys, values, 4,
+                                                  &kCFTypeDictionaryKeyCallBacks,
+                                                  &kCFTypeDictionaryValueCallBacks);
+    CFRelease(maximumPixelNumber);
+    return options;
+}
+
+static UIImage *ApolloAlbumCreateDisplayImage(NSURL *fileURL, NSUInteger maximumPixelSize) {
+    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)fileURL, NULL);
+    if (!source) return nil;
+    CFDictionaryRef options = ApolloAlbumCreateThumbnailOptions(maximumPixelSize);
+    CGImageRef thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options);
+    CFRelease(options);
+    CFRelease(source);
+    if (!thumbnail) return nil;
+    UIImage *image = [UIImage imageWithCGImage:thumbnail];
+    CGImageRelease(thumbnail);
+    return image;
+}
+
+@interface ApolloAlbumDownloadRecord : NSObject
+@property (nonatomic, strong) NSURL *destinationURL;
+@property (nonatomic, strong) NSFileHandle *outputHandle;
+@property (nonatomic, strong) NSHTTPURLResponse *response;
+@property (nonatomic, strong) NSError *failure;
+@property (nonatomic) unsigned long long receivedBytes;
+@property (nonatomic, copy) void (^completion)(NSURLSessionDataTask *task, NSURL *fileURL,
+                                                  NSHTTPURLResponse *response, NSError *error);
+@end
+@implementation ApolloAlbumDownloadRecord
+@end
+
+// Stream each response directly into its final per-viewer file. A data-task
+// delegate gives us the response-disposition callback before body delivery,
+// while incremental writes preserve the download-task path's bounded memory.
+// This rejects an oversized Content-Length before the body and cancels when a
+// missing or dishonest length crosses either hard limit during transfer.
+@interface ApolloAlbumDownloadCoordinator : NSObject <NSURLSessionDataDelegate>
+@property (nonatomic, strong) NSURLSession *session;
+@property (nonatomic, strong) NSOperationQueue *delegateQueue;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, ApolloAlbumDownloadRecord *> *records;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *acceptedFileBytes;
+@property (nonatomic) unsigned long long inFlightBytes;
+@property (nonatomic) unsigned long long acceptedBytes;
+- (NSURLSessionDataTask *)downloadRequest:(NSURLRequest *)request
+                                  destination:(NSURL *)destination
+                                   completion:(void (^)(NSURLSessionDataTask *, NSURL *, NSHTTPURLResponse *, NSError *))completion;
+- (void)releaseAcceptedFile:(NSURL *)fileURL;
+- (void)invalidateAndCancel;
+@end
+
+@implementation ApolloAlbumDownloadCoordinator
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _records = [NSMutableDictionary dictionary];
+        _acceptedFileBytes = [NSMutableDictionary dictionary];
+        NSOperationQueue *delegateQueue = [NSOperationQueue new];
+        delegateQueue.name = @"com.apolloreborn.album-downloads";
+        delegateQueue.maxConcurrentOperationCount = 1;
+        delegateQueue.qualityOfService = NSQualityOfServiceUtility;
+        _delegateQueue = delegateQueue;
+        NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
+        _session = [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:delegateQueue];
+    }
+    return self;
+}
+
+- (NSError *)errorWithCode:(NSInteger)code description:(NSString *)description {
+    return [NSError errorWithDomain:kApolloAlbumDownloadErrorDomain code:code
+                           userInfo:@{NSLocalizedDescriptionKey: description ?: @"Album download failed"}];
+}
+
+- (NSURLSessionDataTask *)downloadRequest:(NSURLRequest *)request
+                                  destination:(NSURL *)destination
+                                   completion:(void (^)(NSURLSessionDataTask *, NSURL *, NSHTTPURLResponse *, NSError *))completion {
+    NSURLSessionDataTask *task = [self.session dataTaskWithRequest:request];
+    ApolloAlbumDownloadRecord *record = [ApolloAlbumDownloadRecord new];
+    record.destinationURL = destination;
+    record.completion = [completion copy];
+    [[NSFileManager defaultManager] removeItemAtURL:destination error:nil];
+    if (![[NSFileManager defaultManager] createFileAtPath:destination.path contents:nil attributes:nil]) {
+        record.failure = [self errorWithCode:8 description:@"Could not create the album image file"];
+    } else {
+        record.outputHandle = [NSFileHandle fileHandleForWritingAtPath:destination.path];
+        if (!record.outputHandle) {
+            record.failure = [self errorWithCode:8 description:@"Could not open the album image file"];
+        }
+    }
+    @synchronized (self) {
+        self.records[@(task.taskIdentifier)] = record;
+    }
+    return task;
+}
+
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask
+ didReceiveResponse:(NSURLResponse *)response
+  completionHandler:(void (^)(NSURLSessionResponseDisposition disposition))completionHandler {
+    ApolloAlbumDownloadRecord *record = nil;
+    @synchronized (self) { record = self.records[@(dataTask.taskIdentifier)]; }
+    NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+    record.response = http;
+    BOOL validHTTP = http && http.statusCode >= 200 && http.statusCode < 300;
+    NSString *mime = response.MIMEType.lowercaseString;
+    BOOL compatibleMIME = mime.length == 0 || [mime hasPrefix:@"image/"] ||
+        [mime isEqualToString:@"application/octet-stream"] || [mime isEqualToString:@"binary/octet-stream"];
+    long long expected = response.expectedContentLength;
+    BOOL advertisedTooLarge = expected > 0 && (unsigned long long)expected > kApolloAlbumMaximumItemBytes;
+    if (!record || record.failure || !validHTTP || !compatibleMIME || advertisedTooLarge) {
+        if (record) {
+            if (!record.failure) {
+                NSString *message = !validHTTP ? @"The image server returned an HTTP error"
+                    : (!compatibleMIME ? @"The server did not return an image"
+                                       : @"The image is larger than the 50 MB limit");
+                record.failure = [self errorWithCode:advertisedTooLarge ? 2 : 1 description:message];
+            }
+        }
+        completionHandler(NSURLSessionResponseCancel);
+        return;
+    }
+    completionHandler(NSURLSessionResponseAllow);
+}
+
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
+    ApolloAlbumDownloadRecord *record = nil;
+    @synchronized (self) { record = self.records[@(dataTask.taskIdentifier)]; }
+    if (!record || record.failure || data.length == 0) return;
+
+    unsigned long long delta = data.length;
+    unsigned long long viewerAllowance = kApolloAlbumMaximumViewerBytes - MIN(self.acceptedBytes, kApolloAlbumMaximumViewerBytes);
+    BOOL itemOverLimit = delta > kApolloAlbumMaximumItemBytes - MIN(record.receivedBytes, kApolloAlbumMaximumItemBytes);
+    BOOL viewerOverLimit = self.inFlightBytes >= viewerAllowance || delta > viewerAllowance - self.inFlightBytes;
+    if (itemOverLimit || viewerOverLimit) {
+        record.failure = [self errorWithCode:3 description:
+            itemOverLimit ? @"The image exceeded the 50 MB limit" : @"The album exceeded the 150 MB limit"];
+        [dataTask cancel];
+        return;
+    }
+    record.receivedBytes += delta;
+    self.inFlightBytes += delta;
+    @try {
+        [record.outputHandle writeData:data];
+    } @catch (NSException *exception) {
+        record.failure = [self errorWithCode:6 description:
+            exception.reason ?: @"Could not store the downloaded image"];
+        [dataTask cancel];
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+    ApolloAlbumDownloadRecord *record = nil;
+    @synchronized (self) {
+        NSNumber *key = @(task.taskIdentifier);
+        record = self.records[key];
+        if (!record) return;
+        [self.records removeObjectForKey:key];
+    }
+    self.inFlightBytes = self.inFlightBytes >= record.receivedBytes
+        ? self.inFlightBytes - record.receivedBytes : 0;
+
+    [record.outputHandle closeFile];
+    record.outputHandle = nil;
+    NSURL *fileURL = nil;
+    if (!record.failure && !error) {
+        NSNumber *fileSize = nil;
+        [record.destinationURL getResourceValue:&fileSize forKey:NSURLFileSizeKey error:nil];
+        unsigned long long bytes = fileSize.unsignedLongLongValue;
+        if (bytes == 0 || bytes > kApolloAlbumMaximumItemBytes || bytes != record.receivedBytes) {
+            record.failure = [self errorWithCode:4 description:@"The downloaded image had an invalid size"];
+        } else {
+            CGImageSourceRef imageSource = CGImageSourceCreateWithURL((__bridge CFURLRef)record.destinationURL, NULL);
+            BOOL validImage = ApolloAlbumImageSourceIsSafe(imageSource);
+            if (imageSource) CFRelease(imageSource);
+            if (!validImage) {
+                record.failure = [self errorWithCode:5
+                                         description:@"The downloaded image was unsupported or too large to decode safely"];
+            } else {
+                // The incremental invariant already covered accepted + active
+                // files, so replacing this task's in-flight bytes with accepted
+                // bytes cannot cross the viewer cap.
+                self.acceptedBytes += bytes;
+                self.acceptedFileBytes[record.destinationURL.path] = @(bytes);
+                fileURL = record.destinationURL;
+            }
+        }
+    }
+
+    NSError *finalError = record.failure ?: error;
+    if (!fileURL) [[NSFileManager defaultManager] removeItemAtURL:record.destinationURL error:nil];
+    void (^completion)(NSURLSessionDataTask *, NSURL *, NSHTTPURLResponse *, NSError *) = record.completion;
+    if (completion) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion((NSURLSessionDataTask *)task, fileURL, record.response, finalError);
+        });
+    }
+}
+
+- (void)releaseAcceptedFile:(NSURL *)fileURL {
+    NSString *path = fileURL.path;
+    if (path.length == 0 || !self.delegateQueue) return;
+    __weak typeof(self) weakSelf = self;
+    [self.delegateQueue addOperationWithBlock:^{
+        ApolloAlbumDownloadCoordinator *owner = weakSelf;
+        NSNumber *size = owner.acceptedFileBytes[path];
+        if (!size) return;
+        unsigned long long bytes = size.unsignedLongLongValue;
+        owner.acceptedBytes = owner.acceptedBytes >= bytes ? owner.acceptedBytes - bytes : 0;
+        [owner.acceptedFileBytes removeObjectForKey:path];
+    }];
+}
+
+- (void)invalidateAndCancel {
+    [self.session invalidateAndCancel];
+    self.session = nil;
+}
+
+@end
+
 @interface ApolloImageChestAlbumViewController : UIViewController <UIScrollViewDelegate, UIGestureRecognizerDelegate>
 @property (nonatomic, copy) NSArray<NSDictionary *> *items;
 @property (nonatomic) NSInteger initialIndex;
@@ -1056,13 +1401,15 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
 // for the current/adjacent window remain resident.
 @property (nonatomic, strong) NSURL *viewerDirectoryURL;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSURL *> *imageFileURLsByIndex;
-@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSURLSessionDownloadTask *> *activeImageTasks;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSURLSessionDataTask *> *activeImageTasks;
+@property (nonatomic, strong) ApolloAlbumDownloadCoordinator *downloadCoordinator;
 @property (nonatomic, strong) NSMutableOrderedSet<NSNumber *> *pendingImageIndexes;
 @property (nonatomic, strong) NSMutableSet<NSNumber *> *failedImageIndexes;
 @property (nonatomic, strong) NSMutableSet<NSNumber *> *decodingImageIndexes;
 @property (nonatomic, strong) NSSet<NSNumber *> *activeWindowIndexes;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *downloadWaiters;
 @property (nonatomic) BOOL tearingDown;
+@property (nonatomic) NSUInteger photoLibrarySavesInFlight;
 @property (nonatomic, strong) UIProgressView *progressBar;
 @property (nonatomic, strong) NSTimer *progressTimer;
 @property (nonatomic, strong) UIButton *actionButton;
@@ -1074,7 +1421,9 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
 - (instancetype)initWithItems:(NSArray<NSDictionary *> *)items initialIndex:(NSInteger)initialIndex;
 - (void)apollo_updateActiveWindowAroundPage:(NSInteger)page;
 - (void)apollo_pumpImageDownloads;
+- (void)apollo_removeAcceptedFileAtURL:(NSURL *)fileURL;
 - (BOOL)apollo_loadingInProgress;
+- (void)apollo_removeViewerStorageIfPossible;
 - (void)apollo_tearDownViewerStorage;
 @end
 
@@ -1121,6 +1470,7 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
     self.failedImageIndexes = [NSMutableSet set];
     self.decodingImageIndexes = [NSMutableSet set];
     self.downloadWaiters = [NSMutableArray array];
+    self.downloadCoordinator = [ApolloAlbumDownloadCoordinator new];
     self.viewerDirectoryURL = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES]
         URLByAppendingPathComponent:[NSString stringWithFormat:@"ApolloImageViewer-%@", [NSUUID UUID].UUIDString]
                          isDirectory:YES];
@@ -1166,6 +1516,20 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
         imageView.contentMode = UIViewContentModeScaleAspectFit;
         [zoomScrollView addSubview:imageView];
         [page addSubview:zoomScrollView];
+
+        UIButton *retryButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        retryButton.tag = 5000 + (NSInteger)i;
+        retryButton.hidden = YES;
+        retryButton.titleLabel.numberOfLines = 2;
+        retryButton.titleLabel.textAlignment = NSTextAlignmentCenter;
+        retryButton.titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
+        [retryButton setTitle:@"Couldn’t load image\nTap to retry" forState:UIControlStateNormal];
+        retryButton.tintColor = UIColor.whiteColor;
+        retryButton.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.92];
+        retryButton.layer.cornerRadius = 12.0;
+        retryButton.clipsToBounds = YES;
+        [retryButton addTarget:self action:@selector(apollo_retryImageDownload:) forControlEvents:UIControlEventTouchUpInside];
+        [page addSubview:retryButton];
         [self.scrollView addSubview:page];
 
     }
@@ -1286,6 +1650,12 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
     return [self.viewerDirectoryURL URLByAppendingPathComponent:name];
 }
 
+- (void)apollo_removeAcceptedFileAtURL:(NSURL *)fileURL {
+    if (!fileURL) return;
+    [self.downloadCoordinator releaseAcceptedFile:fileURL];
+    [[NSFileManager defaultManager] removeItemAtURL:fileURL error:nil];
+}
+
 - (void)apollo_displayFileForPageIfActive:(NSInteger)page decodedImage:(UIImage *)decodedImage {
     NSNumber *index = @(page);
     if (![self.activeWindowIndexes containsObject:index]) return;
@@ -1304,6 +1674,10 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
     NSURL *fileURL = self.imageFileURLsByIndex[index];
     if (!fileURL) return;
     [self.decodingImageIndexes addObject:index];
+    CGFloat displayScale = UIScreen.mainScreen.scale;
+    CGFloat longestViewDimension = MAX(self.view.bounds.size.width, self.view.bounds.size.height);
+    NSUInteger maximumPixelSize = (NSUInteger)ceil(longestViewDimension * MAX(displayScale, 1.0) * 2.0);
+    maximumPixelSize = MAX((NSUInteger)2048, MIN((NSUInteger)4096, maximumPixelSize));
 
     __weak typeof(self) weakSelf = self;
     dispatch_async(ApolloImageChestViewerDecodeQueue(), ^{
@@ -1317,7 +1691,7 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
         });
         if (!stillNeeded) return;
 
-        UIImage *image = [UIImage imageWithContentsOfFile:fileURL.path];
+        UIImage *image = ApolloAlbumCreateDisplayImage(fileURL, maximumPixelSize);
         dispatch_async(dispatch_get_main_queue(), ^{
             ApolloImageChestAlbumViewController *owner = weakSelf;
             if (!owner) return;
@@ -1330,12 +1704,14 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
             }
 
             // The temporary file may have been purged or become unreadable.
-            // Drop the stale mapping and let the normal three-slot pump retry it.
+            // Drop the stale mapping, but require an explicit retry so a source
+            // that ImageIO accepts yet cannot thumbnail cannot form a tight
+            // download/decode loop.
             [owner.imageFileURLsByIndex removeObjectForKey:index];
-            [[NSFileManager defaultManager] removeItemAtURL:fileURL error:nil];
-            [owner.failedImageIndexes removeObject:index];
-            [owner apollo_enqueueImageAtIndex:index priority:YES];
-            [owner apollo_pumpImageDownloads];
+            [owner apollo_removeAcceptedFileAtURL:fileURL];
+            [owner.failedImageIndexes addObject:index];
+            UIButton *retry = (UIButton *)[owner.scrollView viewWithTag:5000 + page];
+            if ([retry isKindOfClass:[UIButton class]]) retry.hidden = NO;
         });
     });
 }
@@ -1363,10 +1739,22 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
     NSURL *imageURL = [self.items[page][@"url"] isKindOfClass:[NSURL class]] ? self.items[page][@"url"] : nil;
     if (!imageURL) {
         [self.failedImageIndexes addObject:index];
+        UIButton *retry = (UIButton *)[self.scrollView viewWithTag:5000 + page];
+        if ([retry isKindOfClass:[UIButton class]]) retry.hidden = NO;
         return;
     }
     if (priority) [self.pendingImageIndexes insertObject:index atIndex:0];
     else [self.pendingImageIndexes addObject:index];
+}
+
+- (void)apollo_retryImageDownload:(UIButton *)sender {
+    NSInteger page = sender.tag - 5000;
+    if (page < 0 || page >= (NSInteger)self.items.count || self.tearingDown) return;
+    NSNumber *index = @(page);
+    sender.hidden = YES;
+    [self.failedImageIndexes removeObject:index];
+    [self apollo_enqueueImageAtIndex:index priority:YES];
+    [self apollo_pumpImageDownloads];
 }
 
 - (void)apollo_resolveDownloadWaiters {
@@ -1409,6 +1797,8 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
             ? self.items[page][@"url"] : nil;
         if (!imageURL) {
             [self.failedImageIndexes addObject:index];
+            UIButton *retry = (UIButton *)[self.scrollView viewWithTag:5000 + page];
+            if ([retry isKindOfClass:[UIButton class]]) retry.hidden = NO;
             continue;
         }
 
@@ -1417,51 +1807,39 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
                                                             timeoutInterval:60.0];
         NSURL *destination = [self apollo_destinationURLForPage:page];
         __weak typeof(self) weakSelf = self;
-        __block __weak NSURLSessionDownloadTask *weakTask = nil;
-        NSURLSessionDownloadTask *task = [[NSURLSession sharedSession] downloadTaskWithRequest:request
-                                                                            completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
-            ApolloImageChestAlbumViewController *strongSelf = weakSelf;
-            NSURLSessionDownloadTask *finishedTask = weakTask;
-            NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-            BOOL validHTTP = !error && http.statusCode >= 200 && http.statusCode < 300 && location != nil;
-            UIImage *decodedImage = nil;
-            NSError *moveError = nil;
-            if (validHTTP && strongSelf && !strongSelf.tearingDown) {
-                [[NSFileManager defaultManager] removeItemAtURL:destination error:nil];
-                if ([[NSFileManager defaultManager] moveItemAtURL:location toURL:destination error:&moveError]) {
-                    decodedImage = [UIImage imageWithContentsOfFile:destination.path];
-                    if (!decodedImage) [[NSFileManager defaultManager] removeItemAtURL:destination error:nil];
-                }
-            }
-
-            dispatch_async(dispatch_get_main_queue(), ^{
+        NSURLSessionDataTask *task = [self.downloadCoordinator downloadRequest:request
+            destination:destination
+             completion:^(NSURLSessionDataTask *finishedTask, NSURL *fileURL,
+                          NSHTTPURLResponse *http, NSError *error) {
                 ApolloImageChestAlbumViewController *owner = weakSelf;
                 if (!owner) {
-                    [[NSFileManager defaultManager] removeItemAtURL:destination error:nil];
+                    if (fileURL) [[NSFileManager defaultManager] removeItemAtURL:fileURL error:nil];
                     return;
                 }
                 if (owner.activeImageTasks[index] != finishedTask) {
-                    [[NSFileManager defaultManager] removeItemAtURL:destination error:nil];
+                    if (fileURL) [owner apollo_removeAcceptedFileAtURL:fileURL];
                     return;
                 }
                 [owner.activeImageTasks removeObjectForKey:index];
-                BOOL accepted = decodedImage != nil && !owner.tearingDown;
+                BOOL cancelled = [error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled;
+                BOOL accepted = fileURL != nil && !error && !owner.tearingDown;
+                UIButton *retry = (UIButton *)[owner.scrollView viewWithTag:5000 + page];
                 if (accepted) {
-                    owner.imageFileURLsByIndex[index] = destination;
+                    owner.imageFileURLsByIndex[index] = fileURL;
                     [owner.failedImageIndexes removeObject:index];
-                    [owner apollo_displayFileForPageIfActive:page decodedImage:decodedImage];
-                } else if (!(error.domain && [error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled)) {
+                    if ([retry isKindOfClass:[UIButton class]]) retry.hidden = YES;
+                    [owner apollo_displayFileForPageIfActive:page decodedImage:nil];
+                } else if (!cancelled && !owner.tearingDown) {
                     [owner.failedImageIndexes addObject:index];
-                    ApolloLog(@"[InlineImages] viewer download failed page=%ld status=%ld err=%@ move=%@",
+                    if ([retry isKindOfClass:[UIButton class]]) retry.hidden = NO;
+                    ApolloLog(@"[InlineImages] viewer download failed page=%ld status=%ld err=%@",
                               (long)page + 1, (long)http.statusCode,
-                              error.localizedDescription ?: @"nil", moveError.localizedDescription ?: @"nil");
+                              error.localizedDescription ?: @"unknown error");
                 }
                 [owner apollo_resolveDownloadWaiters];
                 [owner apollo_pumpImageDownloads];
                 [owner apollo_updateLoadingProgress];
-            });
-        }];
-        weakTask = task;
+            }];
         self.activeImageTasks[index] = task;
         [task resume];
     }
@@ -1475,7 +1853,20 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
     NSMutableSet<NSNumber *> *window = [NSMutableSet setWithObject:@(page)];
     if (page > 0) [window addObject:@(page - 1)];
     if (page + 1 < (NSInteger)self.items.count) [window addObject:@(page + 1)];
-    if ([previousWindow isEqualToSet:window]) return;
+    if ([previousWindow isEqualToSet:window]) {
+        // A memory warning may have released a non-current decoded image while
+        // leaving its exact file and active-window membership intact. Two-item
+        // albums have the same {0,1} window on both pages, so the old equality
+        // fast path could otherwise leave the second page blank forever.
+        for (NSNumber *index in window) {
+            NSInteger activePage = index.integerValue;
+            UIImageView *imageView = (UIImageView *)[self.scrollView viewWithTag:3000 + activePage];
+            if (!imageView.image && self.imageFileURLsByIndex[index]) {
+                [self apollo_displayFileForPageIfActive:activePage decodedImage:nil];
+            }
+        }
+        return;
+    }
     self.activeWindowIndexes = window;
 
     for (NSUInteger i = 0; i < self.items.count; i++) {
@@ -1495,7 +1886,7 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
     // are represented by waiters and keep their downloads alive.
     for (NSNumber *index in [self.activeImageTasks.allKeys copy]) {
         if ([window containsObject:index] || [self apollo_indexIsNeededByDownloadWaiter:index]) continue;
-        NSURLSessionDownloadTask *task = self.activeImageTasks[index];
+        NSURLSessionDataTask *task = self.activeImageTasks[index];
         [self.activeImageTasks removeObjectForKey:index];
         [task cancel];
     }
@@ -1545,13 +1936,21 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
     self.tearingDown = YES;
     [self.progressTimer invalidate];
     self.progressTimer = nil;
-    for (NSURLSessionDownloadTask *task in self.activeImageTasks.allValues) [task cancel];
+    for (NSURLSessionDataTask *task in self.activeImageTasks.allValues) [task cancel];
+    [self.downloadCoordinator invalidateAndCancel];
+    self.downloadCoordinator = nil;
     [self.activeImageTasks removeAllObjects];
     [self.pendingImageIndexes removeAllObjects];
     [self.downloadWaiters removeAllObjects];
     [self.decodingImageIndexes removeAllObjects];
+    [self apollo_removeViewerStorageIfPossible];
+}
+
+- (void)apollo_removeViewerStorageIfPossible {
+    if (self.photoLibrarySavesInFlight > 0) return;
     if (self.viewerDirectoryURL) {
         [[NSFileManager defaultManager] removeItemAtURL:self.viewerDirectoryURL error:nil];
+        self.viewerDirectoryURL = nil;
     }
     [self.imageFileURLsByIndex removeAllObjects];
 }
@@ -1601,6 +2000,11 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
         UIScrollView *zoomScrollView = [page viewWithTag:4000 + (NSInteger)i];
         zoomScrollView.frame = page.bounds;
         [self apollo_layoutZoomScrollView:zoomScrollView resetZoom:resetZoom];
+        UIButton *retry = (UIButton *)[page viewWithTag:5000 + (NSInteger)i];
+        if ([retry isKindOfClass:[UIButton class]]) {
+            retry.frame = CGRectMake((page.bounds.size.width - 220.0) * 0.5,
+                                     (page.bounds.size.height - 72.0) * 0.5, 220.0, 72.0);
+        }
     }
 
     CGFloat safeTop = 16.0;
@@ -1688,7 +2092,7 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
     NSUInteger total = self.activeImageTasks.count + self.pendingImageIndexes.count;
     if (total == 0) return 1.0;
     double sum = 0.0;
-    for (NSURLSessionDownloadTask *task in self.activeImageTasks.allValues) {
+    for (NSURLSessionDataTask *task in self.activeImageTasks.allValues) {
         double fraction = task.progress.fractionCompleted;
         if (task.state == NSURLSessionTaskStateCompleted) fraction = 1.0;
         sum += MAX(0.0, MIN(fraction, 1.0));
@@ -1767,6 +2171,10 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
     void (^performSave)(void) = ^{
         ApolloImageChestAlbumViewController *strongSelf = weakSelf;
         if (!strongSelf) return;
+        if (indexes.count > 1 && ![strongSelf apollo_hasCapacityForSavingIndexes:indexes]) {
+            [strongSelf apollo_showToast:@"Not enough free space"];
+            return;
+        }
         [strongSelf apollo_showToast:indexes.count > 1 ? @"Downloading originals…" : @"Downloading original…"];
         [strongSelf apollo_ensureFilesForIndexes:indexes completion:^(NSArray<NSURL *> *files, BOOL allReady) {
             ApolloImageChestAlbumViewController *owner = weakSelf;
@@ -1775,6 +2183,7 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
                 [owner apollo_showToast:@"Save failed"];
                 return;
             }
+            owner.photoLibrarySavesInFlight++;
             [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
                 for (NSURL *fileURL in files) {
                     PHAssetCreationRequest *request = [PHAssetCreationRequest creationRequestForAsset];
@@ -1782,6 +2191,9 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
                 }
             } completionHandler:^(BOOL success, NSError *error) {
                 dispatch_async(dispatch_get_main_queue(), ^{
+                    if (owner.photoLibrarySavesInFlight > 0) {
+                        owner.photoLibrarySavesInFlight--;
+                    }
                     if (success) {
                         [owner apollo_showToast:files.count == 1 ? @"Saved"
                                               : [NSString stringWithFormat:@"Saved %lu images", (unsigned long)files.count]];
@@ -1789,6 +2201,7 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
                         ApolloLog(@"[InlineImages] album save failed: %@", error.localizedDescription);
                         [owner apollo_showToast:@"Save failed"];
                     }
+                    if (owner.tearingDown) [owner apollo_removeViewerStorageIfPossible];
                 });
             }];
         }];
@@ -1807,6 +2220,47 @@ static dispatch_queue_t ApolloImageChestViewerDecodeQueue(void) {
     } else {
         [self apollo_showToast:@"Photos access denied"];
     }
+}
+
+- (BOOL)apollo_hasCapacityForSavingIndexes:(NSArray<NSNumber *> *)indexes {
+    unsigned long long storedBytes = 0;
+    NSUInteger remainingCount = 0;
+    for (NSNumber *index in indexes) {
+        NSURL *fileURL = self.imageFileURLsByIndex[index];
+        if (!fileURL) {
+            remainingCount++;
+            continue;
+        }
+        NSNumber *fileSize = nil;
+        [fileURL getResourceValue:&fileSize forKey:NSURLFileSizeKey error:nil];
+        storedBytes = storedBytes > ULLONG_MAX - fileSize.unsignedLongLongValue
+            ? ULLONG_MAX : storedBytes + fileSize.unsignedLongLongValue;
+    }
+    if (remainingCount == 0) return YES;
+
+    NSNumber *availableCapacity = nil;
+    NSError *capacityError = nil;
+    if (![self.viewerDirectoryURL getResourceValue:&availableCapacity
+                                            forKey:NSURLVolumeAvailableCapacityForImportantUsageKey
+                                             error:&capacityError] || ![availableCapacity isKindOfClass:[NSNumber class]]) {
+        ApolloLog(@"[InlineImages] volume capacity unavailable before Save All: %@",
+                       capacityError.localizedDescription ?: @"unknown error");
+        return YES;
+    }
+
+    unsigned long long remainingViewerAllowance = storedBytes >= kApolloAlbumMaximumViewerBytes
+        ? 0 : kApolloAlbumMaximumViewerBytes - storedBytes;
+    unsigned long long requestedAllowance = remainingCount > ULLONG_MAX / kApolloAlbumMaximumItemBytes
+        ? ULLONG_MAX : (unsigned long long)remainingCount * kApolloAlbumMaximumItemBytes;
+    unsigned long long worstCase = MIN(remainingViewerAllowance, requestedAllowance);
+    unsigned long long required = worstCase > ULLONG_MAX - kApolloAlbumSaveSafetyBytes
+        ? ULLONG_MAX : worstCase + kApolloAlbumSaveSafetyBytes;
+    BOOL enough = availableCapacity.unsignedLongLongValue >= required;
+    if (!enough) {
+        ApolloLog(@"[InlineImages] Save All rejected for low disk available=%llu required=%llu remaining=%lu",
+                  availableCapacity.unsignedLongLongValue, required, (unsigned long)remainingCount);
+    }
+    return enough;
 }
 
 - (void)apollo_shareImageAtIndex:(NSInteger)page fromView:(UIView *)sourceView {
@@ -2239,7 +2693,7 @@ static BOOL ApolloPresentOrResolveImageChestAlbumURL(NSURL *url, UIView *sourceV
 }
 
 - (void)imageNode:(id)imageNode didLoadImage:(UIImage *)image {
-    ApolloLog(@"[InlineImages] DIDLOAD imageNode=%p hasImage=%d size=%@ url=%@",
+    ApolloLogDebug(@"[InlineImages] DIDLOAD imageNode=%p hasImage=%d size=%@ url=%@",
               imageNode, image != nil, image ? NSStringFromCGSize(image.size) : @"nil",
               [imageNode respondsToSelector:@selector(URL)] ? [(ASNetworkImageNode *)imageNode URL] : nil);
     if (!image || image.size.width <= 0 || image.size.height <= 0) return;
@@ -2262,7 +2716,7 @@ static BOOL ApolloPresentOrResolveImageChestAlbumURL(NSURL *url, UIView *sourceV
     NSNumber *cur = objc_getAssociatedObject(imageNode, &kApolloAspectRatioKey);
     if (cur && fabs(newRatio - [cur doubleValue]) < 0.01) return;
     objc_setAssociatedObject(imageNode, &kApolloAspectRatioKey, @(newRatio), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    ApolloLog(@"[InlineImages] ratio set imageNode=%p ratio=%.3f size=%@",
+    ApolloLogDebug(@"[InlineImages] ratio set imageNode=%p ratio=%.3f size=%@",
               imageNode, newRatio, NSStringFromCGSize(size));
 
     // Surface the new size. Prefer the debounced per-host scheduler (one
@@ -2270,7 +2724,7 @@ static BOOL ApolloPresentOrResolveImageChestAlbumURL(NSURL *url, UIView *sourceV
     // changed" climb only when the node has no live inline host.
     if ([imageNode isKindOfClass:[ApolloASNetworkImageNodeClass() class]] &&
         ApolloInlineHostForNode(imageNode)) {
-        ApolloScheduleCoalescedHostRelayout((ASNetworkImageNode *)imageNode);
+        ApolloScheduleCoalescedHostRelayout((ASNetworkImageNode *)imageNode, nil);
         return;
     }
     SEL sel = NSSelectorFromString(@"_u_setNeedsLayoutFromAbove");
@@ -2317,7 +2771,7 @@ static void ApolloActivateNativeInlineGIFGate(ASDisplayNode *node) {
             ApolloApplyNativeInlineGIFAutoplayGate(strong);
         }];
     }
-    ApolloLog(@"[AutoplayGIF] native inline GIF gated node=%p class=%@",
+    ApolloLogDebug(@"[AutoplayGIF] native inline GIF gated node=%p class=%@",
               node, NSStringFromClass([node class]));
 }
 
@@ -2434,7 +2888,7 @@ static void ApolloGateNativeInlineAnimatedImageIfNeeded(ASDisplayNode *node) {
         if (ready && [anim respondsToSelector:@selector(coverImage)]) {
             cover = [anim valueForKey:@"coverImage"];
         }
-        ApolloLog(@"[InlineImages] _locked_setAnimatedImage imageNode=%p ready=%d coverSize=%@",
+        ApolloLogDebug(@"[InlineImages] _locked_setAnimatedImage imageNode=%p ready=%d coverSize=%@",
                   strong, ready, cover ? NSStringFromCGSize(cover.size) : @"nil");
 
         if (cover && cover.size.width > 0 && cover.size.height > 0) {
@@ -2457,7 +2911,7 @@ static void ApolloGateNativeInlineAnimatedImageIfNeeded(ASDisplayNode *node) {
         if ([anim respondsToSelector:@selector(setCoverImageReadyCallback:)]) {
             id capturedAnim = retainedAnim;
             void (^cb)(UIImage *) = ^(UIImage *coverImage) {
-                ApolloLog(@"[InlineImages] coverImageReadyCallback imageNode=%p coverSize=%@",
+                ApolloLogDebug(@"[InlineImages] coverImageReadyCallback imageNode=%p coverSize=%@",
                           weakSelf, coverImage ? NSStringFromCGSize(coverImage.size) : @"nil");
                 ASImageNode *s = weakSelf;
                 if (!s || !coverImage || coverImage.size.width <= 0 || !ApolloInlineGIFGenerationMatches(s, generation)) return;
@@ -2544,17 +2998,17 @@ static void ApolloGateNativeInlineAnimatedImageIfNeeded(ASDisplayNode *node) {
     objc_setAssociatedObject(self, &kApolloLastDisplayBoundsKey,
                              [NSValue valueWithCGSize:cur],
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    ApolloLog(@"[InlineImages] re-display: backing store was rendered at %@ but node is now %@ (node=%p)",
+    ApolloLogDebug(@"[InlineImages] re-display: backing store was rendered at %@ but node is now %@ (node=%p)",
               NSStringFromCGSize(last), NSStringFromCGSize(cur), self);
     [(ASDisplayNode *)self setNeedsDisplay];
 }
 
 - (void)setURL:(NSURL *)URL {
-    if (ApolloImageNodeHasInlineHost(self) &&
+    if (ApolloIsInlineMediaLeafNode(self) &&
         ![objc_getAssociatedObject(self, &kApolloInlineGIFReloadInFlightKey) boolValue]) {
         NSURL *previous = [self respondsToSelector:@selector(URL)] ? [self URL] : nil;
         if ((previous && URL && ![previous isEqual:URL]) || (previous && !URL)) {
-            ApolloLog(@"[AutoplayGIF] clearing GIF state on URL change node=%p", self);
+            ApolloLogDebug(@"[AutoplayGIF] clearing GIF state on URL change node=%p", self);
             ApolloClearInlineGIFNodeState(self);
         }
     }
@@ -2562,7 +3016,7 @@ static void ApolloGateNativeInlineAnimatedImageIfNeeded(ASDisplayNode *node) {
 }
 
 - (void)clearImage {
-    if (ApolloImageNodeHasInlineHost(self)) {
+    if (ApolloIsInlineMediaLeafNode(self)) {
         ApolloClearInlineGIFNodeState(self);
     }
     %orig;
@@ -2761,8 +3215,9 @@ static void ApolloHostRelayoutArm(ASDisplayNode *host, double delayMs) {
     });
 }
 
-static void ApolloScheduleCoalescedHostRelayout(ASNetworkImageNode *imageNode) {
-    ASDisplayNode *host = ApolloInlineHostForNode(imageNode);
+static void ApolloScheduleCoalescedHostRelayout(ASNetworkImageNode *imageNode,
+                                                ASDisplayNode *fallbackHost) {
+    ASDisplayNode *host = ApolloInlineHostForNode(imageNode) ?: fallbackHost;
     if (!host) return;
     // Bookkeeping on main so the timestamp/armed associations never race.
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -2777,9 +3232,11 @@ static void ApolloScheduleCoalescedHostRelayout(ASNetworkImageNode *imageNode) {
 
 // Async-resolution entry point (network completion, reuse-path re-resolve):
 // apply the content, then surface it with one coalesced host relayout.
-static void ApolloApplyResolvedAlbumImage(ASNetworkImageNode *imageNode, NSDictionary *result) {
+static void ApolloApplyResolvedAlbumImage(ASNetworkImageNode *imageNode,
+                                          NSDictionary *result,
+                                          ASDisplayNode *fallbackHost) {
     if (!ApolloApplyResolvedAlbumImageContent(imageNode, result)) return;
-    ApolloScheduleCoalescedHostRelayout(imageNode);
+    ApolloScheduleCoalescedHostRelayout(imageNode, fallbackHost);
 }
 
 // Standalone play-circle glyph (transparent background) drawn into a
@@ -3046,30 +3503,29 @@ static void ApolloClearInlineGIFNodeState(ASNetworkImageNode *node) {
     objc_setAssociatedObject(node, &kApolloInlineAnimatedGIFKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(node, &kApolloInlineGIFUserForcedPlayKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(node, &kApolloInlineGIFOverlayReassertKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    ApolloSetInlineHostForNode(node, nil);
     ApolloUnregisterInlineGIFNode(node);
 }
 
 static BOOL ApolloInlineGIFImageNodeIsLiveForRefresh(ASNetworkImageNode *node) {
     if (!ApolloInlineGIFNodeIsRegistryEligible(node)) {
         if (node) ApolloUnregisterInlineGIFNode(node);
-        ApolloLog(@"[AutoplayGIF] live-check node=%p ineligible", node);
+        ApolloLogDebug(@"[AutoplayGIF] live-check node=%p ineligible", node);
         return NO;
     }
     if (!node) return NO;
     if (![objc_getAssociatedObject(node, &kApolloInlineAnimatedGIFKey) boolValue]) {
         ApolloUnregisterInlineGIFNode(node);
-        ApolloLog(@"[AutoplayGIF] live-check node=%p no-anim-flag", node);
+        ApolloLogDebug(@"[AutoplayGIF] live-check node=%p no-anim-flag", node);
         return NO;
     }
     @try {
         if (![node respondsToSelector:@selector(isNodeLoaded)] || ![node isNodeLoaded]) {
-            ApolloLog(@"[AutoplayGIF] live-check node=%p not-loaded", node);
+            ApolloLogDebug(@"[AutoplayGIF] live-check node=%p not-loaded", node);
             return NO;
         }
         if (!node.supernode) {
             ApolloUnregisterInlineGIFNode(node);
-            ApolloLog(@"[AutoplayGIF] live-check node=%p no-supernode", node);
+            ApolloLogDebug(@"[AutoplayGIF] live-check node=%p no-supernode", node);
             return NO;
         }
         // Deliberately no node.URL requirement: the tweak's GIF pipeline loads
@@ -3323,7 +3779,7 @@ BOOL ApolloReloadInlineGIFImageNodeForAutoplay(id imageNode) {
 
     ApolloRemovePlayOverlayFromNode(node);
     if (ApolloResumeInlineGIFPlaybackIfPossible(node)) {
-        ApolloLog(@"[AutoplayGIF] resume-only node=%p", node);
+        ApolloLogDebug(@"[AutoplayGIF] resume-only node=%p", node);
         return NO;
     }
     // No live FLAnimatedImageView to resume (the pause's cover swap tears the
@@ -3339,7 +3795,7 @@ BOOL ApolloReloadInlineGIFImageNodeForAutoplay(id imageNode) {
             ApolloUnregisterInlineGIFNode(node);
             return NO;
         }
-        ApolloLog(@"[AutoplayGIF] reload reinject node=%p", node);
+        ApolloLogDebug(@"[AutoplayGIF] reload reinject node=%p", node);
         return YES;
     }
 
@@ -3376,7 +3832,7 @@ BOOL ApolloReloadInlineGIFImageNodeForAutoplay(id imageNode) {
         ApolloUnregisterInlineGIFNode(node);
         return NO;
     }
-    ApolloLog(@"[AutoplayGIF] reload node=%p url=%@", node, url.host ?: url.absoluteString);
+    ApolloLogDebug(@"[AutoplayGIF] reload node=%p url=%@", node, url.host ?: url.absoluteString);
     return YES;
 }
 
@@ -3447,7 +3903,7 @@ static void ApolloApplyInlineGIFPlaybackPolicyWithCover(ASNetworkImageNode *imag
         if (shouldPlay) {
             ApolloUpdateInlineGIFOverlayForNode(strong);
             if (ApolloResumeInlineGIFPlaybackIfPossible(strong)) {
-                ApolloLog(@"[AutoplayGIF] policy node=%p retry=%lu shouldPlay=1 resume=1 forced=%d",
+                ApolloLogDebug(@"[AutoplayGIF] policy node=%p retry=%lu shouldPlay=1 resume=1 forced=%d",
                           strong, (unsigned long)retryIndex, forcedPlay);
                 return;
             }
@@ -3466,18 +3922,18 @@ static void ApolloApplyInlineGIFPlaybackPolicyWithCover(ASNetworkImageNode *imag
                 });
                 ApolloTrackInlineGIFPendingPolicyBlock(strong, retryBlock);
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), retryBlock);
-                ApolloLog(@"[AutoplayGIF] policy node=%p retry=%lu shouldPlay=1 resume=0 scheduling=%lu forced=%d",
+                ApolloLogDebug(@"[AutoplayGIF] policy node=%p retry=%lu shouldPlay=1 resume=0 scheduling=%lu forced=%d",
                           strong, (unsigned long)retryIndex, (unsigned long)(retryIndex + 1), forcedPlay);
                 return;
             }
-            ApolloLog(@"[AutoplayGIF] policy node=%p retry=%lu shouldPlay=1 resume=0 forced=%d",
+            ApolloLogDebug(@"[AutoplayGIF] policy node=%p retry=%lu shouldPlay=1 resume=0 forced=%d",
                       strong, (unsigned long)retryIndex, forcedPlay);
             return;
         }
 
         if (cover) {
             ApolloPauseInlineGIFNode(strong, cover);
-            ApolloLog(@"[AutoplayGIF] policy node=%p retry=%lu staticCover=1 shouldPlay=0",
+            ApolloLogDebug(@"[AutoplayGIF] policy node=%p retry=%lu staticCover=1 shouldPlay=0",
                       strong, (unsigned long)retryIndex);
             return;
         }
@@ -3497,13 +3953,13 @@ static void ApolloApplyInlineGIFPlaybackPolicyWithCover(ASNetworkImageNode *imag
             });
             ApolloTrackInlineGIFPendingPolicyBlock(strong, retryBlock);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), retryBlock);
-            ApolloLog(@"[AutoplayGIF] policy node=%p retry=%lu waitingForCover=%lu shouldPlay=0",
+            ApolloLogDebug(@"[AutoplayGIF] policy node=%p retry=%lu waitingForCover=%lu shouldPlay=0",
                       strong, (unsigned long)retryIndex, (unsigned long)(retryIndex + 1));
             return;
         }
 
         ApolloPauseInlineGIFNode(strong, nil);
-        ApolloLog(@"[AutoplayGIF] policy node=%p retry=%lu pausedNoCover=1 shouldPlay=0",
+        ApolloLogDebug(@"[AutoplayGIF] policy node=%p retry=%lu pausedNoCover=1 shouldPlay=0",
                   strong, (unsigned long)retryIndex);
     });
     ApolloTrackInlineGIFPendingPolicyBlock(imageNode, block);
@@ -3543,7 +3999,7 @@ static BOOL ApolloResumeInlineGIFPlaybackIfPossible(ASNetworkImageNode *imageNod
     // Autoplay resume drops the overlay; a user-forced (tap-to-play) resume
     // swaps the play button for the corner pause badge.
     ApolloUpdateInlineGIFOverlayForNode(imageNode);
-    ApolloLog(@"[AutoplayGIF] resume node=%p animView=%p forced=%d", imageNode, animView, forcedPlay);
+    ApolloLogDebug(@"[AutoplayGIF] resume node=%p animView=%p forced=%d", imageNode, animView, forcedPlay);
     return YES;
 }
 
@@ -3671,12 +4127,13 @@ static void ApolloInstallStackedCardForImageNode(ASNetworkImageNode *imageNode) 
 // Builds a video thumbnail with a 16:9 placeholder ratio so it's included
 // in layout immediately, then resolves the real poster URL + ratio
 // asynchronously in didLoad (after Texture connects the supernode chain).
-static ASNetworkImageNode *ApolloMakeInlineVideoThumbnailNode(NSURL *videoURL,
-                                                               ASDisplayNode *hostMarkdownNode) {
+static ASNetworkImageNode *ApolloMakeInlineVideoThumbnailNode(NSURL *videoURL) {
     Class imageNodeClass = ApolloASNetworkImageNodeClass();
     if (!imageNodeClass) return nil;
 
     ASNetworkImageNode *imageNode = [[imageNodeClass alloc] init];
+    objc_setAssociatedObject(imageNode, &kApolloInlineMediaLeafKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     imageNode.shouldRenderProgressImages = YES;
     imageNode.contentMode = UIViewContentModeScaleAspectFill;
     imageNode.placeholderColor = [UIColor tertiarySystemFillColor];
@@ -3697,7 +4154,6 @@ static ASNetworkImageNode *ApolloMakeInlineVideoThumbnailNode(NSURL *videoURL,
     // ratio so the layout reserves space immediately; DIDLOAD refines it
     // once the real poster loads.
     objc_setAssociatedObject(imageNode, &kApolloImageURLKey, videoURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    ApolloSetInlineHostForNode(imageNode, hostMarkdownNode);
     objc_setAssociatedObject(imageNode, &kApolloAspectRatioKey, @(9.0 / 16.0), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     __weak ASNetworkImageNode *weakImage = imageNode;
@@ -3738,7 +4194,14 @@ static ASNetworkImageNode *ApolloMakeInlineVideoThumbnailNode(NSURL *videoURL,
                     }
                 }
                 if (dashURL && assetID.length) {
-                    ApolloFetchDashPoster(assetID, dashURL, ^(UIImage *poster) {
+                    CGFloat displayScale = v.window.screen.scale ?: UIScreen.mainScreen.scale;
+                    CGSize displayPoints = v.bounds.size;
+                    if (displayPoints.width < 1.0 || displayPoints.height < 1.0) {
+                        displayPoints = UIScreen.mainScreen.bounds.size;
+                    }
+                    CGSize targetPixels = CGSizeMake(displayPoints.width * MAX(displayScale, 1.0),
+                                                     displayPoints.height * MAX(displayScale, 1.0));
+                    ApolloFetchDashPoster(assetID, dashURL, targetPixels, ^(UIImage *poster) {
                         ASNetworkImageNode *strong = weakImage;
                         if (!strong) return;
                         if (poster) {
@@ -3787,6 +4250,8 @@ static ASNetworkImageNode *ApolloMakeInlineImageNode(NSURL *normalizedURL,
     BOOL deferredAlbum = deferredImgur || deferredImageChest;
 
     ASNetworkImageNode *imageNode = [[imageNodeClass alloc] init];
+    objc_setAssociatedObject(imageNode, &kApolloInlineMediaLeafKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (!deferredAlbum) {
         imageNode.URL = normalizedURL;
     }
@@ -3840,7 +4305,6 @@ static ASNetworkImageNode *ApolloMakeInlineImageNode(NSURL *normalizedURL,
         // copy/share/open actions keep what the user posted.
         objc_setAssociatedObject(imageNode, &kApolloOriginalImageURLKey, normalizedURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    ApolloSetInlineHostForNode(imageNode, hostMarkdownNode);
     if (ratio > 0) {
         objc_setAssociatedObject(imageNode, &kApolloAspectRatioKey, @(ratio), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
@@ -3852,6 +4316,7 @@ static ASNetworkImageNode *ApolloMakeInlineImageNode(NSURL *normalizedURL,
     // re-measure the row once per album. Only a genuinely async resolution
     // needs the coalesced relayout to surface the image afterwards.
     __weak ASNetworkImageNode *weakImage = imageNode;
+    __weak ASDisplayNode *weakHost = hostMarkdownNode;
     if (deferredImgur) {
         NSDictionary *cachedImgur = ApolloCachedImgurResolution(normalizedURL);
         if (cachedImgur) {
@@ -3860,7 +4325,7 @@ static ASNetworkImageNode *ApolloMakeInlineImageNode(NSURL *normalizedURL,
             ApolloResolveImgurURL(normalizedURL, ^(NSDictionary *result) {
                 ASNetworkImageNode *strong = weakImage;
                 if (!strong || !result) return;
-                ApolloApplyResolvedAlbumImage(strong, result);
+                ApolloApplyResolvedAlbumImage(strong, result, weakHost);
             });
         }
     } else if (deferredImageChest) {
@@ -3871,7 +4336,7 @@ static ASNetworkImageNode *ApolloMakeInlineImageNode(NSURL *normalizedURL,
             ApolloImageChestResolveURL(normalizedURL, ^(NSDictionary *result) {
                 ASNetworkImageNode *strong = weakImage;
                 if (!strong || !result) return;
-                ApolloApplyResolvedAlbumImage(strong, result);
+                ApolloApplyResolvedAlbumImage(strong, result, weakHost);
             });
         }
     }
@@ -3961,7 +4426,7 @@ static void ApolloRefreshInlineMediaLayout(void) {
             relaid++;
         } @catch (__unused NSException *exception) {}
     }
-    ApolloLog(@"[InlineImages] media layout refresh nodes=%lu relaid=%lu",
+    ApolloLogDebug(@"[InlineImages] media layout refresh nodes=%lu relaid=%lu",
               (unsigned long)nodes.count, (unsigned long)relaid);
 }
 
@@ -4189,8 +4654,8 @@ static void ApolloScheduleInlineGIFMetadataRetry(ASDisplayNode *hostMarkdownNode
                 // so the /player URL is reclassified as a GIF on the next layout.
                 objc_setAssociatedObject(host, &kApolloCachedOrigChildrenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 ApolloRequestMarkdownRelayout(host);
-                ApolloLog(@"[InlineImages] reddit GIF metadata arrived — rebuilding decomposition host=%p attempt=%lu",
-                          host, (unsigned long)attempt);
+                ApolloLogDebug(@"[InlineImages] reddit GIF metadata arrived — rebuilding decomposition host=%p attempt=%lu",
+                               host, (unsigned long)attempt);
                 return;
             }
             // Metadata is present but none of the candidates are GIFs — they're
@@ -4430,25 +4895,24 @@ static ASNetworkImageNode *ApolloImageNodeForURL(NSURL *normalizedURL,
     NSString *key = [normalizedURL absoluteString];
     ASNetworkImageNode *existing = key ? cache[key] : nil;
     if (existing) {
-        // Reuse: ensure the host association is still up to date in case
-        // (somehow) it pointed elsewhere previously.
-        ApolloSetInlineHostForNode(existing, hostMarkdownNode);
         // If this is a cached album/gallery node whose resolution never
         // completed (e.g. previous host was deallocated mid-fetch), kick
         // off another resolve attempt — the resolver dedupes on cacheKey.
         if (ApolloIsImgurAlbumOrGalleryURL(normalizedURL) && !objc_getAssociatedObject(existing, &kApolloImageURLKey)) {
             __weak ASNetworkImageNode *weakImage = existing;
+            __weak ASDisplayNode *weakHost = hostMarkdownNode;
             ApolloResolveImgurURL(normalizedURL, ^(NSDictionary *result) {
                 ASNetworkImageNode *strong = weakImage;
                 if (!strong || !result) return;
-                ApolloApplyResolvedAlbumImage(strong, result);
+                ApolloApplyResolvedAlbumImage(strong, result, weakHost);
             });
         } else if (ApolloImageChestIsPostURL(normalizedURL) && !objc_getAssociatedObject(existing, &kApolloImageURLKey)) {
             __weak ASNetworkImageNode *weakImage = existing;
+            __weak ASDisplayNode *weakHost = hostMarkdownNode;
             ApolloImageChestResolveURL(normalizedURL, ^(NSDictionary *result) {
                 ASNetworkImageNode *strong = weakImage;
                 if (!strong || !result) return;
-                ApolloApplyResolvedAlbumImage(strong, result);
+                ApolloApplyResolvedAlbumImage(strong, result, weakHost);
             });
         }
         return existing;
@@ -4473,11 +4937,10 @@ static ASNetworkImageNode *ApolloVideoThumbnailNodeForURL(NSURL *normalizedURL,
     NSString *key = [normalizedURL absoluteString];
     ASNetworkImageNode *existing = key ? cache[key] : nil;
     if (existing) {
-        ApolloSetInlineHostForNode(existing, hostMarkdownNode);
         return existing;
     }
 
-    ASNetworkImageNode *videoNode = ApolloMakeInlineVideoThumbnailNode(normalizedURL, hostMarkdownNode);
+    ASNetworkImageNode *videoNode = ApolloMakeInlineVideoThumbnailNode(normalizedURL);
     if (!videoNode) return nil;
     // No manual addSubnode: — see ApolloHiddenInlineLeafSpec for the ASM invariant.
     if (key) cache[key] = videoNode;
@@ -4649,7 +5112,7 @@ static BOOL ApolloLinkButtonHasInlineHost(ASDisplayNode *linkButtonNode) {
         objc_setAssociatedObject(self, &kApolloCachedOrigChildrenKey, origChildren, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         decomp = rekeyed.count > 0 ? rekeyed : nil;
         identityMatches = YES; // content is stable — skip the rebuild below
-        ApolloLog(@"[InlineImages] vote-stable relayout: reused decomposition across pointer churn (md=%p leaves=%lu) — no rebuild, no flicker",
+        ApolloLogDebug(@"[InlineImages] vote-stable relayout: reused decomposition across pointer churn (md=%p leaves=%lu) — no rebuild, no flicker",
                   self, (unsigned long)rekeyed.count);
     }
 
@@ -4747,7 +5210,7 @@ static BOOL ApolloLinkButtonHasInlineHost(ASDisplayNode *linkButtonNode) {
         }
         for (id leaf in leaves) {
             if ([usedLeaves containsObject:leaf]) {
-                ApolloLog(@"[InlineImages] skipping duplicate leaf instance %p in one layout pass (host=%p)", leaf, self);
+                ApolloLogDebug(@"[InlineImages] skipping duplicate leaf instance %p in one layout pass (host=%p)", leaf, self);
                 continue;
             }
             [usedLeaves addObject:leaf];

@@ -26,6 +26,7 @@
 #import "ApolloImgChestUpload.h"
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import <objc/runtime.h>
 
 static NSString *const kImgChestAPIBase = @"https://api.imgchest.com/v1";
 static NSString *const kUploadRegistryDefaultsKey = @"ApolloRebornUploadRegistry";
@@ -36,6 +37,99 @@ static NSString *const kProviderReddit = @"reddit";
 // Owned files cached per token for album combining; evicted once combined or
 // when the cap is exceeded (oldest first). 150 MB covers any realistic album.
 static const unsigned long long kAlbumFileCacheCapBytes = 150ULL * 1024ULL * 1024ULL;
+static char kApolloImgChestUploadOperationKey;
+static void ApolloImgChestRemoveManagedFile(NSURL *fileURL);
+static NSError *ApolloImgChestError(NSString *message);
+static NSError *ApolloImgChestCancelledError(void);
+
+static dispatch_queue_t ApolloImgChestMultipartQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("com.apolloreborn.imgchest-multipart", DISPATCH_QUEUE_SERIAL);
+        dispatch_set_target_queue(queue, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    });
+    return queue;
+}
+
+@interface ApolloImgChestUploadOperation ()
+@property (atomic, readwrite, getter=isCancelled) BOOL cancelled;
+@property (nonatomic, strong) NSURLSessionTask *activeTask;
+@property (nonatomic, strong) NSMutableSet<NSURL *> *cleanupFiles;
+@property (nonatomic) BOOL finished;
+- (BOOL)adoptTaskIfActive:(NSURLSessionTask *)task;
+- (void)addCleanupFile:(NSURL *)fileURL;
+- (void)relinquishCleanupFile:(NSURL *)fileURL;
+- (BOOL)finishOnce;
+@end
+
+@implementation ApolloImgChestUploadOperation
+
+- (instancetype)init {
+    self = [super init];
+    if (self) _cleanupFiles = [NSMutableSet set];
+    return self;
+}
+
+- (void)cancel {
+    NSURLSessionTask *task = nil;
+    NSArray<NSURL *> *files = nil;
+    @synchronized (self) {
+        if (self.cancelled || self.finished) return;
+        self.cancelled = YES;
+        task = self.activeTask;
+        self.activeTask = nil;
+        files = self.cleanupFiles.allObjects;
+        [self.cleanupFiles removeAllObjects];
+    }
+    [task cancel];
+    for (NSURL *fileURL in files) ApolloImgChestRemoveManagedFile(fileURL);
+}
+
+- (BOOL)adoptTaskIfActive:(NSURLSessionTask *)task {
+    @synchronized (self) {
+        if (self.cancelled || self.finished) return NO;
+        self.activeTask = task;
+        return YES;
+    }
+}
+
+- (void)addCleanupFile:(NSURL *)fileURL {
+    if (!fileURL) return;
+    BOOL removeNow = NO;
+    @synchronized (self) {
+        if (self.cancelled || self.finished) removeNow = YES;
+        else [self.cleanupFiles addObject:fileURL];
+    }
+    if (removeNow) ApolloImgChestRemoveManagedFile(fileURL);
+}
+
+- (void)relinquishCleanupFile:(NSURL *)fileURL {
+    if (!fileURL) return;
+    @synchronized (self) { [self.cleanupFiles removeObject:fileURL]; }
+}
+
+- (BOOL)finishOnce {
+    @synchronized (self) {
+        if (self.finished) return NO;
+        self.finished = YES;
+        self.activeTask = nil;
+        return YES;
+    }
+}
+
+@end
+
+void ApolloImgChestAssociateOperationWithTask(ApolloImgChestUploadOperation *operation, NSURLSessionTask *task) {
+    if (!operation || !task) return;
+    objc_setAssociatedObject(task, &kApolloImgChestUploadOperationKey, operation, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+void ApolloImgChestCancelOperationAssociatedWithTask(NSURLSessionTask *task) {
+    ApolloImgChestUploadOperation *operation = task
+        ? objc_getAssociatedObject(task, &kApolloImgChestUploadOperationKey) : nil;
+    [operation cancel];
+}
 
 #pragma mark - Upload registry (persisted)
 
@@ -166,14 +260,50 @@ static NSURL *ApolloImgChestUniqueManagedURL(NSString *filename) {
     return [ApolloImgChestManagedDirectory() URLByAppendingPathComponent:name];
 }
 
-static NSURL *ApolloImgChestCopyFileIntoManagedStorage(NSURL *sourceURL, NSString *filename, NSError **outError) {
+static NSURL *ApolloImgChestCopyFileIntoManagedStorage(NSURL *sourceURL, NSString *filename,
+                                                        ApolloImgChestUploadOperation *operation,
+                                                        NSError **outError) {
     if (![sourceURL isKindOfClass:[NSURL class]] || !sourceURL.isFileURL) {
         if (outError) *outError = [NSError errorWithDomain:@"ApolloImgChestUpload" code:-2
                                                   userInfo:@{NSLocalizedDescriptionKey: @"Invalid image file URL"}];
         return nil;
     }
     NSURL *destination = ApolloImgChestUniqueManagedURL(filename ?: sourceURL.lastPathComponent ?: @"image.jpg");
-    if (![[NSFileManager defaultManager] copyItemAtURL:sourceURL toURL:destination error:outError]) return nil;
+    if (![[NSFileManager defaultManager] createFileAtPath:destination.path contents:nil attributes:nil]) {
+        if (outError) *outError = [NSError errorWithDomain:@"ApolloImgChestUpload" code:-4
+                                                   userInfo:@{NSLocalizedDescriptionKey: @"Could not create staged image file"}];
+        return nil;
+    }
+    NSFileHandle *input = [NSFileHandle fileHandleForReadingAtPath:sourceURL.path];
+    NSFileHandle *output = [NSFileHandle fileHandleForWritingAtPath:destination.path];
+    BOOL success = input && output;
+    BOOL reachedEnd = NO;
+    NSError *stagingError = nil;
+    while (success && !reachedEnd) {
+        @autoreleasepool {
+            if (operation.cancelled) {
+                stagingError = ApolloImgChestCancelledError();
+                success = NO;
+                continue;
+            }
+            @try {
+                NSData *chunk = [input readDataOfLength:64 * 1024];
+                if (chunk.length == 0) reachedEnd = YES;
+                else [output writeData:chunk];
+            } @catch (NSException *exception) {
+                stagingError = [NSError errorWithDomain:@"ApolloImgChestUpload" code:-5
+                                                userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Could not stage image file"}];
+                success = NO;
+            }
+        }
+    }
+    [input closeFile];
+    [output closeFile];
+    if (!success) {
+        ApolloImgChestRemoveManagedFile(destination);
+        if (outError && stagingError) *outError = stagingError;
+        return nil;
+    }
     if (ApolloImgChestFileSize(destination).unsignedLongLongValue == 0) {
         ApolloImgChestRemoveManagedFile(destination);
         if (outError && !*outError) *outError = [NSError errorWithDomain:@"ApolloImgChestUpload" code:-3
@@ -183,9 +313,36 @@ static NSURL *ApolloImgChestCopyFileIntoManagedStorage(NSURL *sourceURL, NSStrin
     return destination;
 }
 
-static NSURL *ApolloImgChestWriteDataIntoManagedStorage(NSData *data, NSString *filename, NSError **outError) {
+static NSURL *ApolloImgChestWriteDataIntoManagedStorage(NSData *data, NSString *filename,
+                                                         ApolloImgChestUploadOperation *operation,
+                                                         NSError **outError) {
     NSURL *destination = ApolloImgChestUniqueManagedURL(filename ?: @"image.jpg");
-    if (![data writeToURL:destination options:NSDataWritingAtomic error:outError]) return nil;
+    if (![[NSFileManager defaultManager] createFileAtPath:destination.path contents:nil attributes:nil]) return nil;
+    NSFileHandle *output = [NSFileHandle fileHandleForWritingAtPath:destination.path];
+    BOOL success = output != nil;
+    NSError *stagingError = nil;
+    for (NSUInteger offset = 0; success && offset < data.length; offset += MIN((NSUInteger)(64 * 1024), data.length - offset)) {
+        @autoreleasepool {
+            if (operation.cancelled) {
+                stagingError = ApolloImgChestCancelledError();
+                success = NO;
+                continue;
+            }
+            NSUInteger length = MIN((NSUInteger)(64 * 1024), data.length - offset);
+            @try { [output writeData:[data subdataWithRange:NSMakeRange(offset, length)]]; }
+            @catch (NSException *exception) {
+                stagingError = [NSError errorWithDomain:@"ApolloImgChestUpload" code:-6
+                                                userInfo:@{NSLocalizedDescriptionKey: exception.reason ?: @"Could not stage image data"}];
+                success = NO;
+            }
+        }
+    }
+    [output closeFile];
+    if (!success) {
+        ApolloImgChestRemoveManagedFile(destination);
+        if (outError && stagingError) *outError = stagingError;
+        return nil;
+    }
     return destination;
 }
 
@@ -242,6 +399,41 @@ static NSDictionary *_Nullable ApolloImgChestCachePeek(NSString *token) {
     }
 }
 
+// Freeze album members while holding the same lock used by cache eviction.
+// Hard links are effectively free snapshots on this volume: eviction may
+// unlink the cache-owned name afterward, while the album build keeps a stable
+// inode until its operation completes or is cancelled.
+static NSArray<NSDictionary *> *_Nullable ApolloImgChestSnapshotCachedParts(
+    NSArray<NSString *> *tokens, NSArray<NSURL *> **snapshotFilesOut, NSError **outError) {
+    NSMutableArray<NSDictionary *> *parts = [NSMutableArray arrayWithCapacity:tokens.count];
+    NSMutableArray<NSURL *> *snapshotFiles = [NSMutableArray arrayWithCapacity:tokens.count];
+    @synchronized (ApolloImgChestCache()) {
+        for (NSString *token in tokens) {
+            NSDictionary *cached = ApolloImgChestCache()[token];
+            NSURL *sourceURL = [cached[@"fileURL"] isKindOfClass:[NSURL class]] ? cached[@"fileURL"] : nil;
+            if (ApolloImgChestFileSize(sourceURL).unsignedLongLongValue == 0) {
+                if (outError) *outError = ApolloImgChestError(@"An album image expired before it could be combined");
+                for (NSURL *snapshotURL in snapshotFiles) ApolloImgChestRemoveManagedFile(snapshotURL);
+                return nil;
+            }
+
+            NSURL *snapshotURL = ApolloImgChestUniqueManagedURL(sourceURL.lastPathComponent ?: @"album-image");
+            NSError *linkError = nil;
+            if (![[NSFileManager defaultManager] linkItemAtURL:sourceURL toURL:snapshotURL error:&linkError]) {
+                if (outError) *outError = linkError ?: ApolloImgChestError(@"Could not snapshot an album image");
+                for (NSURL *createdURL in snapshotFiles) ApolloImgChestRemoveManagedFile(createdURL);
+                return nil;
+            }
+            NSMutableDictionary *snapshotPart = [cached mutableCopy];
+            snapshotPart[@"fileURL"] = snapshotURL;
+            [parts addObject:snapshotPart];
+            [snapshotFiles addObject:snapshotURL];
+        }
+    }
+    if (snapshotFilesOut) *snapshotFilesOut = [snapshotFiles copy];
+    return [parts copy];
+}
+
 static void ApolloImgChestCacheRemove(NSArray<NSString *> *tokens) {
     @synchronized (ApolloImgChestCache()) {
         for (NSString *token in tokens) {
@@ -263,6 +455,11 @@ static NSError *ApolloImgChestError(NSString *message) {
     return [NSError errorWithDomain:@"ApolloImgChestUpload"
                                code:-1
                            userInfo:@{NSLocalizedDescriptionKey: message ?: @"Image Chest upload failed"}];
+}
+
+static NSError *ApolloImgChestCancelledError(void) {
+    return [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled
+                           userInfo:@{NSLocalizedDescriptionKey: @"Image Chest upload cancelled"}];
 }
 
 static NSString *ApolloImgChestSanitizedMultipartFilename(NSString *filename) {
@@ -306,6 +503,7 @@ static BOOL ApolloImgChestAppendString(NSFileHandle *handle, NSString *string, N
 static NSURL *ApolloImgChestMultipartFile(NSString *boundary,
                                           NSDictionary<NSString *, NSString *> *fields,
                                           NSArray<NSDictionary *> *imageParts,
+                                          ApolloImgChestUploadOperation *operation,
                                           NSError **outError) {
     NSURL *bodyURL = [ApolloImgChestManagedDirectory() URLByAppendingPathComponent:
         [[NSUUID UUID].UUIDString stringByAppendingPathExtension:@"multipart"]];
@@ -313,17 +511,28 @@ static NSURL *ApolloImgChestMultipartFile(NSString *boundary,
         if (outError) *outError = ApolloImgChestError(@"Could not create multipart body file");
         return nil;
     }
+    [operation addCleanupFile:bodyURL];
 
     NSFileHandle *output = [NSFileHandle fileHandleForWritingAtPath:bodyURL.path];
-    BOOL success = output != nil;
+    BOOL success = output != nil && !operation.cancelled;
     for (NSString *name in fields) {
         if (!success) break;
+        if (operation.cancelled) {
+            success = NO;
+            if (outError) *outError = ApolloImgChestCancelledError();
+            break;
+        }
         success = ApolloImgChestAppendString(output, [NSString stringWithFormat:@"--%@\r\n", boundary], outError)
             && ApolloImgChestAppendString(output, [NSString stringWithFormat:@"Content-Disposition: form-data; name=\"%@\"\r\n\r\n", name], outError)
             && ApolloImgChestAppendString(output, [NSString stringWithFormat:@"%@\r\n", fields[name]], outError);
     }
     for (NSDictionary *part in imageParts) {
         if (!success) break;
+        if (operation.cancelled) {
+            success = NO;
+            if (outError) *outError = ApolloImgChestCancelledError();
+            break;
+        }
         NSURL *fileURL = [part[@"fileURL"] isKindOfClass:[NSURL class]] ? part[@"fileURL"] : nil;
         if (ApolloImgChestFileSize(fileURL).unsignedLongLongValue == 0) {
             success = NO;
@@ -341,21 +550,28 @@ static NSURL *ApolloImgChestMultipartFile(NSString *boundary,
             if (outError) *outError = ApolloImgChestError(@"Could not open album image file");
         }
         BOOL reachedEnd = NO;
+        NSError *streamError = nil;
         while (success && !reachedEnd) {
             @autoreleasepool {
+                if (operation.cancelled) {
+                    streamError = ApolloImgChestCancelledError();
+                    success = NO;
+                    continue;
+                }
                 NSData *chunk = nil;
                 @try { chunk = [input readDataOfLength:64 * 1024]; }
                 @catch (NSException *exception) {
-                    if (outError) *outError = ApolloImgChestError(exception.reason ?: @"Could not read album image file");
+                    streamError = ApolloImgChestError(exception.reason ?: @"Could not read album image file");
                     success = NO;
                 }
                 if (success && chunk.length == 0) {
                     reachedEnd = YES;
                 } else if (success) {
-                    success = ApolloImgChestAppendData(output, chunk, outError);
+                    success = ApolloImgChestAppendData(output, chunk, &streamError);
                 }
             }
         }
+        if (!success && outError && streamError) *outError = streamError;
         [input closeFile];
         if (success) success = ApolloImgChestAppendString(output, @"\r\n", outError);
     }
@@ -364,6 +580,7 @@ static NSURL *ApolloImgChestMultipartFile(NSString *boundary,
 
     if (!success) {
         ApolloImgChestRemoveManagedFile(bodyURL);
+        [operation relinquishCleanupFile:bodyURL];
         return nil;
     }
     return bodyURL;
@@ -372,9 +589,10 @@ static NSURL *ApolloImgChestMultipartFile(NSString *boundary,
 // POST /v1/post with the given image parts. completion(postDictionary, error)
 // where postDictionary is the API's `data` object: {id, link, images: [...]}.
 static void ApolloImgChestCreatePost(NSArray<NSDictionary *> *imageParts,
-                                     void (^completion)(NSDictionary *_Nullable post, NSError *_Nullable error)) {
+                                     ApolloImgChestUploadOperation *operation,
+    void (^completion)(NSDictionary *_Nullable post, NSError *_Nullable error)) {
     if (!ApolloImgChestUploadAvailable()) {
-        completion(nil, ApolloImgChestError(@"No Image Chest API key configured"));
+        if ([operation finishOnce]) completion(nil, ApolloImgChestError(@"No Image Chest API key configured"));
         return;
     }
     NSString *boundary = [NSString stringWithFormat:@"apollo-imgchest-%@", [NSUUID UUID].UUIDString];
@@ -386,9 +604,18 @@ static void ApolloImgChestCreatePost(NSArray<NSDictionary *> *imageParts,
     [request setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@", boundary] forHTTPHeaderField:@"Content-Type"];
     // "hidden" = unlisted: reachable by link, not listed publicly.
     NSError *bodyError = nil;
-    NSURL *multipartURL = ApolloImgChestMultipartFile(boundary, @{ @"privacy": @"hidden" }, imageParts, &bodyError);
+    NSURL *multipartURL = ApolloImgChestMultipartFile(boundary, @{ @"privacy": @"hidden" }, imageParts, operation, &bodyError);
     if (!multipartURL) {
-        completion(nil, bodyError ?: ApolloImgChestError(@"Could not build Image Chest upload"));
+        NSError *error = bodyError ?: (operation.cancelled
+            ? ApolloImgChestCancelledError()
+            : ApolloImgChestError(@"Could not build Image Chest upload"));
+        if ([operation finishOnce]) completion(nil, error);
+        return;
+    }
+    if (operation.cancelled) {
+        ApolloImgChestRemoveManagedFile(multipartURL);
+        [operation relinquishCleanupFile:multipartURL];
+        if ([operation finishOnce]) completion(nil, ApolloImgChestCancelledError());
         return;
     }
 
@@ -396,6 +623,11 @@ static void ApolloImgChestCreatePost(NSArray<NSDictionary *> *imageParts,
                                                                               fromFile:multipartURL
                                                                      completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         ApolloImgChestRemoveManagedFile(multipartURL);
+        [operation relinquishCleanupFile:multipartURL];
+        if (operation.cancelled) {
+            if ([operation finishOnce]) completion(nil, ApolloImgChestCancelledError());
+            return;
+        }
         NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
         id root = data.length > 0 ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
         NSDictionary *json = [root isKindOfClass:[NSDictionary class]] ? root : nil;
@@ -404,11 +636,18 @@ static void ApolloImgChestCreatePost(NSArray<NSDictionary *> *imageParts,
             NSString *message = [json[@"message"] isKindOfClass:[NSString class]] ? json[@"message"] : nil;
             ApolloLog(@"[ImgChestUpload] create post failed status=%ld err=%@ msg=%@ bytes=%lu",
                       (long)http.statusCode, error.localizedDescription ?: @"nil", message ?: @"nil", (unsigned long)data.length);
-            completion(nil, error ?: ApolloImgChestError(message ?: @"Image Chest upload failed"));
+            if ([operation finishOnce]) completion(nil, error ?: ApolloImgChestError(message ?: @"Image Chest upload failed"));
             return;
         }
-        completion(post, nil);
+        if ([operation finishOnce]) completion(post, nil);
     }];
+    if (![operation adoptTaskIfActive:task]) {
+        [task cancel];
+        ApolloImgChestRemoveManagedFile(multipartURL);
+        [operation relinquishCleanupFile:multipartURL];
+        if ([operation finishOnce]) completion(nil, ApolloImgChestCancelledError());
+        return;
+    }
     [task resume];
 }
 
@@ -444,22 +683,25 @@ static NSURL *_Nullable ApolloImgChestFirstImageLink(NSDictionary *post) {
 static void ApolloImgChestUploadOwnedFile(NSURL *ownedFileURL,
                                           NSString *filename,
                                           NSString *mimeType,
+                                          ApolloImgChestUploadOperation *operation,
                                           void (^completion)(NSURL *_Nullable directLink, NSError *_Nullable error)) {
     NSNumber *size = ApolloImgChestFileSize(ownedFileURL);
     if (size.unsignedLongLongValue == 0) {
         ApolloImgChestRemoveManagedFile(ownedFileURL);
-        completion(nil, ApolloImgChestError(@"Empty image file"));
+        [operation relinquishCleanupFile:ownedFileURL];
+        if ([operation finishOnce]) completion(nil, ApolloImgChestError(@"Empty image file"));
         return;
     }
     NSDictionary *part = @{ @"fileURL": ownedFileURL,
                              @"size": size,
                              @"filename": ApolloImgChestSanitizedMultipartFilename(filename),
                              @"mimeType": ApolloImgChestSafeMIMEType(mimeType) };
-    ApolloImgChestCreatePost(@[part], ^(NSDictionary *post, NSError *error) {
+    ApolloImgChestCreatePost(@[part], operation, ^(NSDictionary *post, NSError *error) {
         NSString *postID = [post[@"id"] isKindOfClass:[NSString class]] ? post[@"id"] : nil;
         NSURL *link = ApolloImgChestFirstImageLink(post);
         if (!postID || !link) {
             ApolloImgChestRemoveManagedFile(ownedFileURL);
+            [operation relinquishCleanupFile:ownedFileURL];
             completion(nil, error ?: ApolloImgChestError(@"Image Chest response missing link"));
             return;
         }
@@ -474,39 +716,73 @@ static void ApolloImgChestUploadOwnedFile(NSURL *ownedFileURL,
                                            @"filename": ApolloImgChestSanitizedMultipartFilename(filename),
                                            @"mimeType": ApolloImgChestSafeMIMEType(mimeType),
                                            @"post": postID });
+        [operation relinquishCleanupFile:ownedFileURL];
         ApolloLog(@"[ImgChestUpload] uploaded %@ bytes -> post=%@ link=%@", size, postID, link.absoluteString);
         completion(link, nil);
     });
 }
 
-void ApolloImgChestUploadData(NSData *data,
-                              NSString *filename,
-                              NSString *mimeType,
-                              void (^completion)(NSURL *_Nullable directLink, NSError *_Nullable error)) {
+ApolloImgChestUploadOperation *ApolloImgChestUploadData(NSData *data,
+                                                         NSString *filename,
+                                                         NSString *mimeType,
+                                                         void (^completion)(NSURL *_Nullable directLink, NSError *_Nullable error)) {
+    ApolloImgChestUploadOperation *operation = [ApolloImgChestUploadOperation new];
     if (data.length == 0) {
+        [operation finishOnce];
         completion(nil, ApolloImgChestError(@"Empty image data"));
-        return;
+        return operation;
     }
-    NSError *error = nil;
-    NSURL *ownedFileURL = ApolloImgChestWriteDataIntoManagedStorage(data, filename, &error);
-    if (!ownedFileURL) {
-        completion(nil, error ?: ApolloImgChestError(@"Could not stage image data"));
-        return;
-    }
-    ApolloImgChestUploadOwnedFile(ownedFileURL, filename, mimeType, completion);
+    NSData *dataCopy = [data copy];
+    NSString *filenameCopy = [filename copy];
+    NSString *mimeTypeCopy = [mimeType copy];
+    dispatch_async(ApolloImgChestMultipartQueue(), ^{
+        if (operation.cancelled) {
+            if ([operation finishOnce]) completion(nil, ApolloImgChestCancelledError());
+            return;
+        }
+        NSError *error = nil;
+        NSURL *ownedFileURL = ApolloImgChestWriteDataIntoManagedStorage(dataCopy, filenameCopy, operation, &error);
+        if (!ownedFileURL) {
+            if ([operation finishOnce]) completion(nil, error ?: ApolloImgChestError(@"Could not stage image data"));
+            return;
+        }
+        [operation addCleanupFile:ownedFileURL];
+        if (operation.cancelled) {
+            if ([operation finishOnce]) completion(nil, ApolloImgChestCancelledError());
+            return;
+        }
+        ApolloImgChestUploadOwnedFile(ownedFileURL, filenameCopy, mimeTypeCopy, operation, completion);
+    });
+    return operation;
 }
 
-void ApolloImgChestUploadFile(NSURL *fileURL,
-                              NSString *filename,
-                              NSString *mimeType,
-                              void (^completion)(NSURL *_Nullable directLink, NSError *_Nullable error)) {
-    NSError *error = nil;
-    NSURL *ownedFileURL = ApolloImgChestCopyFileIntoManagedStorage(fileURL, filename, &error);
-    if (!ownedFileURL) {
-        completion(nil, error ?: ApolloImgChestError(@"Could not stage image file"));
-        return;
-    }
-    ApolloImgChestUploadOwnedFile(ownedFileURL, filename, mimeType, completion);
+ApolloImgChestUploadOperation *ApolloImgChestUploadFile(NSURL *fileURL,
+                                                         NSString *filename,
+                                                         NSString *mimeType,
+                                                         void (^completion)(NSURL *_Nullable directLink, NSError *_Nullable error)) {
+    ApolloImgChestUploadOperation *operation = [ApolloImgChestUploadOperation new];
+    NSURL *sourceURL = [fileURL copy];
+    NSString *filenameCopy = [filename copy];
+    NSString *mimeTypeCopy = [mimeType copy];
+    dispatch_async(ApolloImgChestMultipartQueue(), ^{
+        if (operation.cancelled) {
+            if ([operation finishOnce]) completion(nil, ApolloImgChestCancelledError());
+            return;
+        }
+        NSError *error = nil;
+        NSURL *ownedFileURL = ApolloImgChestCopyFileIntoManagedStorage(sourceURL, filenameCopy, operation, &error);
+        if (!ownedFileURL) {
+            if ([operation finishOnce]) completion(nil, error ?: ApolloImgChestError(@"Could not stage image file"));
+            return;
+        }
+        [operation addCleanupFile:ownedFileURL];
+        if (operation.cancelled) {
+            if ([operation finishOnce]) completion(nil, ApolloImgChestCancelledError());
+            return;
+        }
+        ApolloImgChestUploadOwnedFile(ownedFileURL, filenameCopy, mimeTypeCopy, operation, completion);
+    });
+    return operation;
 }
 
 #pragma mark - Album combining
@@ -573,7 +849,6 @@ ApolloImgChestAlbumResponder ApolloImgChestAlbumCreationResponderForRequest(NSUR
     NSArray<NSString *> *tokens = ApolloImgChestAlbumTokensFromRequest(request);
     if (tokens.count < 2) return nil;
 
-    NSMutableArray<NSDictionary *> *parts = [NSMutableArray arrayWithCapacity:tokens.count];
     NSMutableArray<NSString *> *interimPosts = [NSMutableArray array];
     for (NSString *token in tokens) {
         NSDictionary *cached = ApolloImgChestCachePeek(token);
@@ -584,14 +859,20 @@ ApolloImgChestAlbumResponder ApolloImgChestAlbumCreationResponderForRequest(NSUR
             ApolloLog(@"[ImgChestUpload] album token %@ has no cached file; not combining", token);
             return nil;
         }
-        [parts addObject:cached];
         NSString *postID = [cached[@"post"] isKindOfClass:[NSString class]] ? cached[@"post"] : nil;
         if (postID.length > 0) [interimPosts addObject:postID];
     }
 
     NSArray<NSString *> *tokensCopy = [tokens copy];
-    return ^(ApolloImgChestReply reply) {
-        ApolloImgChestCreatePost(parts, ^(NSDictionary *post, NSError *error) {
+    return ^ApolloImgChestUploadOperation *(ApolloImgChestReply reply) {
+        ApolloImgChestUploadOperation *operation = [ApolloImgChestUploadOperation new];
+        __block NSArray<NSURL *> *snapshotFiles = @[];
+        void (^postCompletion)(NSDictionary *, NSError *) = ^(NSDictionary *post, NSError *error) {
+            for (NSURL *snapshotURL in snapshotFiles) {
+                ApolloImgChestRemoveManagedFile(snapshotURL);
+                [operation relinquishCleanupFile:snapshotURL];
+            }
+            snapshotFiles = @[];
             NSString *postID = [post[@"id"] isKindOfClass:[NSString class]] ? post[@"id"] : nil;
             NSString *postLink = [post[@"link"] isKindOfClass:[NSString class]] && [post[@"link"] length] > 0
                 ? post[@"link"]
@@ -660,7 +941,26 @@ ApolloImgChestAlbumResponder ApolloImgChestAlbumCreationResponderForRequest(NSUR
             ApolloLog(@"[ImgChestUpload] combined %lu uploads into album post=%@ link=%@",
                       (unsigned long)tokensCopy.count, postID, postLink);
             reply(json, fake, nil);
+        };
+        dispatch_async(ApolloImgChestMultipartQueue(), ^{
+            if (operation.cancelled) {
+                if ([operation finishOnce]) reply(nil, nil, ApolloImgChestCancelledError());
+                return;
+            }
+            NSError *snapshotError = nil;
+            NSArray<NSDictionary *> *parts = ApolloImgChestSnapshotCachedParts(tokensCopy, &snapshotFiles, &snapshotError);
+            if (!parts) {
+                if ([operation finishOnce]) reply(nil, nil, snapshotError ?: ApolloImgChestError(@"Could not snapshot album images"));
+                return;
+            }
+            for (NSURL *snapshotURL in snapshotFiles) [operation addCleanupFile:snapshotURL];
+            if (operation.cancelled) {
+                if ([operation finishOnce]) reply(nil, nil, ApolloImgChestCancelledError());
+                return;
+            }
+            ApolloImgChestCreatePost(parts, operation, postCompletion);
         });
+        return operation;
     };
 }
 

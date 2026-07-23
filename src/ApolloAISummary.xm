@@ -1718,7 +1718,6 @@ static char kApolloAICommentExpandChoiceKey;
 // explicit request to read this summary. Cleared like a one-shot by the expand.
 static char kApolloAIPostExpandOnReadyKey;
 static char kApolloAICommentExpandOnReadyKey;
-static char kApolloAISummaryOwnerKey;
 static char kApolloAISummaryIsPostKey;
 
 static void ApolloAIForceHeaderRemeasure(NSString *fullName);
@@ -1890,12 +1889,12 @@ static ASTextNode *ApolloAIEnsureSummaryNode(id headerNode, BOOL isPost) {
     textNode = [[textNodeClass alloc] init];
     textNode.maximumNumberOfLines = 0;
     textNode.userInteractionEnabled = YES;
-    objc_setAssociatedObject(textNode, &kApolloAISummaryOwnerKey, headerNode, OBJC_ASSOCIATION_ASSIGN);
     objc_setAssociatedObject(textNode, &kApolloAISummaryIsPostKey, @(isPost), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     __weak ASTextNode *weakTextNode = textNode;
+    __weak id weakHeaderNode = headerNode;
     [textNode onDidLoad:^(__kindof ASDisplayNode *node) {
         ASTextNode *strongTextNode = weakTextNode;
-        id owner = objc_getAssociatedObject(strongTextNode, &kApolloAISummaryOwnerKey);
+        id owner = weakHeaderNode;
         if (!owner || !strongTextNode.view) return;
         SEL action = isPost ? NSSelectorFromString(@"apollo_togglePostSummary")
                             : NSSelectorFromString(@"apollo_toggleDiscussionSummary");

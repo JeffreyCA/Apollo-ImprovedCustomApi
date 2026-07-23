@@ -31,7 +31,7 @@
 #endif
 
 #if APOLLO_TRANSLATION_VERBOSE_LOGS
-#define ApolloTranslationVerboseLog(fmt, ...) ApolloLog(fmt, ##__VA_ARGS__)
+#define ApolloTranslationVerboseLog(fmt, ...) ApolloLogDebug(fmt, ##__VA_ARGS__)
 #else
 #define ApolloTranslationVerboseLog(fmt, ...) do {} while (0)
 #endif
@@ -9573,24 +9573,24 @@ static void ApolloDbgPurgeNSCaches(CFNotificationCenterRef c, void *o, CFStringR
             @"Tjen def. Fernandez", @"I love Dua Lipa's new album",
             @"Roger Federer wins again", @"Bonjour tout le monde",
             @"voy a casa", @"Che bella giornata", @"Bonjour" ];
-        ApolloLog(@"[Translation][NameTest] provider=%@ — proper-noun protection self-test", sTranslationProvider ?: @"(nil)");
+        ApolloLogDebug(@"[Translation][NameTest] provider=%@ — proper-noun protection self-test", sTranslationProvider ?: @"(nil)");
         for (NSString *title in titles) {
             NSDictionary<NSString *, NSString *> *names = nil;
             NSString *protectedText = ApolloProtectTranslationNames(title, &names);
             BOOL onlyNames = names.count > 0 && ApolloProtectedTextIsOnlyProtectedTokens(protectedText, names, @{});
             BOOL titleHeuristic = ApolloTitleLooksLikeProperNouns(title);
             BOOL willSkip = onlyNames || titleHeuristic;
-            ApolloLog(@"[Translation][NameTest] \"%@\" -> ner=[%@] titleHeuristic=%d => %@",
-                title,
-                names.count ? [names.allValues componentsJoinedByString:@", "] : @"none",
-                titleHeuristic,
-                willSkip ? @"SKIP (left untranslated)" : @"translate");
+            ApolloLogDebug(@"[Translation][NameTest] \"%@\" -> ner=[%@] titleHeuristic=%d => %@",
+                           title,
+                           names.count ? [names.allValues componentsJoinedByString:@", "] : @"none",
+                           titleHeuristic,
+                           willSkip ? @"SKIP (left untranslated)" : @"translate");
         }
         NSString *probe = @"Dua Lipa";
         ApolloRequestTranslation(ApolloTranslationCacheKey(probe, @"en"), probe, @"en", ^(NSString *translated, NSError *error) {
-            ApolloLog(@"[Translation][NameTest] end-to-end \"%@\" => \"%@\" (err=%@) — %@",
-                probe, translated ?: @"(nil)", error ? @(error.code) : @"none",
-                [translated isEqualToString:probe] ? @"PASS name preserved" : @"CHECK");
+            ApolloLogDebug(@"[Translation][NameTest] end-to-end \"%@\" => \"%@\" (err=%@) — %@",
+                           probe, translated ?: @"(nil)", error ? @(error.code) : @"none",
+                           [translated isEqualToString:probe] ? @"PASS name preserved" : @"CHECK");
         });
     });
 #endif

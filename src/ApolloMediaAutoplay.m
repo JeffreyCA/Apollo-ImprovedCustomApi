@@ -318,12 +318,12 @@ static void ApolloLogAutoplayDecision(NSString *mode, BOOL shouldPlay) {
     if (@available(iOS 9.0, *)) {
         lpm = [NSProcessInfo processInfo].isLowPowerModeEnabled;
     }
-    ApolloLog(@"[AutoplayGIF] mode=%@ shouldPlay=%d lpm=%d wifi=%d cellular=%d",
-              mode ?: @"unknown",
-              shouldPlay,
-              lpm,
-              ApolloNetworkIsOnWiFi(),
-              ApolloNetworkIsOnCellular());
+    ApolloLogDebug(@"[AutoplayGIF] mode=%@ shouldPlay=%d lpm=%d wifi=%d cellular=%d",
+                   mode ?: @"unknown",
+                   shouldPlay,
+                   lpm,
+                   ApolloNetworkIsOnWiFi(),
+                   ApolloNetworkIsOnCellular());
 }
 
 BOOL ApolloShouldAutoplayInlineGIFCached(void) {
@@ -524,7 +524,7 @@ NSURL *ApolloInlineGIFDisplayURLFromMetadata(NSURL *url, NSDictionary *mediaMeta
 void ApolloRegisterInlineGIFNode(id imageNode) {
     if (!ApolloInlineGIFNodeIsRegistryEligible(imageNode)) {
         if (imageNode) {
-            ApolloLog(@"[AutoplayGIF] register skipped ineligible class=%@", NSStringFromClass([imageNode class]));
+            ApolloLogDebug(@"[AutoplayGIF] register skipped ineligible class=%@", NSStringFromClass([imageNode class]));
         }
         return;
     }
@@ -567,7 +567,7 @@ void ApolloRefreshVisibleInlineGIFAutoplay(void) {
             previousShouldPlay == shouldPlay &&
             ((sAutoplayRefreshLastMode == mode) || [sAutoplayRefreshLastMode isEqualToString:mode]) &&
             ((previousMode == mode) || [previousMode isEqualToString:mode])) {
-            ApolloLog(@"[AutoplayGIF] refresh skipped unchanged mode=%@ shouldPlay=%d", mode, shouldPlay);
+            ApolloLogDebug(@"[AutoplayGIF] refresh skipped unchanged mode=%@ shouldPlay=%d", mode, shouldPlay);
             return;
         }
         sAutoplayRefreshStateValid = YES;
@@ -611,8 +611,8 @@ void ApolloRefreshVisibleInlineGIFAutoplay(void) {
                 }
             }
         }
-        ApolloLog(@"[AutoplayGIF] refresh mode=%@ nodes=%lu reload=%lu pause=%lu skip=%lu pruned=%lu shouldPlay=%d",
-                  mode, (unsigned long)nodes.count, (unsigned long)reloadCount, (unsigned long)pauseCount, (unsigned long)skipCount, (unsigned long)prunedCount, shouldPlay);
+        ApolloLogDebug(@"[AutoplayGIF] refresh mode=%@ nodes=%lu reload=%lu pause=%lu skip=%lu pruned=%lu shouldPlay=%d",
+                       mode, (unsigned long)nodes.count, (unsigned long)reloadCount, (unsigned long)pauseCount, (unsigned long)skipCount, (unsigned long)prunedCount, shouldPlay);
     });
     sDeferredAutoplayRefreshBlock = block;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), block);

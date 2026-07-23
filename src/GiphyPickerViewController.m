@@ -4,65 +4,156 @@
 #import "ApolloThemeRuntime.h"
 
 #import <ImageIO/ImageIO.h>
+#import <objc/message.h>
+#import <objc/runtime.h>
 
 static NSString *const kGiphyCellReuseID = @"GiphyCell";
 static const NSTimeInterval kGiphySearchDebounce = 0.30;
+static const NSUInteger kGiphyMaximumPreviewBytes = 12 * 1024 * 1024;
+static const NSUInteger kGiphyMaximumPreviewFrames = 500;
+static const unsigned long long kGiphyMaximumPreviewPixels = 16ULL * 1024ULL * 1024ULL;
+static const size_t kGiphyMaximumPreviewDimension = 4096;
 
-static NSTimeInterval ApolloGiphyFrameDurationAtIndex(CGImageSourceRef source, size_t index) {
-    NSTimeInterval duration = 0.1;
-    CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, index, NULL);
-    if (!properties) return duration;
-
-    CFDictionaryRef gifProperties = CFDictionaryGetValue(properties, kCGImagePropertyGIFDictionary);
-    if (gifProperties) {
-        NSNumber *unclamped = CFDictionaryGetValue(gifProperties, kCGImagePropertyGIFUnclampedDelayTime);
-        NSNumber *clamped = CFDictionaryGetValue(gifProperties, kCGImagePropertyGIFDelayTime);
-        if ([unclamped isKindOfClass:[NSNumber class]]) {
-            duration = unclamped.doubleValue;
-        } else if ([clamped isKindOfClass:[NSNumber class]]) {
-            duration = clamped.doubleValue;
-        }
-    }
-    CFRelease(properties);
-
-    if (duration < 0.02) duration = 0.1;
-    return duration;
+static dispatch_queue_t ApolloGiphyPreviewDecodeQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("com.apolloreborn.giphy-preview-decode", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
 }
 
-static UIImage *ApolloGiphyAnimatedImageFromGIFData(NSData *data) {
+static BOOL ApolloGiphyDataIsGIF(NSData *data) {
+    if (data.length < 6) return NO;
+    const unsigned char *bytes = data.bytes;
+    return bytes[0] == 'G' && bytes[1] == 'I' && bytes[2] == 'F';
+}
+
+static BOOL ApolloGiphyReadPreviewDimensions(CFDictionaryRef properties,
+                                              unsigned long long *widthOut,
+                                              unsigned long long *heightOut) {
+    if (!properties) return NO;
+    CFNumberRef widthNumber = (CFNumberRef)CFDictionaryGetValue(properties, kCGImagePropertyPixelWidth);
+    CFNumberRef heightNumber = (CFNumberRef)CFDictionaryGetValue(properties, kCGImagePropertyPixelHeight);
+    long long widthValue = 0;
+    long long heightValue = 0;
+    BOOL valid = widthNumber && CFGetTypeID(widthNumber) == CFNumberGetTypeID() &&
+        heightNumber && CFGetTypeID(heightNumber) == CFNumberGetTypeID() &&
+        CFNumberGetValue(widthNumber, kCFNumberLongLongType, &widthValue) &&
+        CFNumberGetValue(heightNumber, kCFNumberLongLongType, &heightValue);
+    if (!valid || widthValue <= 0 || heightValue <= 0) return NO;
+    if (widthOut) *widthOut = (unsigned long long)widthValue;
+    if (heightOut) *heightOut = (unsigned long long)heightValue;
+    return YES;
+}
+
+static CFDictionaryRef ApolloGiphyThumbnailOptions(void) {
+    static CFDictionaryRef options;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSInteger maximumPixelSize = 1024;
+        CFNumberRef maximumPixelNumber = CFNumberCreate(kCFAllocatorDefault,
+                                                         kCFNumberNSIntegerType,
+                                                         &maximumPixelSize);
+        const void *keys[] = {
+            kCGImageSourceCreateThumbnailFromImageAlways,
+            kCGImageSourceCreateThumbnailWithTransform,
+            kCGImageSourceShouldCacheImmediately,
+            kCGImageSourceThumbnailMaxPixelSize,
+        };
+        const void *values[] = {
+            kCFBooleanTrue, kCFBooleanTrue, kCFBooleanTrue, maximumPixelNumber,
+        };
+        options = CFDictionaryCreate(kCFAllocatorDefault, keys, values, 4,
+                                     &kCFTypeDictionaryKeyCallBacks,
+                                     &kCFTypeDictionaryValueCallBacks);
+        CFRelease(maximumPixelNumber);
+    });
+    return options;
+}
+
+static id ApolloGiphyPreviewMediaFromData(NSData *data) {
     if (data.length == 0) return nil;
 
     CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
     if (!source) return nil;
 
     size_t frameCount = CGImageSourceGetCount(source);
-    if (frameCount == 0) {
+    if (frameCount == 0 || frameCount > kGiphyMaximumPreviewFrames) {
+        CFRelease(source);
+        return nil;
+    }
+    CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+    unsigned long long width = 0;
+    unsigned long long height = 0;
+    BOOL dimensionsValid = ApolloGiphyReadPreviewDimensions(properties, &width, &height);
+    if (properties) CFRelease(properties);
+    if (!dimensionsValid ||
+        width > kGiphyMaximumPreviewDimension || height > kGiphyMaximumPreviewDimension ||
+        height > kGiphyMaximumPreviewPixels / width) {
         CFRelease(source);
         return nil;
     }
 
-    if (frameCount == 1) {
-        CGImageRef cgImage = CGImageSourceCreateImageAtIndex(source, 0, NULL);
-        UIImage *image = cgImage ? [UIImage imageWithCGImage:cgImage scale:UIScreen.mainScreen.scale orientation:UIImageOrientationUp] : nil;
-        if (cgImage) CGImageRelease(cgImage);
-        CFRelease(source);
-        return image;
+    if (frameCount > 1 && ApolloGiphyDataIsGIF(data)) {
+        Class animatedClass = objc_getClass("FLAnimatedImage");
+        if (animatedClass) {
+            id (*initializer)(id, SEL, NSData *, NSUInteger, BOOL) =
+                (id (*)(id, SEL, NSData *, NSUInteger, BOOL))objc_msgSend;
+            id media = initializer([animatedClass alloc],
+                @selector(initWithAnimatedGIFData:optimalFrameCacheSize:predrawingEnabled:),
+                data, (NSUInteger)0, YES);
+            if (media) {
+                CFRelease(source);
+                return media;
+            }
+        }
     }
 
-    NSMutableArray<UIImage *> *frames = [NSMutableArray arrayWithCapacity:frameCount];
-    NSTimeInterval duration = 0.0;
-    for (size_t index = 0; index < frameCount; index++) {
-        CGImageRef cgImage = CGImageSourceCreateImageAtIndex(source, index, NULL);
-        if (!cgImage) continue;
-        [frames addObject:[UIImage imageWithCGImage:cgImage scale:UIScreen.mainScreen.scale orientation:UIImageOrientationUp]];
-        duration += ApolloGiphyFrameDurationAtIndex(source, index);
-        CGImageRelease(cgImage);
-    }
+    CGImageRef cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0,
+                                                             ApolloGiphyThumbnailOptions());
+    UIImage *image = cgImage ? [UIImage imageWithCGImage:cgImage] : nil;
+    if (cgImage) CGImageRelease(cgImage);
     CFRelease(source);
+    return image;
+}
 
-    if (frames.count == 0) return nil;
-    if (frames.count == 1) return frames.firstObject;
-    return [UIImage animatedImageWithImages:frames duration:MAX(duration, 0.1)];
+static void ApolloGiphyClearPreviewView(UIImageView *imageView) {
+    if (!imageView) return;
+    [imageView stopAnimating];
+    if ([imageView respondsToSelector:@selector(setAnimatedImage:)]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(imageView, @selector(setAnimatedImage:), nil);
+    }
+    imageView.image = nil;
+    imageView.animationImages = nil;
+}
+
+static void ApolloGiphyApplyPreviewMedia(UIImageView *imageView, id media) {
+    if (!imageView || !media) return;
+    Class animatedClass = objc_getClass("FLAnimatedImage");
+    if (animatedClass && [media isKindOfClass:animatedClass] &&
+        [imageView respondsToSelector:@selector(setAnimatedImage:)]) {
+        imageView.image = nil;
+        ((void (*)(id, SEL, id))objc_msgSend)(imageView, @selector(setAnimatedImage:), media);
+    } else if ([media isKindOfClass:[UIImage class]]) {
+        imageView.image = media;
+    }
+}
+
+static NSError *ApolloGiphyPreviewResponseError(NSHTTPURLResponse *response) {
+    NSString *mime = response.MIMEType.lowercaseString;
+    if ([mime hasPrefix:@"image/"] || [mime isEqualToString:@"application/octet-stream"] ||
+        [mime isEqualToString:@"binary/octet-stream"]) return nil;
+    return [NSError errorWithDomain:@"ApolloGiphy" code:8
+                           userInfo:@{NSLocalizedDescriptionKey: @"Giphy returned a non-image preview"}];
+}
+
+static UIImageView *ApolloGiphyCreatePreviewView(CGRect frame) {
+    Class animatedViewClass = objc_getClass("FLAnimatedImageView");
+    if (animatedViewClass && [animatedViewClass isSubclassOfClass:[UIImageView class]]) {
+        return [[animatedViewClass alloc] initWithFrame:frame];
+    }
+    return [[UIImageView alloc] initWithFrame:frame];
 }
 
 static UIColor *ApolloGiphyAccentColorFromController(UIViewController *controller) {
@@ -82,6 +173,7 @@ static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *contr
 @property (nonatomic, strong) UIImageView *thumbnailView;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic, strong) NSURLSessionDataTask *loadTask;
+@property (nonatomic) NSUInteger loadGeneration;
 - (void)applyThemeWithTileColor:(UIColor *)tileColor accentColor:(UIColor *)accentColor;
 - (void)configureWithPreviewURL:(NSURL *)url;
 @end
@@ -94,7 +186,7 @@ static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *contr
         self.contentView.layer.cornerRadius = 8.0;
         self.contentView.clipsToBounds = YES;
 
-        _thumbnailView = [[UIImageView alloc] initWithFrame:self.contentView.bounds];
+        _thumbnailView = ApolloGiphyCreatePreviewView(self.contentView.bounds);
         _thumbnailView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         _thumbnailView.contentMode = UIViewContentModeScaleAspectFill;
         _thumbnailView.clipsToBounds = YES;
@@ -118,37 +210,47 @@ static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *contr
 
 - (void)prepareForReuse {
     [super prepareForReuse];
+    self.loadGeneration++;
     [self.loadTask cancel];
     self.loadTask = nil;
-    [self.thumbnailView stopAnimating];
-    self.thumbnailView.image = nil;
-    self.thumbnailView.animationImages = nil;
+    ApolloGiphyClearPreviewView(self.thumbnailView);
     [self.spinner stopAnimating];
 }
 
 - (void)configureWithPreviewURL:(NSURL *)url {
-    [self.thumbnailView stopAnimating];
-    self.thumbnailView.image = nil;
-    self.thumbnailView.animationImages = nil;
-    if (!url) return;
+    self.loadGeneration++;
+    NSUInteger generation = self.loadGeneration;
+    [self.loadTask cancel];
+    self.loadTask = nil;
+    ApolloGiphyClearPreviewView(self.thumbnailView);
+    if (!url) {
+        [self.spinner stopAnimating];
+        return;
+    }
 
     [self.spinner startAnimating];
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
+                                                            cachePolicy:NSURLRequestUseProtocolCachePolicy
+                                                        timeoutInterval:20.0];
     __weak typeof(self) weakSelf = self;
-    self.loadTask = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    __block __weak NSURLSessionDataTask *weakTask = nil;
+    NSURLSessionDataTask *task = ApolloStartBoundedDataRequest(request, kGiphyMaximumPreviewBytes,
+        ^NSError *(NSHTTPURLResponse *response) {
+            return ApolloGiphyPreviewResponseError(response);
+        }, ApolloGiphyPreviewDecodeQueue(),
+        ^(NSData *data, __unused NSHTTPURLResponse *response, NSError *error) {
+        id media = !error ? ApolloGiphyPreviewMediaFromData(data) : nil;
         dispatch_async(dispatch_get_main_queue(), ^{
-            __strong typeof(weakSelf) strongSelf = weakSelf;
-            if (!strongSelf) return;
-            [strongSelf.spinner stopAnimating];
-            if (error || data.length == 0) return;
-
-            UIImage *image = ApolloGiphyAnimatedImageFromGIFData(data);
-            if (!image) return;
-
-            strongSelf.thumbnailView.image = image;
-            [strongSelf.thumbnailView startAnimating];
+            GiphyPickerCell *cell = weakSelf;
+            NSURLSessionDataTask *finishedTask = weakTask;
+            if (!cell || generation != cell.loadGeneration || cell.loadTask != finishedTask) return;
+            cell.loadTask = nil;
+            [cell.spinner stopAnimating];
+            if (media) ApolloGiphyApplyPreviewMedia(cell.thumbnailView, media);
         });
-    }];
-    [self.loadTask resume];
+    });
+    weakTask = task;
+    self.loadTask = task;
 }
 
 @end
@@ -388,7 +490,8 @@ static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *contr
     NSUInteger offset = append ? self.nextOffset : 0;
     NSUInteger generation = self.requestGeneration;
     __weak typeof(self) weakSelf = self;
-    ApolloGiphyFetchCompletion handler = ^(NSArray<ApolloGiphyGIF *> *gifs, BOOL hasMore, NSError *error) {
+    ApolloGiphyFetchCompletion handler = ^(NSArray<ApolloGiphyGIF *> *gifs, BOOL hasMore,
+                                           NSUInteger nextOffset, NSError *error) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) return;
         if (generation != strongSelf.requestGeneration || ![query isEqualToString:strongSelf.activeQuery ?: @""]) return;
@@ -404,9 +507,13 @@ static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *contr
                 strongSelf.gifs = @[];
                 strongSelf.statusLabel.hidden = NO;
                 strongSelf.statusLabel.text = error.localizedDescription;
+                [strongSelf.collectionView reloadData];
             }
-            [strongSelf.collectionView reloadData];
-            [strongSelf updateStatusMessage];
+            // Preserve a successfully loaded page on append failure. In
+            // particular, do not reload while still sitting at the pagination
+            // threshold: that can synchronously produce another scroll callback
+            // and turn one failure into an automatic retry loop. A later user
+            // scroll naturally retries the same offset.
             return;
         }
 
@@ -416,7 +523,7 @@ static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *contr
             strongSelf.gifs = gifs;
         }
         strongSelf.hasMore = hasMore;
-        strongSelf.nextOffset = offset + gifs.count;
+        strongSelf.nextOffset = nextOffset;
         [strongSelf.collectionView reloadData];
         [strongSelf updateStatusMessage];
     };
