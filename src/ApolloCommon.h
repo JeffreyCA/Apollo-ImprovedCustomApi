@@ -19,6 +19,12 @@ BOOL ApolloRouteResolvedURLViaApolloScheme(NSURL *resolvedURL);
 void ApolloFlushReadPostIDsToDefaults(void);
 UITableView *ApolloInheritedSettingsThemeSourceTableView(UITableViewController *controller);
 void ApolloApplyInheritedSettingsTableTheme(UITableViewController *controller);
+
+// YES if sourceTable is nil or detached from its window. A covered (non-
+// topmost) nav stack screen stops getting traitCollectionDidChange:, so its
+// cells' colors can be stale — callers sampling a cell's color from an
+// inherited source table should check this before trusting the sample.
+BOOL ApolloThemeSourceTableIsStale(UITableView *sourceTable);
 UIImage *ApolloEmojiSettingsIcon(NSString *emoji, UIColor *backgroundColor, CGFloat size);
 UIImage *ApolloBuyMeACoffeeSettingsIcon(CGFloat size);
 UIImage *ApolloRebornOptionsSettingsIcon(CGFloat size);

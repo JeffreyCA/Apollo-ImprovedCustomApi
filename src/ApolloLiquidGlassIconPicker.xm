@@ -137,13 +137,12 @@ static BOOL LGIsDarkAppearance(UIView *view) {
 
 #pragma mark - Theme background helpers
 
-// ApolloThemeRuntimeColor() only resolves while the tweak's own custom-theme
-// runtime is active — it knows nothing about Apollo's stock themes (e.g.
-// Sunset) or Pure Black Dark Mode, so falling back to a plain system color
-// under those looked reasonable but was wrong. Sample an already-themed
-// native cell instead, same trick as apollo_themeCellBackgroundColor in
-// ApolloSettingsTableViewController.m.
+// Sample an already-themed native cell, same trick as
+// apollo_themeCellBackgroundColor in ApolloSettingsTableViewController.m.
+// Only used while sourceTable is live — see LGThemedCardBackgroundColor.
 static UIColor *LGNativeCellBackgroundColor(UITableView *sourceTable) {
+    if (ApolloThemeSourceTableIsStale(sourceTable)) return nil;
+
     // NSClassFromString: these two classes are declared later in this file.
     Class packCardClass = NSClassFromString(@"LGPackCardCell");
     Class featuredClass = NSClassFromString(@"LGFeaturedIconCell");
@@ -167,9 +166,11 @@ static UIColor *LGThemedPageBackgroundColor(UITableView *sourceTable) {
 // sourceTable should be an already-rendered table one level up the nav
 // stack (see ApolloInheritedSettingsThemeSourceTableView), not the table
 // currently being built — otherwise there's no native cell yet to sample.
+// ApolloThemeCardBackgroundColor() handles the stale/no-sample case,
+// including stock themes and Pure Black Dark Mode.
 static UIColor *LGThemedCardBackgroundColor(UITableView *sourceTable) {
     return LGNativeCellBackgroundColor(sourceTable)
-        ?: ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryBackground)
+        ?: ApolloThemeCardBackgroundColor()
         ?: UIColor.secondarySystemGroupedBackgroundColor;
 }
 
