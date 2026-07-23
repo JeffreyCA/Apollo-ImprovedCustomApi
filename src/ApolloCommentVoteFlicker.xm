@@ -45,6 +45,7 @@
 #import <objc/message.h>
 
 #import "ApolloCommon.h"
+#import "ApolloTranslation.h"
 
 @interface ASDisplayNode : NSObject
 @property (nonatomic) BOOL neverShowPlaceholders;
@@ -173,30 +174,206 @@ static void ApolloVFRealizeUpdatedCommentsInfo(id postInfo, const char *stage) {
     } @catch (__unused NSException *e) {}
 }
 
+// A vote (or any in-place model update) makes Apollo splice a Mantle COPY of
+// the comment into the tree, and Mantle's copy re-runs every property setter —
+// including setCollapsed: with whatever the model last parsed from the server.
+// Reddit marks crowd-controlled comments `collapsed: true` in the listing JSON,
+// but Apollo's initial cell build renders them EXPANDED (the flatten only
+// collapses tracker/blocked/AutoMod comments), so the flag sits latent in the
+// model. The vote-time reconfigure (unlike the initial build) DOES honor
+// comment.collapsed, so the row the user just voted on snaps into the
+// collapsed presentation (body hidden, child-count badge) and then bounces
+// back when the next update lands — the "flicker" on every vote in
+// crowd-controlled threads (reported against translated threads because
+// foreign-language subs are where both crowd control and translation are on).
+//
+// Neutralize the flag on the incoming copy ONLY when the visible row is
+// actually RENDERED EXPANDED: an expanded row whose replacement model says
+// collapsed can only be latent server state (or our own setStickied: hook
+// re-asserting on the copy) — Apollo's own collapse toggle never routes
+// through this notification (it splices + rebuilds directly). A row that is
+// rendered collapsed, on the other hand, is a DELIBERATE collapse — the user's
+// manual toggle, a blocked/AutoMod collapse, or the tweak's own Collapse
+// Pinned Comments feature (ApolloCommentsCollapse.xm forces _collapsed on
+// stickied comments) — and clearing the copy's flag there would pop the row
+// open on vote. Gate on the rendered presentation, not the model flags.
+//
+// The rendered state is probed structurally: CommentCellNode's byline layout
+// switches its trailing accessories on comment.collapsed — the collapsed
+// presentation carries totalCollapsedChildrenIndicator (the child-count
+// badge) and collapseDisclosureIndicator, the expanded one carries the
+// age/more-options cluster instead. Either indicator live in the hierarchy ⇒
+// the row is rendered collapsed. The write goes straight to the ivar so no
+// setCollapsed: hooks (cover views, settle windows) fire for what is a pure
+// metadata correction.
+static BOOL ApolloVFAccessoryNodeIsLive(id node) {
+    if (!node) return NO;
+    @try {
+        if (![node respondsToSelector:@selector(isNodeLoaded)] ||
+            !((BOOL (*)(id, SEL))objc_msgSend)(node, @selector(isNodeLoaded))) return NO;
+        // Probe at the LAYER level: these indicator nodes are layer-backed
+        // (no UIView — -view returns nil for them), and a layer probe also
+        // covers view-backed nodes uniformly.
+        CALayer *layer = [node respondsToSelector:@selector(layer)]
+            ? ((CALayer *(*)(id, SEL))objc_msgSend)(node, @selector(layer)) : nil;
+        if (!layer.superlayer || layer.hidden) return NO;
+        CGRect f = layer.frame;
+        return f.size.width > 0.5 && f.size.height > 0.5;
+    } @catch (__unused NSException *e) { return NO; }
+}
+
+static BOOL ApolloVFCellRendersCollapsed(id cell) {
+    return ApolloVFAccessoryNodeIsLive(ApolloVFIvar(cell, "totalCollapsedChildrenIndicator")) ||
+           ApolloVFAccessoryNodeIsLive(ApolloVFIvar(cell, "collapseDisclosureIndicator"));
+}
+
+static void ApolloVFNeutralizeCarriedOverCollapse(id note) {
+    @try {
+        id oldModel = [note isKindOfClass:[NSNotification class]] ? [(NSNotification *)note object] : nil;
+        id newModel = [note isKindOfClass:[NSNotification class]] ? [(NSNotification *)note userInfo][@"newModel"] : nil;
+        Class commentClass = objc_getClass("RDKComment");
+        if (!commentClass || ![oldModel isKindOfClass:commentClass] || ![newModel isKindOfClass:commentClass]) return;
+        if (![newModel respondsToSelector:@selector(collapsed)]) return;
+        BOOL newCollapsed = ((BOOL (*)(id, SEL))objc_msgSend)(newModel, @selector(collapsed));
+        if (!newCollapsed) return; // nothing to neutralize
+        NSArray *cells = ApolloVFCellsForUpdatedModel(note);
+        if (cells.count == 0) return; // no visible row — nothing can flicker, and an
+                                      // off-screen pinned/collapsed comment keeps its flag
+        for (id cell in cells) {
+            if (ApolloVFCellRendersCollapsed(cell)) {
+                ApolloLog(@"[VoteFlicker] kept collapse on updated comment — row is rendered collapsed (deliberate)");
+                return;
+            }
+        }
+        Ivar collapsedIvar = class_getInstanceVariable([newModel class], "_collapsed");
+        if (!collapsedIvar) return;
+        *(BOOL *)((uint8_t *)(__bridge void *)newModel + ivar_getOffset(collapsedIvar)) = NO;
+        ApolloLog(@"[VoteFlicker] cleared carried-over server collapse on updated comment (row renders expanded)");
+    } @catch (__unused NSException *e) {}
+}
+
+// ── Vote-window row-height quiesce ──────────────────────────────────────────
+// A vote's reconfigure rebuilds the comment's body text node and the fresh
+// node briefly holds the UNTRANSLATED original — one "Translated from X"
+// marker line shorter than what's on screen. The rebuilt node is still
+// detached when its text is set, so the translation module's identity-checked
+// preempt must decline (an identical body could otherwise borrow another
+// comment's translation), and the scheduled reapply restores the text ~10ms
+// later. The text race is invisible (the reapply's synchronous heal wins),
+// but ASTableView's requeryNodeHeights runs in between: it commits the
+// one-line-shorter measure as an ANIMATED row update and then a second
+// animated update restores it — the comment's bottom divider visibly nudges
+// up and springs back on every vote. Suppress height re-queries for a short
+// window around the reconfigure and re-run once after it: the intermediate
+// measure is never committed, and the deferred re-query commits the (by then
+// unchanged) final height.
+static CFAbsoluteTime sApolloVFHeightQuiesceUntil = 0;
+static char kApolloVFRequeryDeferredKey;
+
+static void (*orig_ApolloVFRequeryNodeHeights)(id, SEL);
+static void ApolloVFRequeryNodeHeights(id self, SEL _cmd) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now < sApolloVFHeightQuiesceUntil) {
+        if (!objc_getAssociatedObject(self, &kApolloVFRequeryDeferredKey)) {
+            objc_setAssociatedObject(self, &kApolloVFRequeryDeferredKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            NSTimeInterval delay = MAX(0.02, (sApolloVFHeightQuiesceUntil - now) + 0.02);
+            __weak UIView *weakSelf = (UIView *)self;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                UIView *strongSelf = weakSelf;
+                if (!strongSelf) return;
+                objc_setAssociatedObject(strongSelf, &kApolloVFRequeryDeferredKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                // Run the deferred requery even off-window: dropping it
+                // left the table's committed row heights permanently stale —
+                // any row that grew during the quiesce (e.g. an inline image
+                // getting its ratio) stayed short until something else happened
+                // to re-query. requeryNodeHeights is a pure recompute and safe
+                // off-window; the quiesce's only job is to SKIP the mid-vote
+                // intermediate measure, never to lose the final one.
+                @try { orig_ApolloVFRequeryNodeHeights(strongSelf, _cmd); } @catch (__unused NSException *e) {}
+            });
+        }
+        return;
+    }
+    orig_ApolloVFRequeryNodeHeights(self, _cmd);
+}
+
 // Shared handler body for both section-controller hooks: arm the matching
 // visible cell(s) before the reconfigure, flush the display wave right after,
 // and once more on the next runloop turn (the -setNeedsLayout relayout lands
 // there; its re-displays are what commit blank without this).
 static void ApolloVFHandleModelUpdate(id note, void (^origCall)(void)) {
+    ApolloVFNeutralizeCarriedOverCollapse(note);
     NSArray *cells = ApolloVFCellsForUpdatedModel(note);
+    NSMutableArray *translatedBodyCovers = [NSMutableArray array];
     for (ASDisplayNode *cell in cells) {
         @try {
             if ([cell respondsToSelector:@selector(setNeverShowPlaceholders:)]) {
                 cell.neverShowPlaceholders = YES;
             }
+            id cover = ApolloTranslationInstallVoteBodyCover(cell);
+            if (cover) [translatedBodyCovers addObject:cover];
         } @catch (__unused NSException *e) {}
+    }
+    if (cells.count > 0) {
+        sApolloVFHeightQuiesceUntil = CFAbsoluteTimeGetCurrent() + 0.12;
     }
     origCall();
     if (cells.count == 0) return;
+    // Settle the translation right before EACH flush: these synchronous
+    // flushes exist to kill the blank frame, but they paint whatever the body
+    // holds — and a vote rebuilds the body node with the untranslated
+    // original ~a turn later, which the detached-node preempt can only
+    // correct after attach. A flush landing inside that gap painted the
+    // original language for a frame or two ("sometimes it flickers"). The
+    // settle call is an exact-gate no-op when the text is already right, so
+    // the usual pre-reset flush stays write-free — and the module's
+    // recently-applied guard is content-scoped now, so even a pre-reset
+    // write cannot strand the post-reset restore (the round-2 failure mode).
+    for (ASDisplayNode *cell in cells) {
+        @try { ApolloTranslationReapplySynchronouslyForVoteReconfigure(cell); }
+        @catch (__unused NSException *e) {}
+    }
     ApolloVFEnsureSynchronousDisplay(cells, "post-reconfigure");
     dispatch_async(dispatch_get_main_queue(), ^{
+        for (ASDisplayNode *cell in cells) {
+            @try { ApolloTranslationReapplySynchronouslyForVoteReconfigure(cell); }
+            @catch (__unused NSException *e) {}
+        }
         ApolloVFEnsureSynchronousDisplay(cells, "next-turn");
     });
+    // The deferred translation preempt lands on the next main turn and the
+    // replacement body's synchronous flush is complete by the following
+    // frame. Keep the exact old translated pixels over the BODY ONLY for a
+    // few extra frames, then remove them without animation. Score/byline
+    // changes remain visible throughout because they sit outside the cover.
+    if (translatedBodyCovers.count > 0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.60 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            for (id cover in translatedBodyCovers) {
+                ApolloTranslationRemoveVoteBodyCover(cover);
+            }
+        });
+    }
 }
 
 %hook _TtC6Apollo15CommentCellNode
-- (void)didEnterVisibleState { %orig; ApolloVFTrackCell(self, YES); }
-- (void)didExitVisibleState  { %orig; ApolloVFTrackCell(self, NO);  }
+- (void)didEnterVisibleState {
+    %orig;
+    ApolloVFTrackCell(self, YES);
+    // Cached translations can be installed by the global text-node preempt
+    // before the normal translation apply function ever runs. Prime after the
+    // cell has settled so that fast path also has a ready vote cover.
+    __weak id weakCell = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        id strongCell = weakCell;
+        if (!strongCell || ![sApolloVFVisibleCells containsObject:strongCell]) return;
+        ApolloTranslationPrimeVoteBodySnapshot(strongCell);
+    });
+}
+- (void)didExitVisibleState {
+    %orig;
+    ApolloVFTrackCell(self, NO);
+    ApolloTranslationDiscardVoteBodySnapshot(self);
+}
 %end
 
 %hook _TtC6Apollo22CommentsHeaderCellNode
@@ -278,6 +455,18 @@ static void ApolloVFForegroundHeal(const char *stage) {
 
 %ctor {
     %init;
+
+    // Vote-window height quiesce (see sApolloVFHeightQuiesceUntil above).
+    // Manual swizzle with an existence guard: requeryNodeHeights is a Texture
+    // internal — if a future Apollo binary ships without it, the quiesce
+    // silently disarms and the rest of the module is unaffected.
+    Class tableClass = objc_getClass("ASTableView");
+    Method requeryMethod = tableClass ? class_getInstanceMethod(tableClass, NSSelectorFromString(@"requeryNodeHeights")) : NULL;
+    if (requeryMethod) {
+        orig_ApolloVFRequeryNodeHeights = (void (*)(id, SEL))method_getImplementation(requeryMethod);
+        method_setImplementation(requeryMethod, (IMP)ApolloVFRequeryNodeHeights);
+    }
+
     NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
     void (^heal)(NSNotification *) = ^(__unused NSNotification *n) {
         ApolloVFForegroundHeal("now");

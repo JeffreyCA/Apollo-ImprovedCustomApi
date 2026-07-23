@@ -22,6 +22,7 @@
 #import "ApolloSubredditInfoCache.h"
 #import "ApolloBannedProfile.h"
 #import "ApolloProfileSocialLinks.h"
+#import "ApolloWhatsNew.h"           // ApolloWhatsNewPresentForDebug() — TEMPORARY debug row
 #import "UserDefaultConstants.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/runtime.h>
@@ -746,11 +747,22 @@ typedef NS_ENUM(NSInteger, Tag) {
     backend.iconSystemName    = @"bell.badge.fill";              backend.iconTileColor    = [UIColor systemRedColor];
     flex.iconSystemName       = @"ant.fill";                     flex.iconTileColor       = [UIColor systemGrayColor];
     exportLogs.iconSystemName = @"square.and.arrow.up.on.square.fill"; exportLogs.iconTileColor = [UIColor systemGrayColor];
+    // TEMPORARY dev-only: presents the What's New sheet on demand, bypassing
+    // gating (never touches UDKeyLastSeenWhatsNewVersion, so it's safe to tap
+    // repeatedly). Remove this row and ApolloWhatsNewPresentForDebug() once the
+    // gated flow has shipped and this is no longer needed for testing.
+    ApolloSettingsRow *whatsNewDebug =
+        [ApolloSettingsRow buttonRowWithID:@"adv.whatsNewDebug"
+                                     title:@"🔧 What's New Debug"
+                                    action:^{ ApolloWhatsNewPresentForDebug(); }];
+    whatsNewDebug.visible = ^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFLEX]; };
+
     loginPersistenceDebug.iconSystemName = @"wrench.and.screwdriver.fill"; loginPersistenceDebug.iconTileColor = [UIColor systemGrayColor];
+    whatsNewDebug.iconSystemName = @"sparkles"; whatsNewDebug.iconTileColor = [UIColor systemGrayColor];
 
     return [ApolloSettingsSection sectionWithTitle:@"Advanced"
                                             footer:@"Notification backend, developer tools and diagnostics."
-                                              rows:@[ backend, flex, exportLogs, loginPersistenceDebug ]];
+                                              rows:@[ backend, flex, exportLogs, loginPersistenceDebug, whatsNewDebug ]];
 }
 
 - (ApolloSettingsSection *)buildDataSection {
@@ -1280,9 +1292,13 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.selectionStyle = UITableViewCellSelectionStyleDefault;
             }
             cell.textLabel.text = @"Apollo AI";
+            NSString *activeProviderName = @"On-device AI";
+            if ([sAISummaryProvider isEqualToString:@"openrouter"]) activeProviderName = @"OpenRouter AI";
+            else if ([sAISummaryProvider isEqualToString:@"gemini"]) activeProviderName = @"Gemini AI";
+            else if ([sAISummaryProvider isEqualToString:@"custom"]) activeProviderName = @"Custom cloud AI";
             cell.detailTextLabel.text = sEnableAISummaries
-                ? @"On-device AI enabled"
-                : @"On-device summaries and generation settings";
+                ? [NSString stringWithFormat:@"%@ enabled", activeProviderName]
+                : @"On-device or cloud summaries and generation settings";
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.detailTextLabel.numberOfLines = 0;
             cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
@@ -1611,6 +1627,14 @@ typedef NS_ENUM(NSInteger, Tag) {
     // Sub-option: only exists while Subreddit List Enhancements is on.
     modernDividers.visible = ^BOOL { return sSubredditListEnhancements; };
 
+    // Deliberately NOT gated on the enhancements master: hides the description
+    // subtitles under Home/Popular/All/Moderator in both classic and modern lists.
+    ApolloSettingsRow *hideDescriptions =
+        [ApolloSettingsRow switchRowWithID:@"sub.hideFeedDescriptions"
+                                     title:@"Hide Feed Descriptions"
+                                      isOn:^BOOL { return sHideSubredditListDescriptions; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf hideSubredditListDescriptionsSwitchToggled:sender]; }];
+
     ApolloSettingsRow *headers =
         [ApolloSettingsRow switchRowWithID:@"sub.headers"
                                      title:@"Show Subreddit Headers"
@@ -1631,8 +1655,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     };
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Enhance the subreddit list and community pages with dividers, headers and highlights."
-                                              rows:@[ enhancements, modernDividers, headers, highlights ]];
+                                            footer:@"Enhance the subreddit list and community pages with dividers, headers and highlights. Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts."
+                                              rows:@[ enhancements, modernDividers, hideDescriptions, headers, highlights ]];
 }
 
 - (ApolloSettingsSection *)buildSubredditsSourcesSection {
@@ -2943,7 +2967,8 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)flexSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyEnableFLEX];
-    // The Login Persistence Debug row only exists while developer mode is on.
+    // The Login Persistence Debug and What's New Debug rows only exist while
+    // developer mode is on.
     [self visibilityDidChange];
 }
 
@@ -3051,6 +3076,12 @@ typedef NS_ENUM(NSInteger, Tag) {
     sModernSubredditDividers = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sModernSubredditDividers forKey:UDKeyModernSubredditDividers];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloModernSubredditDividersChangedNotification object:nil];
+}
+
+- (void)hideSubredditListDescriptionsSwitchToggled:(UISwitch *)sender {
+    sHideSubredditListDescriptions = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sHideSubredditListDescriptions forKey:UDKeyHideSubredditListDescriptions];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloHideSubredditListDescriptionsChangedNotification object:nil];
 }
 
 - (void)showRecentlyReadThumbnailsSwitchToggled:(UISwitch *)sender {

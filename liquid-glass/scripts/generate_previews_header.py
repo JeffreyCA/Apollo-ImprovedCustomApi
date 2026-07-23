@@ -4,19 +4,35 @@
 Groups are defined in icons.json under the top-level "groups" key:
 
   "groups": [
-    { "id": "community", "title": "Liquid Glass", "presentation": "inline" },
-    { "id": "classic",   "title": "Classic Icons", "presentation": "push"  }
+    { "id": "original", "title": "Original",
+      "coverIconIDs": ["igerman00", "jryng"], "description": "...", "author": "..." },
+    { "id": "helios",   "title": "Helios" }
   ]
 
-Each icon's "group" field assigns it to a group by ID. Icons without a
-"group" field go into the first group. The generator emits one per-group
-entry array and a kLGIconGroups[] descriptor table that the picker reads
-at runtime — no source changes are needed to add or rename groups.
+Every icon's "group" field must name one of these group ids — there is no
+default/fallback group, so every icon is required to declare one explicitly.
+The generator emits one per-group entry array and a kLGIconGroups[]
+descriptor table that the picker reads at runtime — no source changes are
+needed to add, rename, or reorder groups.
 
-  "presentation": "inline" — icons rendered as rows directly in the
-                             injected table-view section.
-  "presentation": "push"   — one disclosure row that pushes a new
-                             LGGroupIconsViewController onto the nav stack.
+Per-group optional fields:
+
+  "coverIconIDs" — ordered icon IDs to sample for that pack's fan artwork
+                    on the main screen. Falls back at runtime to the first
+                    few icons in the group if omitted or if none of the
+                    listed IDs are registered on a given IPA.
+  "description"  — short sentence shown as a header above the pack's icon
+                    grid.
+  "author"       — pack-level curator credit (distinct from each icon's own
+                    "designer"), shown on the pack card.
+
+A top-level "featured" key lists icon IDs (must already exist in "icons")
+to surface as one-tap shortcuts above the pack list:
+
+  "featured": ["jryng", "helios"]
+
+Omit or leave empty for no Featured section — this is the default and is
+fully backward compatible with registries that predate this key.
 
 Preview images are NOT embedded here. They are compiled as named imagesets
 into the app's Assets.car by rebuild_assets.py and loaded at runtime via
@@ -28,12 +44,6 @@ import json
 import os
 import re
 import sys
-
-
-PRESENTATION_MAP = {
-    "inline": "LGGroupPresentationInline",
-    "push":   "LGGroupPresentationPush",
-}
 
 
 def escape(s: str) -> str:
@@ -65,21 +75,44 @@ def main() -> int:
     lg_dir = os.path.abspath(os.path.join(scripts_dir, ".."))
     registry = load_registry(lg_dir)
 
-    raw_groups = registry.get("groups", [
-        {"id": "community", "title": "Liquid Glass", "presentation": "inline"},
-    ])
-    default_group = raw_groups[0]["id"]
+    raw_groups = registry.get("groups", [])
+    if not raw_groups:
+        print('error: icons.json has no "groups"', file=sys.stderr)
+        return 1
+
+    # icon_id -> (displayName, designer), used both for bucketing and for
+    # resolving the top-level "featured" list below.
+    icon_lookup: dict[str, tuple[str, str]] = {}
+    for entry in registry["icons"]:
+        icon_lookup[entry["id"]] = (entry.get("displayName", entry["id"]), entry.get("designer", ""))
 
     # Bucket icons into groups, preserving registry order within each group.
+    # Every icon must declare a "group" naming one of the ids above — there
+    # is no default/fallback group.
     buckets: dict[str, list[tuple[str, str, str]]] = {g["id"]: [] for g in raw_groups}
     for entry in registry["icons"]:
         icon_id      = entry["id"]
-        display_name = entry.get("displayName", icon_id)
-        designer     = entry.get("designer", "")
-        group        = entry.get("group", default_group)
+        display_name, designer = icon_lookup[icon_id]
+        group = entry.get("group")
         if group not in buckets:
-            group = default_group
+            print(f'error: icon "{icon_id}" has no valid "group" '
+                  f'(got {group!r}; must be one of {sorted(buckets)})', file=sys.stderr)
+            return 1
         buckets[group].append((icon_id, display_name, designer))
+
+    # Resolve the top-level "featured" list against icon_lookup. Unlike a
+    # bad "group" reference (which is now a hard error above), a featured ID
+    # that doesn't exist at all is called out separately for a clearer
+    # message about which key is at fault.
+    featured_ids = registry.get("featured", [])
+    featured_entries: list[tuple[str, str, str]] = []
+    for icon_id in featured_ids:
+        if icon_id not in icon_lookup:
+            print(f'error: "featured" references unknown icon id "{icon_id}" '
+                  f'(not present in "icons")', file=sys.stderr)
+            return 1
+        display_name, designer = icon_lookup[icon_id]
+        featured_entries.append((icon_id, display_name, designer))
 
     with open(out_path, "w") as fp:
         fp.write("// Auto-generated by liquid-glass/scripts/generate_previews_header.py.\n")
@@ -93,17 +126,15 @@ def main() -> int:
         fp.write("    const char *designer;\n")
         fp.write("} LGIconRowEntry;\n\n")
 
-        fp.write("typedef enum {\n")
-        fp.write("    LGGroupPresentationInline = 0,\n")
-        fp.write("    LGGroupPresentationPush   = 1,\n")
-        fp.write("} LGGroupPresentation;\n\n")
-
         fp.write("typedef struct {\n")
         fp.write("    const char          *groupID;\n")
         fp.write("    const char          *title;\n")
-        fp.write("    LGGroupPresentation  presentation;\n")
+        fp.write("    const char          *description;\n")
+        fp.write("    const char          *author;\n")
         fp.write("    const LGIconRowEntry *entries;\n")
         fp.write("    size_t               entryCount;\n")
+        fp.write("    const char *const   *coverIconIDs;\n")
+        fp.write("    size_t               coverIconIDCount;\n")
         fp.write("} LGIconGroupDef;\n\n")
 
         # ── Per-group entry arrays ─────────────────────────────────────────
@@ -115,25 +146,53 @@ def main() -> int:
                 fp.write(f'    {{ "{escape(icon_id)}", "{escape(display_name)}", "{escape(designer)}" }},\n')
             fp.write("};\n\n")
 
+        # ── Per-group cover-icon-ID arrays (only when non-empty) ───────────
+        for g in raw_groups:
+            gid       = g["id"]
+            cover_ids = g.get("coverIconIDs", [])
+            if not cover_ids:
+                continue
+            fp.write(f"static const char *const kLGGroupCover_{c_id(gid)}[] = {{\n")
+            for icon_id in cover_ids:
+                fp.write(f'    "{escape(icon_id)}",\n')
+            fp.write("};\n\n")
+
         # ── Group descriptor table ─────────────────────────────────────────
         fp.write("static const LGIconGroupDef kLGIconGroups[] = {\n")
         for g in raw_groups:
-            gid   = g["id"]
-            title = g.get("title", gid)
-            pres  = PRESENTATION_MAP.get(g.get("presentation", "push"), "LGGroupPresentationPush")
-            arr   = f"kLGGroupEntries_{c_id(gid)}"
-            n     = len(buckets[gid])
-            fp.write(f'    {{ "{escape(gid)}", "{escape(title)}", {pres}, {arr}, {n} }},\n')
+            gid         = g["id"]
+            title       = g.get("title", gid)
+            description = g.get("description", "")
+            author      = g.get("author", "")
+            arr         = f"kLGGroupEntries_{c_id(gid)}"
+            n           = len(buckets[gid])
+            cover_ids   = g.get("coverIconIDs", [])
+            if cover_ids:
+                cover_arr  = f"kLGGroupCover_{c_id(gid)}"
+                cover_n    = len(cover_ids)
+            else:
+                cover_arr  = "NULL"
+                cover_n    = 0
+            fp.write(f'    {{ "{escape(gid)}", "{escape(title)}", "{escape(description)}", '
+                     f'"{escape(author)}", {arr}, {n}, {cover_arr}, {cover_n} }},\n')
         fp.write("};\n\n")
 
         fp.write(f"static const size_t kLGIconGroupCount = {len(raw_groups)};\n\n")
+
+        # ── Featured entries (top-level, cross-group shortcuts) ────────────
+        fp.write("static const LGIconRowEntry kLGFeaturedEntries[] = {\n")
+        for icon_id, display_name, designer in featured_entries:
+            fp.write(f'    {{ "{escape(icon_id)}", "{escape(display_name)}", "{escape(designer)}" }},\n')
+        fp.write("};\n\n")
+        fp.write(f"static const size_t kLGFeaturedEntryCount = {len(featured_entries)};\n\n")
 
         primary = registry["primaryIconID"]
         fp.write(f'static const char *const kLGPrimaryIconIDCString = "{escape(primary)}";\n')
 
     total = sum(len(v) for v in buckets.values())
     summary = ", ".join(f"{len(buckets[g['id']])} {g['id']}" for g in raw_groups)
-    print(f"Wrote {len(raw_groups)} groups ({summary}), {total} total → {out_path}")
+    print(f"Wrote {len(raw_groups)} groups ({summary}), {total} total, "
+          f"{len(featured_entries)} featured → {out_path}")
     return 0
 
 

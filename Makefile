@@ -17,6 +17,9 @@ FLEXING_DIR := $(MODULES_DIR)/FLEXing
 THEME_GALLERY_DIR := theme-gallery
 THEME_GALLERY_GEN_H := $(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/generated/ApolloThemeGalleryCatalog.gen.h
 THEME_GALLERY_GEN_M := $(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/generated/ApolloThemeGalleryCatalog.gen.m
+WHATS_NEW_DIR := whats-new
+WHATS_NEW_GEN_H := $(THEOS_PROJECT_DIR)/$(WHATS_NEW_DIR)/generated/ApolloWhatsNewCatalog.gen.h
+WHATS_NEW_GEN_M := $(THEOS_PROJECT_DIR)/$(WHATS_NEW_DIR)/generated/ApolloWhatsNewCatalog.gen.m
 
 SSZIPARCHIVE_FILES = $(wildcard $(SSZIPARCHIVE_DIR)/*.m) \
     $(wildcard $(SSZIPARCHIVE_DIR)/minizip/*.c) \
@@ -25,7 +28,10 @@ SSZIPARCHIVE_FILES = $(wildcard $(SSZIPARCHIVE_DIR)/*.m) \
 ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloFoundationModels.swift \
     $(SRC_DIR)/ApolloAISummary.xm \
+    $(SRC_DIR)/ApolloAICloudBridge.m \
     $(SRC_DIR)/ApolloAutoHideMetaFeeds.xm \
+    $(SRC_DIR)/ApolloWhatsNew.xm \
+    $(WHATS_NEW_GEN_M) \
     $(SRC_DIR)/Tweak.xm \
     $(SRC_DIR)/ApolloCommon.m \
     $(SRC_DIR)/settings/ApolloSettingsTableViewController.m \
@@ -82,6 +88,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloPerPostCommentSort.xm \
     $(SRC_DIR)/ApolloLiquidGlass.xm \
     $(SRC_DIR)/ApolloTabBarTitles.xm \
+    $(SRC_DIR)/ApolloScrollEdgePopFix.xm \
     $(SRC_DIR)/ApolloLiquidGlassIconPicker.xm \
     $(SRC_DIR)/ApolloModmailLayout.xm \
     $(SRC_DIR)/ApolloAutoHideTabBar.xm \
@@ -97,6 +104,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloSavedCategories.xm \
     $(SRC_DIR)/ApolloSwiftIvarBridge.swift \
     $(SRC_DIR)/ApolloUserFlair.xm \
+    $(SRC_DIR)/ApolloOwnCommentFlair.xm \
     $(SRC_DIR)/ApolloFlairColors.xm \
     $(SRC_DIR)/ApolloNativeActionMenus.xm \
     $(SRC_DIR)/ApolloHostedVideo.m \
@@ -218,7 +226,7 @@ endif
 # ApolloAppleTranslation.swift) only exists on iOS 18.0+. Weak-link it so the tweak still
 # loads on older iOS, where the Apple provider is gated off at runtime.
 ApolloReborn_LDFLAGS += -weak_framework Translation
-ApolloReborn_CFLAGS = -fobjc-arc -Wno-error=unguarded-availability-new -Wno-error=deprecated-declarations -Wno-module-import-in-extern-c -I$(THEOS_PROJECT_DIR)/$(SRC_DIR) -I$(THEOS_PROJECT_DIR)/liquid-glass/generated -I$(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/generated -I$(THEOS_PROJECT_DIR)/$(MODULES_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR)/minizip -DHAVE_ARC4RANDOM_BUF -DHAVE_ICONV -DHAVE_INTTYPES_H -DHAVE_PKCRYPT -DHAVE_STDINT_H -DHAVE_WZAES -DHAVE_ZLIB -DZLIB_COMPAT
+ApolloReborn_CFLAGS = -fobjc-arc -Wno-error=unguarded-availability-new -Wno-error=deprecated-declarations -Wno-module-import-in-extern-c -I$(THEOS_PROJECT_DIR)/$(SRC_DIR) -I$(THEOS_PROJECT_DIR)/liquid-glass/generated -I$(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/generated -I$(THEOS_PROJECT_DIR)/$(WHATS_NEW_DIR)/generated -I$(THEOS_PROJECT_DIR)/$(MODULES_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR)/minizip -DHAVE_ARC4RANDOM_BUF -DHAVE_ICONV -DHAVE_INTTYPES_H -DHAVE_PKCRYPT -DHAVE_STDINT_H -DHAVE_WZAES -DHAVE_ZLIB -DZLIB_COMPAT
 
 ApolloReborn_BUNDLE_RESOURCE_DIRS = resources
 
@@ -268,8 +276,8 @@ endif
 
 CONTROL_FILE = $(THEOS_PROJECT_DIR)/control
 
-# Generate Version.h and the theme gallery catalog.
-before-all:: generate_version_h generate_theme_gallery_catalog
+# Generate Version.h, the theme gallery catalog, and the What's New catalog.
+before-all:: generate_version_h generate_theme_gallery_catalog generate_whats_new_catalog
 
 generate_version_h:
 	@echo "Generating Version.h from control file"
@@ -286,6 +294,16 @@ $(THEME_GALLERY_GEN_H) $(THEME_GALLERY_GEN_M): $(THEOS_PROJECT_DIR)/$(THEME_GALL
 		$(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/themes \
 		$(THEME_GALLERY_GEN_H) \
 		$(THEME_GALLERY_GEN_M)
+
+WHATS_NEW_SOURCES := $(wildcard $(THEOS_PROJECT_DIR)/$(WHATS_NEW_DIR)/releases/*.json)
+
+generate_whats_new_catalog: $(WHATS_NEW_GEN_H) $(WHATS_NEW_GEN_M)
+
+$(WHATS_NEW_GEN_H) $(WHATS_NEW_GEN_M): $(THEOS_PROJECT_DIR)/$(WHATS_NEW_DIR)/scripts/generate_catalog.py $(WHATS_NEW_SOURCES)
+	@python3 $(THEOS_PROJECT_DIR)/$(WHATS_NEW_DIR)/scripts/generate_catalog.py \
+		$(THEOS_PROJECT_DIR)/$(WHATS_NEW_DIR)/releases \
+		$(WHATS_NEW_GEN_H) \
+		$(WHATS_NEW_GEN_M)
 
 # Liquid Glass icon metadata header is generated explicitly by running 'make lg-previews'
 LG_DIR = $(THEOS_PROJECT_DIR)/liquid-glass

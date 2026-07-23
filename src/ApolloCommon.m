@@ -355,6 +355,10 @@ UITableView *ApolloInheritedSettingsThemeSourceTableView(UITableViewController *
     return ApolloFindTableViewInView(source.view);
 }
 
+BOOL ApolloThemeSourceTableIsStale(UITableView *sourceTable) {
+    return sourceTable == nil || sourceTable.window == nil;
+}
+
 void ApolloApplyInheritedSettingsTableTheme(UITableViewController *controller) {
     if (!controller) return;
 

@@ -36,6 +36,12 @@ static NSString *const UDKeySubredditListEnhancements = @"SubredditListEnhanceme
 static NSString *const UDKeyHiddenModeratorSubreddits = @"HiddenModeratorSubreddits";
 static NSString *const UDKeyModernSubredditDividers = @"ModernSubredditDividers";
 static NSString *const ApolloModernSubredditDividersChangedNotification = @"ApolloModernSubredditDividersChangedNotification";
+// Hides the description subtitles under the subreddit list's built-in feed rows
+// (Home, Popular Posts, All Posts, Moderator Posts). Independent of the
+// enhancements master — applies in both the classic and modern list styles.
+// Default NO. See ApolloSubredditIndexPolish.xm.
+static NSString *const UDKeyHideSubredditListDescriptions = @"HideSubredditListDescriptions";
+static NSString *const ApolloHideSubredditListDescriptionsChangedNotification = @"ApolloHideSubredditListDescriptionsChangedNotification";
 // Color post (link) and user/author flairs with Reddit's assigned colors. Default NO.
 static NSString *const UDKeyEnableFlairColors = @"EnableFlairColors";
 static NSString *const ApolloFlairColorsChangedNotification = @"ApolloFlairColorsChangedNotification";
@@ -247,6 +253,12 @@ static NSString *const UDKeyEnableAISummaries = @"EnableAISummaries";
 // turning the master on keeps the original behaviour (post + comment summaries).
 static NSString *const UDKeyEnableAIPostSummaries = @"EnableAIPostSummaries";       // post / link / both
 static NSString *const UDKeyEnableAICommentSummaries = @"EnableAICommentSummaries"; // discussion
+// User-selectable AI summary tuning. Text posts must meet the word threshold
+// (50...300 in 50-word steps; default 150). Post/link and discussion detail are
+// stored independently as ApolloAISummaryDetail values (Brief/Balanced/In-depth).
+static NSString *const UDKeyAIPostWordThreshold = @"AIPostWordThreshold";
+static NSString *const UDKeyAIPostSummaryDetail = @"AIPostSummaryDetail";
+static NSString *const UDKeyAICommentSummaryDetail = @"AICommentSummaryDetail";
 // When on, summaries are generated only when the user taps the card (rather than
 // automatically on open). Off by default. Cached summaries still show instantly.
 static NSString *const UDKeyEnableTapToSummarize = @"EnableTapToSummarize";
@@ -255,6 +267,19 @@ static NSString *const UDKeyEnableTapToSummarize = @"EnableTapToSummarize";
 // (current behaviour: cards open on tap). Tapping an idle "Tap to summarize"
 // card always opens it once loaded, regardless of this setting.
 static NSString *const UDKeyEnableAIAutoExpandSummaries = @"EnableAIAutoExpandSummaries";
+// AI summary backend. "apple" (on-device FoundationModels, the default) or a
+// cloud provider reached through an OpenAI-compatible chat-completions API:
+// "openrouter" | "gemini" | "custom". Cloud providers need a user-supplied API
+// key; "custom" additionally needs a base URL. Keys/models are stored
+// per-provider so switching back and forth never loses them.
+static NSString *const UDKeyAISummaryProvider = @"AISummaryProvider"; // apple | openrouter | gemini | custom
+static NSString *const UDKeyOpenRouterAPIKey  = @"OpenRouterAPIKey";
+static NSString *const UDKeyOpenRouterAIModel = @"OpenRouterAIModel";
+static NSString *const UDKeyGeminiAPIKey      = @"GeminiAPIKey";
+static NSString *const UDKeyGeminiAIModel     = @"GeminiAIModel";
+static NSString *const UDKeyCustomAIAPIKey    = @"CustomAIAPIKey";
+static NSString *const UDKeyCustomAIModel     = @"CustomAIModel";
+static NSString *const UDKeyCustomAIBaseURL   = @"CustomAIBaseURL"; // OpenAI-compatible base URL, e.g. https://api.example.com/v1
 
 // Picture-in-Picture: floating in-app mini-player for comments-page videos.
 static NSString *const UDKeyPictureInPictureEnabled = @"PictureInPictureEnabled";       // master switch
@@ -410,3 +435,12 @@ static NSString *const ApolloLinkPreviewModeDidChangeNotification = @"ApolloLink
 // Posted by the Inline Media settings screen when size/alignment changes so
 // visible comments re-measure their inline media immediately.
 static NSString *const ApolloInlineMediaLayoutDidChangeNotification = @"ApolloInlineMediaLayoutDidChangeNotification";
+
+// The last TWEAK_VERSION (without the leading "v") the What's New sheet was
+// shown for (or silently advanced past, when a version has no catalog entry).
+// Deliberately never registered with a default value, and an absent value is
+// deliberately NOT treated as "fresh install, skip": it is indistinguishable
+// from an upgrade off a build that predates this feature — the actual target
+// audience for the release this ships in. See the gating doc in
+// ApolloWhatsNew.xm.
+static NSString *const UDKeyLastSeenWhatsNewVersion = @"LastSeenWhatsNewVersion";
