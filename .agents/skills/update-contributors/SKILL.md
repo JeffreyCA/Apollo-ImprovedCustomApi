@@ -21,7 +21,7 @@ Run this skill when the user asks anything like:
 ## Tooling
 
 - Use `gh api` for GitHub data. Prefer authenticated `gh` (`gh auth status`) to avoid rate limits.
-- Use `python3 .github/skills/update-contributors/generate-readme-contributors.py` to regenerate `README.md`.
+- Use `python3 .agents/skills/update-contributors/generate-readme-contributors.py` to regenerate `README.md`.
 - Do **not** use third-party contributor generators or recreate legacy contributor config files.
 
 ## `contributors.json` schema
@@ -102,7 +102,7 @@ For non-GitHub contributors, provide stable identity fields:
 Run:
 
 ```bash
-python3 .github/skills/update-contributors/generate-readme-contributors.py
+python3 .agents/skills/update-contributors/generate-readme-contributors.py
 ```
 
 The generator queries GitHub profiles through `gh api users/<login>` and rewrites only the generated contributor block in `README.md`.
@@ -111,8 +111,8 @@ The generator queries GitHub profiles through `gh api users/<login>` and rewrite
 
 ```bash
 python3 -m json.tool contributors.json >/dev/null
-python3 .github/skills/update-contributors/generate-readme-contributors.py
-git --no-pager diff --stat contributors.json README.md .github/skills/update-contributors
+python3 .agents/skills/update-contributors/generate-readme-contributors.py
+git --no-pager diff --stat contributors.json README.md .agents/skills/update-contributors
 ```
 
 Show the diff to the user before they commit. Do **not** auto-commit.

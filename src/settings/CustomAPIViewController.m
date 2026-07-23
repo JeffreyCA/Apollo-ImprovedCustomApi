@@ -21,6 +21,7 @@
 #import "ApolloSubredditInfoCache.h"
 #import "ApolloBannedProfile.h"
 #import "ApolloProfileSocialLinks.h"
+#import "ApolloWhatsNew.h"           // ApolloWhatsNewPresentForDebug() — TEMPORARY debug row
 #import "UserDefaultConstants.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/runtime.h>
@@ -743,11 +744,22 @@ typedef NS_ENUM(NSInteger, Tag) {
     backend.iconSystemName    = @"bell.badge.fill";              backend.iconTileColor    = [UIColor systemRedColor];
     flex.iconSystemName       = @"ant.fill";                     flex.iconTileColor       = [UIColor systemGrayColor];
     exportLogs.iconSystemName = @"square.and.arrow.up.on.square.fill"; exportLogs.iconTileColor = [UIColor systemGrayColor];
+    // TEMPORARY dev-only: presents the What's New sheet on demand, bypassing
+    // gating (never touches UDKeyLastSeenWhatsNewVersion, so it's safe to tap
+    // repeatedly). Remove this row and ApolloWhatsNewPresentForDebug() once the
+    // gated flow has shipped and this is no longer needed for testing.
+    ApolloSettingsRow *whatsNewDebug =
+        [ApolloSettingsRow buttonRowWithID:@"adv.whatsNewDebug"
+                                     title:@"🔧 What's New Debug"
+                                    action:^{ ApolloWhatsNewPresentForDebug(); }];
+    whatsNewDebug.visible = ^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFLEX]; };
+
     loginPersistenceDebug.iconSystemName = @"wrench.and.screwdriver.fill"; loginPersistenceDebug.iconTileColor = [UIColor systemGrayColor];
+    whatsNewDebug.iconSystemName = @"sparkles"; whatsNewDebug.iconTileColor = [UIColor systemGrayColor];
 
     return [ApolloSettingsSection sectionWithTitle:@"Advanced"
                                             footer:@"Notification backend, developer tools and diagnostics."
-                                              rows:@[ backend, flex, exportLogs, loginPersistenceDebug ]];
+                                              rows:@[ backend, flex, exportLogs, loginPersistenceDebug, whatsNewDebug ]];
 }
 
 - (ApolloSettingsSection *)buildDataSection {
@@ -1114,11 +1126,11 @@ typedef NS_ENUM(NSInteger, Tag) {
                                               rows:@[ readThumbnails, readPostMax, filterNSFWRR ]];
 }
 
-// The "Open in App" screen (Bluesky / GitHub / Steam) now lives in native
-// General → Open Links — see ApolloSettingsNativeInjections.xm. Its old
-// YouTube toggle and Default Browser picker were dropped outright: they
-// wrote Apollo's own keys, and the native rows ("Open Videos in YouTube
-// App", "Open Links in") are shown again in General → Other.
+// The "Open in App" screen now lives in native General → Open Links — see
+// ApolloSettingsNativeInjections.xm. Besides the Bluesky / GitHub / Steam
+// toggles it mirrors Apollo's own YouTube switch and "Open Links in" browser
+// picker against their native keys; the native General → Other rows are
+// hidden (registration in the same file).
 
 // Compact state shown below the Info Row disclosure. This is derived from the
 // same globals as the destination form, so returning from that screen only
@@ -1277,9 +1289,13 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.selectionStyle = UITableViewCellSelectionStyleDefault;
             }
             cell.textLabel.text = @"Apollo AI";
+            NSString *activeProviderName = @"On-device AI";
+            if ([sAISummaryProvider isEqualToString:@"openrouter"]) activeProviderName = @"OpenRouter AI";
+            else if ([sAISummaryProvider isEqualToString:@"gemini"]) activeProviderName = @"Gemini AI";
+            else if ([sAISummaryProvider isEqualToString:@"custom"]) activeProviderName = @"Custom cloud AI";
             cell.detailTextLabel.text = sEnableAISummaries
-                ? @"On-device AI enabled"
-                : @"On-device summaries and generation settings";
+                ? [NSString stringWithFormat:@"%@ enabled", activeProviderName]
+                : @"On-device or cloud summaries and generation settings";
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.detailTextLabel.numberOfLines = 0;
             cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
@@ -1529,6 +1545,29 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf profileTabAvatarSwitchToggled:sender]; }];
 
+    ApolloSettingsRow *iconOnlyTabBar =
+        [ApolloSettingsRow switchRowWithID:@"profiles.iconOnlyTabBar"
+                                     title:@"Icon-Only Tab Bar"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf iconOnlyTabBarSwitchToggled:sender]; }];
+
+    // Mirror of Apollo's native "Hide Username on Tab Bar" switch (relocated
+    // here from General → Other, which now hides it — see
+    // ApolloSettingsNativeInjections.xm). Same key, and the native change
+    // notification is posted so Apollo relabels the profile tab live. While
+    // Icon-Only Tab Bar is on, every tab label is already hidden, so this
+    // narrower option shows off + disabled — the same treatment
+    // ApolloTabBarTitles.xm gives the native row.
+    ApolloSettingsRow *hideUsernameTab =
+        [ApolloSettingsRow switchRowWithID:@"profiles.hideUsernameTab"
+                                     title:@"Hide Username on Tab Bar"
+                                      isOn:^BOOL {
+            return !sHideTabBarTitles &&
+                   [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyNativeHideUsernameOnTabBar];
+        }
+                                  onToggle:^(UISwitch *sender) { [weakSelf hideUsernameTabSwitchToggled:sender]; }];
+    hideUsernameTab.enabled = ^BOOL { return !sHideTabBarTitles; };
+
     // Single toggle for Reborn's detailed profile page: banner, large
     // avatar/snoovatar, display name, bio, and the Social Links band (all of
     // which live in the custom header). Off → Apollo's compact stock profile.
@@ -1539,8 +1578,8 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onToggle:^(UISwitch *sender) { [weakSelf showDetailedProfilesSwitchToggled:sender]; }];
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Show profile pictures, and open Reborn's detailed profile pages with a banner, bio and social links."
-                                              rows:@[ userAvatars, profileTabAvatar, detailedProfiles ]];
+                                            footer:@"Customize profile pictures, profile pages and the tab bar. Icon-Only Tab Bar hides every tab's text label (Hide Username on Tab Bar only hides yours), while keeping each icon's accessibility name."
+                                              rows:@[ userAvatars, profileTabAvatar, iconOnlyTabBar, hideUsernameTab, detailedProfiles ]];
 }
 
 // Subreddits group screen (ApolloSubredditsSettingsViewController), two
@@ -1562,6 +1601,16 @@ typedef NS_ENUM(NSInteger, Tag) {
     // Sub-option: only exists while Subreddit List Enhancements is on.
     modernDividers.visible = ^BOOL { return sSubredditListEnhancements; };
 
+    // Deliberately NOT gated on the enhancements master: hides the description
+    // subtitles under Home/Popular/All/Moderator in both classic and modern lists.
+    // A subreddit-LIST feature, so it stays here beside the list toggles rather
+    // than moving into the Subreddit Layout (header) screen below.
+    ApolloSettingsRow *hideDescriptions =
+        [ApolloSettingsRow switchRowWithID:@"sub.hideFeedDescriptions"
+                                     title:@"Hide Feed Descriptions"
+                                      isOn:^BOOL { return sHideSubredditListDescriptions; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf hideSubredditListDescriptionsSwitchToggled:sender]; }];
+
     // Pushes the dedicated Subreddit Layout screen — the single customize
     // screen for everything subreddit-header-related: the master on/off
     // (moved here from a separate "Show Subreddit Headers" row, which read as
@@ -1579,8 +1628,8 @@ typedef NS_ENUM(NSInteger, Tag) {
         }];
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Enhance the subreddit list with dividers, and customize subreddit pages."
-                                              rows:@[ enhancements, modernDividers, subredditLayout ]];
+                                            footer:@"Enhance the subreddit list with dividers, and customize subreddit pages. Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts."
+                                              rows:@[ enhancements, modernDividers, hideDescriptions, subredditLayout ]];
 }
 
 - (NSString *)subredditLayoutSummaryText {
@@ -2905,7 +2954,8 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)flexSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyEnableFLEX];
-    // The Login Persistence Debug row only exists while developer mode is on.
+    // The Login Persistence Debug and What's New Debug rows only exist while
+    // developer mode is on.
     [self visibilityDidChange];
 }
 
@@ -3015,6 +3065,12 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloModernSubredditDividersChangedNotification object:nil];
 }
 
+- (void)hideSubredditListDescriptionsSwitchToggled:(UISwitch *)sender {
+    sHideSubredditListDescriptions = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sHideSubredditListDescriptions forKey:UDKeyHideSubredditListDescriptions];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloHideSubredditListDescriptionsChangedNotification object:nil];
+}
+
 - (void)showRecentlyReadThumbnailsSwitchToggled:(UISwitch *)sender {
     sShowRecentlyReadThumbnails = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sShowRecentlyReadThumbnails forKey:UDKeyShowRecentlyReadThumbnails];
@@ -3078,6 +3134,21 @@ typedef NS_ENUM(NSInteger, Tag) {
     sUseProfileAvatarTabIcon = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sUseProfileAvatarTabIcon forKey:UDKeyUseProfileAvatarTabIcon];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloProfileTabAvatarIconChangedNotification" object:nil];
+}
+
+- (void)iconOnlyTabBarSwitchToggled:(UISwitch *)sender {
+    // Enabling also clears the native Hide Username key (see
+    // ApolloSetHideTabBarTitlesEnabled), so the sibling row below must re-read
+    // its switch state and enablement either way.
+    ApolloSetHideTabBarTitlesEnabled(sender.isOn);
+    [self reloadRowWithID:@"profiles.hideUsernameTab"];
+}
+
+- (void)hideUsernameTabSwitchToggled:(UISwitch *)sender {
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyNativeHideUsernameOnTabBar];
+    // Apollo natively observes this and relabels the profile tab immediately.
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:ApolloNativeHideUsernameOnTabBarChangedNotification object:nil];
 }
 
 - (void)showDetailedProfilesSwitchToggled:(UISwitch *)sender {

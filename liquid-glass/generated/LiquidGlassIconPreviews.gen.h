@@ -8,20 +8,18 @@ typedef struct {
     const char *designer;
 } LGIconRowEntry;
 
-typedef enum {
-    LGGroupPresentationInline = 0,
-    LGGroupPresentationPush   = 1,
-} LGGroupPresentation;
-
 typedef struct {
     const char          *groupID;
     const char          *title;
-    LGGroupPresentation  presentation;
+    const char          *description;
+    const char          *author;
     const LGIconRowEntry *entries;
     size_t               entryCount;
+    const char *const   *coverIconIDs;
+    size_t               coverIconIDCount;
 } LGIconGroupDef;
 
-static const LGIconRowEntry kLGGroupEntries_community[] = {
+static const LGIconRowEntry kLGGroupEntries_original[] = {
     { "igerman00", "Canon", "iGerman00" },
     { "jryng", "OG", "jryng" },
     { "metalnakls", "metalnakls", "metalnakls" },
@@ -29,7 +27,7 @@ static const LGIconRowEntry kLGGroupEntries_community[] = {
     { "apollo-classic", "Apollo Classic", "IllIIllIllIllII" },
 };
 
-static const LGIconRowEntry kLGGroupEntries_new_variants[] = {
+static const LGIconRowEntry kLGGroupEntries_classics[] = {
     { "jryng-morty", "Wubalubadubdub", "jryng" },
     { "jryng-duck", "Wilson", "jryng" },
     { "jryng-antenna", "Irradiate", "jryng" },
@@ -71,21 +69,16 @@ static const LGIconRowEntry kLGGroupEntries_new_variants[] = {
     { "jryng-snazzy", "Margaret", "jryng" },
     { "jryng-andru", "Pro Wrestler", "jryng" },
     { "jryng-eap", "EAP", "jryng" },
-    { "jryng-red", "Red", "jryng" },
     { "lilacvibes-trans", "Trans", "lilacvibes" },
     { "lilacvibes-pride", "Pride", "lilacvibes" },
     { "lilacvibes-progress", "Progress Pride", "lilacvibes" },
 };
 
-static const LGIconRowEntry kLGGroupEntries_custom[] = {
-    { "bajader-aperture-science", "Aperture Science", "bajader" },
-    { "bajader-apollos", "ApollOS", "bajader" },
-    { "bajader-glitched", "Glitched", "bajader" },
-    { "paulo1manso-modern", "Modern", "paulo1manso" },
-    { "paulo1manso-modern-alt", "Modern Alt", "paulo1manso" },
-    { "synthwave", "Synthwave", "IllIIllIllIllII" },
+static const LGIconRowEntry kLGGroupEntries_helios[] = {
     { "helios", "Helios", "IllIIllIllIllII" },
     { "helios-halo", "Helios Halo", "IllIIllIllIllII" },
+    { "helios-legacy", "Helios Legacy", "IllIIllIllIllII" },
+    { "helios-tribute", "Helios Tribute", "IllIIllIllIllII" },
     { "helios-cryo", "Helios Cryo", "IllIIllIllIllII" },
     { "helios-cryo-halo", "Helios Cryo Halo", "IllIIllIllIllII" },
     { "helios-parallax", "Helios Parallax", "IllIIllIllIllII" },
@@ -94,12 +87,57 @@ static const LGIconRowEntry kLGGroupEntries_custom[] = {
     { "helios-ultra-halo", "Helios Ultra Halo", "IllIIllIllIllII" },
 };
 
-static const LGIconGroupDef kLGIconGroups[] = {
-    { "community", "Liquid Glass", LGGroupPresentationInline, kLGGroupEntries_community, 5 },
-    { "new-variants", "New Variants", LGGroupPresentationPush, kLGGroupEntries_new_variants, 45 },
-    { "custom", "Custom", LGGroupPresentationPush, kLGGroupEntries_custom, 14 },
+static const LGIconRowEntry kLGGroupEntries_concepts[] = {
+    { "bajader-aperture-science", "Aperture Science", "bajader" },
+    { "bajader-apollos", "ApollOS", "bajader" },
+    { "bajader-glitched", "Glitched", "bajader" },
+    { "paulo1manso-modern", "Modern", "paulo1manso" },
+    { "paulo1manso-modern-alt", "Modern Alt", "paulo1manso" },
+    { "jryng-red", "Red", "jryng" },
+    { "synthwave", "Synthwave", "IllIIllIllIllII" },
 };
 
-static const size_t kLGIconGroupCount = 3;
+static const char *const kLGGroupCover_original[] = {
+    "igerman00",
+    "jryng",
+    "harunatsu",
+};
+
+static const char *const kLGGroupCover_classics[] = {
+    "lilacvibes-pride",
+    "bajader-sunset",
+    "jryng-antenna",
+};
+
+static const char *const kLGGroupCover_helios[] = {
+    "helios-legacy",
+    "helios-cryo",
+    "helios",
+};
+
+static const char *const kLGGroupCover_concepts[] = {
+    "bajader-glitched",
+    "bajader-aperture-science",
+    "paulo1manso-modern",
+};
+
+static const LGIconGroupDef kLGIconGroups[] = {
+    { "original", "Original", "The original Apollo icon in Liquid Glass, crafted by the community.", "", kLGGroupEntries_original, 5, kLGGroupCover_original, 3 },
+    { "classics", "Classics", "Dozens of colorful variants and one-off designs from the original Apollo app, recreated in Liquid Glass.", "jryng, bajader, lilacvibes", kLGGroupEntries_classics, 44, kLGGroupCover_classics, 3 },
+    { "helios", "Helios", "Icons inspired by the Hyper Suit 4000 icon from Apollo, and the Modern icons by paulo1manso.", "IllIIllIllIllII", kLGGroupEntries_helios, 10, kLGGroupCover_helios, 3 },
+    { "concepts", "Concepts", "A mix of standalone icon concepts, including small thematic sets too short for their own pack.", "", kLGGroupEntries_concepts, 7, kLGGroupCover_concepts, 3 },
+};
+
+static const size_t kLGIconGroupCount = 4;
+
+static const LGIconRowEntry kLGFeaturedEntries[] = {
+    { "jryng", "OG", "jryng" },
+    { "helios", "Helios", "IllIIllIllIllII" },
+    { "bajader-aperture-science", "Aperture Science", "bajader" },
+    { "paulo1manso-modern", "Modern", "paulo1manso" },
+    { "lilacvibes-progress", "Progress Pride", "lilacvibes" },
+};
+
+static const size_t kLGFeaturedEntryCount = 5;
 
 static const char *const kLGPrimaryIconIDCString = "jryng";

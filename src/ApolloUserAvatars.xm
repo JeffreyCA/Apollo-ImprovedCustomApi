@@ -2782,8 +2782,71 @@ static void ApolloPinAccountToCurrentDefaultCredentialsIfNeeded(id currentUser) 
 
 %end
 
+// A vote's model-update reconfigure can REBUILD the author byline text node.
+// The fresh node carries no avatar ownership, so the rewrite-preserve hook
+// (owned nodes only) can't keep the avatar attachment — the byline renders
+// text-only, one avatar line-height (~10pt) shorter, until the profile batch
+// fetch re-applies it seconds later: the comment's row visibly dips and
+// springs back on every vote of a comment whose author avatar has fallen out
+// of the image cache. Re-run the normal cell apply shortly after the update
+// settles: the rebuilt node is attached by then, the apply is idempotent
+// (applied-token + prepended-marker check), and the immediate placeholder
+// render is diameter-identical to the eventual image, so the row height never
+// moves while the real avatar loads.
+static void ApolloInlineAvatarReapplyAfterModelUpdate(NSString *fullName) {
+    if (fullName.length == 0) return;
+    UITableView *tableView = nil;
+    for (UIWindow *window in [UIApplication sharedApplication].windows) {
+        if (window.hidden) continue;
+        NSMutableArray *stack = [NSMutableArray arrayWithObject:window];
+        while (stack.count && !tableView) {
+            UIView *view = stack.lastObject; [stack removeLastObject];
+            if ([view isKindOfClass:[UITableView class]]) {
+                for (UITableViewCell *cell in ((UITableView *)view).visibleCells) {
+                    if (![cell respondsToSelector:@selector(node)]) continue;
+                    id node = ((id (*)(id, SEL))objc_msgSend)(cell, @selector(node));
+                    if (node && [NSStringFromClass([node class]) containsString:@"CommentCellNode"]) {
+                        tableView = (UITableView *)view;
+                        break;
+                    }
+                }
+            }
+            [stack addObjectsFromArray:view.subviews];
+        }
+        if (tableView) break;
+    }
+    if (!tableView) return;
+    for (UITableViewCell *cell in tableView.visibleCells) {
+        if (![cell respondsToSelector:@selector(node)]) continue;
+        id node = ((id (*)(id, SEL))objc_msgSend)(cell, @selector(node));
+        if (!node || ![NSStringFromClass([node class]) containsString:@"CommentCellNode"]) continue;
+        id comment = nil;
+        Ivar ivar = class_getInstanceVariable([node class], "comment");
+        if (ivar) comment = object_getIvar(node, ivar);
+        if (!comment || ![comment respondsToSelector:@selector(fullName)]) continue;
+        NSString *cellFullName = ((id (*)(id, SEL))objc_msgSend)(comment, @selector(fullName));
+        if (![cellFullName isKindOfClass:[NSString class]] || ![cellFullName isEqualToString:fullName]) continue;
+        ApolloApplyAvatarToCellWithDiameter(node, ApolloUsernameFromCell(node, @"comment"), ApolloCommentInlineAvatarDiameter);
+        return;
+    }
+}
+
 %ctor {
     %init;
+    [[NSNotificationCenter defaultCenter] addObserverForName:@"com.christianselig.ModelObjectUpdated"
+                                                      object:nil
+                                                       queue:nil
+                                                  usingBlock:^(NSNotification *note) {
+        if (!sShowUserAvatars || ![NSThread isMainThread]) return;
+        id model = note.object;
+        if (![model isKindOfClass:objc_getClass("RDKComment")]) return;
+        if (![model respondsToSelector:@selector(fullName)]) return;
+        NSString *fullName = ((id (*)(id, SEL))objc_msgSend)(model, @selector(fullName));
+        if (![fullName isKindOfClass:[NSString class]] || fullName.length == 0) return;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            ApolloInlineAvatarReapplyAfterModelUpdate(fullName);
+        });
+    }];
     [[NSNotificationCenter defaultCenter] addObserverForName:ApolloUserAvatarsToggleChangedNotification
                                                       object:nil
                                                        queue:[NSOperationQueue mainQueue]

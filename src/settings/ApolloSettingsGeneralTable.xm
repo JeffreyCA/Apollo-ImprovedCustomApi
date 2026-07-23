@@ -74,6 +74,15 @@ typedef UITableViewCell *(^ApolloGTRowFactory)(UIViewController *vc, UITableView
 static NSMutableArray<BOOL (^)(UITableViewCell *)> *sGTHideMatchers;
 static NSMutableArray<ApolloGTInjection *> *sGTInjections;
 
+@interface ApolloGTNativeRowConfiguration : NSObject
+@property (nonatomic, copy) NSString *title;
+@property (nonatomic, copy) void (^configure)(UIViewController *vc, UITableViewCell *cell);
+@end
+@implementation ApolloGTNativeRowConfiguration
+@end
+
+static NSMutableArray<ApolloGTNativeRowConfiguration *> *sGTNativeRowConfigurations;
+
 void ApolloGeneralTableHideRows(BOOL (^cellMatcher)(UITableViewCell *cell)) {
     if (!cellMatcher) return;
     if (!sGTHideMatchers) sGTHideMatchers = [NSMutableArray array];
@@ -100,6 +109,17 @@ void ApolloGeneralTableInjectSelectableRow(NSString *anchorTitle,
     [sGTInjections addObject:inj];
 }
 
+void ApolloGeneralTableConfigureNativeRow(NSString *title,
+                                          void (^configure)(UIViewController *vc,
+                                                            UITableViewCell *cell)) {
+    if (!title || !configure) return;
+    ApolloGTNativeRowConfiguration *configuration = [ApolloGTNativeRowConfiguration new];
+    configuration.title = title;
+    configuration.configure = configure;
+    if (!sGTNativeRowConfigurations) sGTNativeRowConfigurations = [NSMutableArray array];
+    [sGTNativeRowConfigurations addObject:configuration];
+}
+
 // MARK: - shared title matching
 
 static BOOL ApolloGTStringMatchesTitle(NSString *text, NSString *title) {
@@ -124,6 +144,15 @@ BOOL ApolloGeneralTableCellHasTitle(UITableViewCell *cell, NSString *title) {
     if (!cell || !title) return NO;
     if (ApolloGTStringMatchesTitle(cell.textLabel.text, title)) return YES;
     return ApolloGTLabelTreeHasTitle(cell.contentView, title, 0);
+}
+
+static void ApolloGTApplyNativeRowConfigurations(UIViewController *vc, UITableViewCell *cell) {
+    if (!vc || !cell) return;
+    for (ApolloGTNativeRowConfiguration *configuration in sGTNativeRowConfigurations) {
+        if (ApolloGeneralTableCellHasTitle(cell, configuration.title)) {
+            configuration.configure(vc, cell);
+        }
+    }
 }
 
 // MARK: - map state
@@ -352,6 +381,15 @@ static void ApolloGTZeroReturn(NSInvocation *inv) {
 
     [inv invokeWithTarget:vc];
 
+    // Native rows pass through Eureka unchanged, then receive any registered
+    // state-only configuration. Applying after every dequeue makes off-screen
+    // rows agree as soon as they scroll into view without rebuilding the form.
+    if (sel == @selector(tableView:cellForRowAtIndexPath:)) {
+        __unsafe_unretained UITableViewCell *cell = nil;
+        [inv getReturnValue:&cell];
+        ApolloGTApplyNativeRowConfigurations(vc, cell);
+    }
+
     // Echoed index paths (willSelect, targetIndexPathForMove, ...) go back
     // native -> display. Pin the replacement to the pool: setReturnValue: does
     // not retain, and "small NSIndexPaths are tagged (immortal) pointers" is a
@@ -402,6 +440,16 @@ static UITableView *ApolloGTFindTable(UIViewController *vc) {
     return nil;
 }
 
+void ApolloGeneralTableRefreshNativeRowConfigurations(void) {
+    UIViewController *vc = sApolloGTActiveVC;
+    if (!vc || !vc.viewIfLoaded.window) return;
+    UITableView *tv = ApolloGTFindTable(vc);
+    if (!tv) return;
+    for (NSIndexPath *indexPath in tv.indexPathsForVisibleRows) {
+        ApolloGTApplyNativeRowConfigurations(vc, [tv cellForRowAtIndexPath:indexPath]);
+    }
+}
+
 UITableViewCell *ApolloGeneralTableVisibleCellForTitle(UIViewController *vc, NSString *title) {
     if (!vc || !title || !vc.viewIfLoaded.window) return nil;
     UITableView *tv = ApolloGTFindTable(vc);
@@ -438,7 +486,8 @@ UITableViewCell *ApolloGeneralTableVisibleCellForTitle(UIViewController *vc, NSS
 // guard (the old sPPCSScanning flag is gone by construction).
 static void ApolloGTScanAndInstall(UIViewController *vc) {
     if (objc_getAssociatedObject(vc, kApolloGTProxyKey)) return;
-    if (sGTHideMatchers.count == 0 && sGTInjections.count == 0) return;
+    if (sGTHideMatchers.count == 0 && sGTInjections.count == 0 &&
+        sGTNativeRowConfigurations.count == 0) return;
     UITableView *tv = ApolloGTFindTable(vc);
     if (!tv) {
         ApolloLog(@"[GeneralTable] no table view found; leaving the screen native");
@@ -457,6 +506,7 @@ static void ApolloGTScanAndInstall(UIViewController *vc) {
                 for (NSInteger r = 0; r < rowCount; r++) {
                     UITableViewCell *cell = [ds tableView:tv
                                     cellForRowAtIndexPath:[NSIndexPath indexPathForRow:r inSection:s]];
+                    ApolloGTApplyNativeRowConfigurations(vc, cell);
                     [cells addObject:cell ?: [UITableViewCell new]];
                 }
 
@@ -516,7 +566,7 @@ static void ApolloGTScanAndInstall(UIViewController *vc) {
         return;
     }
 
-    if (displayBySection.count == 0) {
+    if (displayBySection.count == 0 && sGTNativeRowConfigurations.count == 0) {
         ApolloLog(@"[GeneralTable] nothing matched (no hides, no anchors); screen left native");
         return;
     }

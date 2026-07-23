@@ -2174,6 +2174,16 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
             [self setValue:mutableRequest forKey:@"_currentRequest"];
         }
     } else if ([requestURL.host isEqualToString:@"oauth.reddit.com"] || [requestURL.host isEqualToString:@"www.reddit.com"]) {
+        // Probe-tagged requests (fragment marker) are our OWN self-authored
+        // traffic — session probes, upload leases, the social-links scrape GETs.
+        // They authenticate themselves and pick their User-Agent deliberately
+        // (stamping the app UA here made Reddit render device=mobile, which
+        // drops the server-side markup the scrapers parse) — leave them alone.
+        if (ApolloWebJSONURLIsProbe(requestURL)) {
+            %orig;
+            return;
+        }
+
         // Web JSON spike: when the flag is on, whitelisted listing reads are
         // re-pointed at cookie-authenticated www.reddit.com/...json instead of
         // the oauth host (see ApolloWebJSON.m). Returns nil when off/not
@@ -2677,6 +2687,7 @@ static void initializeRandomSources() {
                                     UDKeyCommentLinkHost: @(CommentLinkHostOff),
                                     UDKeyShowUserAvatars: @NO,
                                     UDKeyUseProfileAvatarTabIcon: @NO,
+                                    UDKeyHideTabBarTitles: @NO,
                                     UDKeyShowDetailedProfiles: @YES,
                                     UDKeyShowSubredditHeaders: @NO,
                                     UDKeySubredditHeaderImmersive: @YES,
@@ -2712,8 +2723,12 @@ static void initializeRandomSources() {
                                     UDKeyEnableAISummaries: @NO,
                                     UDKeyEnableAIPostSummaries: @YES,
                                     UDKeyEnableAICommentSummaries: @YES,
+                                    UDKeyAIPostWordThreshold: @150,
+                                    UDKeyAIPostSummaryDetail: @(ApolloAISummaryDetailBalanced),
+                                    UDKeyAICommentSummaryDetail: @(ApolloAISummaryDetailBalanced),
                                     UDKeyEnableTapToSummarize: @NO,
                                     UDKeyEnableAIAutoExpandSummaries: @NO,
+                                    UDKeyAISummaryProvider: @"apple",
                                     UDKeyPictureInPictureEnabled: @NO,
                                     UDKeyPictureInPictureActivation: @(ApolloPiPActivationModeUnmutedOnly),
                                     UDKeyPictureInPictureStartPosition: @(ApolloPiPStartPositionTopRight),
@@ -2769,6 +2784,23 @@ static void initializeRandomSources() {
     sEnableAISummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAISummaries];
     sEnableAIPostSummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAIPostSummaries];
     sEnableAICommentSummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAICommentSummaries];
+    sAIPostWordThreshold = [standardDefaults integerForKey:UDKeyAIPostWordThreshold];
+    if (sAIPostWordThreshold < 50 || sAIPostWordThreshold > 300 || sAIPostWordThreshold % 50 != 0) {
+        sAIPostWordThreshold = 150;
+        [standardDefaults setInteger:sAIPostWordThreshold forKey:UDKeyAIPostWordThreshold];
+    }
+    sAIPostSummaryDetail = (ApolloAISummaryDetail)[standardDefaults integerForKey:UDKeyAIPostSummaryDetail];
+    if (sAIPostSummaryDetail < ApolloAISummaryDetailBrief ||
+        sAIPostSummaryDetail > ApolloAISummaryDetailInDepth) {
+        sAIPostSummaryDetail = ApolloAISummaryDetailBalanced;
+        [standardDefaults setInteger:sAIPostSummaryDetail forKey:UDKeyAIPostSummaryDetail];
+    }
+    sAICommentSummaryDetail = (ApolloAISummaryDetail)[standardDefaults integerForKey:UDKeyAICommentSummaryDetail];
+    if (sAICommentSummaryDetail < ApolloAISummaryDetailBrief ||
+        sAICommentSummaryDetail > ApolloAISummaryDetailInDepth) {
+        sAICommentSummaryDetail = ApolloAISummaryDetailBalanced;
+        [standardDefaults setInteger:sAICommentSummaryDetail forKey:UDKeyAICommentSummaryDetail];
+    }
     sEnableTapToSummarize = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableTapToSummarize];
     sEnableAIAutoExpandSummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAIAutoExpandSummaries];
     // "Tap to Summarize" and "Open Summaries Automatically" are mutually exclusive in
@@ -2778,6 +2810,30 @@ static void initializeRandomSources() {
     if (sEnableTapToSummarize && sEnableAIAutoExpandSummaries) {
         sEnableAIAutoExpandSummaries = NO;
         [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyEnableAIAutoExpandSummaries];
+    }
+    // AI summary backend: sanitize to a known provider (unrecognized/unset → apple,
+    // the on-device default), mirroring the translation-provider handling below.
+    {
+        NSString *aiProvider = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyAISummaryProvider];
+        if ([aiProvider isEqualToString:@"openrouter"] || [aiProvider isEqualToString:@"gemini"] ||
+            [aiProvider isEqualToString:@"custom"] || [aiProvider isEqualToString:@"apple"]) {
+            sAISummaryProvider = [aiProvider copy];
+        } else {
+            sAISummaryProvider = @"apple";
+        }
+        NSString *(^loadKey)(NSString *) = ^NSString *(NSString *udKey) {
+            NSString *v = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:udKey];
+            if (![v isKindOfClass:[NSString class]]) return nil;
+            v = [v stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            return v.length > 0 ? [v copy] : nil;
+        };
+        sOpenRouterAPIKey = loadKey(UDKeyOpenRouterAPIKey);
+        sOpenRouterAIModel = loadKey(UDKeyOpenRouterAIModel);
+        sGeminiAPIKey = loadKey(UDKeyGeminiAPIKey);
+        sGeminiAIModel = loadKey(UDKeyGeminiAIModel);
+        sCustomAIAPIKey = loadKey(UDKeyCustomAIAPIKey);
+        sCustomAIModel = loadKey(UDKeyCustomAIModel);
+        sCustomAIBaseURL = loadKey(UDKeyCustomAIBaseURL);
     }
     sInlineImageAlignment = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyInlineImageAlignment];
     if (sInlineImageAlignment < ApolloInlineImageAlignmentCenter || sInlineImageAlignment > ApolloInlineImageAlignmentRight) {
@@ -2829,6 +2885,8 @@ static void initializeRandomSources() {
     if (sCommentLinkHost < CommentLinkHostOff || sCommentLinkHost > CommentLinkHostImgChest) sCommentLinkHost = CommentLinkHostOff;
     sShowUserAvatars = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars];
     sUseProfileAvatarTabIcon = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon];
+    sHideTabBarTitles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles];
+    ApolloNormalizeNativeHideUsernameForIconOnlyTabBar();
     sShowDetailedProfiles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowDetailedProfiles];
     sShowSubredditHeaders = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders];
     sSubredditHeaderImmersive = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditHeaderImmersive];
@@ -2869,6 +2927,7 @@ static void initializeRandomSources() {
     }
     sModernSubredditDividers = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers];
     sSubredditListEnhancements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditListEnhancements];
+    sHideSubredditListDescriptions = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideSubredditListDescriptions];
     sEnableFlairColors = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFlairColors];
     sEnableBulkTranslation = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableBulkTranslation];
     sAutoTranslateOnAppear = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoTranslateOnAppear];

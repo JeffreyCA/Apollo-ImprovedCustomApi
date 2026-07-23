@@ -468,6 +468,26 @@ static UIView *ApolloNativeActionMenuCreateProxyAnchorView(UIView *sourceView, B
     return anchorView;
 }
 
+// Issue #249 follow-up: the liquid morph is meant for COMPACT tapped controls
+// (bar buttons, a cell's "…" button) — UIKit hides the morph source while the
+// menu is open, which reads as "the control became the menu". When the
+// resolved source is the tapped ROW itself (composer flair row: a full-width
+// table cell), that same hiding reads as the row vanishing until the menu
+// closes. Skip the morph for row-scale sources: the menu still presents
+// anchored at the row (proxy-anchor preview), but the row stays visible.
+static BOOL ApolloNativeActionMenuViewShouldMorph(UIView *view) {
+    if (!view || !view.window) return NO;
+    if ([view isKindOfClass:[UITableViewCell class]]) return NO;
+    if ([view isKindOfClass:objc_getClass("UICollectionViewCell")]) return NO;
+    // The gesture fallback can resolve the whole table/scroll view.
+    if ([view isKindOfClass:[UIScrollView class]]) return NO;
+    // Anything near full-width is a row, not a control (ASDK cell nodes and
+    // custom row views aren't UITableViewCell subclasses).
+    CGFloat windowWidth = CGRectGetWidth(view.window.bounds);
+    if (windowWidth > 0 && CGRectGetWidth(view.bounds) > 0.6 * windowWidth) return NO;
+    return YES;
+}
+
 static BOOL ApolloNativeActionMenuModeratorStyleActive(void) {
     NSUInteger count = MIN(sApolloNativeActionMenuCaptureDepth, (NSUInteger)(sizeof(sApolloNativeActionMenuModeratorStyleStack) / sizeof(sApolloNativeActionMenuModeratorStyleStack[0])));
     for (NSUInteger i = 0; i < count; i++) {
@@ -900,10 +920,47 @@ static id ApolloNativeActionMenuCompactMenuStyle(void) {
 }
 
 - (UITargetedPreview *)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction previewForDismissingMenuWithConfiguration:(__unused UIContextMenuConfiguration *)configuration {
-    return [self contextMenuInteraction:interaction previewForHighlightingMenuWithConfiguration:configuration];
+    // Dismissal deliberately does NOT reuse the morph-view preview: UIKit
+    // snapshots that view and flies it from the collapsed menu's anchor back to
+    // the control's frame, so the "..." button visibly glides back into its row
+    // after every menu dismissal. Returning an invisible preview anchored on
+    // the proxy keeps the menu's own fade-out and lets the real control simply
+    // reappear in place (restored in willEndForConfiguration below) with no
+    // flight. Do not return nil here — nil makes UIKit fall back to the
+    // presentation (morph) preview and the glide comes back.
+    UIView *sourceView = self.sourceView;
+    if (!sourceView) return nil;
+
+    UIPreviewParameters *parameters = [UIPreviewParameters new];
+    parameters.backgroundColor = UIColor.clearColor;
+    parameters.visiblePath = [UIBezierPath bezierPathWithRect:CGRectZero];
+    SEL setAppliesShadowSelector = NSSelectorFromString(@"setAppliesShadow:");
+    if ([parameters respondsToSelector:setAppliesShadowSelector]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(parameters, setAppliesShadowSelector, NO);
+    }
+    return [[UITargetedPreview alloc] initWithView:sourceView parameters:parameters];
 }
 
 - (void)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction willEndForConfiguration:(__unused UIContextMenuConfiguration *)configuration animator:(id<UIContextMenuInteractionAnimating>)animator {
+    // The morph hid the real control for the menu's lifetime. With the
+    // dismissal preview above being invisible, nothing re-reveals it visually —
+    // restore it right as the dismissal starts so the button is sitting in its
+    // own row while the menu fades (idempotent with UIKit's own end-of-
+    // animation unhide bookkeeping).
+    UIView *morphSource = self.morphSourceView;
+    if (morphSource) {
+        UIView *morphView = morphSource;
+        SEL morphViewSelector = NSSelectorFromString(@"_morphView");
+        if ([morphSource respondsToSelector:morphViewSelector]) {
+            UIView *resolved = ((id (*)(id, SEL))objc_msgSend)(morphSource, morphViewSelector);
+            if (resolved) morphView = resolved;
+        }
+        for (UIView *restore in @[morphView, morphSource]) {
+            if (restore.hidden) restore.hidden = NO;
+            if (restore.alpha < 0.999) restore.alpha = 1.0;
+        }
+    }
+
     UIView *sourceView = self.sourceView;
     UIContextMenuInteraction *menuInteraction = self.interaction;
     if (!sourceView || !menuInteraction) return;
@@ -1080,8 +1137,13 @@ static BOOL ApolloNativeActionMenuPresent(id presenter, id actionController, voi
     ApolloNativeActionMenuPresenter *menuPresenter = [ApolloNativeActionMenuPresenter new];
     menuPresenter.menu = menu;
     menuPresenter.sourceView = anchorView;
-    menuPresenter.morphSourceView = sourceView;
+    BOOL morphable = ApolloNativeActionMenuViewShouldMorph(sourceView);
+    menuPresenter.morphSourceView = morphable ? sourceView : nil;
     menuPresenter.removeSourceViewOnEnd = removeAnchorViewOnEnd;
+    ApolloLog(@"[NativeActionMenu] source=%@ %.0fx%.0f morph=%@",
+              NSStringFromClass(sourceView.class),
+              CGRectGetWidth(sourceView.bounds), CGRectGetHeight(sourceView.bounds),
+              morphable ? @"yes" : @"no");
 
     UIContextMenuInteraction *interaction = [[UIContextMenuInteraction alloc] initWithDelegate:menuPresenter];
     if (![interaction respondsToSelector:NSSelectorFromString(@"_presentMenuAtLocation:")]) {
