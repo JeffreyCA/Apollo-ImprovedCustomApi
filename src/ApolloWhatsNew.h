@@ -11,8 +11,11 @@ extern "C" {
 
 // Presents the "What's New" sheet over the current top view controller if the
 // running TWEAK_VERSION has curated content (whats-new/releases/*.json) the
-// user hasn't seen yet. No-ops on a fresh install (nothing to recap) and at
-// most once per launch. Safe to call from any thread; hops to main itself.
+// user hasn't seen yet. An absent seen-marker counts as unseen — it is
+// indistinguishable between a fresh install and an upgrade from a build that
+// predates this feature, and the upgrade case is the target audience (see the
+// gating doc in ApolloWhatsNew.xm). Safe to call from any thread; hops to
+// main itself. Idempotent once a presentation commits for the current version.
 void ApolloWhatsNewPresentIfNeeded(void);
 
 // TEMPORARY (dev/debug only): presents the sheet immediately on the main

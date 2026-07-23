@@ -415,7 +415,10 @@ static NSString *const ApolloLinkPreviewModeDidChangeNotification = @"ApolloLink
 static NSString *const ApolloInlineMediaLayoutDidChangeNotification = @"ApolloInlineMediaLayoutDidChangeNotification";
 
 // The last TWEAK_VERSION (without the leading "v") the What's New sheet was
-// shown for, or confirmed not needed on a fresh install. Deliberately never
-// registered with a default value — an absent key is how ApolloWhatsNew.xm
-// tells a fresh install apart from an upgrade. See ApolloWhatsNew.xm.
+// shown for (or silently advanced past, when a version has no catalog entry).
+// Deliberately never registered with a default value, and an absent value is
+// deliberately NOT treated as "fresh install, skip": it is indistinguishable
+// from an upgrade off a build that predates this feature — the actual target
+// audience for the release this ships in. See the gating doc in
+// ApolloWhatsNew.xm.
 static NSString *const UDKeyLastSeenWhatsNewVersion = @"LastSeenWhatsNewVersion";

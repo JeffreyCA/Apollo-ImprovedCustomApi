@@ -67,6 +67,7 @@ static UIImage *ApolloWhatsNewCurrentAppIcon(void);
 @implementation ApolloWhatsNewViewController {
     NSString *_headline;
     NSArray<NSDictionary *> *_items;
+    UIColor *_accent;
 
     UIScrollView *_scrollView;
     UIStackView *_headerStack;
@@ -93,8 +94,10 @@ static UIImage *ApolloWhatsNewCurrentAppIcon(void);
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
     UIColor *accent = ApolloThemeAccentColor() ?: self.view.tintColor ?: [UIColor systemBlueColor];
+    _accent = accent;
 
     _continueButton = [self apollo_makeContinueButtonWithAccent:accent];
+    [self apollo_updateContinueTitleColor];
     [self.view addSubview:_continueButton];
     [NSLayoutConstraint activateConstraints:@[
         [_continueButton.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:20],
@@ -227,6 +230,7 @@ static UIImage *ApolloWhatsNewCurrentAppIcon(void);
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+    [self apollo_updateContinueTitleColor];   // in the hierarchy now — real traits
     if (_hasAnimatedIn) return;
     _hasAnimatedIn = YES;
     [self apollo_animateEntrance];
@@ -248,6 +252,20 @@ static UIImage *ApolloWhatsNewCurrentAppIcon(void);
 }
 
 - (void)apollo_animateEntrance {
+    if (UIAccessibilityIsReduceMotionEnabled()) {
+        // Reduce Motion: land everything in its final state, no springs/slides.
+        _headerStack.alpha = 1.0;
+        _headerStack.transform = CGAffineTransformIdentity;
+        _headerTopConstraint.constant = 36;
+        for (UIView *row in _rowViews) {
+            row.alpha = 1.0;
+            row.transform = CGAffineTransformIdentity;
+        }
+        _continueButton.alpha = 1.0;
+        _continueButton.transform = CGAffineTransformIdentity;
+        [self.view layoutIfNeeded];
+        return;
+    }
     static const NSTimeInterval kTitlePopDelay = 0.05;
     static const NSTimeInterval kTitlePopDuration = 0.5;
     static const NSTimeInterval kTitleSlideDelay = kTitlePopDelay + 0.28;
@@ -289,6 +307,15 @@ static UIImage *ApolloWhatsNewCurrentAppIcon(void);
     NSString *iconName = [item[@"icon"] isKindOfClass:[NSString class]] ? item[@"icon"] : nil;
     UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:26 weight:UIImageSymbolWeightRegular];
     UIImage *icon = iconName.length > 0 ? [UIImage systemImageNamed:iconName withConfiguration:symbolConfig] : nil;
+    if (!icon && iconName.length > 0) {
+        // SF Symbols are OS-versioned and the device build floor is iOS 14 —
+        // a JSON entry naming a newer symbol would otherwise render a blank
+        // 36pt gap in the icon column on older OSes, on the one screen that
+        // shows off the release. Fall back to a floor-safe generic (sparkles,
+        // SF Symbols 2 / iOS 14) so the row always keeps its icon.
+        ApolloLog(@"[WhatsNew] Symbol '%@' unavailable on this OS — using fallback.", iconName);
+        icon = [UIImage systemImageNamed:@"sparkles" withConfiguration:symbolConfig];
+    }
 
     UIImageView *iconView = [[UIImageView alloc] initWithImage:[icon imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate]];
     iconView.tintColor = accent;
@@ -330,10 +357,27 @@ static UIImage *ApolloWhatsNewCurrentAppIcon(void);
     button.clipsToBounds = YES;
     button.titleLabel.font = [UIFont boldSystemFontOfSize:17];
     [button setTitle:@"Continue" forState:UIControlStateNormal];
-    BOOL lightAccent = ApolloColorIsLight([accent resolvedColorWithTraitCollection:self.traitCollection]);
-    [button setTitleColor:lightAccent ? [UIColor blackColor] : [UIColor whiteColor] forState:UIControlStateNormal];
     [button addTarget:self action:@selector(apollo_continueTapped) forControlEvents:UIControlEventTouchUpInside];
     return button;
+}
+
+// The black-vs-white title choice bakes the accent's resolved light/dark
+// variant into a static color, so (unlike the dynamic accent fill behind it)
+// it does NOT follow appearance changes on its own — and at viewDidLoad the
+// VC's traits may still be ambient rather than the presented hierarchy's
+// (Apollo's themes override the window style). Recomputed once in-hierarchy
+// (viewDidAppear) and on every appearance flip.
+- (void)apollo_updateContinueTitleColor {
+    UIColor *accent = _accent ?: [UIColor systemBlueColor];
+    BOOL lightAccent = ApolloColorIsLight([accent resolvedColorWithTraitCollection:self.traitCollection]);
+    [_continueButton setTitleColor:lightAccent ? [UIColor blackColor] : [UIColor whiteColor] forState:UIControlStateNormal];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previous]) {
+        [self apollo_updateContinueTitleColor];
+    }
 }
 
 - (void)apollo_continueTapped {
@@ -357,9 +401,11 @@ static UIViewController *ApolloWhatsNewTopViewController(void) {
 
 // A top VC that's mid-transition, or already presenting something, will
 // silently no-op presentViewController: — checking this before committing
-// avoids marking a version "seen" when nothing was actually shown, and
-// doubles as the guard against the real and debug presentation paths racing
-// each other onto the same top VC.
+// avoids marking a version "seen" when nothing was actually shown. NOTE this
+// alone does NOT prevent two chains stacking two sheets: once one chain's
+// sheet has finished presenting, that sheet IS the top VC and passes every
+// check here — the stacking guards (already-a-What's-New-sheet + marker
+// re-read) live in ApolloWhatsNewAttemptPresentation.
 static BOOL ApolloWhatsNewTopViewControllerReadyToPresent(UIViewController *top) {
     return top && !top.isBeingPresented && !top.isBeingDismissed && !top.presentedViewController;
 }
@@ -414,9 +460,28 @@ static UIImage *ApolloWhatsNewCurrentAppIcon(void) {
 // Builds and presents the sheet over the current top view controller,
 // retrying at the given delays (relative to "now") if the top VC isn't ready
 // yet. Calls markSeen() exactly once, only after a presentation actually
-// commits — never on a give-up.
-static void ApolloWhatsNewAttemptPresentation(NSString *headline, NSArray<NSDictionary *> *items, NSArray<NSNumber *> *remainingDelays, void (^markSeen)(void)) {
+// commits — never on a give-up. versionGate (nil for the debug path) is the
+// version this chain intends to show: it is re-read against the seen-marker
+// right before committing, because two chains can legitimately overlap — the
+// sPending debounce only covers 0.5s while a retry chain runs up to ~1.8s,
+// so two foregrounds >0.5s apart while the marker is still unset each start
+// a chain, and once chain A's sheet has finished presenting it passes every
+// ReadyToPresent check as chain B's top VC. markSeen runs synchronously at
+// A's commit, so B's re-read (plus the sheet-class check, which also covers
+// the markSeen-less debug path) makes the first chain to commit the only one.
+static void ApolloWhatsNewAttemptPresentation(NSString *headline, NSArray<NSDictionary *> *items, NSArray<NSNumber *> *remainingDelays, NSString *versionGate, void (^markSeen)(void)) {
     UIViewController *top = ApolloWhatsNewTopViewController();
+    if ([top isKindOfClass:[ApolloWhatsNewViewController class]]) {
+        ApolloLog(@"[WhatsNew] A What's New sheet is already up — not stacking another.");
+        return;
+    }
+    if (versionGate) {
+        NSString *lastSeen = [[NSUserDefaults standardUserDefaults] stringForKey:UDKeyLastSeenWhatsNewVersion];
+        if ([lastSeen isEqualToString:versionGate]) {
+            ApolloLog(@"[WhatsNew] %@ was marked seen while this chain waited — skipping.", versionGate);
+            return;
+        }
+    }
     if (ApolloWhatsNewTopViewControllerReadyToPresent(top)) {
         ApolloWhatsNewViewController *whatsNewVC = [[ApolloWhatsNewViewController alloc] initWithHeadline:headline items:items];
         whatsNewVC.modalPresentationStyle = UIModalPresentationPageSheet;
@@ -438,7 +503,7 @@ static void ApolloWhatsNewAttemptPresentation(NSString *headline, NSArray<NSDict
     NSTimeInterval delay = remainingDelays.firstObject.doubleValue;
     NSArray<NSNumber *> *rest = [remainingDelays subarrayWithRange:NSMakeRange(1, remainingDelays.count - 1)];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        ApolloWhatsNewAttemptPresentation(headline, items, rest, markSeen);
+        ApolloWhatsNewAttemptPresentation(headline, items, rest, versionGate, markSeen);
     });
 }
 
@@ -463,7 +528,7 @@ static void ApolloWhatsNewPresentNow(void) {
         return;
     }
 
-    ApolloWhatsNewAttemptPresentation(headline, items, @[@0, @0.6, @1.2], ^{
+    ApolloWhatsNewAttemptPresentation(headline, items, @[@0, @0.6, @1.2], currentVersion, ^{
         [defaults setObject:currentVersion forKey:UDKeyLastSeenWhatsNewVersion];
         ApolloLog(@"[WhatsNew] Presented What's New for %@", currentVersion);
     });
@@ -482,13 +547,14 @@ void ApolloWhatsNewPresentForDebug(void) {
         }
         // No retries here (unlike the real path) — this is an explicit,
         // interactive dev action; if the top VC isn't ready, the developer
-        // can just tap again. ApolloWhatsNewTopViewControllerReadyToPresent
-        // still protects against racing a real, in-flight presentation.
+        // can just tap again. versionGate is nil: the debug path ignores the
+        // seen-marker by design (the sheet-class check inside still prevents
+        // stacking onto an already-visible What's New sheet).
         if (!ApolloWhatsNewTopViewControllerReadyToPresent(ApolloWhatsNewTopViewController())) {
             ApolloLog(@"[WhatsNew] Debug present: no top view controller available.");
             return;
         }
-        ApolloWhatsNewAttemptPresentation(headline, items, @[], nil);
+        ApolloWhatsNewAttemptPresentation(headline, items, @[], nil, nil);
     });
 }
 
