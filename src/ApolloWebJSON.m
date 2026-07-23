@@ -1749,6 +1749,24 @@ NSString *ApolloWebJSONKeylessOAuthBearer(NSString *username) {
     return ApolloWebJSONUsableTokenV2ForSession(session) ?: ApolloWebJSONMintWebBearerForAccount(user);
 }
 
+// Fetch-outcome feedback for ApolloWebJSONKeylessOAuthBearer callers: a 401/403
+// with a minted bearer is the signature of a dead session having been handed an
+// anonymous token (the mint itself can't tell). Drop the cached mint and
+// remember the failure so the next attempt backs off instead of re-minting a
+// doomed token. token_v2 bearers have nothing to drop — they age out of the
+// stored cookie header on their own. Pass the SAME username you gave
+// ApolloWebJSONKeylessOAuthBearer (nil/empty → the active account, matching its
+// fallback) so the mint cache, which keys on that string, resolves.
+void ApolloWebJSONInvalidateOAuthBearerForAccount(NSString *username, NSString *bearer) {
+    NSString *user = username.length ? username : ApolloActiveWebSessionUsername();
+    if (user.length == 0 || bearer.length == 0) return;
+    NSString *cached = ApolloWebJSONCachedMintedBearerForUser(user);
+    if (![cached isEqualToString:bearer]) return;
+    ApolloWebJSONDropMintedBearerForUser(user);
+    ApolloWebJSONRecordMintFailureForUser(user);
+    ApolloLog(@"[WebJSON] Dropped rejected web bearer for u/%@ (fetch outcome 401/403)", user);
+}
+
 NSArray *ApolloWebJSONRescueFlairList(NSHTTPURLResponse *response) {
     NSURL *failedURL = response.URL;
     if (!failedURL) return nil;
@@ -1764,21 +1782,16 @@ NSArray *ApolloWebJSONRescueFlairList(NSHTTPURLResponse *response) {
     // failed request; fall back to the active session for safety.
     NSString *username = ApolloWebJSONAccountFromURL(failedURL) ?: ApolloActiveWebSessionUsername();
     if (username.length == 0) return nil;
-    ApolloWebSessionEntry *session = ApolloWebSessionFor(username);
-    if (session.cookieHeader.length == 0) return nil;
 
-    // Prefer the stored token_v2 cookie while it's still fresh (harvests are
-    // <24h old at first); after that, mint a bearer from the accounts token
-    // service. A minted bearer is unproven until the fetch below succeeds
-    // with it — a dead session can yield an anonymous token, so the 401/403
-    // outcome is what decides whether the mint "worked".
-    NSString *token = ApolloWebJSONUsableTokenV2ForSession(session);
-    BOOL minted = NO;
-    if (token.length == 0) {
-        token = ApolloWebJSONMintWebBearerForAccount(username);
-        minted = token.length > 0;
-    }
+    // Resolve the account's own OAuth bearer (fresh token_v2, else a minted
+    // accounts-service bearer). A minted bearer is unproven until the fetch
+    // below succeeds — a dead session can yield an anonymous token, so the
+    // 401/403 outcome is what decides whether it "worked". `minted` (a bearer
+    // that came from the mint, not the token_v2 cookie) drives that outcome
+    // handling; the mint cache is the source of truth for it.
+    NSString *token = ApolloWebJSONKeylessOAuthBearer(username);
     if (token.length == 0) return nil;
+    BOOL minted = [token isEqualToString:ApolloWebJSONCachedMintedBearerForUser(username)];
 
     // Same path + query as the failed www request, back on the oauth host.
     NSURLComponents *components = [NSURLComponents componentsWithURL:failedURL resolvingAgainstBaseURL:NO];
@@ -1810,14 +1823,11 @@ NSArray *ApolloWebJSONRescueFlairList(NSHTTPURLResponse *response) {
         return nil;
     }
     if (status == 401 || status == 403) {
-        if (minted) {
-            // The freshly minted bearer doesn't authenticate — the signature
-            // of a dead session being handed an anonymous token. Drop it and
-            // remember the failure so the next opens don't repay the mint
-            // cost immediately. (Nothing was ever persisted from the mint.)
-            ApolloWebJSONDropMintedBearerForUser(username);
-            ApolloWebJSONRecordMintFailureForUser(username);
-        }
+        // A minted bearer that doesn't authenticate is the signature of a dead
+        // session handed an anonymous token — drop it and remember the failure
+        // so the next opens don't repay the mint cost immediately. No-op for a
+        // token_v2 bearer (it isn't the cached mint). Nothing was persisted.
+        ApolloWebJSONInvalidateOAuthBearerForAccount(username, token);
         ApolloLog(@"[WebJSON] Flair rescue got HTTP %ld for %@%@", (long)status, failedURL.path,
                   minted ? @" with a freshly minted bearer — treating the web session as signed out" : @"");
         return nil;

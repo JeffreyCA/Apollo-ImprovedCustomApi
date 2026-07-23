@@ -110,6 +110,13 @@ BOOL ApolloWebJSONRequestIsInternal(NSURL *url);
 // request with ApolloWebJSONProbeURL so the transport hooks leave it alone.
 NSString *ApolloWebJSONKeylessOAuthBearer(NSString *username);
 
+// Fetch-outcome feedback for ApolloWebJSONKeylessOAuthBearer callers: report a
+// 401/403 so a minted bearer proven dead (an anonymous token from a signed-out
+// session) is dropped and its account backs off instead of re-minting a doomed
+// token every attempt. No-op for a token_v2 bearer. Pass the SAME username you
+// gave ApolloWebJSONKeylessOAuthBearer (the mint cache keys on it).
+void ApolloWebJSONInvalidateOAuthBearerForAccount(NSString *username, NSString *bearer);
+
 // Hydrates the legacy single-session globals from the keychain, migrating any
 // legacy NSUserDefaults cookie value, then any legacy single-global session,
 // into the per-account ApolloWebSessionStore (see that file's harvest path for

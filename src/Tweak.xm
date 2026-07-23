@@ -1896,8 +1896,15 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
     NSString *host = [url host];
     NSString *path = [url path];
 
-    NSData *redditAlbumResponseData = sImageUploadProvider == ImageUploadProviderReddit ? ApolloRedditSyntheticImgurAlbumResponseDataForRequest(request) : nil;
-    if (sImageUploadProvider == ImageUploadProviderReddit && redditAlbumResponseData.length > 0) {
+    // Not gated on the Reddit provider setting: keyless Web JSON uploads are
+    // claimed for Reddit regardless of the Media Upload Host (see
+    // ApolloShouldUseCookieRedditUpload), so their multi-image albums must be
+    // synthesized into Reddit galleries too. The synthesis only succeeds when
+    // >= 2 of the album's member tokens map to RECORDED Reddit uploads, so a
+    // genuine Imgur album (Imgur-hosted member ids) still passes through to
+    // Imgur untouched. ImgChest keeps its own album responder below.
+    NSData *redditAlbumResponseData = sImageUploadProvider != ImageUploadProviderImgChest ? ApolloRedditSyntheticImgurAlbumResponseDataForRequest(request) : nil;
+    if (redditAlbumResponseData.length > 0) {
         NSHTTPURLResponse *fakeHTTPResponse = [[NSHTTPURLResponse alloc] initWithURL:url
                                                                           statusCode:200
                                                                          HTTPVersion:@"HTTP/1.1"

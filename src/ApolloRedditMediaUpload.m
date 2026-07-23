@@ -495,7 +495,14 @@ static void ApolloRequestRedditMediaAsset(NSData *mediaData,
         return;
     }
 
-    NSURL *url = [NSURL URLWithString:@"https://oauth.reddit.com/api/media/asset.json"];
+    // Probe fragment: this is a tweak-internal request, so the transport hooks
+    // must leave it alone — the Web JSON chokepoint must not re-point it (the
+    // /api/media/* exclusion already covers that, belt and suspenders), and
+    // crucially the bearer capture must not read this Authorization header. In
+    // keyless mode the bearer here is the posting account's minted web bearer,
+    // and capturing it would poison sLatestRedditBearerToken for mixed
+    // API-key + keyless installs. The fragment never reaches the wire.
+    NSURL *url = ApolloWebJSONProbeURL([NSURL URLWithString:@"https://oauth.reddit.com/api/media/asset.json"]);
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.HTTPMethod = @"POST";
     [request setValue:[@"Bearer " stringByAppendingString:bearerToken] forHTTPHeaderField:@"Authorization"];
