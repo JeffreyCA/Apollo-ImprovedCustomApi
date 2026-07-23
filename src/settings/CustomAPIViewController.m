@@ -1546,6 +1546,14 @@ typedef NS_ENUM(NSInteger, Tag) {
     // Sub-option: only exists while Subreddit List Enhancements is on.
     modernDividers.visible = ^BOOL { return sSubredditListEnhancements; };
 
+    // Deliberately NOT gated on the enhancements master: hides the description
+    // subtitles under Home/Popular/All/Moderator in both classic and modern lists.
+    ApolloSettingsRow *hideDescriptions =
+        [ApolloSettingsRow switchRowWithID:@"sub.hideFeedDescriptions"
+                                     title:@"Hide Feed Descriptions"
+                                      isOn:^BOOL { return sHideSubredditListDescriptions; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf hideSubredditListDescriptionsSwitchToggled:sender]; }];
+
     ApolloSettingsRow *headers =
         [ApolloSettingsRow switchRowWithID:@"sub.headers"
                                      title:@"Show Subreddit Headers"
@@ -1566,8 +1574,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     };
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Enhance the subreddit list and community pages with dividers, headers and highlights."
-                                              rows:@[ enhancements, modernDividers, headers, highlights ]];
+                                            footer:@"Enhance the subreddit list and community pages with dividers, headers and highlights. Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts."
+                                              rows:@[ enhancements, modernDividers, hideDescriptions, headers, highlights ]];
 }
 
 - (ApolloSettingsSection *)buildSubredditsSourcesSection {
@@ -2986,6 +2994,12 @@ typedef NS_ENUM(NSInteger, Tag) {
     sModernSubredditDividers = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sModernSubredditDividers forKey:UDKeyModernSubredditDividers];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloModernSubredditDividersChangedNotification object:nil];
+}
+
+- (void)hideSubredditListDescriptionsSwitchToggled:(UISwitch *)sender {
+    sHideSubredditListDescriptions = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sHideSubredditListDescriptions forKey:UDKeyHideSubredditListDescriptions];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloHideSubredditListDescriptionsChangedNotification object:nil];
 }
 
 - (void)showRecentlyReadThumbnailsSwitchToggled:(UISwitch *)sender {

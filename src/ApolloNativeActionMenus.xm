@@ -899,10 +899,47 @@ static id ApolloNativeActionMenuCompactMenuStyle(void) {
 }
 
 - (UITargetedPreview *)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction previewForDismissingMenuWithConfiguration:(__unused UIContextMenuConfiguration *)configuration {
-    return [self contextMenuInteraction:interaction previewForHighlightingMenuWithConfiguration:configuration];
+    // Dismissal deliberately does NOT reuse the morph-view preview: UIKit
+    // snapshots that view and flies it from the collapsed menu's anchor back to
+    // the control's frame, so the "..." button visibly glides back into its row
+    // after every menu dismissal. Returning an invisible preview anchored on
+    // the proxy keeps the menu's own fade-out and lets the real control simply
+    // reappear in place (restored in willEndForConfiguration below) with no
+    // flight. Do not return nil here — nil makes UIKit fall back to the
+    // presentation (morph) preview and the glide comes back.
+    UIView *sourceView = self.sourceView;
+    if (!sourceView) return nil;
+
+    UIPreviewParameters *parameters = [UIPreviewParameters new];
+    parameters.backgroundColor = UIColor.clearColor;
+    parameters.visiblePath = [UIBezierPath bezierPathWithRect:CGRectZero];
+    SEL setAppliesShadowSelector = NSSelectorFromString(@"setAppliesShadow:");
+    if ([parameters respondsToSelector:setAppliesShadowSelector]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(parameters, setAppliesShadowSelector, NO);
+    }
+    return [[UITargetedPreview alloc] initWithView:sourceView parameters:parameters];
 }
 
 - (void)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction willEndForConfiguration:(__unused UIContextMenuConfiguration *)configuration animator:(id<UIContextMenuInteractionAnimating>)animator {
+    // The morph hid the real control for the menu's lifetime. With the
+    // dismissal preview above being invisible, nothing re-reveals it visually —
+    // restore it right as the dismissal starts so the button is sitting in its
+    // own row while the menu fades (idempotent with UIKit's own end-of-
+    // animation unhide bookkeeping).
+    UIView *morphSource = self.morphSourceView;
+    if (morphSource) {
+        UIView *morphView = morphSource;
+        SEL morphViewSelector = NSSelectorFromString(@"_morphView");
+        if ([morphSource respondsToSelector:morphViewSelector]) {
+            UIView *resolved = ((id (*)(id, SEL))objc_msgSend)(morphSource, morphViewSelector);
+            if (resolved) morphView = resolved;
+        }
+        for (UIView *restore in @[morphView, morphSource]) {
+            if (restore.hidden) restore.hidden = NO;
+            if (restore.alpha < 0.999) restore.alpha = 1.0;
+        }
+    }
+
     UIView *sourceView = self.sourceView;
     UIContextMenuInteraction *menuInteraction = self.interaction;
     if (!sourceView || !menuInteraction) return;

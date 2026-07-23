@@ -5,9 +5,11 @@
 #import <objc/message.h>
 #include <dlfcn.h>
 #include <float.h>
+#include <math.h>
 #include <string.h>
 
 #import "ApolloCommon.h"
+#import "ApolloDeletedCommentsData.h"
 #import "ApolloState.h"
 #import "ApolloThemeRuntime.h"
 #import "ApolloTranslation.h"
@@ -36,6 +38,18 @@
 
 static const void *kApolloOriginalAttributedTextKey = &kApolloOriginalAttributedTextKey;
 static const void *kApolloTranslatedTextNodeKey = &kApolloTranslatedTextNodeKey;
+// Last fully-composited translated body bitmap + cell-relative frame. Apollo
+// can leave the replacement body's logical text and visible backing image out
+// of sync after repeated votes, so later vote windows need a known-good visual
+// fallback rather than depending on whichever body node currently wins lookup.
+static const void *kApolloVoteBodySnapshotKey = &kApolloVoteBodySnapshotKey;
+static const void *kApolloVoteBodySnapshotPrimeScheduledKey = &kApolloVoteBodySnapshotPrimeScheduledKey;
+static const void *kApolloVoteBodyCoverViewKey = &kApolloVoteBodyCoverViewKey;
+static const void *kApolloPersistentVoteBodyCoverKey = &kApolloPersistentVoteBodyCoverKey;
+// Counts overlapping vote windows separately from the brief invisible-layer
+// warm-up. A rapid second vote can begin before the first delayed removal; the
+// first completion must not hide the cover while the second rebuild is active.
+static const void *kApolloVoteBodyCoverActiveCountKey = &kApolloVoteBodyCoverActiveCountKey;
 static const void *kApolloCellTranslationKeyKey = &kApolloCellTranslationKeyKey;
 static const void *kApolloThreadTranslatedModeKey = &kApolloThreadTranslatedModeKey;
 // Set when the user explicitly toggled away from a translated thread (so we
@@ -52,6 +66,7 @@ static const void *kApolloTranslationOwnedTextNodeKey = &kApolloTranslationOwned
 static const void *kApolloOwnedNodeOriginalBodyKey = &kApolloOwnedNodeOriginalBodyKey;
 static const void *kApolloOwnedNodeTranslatedTextKey = &kApolloOwnedNodeTranslatedTextKey;
 static const void *kApolloOwnedNodeReentrancyKey = &kApolloOwnedNodeReentrancyKey;
+static const void *kApolloDeferredPreemptScheduledKey = &kApolloDeferredPreemptScheduledKey;
 // Marker for title text nodes. Title nodes live outside the comments view
 // controller (feeds, search, profiles) so they must bypass the
 // `ApolloControllerIsInTranslatedMode` check used by the comment-thread
@@ -295,6 +310,34 @@ static void ApolloAppendTranslateAffordanceForCellNode(id cellNode, RDKComment *
 static void ApolloShowOriginalWithRetranslateAffordanceForCellNode(id cellNode, RDKComment *comment, id textNode);
 static BOOL ApolloAttributedStringEndsWithMarker(NSAttributedString *attr);
 static void ApolloApplyTranslationToTitleNode(id titleNode, id textNode, NSString *sourceText, NSString *translatedText);
+// Main-thread-only flag used to reuse the normal snapshot builder while
+// briefly presenting an identical body-only cover to precommit its layer.
+static BOOL sApolloPrimingVoteBodySnapshot = NO;
+static void ApolloScheduleVoteBodySnapshotPrime(id commentCellNode) {
+    if (!commentCellNode || objc_getAssociatedObject(commentCellNode, kApolloVoteBodySnapshotPrimeScheduledKey)) return;
+    NSObject *primeToken = [NSObject new];
+    objc_setAssociatedObject(commentCellNode, kApolloVoteBodySnapshotPrimeScheduledKey,
+                             primeToken, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak id weakCell = commentCellNode;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        id strongCell = weakCell;
+        if (!strongCell) return;
+        // didExitVisibleState/discard cancels this token. Identity (rather
+        // than a BOOL) also prevents an older block from consuming a newer
+        // schedule after a rapid exit/re-entry or cell reuse.
+        if (objc_getAssociatedObject(strongCell, kApolloVoteBodySnapshotPrimeScheduledKey) != primeToken) return;
+        objc_setAssociatedObject(strongCell, kApolloVoteBodySnapshotPrimeScheduledKey,
+                                 nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // A real translation/style write supersedes any snapshot previously
+        // cached for this cell, even when it happens to have the same fullname.
+        objc_setAssociatedObject(strongCell, kApolloVoteBodySnapshotKey,
+                                 nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        sApolloPrimingVoteBodySnapshot = YES;
+        @try { ApolloTranslationInstallVoteBodyCover(strongCell); }
+        @catch (__unused NSException *e) {}
+        sApolloPrimingVoteBodySnapshot = NO;
+    });
+}
 // A feed post title the user tapped to pin back to ORIGINAL; gates the title
 // apply path so a re-translation pass won't swap it back until they toggle again.
 static const void *kApolloTitlePinnedOriginalKey = &kApolloTitlePinnedOriginalKey;
@@ -1692,8 +1735,34 @@ static id ApolloBestCommentTextNode(id commentCellNode, RDKComment *comment) {
 
 // One deferred, per-table-coalesced empty begin/endUpdates: re-queries row heights and
 // re-measures only nodes whose calculated layout was invalidated. Mirrors the
-// link-preview module's coalesced height refresh (#630 rounds 6-7).
+// link-preview module's coalesced height refresh (#630 rounds 6-7), including its
+// collapse-settle gate: an empty begin/endUpdates fired while a comment
+// collapse/expand row animation is running re-queries every row height
+// mid-animation and restarts the native delete/insert animations (#620 round 2's
+// wrong-way glide). Defer to the window's end, bounded like the LP refresher so
+// a collapse storm can't postpone the height commit forever.
 static char kApolloTranslationHeightCommitPendingKey;
+static void ApolloTranslationRunHostHeightCommit(UITableView *tableView, NSInteger attemptsLeft) {
+    NSTimeInterval settleDelay = ApolloDeletedCommentsCollapseSettleDelayRemaining();
+    if (settleDelay > 0 && attemptsLeft > 0) {
+        __weak UITableView *weakTableView = tableView;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((settleDelay + 0.03) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UITableView *strongTableView = weakTableView;
+            if (!strongTableView) return;
+            ApolloTranslationRunHostHeightCommit(strongTableView, attemptsLeft - 1);
+        });
+        return;
+    }
+    objc_setAssociatedObject(tableView, &kApolloTranslationHeightCommitPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (!tableView.window) return;
+    @try {
+        [UIView performWithoutAnimation:^{
+            [tableView beginUpdates];
+            [tableView endUpdates];
+        }];
+    } @catch (__unused NSException *e) {}
+}
+
 static void ApolloTranslationScheduleHostHeightCommit(id cellNode) {
     if (!cellNode) return;
     UIView *cellView = nil;
@@ -1721,14 +1790,7 @@ static void ApolloTranslationScheduleHostHeightCommit(id cellNode) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UITableView *strongTableView = weakTableView;
         if (!strongTableView) return;
-        objc_setAssociatedObject(strongTableView, &kApolloTranslationHeightCommitPendingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        if (!strongTableView.window) return;
-        @try {
-            [UIView performWithoutAnimation:^{
-                [strongTableView beginUpdates];
-                [strongTableView endUpdates];
-            }];
-        } @catch (__unused NSException *e) {}
+        ApolloTranslationRunHostHeightCommit(strongTableView, 6);
     });
 }
 
@@ -1899,6 +1961,12 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     }
     // Already showing the translation? No-op.
     if (textMatchesTranslation && !textMatchesBody) {
+        NSDictionary *snapshot = objc_getAssociatedObject(commentCellNode, kApolloVoteBodySnapshotKey);
+        NSString *snapshotFullName = [snapshot objectForKey:@"fullName"];
+        NSString *commentFullName = ApolloCommentFullName(comment);
+        if (commentFullName.length > 0 && ![snapshotFullName isEqualToString:commentFullName]) {
+            ApolloScheduleVoteBodySnapshotPrime(commentCellNode);
+        }
         return;
     }
 
@@ -1936,6 +2004,12 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     // nothing to do.
     if ([current.string isEqualToString:displayAttr.string]) {
         ApolloTranslationVerboseLog(@"[Translation/vote] apply: display identical — exact no-op cell=%p", commentCellNode);
+        NSDictionary *snapshot = objc_getAssociatedObject(commentCellNode, kApolloVoteBodySnapshotKey);
+        NSString *snapshotFullName = [snapshot objectForKey:@"fullName"];
+        NSString *commentFullName = ApolloCommentFullName(comment);
+        if (commentFullName.length > 0 && ![snapshotFullName isEqualToString:commentFullName]) {
+            ApolloScheduleVoteBodySnapshotPrime(commentCellNode);
+        }
         return;
     }
 
@@ -1986,6 +2060,10 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
         if (textMatchesBody) ApolloIndexTranslatedCommentBody(current.string, fullName);
     }
     ApolloMarkVisibleTranslationApplied(comment.body, translatedText);
+    // Warm a fully-independent body bitmap after Texture has committed this
+    // translation. The vote handler can then install it without rasterizing
+    // from a surface that Apollo is about to clear in the same frame.
+    ApolloScheduleVoteBodySnapshotPrime(commentCellNode);
 }
 
 static void ApolloRestoreOriginalForCellNode(id commentCellNode, RDKComment *comment) {
@@ -3490,6 +3568,12 @@ static NSString *ApolloTranslationFailureCooldownKey(NSString *cacheKey) {
     return [NSString stringWithFormat:@"%@|%@", provider, cacheKey ?: @""];
 }
 
+// userInfo marker on errors replayed from the cooldown cache, so downstream
+// logging can tell "the provider just failed" from "the cached failure was
+// handed back to yet another rebuilt cell" — inside a cell-rebuild storm the
+// latter fired the same failure log several times a second.
+static NSString *const kApolloTranslationCooldownReplayKey = @"ApolloTranslationCooldownReplay";
+
 static NSError *ApolloRecentTranslationFailure(NSString *cacheKey) {
     if (cacheKey.length == 0 || !sTranslationFailureCooldowns) return nil;
     NSString *failureKey = ApolloTranslationFailureCooldownKey(cacheKey);
@@ -3499,7 +3583,9 @@ static NSError *ApolloRecentTranslationFailure(NSString *cacheKey) {
         NSNumber *timestamp = [record[@"timestamp"] isKindOfClass:[NSNumber class]] ? record[@"timestamp"] : nil;
         NSError *error = [record[@"error"] isKindOfClass:[NSError class]] ? record[@"error"] : nil;
         if (timestamp && error && now - timestamp.doubleValue < kApolloTranslationFailureRetryDelay) {
-            return error;
+            NSMutableDictionary *info = [error.userInfo mutableCopy] ?: [NSMutableDictionary dictionary];
+            info[kApolloTranslationCooldownReplayKey] = @YES;
+            return [NSError errorWithDomain:error.domain code:error.code userInfo:info];
         }
         if (record) [sTranslationFailureCooldowns removeObjectForKey:failureKey];
     }
@@ -3829,7 +3915,10 @@ static void ApolloMaybeTranslateCommentCellNode(id commentCellNode, BOOL forceTr
         if (![currentKey isEqualToString:cacheKey]) return;
 
         if (![translated isKindOfClass:[NSString class]] || translated.length == 0) {
-            if (error) {
+            // Log fresh provider failures once; cooldown replays (the cached
+            // error handed to every rebuilt cell for the next 15s) are noise
+            // that floods the log inside cell-rebuild storms.
+            if (error && ![error.userInfo[kApolloTranslationCooldownReplayKey] boolValue]) {
                 ApolloLog(@"[Translation] Failed to translate comment: %@", error.localizedDescription ?: @"unknown error");
             }
             return;
@@ -3876,13 +3965,41 @@ static BOOL ApolloReapplyCachedTranslationForCellNode(id commentCellNode) {
     return YES;
 }
 
+// Rapid consecutive votes can reset a comment's body back to the original
+// WHILE the recently-applied re-entrancy guard from the previous vote's
+// restore is still hot (~150ms). The guard exists to break the harmless
+// apply → layout-invalidate → schedule loop on ALREADY-translated text, so
+// honoring it when the on-screen text has genuinely regressed leaves the
+// original language (one marker line shorter) on screen until something else
+// re-triggers a pass — the "flickers again after a few rapid votes" report.
+// Bypass the guard only when the body no longer shows the cached translation.
+static BOOL ApolloTextMatchesSourceOrVisualDisplay(NSString *incomingText, NSString *targetText);
+static BOOL ApolloCellNodeStillShowsCachedTranslation(id commentCellNode) {
+    RDKComment *comment = ApolloCommentFromCellNode(commentCellNode);
+    if (!comment) return YES; // can't tell — keep the guard
+    NSString *fullName = ApolloCommentFullName(comment);
+    NSString *translated = fullName.length > 0 ? ApolloCachedCommentTranslationForFullName(fullName) : nil;
+    if (translated.length == 0) return YES; // nothing to restore anyway
+    id textNode = ApolloBestCommentTextNode(commentCellNode, comment);
+    if (!textNode) return YES;
+    NSAttributedString *current = nil;
+    @try { current = ((id (*)(id, SEL))objc_msgSend)(textNode, @selector(attributedText)); }
+    @catch (__unused NSException *e) { return YES; }
+    if (![current isKindOfClass:[NSAttributedString class]] || current.length == 0) return YES;
+    return ApolloTextMatchesSourceOrVisualDisplay(current.string, ApolloStripInlineMediaTokens(translated));
+}
+
+static BOOL ApolloCommentCellNodeIsBackedByActiveCommentsTable(id commentCellNode, UIViewController *commentsVC);
+
 static void ApolloScheduleCachedTranslationReapplyForCellNode(id commentCellNode) {
     if (!commentCellNode || !sEnableBulkTranslation) return;
     if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return;
     if ([objc_getAssociatedObject(commentCellNode, kApolloReapplyScheduledKey) boolValue]) return;
     // Re-entrancy guard: skip if we just applied translation here. Breaks
-    // the apply -> ASDK invalidates layout -> hook -> schedule loop.
-    if ([objc_getAssociatedObject(commentCellNode, kApolloRecentlyAppliedKey) boolValue]) return;
+    // the apply -> ASDK invalidates layout -> hook -> schedule loop — but
+    // only while the body still SHOWS the translation (see above).
+    if ([objc_getAssociatedObject(commentCellNode, kApolloRecentlyAppliedKey) boolValue] &&
+        ApolloCellNodeStillShowsCachedTranslation(commentCellNode)) return;
     objc_setAssociatedObject(commentCellNode, kApolloReapplyScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloTranslationVerboseLog(@"[Translation/vote] commentReapply: SCHEDULED cellNode=%p", commentCellNode);
     __weak id weakNode = commentCellNode;
@@ -3893,6 +4010,15 @@ static void ApolloScheduleCachedTranslationReapplyForCellNode(id commentCellNode
             return;
         }
         objc_setAssociatedObject(strong, kApolloReapplyScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // Context-menu previews use freshly-built CommentCellNodes outside the
+        // comments table. Reapplying a cached translation after UIKit measured
+        // one of those detached nodes changes its height mid-presentation and
+        // creates the overlapping/jumping copy reported in #676. Vote rebuilds
+        // are attached to the real visible table cell before this block fires.
+        if (!ApolloCommentCellNodeIsBackedByActiveCommentsTable(strong, sVisibleCommentsViewController)) {
+            ApolloTranslationVerboseLog(@"[Translation/vote] commentReapply: skipping non-table cellNode=%p", strong);
+            return;
+        }
         ApolloReapplyCachedTranslationForCellNode(strong);
     });
 }
@@ -3990,6 +4116,305 @@ static void ApolloScheduleCachedTranslationReapplyForHeaderCellNode(id headerCel
         objc_setAssociatedObject(strong, kApolloHeaderReapplyScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         ApolloReapplyCachedTranslationForHeaderCellNode(strong);
     });
+}
+
+// Texture can commit a stale original-language backing image even while the
+// rebuilt node's attributedText already contains the translation. Preserve
+// the exact translated pixels that are on screen before Apollo starts the
+// rebuild, then let the vote module remove this body-only cover after its
+// settle window. The byline/score is outside this view, so it remains live.
+id ApolloTranslationInstallVoteBodyCover(id commentCellNode) {
+    if (!commentCellNode || !sEnableBulkTranslation ||
+        !ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return nil;
+    RDKComment *comment = nil;
+    NSString *fullName = nil;
+    NSString *translated = nil;
+    UIView *cellView = nil;
+    UIWindow *window = nil;
+    UIView *coverContainer = nil;
+    @try {
+        comment = ApolloCommentFromCellNode(commentCellNode);
+        fullName = ApolloCommentFullName(comment);
+        translated = fullName.length > 0 ? ApolloCachedCommentTranslationForFullName(fullName) : nil;
+        if ([commentCellNode respondsToSelector:@selector(isNodeLoaded)] &&
+            ((BOOL (*)(id, SEL))objc_msgSend)(commentCellNode, @selector(isNodeLoaded)) &&
+            [commentCellNode respondsToSelector:@selector(view)]) {
+            cellView = ((id (*)(id, SEL))objc_msgSend)(commentCellNode, @selector(view));
+            window = cellView.window;
+            UIView *ancestor = cellView.superview;
+            while (ancestor && ancestor != window) {
+                if ([ancestor isKindOfClass:[UITableViewCell class]]) {
+                    UITableViewCell *tableCell = (UITableViewCell *)ancestor;
+                    coverContainer = tableCell.contentView ?: tableCell;
+                    break;
+                }
+                ancestor = ancestor.superview;
+            }
+        }
+    } @catch (NSException *e) {
+        ApolloTranslationVerboseLog(@"[Translation/vote] body cover setup failed cell=%p exception=%@", commentCellNode, e.name);
+    }
+    if (!comment || fullName.length == 0 || translated.length == 0 ||
+        !cellView || !window || !coverContainer) return nil;
+
+    NSDictionary *cachedSnapshot = objc_getAssociatedObject(commentCellNode, kApolloVoteBodySnapshotKey);
+    CGFloat cachedCellWidth = [[cachedSnapshot objectForKey:@"cellWidth"] doubleValue];
+    if (![[cachedSnapshot objectForKey:@"fullName"] isEqualToString:fullName] ||
+        fabs(cachedCellWidth - CGRectGetWidth(cellView.bounds)) > 0.5) {
+        cachedSnapshot = nil;
+    }
+
+    UIImage *frozenImage = nil;
+    UIColor *frozenBackgroundColor = nil;
+    CGRect bodyFrameInCell = CGRectNull;
+    id textNode = nil;
+    BOOL usedCachedSnapshot = NO;
+    if (cachedSnapshot) {
+        frozenImage = [cachedSnapshot objectForKey:@"image"];
+        bodyFrameInCell = [[cachedSnapshot objectForKey:@"frame"] CGRectValue];
+        frozenBackgroundColor = [cachedSnapshot objectForKey:@"backgroundColor"];
+        usedCachedSnapshot = frozenImage != nil && !CGRectIsEmpty(bodyFrameInCell) && !CGRectIsNull(bodyFrameInCell);
+    }
+    // The normal vote path should only attach the snapshot primed after the
+    // translation settled. Live capture remains as a first-vote fallback for
+    // the narrow window before that prime has fired.
+    if (!usedCachedSnapshot) @try {
+        // Resolve the current body first. Apollo replaces this node on every
+        // vote; the associated node is retained only as a detached fallback.
+        textNode = ApolloBestCommentTextNode(commentCellNode, comment);
+        id associatedNode = objc_getAssociatedObject(commentCellNode, kApolloTranslatedTextNodeKey);
+        NSArray *candidates = textNode
+            ? (associatedNode && associatedNode != textNode ? @[textNode, associatedNode] : @[textNode])
+            : (associatedNode ? @[associatedNode] : @[]);
+        UIView *bodyView = nil;
+        for (id candidate in candidates) {
+            if (![candidate respondsToSelector:@selector(isNodeLoaded)] ||
+                !((BOOL (*)(id, SEL))objc_msgSend)(candidate, @selector(isNodeLoaded)) ||
+                ![candidate respondsToSelector:@selector(view)]) continue;
+            UIView *candidateView = ((id (*)(id, SEL))objc_msgSend)(candidate, @selector(view));
+            if (!candidateView || candidateView.window != window || CGRectIsEmpty(candidateView.bounds) ||
+                ![candidateView isDescendantOfView:cellView]) continue;
+            NSAttributedString *shown = [candidate respondsToSelector:@selector(attributedText)]
+                ? ((id (*)(id, SEL))objc_msgSend)(candidate, @selector(attributedText)) : nil;
+            BOOL isBody = [shown isKindOfClass:[NSAttributedString class]] &&
+                (ApolloTextQualifiesAsBodyCandidate(shown.string, comment.body) ||
+                 ApolloTextQualifiesAsBodyCandidate(shown.string, translated));
+            BOOL isTranslatedBody = [shown isKindOfClass:[NSAttributedString class]] &&
+                ApolloTextQualifiesAsBodyCandidate(shown.string, translated);
+            // Never prime from Apollo's original-language replacement. A vote
+            // in the small window before translation settles is better left
+            // uncovered than deliberately frozen in the wrong language.
+            if (!isBody || !isTranslatedBody) continue;
+            textNode = candidate;
+            bodyView = candidateView;
+            break;
+        }
+
+        if (bodyView) {
+            bodyFrameInCell = [bodyView convertRect:bodyView.bounds toView:cellView];
+            if (!CGRectIsEmpty(bodyFrameInCell)) {
+                // Texture has already committed the correct translated body
+                // backing image before the vote. Do not use
+                // drawViewHierarchyInRect: here: it asks Texture/UIKit to
+                // render again and can itself capture half-finished glyph tiles.
+                id contents = bodyView.layer.contents;
+                // ASTextNode's backing image is intentionally transparent.
+                // Resolve the first real ancestor background so the cover is
+                // opaque; otherwise the stale Portuguese glyphs underneath
+                // remain visible through its clear pixels.
+                for (UIView *ancestor = bodyView; ancestor; ancestor = ancestor.superview) {
+                    UIColor *candidate = ancestor.backgroundColor;
+                    if (!candidate) continue;
+                    candidate = [candidate resolvedColorWithTraitCollection:bodyView.traitCollection];
+                    if (CGColorGetAlpha(candidate.CGColor) >= 0.99) {
+                        frozenBackgroundColor = candidate;
+                        break;
+                    }
+                }
+                if (!frozenBackgroundColor) {
+                    frozenBackgroundColor = [[UIColor systemBackgroundColor]
+                        resolvedColorWithTraitCollection:bodyView.traitCollection];
+                }
+                if (contents && CFGetTypeID((__bridge CFTypeRef)contents) == CGImageGetTypeID()) {
+                    CGImageRef contentsImage = (__bridge CGImageRef)contents;
+                    // Texture's layer.contentsScale is not reliable here (it
+                    // is often 1 while the backing image is screen-scale).
+                    // Derive scale from actual pixels to avoid a visibly soft
+                    // cover caused by a 3x downsample followed by a 3x upscale.
+                    CGFloat pixelScaleX = (CGFloat)CGImageGetWidth(contentsImage) / CGRectGetWidth(bodyView.bounds);
+                    CGFloat pixelScaleY = (CGFloat)CGImageGetHeight(contentsImage) / CGRectGetHeight(bodyView.bounds);
+                    CGFloat contentsScale = MIN(pixelScaleX, pixelScaleY);
+                    if (!isfinite(contentsScale) || contentsScale <= 0.0) contentsScale = window.screen.scale;
+                    UIImage *backingImage = [UIImage imageWithCGImage:(__bridge CGImageRef)contents
+                                                                 scale:contentsScale
+                                                           orientation:UIImageOrientationUp];
+                    // A retained Texture CGImage can still reference a backing
+                    // surface that Texture clears/reuses during the rebuild.
+                    // Rasterizing it into our own bitmap severs that lifetime:
+                    // every cached cover owns stable pixels thereafter.
+                    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
+                    format.scale = contentsScale;
+                    format.opaque = YES;
+                    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc]
+                        initWithSize:bodyView.bounds.size format:format];
+                    frozenImage = [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *context) {
+                        [frozenBackgroundColor setFill];
+                        UIRectFill(bodyView.bounds);
+                        [backingImage drawInRect:bodyView.bounds];
+                    }];
+                }
+                if (frozenImage) {
+                    cachedSnapshot = @{
+                        @"fullName": fullName,
+                        @"image": frozenImage,
+                        @"frame": [NSValue valueWithCGRect:bodyFrameInCell],
+                        @"backgroundColor": frozenBackgroundColor,
+                        @"cellWidth": @(CGRectGetWidth(cellView.bounds)),
+                    };
+                    objc_setAssociatedObject(commentCellNode, kApolloVoteBodySnapshotKey,
+                                             cachedSnapshot, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                }
+            }
+        }
+    } @catch (NSException *e) {
+        ApolloTranslationVerboseLog(@"[Translation/vote] live body capture failed cell=%p exception=%@", commentCellNode, e.name);
+    }
+
+    if (!frozenImage || CGRectIsEmpty(bodyFrameInCell) || CGRectIsNull(bodyFrameInCell)) {
+        ApolloTranslationVerboseLog(@"[Translation/vote] body cover skipped: no live or cached snapshot cell=%p", commentCellNode);
+        return nil;
+    }
+    UIImageView *cover = objc_getAssociatedObject(commentCellNode, kApolloVoteBodyCoverViewKey);
+    if (![cover isKindOfClass:[UIImageView class]]) {
+        cover = [[UIImageView alloc] initWithImage:frozenImage];
+        objc_setAssociatedObject(cover, kApolloPersistentVoteBodyCoverKey,
+                                 @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(commentCellNode, kApolloVoteBodyCoverViewKey,
+                                 cover, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else {
+        cover.image = frozenImage;
+    }
+    // Host the cover in Texture's stable UITableViewCell wrapper. It follows
+    // scrolling and UIKit's context-menu lift, remains below the nav bar's
+    // scroll-edge glass, and stays full-height while Apollo briefly resizes
+    // the inner CommentCellNode view during a vote rebuild.
+    cover.frame = [cellView convertRect:bodyFrameInCell toView:coverContainer];
+    cover.backgroundColor = frozenBackgroundColor;
+    cover.opaque = YES;
+    cover.userInteractionEnabled = NO;
+    cover.accessibilityElementsHidden = YES;
+    // Normal sibling order is sufficient inside this cell-only container.
+    // An extreme z-position here can outrank iOS 26's scroll-edge glass.
+    cover.layer.zPosition = 0.0;
+    [UIView performWithoutAnimation:^{
+        if (cover.superview != coverContainer) [coverContainer addSubview:cover];
+        else [coverContainer bringSubviewToFront:cover];
+        cover.alpha = 1.0;
+    }];
+    if (sApolloPrimingVoteBodySnapshot) {
+        // Commit the already-correct cover while the real body is stable, so
+        // Core Animation uploads its bitmap before any vote. Keeping the view
+        // attached at alpha zero means the vote only flips opacity on an
+        // existing layer; no first-frame view/layer/image commit remains.
+        __weak UIImageView *weakCover = cover;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UIImageView *strongCover = weakCover;
+            if (!strongCover || [objc_getAssociatedObject(strongCover, kApolloVoteBodyCoverActiveCountKey) unsignedIntegerValue] > 0) return;
+            [UIView performWithoutAnimation:^{ strongCover.alpha = 0.0; }];
+        });
+        ApolloTranslationVerboseLog(@"[Translation/vote] primed translated body snapshot cell=%p frame=%@",
+                                    commentCellNode, NSStringFromCGRect(bodyFrameInCell));
+        return nil;
+    }
+    NSUInteger activeCount = [objc_getAssociatedObject(cover, kApolloVoteBodyCoverActiveCountKey) unsignedIntegerValue];
+    objc_setAssociatedObject(cover, kApolloVoteBodyCoverActiveCountKey,
+                             @(activeCount + 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloTranslationVerboseLog(@"[Translation/vote] installed %@ translated body cover cell=%p node=%p frame=%@",
+                                usedCachedSnapshot ? @"cached" : @"live", commentCellNode, textNode,
+                                NSStringFromCGRect(cover.frame));
+    return cover;
+}
+
+void ApolloTranslationRemoveVoteBodyCover(id coverToken) {
+    if (![coverToken isKindOfClass:[UIView class]]) return;
+    UIView *cover = (UIView *)coverToken;
+    NSUInteger activeCount = [objc_getAssociatedObject(cover, kApolloVoteBodyCoverActiveCountKey) unsignedIntegerValue];
+    if (activeCount > 1) {
+        objc_setAssociatedObject(cover, kApolloVoteBodyCoverActiveCountKey,
+                                 @(activeCount - 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    objc_setAssociatedObject(cover, kApolloVoteBodyCoverActiveCountKey,
+                             nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if ([objc_getAssociatedObject(cover, kApolloPersistentVoteBodyCoverKey) boolValue]) {
+        [UIView performWithoutAnimation:^{ cover.alpha = 0.0; }];
+    } else {
+        [cover removeFromSuperview];
+    }
+}
+
+void ApolloTranslationPrimeVoteBodySnapshot(id commentCellNode) {
+    if (!commentCellNode) return;
+    if (![NSThread isMainThread]) {
+        __weak id weakCell = commentCellNode;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ApolloTranslationPrimeVoteBodySnapshot(weakCell);
+        });
+        return;
+    }
+    @try {
+        RDKComment *comment = ApolloCommentFromCellNode(commentCellNode);
+        NSString *fullName = ApolloCommentFullName(comment);
+        NSDictionary *snapshot = objc_getAssociatedObject(commentCellNode, kApolloVoteBodySnapshotKey);
+        UIView *cover = objc_getAssociatedObject(commentCellNode, kApolloVoteBodyCoverViewKey);
+        if (fullName.length > 0 && [[snapshot objectForKey:@"fullName"] isEqualToString:fullName] && cover.superview) return;
+        sApolloPrimingVoteBodySnapshot = YES;
+        ApolloTranslationInstallVoteBodyCover(commentCellNode);
+        sApolloPrimingVoteBodySnapshot = NO;
+    } @catch (__unused NSException *e) {
+        sApolloPrimingVoteBodySnapshot = NO;
+    }
+}
+
+void ApolloTranslationDiscardVoteBodySnapshot(id commentCellNode) {
+    if (!commentCellNode) return;
+    // Cancel a translation-write prime that has not fired yet. Without this,
+    // its delayed block can recreate an offscreen cover after cleanup.
+    objc_setAssociatedObject(commentCellNode, kApolloVoteBodySnapshotPrimeScheduledKey,
+                             nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UIView *cover = objc_getAssociatedObject(commentCellNode, kApolloVoteBodyCoverViewKey);
+    [cover removeFromSuperview];
+    objc_setAssociatedObject(commentCellNode, kApolloVoteBodyCoverViewKey,
+                             nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(commentCellNode, kApolloVoteBodySnapshotKey,
+                             nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+// Synchronous vote-path reapply, called by the vote-flicker module right
+// BEFORE each of its synchronous display flushes for a vote-reconfigured
+// cell. Those flushes exist to kill the #627 blank frame, but they also
+// faithfully paint whatever the body node holds at that instant — and a
+// vote rebuilds the body node with the UNTRANSLATED original, which the
+// detached-node preempt can only correct one runloop turn later. When a
+// flush lands inside that gap, the original language gets painted for a
+// frame or two. Settling the text here first closes the gap: if the body
+// already shows the translation this is a cheap exact-gate no-op (so the
+// usual pre-reset flush never writes and never arms the recently-applied
+// guard — and since that guard is content-scoped now, even an early write
+// cannot strand a later reset the way the first version of this call did).
+BOOL ApolloTranslationReapplySynchronouslyForVoteReconfigure(id cellNode) {
+    if (!cellNode || !sEnableBulkTranslation) return NO;
+    if (!ApolloControllerIsInTranslatedMode(sVisibleCommentsViewController)) return NO;
+    NSString *className = NSStringFromClass([cellNode class]);
+    @try {
+        if ([className containsString:@"CommentsHeaderCellNode"]) {
+            return ApolloReapplyCachedTranslationForHeaderCellNode(cellNode);
+        }
+        if ([className containsString:@"CommentCellNode"]) {
+            return ApolloReapplyCachedTranslationForCellNode(cellNode);
+        }
+    } @catch (__unused NSException *e) {}
+    return NO;
 }
 
 #pragma mark - Phase C: post selftext translation driver
@@ -4714,6 +5139,36 @@ static id ApolloCommentCellNodeForTextNode(id textNode) {
         @catch (__unused NSException *e) { break; }
     }
     return nil;
+}
+
+// Vote rebuilds attach their fresh body node back to the real table-backed
+// CommentCellNode before the deferred preempt runs. Apollo also builds
+// temporary CommentCellNode copies for context-menu previews, but those live
+// in a window transition container instead of a UITableViewCell. Translating
+// those copies after UIKit has measured the preview at the original-language
+// height makes the preview overflow and appear to jump up the screen.
+static BOOL ApolloCommentCellNodeIsBackedByActiveCommentsTable(id commentCellNode, UIViewController *commentsVC) {
+    if (!commentCellNode || !commentsVC || ![NSThread isMainThread]) return NO;
+    @try {
+        UITableView *commentsTable = GetCommentsTableView(commentsVC);
+        if (!commentsTable) return NO;
+        if ([commentCellNode respondsToSelector:@selector(isNodeLoaded)] &&
+            !((BOOL (*)(id, SEL))objc_msgSend)(commentCellNode, @selector(isNodeLoaded))) return NO;
+        UIView *view = [commentCellNode respondsToSelector:@selector(view)]
+            ? ((UIView *(*)(id, SEL))objc_msgSend)(commentCellNode, @selector(view)) : nil;
+        UITableViewCell *tableCell = nil;
+        for (UIView *ancestor = view; ancestor; ancestor = ancestor.superview) {
+            if (!tableCell && [ancestor isKindOfClass:[UITableViewCell class]]) {
+                tableCell = (UITableViewCell *)ancestor;
+            }
+            if ([ancestor isKindOfClass:[UITableView class]]) {
+                UITableView *table = (UITableView *)ancestor;
+                return tableCell && table == commentsTable && tableCell.window == commentsTable.window &&
+                    [commentsTable indexPathForCell:tableCell] != nil;
+            }
+        }
+    } @catch (__unused NSException *e) {}
+    return NO;
 }
 
 // Compact "🌐 Show translation" affordance appended under the ORIGINAL text when
@@ -6561,6 +7016,31 @@ static BOOL ApolloPrepareTranslatedSwapForTextNode(id textNode,
 
     NSString *incomingText = incomingAttributedText.string;
     if (ApolloTextMatchesSourceOrVisualDisplay(incomingText, translatedText)) {
+        // Marker parity for the pass-through branch too: Apollo's vote-time
+        // rewrite can hand this hook the CLEAN translation (no "Translated
+        // from <Language>" line). Letting it through unchanged measures the
+        // row one marker line shorter until the scheduled reapply re-appends
+        // the marker ~10ms later — and BOTH height commits run as animated
+        // table updates, so the comment's bottom divider visibly nudges up
+        // and springs back on every vote. Same rule as the incoming==original
+        // rebuild below (round 4's fix), applied here: swap in incoming +
+        // marker. Guarded on the incoming being EXACTLY the clean translation:
+        // the surrounding matcher tolerates marker-bearing variants (which
+        // must pass through untouched — appending blindly doubled the line on
+        // every initial render), so only the character-identical marker-less
+        // form takes this branch.
+        if (swapOut && [incomingText isEqualToString:translatedText] &&
+            [objc_getAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey) boolValue]) {
+            NSAttributedString *withMarker = ApolloAttributedStringByAppendingTranslationMarker(incomingAttributedText, originalBody);
+            if ([withMarker isKindOfClass:[NSAttributedString class]] &&
+                withMarker != incomingAttributedText &&
+                ![withMarker.string isEqualToString:incomingText]) {
+                ApolloTranslationVerboseLog(@"[Translation/vote] prepareSwap: incoming==translated but marker-less → appending marker node=%p", textNode);
+                ApolloEnsureMarkerTappableOnNode(textNode);
+                *swapOut = withMarker;
+                return YES;
+            }
+        }
         ApolloTranslationVerboseLog(@"[Translation/vote] prepareSwap: incoming==translated, no-op node=%p", textNode);
         return NO;
     }
@@ -6684,6 +7164,12 @@ static BOOL ApolloPreemptUnownedCommentTextNode(id textNode, NSAttributedString 
     // the owning model from this fresh node so identical bodies cannot borrow
     // another comment's translation cache or per-item pin state.
     id cellNode = ApolloCommentCellNodeForTextNode(textNode);
+    // Fresh body nodes also exist in Apollo's separately-measured context-menu
+    // preview controller. Only adopt a node in the active comments table. A
+    // detached vote replacement falls through to the deferred retry below and
+    // passes this check once Apollo attaches it to the real row; a preview
+    // clone never does, so its already-measured height stays coherent.
+    if (!ApolloCommentCellNodeIsBackedByActiveCommentsTable(cellNode, vc)) return NO;
     RDKComment *comment = cellNode ? ApolloCommentFromCellNode(cellNode) : nil;
     NSString *fullName = comment ? ApolloCommentFullName(comment) : nil;
     if (fullName.length == 0) return NO;
@@ -6722,6 +7208,60 @@ static BOOL ApolloPreemptUnownedCommentTextNode(id textNode, NSAttributedString 
     if (swapOut) *swapOut = rebuilt;
     ApolloTranslationVerboseLog(@"[Translation/vote] preempt(comment): unowned node=%p matched body index (%@) → SYNC swap", textNode, fullName);
     return YES;
+}
+
+// The comment preempt above must resolve the node's enclosing cell for
+// identity, but a vote's rebuilt body node receives its first write while
+// still DETACHED — the preempt declines, Apollo's original-language text goes
+// through, and the ~10ms scheduled reapply usually overwrites it before its
+// async render commits. Usually: when the render wins that race, the comment
+// visibly flashes the original language for a frame or two on the vote (the
+// row height no longer moves — the vote-flicker module holds it — but the
+// text itself repaints). Close the race: when a DECLINED unowned write looks
+// like one of this thread's translated bodies (candidate set exists in the
+// body index — a cheap dictionary hit), retry the preempt one runloop turn
+// later. The node is attached by then, so the preempt can resolve the real
+// comment and swap; the synchronous heal then flushes the swap before the
+// original's async render can commit.
+static void ApolloScheduleDeferredCommentPreempt(id textNode, NSAttributedString *incomingAttributedText) {
+    NSString *incomingText = [incomingAttributedText isKindOfClass:[NSAttributedString class]] ? incomingAttributedText.string : nil;
+    if (!textNode || incomingText.length == 0) return;
+    UIViewController *vc = sVisibleCommentsViewController;
+    if (!vc || !ApolloControllerIsInTranslatedMode(vc)) return;
+    BOOL hasCandidates = NO;
+    @synchronized (ApolloTranslatedBodyIndexLock()) {
+        ApolloScopeTranslatedBodyIndexLocked(vc);
+        hasCandidates = ((NSSet *)sApolloTranslatedBodyIndex[incomingText]).count > 0;
+    }
+    if (!hasCandidates) return;
+    if ([objc_getAssociatedObject(textNode, kApolloDeferredPreemptScheduledKey) boolValue]) return;
+    objc_setAssociatedObject(textNode, kApolloDeferredPreemptScheduledKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak id weakNode = textNode;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        id node = weakNode;
+        if (!node) return;
+        objc_setAssociatedObject(node, kApolloDeferredPreemptScheduledKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // Adopted by a preempt/apply in the meantime — nothing to do.
+        if ([objc_getAssociatedObject(node, kApolloTranslationOwnedTextNodeKey) boolValue]) return;
+        NSAttributedString *current = nil;
+        @try { current = ((id (*)(id, SEL))objc_msgSend)(node, @selector(attributedText)); }
+        @catch (__unused NSException *e) { return; }
+        if (![current isKindOfClass:[NSAttributedString class]] ||
+            ![current.string isEqualToString:incomingText]) return; // text moved on
+        id cellNode = ApolloCommentCellNodeForTextNode(node);
+        if (!ApolloCommentCellNodeIsBackedByActiveCommentsTable(cellNode, vc)) {
+            ApolloTranslationVerboseLog(@"[Translation/vote] deferred preempt: skipping non-table comment clone node=%p", node);
+            return;
+        }
+        NSAttributedString *swap = nil;
+        if (!ApolloPreemptUnownedCommentTextNode(node, current, &swap) || !swap) return;
+        objc_setAssociatedObject(node, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        @try { ((void (*)(id, SEL, id))objc_msgSend)(node, @selector(setAttributedText:), swap); }
+        @catch (__unused NSException *e) {}
+        objc_setAssociatedObject(node, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (cellNode) ApolloTranslationHealCellDisplaySync(cellNode);
+        ApolloTranslationVerboseLog(@"[Translation/vote] deferred preempt: rebuilt node=%p swapped after attach", node);
+    });
 }
 
 // Vote-flash mitigation: when the comments header is rebuilt after a vote
@@ -6813,6 +7353,10 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             return;
         }
+        // Preempt declined (typically: rebuilt node still detached, identity
+        // unresolvable). If this looks like a translated body, retry next
+        // turn once the node is attached — see the deferred preempt above.
+        ApolloScheduleDeferredCommentPreempt(self, attributedText);
         %orig;
         return;
     }
@@ -6887,6 +7431,10 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             return;
         }
+        // Preempt declined (typically: rebuilt node still detached, identity
+        // unresolvable). If this looks like a translated body, retry next
+        // turn once the node is attached — see the deferred preempt above.
+        ApolloScheduleDeferredCommentPreempt(self, attributedText);
         %orig;
         return;
     }
