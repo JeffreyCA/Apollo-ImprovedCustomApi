@@ -722,16 +722,31 @@ static void HideApolloStatusBarBackgroundView(UINavigationController *navControl
 
 // MARK: - Re-center title widget pushed off-center by Liquid Glass bar items
 //
-// On iOS 26 Liquid Glass, asymmetric padding around bar items widens the
-// trailing item stack more than the back button, so UINavigationBar centers the
-// title in the gap between items rather than at the bar's true midpoint.
+// On iOS 26 Liquid Glass, UIKit places the inline title with three different
+// rules depending on how it measures (observed on-device/sim, issues #178/#200):
+//   1. fits at the bar's absolute midpoint -> bar-centered ("4 Comments"),
+//   2. too wide for the midpoint -> leading-aligned against the back pill
+//      ("273 Comments"),
+//   3. greedy title views (JumpBar/Home) -> wrapper fills the whole gap and the
+//      content centers in it -> gap-centered.
+// So the perceived position hops around per screen, and it shifts again when
+// the translation globe widens the trailing pill. The old fix pulled the title
+// toward the absolute bar midpoint, which overlapped the trailing pill on long
+// titles (#178) and was therefore disabled entirely while bulk translation was
+// on (#200) — bringing the inconsistency right back.
 //
 // Fix: hook _UINavigationBarTitleControl (the universal container for plain
-// titles, DualLabelTitleButton, and JumpBar) and apply a CGAffineTransform
-// translation that pulls its center toward the bar midpoint, clamped to avoid
-// overlapping either bar item stack.
+// titles, DualLabelTitleButton, and JumpBar) and translate it to the midpoint
+// of the visual gap between the leading (back) pill and the trailing pill —
+// their actual _UINavigationBarPlatterView edges, measured at layout time. One
+// rule for every screen and every trailing-pill width, equal breathing room on
+// both sides by construction, so it can never overlap either pill and no
+// longer needs the bulk-translation opt-out.
 
 @interface _UINavigationBarTitleControl : UIControl
+@end
+
+@interface _UINavigationBarPlatterView : UIView
 @end
 
 static void ApolloRecenterTitleControl(UIView *titleControl) {
@@ -771,8 +786,12 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
     }
 
     // Walk the bar's view tree to find the nearest visible content edges on
-    // either side. Recurse into containers (e.g. _UITAMICAdaptorView wrappers)
-    // and treat controls / labels / image views / visual-effect bubbles as edges.
+    // either side. Liquid Glass pills are _UINavigationBarPlatterView instances
+    // — their frame IS the visual capsule edge, so treat them as opaque content
+    // (don't recurse to the buttons inside, which sit a few points further in).
+    // Otherwise recurse into containers (e.g. _UITAMICAdaptorView wrappers) and
+    // treat controls / labels / image views / visual-effect bubbles as edges.
+    BOOL foundLeft = NO, foundRight = NO;
     CGFloat leftLimit = 0;
     CGFloat rightLimit = CGRectGetWidth(bar.bounds);
     NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:bar];
@@ -781,9 +800,15 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
         [queue removeObjectAtIndex:0];
         for (UIView *child in v.subviews) {
             if ([titleSubtree containsObject:[NSValue valueWithNonretainedObject:child]]) continue;
-            if (child.hidden || child.alpha == 0) continue;
+            // A platter mid-fade (alpha 0) already has its final frame — count
+            // it, or the title parks at a stale center with no later layout
+            // pass to fix it. Removed platters leave the tree, so `hidden` is
+            // enough to skip genuinely dead ones.
+            BOOL isPlatter = [NSStringFromClass(child.class) containsString:@"NavigationBarPlatterView"];
+            if (child.hidden || (!isPlatter && child.alpha == 0)) continue;
 
-            BOOL isContent = [child isKindOfClass:[UIControl class]] ||
+            BOOL isContent = isPlatter ||
+                             [child isKindOfClass:[UIControl class]] ||
                              [child isKindOfClass:[UILabel class]] ||
                              [child isKindOfClass:[UIImageView class]] ||
                              [child isKindOfClass:[UIVisualEffectView class]];
@@ -794,22 +819,50 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
             if (child.bounds.size.width <= 0 || child.bounds.size.height <= 0) continue;
 
             CGRect sibInBar = [child.superview convertRect:child.frame toView:bar];
-            if (CGRectGetMaxX(sibInBar) <= CGRectGetMinX(frameInBar) + 0.5) {
+            if (isPlatter) {
+                // Pills are bar chrome — never legitimately underneath the
+                // title. UIKit's wrapper can lag a platter resize (its
+                // constraints were solved against the OLD pill geometry), which
+                // makes the stale title frame overlap the pill; a strict
+                // disjointness test would then drop the pill from the scan
+                // entirely. Side-classify by centers instead.
+                if (CGRectGetMidX(sibInBar) < CGRectGetMidX(frameInBar)) {
+                    leftLimit = MAX(leftLimit, CGRectGetMaxX(sibInBar));
+                    foundLeft = YES;
+                } else {
+                    rightLimit = MIN(rightLimit, CGRectGetMinX(sibInBar));
+                    foundRight = YES;
+                }
+            } else if (CGRectGetMaxX(sibInBar) <= CGRectGetMinX(frameInBar) + 0.5) {
                 leftLimit = MAX(leftLimit, CGRectGetMaxX(sibInBar));
+                foundLeft = YES;
             } else if (CGRectGetMinX(sibInBar) + 0.5 >= CGRectGetMaxX(frameInBar)) {
                 rightLimit = MIN(rightLimit, CGRectGetMinX(sibInBar));
+                foundRight = YES;
             }
         }
     }
 
     const CGFloat kEdgePadding = 8.0;
     CGFloat halfWidth = width / 2.0;
-    CGFloat minCenter = leftLimit + halfWidth + kEdgePadding;
-    CGFloat maxCenter = rightLimit - halfWidth - kEdgePadding;
-
-    CGFloat targetCenter = (minCenter > maxCenter)
-        ? unadjustedCenter   // bar too cramped — leave UIKit's layout alone
-        : MIN(MAX(barCenter, minCenter), maxCenter);
+    CGFloat targetCenter;
+    if (foundLeft && foundRight) {
+        // Pills on both sides: park the title at the midpoint of the visual gap
+        // between them. Equal margins by construction — no overlap possible —
+        // and the position no longer depends on which of UIKit's three layout
+        // arms fired or how wide the trailing pill is.
+        targetCenter = (rightLimit - leftLimit >= width + 4.0)
+            ? (leftLimit + rightLimit) / 2.0
+            : unadjustedCenter;  // gap narrower than the title — leave UIKit's layout alone
+    } else {
+        // Content on at most one side (root screens etc.): prefer the bar's
+        // absolute midpoint, nudged off the single pill if it would overlap.
+        CGFloat minCenter = leftLimit + halfWidth + kEdgePadding;
+        CGFloat maxCenter = rightLimit - halfWidth - kEdgePadding;
+        targetCenter = (minCenter > maxCenter)
+            ? unadjustedCenter   // bar too cramped — leave UIKit's layout alone
+            : MIN(MAX(barCenter, minCenter), maxCenter);
+    }
 
     CGFloat newTx = targetCenter - unadjustedCenter;
     if (fabs(newTx - existingTx) < 0.5) return;
@@ -827,11 +880,72 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
 - (void)layoutSubviews {
     %orig;
     if (!IsLiquidGlass()) return;
-    // Bulk translation adds a new right nav bar item which often causes the title overlap.
-    // Skip adjustment for now until we can find a more robust solution that works with the dynamic item changes.
-    if (sEnableBulkTranslation) return;
+    // Gap-centering measures the trailing pill each pass, so the translation
+    // globe appearing/disappearing is just a new gap — no bulk-translation
+    // opt-out needed anymore (the old absolute centering had to bail: #178/#200).
     ApolloRecenterTitleControl(self);
 }
+
+%end
+
+// Neither the title control NOR UIKit's own bar layout react when a pill
+// changes: Apollo installs its trailing buttons asynchronously (mod status,
+// translation globe, …), and once a platter appears or resizes, (a) the title
+// control keeps the transform computed against the OLD pills, and (b) UIKit's
+// content-view constraint solve — which positioned/sized the title wrapper
+// against the old pill geometry — goes stale too (observed: wrapper still
+// overlapping a platter that had since widened by the globe merge). So on any
+// real platter geometry change, mark BOTH the bar's content view (re-solves
+// the wrapper) and the title control (re-runs the recenter) dirty. Gated on an
+// actual frame delta so steady-state layout passes never dirty an ancestor —
+// that's what makes this loop-proof.
+static const void *kApolloPlatterLastFrameKey = &kApolloPlatterLastFrameKey;
+
+static void ApolloPokeTitleLayoutNearPlatter(UIView *fromView) {
+    UINavigationBar *bar = nil;
+    for (UIView *v = fromView; v != nil; v = v.superview) {
+        if ([v isKindOfClass:[UINavigationBar class]]) { bar = (UINavigationBar *)v; break; }
+    }
+    if (!bar) return;
+    NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:(UIView *)bar];
+    while (q.count > 0) {
+        UIView *v = q.firstObject;
+        [q removeObjectAtIndex:0];
+        NSString *cls = NSStringFromClass(v.class);
+        if ([cls containsString:@"NavigationBarContentView"]) {
+            [v setNeedsLayout];
+        } else if ([cls containsString:@"NavigationBarTitleControl"]) {
+            [v setNeedsLayout];
+            return;
+        }
+        for (UIView *c in v.subviews) [q addObject:c];
+    }
+}
+
+%group ApolloLGPlatterPoke
+
+%hook _UINavigationBarPlatterView
+
+- (void)layoutSubviews {
+    %orig;
+    if (!IsLiquidGlass()) return;
+    CGRect frame = self.frame;
+    NSValue *last = objc_getAssociatedObject(self, kApolloPlatterLastFrameKey);
+    if (last && CGRectEqualToRect(last.CGRectValue, frame)) return;
+    objc_setAssociatedObject(self, kApolloPlatterLastFrameKey, [NSValue valueWithCGRect:frame], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloPokeTitleLayoutNearPlatter(self);
+}
+
+- (void)willMoveToSuperview:(UIView *)newSuperview {
+    // Removal never lays the removed pill out again — poke via the superview
+    // chain while we still have one.
+    if (IsLiquidGlass() && !newSuperview && self.superview) {
+        ApolloPokeTitleLayoutNearPlatter(self.superview);
+    }
+    %orig;
+}
+
+%end
 
 %end
 
@@ -853,4 +967,9 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
 
 %ctor {
     %init;
+    // _UINavigationBarPlatterView only exists on iOS 26+ — register the poke
+    // hooks only when the class is present so older runtimes skip it cleanly.
+    if (objc_getClass("_UINavigationBarPlatterView")) {
+        %init(ApolloLGPlatterPoke);
+    }
 }
