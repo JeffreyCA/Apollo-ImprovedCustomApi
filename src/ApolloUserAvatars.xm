@@ -88,6 +88,10 @@ static const void *kApolloProfileTabAvatarImageMarkerKey = &kApolloProfileTabAva
 @property(nonatomic, strong) UIVisualEffectView *followGlassView;
 @property(nonatomic, strong) UIButton *messageButton;
 @property(nonatomic, strong) UIVisualEffectView *messageGlassView;
+// The envelope glyph is a rasterized composite (a full UIGraphicsImageRenderer
+// draw); cache the color+point it was rendered for so the un-changed common
+// case (repeated trait/tint/install passes) skips the re-render + setImage.
+@property(nonatomic, copy) NSString *cachedEnvelopeKey;
 @property(nonatomic) BOOL isFollowing;
 @property(nonatomic) BOOL showsUserActions;
 // After a Follow/Unfollow tap the optimistic pill state is authoritative for a short
@@ -583,8 +587,22 @@ static const void *kApolloProfileGlassAccentKey = &kApolloProfileGlassAccentKey;
     // Point size tracks the Follow title's text style so the glyph grows with the
     // pill it sits in rather than shrinking away inside it at large text sizes.
     CGFloat glyphPoint = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleBody] scaledValueForValue:19.0];
-    UIImage *envelope = ApolloProfileTintedSymbol(@"envelope.fill", glyphPoint, onAccent);
-    if (envelope) [self.messageButton setImage:envelope forState:UIControlStateNormal];
+    // Skip the raster + setImage when neither the on-accent color nor the point
+    // size changed since the last render (setImage would also re-trigger the
+    // app-wide UIImageView hook). onAccent is black or white (grayscale space),
+    // so key on its white component via getWhite: — getRed: can fail for
+    // grayscale colors, which would collide black and white onto one key.
+    UIColor *resolvedOnAccent = [onAccent resolvedColorWithTraitCollection:self.traitCollection];
+    CGFloat white = 0, whiteAlpha = 0;
+    [resolvedOnAccent getWhite:&white alpha:&whiteAlpha];
+    NSString *envelopeKey = [NSString stringWithFormat:@"%.0f|%.2f", glyphPoint, white];
+    if (![envelopeKey isEqualToString:self.cachedEnvelopeKey] || self.messageButton.currentImage == nil) {
+        UIImage *envelope = ApolloProfileTintedSymbol(@"envelope.fill", glyphPoint, onAccent);
+        if (envelope) {
+            [self.messageButton setImage:envelope forState:UIControlStateNormal];
+            self.cachedEnvelopeKey = envelopeKey;
+        }
+    }
 
     self.editGlassView = [self apollo_styleGlassButton:self.editProfileButton existing:self.editGlassView accent:accentColor];
     self.followGlassView = [self apollo_styleGlassButton:self.followButton existing:self.followGlassView accent:accentColor];
@@ -1115,7 +1133,12 @@ static UIFont *ApolloProfileClassicNameFont(void) {
     self.displayNameLabel.text = displayName.length > 0 ? displayName : nil;
     self.usernameLabel.text = (!displayMatchesUsername && username.length > 0) ? [@"u/" stringByAppendingString:username] : nil;
     NSString *aboutText = info.aboutText.length > 0 ? info.aboutText : nil;
-    if (![aboutText isEqualToString:self.aboutLabel.text]) {
+    // nil-safe change detection: `aboutText` is nil for a bio-less profile, and
+    // -[nil isEqualToString:] returns NO, so the bare message would run the
+    // "new bio" reset every time. Treat two nils (and two equal strings) as
+    // unchanged so the collapse state is only reset on a genuine bio change.
+    BOOL bioChanged = (aboutText || self.aboutLabel.text) && ![aboutText isEqualToString:self.aboutLabel.text];
+    if (bioChanged) {
         // New bio (profile switch or refreshed text) starts collapsed again.
         self.aboutExpanded = NO;
         self.aboutLabel.numberOfLines = ApolloProfileAboutCollapsedLines;
@@ -1141,7 +1164,17 @@ static UIFont *ApolloProfileClassicNameFont(void) {
             [self apollo_setFollowing:self.followIntentValue];
         } else {
             self.followIntentDate = nil;
-            [self apollo_setFollowing:(info.followStateKnown ? info.userIsSubscriber : NO)];
+            // The follow flag is account-specific but the cache entry is shared
+            // and disk-persisted for days: only honour it when it was fetched AS
+            // the currently active account, else another account's "Following"
+            // could show here. Unknown/other-account → NO (the async refetch
+            // corrects it for this account). Unstamped legacy entries read as
+            // unknown, which is safe.
+            NSString *activeAccount = ApolloActiveAccountUsername();
+            BOOL followKnownForActiveAccount = info.followStateKnown &&
+                info.followStateAccount.length > 0 && activeAccount.length > 0 &&
+                [info.followStateAccount caseInsensitiveCompare:activeAccount] == NSOrderedSame;
+            [self apollo_setFollowing:(followKnownForActiveAccount ? info.userIsSubscriber : NO)];
         }
     }
 
@@ -2619,6 +2652,12 @@ static UIView *ApolloProfileNavTitleLabelInView(UIView *rootView, NSString *user
 }
 
 static const void *kApolloProfileNavTitleFadeTargetKey = &kApolloProfileNavTitleFadeTargetKey;
+static const void *kApolloProfileNavTitleFadeMissAtKey = &kApolloProfileNavTitleFadeMissAtKey;
+// After a miss, don't re-walk the whole nav bar on every scroll frame — but the
+// target CAN appear late (the title control builds during a fling), so the miss
+// is only cached for a short window before we retry. Bounds a sustained miss to
+// a few walks/sec instead of 60-120, while still finding a late target quickly.
+static const NSTimeInterval kApolloProfileNavTitleFadeMissWindow = 0.3;
 
 // The view whose alpha the cross-fade drives: the _UINavigationBarTitleControl
 // hosting the title label when there is one (so the Liquid Glass title capsule
@@ -2643,11 +2682,19 @@ static UIView *ApolloProfileNavTitleFadeTargetForController(UIViewController *vi
         if (walk == navigationBar) return cached;
     }
 
+    // Recent miss still within its window → skip the walk this frame.
+    NSNumber *missAt = objc_getAssociatedObject(viewController, kApolloProfileNavTitleFadeMissAtKey);
+    if (missAt && (CACurrentMediaTime() - missAt.doubleValue) < kApolloProfileNavTitleFadeMissWindow) {
+        return nil;
+    }
+
     UIView *label = ApolloProfileNavTitleLabelInView(navigationBar, header.username);
     if (!label) {
         objc_setAssociatedObject(viewController, kApolloProfileNavTitleFadeTargetKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(viewController, kApolloProfileNavTitleFadeMissAtKey, @(CACurrentMediaTime()), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return nil;
     }
+    objc_setAssociatedObject(viewController, kApolloProfileNavTitleFadeMissAtKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     UIView *target = label;
     UIView *candidate = label.superview;
     while (candidate && candidate != navigationBar) {
@@ -2684,6 +2731,19 @@ static void ApolloProfileApplyNavTitleFade(UIViewController *viewController, UIS
     // which would expose a duplicate (invisible) title alongside the header's
     // own name — hide it from the accessibility tree while faded out.
     target.accessibilityElementsHidden = alpha <= 0.01;
+}
+
+// Restore the faded title control to alpha 1 (and un-hide it from
+// accessibility). Called when the profile disappears: the fade drives the
+// SHARED _UINavigationBarTitleControl to alpha 0, and only scroll events
+// un-fade it — none fire after a pop, so a profile popped while scrolled to the
+// top would leave the title control at alpha 0. If UIKit then reuses that
+// control for the destination screen's title, it would render invisible.
+static void ApolloProfileResetNavTitleFade(UIViewController *viewController) {
+    UIView *target = objc_getAssociatedObject(viewController, kApolloProfileNavTitleFadeTargetKey);
+    if (!target) return;
+    if (fabs(target.alpha - 1.0) > 0.001) target.alpha = 1.0;
+    target.accessibilityElementsHidden = NO;
 }
 
 // Re-derive the fade from the table's current offset (appear/layout paths, where
@@ -2945,23 +3005,18 @@ static void ApolloProfileRefreshViewControllersInTree(UIViewController *viewCont
         }
         ApolloProfileScheduleInstallOrUpdateHeader(viewController);
         // A viewer-preference toggle (Stat Cards/Social Links/Follow&Message/
-        // Avatar Style) doesn't change the username, so the
+        // Avatar Style/Banner) doesn't change the username, so the
         // install/update call above takes its "already installed" branch and
-        // never re-reads those flags — they're only applied from
-        // applyProfileInfo:/ApolloProfileSetSnoovatarMode, which otherwise run
-        // just once per profile load (or on an actual username change). Without
-        // this, a toggle only visibly took effect after a pull-to-refresh.
-        // Re-apply the already-cached info (no network fetch, cheap) so the
-        // change shows immediately on whatever profile is currently visible.
+        // never re-reads those flags. Re-run the full image/info apply from the
+        // already-cached info (no network fetch, cheap, supersession-guarded) so
+        // the change shows immediately. ApolloProfileLoadImages is the ONLY path
+        // that reads sProfileShowBanner and re-picks the avatar URL per
+        // sProfileAvatarStyle — applyProfileInfo alone leaves the Banner toggle
+        // and Full↔Circle/Square switch needing a pull-to-refresh.
         ApolloProfileHeaderView *header = objc_getAssociatedObject(viewController, kApolloProfileHeaderViewKey);
         NSString *headerUsername = header.username;
         if (header && headerUsername.length > 0) {
-            ApolloUserProfileInfo *cachedInfo = [[ApolloUserProfileCache sharedCache] cachedInfoForUsername:headerUsername];
-            if (cachedInfo) {
-                [header applyProfileInfo:cachedInfo fallbackUsername:headerUsername];
-                BOOL showSnoovatar = cachedInfo.hasSnoovatar && cachedInfo.snoovatarURL != nil && sProfileAvatarStyle == 0;
-                ApolloProfileSetSnoovatarMode(header, showSnoovatar);
-            }
+            ApolloProfileLoadImages(header, headerUsername, NO);
         }
         if (refreshCount) (*refreshCount)++;
     }
@@ -2976,16 +3031,37 @@ static void ApolloProfileRefreshViewControllersInTree(UIViewController *viewCont
 
 static void ApolloProfileRefreshControllersForUsername(NSString *username) {
     username = ApolloAvatarNormalizedUsername(username);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:128];
-        NSUInteger refreshCount = 0;
-        for (UIWindow *window in ApolloAllWindows()) {
-            ApolloProfileRefreshViewControllersInTree(window.rootViewController, username, visited, &refreshCount);
+    // Coalesce a burst: AccountManager schedules this from viewDidLoad +
+    // viewWillAppear + viewDidAppear, and each call would otherwise queue an
+    // independent full recursive walk of every window's VC tree. Fold same-cycle
+    // calls into one walk; if the pending scope and the new one differ, widen to
+    // "all" (nil) — a superset that still covers any specific username. Statics
+    // are only touched on the main queue.
+    static BOOL sRefreshScheduled = NO;
+    static NSString *sRefreshPendingUsername = nil;
+    dispatch_block_t coalesce = ^{
+        if (sRefreshScheduled) {
+            if (![sRefreshPendingUsername isEqualToString:username]) sRefreshPendingUsername = nil;  // widen to all
+            return;
         }
-        if (username.length > 0 || refreshCount > 0) {
-            ApolloLog(@"[UserAvatars] Refreshed %lu profile controllers after profile update for u/%@", (unsigned long)refreshCount, username ?: @"all");
-        }
-    });
+        sRefreshScheduled = YES;
+        sRefreshPendingUsername = username;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString *scope = sRefreshPendingUsername;
+            sRefreshScheduled = NO;
+            sRefreshPendingUsername = nil;
+            NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:128];
+            NSUInteger refreshCount = 0;
+            for (UIWindow *window in ApolloAllWindows()) {
+                ApolloProfileRefreshViewControllersInTree(window.rootViewController, scope, visited, &refreshCount);
+            }
+            if (scope.length > 0 || refreshCount > 0) {
+                ApolloLog(@"[UserAvatars] Refreshed %lu profile controllers after profile update for u/%@", (unsigned long)refreshCount, scope ?: @"all");
+            }
+        });
+    };
+    if ([NSThread isMainThread]) coalesce();
+    else dispatch_async(dispatch_get_main_queue(), coalesce);
 }
 
 static SEL ApolloProfileTabAvatarActiveKey(void) {
@@ -3166,6 +3242,13 @@ static UITabBarItem *ApolloProfileTabItemForIconImageView(UIImageView *imageView
 // YES when this image view is the profile tab's avatar slot. Marker fast-path first
 // (covers the freshly-stamped image), then the durable structural lookup.
 static BOOL ApolloProfileImageViewIsProfileTabAvatarSlot(UIImageView *imageView) {
+    // Hot-path guard: this is called from the base UIImageView -setImage:/
+    // -setHighlightedImage: hooks, i.e. for EVERY image view in Apollo (feed
+    // thumbnails, galleries, media viewer, chat). The whole profile-tab-avatar
+    // feature only exists when this toggle is on (default off), and no image view
+    // carries the avatar marker while it's off — so short-circuit before the
+    // ~9-level class-name superview walk instead of running it per image set.
+    if (!sUseProfileAvatarTabIcon) return NO;
     if (ApolloProfileImageViewShowsTabAvatar(imageView)) return YES;
     UITabBarItem *item = ApolloProfileTabItemForIconImageView(imageView);
     return item && [objc_getAssociatedObject(item, ApolloProfileTabAvatarActiveKey()) boolValue];
@@ -3755,6 +3838,13 @@ static void ApolloAvatarApplySubredditIconToSharePreview(id postInfo, NSString *
     ApolloProfileApplyTabAvatarForController(((UIViewController *)self).tabBarController);
 }
 
+- (void)viewWillDisappear:(BOOL)animated {
+    %orig;
+    // Un-fade the shared nav title control we may have driven to alpha 0, so the
+    // next screen doesn't inherit an invisible title if UIKit reuses the control.
+    ApolloProfileResetNavTitleFade((UIViewController *)self);
+}
+
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     ApolloProfileScheduleInstallOrUpdateHeader(self);
@@ -3815,9 +3905,13 @@ static void ApolloProfileZeroNodeHeight(id node) {
 
 - (id)layoutSpecThatFits:(struct CDStruct_90e057aa)constrainedSize {
     id spec = %orig;
-    // Detailed profile shows the stats as our own glass cards, so collapse Apollo's
-    // native karma cell to avoid the duplicate row (both New and Classic).
-    if (!sShowDetailedProfiles) return spec;
+    // Collapse Apollo's native karma cell ONLY when our own glass Stat Cards are
+    // actually replacing it. sShowDetailedProfiles is pinned YES (the master
+    // switch was retired), so gating on it alone always collapsed the native
+    // cell — meaning turning Stat Cards OFF hid our cards AND left the native
+    // row zeroed, showing no karma anywhere. Gate on the Stat Cards toggle so
+    // "off" falls back to Apollo's native cell.
+    if (!sShowDetailedProfiles || !sProfileShowStatCards) return spec;
     ApolloProfileZeroNodeHeight(self);
     Class specClass = NSClassFromString(@"ASLayoutSpec");
     id emptySpec = specClass ? [[specClass alloc] init] : nil;

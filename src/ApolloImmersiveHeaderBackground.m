@@ -49,13 +49,30 @@ void ApolloImmersiveSetBannerCacheKey(UIImage *banner, NSString *cacheKey) {
     objc_setAssociatedObject(banner, kApolloImmersiveBannerCacheKey, [cacheKey copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
 }
 
+// A per-instance identity that (unlike the raw pointer) can never alias a
+// LATER image: heap addresses recycle the moment an image deallocates, so a
+// "%p" key can hand a freshly-allocated banner the dead banner's cached blur
+// and luminance verdict. This associated UUID lives and dies with the exact
+// instance it stamps, making that collision impossible while still letting
+// every consumer of the same instance coalesce.
+NSString *ApolloImmersiveBannerInstanceIdentity(UIImage *image) {
+    if (!image) return nil;
+    static const void *kApolloImmersiveInstanceIdentityKey = &kApolloImmersiveInstanceIdentityKey;
+    NSString *identity = objc_getAssociatedObject(image, kApolloImmersiveInstanceIdentityKey);
+    if (identity.length == 0) {
+        identity = [NSUUID UUID].UUIDString;
+        objc_setAssociatedObject(image, kApolloImmersiveInstanceIdentityKey, identity, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    }
+    return identity;
+}
+
 static NSString *ApolloImmersiveWorkKey(UIImage *banner) {
     if (!banner) return nil;
     NSString *logicalKey = objc_getAssociatedObject(banner, kApolloImmersiveBannerCacheKey);
     if (logicalKey.length > 0) return logicalKey;
     // Images with no known URL/custom-asset identity still coalesce for every
     // consumer of this exact instance.
-    return [NSString stringWithFormat:@"image:%p", banner];
+    return [NSString stringWithFormat:@"image:%@", ApolloImmersiveBannerInstanceIdentity(banner)];
 }
 
 static NSCache<NSString *, NSNumber *> *ApolloImmersiveBrightnessCache(void) {
@@ -177,11 +194,19 @@ static NSUInteger const ApolloImmersiveBackdropCacheByteBudget = 32 * 1024 * 102
 
 static UIImage *ApolloImmersiveDownsampledImage(UIImage *image, CGFloat maxDimension) {
     CGSize size = image.size;
-    CGFloat maxSide = MAX(size.width, size.height);
-    if (maxSide <= maxDimension || maxSide <= 0.0) return image;
-    CGFloat scale = maxDimension / maxSide;
-    CGSize targetSize = CGSizeMake(MAX(1.0, round(size.width * scale)), MAX(1.0, round(size.height * scale)));
-    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    // The cap is a PIXEL budget (format.scale is forced to 1 below), so the
+    // comparison must be in pixels too — image.size is points, and a 600pt@3x
+    // banner is 1800px of blur work that must not slip past a 640 limit.
+    CGFloat imageScale = MAX((CGFloat)1.0, image.scale);
+    CGFloat maxSidePixels = MAX(size.width, size.height) * imageScale;
+    if (maxSidePixels <= maxDimension || maxSidePixels <= 0.0) return image;
+    CGFloat shrink = maxDimension / maxSidePixels;
+    CGSize targetSize = CGSizeMake(MAX(1.0, round(size.width * imageScale * shrink)),
+                                   MAX(1.0, round(size.height * imageScale * shrink)));
+    // alloc/init, NOT preferredFormat: this runs on a background queue and
+    // preferredFormat reads UIScreen/trait state (a main-thread UIKit read) only
+    // to hand back a scale we immediately overwrite with 1.0 anyway.
+    UIGraphicsImageRendererFormat *format = [[UIGraphicsImageRendererFormat alloc] init];
     format.scale = 1.0; // blurred output doesn't need retina-density source data
     format.opaque = NO;
     UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:targetSize format:format];
@@ -203,9 +228,15 @@ static UIImage *ApolloImmersiveGaussianBlurredImage(UIImage *image) {
     dispatch_once(&once, ^{ context = [CIContext contextWithOptions:nil]; });
     CGImageRef cgImage = [context createCGImage:blurred fromRect:input.extent];
     if (!cgImage) return image;
+    // Tag with the metadata of the input that was ACTUALLY blurred: the
+    // downsample renders via drawInRect:, which bakes EXIF orientation into
+    // the pixels (output is .up/scale-1) — re-tagging that with the original's
+    // orientation would rotate a portrait camera photo a second time at
+    // display. When no downsample ran, `downsampled` IS `image`, preserving
+    // the original (self-cancelling) tagging for small banners.
     UIImage *result = [UIImage imageWithCGImage:cgImage
-                                         scale:image.scale
-                                   orientation:image.imageOrientation];
+                                         scale:downsampled.scale
+                                   orientation:downsampled.imageOrientation];
     CGImageRelease(cgImage);
     return result;
 }
@@ -303,6 +334,13 @@ static void ApolloImmersiveRequestBackdrop(UIImage *banner, void (^completion)(U
 @property(nonatomic, assign) CGFloat regionHeight;
 @property(nonatomic, assign) CGFloat extendedHeight;
 @property(nonatomic, assign) CGFloat topInset;
+// The veil/scrim gradient COLORS depend only on the resolved page color, but
+// their locations/frames change every layout pass (per scroll-driven chrome
+// animation frame). Cache the ~14 CGColor arrays keyed on the resolved color
+// so a scroll only recomputes locations, not the color stops.
+@property(nonatomic, strong) UIColor *cachedGradientColorKey;
+@property(nonatomic, copy) NSArray *cachedVeilColors;
+@property(nonatomic, copy) NSArray *cachedScrimColors;
 @end
 
 @implementation ApolloImmersiveHeaderBackgroundView
@@ -467,20 +505,27 @@ static void ApolloImmersiveRequestBackdrop(UIImage *banner, void (^completion)(U
     CGFloat locWash = MIN(1.0, MAX(locSeam, wash));
     CGFloat locDeep = MIN(1.0, MAX(locWash, deep));
     CGFloat locEnd = MIN(1.0, MAX(locDeep, end));
+    // Rebuild the color stops only when the resolved page color actually
+    // changed (theme flip / trait change) — not on every scroll-animation frame.
+    if (![self.cachedGradientColorKey isEqual:pageColor]) {
+        self.cachedGradientColorKey = pageColor;
+        self.cachedVeilColors = @[(id)[pageColor colorWithAlphaComponent:0.0].CGColor,
+                                  (id)[pageColor colorWithAlphaComponent:0.0].CGColor,
+                                  (id)[pageColor colorWithAlphaComponent:0.60].CGColor,
+                                  (id)[pageColor colorWithAlphaComponent:0.88].CGColor,
+                                  (id)pageColor.CGColor,
+                                  (id)pageColor.CGColor];
+        self.cachedScrimColors = @[(id)[pageColor colorWithAlphaComponent:0.70].CGColor,
+                                   (id)[pageColor colorWithAlphaComponent:0.38].CGColor,
+                                   (id)[pageColor colorWithAlphaComponent:0.0].CGColor];
+    }
     self.veilLayer.frame = self.contentContainer.bounds;
-    self.veilLayer.colors = @[(id)[pageColor colorWithAlphaComponent:0.0].CGColor,
-                              (id)[pageColor colorWithAlphaComponent:0.0].CGColor,
-                              (id)[pageColor colorWithAlphaComponent:0.60].CGColor,
-                              (id)[pageColor colorWithAlphaComponent:0.88].CGColor,
-                              (id)pageColor.CGColor,
-                              (id)pageColor.CGColor];
+    self.veilLayer.colors = self.cachedVeilColors;
     self.veilLayer.locations = @[@0.0, @(locSeam), @(locWash), @(locDeep), @(locEnd), @1.0];
 
     CGFloat scrimHeight = MIN(totalHeight, self.topInset + 32.0);
     self.chromeScrimLayer.frame = CGRectMake(0.0, 0.0, width, MAX(1.0, scrimHeight));
-    self.chromeScrimLayer.colors = @[(id)[pageColor colorWithAlphaComponent:0.70].CGColor,
-                                     (id)[pageColor colorWithAlphaComponent:0.38].CGColor,
-                                     (id)[pageColor colorWithAlphaComponent:0.0].CGColor];
+    self.chromeScrimLayer.colors = self.cachedScrimColors;
     self.chromeScrimLayer.locations = @[@0.0, @0.55, @1.0];
 
     [CATransaction commit];

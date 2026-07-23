@@ -776,7 +776,7 @@ static void ApolloCollectNavigationTitleContent(UIView *root,
     }
 }
 
-static void ApolloRecenterTitleControl(UIView *titleControl);
+static BOOL ApolloRecenterTitleControl(UIView *titleControl);
 
 @interface ApolloNavigationTitleGlassController : NSObject
 @property (nonatomic, weak) UIView *titleControl;
@@ -790,6 +790,13 @@ static void ApolloRecenterTitleControl(UIView *titleControl);
 @property (nonatomic, weak) UIView *observedJumpBar;
 @property (nonatomic) CGRect observedJumpBarBounds;
 @property (nonatomic) NSUInteger observedJumpBarSubviewCount;
+// The recenter's output depends on SIBLING bar-item geometry (left/right
+// content limits) and on the JumpBar label's own text/font, none of which the
+// title-local observations above capture. Without these, a trailing pill
+// appearing/disappearing or a Dynamic Type change leaves a stale center/capsule
+// because the gate compares "unchanged".
+@property (nonatomic) NSUInteger observedBarFingerprint;
+@property (nonatomic) NSUInteger observedContentMetric;
 - (instancetype)initWithTitleControl:(UIView *)titleControl;
 - (void)scheduleTargetRefresh;
 - (void)scheduleTargetRefreshIfNeeded;
@@ -896,14 +903,64 @@ static void ApolloRecenterTitleControl(UIView *titleControl);
     self.glassView.frame = targetFrame;
 }
 
+// Read-only, depth/count-capped fold of every visible descendant frame under
+// the enclosing navigation bar (pills sit ~5-6 levels deep on Liquid Glass).
+// Frame reads only — cheap versus the frame conversions, bar scan and transform
+// writes this gate exists to avoid.
+static void ApolloTitleFoldBarContentFingerprint(UIView *view, NSUInteger depth,
+                                                 NSUInteger *count, NSUInteger *hash) {
+    if (depth > 8 || *count > 120) return;
+    for (UIView *child in view.subviews) {
+        if (child.hidden || child.alpha < 0.01) continue;
+        (*count)++;
+        CGRect f = child.frame;
+        NSUInteger h = ((NSUInteger)lround(f.origin.x * 2.0) & 0xFFF)
+                     | (((NSUInteger)lround(f.origin.y * 2.0) & 0xFFF) << 12)
+                     | (((NSUInteger)lround(f.size.width * 2.0) & 0xFFF) << 24)
+                     | (((NSUInteger)lround(f.size.height * 2.0) & 0xFFF) << 36);
+        *hash = (*hash * 1099511628211ULL) ^ h;
+        ApolloTitleFoldBarContentFingerprint(child, depth + 1, count, hash);
+    }
+}
+
+static NSUInteger ApolloTitleBarContentFingerprint(UIView *titleControl) {
+    UINavigationBar *bar = nil;
+    for (UIView *v = titleControl.superview; v != nil; v = v.superview) {
+        if ([v isKindOfClass:[UINavigationBar class]]) { bar = (UINavigationBar *)v; break; }
+    }
+    if (!bar) return 0;
+    NSUInteger hash = 1469598103934665603ULL;
+    NSUInteger count = 0;
+    ApolloTitleFoldBarContentFingerprint(bar, 0, &count, &hash);
+    return hash ^ (count << 1);
+}
+
+static NSUInteger ApolloTitleJumpBarContentMetric(UIView *jumpBar) {
+    if (!jumpBar) return 0;
+    id nameLabel = ApolloJumpBarObjectIvar(jumpBar, "nameLabel");
+    if (![nameLabel isKindOfClass:UILabel.class]) return 0;
+    UILabel *label = (UILabel *)nameLabel;
+    return label.text.hash ^ (NSUInteger)lround(label.font.pointSize * 4.0);
+}
+
 - (void)refreshTargets {
+    // Out of window → not visible; inserting the capsule and applying the
+    // recenter transform now is wasted work (self-heals on didMoveToWindow).
+    // ApolloUpdateNavigationTitleGlass guards this on entry, but the
+    // layoutSubviews→scheduleTargetRefreshIfNeeded path can reach here directly.
+    if (!self.titleControl.window) return;
     UIView *jumpBar = ApolloFindJumpBar(self.titleControl);
     UIView *hostView = jumpBar ?: self.titleControl;
     NSMutableArray<UIView *> *glassCandidates = [NSMutableArray array];
 
     // This may transform the title control, so keep it outside UIKit's active
-    // navigation-bar layout pass.
-    if (!sEnableBulkTranslation) ApolloRecenterTitleControl(self.titleControl);
+    // navigation-bar layout pass. When it BAILS (mid push/pop animation, bar not
+    // resolvable, zero width) the observations below must not latch — the old
+    // code recovered from a skipped recenter by re-running every layout pass, so
+    // latching "unchanged" against geometry the recenter never processed would
+    // leave the title off-center until the next real change.
+    BOOL recenterSettled = YES;
+    if (!sEnableBulkTranslation) recenterSettled = ApolloRecenterTitleControl(self.titleControl);
 
     if (jumpBar) {
         const char *ivarNames[] = {
@@ -926,7 +983,10 @@ static void ApolloRecenterTitleControl(UIView *titleControl);
     self.observedJumpBar = jumpBar;
     self.observedJumpBarBounds = jumpBar.bounds;
     self.observedJumpBarSubviewCount = jumpBar.subviews.count;
-    self.observationValid = YES;
+    self.observedBarFingerprint = ApolloTitleBarContentFingerprint(self.titleControl);
+    self.observedContentMetric = ApolloTitleJumpBarContentMetric(jumpBar);
+    // A bailed recenter leaves the gate open so the next layout pass retries.
+    self.observationValid = recenterSettled;
 }
 
 - (void)scheduleTargetRefreshIfNeeded {
@@ -939,7 +999,9 @@ static void ApolloRecenterTitleControl(UIView *titleControl);
         self.observedTitleSubviewCount == titleControl.subviews.count &&
         self.observedJumpBar == jumpBar &&
         CGRectEqualToRect(self.observedJumpBarBounds, jumpBar.bounds) &&
-        self.observedJumpBarSubviewCount == jumpBar.subviews.count;
+        self.observedJumpBarSubviewCount == jumpBar.subviews.count &&
+        self.observedBarFingerprint == ApolloTitleBarContentFingerprint(titleControl) &&
+        self.observedContentMetric == ApolloTitleJumpBarContentMetric(jumpBar);
     if (!unchanged) [self scheduleTargetRefresh];
 }
 
@@ -970,17 +1032,21 @@ static void ApolloUpdateNavigationTitleGlass(UIView *titleControl) {
     [controller scheduleTargetRefresh];
 }
 
-static void ApolloRecenterTitleControl(UIView *titleControl) {
-    if (!titleControl.window || !titleControl.superview) return;
+// Returns whether the recenter ran to a decision. NO = it bailed before
+// evaluating (mid push/pop animation, bar not resolvable, zero width); callers
+// must not latch "geometry unchanged" observations against a bail, or the
+// skipped recenter is never retried until the next real geometry change.
+static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
+    if (!titleControl.window || !titleControl.superview) return NO;
 
     UINavigationBar *bar = nil;
     for (UIView *v = titleControl.superview; v != nil; v = v.superview) {
         if ([v isKindOfClass:[UINavigationBar class]]) { bar = (UINavigationBar *)v; break; }
     }
-    if (!bar) return;
+    if (!bar) return NO;
 
     // Skip during push/pop so we don't fight UIKit's transition animations.
-    if (bar.layer.animationKeys.count > 0) return;
+    if (bar.layer.animationKeys.count > 0) return NO;
 
     // Measure pre-transform position by subtracting our own previous tx.
     CGFloat existingTx = titleControl.transform.tx;
@@ -988,7 +1054,7 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
     frameInBar.origin.x -= existingTx;
 
     CGFloat width = CGRectGetWidth(frameInBar);
-    if (width <= 0) return;
+    if (width <= 0) return NO;
 
     CGFloat unadjustedCenter = CGRectGetMidX(frameInBar);
     CGFloat barCenter = CGRectGetMidX(bar.bounds);
@@ -1048,7 +1114,7 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
         : MIN(MAX(barCenter, minCenter), maxCenter);
 
     CGFloat newTx = targetCenter - unadjustedCenter;
-    if (fabs(newTx - existingTx) < 0.5) return;
+    if (fabs(newTx - existingTx) < 0.5) return YES;   // ran; already in place
 
     CGAffineTransform desired = (fabs(newTx) < 0.5) ? CGAffineTransformIdentity
                                                     : CGAffineTransformMakeTranslation(newTx, 0);
@@ -1056,6 +1122,7 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
     [CATransaction setDisableActions:YES];
     titleControl.transform = desired;
     [CATransaction commit];
+    return YES;
 }
 
 %hook _UINavigationBarTitleControl

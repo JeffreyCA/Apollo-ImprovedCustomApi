@@ -27,8 +27,14 @@ extern NSString * const ApolloUserProfileUsernameKey;
 // Whether the logged-in account follows this user (about.json's
 // `data.subreddit.user_is_subscriber`). Drives the profile Follow button's
 // Follow/Following state. `followStateKnown` is NO until about.json fills it in.
+// This field is ACCOUNT-SPECIFIC (it's relative to whoever was signed in for the
+// fetch) while the rest of the entry is viewer-independent and persists for
+// days, so `followStateAccount` records the account it belongs to — callers must
+// treat the follow state as unknown unless it matches the active account, or a
+// stale entry shows account A's "Following" to account B.
 @property(nonatomic) BOOL userIsSubscriber;
 @property(nonatomic) BOOL followStateKnown;
+@property(nonatomic, copy) NSString *followStateAccount;   // account the follow flag was fetched as (nil = unknown)
 // YES once about.json has populated isSuspended at least once for this entry.
 @property(nonatomic) BOOL suspensionChecked;
 

@@ -116,7 +116,8 @@ NSString *ApolloSecretForClientId(NSString *clientId) {
 // also turned up zero callers, consistent with it never being reassigned at
 // runtime outside of NSKeyedUnarchiver's KVC-based decode).
 //
-// Resolve from disk instead: AccountManager persists `CurrentRedditAccountIndex`
+// For username-only lookup, resolve from disk instead: AccountManager persists
+// `CurrentRedditAccountIndex`
 // into the shared-group defaults whenever the active account changes, and
 // `RedditAccounts2` is the index-aligned NSKeyedArchiver([RDKClient]) array (see
 // ApolloWebJSONIdentity.xm's synthesis code for the full on-disk format notes).
@@ -124,20 +125,39 @@ NSString *ApolloSecretForClientId(NSString *clientId) {
 // the primary (only) mechanism since the live signal can't be trusted at all.
 static NSString *const kApolloAccountCredsGroupSuite = @"group.com.christianselig.apollo";
 
-// Apollo.AccountManager's Swift accounts/currentAccountIndex properties are
-// not ObjC-visible, but their guarded ivar layouts are stable in this Apollo
-// build. Return the exact in-process RDKClient that Apollo owns; unarchiving
-// RedditAccounts2 would create a credential copy unsuitable for mutations.
+// Apollo.AccountManager does not expose its Swift `accounts` array or
+// `currentAccountIndex` through ObjC. The live manager still registers both
+// fields as ivars, though, and this Apollo build uses the standard native Swift
+// Array representation: the ivar is one pointer to ContiguousArrayStorage,
+// whose count/capacity/elements begin at words 2/3/4. Reading the manager's live
+// array is important here. Unarchiving RedditAccounts2 would create a second
+// RDKClient with copied credentials, while mutations must travel through the
+// exact client Apollo owns and keeps refreshed in-process.
+//
+// Keep every assumption guarded. If a future Apollo/Swift runtime changes the
+// layout, this returns nil and callers fail closed instead of messaging an
+// invalid pointer.
 id ApolloActiveAccountClient(void) {
+    // Main-thread only. The walk below reads AccountManager's live Swift array
+    // buffer without a retain; a concurrent reassignment of `accounts` on
+    // another thread would free the storage between our reads (use-after-free).
+    // Every caller today is a main-thread UI action (the follow-button tap); this
+    // fails closed rather than trusting a future off-main caller not to exist.
+    if (![NSThread isMainThread]) return nil;
+
     Class managerClass = objc_getClass("_TtC6Apollo14AccountManager");
     SEL sharedSelector = NSSelectorFromString(@"shared");
     if (!managerClass || ![managerClass respondsToSelector:sharedSelector]) return nil;
 
     id manager = ((id (*)(id, SEL))objc_msgSend)(managerClass, sharedSelector);
+    if (!manager) return nil;
     Ivar accountsIvar = class_getInstanceVariable(managerClass, "accounts");
     Ivar currentIndexIvar = class_getInstanceVariable(managerClass, "currentAccountIndex");
-    if (!manager || !accountsIvar || !currentIndexIvar) return nil;
+    if (!accountsIvar || !currentIndexIvar) return nil;
 
+    // Hopper: Optional<Int> is stored as the Int word followed by an
+    // extra-inhabitant byte; bit 0 set at +8 means nil. This is the same check
+    // AccountManager's own subscription-refresh path performs before indexing.
     NSInteger index = 0;
     uint8_t indexIsNil = 1;
     uint8_t *managerBytes = (uint8_t *)(__bridge void *)manager;
@@ -148,6 +168,13 @@ id ApolloActiveAccountClient(void) {
 
     uintptr_t storageWord = 0;
     memcpy(&storageWord, managerBytes + ivar_getOffset(accountsIvar), sizeof(storageWord));
+    // We only understand a NATIVE Swift array here: the low 3 bits are inline
+    // flags (masked off below), but a bridged/tagged _BridgeStorage word carries
+    // a discriminator in the HIGH bits (objc bridge object bit 0x40..00, or a
+    // tagged-pointer top bit). object_getClass on such a word dereferences a
+    // non-canonical pointer → crash. If `accounts` is ever backed by a bridged
+    // NSArray, bail instead of masking-and-dereferencing.
+    if (storageWord & 0xF000000000000000ULL) return nil;
     void *storage = (void *)(storageWord & ~(uintptr_t)0x7);
     if (!storage) return nil;
     Class storageClass = object_getClass((__bridge id)storage);
@@ -156,7 +183,9 @@ id ApolloActiveAccountClient(void) {
 
     uintptr_t count = 0;
     memcpy(&count, (uint8_t *)storage + (2 * sizeof(uintptr_t)), sizeof(count));
-    if (count == 0 || count > 64 || (uintptr_t)index >= count) return nil;
+    if (count == 0 || count > 64) return nil;
+
+    if ((uintptr_t)index >= count) return nil;
 
     void *rawClient = NULL;
     size_t elementOffset = (4 + (NSUInteger)index) * sizeof(uintptr_t);
@@ -164,7 +193,8 @@ id ApolloActiveAccountClient(void) {
     if (!rawClient) return nil;
     id client = (__bridge id)rawClient;
     Class clientClass = objc_getClass("RDKClient");
-    return clientClass && [client isKindOfClass:clientClass] ? client : nil;
+    if (!clientClass || ![client isKindOfClass:clientClass]) return nil;
+    return client;
 }
 
 static id ApolloAccountCredsUnarchive(NSData *data) {

@@ -33,6 +33,13 @@ FOUNDATION_EXPORT BOOL ApolloImmersiveBannerIsLight(UIImage *banner);
 // blurred-backdrop work. Call this before either API below.
 FOUNDATION_EXPORT void ApolloImmersiveSetBannerCacheKey(UIImage *banner, NSString *cacheKey);
 
+// A cache-key component unique to this image INSTANCE for callers that need
+// "never share with a different image" semantics (custom banners, appearance
+// variants). Use this instead of the raw pointer: heap addresses recycle on
+// dealloc, so "%p" keys can serve a brand-new image the dead image's cached
+// blur; this UUID lives and dies with the instance it stamps.
+FOUNDATION_EXPORT NSString *ApolloImmersiveBannerInstanceIdentity(UIImage *image);
+
 // Same check, computed off the main thread for a not-yet-sampled banner
 // (the sample reads every pixel of the source image, which can be a visible
 // hitch on the main thread for a large custom banner). `completion` fires on
