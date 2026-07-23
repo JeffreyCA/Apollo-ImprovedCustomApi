@@ -138,6 +138,13 @@ static NSString *const kApolloAccountCredsGroupSuite = @"group.com.christianseli
 // layout, this returns nil and callers fail closed instead of messaging an
 // invalid pointer.
 id ApolloActiveAccountClient(void) {
+    // Main-thread only. The walk below reads AccountManager's live Swift array
+    // buffer without a retain; a concurrent reassignment of `accounts` on
+    // another thread would free the storage between our reads (use-after-free).
+    // Every caller today is a main-thread UI action (the follow-button tap); this
+    // fails closed rather than trusting a future off-main caller not to exist.
+    if (![NSThread isMainThread]) return nil;
+
     Class managerClass = objc_getClass("_TtC6Apollo14AccountManager");
     SEL sharedSelector = NSSelectorFromString(@"shared");
     if (!managerClass || ![managerClass respondsToSelector:sharedSelector]) return nil;
@@ -161,8 +168,13 @@ id ApolloActiveAccountClient(void) {
 
     uintptr_t storageWord = 0;
     memcpy(&storageWord, managerBytes + ivar_getOffset(accountsIvar), sizeof(storageWord));
-    // Native Swift arrays use the low three bits of the storage word for flags;
-    // AccountManager's own code masks them before reading count/elements.
+    // We only understand a NATIVE Swift array here: the low 3 bits are inline
+    // flags (masked off below), but a bridged/tagged _BridgeStorage word carries
+    // a discriminator in the HIGH bits (objc bridge object bit 0x40..00, or a
+    // tagged-pointer top bit). object_getClass on such a word dereferences a
+    // non-canonical pointer → crash. If `accounts` is ever backed by a bridged
+    // NSArray, bail instead of masking-and-dereferencing.
+    if (storageWord & 0xF000000000000000ULL) return nil;
     void *storage = (void *)(storageWord & ~(uintptr_t)0x7);
     if (!storage) return nil;
     Class storageClass = object_getClass((__bridge id)storage);

@@ -203,7 +203,10 @@ static UIImage *ApolloImmersiveDownsampledImage(UIImage *image, CGFloat maxDimen
     CGFloat shrink = maxDimension / maxSidePixels;
     CGSize targetSize = CGSizeMake(MAX(1.0, round(size.width * imageScale * shrink)),
                                    MAX(1.0, round(size.height * imageScale * shrink)));
-    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    // alloc/init, NOT preferredFormat: this runs on a background queue and
+    // preferredFormat reads UIScreen/trait state (a main-thread UIKit read) only
+    // to hand back a scale we immediately overwrite with 1.0 anyway.
+    UIGraphicsImageRendererFormat *format = [[UIGraphicsImageRendererFormat alloc] init];
     format.scale = 1.0; // blurred output doesn't need retina-density source data
     format.opaque = NO;
     UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:targetSize format:format];
@@ -331,6 +334,13 @@ static void ApolloImmersiveRequestBackdrop(UIImage *banner, void (^completion)(U
 @property(nonatomic, assign) CGFloat regionHeight;
 @property(nonatomic, assign) CGFloat extendedHeight;
 @property(nonatomic, assign) CGFloat topInset;
+// The veil/scrim gradient COLORS depend only on the resolved page color, but
+// their locations/frames change every layout pass (per scroll-driven chrome
+// animation frame). Cache the ~14 CGColor arrays keyed on the resolved color
+// so a scroll only recomputes locations, not the color stops.
+@property(nonatomic, strong) UIColor *cachedGradientColorKey;
+@property(nonatomic, copy) NSArray *cachedVeilColors;
+@property(nonatomic, copy) NSArray *cachedScrimColors;
 @end
 
 @implementation ApolloImmersiveHeaderBackgroundView
@@ -495,20 +505,27 @@ static void ApolloImmersiveRequestBackdrop(UIImage *banner, void (^completion)(U
     CGFloat locWash = MIN(1.0, MAX(locSeam, wash));
     CGFloat locDeep = MIN(1.0, MAX(locWash, deep));
     CGFloat locEnd = MIN(1.0, MAX(locDeep, end));
+    // Rebuild the color stops only when the resolved page color actually
+    // changed (theme flip / trait change) — not on every scroll-animation frame.
+    if (![self.cachedGradientColorKey isEqual:pageColor]) {
+        self.cachedGradientColorKey = pageColor;
+        self.cachedVeilColors = @[(id)[pageColor colorWithAlphaComponent:0.0].CGColor,
+                                  (id)[pageColor colorWithAlphaComponent:0.0].CGColor,
+                                  (id)[pageColor colorWithAlphaComponent:0.60].CGColor,
+                                  (id)[pageColor colorWithAlphaComponent:0.88].CGColor,
+                                  (id)pageColor.CGColor,
+                                  (id)pageColor.CGColor];
+        self.cachedScrimColors = @[(id)[pageColor colorWithAlphaComponent:0.70].CGColor,
+                                   (id)[pageColor colorWithAlphaComponent:0.38].CGColor,
+                                   (id)[pageColor colorWithAlphaComponent:0.0].CGColor];
+    }
     self.veilLayer.frame = self.contentContainer.bounds;
-    self.veilLayer.colors = @[(id)[pageColor colorWithAlphaComponent:0.0].CGColor,
-                              (id)[pageColor colorWithAlphaComponent:0.0].CGColor,
-                              (id)[pageColor colorWithAlphaComponent:0.60].CGColor,
-                              (id)[pageColor colorWithAlphaComponent:0.88].CGColor,
-                              (id)pageColor.CGColor,
-                              (id)pageColor.CGColor];
+    self.veilLayer.colors = self.cachedVeilColors;
     self.veilLayer.locations = @[@0.0, @(locSeam), @(locWash), @(locDeep), @(locEnd), @1.0];
 
     CGFloat scrimHeight = MIN(totalHeight, self.topInset + 32.0);
     self.chromeScrimLayer.frame = CGRectMake(0.0, 0.0, width, MAX(1.0, scrimHeight));
-    self.chromeScrimLayer.colors = @[(id)[pageColor colorWithAlphaComponent:0.70].CGColor,
-                                     (id)[pageColor colorWithAlphaComponent:0.38].CGColor,
-                                     (id)[pageColor colorWithAlphaComponent:0.0].CGColor];
+    self.chromeScrimLayer.colors = self.cachedScrimColors;
     self.chromeScrimLayer.locations = @[@0.0, @0.55, @1.0];
 
     [CATransaction commit];
