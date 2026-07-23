@@ -782,7 +782,17 @@ static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderat
         BOOL destructive = ApolloNativeActionMenuTitleIsDestructive(title);
         UIAction *action = ApolloNativeActionMenuAction(title, subtitle, image, actionTintColor, opensModeratorMenu, destructive, NO, enabled, actionController, (NSInteger)i);
         if (action) {
-            [children addObject:action];
+            UIMenuElement *element = action;
+            // actionKind 51 = Submit Post: swap the plain row for the quick
+            // post-type group (Photo/Link/Text/Poll) when one is available.
+            if (actionKind == 51 && enabled) {
+                NSInteger row = (NSInteger)i;
+                UIMenu *postTypes = ApolloSubmitPostTypesMenu(actionController, ^{
+                    ApolloNativeActionMenuSelectRow(actionController, row);
+                });
+                if (postTypes) element = postTypes;
+            }
+            [children addObject:element];
         }
     }
 
@@ -909,10 +919,47 @@ static id ApolloNativeActionMenuCompactMenuStyle(void) {
 }
 
 - (UITargetedPreview *)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction previewForDismissingMenuWithConfiguration:(__unused UIContextMenuConfiguration *)configuration {
-    return [self contextMenuInteraction:interaction previewForHighlightingMenuWithConfiguration:configuration];
+    // Dismissal deliberately does NOT reuse the morph-view preview: UIKit
+    // snapshots that view and flies it from the collapsed menu's anchor back to
+    // the control's frame, so the "..." button visibly glides back into its row
+    // after every menu dismissal. Returning an invisible preview anchored on
+    // the proxy keeps the menu's own fade-out and lets the real control simply
+    // reappear in place (restored in willEndForConfiguration below) with no
+    // flight. Do not return nil here — nil makes UIKit fall back to the
+    // presentation (morph) preview and the glide comes back.
+    UIView *sourceView = self.sourceView;
+    if (!sourceView) return nil;
+
+    UIPreviewParameters *parameters = [UIPreviewParameters new];
+    parameters.backgroundColor = UIColor.clearColor;
+    parameters.visiblePath = [UIBezierPath bezierPathWithRect:CGRectZero];
+    SEL setAppliesShadowSelector = NSSelectorFromString(@"setAppliesShadow:");
+    if ([parameters respondsToSelector:setAppliesShadowSelector]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(parameters, setAppliesShadowSelector, NO);
+    }
+    return [[UITargetedPreview alloc] initWithView:sourceView parameters:parameters];
 }
 
 - (void)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction willEndForConfiguration:(__unused UIContextMenuConfiguration *)configuration animator:(id<UIContextMenuInteractionAnimating>)animator {
+    // The morph hid the real control for the menu's lifetime. With the
+    // dismissal preview above being invisible, nothing re-reveals it visually —
+    // restore it right as the dismissal starts so the button is sitting in its
+    // own row while the menu fades (idempotent with UIKit's own end-of-
+    // animation unhide bookkeeping).
+    UIView *morphSource = self.morphSourceView;
+    if (morphSource) {
+        UIView *morphView = morphSource;
+        SEL morphViewSelector = NSSelectorFromString(@"_morphView");
+        if ([morphSource respondsToSelector:morphViewSelector]) {
+            UIView *resolved = ((id (*)(id, SEL))objc_msgSend)(morphSource, morphViewSelector);
+            if (resolved) morphView = resolved;
+        }
+        for (UIView *restore in @[morphView, morphSource]) {
+            if (restore.hidden) restore.hidden = NO;
+            if (restore.alpha < 0.999) restore.alpha = 1.0;
+        }
+    }
+
     UIView *sourceView = self.sourceView;
     UIContextMenuInteraction *menuInteraction = self.interaction;
     if (!sourceView || !menuInteraction) return;
@@ -1521,8 +1568,32 @@ static BOOL ApolloNativeActionMenuCanFallbackPresent(id presenter, id actionCont
 %end
 
 %hook _TtC6Apollo22ModQueueViewController
+- (void)modQueueFilterNodeTapped {
+    id filterNode = ApolloReadObjectIvar(self, "modQueueFilterNode");
+    UIView *filterNodeView = ApolloNativeActionMenuViewForObject(filterNode);
+    BOOL filterNodeDispatchActive = sApolloNativeActionMenuCaptureDepth > 0
+        && sApolloNativeActionMenuSourceView == filterNodeView;
+    id source = filterNodeDispatchActive
+        ? filterNode
+        : ApolloReadObjectIvar(self, "filterBarButtonItem");
+    ApolloNativeActionMenuBeginCapture(source, self);
+    %orig;
+    ApolloNativeActionMenuEndCapture();
+}
+
 - (void)titleViewButtonTappedWithSender:(id)sender {
     ApolloNativeActionMenuBeginCapture(sender, self);
+    %orig;
+    ApolloNativeActionMenuEndCapture();
+}
+%end
+
+%hook _TtC6Apollo18ModQueueFilterNode
+- (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
+    // The nav-bar item and bottom filter node call the same no-argument action.
+    // Texture dispatches the node's target synchronously from this method, so
+    // preserve the actual touched node for the nested controller hook above.
+    ApolloNativeActionMenuBeginCapture(self, self);
     %orig;
     ApolloNativeActionMenuEndCapture();
 }

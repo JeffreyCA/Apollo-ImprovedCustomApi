@@ -74,6 +74,9 @@ NSString *ApolloEffectiveRedirectURI(void);
 // ([[RDKClient sharedClient] currentUser].username), or nil if none/unavailable.
 NSString * _Nullable ApolloActiveAccountUsername(void);
 
+// Login-persistence diagnostics: count of persisted accounts and how many carry a currentUser.
+void ApolloPersistedAccountStats(NSInteger *outCount, NSInteger *outWithUser);
+
 // Interactive OAuth (API-key) sign-in tracking. Auth modes are mutually
 // exclusive per account, but nothing used to enforce the transition: an
 // account that once had a web session and later signs in WITH an API key kept

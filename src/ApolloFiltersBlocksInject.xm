@@ -9,6 +9,10 @@
 //     lists, plus an "Add Subreddit..." row.
 //   • FILTER SUBREDDITS BY NAME — a list of name substrings (hide any subreddit
 //     whose name contains the word), plus an "Add Word..." row.
+//   • TAG FILTERS — the global Enable/NSFW/Spoiler switches plus a
+//     "Per-Subreddit Overrides" disclosure (settings IA restructure: Tag
+//     Filters is a filter, so it lives here now instead of a top-level
+//     Settings row; the switches write the same defaults the old screen did).
 //
 // Native sections are left fully intact (we append, so their indices never shift;
 // every native section/row routes straight to %orig). Cells are borrowed from a
@@ -22,7 +26,10 @@
 
 #import "ApolloCommon.h"
 #import "ApolloPostFilterStore.h"
+#import "ApolloState.h"
 #import "ApolloSubredditFilterDetailViewController.h"
+#import "TagFiltersViewController.h"
+#import "UserDefaultConstants.h"
 
 // Native Filters & Blocks screen (Apollo.SettingsFiltersViewController). Declared
 // for the compiler so our self-calls (the dataSource method + the %new helpers
@@ -35,10 +42,24 @@
 - (UITableViewCell *)apollo_pfBlockedToggleCellForTable:(UITableView *)tableView showingExpanded:(BOOL)showingExpanded;
 - (void)apollo_pfRefreshBlockedToggleCount:(UITableView *)tableView;
 - (void)apollo_pfSetBlockedExpanded:(BOOL)expanded table:(UITableView *)tableView;
+- (UITableViewCell *)apollo_tfCellForTable:(UITableView *)tableView row:(NSInteger)row;
+- (void)apollo_tfEnableChanged:(UISwitch *)sw;
+- (void)apollo_tfNSFWChanged:(UISwitch *)sw;
+- (void)apollo_tfSpoilerChanged:(UISwitch *)sw;
+- (void)apollo_tfOpenOverrides;
 @end
 
 // Number of Reborn sections appended after the native ones.
-static const NSInteger kApolloPFExtraSections = 2;
+static const NSInteger kApolloPFExtraSections = 3;
+
+// Rows of the appended Tag Filters section (always 4; static).
+enum {
+    ApolloTFRowEnable = 0,
+    ApolloTFRowNSFW,
+    ApolloTFRowSpoiler,
+    ApolloTFRowOverrides,
+    ApolloTFRowCount,
+};
 
 // Collapsible native Blocked Users section (the last native section): collapsed by
 // default to a single tappable "Blocked Users (N)" row so a long block list doesn't
@@ -130,8 +151,9 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
         }
         return %orig;
     }
-    if (section == native) return (NSInteger)[ApolloPostFilterStore allSubreddits].count + 1; // + Add
-    return (NSInteger)[ApolloPostFilterStore nameSubstrings].count + 1;                        // + Add
+    if (section == native) return (NSInteger)[ApolloPostFilterStore allSubreddits].count + 1;     // + Add
+    if (section == native + 1) return (NSInteger)[ApolloPostFilterStore nameSubstrings].count + 1; // + Add
+    return ApolloTFRowCount; // Tag Filters (static)
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -147,6 +169,8 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
         }
         return %orig;
     }
+
+    if (indexPath.section == native + 2) return [self apollo_tfCellForTable:tableView row:indexPath.row];
 
     BOOL isSubSection = (indexPath.section == native);
     NSArray<NSString *> *items = isSubSection ? [ApolloPostFilterStore allSubreddits]
@@ -192,7 +216,10 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
         }
         return %orig;
     }
-    NSString *title = (section == native) ? @"Subreddit-Specific Filters" : @"Filter Subreddits by Name";
+    NSString *title;
+    if (section == native) title = @"Subreddit-Specific Filters";
+    else if (section == native + 1) title = @"Filter Subreddits by Name";
+    else title = @"Tag Filters";
     return ApolloPFSectionHeaderView(title);
 }
 
@@ -204,9 +231,14 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
         // a frame as it re-laid-out). It just slides down as the rows expand.
         return %orig;
     }
-    NSString *text = (section == native)
-        ? @"Hide posts in a specific subreddit by title keyword or post flair. Tap a subreddit to configure. Applies on this device."
-        : @"Hide any subreddit whose name contains one of these words, in feeds and in search (e.g. 'circlejerk' hides r/carscirclejerk). Applies on this device.";
+    NSString *text;
+    if (section == native) {
+        text = @"Hide posts in a specific subreddit by title keyword or post flair. Tap a subreddit to configure. Applies on this device.";
+    } else if (section == native + 1) {
+        text = @"Hide any subreddit whose name contains one of these words, in feeds and in search (e.g. 'circlejerk' hides r/carscirclejerk). Applies on this device.";
+    } else {
+        text = @"Filtered posts are covered with a frosted blur over the post's title and thumbnail. Tap the blur to confirm and reveal the post.";
+    }
     return ApolloPFSectionFooterView(text);
 }
 
@@ -238,12 +270,14 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
         } else {
             [self apollo_pfPromptAddSubredditFromTable:tableView];
         }
-    } else {
+    } else if (indexPath.section == native + 1) {
         NSArray<NSString *> *names = [ApolloPostFilterStore nameSubstrings];
         if ((NSUInteger)indexPath.row >= names.count) {
             [self apollo_pfPromptAddNameFromTable:tableView];
         }
         // Existing name rows: no detail; remove via swipe / Edit.
+    } else if (indexPath.row == ApolloTFRowOverrides) {
+        [self apollo_tfOpenOverrides];
     }
 }
 
@@ -258,6 +292,7 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
         }
         return %orig;
     }
+    if (indexPath.section == native + 2) return NO; // Tag Filters rows are static
     NSArray<NSString *> *items = (indexPath.section == native) ? [ApolloPostFilterStore allSubreddits]
                                                               : [ApolloPostFilterStore nameSubstrings];
     return (NSUInteger)indexPath.row < items.count; // item rows deletable; Add row not
@@ -293,6 +328,7 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
         %orig; return;
     }
     if (editingStyle != UITableViewCellEditingStyleDelete) return;
+    if (indexPath.section == native + 2) return; // Tag Filters rows are static
     BOOL isSubSection = (indexPath.section == native);
     NSArray<NSString *> *items = isSubSection ? [ApolloPostFilterStore allSubreddits]
                                               : [ApolloPostFilterStore nameSubstrings];
@@ -370,6 +406,96 @@ static UIView *ApolloPFSectionFooterView(NSString *text) {
         [tableView reloadData];
     }]];
     [(UIViewController *)self presentViewController:alert animated:YES completion:nil];
+}
+
+#pragma mark - Tag Filters section
+
+// Switch/disclosure cells for the appended Tag Filters section. Fresh cells per
+// call (like TagFiltersViewController's own — this table reloads wholesale, no
+// per-row reuse to go stale). Theming borrows the same probe row the Blocked
+// Users toggle uses.
+%new
+- (UITableViewCell *)apollo_tfCellForTable:(UITableView *)tableView row:(NSInteger)row {
+    UITableViewCell *cell;
+    if (row == ApolloTFRowOverrides) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        cell.textLabel.text = @"Per-Subreddit Overrides";
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        cell.textLabel.enabled = sTagFilterEnabled;
+    } else {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        UISwitch *sw = [[UISwitch alloc] init];
+        switch (row) {
+            case ApolloTFRowEnable:
+                cell.textLabel.text = @"Enable Tag Filters";
+                sw.on = sTagFilterEnabled;
+                [sw addTarget:self action:@selector(apollo_tfEnableChanged:) forControlEvents:UIControlEventValueChanged];
+                break;
+            case ApolloTFRowNSFW:
+                cell.textLabel.text = @"NSFW";
+                sw.on = sTagFilterNSFW;
+                sw.enabled = sTagFilterEnabled;
+                cell.textLabel.enabled = sTagFilterEnabled;
+                [sw addTarget:self action:@selector(apollo_tfNSFWChanged:) forControlEvents:UIControlEventValueChanged];
+                break;
+            case ApolloTFRowSpoiler:
+            default:
+                cell.textLabel.text = @"Spoiler";
+                sw.on = sTagFilterSpoiler;
+                sw.enabled = sTagFilterEnabled;
+                cell.textLabel.enabled = sTagFilterEnabled;
+                [sw addTarget:self action:@selector(apollo_tfSpoilerChanged:) forControlEvents:UIControlEventValueChanged];
+                break;
+        }
+        cell.accessoryView = sw;
+    }
+    @try {   // borrow the native theme (background); labels stay label-color
+        UITableViewCell *probe = [self tableView:tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]];
+        UIColor *c = probe.backgroundColor ?: probe.contentView.backgroundColor;
+        if (c && CGColorGetAlpha(c.CGColor) > 0.01) cell.backgroundColor = c;
+    } @catch (__unused id e) {}
+    return cell;
+}
+
+%new
+- (void)apollo_tfEnableChanged:(UISwitch *)sw {
+    sTagFilterEnabled = sw.on;
+    [[NSUserDefaults standardUserDefaults] setBool:sw.on forKey:UDKeyTagFilterEnabled];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloTagFiltersChangedNotification object:nil];
+    // Re-gate the NSFW/Spoiler/Overrides rows' enabled look.
+    UITableView *t = objc_getAssociatedObject(self, kApolloPFBlockedTableKey);
+    if ([t isKindOfClass:[UITableView class]]) {
+        NSInteger section = [self apollo_pfNativeSectionCount:t] + 2;
+        @try { [t reloadSections:[NSIndexSet indexSetWithIndex:section] withRowAnimation:UITableViewRowAnimationNone]; } @catch (__unused id e) {}
+    }
+}
+
+%new
+- (void)apollo_tfNSFWChanged:(UISwitch *)sw {
+    sTagFilterNSFW = sw.on;
+    [[NSUserDefaults standardUserDefaults] setBool:sw.on forKey:UDKeyTagFilterNSFW];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloTagFiltersChangedNotification object:nil];
+}
+
+%new
+- (void)apollo_tfSpoilerChanged:(UISwitch *)sw {
+    sTagFilterSpoiler = sw.on;
+    [[NSUserDefaults standardUserDefaults] setBool:sw.on forKey:UDKeyTagFilterSpoiler];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloTagFiltersChangedNotification object:nil];
+}
+
+%new
+- (void)apollo_tfOpenOverrides {
+    TagFiltersViewController *vc = [[TagFiltersViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+    vc.overridesOnly = YES;
+    UIViewController *selfVC = (UIViewController *)self;
+    if (selfVC.navigationController) {
+        [selfVC.navigationController pushViewController:vc animated:YES];
+    } else {
+        [selfVC presentViewController:[[UINavigationController alloc] initWithRootViewController:vc] animated:YES completion:nil];
+    }
 }
 
 #pragma mark - Collapsible Blocked Users toggle

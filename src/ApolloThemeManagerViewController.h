@@ -1,5 +1,5 @@
 #import <UIKit/UIKit.h>
-#import "ApolloSettingsTableViewController.h"
+#import "settings/ApolloSettingsTableViewController.h"
 
 // ApolloThemeManagerViewController — the v2 Theme Manager UI (spec §13).
 //

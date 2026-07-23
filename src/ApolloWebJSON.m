@@ -89,7 +89,11 @@ static NSURL *ApolloWebJSONURLWithFragment(NSURL *url, NSString *fragment) {
     return c.URL ?: url;
 }
 
-static BOOL ApolloWebJSONURLIsProbe(NSURL *url) {
+// Exported (ApolloWebJSON.h): Tweak.xm's _onqueue_resume hook uses this to leave
+// probe-tagged requests entirely alone — including their User-Agent, which the
+// scrape paths set to desktop Safari deliberately (the app UA makes Reddit
+// render device=mobile, dropping the server-side markup the scrapers parse).
+BOOL ApolloWebJSONURLIsProbe(NSURL *url) {
     return [url.fragment isEqualToString:kApolloWebJSONProbeMarker];
 }
 
@@ -1732,6 +1736,17 @@ static NSString *ApolloWebJSONMintWebBearerForAccount(NSString *username) {
         ApolloLog(@"[WebJSON] Web-bearer mint for u/%@ succeeded (validated by the fetch that follows)", username);
         return token;
     }
+}
+
+NSString *ApolloWebJSONKeylessOAuthBearer(NSString *username) {
+    NSString *user = username.length ? username : ApolloActiveWebSessionUsername();
+    if (user.length == 0) return nil;
+    ApolloWebSessionEntry *session = ApolloWebSessionFor(user);
+    if (session.cookieHeader.length == 0) return nil;
+    // token_v2 while it's still fresh, else a bearer minted from the accounts
+    // token service (ApolloWebJSONMintWebBearerForAccount) — the HTML-page-load
+    // rotation this used to rely on is dead upstream (see the mint's note).
+    return ApolloWebJSONUsableTokenV2ForSession(session) ?: ApolloWebJSONMintWebBearerForAccount(user);
 }
 
 NSArray *ApolloWebJSONRescueFlairList(NSHTTPURLResponse *response) {

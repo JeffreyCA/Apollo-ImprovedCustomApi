@@ -1,5 +1,6 @@
 #import "ApolloWebAuthViewController.h"
 #import "ApolloManualSignInViewController.h"
+#import "ApolloWebSessionLoginViewController.h"
 #import "ApolloCommon.h"
 
 #import <WebKit/WebKit.h>
@@ -150,6 +151,32 @@
                                         userInfo:nil]];
 }
 
+// Before completing OAuth, opportunistically "grab" the reddit.com web session
+// this login webview is already signed into, so Polls / API-Key-Free features are
+// set up with no second sign-in. Best-effort and time-boxed: sign-in ALWAYS
+// completes (whether or not the harvest succeeds) and never waits more than a
+// moment. The harvest must run before _finishWithURL: tears down the ephemeral
+// webview and its cookie jar.
+- (void)_harvestPollSessionThenFinishWithURL:(NSURL *)url {
+    [self.spinner startAnimating];
+    __block BOOL didFinish = NO;
+    __weak typeof(self) weakSelf = self;
+    void (^finishOnce)(void) = ^{
+        if (didFinish) return;
+        didFinish = YES;
+        [weakSelf _finishWithURL:url error:nil];
+    };
+    // Safety net: never let a hung probe block sign-in.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!didFinish) ApolloLog(@"[WebAuth] Auto-harvest timed out — completing sign-in anyway");
+        finishOnce();
+    });
+    [ApolloWebSessionLoginViewController harvestPollSessionFromWebView:self.webView
+                                                           completion:^(NSString *username) {
+        finishOnce();
+    }];
+}
+
 - (void)_finishWithURL:(NSURL *)url error:(NSError *)error {
     if (self.finished) return;
     self.finished = YES;
@@ -201,7 +228,7 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
         // actually goes out over the network (for http/https redirect URIs).
         decisionHandler(WKNavigationActionPolicyCancel);
         ApolloLog(@"[WebAuth] Intercepted callback: %@", url);
-        [self _finishWithURL:url error:nil];
+        [self _harvestPollSessionThenFinishWithURL:url];
         return;
     }
 

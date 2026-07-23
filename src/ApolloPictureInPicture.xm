@@ -8,6 +8,7 @@
 #import "ApolloMediaAutoplay.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
+#import "settings/ApolloSettingsRouter.h"
 
 // =============================================================================
 // MARK: - Overview
@@ -540,6 +541,9 @@ static const NSTimeInterval kPiPControlsAutoHideDelay = 3.0;
 @property (nonatomic, strong) UIButton *playPauseButton;
 @property (nonatomic, strong) UIButton *muteButton;
 @property (nonatomic, strong) UIButton *closeButton;
+// Contextual entry point (settings IA): gear beside the close button opening
+// the Picture-in-Picture settings screen via the route registry.
+@property (nonatomic, strong) UIButton *settingsButton;
 // Optional overlay extras (settings-gated): skip back/ahead by sPiPSkipSeconds,
 // plus a read-only progress strip along the bottom edge.
 @property (nonatomic, strong) UIButton *skipBackButton;
@@ -1271,6 +1275,7 @@ static BOOL sPiPSessionHandbackInProgress = NO;
 
     self.closeButton = makeButton(@"xmark", smallConfig, @selector(closeTapped));
     self.muteButton = makeButton(@"speaker.slash.fill", smallConfig, @selector(muteTapped));
+    self.settingsButton = makeButton(@"gearshape.fill", smallConfig, @selector(settingsTapped));
 
     UITapGestureRecognizer *tap =
         [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
@@ -1890,6 +1895,9 @@ static BOOL sPiPSessionHandbackInProgress = NO;
     if (w < 1 || h < 1) return;
 
     self.closeButton.frame = CGRectMake(6, 6, 34, 34);
+    // The gear rides the same top band (y <= 40) the skip-row layout already
+    // keeps the center controls clear of, so it needs no collision handling.
+    self.settingsButton.frame = CGRectMake(44, 6, 34, 34);
     self.muteButton.frame = CGRectMake(w - 40, 6, 34, 34);
     // A silent GIF has no audio to toggle — hide the mute control for it (also
     // avoids an unmute tap spuriously claiming the Playback session).
@@ -2087,6 +2095,14 @@ static BOOL sPiPSessionHandbackInProgress = NO;
         }
         [player play];
     }
+    [self restartControlsTimer];
+}
+
+// Opens General → Media → Picture-in-Picture via the route registry. The card
+// lives in its own window and stays up over the settings screen, so toggles
+// (skip buttons, progress bar) can be watched take effect live.
+- (void)settingsTapped {
+    ApolloSettingsRouteOpen(@"picture-in-picture");
     [self restartControlsTimer];
 }
 

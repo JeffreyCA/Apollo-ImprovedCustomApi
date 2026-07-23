@@ -12,6 +12,8 @@
 #import "ApolloThemeRuntime.h"
 #import "ApolloThemeManagerViewController.h"
 #import "ApolloCommon.h"
+#import "ApolloState.h"
+#import "UserDefaultConstants.h"
 
 static NSString * const kAppColorThemeKey = @"AppColorTheme";
 
@@ -38,6 +40,99 @@ static UISwipeActionsConfiguration *(*sLeadingSwipeOrig)(id, SEL, UITableView *,
 static UISwipeActionsConfiguration *(*sTrailingSwipeOrig)(id, SEL, UITableView *, NSIndexPath *);
 
 static inline BOOL IsThemesRow(NSIndexPath *ip) { return ip.section == 0 && ip.row == 0; }
+
+// ---------------------------------------------------------------------------
+// "Color Flairs" row, appended at the end of the native Flair section
+// (settings IA restructure: the toggle used to live in the Reborn hub, but its
+// family — Post Flair / User Flair — is right here). This module already owns
+// the Appearance table's whole replaced-method surface, so the appended slot
+// is intercepted in every handler below BEFORE Eureka can index its form model
+// with an out-of-bounds row (the same reason the General screen has exactly
+// one remapper). Appending at the section's end shifts no native paths, so the
+// Themes-row repoint above is unaffected.
+// ---------------------------------------------------------------------------
+
+static NSString * const kFlairSectionHeaderTitle = @"Flair";
+
+// The Flair section's index, resolved fresh per call (the Appearance form can
+// insert/remove sections around it, e.g. the text-size slider). Uses the VC's
+// REAL titleForHeader/numberOfSections — neither is replaced. NSNotFound when
+// absent (future binary): the row simply isn't appended.
+static NSInteger FlairSectionIndex(id vc, UITableView *tv) {
+    if (![vc respondsToSelector:@selector(numberOfSectionsInTableView:)] ||
+        ![vc respondsToSelector:@selector(tableView:titleForHeaderInSection:)]) return NSNotFound;
+    NSInteger sections = ((NSInteger (*)(id, SEL, UITableView *))objc_msgSend)(
+        vc, @selector(numberOfSectionsInTableView:), tv);
+    for (NSInteger s = 0; s < sections; s++) {
+        NSString *title = ((NSString *(*)(id, SEL, UITableView *, NSInteger))objc_msgSend)(
+            vc, @selector(tableView:titleForHeaderInSection:), tv, s);
+        if ([title isKindOfClass:[NSString class]] &&
+            [[title stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet]
+                caseInsensitiveCompare:kFlairSectionHeaderTitle] == NSOrderedSame) {
+            return s;
+        }
+    }
+    return NSNotFound;
+}
+
+// YES when ip is the appended Color Flairs slot: first row past the Flair
+// section's native count.
+static BOOL IsColorFlairsRow(id vc, UITableView *tv, NSIndexPath *ip) {
+    if (!sRowsOrig) return NO;
+    NSInteger flairSection = FlairSectionIndex(vc, tv);
+    if (flairSection == NSNotFound || ip.section != flairSection) return NO;
+    NSInteger native = sRowsOrig(vc, @selector(tableView:numberOfRowsInSection:), tv, ip.section);
+    return ip.row == native;
+}
+
+// Toggle target: a plain object rather than a %new method — the row is
+// tweak-owned and the Appearance VC class stays untouched beyond the IMP layer.
+@interface ApolloFlairColorsToggleTarget : NSObject
+- (void)colorFlairsSwitchToggled:(UISwitch *)sender;
+@end
+
+@implementation ApolloFlairColorsToggleTarget
+- (void)colorFlairsSwitchToggled:(UISwitch *)sender {
+    sEnableFlairColors = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyEnableFlairColors];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloFlairColorsChangedNotification object:nil];
+    ApolloLog(@"ThemeManager: Color Flairs toggle -> %d", sender.isOn);
+}
+@end
+
+static ApolloFlairColorsToggleTarget *sFlairColorsToggleTarget = nil;
+static const void *kFlairColorsRowCellKey = &kFlairColorsRowCellKey;
+
+// Built once per screen instance, re-themed from the donor (the native Post
+// Flair row) and re-read from defaults on every dequeue.
+static UITableViewCell *BuildColorFlairsCell(id vc, UITableView *tv, NSIndexPath *ip) {
+    UITableViewCell *cell = objc_getAssociatedObject(vc, kFlairColorsRowCellKey);
+    UISwitch *sw = (UISwitch *)cell.accessoryView;
+    if (!cell || ![sw isKindOfClass:[UISwitch class]]) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.textLabel.text = @"Color Flairs";
+        if (!sFlairColorsToggleTarget) sFlairColorsToggleTarget = [ApolloFlairColorsToggleTarget new];
+        sw = [[UISwitch alloc] init];
+        [sw addTarget:sFlairColorsToggleTarget action:@selector(colorFlairsSwitchToggled:)
+     forControlEvents:UIControlEventValueChanged];
+        cell.accessoryView = sw;
+        objc_setAssociatedObject(vc, kFlairColorsRowCellKey, cell, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    UITableViewCell *donor = (sCellOrig && ip.row > 0)
+        ? sCellOrig(vc, @selector(tableView:cellForRowAtIndexPath:),
+                    tv, [NSIndexPath indexPathForRow:0 inSection:ip.section])
+        : nil;
+    if (donor) {
+        cell.backgroundColor = donor.backgroundColor;
+        cell.textLabel.font = donor.textLabel.font;
+        cell.textLabel.textColor = donor.textLabel.textColor;
+    }
+    UISwitch *donorSwitch = [donor.accessoryView isKindOfClass:[UISwitch class]] ? (UISwitch *)donor.accessoryView : nil;
+    sw.onTintColor = donorSwitch.onTintColor ?: ApolloThemeAccentColor();
+    sw.on = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFlairColors];
+    return cell;
+}
 
 // ---------------------------------------------------------------------------
 // Native theme screen modes.
@@ -168,7 +263,9 @@ extern "C" BOOL ApolloThemeOpenNativeCommentsThemeFromHub(UIViewController *hub)
 }
 
 static NSInteger Rows(id self, SEL _cmd, UITableView *tv, NSInteger section) {
-    return sRowsOrig ? sRowsOrig(self, _cmd, tv, section) : 0;
+    NSInteger n = sRowsOrig ? sRowsOrig(self, _cmd, tv, section) : 0;
+    if (section == FlairSectionIndex(self, tv)) n += 1; // the Color Flairs slot
+    return n;
 }
 
 // Apollo's Appearance screen builds this row with a UIListContentConfiguration
@@ -196,20 +293,34 @@ static void RewriteThemesRowLabel(UITableViewCell *cell) {
 }
 
 static UITableViewCell *Cell(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (IsColorFlairsRow(self, tv, ip)) return BuildColorFlairsCell(self, tv, ip);
     UITableViewCell *cell = sCellOrig ? sCellOrig(self, _cmd, tv, ip)
                                       : [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
     if (IsThemesRow(ip)) RewriteThemesRowLabel(cell);
     return cell;
 }
 
+// The Color Flairs slot borrows the sibling Post Flair row's height answers
+// (same visual row class); everything else falls through. Every handler below
+// intercepts the appended slot before calling the original — the original
+// would index Eureka's form model with an out-of-bounds row.
 static CGFloat Height(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (IsColorFlairsRow(self, tv, ip)) {
+        if (ip.row == 0 || !sHeightOrig) return UITableViewAutomaticDimension;
+        return sHeightOrig(self, _cmd, tv, [NSIndexPath indexPathForRow:0 inSection:ip.section]);
+    }
     return sHeightOrig ? sHeightOrig(self, _cmd, tv, ip) : UITableViewAutomaticDimension;
 }
 static CGFloat EstHeight(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (IsColorFlairsRow(self, tv, ip)) {
+        if (ip.row == 0 || !sEstHeightOrig) return 52.0;
+        return sEstHeightOrig(self, _cmd, tv, [NSIndexPath indexPathForRow:0 inSection:ip.section]);
+    }
     return sEstHeightOrig ? sEstHeightOrig(self, _cmd, tv, ip) : 52.0;
 }
 
 static void Select(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (IsColorFlairsRow(self, tv, ip)) { [tv deselectRowAtIndexPath:ip animated:YES]; return; }
     if (IsThemesRow(ip)) {
         [tv deselectRowAtIndexPath:ip animated:YES];
         ApolloThemeManagerViewController *vc = [[ApolloThemeManagerViewController alloc] init];
@@ -220,49 +331,61 @@ static void Select(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
 }
 
 static void WillDisplay(id self, SEL _cmd, UITableView *tv, UITableViewCell *cell, NSIndexPath *ip) {
+    if (IsColorFlairsRow(self, tv, ip)) return;
     if (sWillDisplayOrig) sWillDisplayOrig(self, _cmd, tv, cell, ip);
     if (IsThemesRow(ip)) RewriteThemesRowLabel(cell);
 }
 
 static void DidEndDisplaying(id self, SEL _cmd, UITableView *tv, UITableViewCell *cell, NSIndexPath *ip) {
+    if (IsColorFlairsRow(self, tv, ip)) return;
     if (sDidEndDisplayingOrig) sDidEndDisplayingOrig(self, _cmd, tv, cell, ip);
 }
 static BOOL ShouldHighlight(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (IsColorFlairsRow(self, tv, ip)) return NO;   // the switch is the control
     if (IsThemesRow(ip)) return YES;
     return sShouldHighlightOrig ? sShouldHighlightOrig(self, _cmd, tv, ip) : YES;
 }
 static NSIndexPath *WillSelect(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (IsColorFlairsRow(self, tv, ip)) return nil;
     if (IsThemesRow(ip)) return ip;
     if (!sWillSelectOrig) return ip;
     NSIndexPath *r = sWillSelectOrig(self, _cmd, tv, ip);
     return r ? ip : nil;
 }
 static void DidHighlight(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (IsColorFlairsRow(self, tv, ip)) return;
     if (sDidHighlightOrig) sDidHighlightOrig(self, _cmd, tv, ip);
 }
 static void DidUnhighlight(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (IsColorFlairsRow(self, tv, ip)) return;
     if (sDidUnhighlightOrig) sDidUnhighlightOrig(self, _cmd, tv, ip);
 }
 static BOOL CanEdit(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (IsColorFlairsRow(self, tv, ip)) return NO;
     if (IsThemesRow(ip)) return NO;
     return sCanEditOrig ? sCanEditOrig(self, _cmd, tv, ip) : NO;
 }
 static BOOL CanMove(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (IsColorFlairsRow(self, tv, ip)) return NO;
     if (IsThemesRow(ip)) return NO;
     return sCanMoveOrig ? sCanMoveOrig(self, _cmd, tv, ip) : NO;
 }
 static NSInteger EditingStyle(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (IsColorFlairsRow(self, tv, ip)) return UITableViewCellEditingStyleNone;
     if (IsThemesRow(ip)) return UITableViewCellEditingStyleNone;
     return sEditingStyleOrig ? sEditingStyleOrig(self, _cmd, tv, ip) : UITableViewCellEditingStyleNone;
 }
 static NSInteger Indent(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (IsColorFlairsRow(self, tv, ip)) return 0;
     return sIndentOrig ? sIndentOrig(self, _cmd, tv, ip) : 0;
 }
 static UISwipeActionsConfiguration *LeadingSwipe(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (IsColorFlairsRow(self, tv, ip)) return nil;
     if (IsThemesRow(ip)) return nil;
     return sLeadingSwipeOrig ? sLeadingSwipeOrig(self, _cmd, tv, ip) : nil;
 }
 static UISwipeActionsConfiguration *TrailingSwipe(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    if (IsColorFlairsRow(self, tv, ip)) return nil;
     if (IsThemesRow(ip)) return nil;
     return sTrailingSwipeOrig ? sTrailingSwipeOrig(self, _cmd, tv, ip) : nil;
 }
