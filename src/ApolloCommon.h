@@ -64,6 +64,9 @@ BOOL ApolloRouteURLThroughApp(NSURL *url);
 // Returns all UIWindows across every connected UIWindowScene.
 // Use instead of the deprecated UIApplication.windows property.
 NSArray<UIWindow *> *ApolloAllWindows(void);
+// Re-centers every live nav bar title after the LG title-centering mode toggle
+// changes (defined in ApolloLiquidGlass.xm; no-op off Liquid Glass).
+void ApolloLGTitleCenteringModeChanged(void);
 
 // Apollo's main ApolloTabBarController, found via the scene/app delegate's
 // tabBarController ivar or by walking window root VCs. Returns nil while the

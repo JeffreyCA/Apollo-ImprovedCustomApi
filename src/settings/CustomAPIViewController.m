@@ -1201,6 +1201,20 @@ typedef NS_ENUM(NSInteger, Tag) {
         }
                                   onSelect:nil];
 
+    ApolloSettingsRow *titleGapCentering =
+        [ApolloSettingsRow customRowWithID:@"gen.titleGapCentering"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            BOOL lgSupported = IsLiquidGlass();
+            UITableViewCell *cell = [weakSelf switchCellWithIdentifier:@"Cell_Gen_TitleGapCentering"
+                                                                 label:@"Balance Title Between Buttons"
+                                                                detail:@"Requires Liquid Glass. Centers the nav bar title between the back button and the top-right buttons; off centers it on the screen instead."
+                                                                    on:lgSupported && sLGTitleGapCentering
+                                                               enabled:lgSupported
+                                                                action:@selector(lgTitleGapCenteringSwitchToggled:)];
+            return cell ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        }
+                                  onSelect:nil];
+
     // Temporary iPad stopgap (#387): dock the floating tab bar at the
     // bottom instead of the top-center pill that overlaps the search bar.
     ApolloSettingsRow *iPadTabBarBottom =
@@ -1219,7 +1233,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     return [ApolloSettingsSection sectionWithTitle:nil
                                             footer:@"Liquid Glass chrome behaviors."
-                                              rows:@[ tabBarIdle, keepSearchInPlace, iPadTabBarBottom ]];
+                                              rows:@[ tabBarIdle, keepSearchInPlace, titleGapCentering, iPadTabBarBottom ]];
 }
 
 - (ApolloSettingsRow *)buildApolloAIRow {
@@ -3087,6 +3101,12 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)keepSearchBarInPlaceSwitchToggled:(UISwitch *)sender {
     sKeepSearchBarInPlace = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sKeepSearchBarInPlace forKey:UDKeyKeepSearchBarInPlace];
+}
+
+- (void)lgTitleGapCenteringSwitchToggled:(UISwitch *)sender {
+    sLGTitleGapCentering = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sLGTitleGapCentering forKey:UDKeyLGTitleGapCentering];
+    ApolloLGTitleCenteringModeChanged();
 }
 
 - (void)liveCommentsFollowSwitchToggled:(UISwitch *)sender {

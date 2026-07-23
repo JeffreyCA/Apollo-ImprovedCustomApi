@@ -846,7 +846,7 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
     const CGFloat kEdgePadding = 8.0;
     CGFloat halfWidth = width / 2.0;
     CGFloat targetCenter;
-    if (foundLeft && foundRight) {
+    if (sLGTitleGapCentering && foundLeft && foundRight) {
         // Pills on both sides: park the title at the midpoint of the visual gap
         // between them. Equal margins by construction — no overlap possible —
         // and the position no longer depends on which of UIKit's three layout
@@ -855,8 +855,11 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
             ? (leftLimit + rightLimit) / 2.0
             : unadjustedCenter;  // gap narrower than the title — leave UIKit's layout alone
     } else {
-        // Content on at most one side (root screens etc.): prefer the bar's
-        // absolute midpoint, nudged off the single pill if it would overlap.
+        // Screen centering (the toggle's OFF mode, and always the rule when
+        // content sits on at most one side, e.g. root screens): prefer the
+        // bar's absolute midpoint, nudged just enough off a pill it would
+        // overlap. The nudge is what keeps long titles from sliding under the
+        // trailing pill (#178) without needing the old bulk-translation bail.
         CGFloat minCenter = leftLimit + halfWidth + kEdgePadding;
         CGFloat maxCenter = rightLimit - halfWidth - kEdgePadding;
         targetCenter = (minCenter > maxCenter)
@@ -948,6 +951,25 @@ static void ApolloPokeTitleLayoutNearPlatter(UIView *fromView) {
 %end
 
 %end
+
+// Settings toggled the centering mode: re-run the recenter on every live nav
+// bar so open screens move immediately instead of waiting for their next
+// natural layout pass.
+void ApolloLGTitleCenteringModeChanged(void) {
+    if (!IsLiquidGlass()) return;
+    for (UIWindow *window in ApolloAllWindows()) {
+        NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:(UIView *)window];
+        while (q.count > 0) {
+            UIView *v = q.firstObject;
+            [q removeObjectAtIndex:0];
+            if ([v isKindOfClass:[UINavigationBar class]]) {
+                ApolloPokeTitleLayoutNearPlatter(v);
+                continue;
+            }
+            for (UIView *c in v.subviews) [q addObject:c];
+        }
+    }
+}
 
 // MARK: - AccountManagerViewController top padding fix for Liquid Glass
 // In Liquid Glass mode the account switcher popup has no built-in top margin,

@@ -96,6 +96,10 @@ extern BOOL sIPadTabBarBottom;
 // dock/grow); the field stays put and results populate the feed in place. Liquid Glass only;
 // mutually exclusive with the default nav-hide mode. See ApolloSearchInPlace.xm.
 extern BOOL sKeepSearchBarInPlace;
+// Liquid Glass title placement: ON (default) = centered in the gap between the
+// back pill and the trailing pill; OFF = centered on the screen, nudged only to
+// clear a pill. See ApolloRecenterTitleControl in ApolloLiquidGlass.xm.
+extern BOOL sLGTitleGapCentering;
 // When ON (default), press-and-hold on a post info row shows the glass-slider
 // magnifier loupe: slide to pick an icon, release to activate it (upvote /
 // comments / posted / % upvoted / translation). See ApolloStatsRowTouch.xm.
