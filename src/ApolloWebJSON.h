@@ -144,6 +144,12 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username);
 // next app launch.
 void ApolloWebJSONNoteSessionReauthenticated(NSString *username);
 
+// Re-arms the visible expiry prompt when the user chooses Later or cancels the
+// re-authentication browser. The current session remains untouched; only the
+// one-shot announcement/probe latch is cleared so a later retry can ask again
+// instead of leaving the requesting screen spinning for the rest of the launch.
+void ApolloWebJSONNoteSessionReauthenticationDeferred(NSString *username);
+
 // Posted (on the main thread) the first time a harvested session is observed to
 // have expired/been revoked, with userInfo[@"username"] set to the (lowercased)
 // account it expired for — expiry is now tracked per-account, since a session

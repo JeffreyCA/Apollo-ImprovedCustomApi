@@ -20,22 +20,20 @@ NS_ASSUME_NONNULL_BEGIN
 // The session is sensitive (it IS the account's live login, not just an API
 // client secret), so it's kept in the keychain — reusing ApolloWebJSON.m's
 // existing service string so the simulator's Valet/SecItem virtualization keeps
-// covering it. The global `sWebJSONEnabled` flag still exists as the internal
-// transport gate, but it is auto-managed rather than user-facing: a keyless
-// sign-in (harvest) turns it on, and launch turns it on whenever stored
-// sessions exist. The Settings switch that used to write it now reflects and
-// converts the ACTIVE account's sign-in mode instead.
+// covering it. The API-Key-Free setting remains an auto-managed description of
+// the active account's transport. Auxiliary feature sessions never change it.
 
 @interface ApolloWebSessionEntry : NSObject
 @property (nonatomic, copy) NSString *cookieHeader;
 @property (nonatomic, copy) NSString *modhash;
-// YES when this session was harvested purely for the experimental Polls feature
-// — auto-captured during an OAuth sign-in, or set up from Polls settings for an
-// account that authenticates via OAuth. A poll-only session is DELIBERATELY
-// invisible to ApolloWebSessionFor / ApolloActiveWebSession — i.e. to the whole
-// API-Key-Free transport + identity spine — so storing one for an OAuth account
-// never reroutes that account's healthy requests through cookie transport. Only
-// the poll features read it, via ApolloWebSessionPollFor.
+// YES when this session was harvested only for Reddit web features (Polls,
+// Chat, or modern Modmail) while the account still authenticates through OAuth
+// — auto-captured during an OAuth sign-in, or set up from the feature's own
+// settings. The historical persisted property name remains `pollOnly` for
+// compatibility. An auxiliary session is DELIBERATELY invisible to
+// ApolloWebSessionFor / ApolloActiveWebSession — i.e. to the whole API-Key-Free
+// transport + identity spine — so it never reroutes a healthy OAuth account
+// through cookie transport. Web-only features read it via ApolloWebSessionPollFor.
 @property (nonatomic) BOOL pollOnly;
 @end
 
@@ -52,10 +50,10 @@ extern "C" {
 // session. Poll code must use ApolloWebSessionPollFor instead.
 ApolloWebSessionEntry * _Nullable ApolloWebSessionFor(NSString *username);
 
-// Any stored web session for `username` usable by the experimental Polls feature
-// — PRIMARY or poll-only. Poll voting/creation and the Polls settings screen use
-// this; nothing on the transport/identity spine should. Returns nil only when the
-// account has no stored session at all.
+// Any stored web session for `username` usable by Reddit web-only features —
+// PRIMARY or auxiliary. Polls, Chat, and modern Modmail use this; nothing on the
+// transport/identity spine should. Returns nil only when the account has no
+// stored session at all.
 ApolloWebSessionEntry * _Nullable ApolloWebSessionPollFor(NSString *username);
 
 // Upserts (and persists to the keychain) the PRIMARY harvested session for

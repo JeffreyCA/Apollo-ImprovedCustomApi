@@ -537,6 +537,22 @@ void ApolloWebJSONNoteSessionReauthenticated(NSString *username) {
     }
 }
 
+void ApolloWebJSONNoteSessionReauthenticationDeferred(NSString *username) {
+    NSString *key = [[username ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+    if (key.length == 0) return;
+    // This intentionally has the same in-memory reset shape as a successful
+    // re-authentication, but does NOT touch the stored session. The distinction
+    // is semantic and important to the callers: Later/Cancel means "ask me on
+    // the next failing action", not "this cookie is healthy now".
+    @synchronized (ApolloWebJSONExpiryLock()) {
+        [sConsecutiveBlockResponsesByUser removeObjectForKey:key];
+        [sSessionExpiredAnnouncedUsers removeObject:key];
+        [sProbeBackoffAttemptsByUser removeObjectForKey:key];
+        [sSessionProbeInFlightUsers removeObject:key];
+    }
+    ApolloLog(@"[WebJSON] Re-armed the expired-session prompt for u/%@ after re-authentication was deferred", key);
+}
+
 // Confirm the cookie is actually dead with a direct GET /api/me.json before
 // declaring expiry. A revoked/expired cookie returns the block page (or no
 // username); a transient Cloudflare/rate-limit 403 burst — common right after

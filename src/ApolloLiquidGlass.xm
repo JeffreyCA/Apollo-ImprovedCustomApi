@@ -365,6 +365,26 @@ static void ApolloCancelLiquidLensGesture(UITabBar *tabBar) {
 @interface _UITAMICAdaptorView : UIView
 @end
 
+static void ApolloInsetLiquidGlassTabBadges(UIView *tabButton) {
+    if (!IsLiquidGlass() || !tabButton.window) return;
+
+    Class badgeClass = NSClassFromString(@"_UIBarBadgeView");
+    if (!badgeClass) return;
+
+    // iOS 26 renders both a normal and selected-content copy of each tab item.
+    // The selected copy is scaled to 116% inside a clipping glass platter, so
+    // UIKit's legacy badge origin (y=2) loses roughly four pixels at the top.
+    // _UITabButton owns these child frames; correct them after its layout pass
+    // with an absolute, idempotent inset rather than allowing repeated drift.
+    for (UIView *subview in tabButton.subviews) {
+        if (![subview isKindOfClass:badgeClass]) continue;
+        CGRect frame = subview.frame;
+        if (frame.origin.y >= 6.0) continue;
+        frame.origin.y = 6.0;
+        subview.frame = frame;
+    }
+}
+
 %hook UITabBarItem
 
 - (void)setImage:(UIImage *)image {
@@ -440,6 +460,11 @@ static void ApolloCancelLiquidLensGesture(UITabBar *tabBar) {
 %end
 
 %hook _UITabButton
+
+- (void)layoutSubviews {
+    %orig;
+    ApolloInsetLiquidGlassTabBadges(self);
+}
 
 - (void)didMoveToWindow {
     %orig;

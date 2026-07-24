@@ -2752,6 +2752,8 @@ static void initializeRandomSources() {
                                     UDKeyPostFilterSubreddits: @{},
                                     UDKeyPostFilterNameSubstrings: @[],
                                     UDKeyWebJSONEnabled: @NO,
+                                    UDKeyUseModernRedditChat: @NO,
+                                    UDKeyUseModernRedditModmail: @NO,
                                     UDKeyNotificationBackendURL: @"",
                                     UDKeyNotificationBackendRegistrationToken: @"",
                                     UDKeyRedditClientSecret: @""};

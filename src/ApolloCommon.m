@@ -302,7 +302,10 @@ NSURL *ApolloURLByConvertingResolvedURLToApolloScheme(NSURL *url) {
         return nil;
     }
 
-    if ([host hasSuffix:@"reddit.com"]) {
+    // Accept reddit.com and real subdomains only. A bare suffix test also
+    // matches unrelated lookalikes such as notreddit.com, which must stay on
+    // the external-web path instead of being rewritten into an Apollo deep link.
+    if ([host isEqualToString:@"reddit.com"] || [host hasSuffix:@".reddit.com"]) {
         components.host = @"reddit.com";
     } else if ([host isEqualToString:@"redd.it"] || [host hasSuffix:@".redd.it"]) {
         components.host = host;

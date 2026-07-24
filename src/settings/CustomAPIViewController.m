@@ -8,6 +8,7 @@
 #import "settings/ApolloPollSettingsViewController.h"
 #import "InfoRowSettingsViewController.h"
 #import "ApolloWebSessionLoginViewController.h"
+#import "ApolloDirectChatWeb.h"
 #import "settings/ApolloAISettingsViewController.h"
 #import "ApolloWebSessionStore.h"
 #import "ApolloAccountCredentials.h"
@@ -477,6 +478,10 @@ typedef NS_ENUM(NSInteger, Tag) {
     // flow (signed-in user / write-token availability may have just changed).
     // No-ops while the row is hidden (API-Key-Free Mode off).
     [self reloadRowWithID:@"api.webSessionLogin"];
+    // The active account can change while this screen is off-screen, flipping
+    // modern Chat/Modmail between optional and mandatory — re-derive both.
+    [self reloadRowWithID:@"api.modernChat"];
+    [self reloadRowWithID:@"api.modernModmail"];
     // Refresh the Apollo AI and Rich Link Previews status subtitles after returning
     // from their subviews.
     [self reloadRowWithID:@"feat.infoRow"];
@@ -1026,9 +1031,49 @@ typedef NS_ENUM(NSInteger, Tag) {
     // Only exists while API-Key-Free Mode is on (see -_applyWebJSONEnabled:).
     webSessionLogin.visible = ^BOOL { return sWebJSONEnabled; };
 
+    // Modern Reddit Chat. API-key accounts may opt in; API-key-free accounts are
+    // forced on (and the switch disabled) because Reddit no longer exposes Direct
+    // Chat through the legacy message API. Uses the harvested web session.
+    ApolloSettingsRow *modernChat =
+        [ApolloSettingsRow customRowWithID:@"api.modernChat"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            BOOL required = ApolloModernChatIsRequiredForActiveAccount();
+            BOOL selected = required || [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseModernRedditChat];
+            return [weakSelf switchCellWithIdentifier:@"Cell_API_ModernChat"
+                                                label:@"Use Modern Reddit Chat"
+                                               detail:required
+                                                      ? @"Required for the active API-key-free account because Reddit no longer exposes Direct Chat through the legacy message API."
+                                                      : @"Off keeps Apollo's legacy Direct Chat. On uses Reddit's current Chat with requests, group chats, and media. Requires a web-session sign-in."
+                                                   on:selected
+                                              enabled:!required
+                                               action:@selector(modernRedditChatSwitchToggled:)]
+                ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        }
+                                  onSelect:nil];
+
+    // Modern Moderator Mail. Same shape as Chat: opt-in for API-key accounts,
+    // forced on for API-key-free ones (Apollo's native Modmail needs OAuth creds
+    // they deliberately don't have).
+    ApolloSettingsRow *modernModmail =
+        [ApolloSettingsRow customRowWithID:@"api.modernModmail"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            BOOL required = ApolloModernChatIsRequiredForActiveAccount();
+            BOOL selected = required || [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseModernRedditModmail];
+            return [weakSelf switchCellWithIdentifier:@"Cell_API_ModernModmail"
+                                                label:@"Use Modern Moderator Mail"
+                                               detail:required
+                                                      ? @"Required for the active API-key-free account because Apollo's native Moderator Mail requires Reddit API credentials."
+                                                      : @"Off keeps Apollo's native Moderator Mail. On uses Reddit's current Modmail with the active web-session account."
+                                                   on:selected
+                                              enabled:!required
+                                               action:@selector(modernRedditModmailSwitchToggled:)]
+                ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        }
+                                  onSelect:nil];
+
     return [ApolloSettingsSection sectionWithTitle:@"Experimental"
                                             footer:@"Sign in to reddit.com instead of using API keys."
-                                              rows:@[ webJSON, webSessionLogin ]];
+                                              rows:@[ webJSON, webSessionLogin, modernChat, modernModmail ]];
 }
 
 - (ApolloSettingsSection *)buildAPIKeysExtrasSection {
@@ -3021,6 +3066,21 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     // The Web Session Login row only exists while the mode is on.
     [self visibilityDidChange];
+}
+
+// Modern Chat / Modmail opt-in for API-key accounts. API-key-free accounts are
+// forced on (the switch is disabled via -buildAPIKeysExperimentalSection), so
+// these only ever fire for a keyed account choosing to opt in or out.
+- (void)modernRedditChatSwitchToggled:(UISwitch *)sender {
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyUseModernRedditChat];
+    // The combined Inbox tab badge gates its chat contribution on this key —
+    // re-render it now so switching modern Chat off immediately drops any
+    // chat-inflated count back to Apollo's native value.
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloModernChatStatusDidChangeNotification object:nil];
+}
+
+- (void)modernRedditModmailSwitchToggled:(UISwitch *)sender {
+    [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyUseModernRedditModmail];
 }
 
 // This row is "manage/refresh my web login", NOT "add another account", so it
