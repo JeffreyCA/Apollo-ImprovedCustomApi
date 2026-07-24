@@ -32,6 +32,12 @@ UIColor *ApolloThemeRuntimeColor(ApolloThemeToken token);
 // supply their own last-resort (typically a view tint or systemBlue).
 UIColor *ApolloThemeAccentColor(void);
 
+// The EFFECTIVE card/cell background for tweak-drawn UI: the custom theme's
+// card color when one is active, else the stock theme's (Pure Black Dark
+// Mode aware). nil only if neither can be determined — callers supply their
+// own last-resort (typically secondarySystemGroupedBackgroundColor).
+UIColor *ApolloThemeCardBackgroundColor(void);
+
 // Re-derive a caller-provided system font in the active theme's system design.
 // Returns `base` unchanged when the theme runtime is inactive or the active
 // theme uses the default system font.
@@ -41,6 +47,9 @@ UIFont *ApolloThemeRuntimeFont(UIFont *base);
 // design (the theme editor's font-picker tiles and preview rows): the font
 // sink hooks and the live font-refresh walk leave pinned views untouched.
 void ApolloThemeRuntimeSetFontPinned(id view, BOOL pinned);
+
+// Preserve a tweak-owned visual-effect fill on Apollo's custom search field.
+void ApolloThemeRuntimeSetBackgroundColorPassthrough(id view, BOOL enabled);
 
 // Walk the app's windows and re-derive system-design fonts on Apollo-owned
 // labels / text fields / text views (plus vetted nav/tab-bar chrome) into the

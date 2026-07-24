@@ -19,11 +19,13 @@
 #import "ApolloLinkPreviewCache.h"
 #import "settings/ApolloDeletedCommentsSettingsViewController.h"
 #import "settings/ApolloLinkPreviewSettingsViewController.h"
+#import "settings/ApolloProfileLayoutViewController.h"
 #import "ApolloSubredditCustomBannerCache.h"
 #import "ApolloSubredditCustomIconCache.h"
 #import "ApolloSubredditInfoCache.h"
 #import "ApolloBannedProfile.h"
 #import "ApolloProfileSocialLinks.h"
+#import "ApolloWhatsNew.h"           // ApolloWhatsNewPresentForDebug() — TEMPORARY debug row
 #import "UserDefaultConstants.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/runtime.h>
@@ -39,6 +41,7 @@
 #import "settings/ApolloReportViewController.h"
 #import "settings/ApolloOpenInAppViewController.h"
 #import "settings/SavedCategoriesViewController.h"
+#import "settings/ApolloSubredditLayoutViewController.h"
 #import "settings/TranslationSettingsViewController.h"
 #import "PictureInPictureViewController.h"
 #import "TagFiltersViewController.h"
@@ -484,6 +487,9 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self reloadRowWithID:@"inlineMedia.settings"];
     [self reloadRowWithID:@"linkPreviews.settings"];
     [self reloadRowWithID:@"polls.settings"];
+    // Refresh the Profile Layout summary after returning from that screen
+    // (Density/Avatar/band switches may have just changed).
+    [self reloadRowWithID:@"media.profileLayout"];
     // The Setup section footer (onboarding nudge) collapses once a Reddit key
     // exists, which may have just been entered on the pushed API Keys screen.
     // Section 0 is Setup on the hub; reloading it re-evaluates the footer.
@@ -745,11 +751,22 @@ typedef NS_ENUM(NSInteger, Tag) {
     backend.iconSystemName    = @"bell.badge.fill";              backend.iconTileColor    = [UIColor systemRedColor];
     flex.iconSystemName       = @"ant.fill";                     flex.iconTileColor       = [UIColor systemGrayColor];
     exportLogs.iconSystemName = @"square.and.arrow.up.on.square.fill"; exportLogs.iconTileColor = [UIColor systemGrayColor];
+    // TEMPORARY dev-only: presents the What's New sheet on demand, bypassing
+    // gating (never touches UDKeyLastSeenWhatsNewVersion, so it's safe to tap
+    // repeatedly). Remove this row and ApolloWhatsNewPresentForDebug() once the
+    // gated flow has shipped and this is no longer needed for testing.
+    ApolloSettingsRow *whatsNewDebug =
+        [ApolloSettingsRow buttonRowWithID:@"adv.whatsNewDebug"
+                                     title:@"🔧 What's New Debug"
+                                    action:^{ ApolloWhatsNewPresentForDebug(); }];
+    whatsNewDebug.visible = ^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFLEX]; };
+
     loginPersistenceDebug.iconSystemName = @"wrench.and.screwdriver.fill"; loginPersistenceDebug.iconTileColor = [UIColor systemGrayColor];
+    whatsNewDebug.iconSystemName = @"sparkles"; whatsNewDebug.iconTileColor = [UIColor systemGrayColor];
 
     return [ApolloSettingsSection sectionWithTitle:@"Advanced"
                                             footer:@"Notification backend, developer tools and diagnostics."
-                                              rows:@[ backend, flex, exportLogs, loginPersistenceDebug ]];
+                                              rows:@[ backend, flex, exportLogs, loginPersistenceDebug, whatsNewDebug ]];
 }
 
 - (ApolloSettingsSection *)buildDataSection {
@@ -1220,9 +1237,47 @@ typedef NS_ENUM(NSInteger, Tag) {
         }
                                   onSelect:nil];
 
+    // Overrides UIScrollView's top/bottom edge glass (iOS 26+). Liquid Glass
+    // only — hidden otherwise rather than shown-disabled, since the row has
+    // nothing to preview/explain on a non-Glass device.
+    ApolloSettingsRow *scrollEdgeEffect =
+        [ApolloSettingsRow valueRowWithID:@"gen.scrollEdgeEffect"
+                                    title:@"Scroll Edge Effect"
+                                   detail:^NSString * { return [weakSelf scrollEdgeEffectStyleText]; }
+                                 onSelect:^{
+            [weakSelf presentScrollEdgeEffectStyleSheetFromSourceView:[weakSelf cellForRowID:@"gen.scrollEdgeEffect"]];
+        }];
+    scrollEdgeEffect.configure = ^(UITableViewCell *cell) { cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator; };
+    scrollEdgeEffect.visible = ^BOOL { return IsLiquidGlass(); };
+
     return [ApolloSettingsSection sectionWithTitle:nil
                                             footer:@"Liquid Glass chrome behaviors."
-                                              rows:@[ tabBarIdle, keepSearchInPlace, iPadTabBarBottom ]];
+                                              rows:@[ tabBarIdle, keepSearchInPlace, iPadTabBarBottom, scrollEdgeEffect ]];
+}
+
+- (NSString *)scrollEdgeEffectStyleText {
+    switch (sScrollEdgeEffectStyle) {
+        case ApolloScrollEdgeEffectStyleSoft:   return @"Soft";
+        case ApolloScrollEdgeEffectStyleHard:   return @"Hard";
+        case ApolloScrollEdgeEffectStyleHidden: return @"Hidden";
+        default:                                return @"Automatic";
+    }
+}
+
+- (void)setScrollEdgeEffectStyle:(NSInteger)style {
+    sScrollEdgeEffectStyle = style;
+    [[NSUserDefaults standardUserDefaults] setInteger:sScrollEdgeEffectStyle forKey:UDKeyScrollEdgeEffectStyle];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloScrollEdgeEffectStyleChangedNotification" object:nil];
+    [self reloadRowWithID:@"gen.scrollEdgeEffect"];
+}
+
+- (void)presentScrollEdgeEffectStyleSheetFromSourceView:(UIView *)sourceView {
+    __weak typeof(self) weakSelf = self;
+    ApolloSettingsPresentPicker(self, sourceView, @"Scroll Edge Effect",
+                                @[@"Automatic", @"Soft", @"Hard", @"Hidden"],
+                                sScrollEdgeEffectStyle, ^(NSInteger pickedIndex) {
+        [weakSelf setScrollEdgeEffectStyle:pickedIndex];
+    });
 }
 
 - (ApolloSettingsRow *)buildApolloAIRow {
@@ -1241,9 +1296,13 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.selectionStyle = UITableViewCellSelectionStyleDefault;
             }
             cell.textLabel.text = @"Apollo AI";
+            NSString *activeProviderName = @"On-device AI";
+            if ([sAISummaryProvider isEqualToString:@"openrouter"]) activeProviderName = @"OpenRouter AI";
+            else if ([sAISummaryProvider isEqualToString:@"gemini"]) activeProviderName = @"Gemini AI";
+            else if ([sAISummaryProvider isEqualToString:@"custom"]) activeProviderName = @"Custom cloud AI";
             cell.detailTextLabel.text = sEnableAISummaries
-                ? @"On-device AI enabled"
-                : @"On-device summaries and generation settings";
+                ? [NSString stringWithFormat:@"%@ enabled", activeProviderName]
+                : @"On-device or cloud summaries and generation settings";
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.detailTextLabel.numberOfLines = 0;
             cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
@@ -1493,6 +1552,19 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf profileTabAvatarSwitchToggled:sender]; }];
 
+    // Pushes the dedicated Profile Layout screen (Density + Avatar pickers,
+    // per-band show switches). Supersedes the old flat "Show Detailed
+    // Profiles" switch — sShowDetailedProfiles is now driven entirely from
+    // there (forced YES whenever Density/Avatar changes; New vs Classic is
+    // the real on/off for the melt backdrop, not this flag).
+    ApolloSettingsRow *profileLayout =
+        [self hubDisclosureRowWithID:@"media.profileLayout"
+                                title:@"Profile Layout"
+                             subtitle:^NSString * { return [weakSelf profileLayoutSummaryText]; }
+                                 push:^UIViewController * {
+            return [[ApolloProfileLayoutViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        }];
+
     ApolloSettingsRow *iconOnlyTabBar =
         [ApolloSettingsRow switchRowWithID:@"profiles.iconOnlyTabBar"
                                      title:@"Icon-Only Tab Bar"
@@ -1516,15 +1588,6 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onToggle:^(UISwitch *sender) { [weakSelf hideUsernameTabSwitchToggled:sender]; }];
     hideUsernameTab.enabled = ^BOOL { return !sHideTabBarTitles; };
 
-    // Single toggle for Reborn's detailed profile page: banner, large
-    // avatar/snoovatar, display name, bio, and the Social Links band (all of
-    // which live in the custom header). Off → Apollo's compact stock profile.
-    ApolloSettingsRow *detailedProfiles =
-        [ApolloSettingsRow switchRowWithID:@"media.detailedProfiles"
-                                     title:@"Show Detailed Profiles"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowDetailedProfiles]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf showDetailedProfilesSwitchToggled:sender]; }];
-
     // Master switch for the profile Badge Book (achievements + Trophy Case
     // strip in the profile header — ApolloBadgeBookStrip.m reads the flag).
     ApolloSettingsRow *badgeBook =
@@ -1535,7 +1598,26 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     return [ApolloSettingsSection sectionWithTitle:nil
                                             footer:@"Customize profile pictures, profile pages and the tab bar. Icon-Only Tab Bar hides every tab's text label (Hide Username on Tab Bar only hides yours), while keeping each icon's accessibility name.\n\nBadge Book adds a strip to profiles that opens the full Achievements catalogue (earned and locked, by category) and the user's Trophy Case. The catalogue is bundled so it opens instantly; each profile's earned badges are read from Reddit's public profile pages on first view and cached."
-                                              rows:@[ userAvatars, profileTabAvatar, iconOnlyTabBar, hideUsernameTab, detailedProfiles, badgeBook ]];
+                                              rows:@[ userAvatars, profileTabAvatar, iconOnlyTabBar, hideUsernameTab, profileLayout, badgeBook ]];
+}
+
+- (NSString *)profileLayoutSummaryText {
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    [parts addObject:sProfileHeaderImmersive ? @"New (Immersive)" : @"Classic (Compact)"];
+    switch (sProfileAvatarStyle) {
+        case 1:  [parts addObject:@"Circle Avatar"]; break;
+        case 2:  [parts addObject:@"Square Avatar"]; break;
+        default: break; // Full is the default, not worth calling out
+    }
+    NSMutableArray<NSString *> *hidden = [NSMutableArray array];
+    if (!sProfileShowBanner) [hidden addObject:@"Banner"];
+    if (!sProfileShowStatCards) [hidden addObject:@"Stat Cards"];
+    if (!sProfileShowSocialLinks) [hidden addObject:@"Social Links"];
+    if (!sProfileShowActions) [hidden addObject:@"Follow & Message"];
+    if (hidden.count > 0) {
+        [parts addObject:[NSString stringWithFormat:@"%@ off", [hidden componentsJoinedByString:@", "]]];
+    }
+    return [parts componentsJoinedByString:@" · "];
 }
 
 // Subreddits group screen (ApolloSubredditsSettingsViewController), two
@@ -1557,28 +1639,49 @@ typedef NS_ENUM(NSInteger, Tag) {
     // Sub-option: only exists while Subreddit List Enhancements is on.
     modernDividers.visible = ^BOOL { return sSubredditListEnhancements; };
 
-    ApolloSettingsRow *headers =
-        [ApolloSettingsRow switchRowWithID:@"sub.headers"
-                                     title:@"Show Subreddit Headers"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf subredditHeadersSwitchToggled:sender]; }];
+    // Deliberately NOT gated on the enhancements master: hides the description
+    // subtitles under Home/Popular/All/Moderator in both classic and modern lists.
+    // A subreddit-LIST feature, so it stays here beside the list toggles rather
+    // than moving into the Subreddit Layout (header) screen below.
+    ApolloSettingsRow *hideDescriptions =
+        [ApolloSettingsRow switchRowWithID:@"sub.hideFeedDescriptions"
+                                     title:@"Hide Feed Descriptions"
+                                      isOn:^BOOL { return sHideSubredditListDescriptions; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf hideSubredditListDescriptionsSwitchToggled:sender]; }];
 
-    // Off / Partial / Full replaces the old master + "Load All Highlights (Web)"
-    // switch pair with one picker (see -communityHighlightsModeText).
-    ApolloSettingsRow *highlights =
-        [ApolloSettingsRow valueRowWithID:@"sub.highlights"
-                                    title:@"Community Highlights"
-                                   detail:^NSString * { return [weakSelf communityHighlightsModeText]; }
-                                 onSelect:^{
-            [weakSelf presentCommunityHighlightsModeSheetFromSourceView:[weakSelf cellForRowID:@"sub.highlights"]];
+    // Pushes the dedicated Subreddit Layout screen — the single customize
+    // screen for everything subreddit-header-related: the master on/off
+    // (moved here from a separate "Show Subreddit Headers" row, which read as
+    // a confusing near-duplicate of the Banner switch inside that same
+    // screen), Density, the per-band show switches, and Community Highlights
+    // (also moved here — it's a subreddit-page feature, not a subreddit-list
+    // one, so it belongs alongside the rest of this customization rather than
+    // as a sibling of the list-view toggles above).
+    ApolloSettingsRow *subredditLayout =
+        [self hubDisclosureRowWithID:@"sub.layout"
+                                title:@"Subreddit Layout"
+                             subtitle:^NSString * { return [weakSelf subredditLayoutSummaryText]; }
+                                 push:^UIViewController * {
+            return [[ApolloSubredditLayoutViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
-    highlights.configure = ^(UITableViewCell *cell) {
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-    };
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Enhance the subreddit list and community pages with dividers, headers and highlights."
-                                              rows:@[ enhancements, modernDividers, headers, highlights ]];
+                                            footer:@"Enhance the subreddit list with dividers, and customize subreddit pages. Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts."
+                                              rows:@[ enhancements, modernDividers, hideDescriptions, subredditLayout ]];
+}
+
+- (NSString *)subredditLayoutSummaryText {
+    if (!sShowSubredditHeaders) return @"Headers off";
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    [parts addObject:sSubredditHeaderImmersive ? @"New (Immersive)" : @"Classic (Compact)"];
+    NSMutableArray<NSString *> *hidden = [NSMutableArray array];
+    if (!sSubredditShowBanner) [hidden addObject:@"Banner"];
+    if (!sSubredditShowJoinButton) [hidden addObject:@"Join Button"];
+    if (!sSubredditShowDisplayName) [hidden addObject:@"Subreddit Name"];
+    if (hidden.count > 0) {
+        [parts addObject:[NSString stringWithFormat:@"%@ off", [hidden componentsJoinedByString:@", "]]];
+    }
+    return [parts componentsJoinedByString:@" · "];
 }
 
 - (ApolloSettingsSection *)buildSubredditsSourcesSection {
@@ -2889,7 +2992,8 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)flexSwitchToggled:(UISwitch *)sender {
     [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyEnableFLEX];
-    // The Login Persistence Debug row only exists while developer mode is on.
+    // The Login Persistence Debug and What's New Debug rows only exist while
+    // developer mode is on.
     [self visibilityDidChange];
 }
 
@@ -2999,6 +3103,12 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloModernSubredditDividersChangedNotification object:nil];
 }
 
+- (void)hideSubredditListDescriptionsSwitchToggled:(UISwitch *)sender {
+    sHideSubredditListDescriptions = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sHideSubredditListDescriptions forKey:UDKeyHideSubredditListDescriptions];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloHideSubredditListDescriptionsChangedNotification object:nil];
+}
+
 - (void)showRecentlyReadThumbnailsSwitchToggled:(UISwitch *)sender {
     sShowRecentlyReadThumbnails = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sShowRecentlyReadThumbnails forKey:UDKeyShowRecentlyReadThumbnails];
@@ -3035,45 +3145,6 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)proxyImgurDDGSwitchToggled:(UISwitch *)sender {
     sProxyImgurDDG = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sProxyImgurDDG forKey:UDKeyProxyImgurDDG];
-}
-
-- (void)subredditHeadersSwitchToggled:(UISwitch *)sender {
-    sShowSubredditHeaders = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sShowSubredditHeaders forKey:UDKeyShowSubredditHeaders];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloSubredditHeaderToggleChangedNotification" object:nil];
-}
-
-- (NSString *)communityHighlightsModeText {
-    if (!sCommunityHighlights) return @"Off";
-    return sCommunityHighlightsWeb ? @"Full" : @"Partial";
-}
-
-// mode: 0 = Off, 1 = Partial (REST API, up to 2), 2 = Full (web harvest, up to 6).
-// Backed by the same two booleans other builds' preferences/backups already use
-// (see ApolloState.h) so no migration is needed.
-- (void)setCommunityHighlightsMode:(NSInteger)mode {
-    BOOL enabled = (mode != 0);
-    BOOL full = (mode == 2);
-    if (sCommunityHighlights == enabled && sCommunityHighlightsWeb == full) return;
-
-    sCommunityHighlights = enabled;
-    sCommunityHighlightsWeb = full;
-    [[NSUserDefaults standardUserDefaults] setBool:sCommunityHighlights forKey:UDKeyCommunityHighlights];
-    [[NSUserDefaults standardUserDefaults] setBool:sCommunityHighlightsWeb forKey:UDKeyCommunityHighlightsWeb];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloCommunityHighlightsToggleChangedNotification" object:nil];
-    [self reloadRowWithID:@"sub.highlights"];
-}
-
-// Title + options + "(Current)" only — shared picker (option index == mode).
-- (void)presentCommunityHighlightsModeSheetFromSourceView:(UIView *)sourceView {
-    __weak typeof(self) weakSelf = self;
-    NSInteger current = !sCommunityHighlights ? 0 : (sCommunityHighlightsWeb ? 2 : 1);
-    ApolloSettingsPresentPicker(self, sourceView, @"Community Highlights",
-                                @[@"Off", @"Partial", @"Full"],
-                                current,
-                                ^(NSInteger pickedIndex) {
-        [weakSelf setCommunityHighlightsMode:pickedIndex];
-    });
 }
 
 - (void)textPostThumbnailsSwitchToggled:(UISwitch *)sender {
@@ -3116,18 +3187,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     // Apollo natively observes this and relabels the profile tab immediately.
     [[NSNotificationCenter defaultCenter]
         postNotificationName:ApolloNativeHideUsernameOnTabBarChangedNotification object:nil];
-}
-
-- (void)showDetailedProfilesSwitchToggled:(UISwitch *)sender {
-    // One toggle for the whole detailed profile (header + banner + avatar + bio +
-    // social links). The avatars-toggle notification is observed in ApolloUserAvatars.xm
-    // and re-walks visible profile controllers, installing or tearing down the header
-    // per the new value; the social-links notification refreshes the band (gated on the
-    // same flag). Both apply live, no relaunch.
-    sShowDetailedProfiles = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sShowDetailedProfiles forKey:UDKeyShowDetailedProfiles];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloUserAvatarsToggleChangedNotification" object:nil];
-    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloSocialLinksToggleChangedNotification object:nil];
 }
 
 - (void)badgeBookSwitchToggled:(UISwitch *)sender {
