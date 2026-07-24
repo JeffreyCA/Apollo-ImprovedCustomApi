@@ -2696,6 +2696,10 @@ static void initializeRandomSources() {
                                     UDKeyProfileShowActions: @YES,
                                     UDKeyProfileAvatarStyle: @0,
                                     UDKeyShowSubredditHeaders: @NO,
+                                    UDKeySubredditHeaderImmersive: @YES,
+                                    UDKeySubredditShowBanner: @YES,
+                                    UDKeySubredditShowJoinButton: @YES,
+                                    UDKeySubredditShowDisplayName: @YES,
                                     UDKeyCommunityHighlights: @NO,
                                     UDKeyCommunityHighlightsWeb: @NO,
                                     UDKeyAutoHideTabBarShowOnIdle: @NO,
@@ -2908,6 +2912,10 @@ static void initializeRandomSources() {
         [standardDefaults setInteger:0 forKey:UDKeyProfileAvatarStyle];
     }
     sShowSubredditHeaders = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders];
+    sSubredditHeaderImmersive = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditHeaderImmersive];
+    sSubredditShowBanner = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowBanner];
+    sSubredditShowJoinButton = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowJoinButton];
+    sSubredditShowDisplayName = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowDisplayName];
     sCommunityHighlights = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlights];
     sCommunityHighlightsWeb = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlightsWeb];
     sAutoHideTabBarShowOnIdle = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoHideTabBarShowOnIdle];

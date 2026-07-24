@@ -38,6 +38,7 @@
 #import "settings/ApolloReportViewController.h"
 #import "settings/ApolloOpenInAppViewController.h"
 #import "settings/SavedCategoriesViewController.h"
+#import "settings/ApolloSubredditLayoutViewController.h"
 #import "settings/TranslationSettingsViewController.h"
 #import "PictureInPictureViewController.h"
 #import "TagFiltersViewController.h"
@@ -1629,34 +1630,47 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     // Deliberately NOT gated on the enhancements master: hides the description
     // subtitles under Home/Popular/All/Moderator in both classic and modern lists.
+    // A subreddit-LIST feature, so it stays here beside the list toggles rather
+    // than moving into the Subreddit Layout (header) screen below.
     ApolloSettingsRow *hideDescriptions =
         [ApolloSettingsRow switchRowWithID:@"sub.hideFeedDescriptions"
                                      title:@"Hide Feed Descriptions"
                                       isOn:^BOOL { return sHideSubredditListDescriptions; }
                                   onToggle:^(UISwitch *sender) { [weakSelf hideSubredditListDescriptionsSwitchToggled:sender]; }];
 
-    ApolloSettingsRow *headers =
-        [ApolloSettingsRow switchRowWithID:@"sub.headers"
-                                     title:@"Show Subreddit Headers"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf subredditHeadersSwitchToggled:sender]; }];
-
-    // Off / Partial / Full replaces the old master + "Load All Highlights (Web)"
-    // switch pair with one picker (see -communityHighlightsModeText).
-    ApolloSettingsRow *highlights =
-        [ApolloSettingsRow valueRowWithID:@"sub.highlights"
-                                    title:@"Community Highlights"
-                                   detail:^NSString * { return [weakSelf communityHighlightsModeText]; }
-                                 onSelect:^{
-            [weakSelf presentCommunityHighlightsModeSheetFromSourceView:[weakSelf cellForRowID:@"sub.highlights"]];
+    // Pushes the dedicated Subreddit Layout screen — the single customize
+    // screen for everything subreddit-header-related: the master on/off
+    // (moved here from a separate "Show Subreddit Headers" row, which read as
+    // a confusing near-duplicate of the Banner switch inside that same
+    // screen), Density, the per-band show switches, and Community Highlights
+    // (also moved here — it's a subreddit-page feature, not a subreddit-list
+    // one, so it belongs alongside the rest of this customization rather than
+    // as a sibling of the list-view toggles above).
+    ApolloSettingsRow *subredditLayout =
+        [self hubDisclosureRowWithID:@"sub.layout"
+                                title:@"Subreddit Layout"
+                             subtitle:^NSString * { return [weakSelf subredditLayoutSummaryText]; }
+                                 push:^UIViewController * {
+            return [[ApolloSubredditLayoutViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
-    highlights.configure = ^(UITableViewCell *cell) {
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-    };
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Enhance the subreddit list and community pages with dividers, headers and highlights. Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts."
-                                              rows:@[ enhancements, modernDividers, hideDescriptions, headers, highlights ]];
+                                            footer:@"Enhance the subreddit list with dividers, and customize subreddit pages. Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts."
+                                              rows:@[ enhancements, modernDividers, hideDescriptions, subredditLayout ]];
+}
+
+- (NSString *)subredditLayoutSummaryText {
+    if (!sShowSubredditHeaders) return @"Headers off";
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    [parts addObject:sSubredditHeaderImmersive ? @"New (Immersive)" : @"Classic (Compact)"];
+    NSMutableArray<NSString *> *hidden = [NSMutableArray array];
+    if (!sSubredditShowBanner) [hidden addObject:@"Banner"];
+    if (!sSubredditShowJoinButton) [hidden addObject:@"Join Button"];
+    if (!sSubredditShowDisplayName) [hidden addObject:@"Subreddit Name"];
+    if (hidden.count > 0) {
+        [parts addObject:[NSString stringWithFormat:@"%@ off", [hidden componentsJoinedByString:@", "]]];
+    }
+    return [parts componentsJoinedByString:@" · "];
 }
 
 - (ApolloSettingsSection *)buildSubredditsSourcesSection {
@@ -3120,45 +3134,6 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)proxyImgurDDGSwitchToggled:(UISwitch *)sender {
     sProxyImgurDDG = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sProxyImgurDDG forKey:UDKeyProxyImgurDDG];
-}
-
-- (void)subredditHeadersSwitchToggled:(UISwitch *)sender {
-    sShowSubredditHeaders = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sShowSubredditHeaders forKey:UDKeyShowSubredditHeaders];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloSubredditHeaderToggleChangedNotification" object:nil];
-}
-
-- (NSString *)communityHighlightsModeText {
-    if (!sCommunityHighlights) return @"Off";
-    return sCommunityHighlightsWeb ? @"Full" : @"Partial";
-}
-
-// mode: 0 = Off, 1 = Partial (REST API, up to 2), 2 = Full (web harvest, up to 6).
-// Backed by the same two booleans other builds' preferences/backups already use
-// (see ApolloState.h) so no migration is needed.
-- (void)setCommunityHighlightsMode:(NSInteger)mode {
-    BOOL enabled = (mode != 0);
-    BOOL full = (mode == 2);
-    if (sCommunityHighlights == enabled && sCommunityHighlightsWeb == full) return;
-
-    sCommunityHighlights = enabled;
-    sCommunityHighlightsWeb = full;
-    [[NSUserDefaults standardUserDefaults] setBool:sCommunityHighlights forKey:UDKeyCommunityHighlights];
-    [[NSUserDefaults standardUserDefaults] setBool:sCommunityHighlightsWeb forKey:UDKeyCommunityHighlightsWeb];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloCommunityHighlightsToggleChangedNotification" object:nil];
-    [self reloadRowWithID:@"sub.highlights"];
-}
-
-// Title + options + "(Current)" only — shared picker (option index == mode).
-- (void)presentCommunityHighlightsModeSheetFromSourceView:(UIView *)sourceView {
-    __weak typeof(self) weakSelf = self;
-    NSInteger current = !sCommunityHighlights ? 0 : (sCommunityHighlightsWeb ? 2 : 1);
-    ApolloSettingsPresentPicker(self, sourceView, @"Community Highlights",
-                                @[@"Off", @"Partial", @"Full"],
-                                current,
-                                ^(NSInteger pickedIndex) {
-        [weakSelf setCommunityHighlightsMode:pickedIndex];
-    });
 }
 
 - (void)textPostThumbnailsSwitchToggled:(UISwitch *)sender {

@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 
 @class UIScrollView;
+@class UINavigationItem;
 @class UIViewController;
 
 extern NSString *sRedditClientId;
@@ -81,6 +82,19 @@ extern BOOL sProfileShowSocialLinks;
 extern BOOL sProfileShowActions;
 extern NSInteger sProfileAvatarStyle; // 0 Full snoovatar, 1 Circle, 2 Square
 extern BOOL sShowSubredditHeaders;
+// New (Immersive, melt/ambient backdrop) vs Classic (same content, flat) —
+// only meaningful while sShowSubredditHeaders is YES. Mirrors
+// sProfileHeaderImmersive's semantics for subreddits. See ApolloSubredditHeaders.xm.
+extern BOOL sSubredditHeaderImmersive;
+// Per-section show switches on the subreddit header (banner / Join button /
+// display name) — same "turn off the bands you don't need" pattern as the
+// profile header's per-section switches.
+extern BOOL sSubredditShowBanner;
+extern BOOL sSubredditShowJoinButton;
+// Whether the community's big bold title (e.g. "Reddit Science") shows above
+// the r/name line. Direct on/off choice rather than the old auto-hide-if-
+// similar-to-r/name heuristic, so behavior is predictable across subreddits.
+extern BOOL sSubredditShowDisplayName;
 // Backing booleans for the single Community Highlights mode picker:
 //   Off     = both NO
 //   Partial = sCommunityHighlights YES, sCommunityHighlightsWeb NO
@@ -157,6 +171,15 @@ void ApolloApplyScrollEdgeEffectStyle(UIScrollView *scrollView);
 // ASTableView. Applying at the controller level mirrors SwiftUI's inherited
 // NavigationStack modifier and reaches both views.
 void ApolloApplyScrollEdgeEffectStyleToViewController(UIViewController *viewController);
+// Whether the nav title for this view controller should size its JumpBar to
+// its actual content (with truncation if still too wide) instead of Apollo's
+// fixed native width (ApolloSubredditHeaders.xm's subreddit feeds).
+// Positioning stays on the existing centering formula, unchanged, everywhere.
+BOOL ApolloSubredditTitleShouldTruncate(UIViewController *viewController);
+// Schedules a layout pass only for the subreddit title owned by this nav item.
+// ApolloTranslation.xm calls this after Apollo replaces its trailing item
+// cluster; unrelated windows and navigation stacks are never traversed.
+void ApolloSubredditRequestTitleRelayout(UINavigationItem *navigationItem);
 extern BOOL sModernSubredditDividers;
 // Master toggle for subreddit list enhancements (see UDKeySubredditListEnhancements).
 extern BOOL sSubredditListEnhancements;

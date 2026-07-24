@@ -670,8 +670,9 @@ static void ApolloNativeActionMenuSortSavedCategoriesIfNeeded(id presenter, id a
 static UIMenuElement *ApolloNativeActionMenuMakeReportRow(NSString *title, NSString *subtitle) {
     UIAction *row = [UIAction actionWithTitle:title image:nil identifier:nil handler:^(__unused UIAction *action) {}];
     row.attributes = UIMenuElementAttributesDisabled;
-    if (subtitle.length > 0 && [row respondsToSelector:@selector(setSubtitle:)]) {
-        row.subtitle = subtitle;
+    SEL setSubtitleSelector = NSSelectorFromString(@"setSubtitle:");
+    if (subtitle.length > 0 && [row respondsToSelector:setSubtitleSelector]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(row, setSubtitleSelector, subtitle);
     }
     return row;
 }

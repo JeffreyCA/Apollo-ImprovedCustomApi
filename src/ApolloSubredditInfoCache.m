@@ -1,5 +1,6 @@
 #import "ApolloSubredditInfoCache.h"
 
+#import "ApolloAccountCredentials.h"   // ApolloActiveAccountUsername() — userIsSubscriber stamping
 #import "ApolloState.h"
 
 NSString * const ApolloSubredditInfoUpdatedNotification = @"ApolloSubredditInfoUpdatedNotification";
@@ -171,6 +172,14 @@ NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
         dict[@"allowsImageComments"] = @(info.allowsImageComments);
         dict[@"allowsGifComments"] = @(info.allowsGifComments);
     }
+    // Written only when known, so a reloaded entry that never carried the flag
+    // stays nil (unknown) rather than decoding as a definite "not subscribed."
+    if (info.userIsSubscriber != nil) {
+        dict[@"userIsSubscriber"] = @(info.userIsSubscriber.boolValue);
+        if (info.userIsSubscriberAccount.length) {
+            dict[@"userIsSubscriberAccount"] = info.userIsSubscriberAccount;
+        }
+    }
     return dict;
 }
 
@@ -203,6 +212,11 @@ NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
     info.commentMediaInfoAvailable = [dict[@"commentMediaInfoAvailable"] boolValue];
     info.allowsImageComments = [dict[@"allowsImageComments"] boolValue];
     info.allowsGifComments = [dict[@"allowsGifComments"] boolValue];
+    id storedSubscriberFlag = dict[@"userIsSubscriber"];
+    if ([storedSubscriberFlag isKindOfClass:[NSNumber class]]) {
+        info.userIsSubscriber = @([storedSubscriberFlag boolValue]);
+        info.userIsSubscriberAccount = [self cleanStringFromValue:dict[@"userIsSubscriberAccount"]];
+    }
     return info;
 }
 
@@ -323,6 +337,18 @@ NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
                                                     bannerURL:bannerURL
                                               subscriberCount:subscriberCount
                                                     fetchedAt:[NSDate date]];
+
+    // Only present on an authenticated fetch; leaving it nil otherwise is what
+    // lets callers tell "not subscribed" apart from "nobody asked reddit as
+    // this user." Reddit sends a JSON bool, which lands as an NSNumber. Stamped
+    // with the account the fetch ran as: the flag is account-specific while the
+    // entry itself is shared and disk-persisted for days, so an unstamped or
+    // other-account flag must read as unknown after an account switch.
+    id subscriberFlag = dataDict[@"user_is_subscriber"];
+    if ([subscriberFlag isKindOfClass:[NSNumber class]]) {
+        info.userIsSubscriber = @([subscriberFlag boolValue]);
+        info.userIsSubscriberAccount = ApolloActiveAccountUsername().lowercaseString;
+    }
 
     // `allowed_media_in_comments` is an array of permitted media kinds for
     // comments. Absent/empty means no media is allowed. Values seen in the wild:
