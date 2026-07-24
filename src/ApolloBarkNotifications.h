@@ -94,6 +94,17 @@ NSData *ApolloBarkSyntheticTokenData(void);
 // `message` is suitable for a UIAlertController.
 void ApolloBarkSendTestNotification(void (^completion)(BOOL ok, NSString *message));
 
+// Client-side chat push: POST directly to the Bark push URL, no backend hop.
+// Used by the modern Chat unread poller — the self-hosted backend polls
+// Reddit's OAuth API server-side, where modern Chat does not exist, so chat
+// pushes can only originate on-device. Gated on ApolloBarkConfigured() (a
+// backend is NOT required). `completion` (nullable, main queue) reports
+// whether Bark actually accepted the push, so the poller can hold its
+// notified-watermark back and retry on the next tick after a transient
+// failure instead of silently dropping the event.
+void ApolloBarkSendChatNotification(NSString *title, NSString *body, NSString *clickURLString,
+                                    void (^completion)(BOOL delivered));
+
 // Fire-and-forget POST {backend}/v1/device that re-registers the current
 // device with the transport implied by the current settings (bark when
 // ApolloBarkModeActive(), apns otherwise), flipping the existing row in

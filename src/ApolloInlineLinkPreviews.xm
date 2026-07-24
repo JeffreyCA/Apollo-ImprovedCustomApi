@@ -138,6 +138,7 @@ static char kApolloLinkPreviewImageFallbackURLKey;
 static char kApolloLinkPreviewImageFallbackScheduledKey;
 static char kApolloLinkPreviewImageFallbackInFlightKey;
 static char kApolloLinkPreviewImageFallbackAppliedURLKey;
+static char kApolloLinkPreviewImageFallbackResizeInFlightURLKey;
 static char kApolloLinkPreviewRenderSignaturesKey;
 static char kApolloLinkPreviewCropContextKey;
 
@@ -891,6 +892,28 @@ static BOOL ApolloLPNetworkImageNodeHasImage(ASNetworkImageNode *imageNode) {
     return [image isKindOfClass:[UIImage class]] && image.size.width > 0.0 && image.size.height > 0.0;
 }
 
+static char kApolloLPDisplaySizedImageCacheKey;
+static char kApolloLPDisplaySizedImagePendingKey;
+
+static dispatch_queue_t ApolloLPImageResizeQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("com.apolloreborn.linkpreview.resize",
+                                      dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
+                                                                              QOS_CLASS_UTILITY,
+                                                                              0));
+    });
+    return queue;
+}
+
+static BOOL ApolloLPImageNeedsDisplayResize(UIImage *image) {
+    if (![image isKindOfClass:[UIImage class]]) return NO;
+    CGFloat w = image.size.width * image.scale;
+    CGFloat h = image.size.height * image.scale;
+    return w > 0.0 && h > 0.0 && MAX(w, h) > 1000.0;
+}
+
 // Cap the pixel size of any bitmap the card machinery holds on to. Cards render at
 // most ~screen width x ~200pt; og:image heroes are frequently 2000px+ wide, which
 // decode to 8-12MB each — and the fallback path pins them in defaultImage, where
@@ -902,23 +925,107 @@ static UIImage *ApolloLPDisplaySizedImage(UIImage *image) {
     CGFloat w = image.size.width * image.scale, h = image.size.height * image.scale;
     CGFloat longest = MAX(w, h);
     if (longest <= maxDim || w <= 0 || h <= 0) return image;
-    CGFloat ratio = maxDim / longest;
-    CGSize target = CGSizeMake(floor(w * ratio), floor(h * ratio));
-    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
-    format.scale = 1.0;
-    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:target format:format];
-    UIImage *scaled = [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *ctx) {
-        [image drawInRect:CGRectMake(0, 0, target.width, target.height)];
-    }];
+    UIImage *cached = objc_getAssociatedObject(image, &kApolloLPDisplaySizedImageCacheKey);
+    if ([cached isKindOfClass:[UIImage class]]) return cached;
+
+    // UIGraphicsImageRenderer reaches vImageConvert_AnyToAny, which needs a
+    // meaningful amount of stack, and the renderer's frames land on whichever
+    // thread runs this — a dispatch_sync onto the resize queue would NOT move
+    // them (GCD runs a sync block on the CALLING thread; it only takes the
+    // queue's exclusion). So this must never run on the main thread, where a
+    // deep Texture remeasure once left ~27 KB of headroom and the renderer hit
+    // the guard page. Main-thread callers check ApolloLPDisplaySizedImageIfReady
+    // and, on a miss, rasterize on ApolloLPImageResizeQueue instead.
+    UIImage *scaled = nil;
+    @autoreleasepool {
+        CGFloat ratio = maxDim / longest;
+        CGSize target = CGSizeMake(floor(w * ratio), floor(h * ratio));
+        @try {
+            UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+            format.scale = 1.0;
+            UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:target format:format];
+            scaled = [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *ctx) {
+                [image drawInRect:CGRectMake(0, 0, target.width, target.height)];
+            }];
+        } @catch (__unused NSException *exception) {
+            scaled = nil;
+        }
+        if (scaled) {
+            objc_setAssociatedObject(image,
+                                     &kApolloLPDisplaySizedImageCacheKey,
+                                     scaled,
+                                     OBJC_ASSOCIATION_RETAIN);
+        }
+    }
     return scaled ?: image;
+}
+
+// Non-rasterizing front door for main-thread callers: the image itself when it
+// is already display-sized, the memoized scaled copy when one exists, else nil
+// — meaning a real rasterize is needed and must happen off-main.
+static UIImage *ApolloLPDisplaySizedImageIfReady(UIImage *image) {
+    if (!image) return nil;
+    if (!ApolloLPImageNeedsDisplayResize(image)) return image;
+    UIImage *cached = objc_getAssociatedObject(image, &kApolloLPDisplaySizedImageCacheKey);
+    return [cached isKindOfClass:[UIImage class]] ? cached : nil;
 }
 
 static void ApolloLPRememberRenderedImageForURL(ASNetworkImageNode *imageNode, NSURL *imageURL) {
     if (!imageURL.absoluteString.length || !ApolloLPNetworkImageNodeHasImage(imageNode)) return;
-    UIImage *image = ApolloLPDisplaySizedImage(imageNode.image);
-    NSUInteger cost = (NSUInteger)(image.size.width * image.size.height * image.scale * image.scale * 4.0);
-    [ApolloLPFallbackImageCache() setObject:image forKey:imageURL.absoluteString cost:cost];
-    ApolloLPMaybeKickFaceScanForNode(imageNode, imageURL, image);
+    NSString *key = imageURL.absoluteString;
+    UIImage *sourceImage = imageNode.image;
+    UIImage *cachedImage = [ApolloLPFallbackImageCache() objectForKey:key];
+    if (cachedImage) {
+        ApolloLPMaybeKickFaceScanForNode(imageNode, imageURL, cachedImage);
+        return;
+    }
+
+    if (!ApolloLPImageNeedsDisplayResize(sourceImage)) {
+        NSUInteger cost = (NSUInteger)(sourceImage.size.width * sourceImage.size.height * sourceImage.scale * sourceImage.scale * 4.0);
+        [ApolloLPFallbackImageCache() setObject:sourceImage forKey:key cost:cost];
+        ApolloLPMaybeKickFaceScanForNode(imageNode, imageURL, sourceImage);
+        return;
+    }
+
+    // layoutSpecThatFits: calls this path on every measurement. Never wait for
+    // an oversized bitmap to rasterize there: one queued resize feeds the cache,
+    // while the ASNetworkImageNode keeps displaying its already-loaded image.
+    @synchronized (sourceImage) {
+        UIImage *scaled = objc_getAssociatedObject(sourceImage, &kApolloLPDisplaySizedImageCacheKey);
+        if ([scaled isKindOfClass:[UIImage class]]) {
+            NSUInteger cost = (NSUInteger)(scaled.size.width * scaled.size.height * scaled.scale * scaled.scale * 4.0);
+            [ApolloLPFallbackImageCache() setObject:scaled forKey:key cost:cost];
+            ApolloLPMaybeKickFaceScanForNode(imageNode, imageURL, scaled);
+            return;
+        }
+        if ([objc_getAssociatedObject(sourceImage, &kApolloLPDisplaySizedImagePendingKey) boolValue]) return;
+        objc_setAssociatedObject(sourceImage,
+                                 &kApolloLPDisplaySizedImagePendingKey,
+                                 @YES,
+                                 OBJC_ASSOCIATION_RETAIN);
+    }
+
+    __weak ASNetworkImageNode *weakImageNode = imageNode;
+    NSURL *imageURLCopy = imageURL;
+    dispatch_async(ApolloLPImageResizeQueue(), ^{
+        UIImage *scaled = ApolloLPDisplaySizedImage(sourceImage);
+        @synchronized (sourceImage) {
+            objc_setAssociatedObject(sourceImage,
+                                     &kApolloLPDisplaySizedImagePendingKey,
+                                     nil,
+                                     OBJC_ASSOCIATION_RETAIN);
+        }
+        if (scaled != sourceImage) {
+            NSUInteger cost = (NSUInteger)(scaled.size.width * scaled.size.height * scaled.scale * scaled.scale * 4.0);
+            [ApolloLPFallbackImageCache() setObject:scaled forKey:key cost:cost];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ASNetworkImageNode *strongImageNode = weakImageNode;
+            if (strongImageNode && scaled != sourceImage) {
+                ApolloLPMaybeKickFaceScanForNode(strongImageNode, imageURLCopy, scaled);
+            }
+        });
+    });
 }
 
 static void ApolloLPSetNetworkImageURLPreservingImage(ASNetworkImageNode *imageNode, NSURL *imageURL) {
@@ -1010,16 +1117,17 @@ static BOOL ApolloLPImageURLIsDead(NSURL *url) {
     }
 }
 
-static void ApolloLPApplyFallbackImage(ASNetworkImageNode *imageNode, NSURL *imageURL, UIImage *image, NSString *host) {
-    (void)host;
-    if (!imageNode || !image || image.size.width <= 0.0 || image.size.height <= 0.0) return;
+// Tail of the fallback apply — displayImage must already be display-sized.
+// Re-runs the liveness guards because it also fires after an async resize,
+// by which point the node may have moved to another URL or grown an image.
+// scanImage is what the face scan's pre-flight guards inspect (the scan
+// itself re-fetches from the fallback cache and works in unit coordinates).
+static void ApolloLPApplyFallbackImageNow(ASNetworkImageNode *imageNode, NSURL *imageURL, UIImage *displayImage, UIImage *scanImage) {
+    if (!imageNode || !displayImage || displayImage.size.width <= 0.0 || displayImage.size.height <= 0.0) return;
     NSURL *currentURL = objc_getAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackURLKey);
     if (![currentURL.absoluteString isEqualToString:imageURL.absoluteString]) return;
     if (ApolloLPNetworkImageNodeHasImage(imageNode)) return;
 
-    // Pin only a display-sized bitmap: og:image heroes decode to 8-12MB and
-    // defaultImage is outside Texture's out-of-range release (#630 round 8).
-    UIImage *displayImage = ApolloLPDisplaySizedImage(image);
     imageNode.image = displayImage;
     // Persist the decoded image as defaultImage so Texture keeps painting it
     // when it releases imageNode.image outside the display range. Without
@@ -1030,7 +1138,48 @@ static void ApolloLPApplyFallbackImage(ASNetworkImageNode *imageNode, NSURL *ima
     }
     imageNode.backgroundColor = nil;
     objc_setAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackAppliedURLKey, imageURL.absoluteString, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    ApolloLPMaybeKickFaceScanForNode(imageNode, imageURL, image);
+    ApolloLPMaybeKickFaceScanForNode(imageNode, imageURL, scanImage ?: displayImage);
+}
+
+static void ApolloLPApplyFallbackImage(ASNetworkImageNode *imageNode, NSURL *imageURL, UIImage *image, NSString *host) {
+    (void)host;
+    if (!imageNode || !image || image.size.width <= 0.0 || image.size.height <= 0.0) return;
+    NSURL *currentURL = objc_getAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackURLKey);
+    if (![currentURL.absoluteString isEqualToString:imageURL.absoluteString]) return;
+    if (ApolloLPNetworkImageNodeHasImage(imageNode)) return;
+
+    // Pin only a display-sized bitmap: og:image heroes decode to 8-12MB and
+    // defaultImage is outside Texture's out-of-range release (#630 round 8).
+    UIImage *displayImage = ApolloLPDisplaySizedImageIfReady(image);
+    if (displayImage) {
+        ApolloLPApplyFallbackImageNow(imageNode, imageURL, displayImage, image);
+        return;
+    }
+
+    // No display-sized copy exists yet, and this function has synchronous
+    // callers on the layout stack (ApolloLPScheduleImageFallbackIfNeeded runs
+    // inside card builds). Rasterizing here would land the renderer's frames
+    // on that same nearly-exhausted stack — the exact geometry the stack
+    // guard exists for — so kick the one memoized resize on the utility queue
+    // and finish the apply on main when the bitmap lands. Until then the node
+    // keeps its placeholder, the same interim state as the network-fetch path.
+    // The in-flight marker keeps repeated measures from queueing duplicates.
+    if ([objc_getAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackResizeInFlightURLKey) isEqualToString:imageURL.absoluteString]) return;
+    objc_setAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackResizeInFlightURLKey, imageURL.absoluteString, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    __weak ASNetworkImageNode *weakImageNode = imageNode;
+    NSURL *imageURLCopy = imageURL;
+    dispatch_async(ApolloLPImageResizeQueue(), ^{
+        UIImage *scaled = ApolloLPDisplaySizedImage(image);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ASNetworkImageNode *strongImageNode = weakImageNode;
+            if (!strongImageNode) return;
+            objc_setAssociatedObject(strongImageNode, &kApolloLinkPreviewImageFallbackResizeInFlightURLKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+            // On rasterize failure `scaled` is the original image — apply it
+            // anyway (a full-size pin beats a permanently blank card, and
+            // that was the pre-existing failure behavior).
+            ApolloLPApplyFallbackImageNow(strongImageNode, imageURLCopy, scaled, image);
+        });
+    });
 }
 
 static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL *imageURL, NSString *host) {
@@ -1062,6 +1211,14 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
         UIImage *image = data.length > 0 ? [UIImage imageWithData:data scale:UIScreen.mainScreen.scale] : nil;
         BOOL definitivelyDead = NO;
         if (image) {
+            // Cache only a display-sized bitmap. Storing the raw decode
+            // (8-12MB for og:image heroes) relied on a later measure's
+            // remember-pass to overwrite it with the scaled copy, and the
+            // memoized early-return there no longer overwrites — the
+            // full-size entry would squat in the 40MB budget for good.
+            // This is a URLSession delegate-queue thread, never the
+            // main/layout stack, so rasterizing inline here is safe.
+            image = ApolloLPDisplaySizedImage(image);
             NSUInteger cost = (NSUInteger)(image.size.width * image.size.height * image.scale * image.scale * 4.0);
             [ApolloLPFallbackImageCache() setObject:image forKey:key cost:cost];
         } else {
@@ -1956,11 +2113,17 @@ static void ApolloLPApplyStyleSize(id style, CGSize size) {
 
 static void ApolloLPClearStyleSize(id style) {
     if (!style) return;
-    @try {
-        [style setValue:nil forKey:@"preferredSize"];
-    } @catch (__unused NSException *exception) {
-        ApolloLPApplyStyleSize(style, CGSizeZero);
-    }
+    // Never KVC-nil a struct-typed key: `setValue:nil forKey:@"preferredSize"`
+    // reaches -[NSObject setNilValueForKey:], which THROWS NSInvalidArgumentException
+    // unconditionally (CGSize has no nil form), so the old @try here threw and
+    // caught an ObjC exception on EVERY compact-card measure — the @catch arm
+    // (preferredSize = zero) was the de facto behavior all along. Worse, the row
+    // is measured while Texture layout has the main-thread stack nearly
+    // exhausted, and raising the exception there (reason string formatting +
+    // unwind) crossed the stack guard — the 07-18 sort-switch SIGSEGV crashes
+    // (KERN_PROTECTION_FAILURE in __CFStringChangeSizeMultiple/_Unwind_RaiseException
+    // right above setNilValueForKey:). Set the zero size directly instead.
+    ApolloLPApplyStyleSize(style, CGSizeZero);
 }
 
 static void ApolloLPResetStyle(id style) {
@@ -4104,6 +4267,125 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
     return ApolloBannedProfileWrapLinkButtonSpecWithBannedHint(linkButtonNode, nativeSpec, redditUsername);
 }
 
+// ========================== Stack-guard sentinel ==========================
+// The 07-18 device crashes (Apollo-2026-07-18-025209/025258.ips) died from
+// MAIN-THREAD STACK EXHAUSTION during a comment-section batch table update
+// (switching the comment sort; the pre-#686 report was a vote update): SIGSEGV
+// on the stack guard page with the whole 1MB main stack consumed under a
+// shallow ~80-frame chain — every visible frame is <2KB static, so something
+// content-scaled dynamically ate ~900KB inside one row measure. The immediate
+// straw was the always-throwing KVC nil-clear (fixed in ApolloLPClearStyleSize:
+// exception-reason formatting + unwind need tens of KB the guard page no longer
+// had). This sentinel is the second layer of defense, plus the diagnostic that
+// names the real stack hog if exhaustion ever recurs:
+//  - at row-measure entry points, cheaply check main-thread stack headroom;
+//  - if a rich card is about to be built on a starving stack, render the
+//    native link spec for that pass instead (a later, healthy measure builds
+//    the card normally — same upgrade path used by every other bail here);
+//  - append ONE frame-pointer-walk attribution (any frame gap >=32KB, with
+//    dladdr symbols) to the persistent login-diag file, so the exhaustion
+//    shows up in the user's exported debug log with the guilty frame named,
+//    even if the process dies right after.
+#import <pthread.h>
+#import <dlfcn.h>
+
+// Remaining-stack floor below which a rich-card build is unsafe. The crash
+// reports show ordinary measures surviving with ~30KB left until the KVC throw
+// needed more; 160KB gives the whole remaining layout pass (nested stack specs,
+// text kit, our card specs) comfortable margin while being far beyond anything
+// ordinary content consumes at this depth (sim baseline: ~35KB TOTAL).
+static const size_t kApolloLPStackHeadroomFloor = 160 * 1024;
+
+static BOOL ApolloLPMainStackNearlyExhausted(size_t *usedOut, size_t *sizeOut) {
+    if (pthread_main_np() == 0) return NO; // crashes are main-thread; bg layout threads size themselves
+    pthread_t me = pthread_self();
+    uintptr_t top = (uintptr_t)pthread_get_stackaddr_np(me);
+    size_t size = pthread_get_stacksize_np(me);
+    uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
+    if (size == 0 || sp <= top - size || sp >= top) return NO;
+    size_t used = top - sp;
+    if (usedOut) *usedOut = used;
+    if (sizeOut) *sizeOut = size;
+    return (size - used) < kApolloLPStackHeadroomFloor;
+}
+
+// Walk the frame-pointer chain and attribute any gap >=32KB to the function
+// that owns it. Rate-limited: the full walk + dladdr + diag-file append runs at
+// most once per minute (the cheap headroom check above is the everyday cost).
+static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size) {
+    static CFAbsoluteTime sLastDump = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (sLastDump != 0 && now - sLastDump < 60.0) return;
+    sLastDump = now;
+
+    pthread_t me = pthread_self();
+    uintptr_t top = (uintptr_t)pthread_get_stackaddr_np(me);
+    uintptr_t bottom = top - pthread_get_stacksize_np(me);
+    NSMutableString *bigs = [NSMutableString string];
+    uintptr_t cur = (uintptr_t)__builtin_frame_address(0);
+    int frames = 0;
+    while (frames < 1024 && cur >= bottom && cur + 16 <= top) {
+        uintptr_t next = *(uintptr_t *)cur;
+        uintptr_t ret  = *(uintptr_t *)(cur + 8);
+        if (next <= cur || next >= top || next < bottom) break;
+        uintptr_t delta = next - cur;
+        if (delta >= 32 * 1024) {
+            Dl_info info = {0};
+            const char *sym = "?", *img = "?";
+            uintptr_t off = 0;
+            if (dladdr((void *)ret, &info)) {
+                sym = info.dli_sname ?: "?";
+                img = info.dli_fname ? (strrchr(info.dli_fname, '/') ? strrchr(info.dli_fname, '/') + 1 : info.dli_fname) : "?";
+                off = info.dli_saddr ? (ret - (uintptr_t)info.dli_saddr) : 0;
+            }
+            [bigs appendFormat:@" | %luKB under %s`%s+0x%lx",
+                               (unsigned long)(delta / 1024), img, sym, (unsigned long)off];
+        }
+        cur = next;
+        frames++;
+    }
+    NSString *line = [NSString stringWithFormat:@"[StackGuard] %s: main stack %lu/%luKB used, %d frames%@",
+                      where, (unsigned long)(used / 1024), (unsigned long)(size / 1024), frames,
+                      bigs.length ? bigs : @" (no frame gap >=32KB)"];
+    ApolloLog(@"%@", line);
+    ApolloAppendLoginDiag(line);
+}
+
+// Row-measure entry: purely observational (a height must be returned either
+// way), but this is the earliest point the exhaustion is visible when the hog
+// sits below the ASDK layout recursion.
+%hook ASTableView
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    size_t diagUsed = 0, diagSize = 0;
+    if (ApolloLPMainStackNearlyExhausted(&diagUsed, &diagSize)) {
+        ApolloLPStackGuardReport("heightForRow", diagUsed, diagSize);
+    }
+    return %orig;
+}
+%end
+
+// Wide-spec probe: ASStackLayoutSpec's layout stack-allocates per child, so a
+// runaway children array (a re-append loop) would eat stack with no extra
+// frames. A legitimate comment body stays well under this.
+%hook ASStackLayoutSpec
+- (id)calculateLayoutThatFits:(struct CDStruct_90e057aa)constrainedSize {
+    NSArray *probeChildren = [(id)self respondsToSelector:@selector(children)] ? [(id)self children] : nil;
+    if (probeChildren.count >= 300) {
+        static CFAbsoluteTime sLastWideLog = 0;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (sLastWideLog == 0 || now - sLastWideLog >= 10.0) {
+            sLastWideLog = now;
+            NSString *line = [NSString stringWithFormat:@"[StackGuard] wide ASStackLayoutSpec: children=%lu",
+                              (unsigned long)probeChildren.count];
+            ApolloLog(@"%@", line);
+            ApolloAppendLoginDiag(line);
+        }
+    }
+    return %orig;
+}
+%end
+// ======================== END stack-guard sentinel ========================
+
 %hook _TtC6Apollo14LinkButtonNode
 
 // Release the per-card bitmap pins when the card leaves the preload range, and
@@ -4139,6 +4421,27 @@ static id ApolloLPNativeLinkSpecWithBannedHintIfNeeded(id linkButtonNode, NSURL 
 }
 
 - (id)layoutSpecThatFits:(struct CDStruct_90e057aa)constrainedSize {
+    // Stack-guard sentinel: never start a rich-card build on a starving main
+    // stack (the 07-18 sort-switch crash geometry). The native spec is the
+    // cheapest correct layout for THIS pass — but Texture caches it, and
+    // stack pressure is transient with nothing else arranged to invalidate
+    // the node (a first-measure bail isn't even in the registered-nodes set
+    // yet), so schedule one relayout for the next runloop turn ourselves.
+    // A dispatch block starts near the top of the unwound stack, so the
+    // retried measure cannot re-trip the guard and loop.
+    {
+        size_t guardUsed = 0, guardSize = 0;
+        if (ApolloLPMainStackNearlyExhausted(&guardUsed, &guardSize)) {
+            ApolloLPStackGuardReport("LinkButtonNode.layoutSpecThatFits", guardUsed, guardSize);
+            ApolloLPRestoreHostShell((ASDisplayNode *)self);
+            __weak ASDisplayNode *weakSelf = (ASDisplayNode *)self;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                ASDisplayNode *strongSelf = weakSelf;
+                if (strongSelf) ApolloLPTriggerRelayoutForHost(strongSelf, @"stack-guard-recovery");
+            });
+            return %orig;
+        }
+    }
     NSString *urlString = ApolloGetLinkButtonNodeURLString(self);
     NSURL *url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
     ApolloLPPrefetchRedditUserProfileIfNeeded(url);

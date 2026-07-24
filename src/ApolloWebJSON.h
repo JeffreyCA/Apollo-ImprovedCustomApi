@@ -82,6 +82,34 @@ BOOL ApolloWebJSONShouldStubInvitedModerators(NSURLResponse *response);
 // RDKResponseSerializer hook.
 BOOL ApolloWebJSONShouldStubFlairList(NSURLResponse *response);
 
+// Recovers the real flair-template list after a cookie-routed flair fetch
+// failed (see ApolloWebJSONShouldStubFlairList): refetches the same path+query
+// from oauth.reddit.com using the session's token_v2 cookie as an OAuth
+// bearer, minting a fresh bearer from the accounts token service
+// (accounts.reddit.com/api/access_token) when the stored one has aged out.
+// Returns the template array Apollo natively parses, or nil when no usable
+// bearer/response could be produced (caller falls back to the empty stub).
+// Synchronous, bounded by short timeouts — background queues only; in
+// practice it runs on AFNetworking's response-processing queue via the
+// RDKResponseSerializer hook.
+NSArray *ApolloWebJSONRescueFlairList(NSHTTPURLResponse *response);
+
+// YES for requests the WebJSON layer authors itself (session probes, token_v2
+// mints, flair rescue fetches), marked by an internal URL fragment that never
+// reaches the wire. Transport-level observers — in particular the bearer
+// capture feeding sLatestRedditBearerToken — must skip these: their bearer is
+// the web-session account's token_v2, not Apollo's own OAuth credential.
+BOOL ApolloWebJSONRequestIsInternal(NSURL *url);
+
+// A token_v2-derived OAuth bearer for `username` (or the active web-session
+// account when nil/empty), minting a fresh token when the stored one is stale
+// (see ApolloWebJSONRescueFlairList above for why token_v2 works there).
+// Returns nil when the account has no stored web session — i.e. for API-key
+// accounts, which authenticate with Apollo's own bearer instead. Synchronous,
+// bounded by short timeouts — background queues only. Callers must mark their
+// request with ApolloWebJSONProbeURL so the transport hooks leave it alone.
+NSString *ApolloWebJSONKeylessOAuthBearer(NSString *username);
+
 // Hydrates the legacy single-session globals from the keychain, migrating any
 // legacy NSUserDefaults cookie value, then any legacy single-global session,
 // into the per-account ApolloWebSessionStore (see that file's harvest path for
@@ -115,6 +143,12 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username);
 // re-authenticated account could never be detected as expired again until the
 // next app launch.
 void ApolloWebJSONNoteSessionReauthenticated(NSString *username);
+
+// Re-arms the visible expiry prompt when the user chooses Later or cancels the
+// re-authentication browser. The current session remains untouched; only the
+// one-shot announcement/probe latch is cleared so a later retry can ask again
+// instead of leaving the requesting screen spinning for the rest of the launch.
+void ApolloWebJSONNoteSessionReauthenticationDeferred(NSString *username);
 
 // Posted (on the main thread) the first time a harvested session is observed to
 // have expired/been revoked, with userInfo[@"username"] set to the (lowercased)
@@ -202,6 +236,12 @@ BOOL ApolloWebJSONDiskAccountHasRealCredential(NSString *username);
 // HTTP header) to mark any request that the Web JSON layer or its clients
 // (e.g. ApolloRedditMediaUpload.m) issue themselves with the cookie already set.
 NSURL *ApolloWebJSONProbeURL(NSURL *url);
+
+// YES when `url` carries the probe fragment — i.e. it's one of our own
+// self-authored requests (session probes, upload leases, scrape GETs). Such
+// requests must pass through the network hooks completely untouched: no Web
+// JSON rewrite, no User-Agent stamping (they pick their UA deliberately).
+BOOL ApolloWebJSONURLIsProbe(NSURL *url);
 
 #ifdef __cplusplus
 }

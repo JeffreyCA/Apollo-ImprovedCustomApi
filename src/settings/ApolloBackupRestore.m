@@ -364,6 +364,28 @@ BOOL ApolloBackupRestoreRestoreFromZipURL(NSURL *zipURL, NSString **outErrorTitl
     NSString *libreAPIKey = [defaults stringForKey:UDKeyLibreTranslateAPIKey];
     sLibreTranslateAPIKey = libreAPIKey.length > 0 ? libreAPIKey : nil;
 
+    // AI summary backend + per-provider cloud credentials (same sanitize rules
+    // as the launch-time load in Tweak.xm: unknown provider → apple, empty → nil).
+    NSString *aiProvider = [defaults stringForKey:UDKeyAISummaryProvider];
+    if ([aiProvider isEqualToString:@"openrouter"] || [aiProvider isEqualToString:@"gemini"] ||
+        [aiProvider isEqualToString:@"custom"] || [aiProvider isEqualToString:@"apple"]) {
+        sAISummaryProvider = aiProvider;
+    } else {
+        sAISummaryProvider = @"apple";
+    }
+    NSString *(^aiKey)(NSString *) = ^NSString *(NSString *udKey) {
+        NSString *v = [[defaults stringForKey:udKey] stringByTrimmingCharactersInSet:
+                       [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        return v.length > 0 ? v : nil;
+    };
+    sOpenRouterAPIKey = aiKey(UDKeyOpenRouterAPIKey);
+    sOpenRouterAIModel = aiKey(UDKeyOpenRouterAIModel);
+    sGeminiAPIKey = aiKey(UDKeyGeminiAPIKey);
+    sGeminiAIModel = aiKey(UDKeyGeminiAIModel);
+    sCustomAIAPIKey = aiKey(UDKeyCustomAIAPIKey);
+    sCustomAIModel = aiKey(UDKeyCustomAIModel);
+    sCustomAIBaseURL = aiKey(UDKeyCustomAIBaseURL);
+
     // Restore group preferences, including the NSUserDefaults account state
     // (LoggedInAccountDetails, CurrentRedditAccountIndex, and the RedditAccounts2 /
     // RedditApplicationOnlyAccount2 mirrors). Apollo's AccountManager actually loads accounts

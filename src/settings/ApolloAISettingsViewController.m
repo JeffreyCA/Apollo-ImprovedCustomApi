@@ -1,10 +1,267 @@
 #import "settings/ApolloAISettingsViewController.h"
 
+#import "ApolloAICloudBridge.h"
 #import "ApolloAISummary.h"
 #import "ApolloCommon.h"
 #import "ApolloState.h"
 #import "ApolloToast.h"
 #import "UserDefaultConstants.h"
+
+#import <math.h>
+#import <QuartzCore/QuartzCore.h>
+#import <objc/runtime.h>
+
+static UIViewController *ApolloAISettingsViewControllerForView(UIView *view) {
+    UIResponder *responder = view;
+    while (responder) {
+        if ([responder isKindOfClass:[UIViewController class]]) {
+            return (UIViewController *)responder;
+        }
+        responder = responder.nextResponder;
+    }
+    return nil;
+}
+
+// Apollo installs a full-width back-swipe recognizer above settings screens.
+// Claim touches that begin on an enabled slider so that recognizer cannot
+// cancel UIControl tracking before the detent confirmation guard sees a second
+// movement frame. This mirrors Inline Media's device-proven slider handling.
+@interface ApolloAISettingsSliderClaimGesture : UIGestureRecognizer
+@property (nonatomic, weak) UITouch *apollo_claimedTouch;
+@end
+
+@implementation ApolloAISettingsSliderClaimGesture
+- (instancetype)initWithTarget:(id)target action:(SEL)action {
+    if ((self = [super initWithTarget:target action:action])) {
+        self.cancelsTouchesInView = NO;
+        self.delaysTouchesBegan = NO;
+        self.delaysTouchesEnded = NO;
+    }
+    return self;
+}
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.state != UIGestureRecognizerStatePossible) return;
+    UISlider *slider = [self.view isKindOfClass:[UISlider class]] ? (UISlider *)self.view : nil;
+    if (slider && !slider.isEnabled) {
+        self.state = UIGestureRecognizerStateFailed;
+        return;
+    }
+    self.apollo_claimedTouch = touches.anyObject;
+    self.state = UIGestureRecognizerStateBegan;
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.apollo_claimedTouch && ![touches containsObject:self.apollo_claimedTouch]) return;
+    if (self.state == UIGestureRecognizerStateBegan || self.state == UIGestureRecognizerStateChanged) {
+        self.state = UIGestureRecognizerStateChanged;
+    }
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.apollo_claimedTouch && ![touches containsObject:self.apollo_claimedTouch]) return;
+    if (self.state == UIGestureRecognizerStateBegan || self.state == UIGestureRecognizerStateChanged) {
+        self.state = UIGestureRecognizerStateEnded;
+    }
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (self.apollo_claimedTouch && ![touches containsObject:self.apollo_claimedTouch]) return;
+    self.state = UIGestureRecognizerStateCancelled;
+}
+
+- (void)reset {
+    [super reset];
+    self.apollo_claimedTouch = nil;
+}
+@end
+
+// A UISlider that carries a weak pointer to the value label shown beside its
+// title, so the value-changed handler can update the text without re-reading
+// the whole row. Used by the detent-slider rows below (post length + detail).
+@interface ApolloAISettingsSlider : UISlider
+@property (nonatomic, weak) UILabel *apollo_valueLabel;
+@property (nonatomic, strong) UISelectionFeedbackGenerator *apollo_feedback;
+@property (nonatomic) NSInteger apollo_lastSnappedIndex;
+@property (nonatomic) NSInteger apollo_pendingIndex;
+@property (nonatomic) NSInteger apollo_pendingStreak;
+@property (nonatomic) CFTimeInterval apollo_lastFeedbackTime;
+@property (nonatomic, strong) ApolloAISettingsSliderClaimGesture *apollo_claimGesture;
+@property (nonatomic, strong) NSHashTable<UIGestureRecognizer *> *apollo_wiredBackGestures;
+@end
+
+static NSInteger ApolloAISettingsHystereticIndex(float raw, NSInteger current,
+                                                  NSInteger minimum, NSInteger maximum);
+
+@implementation ApolloAISettingsSlider
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        _apollo_feedback = [[UISelectionFeedbackGenerator alloc] init];
+        _apollo_wiredBackGestures = [NSHashTable weakObjectsHashTable];
+        _apollo_claimGesture = [[ApolloAISettingsSliderClaimGesture alloc] initWithTarget:nil action:NULL];
+        [self addGestureRecognizer:_apollo_claimGesture];
+    }
+    return self;
+}
+
+- (void)apollo_wireSwipeBackFailureRequirements {
+    if (!self.apollo_claimGesture) return;
+
+    UIGestureRecognizer *pop =
+        ApolloAISettingsViewControllerForView(self).navigationController.interactivePopGestureRecognizer;
+    if (pop && ![self.apollo_wiredBackGestures containsObject:pop]) {
+        [pop requireGestureRecognizerToFail:self.apollo_claimGesture];
+        [self.apollo_wiredBackGestures addObject:pop];
+    }
+
+    for (UIView *view = self.superview; view; view = view.superview) {
+        UIGestureRecognizer *scrollPan = [view isKindOfClass:[UIScrollView class]]
+            ? ((UIScrollView *)view).panGestureRecognizer : nil;
+        for (UIGestureRecognizer *gesture in view.gestureRecognizers) {
+            if (gesture == self.apollo_claimGesture || gesture == scrollPan || gesture == pop) continue;
+            if ([self.apollo_wiredBackGestures containsObject:gesture]) continue;
+            NSString *className = NSStringFromClass([gesture class]);
+            BOOL panLike = [gesture isKindOfClass:[UIPanGestureRecognizer class]] ||
+                [className containsString:@"ParallaxTransition"];
+            if (!panLike) continue;
+            [gesture requireGestureRecognizerToFail:self.apollo_claimGesture];
+            [self.apollo_wiredBackGestures addObject:gesture];
+        }
+    }
+}
+
+// iOS 26 adds a private fluid-slider interaction whose feedback conductor
+// vibrates continuously while the thumb moves. These are discrete detent
+// sliders, so suppress that interaction and provide one selection tap ourselves
+// only after a new stop has been confirmed.
+- (void)addInteraction:(id<UIInteraction>)interaction {
+    if ([NSStringFromClass([interaction class]) containsString:@"FluidSliderInteraction"]) return;
+    [super addInteraction:interaction];
+}
+
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (!self.window) return;
+    for (id<UIInteraction> interaction in [self.interactions copy]) {
+        if ([NSStringFromClass([interaction class]) containsString:@"FluidSliderInteraction"]) {
+            [self removeInteraction:interaction];
+        }
+    }
+    for (NSString *selectorName in @[@"_setModulationFeedbackGenerator:", @"_setEdgeFeedbackGenerator:"]) {
+        SEL selector = NSSelectorFromString(selectorName);
+        if (![self respondsToSelector:selector]) continue;
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [self performSelector:selector withObject:nil];
+        #pragma clang diagnostic pop
+    }
+    [self apollo_wireSwipeBackFailureRequirements];
+}
+
+- (void)apollo_applyTouch:(UITouch *)touch {
+    CGRect track = [self trackRectForBounds:self.bounds];
+    CGFloat width = MAX(1.0, CGRectGetWidth(track));
+    CGFloat fraction = ([touch locationInView:self].x - CGRectGetMinX(track)) / width;
+    fraction = MIN(1.0, MAX(0.0, fraction));
+    float raw = self.minimumValue + fraction * (self.maximumValue - self.minimumValue);
+    NSInteger minimum = (NSInteger)self.minimumValue;
+    NSInteger maximum = (NSInteger)self.maximumValue;
+    NSInteger candidate = ApolloAISettingsHystereticIndex(raw,
+                                                            self.apollo_lastSnappedIndex,
+                                                            minimum, maximum);
+
+    // Match Inline Media's detent handling: confirm a crossing from the touch
+    // position itself instead of letting UISlider move continuously and then
+    // snapping it backward from the value-changed callback. Resetting the stock
+    // slider during tracking prevented it from ever progressing to another stop.
+    if (candidate == self.apollo_lastSnappedIndex) {
+        self.apollo_pendingIndex = candidate;
+        self.apollo_pendingStreak = 0;
+    } else if (candidate == self.apollo_pendingIndex) {
+        self.apollo_pendingStreak++;
+    } else {
+        self.apollo_pendingIndex = candidate;
+        self.apollo_pendingStreak = 1;
+    }
+
+    CFTimeInterval now = CACurrentMediaTime();
+    BOOL lockedOut = (now - self.apollo_lastFeedbackTime) < 0.15;
+    BOOL confirmed = candidate != self.apollo_lastSnappedIndex &&
+        self.apollo_pendingStreak >= 2 && !lockedOut;
+    if (!confirmed) return;
+
+    self.apollo_lastSnappedIndex = candidate;
+    self.apollo_pendingStreak = 0;
+    self.apollo_lastFeedbackTime = now;
+    [self setValue:(float)candidate animated:YES];
+    [self.apollo_feedback selectionChanged];
+    [self.apollo_feedback prepare];
+    [self sendActionsForControlEvents:UIControlEventValueChanged];
+}
+
+- (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    [self apollo_wireSwipeBackFailureRequirements];
+    self.apollo_lastSnappedIndex = (NSInteger)lroundf(self.value);
+    self.apollo_pendingIndex = self.apollo_lastSnappedIndex;
+    self.apollo_pendingStreak = 0;
+    [self.apollo_feedback prepare];
+    [self apollo_applyTouch:touch];
+    return YES;
+}
+
+- (BOOL)continueTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    [self apollo_applyTouch:touch];
+    return YES;
+}
+@end
+
+// UITableView normally delays and may cancel a control's touches once its pan
+// recognizer sees movement. Scope immediate, non-cancellable delivery to these
+// sliders so the rest of the AI settings screen keeps normal scrolling.
+@interface ApolloAISettingsTableView : UITableView
+@end
+
+@implementation ApolloAISettingsTableView
+static BOOL ApolloAISettingsViewIsInSlider(UIView *view) {
+    for (UIView *candidate = view; candidate; candidate = candidate.superview) {
+        if ([candidate isKindOfClass:[ApolloAISettingsSlider class]]) return YES;
+    }
+    return NO;
+}
+
+- (BOOL)touchesShouldBegin:(NSSet<UITouch *> *)touches
+                 withEvent:(UIEvent *)event
+             inContentView:(UIView *)view {
+    if (ApolloAISettingsViewIsInSlider(view)) return YES;
+    return [super touchesShouldBegin:touches withEvent:event inContentView:view];
+}
+
+- (BOOL)touchesShouldCancelInContentView:(UIView *)view {
+    if (ApolloAISettingsViewIsInSlider(view)) return NO;
+    return [super touchesShouldCancelInContentView:view];
+}
+@end
+
+// Keep a held finger from oscillating between neighboring stops. The 0.15
+// index-unit dead band is much wider than normal fingertip jitter while still
+// making deliberate movement feel immediate.
+static NSInteger ApolloAISettingsHystereticIndex(float raw, NSInteger current,
+                                                  NSInteger minimum, NSInteger maximum) {
+    current = MAX(minimum, MIN(current, maximum));
+    while (current < maximum && raw > (float)current + 0.65f) current++;
+    while (current > minimum && raw < (float)current - 0.65f) current--;
+    return current;
+}
+
+static NSString *ApolloAISettingsDetailText(ApolloAISummaryDetail detail) {
+    switch (detail) {
+        case ApolloAISummaryDetailBrief: return @"Brief";
+        case ApolloAISummaryDetailInDepth: return @"In-depth";
+        case ApolloAISummaryDetailBalanced:
+        default: return @"Balanced";
+    }
+}
 
 // The three mutually-exclusive ways summaries can appear when a thread opens,
 // derived from and persisted to the sEnableTapToSummarize /
@@ -19,6 +276,73 @@ typedef NS_ENUM(NSInteger, ApolloAISummaryMode) {
     ApolloAISummaryModeCount,
 };
 
+// UITextField tags for the provider fields (kept clear of the stacked cell's
+// internal label tags, 9000-range).
+typedef NS_ENUM(NSInteger, ApolloAIFieldTag) {
+    ApolloAIFieldTagAPIKey = 9101,
+    ApolloAIFieldTagModel,
+    ApolloAIFieldTagBaseURL,
+};
+
+// The backends summaries can be generated by, in picker order.
+static NSArray<NSString *> *ApolloAIProviderIdentifiers(void) {
+    return @[ @"apple", @"openrouter", @"gemini", @"custom" ];
+}
+
+static BOOL ApolloAIIsCloudProvider(void) {
+    return sAISummaryProvider.length > 0 && ![sAISummaryProvider isEqualToString:@"apple"];
+}
+
+static NSString *ApolloAIProviderDisplayName(NSString *provider) {
+    if ([provider isEqualToString:@"openrouter"]) return @"OpenRouter";
+    if ([provider isEqualToString:@"gemini"]) return @"Google Gemini";
+    if ([provider isEqualToString:@"custom"]) return @"Custom";
+    return @"Apple On-Device";
+}
+
+// The stored API key / model for the ACTIVE provider (each provider keeps its
+// own pair, so switching back and forth never loses a key).
+static NSString *ApolloAIStoredAPIKey(void) {
+    if ([sAISummaryProvider isEqualToString:@"openrouter"]) return sOpenRouterAPIKey;
+    if ([sAISummaryProvider isEqualToString:@"gemini"]) return sGeminiAPIKey;
+    if ([sAISummaryProvider isEqualToString:@"custom"]) return sCustomAIAPIKey;
+    return nil;
+}
+
+static NSString *ApolloAIStoredModel(void) {
+    if ([sAISummaryProvider isEqualToString:@"openrouter"]) return sOpenRouterAIModel;
+    if ([sAISummaryProvider isEqualToString:@"gemini"]) return sGeminiAIModel;
+    if ([sAISummaryProvider isEqualToString:@"custom"]) return sCustomAIModel;
+    return nil;
+}
+
+// Persist one provider field: updates the matching sVar global and writes/clears
+// the defaults key (empty → removed, so the registered/nil fallback applies).
+static void ApolloAISaveProviderField(ApolloAIFieldTag tag, NSString *value) {
+    value = [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *stored = value.length > 0 ? [value copy] : nil;
+    NSString *udKey = nil;
+    if (tag == ApolloAIFieldTagBaseURL) {
+        sCustomAIBaseURL = stored;
+        udKey = UDKeyCustomAIBaseURL;
+    } else if ([sAISummaryProvider isEqualToString:@"openrouter"]) {
+        if (tag == ApolloAIFieldTagAPIKey) { sOpenRouterAPIKey = stored; udKey = UDKeyOpenRouterAPIKey; }
+        else { sOpenRouterAIModel = stored; udKey = UDKeyOpenRouterAIModel; }
+    } else if ([sAISummaryProvider isEqualToString:@"gemini"]) {
+        if (tag == ApolloAIFieldTagAPIKey) { sGeminiAPIKey = stored; udKey = UDKeyGeminiAPIKey; }
+        else { sGeminiAIModel = stored; udKey = UDKeyGeminiAIModel; }
+    } else if ([sAISummaryProvider isEqualToString:@"custom"]) {
+        if (tag == ApolloAIFieldTagAPIKey) { sCustomAIAPIKey = stored; udKey = UDKeyCustomAIAPIKey; }
+        else { sCustomAIModel = stored; udKey = UDKeyCustomAIModel; }
+    }
+    if (!udKey) return;
+    if (stored) {
+        [[NSUserDefaults standardUserDefaults] setObject:stored forKey:udKey];
+    } else {
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:udKey];
+    }
+}
+
 // ObjC surface exported by ApolloFoundationModels.swift. Resolve it dynamically
 // so this settings screen remains loadable when the build SDK does not contain
 // FoundationModels and the Swift bridge reports the feature unavailable.
@@ -27,11 +351,18 @@ typedef NS_ENUM(NSInteger, ApolloAISummaryMode) {
 - (NSInteger)availabilityStatus;
 @end
 
+@interface ApolloAISettingsViewController () <UITextFieldDelegate>
+@end
+
 @implementation ApolloAISettingsViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Apollo AI";
+    if (![self.tableView isKindOfClass:[ApolloAISettingsTableView class]]) {
+        object_setClass(self.tableView, [ApolloAISettingsTableView class]);
+    }
+    self.tableView.delaysContentTouches = NO;
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -59,8 +390,43 @@ typedef NS_ENUM(NSInteger, ApolloAISummaryMode) {
                                   onToggle:^(UISwitch *sender) {
             sEnableAIPostSummaries = sender.isOn;
             [[NSUserDefaults standardUserDefaults] setBool:sEnableAIPostSummaries forKey:UDKeyEnableAIPostSummaries];
+            // Only the rows that hang off this toggle — reloading this row too
+            // would swap the cell out from under the mid-flip UISwitch and
+            // restart its knob animation (see -masterToggled:).
+            [weakSelf reloadRowWithID:@"postThreshold"];
+            [weakSelf reloadRowWithID:@"postDetail"];
         }];
     postSummaries.enabled = ^BOOL { return sEnableAISummaries; };
+
+    // Minimum body length (in words) a Reddit text post must reach before a
+    // summary is generated for it; linked articles remain eligible regardless.
+    // Six 50-word detents (50...300). Enabled only while post summaries are on.
+    ApolloSettingsRow *postThreshold =
+        [ApolloSettingsRow customRowWithID:@"postThreshold"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            return [weakSelf sliderCellWithLabel:@"Minimum Post Length"
+                                       valueText:[NSString stringWithFormat:@"%ld words", (long)sAIPostWordThreshold]
+                                   selectedIndex:(sAIPostWordThreshold / 50) - 1
+                                      tickLabels:@[@"50", @"100", @"150", @"200", @"250", @"300"]
+                                         enabled:(sEnableAISummaries && sEnableAIPostSummaries)
+                                          action:@selector(postThresholdSliderChanged:)];
+        }
+                                  onSelect:nil];
+    postThreshold.height = ^CGFloat { return 94.0; };
+
+    // How much detail a post/link summary carries (Brief / Balanced / In-depth).
+    ApolloSettingsRow *postDetail =
+        [ApolloSettingsRow customRowWithID:@"postDetail"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            return [weakSelf sliderCellWithLabel:@"Post/Link Detail"
+                                       valueText:ApolloAISettingsDetailText(sAIPostSummaryDetail)
+                                   selectedIndex:sAIPostSummaryDetail
+                                      tickLabels:@[@"Brief", @"Balanced", @"In-depth"]
+                                         enabled:(sEnableAISummaries && sEnableAIPostSummaries)
+                                          action:@selector(postDetailSliderChanged:)];
+        }
+                                  onSelect:nil];
+    postDetail.height = ^CGFloat { return 94.0; };
 
     ApolloSettingsRow *commentSummaries =
         [ApolloSettingsRow switchRowWithID:@"commentSummaries"
@@ -69,8 +435,25 @@ typedef NS_ENUM(NSInteger, ApolloAISummaryMode) {
                                   onToggle:^(UISwitch *sender) {
             sEnableAICommentSummaries = sender.isOn;
             [[NSUserDefaults standardUserDefaults] setBool:sEnableAICommentSummaries forKey:UDKeyEnableAICommentSummaries];
+            // Discussion detail is the only row that depends on this toggle;
+            // never reload the toggled row itself (see -masterToggled:).
+            [weakSelf reloadRowWithID:@"commentDetail"];
         }];
     commentSummaries.enabled = ^BOOL { return sEnableAISummaries; };
+
+    // How much detail a comment-thread (discussion) summary carries.
+    ApolloSettingsRow *commentDetail =
+        [ApolloSettingsRow customRowWithID:@"commentDetail"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            return [weakSelf sliderCellWithLabel:@"Discussion Detail"
+                                       valueText:ApolloAISettingsDetailText(sAICommentSummaryDetail)
+                                   selectedIndex:sAICommentSummaryDetail
+                                      tickLabels:@[@"Brief", @"Balanced", @"In-depth"]
+                                         enabled:(sEnableAISummaries && sEnableAICommentSummaries)
+                                          action:@selector(commentDetailSliderChanged:)];
+        }
+                                  onSelect:nil];
+    commentDetail.height = ^CGFloat { return 94.0; };
 
     // The old "Tap to Summarize" / "Open Summaries Automatically" switch pair
     // (mutually exclusive, with a non-obvious "neither" state) is now a single
@@ -91,10 +474,59 @@ typedef NS_ENUM(NSInteger, ApolloAISummaryMode) {
         cell.selectionStyle = sEnableAISummaries ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
     };
 
+    // Which backend generates summaries. Apple runs on-device; the cloud
+    // providers post the text to a third-party API under the user's own key.
+    ApolloSettingsRow *provider =
+        [ApolloSettingsRow valueRowWithID:@"provider"
+                                    title:@"AI Provider"
+                                   detail:^NSString * { return ApolloAIProviderDisplayName(sAISummaryProvider); }
+                                 onSelect:^{ [weakSelf presentProviderPicker]; }];
+    provider.configure = ^(UITableViewCell *cell) {
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    };
+
+    ApolloSettingsRow *providerKey =
+        [ApolloSettingsRow customRowWithID:@"provider.apiKey"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            return [weakSelf providerFieldCellWithLabel:@"API Key"
+                                            placeholder:[NSString stringWithFormat:@"Your %@ API key",
+                                                         ApolloAIProviderDisplayName(sAISummaryProvider)]
+                                                   text:ApolloAIStoredAPIKey()
+                                                    tag:ApolloAIFieldTagAPIKey];
+        }
+                                  onSelect:nil];
+    providerKey.visible = ^BOOL { return ApolloAIIsCloudProvider(); };
+
+    ApolloSettingsRow *providerModel =
+        [ApolloSettingsRow customRowWithID:@"provider.model"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            NSString *defaultModel = ApolloAICloudDefaultModelForProvider(sAISummaryProvider);
+            return [weakSelf providerFieldCellWithLabel:@"Model"
+                                            placeholder:(defaultModel ?: @"Required — e.g. gpt-4o-mini")
+                                                   text:ApolloAIStoredModel()
+                                                    tag:ApolloAIFieldTagModel];
+        }
+                                  onSelect:nil];
+    providerModel.visible = ^BOOL { return ApolloAIIsCloudProvider(); };
+
+    ApolloSettingsRow *providerBaseURL =
+        [ApolloSettingsRow customRowWithID:@"provider.baseURL"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            return [weakSelf providerFieldCellWithLabel:@"Base URL"
+                                            placeholder:@"https://api.example.com/v1"
+                                                   text:sCustomAIBaseURL
+                                                    tag:ApolloAIFieldTagBaseURL];
+        }
+                                  onSelect:nil];
+    providerBaseURL.visible = ^BOOL { return [sAISummaryProvider isEqualToString:@"custom"]; };
+
     ApolloSettingsRow *availability =
         [ApolloSettingsRow valueRowWithID:@"availability"
-                                    title:@"On-Device Model"
-                                   detail:^NSString * { return [weakSelf modelAvailabilityText]; }
+                                    title:(ApolloAIIsCloudProvider() ? ApolloAIProviderDisplayName(sAISummaryProvider)
+                                                                     : @"On-Device Model")
+                                   detail:^NSString * {
+            return ApolloAIIsCloudProvider() ? [weakSelf cloudAvailabilityText] : [weakSelf modelAvailabilityText];
+        }
                                  onSelect:nil];
 
     // Destructive action — the buttonRow kind would accent-tint the label, so
@@ -115,15 +547,41 @@ typedef NS_ENUM(NSInteger, ApolloAISummaryMode) {
                                      title:@"Export Apollo AI Logs"
                                     action:^{ [weakSelf exportLogsTapped]; }];
 
+    NSString *generalFooter;
+    if (ApolloAIIsCloudProvider()) {
+        generalFooter = [NSString stringWithFormat:
+            @"Summaries are generated by %@ using your API key — post and comment text (and fetched "
+            @"article text) is sent to that service. Your key is stored in Apollo's settings on this "
+            @"device, and is included in settings backups.", ApolloAIProviderDisplayName(sAISummaryProvider)];
+    } else {
+        generalFooter = @"Summaries are generated entirely on-device using Apple Intelligence — no post or comment text is sent to an external AI service. Summarizing a linked article does fetch that page from its source website, which happens automatically when you open a thread unless Tap to Summarize is on.";
+    }
+
+    NSString *providerFooter;
+    if ([sAISummaryProvider isEqualToString:@"custom"]) {
+        providerFooter = @"Any OpenAI-compatible chat-completions service: enter its base URL (e.g. https://api.example.com/v1), an API key, and a model ID.";
+    } else if (ApolloAIIsCloudProvider()) {
+        providerFooter = @"Leave Model empty to use the suggested default. Cloud providers work on any iPhone — no Apple Intelligence required.";
+    } else {
+        providerFooter = @"Apple On-Device requires an Apple Intelligence-capable device on iOS 26 or later. Choose a cloud provider with your own API key to get summaries on any iPhone.";
+    }
+
+    NSString *availabilityFooter = ApolloAIIsCloudProvider()
+        ? @"Availability is diagnostic. Ready means the provider is configured; the API key itself is only verified when a summary is generated."
+        : @"Availability is diagnostic. On some iOS versions, sideloaded apps may report Apple Intelligence as disabled even when generation still works.";
+
     return @[
         [ApolloSettingsSection sectionWithTitle:@"General"
-                                         footer:@"Summaries are generated entirely on-device using Apple Intelligence — no post or comment text is sent to an external AI service. Summarizing a linked article does fetch that page from its source website, which happens automatically when you open a thread unless Tap to Summarize is on."
+                                         footer:generalFooter
                                            rows:@[ master ]],
+        [ApolloSettingsSection sectionWithTitle:@"Provider"
+                                         footer:providerFooter
+                                           rows:@[ provider, providerKey, providerModel, providerBaseURL ]],
         [ApolloSettingsSection sectionWithTitle:@"Summaries"
-                                         footer:@"When Opening a Thread controls how enabled summaries appear:\n\n• Generate on Open — summaries generate as you open a thread and wait, collapsed, until you tap them.\n• Open Automatically — summaries generate and expand on their own.\n• Tap to Summarize — nothing generates until you tap a summary card, which then opens once it's ready."
-                                           rows:@[ postSummaries, commentSummaries, summaryMode ]],
+                                         footer:@"Minimum Post Length applies to Reddit text-post bodies; linked articles remain eligible independently. Brief gives the essentials, Balanced matches the standard summary, and In-depth adds useful context without reproducing the source.\n\nWhen Opening a Thread controls how enabled summaries appear:\n\n• Generate on Open — summaries generate as you open a thread and wait, collapsed, until you tap them.\n• Open Automatically — summaries generate and expand on their own.\n• Tap to Summarize — nothing generates until you tap a summary card, which then opens once it's ready."
+                                           rows:@[ postSummaries, postThreshold, postDetail, commentSummaries, commentDetail, summaryMode ]],
         [ApolloSettingsSection sectionWithTitle:@"Availability"
-                                         footer:@"Availability is diagnostic. On some iOS versions, sideloaded apps may report Apple Intelligence as disabled even when generation still works."
+                                         footer:availabilityFooter
                                            rows:@[ availability ]],
         [ApolloSettingsSection sectionWithTitle:@"Maintenance"
                                          footer:@"Clearing the cache removes saved summaries and extracted article text. Apollo AI logs contain only AI-specific Reborn diagnostics from the current app session."
@@ -153,12 +611,256 @@ typedef NS_ENUM(NSInteger, ApolloAISummaryMode) {
     }
 }
 
-// Every Summaries row's on/enabled state depends on the shared globals, so
-// re-read all three after any of them changes.
+// Cloud readiness string for the Availability row (mirrors what
+// ApolloAICloudBridge.availabilityStatus checks).
+- (NSString *)cloudAvailabilityText {
+    if (ApolloAIStoredAPIKey().length == 0) return @"API Key Required";
+    if ([sAISummaryProvider isEqualToString:@"custom"]) {
+        if (sCustomAIBaseURL.length == 0) return @"Base URL Required";
+        if (ApolloAICloudEffectiveModel().length == 0) return @"Model Required";
+    }
+    return @"Ready";
+}
+
+#pragma mark - Provider fields
+
+// Stacked caption-over-field cell for the provider API key / model / base URL.
+// Follows CustomAPIViewController's stackedTextFieldCell pattern; the form
+// rebuilds these cells fresh, so no dequeue/reuse plumbing is needed.
+- (UITableViewCell *)providerFieldCellWithLabel:(NSString *)label
+                                    placeholder:(NSString *)placeholder
+                                           text:(NSString *)text
+                                            tag:(ApolloAIFieldTag)tag {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    cell.textLabel.hidden = YES;
+
+    UILabel *captionLabel = [[UILabel alloc] init];
+    captionLabel.text = label;
+    captionLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    captionLabel.adjustsFontForContentSizeCategory = YES;
+    captionLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UITextField *textField = [[UITextField alloc] init];
+    textField.tag = tag;
+    textField.delegate = self;
+    textField.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCallout];
+    textField.adjustsFontForContentSizeCategory = YES;
+    textField.text = text;
+    textField.placeholder = placeholder;
+    textField.accessibilityLabel = label;
+    textField.clearButtonMode = UITextFieldViewModeWhileEditing;
+    textField.autocorrectionType = UITextAutocorrectionTypeNo;
+    textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    textField.spellCheckingType = UITextSpellCheckingTypeNo;
+    textField.returnKeyType = UIReturnKeyDone;
+    textField.adjustsFontSizeToFitWidth = YES;
+    textField.minimumFontSize = 12;
+    textField.translatesAutoresizingMaskIntoConstraints = NO;
+    if (tag == ApolloAIFieldTagAPIKey) {
+        // Masked like the other API-key fields; unmasked while editing (see
+        // textFieldDidBeginEditing:).
+        textField.secureTextEntry = YES;
+    } else if (tag == ApolloAIFieldTagBaseURL) {
+        textField.keyboardType = UIKeyboardTypeURL;
+    }
+
+    [cell.contentView addSubview:captionLabel];
+    [cell.contentView addSubview:textField];
+    UILayoutGuide *margins = cell.contentView.layoutMarginsGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [captionLabel.topAnchor constraintEqualToAnchor:margins.topAnchor],
+        [captionLabel.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+        [captionLabel.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor],
+        [textField.topAnchor constraintEqualToAnchor:captionLabel.bottomAnchor constant:4],
+        [textField.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+        [textField.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor],
+        [textField.bottomAnchor constraintEqualToAnchor:margins.bottomAnchor],
+    ]];
+    return cell;
+}
+
+- (void)presentProviderPicker {
+    [self.view endEditing:YES]; // commit any in-progress field first
+    NSArray<NSString *> *providers = ApolloAIProviderIdentifiers();
+    NSMutableArray<NSString *> *titles = [NSMutableArray arrayWithCapacity:providers.count];
+    for (NSString *provider in providers) [titles addObject:ApolloAIProviderDisplayName(provider)];
+    NSInteger currentIndex = [providers indexOfObject:sAISummaryProvider];
+    if (currentIndex == NSNotFound) currentIndex = 0;
+    __weak __typeof(self) weakSelf = self;
+    ApolloSettingsPresentPicker(self, [self cellForRowID:@"provider"], @"AI Provider",
+                                titles, currentIndex, ^(NSInteger pickedIndex) {
+        [weakSelf providerPicked:providers[pickedIndex]];
+    });
+}
+
+- (void)providerPicked:(NSString *)provider {
+    sAISummaryProvider = [provider copy];
+    [[NSUserDefaults standardUserDefaults] setObject:sAISummaryProvider forKey:UDKeyAISummaryProvider];
+    // The General/Provider/Availability footers and the availability row title
+    // are all provider-aware and computed in -buildForm, and the Provider
+    // section's row set changes with the provider — rebuild the whole form.
+    [self rebuildForm];
+}
+
+#pragma mark - UITextFieldDelegate
+
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    [textField resignFirstResponder];
+    return YES;
+}
+
+- (void)textFieldDidBeginEditing:(UITextField *)textField {
+    // Reveal the key while the user is actively editing it (matches the Custom
+    // API screen's behaviour); re-masked when editing ends.
+    if (textField.tag == ApolloAIFieldTagAPIKey) textField.secureTextEntry = NO;
+}
+
+- (void)textFieldDidEndEditing:(UITextField *)textField {
+    switch (textField.tag) {
+        case ApolloAIFieldTagAPIKey:
+        case ApolloAIFieldTagModel:
+        case ApolloAIFieldTagBaseURL:
+            ApolloAISaveProviderField((ApolloAIFieldTag)textField.tag, textField.text ?: @"");
+            break;
+        default:
+            return;
+    }
+    if (textField.tag == ApolloAIFieldTagAPIKey) textField.secureTextEntry = YES;
+    // Configuration may have crossed the ready/unready line — refresh the
+    // Availability row (never the Provider section itself, which would tear
+    // down this very text field mid-edit-session).
+    [self reloadRowWithID:@"availability"];
+}
+
+// Every Summaries row's enabled state hangs off the master switch, so re-read
+// them all when it flips. The master's own row (enableAI) must stay out of this
+// list — reloadRowWithID: physically swaps the cell, and doing that to the row
+// whose UISwitch is mid-flip tears the animating switch out of the hierarchy
+// and crossfades in a replacement already snapped to the end state (the
+// "double switch" glitch). Same rule for the sub-toggles: their handlers
+// reload only their dependent slider rows, never themselves.
 - (void)reloadSummaryControls {
     [self reloadRowWithID:@"postSummaries"];
+    [self reloadRowWithID:@"postThreshold"];
+    [self reloadRowWithID:@"postDetail"];
     [self reloadRowWithID:@"commentSummaries"];
+    [self reloadRowWithID:@"commentDetail"];
     [self reloadRowWithID:@"summaryMode"];
+}
+
+#pragma mark - Detent sliders (post length + summary detail)
+
+// A compact detent-slider cell: the current value is shown beside the title and
+// every available stop is labelled below the track. The control stores indices
+// (not the word/detail values themselves), so snapping is identical for the
+// six-stop threshold and the three-stop detail controls.
+- (UITableViewCell *)sliderCellWithLabel:(NSString *)label
+                               valueText:(NSString *)valueText
+                           selectedIndex:(NSInteger)selectedIndex
+                              tickLabels:(NSArray<NSString *> *)tickLabels
+                                 enabled:(BOOL)enabled
+                                  action:(SEL)action {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                                   reuseIdentifier:nil];
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+
+    UILabel *title = [[UILabel alloc] init];
+    title.text = label;
+    title.font = [UIFont systemFontOfSize:17.0];
+    title.enabled = enabled;
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:title];
+
+    UILabel *value = [[UILabel alloc] init];
+    value.text = valueText;
+    value.font = [UIFont monospacedDigitSystemFontOfSize:15.0 weight:UIFontWeightRegular];
+    value.textColor = [UIColor secondaryLabelColor];
+    value.textAlignment = NSTextAlignmentRight;
+    value.alpha = enabled ? 1.0 : 0.45;
+    value.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:value];
+
+    ApolloAISettingsSlider *slider = [[ApolloAISettingsSlider alloc] init];
+    slider.minimumValue = 0.0f;
+    slider.maximumValue = (float)MAX(0, (NSInteger)tickLabels.count - 1);
+    slider.value = (float)selectedIndex;
+    slider.apollo_lastSnappedIndex = selectedIndex;
+    slider.apollo_pendingIndex = selectedIndex;
+    slider.enabled = enabled;
+    slider.continuous = YES;
+    slider.accessibilityLabel = label;
+    slider.accessibilityValue = valueText;
+    slider.apollo_valueLabel = value;
+    slider.translatesAutoresizingMaskIntoConstraints = NO;
+    [slider addTarget:self action:action forControlEvents:UIControlEventValueChanged];
+    [cell.contentView addSubview:slider];
+
+    NSMutableArray<UILabel *> *tickViews = [NSMutableArray arrayWithCapacity:tickLabels.count];
+    for (NSString *tickText in tickLabels) {
+        UILabel *tick = [[UILabel alloc] init];
+        tick.text = tickText;
+        tick.font = [UIFont systemFontOfSize:10.0 weight:UIFontWeightRegular];
+        tick.textColor = [UIColor tertiaryLabelColor];
+        tick.textAlignment = NSTextAlignmentCenter;
+        tick.alpha = enabled ? 1.0 : 0.45;
+        [tickViews addObject:tick];
+    }
+    UIStackView *ticks = [[UIStackView alloc] initWithArrangedSubviews:tickViews];
+    ticks.axis = UILayoutConstraintAxisHorizontal;
+    ticks.distribution = UIStackViewDistributionFillEqually;
+    ticks.userInteractionEnabled = NO;
+    ticks.translatesAutoresizingMaskIntoConstraints = NO;
+    [cell.contentView addSubview:ticks];
+
+    UILayoutGuide *margins = cell.contentView.layoutMarginsGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [title.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+        [title.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:8.0],
+        [value.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor],
+        [value.centerYAnchor constraintEqualToAnchor:title.centerYAnchor],
+        [value.leadingAnchor constraintGreaterThanOrEqualToAnchor:title.trailingAnchor constant:8.0],
+        [slider.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor constant:8.0],
+        [slider.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor constant:-8.0],
+        [slider.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:2.0],
+        [ticks.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
+        [ticks.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor],
+        [ticks.topAnchor constraintEqualToAnchor:slider.bottomAnchor constant:-3.0],
+        [ticks.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-6.0],
+    ]];
+    return cell;
+}
+
+- (NSInteger)snappedIndexForSlider:(ApolloAISettingsSlider *)slider {
+    NSInteger minimum = (NSInteger)slider.minimumValue;
+    NSInteger maximum = (NSInteger)slider.maximumValue;
+    NSInteger index = (NSInteger)lroundf(slider.value);
+    return MAX(minimum, MIN(index, maximum));
+}
+
+- (void)postThresholdSliderChanged:(ApolloAISettingsSlider *)slider {
+    NSInteger index = [self snappedIndexForSlider:slider];
+    sAIPostWordThreshold = (index + 1) * 50;
+    NSString *text = [NSString stringWithFormat:@"%ld words", (long)sAIPostWordThreshold];
+    slider.apollo_valueLabel.text = text;
+    slider.accessibilityValue = text;
+    [[NSUserDefaults standardUserDefaults] setInteger:sAIPostWordThreshold forKey:UDKeyAIPostWordThreshold];
+}
+
+- (void)postDetailSliderChanged:(ApolloAISettingsSlider *)slider {
+    sAIPostSummaryDetail = (ApolloAISummaryDetail)[self snappedIndexForSlider:slider];
+    NSString *text = ApolloAISettingsDetailText(sAIPostSummaryDetail);
+    slider.apollo_valueLabel.text = text;
+    slider.accessibilityValue = text;
+    [[NSUserDefaults standardUserDefaults] setInteger:sAIPostSummaryDetail forKey:UDKeyAIPostSummaryDetail];
+}
+
+- (void)commentDetailSliderChanged:(ApolloAISettingsSlider *)slider {
+    sAICommentSummaryDetail = (ApolloAISummaryDetail)[self snappedIndexForSlider:slider];
+    NSString *text = ApolloAISettingsDetailText(sAICommentSummaryDetail);
+    slider.apollo_valueLabel.text = text;
+    slider.accessibilityValue = text;
+    [[NSUserDefaults standardUserDefaults] setInteger:sAICommentSummaryDetail forKey:UDKeyAICommentSummaryDetail];
 }
 
 #pragma mark - Summary mode

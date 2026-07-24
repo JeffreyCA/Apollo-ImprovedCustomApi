@@ -299,6 +299,10 @@ void ApolloRedditCaptureBearerTokenFromAuthorization(NSString *authorization, NS
 void ApolloRedditCaptureBearerTokenFromAuthorizationForURL(NSString *authorization, NSURL *url, NSString *source) {
     if (!ApolloURLIsRedditOAuth(url)) return;
     if (ApolloURLIsAccountSpecificPoll(url)) return;
+    // WebJSON-internal fetches (flair rescue etc.) authenticate with the
+    // web-session account's token_v2 — a real-looking bearer that belongs to
+    // a DIFFERENT account than whoever Apollo is composing/uploading as.
+    if (ApolloWebJSONRequestIsInternal(url)) return;
     ApolloRedditCaptureBearerTokenFromAuthorization(authorization, source);
 }
 
@@ -306,6 +310,7 @@ void ApolloRedditCaptureBearerTokenFromRequest(NSURLRequest *request, NSString *
     if (![request isKindOfClass:[NSURLRequest class]]) return;
     if (!ApolloURLIsRedditOAuth(request.URL)) return;
     if (ApolloURLIsAccountSpecificPoll(request.URL)) return;
+    if (ApolloWebJSONRequestIsInternal(request.URL)) return;
     ApolloRedditCaptureBearerTokenFromAuthorization([request valueForHTTPHeaderField:@"Authorization"], source);
 }
 

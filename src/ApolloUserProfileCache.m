@@ -1,4 +1,5 @@
 #import "ApolloUserProfileCache.h"
+#import "ApolloAccountCredentials.h"   // ApolloActiveAccountUsername() — follow-state account scoping
 #import "ApolloBannedProfile.h"
 #import "ApolloCommon.h"
 #import "ApolloLinkPreviewCache.h"
@@ -39,6 +40,11 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
         _bannerURL = bannerURL;
         _defaultSnoo = defaultSnoo;
         _fetchedAt = fetchedAt ?: [NSDate date];
+        _linkKarma = -1;
+        _commentKarma = -1;
+        _createdUTC = 0.0;
+        _userIsSubscriber = NO;
+        _followStateKnown = NO;
     }
     return self;
 }
@@ -205,6 +211,13 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
     dict[@"hasSnoovatar"] = @(info.hasSnoovatar);
     dict[@"isSuspended"] = @(info.isSuspended);
     dict[@"suspensionChecked"] = @(info.suspensionChecked);
+    dict[@"linkKarma"] = @(info.linkKarma);
+    dict[@"commentKarma"] = @(info.commentKarma);
+    dict[@"createdUTC"] = @(info.createdUTC);
+    if (info.followStateKnown) {
+        dict[@"userIsSubscriber"] = @(info.userIsSubscriber);
+        if (info.followStateAccount.length) dict[@"followStateAccount"] = info.followStateAccount;
+    }
     dict[@"fetchedAt"] = @([info.fetchedAt timeIntervalSince1970]);
     return dict;
 }
@@ -234,6 +247,8 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
         fetchedAt = [NSDate distantPast];
         suspensionChecked = NO;
     }
+    // Entries cached before stat capture lack karma/created; force one refetch to gain them.
+    if (!dict[@"createdUTC"]) fetchedAt = [NSDate distantPast];
     ApolloUserProfileInfo *info = [[ApolloUserProfileInfo alloc] initWithUsername:username iconURL:iconURL bannerURL:bannerURL defaultSnoo:defaultSnoo fetchedAt:fetchedAt];
     info.snoovatarURL = snoovatarURL;
     info.decoratorURL = decoratorURL;
@@ -243,6 +258,21 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
     info.hasSnoovatar = hasSnoovatar;
     info.isSuspended = isSuspended;
     info.suspensionChecked = suspensionChecked;
+    // respondsToSelector: guards, not bare key-presence: a JSON null in an
+    // externally hand-edited cache file deserializes to NSNull, and
+    // -[NSNull integerValue] is an unrecognized selector → crash. Matches the
+    // network path's guarding below.
+    if ([dict[@"linkKarma"] respondsToSelector:@selector(integerValue)]) info.linkKarma = [dict[@"linkKarma"] integerValue];
+    if ([dict[@"commentKarma"] respondsToSelector:@selector(integerValue)]) info.commentKarma = [dict[@"commentKarma"] integerValue];
+    if ([dict[@"createdUTC"] respondsToSelector:@selector(doubleValue)]) info.createdUTC = [dict[@"createdUTC"] doubleValue];
+    if ([dict[@"userIsSubscriber"] respondsToSelector:@selector(boolValue)]) {
+        info.userIsSubscriber = [dict[@"userIsSubscriber"] boolValue];
+        info.followStateKnown = YES;
+        // May be nil on entries written before this field existed → reads as
+        // "unknown account" at the use site, which correctly falls back.
+        id acct = dict[@"followStateAccount"];
+        info.followStateAccount = [acct isKindOfClass:[NSString class]] ? acct : nil;
+    }
     return info;
 }
 
@@ -315,11 +345,24 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
         @"schemaVersion": @(ApolloUserProfileCacheSchemaVersion),
         @"entries": entries,
     };
+    NSString *path = [self cachePath];
 
-    NSData *data = [NSJSONSerialization dataWithJSONObject:root options:0 error:nil];
-    if (data.length) {
-        [data writeToFile:[self cachePath] atomically:YES];
-    }
+    // Encode + write on a dedicated serial IO queue, NOT on self.queue. This
+    // runs after every info fetch / batch / follow toggle, and the JSON encode
+    // (up to ~2000 entries) plus the synchronous atomic write would otherwise
+    // occupy self.queue — blocking the main-thread dispatch_sync in
+    // cachedInfoForUsername on the hot cell-layout path (a scroll hitch). `root`
+    // is an immutable snapshot of freshly-built dictionaries, safe off-queue;
+    // the serial IO queue keeps writes ordered so the newest snapshot wins.
+    static dispatch_queue_t ioQueue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ ioQueue = dispatch_queue_create("com.apollo.reborn.profilecache.io", DISPATCH_QUEUE_SERIAL); });
+    dispatch_async(ioQueue, ^{
+        NSData *data = [NSJSONSerialization dataWithJSONObject:root options:0 error:nil];
+        if (data.length) {
+            [data writeToFile:path atomically:YES];
+        }
+    });
 }
 
 - (ApolloUserProfileInfo *)cachedInfoForUsername:(NSString *)username {
@@ -334,6 +377,24 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
         if (diskInfo) [self.infoCache setObject:diskInfo forKey:key];
     });
     return diskInfo;
+}
+
+// Optimistically record a follow toggle so the profile header keeps the new state
+// across re-navigation without a full about.json refetch (Reddit is slow to reflect
+// the change in `user_is_subscriber`, so an immediate refetch would revert the pill).
+- (void)updateFollowState:(BOOL)following forUsername:(NSString *)username {
+    NSString *key = [self normalizedUsername:username];
+    if (!key) return;
+    dispatch_async(self.queue, ^{
+        ApolloUserProfileInfo *info = self.diskInfo[key] ?: [self.infoCache objectForKey:key];
+        if (!info) return;
+        info.userIsSubscriber = following;
+        info.followStateKnown = YES;
+        info.followStateAccount = ApolloActiveAccountUsername().lowercaseString;   // whose follow this is
+        self.diskInfo[key] = info;
+        [self.infoCache setObject:info forKey:key];
+        [self saveDiskCacheLocked];
+    });
 }
 
 - (NSString *)escapedUsernameForPath:(NSString *)username {
@@ -409,6 +470,22 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
     info.hasSnoovatar = snoovatarURL != nil;
     info.isSuspended = isSuspended;
     info.suspensionChecked = YES;
+    id linkKarma = dataDict[@"link_karma"];
+    id commentKarma = dataDict[@"comment_karma"];
+    id createdUTC = dataDict[@"created_utc"];
+    if ([linkKarma respondsToSelector:@selector(integerValue)]) info.linkKarma = [linkKarma integerValue];
+    if ([commentKarma respondsToSelector:@selector(integerValue)]) info.commentKarma = [commentKarma integerValue];
+    if ([createdUTC respondsToSelector:@selector(doubleValue)]) info.createdUTC = [createdUTC doubleValue];
+    // Follow state: `data.subreddit.user_is_subscriber` is YES when the logged-in
+    // account follows this user (following == subscribing to their u_ profile).
+    id userIsSubscriber = subreddit[@"user_is_subscriber"];
+    if ([userIsSubscriber respondsToSelector:@selector(boolValue)]) {
+        info.userIsSubscriber = [userIsSubscriber boolValue];
+        info.followStateKnown = YES;
+        // Stamp the account this authenticated fetch ran as — the flag is
+        // account-specific, the rest of the entry is shared and disk-persisted.
+        info.followStateAccount = ApolloActiveAccountUsername().lowercaseString;
+    }
     return info;
 }
 
