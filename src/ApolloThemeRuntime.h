@@ -48,6 +48,9 @@ UIFont *ApolloThemeRuntimeFont(UIFont *base);
 // sink hooks and the live font-refresh walk leave pinned views untouched.
 void ApolloThemeRuntimeSetFontPinned(id view, BOOL pinned);
 
+// Preserve a tweak-owned visual-effect fill on Apollo's custom search field.
+void ApolloThemeRuntimeSetBackgroundColorPassthrough(id view, BOOL enabled);
+
 // Walk the app's windows and re-derive system-design fonts on Apollo-owned
 // labels / text fields / text views (plus vetted nav/tab-bar chrome) into the
 // active theme's font — the live-update path after a font change. Also runs

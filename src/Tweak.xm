@@ -2690,6 +2690,10 @@ static void initializeRandomSources() {
                                     UDKeyHideTabBarTitles: @NO,
                                     UDKeyShowDetailedProfiles: @YES,
                                     UDKeyShowSubredditHeaders: @NO,
+                                    UDKeySubredditHeaderImmersive: @YES,
+                                    UDKeySubredditShowBanner: @YES,
+                                    UDKeySubredditShowJoinButton: @YES,
+                                    UDKeySubredditShowDisplayName: @YES,
                                     UDKeyCommunityHighlights: @NO,
                                     UDKeyCommunityHighlightsWeb: @NO,
                                     UDKeyAutoHideTabBarShowOnIdle: @NO,
@@ -2885,6 +2889,10 @@ static void initializeRandomSources() {
     ApolloNormalizeNativeHideUsernameForIconOnlyTabBar();
     sShowDetailedProfiles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowDetailedProfiles];
     sShowSubredditHeaders = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders];
+    sSubredditHeaderImmersive = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditHeaderImmersive];
+    sSubredditShowBanner = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowBanner];
+    sSubredditShowJoinButton = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowJoinButton];
+    sSubredditShowDisplayName = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowDisplayName];
     sCommunityHighlights = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlights];
     sCommunityHighlightsWeb = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlightsWeb];
     sAutoHideTabBarShowOnIdle = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoHideTabBarShowOnIdle];
@@ -2911,6 +2919,11 @@ static void initializeRandomSources() {
         [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyApolloRememberSubredditCommentsSort]) {
         [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyApolloRememberSubredditCommentsSort];
         ApolloLog(@"[PerPostSort] exclusivity: normalized stale both-on at launch (native Remember Subreddit Sort -> OFF)");
+    }
+    sScrollEdgeEffectStyle = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyScrollEdgeEffectStyle];
+    if (sScrollEdgeEffectStyle < ApolloScrollEdgeEffectStyleAutomatic || sScrollEdgeEffectStyle > ApolloScrollEdgeEffectStyleHidden) {
+        sScrollEdgeEffectStyle = ApolloScrollEdgeEffectStyleAutomatic;
+        [standardDefaults setInteger:sScrollEdgeEffectStyle forKey:UDKeyScrollEdgeEffectStyle];
     }
     sModernSubredditDividers = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers];
     sSubredditListEnhancements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditListEnhancements];

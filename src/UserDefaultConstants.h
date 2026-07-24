@@ -120,6 +120,12 @@ static NSString *const ApolloTabBarTitlesChangedNotification = @"ApolloTabBarTit
 // See ApolloUserAvatars.xm and ApolloProfileSocialLinks.m. Default YES.
 static NSString *const UDKeyShowDetailedProfiles = @"ShowDetailedProfiles";
 static NSString *const UDKeyShowSubredditHeaders = @"ShowSubredditHeaders";
+// New (Immersive, with the melt/ambient backdrop) vs Classic (same content,
+// flat) — mirrors UDKeyProfileHeaderImmersive's semantics for subreddits.
+static NSString *const UDKeySubredditHeaderImmersive = @"SubredditHeaderImmersive";
+static NSString *const UDKeySubredditShowBanner = @"SubredditShowBanner";
+static NSString *const UDKeySubredditShowJoinButton = @"SubredditShowJoinButton";
+static NSString *const UDKeySubredditShowDisplayName = @"SubredditShowDisplayName";
 // Backing values for the single Community Highlights picker. Keeping the old
 // keys maps existing settings naturally: both YES = Full, master only = Partial,
 // master NO = Off.
@@ -194,6 +200,9 @@ static NSString *const UDKeyPerPostCommentSortMapping = @"PerPostCommentSortMapp
 // off, and launch/restore normalize a stale both-on to per-post. This toggle key is
 // the ONLY native default the feature ever writes. See ApolloPerPostCommentSort.xm.
 static NSString *const UDKeyApolloRememberSubredditCommentsSort = @"RememberRedditCommentsSort";
+// Override for UIScrollView top/bottom scroll edge effects (Liquid Glass, iOS 26+).
+// 0 = Automatic (default), 1 = Soft, 2 = Hard, 3 = Hidden.
+static NSString *const UDKeyScrollEdgeEffectStyle = @"ScrollEdgeEffectStyle";
 // Render image URLs (i.redd.it, preview.redd.it, i.imgur.com, generic .png/.jpg/.jpeg/.webp)
 // inline within post selftext and comments instead of leaving them as plain text links.
 static NSString *const UDKeyEnableInlineImages = @"EnableInlineImages";

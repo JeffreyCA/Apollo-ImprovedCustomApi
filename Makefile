@@ -54,6 +54,8 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloSubredditCustomBannerCache.m \
     $(SRC_DIR)/ApolloSubredditCustomIconCache.m \
     $(SRC_DIR)/ApolloSubredditDefaultAssets.c \
+    $(SRC_DIR)/ApolloImmersiveHeaderBackground.m \
+    $(SRC_DIR)/ApolloIdentityHeaderLayout.m \
     $(SRC_DIR)/ApolloUserAvatars.xm \
     $(SRC_DIR)/ApolloProfileSocialLinks.m \
     $(SRC_DIR)/ApolloModeratorAvatars.xm \
@@ -92,6 +94,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloAutoHideTabBar.xm \
     $(SRC_DIR)/ApolloTabBarCollapseSide.xm \
     $(SRC_DIR)/ApolloIPadTabBarBottom.xm \
+    $(SRC_DIR)/ApolloScrollEdgeEffect.xm \
     $(SRC_DIR)/settings/ApolloSettings.xm \
     $(SRC_DIR)/ApolloRecentlyRead.xm \
     $(SRC_DIR)/ApolloHiddenContentData.m \
@@ -174,6 +177,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloSignInSplash.xm \
     $(SRC_DIR)/ApolloHideSubscribePrompt.xm \
     $(SRC_DIR)/settings/CustomAPIViewController.m \
+    $(SRC_DIR)/settings/ApolloSubredditLayoutViewController.m \
     $(SRC_DIR)/settings/ApolloAISettingsViewController.m \
     $(SRC_DIR)/settings/ApolloDeletedCommentsSettingsViewController.m \
     $(SRC_DIR)/settings/ApolloLinkPreviewSettingsViewController.m \
