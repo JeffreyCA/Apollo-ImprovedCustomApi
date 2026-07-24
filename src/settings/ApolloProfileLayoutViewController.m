@@ -5,6 +5,8 @@
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
 #import "ApolloProfileSocialLinks.h"
+#import "ApolloBadgeBookStrip.h"     // ApolloBadgeBookToggleChangedNotification
+#import "ApolloBadgeBookCatalog.h"   // ApolloBadgeBookPrewarmImages()
 
 @implementation ApolloProfileLayoutViewController
 
@@ -138,6 +140,23 @@
             [weakSelf apollo_persistAndApply];
         }];
 
+    // Unlike the pure-visibility switches around it, this one also gates the
+    // feature's scraping — off means no strip, no fetches, no entry point.
+    ApolloSettingsRow *badgeBook =
+        [ApolloSettingsRow switchRowWithID:@"showBadgeBook"
+                                     title:@"Badge Book"
+                                      isOn:^BOOL { return sBadgeBookEnabled; }
+                                  onToggle:^(UISwitch *sender) {
+            sBadgeBookEnabled = sender.isOn;
+            [[NSUserDefaults standardUserDefaults] setBool:sender.isOn forKey:UDKeyBadgeBookEnabled];
+            // Any on-screen strip re-measures and (re)loads or collapses live.
+            [[NSNotificationCenter defaultCenter] postNotificationName:ApolloBadgeBookToggleChangedNotification object:nil];
+            // Launch skipped the prewarm when the feature was off; start it now
+            // so the first profile visited still blits ready bitmaps.
+            if (sBadgeBookEnabled) ApolloBadgeBookPrewarmImages();
+            [weakSelf apollo_persistAndApply];
+        }];
+
     ApolloSettingsRow *actions =
         [ApolloSettingsRow switchRowWithID:@"showActions"
                                      title:@"Follow & Message"
@@ -150,8 +169,8 @@
 
     ApolloSettingsSection *showSection =
         [ApolloSettingsSection sectionWithTitle:@"Show on Profiles"
-                                         footer:@"Turn off the bands you don't need to make every profile shorter — the menu surfaces sooner."
-                                           rows:@[ banner, statCards, socialLinks, actions ]];
+                                         footer:@"Turn off the bands you don't need to make every profile shorter — the menu surfaces sooner.\n\nBadge Book opens the full Achievements catalogue (earned and locked, by category) and the user's Trophy Case. The catalogue is bundled so it opens instantly; each profile's earned badges are read from Reddit's public profile pages on first view and cached."
+                                           rows:@[ banner, statCards, socialLinks, badgeBook, actions ]];
 
     return @[ layoutSection, showSection ];
 }

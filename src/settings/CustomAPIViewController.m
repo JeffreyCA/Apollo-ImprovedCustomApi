@@ -12,8 +12,6 @@
 #import "ApolloWebSessionStore.h"
 #import "ApolloAccountCredentials.h"
 #import "ApolloState.h"
-#import "ApolloBadgeBookStrip.h"     // ApolloBadgeBookToggleChangedNotification
-#import "ApolloBadgeBookCatalog.h"   // ApolloBadgeBookPrewarmImages()
 #import "ApolloBadgeBookScraper.h"   // ApolloBadgeBookInvalidate() — Clear Tweak Caches
 #import "ApolloUserProfileCache.h"
 #import "ApolloLinkPreviewCache.h"
@@ -1588,17 +1586,9 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onToggle:^(UISwitch *sender) { [weakSelf hideUsernameTabSwitchToggled:sender]; }];
     hideUsernameTab.enabled = ^BOOL { return !sHideTabBarTitles; };
 
-    // Master switch for the profile Badge Book (achievements + Trophy Case
-    // strip in the profile header — ApolloBadgeBookStrip.m reads the flag).
-    ApolloSettingsRow *badgeBook =
-        [ApolloSettingsRow switchRowWithID:@"profiles.badgeBook"
-                                     title:@"Show Badge Book on Profiles"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBadgeBookEnabled]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf badgeBookSwitchToggled:sender]; }];
-
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Customize profile pictures, profile pages and the tab bar. Icon-Only Tab Bar hides every tab's text label (Hide Username on Tab Bar only hides yours), while keeping each icon's accessibility name.\n\nBadge Book adds a strip to profiles that opens the full Achievements catalogue (earned and locked, by category) and the user's Trophy Case. The catalogue is bundled so it opens instantly; each profile's earned badges are read from Reddit's public profile pages on first view and cached."
-                                              rows:@[ userAvatars, profileTabAvatar, iconOnlyTabBar, hideUsernameTab, profileLayout, badgeBook ]];
+                                            footer:@"Customize profile pictures, profile pages and the tab bar. Icon-Only Tab Bar hides every tab's text label (Hide Username on Tab Bar only hides yours), while keeping each icon's accessibility name."
+                                              rows:@[ userAvatars, profileTabAvatar, iconOnlyTabBar, hideUsernameTab, profileLayout ]];
 }
 
 - (NSString *)profileLayoutSummaryText {
@@ -1613,6 +1603,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     if (!sProfileShowBanner) [hidden addObject:@"Banner"];
     if (!sProfileShowStatCards) [hidden addObject:@"Stat Cards"];
     if (!sProfileShowSocialLinks) [hidden addObject:@"Social Links"];
+    if (!sBadgeBookEnabled) [hidden addObject:@"Badge Book"];
     if (!sProfileShowActions) [hidden addObject:@"Follow & Message"];
     if (hidden.count > 0) {
         [parts addObject:[NSString stringWithFormat:@"%@ off", [hidden componentsJoinedByString:@", "]]];
@@ -3187,18 +3178,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     // Apollo natively observes this and relabels the profile tab immediately.
     [[NSNotificationCenter defaultCenter]
         postNotificationName:ApolloNativeHideUsernameOnTabBarChangedNotification object:nil];
-}
-
-- (void)badgeBookSwitchToggled:(UISwitch *)sender {
-    // Master switch for the profile Badge Book. The cached flag is read by the
-    // header strip (ApolloBadgeBookStrip.m); the notification makes any on-screen
-    // strip re-measure and (re)load or collapse live, no relaunch.
-    sBadgeBookEnabled = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sBadgeBookEnabled forKey:UDKeyBadgeBookEnabled];
-    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloBadgeBookToggleChangedNotification object:nil];
-    // Launch skipped the prewarm when the feature was off; start it now so the
-    // first profile visited after flipping this on still blits ready bitmaps.
-    if (sBadgeBookEnabled) ApolloBadgeBookPrewarmImages();
 }
 
 - (void)promptClearAllCachesFromSourceView:(UIView *)sourceView {
