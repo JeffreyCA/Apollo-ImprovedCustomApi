@@ -8,6 +8,21 @@
 
 static NSString *const kLinkCompanionTestFlightURL = @"https://testflight.apple.com/join/afRc2ztK";
 
+// One-tap install of the "Open in Apollo" Shortcut for people browsing in a
+// non-Safari browser (Chrome/Firefox/Edge/Brave/...), where the Safari extension
+// and Universal Link path don't apply. Build the shortcut once from the
+// Shortcuts app (README → "Build the Open in Apollo shortcut"), then
+// Share → Copy iCloud Link and paste the resulting
+// https://www.icloud.com/shortcuts/<id> URL here. Tapping it opens the Shortcuts
+// app straight to an "Add Shortcut" prompt — the closest to one-tap iOS allows.
+// Left empty on purpose: the button stays hidden until a real iCloud link is
+// set, so this is safe to ship un-filled.
+static NSString *const kLinkCompanionShortcutURL = @"";
+
+static BOOL LinkCompanionShortcutConfigured(void) {
+    return [kLinkCompanionShortcutURL hasPrefix:@"https://www.icloud.com/shortcuts/"];
+}
+
 // Content column cap so the page reads as a centered feature sheet on iPad
 // instead of edge-to-edge text.
 static const CGFloat kLinkCompanionMaxContentWidth = 560.0;
@@ -77,8 +92,8 @@ UIImage *ApolloLinkCompanionIcon(CGFloat side) {
 
 @implementation ApolloLinkCompanionHeroView
 
-static const CGFloat kHeroIconSide = 108.0;
-static const CGFloat kHeroRingBaseDiameter = 148.0;
+static const CGFloat kHeroIconSide = 58.0;
+static const CGFloat kHeroRingBaseDiameter = 86.0;
 static const NSUInteger kHeroRingCount = 3;
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -134,8 +149,8 @@ static const NSUInteger kHeroRingCount = 3;
 
     UILabel *title = [[UILabel alloc] init];
     title.translatesAutoresizingMaskIntoConstraints = NO;
-    title.text = @"Link Companion";
-    title.font = [UIFont systemFontOfSize:[UIFont preferredFontForTextStyle:UIFontTextStyleTitle1].pointSize
+    title.text = @"Open Reddit links straight in Apollo";
+    title.font = [UIFont systemFontOfSize:[UIFont preferredFontForTextStyle:UIFontTextStyleTitle2].pointSize
                                    weight:UIFontWeightBold];
     title.textColor = [UIColor labelColor];
     title.textAlignment = NSTextAlignmentCenter;
@@ -146,15 +161,15 @@ static const NSUInteger kHeroRingCount = 3;
 
     UILabel *subtitle = [[UILabel alloc] init];
     subtitle.translatesAutoresizingMaskIntoConstraints = NO;
-    subtitle.text = @"Reddit links in Safari, opened right in Apollo.";
-    subtitle.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    subtitle.text = @"Install once — then Reddit links in Safari open straight in Apollo, no pop-ups.";
+    subtitle.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
     subtitle.textColor = [UIColor secondaryLabelColor];
     subtitle.textAlignment = NSTextAlignmentCenter;
     subtitle.numberOfLines = 0;
     [self addSubview:subtitle];
 
     [NSLayoutConstraint activateConstraints:@[
-        [iconView.topAnchor constraintEqualToAnchor:self.topAnchor constant:28.0],
+        [iconView.topAnchor constraintEqualToAnchor:self.topAnchor constant:6.0],
         [iconView.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
         [iconView.widthAnchor constraintEqualToConstant:kHeroIconSide],
         [iconView.heightAnchor constraintEqualToConstant:kHeroIconSide],
@@ -164,7 +179,7 @@ static const NSUInteger kHeroRingCount = 3;
         [ringHost.widthAnchor constraintEqualToConstant:0.0],
         [ringHost.heightAnchor constraintEqualToConstant:0.0],
 
-        [kicker.topAnchor constraintEqualToAnchor:iconView.bottomAnchor constant:20.0],
+        [kicker.topAnchor constraintEqualToAnchor:iconView.bottomAnchor constant:14.0],
         [kicker.leadingAnchor constraintEqualToAnchor:self.layoutMarginsGuide.leadingAnchor],
         [kicker.trailingAnchor constraintEqualToAnchor:self.layoutMarginsGuide.trailingAnchor],
 
@@ -225,12 +240,179 @@ static const NSUInteger kHeroRingCount = 3;
 
 @end
 
+#pragma mark - Gradient CTA button
+
+// Primary CTA. On iOS 26 Liquid Glass it's a tinted glass capsule (matching the
+// system chrome); otherwise it falls back to an accent→purple gradient. The VC
+// drives the tint/colors from the theme accent via -applyGlassTint:.
+@interface LinkCompanionGradientButton : UIButton
+@property (nonatomic, strong) CAGradientLayer *gradientLayer;   // fallback only
+@property (nonatomic, strong) UIVisualEffectView *glassView;    // LG only
+@property (nonatomic, strong) id glassEffect;                   // UIGlassEffect
+@end
+
+@implementation LinkCompanionGradientButton
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.layer.cornerRadius = 16.0;
+        self.layer.cornerCurve = kCACornerCurveContinuous;
+        self.clipsToBounds = YES;
+
+        Class glassCls = NSClassFromString(@"UIGlassEffect");
+        if (IsLiquidGlass() && glassCls) {
+            _glassEffect = [[glassCls alloc] init];
+            @try { [_glassEffect setValue:@YES forKey:@"interactive"]; } @catch (__unused id e) {}
+            _glassView = [[UIVisualEffectView alloc] initWithEffect:_glassEffect];
+            _glassView.userInteractionEnabled = NO;
+            _glassView.frame = self.bounds;
+            [self insertSubview:_glassView atIndex:0];
+        } else {
+            _gradientLayer = [CAGradientLayer layer];
+            _gradientLayer.startPoint = CGPointMake(0.0, 0.5);
+            _gradientLayer.endPoint = CGPointMake(1.0, 0.5);
+            [self.layer insertSublayer:_gradientLayer atIndex:0];
+        }
+    }
+    return self;
+}
+- (void)applyGlassTint:(UIColor *)tint gradientEnd:(UIColor *)gradientEnd {
+    if (_glassEffect) {
+        @try { [_glassEffect setValue:tint forKey:@"tintColor"]; } @catch (__unused id e) {}
+        // Re-apply the (now mutated) effect so the tint takes.
+        _glassView.effect = _glassEffect;
+    } else {
+        _gradientLayer.colors = @[ (id)tint.CGColor, (id)gradientEnd.CGColor ];
+    }
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    _gradientLayer.frame = self.bounds;
+    _glassView.frame = self.bounds;
+    if (_glassView) [self sendSubviewToBack:_glassView];
+}
+@end
+
+#pragma mark - Card building blocks
+
+// Rounded panel that sits on Apollo's themed background. On Liquid Glass it's a
+// real glass material; otherwise a translucent overlay that reads as a lighter
+// tint of the theme background (NOT the near-black system grouped color, which
+// clashes with a navy theme). Content is added directly on top.
+static UIView *LinkCompanionMakeCard(void) {
+    UIView *card = [[UIView alloc] init];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    card.layer.cornerRadius = 20.0;
+    card.layer.cornerCurve = kCACornerCurveContinuous;
+    card.clipsToBounds = YES;
+
+    Class glassCls = NSClassFromString(@"UIGlassEffect");
+    if (IsLiquidGlass() && glassCls) {
+        UIVisualEffect *effect = [[glassCls alloc] init];
+        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:effect];
+        glass.translatesAutoresizingMaskIntoConstraints = NO;
+        glass.userInteractionEnabled = NO;
+        [card addSubview:glass];
+        [NSLayoutConstraint activateConstraints:@[
+            [glass.topAnchor constraintEqualToAnchor:card.topAnchor],
+            [glass.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
+            [glass.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
+            [glass.bottomAnchor constraintEqualToAnchor:card.bottomAnchor],
+        ]];
+    } else {
+        card.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
+    }
+    return card;
+}
+
+// Small padded tag, e.g. "Safari", to the right of a section header.
+static UIView *LinkCompanionMakePill(NSString *text) {
+    UILabel *label = [[UILabel alloc] init];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.text = text;
+    label.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
+    label.textColor = [UIColor secondaryLabelColor];
+
+    UIView *pill = [[UIView alloc] init];
+    pill.translatesAutoresizingMaskIntoConstraints = NO;
+    pill.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.10];
+    pill.layer.cornerRadius = 12.0;
+    pill.layer.cornerCurve = kCACornerCurveContinuous;
+    [pill addSubview:label];
+    [pill setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.topAnchor constraintEqualToAnchor:pill.topAnchor constant:4.0],
+        [label.bottomAnchor constraintEqualToAnchor:pill.bottomAnchor constant:-4.0],
+        [label.leadingAnchor constraintEqualToAnchor:pill.leadingAnchor constant:11.0],
+        [label.trailingAnchor constraintEqualToAnchor:pill.trailingAnchor constant:-11.0],
+    ]];
+    return pill;
+}
+
+// A numbered step: circled index + title/body. Manual constraints (not a stack)
+// so the text column reliably spans from the badge to the row's trailing edge.
+static UIView *LinkCompanionMakeStep(NSString *number, NSString *title, NSString *body) {
+    UIView *row = [[UIView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UILabel *badge = [[UILabel alloc] init];
+    badge.translatesAutoresizingMaskIntoConstraints = NO;
+    badge.text = number;
+    badge.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightSemibold];
+    badge.textColor = [UIColor labelColor];
+    badge.textAlignment = NSTextAlignmentCenter;
+    badge.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.10];
+    badge.layer.cornerRadius = 14.0;
+    badge.clipsToBounds = YES;
+    [row addSubview:badge];
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    titleLabel.text = title;
+    titleLabel.font = [UIFont systemFontOfSize:[UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline].pointSize
+                                         weight:UIFontWeightSemibold];
+    titleLabel.textColor = [UIColor labelColor];
+    titleLabel.numberOfLines = 0;
+    [row addSubview:titleLabel];
+
+    UILabel *bodyLabel = [[UILabel alloc] init];
+    bodyLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    bodyLabel.text = body;
+    bodyLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    bodyLabel.textColor = [UIColor secondaryLabelColor];
+    bodyLabel.numberOfLines = 0;
+    [row addSubview:bodyLabel];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [badge.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [badge.topAnchor constraintEqualToAnchor:row.topAnchor constant:1.0],
+        [badge.widthAnchor constraintEqualToConstant:28.0],
+        [badge.heightAnchor constraintEqualToConstant:28.0],
+
+        [titleLabel.leadingAnchor constraintEqualToAnchor:badge.trailingAnchor constant:14.0],
+        [titleLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [titleLabel.topAnchor constraintEqualToAnchor:row.topAnchor],
+
+        [bodyLabel.leadingAnchor constraintEqualToAnchor:titleLabel.leadingAnchor],
+        [bodyLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [bodyLabel.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:2.0],
+
+        [row.bottomAnchor constraintEqualToAnchor:bodyLabel.bottomAnchor],
+        [row.bottomAnchor constraintGreaterThanOrEqualToAnchor:badge.bottomAnchor],
+    ]];
+    return row;
+}
+
 #pragma mark - Screen
 
 @implementation ApolloLinkCompanionViewController {
     ApolloLinkCompanionHeroView *_heroView;
-    UIButton *_installButton;
-    NSArray<UIImageView *> *_bulletIcons;
+    LinkCompanionGradientButton *_installButton;
+    UIControl *_shortcutCard;
+    UIImageView *_shortcutIcon;
+    UILabel *_shortcutTitle;
+    UILabel *_shortcutSubtitle;
+    UIImageView *_shortcutChevron;
 }
 
 - (void)viewDidLoad {
@@ -238,40 +420,9 @@ static const NSUInteger kHeroRingCount = 3;
     self.title = @"Link Companion";
     self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
 
-    // ---- Pinned bottom install bar -----------------------------------------
-
-    UIView *bottomBar = [[UIView alloc] init];
-    bottomBar.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:bottomBar];
-
-    _installButton = [UIButton buttonWithType:UIButtonTypeCustom];
-    _installButton.translatesAutoresizingMaskIntoConstraints = NO;
-    _installButton.titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold];
-    _installButton.layer.cornerRadius = 16.0;
-    _installButton.layer.cornerCurve = kCACornerCurveContinuous;
-    [_installButton setTitle:@"  Get it on TestFlight" forState:UIControlStateNormal];
-    [_installButton addTarget:self action:@selector(openTestFlight) forControlEvents:UIControlEventTouchUpInside];
-    // Custom buttons don't dim on touch; a light alpha dip restores the feedback.
-    [_installButton addTarget:self action:@selector(installTouchDown) forControlEvents:UIControlEventTouchDown];
-    [_installButton addTarget:self action:@selector(installTouchUp)
-             forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
-    [bottomBar addSubview:_installButton];
-
-    UILabel *installCaption = [[UILabel alloc] init];
-    installCaption.translatesAutoresizingMaskIntoConstraints = NO;
-    installCaption.text = @"Free · takes about a minute";
-    installCaption.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
-    installCaption.textColor = [UIColor secondaryLabelColor];
-    installCaption.textAlignment = NSTextAlignmentCenter;
-    [bottomBar addSubview:installCaption];
-
-    // ---- Scrollable hero + bullets -----------------------------------------
-
     UIScrollView *scrollView = [[UIScrollView alloc] init];
     scrollView.translatesAutoresizingMaskIntoConstraints = NO;
-    scrollView.alwaysBounceVertical = NO;
-    // Automatic only insets "the" primary scroll view heuristically; this one
-    // shares the VC with the pinned bottom bar, so demand the nav-bar inset.
+    scrollView.alwaysBounceVertical = YES;
     scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAlways;
     [self.view addSubview:scrollView];
 
@@ -279,119 +430,239 @@ static const NSUInteger kHeroRingCount = 3;
     content.translatesAutoresizingMaskIntoConstraints = NO;
     [scrollView addSubview:content];
 
+    // Cards stacked vertically; each fills the (centered, iPad-capped) column.
+    UIStackView *cards = [[UIStackView alloc] init];
+    cards.translatesAutoresizingMaskIntoConstraints = NO;
+    cards.axis = UILayoutConstraintAxisVertical;
+    cards.spacing = 8.0;
+    [content addSubview:cards];
+
+    // ---- Hero card: icon + pitch + gradient TestFlight CTA -----------------
+
+    UIView *heroCard = LinkCompanionMakeCard();
+    [cards addArrangedSubview:heroCard];
+
     _heroView = [[ApolloLinkCompanionHeroView alloc] initWithFrame:CGRectZero];
     _heroView.translatesAutoresizingMaskIntoConstraints = NO;
-    [content addSubview:_heroView];
+    [heroCard addSubview:_heroView];
 
-    NSArray<NSArray<NSString *> *> *bullets = @[
-        @[ @"safari.fill",
-           @"Works right in Safari",
-           @"Tap any Reddit link and Apollo's built-in extension scoops it up before the page even loads." ],
-        @[ @"bolt.fill",
-           @"Straight into Apollo",
-           @"The Companion hands the link over instantly — no “Open in Apollo?” pop-ups, no redirect pages in between." ],
-        @[ @"checkmark.seal.fill",
-           @"Install once, forget it",
-           @"Sideloaded apps can't claim links as their own, so this tiny helper claims them for Apollo — and quietly forwards every single one." ],
+    _installButton = [[LinkCompanionGradientButton alloc] initWithFrame:CGRectZero];
+    _installButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _installButton.titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold];
+    [_installButton setTitle:@"  Get it on TestFlight" forState:UIControlStateNormal];
+    [_installButton addTarget:self action:@selector(openTestFlight) forControlEvents:UIControlEventTouchUpInside];
+    [_installButton addTarget:self action:@selector(installTouchDown) forControlEvents:UIControlEventTouchDown];
+    [_installButton addTarget:self action:@selector(installTouchUp)
+             forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
+    [heroCard addSubview:_installButton];
+
+    UILabel *installCaption = [[UILabel alloc] init];
+    installCaption.translatesAutoresizingMaskIntoConstraints = NO;
+    installCaption.text = @"Free · about a minute to set up · no account required";
+    installCaption.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    installCaption.textColor = [UIColor secondaryLabelColor];
+    installCaption.textAlignment = NSTextAlignmentCenter;
+    installCaption.numberOfLines = 0;
+    [heroCard addSubview:installCaption];
+
+    // ---- "How it works" card: Safari pill + numbered steps -----------------
+
+    UIView *howCard = LinkCompanionMakeCard();
+    [cards addArrangedSubview:howCard];
+
+    UILabel *howTitle = [[UILabel alloc] init];
+    howTitle.translatesAutoresizingMaskIntoConstraints = NO;
+    howTitle.text = @"How it works";
+    howTitle.font = [UIFont systemFontOfSize:[UIFont preferredFontForTextStyle:UIFontTextStyleHeadline].pointSize
+                                       weight:UIFontWeightBold];
+    howTitle.textColor = [UIColor labelColor];
+    [howCard addSubview:howTitle];
+
+    UIView *safariPill = LinkCompanionMakePill(@"Safari");
+    [howCard addSubview:safariPill];
+
+    UIStackView *steps = [[UIStackView alloc] init];
+    steps.translatesAutoresizingMaskIntoConstraints = NO;
+    steps.axis = UILayoutConstraintAxisVertical;
+    steps.spacing = 12.0;
+    [howCard addSubview:steps];
+
+    NSArray<NSArray<NSString *> *> *stepData = @[
+        @[ @"1", @"Install Link Companion", @"Open the TestFlight build and launch it once." ],
+        @[ @"2", @"Turn the extension on", @"Settings → Apps → Safari → Extensions → Open in Apollo. Allow Reddit, set to Always." ],
+        @[ @"3", @"Tap any Reddit link", @"It opens straight in Apollo — no pop-ups." ],
     ];
-
-    UIStackView *bulletStack = [[UIStackView alloc] init];
-    bulletStack.translatesAutoresizingMaskIntoConstraints = NO;
-    bulletStack.axis = UILayoutConstraintAxisVertical;
-    bulletStack.spacing = 22.0;
-    [content addSubview:bulletStack];
-
-    NSMutableArray<UIImageView *> *bulletIcons = [NSMutableArray array];
-    for (NSArray<NSString *> *bullet in bullets) {
-        UIImageView *symbol = [[UIImageView alloc] init];
-        symbol.translatesAutoresizingMaskIntoConstraints = NO;
-        symbol.image = [UIImage systemImageNamed:bullet[0]
-                               withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:28.0
-                                                                                                 weight:UIImageSymbolWeightMedium]];
-        symbol.contentMode = UIViewContentModeCenter;
-        [symbol setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
-        [bulletIcons addObject:symbol];
-
-        UILabel *bulletTitle = [[UILabel alloc] init];
-        bulletTitle.translatesAutoresizingMaskIntoConstraints = NO;
-        bulletTitle.text = bullet[1];
-        bulletTitle.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
-        bulletTitle.textColor = [UIColor labelColor];
-        bulletTitle.numberOfLines = 0;
-
-        UILabel *bulletBody = [[UILabel alloc] init];
-        bulletBody.translatesAutoresizingMaskIntoConstraints = NO;
-        bulletBody.text = bullet[2];
-        bulletBody.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
-        bulletBody.textColor = [UIColor secondaryLabelColor];
-        bulletBody.numberOfLines = 0;
-
-        UIStackView *textStack = [[UIStackView alloc] initWithArrangedSubviews:@[ bulletTitle, bulletBody ]];
-        textStack.axis = UILayoutConstraintAxisVertical;
-        textStack.spacing = 3.0;
-
-        UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[ symbol, textStack ]];
-        row.axis = UILayoutConstraintAxisHorizontal;
-        row.alignment = UIStackViewAlignmentCenter;
-        row.spacing = 18.0;
-        [symbol.widthAnchor constraintEqualToConstant:44.0].active = YES;
-        [bulletStack addArrangedSubview:row];
+    NSUInteger si = 0;
+    for (NSArray<NSString *> *s in stepData) {
+        [steps addArrangedSubview:LinkCompanionMakeStep(s[0], s[1], s[2])];
+        if (++si < stepData.count) {
+            // Divider wrapped in a full-width row so its inset never fights the
+            // stack's fill alignment; the line is indented to the step text.
+            UIView *divRow = [[UIView alloc] init];
+            divRow.translatesAutoresizingMaskIntoConstraints = NO;
+            UIView *line = [[UIView alloc] init];
+            line.translatesAutoresizingMaskIntoConstraints = NO;
+            line.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.08];
+            [divRow addSubview:line];
+            [steps addArrangedSubview:divRow];
+            [NSLayoutConstraint activateConstraints:@[
+                [divRow.heightAnchor constraintEqualToConstant:1.0 / UIScreen.mainScreen.scale],
+                [line.leadingAnchor constraintEqualToAnchor:divRow.leadingAnchor constant:42.0],
+                [line.trailingAnchor constraintEqualToAnchor:divRow.trailingAnchor],
+                [line.topAnchor constraintEqualToAnchor:divRow.topAnchor],
+                [line.bottomAnchor constraintEqualToAnchor:divRow.bottomAnchor],
+            ]];
+        }
     }
-    _bulletIcons = bulletIcons;
+
+    // ---- Shortcut card: one-tap non-Safari fallback (conditional) ----------
+
+    if (LinkCompanionShortcutConfigured()) {
+        _shortcutCard = [[UIControl alloc] init];
+        _shortcutCard.translatesAutoresizingMaskIntoConstraints = NO;
+        _shortcutCard.layer.cornerRadius = 20.0;
+        _shortcutCard.layer.cornerCurve = kCACornerCurveContinuous;
+        _shortcutCard.clipsToBounds = YES;
+        // Same glass/translucent treatment as the other cards.
+        Class glassCls = NSClassFromString(@"UIGlassEffect");
+        if (IsLiquidGlass() && glassCls) {
+            UIVisualEffect *effect = [[glassCls alloc] init];
+            UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:effect];
+            glass.translatesAutoresizingMaskIntoConstraints = NO;
+            glass.userInteractionEnabled = NO;
+            [_shortcutCard addSubview:glass];
+            [NSLayoutConstraint activateConstraints:@[
+                [glass.topAnchor constraintEqualToAnchor:_shortcutCard.topAnchor],
+                [glass.leadingAnchor constraintEqualToAnchor:_shortcutCard.leadingAnchor],
+                [glass.trailingAnchor constraintEqualToAnchor:_shortcutCard.trailingAnchor],
+                [glass.bottomAnchor constraintEqualToAnchor:_shortcutCard.bottomAnchor],
+            ]];
+        } else {
+            _shortcutCard.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
+        }
+        [_shortcutCard addTarget:self action:@selector(openShortcut) forControlEvents:UIControlEventTouchUpInside];
+        [_shortcutCard addTarget:self action:@selector(shortcutTouchDown) forControlEvents:UIControlEventTouchDown];
+        [_shortcutCard addTarget:self action:@selector(shortcutTouchUp)
+                forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
+        [cards addArrangedSubview:_shortcutCard];
+
+        // Rounded icon tile (mirrors the app-tile language of the hero).
+        UIView *iconTile = [[UIView alloc] init];
+        iconTile.translatesAutoresizingMaskIntoConstraints = NO;
+        iconTile.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.10];
+        iconTile.layer.cornerRadius = 9.0;
+        iconTile.layer.cornerCurve = kCACornerCurveContinuous;
+        [_shortcutCard addSubview:iconTile];
+
+        _shortcutIcon = [[UIImageView alloc] initWithImage:
+            [UIImage systemImageNamed:@"square.and.arrow.up"
+                    withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:17.0
+                                                                                      weight:UIImageSymbolWeightSemibold]]];
+        _shortcutIcon.translatesAutoresizingMaskIntoConstraints = NO;
+        _shortcutIcon.contentMode = UIViewContentModeCenter;
+        [iconTile addSubview:_shortcutIcon];
+
+        _shortcutTitle = [[UILabel alloc] init];
+        _shortcutTitle.translatesAutoresizingMaskIntoConstraints = NO;
+        _shortcutTitle.text = @"Get the Shortcut";
+        _shortcutTitle.font = [UIFont systemFontOfSize:[UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline].pointSize
+                                                weight:UIFontWeightSemibold];
+        [_shortcutCard addSubview:_shortcutTitle];
+
+        _shortcutSubtitle = [[UILabel alloc] init];
+        _shortcutSubtitle.translatesAutoresizingMaskIntoConstraints = NO;
+        _shortcutSubtitle.text = @"For Chrome, Firefox & other browsers";
+        _shortcutSubtitle.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+        _shortcutSubtitle.textColor = [UIColor secondaryLabelColor];
+        _shortcutSubtitle.numberOfLines = 0;
+        [_shortcutCard addSubview:_shortcutSubtitle];
+
+        _shortcutChevron = [[UIImageView alloc] initWithImage:
+            [UIImage systemImageNamed:@"chevron.right"
+                    withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:13.0
+                                                                                      weight:UIImageSymbolWeightSemibold]]];
+        _shortcutChevron.translatesAutoresizingMaskIntoConstraints = NO;
+        [_shortcutChevron setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+        [_shortcutCard addSubview:_shortcutChevron];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [iconTile.leadingAnchor constraintEqualToAnchor:_shortcutCard.leadingAnchor constant:14.0],
+            [iconTile.centerYAnchor constraintEqualToAnchor:_shortcutCard.centerYAnchor],
+            [iconTile.widthAnchor constraintEqualToConstant:34.0],
+            [iconTile.heightAnchor constraintEqualToConstant:34.0],
+            [_shortcutIcon.centerXAnchor constraintEqualToAnchor:iconTile.centerXAnchor],
+            [_shortcutIcon.centerYAnchor constraintEqualToAnchor:iconTile.centerYAnchor],
+        ]];
+    }
 
     // ---- Layout ------------------------------------------------------------
 
-    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
-
-    // Full-width content view defines the scrollable size; the hero/bullets
-    // and button live in a centered column capped for iPad.
-    NSLayoutConstraint *contentWidth = [content.widthAnchor constraintEqualToAnchor:scrollView.frameLayoutGuide.widthAnchor];
-    // 999, not DefaultHigh: these must beat the labels' intrinsic-width
-    // preference (750) so text wraps instead of running off-screen, while
-    // still yielding to the required ≤560 iPad cap.
-    NSLayoutConstraint *columnWidth = [bulletStack.widthAnchor constraintEqualToAnchor:content.widthAnchor constant:-64.0];
-    columnWidth.priority = UILayoutPriorityRequired - 1;
-    NSLayoutConstraint *buttonWidth = [_installButton.widthAnchor constraintEqualToAnchor:bottomBar.widthAnchor constant:-48.0];
-    buttonWidth.priority = UILayoutPriorityRequired - 1;
+    NSLayoutConstraint *cardsWidth = [cards.widthAnchor constraintEqualToAnchor:content.widthAnchor constant:-32.0];
+    cardsWidth.priority = UILayoutPriorityRequired - 1;
 
     [NSLayoutConstraint activateConstraints:@[
         [scrollView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
         [scrollView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [scrollView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [scrollView.bottomAnchor constraintEqualToAnchor:bottomBar.topAnchor],
+        [scrollView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
 
         [content.topAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.topAnchor],
         [content.leadingAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.leadingAnchor],
         [content.trailingAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.trailingAnchor],
         [content.bottomAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.bottomAnchor],
-        contentWidth,
+        [content.widthAnchor constraintEqualToAnchor:scrollView.frameLayoutGuide.widthAnchor],
 
-        [_heroView.topAnchor constraintEqualToAnchor:content.topAnchor],
-        [_heroView.centerXAnchor constraintEqualToAnchor:content.centerXAnchor],
-        [_heroView.widthAnchor constraintLessThanOrEqualToConstant:kLinkCompanionMaxContentWidth],
-        [_heroView.leadingAnchor constraintGreaterThanOrEqualToAnchor:content.leadingAnchor constant:24.0],
+        [cards.topAnchor constraintEqualToAnchor:content.topAnchor constant:14.0],
+        [cards.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-14.0],
+        [cards.centerXAnchor constraintEqualToAnchor:content.centerXAnchor],
+        cardsWidth,
+        [cards.widthAnchor constraintLessThanOrEqualToConstant:kLinkCompanionMaxContentWidth],
 
-        [bulletStack.topAnchor constraintEqualToAnchor:_heroView.bottomAnchor constant:30.0],
-        [bulletStack.centerXAnchor constraintEqualToAnchor:content.centerXAnchor],
-        [bulletStack.widthAnchor constraintLessThanOrEqualToConstant:kLinkCompanionMaxContentWidth],
-        columnWidth,
-        [bulletStack.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-24.0],
+        // Hero card internals
+        [_heroView.topAnchor constraintEqualToAnchor:heroCard.topAnchor constant:16.0],
+        [_heroView.leadingAnchor constraintEqualToAnchor:heroCard.leadingAnchor constant:16.0],
+        [_heroView.trailingAnchor constraintEqualToAnchor:heroCard.trailingAnchor constant:-16.0],
 
-        [bottomBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [bottomBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [bottomBar.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-
-        [_installButton.topAnchor constraintEqualToAnchor:bottomBar.topAnchor constant:8.0],
-        [_installButton.centerXAnchor constraintEqualToAnchor:bottomBar.centerXAnchor],
-        [_installButton.widthAnchor constraintLessThanOrEqualToConstant:kLinkCompanionMaxContentWidth],
-        buttonWidth,
-        [_installButton.heightAnchor constraintEqualToConstant:56.0],
+        [_installButton.topAnchor constraintEqualToAnchor:_heroView.bottomAnchor constant:16.0],
+        [_installButton.leadingAnchor constraintEqualToAnchor:heroCard.leadingAnchor constant:16.0],
+        [_installButton.trailingAnchor constraintEqualToAnchor:heroCard.trailingAnchor constant:-16.0],
+        [_installButton.heightAnchor constraintEqualToConstant:52.0],
 
         [installCaption.topAnchor constraintEqualToAnchor:_installButton.bottomAnchor constant:10.0],
-        [installCaption.centerXAnchor constraintEqualToAnchor:bottomBar.centerXAnchor],
-        [installCaption.leadingAnchor constraintGreaterThanOrEqualToAnchor:bottomBar.leadingAnchor constant:24.0],
-        [installCaption.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-8.0],
+        [installCaption.leadingAnchor constraintEqualToAnchor:heroCard.leadingAnchor constant:16.0],
+        [installCaption.trailingAnchor constraintEqualToAnchor:heroCard.trailingAnchor constant:-16.0],
+        [installCaption.bottomAnchor constraintEqualToAnchor:heroCard.bottomAnchor constant:-14.0],
+
+        // How-it-works card internals
+        [howTitle.topAnchor constraintEqualToAnchor:howCard.topAnchor constant:14.0],
+        [howTitle.leadingAnchor constraintEqualToAnchor:howCard.leadingAnchor constant:16.0],
+
+        [safariPill.centerYAnchor constraintEqualToAnchor:howTitle.centerYAnchor],
+        [safariPill.trailingAnchor constraintEqualToAnchor:howCard.trailingAnchor constant:-16.0],
+        [safariPill.leadingAnchor constraintGreaterThanOrEqualToAnchor:howTitle.trailingAnchor constant:8.0],
+
+        [steps.topAnchor constraintEqualToAnchor:howTitle.bottomAnchor constant:12.0],
+        [steps.leadingAnchor constraintEqualToAnchor:howCard.leadingAnchor constant:16.0],
+        [steps.trailingAnchor constraintEqualToAnchor:howCard.trailingAnchor constant:-16.0],
+        [steps.bottomAnchor constraintEqualToAnchor:howCard.bottomAnchor constant:-14.0],
     ]];
+
+    // Shortcut card internals
+    if (_shortcutCard) {
+        [NSLayoutConstraint activateConstraints:@[
+            [_shortcutTitle.topAnchor constraintEqualToAnchor:_shortcutCard.topAnchor constant:12.0],
+            [_shortcutTitle.leadingAnchor constraintEqualToAnchor:_shortcutIcon.superview.trailingAnchor constant:12.0],
+
+            [_shortcutSubtitle.topAnchor constraintEqualToAnchor:_shortcutTitle.bottomAnchor constant:1.0],
+            [_shortcutSubtitle.leadingAnchor constraintEqualToAnchor:_shortcutTitle.leadingAnchor],
+            [_shortcutSubtitle.trailingAnchor constraintEqualToAnchor:_shortcutChevron.leadingAnchor constant:-8.0],
+            [_shortcutSubtitle.bottomAnchor constraintEqualToAnchor:_shortcutCard.bottomAnchor constant:-12.0],
+
+            [_shortcutTitle.trailingAnchor constraintLessThanOrEqualToAnchor:_shortcutChevron.leadingAnchor constant:-8.0],
+            [_shortcutChevron.trailingAnchor constraintEqualToAnchor:_shortcutCard.trailingAnchor constant:-16.0],
+            [_shortcutChevron.centerYAnchor constraintEqualToAnchor:_shortcutCard.centerYAnchor],
+        ]];
+    }
 
     // CoreAnimation drops the ring animations whenever the app backgrounds;
     // reinstall on foreground (appear/disappear is handled in the lifecycle).
@@ -418,19 +689,28 @@ static const NSUInteger kHeroRingCount = 3;
 }
 
 - (void)applyTheme {
-    // Inherit the settings background from the previous screen in the stack
-    // (mirrors ApolloApplyInheritedSettingsTableTheme, minus the table parts —
-    // the helper only inspects the PREVIOUS stack entry, so the cast is safe).
-    UITableView *source = ApolloInheritedSettingsThemeSourceTableView((UITableViewController *)self);
-    self.view.backgroundColor = source.backgroundColor ?: [UIColor systemGroupedBackgroundColor];
+    // Prefer the active custom theme's background; otherwise inherit the previous
+    // settings screen's table background (mirrors ApolloApplyInheritedSettingsTableTheme).
+    // Deep-links have no source table, so fall back to a sane grouped color.
+    UIColor *bg = nil;
+    if (ApolloThemeRuntimeIsActive()) {
+        bg = ApolloThemeRuntimeColor(ApolloThemeTokenBackground);
+    }
+    if (!bg) {
+        UITableView *source = ApolloInheritedSettingsThemeSourceTableView((UITableViewController *)self);
+        bg = source.backgroundColor;
+    }
+    self.view.backgroundColor = bg ?: [UIColor systemGroupedBackgroundColor];
 
     UIColor *accent = LinkCompanionAccentColor(self.view);
     self.view.tintColor = accent;
     self.navigationController.navigationBar.tintColor = accent;
-    for (UIImageView *symbol in _bulletIcons) symbol.tintColor = accent;
 
-    _installButton.backgroundColor = accent;
+    // Primary CTA: tinted Liquid Glass on iOS 26, else an accent→purple gradient.
     UIColor *resolved = [accent resolvedColorWithTraitCollection:self.view.traitCollection];
+    UIColor *resolvedPurple = [[UIColor systemPurpleColor] resolvedColorWithTraitCollection:self.view.traitCollection];
+    [_installButton applyGlassTint:resolved gradientEnd:resolvedPurple];
+
     UIColor *buttonText = ApolloColorIsLight(resolved) ? [UIColor blackColor] : [UIColor whiteColor];
     [_installButton setTitleColor:buttonText forState:UIControlStateNormal];
     UIImage *plane = [UIImage systemImageNamed:@"paperplane.fill"
@@ -438,6 +718,10 @@ static const NSUInteger kHeroRingCount = 3;
                                                                                                weight:UIImageSymbolWeightSemibold]];
     [_installButton setImage:[plane imageWithTintColor:buttonText renderingMode:UIImageRenderingModeAlwaysOriginal]
                     forState:UIControlStateNormal];
+
+    _shortcutTitle.textColor = accent;
+    _shortcutIcon.tintColor = accent;
+    _shortcutChevron.tintColor = [UIColor tertiaryLabelColor];
 }
 
 #pragma mark Hero animation lifecycle
@@ -459,6 +743,22 @@ static const NSUInteger kHeroRingCount = 3;
 
 - (void)installTouchUp {
     _installButton.alpha = 1.0;
+}
+
+- (void)shortcutTouchDown {
+    _shortcutCard.alpha = 0.6;
+}
+
+- (void)shortcutTouchUp {
+    _shortcutCard.alpha = 1.0;
+}
+
+- (void)openShortcut {
+    // Opened externally so the Shortcuts app claims its iCloud Universal Link
+    // and presents the "Add Shortcut" sheet directly.
+    NSURL *url = [NSURL URLWithString:kLinkCompanionShortcutURL];
+    if (!url) return;
+    [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
 }
 
 - (void)openTestFlight {
