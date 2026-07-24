@@ -324,6 +324,14 @@ extern BOOL sWebJSONEnabled;
 // hook checks it; loaded at launch and updated live by the Polls settings
 // toggle. Read through ApolloPollsFeatureEnabled() (ApolloCommon.h).
 extern BOOL sPollsFeatureEnabled;
+// Horizontal alignment of the option text next to its radio glyph in a native
+// poll (ApolloPollVoting.xm, PollOptionNode layoutSpecThatFits: hook). Default
+// Center — matches Apollo's own pre-radio-glyph poll option layout.
+typedef NS_ENUM(NSInteger, ApolloPollOptionAlignment) {
+    ApolloPollOptionAlignmentCenter = 0,
+    ApolloPollOptionAlignmentLeft   = 1,
+};
+extern NSInteger sPollOptionAlignment;
 // Serialized "name=value; name=value" Cookie header harvested from a
 // www.reddit.com web login (must include reddit_session). nil until the user
 // completes the Web Session Login flow. Persisted in the keychain (it's a full

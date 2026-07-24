@@ -1461,6 +1461,32 @@ static BOOL ApolloPollTouchHitVoteButton(id pollNode, CGPoint pointInPollView) {
     return CGRectContainsPoint(backgroundView.frame, pointInPollView);
 }
 
+// Overrides the option text's paragraph alignment to match sPollOptionAlignment.
+// Apollo rebuilds textNode's attributedText inside %orig on every pass, so
+// this must re-run every time; mutating the node in place works since %orig's
+// returned spec already references this same instance.
+static void ApolloPollApplyOptionTextAlignment(id optionNode) {
+    ASTextNode *textNode = ApolloPollObjectIvar(optionNode, "textNode");
+    if (![textNode isKindOfClass:objc_getClass("ASTextNode")]) return;
+    NSAttributedString *current = textNode.attributedText;
+    if (current.length == 0) return;
+    NSTextAlignment alignment = (sPollOptionAlignment == ApolloPollOptionAlignmentLeft)
+        ? NSTextAlignmentLeft : NSTextAlignmentCenter;
+    // Always rewrite, no "already matches" short-circuit: a run with no
+    // NSParagraphStyleAttributeName reads back as nil, and -[nil alignment]
+    // is 0 same as NSTextAlignmentLeft, which would false-positive-skip.
+    NSMutableAttributedString *realigned = [current mutableCopy];
+    [realigned enumerateAttribute:NSParagraphStyleAttributeName
+                           inRange:NSMakeRange(0, realigned.length)
+                           options:0
+                        usingBlock:^(NSParagraphStyle *value, NSRange range, BOOL *stop) {
+        NSMutableParagraphStyle *paragraph = value ? [value mutableCopy] : [NSMutableParagraphStyle new];
+        paragraph.alignment = alignment;
+        [realigned addAttribute:NSParagraphStyleAttributeName value:paragraph range:range];
+    }];
+    textNode.attributedText = realigned;
+}
+
 // Injects the leading radio glyph into each unvoted option row. PollOptionNode
 // only exists for an interactive poll — except an ended-but-never-voted poll,
 // which still renders PollOptionNode rows even though taps route to %orig.
@@ -1468,23 +1494,54 @@ static BOOL ApolloPollTouchHitVoteButton(id pollNode, CGPoint pointInPollView) {
 %hook _TtC6Apollo14PollOptionNode
 - (id)layoutSpecThatFits:(struct ApolloTextureSizeRange)constrainedSize {
     id originalSpec = %orig;
-    if (!ApolloPollsFeatureEnabled()) return originalSpec;
+
+    // Alignment is a display preference, independent of the native-voting
+    // feature (radio glyph + Vote button) gated further down — applies even
+    // with Native Polls off, or to an ended/voted poll's results text.
+    ApolloPollApplyOptionTextAlignment(self);
+
+    // originalSpec is always ASCenterLayoutSpec > ASInsetLayoutSpec >
+    // ASTextNode (confirmed via a runtime spec-tree dump). ASCenterLayoutSpec
+    // unconditionally centers its child, which is what Center mode wants, so
+    // leave it alone there. Left mode has no property to ask it to left-align
+    // instead, so unwrap it and reuse its one child (Apollo's padding-only
+    // inset spec) directly, dropping the centering wrapper.
+    id optionContent = originalSpec;
+    if (sPollOptionAlignment == ApolloPollOptionAlignmentLeft) {
+        Class centerClass = objc_getClass("ASCenterLayoutSpec");
+        if (centerClass && [originalSpec isKindOfClass:centerClass]) {
+            id unwrapped = ((ASLayoutSpec *)originalSpec).children.firstObject;
+            if (unwrapped) optionContent = unwrapped;
+        }
+    }
+
+    if (!ApolloPollsFeatureEnabled()) return optionContent;
 
     id pollNode = [(ASDisplayNode *)self supernode];
     RDKPoll *poll = pollNode ? ApolloPollObjectIvar(pollNode, "poll") : nil;
-    if (poll.hasPollEnded) return originalSpec;
+    if (poll.hasPollEnded) return optionContent;
 
     ASTextNode *radio = ApolloPollEnsureRadioNode((ASDisplayNode *)self);
-    if (!radio) return originalSpec;
+    if (!radio) return optionContent;
     Class stackClass = objc_getClass("ASStackLayoutSpec");
     Class insetClass = objc_getClass("ASInsetLayoutSpec");
-    if (!stackClass || !insetClass) return originalSpec;
+    if (!stackClass || !insetClass) return optionContent;
+
+    // flexShrink:1 lets optionContent shrink to the width left over after the
+    // radio (default is unconstrained-natural-width, which just overflows
+    // instead of wrapping). flexGrow makes it fill that leftover width
+    // instead of hugging its own tight content — needed in Center mode so
+    // centered text has room to center in; Left mode leaves it at 0 so a
+    // short option stays pinned left by justifyContent:Start.
+    ASLayoutElementStyle *contentStyle = [(ASLayoutSpec *)optionContent style];
+    contentStyle.flexShrink = 1.0;
+    contentStyle.flexGrow = (sPollOptionAlignment == ApolloPollOptionAlignmentLeft) ? 0.0 : 1.0;
     ASStackLayoutSpec *row = [stackClass
         stackLayoutSpecWithDirection:ApolloPollStackDirectionHorizontal
                               spacing:2.0
                        justifyContent:ApolloPollStackJustifyContentStart
                            alignItems:ApolloPollStackAlignItemsCenter
-                             children:@[radio, originalSpec]];
+                             children:@[radio, optionContent]];
     return [insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(0, 8, 0, 0) child:row];
 }
 %end

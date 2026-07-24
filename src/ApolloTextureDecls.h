@@ -32,7 +32,14 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@class ASLayoutSpec, ASStackLayoutSpec, ASInsetLayoutSpec, ASBackgroundLayoutSpec, ASTextNode, ASDisplayNode;
+@class ASLayoutSpec, ASStackLayoutSpec, ASInsetLayoutSpec, ASBackgroundLayoutSpec, ASTextNode, ASDisplayNode, ASLayoutElementStyle;
+
+// Real Texture's ASLayoutElementStyle has many more properties; only the two
+// flex-sizing ones used so far are declared here.
+@interface ASLayoutElementStyle : NSObject
+@property (nonatomic) CGFloat flexGrow;
+@property (nonatomic) CGFloat flexShrink;
+@end
 
 @interface ASDisplayNode : NSObject
 - (void)addSubnode:(ASDisplayNode *)subnode;
@@ -49,6 +56,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) BOOL clipsToBounds;
 @property (nonatomic) CGFloat borderWidth;
 @property (nullable, nonatomic) CGColorRef borderColor;
+@property (nonatomic, readonly) ASLayoutElementStyle *style;
 @end
 
 @interface ASTextNode : ASDisplayNode
@@ -58,6 +66,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface ASLayoutSpec : NSObject
 @property (nullable, nonatomic) NSArray *children;
+@property (nonatomic, readonly) ASLayoutElementStyle *style;
 @end
 
 @interface ASStackLayoutSpec : ASLayoutSpec

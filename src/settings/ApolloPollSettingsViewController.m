@@ -6,10 +6,12 @@
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
 
-// Sections. The sign-in section only exists while the master toggle is on, so
-// the screen reads as "turn it on, then set up the account it needs."
+// Sections. Options is always present (a display preference, independent of
+// the Polls toggle). Sign-in only exists while the toggle is on, so the
+// screen reads as "turn it on, then set up the account it needs."
 typedef NS_ENUM(NSInteger, ApolloPollSettingsSection) {
     ApolloPollSettingsSectionToggle = 0,
+    ApolloPollSettingsSectionOptions,  // always present
     ApolloPollSettingsSectionSignIn,   // present only when the toggle is on
 };
 
@@ -48,7 +50,7 @@ typedef NS_ENUM(NSInteger, ApolloPollSettingsSection) {
 #pragma mark - Table structure
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return [self pollsEnabled] ? 2 : 1;
+    return [self pollsEnabled] ? 3 : 2;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
@@ -67,6 +69,9 @@ typedef NS_ENUM(NSInteger, ApolloPollSettingsSection) {
                 "through your reddit.com web session — captured automatically when "
                 "you sign in, so there's usually nothing to set up.\n\n"
                 "Experimental — if anything looks off, please report it.";
+    }
+    if (section == ApolloPollSettingsSectionOptions) {
+        return @"How option text is aligned within the poll.";
     }
     if (section == ApolloPollSettingsSectionSignIn) {
         NSString *username = [self activeUsername];
@@ -95,7 +100,23 @@ typedef NS_ENUM(NSInteger, ApolloPollSettingsSection) {
     if (indexPath.section == ApolloPollSettingsSectionToggle) {
         return [self toggleCell];
     }
+    if (indexPath.section == ApolloPollSettingsSectionOptions) {
+        return [self alignmentCell];
+    }
     return [self signInCell];
+}
+
+- (NSString *)alignmentText {
+    return sPollOptionAlignment == ApolloPollOptionAlignmentLeft ? @"Left" : @"Center";
+}
+
+- (UITableViewCell *)alignmentCell {
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    cell.textLabel.text = @"Option Text Alignment";
+    cell.detailTextLabel.text = [self alignmentText];
+    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    return cell;
 }
 
 - (UITableViewCell *)toggleCell {
@@ -150,12 +171,18 @@ typedef NS_ENUM(NSInteger, ApolloPollSettingsSection) {
 #pragma mark - Selection
 
 - (BOOL)tableView:(UITableView *)tableView shouldHighlightRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == ApolloPollSettingsSectionOptions) return YES;
     if (indexPath.section != ApolloPollSettingsSectionSignIn) return NO;
     return [self activeUsername] != nil;
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.section == ApolloPollSettingsSectionOptions) {
+        UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+        [self presentAlignmentSheetFromSourceView:cell];
+        return;
+    }
     if (indexPath.section != ApolloPollSettingsSectionSignIn) return;
     NSString *username = [self activeUsername];
     if (!username) return;
@@ -164,6 +191,34 @@ typedef NS_ENUM(NSInteger, ApolloPollSettingsSection) {
     } else {
         [self startSignInForUsername:username];
     }
+}
+
+#pragma mark - Option alignment
+
+- (void)presentAlignmentSheetFromSourceView:(UIView *)sourceView {
+    UIAlertController *sheet = [UIAlertController
+        alertControllerWithTitle:@"Option Text Alignment"
+                         message:@"How option text lines up next to its selection circle."
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    NSArray<NSNumber *> *values = @[@(ApolloPollOptionAlignmentCenter), @(ApolloPollOptionAlignmentLeft)];
+    NSArray<NSString *> *titles = @[@"Center", @"Left"];
+    for (NSUInteger i = 0; i < values.count; i++) {
+        NSInteger value = values[i].integerValue;
+        NSString *title = titles[i];
+        if (sPollOptionAlignment == value) title = [title stringByAppendingString:@" (Current)"];
+        [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *action) {
+            sPollOptionAlignment = value;
+            [[NSUserDefaults standardUserDefaults] setInteger:value forKey:UDKeyPollOptionAlignment];
+            [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:0
+                                                                        inSection:ApolloPollSettingsSectionOptions]]
+                                  withRowAnimation:UITableViewRowAnimationNone];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.sourceView = sourceView ?: self.view;
+    sheet.popoverPresentationController.sourceRect = (sourceView ?: self.view).bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 
 #pragma mark - Sign-in flow
@@ -217,7 +272,8 @@ typedef NS_ENUM(NSInteger, ApolloPollSettingsSection) {
     }
     // Update the cached gate so poll hooks react immediately, no relaunch.
     sPollsFeatureEnabled = toggle.on;
-    // Reveal/hide the sign-in section with a soft animation.
+    // Reveal/hide just the sign-in section with a soft animation — Options
+    // stays put, it doesn't depend on this toggle.
     NSIndexSet *signIn = [NSIndexSet indexSetWithIndex:ApolloPollSettingsSectionSignIn];
     [self.tableView beginUpdates];
     if (toggle.on) {

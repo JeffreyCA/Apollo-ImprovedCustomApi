@@ -2977,6 +2977,11 @@ static void initializeRandomSources() {
     // hooks, so reading before they're in place returns nothing.
     sWebJSONEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyWebJSONEnabled];
     sPollsFeatureEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPollsEnabled];
+    sPollOptionAlignment = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPollOptionAlignment];
+    if (sPollOptionAlignment != ApolloPollOptionAlignmentCenter && sPollOptionAlignment != ApolloPollOptionAlignmentLeft) {
+        sPollOptionAlignment = ApolloPollOptionAlignmentCenter;
+        [standardDefaults setInteger:sPollOptionAlignment forKey:UDKeyPollOptionAlignment];
+    }
     // Surface a revoked/expired cookie (detected response-side in
     // ApolloWebJSONNoteResponse) as a re-login prompt wherever the user is.
     [[NSNotificationCenter defaultCenter] addObserverForName:ApolloWebJSONSessionExpiredNotification
