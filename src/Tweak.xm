@@ -2689,6 +2689,7 @@ static void initializeRandomSources() {
                                     UDKeyUseProfileAvatarTabIcon: @NO,
                                     UDKeyHideTabBarTitles: @NO,
                                     UDKeyShowDetailedProfiles: @YES,
+                                    UDKeyBadgeBookEnabled: @YES,
                                     UDKeyProfileHeaderImmersive: @YES,
                                     UDKeyProfileShowBanner: @YES,
                                     UDKeyProfileShowStatCards: @YES,
@@ -2903,6 +2904,11 @@ static void initializeRandomSources() {
         ApolloLog(@"[ProfileLayout] migrated retired detailed-profile master switch to enabled");
     }
     sShowDetailedProfiles = YES;
+    sBadgeBookEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBadgeBookEnabled];
+    // No launch-time icon prewarm: sessions that never open a profile shouldn't
+    // pay for decoded badge bitmaps. The strip (on first preview data) and the
+    // book (viewDidLoad) both call ApolloBadgeBookPrewarmImages() themselves, and
+    // every render path tolerates a cold cache (async off-main decode).
     sProfileHeaderImmersive = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileHeaderImmersive];
     sProfileShowBanner = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowBanner];
     sProfileShowStatCards = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowStatCards];

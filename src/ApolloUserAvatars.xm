@@ -11,6 +11,7 @@
 #import "ApolloSubredditInfoCache.h"
 #import "ApolloBannedProfile.h"
 #import "ApolloProfileSocialLinks.h"
+#import "ApolloBadgeBookStrip.h"
 #import "ApolloAccountCredentials.h"
 #import "ApolloWebSessionStore.h"
 #import "ApolloImmersiveHeaderBackground.h"
@@ -108,6 +109,7 @@ static const void *kApolloProfileTabAvatarImageMarkerKey = &kApolloProfileTabAva
 @property(nonatomic) BOOL aboutExpanded;
 @property(nonatomic, strong) UIButton *aboutToggleButton;
 @property(nonatomic, strong) ApolloProfileSocialLinksView *socialLinksView;
+@property(nonatomic, strong) ApolloBadgeBookStripView *badgeBookView;
 // Glass stat cards (post karma / comment karma / account age). `statCards` holds
 // the visible subset in display order; cards with no data stay hidden and out of
 // the row, so the layout centres however many actually have values.
@@ -458,6 +460,18 @@ static const void *kApolloProfileGlassAccentKey = &kApolloProfileGlassAccentKey;
         };
         [self addSubview:_socialLinksView];
 
+        // Badge Book band — sits below the bio; previews earned achievements/trophies
+        // and opens the full book. Self-manages its data and re-measures the header
+        // when its rendered height changes (same contract as the social band).
+        _badgeBookView = [[ApolloBadgeBookStripView alloc] init];
+        _badgeBookView.heightChangedBlock = ^{
+            ApolloProfileHeaderView *strongSelf = weakSelf;
+            if (!strongSelf) return;
+            [strongSelf setNeedsLayout];
+            if (strongSelf.heightInvalidationBlock) strongSelf.heightInvalidationBlock();
+        };
+        [self addSubview:_badgeBookView];
+
         // Glass stat cards. Created up front (hidden) and populated in applyProfileInfo.
         _postKarmaCard = [[ApolloProfileStatCard alloc] init];
         _commentKarmaCard = [[ApolloProfileStatCard alloc] init];
@@ -614,6 +628,7 @@ static const void *kApolloProfileGlassAccentKey = &kApolloProfileGlassAccentKey;
 // height won't equal the visible content height and the about text gets clipped.
 static CGFloat const ApolloProfileAboutMaxHeight = 220.0; // ~10 lines @ footnote font, covers 200+ chars at full width
 static CGFloat const ApolloProfileSocialAboutGap = 8.0;   // gap below the social band, above the bio
+static CGFloat const ApolloProfileAboutBadgeGap = 10.0;   // gap above the badge-book band (below the social band)
 static CGFloat const ApolloProfileAboutToggleHeight = 22.0; // the "more"/"less" caption row under a truncated bio
 static CGFloat const ApolloProfileActionsBottomGap = 16.0;  // gap below the action row, above the body
 static CGFloat const ApolloProfileActionsButtonGap = 10.0;  // gap between Follow and Message
@@ -913,10 +928,15 @@ static UIFont *ApolloProfileClassicNameFont(void) {
         y += socialH;
     }
 
-    // Badge Book strip attaches here, between social links and the stat cards
-    // — see PR #689 (achievements + Trophy Case). No placeholder shipped in
-    // this PR; #689 adds its own view/property/settings toggle and should
-    // insert its height/frame block at this exact point in the sequence.
+    // Badge Book band — previews earned achievements/trophies and opens the
+    // full book. Self-manages its data (same contract as the social band).
+    CGFloat badgeH = [self apollo_badgeHeightForBodyWidth:bodyWidth];
+    if (apply) self.badgeBookView.hidden = (badgeH <= 0.0);
+    if (badgeH > 0.0) {
+        y += ApolloProfileAboutBadgeGap;
+        if (apply) self.badgeBookView.frame = CGRectMake(bodyX, y, bodyWidth, badgeH);
+        y += badgeH;
+    }
 
     // Glass stat cards
     NSUInteger cardCount = self.statCards.count;
@@ -940,6 +960,12 @@ static UIFont *ApolloProfileClassicNameFont(void) {
         y += ApolloProfileStatsRowHeight;
     }
     return y;
+}
+
+// Height the badge-book band wants at this body width (0 when off / no username).
+- (CGFloat)apollo_badgeHeightForBodyWidth:(CGFloat)bodyWidth {
+    if (!self.badgeBookView) return 0.0;
+    return [self.badgeBookView preferredHeightForWidth:bodyWidth];
 }
 
 - (CGFloat)preferredHeightForWidth:(CGFloat)width {
@@ -1185,6 +1211,8 @@ static UIFont *ApolloProfileClassicNameFont(void) {
     // Feed the social-links band the username so it can load/render (no-op if the
     // username is unchanged; the band re-measures the header when links arrive).
     self.socialLinksView.username = username;
+    // Same for the badge-book band (previews earned achievements/trophies).
+    self.badgeBookView.username = username;
     [self setNeedsLayout];
     CGFloat updatedHeight = [self preferredHeightForWidth:layoutWidth];
     if (self.heightInvalidationBlock && fabs(updatedHeight - previousHeight) > 0.5) {
@@ -2874,6 +2902,7 @@ static void ApolloProfileInstallOrUpdateHeader(id viewControllerObject) {
     }
     header.hostViewController = viewController;
     header.socialLinksView.hostViewController = viewController;
+    header.badgeBookView.hostViewController = viewController;
     header.username = username;
 
     CGFloat chromeHeight = tableView.adjustedContentInset.top;
@@ -3874,6 +3903,7 @@ static void ApolloAvatarApplySubredditIconToSharePreview(id postInfo, NSString *
     ApolloLog(@"[UserAvatars] Pull-to-refresh forcing avatar/banner refetch for u/%@", username);
     ApolloProfileLoadImages(header, username, YES);
     [header.socialLinksView refresh];
+    [header.badgeBookView refresh];
 }
 
 - (void)redditAccountChangedWithNotification:(id)notification {

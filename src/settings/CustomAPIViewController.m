@@ -13,6 +13,7 @@
 #import "ApolloWebSessionStore.h"
 #import "ApolloAccountCredentials.h"
 #import "ApolloState.h"
+#import "ApolloBadgeBookScraper.h"   // ApolloBadgeBookInvalidate() — Clear Tweak Caches
 #import "ApolloUserProfileCache.h"
 #import "ApolloLinkPreviewCache.h"
 #import "settings/ApolloDeletedCommentsSettingsViewController.h"
@@ -1647,6 +1648,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     if (!sProfileShowBanner) [hidden addObject:@"Banner"];
     if (!sProfileShowStatCards) [hidden addObject:@"Stat Cards"];
     if (!sProfileShowSocialLinks) [hidden addObject:@"Social Links"];
+    if (!sBadgeBookEnabled) [hidden addObject:@"Badge Book"];
     if (!sProfileShowActions) [hidden addObject:@"Follow & Message"];
     if (hidden.count > 0) {
         [parts addObject:[NSString stringWithFormat:@"%@ off", [hidden componentsJoinedByString:@", "]]];
@@ -3240,13 +3242,14 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)promptClearAllCachesFromSourceView:(UIView *)sourceView {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Clear Tweak Caches?"
-                                                                   message:@"This removes cached profile pictures, banners, link previews, and remembered banned-profile dismissals."
+                                                                   message:@"This removes cached profile pictures, banners, link previews, badge books, and remembered banned-profile dismissals."
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Clear" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
         [[ApolloUserProfileCache sharedCache] clearAllCaches];
         [[ApolloLinkPreviewCache sharedCache] flushCache];
         [[ApolloSubredditInfoCache sharedCache] clearAllCaches];
+        ApolloBadgeBookInvalidate(nil);   // per-user earned/trophy state, memory + disk
         ApolloBannedProfileClearDismissedOverlays();
         // Re-broadcast the avatars-toggle notification so visible profile headers reload immediately.
         [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloUserAvatarsToggleChangedNotification" object:nil];

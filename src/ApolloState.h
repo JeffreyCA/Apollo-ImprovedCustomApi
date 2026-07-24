@@ -75,6 +75,7 @@ void ApolloNormalizeNativeHideUsernameForIconOnlyTabBar(void);
 // inside this header, so it is gated on this same flag. Default ON via
 // registerDefaults. See ApolloUserAvatars.xm and ApolloProfileSocialLinks.{h,m}.
 extern BOOL sShowDetailedProfiles;
+extern BOOL sBadgeBookEnabled;
 extern BOOL sProfileHeaderImmersive;
 extern BOOL sProfileShowBanner;
 extern BOOL sProfileShowStatCards;

@@ -119,6 +119,11 @@ static NSString *const ApolloTabBarTitlesChangedNotification = @"ApolloTabBarTit
 // (UDKeyShowUserAvatars), which governs the inline avatars next to usernames.
 // See ApolloUserAvatars.xm and ApolloProfileSocialLinks.m. Default YES.
 static NSString *const UDKeyShowDetailedProfiles = @"ShowDetailedProfiles";
+// Master toggle for the profile "Badge Book" — the in-header preview strip and the
+// full Achievements / Trophy Case screen (ApolloBadgeBookStrip.m,
+// ApolloBadgeBookViewController.m). Off → no strip, no scraping, no entry point.
+// Default YES.
+static NSString *const UDKeyBadgeBookEnabled = @"BadgeBookEnabled";
 static NSString *const UDKeyProfileHeaderImmersive = @"ProfileHeaderImmersive";
 static NSString *const UDKeyProfileShowBanner = @"ProfileShowBanner";
 static NSString *const UDKeyProfileShowStatCards = @"ProfileShowStatCards";

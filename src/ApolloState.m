@@ -31,6 +31,7 @@ BOOL sShowUserAvatars = NO;
 BOOL sUseProfileAvatarTabIcon = NO;
 BOOL sHideTabBarTitles = NO;
 BOOL sShowDetailedProfiles = YES;   // effective default ON via registerDefaults (UDKeyShowDetailedProfiles)
+BOOL sBadgeBookEnabled = YES;       // effective default ON via registerDefaults (UDKeyBadgeBookEnabled)
 BOOL sProfileHeaderImmersive = YES; // New (immersive melt) vs Classic (flat); default ON (UDKeyProfileHeaderImmersive)
 // Profile customization — viewer preferences for every profile they view. All show-*
 // default ON; avatar style 0=Full snoovatar, 1=Circle, 2=Square (default Full).

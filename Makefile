@@ -59,6 +59,10 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloIdentityHeaderLayout.m \
     $(SRC_DIR)/ApolloUserAvatars.xm \
     $(SRC_DIR)/ApolloProfileSocialLinks.m \
+    $(SRC_DIR)/ApolloBadgeBookCatalog.m \
+    $(SRC_DIR)/ApolloBadgeBookScraper.m \
+    $(SRC_DIR)/ApolloBadgeBookViewController.m \
+    $(SRC_DIR)/ApolloBadgeBookStrip.m \
     $(SRC_DIR)/ApolloModeratorAvatars.xm \
     $(SRC_DIR)/ApolloPublicStickyAsSubreddit.xm \
     $(SRC_DIR)/ApolloSubredditHeaders.xm \
@@ -199,7 +203,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/UIWindow+Apollo.m \
     $(SRC_DIR)/fishhook.c \
     $(SSZIPARCHIVE_FILES)
-ApolloReborn_FRAMEWORKS = UIKit Security AVFoundation AVKit OSLog NaturalLanguage ImageIO StoreKit Photos PhotosUI SafariServices SystemConfiguration WebKit AuthenticationServices CoreImage Vision LinkPresentation SwiftUI UniformTypeIdentifiers Metal QuartzCore
+ApolloReborn_FRAMEWORKS = UIKit Security AVFoundation AVKit OSLog NaturalLanguage ImageIO StoreKit Photos PhotosUI SafariServices SystemConfiguration WebKit AuthenticationServices CoreImage Vision LinkPresentation SwiftUI UniformTypeIdentifiers Metal QuartzCore CoreMotion
 ApolloReborn_LIBRARIES = z iconv
 # FoundationModels (Apple on-device AI) only ships in the iOS 26+ SDK. Weak-link
 # it so the dylib still loads on older OSes (the Swift bridge guards every call

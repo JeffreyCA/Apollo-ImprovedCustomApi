@@ -626,6 +626,12 @@ static NSString *ApolloSLScrapeCookieHeader(void) {
     return store;
 }
 
+// Exported for other scrape features (Badge Book) — one shared store means the
+// bot-challenge clearance cookie is earned once and reused.
+WKWebsiteDataStore *ApolloSharedScrapeDataStore(void) {
+    return [ApolloSLWebFetch apollo_scrapeDataStore];
+}
+
 // The WebView is now the RARE path (direct HTTP resolves almost everything), but
 // when a network trips it, several profile visits in a row could otherwise stack
 // hidden full-window WKWebViews. Mirror the Badge Book scraper: one runs at a
