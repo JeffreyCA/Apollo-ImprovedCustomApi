@@ -1,0 +1,39 @@
+[
+    {
+        "id": 1,
+        "priority": 100,
+        "action": { "type": "allow" },
+        "condition": {
+            "urlFilter": "apollo_reborn_no_open",
+            "resourceTypes": [ "main_frame" ]
+        }
+    },
+    {
+        "id": 2,
+        "priority": 1,
+        "action": {
+            "type": "redirect",
+            "redirect": {
+                "transform": { "scheme": "https", "host": "open.apolloreborn.app" }
+            }
+        },
+        "condition": {
+            "regexFilter": "^https?://(?:[a-z0-9-]+\\.)?reddit\\.com/(?:r|u|user|comments|gallery)/.+",
+            "resourceTypes": [ "main_frame" ]
+        }
+    },
+    {
+        "id": 3,
+        "priority": 1,
+        "action": {
+            "type": "redirect",
+            "redirect": {
+                "transform": { "scheme": "https", "host": "open.apolloreborn.app" }
+            }
+        },
+        "condition": {
+            "regexFilter": "^https?://(?:[a-z0-9-]+\\.)?redd\\.it/.+",
+            "resourceTypes": [ "main_frame" ]
+        }
+    }
+]

@@ -1,5 +1,5 @@
 {
-    "manifest_version": 2,
+    "manifest_version": 3,
     "default_locale": "en",
 
     "name": "__MSG_extension_name__",
@@ -17,10 +17,23 @@
     "content_scripts": [{
         "js": [ "content.js" ],
         "matches": [ "*://*.reddit.com/*", "*://*.redd.it/*" ],
-        "run_at": "document_end"
+        "run_at": "document_start"
     }],
 
-    "browser_action": {
+    "background": {
+        "scripts": [ "background.js" ],
+        "persistent": false
+    },
+
+    "declarative_net_request": {
+        "rule_resources": [{
+            "id": "auto_open",
+            "enabled": true,
+            "path": "dnr_rules.json"
+        }]
+    },
+
+    "action": {
         "default_popup": "popup.html",
         "default_icon": {
             "16": "images/toolbar-icon-16.png",
@@ -31,6 +44,13 @@
     },
 
     "permissions": [
-        "storage"
+        "storage",
+        "declarativeNetRequest",
+        "declarativeNetRequestWithHostAccess"
+    ],
+
+    "host_permissions": [
+        "*://*.reddit.com/*",
+        "*://*.redd.it/*"
     ]
 }

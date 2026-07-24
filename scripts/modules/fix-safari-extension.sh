@@ -19,7 +19,7 @@ fix_safari_extension_in_app() {
     local asset_dir="${_SAFARI_REPO_DIR}/safari-extension"
 
     local asset
-    for asset in content.js manifest.json; do
+    for asset in content.js manifest.json background.js dnr_rules.json; do
         if [[ ! -f "$asset_dir/$asset" ]]; then
             echo "Error: missing overlay asset: $asset_dir/$asset"
             return 1
@@ -36,7 +36,9 @@ fix_safari_extension_in_app() {
     echo "Repairing Safari extension..."
     cp "$asset_dir/content.js" "$appex/content.js"
     cp "$asset_dir/manifest.json" "$appex/manifest.json"
+    cp "$asset_dir/background.js" "$appex/background.js"
+    cp "$asset_dir/dnr_rules.json" "$appex/dnr_rules.json"
     # The appex's prior signature covers the now-modified web assets.
     rm -rf "$appex/_CodeSignature"
-    echo "Safari extension repaired: content.js + manifest.json overlaid."
+    echo "Safari extension repaired: content.js + manifest.json + background.js + dnr_rules.json overlaid."
 }
