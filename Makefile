@@ -180,6 +180,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/settings/ApolloSubredditLayoutViewController.m \
     $(SRC_DIR)/settings/ApolloAISettingsViewController.m \
     $(SRC_DIR)/settings/ApolloDeletedCommentsSettingsViewController.m \
+    $(SRC_DIR)/settings/ApolloProfileLayoutViewController.m \
     $(SRC_DIR)/settings/ApolloLinkPreviewSettingsViewController.m \
     $(SRC_DIR)/settings/InlineMediaSettingsViewController.m \
     $(SRC_DIR)/settings/InfoRowSettingsViewController.m \

@@ -2689,6 +2689,12 @@ static void initializeRandomSources() {
                                     UDKeyUseProfileAvatarTabIcon: @NO,
                                     UDKeyHideTabBarTitles: @NO,
                                     UDKeyShowDetailedProfiles: @YES,
+                                    UDKeyProfileHeaderImmersive: @YES,
+                                    UDKeyProfileShowBanner: @YES,
+                                    UDKeyProfileShowStatCards: @YES,
+                                    UDKeyProfileShowSocialLinks: @YES,
+                                    UDKeyProfileShowActions: @YES,
+                                    UDKeyProfileAvatarStyle: @0,
                                     UDKeyShowSubredditHeaders: @NO,
                                     UDKeySubredditHeaderImmersive: @YES,
                                     UDKeySubredditShowBanner: @YES,
@@ -2887,7 +2893,24 @@ static void initializeRandomSources() {
     sUseProfileAvatarTabIcon = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon];
     sHideTabBarTitles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles];
     ApolloNormalizeNativeHideUsernameForIconOnlyTabBar();
-    sShowDetailedProfiles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowDetailedProfiles];
+    // The old master switch was retired in favour of the Profile Layout screen.
+    // Migrate existing installs that had it off so the visible per-band controls
+    // cannot appear to do nothing behind an unreachable legacy preference.
+    if (![standardDefaults boolForKey:UDKeyShowDetailedProfiles]) {
+        [standardDefaults setBool:YES forKey:UDKeyShowDetailedProfiles];
+        ApolloLog(@"[ProfileLayout] migrated retired detailed-profile master switch to enabled");
+    }
+    sShowDetailedProfiles = YES;
+    sProfileHeaderImmersive = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileHeaderImmersive];
+    sProfileShowBanner = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowBanner];
+    sProfileShowStatCards = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowStatCards];
+    sProfileShowSocialLinks = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowSocialLinks];
+    sProfileShowActions = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowActions];
+    sProfileAvatarStyle = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyProfileAvatarStyle];
+    if (sProfileAvatarStyle < 0 || sProfileAvatarStyle > 2) {
+        sProfileAvatarStyle = 0;
+        [standardDefaults setInteger:0 forKey:UDKeyProfileAvatarStyle];
+    }
     sShowSubredditHeaders = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders];
     sSubredditHeaderImmersive = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditHeaderImmersive];
     sSubredditShowBanner = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowBanner];

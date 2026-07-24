@@ -75,6 +75,12 @@ void ApolloNormalizeNativeHideUsernameForIconOnlyTabBar(void);
 // inside this header, so it is gated on this same flag. Default ON via
 // registerDefaults. See ApolloUserAvatars.xm and ApolloProfileSocialLinks.{h,m}.
 extern BOOL sShowDetailedProfiles;
+extern BOOL sProfileHeaderImmersive;
+extern BOOL sProfileShowBanner;
+extern BOOL sProfileShowStatCards;
+extern BOOL sProfileShowSocialLinks;
+extern BOOL sProfileShowActions;
+extern NSInteger sProfileAvatarStyle; // 0 Full snoovatar, 1 Circle, 2 Square
 extern BOOL sShowSubredditHeaders;
 // New (Immersive, melt/ambient backdrop) vs Classic (same content, flat) —
 // only meaningful while sShowSubredditHeaders is YES. Mirrors

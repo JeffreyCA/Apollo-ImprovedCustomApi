@@ -119,6 +119,12 @@ static NSString *const ApolloTabBarTitlesChangedNotification = @"ApolloTabBarTit
 // (UDKeyShowUserAvatars), which governs the inline avatars next to usernames.
 // See ApolloUserAvatars.xm and ApolloProfileSocialLinks.m. Default YES.
 static NSString *const UDKeyShowDetailedProfiles = @"ShowDetailedProfiles";
+static NSString *const UDKeyProfileHeaderImmersive = @"ProfileHeaderImmersive";
+static NSString *const UDKeyProfileShowBanner = @"ProfileShowBanner";
+static NSString *const UDKeyProfileShowStatCards = @"ProfileShowStatCards";
+static NSString *const UDKeyProfileShowSocialLinks = @"ProfileShowSocialLinks";
+static NSString *const UDKeyProfileShowActions = @"ProfileShowActions";
+static NSString *const UDKeyProfileAvatarStyle = @"ProfileAvatarStyle";
 static NSString *const UDKeyShowSubredditHeaders = @"ShowSubredditHeaders";
 // New (Immersive, with the melt/ambient backdrop) vs Classic (same content,
 // flat) — mirrors UDKeyProfileHeaderImmersive's semantics for subreddits.

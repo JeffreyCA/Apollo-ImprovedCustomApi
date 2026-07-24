@@ -16,7 +16,9 @@ NSString *const ApolloSocialLinksToggleChangedNotification = @"ApolloSocialLinks
 BOOL ApolloProfileSocialLinksEnabled(void) {
     // The Social Links band is part of the detailed profile (it lives inside the
     // custom header), so it's gated on the single "Show Detailed Profiles" toggle.
-    return sShowDetailedProfiles;
+    // Header on AND the viewer's per-band Social Links switch (a profile-layout
+    // preference from #697's Profile Layout screen).
+    return sShowDetailedProfiles && sProfileShowSocialLinks;
 }
 
 #pragma mark - Model
@@ -26,10 +28,10 @@ BOOL ApolloProfileSocialLinksEnabled(void) {
 
 #pragma mark - Layout constants
 
-static CGFloat const kSLPillHeight   = 30.0;   // name-pill capsule height
-static CGFloat const kSLBadgeSize    = 30.0;   // circular badge diameter
+static CGFloat const kSLPillHeight   = 36.0;   // name-pill capsule height (#697 immersive header sizing)
+static CGFloat const kSLBadgeSize    = 36.0;   // circular badge diameter
 static CGFloat const kSLBadgeGap     = 8.0;
-static CGFloat const kSLIconSize     = 18.0;
+static CGFloat const kSLIconSize     = 20.0;
 static NSUInteger const kSLMaxBadges = 8;      // beyond this we show a "+N" badge
 static NSUInteger const kSLPillThreshold = 3;  // <=3 links -> name pills; >3 -> icon badges + sheet
 static CGFloat const kSLHeaderHeight = 16.0;   // the "Social Links" caption

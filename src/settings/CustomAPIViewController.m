@@ -16,6 +16,7 @@
 #import "ApolloLinkPreviewCache.h"
 #import "settings/ApolloDeletedCommentsSettingsViewController.h"
 #import "settings/ApolloLinkPreviewSettingsViewController.h"
+#import "settings/ApolloProfileLayoutViewController.h"
 #import "ApolloSubredditCustomBannerCache.h"
 #import "ApolloSubredditCustomIconCache.h"
 #import "ApolloSubredditInfoCache.h"
@@ -483,6 +484,9 @@ typedef NS_ENUM(NSInteger, Tag) {
     [self reloadRowWithID:@"inlineMedia.settings"];
     [self reloadRowWithID:@"linkPreviews.settings"];
     [self reloadRowWithID:@"polls.settings"];
+    // Refresh the Profile Layout summary after returning from that screen
+    // (Density/Avatar/band switches may have just changed).
+    [self reloadRowWithID:@"media.profileLayout"];
     // The Setup section footer (onboarding nudge) collapses once a Reddit key
     // exists, which may have just been entered on the pushed API Keys screen.
     // Section 0 is Setup on the hub; reloading it re-evaluates the footer.
@@ -1545,6 +1549,19 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf profileTabAvatarSwitchToggled:sender]; }];
 
+    // Pushes the dedicated Profile Layout screen (Density + Avatar pickers,
+    // per-band show switches). Supersedes the old flat "Show Detailed
+    // Profiles" switch — sShowDetailedProfiles is now driven entirely from
+    // there (forced YES whenever Density/Avatar changes; New vs Classic is
+    // the real on/off for the melt backdrop, not this flag).
+    ApolloSettingsRow *profileLayout =
+        [self hubDisclosureRowWithID:@"media.profileLayout"
+                                title:@"Profile Layout"
+                             subtitle:^NSString * { return [weakSelf profileLayoutSummaryText]; }
+                                 push:^UIViewController * {
+            return [[ApolloProfileLayoutViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        }];
+
     ApolloSettingsRow *iconOnlyTabBar =
         [ApolloSettingsRow switchRowWithID:@"profiles.iconOnlyTabBar"
                                      title:@"Icon-Only Tab Bar"
@@ -1568,18 +1585,28 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onToggle:^(UISwitch *sender) { [weakSelf hideUsernameTabSwitchToggled:sender]; }];
     hideUsernameTab.enabled = ^BOOL { return !sHideTabBarTitles; };
 
-    // Single toggle for Reborn's detailed profile page: banner, large
-    // avatar/snoovatar, display name, bio, and the Social Links band (all of
-    // which live in the custom header). Off → Apollo's compact stock profile.
-    ApolloSettingsRow *detailedProfiles =
-        [ApolloSettingsRow switchRowWithID:@"media.detailedProfiles"
-                                     title:@"Show Detailed Profiles"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowDetailedProfiles]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf showDetailedProfilesSwitchToggled:sender]; }];
-
     return [ApolloSettingsSection sectionWithTitle:nil
                                             footer:@"Customize profile pictures, profile pages and the tab bar. Icon-Only Tab Bar hides every tab's text label (Hide Username on Tab Bar only hides yours), while keeping each icon's accessibility name."
-                                              rows:@[ userAvatars, profileTabAvatar, iconOnlyTabBar, hideUsernameTab, detailedProfiles ]];
+                                              rows:@[ userAvatars, profileTabAvatar, iconOnlyTabBar, hideUsernameTab, profileLayout ]];
+}
+
+- (NSString *)profileLayoutSummaryText {
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    [parts addObject:sProfileHeaderImmersive ? @"New (Immersive)" : @"Classic (Compact)"];
+    switch (sProfileAvatarStyle) {
+        case 1:  [parts addObject:@"Circle Avatar"]; break;
+        case 2:  [parts addObject:@"Square Avatar"]; break;
+        default: break; // Full is the default, not worth calling out
+    }
+    NSMutableArray<NSString *> *hidden = [NSMutableArray array];
+    if (!sProfileShowBanner) [hidden addObject:@"Banner"];
+    if (!sProfileShowStatCards) [hidden addObject:@"Stat Cards"];
+    if (!sProfileShowSocialLinks) [hidden addObject:@"Social Links"];
+    if (!sProfileShowActions) [hidden addObject:@"Follow & Message"];
+    if (hidden.count > 0) {
+        [parts addObject:[NSString stringWithFormat:@"%@ off", [hidden componentsJoinedByString:@", "]]];
+    }
+    return [parts componentsJoinedByString:@" · "];
 }
 
 // Subreddits group screen (ApolloSubredditsSettingsViewController), two
@@ -3149,18 +3176,6 @@ typedef NS_ENUM(NSInteger, Tag) {
     // Apollo natively observes this and relabels the profile tab immediately.
     [[NSNotificationCenter defaultCenter]
         postNotificationName:ApolloNativeHideUsernameOnTabBarChangedNotification object:nil];
-}
-
-- (void)showDetailedProfilesSwitchToggled:(UISwitch *)sender {
-    // One toggle for the whole detailed profile (header + banner + avatar + bio +
-    // social links). The avatars-toggle notification is observed in ApolloUserAvatars.xm
-    // and re-walks visible profile controllers, installing or tearing down the header
-    // per the new value; the social-links notification refreshes the band (gated on the
-    // same flag). Both apply live, no relaunch.
-    sShowDetailedProfiles = sender.isOn;
-    [[NSUserDefaults standardUserDefaults] setBool:sShowDetailedProfiles forKey:UDKeyShowDetailedProfiles];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloUserAvatarsToggleChangedNotification" object:nil];
-    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloSocialLinksToggleChangedNotification object:nil];
 }
 
 - (void)promptClearAllCachesFromSourceView:(UIView *)sourceView {
