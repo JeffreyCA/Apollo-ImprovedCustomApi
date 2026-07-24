@@ -299,6 +299,10 @@ static CGFloat const kBBIconGap     = 6.0;
 }
 
 - (void)refresh {
+    // Feature off or no user yet → nothing to invalidate. The username guard
+    // matters: Invalidate(nil) means "wipe EVERY user's cache", and this is
+    // called on every profile pull-to-refresh.
+    if (!ApolloBadgeBookEnabled() || self.username.length == 0) return;
     ApolloBadgeBookInvalidate(self.username);
     self.badges = nil;
     self.loadedUsername = nil;

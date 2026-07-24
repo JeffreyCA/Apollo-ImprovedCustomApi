@@ -26,6 +26,17 @@ static NSCache<NSString *, UIImage *> *ApolloBBRemoteImageCache(void) {
     return cache;
 }
 
+// In-flight dedup: main-thread map of cacheKey -> waiting completions. The
+// cache stores only DECODED results, so without this a fast scroll bounce
+// through uncatalogued trophies (or the grid + detail card racing on the same
+// art) re-downloads the same URL once per caller until the first response
+// lands. Same pattern as the scraper's ApolloBBPending().
+static NSMutableDictionary<NSString *, NSMutableArray *> *ApolloBBRemoteImagePending(void) {
+    static NSMutableDictionary *pending; static dispatch_once_t once;
+    dispatch_once(&once, ^{ pending = [NSMutableDictionary dictionary]; });
+    return pending;
+}
+
 static void ApolloBBLoadRemoteImage(NSString *urlString, CGFloat pointSize, void (^completion)(UIImage *)) {
     if (urlString.length == 0) { if (completion) completion(nil); return; }
     CGFloat scale = UIScreen.mainScreen.scale;
@@ -38,6 +49,13 @@ static void ApolloBBLoadRemoteImage(NSString *urlString, CGFloat pointSize, void
 
     NSURL *url = [NSURL URLWithString:urlString];
     if (!url) { if (completion) completion(nil); return; }
+
+    // All callers are main-thread UI code, so the pending map needs no lock.
+    NSMutableArray *waiters = ApolloBBRemoteImagePending()[cacheKey];
+    if (waiters) { if (completion) [waiters addObject:[completion copy]]; return; }
+    waiters = [NSMutableArray array];
+    if (completion) [waiters addObject:[completion copy]];
+    ApolloBBRemoteImagePending()[cacheKey] = waiters;
 
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:url
                                                             completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
@@ -62,7 +80,11 @@ static void ApolloBBLoadRemoteImage(NSString *urlString, CGFloat pointSize, void
             }
         }
         if (image) [ApolloBBRemoteImageCache() setObject:image forKey:cacheKey cost:cost];
-        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(image); });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSArray *toNotify = ApolloBBRemoteImagePending()[cacheKey];
+            [ApolloBBRemoteImagePending() removeObjectForKey:cacheKey];
+            for (void (^waiter)(UIImage *) in toNotify) waiter(image);
+        });
     }];
     [task resume];
 }
@@ -510,6 +532,12 @@ static CMMotionManager *ApolloBBSharedMotionManager(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    // Backgrounding strips the infinite ring/shine CAAnimations; re-install on
+    // foreground (see apollo_appWillEnterForeground).
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(apollo_appWillEnterForeground)
+                                                 name:UIApplicationWillEnterForegroundNotification
+                                               object:nil];
     UIColor *background = _background ?: [UIColor systemGroupedBackgroundColor];
     UIColor *surface = _surface ?: [UIColor secondarySystemGroupedBackgroundColor];
     Class glassClass = NSClassFromString(@"UIGlassEffect");
@@ -570,12 +598,7 @@ static CMMotionManager *ApolloBBSharedMotionManager(void) {
         _holoRing = ring;
         [self apollo_applyHoloRingColors];
 
-        CABasicAnimation *spin = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
-        spin.fromValue = @0.0;
-        spin.toValue = @(2.0 * M_PI);
-        spin.duration = 6.0;
-        spin.repeatCount = HUGE_VALF;
-        [ring addAnimation:spin forKey:@"holoSpin"];
+        [self apollo_startHoloSpin];
     }
 
     // ---- Icon ----
@@ -822,6 +845,10 @@ static CMMotionManager *ApolloBBSharedMotionManager(void) {
     _motion = nil;
 }
 
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
 // A soft diagonal white band swept across the card every few seconds.
 - (void)apollo_installShine {
     if (_shine || _shineHost.bounds.size.width <= 0.0) return;
@@ -841,14 +868,39 @@ static CMMotionManager *ApolloBBSharedMotionManager(void) {
     shine.position = CGPointMake(-bounds.size.width * 0.6, bounds.size.height / 2.0);
     [_shineHost.layer addSublayer:shine];
     _shine = shine;
+    [self apollo_startShineSweep];
+}
 
+// Both infinite decorations live here so the foreground handler can re-install
+// them: the system strips CAAnimations from every layer when the app
+// backgrounds, and nothing else re-runs (viewDidAppear doesn't fire on
+// foreground) — without this the ring freezes mid-rotation and the shine
+// parks offscreen for the card's remaining lifetime.
+- (void)apollo_startHoloSpin {
+    if (!_holoRing || [_holoRing animationForKey:@"holoSpin"]) return;
+    CABasicAnimation *spin = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+    spin.fromValue = @0.0;
+    spin.toValue = @(2.0 * M_PI);
+    spin.duration = 6.0;
+    spin.repeatCount = HUGE_VALF;
+    [_holoRing addAnimation:spin forKey:@"holoSpin"];
+}
+
+- (void)apollo_startShineSweep {
+    if (!_shine || [_shine animationForKey:@"sweep"]) return;
+    CGRect bounds = _shineHost.bounds;
     CAKeyframeAnimation *sweep = [CAKeyframeAnimation animationWithKeyPath:@"position.x"];
     sweep.values = @[@(-bounds.size.width * 0.6), @(bounds.size.width * 1.6), @(bounds.size.width * 1.6)];
     sweep.keyTimes = @[@0.0, @0.42, @1.0];   // sweep, then rest — feels like light catching
     sweep.duration = 4.2;
     sweep.repeatCount = HUGE_VALF;
     sweep.timingFunctions = @[[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut]];
-    [shine addAnimation:sweep forKey:@"sweep"];
+    [_shine addAnimation:sweep forKey:@"sweep"];
+}
+
+- (void)apollo_appWillEnterForeground {
+    [self apollo_startHoloSpin];
+    [self apollo_startShineSweep];
 }
 
 // One-shot celebratory burst from behind the icon.
@@ -908,7 +960,13 @@ static CMMotionManager *ApolloBBSharedMotionManager(void) {
     if (_shine) {
         CATransform3D s = CATransform3DMakeRotation(0.35, 0.0, 0.0, 1.0);
         s = CATransform3DTranslate(s, ry * 220.0, rx * 160.0, 0.0);
+        // _shine is a bare sublayer (not view-backed) — without this every
+        // 30Hz write spawns a 0.25s implicit animation: transaction churn and
+        // the parallax visibly lags its input by the implicit duration.
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
         _shine.transform = s;
+        [CATransaction commit];
     }
 }
 
@@ -923,12 +981,20 @@ static CMMotionManager *ApolloBBSharedMotionManager(void) {
             break;
         }
         default: {
-            _panActive = NO;
+            // _panActive stays YES until the spring settles — the 30Hz motion
+            // handler writes layer.transform directly, which would clobber the
+            // in-flight animation (card snaps to the motion pose mid-spring).
             [UIView animateWithDuration:0.6 delay:0.0
                  usingSpringWithDamping:0.45 initialSpringVelocity:0.0
                                 options:UIViewAnimationOptionAllowUserInteraction
                              animations:^{ self->_card.layer.transform = CATransform3DIdentity; }
-                             completion:nil];
+                             completion:^(BOOL finished) {
+                self->_panActive = NO;
+                // Restart with a fresh attitude baseline so the first
+                // post-settle tick starts from the card's current (identity)
+                // pose instead of snapping to the stale pre-pan reference.
+                if (self->_motion) [self apollo_startMotionTilt];
+            }];
             break;
         }
     }

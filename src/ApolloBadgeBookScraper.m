@@ -615,19 +615,45 @@ static NSURLSession *ApolloBBDirectSession(void) {
         NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
         config.HTTPCookieStorage = nil;
         config.HTTPShouldSetCookies = NO;
+        // timeoutIntervalForRequest is an IDLE timer (resets on every received
+        // byte) — a slow-dripping response could hold a leg open indefinitely,
+        // wedging this username's pending entry (and every later waiter) for
+        // the whole app session. The resource cap is the hard wall-clock bound;
+        // 30s covers the ~3MB achievements page on a slow cellular link.
         config.timeoutIntervalForRequest = 12.0;
+        config.timeoutIntervalForResource = 30.0;
         config.HTTPAdditionalHeaders = @{ @"Accept-Language": @"en-US,en;q=0.9" };
         session = [NSURLSession sessionWithConfiguration:config];
     });
     return session;
 }
 
-// GET a Reddit page; completion(html or nil, status, elapsed, bytes) on the
-// session's BACKGROUND delegate queue — callers parse the (multi-MB) HTML
-// right there and hop to main only with the extracted results, so the UI
-// thread never touches raw page bytes.
+// Hard local-connectivity failures — the kind where a WKWebView attempt can't
+// do any better than the direct GET just did. Escalating past one of these
+// only burns a ~60s hidden-WebView poll (and a queue slot) per profile visit
+// while offline. Mirrors ApolloSLIsOfflineErrorCode in ApolloProfileSocialLinks.m.
+static BOOL ApolloBBIsOfflineErrorCode(NSInteger code) {
+    switch (code) {
+        case NSURLErrorNotConnectedToInternet:
+        case NSURLErrorNetworkConnectionLost:
+        case NSURLErrorCannotConnectToHost:
+        case NSURLErrorCannotFindHost:
+        case NSURLErrorDNSLookupFailed:
+        case NSURLErrorInternationalRoamingOff:
+        case NSURLErrorDataNotAllowed:
+            return YES;
+        default:
+            return NO;
+    }
+}
+
+// GET a Reddit page; completion(html or nil, status, errorCode, elapsed, bytes)
+// on the session's BACKGROUND delegate queue — callers parse the (multi-MB)
+// HTML right there and hop to main only with the extracted results, so the UI
+// thread never touches raw page bytes. errorCode is the NSURLError code on
+// transport failure, else 0.
 static void ApolloBBGetHTML(NSString *urlString, NSString *cookieHeader,
-                            void (^completion)(NSString *html, NSInteger status, double elapsed, long bytes)) {
+                            void (^completion)(NSString *html, NSInteger status, NSInteger errorCode, double elapsed, long bytes)) {
     NSURL *url = [NSURL URLWithString:urlString];
     // Tag with the Web JSON probe fragment (never sent over the wire): every
     // task in the process passes through the tweak's _onqueue_resume rewrite,
@@ -647,7 +673,7 @@ static void ApolloBBGetHTML(NSString *urlString, NSString *cookieHeader,
         NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)response).statusCode : 0;
         NSString *html = (status == 200 && data.length)
             ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
-        completion(html, status, elapsed, (long)data.length);
+        completion(html, status, error.code, elapsed, (long)data.length);
     }];
     [task resume];
 }
@@ -774,6 +800,12 @@ static NSTimeInterval const kApolloBBWebFetchWatchdog = 90.0;
     // still works from non-flagged networks.
     ApolloWebSessionEntry *session = ApolloActiveWebSession();
     void (^proceed)(WKWebsiteDataStore *) = ^(WKWebsiteDataStore *store) {
+        // The cookie-seed completions below come from WebKit's network
+        // process — if one straggles in after the watchdog already ran
+        // finish (finished=YES, web still nil so teardown was a no-op),
+        // building the WebView now would orphan it in the window forever:
+        // finish early-returns on finished and can never tear it down.
+        if (self.finished) return;
         WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
         config.websiteDataStore = store;
         self.web = [[WKWebView alloc] initWithFrame:win.bounds configuration:config];
@@ -1070,6 +1102,7 @@ void ApolloBadgeBookFetch(NSString *rawUsername, void (^completion)(ApolloUserBa
         result.username = username;
         __block BOOL delivered = NO;
         __block BOOL userGone = NO;      // a leg saw HTTP 404 — the account doesn't exist
+        __block BOOL sawOfflineError = NO; // a leg failed with a hard connectivity error
         __block int directPending = 2;   // profile page + achievements page
 
         // First component in delivers the (partially-filled) result so the UI
@@ -1123,6 +1156,16 @@ void ApolloBadgeBookFetch(NSString *rawUsername, void (^completion)(ApolloUserBa
                 if (!delivered) { delivered = YES; deliver(result.trophiesResolved || result.achievementsResolved ? result : nil); }
                 return;
             }
+            // Hard local-connectivity failure — a hidden WebView can't do better
+            // than the direct GETs just did; escalating would only burn a ~60s
+            // poll (and the single fallback slot) per profile visit while
+            // offline. Fail the fetch instead (never cached), so a later visit
+            // retries once the network is back.
+            if (sawOfflineError) {
+                ApolloLog(@"[BadgeBook][perf] u/%@ offline (no connectivity) — skipping WebView fallback", username);
+                if (!delivered) { delivered = YES; deliver(result.trophiesResolved || result.achievementsResolved ? result : nil); }
+                return;
+            }
             ApolloLog(@"[BadgeBook][perf] u/%@ direct path incomplete after %.2fs (needTrophies=%d needAchievements=%d) — WebView fallback",
                       username, CFAbsoluteTimeGetCurrent() - t0, needTrophies, needAchievements);
             ApolloBBWebFetch *fetch = [[ApolloBBWebFetch alloc] init];
@@ -1167,7 +1210,7 @@ void ApolloBadgeBookFetch(NSString *rawUsername, void (^completion)(ApolloUserBa
         // Parse on the session's background queue; only the joined results cross
         // to the main thread (result/state are main-thread-only).
         NSString *profileURL = [NSString stringWithFormat:@"https://old.reddit.com/user/%@", escaped];
-        ApolloBBGetHTML(profileURL, cookieHeader, ^(NSString *html, NSInteger status, double elapsed, long bytes) {
+        ApolloBBGetHTML(profileURL, cookieHeader, ^(NSString *html, NSInteger status, NSInteger errorCode, double elapsed, long bytes) {
             BOOL pageOK = (html != nil && ApolloBBLooksLikeOldRedditPage(html));
             NSArray *raw = pageOK ? ApolloBBParseOldRedditTrophies(html) : nil;  // nil = no trophy case
             NSArray<ApolloBadgeItem *> *items = raw ? ApolloBBTrophyItemsFromOldReddit(raw) : @[];
@@ -1189,8 +1232,9 @@ void ApolloBadgeBookFetch(NSString *rawUsername, void (^completion)(ApolloUserBa
                     ApolloLog(@"[BadgeBook][perf] u/%@ trophy page 404 — user not found", username);
                     componentSettled();
                 } else {
-                    ApolloLog(@"[BadgeBook][perf] u/%@ trophy page direct GET failed (%.2fs http=%ld %ldKB title=%@)",
-                              username, elapsed, (long)status, bytes / 1024, failTitle);
+                    if (ApolloBBIsOfflineErrorCode(errorCode)) sawOfflineError = YES;
+                    ApolloLog(@"[BadgeBook][perf] u/%@ trophy page direct GET failed (%.2fs http=%ld err=%ld %ldKB title=%@)",
+                              username, elapsed, (long)status, (long)errorCode, bytes / 1024, failTitle);
                 }
                 if (--directPending == 0) maybeFallback();
             });
@@ -1199,7 +1243,7 @@ void ApolloBadgeBookFetch(NSString *rawUsername, void (^completion)(ApolloUserBa
         // ---- Leg 2: achievements page ----
         if ([ApolloBadgeBookCatalog shared].isLoaded) {
             NSString *achURL = [NSString stringWithFormat:@"https://www.reddit.com/user/%@/achievements/", escaped];
-            ApolloBBGetHTML(achURL, cookieHeader, ^(NSString *html, NSInteger status, double elapsed, long bytes) {
+            ApolloBBGetHTML(achURL, cookieHeader, ^(NSString *html, NSInteger status, NSInteger errorCode, double elapsed, long bytes) {
                 BOOL pageOK = (html != nil && ApolloBBLooksLikeRedditPage(html));
                 NSArray *badges = pageOK ? ApolloBBParseAchievementTags(html) : nil;
                 NSString *failTitle = pageOK ? nil : ApolloBBPageTitle(html);
@@ -1215,8 +1259,9 @@ void ApolloBadgeBookFetch(NSString *rawUsername, void (^completion)(ApolloUserBa
                         componentSettled();
                     } else {
                         if (status == 404) userGone = YES;
-                        ApolloLog(@"[BadgeBook][perf] u/%@ achievements page direct GET failed (%.2fs http=%ld %ldKB title=%@)",
-                                  username, elapsed, (long)status, bytes / 1024, failTitle);
+                        if (ApolloBBIsOfflineErrorCode(errorCode)) sawOfflineError = YES;
+                        ApolloLog(@"[BadgeBook][perf] u/%@ achievements page direct GET failed (%.2fs http=%ld err=%ld %ldKB title=%@)",
+                                  username, elapsed, (long)status, (long)errorCode, bytes / 1024, failTitle);
                     }
                     if (--directPending == 0) maybeFallback();
                 });
