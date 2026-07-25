@@ -31,11 +31,16 @@
 #import <Foundation/Foundation.h>
 
 typedef NS_ENUM(NSInteger, ApolloLPHostShape) {
-    /// No evidence yet — caller should use its own default (hero).
+    /// No evidence, or MIXED evidence (some previews imageful, some not — the
+    /// paywalled-news case: wsj.com and reuters.com serve og:image on free
+    /// articles and 401 on the rest). Mixed deliberately reports Unknown rather
+    /// than Imaged: "sometimes" is not evidence that THIS url will have an image.
     ApolloLPHostShapeUnknown = 0,
-    /// This host's previews reliably resolve without a usable image.
+    /// Every preview we have seen from this host resolved without a usable image.
     ApolloLPHostShapeImageless,
-    /// This host does produce usable preview images.
+    /// Every preview we have seen from this host carried a usable image, and none
+    /// ever did not. This is the ONLY verdict strong enough to justify reserving
+    /// a hero-sized image box before the fetch comes back.
     ApolloLPHostShapeImaged,
 };
 

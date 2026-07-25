@@ -33,25 +33,32 @@ static NSString *const kApolloLPIgnoredHosts[] = {
     @"x.com",
 };
 
-// Counts saturate rather than wrap; the verdict only cares about "any" vs
-// "none", so there is nothing to gain from letting them grow unbounded.
-static const uint32_t kApolloLPMaxCount = 1000;
+// Counters saturate low on purpose. Paired with the opposite-side decay in
+// recordHost:, this makes the store a short sliding window: a host needs only a
+// handful of consistent observations to earn a verdict, and only a handful of
+// contrary ones to lose it. A large cap would make hosts sluggish to re-learn
+// after a site changes (adds a paywall, drops one).
+static const uint32_t kApolloLPMaxCount = 8;
 
 // Bounded like the preview cache it shadows; oldest-seen hosts go first.
 static const NSUInteger kApolloLPMaxHosts = 600;
 
 static const NSTimeInterval kApolloLPDiskFlushInterval = 8.0;
 
-// Verdict rule: a host is predicted imageless only with ZERO counter-evidence
-// (at least one imageless observation and not a single imageful one).
+// Verdict rule: both verdicts require zero counter-evidence within the window.
+// Imageless means nothing recent from this host carried an image; Imaged means
+// everything recent did. Anything mixed reports Unknown, and Unknown gets the
+// safe (compact) placeholder.
 //
-// A ratio/majority rule was considered and rejected: measured against a real
-// 500-entry preview cache, the strict rule pre-empts ~68% of imageless
-// previews with zero false compacts, while a 2:1-style rule risks flipping
-// genuinely mixed hosts — reddit.com alone is 69 imageful / 22 imageless there,
-// and compact-ifying the single most common host in the cache would trade this
-// bug for a worse one. Mixed hosts keep the hero default and keep relying on
-// the existing heal machinery; that residue is expected, not a gap.
+// Mixed is not an edge case, it is the common one, and treating it as Imaged is
+// what made the first version of this fix fail in the field: wsj.com, reuters.com
+// and jn.pt all serve a real og:image on their free articles and 401/403 on the
+// rest, so one successful observation was enough to hand every later article a
+// hero placeholder that then had to collapse.
+//
+// Only Imaged is load-bearing now — it is what lets a reliably-imageful host keep
+// its hero skeleton instead of visibly growing. Imageless and Unknown both lead to
+// the same compact placeholder, so a wrong Imageless verdict costs nothing.
 @interface ApolloLPShapeEntry : NSObject {
 @public
     uint32_t imageless;
@@ -122,6 +129,7 @@ static NSString *ApolloLPNormalizedHost(NSString *host) {
 
 static ApolloLPHostShape ApolloLPShapeForEntry(ApolloLPShapeEntry *entry) {
     if (!entry) return ApolloLPHostShapeUnknown;
+    if (entry->imaged > 0 && entry->imageless > 0) return ApolloLPHostShapeUnknown; // mixed
     if (entry->imaged > 0) return ApolloLPHostShapeImaged;
     if (entry->imageless > 0) return ApolloLPHostShapeImageless;
     return ApolloLPHostShapeUnknown;
@@ -215,10 +223,19 @@ static BOOL ApolloLPHostIsIgnored(NSString *host) {
         entry = [ApolloLPShapeEntry new];
         _hosts[normalized] = entry;
     }
+    // Each observation also decays the opposite counter by one, so a verdict
+    // reflects the host's RECENT behaviour rather than its whole history. Without
+    // that decay the counters only ever grow, so one stale observation pins a
+    // host to mixed/Unknown for the life of the install and the store degrades
+    // monotonically toward "nothing is ever trusted". With it, "Imaged" means a
+    // run of successes with no recent failure — which is the bar a hero
+    // placeholder should have to clear.
     if (hasUsableImage) {
         if (entry->imaged < kApolloLPMaxCount) entry->imaged++;
+        if (entry->imageless > 0) entry->imageless--;
     } else {
         if (entry->imageless < kApolloLPMaxCount) entry->imageless++;
+        if (entry->imaged > 0) entry->imaged--;
     }
     entry->lastSeen = now;
     [self evictIfNeededLocked];
@@ -238,9 +255,9 @@ static BOOL ApolloLPHostIsIgnored(NSString *host) {
         entry = [ApolloLPShapeEntry new];
         _hosts[normalized] = entry;
     }
-    // Retract, don't just counter-balance: under the zero-counter-evidence
-    // verdict rule a stale "imaged" would otherwise outvote every later
-    // failure and keep handing this host hero placeholders forever.
+    // Same shape as an ordinary imageless observation: the fetcher already
+    // counted this host as imageful on the strength of an og:image URL that
+    // turns out to 404, so that credit has to come back off.
     if (entry->imaged > 0) entry->imaged--;
     if (entry->imageless < kApolloLPMaxCount) entry->imageless++;
     entry->lastSeen = [[NSDate date] timeIntervalSince1970];

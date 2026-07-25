@@ -2229,29 +2229,47 @@ static ApolloLPContext ApolloLPContextForMode(NSInteger mode, ApolloLinkPreview 
     return ApolloLPContextSelfText;
 }
 
-// Which shape should an as-yet-unfetched URL's PLACEHOLDER take?
+// May an as-yet-unfetched URL's PLACEHOLDER reserve a hero-sized image box?
 //
-// This is the single decision behind the recurring "compact card stranded in a
-// full-card-height row, shrinks later while scrolling" bug. Getting it wrong in
-// the hero direction reserves ~220pt of image box for a card that will end up
-// ~104pt tall, and only a table row reload can take that space back — the
-// fragile V18/V20/V23/V24 heal machinery elsewhere in this file. Getting it wrong in the compact
-// direction only grows the row, which Texture's ordinary height refresh
-// commits. So: predict compact whenever there is real evidence, and remember
-// that evidence across launches (ApolloLinkPreviewShapeMemory) instead of
-// re-learning it one stranded row at a time, every launch, forever.
+// Both directions cost the same to COMMIT — Texture re-queries the row height
+// either way, and there is no cheap path for one of them. The asymmetry that
+// matters is in DETECTION, and it is decisive:
+//
+//   guessed hero, ended compact — the compact card sits in a row still measured
+//       ~200pt too tall. Nothing can see that by looking: a card shorter than its
+//       cell is what a normal cell looks like. Only per-node bookkeeping
+//       (V20/V23) knows, and a row reload destroys the very node holding it. The
+//       user's recording shows the result: the final compact card stretched
+//       inside a stale hero row for >1.3s, on screen and motionless.
+//   guessed compact, ended hero — the hero card draws past the bottom of its
+//       row, and that IS detectable by looking: V18's stateless geometry check
+//       (ApolloLPRunOverflowHeightCheck) measures the overflow and re-arms on
+//       every didEnterVisibleState, so it converges without needing to have
+//       remembered anything.
+//
+// So a hero box may only be reserved on POSITIVE evidence that the image will be
+// there — never as a default. The wrong guess then lands in the direction the
+// module can actually see and repair.
+//
+// The first version of this fix kept hero as the default and tried to predict
+// compact from a per-host memory. It failed in the field for an
+// obvious-in-hindsight reason: the hosts that actually strand are paywalled news
+// sites (wsj.com and reuters.com 401, jn.pt 403) which DO serve og:image on
+// their free articles, so they never looked imageless — plus every host being
+// seen for the first time. Requiring positive evidence instead makes the failure
+// structurally impossible rather than merely less likely: only a host whose every
+// observed preview carried an image gets a hero placeholder, so the reliable hero
+// cards keep their skeleton and everything else starts compact and grows.
 //
 // Observations are deliberately NOT recorded from the layout path: they come
 // from the preview fetch completion (once per URL, in ApolloLinkPreviewFetcher)
 // and from the dead-image mark (once per image URL), so nothing here runs per
 // measure. The store also refuses to learn anything about x.com / twitter.com /
-// bsky.app, whose cards have a fixed shape — which incidentally closes a leak
-// the old in-memory set had, where a non-post bsky.app URL falling back to a
-// favicon could compact-ify every Bluesky post for the rest of the launch.
-static BOOL ApolloLPShouldUseCompactPlaceholder(NSURL *url) {
+// bsky.app, whose cards have a fixed shape.
+static BOOL ApolloLPHostReliablyHasPreviewImages(NSURL *url) {
     NSString *host = ApolloLPHost(url);
     if (host.length == 0) return NO;
-    return [[ApolloLinkPreviewShapeMemory sharedMemory] shapeForHost:host] == ApolloLPHostShapeImageless;
+    return [[ApolloLinkPreviewShapeMemory sharedMemory] shapeForHost:host] == ApolloLPHostShapeImaged;
 }
 
 static id ApolloLPModelFromNodeIvar(ASDisplayNode *node, const char *ivarName) {
@@ -4509,8 +4527,16 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
         }
     }
     if (!cached) {
-        BOOL compactPlaceholder = selectedMode == ApolloLinkPreviewModeCompact || ApolloLPShouldUseCompactPlaceholder(url) || ApolloLPIsRedditUserProfileURL(url) || ApolloLPIsRedditSubredditURL(url);
-        ApolloLPContext placeholderContext = compactPlaceholder ? ApolloLPContextCompact : ApolloLPContextSelfText;
+        // Reserve a hero image box ONLY on positive evidence (see
+        // ApolloLPHostReliablyHasPreviewImages); otherwise start compact, because
+        // a compact placeholder can only ever grow and a hero one can strand.
+        // Bluesky posts are excluded from the inversion: their final card is
+        // pinned to the hero shape regardless of imagery (below), so a compact
+        // placeholder for them would be a guaranteed grow on every single card.
+        BOOL heroPlaceholder = selectedMode == ApolloLinkPreviewModeFull &&
+            !ApolloLPIsRedditUserProfileURL(url) && !ApolloLPIsRedditSubredditURL(url) &&
+            (ApolloLPIsBlueskyPostURL(url) || ApolloLPHostReliablyHasPreviewImages(url));
+        ApolloLPContext placeholderContext = heroPlaceholder ? ApolloLPContextSelfText : ApolloLPContextCompact;
         NSNumber *inFlight = objc_getAssociatedObject(self, &kApolloLinkPreviewFetchInFlightKey);
         if (![inFlight boolValue]) {
             objc_setAssociatedObject(self, &kApolloLinkPreviewFetchInFlightKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -4535,6 +4561,27 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
                     }
                 });
             }];
+        }
+        // ONCE per host per launch, off the hot path: which shape we reserved and
+        // on what evidence. PR #652 stripped the old placeholder-shape logging,
+        // which is why the only way to diagnose the last round of this bug from a
+        // user report was to film the screen. One line per host is nowhere near
+        // the per-measure volume that change was targeting.
+        {
+            static NSMutableSet *sLoggedShapeHosts; static dispatch_once_t once;
+            dispatch_once(&once, ^{ sLoggedShapeHosts = [NSMutableSet set]; });
+            BOOL shouldLog = NO;
+            @synchronized (sLoggedShapeHosts) {
+                if (host.length > 0 && ![sLoggedShapeHosts containsObject:host]) {
+                    [sLoggedShapeHosts addObject:host];
+                    shouldLog = YES;
+                }
+            }
+            if (shouldLog) {
+                ApolloLog(@"[LinkPreviews] placeholder shape=%@ host=%@ verdict=%ld",
+                          placeholderContext == ApolloLPContextCompact ? @"compact" : @"hero",
+                          host, (long)[[ApolloLinkPreviewShapeMemory sharedMemory] shapeForHost:host]);
+            }
         }
         NSString *placeholderVariant = ApolloLPVariant(area, selectedMode, placeholderContext, YES);
         ApolloLPMarkRenderSignatureIfChanged((ASDisplayNode *)self, placeholderVariant, ApolloLPRenderSignature(url, nil, placeholderVariant), host);
