@@ -217,9 +217,13 @@ static NSString *const UDKeyScrollEdgeEffectStyle = @"ScrollEdgeEffectStyle";
 // Render image URLs (i.redd.it, preview.redd.it, i.imgur.com, generic .png/.jpg/.jpeg/.webp)
 // inline within post selftext and comments instead of leaving them as plain text links.
 static NSString *const UDKeyEnableInlineImages = @"EnableInlineImages";
-// Master toggle for the chat media enhancements: render inbound images/GIFs/emoji/snoomoji
-// inline in DM/chat bubbles, rewrite outgoing media embeds so image/GIF sends work, and tap an
-// image/GIF to open it full screen. OFF = stock Apollo chat (media shown as plain text links).
+// Master toggle for the message media enhancements: render inbound images/GIFs/emoji/snoomoji
+// inline in message bubbles, rewrite outgoing media embeds so image/GIF sends work, and tap an
+// image/GIF to open it full screen. OFF = stock Apollo threads (media shown as plain text links).
+// Scoped to the threads Apollo draws itself with PrivateMessageViewController — legacy Direct
+// Chat, private messages, and native Moderator Mail — so turning on modern Chat/Modmail (which
+// are web surfaces rendering their own media) narrows what this reaches without ever emptying
+// it: private messages are always native.
 // Independent of "Show User Profile Pictures" (avatars have their own toggle). See ApolloChat*.xm.
 static NSString *const UDKeyEnableChatMedia = @"EnableChatMedia";
 // Horizontal alignment for inline media that is narrower than the row (e.g. tall portrait images).
