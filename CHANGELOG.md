@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixes
 
+- Fix **rich link previews** for image-less sites briefly rendering a compact card inside a full-card-height row — a tall empty gap that only collapsed once you scrolled the row back into view — by remembering across launches which sites never produce a preview image and drawing the compact card from the first layout pass (@icpryde)
 - Fix **inline comment images** rendering tiny inside a full-height row after collapsing and re-expanding a comment, and the row flicker/reload loop when voting on a comment with an inline image (#675: @icpryde)
 
 ## [v3.4.2] - 2026-07-17

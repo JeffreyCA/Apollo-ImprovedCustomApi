@@ -8,6 +8,7 @@
 #import "ApolloDeletedCommentsData.h"
 #import "ApolloLinkPreviewCache.h"
 #import "ApolloLinkPreviewFetcher.h"
+#import "ApolloLinkPreviewShapeMemory.h"
 #import "ApolloBannedProfile.h"
 #import "ApolloUserProfileCache.h"
 #import "ApolloState.h"
@@ -1244,6 +1245,12 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
                 // dead-mark suppresses further fetches, so repeats mean a
                 // race, and reflowing again would loop the row reload.
                 ApolloLPMarkImageURLDead(imageURL);
+                // The scrape found an og:image but the file 4xx's. The fetcher
+                // recorded this PAGE host as "imaged" on the strength of that
+                // URL — retract it, so a host that habitually advertises images
+                // it never serves stops getting hero placeholders. (hostCopy is
+                // the page host, not the image CDN's.)
+                [[ApolloLinkPreviewShapeMemory sharedMemory] recordHostAdvertisedImageWasDead:hostCopy];
                 ASDisplayNode *hostNode = (ASDisplayNode *)strongImageNode;
                 for (int hops = 0; hostNode && hops < 24; hops++) {
                     if ([NSStringFromClass([hostNode class]) containsString:@"LinkButtonNode"]) break;
@@ -2222,44 +2229,29 @@ static ApolloLPContext ApolloLPContextForMode(NSInteger mode, ApolloLinkPreview 
     return ApolloLPContextSelfText;
 }
 
-static NSMutableSet<NSString *> *ApolloLPCompactPlaceholderHosts(void) {
-    static NSMutableSet<NSString *> *hosts;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        hosts = [NSMutableSet setWithArray:@[
-            @"amctheatres.com",
-            @"doi.org",
-            @"journals.sagepub.com",
-            @"nature.com",
-            @"news18.com",
-            @"nuvioapp.space",
-            @"piie.com",
-            @"zerozero.pt"
-        ]];
-    });
-    return hosts;
-}
-
+// Which shape should an as-yet-unfetched URL's PLACEHOLDER take?
+//
+// This is the single decision behind the recurring "compact card stranded in a
+// full-card-height row, shrinks later while scrolling" bug. Getting it wrong in
+// the hero direction reserves ~220pt of image box for a card that will end up
+// ~104pt tall, and only a table row reload can take that space back — the
+// fragile V18/V20/V23/V24 heal machinery elsewhere in this file. Getting it wrong in the compact
+// direction only grows the row, which Texture's ordinary height refresh
+// commits. So: predict compact whenever there is real evidence, and remember
+// that evidence across launches (ApolloLinkPreviewShapeMemory) instead of
+// re-learning it one stranded row at a time, every launch, forever.
+//
+// Observations are deliberately NOT recorded from the layout path: they come
+// from the preview fetch completion (once per URL, in ApolloLinkPreviewFetcher)
+// and from the dead-image mark (once per image URL), so nothing here runs per
+// measure. The store also refuses to learn anything about x.com / twitter.com /
+// bsky.app, whose cards have a fixed shape — which incidentally closes a leak
+// the old in-memory set had, where a non-post bsky.app URL falling back to a
+// favicon could compact-ify every Bluesky post for the rest of the launch.
 static BOOL ApolloLPShouldUseCompactPlaceholder(NSURL *url) {
     NSString *host = ApolloLPHost(url);
     if (host.length == 0) return NO;
-
-    @synchronized (ApolloLPCompactPlaceholderHosts()) {
-        if ([ApolloLPCompactPlaceholderHosts() containsObject:host]) return YES;
-        for (NSString *knownHost in ApolloLPCompactPlaceholderHosts()) {
-            if ([host hasSuffix:[@"." stringByAppendingString:knownHost]]) return YES;
-        }
-    }
-    return NO;
-}
-
-static void ApolloLPRememberCompactPlaceholderHost(NSURL *url) {
-    NSString *host = ApolloLPHost(url);
-    if (host.length == 0) return;
-
-    @synchronized (ApolloLPCompactPlaceholderHosts()) {
-        [ApolloLPCompactPlaceholderHosts() addObject:host];
-    }
+    return [[ApolloLinkPreviewShapeMemory sharedMemory] shapeForHost:host] == ApolloLPHostShapeImageless;
 }
 
 static id ApolloLPModelFromNodeIvar(ASDisplayNode *node, const char *ivarName) {
@@ -4606,11 +4598,14 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
         context = ApolloLPContextCompact;
     }
 
-    if (!isBlueskyPost && !isRedditUser && !isRedditSubreddit && displayPreview.imageIsFallbackIcon) {
-        ApolloLPRememberCompactPlaceholderHost(url);
-    } else if (!isBlueskyPost && !isRedditUser && !isRedditSubreddit && selectedMode == ApolloLinkPreviewModeFull && context == ApolloLPContextCompact) {
-        ApolloLPRememberCompactPlaceholderHost(url);
-    }
+    // (Host shape used to be learned here, from the render decision. That ran on
+    // every measure and, worse, taught the memory the wrong thing: a card
+    // rendered compact because its comment happened to hold 2+ links, or because
+    // the user picked Compact mode, is not evidence that the HOST is imageless.
+    // Observations now come from the preview fetch itself — see
+    // ApolloLinkPreviewFetcher's finishURL: and the dead-image mark in
+    // ApolloLPStartFallbackImageFetch — which is once per URL, off the layout
+    // path, and actually about the page.)
     NSString *finalVariant = ApolloLPVariant(area, selectedMode, context, NO);
     ApolloLPMarkRenderSignatureIfChanged((ASDisplayNode *)self, finalVariant, ApolloLPRenderSignature(url, displayPreview, finalVariant), host);
     id richSpec = isBlueskyPost
@@ -4800,6 +4795,11 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
 %ctor {
     sApolloLPRegisteredLinkNodes = [NSHashTable weakObjectsHashTable];
     sApolloLPRegisteredLinkNodesQueue = dispatch_queue_create("com.apollo.linkpreviews.nodes", DISPATCH_QUEUE_SERIAL);
+
+    // One-time, off-thread: derive host verdicts from previews we have already
+    // fetched, so an existing install knows on its first launch which of ITS
+    // hosts are imageless rather than re-learning each one via a stranded row.
+    [[ApolloLinkPreviewShapeMemory sharedMemory] primeFromPreviewCacheIfNeeded];
 
     [[NSNotificationCenter defaultCenter] addObserverForName:ApolloLinkPreviewModeDidChangeNotification
                                                       object:nil
