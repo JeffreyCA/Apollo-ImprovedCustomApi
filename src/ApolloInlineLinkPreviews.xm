@@ -4475,12 +4475,16 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
         }
     }
     NSString *urlString = ApolloGetLinkButtonNodeURLString(self);
+    // Atomic association policies: this runs on Texture's background layout
+    // threads while main-thread paths (context-menu, row-reload bookkeeping)
+    // read the same keys — a nonatomic get can hand back a non-retained object
+    // that a concurrent replace is deallocating.
     NSString *cachedURLString = objc_getAssociatedObject(self, &kApolloLinkPreviewSourceURLStringKey);
     NSURL *url = objc_getAssociatedObject(self, &kApolloLinkPreviewURLKey);
     if (![cachedURLString isEqualToString:urlString]) {
         url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
-        objc_setAssociatedObject(self, &kApolloLinkPreviewSourceURLStringKey, urlString, OBJC_ASSOCIATION_COPY_NONATOMIC);
-        objc_setAssociatedObject(self, &kApolloLinkPreviewURLKey, url, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(self, &kApolloLinkPreviewSourceURLStringKey, urlString, OBJC_ASSOCIATION_COPY);
+        objc_setAssociatedObject(self, &kApolloLinkPreviewURLKey, url, OBJC_ASSOCIATION_RETAIN);
     }
     if (ApolloLPAllModesDisabled()) {
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
