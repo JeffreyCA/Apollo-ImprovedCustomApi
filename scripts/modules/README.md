@@ -65,6 +65,7 @@ No new unpack/repack script, no edits to the other build paths.
 | `inject-tweak` | `inject_tweak_in_app` | replace tweak dylibs from a `.deb` (prepared IPA) |
 | `strip-substrate-arm64e` | `strip_substrate_arm64e_in_app` | strip CydiaSubstrate arm64e slice (iOS 26 dyld) |
 | `patch-bundle-versions` | `patch_bundle_versions_in_app` | set `CFBundleShortVersionString` / `CFBundleVersion` |
+| `enable-promotion` | `enable_promotion_in_app` | unlock adaptive refresh rates above 60 Hz on iPhone |
 | `inject-url-schemes` | `inject_url_schemes_in_app` | append `CFBundleURLTypes` schemes |
 | `fix-safari-extension` | `fix_safari_extension_in_app` | repair `Apollofari.appex` |
 | `fix-openin-extension` | `fix_openin_extension_in_app` | repair `OpenInUIExtension.appex` |

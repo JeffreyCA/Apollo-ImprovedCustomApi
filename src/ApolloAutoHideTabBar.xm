@@ -659,7 +659,9 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
 
 - (void)didMoveToWindow {
     %orig;
-    objc_setAssociatedObject((UIScrollView *)self, &kApolloScrollViewTabBarControllerBoxKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (objc_getAssociatedObject((UIScrollView *)self, &kApolloScrollViewTabBarControllerBoxKey)) {
+        objc_setAssociatedObject((UIScrollView *)self, &kApolloScrollViewTabBarControllerBoxKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
     if (self.window) {
         ApolloApplyScrollEdgeEffectStyle(self);
     }

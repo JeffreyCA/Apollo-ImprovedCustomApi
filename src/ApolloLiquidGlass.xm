@@ -1158,9 +1158,8 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
     NSMutableSet<NSValue *> *titleSubtree = [NSMutableSet set];
     {
         NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:titleControl];
-        while (q.count > 0) {
-            UIView *v = q.firstObject;
-            [q removeObjectAtIndex:0];
+        for (NSUInteger index = 0; index < q.count; index++) {
+            UIView *v = q[index];
             [titleSubtree addObject:[NSValue valueWithNonretainedObject:v]];
             for (UIView *c in v.subviews) [q addObject:c];
         }
@@ -1178,9 +1177,8 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
     BOOL foundLeftContent = NO;
     BOOL foundRightContent = NO;
     NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:bar];
-    while (queue.count > 0) {
-        UIView *v = queue.firstObject;
-        [queue removeObjectAtIndex:0];
+    for (NSUInteger index = 0; index < queue.count; index++) {
+        UIView *v = queue[index];
         for (UIView *child in v.subviews) {
             if ([titleSubtree containsObject:[NSValue valueWithNonretainedObject:child]]) continue;
             if (child.hidden || child.alpha == 0) continue;

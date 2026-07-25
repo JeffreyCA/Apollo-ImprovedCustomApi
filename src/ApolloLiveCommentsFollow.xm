@@ -98,6 +98,7 @@ static const void *kLCFDisplayLinkKey = &kLCFDisplayLinkKey; // CADisplayLink: p
 static const void *kLCFLastOffKey    = &kLCFLastOffKey;    // NSNumber double: contentOffset.y last poll (re-lock stability)
 static const void *kLCFReadAnchorFNKey = &kLCFReadAnchorFNKey; // NSString: comment to keep stable while reading (unlocked)
 static const void *kLCFReadDeltaKey  = &kLCFReadDeltaKey;  // NSNumber double: that comment's (contentY - offset) screen position
+static const void *kLCFVisibleKey    = &kLCFVisibleKey;    // NSNumber bool: comments VC is currently on-screen
 
 static long gLCFGen = 0;
 
@@ -709,7 +710,7 @@ static void LCFTick(__weak UIViewController *weakVC, long gen) {
     if (!vc) return;
     NSNumber *curGen = LCFNum(vc, kLCFGenKey);
     if (!curGen || curGen.longValue != gen) return;     // superseded by a newer appear/disappear
-    if (!sLiveCommentsFollow) return;                   // toggled off — stop the loop
+    if (!sLiveCommentsFollow) return;                   // lifecycle reconciliation stops the display link
 
     // A compose/edit/share sheet (or any modal) is presented over the comments view — stand down so
     // we don't touch the pill while the user is typing. Resume when it dismisses.
@@ -722,11 +723,12 @@ static void LCFTick(__weak UIViewController *weakVC, long gen) {
     BOOL live = LCFIsLive(vc);
 
     if (!live || !tv || LCFIsIsolatedThread(vc)) {
-        // Not live, no table, or an isolated thread (ApolloInboxCommentScroll's domain) — stay
-        // dormant but keep polling cheaply so we notice when Live Update is turned on.
+        // Leaving Live sort invalidates this generation from the display-link
+        // callback. Do not keep an ordinary comments screen on a permanent
+        // 0.4-second discovery poll; sort/lifecycle hooks start a fresh live
+        // session if the user selects Live again.
         if (!LCFWrap(vc).hidden) LCFHidePill(vc);
         LCFSet(vc, kLCFEvalKey, @NO);                   // re-evaluate next time live turns on
-        LCFScheduleTick(weakVC, gen);
         return;
     }
 
@@ -797,6 +799,7 @@ static void LCFStopDisplayLink(UIViewController *vc) {
 }
 
 static void LCFStartDisplayLink(UIViewController *vc) {
+    if (objc_getAssociatedObject(vc, kLCFDisplayLinkKey)) return;
     LCFStopDisplayLink(vc);
     CADisplayLink *link = [CADisplayLink displayLinkWithTarget:vc selector:@selector(apolloLCFDisplayTick:)];
     // Common modes so it keeps firing during scroll tracking (UITrackingRunLoopMode), where we must
@@ -805,45 +808,80 @@ static void LCFStartDisplayLink(UIViewController *vc) {
     objc_setAssociatedObject(vc, kLCFDisplayLinkKey, link, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+// Start/stop the live machinery from state transitions rather than leaving a
+// CADisplayLink and discovery poll attached to every comments screen. UIKit
+// scrolling gets the full ProMotion budget while ordinary sorts are active;
+// only Live Update pays for per-frame follow detection.
+static void LCFStopActiveSession(UIViewController *vc) {
+    if (!vc) return;
+    LCFSet(vc, kLCFGenKey, @(++gLCFGen));
+    LCFStopDisplayLink(vc);
+    LCFHidePill(vc);
+    LCFSet(vc, kLCFEvalKey, @NO);
+    LCFSet(vc, kLCFAnchorKey, nil);
+    LCFSet(vc, kLCFReadAnchorFNKey, nil);
+    LCFSet(vc, kLCFReadDeltaKey, nil);
+}
+
+static void LCFStartActiveSession(UIViewController *vc) {
+    if (!vc || objc_getAssociatedObject(vc, kLCFDisplayLinkKey)) return;
+
+    long gen = ++gLCFGen;
+    LCFSet(vc, kLCFGenKey, @(gen));
+    LCFSet(vc, kLCFFollowKey, @YES);
+    LCFSet(vc, kLCFEvalKey, @NO);
+    LCFSet(vc, kLCFAnchorKey, nil);
+    LCFSet(vc, kLCFReadAnchorFNKey, nil);
+    LCFSet(vc, kLCFReadDeltaKey, nil);
+    LCFSet(vc, kLCFEvalTimeKey, nil);
+    LCFSet(vc, kLCFCountKey, @(-2));
+    LCFSet(vc, kLCFSDSHKey, @(0));
+    LCFSet(vc, kLCFCachedEdgeKey, nil);
+    LCFSet(vc, kLCFCompTimeKey, @(0));
+    LCFSet(vc, kLCFLastOffKey, @(0));
+    UIView *wrap = LCFWrap(vc);
+    if (wrap) wrap.hidden = YES;
+
+    LCFScheduleTick(vc, gen);
+    LCFStartDisplayLink(vc);
+    ApolloLog(@"[LiveFollow] active session started (Live sort)");
+}
+
+static void LCFReconcileActiveSession(UIViewController *vc) {
+    BOOL shouldRun = vc && sLiveCommentsFollow && LCFBool(vc, kLCFVisibleKey)
+        && LCFIsLive(vc) && !LCFIsIsolatedThread(vc);
+    BOOL running = objc_getAssociatedObject(vc, kLCFDisplayLinkKey) != nil;
+    if (shouldRun && !running) {
+        LCFStartActiveSession(vc);
+    } else if (!shouldRun && running) {
+        LCFStopActiveSession(vc);
+    }
+}
+
 // MARK: - hooks
 
 %hook _TtC6Apollo22CommentsViewController
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    if (!sLiveCommentsFollow) return;
-
-    long gen = ++gLCFGen;
-    LCFSet(self, kLCFGenKey, @(gen));
-    LCFSet(self, kLCFFollowKey, @YES);
-    LCFSet(self, kLCFEvalKey, @NO);
-    LCFSet(self, kLCFAnchorKey, nil);
-    LCFSet(self, kLCFEvalTimeKey, nil);
-    LCFSet(self, kLCFCountKey, @(-2));
-    LCFSet(self, kLCFSDSHKey, @(0));
-    LCFSet(self, kLCFCachedEdgeKey, nil);
-    LCFSet(self, kLCFCompTimeKey, @(0));
-    LCFSet(self, kLCFLastOffKey, @(0));
-    UIView *wrap = LCFWrap((UIViewController *)self);
-    if (wrap) wrap.hidden = YES;
-
-    LCFScheduleTick((UIViewController *)self, gen);
-    LCFStartDisplayLink((UIViewController *)self);   // per-frame follow holder
+    LCFSet(self, kLCFVisibleKey, @YES);
+    LCFReconcileActiveSession((UIViewController *)self);
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
-    if (!sLiveCommentsFollow) return;
-    LCFSet(self, kLCFGenKey, @(++gLCFGen));   // supersede the poll loop
-    LCFStopDisplayLink((UIViewController *)self);
-    LCFHidePill((UIViewController *)self);
-    LCFSet(self, kLCFAnchorKey, nil);
+    LCFSet(self, kLCFVisibleKey, @NO);
+    LCFStopActiveSession((UIViewController *)self);
 }
 
 - (void)viewDidLayoutSubviews {
     %orig;
-    if (!sLiveCommentsFollow) return;
     if (![NSThread isMainThread]) return;
+    // Presenting/dismissing Apollo's sort menu causes a controller layout pass.
+    // Reconcile here so selecting Live starts the session without a dormant
+    // timer; repeated ordinary layouts are a raw-ivar check and no allocation.
+    LCFReconcileActiveSession((UIViewController *)self);
+    if (!sLiveCommentsFollow) return;
     // Only keep the pill anchored under the nav bar across rotations / chrome changes.
     // (Detection + pinning is driven by the poll loop, because this does not fire when the
     // table node's content changes.)
@@ -855,7 +893,22 @@ static void LCFStartDisplayLink(UIViewController *vc) {
 // and the scroll-away detection from a CADisplayLink instead. See LCFFollowFrame.)
 %new
 - (void)apolloLCFDisplayTick:(CADisplayLink *)link {
+    if (!sLiveCommentsFollow || !LCFIsLive(self) || LCFIsIsolatedThread((UIViewController *)self)) {
+        LCFStopActiveSession((UIViewController *)self);
+        return;
+    }
     LCFFollowFrame((UIViewController *)self);
+}
+
+- (void)commentsShouldRefreshWithNotification:(id)notification {
+    %orig;
+    // Sort changes drive a native comments refresh. Reconcile after Apollo has
+    // committed currentSort so entering Live starts immediately and leaving it
+    // tears down before the next display frame.
+    __weak UIViewController *weakVC = (UIViewController *)self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        LCFReconcileActiveSession(weakVC);
+    });
 }
 
 - (void)tintColorDidChange {

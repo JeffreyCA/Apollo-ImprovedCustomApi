@@ -134,6 +134,7 @@ static char kApolloLinkPreviewAreaKey;
 static char kApolloLinkPreviewContextMenuInstalledKey;
 static char kApolloLinkPreviewContextMenuInteractionKey;
 static char kApolloLinkPreviewURLKey;
+static char kApolloLinkPreviewSourceURLStringKey;
 static char kApolloLinkPreviewImageFallbackURLKey;
 static char kApolloLinkPreviewImageFallbackScheduledKey;
 static char kApolloLinkPreviewImageFallbackInFlightKey;
@@ -3470,6 +3471,64 @@ static void ApolloLPRenoteDroppedRowReload(ASDisplayNode *originNode, NSString *
     ApolloLPNoteRowReloadMissForNode(originNode, host);
 }
 
+static BOOL ApolloLPScrollViewIsInteracting(UIScrollView *scrollView) {
+    return scrollView.tracking || scrollView.dragging || scrollView.decelerating;
+}
+
+static void ApolloLPScheduleTableRowReloadWhenIdle(UITableView *tableView,
+                                                    NSIndexPath *indexPath,
+                                                    ASDisplayNode *originNode,
+                                                    NSString *host) {
+    __weak ASDisplayNode *weakOriginNode = originNode;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        ASDisplayNode *strongOriginNode = weakOriginNode;
+        if (!tableView.window) {
+            ApolloLPRenoteDroppedRowReload(strongOriginNode, host, indexPath.row);
+            return;
+        }
+        if (ApolloLPScrollViewIsInteracting(tableView)) {
+            ApolloLPScheduleTableRowReloadWhenIdle(tableView, indexPath, strongOriginNode, host);
+            return;
+        }
+        @try {
+            if (![[tableView indexPathsForVisibleRows] containsObject:indexPath]) {
+                ApolloLPRenoteDroppedRowReload(strongOriginNode, host, indexPath.row);
+                return;
+            }
+            [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+        } @catch (__unused NSException *exception) {
+        }
+    });
+}
+
+static void ApolloLPScheduleCollectionItemReloadWhenIdle(UICollectionView *collectionView,
+                                                          NSIndexPath *indexPath,
+                                                          ASDisplayNode *originNode,
+                                                          NSString *host) {
+    __weak ASDisplayNode *weakOriginNode = originNode;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        ASDisplayNode *strongOriginNode = weakOriginNode;
+        if (!collectionView.window) {
+            ApolloLPRenoteDroppedRowReload(strongOriginNode, host, indexPath.item);
+            return;
+        }
+        if (ApolloLPScrollViewIsInteracting(collectionView)) {
+            ApolloLPScheduleCollectionItemReloadWhenIdle(collectionView, indexPath, strongOriginNode, host);
+            return;
+        }
+        @try {
+            if (![[collectionView indexPathsForVisibleItems] containsObject:indexPath]) {
+                ApolloLPRenoteDroppedRowReload(strongOriginNode, host, indexPath.item);
+                return;
+            }
+            [collectionView performBatchUpdates:^{
+                [collectionView reloadItemsAtIndexPaths:@[indexPath]];
+            } completion:nil];
+        } @catch (__unused NSException *exception) {
+        }
+    });
+}
+
 static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDisplayNode *originNode, NSString *host) {
     // Hard convergence budget, keyed on the preview URL (falls back to host): every
     // reload path (V12 shrink heal, V18 overflow, V20 pending mark, V23 poll) funnels
@@ -3523,23 +3582,10 @@ static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDispla
             [attempts addObject:@(now)]; // burn budget only for a SCHEDULED reload
             NSString *hostCopy = [host copy];
             NSIndexPath *indexPathCopy = [indexPath copy];
-            __weak ASDisplayNode *weakOriginNode = originNode;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                @try {
-                    if (![[tableView indexPathsForVisibleRows] containsObject:indexPathCopy]) {
-                        ApolloLPRenoteDroppedRowReload(weakOriginNode, hostCopy, indexPathCopy.row);
-                        return;
-                    }
-                    // Reload ONLY the affected row. This used to also run a full-table
-                    // relayoutItems first, which re-lays out EVERY node synchronously on
-                    // main — on big threads that pinned the main thread for seconds per
-                    // healing card ("threads get very laggy" + the 0x8BADF00D scene-update
-                    // watchdog kill in #630 round 6). The single-row reload re-measures
-                    // this row's node from scratch, which is all the healer needs.
-                    [tableView reloadRowsAtIndexPaths:@[indexPathCopy] withRowAnimation:UITableViewRowAnimationNone];
-                } @catch (__unused NSException *exception) {
-                }
-            });
+            // Reload ONLY the affected row, after active scrolling settles. A
+            // reload during tracking/deceleration steals the frame budget and can
+            // perturb touch handling; cached metadata lets the row wait safely.
+            ApolloLPScheduleTableRowReloadWhenIdle(tableView, indexPathCopy, originNode, hostCopy);
             return YES;
         }
 
@@ -3551,21 +3597,7 @@ static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDispla
             [attempts addObject:@(now)]; // burn budget only for a SCHEDULED reload
             NSString *hostCopy = [host copy];
             NSIndexPath *indexPathCopy = [indexPath copy];
-            __weak ASDisplayNode *weakOriginNode = originNode;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                @try {
-                    if (![[collectionView indexPathsForVisibleItems] containsObject:indexPathCopy]) {
-                        ApolloLPRenoteDroppedRowReload(weakOriginNode, hostCopy, indexPathCopy.item);
-                        return;
-                    }
-                    // Single-item reload only — no full-table relayoutItems (see the
-                    // table branch above; that pinned main for seconds on big threads).
-                    [collectionView performBatchUpdates:^{
-                        [collectionView reloadItemsAtIndexPaths:@[indexPathCopy]];
-                    } completion:nil];
-                } @catch (__unused NSException *exception) {
-                }
-            });
+            ApolloLPScheduleCollectionItemReloadWhenIdle(collectionView, indexPathCopy, originNode, hostCopy);
             return YES;
         }
     }
@@ -4443,13 +4475,22 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
         }
     }
     NSString *urlString = ApolloGetLinkButtonNodeURLString(self);
-    NSURL *url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
-    ApolloLPPrefetchRedditUserProfileIfNeeded(url);
-
+    // Atomic association policies: this runs on Texture's background layout
+    // threads while main-thread paths (context-menu, row-reload bookkeeping)
+    // read the same keys — a nonatomic get can hand back a non-retained object
+    // that a concurrent replace is deallocating.
+    NSString *cachedURLString = objc_getAssociatedObject(self, &kApolloLinkPreviewSourceURLStringKey);
+    NSURL *url = objc_getAssociatedObject(self, &kApolloLinkPreviewURLKey);
+    if (![cachedURLString isEqualToString:urlString]) {
+        url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
+        objc_setAssociatedObject(self, &kApolloLinkPreviewSourceURLStringKey, urlString, OBJC_ASSOCIATION_COPY);
+        objc_setAssociatedObject(self, &kApolloLinkPreviewURLKey, url, OBJC_ASSOCIATION_RETAIN);
+    }
     if (ApolloLPAllModesDisabled()) {
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
         return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, %orig);
     }
+    ApolloLPPrefetchRedditUserProfileIfNeeded(url);
 
     if (!url) {
         ApolloLPRestoreHostShell((ASDisplayNode *)self);

@@ -221,6 +221,7 @@ bash "${REPO_DIR}/build-ipa.sh" --ipa "$IPA_PATH" --deb "$DEB_PATH" -o "$STANDAR
 # from this IPA below and inherit all of it; the no-extensions variants have no
 # appex and omit the extension/widget modules.
 apply_patches_in_place "$STANDARD_IPA" \
+    --module enable-promotion \
     --module fix-safari-extension \
     --module fix-openin-extension \
     --module "$VERSIONS_MODULE" \
@@ -235,6 +236,7 @@ echo "[2/6] Building no-extensions injected IPA..."
 # and injects the default URL schemes in one unpack/repack.
 cyan -i "$IPA_PATH" -f "$DEB_PATH" -o "$NOEXT_IPA" -e
 apply_patches_in_place "$NOEXT_IPA" \
+    --module enable-promotion \
     --module strip-substrate-arm64e \
     --module "$VERSIONS_MODULE" \
     --module "$SCHEMES_MODULE" \

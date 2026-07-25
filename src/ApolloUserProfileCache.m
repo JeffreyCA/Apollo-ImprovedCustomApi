@@ -55,13 +55,16 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
 @property(nonatomic, strong) NSCache<NSString *, ApolloUserProfileInfo *> *infoCache;
 @property(nonatomic, strong) NSCache<NSString *, UIImage *> *imageCache;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, ApolloUserProfileInfo *> *diskInfo;
+// Immutable point-in-time view of diskInfo. Render/preload callers read this
+// without synchronously entering the serial persistence/network queue.
+@property(atomic, strong) NSDictionary<NSString *, ApolloUserProfileInfo *> *infoSnapshot;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSMutableArray<void (^)(ApolloUserProfileInfo *)> *> *infoCompletions;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSMutableArray<void (^)(UIImage *)> *> *imageCompletions;
 @property(nonatomic, strong) NSURLSession *session;
 // Avatar image bytes come from Reddit's public CDN hosts (different hosts than the
 // authenticated about.json API, and not per-token rate-limited), so they get their
 // own session with a wider per-host pool and their own concurrent I/O queue for the
-// disk cache — keeping image work off the serial `queue` that render paths sync onto.
+// disk cache — keeping image work off the serial profile-state queue.
 @property(nonatomic, strong) NSURLSession *imageSession;
 @property(nonatomic) dispatch_queue_t imageIOQueue;
 @property(nonatomic) NSUInteger imageDiskWriteCount;
@@ -69,12 +72,16 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
 // so re-opening threads with overlapping authors doesn't re-request them.
 @property(nonatomic, strong) NSMutableSet<NSString *> *batchRequestedFullNames;
 @property(nonatomic) dispatch_queue_t queue;
+@property(nonatomic) BOOL diskSaveScheduled;
+@property(nonatomic) NSUInteger diskSaveGeneration;
 - (void)startInfoFetchForKey:(NSString *)key bypassingCache:(BOOL)bypassingCache attempt:(NSInteger)attempt;
 - (void)startBatchProfileFetchForFullNames:(NSArray<NSString *> *)chunk token:(NSString *)token;
 - (NSString *)imageCacheDirectory;
 - (NSString *)imageDiskPathForKey:(NSString *)key;
 - (void)persistImageData:(NSData *)data forKey:(NSString *)key;
 - (void)pruneImageDiskCache;
+- (void)publishInfoSnapshotLocked;
+- (void)scheduleDiskCacheSaveLocked;
 @end
 
 @implementation ApolloUserProfileCache
@@ -101,6 +108,7 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
         _imageCache.totalCostLimit = 40 * 1024 * 1024;
 
         _diskInfo = [NSMutableDictionary dictionary];
+        _infoSnapshot = @{};
         _infoCompletions = [NSMutableDictionary dictionary];
         _imageCompletions = [NSMutableDictionary dictionary];
         _batchRequestedFullNames = [NSMutableSet set];
@@ -123,8 +131,8 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
         _imageSession = [NSURLSession sessionWithConfiguration:imageConfiguration];
 
         // Concurrent queue for avatar-image disk reads/decodes (dispatch_async) and
-        // exclusive writes/prunes (dispatch_barrier_async). Kept off `queue` so a
-        // decode never blocks the main thread's synchronous cachedInfoForUsername reads.
+        // exclusive writes/prunes (dispatch_barrier_async). Profile snapshot reads
+        // are non-blocking, and image I/O likewise never occupies that state queue.
         _imageIOQueue = dispatch_queue_create("com.apollofix.avatarImageIO", DISPATCH_QUEUE_CONCURRENT);
 
         [self loadDiskCache];
@@ -331,10 +339,16 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
     for (NSString *key in self.diskInfo) {
         [self.infoCache setObject:self.diskInfo[key] forKey:key];
     }
+    [self publishInfoSnapshotLocked];
+}
+
+- (void)publishInfoSnapshotLocked {
+    self.infoSnapshot = [self.diskInfo copy] ?: @{};
 }
 
 - (void)saveDiskCacheLocked {
     [self pruneDiskInfoLocked];
+    [self publishInfoSnapshotLocked];
 
     NSMutableDictionary *entries = [NSMutableDictionary dictionary];
     for (NSString *key in self.diskInfo) {
@@ -365,17 +379,30 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
     });
 }
 
+// Profile responses often arrive in bursts while scrolling. Serializing and
+// atomically rewriting the complete JSON dictionary once per response keeps
+// the cache queue busy long enough that old synchronous readers stalled the
+// main thread. Coalesce a burst into one write; the immutable snapshot is
+// published immediately, so this delay affects persistence only.
+- (void)scheduleDiskCacheSaveLocked {
+    if (self.diskSaveScheduled) return;
+    self.diskSaveScheduled = YES;
+    NSUInteger generation = self.diskSaveGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)), self.queue, ^{
+        if (!self.diskSaveScheduled || generation != self.diskSaveGeneration) return;
+        self.diskSaveScheduled = NO;
+        [self saveDiskCacheLocked];
+    });
+}
+
 - (ApolloUserProfileInfo *)cachedInfoForUsername:(NSString *)username {
     NSString *key = [self normalizedUsername:username];
     if (!key) return nil;
     ApolloUserProfileInfo *info = [self.infoCache objectForKey:key];
     if (info) return info;
 
-    __block ApolloUserProfileInfo *diskInfo = nil;
-    dispatch_sync(self.queue, ^{
-        diskInfo = self.diskInfo[key];
-        if (diskInfo) [self.infoCache setObject:diskInfo forKey:key];
-    });
+    ApolloUserProfileInfo *diskInfo = self.infoSnapshot[key];
+    if (diskInfo) [self.infoCache setObject:diskInfo forKey:key];
     return diskInfo;
 }
 
@@ -393,7 +420,11 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
         info.followStateAccount = ApolloActiveAccountUsername().lowercaseString;   // whose follow this is
         self.diskInfo[key] = info;
         [self.infoCache setObject:info forKey:key];
-        [self saveDiskCacheLocked];
+        // Same shape as every other writer: publish immediately (the key may be
+        // re-entering diskInfo after a prune, when the old snapshot lacks it),
+        // coalesce the full-cache JSON rewrite.
+        [self publishInfoSnapshotLocked];
+        [self scheduleDiskCacheSaveLocked];
     });
 }
 
@@ -494,7 +525,8 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
         if (info) {
             self.diskInfo[key] = info;
             [self.infoCache setObject:info forKey:key];
-            [self saveDiskCacheLocked];
+            [self publishInfoSnapshotLocked];
+            [self scheduleDiskCacheSaveLocked];
             if (info.iconURL) [self requestImageForURL:info.iconURL completion:nil];
             if (info.decoratorURL) [self requestImageForURL:info.decoratorURL completion:nil];
         }
@@ -831,7 +863,10 @@ static NSTimeInterval ApolloUserProfileRetryBackoffForAttempt(NSInteger attempt)
                 // Warm the image cache so the avatar paints the instant the cell appears.
                 [self requestImageForURL:iconURL completion:nil];
             }
-            if (applied > 0) [self saveDiskCacheLocked];
+            if (applied > 0) {
+                [self publishInfoSnapshotLocked];
+                [self scheduleDiskCacheSaveLocked];
+            }
             ApolloLog(@"[UserAvatars] Batch profile fetch: %lu ids -> %lu new avatars cached", (unsigned long)chunk.count, (unsigned long)applied);
         });
     }];
@@ -978,6 +1013,9 @@ static NSTimeInterval ApolloUserProfileRetryBackoffForAttempt(NSInteger attempt)
     dispatch_async(self.queue, ^{
         NSUInteger infoCount = self.diskInfo.count;
         [self.diskInfo removeAllObjects];
+        [self publishInfoSnapshotLocked];
+        self.diskSaveGeneration++;
+        self.diskSaveScheduled = NO;
         [self.infoCache removeAllObjects];
         [self.imageCache removeAllObjects];
         // Reset the batch-prefetch dedupe set so already-seen users get re-warmed

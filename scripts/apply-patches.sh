@@ -17,6 +17,7 @@ set -euo pipefail
 #   strip-substrate-arm64e         strip CydiaSubstrate arm64e slice
 #   patch-bundle-versions:<short>:<build>   set CFBundleShortVersionString/CFBundleVersion
 #   stamp-build-variant:<variant>  set ARBuildVariant (usage-heartbeat "c" field)
+#   enable-promotion              unlock adaptive refresh rates above 60 Hz on iPhone
 #   inject-url-schemes:<csv>       append URL schemes to CFBundleURLTypes
 #   fix-safari-extension           repair Apollofari.appex
 #   fix-openin-extension[:<dylib>] repair OpenInUIExtension.appex
@@ -56,6 +57,7 @@ module_function() {
         strip-substrate-arm64e)  echo "strip_substrate_arm64e_in_app" ;;
         patch-bundle-versions)   echo "patch_bundle_versions_in_app" ;;
         stamp-build-variant)     echo "stamp_build_variant_in_app" ;;
+        enable-promotion)        echo "enable_promotion_in_app" ;;
         inject-url-schemes)      echo "inject_url_schemes_in_app" ;;
         fix-safari-extension)    echo "fix_safari_extension_in_app" ;;
         fix-openin-extension)    echo "fix_openin_extension_in_app" ;;
