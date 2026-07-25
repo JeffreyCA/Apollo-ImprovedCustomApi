@@ -1,7 +1,38 @@
 #import "ApolloCommon.h"
+#import "ApolloDirectChatWeb.h"
 #import "settings/ApolloSettingsRouter.h"
+#import <UserNotifications/UserNotifications.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+
+// Modern mailbox notification destinations deliberately use Reborn-owned URLs
+// instead of pretending to be legacy Reddit messages:
+//
+//   apollo://reborn/chat
+//   apollo://reborn/chat/room/<opaque-room-id>
+//   apollo://reborn/modmail/all/<opaque-conversation-id>
+//
+// The path after `chat` is already Reddit Chat's path. For Modmail, replace the
+// Reborn-only `modmail` route component with Reddit's real `mail` component.
+// Keeping this translation in one place means Bark taps, APNs taps, widgets,
+// and manually opened URLs all follow the same validated route.
+static NSDictionary<NSString *, NSString *> *ApolloModernMailboxRouteFromURL(NSURL *url) {
+    if (![url isKindOfClass:[NSURL class]] ||
+        ![[url.scheme lowercaseString] isEqualToString:@"apollo"] ||
+        ![[url.host lowercaseString] isEqualToString:@"reborn"]) return nil;
+
+    NSString *path = url.path ?: @"";
+    if ([path isEqualToString:@"/chat"] || [path hasPrefix:@"/chat/"]) {
+        return @{ @"kind": @"chat", @"path": path };
+    }
+    if ([path isEqualToString:@"/modmail"] || [path hasPrefix:@"/modmail/"]) {
+        NSString *suffix = [path substringFromIndex:[@"/modmail" length]];
+        NSString *mailPath = suffix.length > 0
+            ? [@"/mail" stringByAppendingString:suffix] : @"/mail/all";
+        return @{ @"kind": @"modmail", @"path": mailPath };
+    }
+    return nil;
+}
 
 static NSString *ApolloQuickActionNameFromURL(NSURL *url) {
     if (![url isKindOfClass:[NSURL class]]) return nil;
@@ -152,6 +183,46 @@ static BOOL ApolloQuickActionsPerformNow(NSString *action) {
     return YES;
 }
 
+static BOOL ApolloQuickActionsOpenModernMailboxNow(NSDictionary<NSString *, NSString *> *route) {
+    id tabBarController = ApolloMainTabBarController();
+    if (!tabBarController) return NO;
+
+    if ([tabBarController respondsToSelector:@selector(goToInboxTab)]) {
+        @try {
+            ((void (*)(id, SEL))objc_msgSend)(tabBarController, @selector(goToInboxTab));
+        } @catch (NSException *exception) {
+            ApolloLog(@"[QuickActions] Modern mailbox could not select Inbox: %@", exception);
+            return NO;
+        }
+    }
+
+    if (![tabBarController isKindOfClass:[UITabBarController class]]) return NO;
+    UIViewController *selected = [(UITabBarController *)tabBarController selectedViewController];
+    UINavigationController *navigationController = nil;
+    if ([selected isKindOfClass:[UINavigationController class]]) {
+        navigationController = (UINavigationController *)selected;
+    } else if ([selected.navigationController isKindOfClass:[UINavigationController class]]) {
+        navigationController = selected.navigationController;
+    }
+    if (!navigationController) return NO;
+
+    NSString *kind = route[@"kind"];
+    NSString *path = route[@"path"];
+    UIViewController *mailbox = [kind isEqualToString:@"modmail"]
+        ? ApolloCreateModernModmailViewControllerForPath(path)
+        : ApolloCreateModernChatViewControllerForPath(path);
+    if (!mailbox) return NO;
+
+    // A notification is a fresh destination, not another layer on top of an
+    // existing Inbox detail. Reset to Boxes before opening it so Back has one
+    // predictable place to return to.
+    [navigationController popToRootViewControllerAnimated:NO];
+    [navigationController pushViewController:mailbox animated:NO];
+    ApolloLog(@"[QuickActions] Opened modern %@ notification destination",
+              [kind isEqualToString:@"modmail"] ? @"Modmail" : @"Chat");
+    return YES;
+}
+
 static void ApolloQuickActionsPerformWithRetry(NSString *action, NSUInteger attempt) {
     if (ApolloQuickActionsPerformNow(action)) return;
     if (attempt >= 8) {
@@ -164,7 +235,28 @@ static void ApolloQuickActionsPerformWithRetry(NSString *action, NSUInteger atte
     });
 }
 
+static void ApolloQuickActionsOpenModernMailboxWithRetry(NSDictionary<NSString *, NSString *> *route,
+                                                         NSUInteger attempt) {
+    if (ApolloQuickActionsOpenModernMailboxNow(route)) return;
+    if (attempt >= 8) {
+        ApolloLog(@"[QuickActions] Gave up opening modern mailbox notification destination");
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        ApolloQuickActionsOpenModernMailboxWithRetry(route, attempt + 1);
+    });
+}
+
 static BOOL ApolloQuickActionsHandleURL(NSURL *url) {
+    NSDictionary<NSString *, NSString *> *mailboxRoute = ApolloModernMailboxRouteFromURL(url);
+    if (mailboxRoute) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ApolloQuickActionsOpenModernMailboxWithRetry(mailboxRoute, 0);
+        });
+        return YES;
+    }
+
     NSString *action = ApolloQuickActionNameFromURL(url);
     if (!action) return NO;
 
@@ -181,6 +273,25 @@ static BOOL ApolloQuickActionsHandleURL(NSURL *url) {
         return YES;
     }
     return %orig(application, url, options);
+}
+
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+ didReceiveNotificationResponse:(UNNotificationResponse *)response
+         withCompletionHandler:(void (^)(void))completionHandler {
+    NSDictionary *userInfo = response.notification.request.content.userInfo;
+    NSString *rawURL = [userInfo[@"apollo_deep_link"] isKindOfClass:[NSString class]]
+        ? userInfo[@"apollo_deep_link"] : nil;
+    if (!rawURL.length && [userInfo[@"url"] isKindOfClass:[NSString class]]) {
+        rawURL = userInfo[@"url"];
+    }
+
+    NSURL *url = rawURL.length > 0 ? [NSURL URLWithString:rawURL] : nil;
+    if (ApolloQuickActionsHandleURL(url)) {
+        ApolloLog(@"[QuickActions] Handled modern mailbox APNs destination");
+        if (completionHandler) completionHandler();
+        return;
+    }
+    %orig(center, response, completionHandler);
 }
 
 %end

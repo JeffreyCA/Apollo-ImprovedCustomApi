@@ -156,12 +156,13 @@ void ApolloWebSessionSetPollOnly(NSString *username, NSString *cookieHeader, NSS
     if (cookieHeader.length == 0) return;
     // Never downgrade a keyless account's real transport session: if it's already
     // primary, refresh it as primary instead of marking it poll-only.
-    if (ApolloWebSessionIsPrimary(key)) {
+    if (ApolloWebSessionIsPrimary(key) || ApolloWebSessionFor(username)) {
         ApolloWebSessionSet(username, cookieHeader, modhash);
         return;
     }
     ApolloWebSessionKeychainWrite(ApolloWebSessionKeychainAccountName(@"cookie", key), cookieHeader);
     ApolloWebSessionKeychainWrite(ApolloWebSessionKeychainAccountName(@"modhash", key), modhash ?: @"");
+    ApolloWebSessionUpdateIndex(key, NO);
     ApolloWebSessionUpdateIndexNamed(kUDKeyWebSessionPollOnlyIndex, key, YES);
     ApolloLog(@"[WebSessionStore] Stored poll-only web session for u/%@ (%lu cookie bytes, modhash %@)",
               username, (unsigned long)cookieHeader.length, modhash.length > 0 ? @"present" : @"absent");

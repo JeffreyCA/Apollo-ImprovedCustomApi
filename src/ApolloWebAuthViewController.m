@@ -151,13 +151,11 @@
                                         userInfo:nil]];
 }
 
-// Before completing OAuth, opportunistically "grab" the reddit.com web session
-// this login webview is already signed into, so Polls / API-Key-Free features are
-// set up with no second sign-in. Best-effort and time-boxed: sign-in ALWAYS
-// completes (whether or not the harvest succeeds) and never waits more than a
-// moment. The harvest must run before _finishWithURL: tears down the ephemeral
-// webview and its cookie jar.
-- (void)_harvestPollSessionThenFinishWithURL:(NSURL *)url {
+// OAuth has already authenticated Reddit in this webview. Capture its
+// cookies before the ephemeral data store is torn down so Chat, Modmail, and
+// Polls normally need no second sign-in. This is best-effort and time-bounded;
+// the OAuth callback always wins even if Reddit blocks the auxiliary probe.
+- (void)_harvestFeatureSessionThenFinishWithURL:(NSURL *)url {
     [self.spinner startAnimating];
     __block BOOL didFinish = NO;
     __weak typeof(self) weakSelf = self;
@@ -167,12 +165,15 @@
         [weakSelf _finishWithURL:url error:nil];
     };
     // Safety net: never let a hung probe block sign-in.
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (!didFinish) ApolloLog(@"[WebAuth] Auto-harvest timed out — completing sign-in anyway");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (!didFinish) {
+            ApolloLog(@"[WebAuth] Auxiliary session auto-harvest timed out — completing OAuth");
+        }
         finishOnce();
     });
-    [ApolloWebSessionLoginViewController harvestPollSessionFromWebView:self.webView
-                                                           completion:^(NSString *username) {
+    [ApolloWebSessionLoginViewController harvestFeatureSessionFromWebView:self.webView
+                                                               completion:^(__unused NSString *username) {
         finishOnce();
     }];
 }
@@ -228,7 +229,7 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
         // actually goes out over the network (for http/https redirect URIs).
         decisionHandler(WKNavigationActionPolicyCancel);
         ApolloLog(@"[WebAuth] Intercepted callback: %@", url);
-        [self _harvestPollSessionThenFinishWithURL:url];
+        [self _harvestFeatureSessionThenFinishWithURL:url];
         return;
     }
 

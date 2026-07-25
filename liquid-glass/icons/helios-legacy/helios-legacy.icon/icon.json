@@ -1,0 +1,348 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "display-p3:0.34719,0.68047,0.97416,1.00000",
+      "display-p3:0.42549,0.41620,0.96197,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0.7
+      }
+    }
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "blend-mode-specializations" : [
+            {
+              "value" : "normal"
+            },
+            {
+              "appearance" : "dark",
+              "value" : "normal"
+            }
+          ],
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "Apollo Antenna Ball copy.svg",
+          "name" : "Apollo Antenna Ball copy",
+          "opacity-specializations" : [
+            {
+              "value" : 1
+            },
+            {
+              "appearance" : "dark",
+              "value" : 1
+            }
+          ],
+          "position" : {
+            "scale" : 1.09,
+            "translation-in-points" : [
+              -0.0158533223050199,
+              -379.7228245577272
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "display-p3:0.89394,0.06706,0.83891,1.00000"
+          },
+          "hidden" : false,
+          "image-name" : "Closed Eye.svg",
+          "name" : "Closed Eye",
+          "position" : {
+            "scale" : 0.87,
+            "translation-in-points" : [
+              150,
+              140
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "display-p3:0.89394,0.06751,0.83891,1.00000"
+          },
+          "hidden" : false,
+          "image-name" : "Closed Eye.svg",
+          "name" : "Closed Eye",
+          "position" : {
+            "scale" : 0.87,
+            "translation-in-points" : [
+              -150,
+              140
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.21114,0.09444,0.37551,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "display-p3:0.12829,0.12671,0.12671,1.00000"
+              }
+            }
+          ],
+          "image-name" : "Apollo Antenna Icon 2.svg",
+          "name" : "Apollo Antenna Icon 2",
+          "opacity-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : 1
+            }
+          ],
+          "position" : {
+            "scale" : 0.79,
+            "translation-in-points" : [
+              0,
+              -67
+            ]
+          }
+        },
+        {
+          "blend-mode" : "normal",
+          "fill-specializations" : [
+            {
+              "value" : {
+                "linear-gradient" : [
+                  "display-p3:0.16528,0.07429,0.29833,1.00000",
+                  "extended-gray:0.00000,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "linear-gradient" : [
+                  "extended-gray:0.25000,1.00000",
+                  "display-p3:0.12829,0.12671,0.12671,1.00000"
+                ],
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.5,
+                    "y" : 0
+                  },
+                  "stop" : {
+                    "x" : 0.5,
+                    "y" : 0.7
+                  }
+                }
+              }
+            }
+          ],
+          "glass" : false,
+          "image-name" : "Apollo Helmet Space.svg",
+          "name" : "Apollo Helmet Space",
+          "opacity-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : 1
+            }
+          ],
+          "position" : {
+            "scale" : 1.39,
+            "translation-in-points" : [
+              0.21958715867276624,
+              151.3338533137137
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "extended-gray:0.00000,1.00000"
+          },
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "Apollo Helmet Space.svg",
+          "name" : "Apollo Helmet Space",
+          "position" : {
+            "scale" : 1.47,
+            "translation-in-points" : [
+              0.2544248973340473,
+              151.3338533137137
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : true,
+          "image-name" : "Apollo Helmet.svg",
+          "name" : "Apollo Helmet",
+          "position" : {
+            "scale" : 1.46,
+            "translation-in-points" : [
+              0.03851596494837395,
+              94.8126990563893
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.32080,0.60708,0.96001,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:0.75000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "Apollo Ring Large.svg",
+          "name" : "Apollo Ring Large",
+          "opacity-specializations" : [
+            {
+              "value" : 1
+            },
+            {
+              "appearance" : "dark",
+              "value" : 0.1
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0.25
+            }
+          ],
+          "position" : {
+            "scale" : 0.77,
+            "translation-in-points" : [
+              -0.017993374452316857,
+              -379.7038005709613
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.33650,0.52822,0.96392,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:0.50000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "Apollo Ring Large.svg",
+          "name" : "Apollo Ring Large",
+          "opacity-specializations" : [
+            {
+              "value" : 1
+            },
+            {
+              "appearance" : "dark",
+              "value" : 0.15
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0.25
+            }
+          ],
+          "position" : {
+            "scale" : 1.12,
+            "translation-in-points" : [
+              -0.017993374452316857,
+              -379.7038005709613
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.37173,0.44220,0.96002,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:0.25000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "Apollo Ring Large.svg",
+          "name" : "Apollo Ring Large",
+          "opacity-specializations" : [
+            {
+              "value" : 1
+            },
+            {
+              "appearance" : "dark",
+              "value" : 0.4
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0.15
+            }
+          ],
+          "position" : {
+            "scale" : 1.47,
+            "translation-in-points" : [
+              -0.017993374452316857,
+              -379.7038005709613
+            ]
+          }
+        }
+      ],
+      "lighting" : "individual",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

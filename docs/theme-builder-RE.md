@@ -120,8 +120,28 @@ Tinted-theme palettes (primary/secondary/tertiary bg, separator, bar, gray):
 | dracula | dark | 1A1D29 | 222636 | (n/c) | 242838 | 12141C | 484E5B |
 
 Standard neutrals (all non-tinted themes): light FFFFFF / F2F3F7 / F8F8F8 /
-EEEEEF / FBFBFB / CCCCCC; dark 131516 / 000000 / 1A1A1A / 232323 / 131516
-(bar≈bg) / 323740. (n/c) = not captured during the mapping run.
+EEEEEF / FBFBFB / CCCCCC. (n/c) = not captured during the mapping run.
+
+Dark, non-tinted themes are NOT a single fixed value — the primary (card/
+cell) and secondary (page) backgrounds depend on Apollo's own Pure Black
+tier, confirmed directly against live behavior (this supersedes the older,
+incomplete "131516" note this doc previously had, which only captured the
+Pure Black ON value and mislabeled it as the baseline):
+
+| Pure Black tier | primary (card) | secondary (page) |
+|---|---|---|
+| off (both toggles off) | 20252F | 2B3039 |
+| UsePureBlackDarkMode on | 131516 | (not captured) |
+| UsePurePUREBlackMode ("PURER Black") on | 000000 (050505 with PureBlackModeReduceSmearing) | 000000 |
+
+Both toggles are group-defaults BOOLs (`UsePureBlackDarkMode`,
+`UsePurePUREBlackMode`, `PureBlackModeReduceSmearing` — same suite as
+`AppColorTheme`, confirmed via a live plist dump). They apply ONLY to
+non-tinted themes ("Pure black affects Apollo themes only" per Apollo's own
+theme-screen footer) — tinted themes (solarized/outrun/sunset/sepia/dracula,
+palette table above) keep their own fixed dark background regardless of
+either toggle. `tertiary`/`separator`/`bar`/`gray` for non-tinted dark are
+still not captured for any Pure Black tier.
 
 Theme-independent constants (same across all themes — vote green 00B23B/00940F,
 gray text 919191/84878C, separators C7C7CC/646466, link blue 94C6FF/45658D,
