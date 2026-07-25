@@ -18,6 +18,7 @@
 #import "ApolloCommon.h"
 #import "UIWindow+Apollo.h"
 #import <objc/message.h>
+#import <objc/runtime.h>
 
 @interface UITouch (ApolloSimDebugTap)
 - (void)setPhase:(UITouchPhase)phase;
@@ -163,11 +164,144 @@ static void ApolloSimDebugTypeText(NSString *text) {
               (unsigned long)text.length, NSStringFromClass(responder.class));
 }
 
+// "dump" command: log geometry/inset state for every on-screen scroll view and
+// tab bar, so inset regressions (e.g. issue #732) can be measured across
+// app lifecycle transitions without any UI interaction.
+static void ApolloSimDebugDumpScrollViews(UIView *view, int depth) {
+    if (!view) return;
+    if ([view isKindOfClass:[UIScrollView class]]) {
+        UIScrollView *sv = (UIScrollView *)view;
+        if (sv.frame.size.height > 100) {
+            UIEdgeInsets ci = sv.contentInset;
+            UIEdgeInsets ai = sv.adjustedContentInset;
+            UIEdgeInsets sa = sv.safeAreaInsets;
+            ApolloLog(@"[SimDump] %@ frame=%@ offset=(%.1f,%.1f) contentH=%.1f inset(T%.1f B%.1f) adjusted(T%.1f B%.1f) safeArea(T%.1f B%.1f) adjBehavior=%ld vertBounce=%d",
+                      NSStringFromClass(sv.class), NSStringFromCGRect(sv.frame),
+                      sv.contentOffset.x, sv.contentOffset.y, sv.contentSize.height,
+                      ci.top, ci.bottom, ai.top, ai.bottom, sa.top, sa.bottom,
+                      (long)sv.contentInsetAdjustmentBehavior, sv.bounces);
+        }
+    }
+    if ([view isKindOfClass:[UITabBar class]]) {
+        ApolloLog(@"[SimDump] UITabBar frame=%@ hidden=%d alpha=%.2f superH=%.1f",
+                  NSStringFromCGRect(view.frame), view.hidden, view.alpha,
+                  view.superview.bounds.size.height);
+    }
+    for (UIView *sub in view.subviews) {
+        ApolloSimDebugDumpScrollViews(sub, depth + 1);
+    }
+}
+
+static void ApolloSimDebugPerformDump(void) {
+    for (UIWindow *window in ApolloAllWindows()) {
+        if (window.hidden) continue;
+        ApolloLog(@"[SimDump] === window %@ ===", NSStringFromClass(window.class));
+        ApolloSimDebugDumpScrollViews(window, 0);
+        UIViewController *root = window.rootViewController;
+        UIViewController *vc = root;
+        while (vc && ![vc isKindOfClass:[UITabBarController class]]) {
+            vc = vc.childViewControllers.firstObject;
+        }
+        if ([vc isKindOfClass:[UITabBarController class]]) {
+            UITabBarController *tbc = (UITabBarController *)vc;
+            NSNumber *minBehavior = nil;
+            SEL sel = NSSelectorFromString(@"tabBarMinimizeBehavior");
+            if ([tbc respondsToSelector:sel]) {
+                NSInteger v = ((NSInteger (*)(id, SEL))objc_msgSend)(tbc, sel);
+                minBehavior = @(v);
+            }
+            NSNumber *minimized = nil;
+            SEL minSel = NSSelectorFromString(@"isTabBarMinimized");
+            if ([tbc respondsToSelector:minSel]) {
+                minimized = @(((BOOL (*)(id, SEL))objc_msgSend)(tbc, minSel));
+            }
+            ApolloLog(@"[SimDump] TabBarController minimizeBehavior=%@ minimized=%@ safeArea(B%.1f)",
+                      minBehavior ?: @"n/a", minimized ?: @"n/a",
+                      tbc.view.safeAreaInsets.bottom);
+        }
+    }
+    ApolloLog(@"[SimDump] === end ===");
+}
+
+// "fakesafe N" command: make every UIView's safeAreaInsets.bottom
+// under-report by N points — emulating the iOS 27 device transient where a
+// layout pass sees a bottom safe area that excludes the tab bar (issue
+// #732) — then dirty all layout so Apollo's inset math reruns against the
+// faked value. "fakesafe 0" restores reality. Sim-only test harness for
+// ApolloListBottomInsetGuard.
+//
+// Manual swizzle rather than %hook: Logos emits hook-registration glue at
+// the end of the file, OUTSIDE this #if APOLLO_SIM_BUILD region, which
+// breaks device builds. The swizzle is installed lazily on first use.
+static CGFloat sApolloSimFakeSafeAreaDeficit = 0.0;
+static UIEdgeInsets (*sApolloSimOrigSafeAreaInsets)(id, SEL);
+
+static UIEdgeInsets ApolloSimFakedSafeAreaInsets(id self, SEL _cmd) {
+    UIEdgeInsets insets = sApolloSimOrigSafeAreaInsets(self, _cmd);
+    if (sApolloSimFakeSafeAreaDeficit > 0.0) {
+        insets.bottom = MAX(0.0, insets.bottom - sApolloSimFakeSafeAreaDeficit);
+    }
+    return insets;
+}
+
+static void ApolloSimInstallFakeSafeAreaHook(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Method method = class_getInstanceMethod([UIView class], @selector(safeAreaInsets));
+        if (!method) return;
+        sApolloSimOrigSafeAreaInsets = (UIEdgeInsets (*)(id, SEL))method_getImplementation(method);
+        method_setImplementation(method, (IMP)ApolloSimFakedSafeAreaInsets);
+    });
+}
+
+static void ApolloSimDebugDirtyAllLayout(UIView *view) {
+    [view setNeedsLayout];
+    for (UIView *sub in view.subviews) {
+        ApolloSimDebugDirtyAllLayout(sub);
+    }
+}
+
 static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *observer,
                                           CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *contents = [NSString stringWithContentsOfFile:kApolloSimTapFile
                                                        encoding:NSUTF8StringEncoding error:nil];
+        if ([contents hasPrefix:@"dump"]) {
+            ApolloSimDebugPerformDump();
+            return;
+        }
+        if ([contents hasPrefix:@"fakesafe "]) {
+            ApolloSimInstallFakeSafeAreaHook();
+            sApolloSimFakeSafeAreaDeficit = [[contents substringFromIndex:9] doubleValue];
+            for (UIWindow *window in ApolloAllWindows()) {
+                if (window.hidden) continue;
+                ApolloSimDebugDirtyAllLayout(window);
+                [window layoutIfNeeded];
+            }
+            ApolloLog(@"[SimDump] fakesafe deficit=%.1f applied + relayout forced",
+                      sApolloSimFakeSafeAreaDeficit);
+            return;
+        }
+        // "minbehavior N" command: set the main tab bar controller's
+        // tabBarMinimizeBehavior (1=never → expands a minimized bar,
+        // 2=onScrollDown) to emulate iOS 27's expand-on-foreground reset.
+        if ([contents hasPrefix:@"minbehavior "]) {
+            NSInteger value = [[contents substringFromIndex:12] integerValue];
+            for (UIWindow *window in ApolloAllWindows()) {
+                UIViewController *vc = window.rootViewController;
+                while (vc && ![vc isKindOfClass:[UITabBarController class]]) {
+                    vc = vc.childViewControllers.firstObject;
+                }
+                if (![vc isKindOfClass:[UITabBarController class]]) continue;
+                SEL sel = NSSelectorFromString(@"setTabBarMinimizeBehavior:");
+                if ([vc respondsToSelector:sel]) {
+                    ((void (*)(id, SEL, NSInteger))objc_msgSend)(vc, sel, value);
+                    ApolloLog(@"[SimDump] set tabBarMinimizeBehavior=%ld", (long)value);
+                }
+                break;
+            }
+            return;
+        }
         if ([contents hasPrefix:@"text "]) {
             NSString *payload = [[contents substringFromIndex:5] stringByTrimmingCharactersInSet:
                 NSCharacterSet.newlineCharacterSet];

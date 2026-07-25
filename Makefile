@@ -97,6 +97,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloLiquidGlassIconPicker.xm \
     $(SRC_DIR)/ApolloModmailLayout.xm \
     $(SRC_DIR)/ApolloAutoHideTabBar.xm \
+    $(SRC_DIR)/ApolloListBottomInsetGuard.xm \
     $(SRC_DIR)/ApolloTabBarCollapseSide.xm \
     $(SRC_DIR)/ApolloIPadTabBarBottom.xm \
     $(SRC_DIR)/ApolloScrollEdgeEffect.xm \
