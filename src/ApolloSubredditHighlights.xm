@@ -158,17 +158,41 @@ static BOOL ApolloHLPostsTypeTag(id viewController, uint8_t *tag) {
 
 static NSString *ApolloHLNormalizedName(NSString *subredditName) {
     if (![subredditName isKindOfClass:[NSString class]]) return nil;
+    // These are queried on scrolling hot paths (the managed-table layoutSubviews
+    // hook re-derives the name every layout) — build them once.
+    static NSArray<NSString *> *blocked;
+    static NSCharacterSet *invalid;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        blocked = @[@"home", @"popular", @"all", @"search", @"profile",
+                    @"settings", @"inbox", @"friends", @"mod"];
+        invalid = [[NSCharacterSet characterSetWithCharactersInString:
+                    @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"] invertedSet];
+    });
     NSString *clean = [subredditName stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if ([clean hasPrefix:@"/r/"] || [clean hasPrefix:@"/R/"]) clean = [clean substringFromIndex:3];
     if ([clean hasPrefix:@"r/"] || [clean hasPrefix:@"R/"]) clean = [clean substringFromIndex:2];
     if (clean.length == 0) return nil;
-    NSArray<NSString *> *blocked = @[@"home", @"popular", @"all", @"search", @"profile",
-                                     @"settings", @"inbox", @"friends", @"mod"];
     if ([blocked containsObject:clean.lowercaseString]) return nil;
-    NSCharacterSet *invalid = [[NSCharacterSet characterSetWithCharactersInString:
-                                @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"] invertedSet];
     if ([clean rangeOfCharacterFromSet:invalid].location != NSNotFound) return nil;
     return clean;
+}
+
+// Memo of the last derivation, stored on the VC. The managed-table
+// layoutSubviews hook calls ApolloHLSubredditName every scroll frame; the raw
+// inputs (subreddit ivar's name + nav title) almost never change, so the
+// normalization string churn is skipped whenever they're unchanged.
+@interface ApolloHLNameMemo : NSObject
+@property(nonatomic, copy) NSString *rawName;
+@property(nonatomic, copy) NSString *rawTitle;
+@property(nonatomic, copy) NSString *derived;
+@end
+@implementation ApolloHLNameMemo
+@end
+static char kApolloHLNameMemoKey;
+
+static BOOL ApolloHLStringsEqual(NSString *a, NSString *b) {
+    return (a == b) || (a && b && [a isEqualToString:b]);
 }
 
 static NSString *ApolloHLSubredditName(UIViewController *viewController) {
@@ -176,25 +200,43 @@ static NSString *ApolloHLSubredditName(UIViewController *viewController) {
     uint8_t tag = 0;
     BOOL haveTag = ApolloHLPostsTypeTag(viewController, &tag);
     if (haveTag && tag != 0 && tag != 5) return nil; // multireddit / special feed
+    id subreddit = ApolloHLTypedIvar(viewController, @"currentSubreddit", objc_getClass("RDKSubreddit"));
+    NSString *rawName = nil;
+    if (subreddit && [subreddit respondsToSelector:@selector(name)]) {
+        id nameValue = ((id (*)(id, SEL))objc_msgSend)(subreddit, @selector(name));
+        if ([nameValue isKindOfClass:[NSString class]]) rawName = nameValue;
+    }
+    NSString *rawTitle = nil;
+    if (haveTag) {
+        rawTitle = viewController.navigationItem.title;
+        if (rawTitle.length == 0) rawTitle = viewController.title;
+    }
+
+    ApolloHLNameMemo *memo = objc_getAssociatedObject(viewController, &kApolloHLNameMemoKey);
+    if (memo && ApolloHLStringsEqual(memo.rawName, rawName) && ApolloHLStringsEqual(memo.rawTitle, rawTitle)) {
+        return memo.derived;
+    }
+
     // Reddit subreddit names are canonically lowercase; the nav-title fallback can
     // carry display casing ("Apple"). Lowercase the result so every comparison and
     // cache key is consistent (the authoritative `currentSubreddit.name` and the
     // title fallback then always agree).
-    id subreddit = ApolloHLTypedIvar(viewController, @"currentSubreddit", objc_getClass("RDKSubreddit"));
-    if (subreddit && [subreddit respondsToSelector:@selector(name)]) {
-        id nameValue = ((id (*)(id, SEL))objc_msgSend)(subreddit, @selector(name));
-        if ([nameValue isKindOfClass:[NSString class]]) {
-            NSString *normalized = ApolloHLNormalizedName(nameValue);
-            if (normalized.length) return normalized.lowercaseString;
-        }
+    NSString *derived = nil;
+    NSString *normalized = ApolloHLNormalizedName(rawName);
+    if (normalized.length) {
+        derived = normalized.lowercaseString;
+    } else if (haveTag) {
+        derived = ApolloHLNormalizedName(rawTitle).lowercaseString;
     }
-    if (haveTag) {
-        NSString *title = viewController.navigationItem.title;
-        if (title.length == 0) title = viewController.title;
-        NSString *normalized = ApolloHLNormalizedName(title);
-        return normalized.lowercaseString;
+
+    if (!memo) {
+        memo = [ApolloHLNameMemo new];
+        objc_setAssociatedObject(viewController, &kApolloHLNameMemoKey, memo, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    return nil;
+    memo.rawName = rawName;
+    memo.rawTitle = rawTitle;
+    memo.derived = derived;
+    return derived;
 }
 
 static BOOL ApolloHLShouldSkipViewController(UIViewController *viewController) {
@@ -2108,8 +2150,13 @@ static void ApolloHLCollapseOrphanSeparators(UIViewController *vc) {
 
 %hook UIScrollView
 
+// Gated on the feature flag only: whether a table is actually ours is decided
+// by ApolloHLShouldBlockOffset's managed-table marker (one associated-object
+// read), NOT the subreddit-headers toggle — a managed standalone carousel can
+// briefly outlive a headers-toggle-on (until the next install pass restores
+// the native header), and it still needs its auto-scroll suppressed.
 - (void)setContentOffset:(CGPoint)contentOffset {
-    if (sCommunityHighlights && !sShowSubredditHeaders &&
+    if (sCommunityHighlights &&
         [self isKindOfClass:[UITableView class]] &&
         ApolloHLShouldBlockOffset((UITableView *)self, contentOffset)) {
         return;
@@ -2118,7 +2165,7 @@ static void ApolloHLCollapseOrphanSeparators(UIViewController *vc) {
 }
 
 - (void)setContentOffset:(CGPoint)contentOffset animated:(BOOL)animated {
-    if (sCommunityHighlights && !sShowSubredditHeaders &&
+    if (sCommunityHighlights &&
         [self isKindOfClass:[UITableView class]] &&
         ApolloHLShouldBlockOffset((UITableView *)self, contentOffset)) {
         return;

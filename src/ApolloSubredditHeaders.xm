@@ -1834,15 +1834,18 @@ static void ApolloSubredditTearDownHeader(UIViewController *viewController, BOOL
 static BOOL ApolloSubredditNeedsInstall(UIViewController *viewController) {
     if (!viewController) return NO;
     if (ApolloSubredditShouldSkipViewController(viewController)) return NO;
-    UITableView *tableView = ApolloSubredditFindTableView(viewController);
-    ApolloSubredditHeaderView *header = objc_getAssociatedObject(viewController, kApolloSubredditHeaderViewKey);
     UIView *wrappedHeader = objc_getAssociatedObject(viewController, kApolloSubredditWrappedHeaderKey);
 
+    // Bail before the table-view hunt: with the feature off (or on a
+    // home/profile/multireddit feed, where the name comes back empty) only
+    // "is there something to tear down" matters, and this runs from
+    // viewDidLayoutSubviews on every layout pass.
     if (!sShowSubredditHeaders) return wrappedHeader != nil;
     NSString *subredditName = ApolloSubredditNameFromViewController(viewController);
-    // Most PostsViewControllers are home/profile/multireddit feeds. Do not
-    // schedule a doomed install on every layout pass for those screens.
     if (subredditName.length == 0) return wrappedHeader != nil;
+
+    UITableView *tableView = ApolloSubredditFindTableView(viewController);
+    ApolloSubredditHeaderView *header = objc_getAssociatedObject(viewController, kApolloSubredditHeaderViewKey);
     if (!tableView || !header || !wrappedHeader) return YES;
     if (tableView.tableHeaderView != wrappedHeader || header.superview != wrappedHeader) return YES;
     if (header.hidden || wrappedHeader.hidden || header.alpha < 0.99 || wrappedHeader.alpha < 0.99) return YES;

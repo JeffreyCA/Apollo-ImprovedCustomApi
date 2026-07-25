@@ -53,6 +53,7 @@ static const void *kApolloDeletedCommentsBodyOwnerCellKey = &kApolloDeletedComme
 // MarkdownNode's layoutSpecThatFits hook runs, which is the only place we have a
 // guaranteed-correct reference to that node, independent of ivar-name lookup).
 static const void *kApolloDeletedCommentsCellMarkdownNodeKey = &kApolloDeletedCommentsCellMarkdownNodeKey;
+static char kApolloDeletedCommentsMarkdownOwnerRecordedKey;
 static const void *kApolloDeletedCommentsBodyReplacementTextNodeKey = &kApolloDeletedCommentsBodyReplacementTextNodeKey;
 static const void *kApolloDeletedCommentsOriginalBodyKey = &kApolloDeletedCommentsOriginalBodyKey;
 static const void *kApolloDeletedCommentsOriginalBodyHTMLKey = &kApolloDeletedCommentsOriginalBodyHTMLKey;
@@ -4839,12 +4840,25 @@ static BOOL ApolloDeletedCommentsRowSelectionIsStale(id adapter, NSIndexPath *in
 %hook _TtC6Apollo12MarkdownNode
 
 - (id)layoutSpecThatFits:(struct CDStruct_90e057aa)fits {
+    // Feature-gate before anything else: this hook runs for every MarkdownNode
+    // measure on Texture's background layout threads, and both helpers below
+    // open with a supernode walk. Every live activation path re-measures the
+    // affected comments (the "..." menu toggle ends in
+    // ApolloDCMenuRefreshComments; the settings toggle re-reads on relaunch),
+    // so nodes skipped while inactive still get recorded once it's active.
+    if (!ApolloDeletedCommentsFeatureActive()) return %orig;
     // Record cell -> this MarkdownNode so the reveal path can invalidate the
     // exact node that renders the body, without relying on ivar-name lookup
     // (CommentCellNode.bodyNode is _Atomic and was not being found reliably).
-    id ownerCell = ApolloDeletedCommentsCommentCellNodeForTextNode((id)self);
-    if (ownerCell) {
-        objc_setAssociatedObject(ownerCell, kApolloDeletedCommentsCellMarkdownNodeKey, (id)self, OBJC_ASSOCIATION_ASSIGN);
+    // The mapping is stable (ASTableNode does not reuse cell nodes), so stop
+    // walking once it has been recorded. Atomic association: measures run
+    // concurrently on the layout threads.
+    if (!objc_getAssociatedObject((id)self, &kApolloDeletedCommentsMarkdownOwnerRecordedKey)) {
+        id ownerCell = ApolloDeletedCommentsCommentCellNodeForTextNode((id)self);
+        if (ownerCell) {
+            objc_setAssociatedObject(ownerCell, kApolloDeletedCommentsCellMarkdownNodeKey, (id)self, OBJC_ASSOCIATION_ASSIGN);
+            objc_setAssociatedObject((id)self, &kApolloDeletedCommentsMarkdownOwnerRecordedKey, @YES, OBJC_ASSOCIATION_RETAIN);
+        }
     }
     id deletedSpec = ApolloDeletedCommentsDeletedMarkdownLayoutSpecIfNeeded((id)self);
     if (deletedSpec) return deletedSpec;

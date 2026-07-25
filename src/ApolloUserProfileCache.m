@@ -420,7 +420,11 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
         info.followStateAccount = ApolloActiveAccountUsername().lowercaseString;   // whose follow this is
         self.diskInfo[key] = info;
         [self.infoCache setObject:info forKey:key];
-        [self saveDiskCacheLocked];
+        // Coalesced like every other writer: the mutated info object is the
+        // same instance the caches and published snapshot already reference,
+        // so readers see the new state immediately — only the JSON rewrite of
+        // the full cache is deferred.
+        [self scheduleDiskCacheSaveLocked];
     });
 }
 
