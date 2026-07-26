@@ -658,18 +658,17 @@ static NSURL *ApolloGalleryDirectVideoURL(NSURL *url) {
     if (redditVideo) {
         stream = ApolloGalleryVideoStreamURL(redditVideo);
         duration = ApolloGalleryNumber(redditVideo[@"duration"]);
-        if (ApolloGalleryVideoIsSilentLoop(redditVideo)) {
-            kind = ApolloGalleryMediaKindGIF;
-            // Silent by definition, so the mp4 fallback is the whole thing and
-            // is safe to offer for Save.
-            downloadable = ApolloGalleryURL(redditVideo[@"fallback_url"]);
-        }
+        // The fallback mp4 is the video track only for anything with sound, but
+        // it's still the right handle to save from: ApolloGalleryVideoExport
+        // recognises a v.redd.it URL and muxes the DASH audio back in.
+        downloadable = ApolloGalleryURL(redditVideo[@"fallback_url"]);
+        if (ApolloGalleryVideoIsSilentLoop(redditVideo)) kind = ApolloGalleryMediaKindGIF;
     } else if (previewVideo) {
         // An external GIF/short clip Reddit re-hosted; nearly always silent.
         stream = ApolloGalleryVideoStreamURL(previewVideo);
         duration = ApolloGalleryNumber(previewVideo[@"duration"]);
         kind = ApolloGalleryVideoIsSilentLoop(previewVideo) ? ApolloGalleryMediaKindGIF : ApolloGalleryMediaKindVideo;
-        if (kind == ApolloGalleryMediaKindGIF) downloadable = ApolloGalleryURL(previewVideo[@"fallback_url"]);
+        downloadable = ApolloGalleryURL(previewVideo[@"fallback_url"]);
     } else {
         NSURL *direct = ApolloGalleryURL(post[@"url_overridden_by_dest"]) ?: ApolloGalleryURL(post[@"url"]);
         NSURL *directVideo = direct ? ApolloGalleryDirectVideoURL(direct) : nil;

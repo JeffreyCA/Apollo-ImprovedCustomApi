@@ -54,9 +54,9 @@ static ApolloGalleryMediaKind const ApolloGalleryMediaKindAll =
 // backed by an actual animated .gif file (those animate through the image
 // loader instead). May be HLS (.m3u8) or a progressive mp4.
 @property (nonatomic, copy, nullable) NSURL *videoURL;
-// A self-contained mp4 that can be written to Photos, when one exists. Left nil
-// for v.redd.it, whose mp4 fallback carries no audio — saving it would silently
-// produce a mute copy, so Save is hidden there rather than lying.
+// The mp4 to save from. For v.redd.it this is the video-only fallback, which
+// ApolloGalleryVideoExport recognises and re-unites with the separate DASH
+// audio before writing to Photos; everywhere else it's already self-contained.
 @property (nonatomic, copy, nullable) NSURL *videoDownloadURL;
 // Runtime in seconds; 0 when Reddit didn't report one.
 @property (nonatomic) NSTimeInterval duration;

@@ -4,6 +4,7 @@
 #import "ApolloGalleryFeed.h"
 #import "ApolloGalleryImageLoader.h"
 #import "ApolloCommon.h"
+#import "ApolloGalleryVideoExport.h"
 
 #import <Photos/Photos.h>
 #import <AVFoundation/AVFoundation.h>
@@ -952,9 +953,6 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf = self;
     if (item.playsAsVideo) {
-        // Only offer Save when there's a self-contained file to write. A
-        // v.redd.it "fallback" mp4 is the video track alone — saving it would
-        // hand back a silent copy, so it's left out rather than disappointing.
         if (item.videoDownloadURL) {
             [sheet addAction:[UIAlertAction actionWithTitle:@"Save Video" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
                 [weakSelf apollo_saveCurrentVideo];
@@ -1044,68 +1042,18 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
     }
 }
 
-// Videos aren't held in the image cache, so this pulls the mp4 down before
-// handing it to Photos.
+// Handed off to ApolloGalleryVideoExport, which knows that a v.redd.it save
+// needs the separate DASH audio muxed back in before it's worth keeping.
 - (void)apollo_saveCurrentVideo {
     NSURL *source = [self apollo_currentItem].videoDownloadURL;
     if (!source) return;
-    [self apollo_showToast:@"Saving…"];
 
     __weak typeof(self) weakSelf = self;
-    NSURLSessionDownloadTask *task =
-        [[NSURLSession sharedSession] downloadTaskWithURL:source
-                                        completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
-        if (!location || error) {
-            ApolloLog(@"[Gallery] video download failed: %@", error.localizedDescription);
-            dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf apollo_showToast:@"Save failed"]; });
-            return;
-        }
-        // Photos needs a file with a real video extension; the download lands
-        // at a temp path with none.
-        NSString *name = source.lastPathComponent.length > 0 ? source.lastPathComponent : @"video.mp4";
-        if (name.pathExtension.length == 0) name = [name stringByAppendingPathExtension:@"mp4"];
-        NSURL *fileURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:name]];
-        [[NSFileManager defaultManager] removeItemAtURL:fileURL error:NULL];
-        if (![[NSFileManager defaultManager] moveItemAtURL:location toURL:fileURL error:NULL]) {
-            dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf apollo_showToast:@"Save failed"]; });
-            return;
-        }
-        [weakSelf apollo_writeVideoFileToPhotos:fileURL];
-    }];
-    [task resume];
-}
-
-- (void)apollo_writeVideoFileToPhotos:(NSURL *)fileURL {
-    __weak typeof(self) weakSelf = self;
-    void (^performSave)(void) = ^{
-        [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
-            PHAssetCreationRequest *request = [PHAssetCreationRequest creationRequestForAsset];
-            [request addResourceWithType:PHAssetResourceTypeVideo fileURL:fileURL options:nil];
-        } completionHandler:^(BOOL success, NSError *error) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (success) {
-                    [weakSelf apollo_showToast:@"Saved"];
-                } else {
-                    ApolloLog(@"[Gallery] video save failed: %@", error.localizedDescription);
-                    [weakSelf apollo_showToast:@"Save failed"];
-                }
-            });
-        }];
-    };
-
-    PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelAddOnly];
-    if (status == PHAuthorizationStatusNotDetermined) {
-        [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelAddOnly handler:^(PHAuthorizationStatus newStatus) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (newStatus == PHAuthorizationStatusAuthorized || newStatus == PHAuthorizationStatusLimited) performSave();
-                else [weakSelf apollo_showToast:@"Photos access denied"];
-            });
-        }];
-    } else if (status == PHAuthorizationStatusAuthorized || status == PHAuthorizationStatusLimited) {
-        performSave();
-    } else {
-        [self apollo_showToast:@"Photos access denied"];
-    }
+    ApolloGallerySaveVideoToPhotos(source, ^(NSString *text) {
+        [weakSelf apollo_showToast:text];
+    }, ^(BOOL success, NSString *message) {
+        [weakSelf apollo_showToast:message];
+    });
 }
 
 - (void)apollo_shareCurrentImageFromView:(UIView *)sourceView {

@@ -71,6 +71,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloGalleryImageLoader.m \
     $(SRC_DIR)/ApolloGalleryImageViewer.m \
     $(SRC_DIR)/ApolloGalleryViewController.m \
+    $(SRC_DIR)/ApolloGalleryVideoExport.xm \
     $(SRC_DIR)/ApolloGalleryMenu.xm \
     $(SRC_DIR)/ApolloBannedProfile.xm \
     $(SRC_DIR)/ApolloImageUploadHost.xm \
