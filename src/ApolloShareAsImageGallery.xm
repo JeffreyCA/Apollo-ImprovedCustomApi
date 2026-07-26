@@ -209,6 +209,33 @@ static BOOL ApolloShareLinkIsObscured(id link) {
     return NO;
 }
 
+// YES if this URL points straight at an image file rather than a page.
+static BOOL ApolloShareURLIsDirectImage(NSURL *url) {
+    if (![url isKindOfClass:[NSURL class]]) return NO;
+    NSString *ext = url.pathExtension.lowercaseString;
+    if (ext.length == 0) return NO;
+    static NSSet<NSString *> *extensions = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        extensions = [NSSet setWithArray:@[@"gif", @"gifv", @"png", @"jpg", @"jpeg", @"webp"]];
+    });
+    return [extensions containsObject:ext];
+}
+
+// YES if the post's own media is a direct image/GIF file (i.redd.it/….gif,
+// imgur ….gifv, …). Apollo doesn't treat these as image posts — it leaves
+// imageForImagePost nil and draws its compact LINK card, so the share card
+// showed the bare URL text instead of the picture. A GIF inside a *comment*
+// takes a different path entirely, which is why only GIF-as-post looked broken.
+static BOOL ApolloShareLinkIsDirectImage(id link) {
+    if (!link) return NO;
+    if (ApolloShareURLIsDirectImage((NSURL *)ApolloShareCall(link, @selector(URL)))) return YES;
+    id parent = ApolloShareCall(link, @selector(crosspostParent));
+    if (parent && parent != link &&
+        ApolloShareURLIsDirectImage((NSURL *)ApolloShareCall(parent, @selector(URL)))) return YES;
+    return NO;
+}
+
 // Resolves the best still-image URL for a non-gallery media post: the preview
 // media's full-resolution source image, falling back to the low-res
 // thumbnailURL. Also tries the crosspost parent. Returns nil if none.
@@ -618,7 +645,8 @@ static void ApolloShareGalleryPrepareSingle(id previewNode, id link) {
 
     BOOL hasVideo = ApolloShareLinkHasVideo(link);
     BOOL obscured = ApolloShareLinkIsObscured(link);
-    NSURL *posterURL = (hasVideo || obscured) ? ApolloShareResolvePosterURL(link) : nil;
+    BOOL directImage = ApolloShareLinkIsDirectImage(link);
+    NSURL *posterURL = (hasVideo || obscured || directImage) ? ApolloShareResolvePosterURL(link) : nil;
     if (!posterURL) {
         // Genuine link/text/self post (or no still available): keep the card.
         objc_setAssociatedObject(previewNode, &kApolloShareGalleryStateKey,
@@ -628,8 +656,8 @@ static void ApolloShareGalleryPrepareSingle(id previewNode, id link) {
     }
 
     CGSize aspect = ApolloShareResolvePosterAspect(link);
-    ApolloLog(@"[ShareGallery] single poster node=%p video=%d obscured=%d url=%@ — placeholder + fetch",
-              previewNode, hasVideo, obscured, posterURL.absoluteString);
+    ApolloLog(@"[ShareGallery] single poster node=%p video=%d obscured=%d image=%d url=%@ — placeholder + fetch",
+              previewNode, hasVideo, obscured, directImage, posterURL.absoluteString);
 
     // Close the re-entrancy window (see ApolloShareGalleryPrepare): flip the
     // state to Placeholder synchronously, on this (background layout) thread,
