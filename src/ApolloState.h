@@ -197,9 +197,12 @@ extern BOOL sEnableFlairColors;
 // fresh installs (registerDefaults). When NO, Apollo's native behavior (text
 // link + optional link card) is preserved. See ApolloInlineImages.xm.
 extern BOOL sEnableInlineImages;
-// Master toggle for chat media enhancements (inline images/GIFs/emoji/snoomoji in DM/chat
-// bubbles + working media sends + tap-to-fullscreen). Default ON via registerDefaults; OFF =
-// stock Apollo chat. Independent of sShowUserAvatars. See ApolloChatInlineImages/Composer.xm.
+// Master toggle for message media enhancements (inline images/GIFs/emoji/snoomoji in message
+// bubbles + working media sends + tap-to-fullscreen), in every thread Apollo draws itself:
+// legacy Direct Chat, private messages, and native Moderator Mail. Default ON via
+// registerDefaults; OFF = stock Apollo threads. Unaffected by the modern Chat/Modmail toggles,
+// which swap their own surface for a web one that renders its own media (private messages stay
+// native either way). Independent of sShowUserAvatars. See ApolloChatInlineImages/Composer.xm.
 extern BOOL sEnableChatMedia;
 
 // On-device AI summaries (Apple FoundationModels, iOS 26+). Off by default.
