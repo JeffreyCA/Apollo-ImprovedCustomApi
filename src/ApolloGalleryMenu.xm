@@ -9,8 +9,9 @@
 //     Apollo's ActionController sheet into a real UIKit UIMenu. It calls
 //     ApolloInjectGalleryViewMenuItemIfNeeded() while building the children, the
 //     same seam ApolloDeletedCommentsMenu and ApolloPublicStickyAsSubreddit use.
-//     We insert an inline single-item section at the top so the row reads as its
-//     own group instead of shuffling every native row down by one.
+//     We insert an inline single-item section just below the leading "submit a
+//     post" affordance, so the row reads as its own group without displacing
+//     the composer that leads the menu.
 //
 //   • Everything else — the ActionController presents itself as a table sheet.
 //     We append a row to the END of its data source and grow the presentation
@@ -113,6 +114,24 @@ static void ApolloGalleryMenuOpenForController(id actionController) {
 
 #pragma mark - Liquid Glass menu injection
 
+// Where our section goes: after whatever "submit a post" affordance leads the
+// menu, never above it. That affordance has two shapes in the wild — a plain
+// "Submit Post" row (what stock Apollo's action list produces), and a leading
+// inline UIMenu that renders as a small row of post-type icons (image / link /
+// text) at the top of the menu. Skipping both keeps the composer where muscle
+// memory expects it and puts Gallery View directly underneath.
+static NSUInteger ApolloGalleryMenuInsertionIndex(NSArray<UIMenuElement *> *children) {
+    NSUInteger index = 0;
+    while (index < children.count) {
+        UIMenuElement *element = children[index];
+        if ([element isKindOfClass:[UIMenu class]]) { index++; continue; }
+        if ([element isKindOfClass:[UIAction class]] &&
+            [((UIAction *)element).title hasPrefix:@"Submit"]) { index++; continue; }
+        break;
+    }
+    return index;
+}
+
 // Called from ApolloNativeActionMenuBuildMenu as it converts an ActionController
 // into a UIMenu. No-op for every sheet that isn't a subreddit "..." menu.
 void ApolloInjectGalleryViewMenuItemIfNeeded(NSMutableArray *children, NSString *menuTitle, id actionController) {
@@ -140,15 +159,17 @@ void ApolloInjectGalleryViewMenuItemIfNeeded(NSMutableArray *children, NSString 
         ApolloGalleryMenuOpenForController(weakController);
     }];
 
-    // An inline single-item menu renders as its own separated group above the
-    // native rows, rather than sitting inside them.
+    // An inline single-item menu renders as its own separated group rather than
+    // sitting inside the native rows.
     UIMenu *section = [UIMenu menuWithTitle:@""
                                       image:nil
                                  identifier:nil
                                     options:UIMenuOptionsDisplayInline
                                    children:@[action]];
-    [children insertObject:section atIndex:0];
-    ApolloLog(@"[GalleryMenu] Injected '%@' for r/%@ (glass menu)", kApolloGalleryMenuTitle, subreddit);
+    NSUInteger index = ApolloGalleryMenuInsertionIndex(children);
+    [children insertObject:section atIndex:index];
+    ApolloLog(@"[GalleryMenu] Injected '%@' for r/%@ at index %lu (glass menu)",
+              kApolloGalleryMenuTitle, subreddit, (unsigned long)index);
 }
 
 #pragma mark - Arming

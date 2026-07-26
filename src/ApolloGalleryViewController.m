@@ -216,7 +216,11 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
         [self.contentView bringSubviewToFront:self.blurView];
     }
     if (item.galleryCount > 1) {
-        self.badgeLabel.text = [NSString stringWithFormat:@"%ld", (long)item.galleryCount];
+        // Position within the post, not just its size: every image of a
+        // 20-image post gets its own tile, so a bare "20" on each of twenty
+        // tiles in a row reads as "20 images here" twenty times over.
+        self.badgeLabel.text = [NSString stringWithFormat:@"%ld/%ld",
+                                (long)item.galleryIndex + 1, (long)item.galleryCount];
         self.badgeLabel.hidden = NO;
     } else if (item.isAnimated) {
         self.badgeLabel.text = @"GIF";

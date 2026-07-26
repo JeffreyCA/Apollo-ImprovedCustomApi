@@ -903,6 +903,10 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
         [self apollo_notifyWillDismiss];
     }
     [self dismissViewControllerAnimated:YES completion:^{
+        // Apollo's URL handler only acts on apollo:// URLs — handing it the raw
+        // https reddit.com link is silently ignored. The scheme conversion is
+        // what every other in-app route in the tweak goes through.
+        if (ApolloRouteResolvedURLViaApolloScheme(postURL)) return;
         if (!ApolloRouteURLThroughApp(postURL)) {
             ApolloLog(@"[Gallery] couldn't route %@ through the app", postURL.absoluteString);
         }
