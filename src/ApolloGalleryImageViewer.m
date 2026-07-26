@@ -6,6 +6,7 @@
 #import "ApolloCommon.h"
 
 #import <Photos/Photos.h>
+#import <AVFoundation/AVFoundation.h>
 
 // Pages either side of the current one kept warm.
 static NSInteger const kApolloGalleryViewerPrefetchRadius = 2;
@@ -18,6 +19,36 @@ static NSInteger const kApolloGalleryViewerLoadAheadSlack = 4;
 
 static NSString *const kApolloGalleryViewerCellID = @"ApolloGalleryViewerCell";
 
+// Mute state is sticky across pages and launches: someone browsing a video
+// subreddit in public wants it to stay off, and re-muting every clip by hand
+// would be miserable.
+static NSString *const kApolloGalleryViewerMutedKey = @"ApolloGalleryVideosMuted";
+
+static BOOL ApolloGalleryViewerVideosMuted(void) {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    // Default to muted — audio starting unprompted in a scrolling gallery is
+    // the worse surprise.
+    id stored = [defaults objectForKey:kApolloGalleryViewerMutedKey];
+    return stored ? [defaults boolForKey:kApolloGalleryViewerMutedKey] : YES;
+}
+
+static void ApolloGalleryViewerSetVideosMuted(BOOL muted) {
+    [[NSUserDefaults standardUserDefaults] setBool:muted forKey:kApolloGalleryViewerMutedKey];
+}
+
+// Apollo parks the shared session on Ambient, which is silenced by the ringer
+// switch — so an unmuted clip would still play silently without this.
+static void ApolloGalleryViewerActivateAudioSession(void) {
+    if (ApolloGalleryViewerVideosMuted()) return;
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    NSError *error = nil;
+    if (![session setCategory:AVAudioSessionCategoryPlayback error:&error]) {
+        ApolloLog(@"[Gallery] audio session category failed: %@", error.localizedDescription);
+        return;
+    }
+    [session setActive:YES error:NULL];
+}
+
 #pragma mark - Page cell
 
 @interface ApolloGalleryViewerCell : UICollectionViewCell <UIScrollViewDelegate>
@@ -26,6 +57,13 @@ static NSString *const kApolloGalleryViewerCellID = @"ApolloGalleryViewerCell";
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
 @property (nonatomic, strong, nullable) ApolloGalleryImageRequest *request;
 @property (nonatomic, copy, nullable) NSURL *imageURL;
+// Video side. The poster image stays underneath until the first frame is ready,
+// so paging onto a clip never flashes black.
+@property (nonatomic, strong, nullable) AVPlayer *player;
+@property (nonatomic, strong, nullable) AVPlayerLayer *playerLayer;
+@property (nonatomic, strong, nullable) id playerEndObserver;
+@property (nonatomic, copy, nullable) NSURL *videoURL;
+@property (nonatomic, readonly) BOOL hasVideo;
 // Raised while a zoom is active so the pager and the dismiss pan stay out of
 // the way (a zoomed page must pan its own content, not turn the page).
 @property (nonatomic, readonly) BOOL isZoomed;
@@ -79,11 +117,16 @@ static NSString *const kApolloGalleryViewerCellID = @"ApolloGalleryViewerCell";
     return self.zoomView.zoomScale > self.zoomView.minimumZoomScale + 0.01;
 }
 
+- (BOOL)hasVideo {
+    return self.player != nil;
+}
+
 - (void)prepareForReuse {
     [super prepareForReuse];
     [self.request cancel];
     self.request = nil;
     self.imageURL = nil;
+    [self teardownPlayer];
     self.imageView.image = nil;
     self.zoomView.zoomScale = 1.0;
     self.zoomView.contentInset = UIEdgeInsetsZero;
@@ -91,11 +134,23 @@ static NSString *const kApolloGalleryViewerCellID = @"ApolloGalleryViewerCell";
     [self.spinner stopAnimating];
 }
 
+- (void)dealloc {
+    [self teardownPlayer];
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGRect bounds = self.contentView.bounds;
     BOOL boundsChanged = !CGSizeEqualToSize(bounds.size, self.zoomView.frame.size);
     self.zoomView.frame = bounds;
+    // The player sits above the poster and fills the page; AVPlayerLayer's own
+    // aspect-fit gravity handles letterboxing, so it doesn't ride the zoom view.
+    if (self.playerLayer) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        self.playerLayer.frame = bounds;
+        [CATransaction commit];
+    }
     self.spinner.center = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
     // A bounds change (rotation, first layout) invalidates the zoom geometry.
     if (boundsChanged) [self apollo_resetZoomGeometry];
@@ -135,9 +190,64 @@ static NSString *const kApolloGalleryViewerCellID = @"ApolloGalleryViewerCell";
     self.zoomView.contentInset = UIEdgeInsetsMake(vertical, horizontal, vertical, horizontal);
 }
 
+// Setting up / tearing down playback ----------------------------------------
+
+- (void)teardownPlayer {
+    if (self.playerEndObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self.playerEndObserver];
+        self.playerEndObserver = nil;
+    }
+    [self.player pause];
+    [self.playerLayer removeFromSuperlayer];
+    self.playerLayer = nil;
+    self.player = nil;
+    self.videoURL = nil;
+}
+
+- (void)prepareVideo:(NSURL *)url {
+    if (!url) return;
+    self.videoURL = url;
+
+    AVPlayer *player = [AVPlayer playerWithURL:url];
+    player.muted = ApolloGalleryViewerVideosMuted();
+    // Clips are short and usually watched more than once; looping is what a
+    // gallery reader expects and matches how Apollo plays GIF-ish media.
+    __weak typeof(self) weakSelf = self;
+    self.playerEndObserver =
+        [[NSNotificationCenter defaultCenter] addObserverForName:AVPlayerItemDidPlayToEndTimeNotification
+                                                          object:player.currentItem
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification *note) {
+        [weakSelf.player seekToTime:kCMTimeZero];
+        [weakSelf.player play];
+    }];
+
+    AVPlayerLayer *layer = [AVPlayerLayer playerLayerWithPlayer:player];
+    layer.videoGravity = AVLayerVideoGravityResizeAspect;
+    layer.frame = self.contentView.bounds;
+    [self.contentView.layer addSublayer:layer];
+
+    self.player = player;
+    self.playerLayer = layer;
+}
+
+- (void)playIfPossible {
+    if (!self.player) return;
+    // Playback needs the session on a category that isn't silenced by the
+    // ringer switch; Apollo parks it on Ambient, which mutes everything.
+    ApolloGalleryViewerActivateAudioSession();
+    self.player.muted = ApolloGalleryViewerVideosMuted();
+    [self.player play];
+}
+
+- (void)pausePlayback {
+    [self.player pause];
+}
+
 - (void)configureWithItem:(ApolloGalleryItem *)item {
     NSURL *url = item.imageURL;
     self.imageURL = url;
+    if (item.playsAsVideo) [self prepareVideo:item.videoURL];
 
     // A grid thumbnail for this post is usually already decoded — show it
     // immediately so the page is never a black rectangle, then swap in the
@@ -218,6 +328,7 @@ static NSString *const kApolloGalleryViewerCellID = @"ApolloGalleryViewerCell";
 @property (nonatomic, strong) UIView *topChrome;
 @property (nonatomic, strong) UIButton *doneButton;
 @property (nonatomic, strong) UIButton *shareButton;
+@property (nonatomic, strong) UIButton *muteButton;
 @property (nonatomic, strong) UILabel *counterLabel;
 @property (nonatomic, strong) UIView *infoPanel;
 @property (nonatomic, strong) UILabel *titleLabel;
@@ -303,6 +414,16 @@ static NSString *const kApolloGalleryViewerCellID = @"ApolloGalleryViewerCell";
     [self apollo_updateChromeContent];
 }
 
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    // Nothing should keep playing behind or after the viewer.
+    for (UICollectionViewCell *cell in self.collectionView.visibleCells) {
+        if ([cell isKindOfClass:[ApolloGalleryViewerCell class]]) {
+            [(ApolloGalleryViewerCell *)cell pausePlayback];
+        }
+    }
+}
+
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGSize size = self.view.bounds.size;
@@ -322,6 +443,7 @@ static NSString *const kApolloGalleryViewerCellID = @"ApolloGalleryViewerCell";
         [self.collectionView setContentOffset:CGPointMake(size.width * index, 0.0) animated:NO];
         self.currentIndex = index;
         [self apollo_updateChromeContent];
+        [self apollo_syncPlayback];
         [self apollo_prefetchAroundIndex:index];
     } else if (self.hasAppliedInitialIndex) {
         // Rotation moves the page boundaries; re-anchor on the current picture.
@@ -378,6 +500,17 @@ static UIView *ApolloGalleryChromeCapsule(CGFloat cornerRadius) {
     [self.shareButton addTarget:self action:@selector(apollo_sharePressed:) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.shareButton];
 
+    // Only shown while a video/GIF page is up; still images have nothing to mute.
+    self.muteButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.muteButton.tintColor = UIColor.whiteColor;
+    self.muteButton.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
+    self.muteButton.layer.cornerRadius = 16.0;
+    self.muteButton.layer.cornerCurve = kCACornerCurveContinuous;
+    self.muteButton.clipsToBounds = YES;
+    self.muteButton.hidden = YES;
+    [self.muteButton addTarget:self action:@selector(apollo_muteTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.muteButton];
+
     // Bottom-left post details. Tapping it leaves the gallery for the real post.
     self.infoPanel = ApolloGalleryChromeCapsule(14.0);
     [self.view addSubview:self.infoPanel];
@@ -432,8 +565,13 @@ static UIView *ApolloGalleryChromeCapsule(CGFloat cornerRadius) {
 
     self.doneButton.frame = CGRectMake(side, top, 72.0, 32.0);
     self.shareButton.frame = CGRectMake(bounds.size.width - rightSide - 40.0, top, 40.0, 32.0);
+    CGFloat trailing = CGRectGetMinX(self.shareButton.frame);
+    if (!self.muteButton.hidden) {
+        self.muteButton.frame = CGRectMake(trailing - 8.0 - 40.0, top, 40.0, 32.0);
+        trailing = CGRectGetMinX(self.muteButton.frame);
+    }
     CGFloat counterWidth = 84.0;
-    self.counterLabel.frame = CGRectMake(CGRectGetMinX(self.shareButton.frame) - 8.0 - counterWidth, top, counterWidth, 32.0);
+    self.counterLabel.frame = CGRectMake(trailing - 8.0 - counterWidth, top, counterWidth, 32.0);
     self.statusLabel.frame = CGRectMake((bounds.size.width - 150.0) / 2.0, CGRectGetMaxY(self.counterLabel.frame) + 8.0, 150.0, 24.0);
 
     CGFloat bottom = safe.bottom + 16.0;
@@ -479,6 +617,7 @@ static UIView *ApolloGalleryChromeCapsule(CGFloat cornerRadius) {
 
     ApolloGalleryItem *item = (index >= 0 && index < total) ? items[index] : nil;
     self.titleLabel.text = item.postTitle ?: @"";
+    [self apollo_updateMuteButton];
 
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
     if (item.author.length > 0) [parts addObject:[@"u/" stringByAppendingString:item.author]];
@@ -498,11 +637,13 @@ static UIView *ApolloGalleryChromeCapsule(CGFloat cornerRadius) {
     void (^changes)(void) = ^{
         self.doneButton.alpha = alpha;
         self.shareButton.alpha = alpha;
+        self.muteButton.alpha = alpha;
         self.counterLabel.alpha = alpha;
         self.infoPanel.alpha = alpha;
     };
     self.doneButton.userInteractionEnabled = visible;
     self.shareButton.userInteractionEnabled = visible;
+    self.muteButton.userInteractionEnabled = visible;
     self.infoPanel.userInteractionEnabled = visible;
     if (animated) {
         [UIView animateWithDuration:0.22 animations:changes];
@@ -562,8 +703,25 @@ static UIView *ApolloGalleryChromeCapsule(CGFloat cornerRadius) {
     if (page == self.currentIndex) return;
     self.currentIndex = page;
     [self apollo_updateChromeContent];
+    [self apollo_syncPlayback];
     [self apollo_prefetchAroundIndex:page];
     [self apollo_loadMoreIfNeeded];
+}
+
+// Exactly one page plays at a time: every other visible cell (the neighbours a
+// paging collection view keeps alive) gets paused, so audio can't stack up.
+- (void)apollo_syncPlayback {
+    for (UICollectionViewCell *cell in self.collectionView.visibleCells) {
+        if (![cell isKindOfClass:[ApolloGalleryViewerCell class]]) continue;
+        ApolloGalleryViewerCell *viewerCell = (ApolloGalleryViewerCell *)cell;
+        NSIndexPath *indexPath = [self.collectionView indexPathForCell:cell];
+        if (indexPath.item == self.currentIndex) {
+            [viewerCell playIfPossible];
+        } else {
+            [viewerCell pausePlayback];
+        }
+    }
+    [self apollo_updateMuteButton];
 }
 
 - (void)apollo_prefetchAroundIndex:(NSInteger)index {
@@ -652,6 +810,7 @@ static UIView *ApolloGalleryChromeCapsule(CGFloat cornerRadius) {
                     [UIView animateWithDuration:0.15 animations:^{
                 self.doneButton.alpha = 0.0;
                 self.shareButton.alpha = 0.0;
+                self.muteButton.alpha = 0.0;
                 self.counterLabel.alpha = 0.0;
                 self.infoPanel.alpha = 0.0;
             }];
@@ -756,6 +915,26 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
     return items[self.currentIndex];
 }
 
+// The mute control only makes sense on a page that can make noise.
+- (void)apollo_updateMuteButton {
+    ApolloGalleryItem *item = [self apollo_currentItem];
+    BOOL showsMute = item.playsAsVideo && item.kind == ApolloGalleryMediaKindVideo;
+    self.muteButton.hidden = !showsMute;
+    if (showsMute) {
+        BOOL muted = ApolloGalleryViewerVideosMuted();
+        [self.muteButton setImage:[UIImage systemImageNamed:(muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill")]
+                         forState:UIControlStateNormal];
+        self.muteButton.accessibilityLabel = muted ? @"Unmute" : @"Mute";
+        self.muteButton.alpha = self.chromeVisible ? 1.0 : 0.0;
+    }
+    [self.view setNeedsLayout];
+}
+
+- (void)apollo_muteTapped {
+    ApolloGalleryViewerSetVideosMuted(!ApolloGalleryViewerVideosMuted());
+    [self apollo_syncPlayback];
+}
+
 - (void)apollo_sharePressed:(UIButton *)sender {
     [self apollo_presentActionsFromView:sender];
 }
@@ -772,12 +951,26 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
                                                                    message:nil
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf = self;
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Save Image" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [weakSelf apollo_saveCurrentImage];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Share Image" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [weakSelf apollo_shareCurrentImageFromView:sourceView];
-    }]];
+    if (item.playsAsVideo) {
+        // Only offer Save when there's a self-contained file to write. A
+        // v.redd.it "fallback" mp4 is the video track alone — saving it would
+        // hand back a silent copy, so it's left out rather than disappointing.
+        if (item.videoDownloadURL) {
+            [sheet addAction:[UIAlertAction actionWithTitle:@"Save Video" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                [weakSelf apollo_saveCurrentVideo];
+            }]];
+        }
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Share Video Link" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            [weakSelf apollo_presentActivityWithItems:@[item.videoURL] fromView:sourceView];
+        }]];
+    } else {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Save Image" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            [weakSelf apollo_saveCurrentImage];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Share Image" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            [weakSelf apollo_shareCurrentImageFromView:sourceView];
+        }]];
+    }
     if (item.postURL) {
         [sheet addAction:[UIAlertAction actionWithTitle:@"Share Post Link" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
             [weakSelf apollo_sharePostLinkFromView:sourceView];
@@ -842,6 +1035,70 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
                 } else {
                     [weakSelf apollo_showToast:@"Photos access denied"];
                 }
+            });
+        }];
+    } else if (status == PHAuthorizationStatusAuthorized || status == PHAuthorizationStatusLimited) {
+        performSave();
+    } else {
+        [self apollo_showToast:@"Photos access denied"];
+    }
+}
+
+// Videos aren't held in the image cache, so this pulls the mp4 down before
+// handing it to Photos.
+- (void)apollo_saveCurrentVideo {
+    NSURL *source = [self apollo_currentItem].videoDownloadURL;
+    if (!source) return;
+    [self apollo_showToast:@"Saving…"];
+
+    __weak typeof(self) weakSelf = self;
+    NSURLSessionDownloadTask *task =
+        [[NSURLSession sharedSession] downloadTaskWithURL:source
+                                        completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
+        if (!location || error) {
+            ApolloLog(@"[Gallery] video download failed: %@", error.localizedDescription);
+            dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf apollo_showToast:@"Save failed"]; });
+            return;
+        }
+        // Photos needs a file with a real video extension; the download lands
+        // at a temp path with none.
+        NSString *name = source.lastPathComponent.length > 0 ? source.lastPathComponent : @"video.mp4";
+        if (name.pathExtension.length == 0) name = [name stringByAppendingPathExtension:@"mp4"];
+        NSURL *fileURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:name]];
+        [[NSFileManager defaultManager] removeItemAtURL:fileURL error:NULL];
+        if (![[NSFileManager defaultManager] moveItemAtURL:location toURL:fileURL error:NULL]) {
+            dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf apollo_showToast:@"Save failed"]; });
+            return;
+        }
+        [weakSelf apollo_writeVideoFileToPhotos:fileURL];
+    }];
+    [task resume];
+}
+
+- (void)apollo_writeVideoFileToPhotos:(NSURL *)fileURL {
+    __weak typeof(self) weakSelf = self;
+    void (^performSave)(void) = ^{
+        [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+            PHAssetCreationRequest *request = [PHAssetCreationRequest creationRequestForAsset];
+            [request addResourceWithType:PHAssetResourceTypeVideo fileURL:fileURL options:nil];
+        } completionHandler:^(BOOL success, NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (success) {
+                    [weakSelf apollo_showToast:@"Saved"];
+                } else {
+                    ApolloLog(@"[Gallery] video save failed: %@", error.localizedDescription);
+                    [weakSelf apollo_showToast:@"Save failed"];
+                }
+            });
+        }];
+    };
+
+    PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelAddOnly];
+    if (status == PHAuthorizationStatusNotDetermined) {
+        [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelAddOnly handler:^(PHAuthorizationStatus newStatus) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (newStatus == PHAuthorizationStatusAuthorized || newStatus == PHAuthorizationStatusLimited) performSave();
+                else [weakSelf apollo_showToast:@"Photos access denied"];
             });
         }];
     } else if (status == PHAuthorizationStatusAuthorized || status == PHAuthorizationStatusLimited) {

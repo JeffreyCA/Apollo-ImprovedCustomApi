@@ -7,6 +7,8 @@
 #import "ApolloCommon.h"
 #import "ApolloThemeRuntime.h"
 
+#import <objc/message.h>
+
 // Target tile width. The column count is derived from it so the grid widens
 // sensibly on iPad and in landscape instead of stretching two huge columns.
 static CGFloat const kApolloGalleryTargetTileWidth = 185.0;
@@ -217,10 +219,14 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     }
     // No badge for an image's position within a multi-image post — every image
     // gets its own tile, so it only clutters the grid, and the viewer already
-    // spells it out ("7 of 20 in post") once you've opened one. GIF is a
-    // different case: a still thumbnail gives no hint that the tile animates,
-    // and nothing downstream says so either.
-    if (item.isAnimated) {
+    // spells it out ("7 of 20 in post") once you've opened one. Playables are a
+    // different case: a poster frame gives no hint that the tile moves, and
+    // nothing downstream says so either.
+    if (item.kind == ApolloGalleryMediaKindVideo) {
+        NSString *duration = item.durationText;
+        self.badgeLabel.text = duration.length > 0 ? [@"▶ " stringByAppendingString:duration] : @"▶";
+        self.badgeLabel.hidden = NO;
+    } else if (item.kind == ApolloGalleryMediaKindGIF) {
         self.badgeLabel.text = @"GIF";
         self.badgeLabel.hidden = NO;
     }
@@ -272,6 +278,7 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
 @property (nonatomic, strong) UILabel *footerLabel;
 @property (nonatomic, strong) UIRefreshControl *refreshControl;
 @property (nonatomic, weak, nullable) ApolloGalleryImageViewer *activeViewer;
+@property (nonatomic, strong, nullable) UIBarButtonItem *filterBarButtonItem;
 @end
 
 @implementation ApolloGalleryViewController
@@ -367,7 +374,7 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     self.footerLabel.alpha = 0.0;
     [self.view addSubview:self.footerLabel];
 
-    [self apollo_installSortButton];
+    [self apollo_installNavigationButtons];
     [self apollo_beginInitialLoad];
 }
 
@@ -410,14 +417,92 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
 
 #pragma mark Sort
 
-- (void)apollo_installSortButton {
-    UIBarButtonItem *item = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"arrow.up.arrow.down"]
+- (void)apollo_installNavigationButtons {
+    UIBarButtonItem *sort = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"arrow.up.arrow.down"]
                                                              style:UIBarButtonItemStylePlain
                                                             target:nil
                                                             action:nil];
-    item.accessibilityLabel = @"Sort";
-    item.menu = [self apollo_buildSortMenu];
-    self.navigationItem.rightBarButtonItem = item;
+    sort.accessibilityLabel = @"Sort";
+    sort.menu = [self apollo_buildSortMenu];
+
+    self.filterBarButtonItem = [[UIBarButtonItem alloc] initWithImage:[self apollo_filterButtonImage]
+                                                                style:UIBarButtonItemStylePlain
+                                                               target:nil
+                                                               action:nil];
+    self.filterBarButtonItem.accessibilityLabel = @"Filter media";
+    self.filterBarButtonItem.menu = [self apollo_buildFilterMenu];
+
+    // Rightmost first in this array, so: [filter] [sort].
+    self.navigationItem.rightBarButtonItems = @[sort, self.filterBarButtonItem];
+}
+
+// A filled glyph while a filter is narrowing things down, so it's obvious at a
+// glance that the grid isn't showing everything.
+- (UIImage *)apollo_filterButtonImage {
+    BOOL filtering = self.feed.allowedKinds != ApolloGalleryMediaKindAll;
+    return [UIImage systemImageNamed:(filtering ? @"line.3.horizontal.decrease.circle.fill"
+                                                : @"line.3.horizontal.decrease.circle")];
+}
+
+- (UIMenu *)apollo_buildFilterMenu {
+    NSArray<NSDictionary *> *kinds = @[
+        @{ @"title": @"Photos", @"icon": @"photo",           @"kind": @(ApolloGalleryMediaKindPhoto) },
+        @{ @"title": @"GIFs",   @"icon": @"square.stack.3d.forward.dottedline", @"kind": @(ApolloGalleryMediaKindGIF) },
+        @{ @"title": @"Videos", @"icon": @"play.rectangle",  @"kind": @(ApolloGalleryMediaKindVideo) },
+    ];
+
+    __weak typeof(self) weakSelf = self;
+    NSMutableArray<UIMenuElement *> *children = [NSMutableArray array];
+    for (NSDictionary *entry in kinds) {
+        ApolloGalleryMediaKind kind = (ApolloGalleryMediaKind)((NSNumber *)entry[@"kind"]).unsignedIntegerValue;
+        BOOL on = (self.feed.allowedKinds & kind) != 0;
+        BOOL isOnlyOneOn = on && (self.feed.allowedKinds == kind);
+
+        NSUInteger count = [self.feed countOfKind:kind];
+        UIAction *action = [UIAction actionWithTitle:entry[@"title"]
+                                               image:[UIImage systemImageNamed:entry[@"icon"]]
+                                          identifier:nil
+                                             handler:^(__kindof UIAction *a) {
+            [weakSelf apollo_toggleKind:kind];
+        }];
+        action.state = on ? UIMenuElementStateOn : UIMenuElementStateOff;
+        // Turning off the only remaining kind would empty the gallery, so that
+        // one row is disabled rather than silently doing nothing.
+        if (isOnlyOneOn) action.attributes = UIMenuElementAttributesDisabled;
+        if (count > 0 && [action respondsToSelector:@selector(setSubtitle:)]) {
+            ((void (*)(id, SEL, id))objc_msgSend)(action, @selector(setSubtitle:),
+                                                  [NSString stringWithFormat:@"%lu loaded", (unsigned long)count]);
+        }
+        // iOS 16+ can keep the menu up between taps, which is what makes a
+        // multi-select menu feel right; older releases just close each time.
+        if (@available(iOS 16.0, *)) {
+            action.attributes |= UIMenuElementAttributesKeepsMenuPresented;
+        }
+        [children addObject:action];
+    }
+    return [UIMenu menuWithTitle:@"Show" children:children];
+}
+
+- (void)apollo_toggleKind:(ApolloGalleryMediaKind)kind {
+    ApolloGalleryMediaKind updated = self.feed.allowedKinds ^ kind;
+    if (updated == 0) return;   // never leave the gallery with nothing to show
+
+    self.feed.allowedKinds = updated;
+    self.filterBarButtonItem.image = [self apollo_filterButtonImage];
+    self.filterBarButtonItem.menu = [self apollo_buildFilterMenu];
+    [self apollo_setFooterText:nil];
+    [self.collectionView reloadData];
+    [self.collectionView setContentOffset:CGPointMake(0.0, -self.collectionView.adjustedContentInset.top) animated:NO];
+    [self apollo_updateEmptyStateWithError:nil];
+    ApolloLog(@"[Gallery] filter -> photo:%d gif:%d video:%d (%lu of %lu shown)",
+              (updated & ApolloGalleryMediaKindPhoto) != 0,
+              (updated & ApolloGalleryMediaKindGIF) != 0,
+              (updated & ApolloGalleryMediaKindVideo) != 0,
+              (unsigned long)self.feed.items.count, (unsigned long)self.feed.allItems.count);
+
+    // The visible list just shrank; it may no longer fill the screen, so top it
+    // up rather than leaving the user on a stub of a grid.
+    [self apollo_loadMoreIfNeededForIndex:(NSInteger)self.feed.items.count - 1];
 }
 
 - (UIMenu *)apollo_buildSortMenu {
@@ -464,7 +549,7 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     [self apollo_setFooterText:nil];
     [self.collectionView reloadData];
     [self.collectionView setContentOffset:CGPointMake(0.0, -self.collectionView.adjustedContentInset.top) animated:NO];
-    self.navigationItem.rightBarButtonItem.menu = [self apollo_buildSortMenu];
+    self.navigationItem.rightBarButtonItems.firstObject.menu = [self apollo_buildSortMenu];
     [self apollo_beginInitialLoad];
 }
 
@@ -483,6 +568,9 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
         [strongSelf.refreshControl endRefreshing];
         [strongSelf.collectionView reloadData];
         [strongSelf apollo_updateEmptyStateWithError:errorMessage];
+        // Built before the first fetch, so its "N loaded" subtitles were all
+        // zero until now.
+        strongSelf.filterBarButtonItem.menu = [strongSelf apollo_buildFilterMenu];
         (void)addedRange;
     }];
 }
@@ -506,8 +594,15 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     if (errorMessage.length > 0) {
         self.messageLabel.text = [NSString stringWithFormat:@"Couldn't load r/%@.\n%@", self.subreddit, errorMessage];
         self.retryButton.hidden = NO;
+    } else if (self.feed.allItems.count > 0) {
+        // Media was found, the filter just excluded all of it — say so, rather
+        // than implying the subreddit is empty.
+        self.messageLabel.text = [NSString stringWithFormat:
+            @"Nothing matches the current filter.\n%lu items are loaded — tap the filter button to widen it.",
+            (unsigned long)self.feed.allItems.count];
+        self.retryButton.hidden = YES;
     } else {
-        self.messageLabel.text = [NSString stringWithFormat:@"No pictures found in r/%@ (%@).",
+        self.messageLabel.text = [NSString stringWithFormat:@"No media found in r/%@ (%@).",
                                   self.subreddit, self.feed.sortDisplayName];
         self.retryButton.hidden = YES;
     }

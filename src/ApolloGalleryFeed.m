@@ -21,6 +21,22 @@ static NSInteger const kApolloGalleryEmptyPageLimit = 3;
 
 static NSTimeInterval const kApolloGalleryRequestTimeout = 20.0;
 
+// The media-kind filter is a per-view preference rather than a Settings toggle,
+// so it lives on its own key here instead of in UserDefaultConstants.h.
+static NSString *const kApolloGalleryAllowedKindsKey = @"ApolloGalleryAllowedKinds";
+
+static ApolloGalleryMediaKind ApolloGalleryPersistedAllowedKinds(void) {
+    id stored = [[NSUserDefaults standardUserDefaults] objectForKey:kApolloGalleryAllowedKindsKey];
+    if (![stored isKindOfClass:[NSNumber class]]) return ApolloGalleryMediaKindAll;
+    ApolloGalleryMediaKind kinds = (ApolloGalleryMediaKind)((NSNumber *)stored).unsignedIntegerValue;
+    kinds &= ApolloGalleryMediaKindAll;
+    return kinds ?: ApolloGalleryMediaKindAll;
+}
+
+static void ApolloGallerySetPersistedAllowedKinds(ApolloGalleryMediaKind kinds) {
+    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)kinds forKey:kApolloGalleryAllowedKindsKey];
+}
+
 #pragma mark - Small JSON helpers
 
 static NSString *ApolloGalleryString(id value) {
@@ -77,8 +93,23 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
     self = [super init];
     if (self) {
         _galleryCount = 1;
+        _kind = ApolloGalleryMediaKindPhoto;
     }
     return self;
+}
+
+- (BOOL)playsAsVideo {
+    return self.videoURL != nil;
+}
+
+- (NSString *)durationText {
+    NSTimeInterval seconds = self.duration;
+    if (seconds <= 0.0) return nil;
+    NSInteger total = (NSInteger)llround(seconds);
+    NSInteger hours = total / 3600, minutes = (total % 3600) / 60, secs = total % 60;
+    return hours > 0
+        ? [NSString stringWithFormat:@"%ld:%02ld:%02ld", (long)hours, (long)minutes, (long)secs]
+        : [NSString stringWithFormat:@"%ld:%02ld", (long)minutes, (long)secs];
 }
 
 - (NSURL *)postURL {
@@ -101,8 +132,11 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 @interface ApolloGalleryFeed ()
 @property (nonatomic, copy) NSString *subreddit;
 @property (nonatomic, strong) NSMutableArray<ApolloGalleryItem *> *mutableItems;
-// Full-size image URLs already emitted, so a post that resurfaces on a later
-// listing page (or a repost of the same file) doesn't duplicate a tile.
+// `mutableItems` filtered by allowedKinds, rebuilt whenever either changes.
+@property (nonatomic, strong) NSArray<ApolloGalleryItem *> *filteredItems;
+// Media already emitted (stream URL for playables, image URL otherwise), so a
+// post that resurfaces on a later listing page — or a repost of the same file —
+// doesn't duplicate a tile.
 @property (nonatomic, strong) NSMutableSet<NSString *> *seenImageKeys;
 @property (nonatomic, copy, nullable) NSString *afterCursor;
 @property (nonatomic, getter=isLoading) BOOL loading;
@@ -125,12 +159,48 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
         _seenImageKeys = [NSMutableSet set];
         _sort = ApolloGallerySortHot;
         _topWindow = ApolloGalleryTopWindowWeek;
+        _allowedKinds = ApolloGalleryPersistedAllowedKinds();
+        _filteredItems = @[];
     }
     return self;
 }
 
 - (NSArray<ApolloGalleryItem *> *)items {
+    return self.filteredItems;
+}
+
+- (NSArray<ApolloGalleryItem *> *)allItems {
     return self.mutableItems;
+}
+
+- (void)setAllowedKinds:(ApolloGalleryMediaKind)allowedKinds {
+    // Refuse to turn everything off: an empty gallery is never the intent, and
+    // it would also make the loader spin forever looking for admissible media.
+    allowedKinds &= ApolloGalleryMediaKindAll;
+    if (allowedKinds == 0 || allowedKinds == _allowedKinds) return;
+    _allowedKinds = allowedKinds;
+    ApolloGallerySetPersistedAllowedKinds(allowedKinds);
+    [self rebuildFilteredItems];
+}
+
+- (void)rebuildFilteredItems {
+    if (self.allowedKinds == ApolloGalleryMediaKindAll) {
+        self.filteredItems = [self.mutableItems copy];
+        return;
+    }
+    NSMutableArray<ApolloGalleryItem *> *visible = [NSMutableArray array];
+    for (ApolloGalleryItem *item in self.mutableItems) {
+        if (item.kind & self.allowedKinds) [visible addObject:item];
+    }
+    self.filteredItems = visible;
+}
+
+- (NSUInteger)countOfKind:(ApolloGalleryMediaKind)kind {
+    NSUInteger count = 0;
+    for (ApolloGalleryItem *item in self.mutableItems) {
+        if (item.kind & kind) count++;
+    }
+    return count;
 }
 
 - (void)setSort:(ApolloGallerySort)sort {
@@ -161,6 +231,7 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 - (void)reset {
     self.generation += 1;
     [self.mutableItems removeAllObjects];
+    self.filteredItems = @[];
     [self.seenImageKeys removeAllObjects];
     self.afterCursor = nil;
     self.exhausted = NO;
@@ -326,13 +397,13 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 
 - (void)loadNextBatchWithCompletion:(void (^)(NSRange addedRange, NSString *_Nullable errorMessage))completion {
     if (self.loading || self.exhausted) {
-        if (completion) completion(NSMakeRange(self.mutableItems.count, 0), nil);
+        if (completion) completion(NSMakeRange(self.filteredItems.count, 0), nil);
         return;
     }
     self.loading = YES;
     self.lastErrorMessage = nil;
 
-    NSUInteger startIndex = self.mutableItems.count;
+    NSUInteger startIndex = self.filteredItems.count;
     NSUInteger generation = self.generation;
     [self continueBatchFromIndex:startIndex
                       generation:generation
@@ -360,9 +431,10 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
                 return;
             }
 
-            NSUInteger before = strongSelf.mutableItems.count;
+            NSUInteger before = strongSelf.filteredItems.count;
             [strongSelf appendItemsFromListing:listing];
-            NSUInteger gainedThisPage = strongSelf.mutableItems.count - before;
+            [strongSelf rebuildFilteredItems];
+            NSUInteger gainedThisPage = strongSelf.filteredItems.count - before;
 
             strongSelf.consecutiveEmptyPages = (gainedThisPage == 0)
                 ? strongSelf.consecutiveEmptyPages + 1
@@ -371,7 +443,7 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
             NSString *nextCursor = ApolloGalleryString(listing[@"after"]);
             strongSelf.afterCursor = nextCursor;
 
-            NSUInteger gainedThisBatch = strongSelf.mutableItems.count - startIndex;
+            NSUInteger gainedThisBatch = strongSelf.filteredItems.count - startIndex;
             BOOL noMorePages = (nextCursor.length == 0);
             BOOL tooManyEmptyPages = (strongSelf.consecutiveEmptyPages >= kApolloGalleryEmptyPageLimit);
             BOOL batchSatisfied = (gainedThisBatch >= (NSUInteger)kApolloGalleryBatchSize);
@@ -379,19 +451,24 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 
             if (noMorePages || tooManyEmptyPages) {
                 strongSelf.exhausted = YES;
-                ApolloLog(@"[Gallery] r/%@ exhausted (cursor=%@ emptyPages=%ld total=%lu)",
+                ApolloLog(@"[Gallery] r/%@ exhausted (cursor=%@ emptyPages=%ld shown=%lu of %lu)",
                           strongSelf.subreddit, nextCursor ?: @"nil",
                           (long)strongSelf.consecutiveEmptyPages,
+                          (unsigned long)strongSelf.filteredItems.count,
                           (unsigned long)strongSelf.mutableItems.count);
             }
 
             if (strongSelf.exhausted || batchSatisfied || outOfPageBudget) {
                 strongSelf.loading = NO;
                 NSRange added = NSMakeRange(startIndex, gainedThisBatch);
-                ApolloLog(@"[Gallery] r/%@ %@ batch: +%lu (total %lu)",
+                ApolloLog(@"[Gallery] r/%@ %@ batch: +%lu shown (%lu shown / %lu fetched; photo %lu gif %lu video %lu)",
                           strongSelf.subreddit, [strongSelf sortDisplayName],
                           (unsigned long)gainedThisBatch,
-                          (unsigned long)strongSelf.mutableItems.count);
+                          (unsigned long)strongSelf.filteredItems.count,
+                          (unsigned long)strongSelf.mutableItems.count,
+                          (unsigned long)[strongSelf countOfKind:ApolloGalleryMediaKindPhoto],
+                          (unsigned long)[strongSelf countOfKind:ApolloGalleryMediaKindGIF],
+                          (unsigned long)[strongSelf countOfKind:ApolloGalleryMediaKindVideo]);
                 if (completion) completion(added, nil);
                 return;
             }
@@ -412,7 +489,10 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
         NSDictionary *post = ApolloGalleryDict(ApolloGalleryDict(child)[@"data"]);
         if (!post) continue;
         for (ApolloGalleryItem *item in [self itemsFromPost:post]) {
-            NSString *key = item.imageURL.absoluteString;
+            // Key on the stream for playables: two posts of the same video can
+            // carry differently-signed poster URLs, and every v.redd.it poster
+            // is unique even when the clip isn't.
+            NSString *key = item.videoURL.absoluteString ?: item.imageURL.absoluteString;
             if (key.length == 0 || [self.seenImageKeys containsObject:key]) continue;
             [self.seenImageKeys addObject:key];
             [self.mutableItems addObject:item];
@@ -465,7 +545,10 @@ static CGFloat const kApolloGalleryThumbnailTargetWidth = 640.0;
 
     NSArray<ApolloGalleryItem *> *items = [self galleryItemsFromPost:mediaSource];
     if (items.count == 0) {
-        ApolloGalleryItem *single = [self singleImageItemFromPost:mediaSource];
+        // Video first: a v.redd.it post also carries a still preview, so the
+        // image parser would happily claim it and we'd lose the playback.
+        ApolloGalleryItem *single = [self videoItemFromPost:mediaSource]
+                                    ?: [self singleImageItemFromPost:mediaSource];
         if (single) items = @[single];
     }
     // Titles/permalinks/flags always come from the post the user would open,
@@ -508,7 +591,7 @@ static CGFloat const kApolloGalleryThumbnailTargetWidth = 640.0;
 
         ApolloGalleryItem *item = [[ApolloGalleryItem alloc] init];
         item.imageURL = full;
-        item.isAnimated = animated;
+        item.kind = animated ? ApolloGalleryMediaKindGIF : ApolloGalleryMediaKindPhoto;
         item.pixelSize = CGSizeMake(ApolloGalleryNumber(source[@"x"]), ApolloGalleryNumber(source[@"y"]));
         // `p` holds the still previews; use one even for animated entries so the
         // grid doesn't pull a multi-megabyte GIF per tile.
@@ -522,6 +605,100 @@ static CGFloat const kApolloGalleryThumbnailTargetWidth = 640.0;
         item.galleryCount = (NSInteger)items.count;
     }
     return items;
+}
+
+// A Reddit `reddit_video` blob (from media.reddit_video or
+// preview.reddit_video_preview) turned into a playable stream.
+//
+// HLS is preferred over `fallback_url` because for real v.redd.it videos the
+// mp4 fallback is the VIDEO track only — Reddit serves audio as a separate DASH
+// stream — so playing the fallback gives a silent clip. The .m3u8 muxes both.
+static NSURL *ApolloGalleryVideoStreamURL(NSDictionary *video) {
+    return ApolloGalleryURL(video[@"hls_url"]) ?: ApolloGalleryURL(video[@"fallback_url"]);
+}
+
+// YES for a clip Reddit itself considers a soundless loop — a GIF someone
+// uploaded that Reddit transcoded to mp4. These are GIFs to a reader even
+// though they play through AVPlayer.
+static BOOL ApolloGalleryVideoIsSilentLoop(NSDictionary *video) {
+    return ApolloGalleryBool(video[@"is_gif"]);
+}
+
+// Direct links that are really videos: imgur's .gifv (an mp4 wearing a costume)
+// and plain .mp4/.webm links.
+static NSURL *ApolloGalleryDirectVideoURL(NSURL *url) {
+    NSString *extension = url.pathExtension.lowercaseString;
+    if ([extension isEqualToString:@"mp4"] || [extension isEqualToString:@"webm"]) return url;
+    if ([extension isEqualToString:@"gifv"]) {
+        // .gifv is an HTML page; the mp4 sits at the same path.
+        NSString *absolute = url.absoluteString;
+        NSString *swapped = [absolute stringByReplacingCharactersInRange:
+                             NSMakeRange(absolute.length - 4, 4) withString:@"m.mp4"];
+        return [NSURL URLWithString:swapped] ?: nil;
+    }
+    return nil;
+}
+
+// Reddit-hosted video posts and anything with a transcoded video preview.
+// Returns nil when the post has no playable stream, so the caller can fall
+// through to the still-image parser.
+- (ApolloGalleryItem *)videoItemFromPost:(NSDictionary *)post {
+    NSDictionary *previewImage = ApolloGalleryDict(ApolloGalleryArray(ApolloGalleryDict(post[@"preview"])[@"images"]).firstObject);
+    NSDictionary *previewSource = ApolloGalleryDict(previewImage[@"source"]);
+
+    NSDictionary *redditVideo = ApolloGalleryDict(ApolloGalleryDict(post[@"media"])[@"reddit_video"])
+                                ?: ApolloGalleryDict(ApolloGalleryDict(post[@"secure_media"])[@"reddit_video"]);
+    NSDictionary *previewVideo = ApolloGalleryDict(ApolloGalleryDict(post[@"preview"])[@"reddit_video_preview"]);
+
+    NSURL *stream = nil;
+    NSURL *downloadable = nil;
+    NSTimeInterval duration = 0.0;
+    ApolloGalleryMediaKind kind = ApolloGalleryMediaKindVideo;
+
+    if (redditVideo) {
+        stream = ApolloGalleryVideoStreamURL(redditVideo);
+        duration = ApolloGalleryNumber(redditVideo[@"duration"]);
+        if (ApolloGalleryVideoIsSilentLoop(redditVideo)) {
+            kind = ApolloGalleryMediaKindGIF;
+            // Silent by definition, so the mp4 fallback is the whole thing and
+            // is safe to offer for Save.
+            downloadable = ApolloGalleryURL(redditVideo[@"fallback_url"]);
+        }
+    } else if (previewVideo) {
+        // An external GIF/short clip Reddit re-hosted; nearly always silent.
+        stream = ApolloGalleryVideoStreamURL(previewVideo);
+        duration = ApolloGalleryNumber(previewVideo[@"duration"]);
+        kind = ApolloGalleryVideoIsSilentLoop(previewVideo) ? ApolloGalleryMediaKindGIF : ApolloGalleryMediaKindVideo;
+        if (kind == ApolloGalleryMediaKindGIF) downloadable = ApolloGalleryURL(previewVideo[@"fallback_url"]);
+    } else {
+        NSURL *direct = ApolloGalleryURL(post[@"url_overridden_by_dest"]) ?: ApolloGalleryURL(post[@"url"]);
+        NSURL *directVideo = direct ? ApolloGalleryDirectVideoURL(direct) : nil;
+        if (directVideo) {
+            stream = directVideo;
+            // A standalone mp4 is self-contained, so it can be saved as-is.
+            downloadable = directVideo;
+            // imgur .gifv is a looping GIF in mp4 clothing.
+            kind = [direct.pathExtension.lowercaseString isEqualToString:@"gifv"]
+                ? ApolloGalleryMediaKindGIF : ApolloGalleryMediaKindVideo;
+        }
+    }
+    if (!stream) return nil;
+
+    ApolloGalleryItem *item = [[ApolloGalleryItem alloc] init];
+    item.kind = kind;
+    item.videoURL = stream;
+    item.videoDownloadURL = downloadable;
+    item.duration = duration;
+    // The poster frame. Video posts always carry a preview; without one there's
+    // nothing to draw in the grid, so skip the post entirely.
+    NSURL *poster = previewSource ? ApolloGalleryURL(previewSource[@"url"]) : nil;
+    if (!poster) return nil;
+    item.imageURL = poster;
+    item.pixelSize = CGSizeMake(ApolloGalleryNumber(previewSource[@"width"]),
+                                ApolloGalleryNumber(previewSource[@"height"]));
+    item.thumbnailURL = ApolloGalleryBestThumbnail(ApolloGalleryArray(previewImage[@"resolutions"]), @"url",
+                                                   kApolloGalleryThumbnailTargetWidth) ?: poster;
+    return item;
 }
 
 // Ordinary single-image posts, including direct links to external image hosts.
@@ -552,7 +729,7 @@ static CGFloat const kApolloGalleryThumbnailTargetWidth = 640.0;
 
     ApolloGalleryItem *item = [[ApolloGalleryItem alloc] init];
     item.imageURL = full;
-    item.isAnimated = animated;
+    item.kind = animated ? ApolloGalleryMediaKindGIF : ApolloGalleryMediaKindPhoto;
     if (previewSource) {
         item.pixelSize = CGSizeMake(ApolloGalleryNumber(previewSource[@"width"]),
                                     ApolloGalleryNumber(previewSource[@"height"]));

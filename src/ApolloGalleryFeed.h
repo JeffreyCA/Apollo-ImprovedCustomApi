@@ -31,12 +31,35 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-// One displayable picture. A single Reddit post yields one item for a normal
-// image post and N items for a gallery post (galleryCount > 1).
+// What a tile actually is. A bitmask so the filter can allow any combination.
+typedef NS_OPTIONS(NSUInteger, ApolloGalleryMediaKind) {
+    ApolloGalleryMediaKindPhoto = 1 << 0,   // still image
+    ApolloGalleryMediaKindGIF   = 1 << 1,   // silent loop — animated GIF *or* an mp4 Reddit transcoded one into
+    ApolloGalleryMediaKindVideo = 1 << 2,   // real video, usually with sound
+};
+static ApolloGalleryMediaKind const ApolloGalleryMediaKindAll =
+    ApolloGalleryMediaKindPhoto | ApolloGalleryMediaKindGIF | ApolloGalleryMediaKindVideo;
+
+// One displayable piece of media. A single Reddit post yields one item for a
+// normal image/video post and N items for a gallery post (galleryCount > 1).
 @interface ApolloGalleryItem : NSObject
 
-// Full-resolution image used by the fullscreen viewer.
+@property (nonatomic) ApolloGalleryMediaKind kind;
+
+// Full-resolution still. For video/GIF items this is the poster frame, shown
+// while the stream spins up.
 @property (nonatomic, copy) NSURL *imageURL;
+
+// Playable stream for GIF-as-mp4 and video items, nil for stills and for GIFs
+// backed by an actual animated .gif file (those animate through the image
+// loader instead). May be HLS (.m3u8) or a progressive mp4.
+@property (nonatomic, copy, nullable) NSURL *videoURL;
+// A self-contained mp4 that can be written to Photos, when one exists. Left nil
+// for v.redd.it, whose mp4 fallback carries no audio — saving it would silently
+// produce a mute copy, so Save is hidden there rather than lying.
+@property (nonatomic, copy, nullable) NSURL *videoDownloadURL;
+// Runtime in seconds; 0 when Reddit didn't report one.
+@property (nonatomic) NSTimeInterval duration;
 // Smaller preview used by the grid; falls back to imageURL when Reddit gave
 // us no resolutions to pick from.
 @property (nonatomic, copy) NSURL *thumbnailURL;
@@ -52,7 +75,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic) BOOL isNSFW;
 @property (nonatomic) BOOL isSpoiler;
-@property (nonatomic) BOOL isAnimated;   // GIF; the viewer animates these
 
 // Position within a multi-image gallery post (0-based). galleryCount is 1 for
 // ordinary image posts.
@@ -63,6 +85,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly, nullable) NSURL *postURL;
 // YES when the grid should blur this item's thumbnail.
 @property (nonatomic, readonly) BOOL shouldBlurThumbnail;
+// YES when the viewer should drive this item with AVPlayer rather than the
+// image loader.
+@property (nonatomic, readonly) BOOL playsAsVideo;
+// "0:42" / "1:23:45", or nil when the duration is unknown.
+@property (nonatomic, readonly, nullable) NSString *durationText;
 
 @end
 
@@ -91,7 +118,19 @@ typedef NS_ENUM(NSInteger, ApolloGalleryTopWindow) {
 - (instancetype)init NS_UNAVAILABLE;
 
 @property (nonatomic, readonly, copy) NSString *subreddit;
+// The items the UI should show: everything fetched so far, minus the kinds the
+// filter excludes. Filtering happens here rather than at parse time so toggling
+// a kind is instant and never costs a refetch.
 @property (nonatomic, readonly) NSArray<ApolloGalleryItem *> *items;
+// Everything fetched, whatever the filter says. Only useful for counts.
+@property (nonatomic, readonly) NSArray<ApolloGalleryItem *> *allItems;
+
+// Which kinds `items` includes. Never 0 — clearing the last kind is rejected,
+// since an empty gallery is never what someone meant. Persisted across launches.
+@property (nonatomic) ApolloGalleryMediaKind allowedKinds;
+// How many of everything fetched so far are of `kind`, for the filter menu's
+// subtitles.
+- (NSUInteger)countOfKind:(ApolloGalleryMediaKind)kind;
 
 // Changing either resets the feed (items cleared, cursor dropped). Use
 // -setSort:topWindow: to change both at once so only one reset happens.
@@ -110,7 +149,8 @@ typedef NS_ENUM(NSInteger, ApolloGalleryTopWindow) {
 @property (nonatomic, readonly) NSString *sortDisplayName;
 
 // Loads the next batch, walking as many listing pages as it takes to gather a
-// batch worth of pictures (image posts are sparse in mixed subreddits). The
+// batch worth of media the CURRENT FILTER admits (a video-only filter on a
+// mostly-photo subreddit would otherwise return a page of nothing). The
 // completion runs on the main thread with the index range appended to `items`;
 // `addedCount` is 0 when the batch found nothing new. A call made while a load
 // is already in flight, or after the feed is exhausted, completes immediately
