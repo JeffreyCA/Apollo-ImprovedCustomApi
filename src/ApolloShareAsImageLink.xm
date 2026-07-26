@@ -16,7 +16,8 @@
 //      styled from the native Watermark row, positioned one row below Watermark in
 //      viewDidLayoutSubviews. The hosting bottom-sheet is made one row taller by a
 //      hook on SourdoughPresentationController.frameOfPresentedViewInContainerView
-//      (the loop-free way to grow it), so the Share button is never clipped.
+//      by adjusting the presentation controller's frame directly, avoiding
+//      layout feedback loops, so the Share button is never clipped.
 //   2. Share interception — shareButtonTappedWithSender: records the active VC
 //      and the toggle state, then the UIActivityViewController designated
 //      initializer hook appends the link (via a UIActivityItemSource that keeps
@@ -126,8 +127,9 @@ static NSURL *ApolloShareLinkURLForVC(id vc) {
     return nil;
 }
 
-#pragma mark - Outgoing share host rewrite
+#pragma mark - Share host rewriting
 
+// Rewrites outgoing Reddit URLs to the user's selected share host.
 static BOOL ApolloShareLinkIsRedditWebHost(NSString *host) {
     NSString *lower = host.lowercaseString;
     if (lower.length == 0) return NO;
@@ -453,9 +455,6 @@ static void ApolloShareLinkLayoutRow(id vc) {
 
 - (void)viewDidLoad {
     %orig;
-    // DIAGNOSTIC: confirm the share-as-image VC actually loads (post vs comment).
-    BOOL isComment = ApolloShareLinkIvarObject(self, "comment") != nil;
-    ApolloLog(@"[ShareLink] viewDidLoad comment=%d", (int)isComment);
     ApolloShareLinkInstallRow(self);
 }
 
@@ -474,7 +473,6 @@ static void ApolloShareLinkLayoutRow(id vc) {
 - (void)shareButtonTappedWithSender:(id)sender {
     sActiveShareVC = self;
     sActiveShareIncludeLink = [[NSUserDefaults standardUserDefaults] boolForKey:kApolloShareIncludeLinkKey];
-    ApolloLog(@"[ShareLink] share tapped includeLink=%d", (int)sActiveShareIncludeLink);
     %orig;
     // Safety net: clear the handshake shortly after, in case no activity sheet is
     // built (the init hook also clears it immediately on a successful append). Reset
@@ -537,10 +535,11 @@ static BOOL ApolloShareLinkAlreadyHasLinkSource(NSArray *items) {
 
 %end
 
+#pragma mark - Copy Link support
 
-// Apollo's custom Copy Link activity receives our correctly rewritten NSURL,
-// but its stock performActivity ignores that item and copies a private stale URL.
-// Cache the supplied URL, then write it directly when Copy Link is selected.
+// Apollo's custom Copy Link activity receives the rewritten share URL, but
+// performs its own internal copy operation. Cache the rewritten URL during
+// activity preparation, then replace the clipboard after Apollo finishes.
 static char kApolloCopyURLActivityURLKey;
 
 %hook _TtC6Apollo15CopyURLActivity
@@ -573,9 +572,6 @@ static char kApolloCopyURLActivityURLKey;
                                  &kApolloCopyURLActivityURLKey,
                                  rewrittenURL,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-        ApolloLog(@"[ShareLinkHost] CopyURLActivity cached URL=%@",
-                  rewrittenURL.absoluteString);
     } else {
         objc_setAssociatedObject(self,
                                  &kApolloCopyURLActivityURLKey,
