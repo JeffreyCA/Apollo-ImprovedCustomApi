@@ -67,6 +67,11 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloPublicStickyAsSubreddit.xm \
     $(SRC_DIR)/ApolloSubredditHeaders.xm \
     $(SRC_DIR)/ApolloSubredditHighlights.xm \
+    $(SRC_DIR)/ApolloGalleryFeed.m \
+    $(SRC_DIR)/ApolloGalleryImageLoader.m \
+    $(SRC_DIR)/ApolloGalleryImageViewer.m \
+    $(SRC_DIR)/ApolloGalleryViewController.m \
+    $(SRC_DIR)/ApolloGalleryMenu.xm \
     $(SRC_DIR)/ApolloBannedProfile.xm \
     $(SRC_DIR)/ApolloImageUploadHost.xm \
     $(SRC_DIR)/ApolloPhotoPostComposerScrollFix.xm \
