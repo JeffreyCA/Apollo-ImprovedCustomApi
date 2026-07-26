@@ -8,6 +8,7 @@
 
 #import <Photos/Photos.h>
 #import <AVFoundation/AVFoundation.h>
+#import <objc/message.h>
 
 // Pages either side of the current one kept warm.
 static NSInteger const kApolloGalleryViewerPrefetchRadius = 2;
@@ -313,6 +314,16 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
 
 @end
 
+// Chrome glyphs at a fixed point size. Left unconfigured, an SF Symbol scales
+// to the button's font and filled the capsule edge to edge — which is what made
+// the share button look cramped and off-centre (its arrow overshoots the glyph
+// box, so tight bounds read as badly aligned rather than merely tight).
+static UIImage *ApolloGalleryChromeSymbol(NSString *name) {
+    UIImageSymbolConfiguration *configuration =
+        [UIImageSymbolConfiguration configurationWithPointSize:15.0 weight:UIImageSymbolWeightSemibold];
+    return [UIImage systemImageNamed:name withConfiguration:configuration];
+}
+
 // A chrome capsule: the material underneath, one content view (label or button)
 // filling it.
 //
@@ -336,6 +347,11 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
     [super layoutSubviews];
     self.materialView.frame = self.bounds;
     self.pillContentView.frame = self.bounds;
+    // Fully rounded, always: that makes a square icon button a circle and a
+    // text pill a capsule, which is the shape Apple's own glass controls use.
+    // A fixed radius on a 40x32 rect is what made these read as "tight boxes"
+    // rather than iOS 26 controls.
+    self.layer.cornerRadius = MIN(CGRectGetWidth(self.bounds), CGRectGetHeight(self.bounds)) / 2.0;
 }
 @end
 
@@ -343,16 +359,20 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
 // real UIGlassEffect, so the viewer's controls match the rest of the iOS 26 app
 // instead of reading as flat pre-26 pills; older builds keep translucent black,
 // which is what stays legible over an arbitrary photo.
-static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGFloat cornerRadius, CGFloat legacyAlpha) {
+static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGFloat legacyAlpha) {
     ApolloGalleryChromePillView *pill = [[ApolloGalleryChromePillView alloc] initWithFrame:CGRectZero];
-    pill.layer.cornerRadius = cornerRadius;
-    pill.layer.cornerCurve = kCACornerCurveContinuous;
     pill.clipsToBounds = YES;
 
     Class glassClass = NSClassFromString(@"UIGlassEffect");
     if (IsLiquidGlass() && glassClass) {
         pill.backgroundColor = UIColor.clearColor;
-        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:[[glassClass alloc] init]];
+        id effect = [[glassClass alloc] init];
+        // Interactive glass is what gives Apple's controls their press
+        // response; without it the capsule is inert decoration.
+        if ([effect respondsToSelector:@selector(setInteractive:)]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(effect, @selector(setInteractive:), YES);
+        }
+        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:(UIVisualEffect *)effect];
         glass.userInteractionEnabled = NO;
         [pill addSubview:glass];
         pill.materialView = glass;
@@ -525,7 +545,7 @@ static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGF
     [self.doneButton setTitle:@"Done" forState:UIControlStateNormal];
     self.doneButton.tintColor = UIColor.whiteColor;
     self.doneButton.titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
-    self.donePill = ApolloGalleryChromePill(self.doneButton, 16.0, 0.55);
+    self.donePill = ApolloGalleryChromePill(self.doneButton, 0.55);
     [self.doneButton addTarget:self action:@selector(apollo_donePressed) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.donePill];
 
@@ -533,20 +553,20 @@ static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGF
     self.counterLabel.textColor = UIColor.whiteColor;
     self.counterLabel.font = [UIFont monospacedDigitSystemFontOfSize:14.0 weight:UIFontWeightSemibold];
     self.counterLabel.textAlignment = NSTextAlignmentCenter;
-    self.counterPill = ApolloGalleryChromePill(self.counterLabel, 14.0, 0.55);
+    self.counterPill = ApolloGalleryChromePill(self.counterLabel, 0.55);
     [self.view addSubview:self.counterPill];
 
     self.shareButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.shareButton setImage:[UIImage systemImageNamed:@"square.and.arrow.up"] forState:UIControlStateNormal];
+    [self.shareButton setImage:ApolloGalleryChromeSymbol(@"square.and.arrow.up") forState:UIControlStateNormal];
     self.shareButton.tintColor = UIColor.whiteColor;
-    self.sharePill = ApolloGalleryChromePill(self.shareButton, 16.0, 0.55);
+    self.sharePill = ApolloGalleryChromePill(self.shareButton, 0.55);
     [self.shareButton addTarget:self action:@selector(apollo_sharePressed:) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.sharePill];
 
     // Only shown while a video/GIF page is up; still images have nothing to mute.
     self.muteButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.muteButton.tintColor = UIColor.whiteColor;
-    self.mutePill = ApolloGalleryChromePill(self.muteButton, 16.0, 0.55);
+    self.mutePill = ApolloGalleryChromePill(self.muteButton, 0.55);
     [self.muteButton addTarget:self action:@selector(apollo_muteTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.mutePill];
 
@@ -594,7 +614,7 @@ static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGF
     self.statusLabel.textColor = UIColor.whiteColor;
     self.statusLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
     self.statusLabel.textAlignment = NSTextAlignmentCenter;
-    self.statusPill = ApolloGalleryChromePill(self.statusLabel, 12.0, 0.55);
+    self.statusPill = ApolloGalleryChromePill(self.statusLabel, 0.55);
     self.statusPill.alpha = 0.0;
     [self.view addSubview:self.statusPill];
 
@@ -602,7 +622,7 @@ static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGF
     self.toastLabel.textColor = UIColor.whiteColor;
     self.toastLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightSemibold];
     self.toastLabel.textAlignment = NSTextAlignmentCenter;
-    self.toastPill = ApolloGalleryChromePill(self.toastLabel, 14.0, 0.7);
+    self.toastPill = ApolloGalleryChromePill(self.toastLabel, 0.7);
     self.toastPill.alpha = 0.0;
     [self.view addSubview:self.toastPill];
 }
@@ -616,16 +636,23 @@ static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGF
     CGFloat side = MAX(16.0, safe.left + 16.0);
     CGFloat rightSide = MAX(16.0, safe.right + 16.0);
 
-    self.donePill.frame = CGRectMake(side, top, 72.0, 32.0);
-    self.sharePill.frame = CGRectMake(bounds.size.width - rightSide - 40.0, top, 40.0, 32.0);
+    // Icon buttons are SQUARE, so the capsule renders as a circle — the shape
+    // Apple uses for single-glyph glass controls. The old 40x32 rect with a
+    // fixed 16pt radius is what made them read as tight little boxes.
+    CGFloat const controlHeight = 36.0;
+    CGFloat const iconSize = controlHeight;
+    CGFloat const controlGap = 8.0;
+
+    self.donePill.frame = CGRectMake(side, top, 74.0, controlHeight);
+    self.sharePill.frame = CGRectMake(bounds.size.width - rightSide - iconSize, top, iconSize, controlHeight);
     CGFloat trailing = CGRectGetMinX(self.sharePill.frame);
     if (!self.mutePill.hidden) {
-        self.mutePill.frame = CGRectMake(trailing - 8.0 - 40.0, top, 40.0, 32.0);
+        self.mutePill.frame = CGRectMake(trailing - controlGap - iconSize, top, iconSize, controlHeight);
         trailing = CGRectGetMinX(self.mutePill.frame);
     }
-    CGFloat counterWidth = 84.0;
-    self.counterPill.frame = CGRectMake(trailing - 8.0 - counterWidth, top, counterWidth, 32.0);
-    self.statusPill.frame = CGRectMake((bounds.size.width - 150.0) / 2.0, CGRectGetMaxY(self.counterPill.frame) + 8.0, 150.0, 24.0);
+    CGFloat counterWidth = 88.0;
+    self.counterPill.frame = CGRectMake(trailing - controlGap - counterWidth, top, counterWidth, controlHeight);
+    self.statusPill.frame = CGRectMake((bounds.size.width - 156.0) / 2.0, CGRectGetMaxY(self.counterPill.frame) + 8.0, 156.0, 28.0);
 
     CGFloat bottom = safe.bottom + 16.0;
     CGFloat panelWidth = MIN(bounds.size.width - side - rightSide, 460.0);
@@ -650,8 +677,8 @@ static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGF
     self.subtitleLabel.frame = CGRectMake(12.0, 10.0 + titleSize.height + gap, subtitleSize.width, subtitleSize.height);
 
     self.toastPill.frame = CGRectMake((bounds.size.width - 220.0) / 2.0,
-                                       CGRectGetMinY(self.infoPanel.frame) - 44.0,
-                                       220.0, 30.0);
+                                       CGRectGetMinY(self.infoPanel.frame) - 46.0,
+                                       220.0, 32.0);
 }
 
 - (void)apollo_updateChromeContent {
@@ -975,7 +1002,7 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
     self.mutePill.hidden = !showsMute;
     if (showsMute) {
         BOOL muted = ApolloGalleryViewerVideosMuted();
-        [self.muteButton setImage:[UIImage systemImageNamed:(muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill")]
+        [self.muteButton setImage:ApolloGalleryChromeSymbol(muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill")
                          forState:UIControlStateNormal];
         self.muteButton.accessibilityLabel = muted ? @"Unmute" : @"Mute";
         self.mutePill.alpha = self.chromeVisible ? 1.0 : 0.0;
