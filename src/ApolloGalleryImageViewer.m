@@ -313,6 +313,59 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
 
 @end
 
+// A chrome capsule: the material underneath, one content view (label or button)
+// filling it.
+//
+// It lays out by frame rather than Auto Layout on purpose. These pills are
+// frame-positioned from -apollo_layoutChrome and some start hidden, and
+// constraints inside that subtree proved unreliable — a button pinned to all
+// four edges stayed 0x0, so its symbol never drew.
+//
+// A container is also why the material isn't just inserted into the control:
+//   • UILabel draws text into its own layer contents, which any subview covers;
+//   • UIButton re-orders its subviews during layout on iOS 26, so a backdrop
+//     inserted at index 0 ends up ON TOP of the image, leaving a blurred ghost
+//     (the title escapes, which makes the bug look inconsistent).
+@interface ApolloGalleryChromePillView : UIView
+@property (nonatomic, strong, nullable) UIView *materialView;
+@property (nonatomic, strong) UIView *pillContentView;
+@end
+
+@implementation ApolloGalleryChromePillView
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    self.materialView.frame = self.bounds;
+    self.pillContentView.frame = self.bounds;
+}
+@end
+
+// Builds a capsule around `content`. On Liquid Glass builds the backing is a
+// real UIGlassEffect, so the viewer's controls match the rest of the iOS 26 app
+// instead of reading as flat pre-26 pills; older builds keep translucent black,
+// which is what stays legible over an arbitrary photo.
+static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGFloat cornerRadius, CGFloat legacyAlpha) {
+    ApolloGalleryChromePillView *pill = [[ApolloGalleryChromePillView alloc] initWithFrame:CGRectZero];
+    pill.layer.cornerRadius = cornerRadius;
+    pill.layer.cornerCurve = kCACornerCurveContinuous;
+    pill.clipsToBounds = YES;
+
+    Class glassClass = NSClassFromString(@"UIGlassEffect");
+    if (IsLiquidGlass() && glassClass) {
+        pill.backgroundColor = UIColor.clearColor;
+        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:[[glassClass alloc] init]];
+        glass.userInteractionEnabled = NO;
+        [pill addSubview:glass];
+        pill.materialView = glass;
+    } else {
+        pill.backgroundColor = [UIColor colorWithWhite:0.0 alpha:legacyAlpha];
+    }
+
+    content.backgroundColor = UIColor.clearColor;
+    [pill addSubview:content];
+    pill.pillContentView = content;
+    return pill;
+}
+
 #pragma mark - Viewer
 
 @interface ApolloGalleryImageViewer () <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout,
@@ -328,14 +381,21 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
 
 @property (nonatomic, strong) UIView *topChrome;
 @property (nonatomic, strong) UIButton *doneButton;
+@property (nonatomic, strong) ApolloGalleryChromePillView *donePill;
 @property (nonatomic, strong) UIButton *shareButton;
+@property (nonatomic, strong) ApolloGalleryChromePillView *sharePill;
 @property (nonatomic, strong) UIButton *muteButton;
+@property (nonatomic, strong) ApolloGalleryChromePillView *mutePill;
 @property (nonatomic, strong) UILabel *counterLabel;
+@property (nonatomic, strong) ApolloGalleryChromePillView *counterPill;
 @property (nonatomic, strong) UIView *infoPanel;
+@property (nonatomic, strong, nullable) UIView *infoPanelMaterial;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *subtitleLabel;
 @property (nonatomic, strong) UILabel *statusLabel;
+@property (nonatomic, strong) ApolloGalleryChromePillView *statusPill;
 @property (nonatomic, strong) UILabel *toastLabel;
+@property (nonatomic, strong) ApolloGalleryChromePillView *toastPill;
 @property (nonatomic) BOOL chromeVisible;
 
 @property (nonatomic, strong) UIPanGestureRecognizer *dismissPan;
@@ -460,62 +520,60 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
 // Every overlay control sits on a translucent black capsule so it stays legible
 // over an arbitrary photo — the same treatment in Liquid Glass and legacy
 // builds, since the backdrop here is the picture, not app chrome.
-static UIView *ApolloGalleryChromeCapsule(CGFloat cornerRadius) {
-    UIView *capsule = [[UIView alloc] initWithFrame:CGRectZero];
-    capsule.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
-    capsule.layer.cornerRadius = cornerRadius;
-    capsule.layer.cornerCurve = kCACornerCurveContinuous;
-    capsule.clipsToBounds = YES;
-    return capsule;
-}
-
 - (void)apollo_buildChrome {
     self.doneButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [self.doneButton setTitle:@"Done" forState:UIControlStateNormal];
     self.doneButton.tintColor = UIColor.whiteColor;
     self.doneButton.titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
-    self.doneButton.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
-    self.doneButton.layer.cornerRadius = 16.0;
-    self.doneButton.layer.cornerCurve = kCACornerCurveContinuous;
-    self.doneButton.clipsToBounds = YES;
+    self.donePill = ApolloGalleryChromePill(self.doneButton, 16.0, 0.55);
     [self.doneButton addTarget:self action:@selector(apollo_donePressed) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:self.doneButton];
+    [self.view addSubview:self.donePill];
 
     self.counterLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     self.counterLabel.textColor = UIColor.whiteColor;
     self.counterLabel.font = [UIFont monospacedDigitSystemFontOfSize:14.0 weight:UIFontWeightSemibold];
     self.counterLabel.textAlignment = NSTextAlignmentCenter;
-    self.counterLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
-    self.counterLabel.layer.cornerRadius = 14.0;
-    self.counterLabel.layer.cornerCurve = kCACornerCurveContinuous;
-    self.counterLabel.clipsToBounds = YES;
-    [self.view addSubview:self.counterLabel];
+    self.counterPill = ApolloGalleryChromePill(self.counterLabel, 14.0, 0.55);
+    [self.view addSubview:self.counterPill];
 
     self.shareButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [self.shareButton setImage:[UIImage systemImageNamed:@"square.and.arrow.up"] forState:UIControlStateNormal];
     self.shareButton.tintColor = UIColor.whiteColor;
-    self.shareButton.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
-    self.shareButton.layer.cornerRadius = 16.0;
-    self.shareButton.layer.cornerCurve = kCACornerCurveContinuous;
-    self.shareButton.clipsToBounds = YES;
+    self.sharePill = ApolloGalleryChromePill(self.shareButton, 16.0, 0.55);
     [self.shareButton addTarget:self action:@selector(apollo_sharePressed:) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:self.shareButton];
+    [self.view addSubview:self.sharePill];
 
     // Only shown while a video/GIF page is up; still images have nothing to mute.
     self.muteButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.muteButton.tintColor = UIColor.whiteColor;
-    self.muteButton.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
-    self.muteButton.layer.cornerRadius = 16.0;
-    self.muteButton.layer.cornerCurve = kCACornerCurveContinuous;
-    self.muteButton.clipsToBounds = YES;
-    self.muteButton.hidden = YES;
+    self.mutePill = ApolloGalleryChromePill(self.muteButton, 16.0, 0.55);
     [self.muteButton addTarget:self action:@selector(apollo_muteTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:self.muteButton];
+    [self.view addSubview:self.mutePill];
 
     // Bottom-left post details. Tapping it leaves the gallery for the real post.
-    self.infoPanel = ApolloGalleryChromeCapsule(14.0);
+    // The info panel positions its own labels, so it gets the material directly
+    // rather than through a pill; a plain UIView doesn't reorder subviews.
+    self.infoPanel = [[UIView alloc] initWithFrame:CGRectZero];
+    self.infoPanel.layer.cornerRadius = 14.0;
+    self.infoPanel.layer.cornerCurve = kCACornerCurveContinuous;
+    self.infoPanel.clipsToBounds = YES;
+    {
+        Class glassClass = NSClassFromString(@"UIGlassEffect");
+        if (IsLiquidGlass() && glassClass) {
+            self.infoPanel.backgroundColor = UIColor.clearColor;
+            UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:[[glassClass alloc] init]];
+            glass.userInteractionEnabled = NO;
+            glass.frame = self.infoPanel.bounds;
+            glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            [self.infoPanel addSubview:glass];
+            self.infoPanelMaterial = glass;
+        } else {
+            self.infoPanel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
+        }
+    }
     [self.view addSubview:self.infoPanel];
 
+    // (material added above sits at index 0, behind these labels)
     self.titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     self.titleLabel.textColor = UIColor.whiteColor;
     self.titleLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightSemibold];
@@ -536,23 +594,17 @@ static UIView *ApolloGalleryChromeCapsule(CGFloat cornerRadius) {
     self.statusLabel.textColor = UIColor.whiteColor;
     self.statusLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
     self.statusLabel.textAlignment = NSTextAlignmentCenter;
-    self.statusLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
-    self.statusLabel.layer.cornerRadius = 12.0;
-    self.statusLabel.layer.cornerCurve = kCACornerCurveContinuous;
-    self.statusLabel.clipsToBounds = YES;
-    self.statusLabel.alpha = 0.0;
-    [self.view addSubview:self.statusLabel];
+    self.statusPill = ApolloGalleryChromePill(self.statusLabel, 12.0, 0.55);
+    self.statusPill.alpha = 0.0;
+    [self.view addSubview:self.statusPill];
 
     self.toastLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     self.toastLabel.textColor = UIColor.whiteColor;
     self.toastLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightSemibold];
     self.toastLabel.textAlignment = NSTextAlignmentCenter;
-    self.toastLabel.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.7];
-    self.toastLabel.layer.cornerRadius = 14.0;
-    self.toastLabel.layer.cornerCurve = kCACornerCurveContinuous;
-    self.toastLabel.clipsToBounds = YES;
-    self.toastLabel.alpha = 0.0;
-    [self.view addSubview:self.toastLabel];
+    self.toastPill = ApolloGalleryChromePill(self.toastLabel, 14.0, 0.7);
+    self.toastPill.alpha = 0.0;
+    [self.view addSubview:self.toastPill];
 }
 
 - (void)apollo_layoutChrome {
@@ -564,16 +616,16 @@ static UIView *ApolloGalleryChromeCapsule(CGFloat cornerRadius) {
     CGFloat side = MAX(16.0, safe.left + 16.0);
     CGFloat rightSide = MAX(16.0, safe.right + 16.0);
 
-    self.doneButton.frame = CGRectMake(side, top, 72.0, 32.0);
-    self.shareButton.frame = CGRectMake(bounds.size.width - rightSide - 40.0, top, 40.0, 32.0);
-    CGFloat trailing = CGRectGetMinX(self.shareButton.frame);
-    if (!self.muteButton.hidden) {
-        self.muteButton.frame = CGRectMake(trailing - 8.0 - 40.0, top, 40.0, 32.0);
-        trailing = CGRectGetMinX(self.muteButton.frame);
+    self.donePill.frame = CGRectMake(side, top, 72.0, 32.0);
+    self.sharePill.frame = CGRectMake(bounds.size.width - rightSide - 40.0, top, 40.0, 32.0);
+    CGFloat trailing = CGRectGetMinX(self.sharePill.frame);
+    if (!self.mutePill.hidden) {
+        self.mutePill.frame = CGRectMake(trailing - 8.0 - 40.0, top, 40.0, 32.0);
+        trailing = CGRectGetMinX(self.mutePill.frame);
     }
     CGFloat counterWidth = 84.0;
-    self.counterLabel.frame = CGRectMake(trailing - 8.0 - counterWidth, top, counterWidth, 32.0);
-    self.statusLabel.frame = CGRectMake((bounds.size.width - 150.0) / 2.0, CGRectGetMaxY(self.counterLabel.frame) + 8.0, 150.0, 24.0);
+    self.counterPill.frame = CGRectMake(trailing - 8.0 - counterWidth, top, counterWidth, 32.0);
+    self.statusPill.frame = CGRectMake((bounds.size.width - 150.0) / 2.0, CGRectGetMaxY(self.counterPill.frame) + 8.0, 150.0, 24.0);
 
     CGFloat bottom = safe.bottom + 16.0;
     CGFloat panelWidth = MIN(bounds.size.width - side - rightSide, 460.0);
@@ -597,7 +649,7 @@ static UIView *ApolloGalleryChromeCapsule(CGFloat cornerRadius) {
     self.titleLabel.frame = CGRectMake(12.0, 10.0, titleSize.width, titleSize.height);
     self.subtitleLabel.frame = CGRectMake(12.0, 10.0 + titleSize.height + gap, subtitleSize.width, subtitleSize.height);
 
-    self.toastLabel.frame = CGRectMake((bounds.size.width - 220.0) / 2.0,
+    self.toastPill.frame = CGRectMake((bounds.size.width - 220.0) / 2.0,
                                        CGRectGetMinY(self.infoPanel.frame) - 44.0,
                                        220.0, 30.0);
 }
@@ -636,15 +688,15 @@ static UIView *ApolloGalleryChromeCapsule(CGFloat cornerRadius) {
     self.chromeVisible = visible;
     CGFloat alpha = visible ? 1.0 : 0.0;
     void (^changes)(void) = ^{
-        self.doneButton.alpha = alpha;
-        self.shareButton.alpha = alpha;
-        self.muteButton.alpha = alpha;
-        self.counterLabel.alpha = alpha;
+        self.donePill.alpha = alpha;
+        self.sharePill.alpha = alpha;
+        self.mutePill.alpha = alpha;
+        self.counterPill.alpha = alpha;
         self.infoPanel.alpha = alpha;
     };
-    self.doneButton.userInteractionEnabled = visible;
-    self.shareButton.userInteractionEnabled = visible;
-    self.muteButton.userInteractionEnabled = visible;
+    self.donePill.userInteractionEnabled = visible;
+    self.sharePill.userInteractionEnabled = visible;
+    self.mutePill.userInteractionEnabled = visible;
     self.infoPanel.userInteractionEnabled = visible;
     if (animated) {
         [UIView animateWithDuration:0.22 animations:changes];
@@ -657,16 +709,16 @@ static UIView *ApolloGalleryChromeCapsule(CGFloat cornerRadius) {
     self.statusLabel.text = status;
     BOOL show = status.length > 0;
     [UIView animateWithDuration:0.2 animations:^{
-        self.statusLabel.alpha = show ? 1.0 : 0.0;
+        self.statusPill.alpha = show ? 1.0 : 0.0;
     }];
 }
 
 - (void)apollo_showToast:(NSString *)text {
     self.toastLabel.text = text;
-    [self.view bringSubviewToFront:self.toastLabel];
-    [UIView animateWithDuration:0.2 animations:^{ self.toastLabel.alpha = 1.0; }];
+    [self.view bringSubviewToFront:self.toastPill];
+    [UIView animateWithDuration:0.2 animations:^{ self.toastPill.alpha = 1.0; }];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [UIView animateWithDuration:0.3 animations:^{ self.toastLabel.alpha = 0.0; }];
+        [UIView animateWithDuration:0.3 animations:^{ self.toastPill.alpha = 0.0; }];
     });
 }
 
@@ -809,10 +861,10 @@ static UIView *ApolloGalleryChromeCapsule(CGFloat cornerRadius) {
             // on the same touch, so a diagonal flick can't page AND dismiss.
             self.collectionView.scrollEnabled = NO;
                     [UIView animateWithDuration:0.15 animations:^{
-                self.doneButton.alpha = 0.0;
-                self.shareButton.alpha = 0.0;
-                self.muteButton.alpha = 0.0;
-                self.counterLabel.alpha = 0.0;
+                self.donePill.alpha = 0.0;
+                self.sharePill.alpha = 0.0;
+                self.mutePill.alpha = 0.0;
+                self.counterPill.alpha = 0.0;
                 self.infoPanel.alpha = 0.0;
             }];
             break;
@@ -920,13 +972,13 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
 - (void)apollo_updateMuteButton {
     ApolloGalleryItem *item = [self apollo_currentItem];
     BOOL showsMute = item.playsAsVideo && item.kind == ApolloGalleryMediaKindVideo;
-    self.muteButton.hidden = !showsMute;
+    self.mutePill.hidden = !showsMute;
     if (showsMute) {
         BOOL muted = ApolloGalleryViewerVideosMuted();
         [self.muteButton setImage:[UIImage systemImageNamed:(muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill")]
                          forState:UIControlStateNormal];
         self.muteButton.accessibilityLabel = muted ? @"Unmute" : @"Mute";
-        self.muteButton.alpha = self.chromeVisible ? 1.0 : 0.0;
+        self.mutePill.alpha = self.chromeVisible ? 1.0 : 0.0;
     }
     [self.view setNeedsLayout];
 }
