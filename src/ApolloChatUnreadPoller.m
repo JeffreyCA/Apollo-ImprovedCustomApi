@@ -626,8 +626,7 @@ static void ApolloChatPollTick(void) {
     NSString *username = ApolloActiveWebSessionUsername();
     ApolloWebSessionEntry *entry = username.length > 0 ? ApolloWebSessionPollFor(username) : nil;
     BOOL available = username.length > 0 && entry != nil;
-    BOOL shouldOpen = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseModernRedditChat]
-        || ApolloModernChatIsRequiredForSession(entry);
+    BOOL shouldOpen = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseModernRedditChat];
     NSString *gateState = [NSString stringWithFormat:@"open=%d avail=%d user=%@ cookie=%d",
                            shouldOpen, available, username ?: @"-", entry.cookieHeader.length > 0];
     static NSString *sLastGateState = nil;
