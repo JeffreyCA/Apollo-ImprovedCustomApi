@@ -215,14 +215,12 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
         self.blurLabel.text = item.isNSFW ? @"NSFW" : @"SPOILER";
         [self.contentView bringSubviewToFront:self.blurView];
     }
-    if (item.galleryCount > 1) {
-        // Position within the post, not just its size: every image of a
-        // 20-image post gets its own tile, so a bare "20" on each of twenty
-        // tiles in a row reads as "20 images here" twenty times over.
-        self.badgeLabel.text = [NSString stringWithFormat:@"%ld/%ld",
-                                (long)item.galleryIndex + 1, (long)item.galleryCount];
-        self.badgeLabel.hidden = NO;
-    } else if (item.isAnimated) {
+    // No badge for an image's position within a multi-image post — every image
+    // gets its own tile, so it only clutters the grid, and the viewer already
+    // spells it out ("7 of 20 in post") once you've opened one. GIF is a
+    // different case: a still thumbnail gives no hint that the tile animates,
+    // and nothing downstream says so either.
+    if (item.isAnimated) {
         self.badgeLabel.text = @"GIF";
         self.badgeLabel.hidden = NO;
     }
