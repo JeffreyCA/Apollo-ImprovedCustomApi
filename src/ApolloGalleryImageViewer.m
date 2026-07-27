@@ -386,6 +386,44 @@ static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGF
     return pill;
 }
 
+// Builds a chrome button and the view that should be positioned for it.
+//
+// On Liquid Glass we hand the whole job to UIKit's own glass button
+// configuration rather than wrapping our own capsule around a plain button.
+// That's what gets Apple's metrics — UIKit sizes the glass around the glyph, so
+// the symbol is padded and optically centred instead of us guessing — and it's
+// also what lets a button-attached UIMenu play the iOS 26 morph, since the
+// button itself becomes the morph source. Elsewhere we fall back to the
+// hand-rolled pill.
+//
+// Returns the button; `outHost` is what -apollo_layoutChrome should position
+// (the button itself on glass, its pill otherwise).
+static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIView *__strong *outHost) {
+    if (IsLiquidGlass()) {
+        if (@available(iOS 26.0, *)) {
+            UIButtonConfiguration *configuration = [UIButtonConfiguration glassButtonConfiguration];
+            configuration.image = symbol;
+            configuration.title = title;
+            configuration.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+            UIButton *button = [UIButton buttonWithConfiguration:configuration primaryAction:nil];
+            button.tintColor = UIColor.whiteColor;
+            if (outHost) *outHost = button;
+            return button;
+        }
+    }
+
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.tintColor = UIColor.whiteColor;
+    if (symbol) [button setImage:symbol forState:UIControlStateNormal];
+    if (title) {
+        [button setTitle:title forState:UIControlStateNormal];
+        button.titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
+    }
+    ApolloGalleryChromePillView *pill = ApolloGalleryChromePill(button, 0.55);
+    if (outHost) *outHost = pill;
+    return button;
+}
+
 #pragma mark - Viewer
 
 @interface ApolloGalleryImageViewer () <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout,
@@ -401,11 +439,11 @@ static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGF
 
 @property (nonatomic, strong) UIView *topChrome;
 @property (nonatomic, strong) UIButton *doneButton;
-@property (nonatomic, strong) ApolloGalleryChromePillView *donePill;
+@property (nonatomic, strong) UIView *doneHost;
 @property (nonatomic, strong) UIButton *shareButton;
-@property (nonatomic, strong) ApolloGalleryChromePillView *sharePill;
+@property (nonatomic, strong) UIView *shareHost;
 @property (nonatomic, strong) UIButton *muteButton;
-@property (nonatomic, strong) ApolloGalleryChromePillView *mutePill;
+@property (nonatomic, strong) UIView *muteHost;
 @property (nonatomic, strong) UILabel *counterLabel;
 @property (nonatomic, strong) ApolloGalleryChromePillView *counterPill;
 @property (nonatomic, strong) UIView *infoPanel;
@@ -541,13 +579,9 @@ static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGF
 // over an arbitrary photo — the same treatment in Liquid Glass and legacy
 // builds, since the backdrop here is the picture, not app chrome.
 - (void)apollo_buildChrome {
-    self.doneButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.doneButton setTitle:@"Done" forState:UIControlStateNormal];
-    self.doneButton.tintColor = UIColor.whiteColor;
-    self.doneButton.titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
-    self.donePill = ApolloGalleryChromePill(self.doneButton, 0.55);
+    self.doneButton = ApolloGalleryChromeButton(nil, @"Done", &_doneHost);
     [self.doneButton addTarget:self action:@selector(apollo_donePressed) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:self.donePill];
+    [self.view addSubview:self.doneHost];
 
     self.counterLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     self.counterLabel.textColor = UIColor.whiteColor;
@@ -556,19 +590,20 @@ static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGF
     self.counterPill = ApolloGalleryChromePill(self.counterLabel, 0.55);
     [self.view addSubview:self.counterPill];
 
-    self.shareButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.shareButton setImage:ApolloGalleryChromeSymbol(@"square.and.arrow.up") forState:UIControlStateNormal];
-    self.shareButton.tintColor = UIColor.whiteColor;
-    self.sharePill = ApolloGalleryChromePill(self.shareButton, 0.55);
-    [self.shareButton addTarget:self action:@selector(apollo_sharePressed:) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:self.sharePill];
+    self.shareButton = ApolloGalleryChromeButton(ApolloGalleryChromeSymbol(@"square.and.arrow.up"), nil, &_shareHost);
+    // A button-attached UIMenu, NOT a presented action sheet. That's what plays
+    // the iOS 26 morph out of the button; an alert-controller popover gets no
+    // such animation, which is why this felt unlike the rest of the app. The
+    // menu itself is rebuilt per page in -apollo_updateChromeContent.
+    self.shareButton.showsMenuAsPrimaryAction = YES;
+    [self.view addSubview:self.shareHost];
 
     // Only shown while a video/GIF page is up; still images have nothing to mute.
-    self.muteButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.muteButton.tintColor = UIColor.whiteColor;
-    self.mutePill = ApolloGalleryChromePill(self.muteButton, 0.55);
+    self.muteButton = ApolloGalleryChromeButton(ApolloGalleryChromeSymbol(@"speaker.slash.fill"), nil, &_muteHost);
     [self.muteButton addTarget:self action:@selector(apollo_muteTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:self.mutePill];
+    // Hidden until a page that can actually make noise is on screen.
+    self.muteHost.hidden = YES;
+    [self.view addSubview:self.muteHost];
 
     // Bottom-left post details. Tapping it leaves the gallery for the real post.
     // The info panel positions its own labels, so it gets the material directly
@@ -643,12 +678,12 @@ static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGF
     CGFloat const iconSize = controlHeight;
     CGFloat const controlGap = 8.0;
 
-    self.donePill.frame = CGRectMake(side, top, 74.0, controlHeight);
-    self.sharePill.frame = CGRectMake(bounds.size.width - rightSide - iconSize, top, iconSize, controlHeight);
-    CGFloat trailing = CGRectGetMinX(self.sharePill.frame);
-    if (!self.mutePill.hidden) {
-        self.mutePill.frame = CGRectMake(trailing - controlGap - iconSize, top, iconSize, controlHeight);
-        trailing = CGRectGetMinX(self.mutePill.frame);
+    self.doneHost.frame = CGRectMake(side, top, 74.0, controlHeight);
+    self.shareHost.frame = CGRectMake(bounds.size.width - rightSide - iconSize, top, iconSize, controlHeight);
+    CGFloat trailing = CGRectGetMinX(self.shareHost.frame);
+    if (!self.muteHost.hidden) {
+        self.muteHost.frame = CGRectMake(trailing - controlGap - iconSize, top, iconSize, controlHeight);
+        trailing = CGRectGetMinX(self.muteHost.frame);
     }
     CGFloat counterWidth = 88.0;
     self.counterPill.frame = CGRectMake(trailing - controlGap - counterWidth, top, counterWidth, controlHeight);
@@ -707,6 +742,8 @@ static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGF
                           (long)item.galleryIndex + 1, (long)item.galleryCount]];
     }
     self.subtitleLabel.text = [parts componentsJoinedByString:@" · "];
+    // The actions depend on the current item, so rebuild per page.
+    self.shareButton.menu = [self apollo_buildActionsMenu];
 
     [self.view setNeedsLayout];
 }
@@ -715,15 +752,15 @@ static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGF
     self.chromeVisible = visible;
     CGFloat alpha = visible ? 1.0 : 0.0;
     void (^changes)(void) = ^{
-        self.donePill.alpha = alpha;
-        self.sharePill.alpha = alpha;
-        self.mutePill.alpha = alpha;
+        self.doneHost.alpha = alpha;
+        self.shareHost.alpha = alpha;
+        self.muteHost.alpha = alpha;
         self.counterPill.alpha = alpha;
         self.infoPanel.alpha = alpha;
     };
-    self.donePill.userInteractionEnabled = visible;
-    self.sharePill.userInteractionEnabled = visible;
-    self.mutePill.userInteractionEnabled = visible;
+    self.doneHost.userInteractionEnabled = visible;
+    self.shareHost.userInteractionEnabled = visible;
+    self.muteHost.userInteractionEnabled = visible;
     self.infoPanel.userInteractionEnabled = visible;
     if (animated) {
         [UIView animateWithDuration:0.22 animations:changes];
@@ -888,9 +925,9 @@ static ApolloGalleryChromePillView *ApolloGalleryChromePill(UIView *content, CGF
             // on the same touch, so a diagonal flick can't page AND dismiss.
             self.collectionView.scrollEnabled = NO;
                     [UIView animateWithDuration:0.15 animations:^{
-                self.donePill.alpha = 0.0;
-                self.sharePill.alpha = 0.0;
-                self.mutePill.alpha = 0.0;
+                self.doneHost.alpha = 0.0;
+                self.shareHost.alpha = 0.0;
+                self.muteHost.alpha = 0.0;
                 self.counterPill.alpha = 0.0;
                 self.infoPanel.alpha = 0.0;
             }];
@@ -999,13 +1036,13 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
 - (void)apollo_updateMuteButton {
     ApolloGalleryItem *item = [self apollo_currentItem];
     BOOL showsMute = item.playsAsVideo && item.kind == ApolloGalleryMediaKindVideo;
-    self.mutePill.hidden = !showsMute;
+    self.muteHost.hidden = !showsMute;
     if (showsMute) {
         BOOL muted = ApolloGalleryViewerVideosMuted();
         [self.muteButton setImage:ApolloGalleryChromeSymbol(muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill")
                          forState:UIControlStateNormal];
         self.muteButton.accessibilityLabel = muted ? @"Unmute" : @"Mute";
-        self.mutePill.alpha = self.chromeVisible ? 1.0 : 0.0;
+        self.muteHost.alpha = self.chromeVisible ? 1.0 : 0.0;
     }
     [self.view setNeedsLayout];
 }
@@ -1015,12 +1052,58 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
     [self apollo_syncPlayback];
 }
 
-- (void)apollo_sharePressed:(UIButton *)sender {
-    [self apollo_presentActionsFromView:sender];
-}
-
 - (void)apollo_infoPanelTapped {
     [self apollo_openCurrentPost];
+}
+
+// The share button's actions as a UIMenu. Same set as the long-press sheet;
+// as a menu it gets the iOS 26 morph out of the button for free, and on older
+// releases it's still a native menu rather than a modal sheet.
+- (UIMenu *)apollo_buildActionsMenu {
+    ApolloGalleryItem *item = [self apollo_currentItem];
+    if (!item) return [UIMenu menuWithTitle:@"" children:@[]];
+
+    __weak typeof(self) weakSelf = self;
+    NSMutableArray<UIMenuElement *> *children = [NSMutableArray array];
+
+    if (item.playsAsVideo) {
+        if (item.videoDownloadURL) {
+            [children addObject:[UIAction actionWithTitle:@"Save Video"
+                                                    image:[UIImage systemImageNamed:@"arrow.down.to.line"]
+                                               identifier:nil
+                                                  handler:^(__kindof UIAction *a) { [weakSelf apollo_saveCurrentVideo]; }]];
+        }
+        [children addObject:[UIAction actionWithTitle:@"Share Video Link"
+                                                image:[UIImage systemImageNamed:@"square.and.arrow.up"]
+                                           identifier:nil
+                                              handler:^(__kindof UIAction *a) {
+            [weakSelf apollo_presentActivityWithItems:@[item.videoURL] fromView:weakSelf.shareButton];
+        }]];
+    } else {
+        [children addObject:[UIAction actionWithTitle:@"Save Image"
+                                                image:[UIImage systemImageNamed:@"arrow.down.to.line"]
+                                           identifier:nil
+                                              handler:^(__kindof UIAction *a) { [weakSelf apollo_saveCurrentImage]; }]];
+        [children addObject:[UIAction actionWithTitle:@"Share Image"
+                                                image:[UIImage systemImageNamed:@"square.and.arrow.up"]
+                                           identifier:nil
+                                              handler:^(__kindof UIAction *a) {
+            [weakSelf apollo_shareCurrentImageFromView:weakSelf.shareButton];
+        }]];
+    }
+    if (item.postURL) {
+        [children addObject:[UIAction actionWithTitle:@"Share Post Link"
+                                                image:[UIImage systemImageNamed:@"link"]
+                                           identifier:nil
+                                              handler:^(__kindof UIAction *a) {
+            [weakSelf apollo_sharePostLinkFromView:weakSelf.shareButton];
+        }]];
+        [children addObject:[UIAction actionWithTitle:@"Open Post"
+                                                image:[UIImage systemImageNamed:@"arrow.up.right.square"]
+                                           identifier:nil
+                                              handler:^(__kindof UIAction *a) { [weakSelf apollo_openCurrentPost]; }]];
+    }
+    return [UIMenu menuWithTitle:item.postTitle ?: @"" children:children];
 }
 
 - (void)apollo_presentActionsFromView:(UIView *)sourceView {
