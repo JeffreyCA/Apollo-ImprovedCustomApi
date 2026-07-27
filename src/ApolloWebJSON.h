@@ -85,8 +85,8 @@ BOOL ApolloWebJSONShouldStubFlairList(NSURLResponse *response);
 // Recovers the real flair-template list after a cookie-routed flair fetch
 // failed (see ApolloWebJSONShouldStubFlairList): refetches the same path+query
 // from oauth.reddit.com using the session's token_v2 cookie as an OAuth
-// bearer, minting a fresh token via a cookie-authed HTML page load when the
-// stored one has aged out (Reddit only rotates token_v2 on HTML responses).
+// bearer, minting a fresh bearer from the accounts token service
+// (accounts.reddit.com/api/access_token) when the stored one has aged out.
 // Returns the template array Apollo natively parses, or nil when no usable
 // bearer/response could be produced (caller falls back to the empty stub).
 // Synchronous, bounded by short timeouts — background queues only; in
@@ -143,6 +143,12 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username);
 // re-authenticated account could never be detected as expired again until the
 // next app launch.
 void ApolloWebJSONNoteSessionReauthenticated(NSString *username);
+
+// Re-arms the visible expiry prompt when the user chooses Later or cancels the
+// re-authentication browser. The current session remains untouched; only the
+// one-shot announcement/probe latch is cleared so a later retry can ask again
+// instead of leaving the requesting screen spinning for the rest of the launch.
+void ApolloWebJSONNoteSessionReauthenticationDeferred(NSString *username);
 
 // Posted (on the main thread) the first time a harvested session is observed to
 // have expired/been revoked, with userInfo[@"username"] set to the (lowercased)
@@ -230,6 +236,12 @@ BOOL ApolloWebJSONDiskAccountHasRealCredential(NSString *username);
 // HTTP header) to mark any request that the Web JSON layer or its clients
 // (e.g. ApolloRedditMediaUpload.m) issue themselves with the cookie already set.
 NSURL *ApolloWebJSONProbeURL(NSURL *url);
+
+// YES when `url` carries the probe fragment — i.e. it's one of our own
+// self-authored requests (session probes, upload leases, scrape GETs). Such
+// requests must pass through the network hooks completely untouched: no Web
+// JSON rewrite, no User-Agent stamping (they pick their UA deliberately).
+BOOL ApolloWebJSONURLIsProbe(NSURL *url);
 
 #ifdef __cplusplus
 }

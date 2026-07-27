@@ -30,10 +30,17 @@ NS_ASSUME_NONNULL_BEGIN
 // adding.
 + (instancetype)loginControllerForAdditionalAccount;
 
-// Poll voting needs a web session for an account that may otherwise use OAuth.
-// This variant requires the web login to match `username` (preventing the
-// shared WebKit cookie jar from authenticating the wrong Reddit account) and
-// reports whether a matching session was harvested.
+// Expiry recovery variant. It still clears Reddit's shared web cookies before
+// loading, but remembers which stored account requested re-authentication so a
+// Cancel can re-arm that account's expiry prompt for the next retry.
++ (instancetype)loginControllerForReauthenticationOfUsername:(nullable NSString *)username;
+
+// Modern Chat, modern Modmail, and native Polls need a Reddit web session even
+// when the Apollo account itself continues to use OAuth/API-key authentication.
+// This targeted variant requires the web login to match `username` (preventing
+// the shared WebKit cookie jar from authenticating the wrong Reddit account),
+// stores the result as an auxiliary feature session — never as the account
+// transport — and reports whether a matching session was harvested.
 + (instancetype)loginControllerForUsername:(NSString *)username
                                 completion:(void (^)(BOOL success))completion;
 
@@ -47,6 +54,15 @@ NS_ASSUME_NONNULL_BEGIN
 // with older notification posts, but every current poster supplies it.
 + (void)presentExpiredSessionPromptForUsername:(nullable NSString *)username;
 
+// Callback-capable form used by a mailbox that is already on screen. `success`
+// means a Reddit web session was harvested; callers should still resolve the
+// active account again because the user may have signed in as a different
+// Reddit account. The callback runs after the login sheet is dismissed (or
+// immediately with NO when the prompt is cancelled), which lets Chat/Modmail
+// retry in place without making the user close and reopen the mailbox.
++ (void)presentExpiredSessionPromptForUsername:(nullable NSString *)username
+                                    completion:(void (^ _Nullable)(BOOL success))completion;
+
 // Attempts to refresh `username`'s stored session WITHOUT any UI, by loading
 // reddit.com in an off-screen WKWebView on the same persistent data store the
 // login flow uses. Reddit rotates its session cookies (token_v2 is a ~24h JWT)
@@ -58,22 +74,23 @@ NS_ASSUME_NONNULL_BEGIN
 // belongs to a different user (shared jar, multi-account), times out, or a
 // recent silent success evidently didn't stick (10-minute cooldown — repeated
 // expiry verdicts right after a "successful" re-harvest mean the problem isn't
-// snapshot staleness). Concurrent attempts for the same username are coalesced:
-// later callers' completions are dropped and the first attempt's outcome stands.
+// snapshot staleness). Concurrent attempts for the same username are coalesced
+// onto one webview; every caller's completion observes that attempt's outcome.
 + (void)attemptSilentReharvestForUsername:(NSString *)username completion:(void (^)(BOOL success))completion;
 
-// "Grab it once": harvests the reddit.com web session that `webView` is CURRENTLY
-// logged into, storing it POLL-ONLY (ApolloWebSessionSetPollOnly — invisible to
-// the API-Key-Free transport spine, so it never reroutes a healthy OAuth
-// account). Probes /api/me.json in the webview for the username + modhash, then
-// sweeps its .reddit.com cookies. Best-effort and non-blocking: `completion` is
+// "Grab it once": opportunistically captures the already-authenticated Reddit
+// cookies from an OAuth login webview (probes /api/me.json for the username +
+// modhash, then sweeps its .reddit.com cookies). The result is stored as an
+// AUXILIARY feature session (ApolloWebSessionSetPollOnly — invisible to the
+// API-Key-Free transport spine, so it never reroutes a healthy OAuth account),
+// which is how Chat, Modmail, and Polls avoid a second login while the explicit
+// API-key choice remains intact. Best-effort and non-blocking: `completion` is
 // called on the main thread with the harvested (lowercased) username, or nil if
 // the webview is anonymous / nothing usable was found — callers MUST proceed
 // regardless (this is opportunistic, never on the critical path). Wired into the
-// tweak's WKWebView OAuth sign-in (ApolloWebAuthViewController) so Polls and
-// API-Key-Free features are set up the moment the user signs in, no second login.
-+ (void)harvestPollSessionFromWebView:(WKWebView *)webView
-                           completion:(void (^_Nullable)(NSString *_Nullable username))completion;
+// tweak's WKWebView OAuth sign-in (ApolloWebAuthViewController).
++ (void)harvestFeatureSessionFromWebView:(WKWebView *)webView
+                              completion:(void (^ _Nullable)(NSString * _Nullable username))completion;
 
 @end
 

@@ -315,6 +315,52 @@ void ApolloBarkSendTestNotification(void (^completion)(BOOL ok, NSString *messag
     }] resume];
 }
 
+// MARK: - Client-side chat push
+
+void ApolloBarkSendChatNotification(NSString *title, NSString *body, NSString *clickURLString,
+                                    void (^completion)(BOOL delivered)) {
+    completion = [completion copy];
+    void (^finish)(BOOL) = ^(BOOL delivered) {
+        if (!completion) return;
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(delivered); });
+    };
+    if (!ApolloBarkConfigured()) { finish(NO); return; }
+    NSURL *pushURL = ApolloBarkPushURL();
+    if (!pushURL || title.length == 0) { finish(NO); return; }
+
+    // Same payload shape the backend sends (see the test push above), with a
+    // dedicated group so chat threads separately in the Bark app.
+    NSDictionary *payload = @{
+        @"title": title,
+        @"body": body ?: @"",
+        @"url": clickURLString ?: @"apollo://reborn/chat",
+        @"group": @"apollo-chat",
+        @"icon": ApolloBarkNotificationIconURLString(),
+        @"sound": ApolloBarkSelectedSoundName() ?: @"traloop",
+    };
+    NSData *json = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:pushURL];
+    request.HTTPMethod = @"POST";
+    request.HTTPBody = json;
+    request.timeoutInterval = 10;
+    [request setValue:@"application/json; charset=utf-8" forHTTPHeaderField:@"Content-Type"];
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:request
+                                      completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]]
+            ? [(NSHTTPURLResponse *)response statusCode] : 0;
+        BOOL delivered = !error && status == 200;
+        if (!delivered) {
+            ApolloLog(@"[Bark] Chat push failed (HTTP %ld, %@)", (long)status,
+                      error.localizedDescription ?: @"server error");
+        } else {
+            ApolloLog(@"[Bark] Chat push delivered: %@", title);
+        }
+        finish(delivered);
+    }] resume];
+}
+
 // MARK: - Direct transport sync
 
 void ApolloBarkSyncBackendDeviceTransport(void) {

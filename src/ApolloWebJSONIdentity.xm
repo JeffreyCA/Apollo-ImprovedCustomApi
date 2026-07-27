@@ -807,9 +807,11 @@ void ApolloWebJSONRepairPoisonedAccountBlobs(void) {
         // an empty one (no flair options, but the Submit drawer still loads
         // instead of hanging). Either way the 404's validation error is
         // cleared, which is also what keeps RDK's 401/404 retry machinery out
-        // of the picture. This serializer runs on AFNetworking's background
-        // processing queue, so the rescue's bounded synchronous fetches are
-        // safe here. See ApolloWebJSONRescueFlairList.
+        // of the picture. The rescue's synchronous fetches are tightly
+        // bounded, bail straight to the stub on the main thread (same guard
+        // as the media hydration above), and remember a failed mint briefly
+        // so a dead session doesn't repay the timeout on every open. See
+        // ApolloWebJSONRescueFlairList.
         @try {
             if (ApolloWebJSONShouldStubFlairList(response) && ![obj isKindOfClass:[NSArray class]]) {
                 NSArray *rescued = nil;

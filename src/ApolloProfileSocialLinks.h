@@ -9,12 +9,17 @@
 //                "Social Links" sheet listing them all, each row tappable)
 //
 // Reddit's OAuth API (Apollo's token) can't read social links — about.json omits
-// them and gql 404s our token — so, like Community Highlights / the Sidebar weekly
-// stats, we scrape the server-rendered public profile page in a hidden WKWebView
-// (it sails past Reddit's JS bot-challenge that plain requests get 403'd by).
-// Results are cached per-username. Icons come from each link's domain favicon
-// (bundled coffee glyph for Buy Me a Coffee / Ko-fi), so brands render without a
-// bundled logo set. See ApolloProfileSocialLinks.m.
+// them and gql 404s our token — so we read Reddit's server-rendered markup.
+// FAST PATH (default): one direct NSURLSession GET of the profile-header-details
+// svc endpoint + native parse of the social-link tracker markup (~0.5s for every
+// profile bucket; the active account's web-session cookies ride along when
+// available, which also clears Reddit's logged-out hard block on flagged
+// networks). SECOND CHANCE: the full profile page (settles deleted users).
+// FALLBACK: the original hidden-WKWebView scrape — it renders and hydrates like
+// a real browser — for responses neither direct GET can classify. Results are cached per-username (memory + a TTL disk cache). Icons
+// come from each link's domain favicon (bundled coffee glyph for Buy Me a
+// Coffee / Ko-fi), so brands render without a bundled logo set. See
+// ApolloProfileSocialLinks.m.
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -47,6 +52,13 @@
 // YES when "Show Detailed Profiles" is on (reads sShowDetailedProfiles) — the Social
 // Links band is part of the detailed profile, so it shares that toggle.
 FOUNDATION_EXPORT BOOL ApolloProfileSocialLinksEnabled(void);
+
+// The shared logged-out in-memory scrape data store (see ApolloSLWebFetch for the
+// rationale). Exported so other hidden-WKWebView scrapers (Badge Book) reuse the
+// SAME store — Reddit's JS bot-challenge cookie then warms once per session
+// instead of once per feature.
+@class WKWebsiteDataStore;
+FOUNDATION_EXPORT WKWebsiteDataStore *ApolloSharedScrapeDataStore(void);
 
 // Posted by Settings when the toggle flips; the band observes it to reload.
 FOUNDATION_EXPORT NSString *const ApolloSocialLinksToggleChangedNotification;

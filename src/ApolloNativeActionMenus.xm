@@ -468,6 +468,26 @@ static UIView *ApolloNativeActionMenuCreateProxyAnchorView(UIView *sourceView, B
     return anchorView;
 }
 
+// Issue #249 follow-up: the liquid morph is meant for COMPACT tapped controls
+// (bar buttons, a cell's "…" button) — UIKit hides the morph source while the
+// menu is open, which reads as "the control became the menu". When the
+// resolved source is the tapped ROW itself (composer flair row: a full-width
+// table cell), that same hiding reads as the row vanishing until the menu
+// closes. Skip the morph for row-scale sources: the menu still presents
+// anchored at the row (proxy-anchor preview), but the row stays visible.
+static BOOL ApolloNativeActionMenuViewShouldMorph(UIView *view) {
+    if (!view || !view.window) return NO;
+    if ([view isKindOfClass:[UITableViewCell class]]) return NO;
+    if ([view isKindOfClass:objc_getClass("UICollectionViewCell")]) return NO;
+    // The gesture fallback can resolve the whole table/scroll view.
+    if ([view isKindOfClass:[UIScrollView class]]) return NO;
+    // Anything near full-width is a row, not a control (ASDK cell nodes and
+    // custom row views aren't UITableViewCell subclasses).
+    CGFloat windowWidth = CGRectGetWidth(view.window.bounds);
+    if (windowWidth > 0 && CGRectGetWidth(view.bounds) > 0.6 * windowWidth) return NO;
+    return YES;
+}
+
 static BOOL ApolloNativeActionMenuModeratorStyleActive(void) {
     NSUInteger count = MIN(sApolloNativeActionMenuCaptureDepth, (NSUInteger)(sizeof(sApolloNativeActionMenuModeratorStyleStack) / sizeof(sApolloNativeActionMenuModeratorStyleStack[0])));
     for (NSUInteger i = 0; i < count; i++) {
@@ -650,8 +670,9 @@ static void ApolloNativeActionMenuSortSavedCategoriesIfNeeded(id presenter, id a
 static UIMenuElement *ApolloNativeActionMenuMakeReportRow(NSString *title, NSString *subtitle) {
     UIAction *row = [UIAction actionWithTitle:title image:nil identifier:nil handler:^(__unused UIAction *action) {}];
     row.attributes = UIMenuElementAttributesDisabled;
-    if (subtitle.length > 0 && [row respondsToSelector:@selector(setSubtitle:)]) {
-        row.subtitle = subtitle;
+    SEL setSubtitleSelector = NSSelectorFromString(@"setSubtitle:");
+    if (subtitle.length > 0 && [row respondsToSelector:setSubtitleSelector]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(row, setSubtitleSelector, subtitle);
     }
     return row;
 }
@@ -1116,8 +1137,13 @@ static BOOL ApolloNativeActionMenuPresent(id presenter, id actionController, voi
     ApolloNativeActionMenuPresenter *menuPresenter = [ApolloNativeActionMenuPresenter new];
     menuPresenter.menu = menu;
     menuPresenter.sourceView = anchorView;
-    menuPresenter.morphSourceView = sourceView;
+    BOOL morphable = ApolloNativeActionMenuViewShouldMorph(sourceView);
+    menuPresenter.morphSourceView = morphable ? sourceView : nil;
     menuPresenter.removeSourceViewOnEnd = removeAnchorViewOnEnd;
+    ApolloLog(@"[NativeActionMenu] source=%@ %.0fx%.0f morph=%@",
+              NSStringFromClass(sourceView.class),
+              CGRectGetWidth(sourceView.bounds), CGRectGetHeight(sourceView.bounds),
+              morphable ? @"yes" : @"no");
 
     UIContextMenuInteraction *interaction = [[UIContextMenuInteraction alloc] initWithDelegate:menuPresenter];
     if (![interaction respondsToSelector:NSSelectorFromString(@"_presentMenuAtLocation:")]) {

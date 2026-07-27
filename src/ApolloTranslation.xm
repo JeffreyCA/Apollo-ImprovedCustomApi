@@ -9046,6 +9046,9 @@ static void ApolloReapplyTranslationOnAppResume(void) {
 
 - (void)setRightBarButtonItems:(NSArray<UIBarButtonItem *> *)items animated:(BOOL)animated {
     %orig(items, animated);
+    // Subreddit headers size this nav item's title against the trailing
+    // cluster. The owner association makes this a small, local invalidation.
+    if (sShowSubredditHeaders && !sApplyingGlobeMerge) ApolloSubredditRequestTitleRelayout(self);
     if (sApplyingGlobeMerge) return;
     if (!IsLiquidGlass()) return;
     if (objc_getAssociatedObject(self, kApolloGlobeMergeButtonKey)) {
@@ -9059,6 +9062,7 @@ static void ApolloReapplyTranslationOnAppResume(void) {
 
 - (void)setRightBarButtonItem:(UIBarButtonItem *)item animated:(BOOL)animated {
     %orig(item, animated);
+    if (sShowSubredditHeaders && !sApplyingGlobeMerge) ApolloSubredditRequestTitleRelayout(self);
     if (sApplyingGlobeMerge) return;
     if (!IsLiquidGlass()) return;
     if (objc_getAssociatedObject(self, kApolloGlobeMergeButtonKey)) {

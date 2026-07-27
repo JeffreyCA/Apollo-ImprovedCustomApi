@@ -17,6 +17,9 @@ FLEXING_DIR := $(MODULES_DIR)/FLEXing
 THEME_GALLERY_DIR := theme-gallery
 THEME_GALLERY_GEN_H := $(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/generated/ApolloThemeGalleryCatalog.gen.h
 THEME_GALLERY_GEN_M := $(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/generated/ApolloThemeGalleryCatalog.gen.m
+WHATS_NEW_DIR := whats-new
+WHATS_NEW_GEN_H := $(THEOS_PROJECT_DIR)/$(WHATS_NEW_DIR)/generated/ApolloWhatsNewCatalog.gen.h
+WHATS_NEW_GEN_M := $(THEOS_PROJECT_DIR)/$(WHATS_NEW_DIR)/generated/ApolloWhatsNewCatalog.gen.m
 
 SSZIPARCHIVE_FILES = $(wildcard $(SSZIPARCHIVE_DIR)/*.m) \
     $(wildcard $(SSZIPARCHIVE_DIR)/minizip/*.c) \
@@ -25,7 +28,10 @@ SSZIPARCHIVE_FILES = $(wildcard $(SSZIPARCHIVE_DIR)/*.m) \
 ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloFoundationModels.swift \
     $(SRC_DIR)/ApolloAISummary.xm \
+    $(SRC_DIR)/ApolloAICloudBridge.m \
     $(SRC_DIR)/ApolloAutoHideMetaFeeds.xm \
+    $(SRC_DIR)/ApolloWhatsNew.xm \
+    $(WHATS_NEW_GEN_M) \
     $(SRC_DIR)/Tweak.xm \
     $(SRC_DIR)/ApolloCommon.m \
     $(SRC_DIR)/settings/ApolloSettingsTableViewController.m \
@@ -43,13 +49,20 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloUsageHeartbeat.m \
     $(SRC_DIR)/ApolloPushNotifications.m \
     $(SRC_DIR)/ApolloBarkNotifications.m \
+    $(SRC_DIR)/ApolloChatUnreadPoller.m \
     $(SRC_DIR)/ApolloUserProfileCache.m \
     $(SRC_DIR)/ApolloSubredditInfoCache.m \
     $(SRC_DIR)/ApolloSubredditCustomBannerCache.m \
     $(SRC_DIR)/ApolloSubredditCustomIconCache.m \
     $(SRC_DIR)/ApolloSubredditDefaultAssets.c \
+    $(SRC_DIR)/ApolloImmersiveHeaderBackground.m \
+    $(SRC_DIR)/ApolloIdentityHeaderLayout.m \
     $(SRC_DIR)/ApolloUserAvatars.xm \
     $(SRC_DIR)/ApolloProfileSocialLinks.m \
+    $(SRC_DIR)/ApolloBadgeBookCatalog.m \
+    $(SRC_DIR)/ApolloBadgeBookScraper.m \
+    $(SRC_DIR)/ApolloBadgeBookViewController.m \
+    $(SRC_DIR)/ApolloBadgeBookStrip.m \
     $(SRC_DIR)/ApolloModeratorAvatars.xm \
     $(SRC_DIR)/ApolloPublicStickyAsSubreddit.xm \
     $(SRC_DIR)/ApolloSubredditHeaders.xm \
@@ -86,6 +99,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloAutoHideTabBar.xm \
     $(SRC_DIR)/ApolloTabBarCollapseSide.xm \
     $(SRC_DIR)/ApolloIPadTabBarBottom.xm \
+    $(SRC_DIR)/ApolloScrollEdgeEffect.xm \
     $(SRC_DIR)/settings/ApolloSettings.xm \
     $(SRC_DIR)/ApolloRecentlyRead.xm \
     $(SRC_DIR)/ApolloHiddenContentData.m \
@@ -149,6 +163,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloChatInlineImages.xm \
     $(SRC_DIR)/ApolloChatComposer.xm \
     $(SRC_DIR)/ApolloChatsFilter.xm \
+    $(SRC_DIR)/ApolloDirectChatWeb.xm \
     $(SRC_DIR)/ApolloLinkCardTitleFallback.xm \
     $(SRC_DIR)/ApolloFeedTextPostThumbnails.xm \
     $(SRC_DIR)/ApolloTweetBuddy.xm \
@@ -168,8 +183,10 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloSignInSplash.xm \
     $(SRC_DIR)/ApolloHideSubscribePrompt.xm \
     $(SRC_DIR)/settings/CustomAPIViewController.m \
+    $(SRC_DIR)/settings/ApolloSubredditLayoutViewController.m \
     $(SRC_DIR)/settings/ApolloAISettingsViewController.m \
     $(SRC_DIR)/settings/ApolloDeletedCommentsSettingsViewController.m \
+    $(SRC_DIR)/settings/ApolloProfileLayoutViewController.m \
     $(SRC_DIR)/settings/ApolloLinkPreviewSettingsViewController.m \
     $(SRC_DIR)/settings/InlineMediaSettingsViewController.m \
     $(SRC_DIR)/settings/InfoRowSettingsViewController.m \
@@ -186,7 +203,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/UIWindow+Apollo.m \
     $(SRC_DIR)/fishhook.c \
     $(SSZIPARCHIVE_FILES)
-ApolloReborn_FRAMEWORKS = UIKit Security AVFoundation AVKit OSLog NaturalLanguage ImageIO StoreKit Photos PhotosUI SafariServices SystemConfiguration WebKit AuthenticationServices CoreImage Vision LinkPresentation SwiftUI UniformTypeIdentifiers Metal QuartzCore
+ApolloReborn_FRAMEWORKS = UIKit Security AVFoundation AVKit OSLog NaturalLanguage ImageIO StoreKit Photos PhotosUI SafariServices SystemConfiguration WebKit AuthenticationServices CoreImage Vision LinkPresentation SwiftUI UniformTypeIdentifiers Metal QuartzCore CoreMotion
 ApolloReborn_LIBRARIES = z iconv
 # FoundationModels (Apple on-device AI) only ships in the iOS 26+ SDK. Weak-link
 # it so the dylib still loads on older OSes (the Swift bridge guards every call
@@ -216,7 +233,7 @@ endif
 # ApolloAppleTranslation.swift) only exists on iOS 18.0+. Weak-link it so the tweak still
 # loads on older iOS, where the Apple provider is gated off at runtime.
 ApolloReborn_LDFLAGS += -weak_framework Translation
-ApolloReborn_CFLAGS = -fobjc-arc -Wno-error=unguarded-availability-new -Wno-error=deprecated-declarations -Wno-module-import-in-extern-c -I$(THEOS_PROJECT_DIR)/$(SRC_DIR) -I$(THEOS_PROJECT_DIR)/liquid-glass/generated -I$(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/generated -I$(THEOS_PROJECT_DIR)/$(MODULES_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR)/minizip -DHAVE_ARC4RANDOM_BUF -DHAVE_ICONV -DHAVE_INTTYPES_H -DHAVE_PKCRYPT -DHAVE_STDINT_H -DHAVE_WZAES -DHAVE_ZLIB -DZLIB_COMPAT
+ApolloReborn_CFLAGS = -fobjc-arc -Wno-error=unguarded-availability-new -Wno-error=deprecated-declarations -Wno-module-import-in-extern-c -I$(THEOS_PROJECT_DIR)/$(SRC_DIR) -I$(THEOS_PROJECT_DIR)/liquid-glass/generated -I$(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/generated -I$(THEOS_PROJECT_DIR)/$(WHATS_NEW_DIR)/generated -I$(THEOS_PROJECT_DIR)/$(MODULES_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR)/minizip -DHAVE_ARC4RANDOM_BUF -DHAVE_ICONV -DHAVE_INTTYPES_H -DHAVE_PKCRYPT -DHAVE_STDINT_H -DHAVE_WZAES -DHAVE_ZLIB -DZLIB_COMPAT
 
 ApolloReborn_BUNDLE_RESOURCE_DIRS = resources
 
@@ -266,8 +283,8 @@ endif
 
 CONTROL_FILE = $(THEOS_PROJECT_DIR)/control
 
-# Generate Version.h and the theme gallery catalog.
-before-all:: generate_version_h generate_theme_gallery_catalog
+# Generate Version.h, the theme gallery catalog, and the What's New catalog.
+before-all:: generate_version_h generate_theme_gallery_catalog generate_whats_new_catalog
 
 generate_version_h:
 	@echo "Generating Version.h from control file"
@@ -284,6 +301,16 @@ $(THEME_GALLERY_GEN_H) $(THEME_GALLERY_GEN_M): $(THEOS_PROJECT_DIR)/$(THEME_GALL
 		$(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/themes \
 		$(THEME_GALLERY_GEN_H) \
 		$(THEME_GALLERY_GEN_M)
+
+WHATS_NEW_SOURCES := $(wildcard $(THEOS_PROJECT_DIR)/$(WHATS_NEW_DIR)/releases/*.json)
+
+generate_whats_new_catalog: $(WHATS_NEW_GEN_H) $(WHATS_NEW_GEN_M)
+
+$(WHATS_NEW_GEN_H) $(WHATS_NEW_GEN_M): $(THEOS_PROJECT_DIR)/$(WHATS_NEW_DIR)/scripts/generate_catalog.py $(WHATS_NEW_SOURCES)
+	@python3 $(THEOS_PROJECT_DIR)/$(WHATS_NEW_DIR)/scripts/generate_catalog.py \
+		$(THEOS_PROJECT_DIR)/$(WHATS_NEW_DIR)/releases \
+		$(WHATS_NEW_GEN_H) \
+		$(WHATS_NEW_GEN_M)
 
 # Liquid Glass icon metadata header is generated explicitly by running 'make lg-previews'
 LG_DIR = $(THEOS_PROJECT_DIR)/liquid-glass
