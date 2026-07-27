@@ -30,6 +30,10 @@ static BOOL sApolloNativeActionMenuNextPresentationModeratorStyle = NO;
 @property (nonatomic, weak) UIView *morphSourceView;
 @property (nonatomic, strong) UIContextMenuInteraction *interaction;
 @property (nonatomic, assign) BOOL removeSourceViewOnEnd;
+// Empty throwaway view pinned over morphSourceView; this is what UIKit portals
+// into the glass platter, so the real control keeps drawing. See
+// ApolloNativeActionMenuCreateMorphStandIn().
+@property (nonatomic, strong) UIView *morphStandInView;
 @end
 
 static BOOL ApolloNativeActionMenusEnabled(void) {
@@ -844,7 +848,66 @@ static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderat
     return [UIMenu menuWithTitle:title children:children];
 }
 
+// Keep the tapped "..." control on screen for the whole menu lifecycle.
+//
+// UIKit builds the liquid-glass platter by portaling the morph preview's view
+// (a CAPortalLayer pointed at its layer). CoreAnimation stops drawing a
+// portaled layer in its original position for as long as the portal is alive —
+// a render-server effect, so from the app's side the control still looks
+// perfectly healthy (hidden NO, alpha 1, contents set) while its *presentation*
+// layer reads opacity 0. Clearing the portal's hidesSourceLayer does not undo
+// it; only the portal going away does. And the portal outlives the dismissal
+// animation — by ~1s on device — so the control sat blank long after the menu
+// was gone, which reads as the dots vanishing and slowly popping back.
+//
+// So don't let UIKit portal the real thing. This pins an empty throwaway view
+// over the control, exactly its size, and hands UIKit that as the preview: the
+// stand-in absorbs the portaling and the control itself never stops drawing.
+//
+// The stand-in is deliberately *blank* rather than a snapshot. The preview's
+// frame is all the morph needs — it drives where the glass platter blooms from
+// and collapses back to — while any pixels in it get carried inside the platter
+// as a second copy of the icon that animates with the morph. With the control
+// now permanently visible underneath, that copy showed up as a duplicate set of
+// dots sliding into place at the end of the dismissal. Empty stand-in, empty
+// platter: the glass shape blooms out of the control and the control is the
+// only thing ever drawing the icon.
+static UIView *ApolloNativeActionMenuCreateMorphStandIn(UIView *sourceView) {
+    UIView *container = sourceView.superview;
+    if (!container || !sourceView.window || CGRectIsEmpty(sourceView.bounds)) return nil;
+
+    UIView *standIn = [[UIView alloc] initWithFrame:sourceView.frame];
+    standIn.backgroundColor = UIColor.clearColor;
+    standIn.opaque = NO;
+    standIn.userInteractionEnabled = NO;
+    standIn.accessibilityElementsHidden = YES;
+    [container insertSubview:standIn aboveSubview:sourceView];
+    ApolloLog(@"[NativeActionMenu] Morphing from a stand-in over %@ so it stays drawn", sourceView);
+    return standIn;
+}
+
+// Matches the treatment the invisible proxy anchor gets below: a contentless
+// preview must not pick up UIPreviewParameters' default platter background or
+// drop shadow, or the empty stand-in would render as a grey box.
+static UITargetedPreview *ApolloNativeActionMenuStandInPreview(UIView *standIn) {
+    UIPreviewParameters *parameters = [UIPreviewParameters new];
+    parameters.backgroundColor = UIColor.clearColor;
+    parameters.visiblePath = [UIBezierPath bezierPathWithRect:standIn.bounds];
+    SEL setAppliesShadowSelector = NSSelectorFromString(@"setAppliesShadow:");
+    if ([parameters respondsToSelector:setAppliesShadowSelector]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(parameters, setAppliesShadowSelector, NO);
+    }
+    return [[UITargetedPreview alloc] initWithView:standIn parameters:parameters];
+}
+
 @implementation ApolloNativeActionMenuPresenter
+
+// Normally the teardown in -willEndForConfiguration: takes the stand-in out.
+// This catches the presentation that never got a dismissal (aborted before it
+// opened), so a stale copy can't ride along on a recycled cell.
+- (void)dealloc {
+    [_morphStandInView removeFromSuperview];
+}
 
 - (UIContextMenuConfiguration *)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction configurationForMenuAtLocation:(__unused CGPoint)location {
     UIMenu *menu = self.menu;
@@ -900,6 +963,20 @@ static id ApolloNativeActionMenuCompactMenuStyle(void) {
         if ([morphSource respondsToSelector:morphViewSelector]) {
             UIView *resolved = ((id (*)(id, SEL))objc_msgSend)(morphSource, morphViewSelector);
             if (resolved.window) morphView = resolved;
+        }
+
+        // Hand UIKit a stand-in instead of the control itself, so the control
+        // survives being portaled (see ApolloNativeActionMenuCreateMorphStandIn).
+        // Both the highlight and the dismiss preview reuse the same stand-in;
+        // the teardown in -willEndForConfiguration: takes it back out.
+        UIView *standIn = self.morphStandInView;
+        if (!standIn.window) {
+            [standIn removeFromSuperview];
+            standIn = ApolloNativeActionMenuCreateMorphStandIn(morphView);
+            self.morphStandInView = standIn;
+        }
+        if (standIn) {
+            return ApolloNativeActionMenuStandInPreview(standIn);
         }
         return [[UITargetedPreview alloc] initWithView:morphView];
     }
@@ -966,12 +1043,17 @@ static id ApolloNativeActionMenuCompactMenuStyle(void) {
     if (!sourceView || !menuInteraction) return;
 
     BOOL removeSourceViewOnEnd = self.removeSourceViewOnEnd;
+    UIView *standInView = self.morphStandInView;
+    self.morphStandInView = nil;
     // Issue #249: tear down at dismissal END, not START — removing the anchor
     // (the interaction's host view) while the menu is still morphing back into
-    // the source button cuts the dismissal animation short.
+    // the source button cuts the dismissal animation short. The stand-in goes
+    // at the same point: it is what the collapsing platter is portaling, and
+    // pulling it early would empty the platter mid-animation.
     void (^teardown)(void) = ^{
         [sourceView removeInteraction:menuInteraction];
         objc_setAssociatedObject(sourceView, &kApolloNativeActionMenuControllerKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        [standInView removeFromSuperview];
         if (removeSourceViewOnEnd) {
             [sourceView removeFromSuperview];
         }
