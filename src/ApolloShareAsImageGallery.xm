@@ -61,32 +61,41 @@ static id ApolloShareIvarObject(id obj, const char *name) {
     return value;
 }
 
-// Writes an object into a Swift STRONG ivar with balanced ARC ownership.
+// Writes an object into one of SaveAsImagePreviewNode's Swift stored properties
+// (`imageNode`, `imageForImagePost`, `linkButtonNode` — all `let`s with no ObjC
+// accessor), transferring ownership by hand.
 //
-// object_setIvar() stores the raw pointer but does NOT add the +1 retain that a
-// Swift `strong` ivar slot is expected to own. When the host object is later
-// deallocated, Swift's deinit releases every strong ivar — including ours —
-// which over-releases the value we stored and produces a delayed EXC_BAD_ACCESS.
+// DO NOT swap this for object_setIvar() or object_setIvarWithStrongDefault().
+// Both decide what to do from the declaring class's ARC ivar layout, and a Swift
+// class emits no strong-ivar layout, so libobjc classifies these slots as
+// *unretained* — not "unknown". object_setIvarWithStrongDefault's assume-strong
+// fallback only covers "unknown", so on these slots it degrades to a plain
+// pointer assignment: it neither retains the new value nor releases the old.
+// Measured on iOS 26.5 — retain counts either side of that call were identical
+// (imageNode 3->3, imageForImagePost 8->8, replaced imageNode 5->5).
 //
-// To balance that future release we CFRetain the new value (so the slot truly
-// owns +1), and CFRelease whatever was already in the slot (we're taking over
-// its ownership). This mirrors what an ARC strong-property setter does.
+// Swift's deinit still releases every stored property, so a bare store leaves
+// the slot one release in debt. The value then dies early and whoever still
+// points at it crashes later: EXC_BAD_ACCESS in objc_release, from
+// -[ASImageNode .cxx_destruct] releasing its freed `image`, when the share sheet
+// tore down. It surfaced on any video post (and, once the poster gate widened,
+// GIF posts) because those take the two-pass placeholder-then-real install.
 //
-// NOTE: this balance intentionally relies on object_setIvar performing a RAW
-// store (no ARC retain/release) for these Swift `strong` ivars, which holds
-// while the runtime reports their memory management as "unknown". If a future
-// Swift/ObjC runtime ever reports them as strong, object_setIvar would itself
-// objc_storeStrong (retain new / release old), and the CFRetain/CFRelease here
-// would over-release `previous`. Re-check this assumption if it ever regresses
-// across iOS versions.
+// So: do the raw store ourselves, take the +1 the slot is expected to own, and
+// hand back the +1 it held on the old value — no dependence on how the runtime
+// happens to classify these slots. `previous` is an ARC-strong local, so it
+// stays alive across the swap even when the slot held the last reference.
 static void ApolloShareSetIvarObject(id obj, const char *name, id value) {
     if (!obj || !name) return;
     Ivar ivar = class_getInstanceVariable(object_getClass(obj), name);
     if (!ivar) return;
     @try {
         id previous = object_getIvar(obj, ivar);
+        if (previous == value) return;
+        ptrdiff_t offset = ivar_getOffset(ivar);
+        void **slot = (void **)((char *)(__bridge void *)obj + offset);
         if (value) CFRetain((__bridge CFTypeRef)value);   // slot now owns +1 on the new value
-        object_setIvar(obj, ivar, value);
+        *slot = (__bridge void *)value;
         if (previous) CFRelease((__bridge CFTypeRef)previous); // release the value we replaced
     } @catch (__unused NSException *e) {}
 }
