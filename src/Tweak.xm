@@ -1740,6 +1740,227 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
     return request;
 }
 
+// --- Imgur keyless access + regional-block fallbacks -------------------------
+// Imgur closed public API registration (users can no longer obtain a client
+// ID), and its UK exit region-blocks every imgur.com host for properly
+// geolocated UK egresses. Three cooperating pieces keep imgur content working:
+//   1. GET requests to api.imgur.com fall back to the client ID imgur's own
+//      website ships in its public JS for logged-out visitors, so metadata
+//      reads need no personal key. Uploads/deletes still require a real key.
+//   2. /api/image is answered with a real /3/image fetch first (correct
+//      animated/mp4 metadata, so gifs and videos actually play); the old
+//      synthetic static response is now only the unreachable-Imgur fallback
+//      (DDG-proxied poster frame — the best DDG can serve, since it refuses
+//      any non-image content type outright and imgur's .gif URLs for video
+//      uploads return a static JPEG frame anyway).
+//   3. /api/album has no synthetic equivalent (the image list only exists in
+//      the album JSON, and DDG cannot carry JSON), so on failure the same v3
+//      URL is refetched through api.allorigins.win, a long-lived text-capable
+//      proxy with non-UK egress. Image loads inside the album then ride the
+//      existing DDG rewrite in _onqueue_resume.
+// Debug: `defaults write com.christianselig.Apollo ImgurProxySimulateBlock 1`
+// makes the direct attempts fast-fail so the fallbacks can be exercised on a
+// network that imgur does not actually block (e.g. the simulator).
+static NSString *const kApolloImgurPublicWebClientId = @"546c25a59c58ad7";
+
+static NSString *ApolloImgurEffectiveClientIdForMethod(NSString *httpMethod) {
+    if (sImgurClientId.length > 0) return sImgurClientId;
+    if (httpMethod.length == 0 || [httpMethod caseInsensitiveCompare:@"GET"] == NSOrderedSame) {
+        return kApolloImgurPublicWebClientId;
+    }
+    return sImgurClientId;
+}
+
+static BOOL ApolloImgurDebugSimulateBlock(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:@"ImgurProxySimulateBlock"];
+}
+
+// A v3 response is usable when it is HTTP 200 and its JSON says success:true
+// (imgur's regional block and rate limiting both fail this).
+static BOOL ApolloImgurV3ResponseLooksValid(NSData *data, NSURLResponse *response, NSError *error) {
+    if (error || data.length == 0) return NO;
+    if ([response isKindOfClass:[NSHTTPURLResponse class]] && ((NSHTTPURLResponse *)response).statusCode != 200) return NO;
+    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    return [json isKindOfClass:[NSDictionary class]] && [json[@"success"] boolValue];
+}
+
+static NSHTTPURLResponse *ApolloImgurFakeJSONResponseForURL(NSURL *url) {
+    return [[NSHTTPURLResponse alloc] initWithURL:url
+                                       statusCode:200
+                                      HTTPVersion:@"HTTP/1.1"
+                                     headerFields:@{@"Content-Type": @"application/json"}];
+}
+
+// RFC 3986 unreserved-only encoding, for embedding a full URL (including its
+// own query) as a single query-parameter value. URLQueryAllowedCharacterSet is
+// not enough: it leaves & and = bare, which would split the inner URL.
+static NSString *ApolloPercentEncodeFull(NSString *string) {
+    static NSCharacterSet *unreserved;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        unreserved = [NSCharacterSet characterSetWithCharactersInString:
+            @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"];
+    });
+    return [string stringByAddingPercentEncodingWithAllowedCharacters:unreserved];
+}
+
+// The pre-existing synthetic /api/image answer: a static image whose link is
+// DDG-proxied. Fallback only — it deliberately lies (animated:NO, empty mp4)
+// because DDG can serve nothing better than a poster frame.
+static NSData *ApolloImgurSyntheticImageResponseData(NSString *imageID) {
+    // .jpg is a neutral default; Imgur serves the stored format for any
+    // extension (verified: .gif/.jpg both return the original content type).
+    NSString *imgurJPG = [NSString stringWithFormat:@"https://i.imgur.com/%@.jpg", imageID];
+    NSString *ddgProxied = [@"https://external-content.duckduckgo.com/iu/?u=" stringByAppendingString:
+        [imgurJPG stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
+
+    // Match the real Imgur API shape so Unbox's required-key decoding succeeds.
+    NSDictionary *syntheticResponse = @{
+        @"status": @200,
+        @"success": @YES,
+        @"data": @{
+            @"id": imageID,
+            @"deletehash": @"",
+            @"account_id": [NSNull null],
+            @"account_url": [NSNull null],
+            @"ad_type": [NSNull null],
+            @"ad_url": [NSNull null],
+            @"title": [NSNull null],
+            @"description": [NSNull null],
+            @"name": @"",
+            @"type": @"image/jpeg",
+            @"width": @1920,
+            @"height": @1080,
+            @"size": @0,
+            @"views": @0,
+            @"section": [NSNull null],
+            @"vote": [NSNull null],
+            @"bandwidth": @0,
+            @"animated": @NO,
+            @"favorite": @NO,
+            @"in_gallery": @NO,
+            @"in_most_viral": @NO,
+            @"has_sound": @NO,
+            @"is_ad": @NO,
+            @"nsfw": [NSNull null],
+            @"link": ddgProxied,
+            @"tags": @[],
+            @"datetime": @0,
+            @"mp4": @"",
+            @"hls": @""
+        }
+    };
+    return [NSJSONSerialization dataWithJSONObject:syntheticResponse options:0 error:nil];
+}
+
+// Text-capable proxy chain for album JSON (DDG refuses non-image content).
+// Ordered by measured reliability (2026-07: r.jina.ai 5/5 sub-second;
+// allorigins intermittently down but a useful backup for jina's keyless
+// ~20 req/min/IP rate limit). Each entry builds the proxied URL and extracts
+// the upstream body from the proxy's envelope.
+//
+// r.jina.ai wraps responses as:
+//   "Title: ...\n\nURL Source: <url>\n\n[Warning: ...\n\n]Markdown Content:\n<raw body>"
+// and answers 200 even when the upstream failed — the extracted body then
+// carries imgur's own success:false, which the v3 validator rejects, moving
+// the chain along. The target URL is appended to r.jina.ai/ verbatim
+// (unencoded): that is the format jina expects.
+static NSData *ApolloImgurExtractJinaBody(NSData *data) {
+    NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSRange marker = [body rangeOfString:@"Markdown Content:\n"];
+    if (marker.location == NSNotFound) return nil;
+    NSString *inner = [[body substringFromIndex:NSMaxRange(marker)]
+        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return [inner hasPrefix:@"{"] ? [inner dataUsingEncoding:NSUTF8StringEncoding] : nil;
+}
+
+typedef NSData *(^ApolloImgurProxyBodyExtractor)(NSData *);
+
+static void ApolloImgurAlbumFallbackAttempt(NSUInteger index,
+                                            NSArray<NSString *> *names,
+                                            NSArray<NSString *> *urls,
+                                            NSArray<ApolloImgurProxyBodyExtractor> *extractors,
+                                            NSString *albumID, NSString *v3PublicURL,
+                                            void (^completionHandler)(NSData *, NSURLResponse *, NSError *),
+                                            NSData *directData, NSURLResponse *directResponse, NSError *directError) {
+    if (index >= urls.count) {
+        ApolloLog(@"[ImgurProxy] Album %@: all fallbacks failed; surfacing original failure", albumID);
+        completionHandler(directData, directResponse, directError);
+        return;
+    }
+
+    ApolloLog(@"[ImgurProxy] Album %@: trying fallback %@", albumID, names[index]);
+    NSMutableURLRequest *proxyRequest = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urls[index]]];
+    proxyRequest.timeoutInterval = 12.0;
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:proxyRequest
+        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSData *body = (!error && data.length > 0) ? extractors[index](data) : nil;
+        if (body && ApolloImgurV3ResponseLooksValid(body, response, error)) {
+            ApolloLog(@"[ImgurProxy] Album %@ loaded via %@ (%lu bytes)", albumID, names[index], (unsigned long)body.length);
+            completionHandler(body, ApolloImgurFakeJSONResponseForURL([NSURL URLWithString:v3PublicURL]), nil);
+        } else {
+            ApolloImgurAlbumFallbackAttempt(index + 1, names, urls, extractors, albumID, v3PublicURL,
+                                            completionHandler, directData, directResponse, directError);
+        }
+    }];
+    [task resume];
+}
+
+static void ApolloImgurRetryAlbumViaTextProxy(NSString *albumID,
+                                              void (^completionHandler)(NSData *, NSURLResponse *, NSError *),
+                                              NSData *directData, NSURLResponse *directResponse, NSError *directError) {
+    // Every retry uses the public web client ID, never the personal key — a
+    // dead/rate-limited personal key is one of the failure modes being
+    // recovered from, and must not be inherited by the retries. The URL-borne
+    // client_id also stops _onqueue_resume from re-stamping the personal key
+    // as an Authorization header on these requests.
+    NSString *v3PublicURL = [NSString stringWithFormat:@"https://api.imgur.com/3/album/%@?client_id=%@",
+        albumID, kApolloImgurPublicWebClientId];
+
+    ApolloImgurProxyBodyExtractor identity = ^NSData *(NSData *data) { return data; };
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    NSMutableArray<NSString *> *urls = [NSMutableArray array];
+    NSMutableArray<ApolloImgurProxyBodyExtractor> *extractors = [NSMutableArray array];
+
+    // 1. Direct keyless retry — no third party involved. Only useful when the
+    //    first attempt carried a personal key (keyless users already tried the
+    //    public ID), and skipped under the simulated block so the debug flag
+    //    exercises the text proxies.
+    if (sImgurClientId.length > 0 && !ApolloImgurDebugSimulateBlock()) {
+        [names addObject:@"direct keyless retry"];
+        [urls addObject:v3PublicURL];
+        [extractors addObject:identity];
+    }
+    // 2-4. Public text-capable proxies with non-UK egress, ordered by measured
+    //      reliability (2026-07: r.jina.ai 5/5 sub-second; allorigins and
+    //      codetabs intermittently down but free to try). These are NOT
+    //      DuckDuckGo, so they sit behind an explicit opt-out — the "Album
+    //      Fallback Proxies" switch under Media > Network.
+    if (sImgurAlbumFallbackProxies) {
+        [names addObject:@"r.jina.ai"];
+        [urls addObject:[@"https://r.jina.ai/" stringByAppendingString:v3PublicURL]];
+        [extractors addObject:^NSData *(NSData *data) { return ApolloImgurExtractJinaBody(data); }];
+
+        [names addObject:@"allorigins"];
+        [urls addObject:[@"https://api.allorigins.win/raw?url=" stringByAppendingString:ApolloPercentEncodeFull(v3PublicURL)]];
+        [extractors addObject:identity];
+
+        [names addObject:@"codetabs"];
+        [urls addObject:[@"https://api.codetabs.com/v1/proxy?quest=" stringByAppendingString:ApolloPercentEncodeFull(v3PublicURL)]];
+        [extractors addObject:identity];
+    }
+
+    if (urls.count == 0) {
+        ApolloLog(@"[ImgurProxy] Album %@ direct fetch failed; no fallbacks enabled", albumID);
+        completionHandler(directData, directResponse, directError);
+        return;
+    }
+
+    ApolloLog(@"[ImgurProxy] Album %@ direct fetch failed; starting fallback chain", albumID);
+    ApolloImgurAlbumFallbackAttempt(0, names, urls, extractors, albumID, v3PublicURL,
+                                    completionHandler, directData, directResponse, directError);
+}
+
 %hook NSURLSession
 
 // Async image loaders (PINRemoteImage etc.) send no User-Agent on imgchest
@@ -1990,70 +2211,56 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
     if ([url.host isEqualToString:@"apollogur.download"]) {
         NSString *imageID = [url.lastPathComponent stringByDeletingPathExtension];
 
-        if (sProxyImgurDDG && [url.path hasPrefix:@"/api/image"]) {
-            // Fabricate an API response with a DDG-proxied link, skipping api.imgur.com
-            // entirely (also regionally blocked). .jpg is a neutral default; Imgur serves
-            // the correct format regardless and DDG handles both static and animated content.
-            NSString *imgurJPG = [NSString stringWithFormat:@"https://i.imgur.com/%@.jpg", imageID];
-            NSString *ddgProxied = [@"https://external-content.duckduckgo.com/iu/?u=" stringByAppendingString:
-                [imgurJPG stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
-
-            // Match the real Imgur API shape so Unbox's required-key decoding succeeds.
-            NSDictionary *syntheticResponse = @{
-                @"status": @200,
-                @"success": @YES,
-                @"data": @{
-                    @"id": imageID,
-                    @"deletehash": @"",
-                    @"account_id": [NSNull null],
-                    @"account_url": [NSNull null],
-                    @"ad_type": [NSNull null],
-                    @"ad_url": [NSNull null],
-                    @"title": [NSNull null],
-                    @"description": [NSNull null],
-                    @"name": @"",
-                    @"type": @"image/jpeg",
-                    @"width": @1920,
-                    @"height": @1080,
-                    @"size": @0,
-                    @"views": @0,
-                    @"section": [NSNull null],
-                    @"vote": [NSNull null],
-                    @"bandwidth": @0,
-                    @"animated": @NO,
-                    @"favorite": @NO,
-                    @"in_gallery": @NO,
-                    @"in_most_viral": @NO,
-                    @"has_sound": @NO,
-                    @"is_ad": @NO,
-                    @"nsfw": [NSNull null],
-                    @"link": ddgProxied,
-                    @"tags": @[],
-                    @"datetime": @0,
-                    @"mp4": @"",
-                    @"hls": @""
-                }
-            };
-            NSData *jsonData = [NSJSONSerialization dataWithJSONObject:syntheticResponse options:0 error:nil];
-            NSHTTPURLResponse *fakeHTTPResponse = [[NSHTTPURLResponse alloc] initWithURL:url
-                                                                              statusCode:200
-                                                                             HTTPVersion:@"HTTP/1.1"
-                                                                            headerFields:@{@"Content-Type": @"application/json"}];
-
-            ApolloLog(@"[ImgurProxy] Fabricating response for %@", imageID);
-
-            // Route the task to a fast-failing URL; wrapper delivers the synthetic data.
-            void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(__unused NSData *d, __unused NSURLResponse *r, __unused NSError *e) {
-                completionHandler(jsonData, fakeHTTPResponse, nil);
-            };
-            return %orig([NSURL URLWithString:@"http://127.0.0.1:1"], wrappedHandler);
-        }
-
         NSURL *modifiedURL;
 
         if ([url.path hasPrefix:@"/api/image"]) {
             // Access the modified URL to get the actual data
             modifiedURL = [NSURL URLWithString:[@"https://api.imgur.com/3/image/" stringByAppendingString:imageID]];
+
+            if (sProxyImgurDDG && completionHandler) {
+                // Real metadata first: correct animated/mp4 fields mean gifs and
+                // videos actually play. Synthetic static answer (DDG poster) only
+                // when Imgur itself is unreachable — see the fallback block comment
+                // above %hook NSURLSession.
+                NSURL *fetchURL = ApolloImgurDebugSimulateBlock()
+                    ? [NSURL URLWithString:@"http://127.0.0.1:1/apollo-imgur-simulated-block"]
+                    : modifiedURL;
+                void (^imageHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+                    if (ApolloImgurV3ResponseLooksValid(data, response, error)) {
+                        completionHandler(data, response, error);
+                        return;
+                    }
+                    void (^answerSynthetic)(void) = ^{
+                        ApolloLog(@"[ImgurProxy] Image %@ metadata fetch failed; answering with synthetic DDG response", imageID);
+                        completionHandler(ApolloImgurSyntheticImageResponseData(imageID), ApolloImgurFakeJSONResponseForURL(url), nil);
+                    };
+                    // A dead/rate-limited personal key is indistinguishable from
+                    // a regional block here; one direct keyless retry (imgur-only
+                    // traffic, no third party) sorts that out before degrading to
+                    // the synthetic static answer. Keyless users already tried the
+                    // public ID, and the simulated block skips straight to the
+                    // degraded path on purpose.
+                    if (sImgurClientId.length > 0 && !ApolloImgurDebugSimulateBlock()) {
+                        NSString *publicURL = [NSString stringWithFormat:@"https://api.imgur.com/3/image/%@?client_id=%@",
+                            imageID, kApolloImgurPublicWebClientId];
+                        NSMutableURLRequest *retryRequest = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:publicURL]];
+                        retryRequest.timeoutInterval = 12.0;
+                        ApolloLog(@"[ImgurProxy] Image %@ metadata failed with personal key; retrying keyless", imageID);
+                        [[[NSURLSession sharedSession] dataTaskWithRequest:retryRequest
+                            completionHandler:^(NSData *retryData, NSURLResponse *retryResponse, NSError *retryError) {
+                            if (ApolloImgurV3ResponseLooksValid(retryData, retryResponse, retryError)) {
+                                ApolloLog(@"[ImgurProxy] Image %@ loaded via direct keyless retry", imageID);
+                                completionHandler(retryData, ApolloImgurFakeJSONResponseForURL(url), nil);
+                            } else {
+                                answerSynthetic();
+                            }
+                        }] resume];
+                        return;
+                    }
+                    answerSynthetic();
+                };
+                return %orig(fetchURL, imageHandler);
+            }
         } else if ([url.path hasPrefix:@"/api/album"]) {
             // Parse new URL format with title (/album/some-album-title-<albumid>)
             NSRange range = [imageID rangeOfString:@"-" options:NSBackwardsSearch];
@@ -2061,6 +2268,24 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
                 imageID = [imageID substringFromIndex:range.location + 1];
             }
             modifiedURL = [NSURL URLWithString:[@"https://api.imgur.com/3/album/" stringByAppendingString:imageID]];
+
+            if (sProxyImgurDDG && completionHandler) {
+                // Albums have no synthetic equivalent (the image list only exists
+                // in this JSON), so a failed direct fetch retries through the
+                // text-capable proxy before surfacing the failure.
+                NSString *albumID = imageID;
+                NSURL *fetchURL = ApolloImgurDebugSimulateBlock()
+                    ? [NSURL URLWithString:@"http://127.0.0.1:1/apollo-imgur-simulated-block"]
+                    : modifiedURL;
+                void (^albumHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+                    if (ApolloImgurV3ResponseLooksValid(data, response, error)) {
+                        completionHandler(data, response, error);
+                    } else {
+                        ApolloImgurRetryAlbumViaTextProxy(albumID, completionHandler, data, response, error);
+                    }
+                };
+                return %orig(fetchURL, albumHandler);
+            }
         }
 
         if (modifiedURL) {
@@ -2150,7 +2375,7 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
         NSMutableURLRequest *mutableRequest = [request mutableCopy];
         NSString *newURLString = [requestString stringByReplacingOccurrencesOfString:@"imgur-apiv3.p.rapidapi.com" withString:@"api.imgur.com"];
         [mutableRequest setURL:[NSURL URLWithString:newURLString]];
-        [mutableRequest setValue:[@"Client-ID " stringByAppendingString:sImgurClientId] forHTTPHeaderField:@"Authorization"];
+        [mutableRequest setValue:[@"Client-ID " stringByAppendingString:ApolloImgurEffectiveClientIdForMethod(request.HTTPMethod)] forHTTPHeaderField:@"Authorization"];
         StripRapidAPIHeaders(mutableRequest);
         if ([requestURL.path isEqualToString:@"/3/image"]) {
             [mutableRequest setValue:@"image/jpeg" forHTTPHeaderField:@"Content-Type"];
@@ -2163,9 +2388,13 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
         // Only modify if auth not already set: redundant mutableCopy+setValue on upload
         // tasks disrupts the internal body data reference, causing empty uploads.
         NSString *existingAuth = [request valueForHTTPHeaderField:@"Authorization"];
-        if (![existingAuth hasPrefix:@"Client-ID "]) {
+        // Requests whose URL already carries ?client_id= are the keyless
+        // retries above — the URL-borne ID is authoritative, so don't stamp
+        // the (possibly dead) personal key over it.
+        BOOL urlCarriesClientId = requestURL.query != nil && [requestURL.query rangeOfString:@"client_id="].location != NSNotFound;
+        if (![existingAuth hasPrefix:@"Client-ID "] && !urlCarriesClientId) {
             NSMutableURLRequest *mutableRequest = [request mutableCopy];
-            [mutableRequest setValue:[@"Client-ID " stringByAppendingString:sImgurClientId] forHTTPHeaderField:@"Authorization"];
+            [mutableRequest setValue:[@"Client-ID " stringByAppendingString:ApolloImgurEffectiveClientIdForMethod(request.HTTPMethod)] forHTTPHeaderField:@"Authorization"];
             StripRapidAPIHeaders(mutableRequest);
             if ([requestURL.path isEqualToString:@"/3/image"]) {
                 [mutableRequest setValue:@"image/jpeg" forHTTPHeaderField:@"Content-Type"];
@@ -2752,6 +2981,7 @@ static void initializeRandomSources() {
                                     UDKeyTagFilterSubredditOverrides: @{},
                                     UDKeyPostFilterSubreddits: @{},
                                     UDKeyPostFilterNameSubstrings: @[],
+                                    UDKeyImgurAlbumFallbackProxies: @YES,
                                     UDKeyWebJSONEnabled: @NO,
                                     UDKeyUseModernRedditChat: @NO,
                                     UDKeyUseModernRedditModmail: @NO,
@@ -2788,6 +3018,7 @@ static void initializeRandomSources() {
     sVideoHoldSpeedEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyVideoHoldSpeedEnabled];
     sVideoHoldSpeed = ApolloSanitizedHoldSpeed([[NSUserDefaults standardUserDefaults] floatForKey:UDKeyVideoHoldSpeed]);
     sProxyImgurDDG = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProxyImgurDDG];
+    sImgurAlbumFallbackProxies = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyImgurAlbumFallbackProxies];
     sEnableInlineImages = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableInlineImages];
     sEnableChatMedia = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableChatMedia];
     sEnableAISummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAISummaries];

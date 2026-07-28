@@ -93,6 +93,10 @@ static NSString *const UDKeyPassiveDeletedComments = @"PassiveDeletedComments";
 static NSString *const UDKeyLegacyRevealDeletedComments = @"RevealDeletedComments";
 static NSString *const UDKeyFilterNSFWRecentlyRead = @"FilterNSFWRecentlyRead";
 static NSString *const UDKeyProxyImgurDDG = @"ProxyImgurDDG";
+// Allow non-DDG public text proxies (r.jina.ai, allorigins, codetabs) as a
+// last resort for album metadata when Imgur is unreachable — DDG itself cannot
+// carry JSON. Default ON; only consulted while ProxyImgurDDG is enabled.
+static NSString *const UDKeyImgurAlbumFallbackProxies = @"ImgurAlbumFallbackProxies";
 static NSString *const UDKeyImageUploadProvider = @"ImageUploadProvider";
 // Secondary host for images added in the COMMENT/REPLY editor (CommentLinkHost
 // enum). Off (default) keeps comment uploads on the Media Upload Host above;

@@ -27,6 +27,7 @@ BOOL sVideoHoldSpeedEnabled = YES;   // effective default ON via registerDefault
 float sVideoHoldSpeed = 2.0f;        // effective default 2.0× via registerDefaults (UDKeyVideoHoldSpeed)
 
 BOOL sProxyImgurDDG = NO;
+BOOL sImgurAlbumFallbackProxies = YES;
 BOOL sShowUserAvatars = NO;
 BOOL sUseProfileAvatarTabIcon = NO;
 BOOL sHideTabBarTitles = NO;

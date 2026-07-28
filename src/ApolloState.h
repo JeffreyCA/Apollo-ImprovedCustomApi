@@ -50,6 +50,7 @@ float ApolloSanitizedHoldSpeed(float value);
 #endif
 
 extern BOOL sProxyImgurDDG;
+extern BOOL sImgurAlbumFallbackProxies;
 extern BOOL sShowUserAvatars;
 extern BOOL sUseProfileAvatarTabIcon;
 // Hide the visible main-tab labels while retaining/restoring the underlying

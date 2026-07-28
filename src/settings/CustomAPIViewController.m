@@ -1574,9 +1574,16 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProxyImgurDDG]; }
                                   onToggle:^(UISwitch *sender) { [weakSelf proxyImgurDDGSwitchToggled:sender]; }];
 
+    ApolloSettingsRow *albumFallback =
+        [ApolloSettingsRow switchRowWithID:@"media.imgurAlbumFallback"
+                                     title:@"Album Fallback Proxies"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyImgurAlbumFallbackProxies]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf imgurAlbumFallbackSwitchToggled:sender]; }];
+    albumFallback.visible = ^BOOL { return sProxyImgurDDG; };
+
     return [ApolloSettingsSection sectionWithTitle:@"Network"
-                                            footer:@"Route Imgur images through DuckDuckGo to bypass regional blocks. Albums and uploads aren't supported by the proxy."
-                                              rows:@[ proxyImgur ]];
+                                            footer:@"Proxy Imgur via DuckDuckGo loads Imgur images through DuckDuckGo's image cache, so they still appear where Imgur is blocked (e.g. the UK).\n\nDuckDuckGo can only carry images. Multi-image albums also need a small text file listing the album's contents, which DuckDuckGo refuses to fetch. With Album Fallback Proxies on, Apollo gets that file through public text proxies (r.jina.ai, allorigins.win, codetabs.com) whenever Imgur can't be reached directly. Only the album's Imgur address is sent to them — nothing about you or your Reddit account. Turn it off to use DuckDuckGo strictly; albums will then fail while Imgur is blocked.\n\nVideos and uploads can't be proxied at all."
+                                              rows:@[ proxyImgur, albumFallback ]];
 }
 
 // Profiles group screen (ApolloProfilesSettingsViewController).
@@ -2419,7 +2426,7 @@ typedef NS_ENUM(NSInteger, Tag) {
             attributes:plainAttrs];
     } else if ([sectionTitle isEqualToString:@"Network"]) {
         text = [[NSMutableAttributedString alloc]
-            initWithString:@"Proxying routes Imgur image requests through DuckDuckGo to bypass regional blocks; albums and uploads are unsupported by the proxy."
+            initWithString:@"Proxy Imgur via DuckDuckGo loads Imgur images through DuckDuckGo's image cache, so they still appear where Imgur is blocked (e.g. the UK).\n\nDuckDuckGo can only carry images. Multi-image albums also need a small text file listing the album's contents, which DuckDuckGo refuses to fetch. With Album Fallback Proxies on, Apollo gets that file through public text proxies (r.jina.ai, allorigins.win, codetabs.com) whenever Imgur can't be reached directly. Only the album's Imgur address is sent to them — nothing about you or your Reddit account. Turn it off to use DuckDuckGo strictly; albums will then fail while Imgur is blocked.\n\nVideos and uploads can't be proxied at all."
             attributes:plainAttrs];
     } else if ([sectionTitle isEqualToString:@"Notification Backend"]) {
         text = [[NSMutableAttributedString alloc]
@@ -3196,6 +3203,12 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)proxyImgurDDGSwitchToggled:(UISwitch *)sender {
     sProxyImgurDDG = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sProxyImgurDDG forKey:UDKeyProxyImgurDDG];
+    [self visibilityDidChange];
+}
+
+- (void)imgurAlbumFallbackSwitchToggled:(UISwitch *)sender {
+    sImgurAlbumFallbackProxies = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sImgurAlbumFallbackProxies forKey:UDKeyImgurAlbumFallbackProxies];
 }
 
 - (void)textPostThumbnailsSwitchToggled:(UISwitch *)sender {
