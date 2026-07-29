@@ -1009,6 +1009,15 @@ static NSString *ApolloPhotoComposerTextForView(UIView *view) {
     if ([view isKindOfClass:[UITextField class]]) return ((UITextField *)view).text;
     if ([view isKindOfClass:[UITextView class]]) return ((UITextView *)view).text;
     if ([view isKindOfClass:[UIButton class]]) return [(UIButton *)view currentTitle];
+    // Never probe accessibilityLabel on scroll-view containers. With
+    // accessibility active (VoiceOver, or the simulator's automation harness),
+    // -[UITableViewAccessibility accessibilityLabel] enumerates its elements
+    // and REALIZES cells — dequeue → heightForRow → the compose hooks' scope
+    // check → this function again on the same table — a mutual recursion that
+    // blew the 1MB main stack (SIGSEGV in the stack guard page; this walk is
+    // also the long-standing "[StackGuard] heightForRow ~850KB" spike). Real
+    // text never lives on the scroll view itself, so nothing is lost.
+    if ([view isKindOfClass:[UIScrollView class]]) return nil;
     NSString *accessibilityLabel = view.accessibilityLabel;
     return accessibilityLabel.length > 0 ? accessibilityLabel : nil;
 }
@@ -1027,7 +1036,7 @@ static BOOL ApolloPhotoComposerViewContainsText(UIView *rootView, NSString *need
     return NO;
 }
 
-static BOOL ApolloPhotoComposerControllerIsInScope(UIViewController *controller) {
+static BOOL ApolloPhotoComposerControllerIsInScopeUnguarded(UIViewController *controller) {
     if (!controller.isViewLoaded || !controller.view.window) return NO;
 
     NSString *title = controller.navigationItem.title ?: controller.title;
@@ -1049,6 +1058,21 @@ static BOOL ApolloPhotoComposerControllerIsInScope(UIViewController *controller)
         ApolloPhotoComposerViewContainsText(view, @"Link") &&
         ApolloPhotoComposerViewContainsText(view, @"Text");
     return hasPostingContext || hasPostMode;
+}
+
+// Re-entrancy guard (belt and braces for the accessibility recursion handled
+// in ApolloPhotoComposerTextForView): if a scope check's view-tree walk
+// somehow re-enters the compose table's delegate hooks — which call back into
+// this function — answer NO for the inner throwaway pass instead of recursing
+// to stack exhaustion. The recursion is a synchronous same-thread stack, so a
+// plain static is a correct guard.
+static BOOL ApolloPhotoComposerControllerIsInScope(UIViewController *controller) {
+    static BOOL sScopeCheckInProgress = NO;
+    if (sScopeCheckInProgress) return NO;
+    sScopeCheckInProgress = YES;
+    BOOL inScope = ApolloPhotoComposerControllerIsInScopeUnguarded(controller);
+    sScopeCheckInProgress = NO;
+    return inScope;
 }
 
 static NSString *ApolloMediaComposerTrimmedBodyText(NSString *text) {
@@ -3025,6 +3049,13 @@ static UICollectionView *ApolloPhotoComposerFindImageStrip(UIViewController *con
 }
 
 static BOOL ApolloPhotoComposerStripShouldCancelContentTouch(id self, SEL _cmd, UIView *view) {
+    // Always cancel the in-progress content touch so a horizontal drag turns
+    // into a strip scroll. This is the whole point of the fix — the raw
+    // collection view starts with delaysContentTouches/canCancelContentTouches
+    // tuned so a touch that lands on a thumbnail never becomes a scroll.
+    // (Apollo's ImageSlider has no drag-to-reorder — verified against the
+    // binary: no moveItemAt:/beginInteractiveMovement/drag-delegate anywhere —
+    // so there's no lift gesture to preserve here; the strip only scrolls.)
     return YES;
 }
 
@@ -3079,6 +3110,31 @@ static void ApolloPhotoComposerApplyScrollFix(UICollectionView *collectionView) 
     objc_setAssociatedObject(collectionView, &kApolloPhotoComposerScrollFixAppliedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloLog(@"[PhotoComposerScroll] enabled selected-photo strip horizontal scrolling (ancestor recognizers=%lu)", (unsigned long)requiredCount);
 }
+
+// Root cause of "swiping the thumbnails doesn't always move them — do it a few
+// times and it works": the repair passes below only run on controller-level
+// events (appearance, controller layout, dismiss bursts), but the thumbnail
+// strip materializes asynchronously after the photo picker dismisses (and
+// again each time "Choose Media" adds more). Its collection view often
+// attaches AFTER the last burst, so the horizontal-scroll enablement isn't in
+// place yet — the strip won't scroll until some later repair happens to fire.
+// Apply the fix deterministically the moment the strip lands in a window
+// instead: its collection view's delegate is the Apollo.ImageSlider… cell,
+// wired before the view attaches. One cheap class-name check per collection
+// view window-attach app-wide; ApolloPhotoComposerApplyScrollFix dedupes via
+// its applied-key.
+%hook UICollectionView
+
+- (void)didMoveToWindow {
+    %orig;
+    if (!self.window) return;
+    NSString *delegateClass = self.delegate ? NSStringFromClass([self.delegate class]) : @"";
+    if (ApolloPhotoComposerStringContains(delegateClass, @"ImageSlider")) {
+        ApolloPhotoComposerApplyScrollFix(self);
+    }
+}
+
+%end
 
 static void ApolloPhotoComposerRepairController(UIViewController *controller, NSString *reason) {
     if (!ApolloPhotoComposerControllerHasDirectScopeSignal(controller)) return;
