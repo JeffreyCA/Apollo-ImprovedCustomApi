@@ -27,10 +27,10 @@ __BEGIN_DECLS
 // Incremental polls (with a `since` token) are ~2 KB, so a 30 s foreground
 // cadence is cheaper than a single feed image.
 //
-// The poller only runs when the modern Chat surface is actually in use
-// (ApolloModernChatShouldOpen() — forced on for API-key-free accounts, opt-in
-// for API-key accounts) and the active account has a stored web session. With
-// the feature off it never fires, so stock Apollo behavior is untouched.
+// The poller only runs when the modern Chat surface is actually in use (the
+// Use Modern Reddit Chat preference, which applies to API-key and API-key-free
+// accounts alike) and the active account has a stored web session. With the
+// feature off it never fires, so stock Apollo behavior is untouched.
 
 // Ask the poller to refresh soon (coalesced; safe from any thread). Used by
 // UI that wants a fresher count than the periodic cadence, e.g. when the

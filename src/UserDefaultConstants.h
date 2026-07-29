@@ -369,13 +369,17 @@ static NSString *const UDKeyPostFilterNameSubstrings = @"PostFilterNameSubstring
 // Web JSON spike (see ApolloWebJSON.m). Master switch for re-pointing
 // whitelisted listing reads at cookie-authenticated www.reddit.com JSON.
 static NSString *const UDKeyWebJSONEnabled = @"WebJSONEnabled";
-// API-key accounts may opt into Reddit's modern web Chat; API-key-free
-// accounts always use it because legacy /message no longer contains Chat.
+// Reddit's modern web Chat, for API-key and API-key-free accounts alike. Off
+// means Apollo's own Direct Chat, which needs Reddit API credentials.
 static NSString *const UDKeyUseModernRedditChat = @"UseModernRedditChat";
-// API-key accounts may independently opt into Reddit's current web Modmail;
-// API-key-free accounts always use it because Apollo's native new-Modmail
-// endpoints require OAuth credentials they deliberately do not have.
+// Independently, Reddit's current web Modmail. Off means Apollo's native
+// Moderator Mail, whose new-Modmail endpoints require OAuth credentials.
 static NSString *const UDKeyUseModernRedditModmail = @"UseModernRedditModmail";
+// One-shot marker: the two keys above became a plain user preference (they
+// used to be force-enabled for web-session accounts by a derived gate). Set
+// once ApolloMigrateModernMailboxPreferences has recorded the previously
+// implied value, so that never runs twice and re-flips a deliberate choice.
+static NSString *const UDKeyModernMailboxChoiceMigrated = @"ModernMailboxChoiceMigrated";
 // Modern Chat unread poller (ApolloChatUnreadPoller.m). Per-account high-water
 // marks of the unread/requests counts already announced through Bark, so a
 // relaunch doesn't re-push the same unread messages. Not user-facing.

@@ -3057,46 +3057,54 @@ BOOL ApolloModernChatIsAvailable(void) {
     return username.length > 0 && ApolloWebSessionPollFor(username) != nil;
 }
 
-BOOL ApolloModernChatIsRequiredForSession(ApolloWebSessionEntry *entry) {
-    if (!ApolloModernMailboxOSSupported()) return NO;
-    // Only a PRIMARY (API-key-free) session can force the modern surface —
-    // an auxiliary poll-only entry rides along an OAuth account that keeps
-    // Apollo's stock chat unless the user opts in via the settings toggle.
-    if (!entry || entry.pollOnly) return NO;
-    // API-key-free synthesized RDKClient accounts deliberately carry an empty
-    // authorizationCredential.clientIdentifier. Inspect the active client
-    // itself instead of the global default API key, which may belong to a
-    // different account in a mixed API/web-session setup.
-    Class clientClass = objc_getClass("RDKClient");
-    id client = [clientClass respondsToSelector:@selector(sharedClient)]
-        ? ((id (*)(id, SEL))objc_msgSend)(clientClass, @selector(sharedClient)) : nil;
-    id credential = [client respondsToSelector:@selector(authorizationCredential)]
-        ? ((id (*)(id, SEL))objc_msgSend)(client, @selector(authorizationCredential)) : nil;
-    NSString *clientIdentifier = [credential respondsToSelector:@selector(clientIdentifier)]
-        ? ((id (*)(id, SEL))objc_msgSend)(credential, @selector(clientIdentifier)) : nil;
-    return clientIdentifier.length == 0;
-}
-
-BOOL ApolloModernChatIsRequiredForActiveAccount(void) {
-    if (!ApolloModernMailboxOSSupported()) return NO;
-    // A poll-only entry reports pollOnly=YES and is rejected by the session
-    // helper, so resolving via PollFor is equivalent to the primary-only
-    // ApolloActiveWebSession() != nil check at half the account-blob cost.
-    NSString *username = ApolloActiveWebSessionUsername();
-    return ApolloModernChatIsRequiredForSession(
-        username.length > 0 ? ApolloWebSessionPollFor(username) : nil);
-}
-
+// Both surfaces are a straight user preference now. They used to be
+// force-enabled — with the settings switches greyed out — whenever the active
+// account had a primary reddit.com web session and no client identifier on the
+// shared RDKClient, which was read as "this account is API-key-free, so it has
+// no other option". But holding a web session is exactly what modern Chat and
+// Modmail require, and an account can hold one *and* an API key: sign a keyed
+// account into reddit.com to use these surfaces and the lock fired for it too,
+// leaving no way back to Apollo's own Chat / Moderator Mail even though its
+// credentials work fine. Because the preference is app-wide, one such account
+// took the choice away from every account on the device.
+//
+// Modern Chat and Modmail work for keyed and keyless accounts alike, so the
+// preference alone decides. Off means Apollo's own Direct Chat / Moderator
+// Mail, which need Reddit API credentials — an account with no API key that
+// turns these off simply has no Chat or Modmail, the same as before either
+// modern surface existed. ApolloMigrateModernMailboxPreferences below makes
+// sure nobody loses a surface they were relying on when the stored preference
+// took over from the forced gate.
 BOOL ApolloModernChatShouldOpen(void) {
     if (!ApolloModernMailboxOSSupported()) return NO;
-    if (ApolloModernChatIsRequiredForActiveAccount()) return YES;
     return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseModernRedditChat];
 }
 
 BOOL ApolloModernModmailShouldOpen(void) {
     if (!ApolloModernMailboxOSSupported()) return NO;
-    if (ApolloModernChatIsRequiredForActiveAccount()) return YES;
     return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseModernRedditModmail];
+}
+
+void ApolloMigrateModernMailboxPreferences(void) {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if ([defaults boolForKey:UDKeyModernMailboxChoiceMigrated]) return;
+    [defaults setBool:YES forKey:UDKeyModernMailboxChoiceMigrated];
+    // The old forced-on state lived only in the derived gate, never in the
+    // stored preference, so simply honouring the preference from now on would
+    // silently take Chat and Modmail away from everyone who had been getting
+    // them that way. Anyone running API-Key-Free Mode with a stored web session
+    // was in that population — write down what they already had, which they can
+    // now switch off if they would rather use Apollo's own surfaces.
+    if (![defaults boolForKey:UDKeyWebJSONEnabled]) return;
+    if (ApolloWebSessionUsernames().count == 0) return;
+    BOOL chat = [defaults boolForKey:UDKeyUseModernRedditChat];
+    BOOL modmail = [defaults boolForKey:UDKeyUseModernRedditModmail];
+    if (!chat) [defaults setBool:YES forKey:UDKeyUseModernRedditChat];
+    if (!modmail) [defaults setBool:YES forKey:UDKeyUseModernRedditModmail];
+    if (!chat || !modmail) {
+        ApolloLog(@"[DirectChatWeb] Recorded modern Chat/Modmail as on for this web-session setup "
+                  @"(previously implied); both are now switchable in Settings");
+    }
 }
 
 UIViewController *ApolloCreateModernChatViewController(void) {
@@ -3274,5 +3282,6 @@ UIViewController *ApolloCreateModernModmailViewControllerForPath(NSString *desti
 
 %ctor {
     %init;
+    ApolloMigrateModernMailboxPreferences();
     ApolloLog(@"[DirectChatWeb] module loaded");
 }

@@ -22,14 +22,15 @@ __BEGIN_DECLS
 // Apollo's stock (dormant) chat UI instead of a blank web page.
 BOOL ApolloModernMailboxOSSupported(void);
 BOOL ApolloModernChatIsAvailable(void);
-BOOL ApolloModernChatIsRequiredForActiveAccount(void);
-// Per-session variant for callers that already resolved the active account's
-// web-session entry (the 30s unread poller): identical verdict to
-// ApolloModernChatIsRequiredForActiveAccount without re-unarchiving the
-// account blob or re-reading the keychain.
-BOOL ApolloModernChatIsRequiredForSession(ApolloWebSessionEntry * _Nullable entry);
+// Both surfaces are a plain user preference — they work for API-key and
+// API-key-free accounts alike, and off means Apollo's own Direct Chat /
+// Moderator Mail, which need Reddit API credentials.
 BOOL ApolloModernChatShouldOpen(void);
 BOOL ApolloModernModmailShouldOpen(void);
+// One-time: records the previously implied "on" for setups that were getting
+// modern Chat/Modmail from the old forced gate, so switching to a plain
+// preference cannot silently remove either surface. Safe to call repeatedly.
+void ApolloMigrateModernMailboxPreferences(void);
 // YES iff `controller` (a modern mailbox controller) was cookie-seeded for
 // the account that is active RIGHT NOW. The persistent Inbox Chat hub uses
 // this to detect account switches and cookie rotations, so a retained hub can
