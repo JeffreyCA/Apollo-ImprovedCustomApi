@@ -46,6 +46,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloTranslation.h"
+#import "ApolloState.h"
 
 @interface ASDisplayNode : NSObject
 @property (nonatomic) BOOL neverShowPlaceholders;
@@ -361,13 +362,17 @@ static void ApolloVFHandleModelUpdate(id note, void (^origCall)(void)) {
     ApolloVFTrackCell(self, YES);
     // Cached translations can be installed by the global text-node preempt
     // before the normal translation apply function ever runs. Prime after the
-    // cell has settled so that fast path also has a ready vote cover.
-    __weak id weakCell = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        id strongCell = weakCell;
-        if (!strongCell || ![sApolloVFVisibleCells containsObject:strongCell]) return;
-        ApolloTranslationPrimeVoteBodySnapshot(strongCell);
-    });
+    // cell has settled so that fast path also has a ready vote cover. With
+    // bulk translation off there is nothing to snapshot — skip the per-cell
+    // timer + comment-extraction work entirely.
+    if (sEnableBulkTranslation) {
+        __weak id weakCell = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            id strongCell = weakCell;
+            if (!strongCell || ![sApolloVFVisibleCells containsObject:strongCell]) return;
+            ApolloTranslationPrimeVoteBodySnapshot(strongCell);
+        });
+    }
 }
 - (void)didExitVisibleState {
     %orig;

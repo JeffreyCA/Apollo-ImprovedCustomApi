@@ -531,6 +531,21 @@ static void ApolloTagRemoveBlurOverlay(id cell) {
 
 static void ApolloTagApplyDecisionToCell(id cell) {
     if (!cell) return;
+    // Feature off: skip the link ivar-walk + associated-object churn this
+    // otherwise pays on every post-cell layout during scrolling. A cell that
+    // still carries state from when the filter WAS on gets the same teardown
+    // the "none" decision below performs (a nil decision reads as "none"
+    // everywhere it is consumed).
+    if (!sTagFilterEnabled) {
+        if (objc_getAssociatedObject(cell, kApolloTagOverlaysKey) ||
+            objc_getAssociatedObject(cell, kApolloTagDecisionKey)) {
+            objc_setAssociatedObject(cell, kApolloTagDecisionKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            UIView *cellView = ApolloTagCellView(cell);
+            if (cellView) cellView.hidden = NO;
+            ApolloTagRemoveBlurOverlay(cell);
+        }
+        return;
+    }
     RDKLink *link = ApolloTagLinkFromCell(cell);
     NSString *decision = ApolloTagFilterDecisionForLink(link);
 

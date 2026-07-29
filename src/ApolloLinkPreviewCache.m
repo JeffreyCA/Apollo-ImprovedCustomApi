@@ -15,6 +15,15 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
 @interface ApolloLinkPreviewCache ()
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *entries;
 @property (nonatomic, strong) NSCache<NSString *, ApolloLinkPreview *> *memoryCache;
+// Known-absent keys (no disk entry either), so repeat measures of a URL whose
+// fetch hasn't completed skip the dispatch_sync onto the disk queue — misses
+// are the steady state while scrolling. Markers are set only inside the queue
+// (so they can never predate init's synchronous disk load) and cleared by
+// storePreview:.
+@property (nonatomic, strong) NSCache<NSString *, NSNumber *> *missCache;
+// url.absoluteString -> SHA-256 hex key; the digest + hex loop otherwise runs
+// on every lookup, memory hit or not.
+@property (nonatomic, strong) NSCache<NSString *, NSString *> *keyCache;
 @property (nonatomic, strong) dispatch_queue_t queue;
 @property (nonatomic, copy) NSString *cachePath;
 @property (nonatomic) BOOL diskDirty;
@@ -38,6 +47,10 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
         _queue = dispatch_queue_create("com.apollo.linkpreviews.cache", DISPATCH_QUEUE_SERIAL);
         _memoryCache = [NSCache new];
         _memoryCache.countLimit = ApolloLinkPreviewCacheMaxEntries;
+        _missCache = [NSCache new];
+        _missCache.countLimit = 1024;
+        _keyCache = [NSCache new];
+        _keyCache.countLimit = 1024;
 
         NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
         NSString *cacheDirectory = paths.firstObject ?: NSTemporaryDirectory();
@@ -97,6 +110,8 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
 
 - (NSString *)cacheKeyForURL:(NSURL *)url {
     NSString *absoluteString = url.absoluteString ?: @"";
+    NSString *cachedKey = [self.keyCache objectForKey:absoluteString];
+    if (cachedKey) return cachedKey;
     NSData *data = [absoluteString dataUsingEncoding:NSUTF8StringEncoding];
     unsigned char hash[CC_SHA256_DIGEST_LENGTH];
     CC_SHA256(data.bytes, (CC_LONG)data.length, hash);
@@ -105,7 +120,9 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
     for (NSUInteger index = 0; index < CC_SHA256_DIGEST_LENGTH; index++) {
         [result appendFormat:@"%02x", hash[index]];
     }
-    return result;
+    NSString *key = [result copy];
+    [self.keyCache setObject:key forKey:absoluteString];
+    return key;
 }
 
 - (NSTimeInterval)ttlForURL:(NSURL *)url preview:(ApolloLinkPreview *)preview {
@@ -134,6 +151,10 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
     ApolloLinkPreview *memoryPreview = [self.memoryCache objectForKey:key];
     if (memoryPreview && [self previewIsFresh:memoryPreview forURL:url]) return memoryPreview;
 
+    // A key already proven absent stays absent until a store clears its
+    // marker — answer without touching the disk queue.
+    if ([self.missCache objectForKey:key]) return nil;
+
     __block ApolloLinkPreview *preview = nil;
     dispatch_sync(self.queue, ^{
         NSDictionary *entry = self.entries[key];
@@ -148,6 +169,7 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
             [self markDiskDirtyLocked];
             preview = nil;
         }
+        if (!preview) [self.missCache setObject:@YES forKey:key];
     });
     return preview;
 }
@@ -165,6 +187,7 @@ static const NSTimeInterval ApolloLinkPreviewCacheDiskFlushInterval = 8.0;
     if (![url isKindOfClass:[NSURL class]] || !preview) return;
     if (!preview.fetchedAt) preview.fetchedAt = [NSDate date];
     NSString *key = [self cacheKeyForURL:url];
+    [self.missCache removeObjectForKey:key];
     NSMutableDictionary *entry = [[preview dictionaryRepresentation] mutableCopy];
     entry[@"url"] = url.absoluteString ?: @"";
     entry[@"lastAccess"] = @([[NSDate date] timeIntervalSince1970]);

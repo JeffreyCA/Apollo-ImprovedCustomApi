@@ -65,10 +65,20 @@ static NSString *ListCellOwner(UITableViewCell *cell) {
     if (![v isKindOfClass:[UITableView class]]) return nil;
     id delegate = ((UITableView *)v).delegate;
     if (!delegate) return nil;
-    NSString *owner = NSStringFromClass([delegate class]);
+    // The in-scope verdict is a pure function of the delegate's class, and this
+    // runs from the global UITableViewCell layoutSubviews hook on every cell
+    // layout pass while a theme is active — cache it on the class object
+    // instead of re-running NSStringFromClass + five substring scans each time
+    // (@"" marks a cached out-of-scope class; class objects are immortal).
+    Class cls = [delegate class];
+    static char kListCellOwnerVerdictKey;
+    NSString *cached = objc_getAssociatedObject(cls, &kListCellOwnerVerdictKey);
+    if (cached) return cached.length > 0 ? cached : nil;
+    NSString *owner = NSStringFromClass(cls);
     BOOL inScope = [owner containsString:@"ViewController"]
         && ([owner containsString:@"Settings"] || [owner containsString:@"Search"]
             || [owner containsString:@"Friends"] || [owner containsString:@"Inbox"]);
+    objc_setAssociatedObject(cls, &kListCellOwnerVerdictKey, inScope ? owner : @"", OBJC_ASSOCIATION_RETAIN);
     return inScope ? owner : nil;
 }
 

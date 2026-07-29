@@ -4396,26 +4396,15 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
 }
 %end
 
-// Wide-spec probe: ASStackLayoutSpec's layout stack-allocates per child, so a
-// runaway children array (a re-append loop) would eat stack with no extra
-// frames. A legitimate comment body stays well under this.
-%hook ASStackLayoutSpec
-- (id)calculateLayoutThatFits:(struct CDStruct_90e057aa)constrainedSize {
-    NSArray *probeChildren = [(id)self respondsToSelector:@selector(children)] ? [(id)self children] : nil;
-    if (probeChildren.count >= 300) {
-        static CFAbsoluteTime sLastWideLog = 0;
-        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        if (sLastWideLog == 0 || now - sLastWideLog >= 10.0) {
-            sLastWideLog = now;
-            NSString *line = [NSString stringWithFormat:@"[StackGuard] wide ASStackLayoutSpec: children=%lu",
-                              (unsigned long)probeChildren.count];
-            ApolloLog(@"%@", line);
-            ApolloAppendLoginDiag(line);
-        }
-    }
-    return %orig;
-}
-%end
+// The wide-spec probe (an ASStackLayoutSpec.calculateLayoutThatFits hook that
+// counted children per spec) was removed: it ran for EVERY Texture stack layout
+// in the app — feeds compute thousands per second across the background layout
+// threads while scrolling — and a Time Profiler pass attributed a measurable
+// slice of scroll-time CPU to its respondsToSelector/children probing alone.
+// It was a purely diagnostic tripwire that never fired in the field; the
+// protective machinery (the main-stack exhaustion checks above and the safe
+// bail + scheduled relayout in LinkButtonNode.layoutSpecThatFits below) is
+// untouched and still catches the actual failure regardless of cause.
 // ======================== END stack-guard sentinel ========================
 
 %hook _TtC6Apollo14LinkButtonNode

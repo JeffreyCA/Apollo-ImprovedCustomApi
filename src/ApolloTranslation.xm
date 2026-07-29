@@ -1072,19 +1072,25 @@ static NSString *ApolloProtectTranslationLinks(NSString *sourceText, NSDictionar
         }
     };
 
-    NSError *regexError = nil;
-    NSRegularExpression *markdownLinkRegex = [NSRegularExpression regularExpressionWithPattern:@"\\[[^\\]\\n]+\\]\\([^\\s)]+(?:\\s+\\\"[^\\\"]*\\\")?\\)"
-                                                                                       options:0
-                                                                                         error:&regexError];
-    if (!regexError && markdownLinkRegex) {
+    // Compiled once — this runs per title/body per node event on the main
+    // thread during scrolling, and NSRegularExpression is immutable and
+    // thread-safe for concurrent matching (same rationale as the PR #652
+    // display-text regex caching).
+    static NSRegularExpression *markdownLinkRegex;
+    static NSRegularExpression *bareURLRegex;
+    static dispatch_once_t regexOnce;
+    dispatch_once(&regexOnce, ^{
+        markdownLinkRegex = [NSRegularExpression regularExpressionWithPattern:@"\\[[^\\]\\n]+\\]\\([^\\s)]+(?:\\s+\\\"[^\\\"]*\\\")?\\)"
+                                                                      options:0
+                                                                        error:NULL];
+        bareURLRegex = [NSRegularExpression regularExpressionWithPattern:@"(?i)\\bhttps?://[^\\s<>()\\[\\]{}\\\"']+"
+                                                                 options:0
+                                                                   error:NULL];
+    });
+    if (markdownLinkRegex) {
         replaceMatches(markdownLinkRegex, NO);
     }
-
-    regexError = nil;
-    NSRegularExpression *bareURLRegex = [NSRegularExpression regularExpressionWithPattern:@"(?i)\\bhttps?://[^\\s<>()\\[\\]{}\\\"']+"
-                                                                                options:0
-                                                                                  error:&regexError];
-    if (!regexError && bareURLRegex) {
+    if (bareURLRegex) {
         replaceMatches(bareURLRegex, YES);
     }
 
@@ -3076,6 +3082,39 @@ static NSString *ApolloDetectDominantLanguage(NSString *text) {
     NSString *detected = ApolloDominantLanguageWithConfidence(trimmed, NULL);
     [sDetectedLanguageCache setObject:(detected ?: kApolloNoDetectedLanguage) forKey:trimmed];
     return detected;
+}
+
+// Serial background queue for cache-warming language detection. Serial on
+// purpose: a fast scroll schedules many detections in bursts, often for the
+// same string via multiple node events — on a concurrent queue those raced
+// dozens of recognizer runs side by side (measured 33 worker threads all
+// inside NLLanguageRecognizer); serialized, the first warm populates the
+// cache and every duplicate behind it becomes a cache hit.
+static dispatch_queue_t ApolloTranslationDetectionQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("com.apollofix.translation.detect",
+                                      dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+    });
+    return queue;
+}
+
+// Cache-only probe of the detector. Returns the cached verdict (nil can mean
+// "cached: no detectable language") and reports via *outCached whether the
+// verdict is final without running the recognizer. Inputs the full detector
+// would reject without caching (non-strings, <8 chars) are also final. Never
+// runs NLLanguageRecognizer, so scroll-time main-thread callers can use it to
+// decide whether the real detection needs a background hop first.
+static NSString *ApolloDetectDominantLanguageIfCached(NSString *text, BOOL *outCached) {
+    if (outCached) *outCached = NO;
+    if (![text isKindOfClass:[NSString class]]) { if (outCached) *outCached = YES; return nil; }
+    NSString *trimmed = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length < 8) { if (outCached) *outCached = YES; return nil; }
+    NSString *cached = [sDetectedLanguageCache objectForKey:trimmed];
+    if (!cached) return nil;
+    if (outCached) *outCached = YES;
+    return [cached isEqualToString:kApolloNoDetectedLanguage] ? nil : cached;
 }
 
 // YES if `langCode` (a base ISO code like "it") is one the user added to the
@@ -8132,7 +8171,26 @@ static void ApolloMaybeTranslatePostTitleNode(id titleNode) {
 
     // Strip links so URLs don't pollute language detection.
     NSString *detectionText = ApolloProtectTranslationLinks(titleText, NULL);
-    NSString *detected = ApolloDetectDominantLanguage(detectionText);
+    BOOL detectionCached = NO;
+    NSString *detected = ApolloDetectDominantLanguageIfCached(detectionText, &detectionCached);
+    if (!detectionCached) {
+        // NLLanguageRecognizer costs several ms per fresh string — running it
+        // inline meant every newly appearing post paid it on the main thread at
+        // cell-appear time, the worst moment of a scroll frame (a Time Profiler
+        // pass put the detection cluster at ~25% of main-thread busy time during
+        // feed scrolling). Warm the shared cache on a background queue, then
+        // re-run this whole pass: every gate above re-validates against current
+        // node/VC state, and the warm cache makes the re-run synchronous.
+        __weak id weakRetryTitleNode = titleNode;
+        dispatch_async(ApolloTranslationDetectionQueue(), ^{
+            (void)ApolloDetectDominantLanguage(detectionText);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                id strongRetryTitleNode = weakRetryTitleNode;
+                if (strongRetryTitleNode) ApolloMaybeTranslatePostTitleNode(strongRetryTitleNode);
+            });
+        });
+        return;
+    }
     if ([detected isEqualToString:targetLanguage]) return;
 
     // TAP-TO-TRANSLATE: marker + hold as soon as the title is detectably
@@ -8277,7 +8335,22 @@ static void ApolloMaybeTranslateFeedPostBodyNode(id feedCellNode, id excludeTitl
     if (targetLanguage.length == 0) return;
 
     NSString *detectionText = ApolloProtectTranslationLinks(previewText, NULL);
-    NSString *detected = ApolloDetectDominantLanguage(detectionText);
+    BOOL detectionCached = NO;
+    NSString *detected = ApolloDetectDominantLanguageIfCached(detectionText, &detectionCached);
+    if (!detectionCached) {
+        // Same background warm-then-rerun as the title path above: never run
+        // NLLanguageRecognizer on the main thread at cell-appear time.
+        __weak id weakRetryCellNode = feedCellNode;
+        __weak id weakRetryTitleNode = excludeTitleNode;
+        dispatch_async(ApolloTranslationDetectionQueue(), ^{
+            (void)ApolloDetectDominantLanguage(detectionText);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                id strongRetryCellNode = weakRetryCellNode;
+                if (strongRetryCellNode) ApolloMaybeTranslateFeedPostBodyNode(strongRetryCellNode, weakRetryTitleNode);
+            });
+        });
+        return;
+    }
     if ([detected isEqualToString:targetLanguage]) return;
 
     ApolloLog(@"[FeedBodyDBG] body translate (len=%lu)", (unsigned long)previewText.length);
