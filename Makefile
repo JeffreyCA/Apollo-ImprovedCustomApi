@@ -157,6 +157,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloImgChestUpload.m \
     $(SRC_DIR)/ApolloLinkPreviewModel.m \
     $(SRC_DIR)/ApolloLinkPreviewCache.m \
+    $(SRC_DIR)/ApolloLinkPreviewShapeMemory.m \
     $(SRC_DIR)/ApolloLinkPreviewFetcher.m \
     $(SRC_DIR)/ApolloInlineImages.xm \
     $(SRC_DIR)/ApolloInlineLinkPreviews.xm \

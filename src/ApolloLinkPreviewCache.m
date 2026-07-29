@@ -283,6 +283,28 @@ static NSString *ApolloLinkPreviewRedditUsernameFromURL(NSURL *url) {
     });
 }
 
+- (void)enumerateStoredPreviewsUsingBlock:(void (^)(NSURL *url, ApolloLinkPreview *preview))block {
+    if (!block) return;
+
+    // Snapshot under the queue, then run the block outside it: the caller
+    // records into another store that may itself talk back to this cache, and
+    // holding the serial queue across arbitrary work invites a deadlock.
+    __block NSArray<NSDictionary *> *snapshot = nil;
+    dispatch_sync(self.queue, ^{
+        snapshot = [self.entries.allValues copy];
+    });
+
+    for (NSDictionary *entry in snapshot) {
+        NSString *urlString = [entry[@"url"] isKindOfClass:[NSString class]] ? entry[@"url"] : nil;
+        if (urlString.length == 0) continue;
+        NSURL *url = [NSURL URLWithString:urlString];
+        if (!url) continue;
+        ApolloLinkPreview *preview = [ApolloLinkPreview previewFromDictionary:entry];
+        if (!preview) continue;
+        block(url, preview);
+    }
+}
+
 - (void)evictIfNeededLocked {
     if (self.entries.count <= ApolloLinkPreviewCacheMaxEntries) return;
 

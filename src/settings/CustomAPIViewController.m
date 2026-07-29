@@ -16,6 +16,7 @@
 #import "ApolloBadgeBookScraper.h"   // ApolloBadgeBookInvalidate() — Clear Tweak Caches
 #import "ApolloUserProfileCache.h"
 #import "ApolloLinkPreviewCache.h"
+#import "ApolloLinkPreviewShapeMemory.h"
 #import "settings/ApolloDeletedCommentsSettingsViewController.h"
 #import "settings/ApolloLinkPreviewSettingsViewController.h"
 #import "settings/ApolloProfileLayoutViewController.h"
@@ -3281,6 +3282,9 @@ typedef NS_ENUM(NSInteger, Tag) {
     [alert addAction:[UIAlertAction actionWithTitle:@"Clear" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
         [[ApolloUserProfileCache sharedCache] clearAllCaches];
         [[ApolloLinkPreviewCache sharedCache] flushCache];
+        // The learned per-host card-shape verdicts are derived from those same
+        // previews, so they go with them.
+        [[ApolloLinkPreviewShapeMemory sharedMemory] reset];
         [[ApolloSubredditInfoCache sharedCache] clearAllCaches];
         ApolloBadgeBookInvalidate(nil);   // per-user earned/trophy state, memory + disk
         ApolloBannedProfileClearDismissedOverlays();

@@ -4,6 +4,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloLinkPreviewCache.h"
+#import "ApolloLinkPreviewShapeMemory.h"
 #import "ApolloState.h"
 #import "ApolloSubredditInfoCache.h"
 #import "ApolloUserProfileCache.h"
@@ -846,6 +847,16 @@ static NSString *ApolloLinkPreviewBrowserUserAgent(void) {
     } else {
         preview.fetchedAt = preview.fetchedAt ?: [NSDate date];
         [[ApolloLinkPreviewCache sharedCache] storePreview:preview forURL:url];
+        // Teach the shape memory what this host actually produces, so the NEXT
+        // uncached URL on it gets the right card shape on its first measure
+        // instead of a hero placeholder that has to shrink. Only generic web
+        // cards count: reddit user/subreddit and Bluesky previews render with a
+        // fixed card shape whatever their imagery, so they are no evidence.
+        if (preview.previewKind.length == 0) {
+            BOOL hasUsableImage = preview.imageURL.absoluteString.length > 0 && !preview.imageIsFallbackIcon;
+            [[ApolloLinkPreviewShapeMemory sharedMemory] recordHost:ApolloLinkPreviewHost(url)
+                                                     hasUsableImage:hasUsableImage];
+        }
     }
 
     NSString *key = url.absoluteString ?: @"";
