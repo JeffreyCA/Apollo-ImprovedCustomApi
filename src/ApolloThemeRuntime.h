@@ -38,6 +38,18 @@ UIColor *ApolloThemeAccentColor(void);
 // own last-resort (typically secondarySystemGroupedBackgroundColor).
 UIColor *ApolloThemeCardBackgroundColor(void);
 
+// The EFFECTIVE page background for tweak-drawn UI: the custom theme's page
+// color when one is active, else the stock theme's (Pure Black Dark Mode
+// aware). nil only if neither can be determined — callers supply their own
+// last-resort (typically systemGroupedBackgroundColor).
+UIColor *ApolloThemePageBackgroundColor(void);
+
+// The EFFECTIVE separator color for tweak-drawn UI: the custom theme's
+// separator when one is active, else the stock theme's (Pure Black Dark
+// Mode aware). nil only if neither can be determined — callers supply their
+// own last-resort (typically UIColor.separatorColor).
+UIColor *ApolloThemeSeparatorColor(void);
+
 // Re-derive a caller-provided system font in the active theme's system design.
 // Returns `base` unchanged when the theme runtime is inactive or the active
 // theme uses the default system font.

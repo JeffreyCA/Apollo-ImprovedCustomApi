@@ -1,5 +1,6 @@
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloThemeRuntime.h"
 #import <QuartzCore/QuartzCore.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
@@ -366,10 +367,13 @@ void ApolloApplyInheritedSettingsTableTheme(UITableViewController *controller) {
     if (!controller) return;
 
     UITableView *source = ApolloInheritedSettingsThemeSourceTableView(controller);
-    UIColor *backgroundColor = source.backgroundColor ?: controller.tableView.backgroundColor;
+    BOOL stale = ApolloThemeSourceTableIsStale(source);
+    UIColor *backgroundColor = (stale ? nil : source.backgroundColor)
+        ?: ApolloThemePageBackgroundColor() ?: controller.tableView.backgroundColor;
     controller.view.backgroundColor = backgroundColor;
     controller.tableView.backgroundColor = backgroundColor;
-    controller.tableView.separatorColor = source.separatorColor ?: [UIColor separatorColor];
+    controller.tableView.separatorColor = (stale ? nil : source.separatorColor)
+        ?: ApolloThemeSeparatorColor() ?: [UIColor separatorColor];
 }
 
 #pragma mark - LinkButtonNode URL extraction
