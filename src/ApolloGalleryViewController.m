@@ -237,7 +237,9 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     self.thumbnailURL = url;
     if (!url) return;
 
-    UIImage *cached = [[ApolloGalleryImageLoader sharedLoader] cachedImageForURL:url];
+    // Thumbnail tier: one downsampled still frame. A tile must never pay for a
+    // multi-frame GIF decode or a full-resolution bitmap it draws at ~185pt.
+    UIImage *cached = [[ApolloGalleryImageLoader sharedLoader] cachedThumbnailForURL:url];
     if (cached) {
         self.imageView.image = cached;
         return;
@@ -245,9 +247,8 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
 
     __weak typeof(self) weakSelf = self;
     self.imageView.alpha = 0.0;
-    self.request = [[ApolloGalleryImageLoader sharedLoader] loadImageAtURL:url
-                                                                  progress:nil
-                                                                completion:^(UIImage *image, NSData *data) {
+    self.request = [[ApolloGalleryImageLoader sharedLoader] loadThumbnailAtURL:url
+                                                                    completion:^(UIImage *image) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf || ![strongSelf.thumbnailURL isEqual:url]) return;
         if (!image) {
@@ -256,7 +257,6 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
         }
         strongSelf.imageView.image = image;
         [UIView animateWithDuration:0.18 animations:^{ strongSelf.imageView.alpha = 1.0; }];
-        (void)data;
     }];
 }
 
@@ -279,6 +279,9 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
 @property (nonatomic, strong) UIRefreshControl *refreshControl;
 @property (nonatomic, weak, nullable) ApolloGalleryImageViewer *activeViewer;
 @property (nonatomic, strong, nullable) UIBarButtonItem *filterBarButtonItem;
+// Outstanding look-ahead loads keyed by index path, so UIKit's cancel callback
+// can actually stop them (see collectionView:cancelPrefetchingForItemsAtIndexPaths:).
+@property (nonatomic, strong) NSMutableDictionary<NSIndexPath *, ApolloGalleryImageRequest *> *prefetchRequests;
 @end
 
 @implementation ApolloGalleryViewController
@@ -288,6 +291,7 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     if (self) {
         _subreddit = [subreddit copy] ?: @"";
         _feed = [[ApolloGalleryFeed alloc] initWithSubreddit:_subreddit];
+        _prefetchRequests = [NSMutableDictionary dictionary];
     }
     return self;
 }
@@ -483,9 +487,21 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     return [UIMenu menuWithTitle:@"Show" children:children];
 }
 
+
+// Index paths shift or vanish on any wholesale reload (filter toggle, sort
+// change, refresh) — the outstanding look-aheads keyed on them are stale, so
+// stop the transfers rather than let them finish into nothing.
+- (void)apollo_cancelAllPrefetches {
+    for (ApolloGalleryImageRequest *request in self.prefetchRequests.allValues) {
+        [request cancel];
+    }
+    [self.prefetchRequests removeAllObjects];
+}
+
 - (void)apollo_toggleKind:(ApolloGalleryMediaKind)kind {
     ApolloGalleryMediaKind updated = self.feed.allowedKinds ^ kind;
     if (updated == 0) return;   // never leave the gallery with nothing to show
+    [self apollo_cancelAllPrefetches];
 
     self.feed.allowedKinds = updated;
     self.filterBarButtonItem.image = [self apollo_filterButtonImage];
@@ -649,7 +665,7 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
             return;
         }
         if (addedRange.length > 0) {
-            [strongSelf apollo_appendItemsInRange:addedRange];
+            [strongSelf apollo_syncAppendedItems];
         }
         if (strongSelf.feed.isExhausted) {
             [strongSelf apollo_setFooterText:@"That's everything"];
@@ -660,10 +676,19 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     }];
 }
 
-- (void)apollo_appendItemsInRange:(NSRange)range {
-    NSMutableArray<NSIndexPath *> *indexPaths = [NSMutableArray arrayWithCapacity:range.length];
-    for (NSUInteger i = range.location; i < NSMaxRange(range); i++) {
-        [indexPaths addObject:[NSIndexPath indexPathForItem:(NSInteger)i inSection:0]];
+// Appends are derived by diffing the collection view's committed count against
+// the feed, never by trusting a callback-supplied range: a filter toggle can
+// land between a batch starting and finishing, and inserting a stale range is
+// exactly the corruption that NSInternalInconsistencyExceptions are made of.
+// The count can only have GROWN here — shrinks happen solely in
+// apollo_toggleKind, which reloads wholesale.
+- (void)apollo_syncAppendedItems {
+    NSInteger known = [self.collectionView numberOfItemsInSection:0];
+    NSInteger total = (NSInteger)self.feed.items.count;
+    if (total <= known) return;
+    NSMutableArray<NSIndexPath *> *indexPaths = [NSMutableArray arrayWithCapacity:(NSUInteger)(total - known)];
+    for (NSInteger i = known; i < total; i++) {
+        [indexPaths addObject:[NSIndexPath indexPathForItem:i inSection:0]];
     }
     // The waterfall layout rebuilds every frame in -prepareLayout, so it always
     // agrees with the data source after an append.
@@ -712,7 +737,19 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     for (NSIndexPath *indexPath in indexPaths) {
         if (indexPath.item >= (NSInteger)items.count) continue;
         ApolloGalleryItem *item = items[indexPath.item];
-        [[ApolloGalleryImageLoader sharedLoader] prefetchImageAtURL:(item.thumbnailURL ?: item.imageURL)];
+        // Handles are retained so the matching cancel callback can actually
+        // stop the download — fire-and-forget prefetch kept stale transfers
+        // alive through fast scrolls.
+        ApolloGalleryImageRequest *request =
+            [[ApolloGalleryImageLoader sharedLoader] prefetchThumbnailAtURL:(item.thumbnailURL ?: item.imageURL)];
+        if (request) self.prefetchRequests[indexPath] = request;
+    }
+}
+
+- (void)collectionView:(UICollectionView *)collectionView cancelPrefetchingForItemsAtIndexPaths:(NSArray<NSIndexPath *> *)indexPaths {
+    for (NSIndexPath *indexPath in indexPaths) {
+        [self.prefetchRequests[indexPath] cancel];
+        [self.prefetchRequests removeObjectForKey:indexPath];
     }
 }
 

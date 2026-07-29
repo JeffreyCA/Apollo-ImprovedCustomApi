@@ -42,6 +42,40 @@ static NSTimeInterval const kApolloGalleryImageTimeout = 30.0;
 }
 @end
 
+// Cap for the thumbnail decode tier. Grid tiles render at ~185pt (~555px @3x);
+// Reddit's preview variants are mostly ≤640px wide anyway, so this only bites
+// on the fallback cases where the tile URL is an original.
+static CGFloat const kApolloGalleryThumbnailDecodeMaxPixel = 800.0;
+
+// Thumbnail-tier decodes cache under their own key: the same URL can also be
+// decoded at full size by the viewer, and the two products must not shadow
+// each other. '#' can't appear un-escaped in an absolute URL string, so the
+// suffix is collision-safe.
+static NSString *ApolloGalleryThumbnailKey(NSURL *url) {
+    NSString *absolute = url.absoluteString;
+    return absolute.length > 0 ? [absolute stringByAppendingString:@"#thumb"] : nil;
+}
+
+// First-frame, downsampled decode for grid tiles. Never builds a multi-frame
+// animation and never inflates a full-resolution bitmap, so fast scrolling
+// through GIF-heavy grids costs bounded CPU/memory regardless of source size.
+static UIImage *ApolloGalleryDecodeStillThumbnail(NSData *data, CGFloat maxPixelSize) {
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+    if (!source) return nil;
+    NSDictionary *options = @{
+        (id)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+        (id)kCGImageSourceCreateThumbnailWithTransform: @YES,   // bake in EXIF orientation
+        (id)kCGImageSourceShouldCacheImmediately: @YES,         // decode here, not on first draw
+        (id)kCGImageSourceThumbnailMaxPixelSize: @(maxPixelSize),
+    };
+    CGImageRef cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)options);
+    CFRelease(source);
+    if (!cgImage) return nil;
+    UIImage *image = [UIImage imageWithCGImage:cgImage];
+    CGImageRelease(cgImage);
+    return image;
+}
+
 #pragma mark - Animated GIF decoding
 
 // UIImage's +imageWithData: keeps only the first frame of a GIF. Walk the
@@ -196,11 +230,34 @@ static NSUInteger ApolloGalleryImageCost(UIImage *image) {
     return key.length > 0 ? [self.dataCache objectForKey:key] : nil;
 }
 
-- (void)prefetchImageAtURL:(NSURL *)url {
-    if (!url || [self cachedImageForURL:url]) return;
-    [self loadImageAtURL:url progress:nil completion:^(UIImage *image, NSData *data) {
+- (UIImage *)cachedThumbnailForURL:(NSURL *)url {
+    NSString *key = ApolloGalleryThumbnailKey(url);
+    return key.length > 0 ? [self.imageCache objectForKey:key] : nil;
+}
+
+- (ApolloGalleryImageRequest *)prefetchImageAtURL:(NSURL *)url {
+    if (!url || [self cachedImageForURL:url]) return nil;
+    return [self loadImageAtURL:url progress:nil completion:^(UIImage *image, NSData *data) {
         (void)image;
         (void)data;
+    }];
+}
+
+- (ApolloGalleryImageRequest *)prefetchThumbnailAtURL:(NSURL *)url {
+    if (!url || [self cachedThumbnailForURL:url]) return nil;
+    return [self loadThumbnailAtURL:url completion:^(UIImage *image) {
+        (void)image;
+    }];
+}
+
+- (ApolloGalleryImageRequest *)loadThumbnailAtURL:(NSURL *)url
+                                       completion:(void (^)(UIImage *_Nullable image))completion {
+    return [self apollo_loadURL:url
+                   thumbnailMax:kApolloGalleryThumbnailDecodeMaxPixel
+                       progress:nil
+                     completion:^(UIImage *image, NSData *data) {
+        (void)data;
+        completion(image);
     }];
 }
 
@@ -222,13 +279,24 @@ static NSUInteger ApolloGalleryImageCost(UIImage *image) {
 - (ApolloGalleryImageRequest *)loadImageAtURL:(NSURL *)url
                                      progress:(void (^)(double fraction))progress
                                    completion:(void (^)(UIImage *image, NSData *data))completion {
+    return [self apollo_loadURL:url thumbnailMax:0.0 progress:progress completion:completion];
+}
+
+// The one loading core. `thumbnailMax` > 0 selects the thumbnail tier: a
+// first-frame, downsampled decode cached under its own key, so grid tiles
+// never pay for multi-frame GIF decodes or full-resolution bitmaps, and never
+// collide with the viewer's full decode of the same URL.
+- (ApolloGalleryImageRequest *)apollo_loadURL:(NSURL *)url
+                                 thumbnailMax:(CGFloat)thumbnailMax
+                                     progress:(void (^)(double fraction))progress
+                                   completion:(void (^)(UIImage *image, NSData *data))completion {
     NSAssert(NSThread.isMainThread, @"ApolloGalleryImageLoader must be driven from the main thread");
 
     ApolloGalleryImageRequest *request = [[ApolloGalleryImageRequest alloc] init];
     request.loader = self;
     request.completion = completion;
 
-    NSString *key = url.absoluteString;
+    NSString *key = thumbnailMax > 0.0 ? ApolloGalleryThumbnailKey(url) : url.absoluteString;
     if (key.length == 0) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!request.isCancelled && request.completion) request.completion(nil, nil);
@@ -270,9 +338,12 @@ static NSUInteger ApolloGalleryImageCost(UIImage *image) {
                                     completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         UIImage *image = nil;
         if (!error && data.length > 0) {
-            // Decoding happens here, off the main thread, so a big animated GIF
-            // never stalls a scroll.
-            image = ApolloGalleryDecodeAnimatedImage(data) ?: [UIImage imageWithData:data];
+            // Decoding happens here, off the main thread, so a big decode never
+            // stalls a scroll. The thumbnail tier decodes ONE downsampled frame;
+            // the full tier keeps animations intact.
+            image = thumbnailMax > 0.0
+                ? ApolloGalleryDecodeStillThumbnail(data, thumbnailMax)
+                : (ApolloGalleryDecodeAnimatedImage(data) ?: [UIImage imageWithData:data]);
         }
         BOOL wasCancelled = [error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled;
         if (!image && error && !wasCancelled) {
@@ -284,11 +355,22 @@ static NSUInteger ApolloGalleryImageCost(UIImage *image) {
             if (!strongSelf) return;
             if (image) {
                 [strongSelf.imageCache setObject:image forKey:key cost:ApolloGalleryImageCost(image)];
-                if (data.length > 0) [strongSelf.dataCache setObject:data forKey:key cost:data.length];
+                // Original bytes are only kept for full-tier loads — they exist
+                // for Save/Share, which never exports a thumbnail.
+                if (thumbnailMax <= 0.0 && data.length > 0) {
+                    [strongSelf.dataCache setObject:data forKey:key cost:data.length];
+                }
             }
-            ApolloGalleryPendingDownload *finished = strongSelf.pending[key];
-            [strongSelf.pending removeObjectForKey:key];
-            for (ApolloGalleryImageRequest *waiter in finished.requests) {
+            // Only touch the registry if this download still owns its slot. A
+            // cancelled task's completion can land AFTER a fresh download for
+            // the same URL has replaced pending[key]; removing and notifying
+            // blindly here would kill that newer download and hand its waiters
+            // this task's nil. Notifying the CAPTURED download is safe either
+            // way — when it was superseded, its waiters are all cancelled.
+            if (strongSelf.pending[key] == download) {
+                [strongSelf.pending removeObjectForKey:key];
+            }
+            for (ApolloGalleryImageRequest *waiter in download.requests) {
                 if (!waiter.isCancelled && waiter.completion) waiter.completion(image, data);
             }
         });

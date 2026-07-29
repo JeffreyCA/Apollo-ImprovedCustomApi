@@ -10,8 +10,12 @@
 #import <AVFoundation/AVFoundation.h>
 #import <objc/message.h>
 
-// Pages either side of the current one kept warm.
-static NSInteger const kApolloGalleryViewerPrefetchRadius = 2;
+// Pages either side of the current one kept warm with their FULL-SIZE image.
+// Deliberately shallow — full-res warm-up is the expensive kind of prefetch on
+// image-heavy subreddits — and it drops to 0 for the session after a memory
+// warning (the poster/thumbnail still shows instantly; only the sharpening
+// waits for the page to become current).
+static NSInteger const kApolloGalleryViewerPrefetchRadius = 1;
 // Vertical drag (points) or flick velocity that commits the dismissal.
 static CGFloat const kApolloGalleryViewerDismissDistance = 120.0;
 static CGFloat const kApolloGalleryViewerDismissVelocity = 850.0;
@@ -66,6 +70,10 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
 @property (nonatomic, strong, nullable) id playerEndObserver;
 @property (nonatomic, copy, nullable) NSURL *videoURL;
 @property (nonatomic, readonly) BOOL hasVideo;
+// YES once the FULL-SIZE image is what's on screen. While it's NO, the image
+// view is showing the grid's downsampled thumbnail as a placeholder — which
+// Save/Share must never export.
+@property (nonatomic) BOOL fullImageLoaded;
 // Raised while a zoom is active so the pager and the dismiss pan stay out of
 // the way (a zoomed page must pan its own content, not turn the page).
 @property (nonatomic, readonly) BOOL isZoomed;
@@ -130,6 +138,7 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
     self.imageURL = nil;
     [self teardownPlayer];
     self.imageView.image = nil;
+    self.fullImageLoaded = NO;
     self.zoomView.zoomScale = 1.0;
     self.zoomView.contentInset = UIEdgeInsetsZero;
     self.zoomView.panGestureRecognizer.enabled = NO;
@@ -234,6 +243,12 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
 }
 
 - (void)playIfPossible {
+    // Players are created LAZILY, for the current page only: adjacent pages a
+    // paging collection view keeps materialized show their poster frame and
+    // cost no AVPlayer, no buffering, no decoder session. The player appears
+    // the moment its page becomes current (this method) and disappears with
+    // cell reuse.
+    if (!self.player && self.videoURL) [self prepareVideo:self.videoURL];
     if (!self.player) return;
     // Playback needs the session on a category that isn't silenced by the
     // ringer switch; Apollo parks it on Ambient, which mutes everything.
@@ -249,14 +264,17 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
 - (void)configureWithItem:(ApolloGalleryItem *)item {
     NSURL *url = item.imageURL;
     self.imageURL = url;
-    if (item.playsAsVideo) [self prepareVideo:item.videoURL];
+    // Stash the stream URL only; playIfPossible builds the player when this
+    // page actually becomes current.
+    self.videoURL = item.playsAsVideo ? item.videoURL : nil;
 
     // A grid thumbnail for this post is usually already decoded — show it
     // immediately so the page is never a black rectangle, then swap in the
     // full-size version when it lands.
-    UIImage *placeholder = item.thumbnailURL ? [[ApolloGalleryImageLoader sharedLoader] cachedImageForURL:item.thumbnailURL] : nil;
+    UIImage *placeholder = item.thumbnailURL ? [[ApolloGalleryImageLoader sharedLoader] cachedThumbnailForURL:item.thumbnailURL] : nil;
     UIImage *full = url ? [[ApolloGalleryImageLoader sharedLoader] cachedImageForURL:url] : nil;
     self.imageView.image = full ?: placeholder;
+    self.fullImageLoaded = (full != nil);
     // The fit rect depends on the image's proportions, so re-derive it whenever
     // the displayed image changes — including the placeholder→full swap, which
     // can have a different aspect if Reddit's preview was cropped.
@@ -280,6 +298,7 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
         [strongSelf.spinner stopAnimating];
         if (image) {
             strongSelf.imageView.image = image;
+            strongSelf.fullImageLoaded = YES;
             [strongSelf apollo_resetZoomGeometry];
         }
         (void)data;
@@ -458,6 +477,11 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 
 @property (nonatomic, strong) UIPanGestureRecognizer *dismissPan;
 @property (nonatomic) BOOL isDismissing;
+// Full-res look-ahead: how deep (see kApolloGalleryViewerPrefetchRadius), and
+// the outstanding warm-up handles keyed by item index so paging can cancel the
+// ones that fell outside the window.
+@property (nonatomic) NSInteger prefetchRadius;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, ApolloGalleryImageRequest *> *viewerPrefetches;
 @property (nonatomic) CGSize lastLaidOutSize;
 @end
 
@@ -470,6 +494,8 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
         _pendingInitialIndex = MAX(0, MIN(initialIndex, (NSInteger)feed.items.count - 1));
         _currentIndex = _pendingInitialIndex;
         _chromeVisible = YES;
+        _prefetchRadius = kApolloGalleryViewerPrefetchRadius;
+        _viewerPrefetches = [NSMutableDictionary dictionary];
         self.modalPresentationStyle = UIModalPresentationFullScreen;
         self.modalPresentationCapturesStatusBarAppearance = YES;
     }
@@ -541,6 +567,18 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
             [(ApolloGalleryViewerCell *)cell pausePlayback];
         }
     }
+}
+
+- (void)didReceiveMemoryWarning {
+    [super didReceiveMemoryWarning];
+    // The loader is already dropping its caches; stop feeding it. Look-ahead
+    // stays off for the rest of this viewer session — the current page still
+    // loads full-res on demand, neighbours just wait until they're current.
+    self.prefetchRadius = 0;
+    for (ApolloGalleryImageRequest *request in self.viewerPrefetches.allValues) {
+        [request cancel];
+    }
+    [self.viewerPrefetches removeAllObjects];
 }
 
 - (void)viewDidLayoutSubviews {
@@ -842,11 +880,28 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 }
 
 - (void)apollo_prefetchAroundIndex:(NSInteger)index {
+    NSInteger radius = self.prefetchRadius;
+
+    // Paging moved the window: transfers warming pages now outside it are
+    // spent bandwidth and decode pressure, so stop them instead of letting
+    // them run to completion behind the user.
+    NSMutableArray<NSNumber *> *stale = [NSMutableArray array];
+    [self.viewerPrefetches enumerateKeysAndObjectsUsingBlock:^(NSNumber *key, ApolloGalleryImageRequest *request, BOOL *stop) {
+        if (llabs(key.integerValue - index) > radius) {
+            [request cancel];
+            [stale addObject:key];
+        }
+    }];
+    [self.viewerPrefetches removeObjectsForKeys:stale];
+
     NSArray<ApolloGalleryItem *> *items = self.feed.items;
-    for (NSInteger offset = -kApolloGalleryViewerPrefetchRadius; offset <= kApolloGalleryViewerPrefetchRadius; offset++) {
+    for (NSInteger offset = -radius; offset <= radius; offset++) {
         NSInteger neighbour = index + offset;
         if (offset == 0 || neighbour < 0 || neighbour >= (NSInteger)items.count) continue;
-        [[ApolloGalleryImageLoader sharedLoader] prefetchImageAtURL:items[neighbour].imageURL];
+        if (self.viewerPrefetches[@(neighbour)]) continue;
+        ApolloGalleryImageRequest *request =
+            [[ApolloGalleryImageLoader sharedLoader] prefetchImageAtURL:items[neighbour].imageURL];
+        if (request) self.viewerPrefetches[@(neighbour)] = request;
     }
 }
 
@@ -869,7 +924,7 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
             if (strongSelf.feed.isExhausted) [strongSelf apollo_showToast:@"That's everything"];
             return;
         }
-        [strongSelf apollo_appendItemsInRange:addedRange];
+        [strongSelf feedDidAppendItems];
         id<ApolloGalleryImageViewerDelegate> delegate = strongSelf.galleryDelegate;
         if ([delegate respondsToSelector:@selector(galleryViewer:didAppendItemsInRange:)]) {
             [delegate galleryViewer:strongSelf didAppendItemsInRange:addedRange];
@@ -877,26 +932,24 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
     }];
 }
 
-- (void)apollo_appendItemsInRange:(NSRange)range {
-    if (range.length == 0) return;
-    NSMutableArray<NSIndexPath *> *indexPaths = [NSMutableArray arrayWithCapacity:range.length];
-    for (NSUInteger i = range.location; i < NSMaxRange(range); i++) {
-        [indexPaths addObject:[NSIndexPath indexPathForItem:(NSInteger)i inSection:0]];
-    }
-    // Appending past the end never disturbs the visible page's offset, so this
-    // is safe to do while the user is mid-swipe.
-    [self.collectionView performBatchUpdates:^{
-        [self.collectionView insertItemsAtIndexPaths:indexPaths];
-    } completion:nil];
-    [self apollo_updateChromeContent];
-}
-
+// Appends are derived by diffing the collection view's committed count against
+// the feed rather than trusting a callback range — the counts are the truth,
+// and a stale range (a filter/sort change landing mid-batch) then can't be
+// inserted. Appending past the end never disturbs the visible page's offset,
+// so this is safe mid-swipe.
 - (void)feedDidAppendItems {
     if (!self.isViewLoaded) return;
     NSInteger known = [self.collectionView numberOfItemsInSection:0];
     NSInteger total = (NSInteger)self.feed.items.count;
     if (total <= known) return;
-    [self apollo_appendItemsInRange:NSMakeRange((NSUInteger)known, (NSUInteger)(total - known))];
+    NSMutableArray<NSIndexPath *> *indexPaths = [NSMutableArray arrayWithCapacity:(NSUInteger)(total - known)];
+    for (NSInteger i = known; i < total; i++) {
+        [indexPaths addObject:[NSIndexPath indexPathForItem:i inSection:0]];
+    }
+    [self.collectionView performBatchUpdates:^{
+        [self.collectionView insertItemsAtIndexPaths:indexPaths];
+    } completion:nil];
+    [self apollo_updateChromeContent];
 }
 
 #pragma mark Gestures
@@ -1152,13 +1205,19 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
 }
 
 // Original bytes when we still have them (a GIF stays animated), otherwise a
-// PNG re-encode of what's on screen.
+// PNG re-encode of the on-screen image — but ONLY once the full-size image is
+// the thing on screen. While the full load is still in flight the image view
+// is showing the grid's downsampled thumbnail, and exporting that would
+// silently save a low-res copy; returning nil instead routes the action to
+// the "Still loading" toast.
 - (NSData *)apollo_dataForCurrentItem {
     ApolloGalleryItem *item = [self apollo_currentItem];
     if (!item) return nil;
     NSData *data = [[ApolloGalleryImageLoader sharedLoader] cachedDataForURL:item.imageURL];
     if (data.length > 0) return data;
-    UIImage *image = [self apollo_currentCell].imageView.image;
+    ApolloGalleryViewerCell *cell = [self apollo_currentCell];
+    if (!cell.fullImageLoaded) return nil;
+    UIImage *image = cell.imageView.image;
     return image ? UIImagePNGRepresentation(image) : nil;
 }
 

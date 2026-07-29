@@ -180,6 +180,17 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
     if (allowedKinds == 0 || allowedKinds == _allowedKinds) return;
     _allowedKinds = allowedKinds;
     ApolloGallerySetPersistedAllowedKinds(allowedKinds);
+
+    // Invalidate any in-flight batch BEFORE rebuilding: its append accounting
+    // is anchored to a startIndex in the OLD filtered array, so letting it
+    // complete against the new one could compute a bogus (even underflowed)
+    // appended range for the UI to insert. The stale completion drops out on
+    // the generation check without advancing the cursor, so its page is simply
+    // refetched by the next load — nothing is lost, and `seenImageKeys` keeps
+    // the refetch from duplicating tiles.
+    self.generation += 1;
+    self.loading = NO;
+
     [self rebuildFilteredItems];
 }
 
@@ -436,6 +447,20 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
             [strongSelf rebuildFilteredItems];
             NSUInteger gainedThisPage = strongSelf.filteredItems.count - before;
 
+            // Defensive: the generation check above should make this
+            // impossible, but if the filtered count ever ends up below the
+            // batch's start index (these are NSUIntegers — a bare subtraction
+            // would underflow to ~2^64 and the UI would try to insert it as a
+            // range), fail the batch closed instead.
+            if (strongSelf.filteredItems.count < startIndex) {
+                ApolloLog(@"[Gallery] r/%@ batch start %lu is beyond filtered count %lu; dropping batch",
+                          strongSelf.subreddit, (unsigned long)startIndex,
+                          (unsigned long)strongSelf.filteredItems.count);
+                strongSelf.loading = NO;
+                if (completion) completion(NSMakeRange(strongSelf.filteredItems.count, 0), nil);
+                return;
+            }
+
             strongSelf.consecutiveEmptyPages = (gainedThisPage == 0)
                 ? strongSelf.consecutiveEmptyPages + 1
                 : 0;
@@ -628,14 +653,22 @@ static BOOL ApolloGalleryVideoIsSilentLoop(NSDictionary *video) {
 // and plain .mp4/.webm links.
 static NSURL *ApolloGalleryDirectVideoURL(NSURL *url) {
     NSString *extension = url.pathExtension.lowercaseString;
-    if ([extension isEqualToString:@"mp4"] || [extension isEqualToString:@"webm"]) return url;
+    if ([extension isEqualToString:@"mp4"]) return url;
     if ([extension isEqualToString:@"gifv"]) {
-        // .gifv is an HTML page; the mp4 sits at the same path.
-        NSString *absolute = url.absoluteString;
-        NSString *swapped = [absolute stringByReplacingCharactersInRange:
-                             NSMakeRange(absolute.length - 4, 4) withString:@"m.mp4"];
-        return [NSURL URLWithString:swapped] ?: nil;
+        // imgur's .gifv is an HTML wrapper; the real file is the same path with
+        // the extension swapped: i.imgur.com/foo.gifv -> i.imgur.com/foo.mp4.
+        // Swap it on the PATH component (not the raw absolute string, where a
+        // clumsy character-range splice once produced "foo.m.mp4").
+        NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+        NSString *path = components.path;
+        if (![path.pathExtension.lowercaseString isEqualToString:@"gifv"]) return nil;
+        components.path = [[path stringByDeletingPathExtension] stringByAppendingPathExtension:@"mp4"];
+        return components.URL;
     }
+    // .webm is deliberately NOT admitted: AVPlayer can't decode it, so the tile
+    // would be an unplayable poster. Most webm posts still surface through
+    // preview.reddit_video_preview (Reddit's own mp4 transcode) upstream of
+    // this fallback.
     return nil;
 }
 
