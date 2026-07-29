@@ -556,6 +556,23 @@ UIImage *ApolloEmojiSettingsIcon(NSString *emoji, UIColor *backgroundColor, CGFl
     }];
 }
 
+NSAttributedString *ApolloSymbolAttachment(NSString *symbolName, UIFont *font, UIColor *tint) {
+    if (@available(iOS 13.0, *)) {
+        UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithFont:font];
+        UIImage *image = [UIImage systemImageNamed:symbolName withConfiguration:config];
+        if (!image) return nil;
+        image = [image imageWithTintColor:tint renderingMode:UIImageRenderingModeAlwaysOriginal];
+        NSTextAttachment *attachment = [NSTextAttachment new];
+        attachment.image = image;
+        // Center the glyph on the font's cap height so it sits on the text
+        // baseline rather than floating above it.
+        CGFloat y = (font.capHeight - image.size.height) / 2.0;
+        attachment.bounds = CGRectMake(0, y, image.size.width, image.size.height);
+        return [NSAttributedString attributedStringWithAttachment:attachment];
+    }
+    return nil;
+}
+
 static NSString *ApolloBundledResourcePNGPath(NSString *resourceName) {
     return ApolloBundledResourcePath(resourceName, @"png");
 }

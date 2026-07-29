@@ -28,81 +28,8 @@
 #import "ApolloAICloudBridge.h"
 #import "ApolloThemeRuntime.h"
 #import "ApolloState.h"
+#import "ApolloTextureDecls.h"
 #import "Tweak.h"
-
-#pragma mark - Texture declarations
-
-typedef NS_ENUM(unsigned char, ApolloAIStackDirection) {
-    ApolloAIStackDirectionHorizontal = 0,
-    ApolloAIStackDirectionVertical = 1,
-};
-
-typedef NS_ENUM(unsigned char, ApolloAIStackJustifyContent) {
-    ApolloAIStackJustifyContentStart = 0,
-};
-
-typedef NS_ENUM(unsigned char, ApolloAIStackAlignItems) {
-    ApolloAIStackAlignItemsStart = 0,
-    ApolloAIStackAlignItemsStretch = 3,
-};
-
-@class ASLayoutSpec;
-@class ASStackLayoutSpec;
-@class ASInsetLayoutSpec;
-@class ASBackgroundLayoutSpec;
-@class ASDisplayNode;
-@class ASTextNode;
-
-@interface ASDisplayNode : NSObject
-- (void)addSubnode:(ASDisplayNode *)subnode;
-- (void)setNeedsLayout;
-- (void)invalidateCalculatedLayout;
-- (UIView *)view;
-- (void)onDidLoad:(void (^)(__kindof ASDisplayNode *node))body;
-@property (nonatomic) BOOL userInteractionEnabled;
-@property (nullable, nonatomic, copy) UIColor *backgroundColor;
-@property (nonatomic) CGFloat cornerRadius;
-@property (nonatomic) BOOL clipsToBounds;
-@property (nonatomic) CGFloat borderWidth;
-@property (nullable, nonatomic) CGColorRef borderColor;
-@end
-
-@interface ASTextNode : ASDisplayNode
-@property (nonatomic, copy) NSAttributedString *attributedText;
-@property (nonatomic) NSUInteger maximumNumberOfLines;
-@end
-
-@interface ASLayoutSpec : NSObject
-@end
-
-@interface ASStackLayoutSpec : ASLayoutSpec
-@property (nonatomic) ApolloAIStackDirection direction;
-@property (nonatomic) CGFloat spacing;
-@property (nonatomic) ApolloAIStackJustifyContent justifyContent;
-@property (nonatomic) ApolloAIStackAlignItems alignItems;
-@property (nonatomic) NSUInteger flexWrap;
-@property (nonatomic) NSUInteger alignContent;
-@property (nonatomic) CGFloat lineSpacing;
-@property (nullable, nonatomic) NSArray *children;
-+ (instancetype)stackLayoutSpecWithDirection:(ApolloAIStackDirection)direction
-                                     spacing:(CGFloat)spacing
-                              justifyContent:(ApolloAIStackJustifyContent)justifyContent
-                                  alignItems:(ApolloAIStackAlignItems)alignItems
-                                    children:(NSArray *)children;
-@end
-
-@interface ASInsetLayoutSpec : ASLayoutSpec
-@property (nonatomic) UIEdgeInsets insets;
-@property (nullable, nonatomic) id child;
-+ (instancetype)insetLayoutSpecWithInsets:(UIEdgeInsets)insets child:(id)child;
-@end
-
-@interface ASBackgroundLayoutSpec : ASLayoutSpec
-+ (instancetype)backgroundLayoutSpecWithChild:(id)child background:(id)background;
-@end
-
-// ASSizeRange as emitted by Apollo's class-dumped headers.
-struct ApolloAISizeRange { CGSize min; CGSize max; };
 
 #pragma mark - FoundationModels bridge (declared, resolved at runtime)
 
@@ -1768,27 +1695,6 @@ static UIColor *ApolloAISummaryThemeAccent(id headerNode) {
     return tc ? [accent resolvedColorWithTraitCollection:tc] : accent;
 }
 
-// A baseline-aligned SF Symbol as an attributed string, sized to `font` and
-// tinted `tint`. Returns nil if the symbol is unavailable so callers can fall
-// back to a plain glyph.
-static NSAttributedString *ApolloAISymbolAttachment(NSString *symbolName, UIFont *font, UIColor *tint) {
-    if (@available(iOS 13.0, *)) {
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithFont:font];
-        UIImage *image = [UIImage systemImageNamed:symbolName withConfiguration:cfg];
-        if (image) {
-            image = [image imageWithTintColor:tint renderingMode:UIImageRenderingModeAlwaysOriginal];
-            NSTextAttachment *attachment = [[NSTextAttachment alloc] init];
-            attachment.image = image;
-            // Center the glyph on the font's cap height so it sits on the text
-            // baseline rather than floating above it.
-            CGFloat y = (font.capHeight - image.size.height) / 2.0;
-            attachment.bounds = CGRectMake(0, y, image.size.width, image.size.height);
-            return [NSAttributedString attributedStringWithAttachment:attachment];
-        }
-    }
-    return nil;
-}
-
 static NSAttributedString *ApolloAISummaryAttributedText(NSString *title,
                                                          ApolloAIBoxState state,
                                                          NSString *bodyText,
@@ -1837,7 +1743,7 @@ static NSAttributedString *ApolloAISummaryAttributedText(NSString *title,
     NSString *symbolName = isPost ? @"sparkles" : @"text.bubble.fill";
     UIColor *iconTint = accent;
     if (state == ApolloAIBoxStateError) { symbolName = @"exclamationmark.triangle.fill"; iconTint = errorColor; }
-    NSAttributedString *iconAttachment = ApolloAISymbolAttachment(symbolName, titleFont, iconTint);
+    NSAttributedString *iconAttachment = ApolloSymbolAttachment(symbolName, titleFont, iconTint);
     if (iconAttachment) {
         [result appendAttributedString:iconAttachment];
         [result appendAttributedString:[[NSAttributedString alloc] initWithString:@"  " attributes:titleAttributes]];
@@ -1869,7 +1775,7 @@ static NSAttributedString *ApolloAISummaryAttributedText(NSString *title,
     BOOL showChevron = expanded || state == ApolloAIBoxStateReady || state == ApolloAIBoxStateError;
     if (showChevron) {
         NSAttributedString *chevronAttachment =
-            ApolloAISymbolAttachment(expanded ? @"chevron.down" : @"chevron.right", chevronFont, secondary);
+            ApolloSymbolAttachment(expanded ? @"chevron.down" : @"chevron.right", chevronFont, secondary);
         [result appendAttributedString:[[NSAttributedString alloc] initWithString:@"  " attributes:chevronAttributes]];
         if (chevronAttachment) {
             [result appendAttributedString:chevronAttachment];
@@ -3525,7 +3431,7 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
     ApolloAIForceHeaderRemeasure(fullName);
 }
 
-- (id)layoutSpecThatFits:(struct ApolloAISizeRange)constrainedSize {
+- (id)layoutSpecThatFits:(struct ApolloTextureSizeRange)constrainedSize {
     id originalSpec = %orig;
     if (!sEnableAISummaries) return originalSpec;
     ApolloAILogLayoutChildrenOnce((id)self, originalSpec);

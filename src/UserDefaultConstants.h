@@ -394,6 +394,9 @@ static NSString *const UDKeyChatStaleRefreshOverride = @"ChatStaleRefreshOverrid
 // of UDKeyWebJSONEnabled: turning polls on does NOT reroute the request
 // pipeline; it only unlocks the poll tap handler and the compose "Poll" type.
 static NSString *const UDKeyPollsEnabled = @"PollsEnabled";
+// Horizontal alignment of poll option text (ApolloPollOptionAlignment).
+// Default Center (0).
+static NSString *const UDKeyPollOptionAlignment = @"PollOptionAlignment";
 // Legacy NSUserDefaults location of the harvested "name=value; ..." Cookie
 // header. The cookie is now stored in the keychain (ApolloWebJSON.m); this key
 // is retained only so ApolloWebJSONLoadPersistedCredentials can migrate an older

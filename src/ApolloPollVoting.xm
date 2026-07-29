@@ -4,6 +4,7 @@
 #import "ApolloWebSessionStore.h"
 #import "ApolloThemeRuntime.h"
 #import "ApolloState.h"
+#import "ApolloTextureDecls.h"
 #import "UIWindow+Apollo.h"
 #import <objc/message.h>
 #import <objc/runtime.h>
@@ -51,6 +52,36 @@ BOOL ApolloPollsFeatureEnabled(void) {
 - (void)didLoad;
 - (void)setNeedsLayout;
 @end
+
+// MARK: - Radio list + Vote button layout injection (see ApolloTextureDecls.h
+// for the shared Texture forward declarations this and ApolloAISummary.xm
+// both use).
+//
+// Local direction/justifyContent/alignItems enum, deliberately not shared
+// with ApolloAISummary.xm's copy (see ApolloTextureDecls.h) — values
+// confirmed in Hopper: -[PollNode layoutSpecThatFits:] builds its stack with
+// stackLayoutSpecWithDirection:0x0, i.e. Vertical=0/Horizontal=1.
+typedef NS_ENUM(unsigned char, ApolloPollStackDirection) {
+    ApolloPollStackDirectionVertical = 0,
+    ApolloPollStackDirectionHorizontal = 1,
+};
+typedef NS_ENUM(unsigned char, ApolloPollStackJustifyContent) {
+    ApolloPollStackJustifyContentStart = 0,
+    ApolloPollStackJustifyContentCenter = 1,
+    ApolloPollStackJustifyContentEnd = 2,
+};
+typedef NS_ENUM(unsigned char, ApolloPollStackAlignItems) {
+    ApolloPollStackAlignItemsStart = 0,
+    ApolloPollStackAlignItemsEnd = 1,
+    ApolloPollStackAlignItemsCenter = 2,
+    ApolloPollStackAlignItemsStretch = 3,
+};
+
+// Associated-object keys for the radio-list + Vote button state below.
+static const void *kApolloPollPendingOptionKey = &kApolloPollPendingOptionKey;   // NSString*, on PollNode: not-yet-committed selected option id
+static const void *kApolloPollRadioNodeKey = &kApolloPollRadioNodeKey;           // ASTextNode*, on PollOptionNode: leading radio glyph
+static const void *kApolloPollVoteButtonNodeKey = &kApolloPollVoteButtonNodeKey; // ASDisplayNode*, on PollNode: the Vote pill's padded background (also the tap-hit target)
+static const void *kApolloPollVoteButtonTextNodeKey = &kApolloPollVoteButtonTextNodeKey; // ASTextNode*, on PollNode: the "Vote" label
 
 // Reddit's website uses this named same-origin mutation. Keep the private
 // operation name in one place so a server-side rename fails cleanly.
@@ -192,6 +223,12 @@ static UIView *ApolloPollNodeView(id node);
 static void ApolloPollRenderCurrentVote(id pollNode);
 static void ApolloPollScheduleAuthoritativeRefreshes(NSString *postID, NSString *username,
                                                       NSUInteger sequence);
+// Radio-list + Vote button state, defined further down near their %hook
+// sites; forward-declared because ApolloPollBeginVote/RollbackOptimisticVote
+// above need to clear/refresh the two-step selection UI.
+static void ApolloPollSetPendingSelection(id pollNode, NSString *optionID);
+static void ApolloPollRefreshOptionRadios(id pollNode);
+static void ApolloPollRefreshVoteButton(id pollNode);
 static NSMapTable<NSString *, id> *sApolloPollHeadersByPostID;
 static NSString *sApolloPollDiagnosticPostID;
 static NSUInteger sApolloPollDiagnosticSequence;
@@ -846,15 +883,16 @@ static void ApolloPollClearTouchHighlight(id pollNode) {
     objc_setAssociatedObject(pollNode, kApolloPollHighlightOriginalColorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
-// Consume the touch point recorded by the PollNode touchesEnded hook and map
-// it to the option row it landed on. Returns nil for taps outside the rows and
-// for touchless activations (VoiceOver sends the control action directly).
-static RDKPollOption *ApolloPollConsumeTappedOption(id pollNode) {
+// Consume (get + clear) the touch point recorded by the PollNode touchesEnded
+// hook below. Returns NO (outPoint untouched) for a touchless activation
+// (VoiceOver/Switch Control sends the control action directly, with no touch
+// point ever recorded).
+static BOOL ApolloPollConsumeLastTouchPoint(id pollNode, CGPoint *outPoint) {
     NSValue *pointValue = objc_getAssociatedObject(pollNode, kApolloPollLastTouchPointKey);
     objc_setAssociatedObject(pollNode, kApolloPollLastTouchPointKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    UIView *pollView = ApolloPollNodeView(pollNode);
-    if (!pointValue || !pollView) return nil;
-    return ApolloPollOptionAtPoint(pollView, pointValue.CGPointValue, 1);
+    if (!pointValue) return NO;
+    *outPoint = pointValue.CGPointValue;
+    return YES;
 }
 
 // Apollo builds the poll's "N Votes · Closes in …" title once in PollNode's
@@ -1023,6 +1061,14 @@ static void ApolloPollRollbackOptimisticVote(NSString *postID, RDKLink *original
 
     RDKLink *publishLink = currentLink ?: originalLink;
     id publishNode = currentPollNode ?: originalPollNode;
+
+    // A failed/cancelled vote must also reset the two-step selection UI, or
+    // the radio/Vote button would keep showing a choice that was never
+    // actually recorded.
+    ApolloPollSetPendingSelection(publishNode, nil);
+    ApolloPollRefreshOptionRadios(publishNode);
+    ApolloPollRefreshVoteButton(publishNode);
+
     if (publishLink) ApolloPollPublishLinkUpdate(publishLink, publishNode);
     else ApolloPollRenderCurrentVote(publishNode);
 }
@@ -1142,6 +1188,9 @@ static void ApolloPollBeginVote(RDKLink *link, RDKPollOption *option, NSString *
               ApolloPollPointer([sApolloPollHeadersByPostID objectForKey:baseID]));
     ApolloPollLogModel(@"tap before optimistic mutation", link);
 
+    // The two-step selection is now being committed; nothing left to track.
+    ApolloPollSetPendingSelection(pollNode, nil);
+
     // Optimistic UI: selecting an option behaves like checking a control.
     // Network latency is no longer part of the interaction feedback path.
     poll.userSelectionIdentifier = option.identifier;
@@ -1222,6 +1271,281 @@ static void ApolloPollPresentAccessibilityPicker(id pollNode, RDKLink *link,
     [presenter presentViewController:sheet animated:YES completion:nil];
 }
 
+// MARK: - Radio list + Vote button (deliberate two-step voting)
+//
+// Reddit poll votes are irreversible, so an ordinary tap only SELECTS an
+// option (its radio fills); a separate "Vote" button below the options,
+// disabled until something is selected, commits it — the button itself is
+// the confirmation step, so no extra alert is needed. The VoiceOver/Switch
+// Control path (ApolloPollPresentAccessibilityPicker above) stays one-step:
+// picking from that sheet is already a deliberate, explicit action.
+//
+// Mechanism mirrors ApolloAISummary.xm: each hooked -layoutSpecThatFits:
+// calls %orig, lazily creates+caches its own subnode(s), and splices them
+// into the returned spec tree as real stack children (not an overlay) so
+// Texture measures the taller row correctly from the first layout pass —
+// no post-display remeasure needed. Selection changes afterward mutate the
+// cached nodes directly (ApolloPollRefreshOptionRadios/RefreshVoteButton)
+// rather than re-triggering layout, since a glyph/style swap doesn't change
+// measured size and Texture doesn't guarantee a relayout reaches every child.
+
+// ApolloReborn.dylib is injected rather than linked against Apollo, so
+// referencing a Texture class by name (e.g. [ASStackLayoutSpec ...]) fails
+// at LINK time even though the class exists once Apollo actually loads
+// (confirmed: `ld: symbol(s) not found ... _OBJC_CLASS_$_ASStackLayoutSpec`).
+// Every Texture class below is resolved via objc_getClass(...) at the point
+// of use instead, matching how this file already resolves
+// _TtC6Apollo14PollOptionNode elsewhere.
+
+// -layoutSpecThatFits: can run off the main thread. ApolloThemeAccentColor()
+// is a dynamic provider color, so resolve it against an in-hierarchy view's
+// traitCollection to avoid picking the wrong light/dark variant on a
+// background thread (same pattern as ApolloManualSignInViewController.m/
+// ApolloLiveCommentsFollow.xm). Only resolves once the node's view already
+// exists — never force-loads it from a background thread.
+static UIColor *ApolloPollResolvedAccentColor(ASDisplayNode *node) {
+    UIColor *accent = ApolloThemeAccentColor() ?: UIColor.systemBlueColor;
+    BOOL loaded = [node respondsToSelector:@selector(isNodeLoaded)] && node.isNodeLoaded;
+    UITraitCollection *tc = loaded ? node.view.traitCollection : nil;
+    return tc ? [accent resolvedColorWithTraitCollection:tc] : accent;
+}
+
+static NSAttributedString *ApolloPollRadioAttributedText(BOOL selected, UIColor *tint) {
+    UIFont *font = [UIFont systemFontOfSize:20.0 weight:UIFontWeightRegular];
+    NSString *symbol = selected ? @"largecircle.fill.circle" : @"circle";
+    return ApolloSymbolAttachment(symbol, font, tint) ?:
+        [[NSAttributedString alloc] initWithString:(selected ? @"●" : @"○")
+            attributes:@{ NSForegroundColorAttributeName: tint, NSFontAttributeName: font }];
+}
+
+static NSAttributedString *ApolloPollVoteButtonAttributedText(BOOL enabled, UIColor *accent) {
+    UIColor *textColor = enabled
+        ? (ApolloColorIsLight(accent) ? UIColor.blackColor : UIColor.whiteColor)
+        : [UIColor.labelColor colorWithAlphaComponent:0.35];
+    NSMutableParagraphStyle *paragraph = [NSMutableParagraphStyle new];
+    paragraph.alignment = NSTextAlignmentCenter;
+    return [[NSAttributedString alloc] initWithString:@"Vote" attributes:@{
+        NSFontAttributeName: [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold],
+        NSForegroundColorAttributeName: textColor,
+        NSParagraphStyleAttributeName: paragraph,
+    }];
+}
+
+static NSString *ApolloPollPendingSelection(id pollNode) {
+    return objc_getAssociatedObject(pollNode, kApolloPollPendingOptionKey);
+}
+
+static void ApolloPollSetPendingSelection(id pollNode, NSString *optionID) {
+    if (!pollNode) return;
+    objc_setAssociatedObject(pollNode, kApolloPollPendingOptionKey, [optionID copy],
+                              OBJC_ASSOCIATION_COPY_NONATOMIC);
+}
+
+// Lazily creates+caches a bare ASTextNode under `key` on `host` (added via
+// addSubnode:). `didCreate` (if non-NULL) reports whether this call made a
+// fresh node vs. returned the cached one, so callers can set one-time
+// initial content without overwriting a later refresh's state.
+static ASTextNode *ApolloPollEnsureTextNode(ASDisplayNode *host, const void *key, BOOL *didCreate) {
+    ASTextNode *node = objc_getAssociatedObject(host, key);
+    if (node) {
+        if (didCreate) *didCreate = NO;
+        return node;
+    }
+    Class textNodeClass = objc_getClass("ASTextNode");
+    if (!textNodeClass) return nil;
+    node = [textNodeClass new];
+    [host addSubnode:node];
+    objc_setAssociatedObject(host, key, node, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (didCreate) *didCreate = YES;
+    return node;
+}
+
+// The leading radio glyph on a PollOptionNode. Called once per node instance
+// from -[PollOptionNode layoutSpecThatFits:] to splice it into the row;
+// selected/unselected content is refreshed separately, out of band, by
+// ApolloPollRefreshOptionRadios — this only ever sets the initial state.
+static ASTextNode *ApolloPollEnsureRadioNode(ASDisplayNode *optionNode) {
+    BOOL didCreate = NO;
+    ASTextNode *radio = ApolloPollEnsureTextNode(optionNode, kApolloPollRadioNodeKey, &didCreate);
+    if (didCreate) {
+        radio.attributedText = ApolloPollRadioAttributedText(NO, ApolloPollResolvedAccentColor(optionNode));
+    }
+    return radio;
+}
+
+// The Vote pill's text label — no background/cornerRadius of its own (see
+// ApolloPollEnsureVoteButtonBackgroundNode for why). No default content set
+// here either: the PollNode layout hook always calls
+// ApolloPollRefreshVoteButton right before this, on every pass.
+static ASTextNode *ApolloPollEnsureVoteButtonTextNode(ASDisplayNode *pollNode) {
+    return ApolloPollEnsureTextNode(pollNode, kApolloPollVoteButtonTextNodeKey, NULL);
+}
+
+// The Vote pill's visual chrome — a plain node stretched (via
+// ASBackgroundLayoutSpec below) to cover the text node plus its padding.
+// Also the tap-hit target (ApolloPollTouchHitVoteButton), so the padded
+// area is tappable, matching how it looks.
+static ASDisplayNode *ApolloPollEnsureVoteButtonBackgroundNode(ASDisplayNode *pollNode) {
+    ASDisplayNode *background = objc_getAssociatedObject(pollNode, kApolloPollVoteButtonNodeKey);
+    if (background) return background;
+    Class displayNodeClass = objc_getClass("ASDisplayNode");
+    if (!displayNodeClass) return nil;
+    background = [displayNodeClass new];
+    background.cornerRadius = 10.0;
+    background.clipsToBounds = YES;
+    [pollNode addSubnode:background];
+    objc_setAssociatedObject(pollNode, kApolloPollVoteButtonNodeKey, background, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return background;
+}
+
+// Walks a mounted poll's option row VIEWS, not the Swift optionNodes array
+// ivar (a bridged Array<PollOptionNode>, unsafe to read as plain NSArray from
+// ObjC — see ApolloPollOptionAtPoint above). Mirrors its recursion shape.
+static void ApolloPollForEachOptionNode(UIView *containerView, NSUInteger depth,
+                                        void (^body)(id optionNode)) {
+    Class optionClass = objc_getClass("_TtC6Apollo14PollOptionNode");
+    for (UIView *row in containerView.subviews) {
+        id node = [row respondsToSelector:@selector(asyncdisplaykit_node)] ? [row asyncdisplaykit_node] : nil;
+        if (node && [node isKindOfClass:optionClass]) {
+            body(node);
+            continue;
+        }
+        if (depth > 0) ApolloPollForEachOptionNode(row, depth - 1, body);
+    }
+}
+
+// Re-derives every option row's radio glyph from the pending selection.
+// Pure content mutation on already-mounted nodes — no relayout needed, since
+// swapping "circle"/"largecircle.fill.circle" never changes measured size.
+static void ApolloPollRefreshOptionRadios(id pollNode) {
+    UIView *pollView = ApolloPollNodeView(pollNode);
+    if (!pollView) return;
+    NSString *pending = ApolloPollPendingSelection(pollNode);
+    ApolloPollForEachOptionNode(pollView, 1, ^(id optionNode) {
+        ASTextNode *radio = ApolloPollEnsureRadioNode(optionNode);
+        if (!radio) return;
+        RDKPollOption *option = ApolloPollObjectIvar(optionNode, "option");
+        BOOL selected = pending.length > 0 && [pending isEqualToString:option.identifier];
+        UIColor *tint = ApolloPollResolvedAccentColor(optionNode);
+        radio.attributedText = ApolloPollRadioAttributedText(selected, tint);
+        [radio setNeedsDisplay];
+    });
+}
+
+// Restyles the Vote pill (enabled/accent vs. disabled/dim) from the pending
+// selection. Same direct-mutation approach as the radios and for the same
+// reason: the background is stretched by ASBackgroundLayoutSpec in the
+// PollNode layout hook, not resized here, so no relayout is needed.
+static void ApolloPollRefreshVoteButton(id pollNode) {
+    ASTextNode *text = ApolloPollEnsureVoteButtonTextNode(pollNode);
+    ASDisplayNode *background = ApolloPollEnsureVoteButtonBackgroundNode(pollNode);
+    if (!text || !background) return;
+    BOOL enabled = ApolloPollPendingSelection(pollNode).length > 0;
+    UIColor *accent = ApolloPollResolvedAccentColor(pollNode);
+    background.backgroundColor = enabled ? accent : [accent colorWithAlphaComponent:0.15];
+    text.attributedText = ApolloPollVoteButtonAttributedText(enabled, accent);
+    [background setNeedsDisplay];
+    [text setNeedsDisplay];
+}
+
+// Hit-test the cached Vote pill's background node frame — stretched to the
+// full padded pill (see ApolloPollEnsureVoteButtonBackgroundNode), so the
+// padding is tappable too. It's a direct subnode of pollNode, so its frame
+// is already in pollNode's view's coordinate space, same as
+// ApolloPollOptionAtPoint's option-row hit-testing — no conversion needed.
+static BOOL ApolloPollTouchHitVoteButton(id pollNode, CGPoint pointInPollView) {
+    ASDisplayNode *background = objc_getAssociatedObject(pollNode, kApolloPollVoteButtonNodeKey);
+    BOOL loaded = [background respondsToSelector:@selector(isNodeLoaded)] && background.isNodeLoaded;
+    UIView *backgroundView = loaded ? background.view : nil;
+    if (!backgroundView || !backgroundView.window) return NO;
+    return CGRectContainsPoint(backgroundView.frame, pointInPollView);
+}
+
+// Overrides the option text's paragraph alignment to match sPollOptionAlignment.
+// Apollo rebuilds textNode's attributedText inside %orig on every pass, so
+// this must re-run every time; mutating the node in place works since %orig's
+// returned spec already references this same instance.
+static void ApolloPollApplyOptionTextAlignment(id optionNode) {
+    ASTextNode *textNode = ApolloPollObjectIvar(optionNode, "textNode");
+    if (![textNode isKindOfClass:objc_getClass("ASTextNode")]) return;
+    NSAttributedString *current = textNode.attributedText;
+    if (current.length == 0) return;
+    NSTextAlignment alignment = (sPollOptionAlignment == ApolloPollOptionAlignmentLeft)
+        ? NSTextAlignmentLeft : NSTextAlignmentCenter;
+    // Always rewrite, no "already matches" short-circuit: a run with no
+    // NSParagraphStyleAttributeName reads back as nil, and -[nil alignment]
+    // is 0 same as NSTextAlignmentLeft, which would false-positive-skip.
+    NSMutableAttributedString *realigned = [current mutableCopy];
+    [realigned enumerateAttribute:NSParagraphStyleAttributeName
+                           inRange:NSMakeRange(0, realigned.length)
+                           options:0
+                        usingBlock:^(NSParagraphStyle *value, NSRange range, BOOL *stop) {
+        NSMutableParagraphStyle *paragraph = value ? [value mutableCopy] : [NSMutableParagraphStyle new];
+        paragraph.alignment = alignment;
+        [realigned addAttribute:NSParagraphStyleAttributeName value:paragraph range:range];
+    }];
+    textNode.attributedText = realigned;
+}
+
+// Injects the leading radio glyph into each unvoted option row. PollOptionNode
+// only exists for an interactive poll — except an ended-but-never-voted poll,
+// which still renders PollOptionNode rows even though taps route to %orig.
+// Skip the radio there so a no-longer-votable poll doesn't look selectable.
+%hook _TtC6Apollo14PollOptionNode
+- (id)layoutSpecThatFits:(struct ApolloTextureSizeRange)constrainedSize {
+    id originalSpec = %orig;
+
+    // Alignment is a display preference, independent of the native-voting
+    // feature (radio glyph + Vote button) gated further down — applies even
+    // with Native Polls off, or to an ended/voted poll's results text.
+    ApolloPollApplyOptionTextAlignment(self);
+
+    // originalSpec is always ASCenterLayoutSpec > ASInsetLayoutSpec >
+    // ASTextNode (confirmed via a runtime spec-tree dump). ASCenterLayoutSpec
+    // unconditionally centers its child, which is what Center mode wants, so
+    // leave it alone there. Left mode has no property to ask it to left-align
+    // instead, so unwrap it and reuse its one child (Apollo's padding-only
+    // inset spec) directly, dropping the centering wrapper.
+    id optionContent = originalSpec;
+    if (sPollOptionAlignment == ApolloPollOptionAlignmentLeft) {
+        Class centerClass = objc_getClass("ASCenterLayoutSpec");
+        if (centerClass && [originalSpec isKindOfClass:centerClass]) {
+            id unwrapped = ((ASLayoutSpec *)originalSpec).children.firstObject;
+            if (unwrapped) optionContent = unwrapped;
+        }
+    }
+
+    if (!ApolloPollsFeatureEnabled()) return optionContent;
+
+    id pollNode = [(ASDisplayNode *)self supernode];
+    RDKPoll *poll = pollNode ? ApolloPollObjectIvar(pollNode, "poll") : nil;
+    if (poll.hasPollEnded) return optionContent;
+
+    ASTextNode *radio = ApolloPollEnsureRadioNode((ASDisplayNode *)self);
+    if (!radio) return optionContent;
+    Class stackClass = objc_getClass("ASStackLayoutSpec");
+    Class insetClass = objc_getClass("ASInsetLayoutSpec");
+    if (!stackClass || !insetClass) return optionContent;
+
+    // flexShrink:1 lets optionContent shrink to the width left over after the
+    // radio (default is unconstrained-natural-width, which just overflows
+    // instead of wrapping). flexGrow makes it fill that leftover width
+    // instead of hugging its own tight content — needed in Center mode so
+    // centered text has room to center in; Left mode leaves it at 0 so a
+    // short option stays pinned left by justifyContent:Start.
+    ASLayoutElementStyle *contentStyle = [(ASLayoutSpec *)optionContent style];
+    contentStyle.flexShrink = 1.0;
+    contentStyle.flexGrow = (sPollOptionAlignment == ApolloPollOptionAlignmentLeft) ? 0.0 : 1.0;
+    ASStackLayoutSpec *row = [stackClass
+        stackLayoutSpecWithDirection:ApolloPollStackDirectionHorizontal
+                              spacing:2.0
+                       justifyContent:ApolloPollStackJustifyContentStart
+                           alignItems:ApolloPollStackAlignItemsCenter
+                             children:@[radio, optionContent]];
+    return [insetClass insetLayoutSpecWithInsets:UIEdgeInsetsMake(0, 8, 0, 0) child:row];
+}
+%end
+
 // PollNode is an ASControlNode: Apollo registers pollNodeTappedWithSender: for
 // its TouchUpInside event, and taps anywhere inside the poll — option rows
 // included, since plain option subnodes bubble touches up the responder chain —
@@ -1236,6 +1560,39 @@ static void ApolloPollPresentAccessibilityPicker(id pollNode, RDKLink *link,
     UIColor *card = ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryBackground);
     UIView *pollView = ApolloPollNodeView(self);
     if (card && pollView) pollView.backgroundColor = card;
+}
+
+// Appends the always-present, disabled-until-selected Vote button below the
+// option/results content — see "Radio list + Vote button" above for the
+// mechanism.
+- (id)layoutSpecThatFits:(struct ApolloTextureSizeRange)constrainedSize {
+    id originalSpec = %orig;
+    if (!ApolloPollsFeatureEnabled()) return originalSpec;
+    RDKPoll *poll = ApolloPollObjectIvar(self, "poll");
+    if (!poll || poll.hasPollEnded || poll.userSelectionIdentifier.length > 0) return originalSpec;
+
+    ApolloPollRefreshVoteButton(self);
+    ASTextNode *text = ApolloPollEnsureVoteButtonTextNode((ASDisplayNode *)self);
+    ASDisplayNode *background = ApolloPollEnsureVoteButtonBackgroundNode((ASDisplayNode *)self);
+    if (!text || !background) return originalSpec;
+    Class stackClass = objc_getClass("ASStackLayoutSpec");
+    Class insetClass = objc_getClass("ASInsetLayoutSpec");
+    Class backgroundClass = objc_getClass("ASBackgroundLayoutSpec");
+    if (!stackClass || !insetClass || !backgroundClass) return originalSpec;
+    // The padded text drives the pill's size; the background is stretched to
+    // match, so the padding is part of the visible, tappable pill (see
+    // ApolloPollTouchHitVoteButton), not empty space around it.
+    id textInset = [insetClass
+        insetLayoutSpecWithInsets:UIEdgeInsetsMake(6, 16, 6, 16) child:text];
+    id pill = [backgroundClass backgroundLayoutSpecWithChild:textInset background:background];
+    id buttonMargin = [insetClass
+        insetLayoutSpecWithInsets:UIEdgeInsetsMake(0, 20, 16, 20) child:pill];
+    return [stackClass
+        stackLayoutSpecWithDirection:ApolloPollStackDirectionVertical
+                              spacing:0
+                       justifyContent:ApolloPollStackJustifyContentStart
+                           alignItems:ApolloPollStackAlignItemsStretch
+                             children:@[originalSpec, buttonMargin]];
 }
 
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
@@ -1389,39 +1746,67 @@ static void ApolloPollPresentAccessibilityPicker(id pollNode, RDKLink *link,
     if (![pollNode isKindOfClass:objc_getClass("_TtC6Apollo8PollNode")]) {
         pollNode = ApolloPollObjectIvar(self, "pollNode");
     }
-    RDKPollOption *option = ApolloPollConsumeTappedOption(pollNode);
+
     // Apollo's original action is still useful for an ended/already-voted
     // poll's native result presentation. Its legacy "open Reddit to vote"
     // modal is only reachable for an active unvoted poll, which the native
     // feature owns completely below.
     if (poll.hasPollEnded || poll.userSelectionIdentifier.length > 0) {
+        CGPoint discardedPoint;
+        ApolloPollConsumeLastTouchPoint(pollNode, &discardedPoint); // drop any stray touch point
         %orig;
         return;
     }
 
     NSString *username = ApolloActiveAccountUsername();
-    if (option) {
-        ApolloPollDiagnosticLog(@" poll action resolved option post=%@ link=%@ pollNode=%@ option=%@(%@)",
+    CGPoint touchPoint;
+    UIView *pollView = ApolloPollNodeView(pollNode);
+    BOOL hasTouchPoint = ApolloPollConsumeLastTouchPoint(pollNode, &touchPoint) && pollView != nil;
+
+    // Two-step voting (see "Radio list + Vote button" above): a tap on the
+    // Vote button commits the pending selection.
+    if (hasTouchPoint && ApolloPollTouchHitVoteButton(pollNode, touchPoint)) {
+        NSString *pendingID = ApolloPollPendingSelection(pollNode);
+        RDKPollOption *pendingOption = nil;
+        for (RDKPollOption *candidate in poll.options) {
+            if ([candidate.identifier isEqualToString:pendingID]) { pendingOption = candidate; break; }
+        }
+        if (!pendingOption) return; // Vote tapped with nothing selected: no-op.
+        ApolloPollDiagnosticLog(@" vote button tapped post=%@ link=%@ pollNode=%@ option=%@(%@)",
                   link.identifier, ApolloPollPointer(link), ApolloPollPointer(pollNode),
-                  option.identifier, ApolloPollPointer(option));
+                  pendingOption.identifier, ApolloPollPointer(pendingOption));
         if (username.length == 0) {
             ApolloPollShowError(ApolloPollPresenter(), @"Sign in to a Reddit account to vote in polls.");
             return;
         }
-        ApolloPollBeginVote(link, option, username, pollNode);
-    } else {
-        // The whole legacy PollNode is one control, so Apollo routes taps on
-        // "N Votes · Closes in …" through the same action that used to present
-        // its web-voting modal. Under native polls that metadata is deliberately
-        // inert. Only touchless assistive-tech activation needs an option list.
-        ApolloPollDiagnosticLog(@" poll action ignored metadata/accessibility path post=%@ link=%@ pollNode=%@",
-                  link.identifier, ApolloPollPointer(link), ApolloPollPointer(pollNode));
-        if (UIAccessibilityIsVoiceOverRunning() || UIAccessibilityIsSwitchControlRunning()) {
-            if (username.length > 0) {
-                ApolloPollPresentAccessibilityPicker(pollNode, link, username);
-            } else {
-                ApolloPollShowError(ApolloPollPresenter(), @"Sign in to a Reddit account to vote in polls.");
-            }
+        ApolloPollBeginVote(link, pendingOption, username, pollNode);
+        return;
+    }
+
+    RDKPollOption *tappedOption = hasTouchPoint ? ApolloPollOptionAtPoint(pollView, touchPoint, 1) : nil;
+    if (tappedOption) {
+        ApolloPollDiagnosticLog(@" option row selected (not yet voted) post=%@ link=%@ pollNode=%@ option=%@(%@)",
+                  link.identifier, ApolloPollPointer(link), ApolloPollPointer(pollNode),
+                  tappedOption.identifier, ApolloPollPointer(tappedOption));
+        ApolloPollSetPendingSelection(pollNode, tappedOption.identifier);
+        ApolloPollRefreshOptionRadios(pollNode);
+        ApolloPollRefreshVoteButton(pollNode);
+        UISelectionFeedbackGenerator *feedback = [UISelectionFeedbackGenerator new];
+        [feedback selectionChanged];
+        return;
+    }
+
+    // PollNode is one control, so Apollo routes taps on "N Votes · Closes in …"
+    // (and any other non-option/non-button area) through this same action. Only
+    // touchless assistive tech needs the option list below — picking from it is
+    // already a deliberate action, so it still votes directly.
+    ApolloPollDiagnosticLog(@" poll action ignored metadata/accessibility path post=%@ link=%@ pollNode=%@",
+              link.identifier, ApolloPollPointer(link), ApolloPollPointer(pollNode));
+    if (UIAccessibilityIsVoiceOverRunning() || UIAccessibilityIsSwitchControlRunning()) {
+        if (username.length > 0) {
+            ApolloPollPresentAccessibilityPicker(pollNode, link, username);
+        } else {
+            ApolloPollShowError(ApolloPollPresenter(), @"Sign in to a Reddit account to vote in polls.");
         }
     }
 }

@@ -29,6 +29,11 @@ UIImage *ApolloEmojiSettingsIcon(NSString *emoji, UIColor *backgroundColor, CGFl
 UIImage *ApolloBuyMeACoffeeSettingsIcon(CGFloat size);
 UIImage *ApolloRebornOptionsSettingsIcon(CGFloat size);
 
+// Baseline-aligned SF Symbol as an attributed string, sized to `font` and
+// tinted `tint`. Returns nil if the symbol can't load, so callers can fall
+// back to a plain-text glyph. Shared by ApolloAISummary.xm/ApolloPollVoting.xm.
+NSAttributedString *ApolloSymbolAttachment(NSString *symbolName, UIFont *font, UIColor *tint);
+
 // Resolve a path to a bundled tweak resource across the install layouts we
 // support (jailbreak rootful/rootless, Sideloadly/cyan/azule deb fuse, and
 // inject-deb-local.sh). Returns nil if no layout has the file.

@@ -112,6 +112,7 @@ NSArray<NSString *> *sTranslationSkipLanguages = nil;
 
 BOOL sWebJSONEnabled = NO;
 BOOL sPollsFeatureEnabled = NO;
+NSInteger sPollOptionAlignment = ApolloPollOptionAlignmentCenter;
 NSString *sWebSessionCookieHeader = nil;
 NSString *sWebSessionModhash = nil;
 NSString *sWebSessionUsername = nil;
