@@ -193,6 +193,8 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/settings/InlineMediaSettingsViewController.m \
     $(SRC_DIR)/settings/InfoRowSettingsViewController.m \
     $(SRC_DIR)/settings/ApolloOpenInAppViewController.m \
+    $(SRC_DIR)/settings/ApolloLinkCompanionViewController.m \
+    $(SRC_DIR)/settings/ApolloLinkCompanionIconData.m \
     $(SRC_DIR)/settings/TranslationSettingsViewController.m \
     $(SRC_DIR)/settings/SavedCategoriesViewController.m \
     $(SRC_DIR)/TagFiltersViewController.m \

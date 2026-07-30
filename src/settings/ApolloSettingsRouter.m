@@ -10,6 +10,7 @@
 #import "settings/ApolloDeletedCommentsSettingsViewController.h"
 #import "settings/ApolloLinkPreviewSettingsViewController.h"
 #import "settings/ApolloOpenInAppViewController.h"
+#import "settings/ApolloLinkCompanionViewController.h"
 #import "settings/CustomAPIViewController.h"
 #import "settings/InfoRowSettingsViewController.h"
 #import "settings/InlineMediaSettingsViewController.h"
@@ -76,6 +77,9 @@ static void ApolloSettingsRouterEnsureRegistry(void) {
         add(@"rich-link-previews", @"Rich Link Previews", @"Apollo Reborn → Features", ApolloSettingsInsetGrouped([ApolloLinkPreviewSettingsViewController class]));
         add(@"inline-media", @"Inline Media", @"Apollo Reborn → Media", ApolloSettingsInsetGrouped([InlineMediaSettingsViewController class]));
         add(@"open-in-app", @"Open in App", @"General → Open Links", ApolloSettingsInsetGrouped([ApolloOpenInAppViewController class]));
+        add(@"link-companion", @"Link Companion", @"General → Open Links → Open in App", ^UIViewController *{
+            return [[ApolloLinkCompanionViewController alloc] init]; // hero page, not a table
+        });
         add(@"theme-manager", @"Theme Manager", @"Appearance", ^UIViewController *{
             return [[ApolloThemeManagerViewController alloc] init]; // default init = hub/list mode
         });
