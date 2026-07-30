@@ -1,6 +1,7 @@
 // ApolloGalleryFeed.m — see ApolloGalleryFeed.h for the feature overview.
 
 #import "ApolloGalleryFeed.h"
+#import "ApolloTagFilters.h"
 #import "ApolloCommon.h"
 #import "ApolloState.h"
 
@@ -104,9 +105,10 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 }
 
 - (BOOL)shouldBlurThumbnail {
-    // Mirrors what the feed itself does for flagged posts: obscure the picture
-    // in the grid, show it plainly once the user opens it deliberately.
-    return self.isNSFW || self.isSpoiler;
+    // Match Apollo's active-account adult-content choice rather than covering
+    // every mature tile unconditionally. Spoilers keep their independent
+    // reveal gate regardless of that preference.
+    return self.isSpoiler || (self.isNSFW && ApolloShouldBlurNSFWMedia());
 }
 
 @end

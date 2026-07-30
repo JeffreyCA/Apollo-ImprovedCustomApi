@@ -24,6 +24,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloTagFilters.h"
 #import "Tweak.h"
 #import "UIWindow+Apollo.h"
 #import "UserDefaultConstants.h"
@@ -219,6 +220,15 @@ static NSMutableDictionary<NSString *, NSNumber *> *sTagNoProfanityByUser = nil;
 static NSString *sTagActiveUsername = nil;
 static NSInteger sTagEffectiveNoProfanity = -1;
 
+NSNotificationName const ApolloAdultContentBlurPreferenceDidChangeNotification =
+    @"ApolloAdultContentBlurPreferenceDidChangeNotification";
+
+BOOL ApolloShouldBlurNSFWMedia(void) {
+    // Unknown stays covered until Apollo finishes loading the active account,
+    // just as its native feed does during launch.
+    return sTagEffectiveNoProfanity != 0;
+}
+
 static void ApolloTagRefreshAllVisibleCells(void);
 
 static NSString *ApolloTagNormalizedUsername(id userObject) {
@@ -257,6 +267,9 @@ static void ApolloTagRecomputeEffectiveNoProfanity(void) {
     sTagEffectiveNoProfanity = effective;
     ApolloLog(@"[TagFilters] Effective pref_no_profanity=%ld for u/%@ (blur mature media)",
               (long)effective, sTagActiveUsername ?: @"(unknown)");
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:ApolloAdultContentBlurPreferenceDidChangeNotification
+                      object:nil];
     ApolloTagRefreshAllVisibleCells();
 }
 
