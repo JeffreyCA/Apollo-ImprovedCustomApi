@@ -21,22 +21,6 @@ static NSInteger const kApolloGalleryEmptyPageLimit = 3;
 
 static NSTimeInterval const kApolloGalleryRequestTimeout = 20.0;
 
-// The media-kind filter is a per-view preference rather than a Settings toggle,
-// so it lives on its own key here instead of in UserDefaultConstants.h.
-static NSString *const kApolloGalleryAllowedKindsKey = @"ApolloGalleryAllowedKinds";
-
-static ApolloGalleryMediaKind ApolloGalleryPersistedAllowedKinds(void) {
-    id stored = [[NSUserDefaults standardUserDefaults] objectForKey:kApolloGalleryAllowedKindsKey];
-    if (![stored isKindOfClass:[NSNumber class]]) return ApolloGalleryMediaKindAll;
-    ApolloGalleryMediaKind kinds = (ApolloGalleryMediaKind)((NSNumber *)stored).unsignedIntegerValue;
-    kinds &= ApolloGalleryMediaKindAll;
-    return kinds ?: ApolloGalleryMediaKindAll;
-}
-
-static void ApolloGallerySetPersistedAllowedKinds(ApolloGalleryMediaKind kinds) {
-    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)kinds forKey:kApolloGalleryAllowedKindsKey];
-}
-
 #pragma mark - Small JSON helpers
 
 static NSString *ApolloGalleryString(id value) {
@@ -159,7 +143,11 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
         _seenImageKeys = [NSMutableSet set];
         _sort = ApolloGallerySortHot;
         _topWindow = ApolloGalleryTopWindowWeek;
-        _allowedKinds = ApolloGalleryPersistedAllowedKinds();
+        // Every gallery opens showing everything. The filter is deliberately
+        // NOT persisted: it lives on this feed object, and each gallery visit
+        // creates a fresh feed — so "videos only" in one subreddit can't leak
+        // into the next, or into next week.
+        _allowedKinds = ApolloGalleryMediaKindAll;
         _filteredItems = @[];
     }
     return self;
@@ -179,7 +167,6 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
     allowedKinds &= ApolloGalleryMediaKindAll;
     if (allowedKinds == 0 || allowedKinds == _allowedKinds) return;
     _allowedKinds = allowedKinds;
-    ApolloGallerySetPersistedAllowedKinds(allowedKinds);
 
     // Invalidate any in-flight batch BEFORE rebuilding: its append accounting
     // is anchored to a startIndex in the OLD filtered array, so letting it

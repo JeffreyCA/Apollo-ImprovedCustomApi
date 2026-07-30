@@ -126,7 +126,9 @@ typedef NS_ENUM(NSInteger, ApolloGalleryTopWindow) {
 @property (nonatomic, readonly) NSArray<ApolloGalleryItem *> *allItems;
 
 // Which kinds `items` includes. Never 0 — clearing the last kind is rejected,
-// since an empty gallery is never what someone meant. Persisted across launches.
+// since an empty gallery is never what someone meant. Scoped to THIS feed (one
+// gallery visit): every gallery opens with all kinds on, and a filter chosen in
+// one subreddit never follows you into another.
 @property (nonatomic) ApolloGalleryMediaKind allowedKinds;
 // How many of everything fetched so far are of `kind`, for the filter menu's
 // subtitles.
