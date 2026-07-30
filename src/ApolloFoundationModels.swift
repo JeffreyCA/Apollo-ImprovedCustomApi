@@ -50,6 +50,26 @@ public final class ApolloFoundationModels: NSObject {
     private var preparedSessions: [String: Any] = [:]
     private var preparedInstructions: [String: String] = [:]
     private var activeTasks: [String: Task<Void, Never>] = [:]
+    // A cancelled task can finish after its replacement has already been
+    // stored. Cleanup must remove the registry entry only when the finishing
+    // task still owns it; otherwise the old task makes the replacement
+    // unreachable to later cancellation. Monotonic generations provide that
+    // ownership check without comparing opaque Task values.
+    private var activeTaskGenerations: [String: UInt64] = [:]
+    private var nextTaskGeneration: UInt64 = 0
+
+    private func beginTaskGeneration(_ identifier: String) -> UInt64 {
+        nextTaskGeneration &+= 1
+        let generation = nextTaskGeneration
+        activeTaskGenerations[identifier] = generation
+        return generation
+    }
+
+    private func finishTask(_ identifier: String, generation: UInt64) {
+        guard activeTaskGenerations[identifier] == generation else { return }
+        activeTasks.removeValue(forKey: identifier)
+        activeTaskGenerations.removeValue(forKey: identifier)
+    }
 
     /// The on-device model used for every summary. We deliberately do NOT use
     /// `SystemLanguageModel.default`: its default safety guardrail frequently
@@ -141,6 +161,7 @@ public final class ApolloFoundationModels: NSObject {
     @objc public func cancelRequest(_ identifier: String) {
         preparedSessions.removeValue(forKey: identifier)
         preparedInstructions.removeValue(forKey: identifier)
+        activeTaskGenerations.removeValue(forKey: identifier)
         activeTasks.removeValue(forKey: identifier)?.cancel()
     }
 
@@ -171,6 +192,8 @@ public final class ApolloFoundationModels: NSObject {
         // Run the async generation on the main actor: the framework does the
         // heavy work on its own executor and only resumes here to deliver
         // snapshots, so the callbacks land on the main thread for free.
+        activeTasks[identifier]?.cancel()
+        let generation = beginTaskGeneration(identifier)
         let task = Task { @MainActor in
             // A fresh, permissive-guardrail session built from `instructions`.
             // Used when no prepared session was staged, and for the single
@@ -234,9 +257,8 @@ public final class ApolloFoundationModels: NSObject {
                     onComplete(nil, Self.classify(error))
                 }
             }
-            activeTasks.removeValue(forKey: identifier)
+            finishTask(identifier, generation: generation)
         }
-        activeTasks[identifier]?.cancel()
         activeTasks[identifier] = task
         #else
         onComplete(nil, Self.makeError(code: 4, message: "FoundationModels not available in this build"))
@@ -278,6 +300,8 @@ public final class ApolloFoundationModels: NSObject {
         // (empty-string instructions sentinel — never an instructed one).
         let prepared = preparedSessions.removeValue(forKey: identifier) as? LanguageModelSession
         let preparedIsPlain = preparedInstructions.removeValue(forKey: identifier) == ""
+        activeTasks[identifier]?.cancel()
+        let generation = beginTaskGeneration(identifier)
         let task = Task { @MainActor in
             do {
                 if Task.isCancelled { throw CancellationError() }
@@ -298,9 +322,8 @@ public final class ApolloFoundationModels: NSObject {
                     onComplete(nil, Self.classify(error))
                 }
             }
-            activeTasks.removeValue(forKey: identifier)
+            finishTask(identifier, generation: generation)
         }
-        activeTasks[identifier]?.cancel()
         activeTasks[identifier] = task
         #else
         onComplete(nil, Self.makeError(code: 4, message: "FoundationModels not available in this build"))
