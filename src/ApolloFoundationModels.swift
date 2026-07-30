@@ -233,7 +233,12 @@ public final class ApolloFoundationModels: NSObject {
                             let elapsed = ContinuousClock.now - startedAt
                             aiLog.debug("first text \(identifier, privacy: .public) after \(String(describing: elapsed), privacy: .public)")
                         }
-                        onPartial(latest)
+                        // A replaced task can yield one last buffered snapshot
+                        // after cancellation. Never let that stale generation
+                        // overwrite the replacement's UI.
+                        if activeTaskGenerations[identifier] == generation {
+                            onPartial(latest)
+                        }
                     }
                     if !latest.isEmpty || Task.isCancelled { break }
                 }
@@ -246,14 +251,24 @@ public final class ApolloFoundationModels: NSObject {
                 // marks the post failed/suppressed (and won't regenerate on reopen,
                 // since `onComplete` lands after `viewDidDisappear` clears the set).
                 if Task.isCancelled { throw CancellationError() }
-                aiLog.debug("completed \(identifier, privacy: .public) after \(String(describing: ContinuousClock.now - startedAt), privacy: .public)")
-                onComplete(latest, nil)
+                if activeTaskGenerations[identifier] == generation {
+                    aiLog.debug("completed \(identifier, privacy: .public) after \(String(describing: ContinuousClock.now - startedAt), privacy: .public)")
+                    onComplete(latest, nil)
+                }
             } catch {
-                preparedSessions.removeValue(forKey: identifier)
-                preparedInstructions.removeValue(forKey: identifier)
-                if Task.isCancelled {
+                let currentGeneration = activeTaskGenerations[identifier]
+                let stillOwnsIdentifier = currentGeneration == generation
+                let wasReplaced = currentGeneration != nil && !stillOwnsIdentifier
+                // A predecessor must not discard a prepared session staged by
+                // its replacement. Explicit cancelRequest already clears these
+                // dictionaries synchronously, so cleanup is owner-only.
+                if stillOwnsIdentifier {
+                    preparedSessions.removeValue(forKey: identifier)
+                    preparedInstructions.removeValue(forKey: identifier)
+                }
+                if Task.isCancelled && !wasReplaced {
                     onComplete(nil, Self.makeError(code: 6, message: "Generation cancelled"))
-                } else {
+                } else if stillOwnsIdentifier {
                     onComplete(nil, Self.classify(error))
                 }
             }
@@ -313,12 +328,19 @@ public final class ApolloFoundationModels: NSObject {
                 let response = try await session.respond(to: prompt, options: options)
                 aiLog.debug("plain completion RESPONSE \(identifier, privacy: .public) after \(String(describing: ContinuousClock.now - startedAt), privacy: .public): \(response.content, privacy: .public)")
                 if Task.isCancelled { throw CancellationError() }
-                onComplete(response.content, nil)
+                if activeTaskGenerations[identifier] == generation {
+                    onComplete(response.content, nil)
+                }
             } catch {
-                aiLog.debug("plain completion ERROR \(identifier, privacy: .public): \(String(describing: error), privacy: .public)")
-                if Task.isCancelled {
+                let currentGeneration = activeTaskGenerations[identifier]
+                let stillOwnsIdentifier = currentGeneration == generation
+                let wasReplaced = currentGeneration != nil && !stillOwnsIdentifier
+                if !wasReplaced {
+                    aiLog.debug("plain completion ERROR \(identifier, privacy: .public): \(String(describing: error), privacy: .public)")
+                }
+                if Task.isCancelled && !wasReplaced {
                     onComplete(nil, Self.makeError(code: 6, message: "Generation cancelled"))
-                } else {
+                } else if stillOwnsIdentifier {
                     onComplete(nil, Self.classify(error))
                 }
             }

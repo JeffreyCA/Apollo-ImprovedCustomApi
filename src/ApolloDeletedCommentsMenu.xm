@@ -462,12 +462,20 @@ static void ApolloDCMenuCaptureLegacyRowStyle(UITableViewCell *cell) {
     }
 
     BOOL effective = NO;
-    if (!ApolloDCMenuResolveState(self, NULL, NULL, &effective)) return nil;
+    BOOL hasOwner = ApolloDCMenuResolveState(self, NULL, NULL, &effective);
     ApolloDeletedCommentsMenuRowCell *cell =
         [[ApolloDeletedCommentsMenuRowCell alloc]
             initWithStyle:UITableViewCellStyleDefault
           reuseIdentifier:@"ApolloDeletedCommentsMenuRow"];
     [cell configureEffective:effective];
+    // UITableView requires a non-nil cell for every row previously reported by
+    // the data source. The presenting comments controller should stay alive for
+    // the sheet's lifetime, but if UIKit asks during teardown after that weak
+    // owner disappears, return an inert row rather than violating the contract.
+    if (!hasOwner) {
+        cell.userInteractionEnabled = NO;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    }
     return cell;
 }
 

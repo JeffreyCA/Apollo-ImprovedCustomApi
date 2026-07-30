@@ -941,16 +941,41 @@ static dispatch_queue_t ApolloAccountSnapshotQueue(void) {
     static dispatch_queue_t queue;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        queue = dispatch_queue_create("com.apolloreborn.account-snapshots",
-                                      DISPATCH_QUEUE_SERIAL_WITH_AUTORELEASE_POOL);
-        dispatch_set_target_queue(queue, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+        // Construct with the target atomically. Retargeting an already-active
+        // queue via dispatch_set_target_queue traps on newer libdispatch
+        // runtimes (including the Xcode 27 simulator).
+        queue = dispatch_queue_create_with_target(
+            "com.apolloreborn.account-snapshots",
+            DISPATCH_QUEUE_SERIAL_WITH_AUTORELEASE_POOL,
+            dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
     });
     return queue;
 }
 
+// Lifecycle notifications are delivered on the main queue (registration below).
+// A cold launch may emit willEnterForeground immediately before didBecomeActive;
+// skip that redundant first snapshot and take one delayed post-activation
+// baseline instead. Warm foreground transitions still retain both diagnostics.
+static BOOL sApolloAccountSnapshotCompletedFirstActivation = NO;
+
 static void ApolloScheduleAccountSnapshot(NSString *reason) {
     NSString *capturedReason = [reason copy] ?: @"unknown";
-    dispatch_async(ApolloAccountSnapshotQueue(), ^{
+    BOOL didBecomeActive = [capturedReason isEqualToString:@"didBecomeActive"];
+    if (!sApolloAccountSnapshotCompletedFirstActivation &&
+        [capturedReason isEqualToString:@"willEnterForeground"]) {
+        return;
+    }
+    BOOL firstActivation = didBecomeActive && !sApolloAccountSnapshotCompletedFirstActivation;
+    if (didBecomeActive) sApolloAccountSnapshotCompletedFirstActivation = YES;
+
+    // didBecomeActive is delivered while the process-launch watchdog can still
+    // be sensitive on older devices. Give Apollo's first frame and native
+    // CFNetwork setup a clear runway before diagnostics reconstruct archived
+    // AFHTTPSessionManager objects. Warm lifecycle snapshots are already
+    // outside cold launch and can run immediately.
+    NSTimeInterval delay = firstActivation ? 5.0 : 0.0;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                   ApolloAccountSnapshotQueue(), ^{
         ApolloLogAccountSnapshot(capturedReason);
     });
 }
@@ -1415,9 +1440,9 @@ static NSArray *const blockedUrls = @[
 
 // Cache storing subreddit list source URLs -> response body
 static NSCache<NSString *, NSString *> *subredditListCache;
-// Source URLs currently being refreshed. Access only under @synchronized; the
-// cache itself is NSCache and is safe to read from Apollo's request paths while
-// NSURLSession completions populate it in the background.
+// Source URLs currently being refreshed. Access is confined to the serial
+// source queue; the cache itself is NSCache and is safe to read from Apollo's
+// request paths while NSURLSession completions populate it in the background.
 static NSMutableSet<NSString *> *subredditListFetchesInFlight;
 
 static NSArray<NSString *> *ApolloSubredditListLines(NSString *content) {
@@ -1427,43 +1452,60 @@ static NSArray<NSString *> *ApolloSubredditListLines(NSString *content) {
     return [lines filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
 }
 
+static dispatch_queue_t ApolloSubredditSourceQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create_with_target(
+            "com.apolloreborn.subreddit-sources",
+            DISPATCH_QUEUE_SERIAL_WITH_AUTORELEASE_POOL,
+            dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    });
+    return queue;
+}
+
 // Warm a remote subreddit-list source without ever waiting for it. Callers use
 // the last cached value (or their local/native fallback) immediately. The
 // in-flight set prevents a burst of resource/request hooks from starting the
-// same download repeatedly while the first fetch is outstanding.
+// same download repeatedly while the first fetch is outstanding. Crucially,
+// URL/session/request construction also happens on the utility queue: merely
+// creating NSURLSession.sharedSession can initialize CFNetwork, so doing that
+// synchronously from the bundle-resource hook or dylib constructor would leave
+// CFNetwork work on Apollo's launch-critical main thread even without a wait.
 static void ApolloRefreshSubredditListSourceAsync(NSString *source) {
     if (source.length == 0) return;
-    NSURL *url = [NSURL URLWithString:source];
-    NSString *key = url.absoluteString;
-    if (!url || key.length == 0 || [subredditListCache objectForKey:key]) return;
-
-    @synchronized (subredditListFetchesInFlight) {
+    NSString *capturedSource = [source copy];
+    dispatch_async(ApolloSubredditSourceQueue(), ^{
+        NSURL *url = [NSURL URLWithString:capturedSource];
+        NSString *key = url.absoluteString;
+        if (!url || key.length == 0 || [subredditListCache objectForKey:key]) return;
         if ([subredditListFetchesInFlight containsObject:key]) return;
         [subredditListFetchesInFlight addObject:key];
-    }
 
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
-                                                           cachePolicy:NSURLRequestUseProtocolCachePolicy
-                                                       timeoutInterval:8.0];
-    [[[NSURLSession sharedSession] dataTaskWithRequest:request
-                                    completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        NSString *content = data.length > 0
-            ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
-            : nil;
-        NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]]
-            ? (NSHTTPURLResponse *)response
-            : nil;
-        if (!error && http.statusCode == 200 && ApolloSubredditListLines(content).count > 0) {
-            [subredditListCache setObject:content forKey:key];
-            ApolloLog(@"[RandomSources] Refreshed %@", key);
-        } else {
-            ApolloLog(@"[RandomSources] Refresh failed for %@: HTTP %ld error=%@",
-                      key, (long)http.statusCode, error.localizedDescription ?: @"invalid/empty response");
-        }
-        @synchronized (subredditListFetchesInFlight) {
-            [subredditListFetchesInFlight removeObject:key];
-        }
-    }] resume];
+        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
+                                                               cachePolicy:NSURLRequestUseProtocolCachePolicy
+                                                           timeoutInterval:8.0];
+        [[[NSURLSession sharedSession] dataTaskWithRequest:request
+                                        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSString *content = data.length > 0
+                ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
+                : nil;
+            NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]]
+                ? (NSHTTPURLResponse *)response
+                : nil;
+            if (!error && http.statusCode == 200 && ApolloSubredditListLines(content).count > 0) {
+                [subredditListCache setObject:content forKey:key];
+                ApolloLog(@"[RandomSources] Refreshed %@", key);
+            } else {
+                ApolloLog(@"[RandomSources] Refresh failed for %@: HTTP %ld error=%@",
+                          key, (long)http.statusCode,
+                          error.localizedDescription ?: @"invalid/empty response");
+            }
+            dispatch_async(ApolloSubredditSourceQueue(), ^{
+                [subredditListFetchesInFlight removeObject:key];
+            });
+        }] resume];
+    });
 }
 // Replace Reddit API client ID. Resolved per-account (see
 // ApolloAccountCredentials.{h,m}): a pending add-account choice, else the
