@@ -71,6 +71,9 @@ static const void *kApolloSubredditNavigationOwnerKey = &kApolloSubredditNavigat
 
 static Class sPostsViewControllerClass = Nil;
 static BOOL sApolloSubredditRefreshVisibleScheduled = NO;
+// Effectively invisible while the ambient backdrop is covering it, but not
+// literal zero so the banner's accessibility action remains discoverable.
+static CGFloat const ApolloSubredditFadedBannerAlpha = 0.011;
 
 typedef NS_ENUM(NSInteger, ApolloSubredditHeaderAssetKind) {
     ApolloSubredditHeaderAssetKindBanner = 0,
@@ -183,14 +186,6 @@ static CGFloat const ApolloSubredditBannerHeight = 104.0;
 static CGFloat const ApolloSubredditAboutMaxHeight = 220.0;
 static CGFloat const ApolloSubredditAboutToggleHeight = 22.0;
 static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
-// Effectively-invisible-but-not-quite-zero alpha for the banner image view
-// when the ambient backdrop is covering it — matches this codebase's own
-// convention for "still here, just not drawn" views (e.g. the hidden WKWebView
-// scrapers). A literal 0.0 alpha drops the view from VoiceOver's accessibility
-// tree entirely, silently taking its "change banner photo" action with it even
-// though the tap gesture underneath is still very much live.
-static CGFloat const ApolloSubredditFadedBannerAlpha = 0.011;
-
 @implementation ApolloSubredditHeaderView {
     // Memoized about-text NATURAL (unbounded) height; layoutSubviews fires often
     // while scrolling, so avoid re-measuring the about string every pass. Keyed
@@ -1613,6 +1608,7 @@ static void ApolloSubredditInstallAmbient(UIViewController *viewController, UITa
     ambient.frame = tableView.bounds;
     header.bannerImageView.alpha = ApolloSubredditFadedBannerAlpha;
     ApolloSubredditSyncAmbient(header);
+    ApolloSubredditUpdateAmbientScroll(viewController, tableView);
 }
 
 static void ApolloSubredditRemoveAmbient(UIViewController *viewController, UITableView *tableView) {
@@ -1635,6 +1631,14 @@ static void ApolloSubredditUpdateAmbientScroll(UIViewController *viewController,
     if (!ambient) return;
     CGFloat restingOffset = -scrollView.adjustedContentInset.top;
     ambient.contentTranslation = MAX(0.0, scrollView.contentOffset.y - restingOffset);
+}
+
+static void ApolloSubredditUpdateAmbientForManagedTable(UITableView *tableView) {
+    if (![objc_getAssociatedObject(tableView, kApolloSubredditManagedTableKey) boolValue]) return;
+    ApolloSubredditWeakControllerBox *owner =
+        objc_getAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey);
+    UIViewController *viewController = owner.viewController;
+    if (viewController) ApolloSubredditUpdateAmbientScroll(viewController, tableView);
 }
 
 static UIView *ApolloSubredditFindSearchFieldForViewController(UIViewController *viewController) {
@@ -2116,8 +2120,9 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
             objc_setAssociatedObject(tableView, kApolloSubredditRewrapInProgressKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
     }
-    // New (Immersive) gets the melt/ambient backdrop; Classic is the same
-    // content, flat — mirrors the profile header's Density switch exactly.
+    // New gets the melt/ambient backdrop. Classic keeps the same Apollo Reborn
+    // header content flat/compact, while Native mode tears the wrapper down
+    // earlier via sShowSubredditHeaders.
     if (sSubredditHeaderImmersive) {
         ApolloSubredditInstallAmbient(viewController, tableView, header, wrappedHeader);
     } else {
@@ -2310,6 +2315,9 @@ static BOOL ApolloSubredditShouldBlockOffset(UITableView *tableView, CGPoint new
         return;
     }
     %orig;
+    if ([self isKindOfClass:[UITableView class]]) {
+        ApolloSubredditUpdateAmbientForManagedTable((UITableView *)self);
+    }
 }
 
 - (void)setContentOffset:(CGPoint)contentOffset animated:(BOOL)animated {
@@ -2318,6 +2326,9 @@ static BOOL ApolloSubredditShouldBlockOffset(UITableView *tableView, CGPoint new
         return;
     }
     %orig;
+    if ([self isKindOfClass:[UITableView class]]) {
+        ApolloSubredditUpdateAmbientForManagedTable((UITableView *)self);
+    }
 }
 
 %end

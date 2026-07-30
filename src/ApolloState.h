@@ -84,9 +84,10 @@ extern BOOL sProfileShowSocialLinks;
 extern BOOL sProfileShowActions;
 extern NSInteger sProfileAvatarStyle; // 0 Full snoovatar, 1 Circle, 2 Square
 extern BOOL sShowSubredditHeaders;
-// New (Immersive, melt/ambient backdrop) vs Classic (same content, flat) —
-// only meaningful while sShowSubredditHeaders is YES. Mirrors
-// sProfileHeaderImmersive's semantics for subreddits. See ApolloSubredditHeaders.xm.
+// Subreddit Layout density has three user-visible states:
+// New = sShowSubredditHeaders + sSubredditHeaderImmersive,
+// Classic = sShowSubredditHeaders + !sSubredditHeaderImmersive,
+// Native = !sShowSubredditHeaders (Apollo's current/pre-3.5 header).
 extern BOOL sSubredditHeaderImmersive;
 // Per-section show switches on the subreddit header (banner / Join button /
 // display name) — same "turn off the bands you don't need" pattern as the

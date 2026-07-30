@@ -143,6 +143,15 @@ static UIImage *ApolloRootSettingsArtworkAtStandardSize(UIImage *artwork) {
     }];
 }
 
+static UITableView *ApolloRootSettingsTableInView(UIView *view) {
+    if ([view isKindOfClass:UITableView.class]) return (UITableView *)view;
+    for (UIView *subview in view.subviews) {
+        UITableView *tableView = ApolloRootSettingsTableInView(subview);
+        if (tableView) return tableView;
+    }
+    return nil;
+}
+
 %hook SettingsViewController
 
 // Settings search lives on the root screen's navigation item (see
@@ -152,9 +161,21 @@ static UIImage *ApolloRootSettingsArtworkAtStandardSize(UIImage *artwork) {
     %orig;
     ApolloSettingsSearchAttach((UIViewController *)self);
     ApolloRemoveLegacySettingsExportButton((UIViewController *)self);
-    // The search bar now scrolls away with the list (hidesSearchBarWhenScrolling),
-    // so Apollo's native first-section top spacing is correct again — the
-    // 24pt inset trim that hid the empty band under the *pinned* bar is gone.
+
+    // Apollo predates navigation-item search on this screen and leaves its old
+    // first-section breathing room in place. With a pinned, always-visible
+    // search bar that becomes a conspicuous empty band, so trim only the modern
+    // extra padding and leave the grouped section's own inset intact.
+    UITableView *tableView = ApolloRootSettingsTableInView(((UIViewController *)self).view);
+    if (tableView) {
+        if (@available(iOS 15.0, *)) tableView.sectionHeaderTopPadding = 0.0;
+        UIEdgeInsets inset = tableView.contentInset;
+        inset.top -= 24.0;
+        tableView.contentInset = inset;
+        UIEdgeInsets indicatorInsets = tableView.verticalScrollIndicatorInsets;
+        indicatorInsets.top -= 24.0;
+        tableView.verticalScrollIndicatorInsets = indicatorInsets;
+    }
 }
 
 - (void)viewWillAppear:(BOOL)animated {

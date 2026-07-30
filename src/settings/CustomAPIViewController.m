@@ -1701,13 +1701,10 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onToggle:^(UISwitch *sender) { [weakSelf hideSubredditListDescriptionsSwitchToggled:sender]; }];
 
     // Pushes the dedicated Subreddit Layout screen — the single customize
-    // screen for everything subreddit-header-related: the master on/off
-    // (moved here from a separate "Show Subreddit Headers" row, which read as
-    // a confusing near-duplicate of the Banner switch inside that same
-    // screen), Density, the per-band show switches, and Community Highlights
-    // (also moved here — it's a subreddit-page feature, not a subreddit-list
-    // one, so it belongs alongside the rest of this customization rather than
-    // as a sibling of the list-view toggles above).
+    // screen for everything subreddit-page-related: Density (New, Classic, or
+    // Apollo's native header), the Apollo Reborn header show switches, and
+    // Community Highlights (also a subreddit-page feature, not a
+    // subreddit-list one).
     ApolloSettingsRow *subredditLayout =
         [self hubDisclosureRowWithID:@"sub.layout"
                                 title:@"Subreddit Layout"
@@ -1722,7 +1719,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 }
 
 - (NSString *)subredditLayoutSummaryText {
-    if (!sShowSubredditHeaders) return @"Headers off";
+    if (!sShowSubredditHeaders) return @"Native (Apollo)";
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
     [parts addObject:sSubredditHeaderImmersive ? @"New (Immersive)" : @"Classic (Compact)"];
     NSMutableArray<NSString *> *hidden = [NSMutableArray array];

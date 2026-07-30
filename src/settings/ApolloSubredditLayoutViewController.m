@@ -22,33 +22,34 @@ NSString *const ApolloSubredditLayoutToggleChangedNotification = @"ApolloSubredd
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloSubredditLayoutToggleChangedNotification object:nil];
 }
 
-#pragma mark - Master toggle
-
-- (void)setShowHeaders:(BOOL)showHeaders {
-    sShowSubredditHeaders = showHeaders;
-    [[NSUserDefaults standardUserDefaults] setBool:showHeaders forKey:UDKeyShowSubredditHeaders];
-    // Density/Banner/Join Button/Subreddit Name only exist while this is on.
-    [self visibilityDidChange];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloSubredditHeaderToggleChangedNotification" object:nil];
-}
-
 #pragma mark - Density
 
-- (NSString *)densityText { return sSubredditHeaderImmersive ? @"New (Immersive)" : @"Classic (Compact)"; }
+- (NSString *)densityText {
+    if (!sShowSubredditHeaders) return @"Native (Apollo)";
+    return sSubredditHeaderImmersive ? @"New (Immersive)" : @"Classic (Compact)";
+}
 
-- (void)setDensityImmersive:(BOOL)immersive {
+- (void)setDensityMode:(NSInteger)mode {
+    BOOL useRebornHeader = (mode != 2);
+    BOOL immersive = (mode == 0);
+    sShowSubredditHeaders = useRebornHeader;
     sSubredditHeaderImmersive = immersive;
-    [[NSUserDefaults standardUserDefaults] setBool:immersive forKey:UDKeySubredditHeaderImmersive];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setBool:useRebornHeader forKey:UDKeyShowSubredditHeaders];
+    [defaults setBool:immersive forKey:UDKeySubredditHeaderImmersive];
     [self reloadRowWithID:@"density"];
+    [self visibilityDidChange];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloSubredditHeaderToggleChangedNotification" object:nil];
     [self apollo_persistAndApply];
 }
 
 - (void)presentDensityPicker {
     __weak typeof(self) weakSelf = self;
+    NSInteger selected = !sShowSubredditHeaders ? 2 : (sSubredditHeaderImmersive ? 0 : 1);
     ApolloSettingsPresentPicker(self, [self cellForRowID:@"density"], @"Density",
-                                @[@"New — Immersive", @"Classic — Compact"],
-                                sSubredditHeaderImmersive ? 0 : 1, ^(NSInteger pickedIndex) {
-        [weakSelf setDensityImmersive:(pickedIndex == 0)];
+                                @[@"New — Immersive", @"Classic — Compact", @"Native — Apollo"],
+                                selected, ^(NSInteger pickedIndex) {
+        [weakSelf setDensityMode:pickedIndex];
     });
 }
 
@@ -57,7 +58,7 @@ NSString *const ApolloSubredditLayoutToggleChangedNotification = @"ApolloSubredd
 // mode: 0 = Off, 1 = Partial (REST API, up to 2), 2 = Full (web harvest, up to 6).
 // Backed by the same two booleans other builds' preferences/backups already
 // use (see ApolloState.h), so no migration is needed. Independent of the
-// header toggle above — highlights can install into Apollo's native
+// density — highlights can install into Apollo's native
 // tableHeaderView just as well as into ours (ApolloSubredditHighlights.xm),
 // so this row stays visible regardless of sShowSubredditHeaders.
 - (NSString *)communityHighlightsModeText {
@@ -95,22 +96,12 @@ NSString *const ApolloSubredditLayoutToggleChangedNotification = @"ApolloSubredd
 - (NSArray<ApolloSettingsSection *> *)buildForm {
     __weak typeof(self) weakSelf = self;
 
-    // Always visible (never gated) — the section this row lives in must never
-    // go to zero visible rows, since the form layer keeps a section's
-    // header/footer on screen even with nothing left inside it.
-    ApolloSettingsRow *showHeaders =
-        [ApolloSettingsRow switchRowWithID:@"showHeaders"
-                                     title:@"Show Subreddit Headers"
-                                      isOn:^BOOL { return sShowSubredditHeaders; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf setShowHeaders:sender.isOn]; }];
-
     ApolloSettingsRow *density =
         [ApolloSettingsRow valueRowWithID:@"density"
                                     title:@"Density"
                                    detail:^NSString * { return [weakSelf densityText]; }
                                  onSelect:^{ [weakSelf presentDensityPicker]; }];
     density.configure = ^(UITableViewCell *cell) { cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator; };
-    density.visible = ^BOOL { return sShowSubredditHeaders; };
 
     ApolloSettingsRow *banner =
         [ApolloSettingsRow switchRowWithID:@"showBanner"
@@ -146,9 +137,9 @@ NSString *const ApolloSubredditLayoutToggleChangedNotification = @"ApolloSubredd
     displayName.visible = ^BOOL { return sShowSubredditHeaders; };
 
     ApolloSettingsSection *headerSection =
-        [ApolloSettingsSection sectionWithTitle:nil
-                                         footer:@"New adds the immersive melt backdrop behind the banner; Classic is the same content, flat. Turn off the bands you don't need to make the header shorter. Subreddit Name is the community's own title (e.g. \"Reddit Science\") shown above r/name."
-                                           rows:@[ showHeaders, density, banner, joinButton, displayName ]];
+        [ApolloSettingsSection sectionWithTitle:@"Layout"
+                                         footer:@"New and Classic use Apollo Reborn's subreddit header, with the same bands available in both densities. Native keeps Apollo's current subreddit page. Turn off the bands you don't need to make the Reborn header shorter."
+                                           rows:@[ density, banner, joinButton, displayName ]];
 
     ApolloSettingsRow *highlights =
         [ApolloSettingsRow valueRowWithID:@"highlights"
@@ -163,7 +154,7 @@ NSString *const ApolloSubredditLayoutToggleChangedNotification = @"ApolloSubredd
 
     ApolloSettingsSection *highlightsSection =
         [ApolloSettingsSection sectionWithTitle:nil
-                                         footer:@"Pinned posts, shown as a carousel above the feed. Works whether or not Show Subreddit Headers is on."
+                                         footer:@"Pinned posts, shown as a carousel above the feed. Works with every density."
                                            rows:@[ highlights ]];
 
     return @[ headerSection, highlightsSection ];
