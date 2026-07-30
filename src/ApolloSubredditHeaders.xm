@@ -1107,7 +1107,10 @@ static BOOL ApolloSubredditPostsTypeTag(id viewController, uint8_t *tag) {
 // fall back to the nav title so the header still appears instantly on
 // navigation instead of waiting for that async object.
 // Apollo's search-results VC is a different class and never reaches this hook.
-static NSString *ApolloSubredditNameFromViewController(UIViewController *viewController) {
+// Non-static: ApolloGalleryMenu.xm needs the same "is this really a single
+// subreddit, and which one" answer to decide whether the subreddit "..." menu
+// gets a Gallery View row.
+NSString *ApolloSubredditNameFromViewController(UIViewController *viewController) {
     if (!viewController) return nil;
 
     uint8_t tag = 0;

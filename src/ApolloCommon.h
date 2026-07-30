@@ -175,4 +175,11 @@ void ApolloAppendLoginDiag(NSString *line);
 // also write to the diag log.
 NSString *ApolloDebugAccountKeychainReport(void);
 NSString *ApolloDebugPoisonAccountAccessibility(void);
+
+// ApolloGalleryMenu: when the subreddit "..." menu is being built, insert an
+// inline "Gallery View" section into `children` (an NSMutableArray<UIMenuElement *>),
+// just below the leading "submit a post" affordance.
+// No-op for any other menu, and for feeds that aren't a single subreddit.
+// Called from ApolloNativeActionMenuBuildMenu as it converts the action sheet.
+void ApolloInjectGalleryViewMenuItemIfNeeded(NSMutableArray *children, NSString *menuTitle, id actionController);
 __END_DECLS

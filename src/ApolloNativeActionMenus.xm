@@ -845,6 +845,9 @@ static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderat
     // Append "Show/Hide Deleted Comments" when this is a comments view's "..."
     // menu (no-op otherwise; see ApolloDeletedCommentsMenu.xm).
     ApolloInjectDeletedCommentsMenuItemIfNeeded(children, title, actionController);
+    // Prepend "Gallery View" when this is a subreddit's "..." menu (no-op
+    // otherwise; see ApolloGalleryMenu.xm).
+    ApolloInjectGalleryViewMenuItemIfNeeded(children, title, actionController);
     return [UIMenu menuWithTitle:title children:children];
 }
 
