@@ -30,6 +30,10 @@ static BOOL sApolloNativeActionMenuNextPresentationModeratorStyle = NO;
 @property (nonatomic, weak) UIView *morphSourceView;
 @property (nonatomic, strong) UIContextMenuInteraction *interaction;
 @property (nonatomic, assign) BOOL removeSourceViewOnEnd;
+// Empty throwaway view pinned over morphSourceView; this is what UIKit portals
+// into the glass platter, so the real control keeps drawing. See
+// ApolloNativeActionMenuCreateMorphStandIn().
+@property (nonatomic, strong) UIView *morphStandInView;
 @end
 
 static BOOL ApolloNativeActionMenusEnabled(void) {
@@ -468,6 +472,26 @@ static UIView *ApolloNativeActionMenuCreateProxyAnchorView(UIView *sourceView, B
     return anchorView;
 }
 
+// Issue #249 follow-up: the liquid morph is meant for COMPACT tapped controls
+// (bar buttons, a cell's "…" button) — UIKit hides the morph source while the
+// menu is open, which reads as "the control became the menu". When the
+// resolved source is the tapped ROW itself (composer flair row: a full-width
+// table cell), that same hiding reads as the row vanishing until the menu
+// closes. Skip the morph for row-scale sources: the menu still presents
+// anchored at the row (proxy-anchor preview), but the row stays visible.
+static BOOL ApolloNativeActionMenuViewShouldMorph(UIView *view) {
+    if (!view || !view.window) return NO;
+    if ([view isKindOfClass:[UITableViewCell class]]) return NO;
+    if ([view isKindOfClass:objc_getClass("UICollectionViewCell")]) return NO;
+    // The gesture fallback can resolve the whole table/scroll view.
+    if ([view isKindOfClass:[UIScrollView class]]) return NO;
+    // Anything near full-width is a row, not a control (ASDK cell nodes and
+    // custom row views aren't UITableViewCell subclasses).
+    CGFloat windowWidth = CGRectGetWidth(view.window.bounds);
+    if (windowWidth > 0 && CGRectGetWidth(view.bounds) > 0.6 * windowWidth) return NO;
+    return YES;
+}
+
 static BOOL ApolloNativeActionMenuModeratorStyleActive(void) {
     NSUInteger count = MIN(sApolloNativeActionMenuCaptureDepth, (NSUInteger)(sizeof(sApolloNativeActionMenuModeratorStyleStack) / sizeof(sApolloNativeActionMenuModeratorStyleStack[0])));
     for (NSUInteger i = 0; i < count; i++) {
@@ -650,8 +674,9 @@ static void ApolloNativeActionMenuSortSavedCategoriesIfNeeded(id presenter, id a
 static UIMenuElement *ApolloNativeActionMenuMakeReportRow(NSString *title, NSString *subtitle) {
     UIAction *row = [UIAction actionWithTitle:title image:nil identifier:nil handler:^(__unused UIAction *action) {}];
     row.attributes = UIMenuElementAttributesDisabled;
-    if (subtitle.length > 0 && [row respondsToSelector:@selector(setSubtitle:)]) {
-        row.subtitle = subtitle;
+    SEL setSubtitleSelector = NSSelectorFromString(@"setSubtitle:");
+    if (subtitle.length > 0 && [row respondsToSelector:setSubtitleSelector]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(row, setSubtitleSelector, subtitle);
     }
     return row;
 }
@@ -820,10 +845,72 @@ static UIMenu *ApolloNativeActionMenuBuildMenu(id actionController, BOOL moderat
     // Append "Show/Hide Deleted Comments" when this is a comments view's "..."
     // menu (no-op otherwise; see ApolloDeletedCommentsMenu.xm).
     ApolloInjectDeletedCommentsMenuItemIfNeeded(children, title, actionController);
+    // Prepend "Gallery View" when this is a subreddit's "..." menu (no-op
+    // otherwise; see ApolloGalleryMenu.xm).
+    ApolloInjectGalleryViewMenuItemIfNeeded(children, title, actionController);
     return [UIMenu menuWithTitle:title children:children];
 }
 
+// Keep the tapped "..." control on screen for the whole menu lifecycle.
+//
+// UIKit builds the liquid-glass platter by portaling the morph preview's view
+// (a CAPortalLayer pointed at its layer). CoreAnimation stops drawing a
+// portaled layer in its original position for as long as the portal is alive —
+// a render-server effect, so from the app's side the control still looks
+// perfectly healthy (hidden NO, alpha 1, contents set) while its *presentation*
+// layer reads opacity 0. Clearing the portal's hidesSourceLayer does not undo
+// it; only the portal going away does. And the portal outlives the dismissal
+// animation — by ~1s on device — so the control sat blank long after the menu
+// was gone, which reads as the dots vanishing and slowly popping back.
+//
+// So don't let UIKit portal the real thing. This pins an empty throwaway view
+// over the control, exactly its size, and hands UIKit that as the preview: the
+// stand-in absorbs the portaling and the control itself never stops drawing.
+//
+// The stand-in is deliberately *blank* rather than a snapshot. The preview's
+// frame is all the morph needs — it drives where the glass platter blooms from
+// and collapses back to — while any pixels in it get carried inside the platter
+// as a second copy of the icon that animates with the morph. With the control
+// now permanently visible underneath, that copy showed up as a duplicate set of
+// dots sliding into place at the end of the dismissal. Empty stand-in, empty
+// platter: the glass shape blooms out of the control and the control is the
+// only thing ever drawing the icon.
+static UIView *ApolloNativeActionMenuCreateMorphStandIn(UIView *sourceView) {
+    UIView *container = sourceView.superview;
+    if (!container || !sourceView.window || CGRectIsEmpty(sourceView.bounds)) return nil;
+
+    UIView *standIn = [[UIView alloc] initWithFrame:sourceView.frame];
+    standIn.backgroundColor = UIColor.clearColor;
+    standIn.opaque = NO;
+    standIn.userInteractionEnabled = NO;
+    standIn.accessibilityElementsHidden = YES;
+    [container insertSubview:standIn aboveSubview:sourceView];
+    ApolloLog(@"[NativeActionMenu] Morphing from a stand-in over %@ so it stays drawn", sourceView);
+    return standIn;
+}
+
+// Matches the treatment the invisible proxy anchor gets below: a contentless
+// preview must not pick up UIPreviewParameters' default platter background or
+// drop shadow, or the empty stand-in would render as a grey box.
+static UITargetedPreview *ApolloNativeActionMenuStandInPreview(UIView *standIn) {
+    UIPreviewParameters *parameters = [UIPreviewParameters new];
+    parameters.backgroundColor = UIColor.clearColor;
+    parameters.visiblePath = [UIBezierPath bezierPathWithRect:standIn.bounds];
+    SEL setAppliesShadowSelector = NSSelectorFromString(@"setAppliesShadow:");
+    if ([parameters respondsToSelector:setAppliesShadowSelector]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(parameters, setAppliesShadowSelector, NO);
+    }
+    return [[UITargetedPreview alloc] initWithView:standIn parameters:parameters];
+}
+
 @implementation ApolloNativeActionMenuPresenter
+
+// Normally the teardown in -willEndForConfiguration: takes the stand-in out.
+// This catches the presentation that never got a dismissal (aborted before it
+// opened), so a stale copy can't ride along on a recycled cell.
+- (void)dealloc {
+    [_morphStandInView removeFromSuperview];
+}
 
 - (UIContextMenuConfiguration *)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction configurationForMenuAtLocation:(__unused CGPoint)location {
     UIMenu *menu = self.menu;
@@ -879,6 +966,20 @@ static id ApolloNativeActionMenuCompactMenuStyle(void) {
         if ([morphSource respondsToSelector:morphViewSelector]) {
             UIView *resolved = ((id (*)(id, SEL))objc_msgSend)(morphSource, morphViewSelector);
             if (resolved.window) morphView = resolved;
+        }
+
+        // Hand UIKit a stand-in instead of the control itself, so the control
+        // survives being portaled (see ApolloNativeActionMenuCreateMorphStandIn).
+        // Both the highlight and the dismiss preview reuse the same stand-in;
+        // the teardown in -willEndForConfiguration: takes it back out.
+        UIView *standIn = self.morphStandInView;
+        if (!standIn.window) {
+            [standIn removeFromSuperview];
+            standIn = ApolloNativeActionMenuCreateMorphStandIn(morphView);
+            self.morphStandInView = standIn;
+        }
+        if (standIn) {
+            return ApolloNativeActionMenuStandInPreview(standIn);
         }
         return [[UITargetedPreview alloc] initWithView:morphView];
     }
@@ -945,12 +1046,17 @@ static id ApolloNativeActionMenuCompactMenuStyle(void) {
     if (!sourceView || !menuInteraction) return;
 
     BOOL removeSourceViewOnEnd = self.removeSourceViewOnEnd;
+    UIView *standInView = self.morphStandInView;
+    self.morphStandInView = nil;
     // Issue #249: tear down at dismissal END, not START — removing the anchor
     // (the interaction's host view) while the menu is still morphing back into
-    // the source button cuts the dismissal animation short.
+    // the source button cuts the dismissal animation short. The stand-in goes
+    // at the same point: it is what the collapsing platter is portaling, and
+    // pulling it early would empty the platter mid-animation.
     void (^teardown)(void) = ^{
         [sourceView removeInteraction:menuInteraction];
         objc_setAssociatedObject(sourceView, &kApolloNativeActionMenuControllerKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        [standInView removeFromSuperview];
         if (removeSourceViewOnEnd) {
             [sourceView removeFromSuperview];
         }
@@ -1116,8 +1222,13 @@ static BOOL ApolloNativeActionMenuPresent(id presenter, id actionController, voi
     ApolloNativeActionMenuPresenter *menuPresenter = [ApolloNativeActionMenuPresenter new];
     menuPresenter.menu = menu;
     menuPresenter.sourceView = anchorView;
-    menuPresenter.morphSourceView = sourceView;
+    BOOL morphable = ApolloNativeActionMenuViewShouldMorph(sourceView);
+    menuPresenter.morphSourceView = morphable ? sourceView : nil;
     menuPresenter.removeSourceViewOnEnd = removeAnchorViewOnEnd;
+    ApolloLog(@"[NativeActionMenu] source=%@ %.0fx%.0f morph=%@",
+              NSStringFromClass(sourceView.class),
+              CGRectGetWidth(sourceView.bounds), CGRectGetHeight(sourceView.bounds),
+              morphable ? @"yes" : @"no");
 
     UIContextMenuInteraction *interaction = [[UIContextMenuInteraction alloc] initWithDelegate:menuPresenter];
     if (![interaction respondsToSelector:NSSelectorFromString(@"_presentMenuAtLocation:")]) {

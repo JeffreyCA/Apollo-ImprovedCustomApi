@@ -61,15 +61,43 @@ static id ApolloShareIvarObject(id obj, const char *name) {
     return value;
 }
 
-// Swift-emitted object ivars can report unknown ownership to the Objective-C
-// runtime. Use the strong-default setter so known strong/weak metadata is
-// honored and an unknown slot still retains the new value and releases the old.
+// Writes an object into one of SaveAsImagePreviewNode's Swift stored properties
+// (`imageNode`, `imageForImagePost`, `linkButtonNode` — all `let`s with no ObjC
+// accessor), transferring ownership by hand.
+//
+// DO NOT swap this for object_setIvar() or object_setIvarWithStrongDefault().
+// Both decide what to do from the declaring class's ARC ivar layout, and a Swift
+// class emits no strong-ivar layout, so libobjc classifies these slots as
+// *unretained* — not "unknown". object_setIvarWithStrongDefault's assume-strong
+// fallback only covers "unknown", so on these slots it degrades to a plain
+// pointer assignment: it neither retains the new value nor releases the old.
+// Measured on iOS 26.5 — retain counts either side of that call were identical
+// (imageNode 3->3, imageForImagePost 8->8, replaced imageNode 5->5).
+//
+// Swift's deinit still releases every stored property, so a bare store leaves
+// the slot one release in debt. The value then dies early and whoever still
+// points at it crashes later: EXC_BAD_ACCESS in objc_release, from
+// -[ASImageNode .cxx_destruct] releasing its freed `image`, when the share sheet
+// tore down. It surfaced on any video post (and, once the poster gate widened,
+// GIF posts) because those take the two-pass placeholder-then-real install.
+//
+// So: do the raw store ourselves, take the +1 the slot is expected to own, and
+// hand back the +1 it held on the old value — no dependence on how the runtime
+// happens to classify these slots. `previous` is an ARC-strong local, so it
+// stays alive across the swap even when the slot held the last reference.
 static void ApolloShareSetIvarObject(id obj, const char *name, id value) {
     if (!obj || !name) return;
     Ivar ivar = class_getInstanceVariable(object_getClass(obj), name);
     if (!ivar) return;
-    @try { object_setIvarWithStrongDefault(obj, ivar, value); }
-    @catch (__unused NSException *e) {}
+    @try {
+        id previous = object_getIvar(obj, ivar);
+        if (previous == value) return;
+        ptrdiff_t offset = ivar_getOffset(ivar);
+        void **slot = (void **)((char *)(__bridge void *)obj + offset);
+        if (value) CFRetain((__bridge CFTypeRef)value);   // slot now owns +1 on the new value
+        *slot = (__bridge void *)value;
+        if (previous) CFRelease((__bridge CFTypeRef)previous); // release the value we replaced
+    } @catch (__unused NSException *e) {}
 }
 
 // Swift Bool ivars are a single byte at the ivar offset; object_setIvar can't
@@ -187,6 +215,33 @@ static BOOL ApolloShareLinkIsObscured(id link) {
     if (ApolloShareCallBool(link, @selector(spoiler))) return YES;
     if (ApolloShareCallBool(link, @selector(isNSFW))) return YES;
     if (ApolloShareCallBool(link, @selector(NSFW))) return YES;
+    return NO;
+}
+
+// YES if this URL points straight at an image file rather than a page.
+static BOOL ApolloShareURLIsDirectImage(NSURL *url) {
+    if (![url isKindOfClass:[NSURL class]]) return NO;
+    NSString *ext = url.pathExtension.lowercaseString;
+    if (ext.length == 0) return NO;
+    static NSSet<NSString *> *extensions = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        extensions = [NSSet setWithArray:@[@"gif", @"gifv", @"png", @"jpg", @"jpeg", @"webp"]];
+    });
+    return [extensions containsObject:ext];
+}
+
+// YES if the post's own media is a direct image/GIF file (i.redd.it/….gif,
+// imgur ….gifv, …). Apollo doesn't treat these as image posts — it leaves
+// imageForImagePost nil and draws its compact LINK card, so the share card
+// showed the bare URL text instead of the picture. A GIF inside a *comment*
+// takes a different path entirely, which is why only GIF-as-post looked broken.
+static BOOL ApolloShareLinkIsDirectImage(id link) {
+    if (!link) return NO;
+    if (ApolloShareURLIsDirectImage((NSURL *)ApolloShareCall(link, @selector(URL)))) return YES;
+    id parent = ApolloShareCall(link, @selector(crosspostParent));
+    if (parent && parent != link &&
+        ApolloShareURLIsDirectImage((NSURL *)ApolloShareCall(parent, @selector(URL)))) return YES;
     return NO;
 }
 
@@ -599,7 +654,8 @@ static void ApolloShareGalleryPrepareSingle(id previewNode, id link) {
 
     BOOL hasVideo = ApolloShareLinkHasVideo(link);
     BOOL obscured = ApolloShareLinkIsObscured(link);
-    NSURL *posterURL = (hasVideo || obscured) ? ApolloShareResolvePosterURL(link) : nil;
+    BOOL directImage = ApolloShareLinkIsDirectImage(link);
+    NSURL *posterURL = (hasVideo || obscured || directImage) ? ApolloShareResolvePosterURL(link) : nil;
     if (!posterURL) {
         // Genuine link/text/self post (or no still available): keep the card.
         objc_setAssociatedObject(previewNode, &kApolloShareGalleryStateKey,
@@ -609,8 +665,8 @@ static void ApolloShareGalleryPrepareSingle(id previewNode, id link) {
     }
 
     CGSize aspect = ApolloShareResolvePosterAspect(link);
-    ApolloLog(@"[ShareGallery] single poster node=%p video=%d obscured=%d url=%@ — placeholder + fetch",
-              previewNode, hasVideo, obscured, posterURL.absoluteString);
+    ApolloLog(@"[ShareGallery] single poster node=%p video=%d obscured=%d image=%d url=%@ — placeholder + fetch",
+              previewNode, hasVideo, obscured, directImage, posterURL.absoluteString);
 
     // Close the re-entrancy window (see ApolloShareGalleryPrepare): flip the
     // state to Placeholder synchronously, on this (background layout) thread,

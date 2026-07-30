@@ -53,5 +53,12 @@
 // Links band is part of the detailed profile, so it shares that toggle.
 FOUNDATION_EXPORT BOOL ApolloProfileSocialLinksEnabled(void);
 
+// The shared logged-out in-memory scrape data store (see ApolloSLWebFetch for the
+// rationale). Exported so other hidden-WKWebView scrapers (Badge Book) reuse the
+// SAME store — Reddit's JS bot-challenge cookie then warms once per session
+// instead of once per feature.
+@class WKWebsiteDataStore;
+FOUNDATION_EXPORT WKWebsiteDataStore *ApolloSharedScrapeDataStore(void);
+
 // Posted by Settings when the toggle flips; the band observes it to reload.
 FOUNDATION_EXPORT NSString *const ApolloSocialLinksToggleChangedNotification;

@@ -1369,6 +1369,23 @@ static NSURLRequest *ApolloImgChestRewriteSubmitRequest(NSURLRequest *request, N
     return modified;
 }
 
+// Scan a submit body's form pairs for the `url` field that maps to a recorded
+// synthetic Reddit gallery album, returning its member asset IDs (album id via
+// outAlbumID). A map hit is proof this submit is one of OUR Reddit-hosted
+// multi-image posts, regardless of the configured upload provider — genuine
+// Imgur albums never populate sRedditUploadGalleryAssetIDsByAlbumID.
+static NSArray<NSString *> *ApolloRedditGalleryAssetIDsFromSubmitPairs(NSArray<NSString *> *pairs, NSString **outAlbumID) {
+    for (NSString *pair in pairs) {
+        NSRange equals = [pair rangeOfString:@"="];
+        NSString *key = ApolloFormDecodeComponent(equals.location == NSNotFound ? pair : [pair substringToIndex:equals.location]);
+        if (![key isEqualToString:@"url"]) continue;
+        NSString *value = ApolloFormDecodeComponent(equals.location == NSNotFound ? @"" : [pair substringFromIndex:equals.location + 1]);
+        NSArray<NSString *> *assetIDs = ApolloRedditGalleryAssetIDsForURLString(value, outAlbumID);
+        if (assetIDs.count > 0) return assetIDs;
+    }
+    return nil;
+}
+
 NSURLRequest *ApolloRedditMaybeRewriteSubmitRequest(NSURLRequest *request) {
     if (!ApolloIsRedditLegacySubmitRequest(request)) return nil;
 
@@ -1409,6 +1426,26 @@ NSURLRequest *ApolloRedditMaybeRewriteSubmitRequest(NSURLRequest *request) {
         return imgChestRequest;
     }
 
+    // Reddit gallery submit (provider-independent): if the submit's url maps to
+    // a recorded synthetic Reddit gallery album, rewrite it to
+    // /api/submit_gallery_post. This runs above the provider split because
+    // keyless Web JSON uploads are claimed for Reddit regardless of the Media
+    // Upload Host (see ApolloShouldUseCookieRedditUpload) — the synthetic
+    // imgur.com/a/<id> link doesn't exist on Imgur — and a map hit is proof of
+    // a Reddit-hosted multi-image post either way. (The synthesizer never
+    // records a gallery containing video, so the video guard is belt-and-braces.)
+    {
+        NSString *galleryAlbumID = nil;
+        NSArray<NSString *> *galleryAssetIDs = ApolloRedditGalleryAssetIDsFromSubmitPairs(pairs, &galleryAlbumID);
+        if (galleryAssetIDs.count >= 2) {
+            if (ApolloRedditUploadAssetIDsContainVideo(galleryAssetIDs)) {
+                ApolloLog(@"[RedditUpload] Refusing unsupported mixed/video gallery submit (albumID=%@, items=%lu)", galleryAlbumID ?: @"(missing)", (unsigned long)galleryAssetIDs.count);
+                return nil;
+            }
+            return ApolloRedditGallerySubmitRequestFromForm(request, formValues, galleryAssetIDs, galleryAlbumID, canInjectComposerBodyText ? composerBodyText : nil);
+        }
+    }
+
     if (sImageUploadProvider != ImageUploadProviderReddit) {
         if (!shouldInjectComposerBodyText) return nil;
         NSURLRequest *bodyRequest = ApolloSubmitRequestByInjectingMediaBodyText(request, pairs, composerBodyText);
@@ -1422,8 +1459,6 @@ NSURLRequest *ApolloRedditMaybeRewriteSubmitRequest(NSURLRequest *request) {
 
     BOOL hasUploadedURLField = NO;
     BOOL hasUploadedTextField = NO;
-    NSString *galleryAlbumID = nil;
-    NSArray<NSString *> *galleryAssetIDs = nil;
     NSString *uploadedURLAssetID = nil;
     NSString *uploadedURLHost = nil;
     for (NSString *pair in pairs) {
@@ -1436,15 +1471,7 @@ NSURLRequest *ApolloRedditMaybeRewriteSubmitRequest(NSURLRequest *request) {
             uploadedURLHost = ApolloHostForRedditMediaURL(stagedURL);
             uploadedURLAssetID = ApolloAssetIDForRedditUploadedMediaURL(stagedURL) ?: uploadedURLAssetID;
         }
-        if ([key isEqualToString:@"url"] && galleryAssetIDs.count == 0) galleryAssetIDs = ApolloRedditGalleryAssetIDsForURLString(value, &galleryAlbumID);
         if ([key isEqualToString:@"text"] && ApolloFirstRedditUploadedMediaURLInString(value).length > 0) hasUploadedTextField = YES;
-    }
-    if (galleryAssetIDs.count >= 2) {
-        if (ApolloRedditUploadAssetIDsContainVideo(galleryAssetIDs)) {
-            ApolloLog(@"[RedditUpload] Refusing unsupported mixed/video gallery submit (albumID=%@, items=%lu)", galleryAlbumID ?: @"(missing)", (unsigned long)galleryAssetIDs.count);
-            return nil;
-        }
-        return ApolloRedditGallerySubmitRequestFromForm(request, formValues, galleryAssetIDs, galleryAlbumID, shouldInjectComposerBodyText ? composerBodyText : nil);
     }
     if (!ApolloStringContainsRedditUploadedMedia(body)) {
         ApolloMediaPostBodyLogSubmitDecision(@"skip", formValues, composerBodyText, hostedMediaForm, @"no-reddit-uploaded-media");
@@ -2888,6 +2915,24 @@ static void ApolloWarnKeylessUploadUnavailableOnce(void) {
     });
 }
 
+// The lowercased username the current compose will SUBMIT as, when that
+// account is a keyless (web-session) one — nil when the posting account is an
+// API-key account (its own bearer is the right lease identity) or can't be
+// resolved. The temporary posting account chosen via the title chooser wins;
+// otherwise the active account posts. An account is keyless exactly when it
+// has a stored web session: auth modes are mutually exclusive per account,
+// and an interactive OAuth sign-in removes any stale session entry (see
+// ApolloAccountCredentials.h / ApolloWebSessionStore.h).
+static NSString *ApolloRedditKeylessPostingUsername(void) {
+    NSString *composeToken = ApolloMediaComposerActivePostingBearerToken();
+    if (composeToken.length > 0 && !ApolloWebJSONBearerIsSynthetic(composeToken)) return nil;
+    NSString *username = composeToken.length > 0 ? ApolloWebJSONUsernameFromSyntheticBearer(composeToken) : nil;
+    if (username.length == 0) username = ApolloActiveWebSessionUsername();
+    username = username.lowercaseString;
+    if (username.length == 0) return nil;
+    return ApolloWebSessionFor(username).cookieHeader.length > 0 ? username : nil;
+}
+
 // The bearer used for the Reddit media lease. Prefer the compose's posting-account
 // token, then the last captured token. In the keyless Web JSON escape hatch there
 // is no real bearer, so return the synthetic placeholder — the chokepoint rewrite
@@ -2896,6 +2941,19 @@ static void ApolloWarnKeylessUploadUnavailableOnce(void) {
 static NSString *ApolloRedditUploadBearerToken(void) {
     NSString *composeToken = ApolloMediaComposerActivePostingBearerToken();
     if (composeToken.length > 0) return composeToken;
+    // Before falling back to the last globally-captured bearer, make sure the
+    // account that will SUBMIT isn't a keyless web-session account. On a mixed
+    // API-key + keyless install sLatestRedditBearerToken holds the OTHER
+    // account's real bearer (captured from its background traffic); handing it
+    // to a keyless upload makes Reddit reject the post with "All media assets
+    // must be owned by the submitter of this post" (INVALID_MEDIA_ASSETS,
+    // enforced server-side since ~mid-July 2026). Returning the keyless
+    // account's synthetic placeholder makes the WHOLE upload path treat it as
+    // keyless — the routing decision (ApolloShouldUseCookieRedditUpload) and
+    // the lease both key off this, so single images route correctly too, not
+    // just galleries.
+    NSString *keylessUsername = ApolloRedditKeylessPostingUsername();
+    if (keylessUsername.length > 0) return ApolloWebJSONSyntheticBearerTokenForUsername(keylessUsername);
     if (sLatestRedditBearerToken.length > 0) return [sLatestRedditBearerToken copy];
     if (ApolloWebJSONHasUsableSession()) return ApolloWebJSONSyntheticBearerTokenForUsername(ApolloActiveWebSessionUsername());
     return nil;
@@ -2933,14 +2991,23 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
     // different account, which makes Reddit reject the submit with
     // "All media assets must be owned by the submitter of this post".
     NSString *composeToken = ApolloMediaComposerActivePostingBearerToken();
+    // Posting-account-centric identity (INVALID_MEDIA_ASSETS fix): when the
+    // submitting account is keyless, ApolloRedditUploadBearerToken() already
+    // returns its synthetic placeholder (never a foreign captured bearer), so
+    // `token` is synthetic here and the keyless branch below leases under the
+    // account that actually submits.
+    NSString *keylessUsername = ApolloRedditKeylessPostingUsername();
     NSString *token = ApolloRedditUploadBearerToken();
-    // Keyless Web JSON: no real bearer (just the synthetic placeholder), so the
-    // lease goes to the old-reddit web endpoint with cookie + modhash instead.
+    // Keyless Web JSON: no real bearer of Apollo's own. Below we first try the
+    // posting account's web bearer (fresh token_v2 or an accounts-service
+    // mint) on the real oauth media lease — that creates an asset OWNED by the
+    // submitter, which gallery submits require — and only fall back to the
+    // old-reddit cookie + modhash web lease when no bearer can be produced.
     BOOL cookieMode = ApolloWebJSONBearerIsSynthetic(token);
-    if (composeToken.length > 0 && ![composeToken isEqualToString:sLatestRedditBearerToken]) {
+    if (composeToken.length > 0 && ![composeToken isEqualToString:sLatestRedditBearerToken] && !cookieMode) {
         ApolloLog(@"[RedditUpload] Using temporary posting account token for upload (differs from last captured Reddit token)");
-    } else if (ApolloWebJSONBearerIsSynthetic(token)) {
-        ApolloLog(@"[RedditUpload] No real bearer token; routing media lease through the Web JSON cookie session");
+    } else if (cookieMode) {
+        ApolloLog(@"[RedditUpload] Keyless posting account — leasing media under its own web identity");
     }
     NSString *userAgent = sUserAgent.length > 0 ? sUserAgent : defaultUserAgent;
     if (ApolloRedditNativeUploadAttemptIsCancelled(attempt, @"before-media-upload")) return;
@@ -2950,11 +3017,18 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
         ApolloUpdateActiveUploadAlertProgress(progress);
     };
     ApolloUpdateActiveUploadAlertProgress(0.0);
+    // The bearer the media upload actually rode (posting account's own web
+    // bearer in keyless mode) — a video's poster upload must reuse it so both
+    // assets land on the same account. usedCookieLease tracks whether the
+    // fallback cookie web lease carried the upload; it's the only path with no
+    // asset_id in the response.
+    __block NSString *resolvedUploadBearer = token;
+    __block BOOL usedCookieLease = NO;
     ApolloRedditMediaUploadCompletion mediaCompletion = ^(NSURL *mediaURL, NSString *assetID, NSString *webSocketURL, NSError *error) {
         if (ApolloRedditNativeUploadAttemptIsCancelled(attempt, @"media-upload-completion")) return;
         // Cookie uploads (image_upload_s3.json) never return an asset_id — the S3
         // <Location> URL is the whole payload — so only require it off the cookie path.
-        if (error || !mediaURL || (!cookieMode && assetID.length == 0)) {
+        if (error || !mediaURL || (!usedCookieLease && assetID.length == 0)) {
             ApolloLog(@"[RedditUpload] Upload failed: %@", error.localizedDescription);
             if (videoContext) ApolloMediaComposerCompleteVideoUploadContext(videoContext, YES, @"media-upload-error");
             completionHandler(nil, nil, error ?: [NSError errorWithDomain:@"ApolloRedditMediaUpload" code:50
@@ -2994,7 +3068,7 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
             NSString *posterFilename = [NSString stringWithFormat:@"apollo-video-poster-%@.jpg", [NSUUID UUID].UUIDString];
             ApolloLog(@"[RedditUpload] Uploading video poster image for assetID=%@ (%lu bytes)", assetID, (unsigned long)videoPosterData.length);
             attempt.stage = @"poster-upload";
-            attempt.posterOperation = ApolloUploadMediaDataToRedditCancellable(videoPosterData, posterFilename, @"image/jpeg", token, userAgent, nil, ^(NSURL *posterURL, NSString *posterAssetID, NSString *posterWebSocketURL, NSError *posterError) {
+            attempt.posterOperation = ApolloUploadMediaDataToRedditCancellable(videoPosterData, posterFilename, @"image/jpeg", resolvedUploadBearer, userAgent, nil, ^(NSURL *posterURL, NSString *posterAssetID, NSString *posterWebSocketURL, NSError *posterError) {
                 if (ApolloRedditNativeUploadAttemptIsCancelled(attempt, @"poster-upload-completion")) return;
                 if (posterError || !posterURL) {
                     ApolloLog(@"[RedditUpload] Video poster upload failed for assetID=%@: %@", assetID, posterError.localizedDescription ?: @"missing poster URL");
@@ -3029,26 +3103,76 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
         if (videoContext) ApolloMediaComposerCompleteVideoUploadContext(videoContext, YES, @"media-upload-success");
         completeSyntheticUpload();
     };
-    // Resolve the active account's per-account session once so the cookie and
+    // API-key posting account: unchanged — lease with its real bearer.
+    if (!cookieMode) {
+        if (mediaFileURL) {
+            attempt.mediaOperation = ApolloUploadMediaFileToRedditCancellable(mediaFileURL, filename, mimeType, token, userAgent, progressHandler, mediaCompletion);
+        } else {
+            attempt.mediaOperation = ApolloUploadMediaDataToRedditCancellable(mediaData, filename, mimeType, token, userAgent, progressHandler, mediaCompletion);
+        }
+        return;
+    }
+
+    // Keyless posting account. Resolve ITS session once so the cookie and
     // modhash can't come from two different accounts if a switch races the
-    // upload. A nil entry (account switched away mid-flight) fails fast rather
-    // than making a doomed request with the synthetic bearer.
-    ApolloWebSessionEntry *webSession = cookieMode ? ApolloActiveWebSession() : nil;
-    if (cookieMode && webSession.cookieHeader.length == 0) {
-        ApolloLog(@"[RedditUpload] Cookie mode requested but no active web session — aborting upload");
+    // upload; a missing entry (account switched away / signed out mid-flight)
+    // fails fast rather than making a doomed request.
+    NSString *sessionUsername = keylessUsername.length > 0 ? keylessUsername : ApolloActiveWebSessionUsername().lowercaseString;
+    ApolloWebSessionEntry *webSession = sessionUsername.length > 0 ? ApolloWebSessionFor(sessionUsername) : nil;
+    if (webSession.cookieHeader.length == 0) {
+        ApolloLog(@"[RedditUpload] Keyless upload requested but no web session for u/%@ — aborting upload", sessionUsername ?: @"(unknown)");
         completionHandler(nil, nil, [NSError errorWithDomain:@"ApolloRedditMediaUpload" code:54
             userInfo:@{NSLocalizedDescriptionKey: @"No active web session for the posting account — try again after switching back to it"}]);
         return;
     }
-    if (mediaFileURL) {
-        attempt.mediaOperation = cookieMode
-            ? ApolloUploadMediaFileToRedditViaCookieCancellable(mediaFileURL, filename, mimeType, webSession.cookieHeader, webSession.modhash, userAgent, progressHandler, mediaCompletion)
-            : ApolloUploadMediaFileToRedditCancellable(mediaFileURL, filename, mimeType, token, userAgent, progressHandler, mediaCompletion);
-    } else {
-        attempt.mediaOperation = cookieMode
-            ? ApolloUploadMediaDataToRedditViaCookieCancellable(mediaData, filename, mimeType, webSession.cookieHeader, webSession.modhash, userAgent, progressHandler, mediaCompletion)
-            : ApolloUploadMediaDataToRedditCancellable(mediaData, filename, mimeType, token, userAgent, progressHandler, mediaCompletion);
-    }
+
+    void (^startCookieLeaseUpload)(void) = ^{
+        usedCookieLease = YES;
+        resolvedUploadBearer = nil;
+        if (mediaFileURL) {
+            attempt.mediaOperation = ApolloUploadMediaFileToRedditViaCookieCancellable(mediaFileURL, filename, mimeType, webSession.cookieHeader, webSession.modhash, userAgent, progressHandler, mediaCompletion);
+        } else {
+            attempt.mediaOperation = ApolloUploadMediaDataToRedditViaCookieCancellable(mediaData, filename, mimeType, webSession.cookieHeader, webSession.modhash, userAgent, progressHandler, mediaCompletion);
+        }
+    };
+
+    // Try the posting account's own real bearer first (fresh token_v2 or an
+    // accounts-service mint): the oauth media/asset.json lease then creates an
+    // asset OWNED by the submitter, with a real asset_id — which is what lets
+    // multi-image gallery submits pass Reddit's ownership check. The resolve
+    // can mint synchronously (bounded network wait), so hop off the calling
+    // queue; everything downstream is async callbacks anyway.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        if (ApolloRedditNativeUploadAttemptIsCancelled(attempt, @"keyless-bearer-resolve")) return;
+        NSString *ownBearer = sessionUsername.length > 0 ? ApolloWebJSONKeylessOAuthBearer(sessionUsername) : nil;
+        if (ApolloRedditNativeUploadAttemptIsCancelled(attempt, @"keyless-bearer-resolved")) return;
+        if (ownBearer.length == 0) {
+            ApolloLog(@"[RedditUpload] No web bearer for u/%@ — using the cookie web lease (galleries need the bearer)", sessionUsername ?: @"(unknown)");
+            startCookieLeaseUpload();
+            return;
+        }
+        resolvedUploadBearer = ownBearer;
+        ApolloLog(@"[RedditUpload] Leasing media under u/%@'s own web bearer", sessionUsername);
+        // A minted bearer is unproven until a fetch succeeds with it — a dead
+        // session yields an anonymous token that the lease 401/403s. Report
+        // that outcome (drops the mint + arms the backoff) and retry once
+        // through the cookie web lease so single-image uploads still work.
+        ApolloRedditMediaUploadCompletion bearerOutcomeCompletion = ^(NSURL *mediaURL, NSString *assetID, NSString *webSocketURL, NSError *error) {
+            BOOL authRejected = error && [error.domain isEqualToString:@"ApolloRedditMediaUpload"] && (error.code == 401 || error.code == 403);
+            if (authRejected && !ApolloRedditNativeUploadAttemptIsCancelled(attempt, @"keyless-bearer-rejected")) {
+                ApolloWebJSONInvalidateOAuthBearerForAccount(sessionUsername, ownBearer);
+                ApolloLog(@"[RedditUpload] Web-bearer media lease rejected (HTTP %ld) — retrying via the cookie web lease", (long)error.code);
+                startCookieLeaseUpload();
+                return;
+            }
+            mediaCompletion(mediaURL, assetID, webSocketURL, error);
+        };
+        if (mediaFileURL) {
+            attempt.mediaOperation = ApolloUploadMediaFileToRedditCancellable(mediaFileURL, filename, mimeType, ownBearer, userAgent, progressHandler, bearerOutcomeCompletion);
+        } else {
+            attempt.mediaOperation = ApolloUploadMediaDataToRedditCancellable(mediaData, filename, mimeType, ownBearer, userAgent, progressHandler, bearerOutcomeCompletion);
+        }
+    });
 }
 
 // MARK: - Hooks (token capture + upload interception)

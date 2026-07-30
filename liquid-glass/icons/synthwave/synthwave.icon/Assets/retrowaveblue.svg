@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="659" viewBox="0 365 1024 659">
+<defs fill="#000000">
+  <radialGradient id="floor" cx="50%" cy="55%" r="78%" fill="#000000">
+    <stop offset="0" stop-color="#351052" fill="#000000"/>
+    <stop offset=".55" stop-color="#220837" fill="#000000"/>
+    <stop offset="1" stop-color="#11041d" fill="#000000"/>
+  </radialGradient>
+
+  <linearGradient id="bloom" x1="0" y1="365" x2="0" y2="545" gradientUnits="userSpaceOnUse" fill="#000000">
+    <stop offset="0" stop-color="#03a9f4" stop-opacity="0" fill="#000000"/>
+    <stop offset=".42" stop-color="#03a9f4" stop-opacity=".52" fill="#000000"/>
+    <stop offset=".58" stop-color="#03a9f4" stop-opacity=".28" fill="#000000"/>
+    <stop offset="1" stop-color="#03a9f4" stop-opacity="0" fill="#000000"/>
+  </linearGradient>
+
+  <filter id="hGlow" x="-50%" y="-700%" width="200%" height="1500%" fill="#000000">
+    <feGaussianBlur stdDeviation="28" result="b1" fill="#000000"/>
+    <feGaussianBlur stdDeviation="9" result="b2" fill="#000000"/>
+    <feMerge fill="#000000">
+      <feMergeNode in="b1" fill="#000000"/>
+      <feMergeNode in="b2" fill="#000000"/>
+      <feMergeNode in="SourceGraphic" fill="#000000"/>
+    </feMerge>
+  </filter>
+
+  <filter id="gGlow" x="-40%" y="-40%" width="180%" height="180%" fill="#000000">
+    <feGaussianBlur stdDeviation="6" result="b1" fill="#000000"/>
+    <feGaussianBlur stdDeviation="2" result="b2" fill="#000000"/>
+    <feMerge fill="#000000">
+      <feMergeNode in="b1" fill="#000000"/>
+      <feMergeNode in="b2" fill="#000000"/>
+      <feMergeNode in="SourceGraphic" fill="#000000"/>
+    </feMerge>
+  </filter>
+</defs>
+
+<!-- dark grid/floor only, no upper sky background -->
+<rect y="445" width="1024" height="579" fill="url(#floor)"/>
+
+<!-- top pink hue begins at the very top of this cropped SVG -->
+<rect x="-80" y="365" width="1184" height="180" fill="url(#bloom)" opacity=".92"/>
+
+<!-- neon horizon -->
+<line x1="-80" y1="448" x2="1104" y2="448" stroke="#03a9f4" stroke-width="22" filter="url(#hGlow)" fill="#000000"/>
+<line x1="-80" y1="448" x2="1104" y2="448" stroke="#03a9f4" stroke-width="10" fill="#000000"/>
+<line x1="-80" y1="448" x2="1104" y2="448" stroke="#ff9af2" stroke-width="3" opacity=".85" fill="#000000"/>
+
+<!-- deep perspective grid -->
+<g fill="none" stroke="#03a9f4" stroke-linecap="round" filter="url(#gGlow)">
+  <path d="M-8 466H1032" stroke-width="3" fill="#000000"/>
+  <path d="M-16 486H1040" stroke-width="3" fill="#000000"/>
+  <path d="M-28 510H1052" stroke-width="3" fill="#000000"/>
+  <path d="M-42 539H1066" stroke-width="3.5" fill="#000000"/>
+  <path d="M-62 574H1086" stroke-width="3.5" fill="#000000"/>
+  <path d="M-90 617H1114" stroke-width="4" fill="#000000"/>
+  <path d="M-130 671H1154" stroke-width="4.5" fill="#000000"/>
+  <path d="M-185 740H1209" stroke-width="5" fill="#000000"/>
+  <path d="M-265 829H1289" stroke-width="6" fill="#000000"/>
+  <path d="M-380 946H1404" stroke-width="8" fill="#000000"/>
+
+  <path d="M512 448L512 1100" stroke-width="5" fill="#000000"/>
+  <path d="M440 448L245 1100" stroke-width="5" fill="#000000"/>
+  <path d="M584 448L779 1100" stroke-width="5" fill="#000000"/>
+  <path d="M368 448L-55 1100" stroke-width="5" fill="#000000"/>
+  <path d="M656 448L1079 1100" stroke-width="5" fill="#000000"/>
+  <path d="M296 448L-390 1100" stroke-width="5" fill="#000000"/>
+  <path d="M728 448L1414 1100" stroke-width="5" fill="#000000"/>
+  <path d="M224 448L-760 1100" stroke-width="5" fill="#000000"/>
+  <path d="M800 448L1784 1100" stroke-width="5" fill="#000000"/>
+</g>
+
+<!-- bright pink cores -->
+<g fill="none" stroke="#ffb0f5" stroke-linecap="round" opacity=".78">
+  <path d="M-8 466H1032" fill="#000000"/>
+  <path d="M-16 486H1040" fill="#000000"/>
+  <path d="M-28 510H1052" fill="#000000"/>
+  <path d="M-42 539H1066" fill="#000000"/>
+  <path d="M-62 574H1086" fill="#000000"/>
+  <path d="M-90 617H1114" fill="#000000"/>
+  <path d="M-130 671H1154" fill="#000000"/>
+  <path d="M-185 740H1209" fill="#000000"/>
+  <path d="M-265 829H1289" fill="#000000"/>
+  <path d="M-380 946H1404" stroke-width="1.6" fill="#000000"/>
+
+  <path d="M512 448L512 1100" fill="#000000"/>
+  <path d="M440 448L245 1100" fill="#000000"/>
+  <path d="M584 448L779 1100" fill="#000000"/>
+  <path d="M368 448L-55 1100" fill="#000000"/>
+  <path d="M656 448L1079 1100" fill="#000000"/>
+  <path d="M296 448L-390 1100" fill="#000000"/>
+  <path d="M728 448L1414 1100" fill="#000000"/>
+  <path d="M224 448L-760 1100" fill="#000000"/>
+  <path d="M800 448L1784 1100" fill="#000000"/>
+</g>
+</svg>

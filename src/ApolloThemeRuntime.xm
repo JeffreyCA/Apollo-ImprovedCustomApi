@@ -231,11 +231,22 @@ static BOOL TextSinkMayUseTheme(id object, uintptr_t caller);
 // design, not the active theme's). Both the sink hooks and the refresh walk
 // skip them.
 static const void *kApolloThemeFontPinnedKey = &kApolloThemeFontPinnedKey;
+static const void *kApolloThemeBackgroundColorPassthroughKey = &kApolloThemeBackgroundColorPassthroughKey;
 
 void ApolloThemeRuntimeSetFontPinned(id view, BOOL pinned) {
     if (!view) return;
     objc_setAssociatedObject(view, kApolloThemeFontPinnedKey,
                              pinned ? @YES : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+void ApolloThemeRuntimeSetBackgroundColorPassthrough(id view, BOOL enabled) {
+    if (!view) return;
+    objc_setAssociatedObject(view, kApolloThemeBackgroundColorPassthroughKey,
+                             enabled ? @YES : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static BOOL BackgroundColorPassthrough(id view) {
+    return view && [objc_getAssociatedObject(view, kApolloThemeBackgroundColorPassthroughKey) boolValue];
 }
 
 static BOOL FontPinned(id view) {
@@ -855,30 +866,44 @@ static NSString * const kAppGroupSuite  = @"group.com.christianselig.apollo";
 static NSString * const kAppColorThemeKey = @"AppColorTheme";
 static const uint8_t kDonorThemeRawValue = 5; // outrun
 
-// Stock AppColorTheme metadata, indexed by raw value: enum case name + accent
-// {light, dark} (docs/theme-builder-RE.md; accents recovered from the 1.15.11
-// binary's accent switch — jump table 0x100ae3c14, arms off 0x10068b6bc). One
-// table so names and accents cannot drift out of index sync. chumbus dark
-// ignores the UsePureBlackDarkMode variants (000000/050505 — imperceptible).
-static const struct { const char *name; uint32_t light, dark; } kStockThemes[] = {
-    {"default",         0x007AFF, 0x2399FF},
-    {"nefertiti",       0x01A200, 0x01A200},
-    {"fieryStare",      0xFF0000, 0xFD0000},
-    {"spookyPumpkin",   0xFF6200, 0xF25D00},
-    {"solarized",       0x268BD2, 0x268BD2},
-    {"outrun",          0xC400A6, 0xFF00D8},
-    {"sunset",          0xFF6600, 0xFF7D00},
-    {"sepia",           0xB88023, 0xD3AC72},
-    {"monochromatic",   0x000000, 0xFFFFFF},
-    {"navy",            0x0058B8, 0x0060C9},
-    {"skiesOnSkies",    0x00B5F2, 0x01ADE8},
-    {"majesticPurple",  0x8800FF, 0x9C2CFF},
-    {"magentasplosion", 0xFF00B2, 0xE800A2},
-    {"sniffingWalnut",  0xA74E00, 0xA74E00},
-    {"fisherKing",      0x808286, 0x76787D},
-    {"chumbus",         0xF8F8F8, 0x20242B},
-    {"dracula",         0x9760FF, 0xAD81FF},
-    {"mint",            0x37BB98, 0x62DFA7},
+// Apollo's own Pure Black Dark Mode toggles (group defaults, same suite as
+// AppColorTheme). UsePurePUREBlackMode is a stronger tier on top of
+// UsePureBlackDarkMode; both apply only to non-tinted stock themes (Apollo's
+// theme screen: "Pure black affects Apollo themes only").
+static NSString * const kUsePureBlackDarkModeKey = @"UsePureBlackDarkMode";
+static NSString * const kUsePurerBlackDarkModeKey = @"UsePurePUREBlackMode";
+static NSString * const kPureBlackReduceSmearingKey = @"PureBlackModeReduceSmearing";
+
+// Stock AppColorTheme metadata, indexed by raw value: enum case name, accent
+// {light, dark}, card background {light, dark}, page background
+// {light, dark}, and separator {light, dark} (docs/theme-builder-RE.md;
+// accents recovered from the 1.15.11 binary's accent switch — jump table
+// 0x100ae3c14, arms off 0x10068b6bc). One table so all five stay in sync.
+//
+// tinted themes (solarized/outrun/sunset/sepia/dracula) retint everything
+// themselves and ignore Pure Black entirely. Non-tinted themes share one
+// baseline each (card 0x20252F, page 0x2B3039, separator 0x474E5C) that
+// ApolloStockNonTintedDarkCardRGB / ...PageRGB / ...SeparatorRGB override per
+// Apollo's Pure Black tier.
+static const struct { const char *name; uint32_t light, dark; uint32_t bgLight, bgDark; uint32_t pageLight, pageDark; uint32_t sepLight, sepDark; BOOL tinted; } kStockThemes[] = {
+    {"default",         0x007AFF, 0x2399FF, 0xFFFFFF, 0x20252F, 0xF2F3F7, 0x2B3039, 0xEEEEEF, 0x474E5C, NO},
+    {"nefertiti",       0x01A200, 0x01A200, 0xFFFFFF, 0x20252F, 0xF2F3F7, 0x2B3039, 0xEEEEEF, 0x474E5C, NO},
+    {"fieryStare",      0xFF0000, 0xFD0000, 0xFFFFFF, 0x20252F, 0xF2F3F7, 0x2B3039, 0xEEEEEF, 0x474E5C, NO},
+    {"spookyPumpkin",   0xFF6200, 0xF25D00, 0xFFFFFF, 0x20252F, 0xF2F3F7, 0x2B3039, 0xEEEEEF, 0x474E5C, NO},
+    {"solarized",       0x268BD2, 0x268BD2, 0xFDF6E3, 0x002B36, 0xE6DFCF, 0x003745, 0xE0DCCD, 0x002836, YES},
+    {"outrun",          0xC400A6, 0xFF00D8, 0xCFD7E8, 0x061636, 0xBAC1D1, 0x081D47, 0xB5B9C7, 0x06214D, YES},
+    {"sunset",          0xFF6600, 0xFF7D00, 0xFFE3D0, 0x000F29, 0xF2D8C7, 0x12223D, 0xE0CBBD, 0x061B40, YES},
+    {"sepia",           0xB88023, 0xD3AC72, 0xF1EAD9, 0x211E1A, 0xDBD5CA, 0x38332C, 0xD4CEC0, 0x29271F, YES},
+    {"monochromatic",   0x000000, 0xFFFFFF, 0xFFFFFF, 0x20252F, 0xF2F3F7, 0x2B3039, 0xEEEEEF, 0x474E5C, NO},
+    {"navy",            0x0058B8, 0x0060C9, 0xFFFFFF, 0x20252F, 0xF2F3F7, 0x2B3039, 0xEEEEEF, 0x474E5C, NO},
+    {"skiesOnSkies",    0x00B5F2, 0x01ADE8, 0xFFFFFF, 0x20252F, 0xF2F3F7, 0x2B3039, 0xEEEEEF, 0x474E5C, NO},
+    {"majesticPurple",  0x8800FF, 0x9C2CFF, 0xFFFFFF, 0x20252F, 0xF2F3F7, 0x2B3039, 0xEEEEEF, 0x474E5C, NO},
+    {"magentasplosion", 0xFF00B2, 0xE800A2, 0xFFFFFF, 0x20252F, 0xF2F3F7, 0x2B3039, 0xEEEEEF, 0x474E5C, NO},
+    {"sniffingWalnut",  0xA74E00, 0xA74E00, 0xFFFFFF, 0x20252F, 0xF2F3F7, 0x2B3039, 0xEEEEEF, 0x474E5C, NO},
+    {"fisherKing",      0x808286, 0x76787D, 0xFFFFFF, 0x20252F, 0xF2F3F7, 0x2B3039, 0xEEEEEF, 0x474E5C, NO},
+    {"chumbus",         0xF8F8F8, 0x20242B, 0xFFFFFF, 0x20252F, 0xF2F3F7, 0x2B3039, 0xEEEEEF, 0x474E5C, NO},
+    {"dracula",         0x9760FF, 0xAD81FF, 0xF8F8F3, 0x1A1D29, 0xEDEDE8, 0x222636, 0xD7D3E0, 0x242838, YES},
+    {"mint",            0x37BB98, 0x62DFA7, 0xFFFFFF, 0x20252F, 0xF2F3F7, 0x2B3039, 0xEEEEEF, 0x474E5C, NO},
 };
 enum { kStockThemeCount = sizeof(kStockThemes) / sizeof(kStockThemes[0]) };
 
@@ -951,6 +976,140 @@ static UIColor *ApolloThemeStockAccentColor(void) {
 UIColor *ApolloThemeAccentColor(void) {
     UIColor *custom = ApolloThemeRuntimeColor(ApolloThemeTokenAccent);
     return custom ?: ApolloThemeStockAccentColor();
+}
+
+// Dark-mode card override for a non-tinted stock theme, per Apollo's Pure
+// Black tier. PURER is only consulted when Pure Black is also on — Apollo
+// hides its toggle (and ignores the stored value) once Pure Black is off,
+// but doesn't clear it, so an unconditional check would resurrect a stale
+// YES. Read live, not cached: colorWithDynamicProvider: only runs on trait
+// resolution, and -boolForKey: is cheap after the first read.
+static BOOL ApolloStockNonTintedDarkCardRGB(uint32_t *outRGB) {
+    NSUserDefaults *d = GroupDefaults();
+    if (![d boolForKey:kUsePureBlackDarkModeKey]) return NO;
+    if ([d boolForKey:kUsePurerBlackDarkModeKey]) {
+        if (outRGB) *outRGB = [d boolForKey:kPureBlackReduceSmearingKey] ? 0x050505 : 0x000000;
+        return YES;
+    }
+    if (outRGB) *outRGB = 0x131516;
+    return YES;
+}
+
+// Card/cell background ("primaryBG") of the currently-selected stock Apollo
+// theme; nil while the custom runtime is active (donor hijack) or theme
+// unknown. Internal — external callers go through ApolloThemeCardBackgroundColor().
+static UIColor *ApolloThemeStockCardBackgroundColor(void) {
+    if (sEnabled) return nil;
+    uint8_t raw = 0;
+    if (!GetLiveAppColorThemeRaw(&raw)) return nil;
+    if (raw >= kStockThemeCount) return nil;
+    uint32_t light = kStockThemes[raw].bgLight, dark = kStockThemes[raw].bgDark;
+    BOOL tinted = kStockThemes[raw].tinted;
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+        uint32_t rgb = light;
+        if (tc.userInterfaceStyle == UIUserInterfaceStyleDark) {
+            uint32_t pureBlackRGB = 0;
+            rgb = (!tinted && ApolloStockNonTintedDarkCardRGB(&pureBlackRGB)) ? pureBlackRGB : dark;
+        }
+        sBypassHook++;
+        UIColor *c = ApolloThemeUIColorFromRGB(rgb);
+        sBypassHook--;
+        return c;
+    }];
+}
+
+// The EFFECTIVE card/cell background for tweak-drawn UI: the custom theme's
+// card color when one is active, else the stock theme's (Pure Black Dark
+// Mode aware). nil only if neither can be determined — callers supply their
+// own last-resort (typically secondarySystemGroupedBackgroundColor).
+UIColor *ApolloThemeCardBackgroundColor(void) {
+    UIColor *custom = ApolloThemeRuntimeColor(ApolloThemeTokenSecondaryBackground);
+    return custom ?: ApolloThemeStockCardBackgroundColor();
+}
+
+// Dark-mode page-background override for a non-tinted stock theme. Simpler
+// than the card override: Apollo's page background is already black as soon
+// as Pure Black itself is on — PURER only pushes the CARD the rest of the
+// way, it doesn't change the page any further.
+static BOOL ApolloStockNonTintedDarkPageRGB(uint32_t *outRGB) {
+    NSUserDefaults *d = GroupDefaults();
+    if (![d boolForKey:kUsePureBlackDarkModeKey]) return NO;
+    if (outRGB) *outRGB = [d boolForKey:kPureBlackReduceSmearingKey] ? 0x050505 : 0x000000;
+    return YES;
+}
+
+// Page background ("secondaryBG") of the currently-selected stock Apollo
+// theme; nil while the custom runtime is active (donor hijack) or theme
+// unknown. Internal — external callers go through ApolloThemePageBackgroundColor().
+static UIColor *ApolloThemeStockPageBackgroundColor(void) {
+    if (sEnabled) return nil;
+    uint8_t raw = 0;
+    if (!GetLiveAppColorThemeRaw(&raw)) return nil;
+    if (raw >= kStockThemeCount) return nil;
+    uint32_t light = kStockThemes[raw].pageLight, dark = kStockThemes[raw].pageDark;
+    BOOL tinted = kStockThemes[raw].tinted;
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+        uint32_t rgb = light;
+        if (tc.userInterfaceStyle == UIUserInterfaceStyleDark) {
+            uint32_t pureBlackRGB = 0;
+            rgb = (!tinted && ApolloStockNonTintedDarkPageRGB(&pureBlackRGB)) ? pureBlackRGB : dark;
+        }
+        sBypassHook++;
+        UIColor *c = ApolloThemeUIColorFromRGB(rgb);
+        sBypassHook--;
+        return c;
+    }];
+}
+
+// The EFFECTIVE page background for tweak-drawn UI: the custom theme's page
+// color when one is active, else the stock theme's (Pure Black Dark Mode
+// aware). nil only if neither can be determined — callers supply their own
+// last-resort (typically systemGroupedBackgroundColor).
+UIColor *ApolloThemePageBackgroundColor(void) {
+    UIColor *custom = ApolloThemeRuntimeColor(ApolloThemeTokenBackground);
+    return custom ?: ApolloThemeStockPageBackgroundColor();
+}
+
+// Dark-mode separator override for a non-tinted stock theme. One "on" value
+// covers both Pure Black tiers — PURER doesn't push the separator any
+// further than plain Pure Black does (unlike the card).
+static BOOL ApolloStockNonTintedDarkSeparatorRGB(uint32_t *outRGB) {
+    NSUserDefaults *d = GroupDefaults();
+    if (![d boolForKey:kUsePureBlackDarkModeKey]) return NO;
+    if (outRGB) *outRGB = 0x313741;
+    return YES;
+}
+
+// Separator color of the currently-selected stock Apollo theme; nil while
+// the custom runtime is active (donor hijack) or theme unknown. Internal —
+// external callers go through ApolloThemeSeparatorColor().
+static UIColor *ApolloThemeStockSeparatorColor(void) {
+    if (sEnabled) return nil;
+    uint8_t raw = 0;
+    if (!GetLiveAppColorThemeRaw(&raw)) return nil;
+    if (raw >= kStockThemeCount) return nil;
+    uint32_t light = kStockThemes[raw].sepLight, dark = kStockThemes[raw].sepDark;
+    BOOL tinted = kStockThemes[raw].tinted;
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+        uint32_t rgb = light;
+        if (tc.userInterfaceStyle == UIUserInterfaceStyleDark) {
+            uint32_t pureBlackRGB = 0;
+            rgb = (!tinted && ApolloStockNonTintedDarkSeparatorRGB(&pureBlackRGB)) ? pureBlackRGB : dark;
+        }
+        sBypassHook++;
+        UIColor *c = ApolloThemeUIColorFromRGB(rgb);
+        sBypassHook--;
+        return c;
+    }];
+}
+
+// The EFFECTIVE separator color for tweak-drawn UI: the custom theme's
+// separator when one is active, else the stock theme's (Pure Black Dark
+// Mode aware). nil only if neither can be determined — callers supply their
+// own last-resort (typically UIColor.separatorColor).
+UIColor *ApolloThemeSeparatorColor(void) {
+    UIColor *custom = ApolloThemeRuntimeColor(ApolloThemeTokenSeparator);
+    return custom ?: ApolloThemeStockSeparatorColor();
 }
 
 void ApolloThemeRuntimeEnable(void) {
@@ -1490,6 +1649,10 @@ static ASImageNodeTintColorModificationBlockFn ASImageNodeTintColorModificationB
 %hook _TtC6Apollo24ApolloSearchBarTextField
 
 - (void)setBackgroundColor:(UIColor *)color {
+    if (BackgroundColorPassthrough(self)) {
+        %orig(color);
+        return;
+    }
     UIColor *raised = ApolloThemeRuntimeColor(ApolloThemeTokenTertiaryBackground);
     %orig(raised ?: color);
 }

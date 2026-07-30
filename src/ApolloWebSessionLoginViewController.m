@@ -40,14 +40,20 @@ static const NSTimeInterval kFarFutureCookieInterval = 10000.0 * 24 * 60 * 60;
 // and for re-authenticating a known-expired session (already dead, so there's
 // nothing worth preserving).
 @property (nonatomic) BOOL clearsExistingSessionBeforeLoad;
+// Non-empty only when this controller was opened from the expired-session
+// prompt. Cancel must re-arm that account's one-shot prompt latch so tapping
+// the failed feature again can offer re-authentication instead of spinning.
+@property (nonatomic, copy) NSString *reauthenticationUsername;
+// Optional owner callback for an in-place recovery flow such as modern Chat or
+// Modmail. Kept private so ordinary Settings/account-add flows retain their
+// existing behavior.
+@property (nonatomic, copy) void (^authenticationCompletion)(BOOL success);
+// Non-empty for an auxiliary feature login. The harvested Reddit username must
+// match this account, and the resulting cookie cannot become primary transport.
+@property (nonatomic, copy) NSString *requiredUsername;
 // Consecutive harvest attempts that found an incomplete session (see the
 // completeness gate in _harvestAndFinishForUser:).
 @property (nonatomic) NSUInteger harvestAttempts;
-@property (nonatomic, copy) NSString *requiredUsername;
-@property (nonatomic, copy) void (^sessionCompletion)(BOOL success);
-// Fires sessionCompletion once (any dismissal path); declared here so
-// viewDidDisappear: (above its definition) sees the selector under -Werror.
-- (void)_fireSessionCompletion:(BOOL)success;
 @end
 
 // How many times the harvest may defer back to the 2s auth poll while waiting
@@ -66,6 +72,14 @@ static const NSUInteger kMaxIncompleteHarvestAttempts = 5;
 @property (nonatomic, copy) NSString *username;      // lowercased target
 @property (nonatomic, copy) void (^completion)(BOOL);
 @property (nonatomic) BOOL done;
+// Classification of the session being refreshed, captured at entry: a
+// re-harvest must store the fresh cookies with the SAME visibility the dying
+// entry had. The chat unread poller triggers re-harvests for auxiliary
+// (poll-only) sessions riding along API-key accounts — storing those as
+// primary would flip the account onto Web JSON transport behind the user's
+// back (the exact opposite of the "your sign-in choice will not change"
+// promise the feature sign-in makes).
+@property (nonatomic) BOOL pollOnly;
 - (void)_finish:(BOOL)success;
 @end
 
@@ -89,16 +103,21 @@ static const NSTimeInterval kReharvestTimeout = 25.0;
     return vc;
 }
 
++ (instancetype)loginControllerForReauthenticationOfUsername:(NSString *)username {
+    ApolloWebSessionLoginViewController *vc = [self loginControllerForAdditionalAccount];
+    vc.reauthenticationUsername = [[username ?: @"" stringByTrimmingCharactersInSet:
+        [NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+    return vc;
+}
+
 + (instancetype)loginControllerForUsername:(NSString *)username completion:(void (^)(BOOL))completion {
     ApolloWebSessionLoginViewController *vc = [[self alloc] init];
-    // Keep an already-authenticated shared WebKit session long enough to
-    // identify it. _harvestAndFinishForUser: accepts it only when its username
-    // matches requiredUsername; a mismatch's "Sign In Again" path clears the
-    // jar before presenting a fresh login. This makes the common OAuth case
-    // (the same user is already signed into reddit.com) genuinely one tap.
-    vc.clearsExistingSessionBeforeLoad = NO;
-    vc.requiredUsername = username.lowercaseString;
-    vc.sessionCompletion = completion;
+    // Preserve a matching persistent web login for the common one-tap path.
+    // A mismatch is cleared after /api/me.json identifies it, guaranteeing that
+    // Chat/Modmail/Polls never borrow another Reddit account's cookies.
+    vc.requiredUsername = [[username ?: @"" stringByTrimmingCharactersInSet:
+        [NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+    vc.authenticationCompletion = completion;
     return vc;
 }
 
@@ -119,28 +138,46 @@ static const NSTimeInterval kReharvestTimeout = 25.0;
 }
 
 + (void)presentExpiredSessionPromptForUsername:(NSString *)username {
-    UIViewController *top = [[self _apolloKeyWindow] visibleViewController];
-    if (!top) return;
-    // Already in the login flow (or some other modal we shouldn't interrupt).
-    if ([top isKindOfClass:[ApolloWebSessionLoginViewController class]]) return;
+    [self presentExpiredSessionPromptForUsername:username completion:nil];
+}
 
-    NSString *who = username.length > 0 ? [NSString stringWithFormat:@"u/%@", username] : @"your account";
++ (void)presentExpiredSessionPromptForUsername:(NSString *)username
+                                    completion:(void (^)(BOOL success))completion {
+    completion = [completion copy];
+    UIViewController *top = [[self _apolloKeyWindow] visibleViewController];
+    if (!top) { if (completion) completion(NO); return; }
+    // Already in the login flow (or some other modal we shouldn't interrupt).
+    if ([top isKindOfClass:[ApolloWebSessionLoginViewController class]]) {
+        if (completion) completion(NO);
+        return;
+    }
+
+    NSString *instruction = username.length > 0
+        ? [NSString stringWithFormat:@"Sign in as u/%@", username]
+        : @"Sign in to Reddit";
     UIAlertController *alert = [UIAlertController
-        alertControllerWithTitle:@"Reddit Session Expired"
+        alertControllerWithTitle:@"Reddit Sign-In Required"
                          message:[NSString stringWithFormat:
-                             @"%@'s Reddit web session is no longer valid (Reddit returned its sign-in wall). Sign in again to keep using it without API keys.", who]
+                             @"%@ to reconnect this Apollo account. This web sign-in powers API-Key-Free Mode, Reddit Chat, and modern Moderator Mail.", instruction]
                   preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Sign In Again"
                                               style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *a) {
         // The expired session is already known-bad, so clear it before
         // reloading — same rationale as adding an additional account.
-        ApolloWebSessionLoginViewController *vc = [ApolloWebSessionLoginViewController loginControllerForAdditionalAccount];
+        ApolloWebSessionLoginViewController *vc =
+            [ApolloWebSessionLoginViewController loginControllerForReauthenticationOfUsername:username];
+        vc.authenticationCompletion = completion;
         UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
         UIViewController *presenter = [[self _apolloKeyWindow] visibleViewController] ?: top;
         [presenter presentViewController:nav animated:YES completion:nil];
     }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Later" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Later"
+                                              style:UIAlertActionStyleCancel
+                                            handler:^(UIAlertAction *a) {
+        ApolloWebJSONNoteSessionReauthenticationDeferred(username);
+        if (completion) completion(NO);
+    }]];
     [top presentViewController:alert animated:YES completion:nil];
 }
 
@@ -194,7 +231,10 @@ static const NSTimeInterval kReharvestTimeout = 25.0;
         __weak typeof(self) weakSelf = self;
         [self _clearRedditCookiesWithCompletion:^{
             typeof(self) s = weakSelf;
-            if (!s) return;
+            // Cancel may happen while WebKit is still deleting cookies. Do not
+            // resurrect navigation on a controller the user already dismissed;
+            // this was the other half of the cancel-then-spinner loop.
+            if (!s || s.finished) return;
             s.awaitingLogin = YES; // cookies are gone, so /login will show the form, not auto-authenticate
             ApolloLog(@"[WebJSON] Loading login URL: %@", s.loginURL);
             [s.webView loadRequest:[NSURLRequest requestWithURL:s.loginURL]];
@@ -230,18 +270,18 @@ static const NSTimeInterval kReharvestTimeout = 25.0;
     [self.authPollTimer invalidate];
     self.authPollTimer = nil;
 
-    // Safety net for the completion contract. The nav sheet is presented at the
-    // default pageSheet detent with no isModalInPresentation / adaptive-dismiss
-    // delegate, so a swipe-down leaves through neither Cancel nor a successful
-    // harvest — _fireSessionCompletion: would never run. A success has already
+    // Safety net for the completion contract: a page-sheet swipe-down leaves
+    // through neither Cancel nor a successful harvest. A success has already
     // nil-ed the block by now, so a still-set block here means the sheet was
-    // dismissed interactively: honor it as a cancel. Without this the caller
-    // keeps a phantom optimistic vote + a permanently reserved in-flight key
-    // (voting) or a stuck "Post" spinner (compose).
-    if (self.sessionCompletion) {
-        ApolloLog(@"[WebJSON] Web login sheet dismissed without finishing — treating as cancel");
-        self.finished = YES;
-        [self _fireSessionCompletion:NO];
+    // dismissed interactively — honor it as a cancel, otherwise the caller
+    // keeps a phantom optimistic vote / a stuck spinner / a mailbox that never
+    // leaves its loading state.
+    if (self.authenticationCompletion &&
+        (self.navigationController.isBeingDismissed || self.isBeingDismissed)) {
+        ApolloLog(@"[WebJSON] Web login sheet dismissed interactively — treating as cancel");
+        void (^completion)(BOOL) = self.authenticationCompletion;
+        self.authenticationCompletion = nil;
+        completion(NO);
     }
 }
 
@@ -269,12 +309,14 @@ static void ApolloWebSessionProbeMeField(WKWebView *webView, NSString *field, vo
 // Sweeps every .reddit.com cookie in `cookieStore` into a "name=value; …"
 // header, rewrites session-only cookies to a far-future expiry so the
 // persistent data store keeps them across launches (Hydra's trick), and
-// persists cookie + modhash under `username`. When `pollOnly` is YES the session
-// is stored via ApolloWebSessionSetPollOnly (invisible to the transport spine —
-// used by the OAuth auto-harvest and the Polls-settings sign-in for OAuth
-// accounts); otherwise via ApolloWebSessionSet (a primary API-Key-Free session).
+// persists cookie + modhash under `username`. When `auxiliaryOnly` is YES the
+// session is stored via ApolloWebSessionSetPollOnly (invisible to the transport
+// spine — used by the OAuth auto-harvest and the feature-settings sign-in for
+// OAuth accounts); otherwise via ApolloWebSessionSet (a primary API-Key-Free
+// session).
 static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStore, NSString *username, NSString *modhash,
-                                                   BOOL pollOnly, void (^completion)(NSUInteger cookieCount)) {
+                                                   BOOL auxiliaryOnly,
+                                                   void (^completion)(NSUInteger cookieCount)) {
     // Choosing or refreshing keyless auth supersedes any unfinished OAuth
     // attempt. In particular, a failed OAuth token exchange can leave its
     // cleanup discriminator armed for up to 120 seconds; synthesizing the new
@@ -283,11 +325,11 @@ static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStor
     // this harvest just stored.
     //
     // Only the PRIMARY (keyless) path synthesizes an account and fires that
-    // hook. A poll-only harvest rides along a live OAuth sign-in (see
-    // -[ApolloWebAuthViewController _harvestPollSessionThenFinishWithURL:],
+    // hook. An auxiliary harvest rides along a live OAuth sign-in (see
+    // -[ApolloWebAuthViewController _harvestFeatureSessionThenFinishWithURL:],
     // which runs BEFORE the callback arms the discriminator), so disarming here
     // would clobber the protection for the very OAuth account being signed in.
-    if (!pollOnly) {
+    if (!auxiliaryOnly) {
         ApolloCancelInteractiveOAuthSignIn();
     }
     [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
@@ -307,7 +349,7 @@ static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStor
         }
         if (pairs.count > 0) {
             NSString *cookieHeader = [pairs componentsJoinedByString:@"; "];
-            if (pollOnly) {
+            if (auxiliaryOnly) {
                 ApolloWebSessionSetPollOnly(username, cookieHeader, modhash);
             } else {
                 ApolloWebSessionSet(username, cookieHeader, modhash);
@@ -320,11 +362,11 @@ static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStor
             // now (the choosers no longer gate on the master flag), so signing
             // in without an API key IS the opt-in — flip the internal flag on
             // rather than leaving the fresh session with no working transport.
-            // A poll-only harvest must NOT flip it: it's invisible to the
+            // An auxiliary harvest must NOT flip it: it's invisible to the
             // transport spine and rides along an OAuth account that keeps its
             // own request path, so enabling the global transport here would be
             // an unwanted side effect the user never opted into.
-            if (!pollOnly && !sWebJSONEnabled) {
+            if (!auxiliaryOnly && !sWebJSONEnabled) {
                 sWebJSONEnabled = YES;
                 [[NSUserDefaults standardUserDefaults] setBool:YES forKey:UDKeyWebJSONEnabled];
                 ApolloLog(@"[WebJSON] Enabled Web JSON transport — u/%@ signed in without an API key", username);
@@ -372,18 +414,19 @@ static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStor
         if (!s.decisionMade) {
             s.decisionMade = YES;
             if (loggedIn && s.requiredUsername.length > 0) {
-                // Targeted sign-in (Polls / vote): we know exactly which account
-                // we need, so don't show the ambiguous "Already Signed In — Keep
-                // / Re-authenticate" prompt against the shared cookie jar. If the
-                // already-logged-in web user IS the one we need, harvest it
-                // silently (one tap). If it's a stale/other account, clear it and
-                // show the login form — no prompt to "keep" the wrong account.
+                // Targeted sign-in (Chat / Modmail / Polls): we know exactly
+                // which account we need, so don't show the ambiguous "Already
+                // Signed In — Keep / Re-authenticate" prompt against the shared
+                // cookie jar. If the already-logged-in web user IS the one we
+                // need, harvest it silently (one tap). If it's a stale/other
+                // account, clear it and show the login form — no prompt to
+                // "keep" the wrong account.
                 if ([username.lowercaseString isEqualToString:s.requiredUsername]) {
-                    ApolloLog(@"[WebJSON] Existing web login matches required u/%@ — harvesting silently", username);
+                    ApolloLog(@"[WebJSON] Existing web login matches required u/%@ — harvesting auxiliary session", username);
                     s.awaitingLogin = YES; // lets the completeness-gate retry re-enter the harvest
                     [s _harvestAndFinishForUser:username];
                 } else {
-                    ApolloLog(@"[WebJSON] Existing web login u/%@ ≠ required u/%@ — clearing and showing login form",
+                    ApolloLog(@"[WebJSON] Existing web login u/%@ does not match required u/%@ — clearing it",
                               username, s.requiredUsername);
                     [s _reauthenticate];
                 }
@@ -444,13 +487,30 @@ static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStor
 // clean (the persistent store survives app uninstall in the simulator).
 - (void)_clearRedditCookiesWithCompletion:(void (^)(void))completion {
     WKHTTPCookieStore *store = self.webView.configuration.websiteDataStore.httpCookieStore;
+    // WebKit occasionally drops a cookie-deletion completion when a previous
+    // login controller was dismissed during the same operation. Never make the
+    // next attempt wait forever: complete once either every deletion returns or
+    // a short safety timeout expires. The subsequent /login load is authoritative
+    // and will still show whether a stale cookie survived.
+    __block BOOL finished = NO;
+    void (^finishOnce)(NSString *) = ^(NSString *reason) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (finished) return;
+            finished = YES;
+            if (reason.length > 0) ApolloLog(@"[WebJSON] Reddit cookie clear %@", reason);
+            if (completion) completion();
+        });
+    };
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        finishOnce(@"timed out after 4s; continuing to the login page");
+    });
     [store getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
         NSMutableArray<NSHTTPCookie *> *redditCookies = [NSMutableArray array];
         for (NSHTTPCookie *c in cookies) {
             if ([c.domain.lowercaseString hasSuffix:@"reddit.com"]) [redditCookies addObject:c];
         }
         if (redditCookies.count == 0) {
-            dispatch_async(dispatch_get_main_queue(), completion);
+            finishOnce(@"completed (no Reddit cookies present)");
             return;
         }
         // WKHTTPCookieStore completion handlers run serially on the main thread,
@@ -458,7 +518,7 @@ static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStor
         __block NSUInteger remaining = redditCookies.count;
         for (NSHTTPCookie *c in redditCookies) {
             [store deleteCookie:c completionHandler:^{
-                if (--remaining == 0) dispatch_async(dispatch_get_main_queue(), completion);
+                if (--remaining == 0) finishOnce(@"completed");
             }];
         }
     }];
@@ -473,16 +533,20 @@ static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStor
         self.decisionMade = YES;
         self.awaitingLogin = NO;
         NSString *message = [NSString stringWithFormat:
-            @"Apollo is using u/%@, but Reddit signed in as u/%@. Sign in with the matching account to vote.",
+            @"Apollo is using u/%@, but Reddit signed in as u/%@. Sign in with the matching account for Chat, Modmail, and Polls.",
             self.requiredUsername, username];
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Different Reddit Account"
                                                                         message:message
                                                                  preferredStyle:UIAlertControllerStyleAlert];
         __weak typeof(self) weakSelf = self;
-        [alert addAction:[UIAlertAction actionWithTitle:@"Sign In Again" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        [alert addAction:[UIAlertAction actionWithTitle:@"Sign In Again"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(__unused UIAlertAction *action) {
             [weakSelf _reauthenticate];
         }]];
-        [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action) {
+        [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                                  style:UIAlertActionStyleCancel
+                                                handler:^(__unused UIAlertAction *action) {
             [weakSelf _cancelTapped];
         }]];
         [self presentViewController:alert animated:YES completion:nil];
@@ -532,21 +596,25 @@ static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStor
             // Persist the cookie + write token under THIS username (not a single
             // global) — ApolloWebSessionStore, keychain-backed — so it coexists
             // with any other web-session or OAuth accounts already configured.
-            // A requiredUsername means this is the Polls-settings sign-in for a
-            // specific (usually OAuth) account, so store it poll-only — it must
-            // not become that account's primary transport session. The generic
-            // "Sign In Without API Key" flow (no requiredUsername) stores primary.
+            // A requiredUsername means this is a targeted feature sign-in
+            // (Chat/Modmail/Polls) for a specific (usually OAuth) account, so
+            // store it auxiliary-only — it must not become that account's
+            // primary transport session. The generic "Sign In Without API Key"
+            // flow (no requiredUsername) stores primary.
             // ApolloWebSessionSetPollOnly still preserves an existing primary
             // session, so re-signing-in a keyless account never downgrades it.
-            BOOL pollOnly = s2.requiredUsername.length > 0;
-            ApolloWebSessionHarvestFromCookieStore(cookieStore, username, modhash, pollOnly, ^(NSUInteger cookieCount) {
-                ApolloLog(@"[WebJSON] Harvested session for u/%@, %lu cookies, modhash %@",
-                          username, (unsigned long)cookieCount, modhash.length > 0 ? @"captured" : @"absent");
+            BOOL auxiliaryOnly = s2.requiredUsername.length > 0;
+            ApolloWebSessionHarvestFromCookieStore(cookieStore, username, modhash, auxiliaryOnly,
+                                                   ^(NSUInteger cookieCount) {
+                ApolloLog(@"[WebJSON] Harvested %@ session for u/%@, %lu cookies, modhash %@",
+                          auxiliaryOnly ? @"auxiliary" : @"primary",
+                          username, (unsigned long)cookieCount,
+                          modhash.length > 0 ? @"captured" : @"absent");
 
-                // Synthesize a signed-in account so the account tab + write actions
-                // (vote/comment) work — they gate on AccountManager having a current
-                // account, which only loads at launch, so a restart is required.
-                BOOL synthesized = ApolloWebJSONSynthesizeSignedInAccount(username);
+                // Only a primary API-Key-Free sign-in needs a synthetic Apollo
+                // account. A targeted feature login belongs to the already-active
+                // OAuth account and must leave that account untouched.
+                BOOL synthesized = auxiliaryOnly ? NO : ApolloWebJSONSynthesizeSignedInAccount(username);
                 [s2 _finishWithUser:username accountSynthesized:synthesized];
             });
         }];
@@ -590,25 +658,18 @@ static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStor
     self.navigationItem.rightBarButtonItem.menu = menu;
 }
 
-// Fire the one-shot session completion exactly once, whichever way the login VC
-// leaves — Cancel, a successful harvest, or an interactive sheet swipe-dismiss.
-// Nil-ing the block makes every later call a no-op, so the caller's cancel work
-// (vote: end-in-flight + rollback; compose: clear the submitting spinner) runs
-// once and only once, and a success can never be clobbered by a later cancel.
-- (void)_fireSessionCompletion:(BOOL)success {
-    void (^completion)(BOOL) = self.sessionCompletion;
-    if (!completion) return;
-    self.sessionCompletion = nil;
-    completion(success);
-}
-
 - (void)_cancelTapped {
     ApolloLog(@"[WebJSON] User cancelled web session login");
     self.finished = YES;
     [self.authPollTimer invalidate];
     self.authPollTimer = nil;
-    [self _fireSessionCompletion:NO];
-    [self _dismiss];
+    self.webView.navigationDelegate = nil;
+    [self.webView stopLoading];
+    [self.spinner stopAnimating];
+    if (self.reauthenticationUsername.length > 0) {
+        ApolloWebJSONNoteSessionReauthenticationDeferred(self.reauthenticationUsername);
+    }
+    [self _dismissWithAuthenticationSuccess:NO];
 }
 
 // Called after a successful harvest. When an account was synthesized, Apollo must
@@ -620,8 +681,13 @@ static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStor
 // leaving them with a silently-blank account tab. Otherwise (account already
 // present / synthesis skipped) just dismiss with no prompt.
 - (void)_finishWithUser:(NSString *)username accountSynthesized:(BOOL)synthesized {
-    [self _fireSessionCompletion:YES];
-    if (!synthesized) { [self _dismiss]; return; }
+    if (!synthesized) {
+        ApolloWebSessionEntry *entry = self.requiredUsername.length > 0
+            ? ApolloWebSessionPollFor(username)
+            : ApolloWebSessionFor(username);
+        [self _dismissWithAuthenticationSuccess:(entry.cookieHeader.length > 0)];
+        return;
+    }
 
     // Mark the pending state up front; clearing happens at next launch (%ctor).
     // The username travels alongside the flag — sessions are per-account now, so
@@ -641,47 +707,50 @@ static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStor
                                             handler:^(UIAlertAction *a) { exit(0); }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Not Now (account stays inactive)"
                                               style:UIAlertActionStyleCancel
-                                            handler:^(UIAlertAction *a) { [self _dismiss]; }]];
+                                            handler:^(UIAlertAction *a) {
+        BOOL hasSession = ApolloWebSessionFor(username).cookieHeader.length > 0;
+        [self _dismissWithAuthenticationSuccess:hasSession];
+    }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)_dismiss {
-    [self.navigationController dismissViewControllerAnimated:YES completion:nil];
+- (void)_dismissWithAuthenticationSuccess:(BOOL)success {
+    void (^completion)(BOOL) = self.authenticationCompletion;
+    self.authenticationCompletion = nil;
+    [self.navigationController dismissViewControllerAnimated:YES completion:^{
+        if (completion) completion(success);
+    }];
 }
 
-#pragma mark - Opportunistic "grab it once" harvest (from the OAuth webview)
+#pragma mark - Opportunistic feature-session harvest (from OAuth)
 
-+ (void)harvestPollSessionFromWebView:(WKWebView *)webView
-                           completion:(void (^)(NSString *username))completion {
++ (void)harvestFeatureSessionFromWebView:(WKWebView *)webView
+                              completion:(void (^)(NSString *username))completion {
     completion = [completion copy];
     void (^finish)(NSString *) = ^(NSString *username) {
         if (!completion) return;
-        if ([NSThread isMainThread]) completion(username);
+        if (NSThread.isMainThread) completion(username);
         else dispatch_async(dispatch_get_main_queue(), ^{ completion(username); });
     };
     if (!webView) { finish(nil); return; }
-    // Ask reddit.com (in the OAuth webview's own origin) who is logged in. At the
-    // OAuth callback the webview is sitting on the consent page, signed in as the
-    // user being authorized — so its cookie jar holds a live reddit_session +
-    // token_v2 and /api/me.json returns the name + modhash the poll transport needs.
+
     ApolloWebSessionProbeMeField(webView, @"name", ^(NSString *name) {
-        NSString *username = name.length > 0 ? name : nil;
+        NSString *username = name.length > 0 ? name.lowercaseString : nil;
         if (!username) {
-            ApolloLog(@"[WebAuth] Auto-harvest: webview reports no logged-in user — skipping");
+            ApolloLog(@"[WebAuth] Auxiliary auto-harvest found no logged-in Reddit user");
             finish(nil);
             return;
         }
         ApolloWebSessionProbeMeField(webView, @"modhash", ^(NSString *modhash) {
             WKHTTPCookieStore *store = webView.configuration.websiteDataStore.httpCookieStore;
-            // pollOnly:YES — this rides along a real OAuth sign-in, so it must
-            // never become the account's primary transport session.
-            ApolloWebSessionHarvestFromCookieStore(store, username, modhash, YES, ^(NSUInteger cookieCount) {
+            ApolloWebSessionHarvestFromCookieStore(store, username, modhash, YES,
+                                                   ^(NSUInteger cookieCount) {
                 if (cookieCount > 0) {
-                    ApolloLog(@"[WebAuth] Auto-harvested poll session for u/%@ during OAuth (%lu cookies, modhash %@)",
-                              username, (unsigned long)cookieCount, modhash.length > 0 ? @"captured" : @"absent");
+                    ApolloLog(@"[WebAuth] Auto-harvested auxiliary session for u/%@ during OAuth (%lu cookies)",
+                              username, (unsigned long)cookieCount);
                     finish(username);
                 } else {
-                    ApolloLog(@"[WebAuth] Auto-harvest for u/%@ found no reddit.com cookies — skipping", username);
+                    ApolloLog(@"[WebAuth] Auxiliary auto-harvest for u/%@ found no Reddit cookies", username);
                     finish(nil);
                 }
             });
@@ -706,14 +775,33 @@ static void ApolloWebSessionHarvestFromCookieStore(WKHTTPCookieStore *cookieStor
             if (completion) completion(NO);
             return;
         }
-        // Coalesce concurrent attempts: the first one's outcome stands; later
-        // callers are dropped (documented in the header).
-        if (sReharvestsInFlight[key]) return;
+        // Coalesce concurrent attempts: one webview does the work, but every
+        // caller observes the first attempt's outcome (the chat unread poller
+        // clears its backoff from this completion, so dropping it would leave
+        // a successful re-harvest unnoticed for up to 30 minutes).
+        ApolloWebSessionSilentReharvester *inflight = sReharvestsInFlight[key];
+        if (inflight) {
+            void (^prior)(BOOL) = inflight.completion;
+            void (^added)(BOOL) = completion;
+            if (added) {
+                inflight.completion = ^(BOOL success) {
+                    if (prior) prior(success);
+                    added(success);
+                };
+            }
+            return;
+        }
 
         ApolloLog(@"[WebJSON] Attempting silent re-harvest for u/%@ from the persistent webview jar", key);
         ApolloWebSessionSilentReharvester *r = [ApolloWebSessionSilentReharvester new];
         r.username = key;
         r.completion = completion;
+        // Primary sessions are visible to ApolloWebSessionFor; auxiliary
+        // (poll-only) ones are not. If the entry vanished mid-flight,
+        // poll-only is the safe non-escalating default: ApolloWebSessionSetPollOnly
+        // never flips the global transport flag, and it refreshes an existing
+        // primary entry AS primary anyway.
+        r.pollOnly = (ApolloWebSessionFor(key) == nil);
 
         WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
         config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
@@ -826,11 +914,15 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
             typeof(self) s2 = weakSelf;
             if (!s2 || s2.done) return;
             WKHTTPCookieStore *store = webView.configuration.websiteDataStore.httpCookieStore;
-            // Silent re-harvest only ever runs for PRIMARY sessions (poll-only
-            // sessions are invisible to the transport expiry detection that
-            // triggers it), so store primary here.
-            ApolloWebSessionHarvestFromCookieStore(store, s2.username, modhash, NO, ^(NSUInteger cookieCount) {
-                ApolloLog(@"[WebJSON] Silently re-harvested session for u/%@ (%lu cookies, modhash %@) — expiry prompt suppressed",
+            // Store the fresh cookies with the classification captured at
+            // entry. The transport expiry detection only fires for primary
+            // sessions, but the chat unread poller also triggers re-harvests
+            // for auxiliary (poll-only) sessions — those must stay auxiliary
+            // or an API-key account would silently become a Web JSON account.
+            ApolloWebSessionHarvestFromCookieStore(store, s2.username, modhash, s2.pollOnly,
+                                                   ^(NSUInteger cookieCount) {
+                ApolloLog(@"[WebJSON] Silently re-harvested %@ session for u/%@ (%lu cookies, modhash %@) — expiry prompt suppressed",
+                          s2.pollOnly ? @"auxiliary" : @"primary",
                           s2.username, (unsigned long)cookieCount, modhash.length > 0 ? @"captured" : @"absent");
                 [s2 _finish:cookieCount > 0];
             });
@@ -853,10 +945,17 @@ decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
 #pragma mark - Shared sign-in chooser (reused by the empty-state splash and the account switcher)
 
 void ApolloWebSessionPresentSignInChooser(UIViewController *host, void (^apiKeyHandler)(void)) {
+    if (!host || host.presentedViewController) {
+        ApolloLog(@"[WebJSON] Ignoring duplicate sign-in chooser presentation");
+        return;
+    }
     apiKeyHandler = [apiKeyHandler copy];
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Add Account"
-                                                                     message:nil
-                                                              preferredStyle:UIAlertControllerStyleActionSheet];
+    // Use an alert instead of a transient action sheet. It cannot dismiss from
+    // an outside tap and has no default action: the auth mode changes only after
+    // the user explicitly chooses one of the two sign-in methods.
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Choose Sign-In Method"
+                                                                     message:@"Use Apollo's configured API key, or sign in with API-Key-Free Mode. This choice will not change on its own."
+                                                              preferredStyle:UIAlertControllerStyleAlert];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Sign In With API Key"
                                               style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *a) {
@@ -876,8 +975,6 @@ void ApolloWebSessionPresentSignInChooser(UIViewController *host, void (^apiKeyH
         [host presentViewController:nav animated:YES completion:nil];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    sheet.popoverPresentationController.sourceView = host.view;
-    sheet.popoverPresentationController.sourceRect = host.view.bounds;
     [host presentViewController:sheet animated:YES completion:nil];
 }
 

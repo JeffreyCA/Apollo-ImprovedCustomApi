@@ -116,6 +116,23 @@ require_no_extensions_variant() {
     fi
 }
 
+require_promotion_enabled() {
+    local ipa="$1"
+    local name="$2"
+    local plist value value_type
+
+    plist="$(mktemp)"
+    unzip -p "$ipa" 'Payload/*.app/Info.plist' > "$plist" 2>/dev/null
+    value_type="$(plutil -type CADisableMinimumFrameDurationOnPhone "$plist" 2>/dev/null || true)"
+    value="$(plutil -extract CADisableMinimumFrameDurationOnPhone raw -o - "$plist" 2>/dev/null || true)"
+    rm -f "$plist"
+
+    if [[ "$value_type" != "bool" || ( "$value" != "true" && "$value" != "1" ) ]]; then
+        echo "Error: $name does not enable CADisableMinimumFrameDurationOnPhone as a Boolean (type: ${value_type:-missing}, value: ${value:-missing})" >&2
+        exit 1
+    fi
+}
+
 STANDARD_IPA="$(find_variant)"
 BASE="${STANDARD_IPA%.ipa}"
 NOEXT_IPA="${BASE}-NOEXTENSIONS.ipa"
@@ -137,6 +154,13 @@ require_widget_variant "$GLASS_ICONS_IPA" "GLASS Icons"
 require_no_extensions_variant "$NOEXT_IPA" "No Extensions"
 require_no_extensions_variant "$NOEXT_GLASS_IPA" "GLASS No Extensions"
 require_no_extensions_variant "$NOEXT_GLASS_ICONS_IPA" "GLASS Icons No Extensions"
+
+require_promotion_enabled "$STANDARD_IPA" "standard"
+require_promotion_enabled "$NOEXT_IPA" "No Extensions"
+require_promotion_enabled "$GLASS_IPA" "GLASS"
+require_promotion_enabled "$NOEXT_GLASS_IPA" "GLASS No Extensions"
+require_promotion_enabled "$GLASS_ICONS_IPA" "GLASS Icons"
+require_promotion_enabled "$NOEXT_GLASS_ICONS_IPA" "GLASS Icons No Extensions"
 
 echo "IPA variant validation passed:"
 printf '  %s\n' \

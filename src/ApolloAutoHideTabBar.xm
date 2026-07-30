@@ -1,6 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 #import "ApolloCommon.h"
 #import "ApolloState.h"
@@ -271,8 +272,9 @@ static void ApolloShowTabBar(UITabBarController *tbc, BOOL animated) {
     // gesture-end handler writes the bar's model state right after us, which
     // cancels or re-anchors it (see the hide path).
     if (tabBar.hidden) {
-        if ([tbc respondsToSelector:@selector(setTabBarHidden:animated:)]) {
-            [tbc setTabBarHidden:NO animated:NO];
+        SEL setHiddenSelector = NSSelectorFromString(@"setTabBarHidden:animated:");
+        if ([tbc respondsToSelector:setHiddenSelector]) {
+            ((void (*)(id, SEL, BOOL, BOOL))objc_msgSend)(tbc, setHiddenSelector, NO, NO);
         } else {
             tabBar.hidden = NO;
         }
@@ -298,11 +300,12 @@ static void ApolloHideTabBar(UITabBarController *tbc, BOOL animated) {
 
     ApolloLog(@"[AutoHideTabBarFix] Hide (animated=%d)", animated);
 
-    BOOL canSystemHide = [tbc respondsToSelector:@selector(setTabBarHidden:animated:)];
+    SEL setHiddenSelector = NSSelectorFromString(@"setTabBarHidden:animated:");
+    BOOL canSystemHide = [tbc respondsToSelector:setHiddenSelector];
 
     void (^commitHidden)(void) = ^{
         if (canSystemHide) {
-            [tbc setTabBarHidden:YES animated:NO];
+            ((void (*)(id, SEL, BOOL, BOOL))objc_msgSend)(tbc, setHiddenSelector, YES, NO);
         } else {
             tabBar.hidden = YES;
         }
@@ -639,6 +642,13 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
 %end
 
 %hook UIScrollView
+
+- (void)didMoveToWindow {
+    %orig;
+    if (self.window) {
+        ApolloApplyScrollEdgeEffectStyle(self);
+    }
+}
 
 - (void)setContentOffset:(CGPoint)contentOffset {
     if (!sAutoHideTabBarShowOnIdle || !ApolloSupportsNativeTabBarMinimize() || !self.window ||

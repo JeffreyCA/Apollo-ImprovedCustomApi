@@ -18,6 +18,8 @@ source "${MODULES_DIR}/inject-url-schemes.sh"
 source "${MODULES_DIR}/fix-safari-extension.sh"
 # shellcheck source=scripts/modules/fix-openin-extension.sh
 source "${MODULES_DIR}/fix-openin-extension.sh"
+# shellcheck source=scripts/modules/enable-promotion.sh
+source "${MODULES_DIR}/enable-promotion.sh"
 
 # Cleanup on exit (success or failure)
 cleanup() {
@@ -171,6 +173,10 @@ echo "Found app bundle: ${app_bundle_name}"
 
 # --- 2. Apply Modifications (via shared modules) ---
 echo "Applying modifications..."
+
+# Every patched Apollo build should expose the device's full adaptive refresh
+# range, regardless of whether Liquid Glass is also enabled.
+enable_promotion_in_app "$APP_BUNDLE"
 
 # 2a. Liquid Glass (binary + assets)
 if [ "${LIQUID_GLASS}" == "true" ]; then

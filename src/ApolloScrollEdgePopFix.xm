@@ -226,7 +226,12 @@ static void ApolloEdgeBeginTransition(UINavigationController *nav, UIViewControl
 %hook ScrollEdgeEffectView
 
 - (void)layoutSubviews {
-    if (ApolloEdgePocketsFrozenFor(ApolloEdgeOwningScrollView(self))) return;
+    // Steady state (no pop transition in flight): skip the superview walk —
+    // ApolloEdgePocketsFrozenFor's own first condition is this same counter,
+    // so the outcome is identical, just without paying the walk on every
+    // effect-view layout during ordinary scrolling.
+    if (sTransitionsInFlight > 0 &&
+        ApolloEdgePocketsFrozenFor(ApolloEdgeOwningScrollView(self))) return;
     %orig;
 }
 

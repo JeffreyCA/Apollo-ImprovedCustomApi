@@ -141,12 +141,17 @@ static void ApolloApplyAdaptiveTabBarAppearance(UITabBar *tabBar, NSString *reas
             changed = YES;
         }
 
-        if ([tabBar respondsToSelector:@selector(scrollEdgeAppearance)]) {
-            UITabBarAppearance *scrollEdgeAppearance = tabBar.scrollEdgeAppearance;
+        SEL scrollEdgeSelector = NSSelectorFromString(@"scrollEdgeAppearance");
+        SEL setScrollEdgeSelector = NSSelectorFromString(@"setScrollEdgeAppearance:");
+        if ([tabBar respondsToSelector:scrollEdgeSelector] &&
+            [tabBar respondsToSelector:setScrollEdgeSelector]) {
+            UITabBarAppearance *scrollEdgeAppearance =
+                ((id (*)(id, SEL))objc_msgSend)(tabBar, scrollEdgeSelector);
             BOOL scrollEdgeChanged = NO;
             UITabBarAppearance *adaptiveScrollEdgeAppearance = ApolloAdaptiveTabBarAppearance(scrollEdgeAppearance, &scrollEdgeChanged);
             if (scrollEdgeChanged) {
-                tabBar.scrollEdgeAppearance = adaptiveScrollEdgeAppearance;
+                ((void (*)(id, SEL, id))objc_msgSend)(tabBar, setScrollEdgeSelector,
+                                                      adaptiveScrollEdgeAppearance);
                 changed = YES;
             }
         }
@@ -360,6 +365,26 @@ static void ApolloCancelLiquidLensGesture(UITabBar *tabBar) {
 @interface _UITAMICAdaptorView : UIView
 @end
 
+static void ApolloInsetLiquidGlassTabBadges(UIView *tabButton) {
+    if (!IsLiquidGlass() || !tabButton.window) return;
+
+    Class badgeClass = NSClassFromString(@"_UIBarBadgeView");
+    if (!badgeClass) return;
+
+    // iOS 26 renders both a normal and selected-content copy of each tab item.
+    // The selected copy is scaled to 116% inside a clipping glass platter, so
+    // UIKit's legacy badge origin (y=2) loses roughly four pixels at the top.
+    // _UITabButton owns these child frames; correct them after its layout pass
+    // with an absolute, idempotent inset rather than allowing repeated drift.
+    for (UIView *subview in tabButton.subviews) {
+        if (![subview isKindOfClass:badgeClass]) continue;
+        CGRect frame = subview.frame;
+        if (frame.origin.y >= 6.0) continue;
+        frame.origin.y = 6.0;
+        subview.frame = frame;
+    }
+}
+
 %hook UITabBarItem
 
 - (void)setImage:(UIImage *)image {
@@ -435,6 +460,11 @@ static void ApolloCancelLiquidLensGesture(UITabBar *tabBar) {
 %end
 
 %hook _UITabButton
+
+- (void)layoutSubviews {
+    %orig;
+    ApolloInsetLiquidGlassTabBadges(self);
+}
 
 - (void)didMoveToWindow {
     %orig;
@@ -722,29 +752,414 @@ static void HideApolloStatusBarBackgroundView(UINavigationController *navControl
 
 // MARK: - Re-center title widget pushed off-center by Liquid Glass bar items
 //
-// On iOS 26 Liquid Glass, asymmetric padding around bar items widens the
-// trailing item stack more than the back button, so UINavigationBar centers the
-// title in the gap between items rather than at the bar's true midpoint.
+// On iOS 26 Liquid Glass, UIKit places the inline title with three different
+// rules depending on how it measures (observed on-device/sim, issues #178/#200):
+//   1. fits at the bar's absolute midpoint -> bar-centered ("4 Comments"),
+//   2. too wide for the midpoint -> leading-aligned against the back pill
+//      ("273 Comments"),
+//   3. greedy title views (JumpBar/Home) -> wrapper fills the whole gap and the
+//      content centers in it -> gap-centered.
+// So the perceived position hops around per screen, and it shifts again when
+// the translation globe widens the trailing pill. The old fix pulled the title
+// toward the absolute bar midpoint, which overlapped the trailing pill on long
+// titles (#178) and was therefore disabled entirely while bulk translation was
+// on (#200) — bringing the inconsistency right back.
 //
 // Fix: hook _UINavigationBarTitleControl (the universal container for plain
-// titles, DualLabelTitleButton, and JumpBar) and apply a CGAffineTransform
-// translation that pulls its center toward the bar midpoint, clamped to avoid
-// overlapping either bar item stack.
+// titles, DualLabelTitleButton, and JumpBar) and translate it to the midpoint
+// of the visual gap between the leading (back) pill and the trailing pill —
+// their actual _UINavigationBarPlatterView edges, measured at layout time. One
+// rule for every screen and every trailing-pill width, equal breathing room on
+// both sides by construction, so it can never overlap either pill and no
+// longer needs the bulk-translation opt-out.
+//
+// Subreddit headers (ApolloSubredditHeaders.xm) additionally get their
+// JumpBar's width sized to its actual content before this centering math runs
+// — Apollo's own layout snaps that width to one of two fixed constants (156pt
+// moderated / 204pt not) instead of hugging its own text, so without the
+// re-size the gap math is centering a box that has nothing to do with what is
+// actually drawn in it. That sizing pass is unchanged here; only the rule that
+// picks the final center changed.
 
 @interface _UINavigationBarTitleControl : UIControl
 @end
 
-static void ApolloRecenterTitleControl(UIView *titleControl) {
-    if (!titleControl.window || !titleControl.superview) return;
+@interface _UINavigationBarPlatterView : UIView
+@end
+
+// Walks the responder chain (not the view hierarchy — the title control's
+// superview chain terminates at the nav controller's own view, not the
+// child view controller it's currently displaying) to find the visible
+// screen this title belongs to.
+static UIViewController *ApolloOwningTopViewController(UIView *view) {
+    UIResponder *responder = view;
+    while (responder) {
+        if ([responder isKindOfClass:[UINavigationController class]]) {
+            return ((UINavigationController *)responder).topViewController;
+        }
+        responder = responder.nextResponder;
+    }
+    return nil;
+}
+
+// Apollo's JumpBar is a custom, bare titleView. Give it a genuine Regular
+// Liquid Glass capsule and let UIKit's glass renderer provide the native
+// contrast treatment. No background sampling or forced foreground colors are
+// used here.
+static char kApolloNavigationTitleGlassControllerKey;
+
+static UIView *ApolloFindJumpBar(UIView *root) {
+    if (!root) return nil;
+    if ([NSStringFromClass(root.class) isEqualToString:@"Apollo.JumpBar"]) return root;
+    for (UIView *subview in root.subviews) {
+        UIView *match = ApolloFindJumpBar(subview);
+        if (match) return match;
+    }
+    return nil;
+}
+
+static id ApolloJumpBarObjectIvar(UIView *jumpBar, const char *name) {
+    if (!jumpBar || !name) return nil;
+    Ivar ivar = class_getInstanceVariable(jumpBar.class, name);
+    return ivar ? object_getIvar(jumpBar, ivar) : nil;
+}
+
+// Whether the JumpBar is in "type a subreddit name" mode. Apollo swaps the name
+// label and disclosure arrow out for searchTextField, but it does NOT clear the
+// label's text — it only hides it — so anything measuring that label has to
+// check this first or it sizes the bar to invisible content.
+static BOOL ApolloJumpBarIsSearching(UIView *jumpBar) {
+    id searchField = ApolloJumpBarObjectIvar(jumpBar, "searchTextField");
+    if (![searchField isKindOfClass:UIView.class]) return NO;
+    UIView *field = (UIView *)searchField;
+    return !field.hidden && field.alpha > 0.01;
+}
+
+static void ApolloCollectNavigationTitleContent(UIView *root,
+                                                UIView *excluded,
+                                                NSMutableArray<UIView *> *content) {
+    for (UIView *subview in root.subviews) {
+        if (subview == excluded || subview.hidden || subview.alpha < 0.01) continue;
+
+        if ([subview isKindOfClass:UILabel.class] ||
+            [subview isKindOfClass:UIImageView.class] ||
+            [subview isKindOfClass:UITextField.class]) {
+            [content addObject:subview];
+        }
+        ApolloCollectNavigationTitleContent(subview, excluded, content);
+    }
+}
+
+static BOOL ApolloRecenterTitleControl(UIView *titleControl);
+
+@interface ApolloNavigationTitleGlassController : NSObject
+@property (nonatomic, weak) UIView *titleControl;
+@property (nonatomic, weak) UIView *glassHostView;
+@property (nonatomic, strong) UIVisualEffectView *glassView;
+@property (nonatomic) BOOL refreshScheduled;
+@property (nonatomic) BOOL observationValid;
+@property (nonatomic) CGRect observedTitleFrame;
+@property (nonatomic) CGRect observedTitleBounds;
+@property (nonatomic) NSUInteger observedTitleSubviewCount;
+@property (nonatomic, weak) UIView *observedJumpBar;
+@property (nonatomic) CGRect observedJumpBarBounds;
+@property (nonatomic) NSUInteger observedJumpBarSubviewCount;
+@property (nonatomic) BOOL observedSearching;
+// Read-only frame fold over the whole bar subtree: the recenter's output
+// depends on SIBLING bar-item geometry (left/right content limits), so a
+// trailing pill appearing/disappearing must break the "unchanged" gate even
+// when the title's own geometry is untouched. Also catches descendant label
+// relayouts (Dynamic Type) inside an unchanged JumpBar frame.
+@property (nonatomic) NSUInteger observedBarFingerprint;
+@property (nonatomic) NSUInteger observedContentMetric;
+- (instancetype)initWithTitleControl:(UIView *)titleControl;
+- (void)scheduleTargetRefresh;
+- (void)scheduleTargetRefreshIfNeeded;
+- (void)invalidate;
+@end
+
+@implementation ApolloNavigationTitleGlassController
+
+- (instancetype)initWithTitleControl:(UIView *)titleControl {
+    self = [super init];
+    if (!self) return nil;
+
+    _titleControl = titleControl;
+    return self;
+}
+
+- (void)dealloc {
+    [self invalidate];
+}
+
+- (void)invalidate {
+    [self.glassView removeFromSuperview];
+    self.glassView = nil;
+    self.glassHostView = nil;
+    self.observationValid = NO;
+}
+
+- (UIVisualEffectView *)newRegularGlassView {
+    Class glassEffectClass = objc_getClass("UIGlassEffect");
+    SEL effectSelector = NSSelectorFromString(@"effectWithStyle:");
+    if (!glassEffectClass || ![glassEffectClass respondsToSelector:effectSelector]) return nil;
+
+    UIVisualEffect *effect = ((id (*)(id, SEL, NSInteger))objc_msgSend)(
+        glassEffectClass, effectSelector, 0 /* UIGlassEffectStyleRegular */);
+    if (![effect isKindOfClass:UIVisualEffect.class]) return nil;
+
+    UIVisualEffectView *glassView = [[UIVisualEffectView alloc] initWithEffect:effect];
+    glassView.userInteractionEnabled = NO;
+    glassView.clipsToBounds = YES;
+
+    Class cornerClass = objc_getClass("UICornerConfiguration");
+    SEL capsuleSelector = NSSelectorFromString(@"capsuleConfiguration");
+    SEL setCornerSelector = NSSelectorFromString(@"setCornerConfiguration:");
+    if (cornerClass && [cornerClass respondsToSelector:capsuleSelector] &&
+        [glassView respondsToSelector:setCornerSelector]) {
+        id capsule = ((id (*)(id, SEL))objc_msgSend)(cornerClass, capsuleSelector);
+        ((void (*)(id, SEL, id))objc_msgSend)(glassView, setCornerSelector, capsule);
+    }
+    return glassView;
+}
+
+- (CGRect)glassFrameForHostView:(UIView *)hostView candidateViews:(NSArray<UIView *> *)candidateViews {
+    const CGFloat kVerticalPadding = 8.0;
+    CGRect frame;
+
+    if (ApolloJumpBarIsSearching(hostView)) {
+        // Search mode: Apollo re-sizes searchTextField to fit the text on every
+        // keystroke, so a capsule hugging it grew and shrank under the caret,
+        // and any capsule narrower than the text let the text spill out of it.
+        // Pin it to the whole bar instead — which is what it now is: a search
+        // field spanning the gap between the leading and trailing bar buttons.
+        CGRect bounds = hostView.bounds;
+        if (CGRectGetWidth(bounds) <= 0 || CGRectGetHeight(bounds) <= 0) return CGRectNull;
+        id field = ApolloJumpBarObjectIvar(hostView, "searchTextField");
+        CGFloat lineHeight = 0;
+        if ([field isKindOfClass:UITextField.class]) {
+            lineHeight = ceil(((UITextField *)field).font.lineHeight);
+        }
+        if (lineHeight <= 0) lineHeight = 20.0;
+        // Same height the content path below produces, so opening search
+        // changes the capsule's width without also resizing its height.
+        CGFloat height = MIN(CGRectGetHeight(bounds), lineHeight + kVerticalPadding * 2.0);
+        const CGFloat kSearchSideInset = 8.0;
+        frame = CGRectMake(kSearchSideInset,
+                           (CGRectGetHeight(bounds) - height) / 2.0,
+                           MAX(0.0, CGRectGetWidth(bounds) - kSearchSideInset * 2.0),
+                           height);
+        if (CGRectIsEmpty(frame)) return CGRectNull;
+    } else {
+        CGRect contentFrame = CGRectNull;
+        for (UIView *view in candidateViews) {
+            if (![view isKindOfClass:UIView.class] || view.hidden || view.alpha < 0.01 ||
+                CGRectIsEmpty(view.bounds)) continue;
+            CGRect viewFrame = [view convertRect:view.bounds toView:hostView];
+            contentFrame = CGRectIsNull(contentFrame) ? viewFrame : CGRectUnion(contentFrame, viewFrame);
+        }
+
+        if (CGRectIsNull(contentFrame) || CGRectIsEmpty(contentFrame)) return CGRectNull;
+
+        // UINavigationBar title controls are often only as wide as their label.
+        // Permit overhang so the capsule retains real padding instead of
+        // collapsing to a plain title label's intrinsic width and height.
+        frame = CGRectInset(contentFrame, -14.0, -kVerticalPadding);
+    }
+
+    CGFloat scale = hostView.window.screen.scale ?: UIScreen.mainScreen.scale;
+    frame.origin.x = round(frame.origin.x * scale) / scale;
+    frame.origin.y = round(frame.origin.y * scale) / scale;
+    frame.size.width = round(frame.size.width * scale) / scale;
+    frame.size.height = round(frame.size.height * scale) / scale;
+    return frame;
+}
+
+- (void)updateGlassForHostView:(UIView *)hostView candidateViews:(NSArray<UIView *> *)candidateViews {
+    CGRect targetFrame = [self glassFrameForHostView:hostView candidateViews:candidateViews];
+    if (CGRectIsNull(targetFrame) || CGRectIsEmpty(targetFrame)) {
+        [self.glassView removeFromSuperview];
+        self.glassView = nil;
+        self.glassHostView = nil;
+        return;
+    }
+
+    if (self.glassHostView != hostView) {
+        [self.glassView removeFromSuperview];
+        self.glassView = nil;
+        self.glassHostView = hostView;
+    }
+    if (!self.glassView) {
+        self.glassView = [self newRegularGlassView];
+        if (!self.glassView) return;
+        self.glassView.frame = targetFrame;
+        [hostView insertSubview:self.glassView atIndex:0];
+        ApolloLog(@"[NavigationTitleGlass] installed %@ capsule frame=%@",
+                  NSStringFromClass(hostView.class), NSStringFromCGRect(self.glassView.frame));
+        return;
+    }
+
+    if (hostView.subviews.firstObject != self.glassView) {
+        [hostView sendSubviewToBack:self.glassView];
+    }
+    if (CGRectEqualToRect(self.glassView.frame, targetFrame)) return;
+    // UIKit already animates the containing navigation transition. A second,
+    // independently timed frame animation made the capsule visibly trail the
+    // title and continuously retarget during interactive pushes.
+    self.glassView.frame = targetFrame;
+}
+
+// Read-only, depth/count-capped fold of every visible descendant frame under
+// the enclosing navigation bar (pills sit ~5-6 levels deep on Liquid Glass).
+// Frame reads only — a few microseconds — versus the frame conversions, bar
+// scan, transform writes and sizeThatFits passes this gate exists to avoid.
+static void ApolloFoldBarContentFingerprint(UIView *view, NSUInteger depth,
+                                            NSUInteger *count, NSUInteger *hash) {
+    if (depth > 8 || *count > 120) return;
+    for (UIView *child in view.subviews) {
+        if (child.hidden || child.alpha < 0.01) continue;
+        (*count)++;
+        CGRect f = child.frame;
+        NSUInteger h = ((NSUInteger)lround(f.origin.x * 2.0) & 0xFFF)
+                     | (((NSUInteger)lround(f.origin.y * 2.0) & 0xFFF) << 12)
+                     | (((NSUInteger)lround(f.size.width * 2.0) & 0xFFF) << 24)
+                     | (((NSUInteger)lround(f.size.height * 2.0) & 0xFFF) << 36);
+        *hash = (*hash * 1099511628211ULL) ^ h;
+        ApolloFoldBarContentFingerprint(child, depth + 1, count, hash);
+    }
+}
+
+static NSUInteger ApolloNavigationBarContentFingerprint(UIView *titleControl) {
+    UINavigationBar *bar = nil;
+    for (UIView *v = titleControl.superview; v != nil; v = v.superview) {
+        if ([v isKindOfClass:[UINavigationBar class]]) { bar = (UINavigationBar *)v; break; }
+    }
+    if (!bar) return 0;
+    NSUInteger hash = 1469598103934665603ULL;
+    NSUInteger count = 0;
+    ApolloFoldBarContentFingerprint(bar, 0, &count, &hash);
+    return hash ^ (count << 1);
+}
+
+// Text/font identity of the JumpBar's name label: the capsule and the
+// content-sized width are measured from it, and a text or Dynamic Type font
+// change can re-lay the label inside an unchanged JumpBar frame.
+static NSUInteger ApolloJumpBarContentMetric(UIView *jumpBar) {
+    if (!jumpBar) return 0;
+    id nameLabel = ApolloJumpBarObjectIvar(jumpBar, "nameLabel");
+    if (![nameLabel isKindOfClass:UILabel.class]) return 0;
+    UILabel *label = (UILabel *)nameLabel;
+    return label.text.hash ^ (NSUInteger)lround(label.font.pointSize * 4.0);
+}
+
+- (void)refreshTargets {
+    UIView *jumpBar = ApolloFindJumpBar(self.titleControl);
+    UIView *hostView = jumpBar ?: self.titleControl;
+    NSMutableArray<UIView *> *glassCandidates = [NSMutableArray array];
+
+    // Recenter outside layoutSubviews. It can resize JumpBar and transform the
+    // title control, both of which are layout-driving writes that must not feed
+    // back into UIKit's active navigation-bar pass. When it BAILS (mid push/pop
+    // animation, bar not resolvable yet) the observations below must not latch:
+    // the old code recovered from a skipped recenter by re-running every layout
+    // pass, and latching "unchanged" against geometry the recenter never
+    // processed would leave the title off-center until the next real change.
+    //
+    // Runs unconditionally now: gap-centering re-measures the trailing pill
+    // every pass, so the translation globe appearing/disappearing is simply a
+    // new gap. The old `!sEnableBulkTranslation` bail existed because absolute
+    // bar-centering overlapped the widened pill (#178) — and it is exactly what
+    // left titles off-center whenever bulk translation was on (#200).
+    BOOL recenterSettled = ApolloRecenterTitleControl(self.titleControl);
+
+    if (jumpBar) {
+        const char *ivarNames[] = {
+            "nameLabel", "secondaryLabel", "suggestionLabel", "arrowImageView", "searchTextField"
+        };
+        for (NSUInteger i = 0; i < sizeof(ivarNames) / sizeof(ivarNames[0]); i++) {
+            id candidate = ApolloJumpBarObjectIvar(jumpBar, ivarNames[i]);
+            if ([candidate isKindOfClass:UIView.class]) [glassCandidates addObject:candidate];
+        }
+    } else {
+        // Plain titles, profile titles, and Apollo's dual-label title buttons
+        // all ultimately expose their visible label/image content here.
+        ApolloCollectNavigationTitleContent(self.titleControl, self.glassView, glassCandidates);
+    }
+
+    [self updateGlassForHostView:hostView candidateViews:glassCandidates];
+
+    self.observedTitleFrame = self.titleControl.frame;
+    self.observedTitleBounds = self.titleControl.bounds;
+    self.observedTitleSubviewCount = self.titleControl.subviews.count;
+    self.observedJumpBar = jumpBar;
+    self.observedJumpBarBounds = jumpBar.bounds;
+    self.observedJumpBarSubviewCount = jumpBar.subviews.count;
+    self.observedSearching = ApolloJumpBarIsSearching(jumpBar);
+    self.observedBarFingerprint = ApolloNavigationBarContentFingerprint(self.titleControl);
+    self.observedContentMetric = ApolloJumpBarContentMetric(jumpBar);
+    // A bailed recenter leaves the gate open so the next layout pass retries.
+    self.observationValid = recenterSettled;
+}
+
+- (void)scheduleTargetRefresh {
+    if (self.refreshScheduled) return;
+    self.refreshScheduled = YES;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ApolloNavigationTitleGlassController *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        strongSelf.refreshScheduled = NO;
+        [strongSelf refreshTargets];
+    });
+}
+
+- (void)scheduleTargetRefreshIfNeeded {
+    UIView *titleControl = self.titleControl;
+    if (!titleControl) return;
+    UIView *jumpBar = ApolloFindJumpBar(titleControl);
+    BOOL unchanged = self.observationValid &&
+        CGRectEqualToRect(self.observedTitleFrame, titleControl.frame) &&
+        CGRectEqualToRect(self.observedTitleBounds, titleControl.bounds) &&
+        self.observedTitleSubviewCount == titleControl.subviews.count &&
+        self.observedJumpBar == jumpBar &&
+        CGRectEqualToRect(self.observedJumpBarBounds, jumpBar.bounds) &&
+        self.observedJumpBarSubviewCount == jumpBar.subviews.count &&
+        self.observedSearching == ApolloJumpBarIsSearching(jumpBar) &&
+        self.observedBarFingerprint == ApolloNavigationBarContentFingerprint(titleControl) &&
+        self.observedContentMetric == ApolloJumpBarContentMetric(jumpBar);
+    if (!unchanged) [self scheduleTargetRefresh];
+}
+
+@end
+
+static void ApolloUpdateNavigationTitleGlass(UIView *titleControl) {
+    if (!IsLiquidGlass() || !titleControl.window) return;
+
+    ApolloNavigationTitleGlassController *controller =
+        objc_getAssociatedObject(titleControl, &kApolloNavigationTitleGlassControllerKey);
+    if (!controller) {
+        controller = [[ApolloNavigationTitleGlassController alloc] initWithTitleControl:titleControl];
+        objc_setAssociatedObject(titleControl, &kApolloNavigationTitleGlassControllerKey,
+                                 controller, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    [controller scheduleTargetRefresh];
+}
+
+// Returns whether the recenter actually ran to a decision. NO means it bailed
+// before evaluating (mid push/pop animation, bar not resolvable, zero width) —
+// callers must NOT latch "geometry unchanged" observations against a bail, or
+// the skipped recenter is never retried until the next real geometry change.
+static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
+    if (!titleControl.window || !titleControl.superview) return NO;
 
     UINavigationBar *bar = nil;
     for (UIView *v = titleControl.superview; v != nil; v = v.superview) {
         if ([v isKindOfClass:[UINavigationBar class]]) { bar = (UINavigationBar *)v; break; }
     }
-    if (!bar) return;
+    if (!bar) return NO;
 
     // Skip during push/pop so we don't fight UIKit's transition animations.
-    if (bar.layer.animationKeys.count > 0) return;
+    if (bar.layer.animationKeys.count > 0) return NO;
 
     // Measure pre-transform position by subtracting our own previous tx.
     CGFloat existingTx = titleControl.transform.tx;
@@ -752,38 +1167,49 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
     frameInBar.origin.x -= existingTx;
 
     CGFloat width = CGRectGetWidth(frameInBar);
-    if (width <= 0) return;
+    if (width <= 0) return NO;
 
     CGFloat unadjustedCenter = CGRectGetMidX(frameInBar);
-    CGFloat barCenter = CGRectGetMidX(bar.bounds);
 
     // Build a fast set of views to skip when scanning the bar (the title and its
     // entire descendant tree).
     NSMutableSet<NSValue *> *titleSubtree = [NSMutableSet set];
     {
         NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:titleControl];
-        while (q.count > 0) {
-            UIView *v = q.firstObject;
-            [q removeObjectAtIndex:0];
+        for (NSUInteger index = 0; index < q.count; index++) {
+            UIView *v = q[index];
             [titleSubtree addObject:[NSValue valueWithNonretainedObject:v]];
             for (UIView *c in v.subviews) [q addObject:c];
         }
     }
 
     // Walk the bar's view tree to find the nearest visible content edges on
-    // either side. Recurse into containers (e.g. _UITAMICAdaptorView wrappers)
-    // and treat controls / labels / image views / visual-effect bubbles as edges.
+    // either side. Liquid Glass pills are _UINavigationBarPlatterView instances
+    // — their frame IS the visual capsule edge, so treat them as opaque content
+    // (don't recurse to the buttons inside, which sit a few points further in).
+    // Otherwise recurse into containers (e.g. _UITAMICAdaptorView wrappers) and
+    // treat controls / labels / image views / visual-effect bubbles as edges.
     CGFloat leftLimit = 0;
     CGFloat rightLimit = CGRectGetWidth(bar.bounds);
+    // Whether a real sibling was actually found on each side, as opposed to
+    // leftLimit/rightLimit just sitting at their empty-bar defaults above —
+    // the centering formula below needs to tell "nothing here" apart from
+    // "content here, and it happens to reach the edge."
+    BOOL foundLeft = NO, foundRight = NO;
     NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:bar];
-    while (queue.count > 0) {
-        UIView *v = queue.firstObject;
-        [queue removeObjectAtIndex:0];
+    for (NSUInteger index = 0; index < queue.count; index++) {
+        UIView *v = queue[index];
         for (UIView *child in v.subviews) {
             if ([titleSubtree containsObject:[NSValue valueWithNonretainedObject:child]]) continue;
-            if (child.hidden || child.alpha == 0) continue;
+            // A platter mid-fade (alpha 0) already has its final frame — count
+            // it, or the title parks at a stale center with no later layout
+            // pass to fix it. Removed platters leave the tree, so `hidden` is
+            // enough to skip genuinely dead ones.
+            BOOL isPlatter = [NSStringFromClass(child.class) containsString:@"NavigationBarPlatterView"];
+            if (child.hidden || (!isPlatter && child.alpha == 0)) continue;
 
-            BOOL isContent = [child isKindOfClass:[UIControl class]] ||
+            BOOL isContent = isPlatter ||
+                             [child isKindOfClass:[UIControl class]] ||
                              [child isKindOfClass:[UILabel class]] ||
                              [child isKindOfClass:[UIImageView class]] ||
                              [child isKindOfClass:[UIVisualEffectView class]];
@@ -794,25 +1220,118 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
             if (child.bounds.size.width <= 0 || child.bounds.size.height <= 0) continue;
 
             CGRect sibInBar = [child.superview convertRect:child.frame toView:bar];
-            if (CGRectGetMaxX(sibInBar) <= CGRectGetMinX(frameInBar) + 0.5) {
+            if (isPlatter) {
+                // Pills are bar chrome — never legitimately underneath the
+                // title. UIKit's wrapper can lag a platter resize (its
+                // constraints were solved against the OLD pill geometry), which
+                // makes the stale title frame overlap the pill; a strict
+                // disjointness test would then drop the pill from the scan
+                // entirely. Side-classify by centers instead.
+                if (CGRectGetMidX(sibInBar) < CGRectGetMidX(frameInBar)) {
+                    leftLimit = MAX(leftLimit, CGRectGetMaxX(sibInBar));
+                    foundLeft = YES;
+                } else {
+                    rightLimit = MIN(rightLimit, CGRectGetMinX(sibInBar));
+                    foundRight = YES;
+                }
+            } else if (CGRectGetMaxX(sibInBar) <= CGRectGetMinX(frameInBar) + 0.5) {
                 leftLimit = MAX(leftLimit, CGRectGetMaxX(sibInBar));
+                foundLeft = YES;
             } else if (CGRectGetMinX(sibInBar) + 0.5 >= CGRectGetMaxX(frameInBar)) {
                 rightLimit = MIN(rightLimit, CGRectGetMinX(sibInBar));
+                foundRight = YES;
             }
         }
     }
 
     const CGFloat kEdgePadding = 8.0;
-    CGFloat halfWidth = width / 2.0;
-    CGFloat minCenter = leftLimit + halfWidth + kEdgePadding;
-    CGFloat maxCenter = rightLimit - halfWidth - kEdgePadding;
 
-    CGFloat targetCenter = (minCenter > maxCenter)
-        ? unadjustedCenter   // bar too cramped — leave UIKit's layout alone
-        : MIN(MAX(barCenter, minCenter), maxCenter);
+    // Subreddit headers only (see the MARK above): size the JumpBar to its
+    // actual content before centering, instead of leaving it at whatever
+    // fixed width Apollo's own layout handed it (measured: exactly 156pt when
+    // the trailing icon cluster has a moderator shield, 204pt otherwise —
+    // never content-dependent on its own). Measured fresh via -sizeThatFits:
+    // every pass — never cached, never read from a possibly-mid-transition
+    // frame — because that's the one thing here that's immune to timing.
+    UIViewController *topVC = ApolloOwningTopViewController(titleControl);
+    if (topVC && ApolloSubredditTitleShouldTruncate(topVC)) {
+        UIView *jumpBar = ApolloFindJumpBar(titleControl);
+        CGFloat availableWidth = (rightLimit - kEdgePadding) - (leftLimit + kEdgePadding);
+        if (jumpBar && ApolloJumpBarIsSearching(jumpBar)) {
+            // Search mode: the visible content is the text field, not the name
+            // label measured below — which Apollo hides but leaves populated,
+            // so it still measures as if it were on screen. Sizing to it froze
+            // the bar at the name's width while UIKit had already widened the
+            // title control for editing, leaving the field (and the capsule
+            // around it) centred inside a stale, too-narrow bar. Hand the width
+            // back to Apollo's own layout for as long as editing lasts.
+            CGFloat fullWidth = CGRectGetWidth(titleControl.bounds);
+            if (fullWidth > 0 && fabs(CGRectGetWidth(jumpBar.frame) - fullWidth) > 0.5) {
+                CGRect jumpBarFrame = jumpBar.frame;
+                jumpBarFrame.size.width = fullWidth;
+                jumpBar.frame = jumpBarFrame;
+            }
+        } else if (jumpBar && availableWidth > 0) {
+            id nameLabel = ApolloJumpBarObjectIvar(jumpBar, "nameLabel");
+            id arrowImageView = ApolloJumpBarObjectIvar(jumpBar, "arrowImageView");
+            CGFloat naturalWidth = 0;
+            if ([nameLabel isKindOfClass:[UILabel class]]) {
+                UILabel *label = (UILabel *)nameLabel;
+                CGFloat labelHeight = CGRectGetHeight(label.bounds) > 0 ? CGRectGetHeight(label.bounds) : label.font.lineHeight;
+                CGFloat labelNaturalWidth = ceil([label sizeThatFits:CGSizeMake(CGFLOAT_MAX, labelHeight)].width);
+                CGFloat labelLeading = CGRectGetMinX(label.frame);
+                naturalWidth = labelLeading + labelNaturalWidth;
+                if ([arrowImageView isKindOfClass:[UIView class]]) {
+                    const CGFloat kLabelArrowSpacing = 6.0;
+                    naturalWidth += kLabelArrowSpacing + CGRectGetWidth(((UIView *)arrowImageView).bounds);
+                }
+            }
+            CGFloat desiredWidth = naturalWidth > 0 ? MIN(naturalWidth, availableWidth) : CGRectGetWidth(jumpBar.frame);
+            if (naturalWidth > 0 && fabs(desiredWidth - CGRectGetWidth(jumpBar.frame)) > 0.5) {
+                CGRect jumpBarFrame = jumpBar.frame;
+                jumpBarFrame.size.width = desiredWidth;
+                jumpBar.frame = jumpBarFrame;
+                // Resizing the JumpBar changes titleControl's own natural
+                // frame (it hugs its content) — re-measure before centering.
+                frameInBar = [titleControl.superview convertRect:titleControl.frame toView:bar];
+                frameInBar.origin.x -= existingTx;
+                width = CGRectGetWidth(frameInBar);
+                unadjustedCenter = CGRectGetMidX(frameInBar);
+            }
+        }
+    }
+
+    CGFloat halfWidth = width / 2.0;
+    CGFloat targetCenter;
+    if (sLGTitleGapCentering && foundLeft && foundRight) {
+        // Content on BOTH sides: park the title at the midpoint of the visual
+        // gap between them. Equal margins by construction — no overlap possible
+        // — and the position no longer depends on which of UIKit's three layout
+        // arms fired or how wide the trailing pill is. This is the case (e.g. a
+        // single back button facing a 3-icon moderator capsule) where a wider
+        // trailing cluster pulls the visual balance point away from true center.
+        targetCenter = (rightLimit - leftLimit >= width + 4.0)
+            ? (leftLimit + rightLimit) / 2.0
+            : unadjustedCenter;  // gap narrower than the title — leave UIKit's layout alone
+    } else {
+        // Screen centering (the toggle's OFF mode, and always the rule when
+        // content sits on at most one side, e.g. root screens): prefer the
+        // bar's absolute midpoint, nudged just enough off a pill it would
+        // overlap. Gap math on a one-sided bar would drag the title toward
+        // whichever side is empty for no visual reason — a bare back button
+        // doesn't need to be "balanced against". The nudge is what keeps long
+        // titles from sliding under the trailing pill (#178) without needing
+        // the old bulk-translation bail.
+        CGFloat barCenter = CGRectGetMidX(bar.bounds);
+        CGFloat minCenter = leftLimit + halfWidth + kEdgePadding;
+        CGFloat maxCenter = rightLimit - halfWidth - kEdgePadding;
+        targetCenter = (minCenter > maxCenter)
+            ? unadjustedCenter   // bar too cramped — leave UIKit's layout alone
+            : MIN(MAX(barCenter, minCenter), maxCenter);
+    }
 
     CGFloat newTx = targetCenter - unadjustedCenter;
-    if (fabs(newTx - existingTx) < 0.5) return;
+    if (fabs(newTx - existingTx) < 0.5) return YES;   // ran; already in place
 
     CGAffineTransform desired = (fabs(newTx) < 0.5) ? CGAffineTransformIdentity
                                                     : CGAffineTransformMakeTranslation(newTx, 0);
@@ -820,20 +1339,165 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
     [CATransaction setDisableActions:YES];
     titleControl.transform = desired;
     [CATransaction commit];
+    return YES;
 }
 
 %hook _UINavigationBarTitleControl
 
+- (void)didMoveToWindow {
+    %orig;
+    if (!IsLiquidGlass()) return;
+    if (!self.window) {
+        ApolloNavigationTitleGlassController *controller =
+            objc_getAssociatedObject(self, &kApolloNavigationTitleGlassControllerKey);
+        [controller invalidate];
+        objc_setAssociatedObject(self, &kApolloNavigationTitleGlassControllerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ApolloUpdateNavigationTitleGlass(self);
+    });
+}
+
 - (void)layoutSubviews {
     %orig;
     if (!IsLiquidGlass()) return;
-    // Bulk translation adds a new right nav bar item which often causes the title overlap.
-    // Skip adjustment for now until we can find a more robust solution that works with the dynamic item changes.
-    if (sEnableBulkTranslation) return;
-    ApolloRecenterTitleControl(self);
+    // Refresh outside layoutSubviews so capsule sizing and the recenter's own
+    // transform/JumpBar writes cannot feed back into UIKit's navigation-bar
+    // layout pass.
+    ApolloNavigationTitleGlassController *controller =
+        objc_getAssociatedObject(self, &kApolloNavigationTitleGlassControllerKey);
+    if (controller) {
+        [controller scheduleTargetRefreshIfNeeded];
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ApolloUpdateNavigationTitleGlass(self);
+        });
+    }
 }
 
 %end
+
+// MARK: - JumpBar search-mode capsule tracking
+//
+// The capsule is only re-measured from _UINavigationBarTitleControl's own
+// layout pass, and that pass does not fire when search mode opens or closes:
+// Apollo swaps the name label for searchTextField and resizes it from the
+// JumpBar's layout, inside a title control whose bounds never change. The
+// capsule therefore kept whatever geometry it had before the swap. Re-measuring
+// from the JumpBar's own layout is what actually tracks it.
+
+%hook _TtC6Apollo7JumpBar
+
+- (void)layoutSubviews {
+    %orig;
+    if (!IsLiquidGlass()) return;
+    // Schedule only — never size the capsule from inside a layout pass (the
+    // glass view is our own subview of this bar). The controller's refresh is
+    // already coalesced and no-ops when the frame is unchanged.
+    for (UIView *view = ((UIView *)self).superview; view != nil; view = view.superview) {
+        if ([NSStringFromClass(view.class) isEqualToString:@"_UINavigationBarTitleControl"]) {
+            ApolloNavigationTitleGlassController *controller =
+                objc_getAssociatedObject(view, &kApolloNavigationTitleGlassControllerKey);
+            [controller scheduleTargetRefreshIfNeeded];
+            return;
+        }
+    }
+}
+
+%end
+
+// Neither the title control NOR UIKit's own bar layout react when a pill
+// changes: Apollo installs its trailing buttons asynchronously (mod status,
+// translation globe, …), and once a platter appears or resizes, (a) the title
+// control keeps the transform computed against the OLD pills, and (b) UIKit's
+// content-view constraint solve — which positioned/sized the title wrapper
+// against the old pill geometry — goes stale too (observed: wrapper still
+// overlapping a platter that had since widened by the globe merge). So on any
+// real platter geometry change, mark BOTH the bar's content view (re-solves
+// the wrapper) and the title control (re-runs the recenter) dirty. Gated on an
+// actual frame delta so steady-state layout passes never dirty an ancestor —
+// that's what makes this loop-proof.
+//
+// setNeedsLayout alone is NOT enough to re-run the recenter: the title
+// control's layout pass only asks the glass controller for a *conditional*
+// refresh, and that gate skips alpha<0.01 views when fingerprinting the bar
+// while the recenter deliberately counts an alpha-0 platter (a pill fading in
+// already carries its final frame). So the poke would fire, the gate would
+// report "unchanged", and the title would park stale — exactly the bug this
+// exists to prevent. Force the refresh instead; the frame-delta gate above is
+// what keeps that from running every pass.
+static const void *kApolloPlatterLastFrameKey = &kApolloPlatterLastFrameKey;
+
+static void ApolloPokeTitleLayoutNearPlatter(UIView *fromView) {
+    UINavigationBar *bar = nil;
+    for (UIView *v = fromView; v != nil; v = v.superview) {
+        if ([v isKindOfClass:[UINavigationBar class]]) { bar = (UINavigationBar *)v; break; }
+    }
+    if (!bar) return;
+    NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:(UIView *)bar];
+    while (q.count > 0) {
+        UIView *v = q.firstObject;
+        [q removeObjectAtIndex:0];
+        NSString *cls = NSStringFromClass(v.class);
+        if ([cls containsString:@"NavigationBarContentView"]) {
+            [v setNeedsLayout];
+        } else if ([cls containsString:@"NavigationBarTitleControl"]) {
+            [v setNeedsLayout];
+            ApolloUpdateNavigationTitleGlass(v);
+            return;
+        }
+        for (UIView *c in v.subviews) [q addObject:c];
+    }
+}
+
+%group ApolloLGPlatterPoke
+
+%hook _UINavigationBarPlatterView
+
+- (void)layoutSubviews {
+    %orig;
+    if (!IsLiquidGlass()) return;
+    CGRect frame = self.frame;
+    NSValue *last = objc_getAssociatedObject(self, kApolloPlatterLastFrameKey);
+    if (last && CGRectEqualToRect(last.CGRectValue, frame)) return;
+    objc_setAssociatedObject(self, kApolloPlatterLastFrameKey, [NSValue valueWithCGRect:frame], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloPokeTitleLayoutNearPlatter(self);
+}
+
+- (void)willMoveToSuperview:(UIView *)newSuperview {
+    // Removal never lays the removed pill out again — poke via the superview
+    // chain while we still have one.
+    if (IsLiquidGlass() && !newSuperview && self.superview) {
+        ApolloPokeTitleLayoutNearPlatter(self.superview);
+    }
+    %orig;
+}
+
+%end
+
+%end
+
+// Settings toggled the centering mode: re-run the recenter on every live nav
+// bar so open screens move immediately instead of waiting for their next
+// natural layout pass. Flipping the toggle changes no geometry at all, so this
+// relies on the poke forcing an unconditional refresh (see above) — a
+// change-gated one would see an identical bar and do nothing.
+void ApolloLGTitleCenteringModeChanged(void) {
+    if (!IsLiquidGlass()) return;
+    for (UIWindow *window in ApolloAllWindows()) {
+        NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:(UIView *)window];
+        while (q.count > 0) {
+            UIView *v = q.firstObject;
+            [q removeObjectAtIndex:0];
+            if ([v isKindOfClass:[UINavigationBar class]]) {
+                ApolloPokeTitleLayoutNearPlatter(v);
+                continue;
+            }
+            for (UIView *c in v.subviews) [q addObject:c];
+        }
+    }
+}
 
 // MARK: - AccountManagerViewController top padding fix for Liquid Glass
 // In Liquid Glass mode the account switcher popup has no built-in top margin,
@@ -853,4 +1517,9 @@ static void ApolloRecenterTitleControl(UIView *titleControl) {
 
 %ctor {
     %init;
+    // _UINavigationBarPlatterView only exists on iOS 26+ — register the poke
+    // hooks only when the class is present so older runtimes skip it cleanly.
+    if (objc_getClass("_UINavigationBarPlatterView")) {
+        %init(ApolloLGPlatterPoke);
+    }
 }

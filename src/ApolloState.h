@@ -1,5 +1,9 @@
 #import <Foundation/Foundation.h>
 
+@class UIScrollView;
+@class UINavigationItem;
+@class UIViewController;
+
 extern NSString *sRedditClientId;
 extern NSString *sRedditClientSecret;
 extern NSString *sImgurClientId;
@@ -46,6 +50,7 @@ float ApolloSanitizedHoldSpeed(float value);
 #endif
 
 extern BOOL sProxyImgurDDG;
+extern BOOL sImgurAlbumFallbackProxies;
 extern BOOL sShowUserAvatars;
 extern BOOL sUseProfileAvatarTabIcon;
 // Hide the visible main-tab labels while retaining/restoring the underlying
@@ -71,7 +76,28 @@ void ApolloNormalizeNativeHideUsernameForIconOnlyTabBar(void);
 // inside this header, so it is gated on this same flag. Default ON via
 // registerDefaults. See ApolloUserAvatars.xm and ApolloProfileSocialLinks.{h,m}.
 extern BOOL sShowDetailedProfiles;
+extern BOOL sBadgeBookEnabled;
+extern BOOL sProfileHeaderImmersive;
+extern BOOL sProfileShowBanner;
+extern BOOL sProfileShowStatCards;
+extern BOOL sProfileShowSocialLinks;
+extern BOOL sProfileShowActions;
+extern NSInteger sProfileAvatarStyle; // 0 Full snoovatar, 1 Circle, 2 Square
 extern BOOL sShowSubredditHeaders;
+// Subreddit Layout density has three user-visible states:
+// New = sShowSubredditHeaders + sSubredditHeaderImmersive,
+// Classic = sShowSubredditHeaders + !sSubredditHeaderImmersive,
+// Native = !sShowSubredditHeaders (Apollo's current/pre-3.5 header).
+extern BOOL sSubredditHeaderImmersive;
+// Per-section show switches on the subreddit header (banner / Join button /
+// display name) — same "turn off the bands you don't need" pattern as the
+// profile header's per-section switches.
+extern BOOL sSubredditShowBanner;
+extern BOOL sSubredditShowJoinButton;
+// Whether the community's big bold title (e.g. "Reddit Science") shows above
+// the r/name line. Direct on/off choice rather than the old auto-hide-if-
+// similar-to-r/name heuristic, so behavior is predictable across subreddits.
+extern BOOL sSubredditShowDisplayName;
 // Backing booleans for the single Community Highlights mode picker:
 //   Off     = both NO
 //   Partial = sCommunityHighlights YES, sCommunityHighlightsWeb NO
@@ -96,6 +122,10 @@ extern BOOL sIPadTabBarBottom;
 // dock/grow); the field stays put and results populate the feed in place. Liquid Glass only;
 // mutually exclusive with the default nav-hide mode. See ApolloSearchInPlace.xm.
 extern BOOL sKeepSearchBarInPlace;
+// Liquid Glass title placement: ON (default) = centered in the gap between the
+// back pill and the trailing pill; OFF = centered on the screen, nudged only to
+// clear a pill. See ApolloRecenterTitleControl in ApolloLiquidGlass.xm.
+extern BOOL sLGTitleGapCentering;
 // When ON (default), press-and-hold on a post info row shows the glass-slider
 // magnifier loupe: slide to pick an icon, release to activate it (upvote /
 // comments / posted / % upvoted / translation). See ApolloStatsRowTouch.xm.
@@ -126,6 +156,37 @@ extern BOOL sLiveCommentsFollow;
 // sort last picked inside it; other posts keep Apollo's native sort chain. Opt-in;
 // default OFF via registerDefaults. See ApolloPerPostCommentSort.xm.
 extern BOOL sPerPostCommentSort;
+
+// Override for UIScrollView top/bottom scroll edge effects on iOS 26+ Liquid Glass.
+// iOS 26 defaults to Soft; iOS 27 betas default to Hard, which some users find
+// jarring. See ApolloScrollEdgeEffect.xm.
+typedef NS_ENUM(NSInteger, ApolloScrollEdgeEffectStyle) {
+    ApolloScrollEdgeEffectStyleAutomatic = 0,
+    ApolloScrollEdgeEffectStyleSoft      = 1,
+    ApolloScrollEdgeEffectStyleHard      = 2,
+    ApolloScrollEdgeEffectStyleHidden    = 3,
+};
+extern NSInteger sScrollEdgeEffectStyle;
+// Applies sScrollEdgeEffectStyle to a scroll view's top/bottom edge effects (no-op pre-iOS 26
+// or when not Liquid Glass). Called from UIScrollView's didMoveToWindow hook in
+// ApolloAutoHideTabBar.xm — kept here to avoid a second %hook UIScrollView didMoveToWindow,
+// which the Logos internal generator silently drops as a duplicate symbol.
+void ApolloApplyScrollEdgeEffectStyle(UIScrollView *scrollView);
+// Applies the selected style to every scroll view owned by an Apollo list
+// controller. Home, Profile, Comments, and similar screens all inherit Apollo's
+// ASTableViewController, which layers an intercepting UIScrollView over its
+// ASTableView. Applying at the controller level mirrors SwiftUI's inherited
+// NavigationStack modifier and reaches both views.
+void ApolloApplyScrollEdgeEffectStyleToViewController(UIViewController *viewController);
+// Whether the nav title for this view controller should size its JumpBar to
+// its actual content (with truncation if still too wide) instead of Apollo's
+// fixed native width (ApolloSubredditHeaders.xm's subreddit feeds).
+// Positioning stays on the existing centering formula, unchanged, everywhere.
+BOOL ApolloSubredditTitleShouldTruncate(UIViewController *viewController);
+// Schedules a layout pass only for the subreddit title owned by this nav item.
+// ApolloTranslation.xm calls this after Apollo replaces its trailing item
+// cluster; unrelated windows and navigation stacks are never traversed.
+void ApolloSubredditRequestTitleRelayout(UINavigationItem *navigationItem);
 extern BOOL sModernSubredditDividers;
 // Master toggle for subreddit list enhancements (see UDKeySubredditListEnhancements).
 extern BOOL sSubredditListEnhancements;
@@ -142,9 +203,12 @@ extern BOOL sEnableFlairColors;
 // fresh installs (registerDefaults). When NO, Apollo's native behavior (text
 // link + optional link card) is preserved. See ApolloInlineImages.xm.
 extern BOOL sEnableInlineImages;
-// Master toggle for chat media enhancements (inline images/GIFs/emoji/snoomoji in DM/chat
-// bubbles + working media sends + tap-to-fullscreen). Default ON via registerDefaults; OFF =
-// stock Apollo chat. Independent of sShowUserAvatars. See ApolloChatInlineImages/Composer.xm.
+// Master toggle for message media enhancements (inline images/GIFs/emoji/snoomoji in message
+// bubbles + working media sends + tap-to-fullscreen), in every thread Apollo draws itself:
+// legacy Direct Chat, private messages, and native Moderator Mail. Default ON via
+// registerDefaults; OFF = stock Apollo threads. Unaffected by the modern Chat/Modmail toggles,
+// which swap their own surface for a web one that renders its own media (private messages stay
+// native either way). Independent of sShowUserAvatars. See ApolloChatInlineImages/Composer.xm.
 extern BOOL sEnableChatMedia;
 
 // On-device AI summaries (Apple FoundationModels, iOS 26+). Off by default.
@@ -157,6 +221,17 @@ extern BOOL sEnableAIPostSummaries;     // post / link / both summaries
 extern BOOL sEnableAICommentSummaries;  // the "Discussion so far" summary
 extern BOOL sEnableTapToSummarize;      // generate only on tap (off = automatic)
 extern BOOL sEnableAIAutoExpandSummaries; // auto-open a summary card once it's ready (off = stay collapsed)
+// AI summary backend selection + per-provider cloud credentials (see
+// UserDefaultConstants.h). sAISummaryProvider is always one of
+// apple|openrouter|gemini|custom (sanitized on load); the rest are nil when unset.
+extern NSString *sAISummaryProvider;
+extern NSString *sOpenRouterAPIKey;
+extern NSString *sOpenRouterAIModel;
+extern NSString *sGeminiAPIKey;
+extern NSString *sGeminiAIModel;
+extern NSString *sCustomAIAPIKey;
+extern NSString *sCustomAIModel;
+extern NSString *sCustomAIBaseURL;
 
 // AI summary tuning shared by the settings UI and generation pipeline.
 // The threshold applies only to a Reddit self-post body; external article
@@ -313,6 +388,14 @@ extern BOOL sWebJSONEnabled;
 // hook checks it; loaded at launch and updated live by the Polls settings
 // toggle. Read through ApolloPollsFeatureEnabled() (ApolloCommon.h).
 extern BOOL sPollsFeatureEnabled;
+// Horizontal alignment of the option text next to its radio glyph in a native
+// poll (ApolloPollVoting.xm, PollOptionNode layoutSpecThatFits: hook). Default
+// Center — matches Apollo's own pre-radio-glyph poll option layout.
+typedef NS_ENUM(NSInteger, ApolloPollOptionAlignment) {
+    ApolloPollOptionAlignmentCenter = 0,
+    ApolloPollOptionAlignmentLeft   = 1,
+};
+extern NSInteger sPollOptionAlignment;
 // Serialized "name=value; name=value" Cookie header harvested from a
 // www.reddit.com web login (must include reddit_session). nil until the user
 // completes the Web Session Login flow. Persisted in the keychain (it's a full

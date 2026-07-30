@@ -98,6 +98,15 @@ static BOOL SRTTouchHitsNode(ApolloSRTNode *node, UIView *cellView, UITouch *tou
     return CGRectContainsPoint(rect, pt);
 }
 
+// The scrolling list a cell lives in (the feed / comments table). Nearest ancestor
+// only — that's the one whose pan owns the touch.
+static UIScrollView *SRTEnclosingScrollView(UIView *view) {
+    for (UIView *v = view; v; v = v.superview) {
+        if ([v isKindOfClass:[UIScrollView class]]) return (UIScrollView *)v;
+    }
+    return nil;
+}
+
 // MARK: - "Jump to comments" pending flag (set on bubble tap, consumed on appear)
 
 // A feed tap → push is near-instant; the comments view's viewDidAppear fires a
@@ -626,6 +635,11 @@ static const void *kSRTLoupeScrollLockKey = &kSRTLoupeScrollLockKey; // RETAIN: 
 static const void *kSRTLoupeCancelKey = &kSRTLoupeCancelKey;   // NSNumber BOOL: finger dragged away — release cancels
 static const void *kSRTLoupeTouchStartKey = &kSRTLoupeTouchStartKey; // NSValue CGPoint: touch-down point (window coords)
 static const void *kSRTLoupeTintKey = &kSRTLoupeTintKey;       // RETAIN: accent resolved once per hold
+// Per-comment-tap live state: what the touch landed on, so the tap can tell
+// itself apart from a scroll that merely started on the bubble (issue #698).
+static const void *kSRTTapTouchStartKey = &kSRTTapTouchStartKey;     // NSValue CGPoint: touch-down point (window coords)
+static const void *kSRTTapScrollOffsetKey = &kSRTTapScrollOffsetKey; // NSValue CGPoint: list contentOffset at touch-down
+static const void *kSRTTapScrollMovingKey = &kSRTTapScrollMovingKey; // NSNumber BOOL: list already moving at touch-down
 
 enum { kSRTGestureTypeCommentTap = 1, kSRTGestureTypeLoupe = 2 };
 
@@ -824,7 +838,82 @@ static void SRTWireCornerFailureRequirements(UIGestureRecognizer *loupe, UIView 
     UIView *cellView = nil;
     @try { cellView = [(ApolloSRTNode *)cell view]; } @catch (__unused id e) {}
     ApolloSRTNode *commentsNode = SRTCommentsNodeForCell(cell);
-    return SRTTouchHitsNode(commentsNode, cellView, touch, kSRTCommentInsets);
+    if (!SRTTouchHitsNode(commentsNode, cellView, touch, kSRTCommentInsets)) return NO;
+    // Snapshot the touch: where the finger landed, and whether the list was at
+    // rest under it. srtCommentTapShouldBegin measures against this to reject a
+    // scroll that merely started on the bubble (issue #698).
+    UIScrollView *sv = SRTEnclosingScrollView(cellView);
+    objc_setAssociatedObject(gr, kSRTTapTouchStartKey,
+                             [NSValue valueWithCGPoint:[touch locationInView:nil]],
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(gr, kSRTTapScrollOffsetKey,
+                             sv ? [NSValue valueWithCGPoint:sv.contentOffset] : nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(gr, kSRTTapScrollMovingKey,
+                             @(sv.isDragging || sv.isDecelerating),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return YES;
+}
+
+// A finger that moved the list at all was scrolling, not tapping; a couple of
+// points of slop absorb the jitter a settling list can still report.
+static const CGFloat kSRTTapMaxScroll = 3.0;
+// Backstop travel for drags the list never followed (bouncing at a scroll limit,
+// a horizontal swipe). Loose enough that a heavy-thumbed tap still counts.
+static const CGFloat kSRTTapMaxTravel = 24.0;
+
+// Issue #698: a touch that lands on the comment bubble and then scrolls is not a
+// tap, but it used to recognize as one on release — firing the haptic and arming
+// jump-to-comments while nothing on the row lit up ("random vibrations while
+// scrolling", no visual feedback).
+//
+// Ordinary taps inside a scroll view get this protection for free: the list's pan
+// excludes them under UIKit's default arbitration, which is exactly what the
+// sibling age/% tap in ApolloCreatedAtAlert relies on. Ours can't — the loupe
+// needs blanket simultaneous recognition (see the note below
+// shouldRecognizeSimultaneouslyWith…), and that keeps this tap alive through a
+// scroll too. Nor does the recognizer's own movement tolerance help: the cell
+// travels WITH the finger while scrolling, so in cell coordinates the touch never
+// moved at all. So the veto has to be explicit, and measured against the things a
+// scroll actually changes.
+- (BOOL)srtCommentTapShouldBegin:(UIGestureRecognizer *)gr {
+    if (!sInfoRowTapComments) return NO;
+    id cell = objc_getAssociatedObject(gr, kSRTCommentGestureCellKey);
+    if (!cell) return NO;
+    UIView *cellView = nil;
+    @try { cellView = [(ApolloSRTNode *)cell view]; } @catch (__unused id e) {}
+    UIScrollView *sv = SRTEnclosingScrollView(cellView);
+
+    // 1) The list was already moving when the finger landed, or still is: a drag
+    //    that wandered onto the bubble, or the everyday "tap to stop a fling" —
+    //    which UIKit itself swallows (no row selection, no highlight), so we must
+    //    too.
+    if ([objc_getAssociatedObject(gr, kSRTTapScrollMovingKey) boolValue] || sv.isDragging) {
+        ApolloLog(@"[StatsRow] comment tap vetoed — list moving under the touch");
+        return NO;
+    }
+    // 2) The list moved under this touch: it scrolled, so this was a drag. The
+    //    most reliable signal of the three — immune to whether the pan happens to
+    //    have ended before us on touch-up.
+    NSValue *offVal = objc_getAssociatedObject(gr, kSRTTapScrollOffsetKey);
+    if (sv && offVal) {
+        CGPoint was = offVal.CGPointValue, now = sv.contentOffset;
+        if (fabs(now.y - was.y) > kSRTTapMaxScroll || fabs(now.x - was.x) > kSRTTapMaxScroll) {
+            ApolloLog(@"[StatsRow] comment tap vetoed — list scrolled %.0fpt under the touch", now.y - was.y);
+            return NO;
+        }
+    }
+    // 3) The finger itself travelled too far to be a tap.
+    NSValue *startVal = objc_getAssociatedObject(gr, kSRTTapTouchStartKey);
+    if (startVal) {
+        CGPoint start = startVal.CGPointValue, now = [gr locationInView:nil];
+        CGFloat dx = now.x - start.x, dy = now.y - start.y;
+        if (hypot(dx, dy) > kSRTTapMaxTravel) {
+            ApolloLog(@"[StatsRow] comment tap vetoed — finger travelled (%.0f, %.0f)", dx, dy);
+            return NO;
+        }
+    }
+    return YES;
 }
 
 // Max finger travel between touch-down and the 0.3s mark that still reads as a
@@ -838,6 +927,7 @@ static const CGFloat kSRTHoldMaxTravel  = 40.0;
 // fails the press cleanly, releasing every recognizer wired to wait on us.
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gr {
     NSNumber *type = objc_getAssociatedObject(gr, kSRTGestureTypeKey);
+    if (type.integerValue == kSRTGestureTypeCommentTap) return [self srtCommentTapShouldBegin:gr];
     if (type.integerValue != kSRTGestureTypeLoupe) return YES;
     id cell = SRTCellForGesture(gr);
     if (!sIconRowMagnifier || !cell) return NO;
@@ -845,14 +935,9 @@ static const CGFloat kSRTHoldMaxTravel  = 40.0;
     // The feed is already scrolling under this touch — that's a swipe, not a hold.
     UIView *cellView = nil;
     @try { cellView = [(ApolloSRTNode *)cell view]; } @catch (__unused id e) {}
-    for (UIView *v = cellView; v; v = v.superview) {
-        if ([v isKindOfClass:[UIScrollView class]]) {
-            if (((UIScrollView *)v).isDragging) {
-                ApolloLog(@"[StatsRow] loupe vetoed — feed is scrolling");
-                return NO;
-            }
-            break;
-        }
+    if (SRTEnclosingScrollView(cellView).isDragging) {
+        ApolloLog(@"[StatsRow] loupe vetoed — feed is scrolling");
+        return NO;
     }
     // The finger has visibly travelled since touch-down — swipe intent.
     NSValue *startVal = objc_getAssociatedObject(gr, kSRTLoupeTouchStartKey);

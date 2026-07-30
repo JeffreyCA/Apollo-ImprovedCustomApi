@@ -5,7 +5,9 @@ packages/
 Version.h
 .env
 data/
-.claude/
+.claude/*
+!.claude/skills/
+!.claude/skills/**
 Apollo
 .cache
 .DS_Store

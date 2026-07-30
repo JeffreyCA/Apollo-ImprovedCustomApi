@@ -932,6 +932,54 @@ static void ApolloLogAccountSnapshot(NSString *reason) {
     ApolloLoginDiag(@"[AccountBlobGroups] %@ | %@", reason, ApolloAccountsBlobGroupBreakdown());
 }
 
+// Account snapshots reconstruct Apollo's archived RDKClient objects and inspect
+// the keychain. They are diagnostics, never launch-critical work. Keep them on
+// a serial utility queue after lifecycle delivery so they cannot block the main
+// thread or contend with CFNetwork/Foundation initialization from the dylib
+// constructor (the rootless 0x8BADF00D launch watchdog in #718).
+static dispatch_queue_t ApolloAccountSnapshotQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // Construct with the target atomically. Retargeting an already-active
+        // queue via dispatch_set_target_queue traps on newer libdispatch
+        // runtimes (including the Xcode 27 simulator).
+        queue = dispatch_queue_create_with_target(
+            "com.apolloreborn.account-snapshots",
+            DISPATCH_QUEUE_SERIAL_WITH_AUTORELEASE_POOL,
+            dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    });
+    return queue;
+}
+
+// Lifecycle notifications are delivered on the main queue (registration below).
+// A cold launch may emit willEnterForeground immediately before didBecomeActive;
+// skip that redundant first snapshot and take one delayed post-activation
+// baseline instead. Warm foreground transitions still retain both diagnostics.
+static BOOL sApolloAccountSnapshotCompletedFirstActivation = NO;
+
+static void ApolloScheduleAccountSnapshot(NSString *reason) {
+    NSString *capturedReason = [reason copy] ?: @"unknown";
+    BOOL didBecomeActive = [capturedReason isEqualToString:@"didBecomeActive"];
+    if (!sApolloAccountSnapshotCompletedFirstActivation &&
+        [capturedReason isEqualToString:@"willEnterForeground"]) {
+        return;
+    }
+    BOOL firstActivation = didBecomeActive && !sApolloAccountSnapshotCompletedFirstActivation;
+    if (didBecomeActive) sApolloAccountSnapshotCompletedFirstActivation = YES;
+
+    // didBecomeActive is delivered while the process-launch watchdog can still
+    // be sensitive on older devices. Give Apollo's first frame and native
+    // CFNetwork setup a clear runway before diagnostics reconstruct archived
+    // AFHTTPSessionManager objects. Warm lifecycle snapshots are already
+    // outside cold launch and can run immediately.
+    NSTimeInterval delay = firstActivation ? 5.0 : 0.0;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                   ApolloAccountSnapshotQueue(), ^{
+        ApolloLogAccountSnapshot(capturedReason);
+    });
+}
+
 // Fixes apollo-reborn#567: an iCloud-synced Valet item can miss a plain read
 // (errSecItemNotFound) but still collide on add (errSecDuplicateItem), and
 // AccountManager wipes the account instead of retrying. Broaden reads to include
@@ -1498,57 +1546,64 @@ static NSMutableSet<NSString *> *ApolloSubredditSourcesInFlight(void) {
     return sources;
 }
 
-static dispatch_queue_t ApolloSubredditSourceCompletionQueue(void) {
+static dispatch_queue_t ApolloSubredditSourceQueue(void) {
     static dispatch_queue_t queue;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        queue = dispatch_queue_create("com.apolloreborn.subreddit-sources", DISPATCH_QUEUE_SERIAL);
-        dispatch_set_target_queue(queue, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+        queue = dispatch_queue_create_with_target(
+            "com.apolloreborn.subreddit-sources",
+            DISPATCH_QUEUE_SERIAL_WITH_AUTORELEASE_POOL,
+            dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
     });
     return queue;
 }
 
 static void ApolloRefreshSubredditSource(NSString *source) {
     if (![source isKindOfClass:[NSString class]] || source.length == 0) return;
-    NSURL *url = [NSURL URLWithString:source];
-    NSString *scheme = url.scheme.lowercaseString;
-    if (!url || url.host.length == 0 ||
-        (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"])) {
-        ApolloLog(@"[SubredditSources] refresh skipped invalid HTTP(S) source");
-        return;
-    }
-
-    @synchronized (ApolloSubredditSourceCacheLock()) {
-        if ([ApolloSubredditSourcesInFlight() containsObject:source]) return;
-        [ApolloSubredditSourcesInFlight() addObject:source];
-    }
-
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
-                                                            cachePolicy:NSURLRequestUseProtocolCachePolicy
-                                                        timeoutInterval:5.0];
-    ApolloStartBoundedDataRequest(request, kApolloSubredditSourceMaximumBytes, nil,
-                                  ApolloSubredditSourceCompletionQueue(),
-                                  ^(NSData *data, NSHTTPURLResponse *response, NSError *error) {
-        NSString *content = !error && data.length > 0
-            ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
-        if (!error && ApolloSubredditContentIsValid(content)) {
-            [subredditListCache setObject:content forKey:source];
-            ApolloPersistSubredditSourceContent(source, content);
-            ApolloLog(@"[SubredditSources] refreshed host=%@ entries=%lu",
-                      url.host ?: @"(invalid)",
-                      (unsigned long)ApolloSubredditLinesFromContent(content).count);
-        } else {
-            ApolloLog(@"[SubredditSources] refresh rejected host=%@ status=%ld bytes=%lu err=%@",
-                      url.host ?: @"(invalid)", (long)response.statusCode,
-                      (unsigned long)data.length,
-                      error.localizedDescription ?: @"invalid UTF-8 or subreddit name");
+    NSString *capturedSource = [source copy];
+    // URL/request/session construction can initialize CFNetwork. Keep all of
+    // it off Apollo's launch-critical thread, not just the response callback.
+    dispatch_async(ApolloSubredditSourceQueue(), ^{
+        NSURL *url = [NSURL URLWithString:capturedSource];
+        NSString *scheme = url.scheme.lowercaseString;
+        if (!url || url.host.length == 0 ||
+            (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"])) {
+            ApolloLog(@"[SubredditSources] refresh skipped invalid HTTP(S) source");
+            return;
         }
 
-        // Keep the source single-flight through validation and last-known-good
-        // persistence so a hook miss cannot race a duplicate request into place.
         @synchronized (ApolloSubredditSourceCacheLock()) {
-            [ApolloSubredditSourcesInFlight() removeObject:source];
+            if ([ApolloSubredditSourcesInFlight() containsObject:capturedSource]) return;
+            [ApolloSubredditSourcesInFlight() addObject:capturedSource];
         }
+
+        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
+                                                               cachePolicy:NSURLRequestUseProtocolCachePolicy
+                                                           timeoutInterval:5.0];
+        ApolloStartBoundedDataRequest(request, kApolloSubredditSourceMaximumBytes, nil,
+                                      ApolloSubredditSourceQueue(),
+                                      ^(NSData *data, NSHTTPURLResponse *response, NSError *error) {
+            NSString *content = !error && data.length > 0
+                ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+            if (!error && ApolloSubredditContentIsValid(content)) {
+                [subredditListCache setObject:content forKey:capturedSource];
+                ApolloPersistSubredditSourceContent(capturedSource, content);
+                ApolloLog(@"[SubredditSources] refreshed host=%@ entries=%lu",
+                          url.host ?: @"(invalid)",
+                          (unsigned long)ApolloSubredditLinesFromContent(content).count);
+            } else {
+                ApolloLog(@"[SubredditSources] refresh rejected host=%@ status=%ld bytes=%lu err=%@",
+                          url.host ?: @"(invalid)", (long)response.statusCode,
+                          (unsigned long)data.length,
+                          error.localizedDescription ?: @"invalid UTF-8 or subreddit name");
+            }
+
+            // Keep the source single-flight through validation and last-known-good
+            // persistence so a hook miss cannot race a duplicate request into place.
+            @synchronized (ApolloSubredditSourceCacheLock()) {
+                [ApolloSubredditSourcesInFlight() removeObject:capturedSource];
+            }
+        });
     });
 }
 
@@ -1779,9 +1834,12 @@ static const char kARCompletion = '\0';
             - Return plist as a new file
         */
         NSMutableDictionary *fallbackDict = [[NSDictionary dictionaryWithContentsOfURL:url] mutableCopy];
-        // Select random array from dict
+        // Select a random bundled list as an immediate fallback. Never make a
+        // resource lookup depend on the network: this hook runs on Apollo's
+        // launch/UI path.
         NSArray *fallbackKeys = [fallbackDict allKeys];
-        NSString *randomFallbackKey = fallbackKeys[arc4random_uniform((uint32_t)[fallbackKeys count])];
+        if (fallbackKeys.count == 0) return url;
+        NSString *randomFallbackKey = fallbackKeys[arc4random_uniform((uint32_t)fallbackKeys.count)];
         NSArray *fallbackArray = fallbackDict[randomFallbackKey];
         if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowRandNsfw]) {
             fallbackArray = [fallbackArray arrayByAddingObject:@"RandNSFW"];
@@ -1887,6 +1945,227 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
     request.HTTPMethod = @"POST";
     request.timeoutInterval = 1.0;
     return request;
+}
+
+// --- Imgur keyless access + regional-block fallbacks -------------------------
+// Imgur closed public API registration (users can no longer obtain a client
+// ID), and its UK exit region-blocks every imgur.com host for properly
+// geolocated UK egresses. Three cooperating pieces keep imgur content working:
+//   1. GET requests to api.imgur.com fall back to the client ID imgur's own
+//      website ships in its public JS for logged-out visitors, so metadata
+//      reads need no personal key. Uploads/deletes still require a real key.
+//   2. /api/image is answered with a real /3/image fetch first (correct
+//      animated/mp4 metadata, so gifs and videos actually play); the old
+//      synthetic static response is now only the unreachable-Imgur fallback
+//      (DDG-proxied poster frame — the best DDG can serve, since it refuses
+//      any non-image content type outright and imgur's .gif URLs for video
+//      uploads return a static JPEG frame anyway).
+//   3. /api/album has no synthetic equivalent (the image list only exists in
+//      the album JSON, and DDG cannot carry JSON), so on failure the same v3
+//      URL is refetched through api.allorigins.win, a long-lived text-capable
+//      proxy with non-UK egress. Image loads inside the album then ride the
+//      existing DDG rewrite in _onqueue_resume.
+// Debug: `defaults write com.christianselig.Apollo ImgurProxySimulateBlock 1`
+// makes the direct attempts fast-fail so the fallbacks can be exercised on a
+// network that imgur does not actually block (e.g. the simulator).
+static NSString *const kApolloImgurPublicWebClientId = @"546c25a59c58ad7";
+
+static NSString *ApolloImgurEffectiveClientIdForMethod(NSString *httpMethod) {
+    if (sImgurClientId.length > 0) return sImgurClientId;
+    if (httpMethod.length == 0 || [httpMethod caseInsensitiveCompare:@"GET"] == NSOrderedSame) {
+        return kApolloImgurPublicWebClientId;
+    }
+    return sImgurClientId;
+}
+
+static BOOL ApolloImgurDebugSimulateBlock(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:@"ImgurProxySimulateBlock"];
+}
+
+// A v3 response is usable when it is HTTP 200 and its JSON says success:true
+// (imgur's regional block and rate limiting both fail this).
+static BOOL ApolloImgurV3ResponseLooksValid(NSData *data, NSURLResponse *response, NSError *error) {
+    if (error || data.length == 0) return NO;
+    if ([response isKindOfClass:[NSHTTPURLResponse class]] && ((NSHTTPURLResponse *)response).statusCode != 200) return NO;
+    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    return [json isKindOfClass:[NSDictionary class]] && [json[@"success"] boolValue];
+}
+
+static NSHTTPURLResponse *ApolloImgurFakeJSONResponseForURL(NSURL *url) {
+    return [[NSHTTPURLResponse alloc] initWithURL:url
+                                       statusCode:200
+                                      HTTPVersion:@"HTTP/1.1"
+                                     headerFields:@{@"Content-Type": @"application/json"}];
+}
+
+// RFC 3986 unreserved-only encoding, for embedding a full URL (including its
+// own query) as a single query-parameter value. URLQueryAllowedCharacterSet is
+// not enough: it leaves & and = bare, which would split the inner URL.
+static NSString *ApolloPercentEncodeFull(NSString *string) {
+    static NSCharacterSet *unreserved;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        unreserved = [NSCharacterSet characterSetWithCharactersInString:
+            @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"];
+    });
+    return [string stringByAddingPercentEncodingWithAllowedCharacters:unreserved];
+}
+
+// The pre-existing synthetic /api/image answer: a static image whose link is
+// DDG-proxied. Fallback only — it deliberately lies (animated:NO, empty mp4)
+// because DDG can serve nothing better than a poster frame.
+static NSData *ApolloImgurSyntheticImageResponseData(NSString *imageID) {
+    // .jpg is a neutral default; Imgur serves the stored format for any
+    // extension (verified: .gif/.jpg both return the original content type).
+    NSString *imgurJPG = [NSString stringWithFormat:@"https://i.imgur.com/%@.jpg", imageID];
+    NSString *ddgProxied = [@"https://external-content.duckduckgo.com/iu/?u=" stringByAppendingString:
+        [imgurJPG stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
+
+    // Match the real Imgur API shape so Unbox's required-key decoding succeeds.
+    NSDictionary *syntheticResponse = @{
+        @"status": @200,
+        @"success": @YES,
+        @"data": @{
+            @"id": imageID,
+            @"deletehash": @"",
+            @"account_id": [NSNull null],
+            @"account_url": [NSNull null],
+            @"ad_type": [NSNull null],
+            @"ad_url": [NSNull null],
+            @"title": [NSNull null],
+            @"description": [NSNull null],
+            @"name": @"",
+            @"type": @"image/jpeg",
+            @"width": @1920,
+            @"height": @1080,
+            @"size": @0,
+            @"views": @0,
+            @"section": [NSNull null],
+            @"vote": [NSNull null],
+            @"bandwidth": @0,
+            @"animated": @NO,
+            @"favorite": @NO,
+            @"in_gallery": @NO,
+            @"in_most_viral": @NO,
+            @"has_sound": @NO,
+            @"is_ad": @NO,
+            @"nsfw": [NSNull null],
+            @"link": ddgProxied,
+            @"tags": @[],
+            @"datetime": @0,
+            @"mp4": @"",
+            @"hls": @""
+        }
+    };
+    return [NSJSONSerialization dataWithJSONObject:syntheticResponse options:0 error:nil];
+}
+
+// Text-capable proxy chain for album JSON (DDG refuses non-image content).
+// Ordered by measured reliability (2026-07: r.jina.ai 5/5 sub-second;
+// allorigins intermittently down but a useful backup for jina's keyless
+// ~20 req/min/IP rate limit). Each entry builds the proxied URL and extracts
+// the upstream body from the proxy's envelope.
+//
+// r.jina.ai wraps responses as:
+//   "Title: ...\n\nURL Source: <url>\n\n[Warning: ...\n\n]Markdown Content:\n<raw body>"
+// and answers 200 even when the upstream failed — the extracted body then
+// carries imgur's own success:false, which the v3 validator rejects, moving
+// the chain along. The target URL is appended to r.jina.ai/ verbatim
+// (unencoded): that is the format jina expects.
+static NSData *ApolloImgurExtractJinaBody(NSData *data) {
+    NSString *body = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSRange marker = [body rangeOfString:@"Markdown Content:\n"];
+    if (marker.location == NSNotFound) return nil;
+    NSString *inner = [[body substringFromIndex:NSMaxRange(marker)]
+        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return [inner hasPrefix:@"{"] ? [inner dataUsingEncoding:NSUTF8StringEncoding] : nil;
+}
+
+typedef NSData *(^ApolloImgurProxyBodyExtractor)(NSData *);
+
+static void ApolloImgurAlbumFallbackAttempt(NSUInteger index,
+                                            NSArray<NSString *> *names,
+                                            NSArray<NSString *> *urls,
+                                            NSArray<ApolloImgurProxyBodyExtractor> *extractors,
+                                            NSString *albumID, NSString *v3PublicURL,
+                                            void (^completionHandler)(NSData *, NSURLResponse *, NSError *),
+                                            NSData *directData, NSURLResponse *directResponse, NSError *directError) {
+    if (index >= urls.count) {
+        ApolloLog(@"[ImgurProxy] Album %@: all fallbacks failed; surfacing original failure", albumID);
+        completionHandler(directData, directResponse, directError);
+        return;
+    }
+
+    ApolloLog(@"[ImgurProxy] Album %@: trying fallback %@", albumID, names[index]);
+    NSMutableURLRequest *proxyRequest = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urls[index]]];
+    proxyRequest.timeoutInterval = 12.0;
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:proxyRequest
+        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSData *body = (!error && data.length > 0) ? extractors[index](data) : nil;
+        if (body && ApolloImgurV3ResponseLooksValid(body, response, error)) {
+            ApolloLog(@"[ImgurProxy] Album %@ loaded via %@ (%lu bytes)", albumID, names[index], (unsigned long)body.length);
+            completionHandler(body, ApolloImgurFakeJSONResponseForURL([NSURL URLWithString:v3PublicURL]), nil);
+        } else {
+            ApolloImgurAlbumFallbackAttempt(index + 1, names, urls, extractors, albumID, v3PublicURL,
+                                            completionHandler, directData, directResponse, directError);
+        }
+    }];
+    [task resume];
+}
+
+static void ApolloImgurRetryAlbumViaTextProxy(NSString *albumID,
+                                              void (^completionHandler)(NSData *, NSURLResponse *, NSError *),
+                                              NSData *directData, NSURLResponse *directResponse, NSError *directError) {
+    // Every retry uses the public web client ID, never the personal key — a
+    // dead/rate-limited personal key is one of the failure modes being
+    // recovered from, and must not be inherited by the retries. The URL-borne
+    // client_id also stops _onqueue_resume from re-stamping the personal key
+    // as an Authorization header on these requests.
+    NSString *v3PublicURL = [NSString stringWithFormat:@"https://api.imgur.com/3/album/%@?client_id=%@",
+        albumID, kApolloImgurPublicWebClientId];
+
+    ApolloImgurProxyBodyExtractor identity = ^NSData *(NSData *data) { return data; };
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    NSMutableArray<NSString *> *urls = [NSMutableArray array];
+    NSMutableArray<ApolloImgurProxyBodyExtractor> *extractors = [NSMutableArray array];
+
+    // 1. Direct keyless retry — no third party involved. Only useful when the
+    //    first attempt carried a personal key (keyless users already tried the
+    //    public ID), and skipped under the simulated block so the debug flag
+    //    exercises the text proxies.
+    if (sImgurClientId.length > 0 && !ApolloImgurDebugSimulateBlock()) {
+        [names addObject:@"direct keyless retry"];
+        [urls addObject:v3PublicURL];
+        [extractors addObject:identity];
+    }
+    // 2-4. Public text-capable proxies with non-UK egress, ordered by measured
+    //      reliability (2026-07: r.jina.ai 5/5 sub-second; allorigins and
+    //      codetabs intermittently down but free to try). These are NOT
+    //      DuckDuckGo, so they sit behind an explicit opt-out — the "Album
+    //      Fallback Proxies" switch under Media > Network.
+    if (sImgurAlbumFallbackProxies) {
+        [names addObject:@"r.jina.ai"];
+        [urls addObject:[@"https://r.jina.ai/" stringByAppendingString:v3PublicURL]];
+        [extractors addObject:^NSData *(NSData *data) { return ApolloImgurExtractJinaBody(data); }];
+
+        [names addObject:@"allorigins"];
+        [urls addObject:[@"https://api.allorigins.win/raw?url=" stringByAppendingString:ApolloPercentEncodeFull(v3PublicURL)]];
+        [extractors addObject:identity];
+
+        [names addObject:@"codetabs"];
+        [urls addObject:[@"https://api.codetabs.com/v1/proxy?quest=" stringByAppendingString:ApolloPercentEncodeFull(v3PublicURL)]];
+        [extractors addObject:identity];
+    }
+
+    if (urls.count == 0) {
+        ApolloLog(@"[ImgurProxy] Album %@ direct fetch failed; no fallbacks enabled", albumID);
+        completionHandler(directData, directResponse, directError);
+        return;
+    }
+
+    ApolloLog(@"[ImgurProxy] Album %@ direct fetch failed; starting fallback chain", albumID);
+    ApolloImgurAlbumFallbackAttempt(0, names, urls, extractors, albumID, v3PublicURL,
+                                    completionHandler, directData, directResponse, directError);
 }
 
 %hook NSURLSession
@@ -2033,8 +2312,15 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
     NSString *host = [url host];
     NSString *path = [url path];
 
-    NSData *redditAlbumResponseData = sImageUploadProvider == ImageUploadProviderReddit ? ApolloRedditSyntheticImgurAlbumResponseDataForRequest(request) : nil;
-    if (sImageUploadProvider == ImageUploadProviderReddit && redditAlbumResponseData.length > 0) {
+    // Not gated on the Reddit provider setting: keyless Web JSON uploads are
+    // claimed for Reddit regardless of the Media Upload Host (see
+    // ApolloShouldUseCookieRedditUpload), so their multi-image albums must be
+    // synthesized into Reddit galleries too. The synthesis only succeeds when
+    // >= 2 of the album's member tokens map to RECORDED Reddit uploads, so a
+    // genuine Imgur album (Imgur-hosted member ids) still passes through to
+    // Imgur untouched. ImgChest keeps its own album responder below.
+    NSData *redditAlbumResponseData = sImageUploadProvider != ImageUploadProviderImgChest ? ApolloRedditSyntheticImgurAlbumResponseDataForRequest(request) : nil;
+    if (redditAlbumResponseData.length > 0) {
         NSHTTPURLResponse *fakeHTTPResponse = [[NSHTTPURLResponse alloc] initWithURL:url
                                                                           statusCode:200
                                                                          HTTPVersion:@"HTTP/1.1"
@@ -2135,70 +2421,56 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
     if ([url.host isEqualToString:@"apollogur.download"]) {
         NSString *imageID = [url.lastPathComponent stringByDeletingPathExtension];
 
-        if (sProxyImgurDDG && [url.path hasPrefix:@"/api/image"]) {
-            // Fabricate an API response with a DDG-proxied link, skipping api.imgur.com
-            // entirely (also regionally blocked). .jpg is a neutral default; Imgur serves
-            // the correct format regardless and DDG handles both static and animated content.
-            NSString *imgurJPG = [NSString stringWithFormat:@"https://i.imgur.com/%@.jpg", imageID];
-            NSString *ddgProxied = [@"https://external-content.duckduckgo.com/iu/?u=" stringByAppendingString:
-                [imgurJPG stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
-
-            // Match the real Imgur API shape so Unbox's required-key decoding succeeds.
-            NSDictionary *syntheticResponse = @{
-                @"status": @200,
-                @"success": @YES,
-                @"data": @{
-                    @"id": imageID,
-                    @"deletehash": @"",
-                    @"account_id": [NSNull null],
-                    @"account_url": [NSNull null],
-                    @"ad_type": [NSNull null],
-                    @"ad_url": [NSNull null],
-                    @"title": [NSNull null],
-                    @"description": [NSNull null],
-                    @"name": @"",
-                    @"type": @"image/jpeg",
-                    @"width": @1920,
-                    @"height": @1080,
-                    @"size": @0,
-                    @"views": @0,
-                    @"section": [NSNull null],
-                    @"vote": [NSNull null],
-                    @"bandwidth": @0,
-                    @"animated": @NO,
-                    @"favorite": @NO,
-                    @"in_gallery": @NO,
-                    @"in_most_viral": @NO,
-                    @"has_sound": @NO,
-                    @"is_ad": @NO,
-                    @"nsfw": [NSNull null],
-                    @"link": ddgProxied,
-                    @"tags": @[],
-                    @"datetime": @0,
-                    @"mp4": @"",
-                    @"hls": @""
-                }
-            };
-            NSData *jsonData = [NSJSONSerialization dataWithJSONObject:syntheticResponse options:0 error:nil];
-            NSHTTPURLResponse *fakeHTTPResponse = [[NSHTTPURLResponse alloc] initWithURL:url
-                                                                              statusCode:200
-                                                                             HTTPVersion:@"HTTP/1.1"
-                                                                            headerFields:@{@"Content-Type": @"application/json"}];
-
-            ApolloLog(@"[ImgurProxy] Fabricating response for %@", imageID);
-
-            // Route the task to a fast-failing URL; wrapper delivers the synthetic data.
-            void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(__unused NSData *d, __unused NSURLResponse *r, __unused NSError *e) {
-                completionHandler(jsonData, fakeHTTPResponse, nil);
-            };
-            return %orig([NSURL URLWithString:@"http://127.0.0.1:1"], wrappedHandler);
-        }
-
         NSURL *modifiedURL;
 
         if ([url.path hasPrefix:@"/api/image"]) {
             // Access the modified URL to get the actual data
             modifiedURL = [NSURL URLWithString:[@"https://api.imgur.com/3/image/" stringByAppendingString:imageID]];
+
+            if (sProxyImgurDDG && completionHandler) {
+                // Real metadata first: correct animated/mp4 fields mean gifs and
+                // videos actually play. Synthetic static answer (DDG poster) only
+                // when Imgur itself is unreachable — see the fallback block comment
+                // above %hook NSURLSession.
+                NSURL *fetchURL = ApolloImgurDebugSimulateBlock()
+                    ? [NSURL URLWithString:@"http://127.0.0.1:1/apollo-imgur-simulated-block"]
+                    : modifiedURL;
+                void (^imageHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+                    if (ApolloImgurV3ResponseLooksValid(data, response, error)) {
+                        completionHandler(data, response, error);
+                        return;
+                    }
+                    void (^answerSynthetic)(void) = ^{
+                        ApolloLog(@"[ImgurProxy] Image %@ metadata fetch failed; answering with synthetic DDG response", imageID);
+                        completionHandler(ApolloImgurSyntheticImageResponseData(imageID), ApolloImgurFakeJSONResponseForURL(url), nil);
+                    };
+                    // A dead/rate-limited personal key is indistinguishable from
+                    // a regional block here; one direct keyless retry (imgur-only
+                    // traffic, no third party) sorts that out before degrading to
+                    // the synthetic static answer. Keyless users already tried the
+                    // public ID, and the simulated block skips straight to the
+                    // degraded path on purpose.
+                    if (sImgurClientId.length > 0 && !ApolloImgurDebugSimulateBlock()) {
+                        NSString *publicURL = [NSString stringWithFormat:@"https://api.imgur.com/3/image/%@?client_id=%@",
+                            imageID, kApolloImgurPublicWebClientId];
+                        NSMutableURLRequest *retryRequest = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:publicURL]];
+                        retryRequest.timeoutInterval = 12.0;
+                        ApolloLog(@"[ImgurProxy] Image %@ metadata failed with personal key; retrying keyless", imageID);
+                        [[[NSURLSession sharedSession] dataTaskWithRequest:retryRequest
+                            completionHandler:^(NSData *retryData, NSURLResponse *retryResponse, NSError *retryError) {
+                            if (ApolloImgurV3ResponseLooksValid(retryData, retryResponse, retryError)) {
+                                ApolloLog(@"[ImgurProxy] Image %@ loaded via direct keyless retry", imageID);
+                                completionHandler(retryData, ApolloImgurFakeJSONResponseForURL(url), nil);
+                            } else {
+                                answerSynthetic();
+                            }
+                        }] resume];
+                        return;
+                    }
+                    answerSynthetic();
+                };
+                return %orig(fetchURL, imageHandler);
+            }
         } else if ([url.path hasPrefix:@"/api/album"]) {
             // Parse new URL format with title (/album/some-album-title-<albumid>)
             NSRange range = [imageID rangeOfString:@"-" options:NSBackwardsSearch];
@@ -2206,6 +2478,24 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
                 imageID = [imageID substringFromIndex:range.location + 1];
             }
             modifiedURL = [NSURL URLWithString:[@"https://api.imgur.com/3/album/" stringByAppendingString:imageID]];
+
+            if (sProxyImgurDDG && completionHandler) {
+                // Albums have no synthetic equivalent (the image list only exists
+                // in this JSON), so a failed direct fetch retries through the
+                // text-capable proxy before surfacing the failure.
+                NSString *albumID = imageID;
+                NSURL *fetchURL = ApolloImgurDebugSimulateBlock()
+                    ? [NSURL URLWithString:@"http://127.0.0.1:1/apollo-imgur-simulated-block"]
+                    : modifiedURL;
+                void (^albumHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+                    if (ApolloImgurV3ResponseLooksValid(data, response, error)) {
+                        completionHandler(data, response, error);
+                    } else {
+                        ApolloImgurRetryAlbumViaTextProxy(albumID, completionHandler, data, response, error);
+                    }
+                };
+                return %orig(fetchURL, albumHandler);
+            }
         }
 
         if (modifiedURL) {
@@ -2295,7 +2585,7 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
         NSMutableURLRequest *mutableRequest = [request mutableCopy];
         NSString *newURLString = [requestString stringByReplacingOccurrencesOfString:@"imgur-apiv3.p.rapidapi.com" withString:@"api.imgur.com"];
         [mutableRequest setURL:[NSURL URLWithString:newURLString]];
-        [mutableRequest setValue:[@"Client-ID " stringByAppendingString:sImgurClientId] forHTTPHeaderField:@"Authorization"];
+        [mutableRequest setValue:[@"Client-ID " stringByAppendingString:ApolloImgurEffectiveClientIdForMethod(request.HTTPMethod)] forHTTPHeaderField:@"Authorization"];
         StripRapidAPIHeaders(mutableRequest);
         if ([requestURL.path isEqualToString:@"/3/image"]) {
             [mutableRequest setValue:@"image/jpeg" forHTTPHeaderField:@"Content-Type"];
@@ -2308,9 +2598,13 @@ static NSURLRequest *ApolloLocalFastFailRequest(NSString *path) {
         // Only modify if auth not already set: redundant mutableCopy+setValue on upload
         // tasks disrupts the internal body data reference, causing empty uploads.
         NSString *existingAuth = [request valueForHTTPHeaderField:@"Authorization"];
-        if (![existingAuth hasPrefix:@"Client-ID "]) {
+        // Requests whose URL already carries ?client_id= are the keyless
+        // retries above — the URL-borne ID is authoritative, so don't stamp
+        // the (possibly dead) personal key over it.
+        BOOL urlCarriesClientId = requestURL.query != nil && [requestURL.query rangeOfString:@"client_id="].location != NSNotFound;
+        if (![existingAuth hasPrefix:@"Client-ID "] && !urlCarriesClientId) {
             NSMutableURLRequest *mutableRequest = [request mutableCopy];
-            [mutableRequest setValue:[@"Client-ID " stringByAppendingString:sImgurClientId] forHTTPHeaderField:@"Authorization"];
+            [mutableRequest setValue:[@"Client-ID " stringByAppendingString:ApolloImgurEffectiveClientIdForMethod(request.HTTPMethod)] forHTTPHeaderField:@"Authorization"];
             StripRapidAPIHeaders(mutableRequest);
             if ([requestURL.path isEqualToString:@"/3/image"]) {
                 [mutableRequest setValue:@"image/jpeg" forHTTPHeaderField:@"Content-Type"];
@@ -2753,6 +3047,41 @@ static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *contr
 }
 %end
 
+// ApolloActiveAccountUsername() caches the expensive RedditAccounts2 decode.
+// Invalidate it synchronously at the two persisted selection write points so a
+// request made immediately after an account switch cannot observe the previous
+// identity. These hooks are deliberately key-scoped and otherwise transparent;
+// they compose with the theme/auto-hide NSUserDefaults hooks in other modules.
+static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
+    return [key isEqualToString:@"RedditAccounts2"] ||
+           [key isEqualToString:@"CurrentRedditAccountIndex"];
+}
+
+%hook NSUserDefaults
+
+- (void)setObject:(id)value forKey:(NSString *)key {
+    %orig;
+    if (ApolloDefaultsKeyChangesActiveAccount(key)) {
+        ApolloInvalidateActiveAccountUsernameCache();
+    }
+}
+
+- (void)setInteger:(NSInteger)value forKey:(NSString *)key {
+    %orig;
+    if (ApolloDefaultsKeyChangesActiveAccount(key)) {
+        ApolloInvalidateActiveAccountUsernameCache();
+    }
+}
+
+- (void)removeObjectForKey:(NSString *)key {
+    %orig;
+    if (ApolloDefaultsKeyChangesActiveAccount(key)) {
+        ApolloInvalidateActiveAccountUsernameCache();
+    }
+}
+
+%end
+
 // Reddit API can returns "error" as a dict (e.g. {"reason":"UNAUTHORIZED",...})
 // instead of a numeric code. Multiple Apollo code paths call [dict[@"error"] integerValue]
 // on the response, including unhookable block invokes. Adding integerValue to NSDictionary
@@ -2808,12 +3137,24 @@ static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *contr
                                     UDKeyUseProfileAvatarTabIcon: @NO,
                                     UDKeyHideTabBarTitles: @NO,
                                     UDKeyShowDetailedProfiles: @YES,
+                                    UDKeyBadgeBookEnabled: @YES,
+                                    UDKeyProfileHeaderImmersive: @YES,
+                                    UDKeyProfileShowBanner: @YES,
+                                    UDKeyProfileShowStatCards: @YES,
+                                    UDKeyProfileShowSocialLinks: @YES,
+                                    UDKeyProfileShowActions: @YES,
+                                    UDKeyProfileAvatarStyle: @0,
                                     UDKeyShowSubredditHeaders: @NO,
+                                    UDKeySubredditHeaderImmersive: @YES,
+                                    UDKeySubredditShowBanner: @YES,
+                                    UDKeySubredditShowJoinButton: @YES,
+                                    UDKeySubredditShowDisplayName: @YES,
                                     UDKeyCommunityHighlights: @NO,
                                     UDKeyCommunityHighlightsWeb: @NO,
                                     UDKeyAutoHideTabBarShowOnIdle: @NO,
                                     UDKeyTabBarCollapseSide: @0,
                                     UDKeyKeepSearchBarInPlace: @NO,
+                                    UDKeyLGTitleGapCentering: @YES,
                                     UDKeyIPadTabBarBottom: @NO,
                                     UDKeyIconRowMagnifier: @YES,
                                     UDKeyInfoRowTapUpvote: @YES,
@@ -2843,6 +3184,7 @@ static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *contr
                                     UDKeyAICommentSummaryDetail: @(ApolloAISummaryDetailBalanced),
                                     UDKeyEnableTapToSummarize: @NO,
                                     UDKeyEnableAIAutoExpandSummaries: @NO,
+                                    UDKeyAISummaryProvider: @"apple",
                                     UDKeyPictureInPictureEnabled: @NO,
                                     UDKeyPictureInPictureActivation: @(ApolloPiPActivationModeUnmutedOnly),
                                     UDKeyPictureInPictureStartPosition: @(ApolloPiPStartPositionTopRight),
@@ -2859,7 +3201,10 @@ static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *contr
                                     UDKeyTagFilterSubredditOverrides: @{},
                                     UDKeyPostFilterSubreddits: @{},
                                     UDKeyPostFilterNameSubstrings: @[],
+                                    UDKeyImgurAlbumFallbackProxies: @YES,
                                     UDKeyWebJSONEnabled: @NO,
+                                    UDKeyUseModernRedditChat: @NO,
+                                    UDKeyUseModernRedditModmail: @NO,
                                     UDKeyNotificationBackendURL: @"",
                                     UDKeyNotificationBackendRegistrationToken: @"",
                                     UDKeyRedditClientSecret: @""};
@@ -2893,6 +3238,7 @@ static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *contr
     sVideoHoldSpeedEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyVideoHoldSpeedEnabled];
     sVideoHoldSpeed = ApolloSanitizedHoldSpeed([[NSUserDefaults standardUserDefaults] floatForKey:UDKeyVideoHoldSpeed]);
     sProxyImgurDDG = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProxyImgurDDG];
+    sImgurAlbumFallbackProxies = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyImgurAlbumFallbackProxies];
     sEnableInlineImages = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableInlineImages];
     sEnableChatMedia = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableChatMedia];
     sEnableAISummaries = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableAISummaries];
@@ -2924,6 +3270,30 @@ static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *contr
     if (sEnableTapToSummarize && sEnableAIAutoExpandSummaries) {
         sEnableAIAutoExpandSummaries = NO;
         [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyEnableAIAutoExpandSummaries];
+    }
+    // AI summary backend: sanitize to a known provider (unrecognized/unset → apple,
+    // the on-device default), mirroring the translation-provider handling below.
+    {
+        NSString *aiProvider = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:UDKeyAISummaryProvider];
+        if ([aiProvider isEqualToString:@"openrouter"] || [aiProvider isEqualToString:@"gemini"] ||
+            [aiProvider isEqualToString:@"custom"] || [aiProvider isEqualToString:@"apple"]) {
+            sAISummaryProvider = [aiProvider copy];
+        } else {
+            sAISummaryProvider = @"apple";
+        }
+        NSString *(^loadKey)(NSString *) = ^NSString *(NSString *udKey) {
+            NSString *v = (NSString *)[[NSUserDefaults standardUserDefaults] objectForKey:udKey];
+            if (![v isKindOfClass:[NSString class]]) return nil;
+            v = [v stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            return v.length > 0 ? [v copy] : nil;
+        };
+        sOpenRouterAPIKey = loadKey(UDKeyOpenRouterAPIKey);
+        sOpenRouterAIModel = loadKey(UDKeyOpenRouterAIModel);
+        sGeminiAPIKey = loadKey(UDKeyGeminiAPIKey);
+        sGeminiAIModel = loadKey(UDKeyGeminiAIModel);
+        sCustomAIAPIKey = loadKey(UDKeyCustomAIAPIKey);
+        sCustomAIModel = loadKey(UDKeyCustomAIModel);
+        sCustomAIBaseURL = loadKey(UDKeyCustomAIBaseURL);
     }
     sInlineImageAlignment = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyInlineImageAlignment];
     if (sInlineImageAlignment < ApolloInlineImageAlignmentCenter || sInlineImageAlignment > ApolloInlineImageAlignmentRight) {
@@ -2977,14 +3347,41 @@ static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *contr
     sUseProfileAvatarTabIcon = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon];
     sHideTabBarTitles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles];
     ApolloNormalizeNativeHideUsernameForIconOnlyTabBar();
-    sShowDetailedProfiles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowDetailedProfiles];
+    // The old master switch was retired in favour of the Profile Layout screen.
+    // Migrate existing installs that had it off so the visible per-band controls
+    // cannot appear to do nothing behind an unreachable legacy preference.
+    if (![standardDefaults boolForKey:UDKeyShowDetailedProfiles]) {
+        [standardDefaults setBool:YES forKey:UDKeyShowDetailedProfiles];
+        ApolloLog(@"[ProfileLayout] migrated retired detailed-profile master switch to enabled");
+    }
+    sShowDetailedProfiles = YES;
+    sBadgeBookEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyBadgeBookEnabled];
+    // No launch-time icon prewarm: sessions that never open a profile shouldn't
+    // pay for decoded badge bitmaps. The strip (on first preview data) and the
+    // book (viewDidLoad) both call ApolloBadgeBookPrewarmImages() themselves, and
+    // every render path tolerates a cold cache (async off-main decode).
+    sProfileHeaderImmersive = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileHeaderImmersive];
+    sProfileShowBanner = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowBanner];
+    sProfileShowStatCards = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowStatCards];
+    sProfileShowSocialLinks = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowSocialLinks];
+    sProfileShowActions = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyProfileShowActions];
+    sProfileAvatarStyle = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyProfileAvatarStyle];
+    if (sProfileAvatarStyle < 0 || sProfileAvatarStyle > 2) {
+        sProfileAvatarStyle = 0;
+        [standardDefaults setInteger:0 forKey:UDKeyProfileAvatarStyle];
+    }
     sShowSubredditHeaders = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowSubredditHeaders];
+    sSubredditHeaderImmersive = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditHeaderImmersive];
+    sSubredditShowBanner = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowBanner];
+    sSubredditShowJoinButton = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowJoinButton];
+    sSubredditShowDisplayName = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditShowDisplayName];
     sCommunityHighlights = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlights];
     sCommunityHighlightsWeb = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyCommunityHighlightsWeb];
     sAutoHideTabBarShowOnIdle = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoHideTabBarShowOnIdle];
     sTabBarCollapseSide = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyTabBarCollapseSide];
     if (sTabBarCollapseSide != 0 && sTabBarCollapseSide != 1) sTabBarCollapseSide = 0;
     sKeepSearchBarInPlace = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyKeepSearchBarInPlace];
+    sLGTitleGapCentering = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyLGTitleGapCentering];
     sIPadTabBarBottom = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIPadTabBarBottom];
     sIconRowMagnifier = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIconRowMagnifier];
     sInfoRowTapUpvote = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyInfoRowTapUpvote];
@@ -3005,6 +3402,11 @@ static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *contr
         [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyApolloRememberSubredditCommentsSort]) {
         [[NSUserDefaults standardUserDefaults] setBool:NO forKey:UDKeyApolloRememberSubredditCommentsSort];
         ApolloLog(@"[PerPostSort] exclusivity: normalized stale both-on at launch (native Remember Subreddit Sort -> OFF)");
+    }
+    sScrollEdgeEffectStyle = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyScrollEdgeEffectStyle];
+    if (sScrollEdgeEffectStyle < ApolloScrollEdgeEffectStyleAutomatic || sScrollEdgeEffectStyle > ApolloScrollEdgeEffectStyleHidden) {
+        sScrollEdgeEffectStyle = ApolloScrollEdgeEffectStyleAutomatic;
+        [standardDefaults setInteger:sScrollEdgeEffectStyle forKey:UDKeyScrollEdgeEffectStyle];
     }
     sModernSubredditDividers = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers];
     sSubredditListEnhancements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditListEnhancements];
@@ -3071,6 +3473,11 @@ static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *contr
     // hooks, so reading before they're in place returns nothing.
     sWebJSONEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyWebJSONEnabled];
     sPollsFeatureEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPollsEnabled];
+    sPollOptionAlignment = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPollOptionAlignment];
+    if (sPollOptionAlignment != ApolloPollOptionAlignmentCenter && sPollOptionAlignment != ApolloPollOptionAlignmentLeft) {
+        sPollOptionAlignment = ApolloPollOptionAlignmentCenter;
+        [standardDefaults setInteger:sPollOptionAlignment forKey:UDKeyPollOptionAlignment];
+    }
     // Surface a revoked/expired cookie (detected response-side in
     // ApolloWebJSONNoteResponse) as a re-login prompt wherever the user is.
     [[NSNotificationCenter defaultCenter] addObserverForName:ApolloWebJSONSessionExpiredNotification
@@ -3360,8 +3767,8 @@ static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *contr
 
     // Login-persistence diagnostics: snapshot where the account lives at each lifecycle
     // transition so a warm sign-out (wiped while only backgrounded — the "signed out by the
-    // time I got to the store" reports) is pinned to an event and a storage layer. Cheap and
-    // low-frequency; cross-references with the [KeychainTrace] write sizes.
+    // time I got to the store" reports) is pinned to an event and a storage layer. Snapshot
+    // work is scheduled off-main because it decodes archived clients and reads the keychain.
     NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
     NSDictionary<NSNotificationName, NSString *> *snapshotEvents = @{
         UIApplicationDidBecomeActiveNotification:   @"didBecomeActive",
@@ -3372,11 +3779,11 @@ static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *contr
     for (NSNotificationName name in snapshotEvents) {
         NSString *reason = snapshotEvents[name];
         [nc addObserverForName:name object:nil queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(NSNotification *note) { ApolloLogAccountSnapshot(reason); }];
+                    usingBlock:^(NSNotification *note) { ApolloScheduleAccountSnapshot(reason); }];
     }
-    // Session boundary in the persistent buffer so a force-quit + relaunch is legible, followed
-    // by a baseline snapshot of the on-disk state at launch (before AccountManager loads).
+    // A session boundary is safe in the constructor because it does no account
+    // decoding. The first full snapshot arrives from didBecomeActive, after
+    // Apollo/CFNetwork have finished launch initialization.
     NSString *appVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
     ApolloLoginDiag(@"===== launch (Apollo %@, tweak %@) =====", appVersion, @TWEAK_VERSION);
-    ApolloLogAccountSnapshot(@"ctor");
 }

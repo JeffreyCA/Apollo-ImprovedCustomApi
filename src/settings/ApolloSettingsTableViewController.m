@@ -29,11 +29,13 @@ static char kApolloAccentActionCellKey;
 
 - (UIColor *)apollo_themeCellBackgroundColor {
     UITableView *source = [self apollo_sourceThemeTableView];
-    for (UITableViewCell *cell in source.visibleCells) {
-        UIColor *color = cell.backgroundColor ?: cell.contentView.backgroundColor;
-        if (color) return color;
+    if (!ApolloThemeSourceTableIsStale(source)) {
+        for (UITableViewCell *cell in source.visibleCells) {
+            UIColor *color = cell.backgroundColor ?: cell.contentView.backgroundColor;
+            if (color) return color;
+        }
     }
-    return [UIColor secondarySystemGroupedBackgroundColor];
+    return ApolloThemeCardBackgroundColor() ?: [UIColor secondarySystemGroupedBackgroundColor];
 }
 
 - (UIColor *)apollo_themeAccentColor {

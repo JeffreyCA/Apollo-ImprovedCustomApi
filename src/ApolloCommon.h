@@ -50,9 +50,20 @@ BOOL ApolloRouteResolvedURLViaApolloScheme(NSURL *resolvedURL);
 void ApolloFlushReadPostIDsToDefaults(void);
 UITableView *ApolloInheritedSettingsThemeSourceTableView(UITableViewController *controller);
 void ApolloApplyInheritedSettingsTableTheme(UITableViewController *controller);
+
+// YES if sourceTable is nil or detached from its window. A covered (non-
+// topmost) nav stack screen stops getting traitCollectionDidChange:, so its
+// cells' colors can be stale — callers sampling a cell's color from an
+// inherited source table should check this before trusting the sample.
+BOOL ApolloThemeSourceTableIsStale(UITableView *sourceTable);
 UIImage *ApolloEmojiSettingsIcon(NSString *emoji, UIColor *backgroundColor, CGFloat size);
 UIImage *ApolloBuyMeACoffeeSettingsIcon(CGFloat size);
 UIImage *ApolloRebornOptionsSettingsIcon(CGFloat size);
+
+// Baseline-aligned SF Symbol as an attributed string, sized to `font` and
+// tinted `tint`. Returns nil if the symbol can't load, so callers can fall
+// back to a plain-text glyph. Shared by ApolloAISummary.xm/ApolloPollVoting.xm.
+NSAttributedString *ApolloSymbolAttachment(NSString *symbolName, UIFont *font, UIColor *tint);
 
 // Resolve a path to a bundled tweak resource across the install layouts we
 // support (jailbreak rootful/rootless, Sideloadly/cyan/azule deb fuse, and
@@ -95,6 +106,9 @@ BOOL ApolloRouteURLThroughApp(NSURL *url);
 // Returns all UIWindows across every connected UIWindowScene.
 // Use instead of the deprecated UIApplication.windows property.
 NSArray<UIWindow *> *ApolloAllWindows(void);
+// Re-centers every live nav bar title after the LG title-centering mode toggle
+// changes (defined in ApolloLiquidGlass.xm; no-op off Liquid Glass).
+void ApolloLGTitleCenteringModeChanged(void);
 
 // Apollo's main ApolloTabBarController, found via the scene/app delegate's
 // tabBarController ivar or by walking window root VCs. Returns nil while the
@@ -192,4 +206,11 @@ void ApolloAppendLoginDiag(NSString *line);
 // also write to the diag log.
 NSString *ApolloDebugAccountKeychainReport(void);
 NSString *ApolloDebugPoisonAccountAccessibility(void);
+
+// ApolloGalleryMenu: when the subreddit "..." menu is being built, insert an
+// inline "Gallery View" section into `children` (an NSMutableArray<UIMenuElement *>),
+// just below the leading "submit a post" affordance.
+// No-op for any other menu, and for feeds that aren't a single subreddit.
+// Called from ApolloNativeActionMenuBuildMenu as it converts the action sheet.
+void ApolloInjectGalleryViewMenuItemIfNeeded(NSMutableArray *children, NSString *menuTitle, id actionController);
 __END_DECLS

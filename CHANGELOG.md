@@ -6,14 +6,40 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
-- Revamp **Settings** with task-focused sections, unified search, direct navigation to individual options, and dedicated feature-request and privacy-conscious bug-report flows (#637: @jordanearle)
-- Add native **Reddit Polls** voting and creation behind an opt-in setting, using a separate per-account web session when needed (#643: @jordanearle)
-- Redesign **Detailed Profiles** with immersive banners, prominent avatars, glass stat cards, and improved Social Links (#655: @jordanearle)
-- Add modern **Reddit Chat** for API-Key-Free accounts, with an opt-in option for API-key accounts that preserves Apollo's legacy Direct Chat (#658: @icpryde)
+- Add gaze and pointer hover effects plus multiwindow support when Apollo runs on **Apple Vision Pro** (#759: @rebelancap)
 
 ### Fixes
 
-- Fix **inline comment images** rendering tiny inside a full-height row after collapsing and re-expanding a comment, and the row flicker/reload loop when voting on a comment with an inline image (#675: @icpryde)
+- Fix lists becoming stuck beneath the floating tab bar on **iOS 27**, including comments opened from deep links and feeds loading another page (#744: @jordanearle)
+- Improve networking and media reliability by removing avoidable stalls, bounding caches and concurrent downloads, and preserving original animated album media when saving or sharing (#728: @ryannair05)
+
+## [v3.5.0] - 2026-07-??
+
+### Features
+
+- Add **Gallery View** to subreddit menus for browsing photos, GIFs, and videos in a filterable waterfall grid with fullscreen paging, sorting, sharing, and media saving (#746: @icpryde)
+- Revamp **Settings** with task-focused sections, unified deep-linkable search, clearer support flows, better organization, and both always-visible and pull-to-search access (#637, #695, #758: @jordanearle, @icpryde)
+- Redesign **profile and subreddit headers** with immersive artwork, prominent avatars, themed stat cards, configurable New/Classic/Native densities, and much faster Social Links (#696, #697, #722, #758: @jordanearle)
+- Add a **Badge Book** to profiles for browsing Reddit achievements and the restored classic Trophy Case (#689: @jordanearle)
+- Add native **Reddit Polls** voting and creation behind an opt-in setting, with a confirmation step before casting irreversible votes (#643, #735: @jordanearle, @DeltAndy123)
+- Add modern **Reddit Chat and Moderator Mail** for API-Key-Free accounts while letting API-key accounts choose independently between Reddit's current experience and Apollo's legacy clients (#658, #740, #750: @icpryde)
+- Expand **Apollo AI Summaries** with bring-your-own-key OpenRouter, Gemini, and custom OpenAI-compatible providers plus controls for minimum post length and summary detail (#674, #687: @nickclyde, @icpryde)
+- Add a universal **Open Reddit Links in Apollo** flow using the Link Companion app, so Safari links can open any sideloaded or rebranded Apollo build without the custom-scheme confirmation (#685: @jordanearle)
+- Redesign the Liquid Glass **App Icon picker** with featured icons, browsable icon-pack cards, and more reliable active-icon detection on sideloaded installs (#668: @DeltAndy123)
+- Enable **ProMotion** in patched IPAs and improve scrolling smoothness by reducing main-thread work across feeds, translations, previews, avatars, and Liquid Glass navigation (#724, #731: @jordanearle, @icpryde)
+- Add **Hide Feed Descriptions** to compact the built-in Home, Popular, All, and Moderator rows in the subreddit list (#692: @icpryde)
+- Show a live **character counter** for the 25-character Message Moderators subject limit (#751: @icpryde)
+
+### Fixes
+
+- Make **Imgur** images, animated media, and albums work without a personal API key, with additional fallbacks for networks where Imgur is blocked (#729: @jordanearle)
+- Fix **API-Key-Free posting** so post flair opens correctly, user-flair emoji limits match each subreddit, newly posted comments show your flair, and multi-image galleries belong to the correct account (#669, #670, #733: @icpryde)
+- Fix **rich link previews** reserving full-card space for image-less sites and prevent oversized preview images from overflowing the main-thread stack during row layout (#686, #741: @icpryde)
+- Fix **inline comment images** shrinking after collapse and expand, and keep translated comments stable while votes update (#675, #676: @icpryde)
+- Fix modern **Moderator Mail** exposing half-rendered transitions or flickering the subreddit icon while typing a reply (#749: @icpryde)
+- Fix Apollo Reborn **Settings** backgrounds, cards, and separators retaining stale colors after appearance or theme changes (#734: @DeltAndy123)
+- Polish **Liquid Glass navigation** by keeping titles centered between button groups, preserving edge fades during swipe-back, balancing trailing pill padding, and keeping menu controls visible throughout their morph animation (#671, #693, #730, #753: @icpryde)
+- Fix the **Info Row** comment action firing a haptic or opening comments when its touch becomes a scroll gesture (#739: @icpryde)
 
 ## [v3.4.2] - 2026-07-17
 
@@ -706,6 +732,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v3.5.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.4.2...v1.15.11_3.5.0
 [v3.4.2]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.4.1...v1.15.11_3.4.2
 [v3.4.1]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.4.0...v1.15.11_3.4.1
 [v3.4.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.3.0...v1.15.11_3.4.0

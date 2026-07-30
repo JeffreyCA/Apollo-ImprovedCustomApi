@@ -12,6 +12,20 @@ plist_set_string() {
     fi
 }
 
+plist_set_bool() {
+    local plist="$1" key="$2" value="$3"
+    local existing_type
+    existing_type="$(plutil -type "${key}" "$plist" 2>/dev/null || true)"
+    if [[ "$existing_type" == "bool" ]]; then
+        /usr/libexec/PlistBuddy -c "Set :${key} ${value}" "$plist"
+    else
+        if /usr/libexec/PlistBuddy -c "Print :${key}" "$plist" &>/dev/null; then
+            /usr/libexec/PlistBuddy -c "Delete :${key}" "$plist"
+        fi
+        /usr/libexec/PlistBuddy -c "Add :${key} bool ${value}" "$plist"
+    fi
+}
+
 plist_ensure_dict() {
     local plist="$1" key="$2"
     if ! /usr/libexec/PlistBuddy -c "Print :${key}" "$plist" &>/dev/null; then

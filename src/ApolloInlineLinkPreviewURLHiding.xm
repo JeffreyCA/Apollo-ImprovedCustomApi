@@ -54,11 +54,21 @@ static BOOL ApolloLPURLIsHTTP(NSURL *url) {
 
 static BOOL ApolloLPURLHidingShouldProcessTextNode(id textNode) {
     if (!textNode) return NO;
-    NSString *className = NSStringFromClass([textNode class]);
-    if ([className containsString:@"MarkdownTextNode"]) return YES;
-    if ([className containsString:@"Markdown"]) return YES;
-    if ([className hasPrefix:@"_TtC6Apollo"] && [className containsString:@"TextNode"]) return YES;
-    return NO;
+    // The verdict is a pure function of the class, and this runs for every
+    // setAttributedText app-wide (feed scrolling included) — cache it on the
+    // class object itself instead of re-running NSStringFromClass plus the
+    // substring scans each time. Class objects are immortal and associated
+    // storage is thread-safe (these hooks also fire on Texture's background
+    // layout threads).
+    Class cls = [textNode class];
+    static char kApolloLPURLHidingClassVerdictKey;
+    NSNumber *cached = objc_getAssociatedObject(cls, &kApolloLPURLHidingClassVerdictKey);
+    if (cached) return cached.boolValue;
+    NSString *className = NSStringFromClass(cls);
+    BOOL verdict = [className containsString:@"Markdown"] ||
+                   ([className hasPrefix:@"_TtC6Apollo"] && [className containsString:@"TextNode"]);
+    objc_setAssociatedObject(cls, &kApolloLPURLHidingClassVerdictKey, @(verdict), OBJC_ASSOCIATION_RETAIN);
+    return verdict;
 }
 
 static BOOL ApolloLPURLsMatch(NSURL *a, NSURL *b) {

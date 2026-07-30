@@ -1,0 +1,4191 @@
+{
+  "schema_version": 1,
+  "source": {
+    "method": "Union of live Reddit Trophy Cases seeded by r/TrophyWiki",
+    "trophy_wiki_url": "https://www.reddit.com/r/TrophyWiki/comments/mdapdb/updated_trophy_list/",
+    "information_pages_scanned": 566,
+    "subreddit_listing": {
+      "pages_scanned": 6,
+      "posts_discovered": 565,
+      "error": null
+    },
+    "profiles_scanned": 530,
+    "seed_profiles_discovered": 530,
+    "successful_profiles": 530
+  },
+  "fetched_at": "2026-07-17T23:44:20.303Z",
+  "trophy_count": 233,
+  "completeness": "best-effort; Reddit does not publish a global Trophy Case catalogue",
+  "trophies": [
+    {
+      "id": "5845932cdb24fb96_trophy_image_for_1contributor",
+      "title": "#1 Contributor",
+      "bio": "r/help | February 2025",
+      "image_url": "https://i.redd.it/cms/5845932cdb24fb96_trophy_image_for_1contributor.png",
+      "destination_url": "https://reddit.com/r/help/",
+      "observed_profile_count": 3,
+      "example_owners": [
+        "Dhanish04",
+        "DoTheDew",
+        "westcoastcdn19"
+      ]
+    },
+    {
+      "id": "e6a71e9b1820b471_trophy_image_for_2contributor",
+      "title": "#2 Contributor",
+      "bio": "March 2025 | r/help",
+      "image_url": "https://i.redd.it/cms/e6a71e9b1820b471_trophy_image_for_2contributor.png",
+      "destination_url": "https://reddit.com/r/help/",
+      "observed_profile_count": 4,
+      "example_owners": [
+        "Dhanish04",
+        "merchlinkinbio",
+        "westcoastcdn19",
+        "zenlon"
+      ]
+    },
+    {
+      "id": "70bb206310e59ec3_trophy_image_for_3contributor",
+      "title": "#3 Contributor",
+      "bio": "February 2024 | r/help",
+      "image_url": "https://i.redd.it/cms/70bb206310e59ec3_trophy_image_for_3contributor.png",
+      "destination_url": "https://reddit.com/r/help/",
+      "observed_profile_count": 4,
+      "example_owners": [
+        "Dhanish04",
+        "formerqwest",
+        "Octuplicate",
+        "westcoastcdn19"
+      ]
+    },
+    {
+      "id": "760e68b601e561c0_trophy_image_for_100_awards_club",
+      "title": "100 Awards Club",
+      "bio": "Unlocked by getting 100 awards in a month.",
+      "image_url": "https://i.redd.it/cms/760e68b601e561c0_trophy_image_for_100_awards_club.png",
+      "destination_url": null,
+      "observed_profile_count": 164,
+      "example_owners": [
+        "_-Frost-Byte-_",
+        "-Aviator",
+        "-LexXi-",
+        "010",
+        "125RAILGUN"
+      ]
+    },
+    {
+      "id": "d1fed68c52a02fad_trophy_image_for_11_year_club",
+      "title": "11-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/d1fed68c52a02fad_trophy_image_for_11_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 20,
+      "example_owners": [
+        "BaronYike",
+        "corderjones",
+        "Dalorleon",
+        "EViLeleven",
+        "Femilip"
+      ]
+    },
+    {
+      "id": "1a51152004126674_trophy_image_for_12_year_club",
+      "title": "12-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/1a51152004126674_trophy_image_for_12_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 21,
+      "example_owners": [
+        "Acidtwist",
+        "beIIe-and-sebastian",
+        "Dimbreath",
+        "doradiamond",
+        "drkatherine1"
+      ]
+    },
+    {
+      "id": "65d1a238d0a4cd7b_trophy_image_for_13_year_club",
+      "title": "13-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/65d1a238d0a4cd7b_trophy_image_for_13_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 27,
+      "example_owners": [
+        "AkaashMaharaj",
+        "CapnHDawg",
+        "Cryptonaut",
+        "DarthTortilla",
+        "deuteranopia"
+      ]
+    },
+    {
+      "id": "fd8de126c9a09ee2_trophy_image_for_14_year_club",
+      "title": "14-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/fd8de126c9a09ee2_trophy_image_for_14_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 20,
+      "example_owners": [
+        "aSchizophrenicCat",
+        "BrautanGud",
+        "Chazay",
+        "DarthMewtwo",
+        "Dawn_Of_The_Dave"
+      ]
+    },
+    {
+      "id": "8ce1bacc4640d627_trophy_image_for_15_year_club",
+      "title": "15-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/8ce1bacc4640d627_trophy_image_for_15_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 11,
+      "example_owners": [
+        "dumbusername",
+        "F0REM4N",
+        "LiteraryBoner",
+        "pinwale",
+        "ProbablyHittingOnYou"
+      ]
+    },
+    {
+      "id": "1c8599c7a9d84297_trophy_image_for_16_year_club",
+      "title": "16-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/1c8599c7a9d84297_trophy_image_for_16_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 11,
+      "example_owners": [
+        "010",
+        "asjs5",
+        "DoTheDew",
+        "DrJulianBashir",
+        "facetiously"
+      ]
+    },
+    {
+      "id": "783ea8d95604926a_trophy_image_for_17_year_club",
+      "title": "17-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/783ea8d95604926a_trophy_image_for_17_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 22,
+      "example_owners": [
+        "77or88",
+        "AnOddName",
+        "askedrelic",
+        "cdawzrd",
+        "ch4os1337"
+      ]
+    },
+    {
+      "id": "dc4528246d318e0a_trophy_image_for_18_year_club",
+      "title": "18-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/dc4528246d318e0a_trophy_image_for_18_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 19,
+      "example_owners": [
+        "aennil",
+        "animalcrackers",
+        "azron",
+        "Bossman1086",
+        "darthnut"
+      ]
+    },
+    {
+      "id": "94d0ee9e205c2a29_trophy_image_for_19_year_club",
+      "title": "19-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/94d0ee9e205c2a29_trophy_image_for_19_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 8,
+      "example_owners": [
+        "hiS_oWn",
+        "iamdeirdre",
+        "INTPLibrarian",
+        "Kylde",
+        "nerve"
+      ]
+    },
+    {
+      "id": "871b9df322b7cddd_trophy_image_for_20_year_club",
+      "title": "20-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/871b9df322b7cddd_trophy_image_for_20_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 7,
+      "example_owners": [
+        "arunan",
+        "bbbb",
+        "chromakode",
+        "hueypriest",
+        "reddit"
+      ]
+    },
+    {
+      "id": "fa5640c9a1b987d9_trophy_image_for_2021_comiccon_incredible_cosplay",
+      "title": "2021 Comic-Con Incredible Cosplay",
+      "bio": "Unlocked by sharing an incredible display of cosplay during 2021 Comic-Con.",
+      "image_url": "https://i.redd.it/cms/fa5640c9a1b987d9_trophy_image_for_2021_comiccon_incredible_cosplay.png",
+      "destination_url": null,
+      "observed_profile_count": 4,
+      "example_owners": [
+        "DancingBlueElephant",
+        "DaylonPhoto",
+        "jmweissman",
+        "Taliverse"
+      ]
+    },
+    {
+      "id": "mod_hof_attendee_26-40",
+      "title": "2026 Mod Hall of Fame Attendee",
+      "bio": null,
+      "image_url": "https://www.redditstatic.com/awards2/mod_hof_attendee_26-40.png",
+      "destination_url": "https://www.reddit.com/r/ModEvents/",
+      "observed_profile_count": 37,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "BodegaDad",
+        "Cute-Organization844",
+        "cyanocittaetprocyon"
+      ]
+    },
+    {
+      "id": "mod_hof_honoree_26-40",
+      "title": "2026 Mod Hall of Fame Honoree",
+      "bio": null,
+      "image_url": "https://www.redditstatic.com/awards2/mod_hof_honoree_26-40.png",
+      "destination_url": "https://www.reddit.com/r/ModEvents/",
+      "observed_profile_count": 1,
+      "example_owners": [
+        "fsv"
+      ]
+    },
+    {
+      "id": "mod_hof_judge_26-40",
+      "title": "2026 Mod Hall of Fame Judge",
+      "bio": null,
+      "image_url": "https://www.redditstatic.com/awards2/mod_hof_judge_26-40.png",
+      "destination_url": "https://www.reddit.com/r/ModEvents/",
+      "observed_profile_count": 4,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "BodegaDad",
+        "GeekScientist"
+      ]
+    },
+    {
+      "id": "962ce6457b4ae6a5_20th_cakeday_finalist",
+      "title": "20th Cakeday Finalist",
+      "bio": "Unlocked by being one of the 30 finalists for r/Snoo's \"What’s Snoo: 20th cakeday contest.\"",
+      "image_url": "https://i.redd.it/cms/962ce6457b4ae6a5_20th_cakeday_finalist.png",
+      "destination_url": "https://www.reddit.com/r/Snoo/",
+      "observed_profile_count": 2,
+      "example_owners": [
+        "ButINeedThatUsername",
+        "EponaMom"
+      ]
+    },
+    {
+      "id": "9a9b7da118822cf4_20th_cakeday_participation",
+      "title": "20th Cakeday Participation",
+      "bio": "Unlocked by participating in r/Snoo's \"What’s Snoo: 20th cakeday contest.\"",
+      "image_url": "https://i.redd.it/cms/9a9b7da118822cf4_20th_cakeday_participation.png",
+      "destination_url": "https://www.reddit.com/r/Snoo/",
+      "observed_profile_count": 64,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "ameen__shaikh",
+        "Anhapus",
+        "aSchizophrenicCat"
+      ]
+    },
+    {
+      "id": "4cec6b12145c05b1_trophy_image_for_adoptedadmin",
+      "title": "Adopted-Admin",
+      "bio": "Unlocked by helping moderate a community as part of the Adopt-an-Admin program.",
+      "image_url": "https://i.redd.it/cms/4cec6b12145c05b1_trophy_image_for_adoptedadmin.png",
+      "destination_url": "https://mods.reddithelp.com/hc/en-us/articles/4421932319501-Adopt-an-Admin",
+      "observed_profile_count": 7,
+      "example_owners": [
+        "advocado20",
+        "doradiamond",
+        "kebakark",
+        "liltrixxy",
+        "sodypop"
+      ]
+    },
+    {
+      "id": "e0b2b2edbf65a103_trophy_image_for_adopted_an_admin",
+      "title": "Adopted-an-Admin",
+      "bio": "Unlocked by adopting a Reddit admin to help moderate a community as part of the Adopt-an-Admin program.",
+      "image_url": "https://i.redd.it/cms/e0b2b2edbf65a103_trophy_image_for_adopted_an_admin.png",
+      "destination_url": "https://mods.reddithelp.com/hc/en-us/articles/4421932319501-Adopt-an-Admin",
+      "observed_profile_count": 31,
+      "example_owners": [
+        "404NinjaNotFound",
+        "BodegaDad",
+        "cenilecreep",
+        "Cute-Organization844",
+        "Ducati_Don"
+      ]
+    },
+    {
+      "id": "0ceeb63141b25e05_trophy_image_for_alienator",
+      "title": "Alienator",
+      "bio": "Olympics aliens",
+      "image_url": "https://i.redd.it/cms/0ceeb63141b25e05_trophy_image_for_alienator.png",
+      "destination_url": "http://a.thumbs.redditmedia.com/BnLTzIw_SdD87SsB.png",
+      "observed_profile_count": 9,
+      "example_owners": [
+        "chromakode",
+        "GovSchwarzenegger",
+        "krispykrackers",
+        "MrGrim",
+        "powerlanguage"
+      ]
+    },
+    {
+      "id": "af2074e41362dee7_trophy_image_for_alpha_tester",
+      "title": "Alpha Tester",
+      "bio": "Unlocked by helping test the redesign of Reddit's desktop site that took place in 2018.",
+      "image_url": "https://i.redd.it/cms/af2074e41362dee7_trophy_image_for_alpha_tester.png",
+      "destination_url": null,
+      "observed_profile_count": 32,
+      "example_owners": [
+        "404NinjaNotFound",
+        "Acidtwist",
+        "advocado20",
+        "AkaashMaharaj",
+        "Bossman1086"
+      ]
+    },
+    {
+      "id": "3655042a1351780a_trophy_image_for_argentium_award",
+      "title": "Argentium Club",
+      "bio": "Unlocked by receiving an Argentium award on a post or comment.",
+      "image_url": "https://i.redd.it/cms/3655042a1351780a_trophy_image_for_argentium_award.png",
+      "destination_url": null,
+      "observed_profile_count": 110,
+      "example_owners": [
+        "_-Frost-Byte-_",
+        "125RAILGUN",
+        "404NinjaNotFound",
+        "Acidtwist",
+        "AkaashMaharaj"
+      ]
+    },
+    {
+      "id": "686e53251edb874a_trophy_image_for_artisan",
+      "title": "Artisan",
+      "bio": "Unlocked by making an artistic contribution to a Reddit community.",
+      "image_url": "https://i.redd.it/cms/686e53251edb874a_trophy_image_for_artisan.png",
+      "destination_url": "https://www.reddit.com/r/starcraft/comments/lz2k3/rstarcraft_logo_contest/c2wrq05",
+      "observed_profile_count": 3,
+      "example_owners": [
+        "licenseplate",
+        "rufenstein",
+        "Sure_Ill_Draw_That"
+      ]
+    },
+    {
+      "id": "08f64803425be711_trophy_image_for_automagical",
+      "title": "AutoMagical",
+      "bio": "Unlocked by completing the online mod course, \"Automation for Beginners\".",
+      "image_url": "https://i.redd.it/cms/08f64803425be711_trophy_image_for_automagical.png",
+      "destination_url": "https://modeducation.reddithelp.com/",
+      "observed_profile_count": 80,
+      "example_owners": [
+        "010",
+        "AkaashMaharaj",
+        "ameen__shaikh",
+        "Anhapus",
+        "Ant0Pl"
+      ]
+    },
+    {
+      "id": "4c1314a8adcef720_trophy_image_for_baba_yaga",
+      "title": "Baba Yaga",
+      "bio": "Unlocked by joining r/JohnWick before the release of John Wick: Chapter 4 on 3/24/2023.",
+      "image_url": "https://i.redd.it/cms/4c1314a8adcef720_trophy_image_for_baba_yaga.png",
+      "destination_url": null,
+      "observed_profile_count": 5,
+      "example_owners": [
+        "Dhanish04",
+        "Homunculus_316",
+        "ricoimf",
+        "veryblandman",
+        "wolf805"
+      ]
+    },
+    {
+      "id": "eba43cc9664adb69_trophy_image_for_bellwether",
+      "title": "Bellwether",
+      "bio": "2016-01-04",
+      "image_url": "https://i.redd.it/cms/eba43cc9664adb69_trophy_image_for_bellwether.png",
+      "destination_url": null,
+      "observed_profile_count": 3,
+      "example_owners": [
+        "DarthTortilla",
+        "Mattallica",
+        "qgyh2"
+      ]
+    },
+    {
+      "id": "987a274d54a032ee_trophy_image_for_best_comment",
+      "title": "Best Comment",
+      "bio": "2023-01-01",
+      "image_url": "https://i.redd.it/cms/987a274d54a032ee_trophy_image_for_best_comment.png",
+      "destination_url": "https://www.reddit.com/r/AskReddit/comments/ezsyp5/photographers_of_reddit_what_is_the_most/fgpl3ie/?context=5#fgpl3ie",
+      "observed_profile_count": 15,
+      "example_owners": [
+        "Amuro_Ray_Gunner",
+        "Dawn_Of_The_Dave",
+        "fugly16",
+        "Ghawblin",
+        "GovSchwarzenegger"
+      ]
+    },
+    {
+      "id": "7b2af20d35bc420e_trophy_image_for_best_link",
+      "title": "Best Link",
+      "bio": "2023-01-01",
+      "image_url": "https://i.redd.it/cms/7b2af20d35bc420e_trophy_image_for_best_link.png",
+      "destination_url": "https://www.reddit.com/tb/1rs1m7",
+      "observed_profile_count": 25,
+      "example_owners": [
+        "AkaashMaharaj",
+        "ameen__shaikh",
+        "Bossman1086",
+        "BrautanGud",
+        "chromakode"
+      ]
+    },
+    {
+      "id": "e9912bb417b6b2b3_trophy_image_for_best_of_2008",
+      "title": "Best of 2008",
+      "bio": "Submission of the Year",
+      "image_url": "https://i.redd.it/cms/e9912bb417b6b2b3_trophy_image_for_best_of_2008.png",
+      "destination_url": "http://www.reddit.com/tb/7bs5u",
+      "observed_profile_count": 3,
+      "example_owners": [
+        "azron",
+        "qgyh2",
+        "RedDyeNumber4"
+      ]
+    },
+    {
+      "id": "e4d2ecd442b5e9d8_trophy_image_for_best_of_2009",
+      "title": "Best of 2009",
+      "bio": "Moderator of the Year",
+      "image_url": "https://i.redd.it/cms/e4d2ecd442b5e9d8_trophy_image_for_best_of_2009.png",
+      "destination_url": "http://reddit.com/r/SecretSanta",
+      "observed_profile_count": 4,
+      "example_owners": [
+        "kickme444",
+        "look_of_disapproval",
+        "MrGrim",
+        "qgyh2"
+      ]
+    },
+    {
+      "id": "859845eece9afe63_trophy_image_for_best_of_2010",
+      "title": "Best of 2010",
+      "bio": "Submitter of the Year",
+      "image_url": "https://i.redd.it/cms/859845eece9afe63_trophy_image_for_best_of_2010.png",
+      "destination_url": "http://www.reddit.com/r/bestof2010/comments/f4ov8/congratulations_to_drjulianbashir_reddits_2010/",
+      "observed_profile_count": 6,
+      "example_owners": [
+        "DrJulianBashir",
+        "Kylde",
+        "MrGrim",
+        "ProbablyHittingOnYou",
+        "rhoner"
+      ]
+    },
+    {
+      "id": "d213dc0c47bd18f2_trophy_image_for_beta_team",
+      "title": "Beta Team",
+      "bio": "Reddit for Android",
+      "image_url": "https://i.redd.it/cms/d213dc0c47bd18f2_trophy_image_for_beta_team.png",
+      "destination_url": "https://redditama.reddit.com/",
+      "observed_profile_count": 24,
+      "example_owners": [
+        "Acidtwist",
+        "Bossman1086",
+        "ch4os1337",
+        "DoTheDew",
+        "facetiously"
+      ]
+    },
+    {
+      "id": "5b8217752034301b_trophy_image_for_calendar_girl",
+      "title": "Calendar Girl",
+      "bio": "Ms. June",
+      "image_url": "https://i.redd.it/cms/5b8217752034301b_trophy_image_for_calendar_girl.png",
+      "destination_url": "http://blog.reddit.com/2009/10/i-love-i-love-i-love-my-reddit-calendar.html",
+      "observed_profile_count": 9,
+      "example_owners": [
+        "aennil",
+        "animalcrackers",
+        "INTPLibrarian",
+        "jessicalbarry",
+        "krispykrackers"
+      ]
+    },
+    {
+      "id": "3a93e6c8f6ab0de5_trophy_image_for_charity_challenge_winner",
+      "title": "Charity Challenge Winner",
+      "bio": "Unlocked by taking part in the 2014 donation battle to raise money for various charities. (Which r/mylittlepony won.)",
+      "image_url": "https://i.redd.it/cms/3a93e6c8f6ab0de5_trophy_image_for_charity_challenge_winner.png",
+      "destination_url": null,
+      "observed_profile_count": 1,
+      "example_owners": [
+        "krispykrackers"
+      ]
+    },
+    {
+      "id": "89d3f05c2f6716da_trophy_image_for_charter_member",
+      "title": "Charter Member",
+      "bio": "Unlocked by being an early supporter of Reddit by purchasing Reddit gold in 2010.",
+      "image_url": "https://i.redd.it/cms/89d3f05c2f6716da_trophy_image_for_charter_member.png",
+      "destination_url": "https://www.reddit.com/help/gold",
+      "observed_profile_count": 34,
+      "example_owners": [
+        "AnOddName",
+        "arunan",
+        "asjs5",
+        "Bossman1086",
+        "cdawzrd"
+      ]
+    },
+    {
+      "id": "588f4057be84e9d0_chat_channels__pilot",
+      "title": "Chat Channels | Pilot",
+      "bio": "Unlocked by giving feedback during the Chat Channels Pilot program.",
+      "image_url": "https://i.redd.it/cms/588f4057be84e9d0_chat_channels__pilot.png",
+      "destination_url": null,
+      "observed_profile_count": 8,
+      "example_owners": [
+        "AkaashMaharaj",
+        "DesIlesLointaines",
+        "EponaMom",
+        "EuPombo",
+        "F0REM4N"
+      ]
+    },
+    {
+      "id": "2465c15ccaf8cda3_closed_beta_tester",
+      "title": "Closed Beta Tester",
+      "bio": "Unlocked by testing the Reddit beta app.",
+      "image_url": "https://i.redd.it/cms/2465c15ccaf8cda3_closed_beta_tester.png",
+      "destination_url": null,
+      "observed_profile_count": 15,
+      "example_owners": [
+        "404NinjaNotFound",
+        "ButINeedThatUsername",
+        "Chazay",
+        "FaviFake",
+        "flattenedbricks"
+      ]
+    },
+    {
+      "id": "8f1e7fb850945557_trophy_image_for_combo_commenter",
+      "title": "Combo Commenter",
+      "bio": "2023-01-01",
+      "image_url": "https://i.redd.it/cms/8f1e7fb850945557_trophy_image_for_combo_commenter.png",
+      "destination_url": "https://www.reddit.com/user/Palifaith/combocommenter",
+      "observed_profile_count": 14,
+      "example_owners": [
+        "ekjp",
+        "GovSchwarzenegger",
+        "Greenthund3r",
+        "HustlePlays",
+        "karmanaut"
+      ]
+    },
+    {
+      "id": "1f5951849558e45e_trophy_image_for_combo_linker",
+      "title": "Combo Linker",
+      "bio": "2022-06-13",
+      "image_url": "https://i.redd.it/cms/1f5951849558e45e_trophy_image_for_combo_linker.png",
+      "destination_url": "https://www.reddit.com/user/TXVERAS/combolinker",
+      "observed_profile_count": 19,
+      "example_owners": [
+        "ameen__shaikh",
+        "DrJulianBashir",
+        "Estoye",
+        "flattenedbricks",
+        "Greenthund3r"
+      ]
+    },
+    {
+      "id": "e335e704cb58079c_community_status_early_access",
+      "title": "Community Status Early Access",
+      "bio": "Unlocked by participating in the Reddit Community Status Early Access program.",
+      "image_url": "https://i.redd.it/cms/e335e704cb58079c_community_status_early_access.png",
+      "destination_url": null,
+      "observed_profile_count": 26,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "DesIlesLointaines",
+        "doradiamond",
+        "EponaMom"
+      ]
+    },
+    {
+      "id": "c2277841d7f03523_trophy_image_for_corps_member",
+      "title": "Corps Member",
+      "bio": "Unlocked by being a Reddit Community Corps member.",
+      "image_url": "https://i.redd.it/cms/c2277841d7f03523_trophy_image_for_corps_member.png",
+      "destination_url": "https://mods.reddithelp.com/hc/en-us/articles/4489897077773-Reddit-Community-Corps",
+      "observed_profile_count": 13,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "doradiamond",
+        "Femilip",
+        "GeekScientist"
+      ]
+    },
+    {
+      "id": "cd54fee3e0319b1e_trophy_image_for_css_animal",
+      "title": "CSS Animal",
+      "bio": "/r/Naut",
+      "image_url": "https://i.redd.it/cms/cd54fee3e0319b1e_trophy_image_for_css_animal.png",
+      "destination_url": null,
+      "observed_profile_count": 4,
+      "example_owners": [
+        "Cryptonaut",
+        "noahjk",
+        "qtx",
+        "rolmos"
+      ]
+    },
+    {
+      "id": "517f102468997323_trophy_image_for_das_goldene_schnitzel",
+      "title": "Das Goldene Schnitzel",
+      "bio": "Unlocked by completing every task in the r/Deutschemods scavenger hunt.",
+      "image_url": "https://i.redd.it/cms/517f102468997323_trophy_image_for_das_goldene_schnitzel.png",
+      "destination_url": null,
+      "observed_profile_count": 1,
+      "example_owners": [
+        "ButINeedThatUsername"
+      ]
+    },
+    {
+      "id": "1133e289fdc544e3_trophy_image_for_dev_platform_beta",
+      "title": "Dev Platform Beta",
+      "bio": "Unlocked by joining the Reddit Developer Platform beta.",
+      "image_url": "https://i.redd.it/cms/1133e289fdc544e3_trophy_image_for_dev_platform_beta.png",
+      "destination_url": "https://developers.reddit.com/",
+      "observed_profile_count": 16,
+      "example_owners": [
+        "A6uh",
+        "EViLeleven",
+        "flattenedbricks",
+        "fsv",
+        "GeekScientist"
+      ]
+    },
+    {
+      "id": "8b030e9b9d408e0f_trophy_image_for_dev_platform_contest",
+      "title": "Dev Platform Contest",
+      "bio": "2025 Hack Reddit",
+      "image_url": "https://i.redd.it/cms/8b030e9b9d408e0f_trophy_image_for_dev_platform_contest.png",
+      "destination_url": "https://hackreddit.devpost.com/",
+      "observed_profile_count": 11,
+      "example_owners": [
+        "_D-ace_",
+        "A6uh",
+        "EViLeleven",
+        "flattenedbricks",
+        "hammertimestudio"
+      ]
+    },
+    {
+      "id": "4e70ed8cfae092ed_trophy_image_for_dev_platform_contest_winner",
+      "title": "Dev Platform Contest Winner",
+      "bio": "Unlocked by winninng one of the Reddit Developer Platform contests.",
+      "image_url": "https://i.redd.it/cms/4e70ed8cfae092ed_trophy_image_for_dev_platform_contest_winner.png",
+      "destination_url": "https://developers.reddit.com/",
+      "observed_profile_count": 3,
+      "example_owners": [
+        "A6uh",
+        "EViLeleven",
+        "Xenc"
+      ]
+    },
+    {
+      "id": "2e2c160d01128615_devvit_app_published",
+      "title": "Devvit App Published",
+      "bio": "Unlocked by publishing 1+ Dev Platform app.",
+      "image_url": "https://i.redd.it/cms/2e2c160d01128615_devvit_app_published.png",
+      "destination_url": "https://developers.reddit.com/",
+      "observed_profile_count": 11,
+      "example_owners": [
+        "_D-ace_",
+        "A6uh",
+        "fsv",
+        "haykam821",
+        "Independent_Heart_15"
+      ]
+    },
+    {
+      "id": "6747a9a55e75f409_devvit_duck",
+      "title": "Devvit Duck",
+      "bio": "Unlocked by being an officially helpful Dev Platform debugging buddy.",
+      "image_url": "https://i.redd.it/cms/6747a9a55e75f409_devvit_duck.png",
+      "destination_url": "https://developers.reddit.com/",
+      "observed_profile_count": 5,
+      "example_owners": [
+        "flattenedbricks",
+        "fsv",
+        "leemetme",
+        "shiruken",
+        "Xenc"
+      ]
+    },
+    {
+      "id": "43bbd0820d9837b2_devvitor",
+      "title": "Devvitor",
+      "bio": "Unlocked by uploading 1+ Dev Platform app.",
+      "image_url": "https://i.redd.it/cms/43bbd0820d9837b2_devvitor.png",
+      "destination_url": "https://developers.reddit.com/",
+      "observed_profile_count": 17,
+      "example_owners": [
+        "_D-ace_",
+        "A6uh",
+        "EViLeleven",
+        "flattenedbricks",
+        "fsv"
+      ]
+    },
+    {
+      "id": "5159cff00b3fa12e_trophy_image_for_8_year_club",
+      "title": "Eight-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/5159cff00b3fa12e_trophy_image_for_8_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 29,
+      "example_owners": [
+        "ancientflowers",
+        "BaconDalek",
+        "blueneuronDOTnet",
+        "cenilecreep",
+        "DaiyuSamal"
+      ]
+    },
+    {
+      "id": "f19775c9fd4557a0_trophy_image_for_end_game__22",
+      "title": "End Game '22",
+      "bio": "Unlocked by placing one of the final white tiles on the 2022 r/place canvas.",
+      "image_url": "https://i.redd.it/cms/f19775c9fd4557a0_trophy_image_for_end_game__22.png",
+      "destination_url": null,
+      "observed_profile_count": 72,
+      "example_owners": [
+        "010",
+        "125RAILGUN",
+        "404NinjaNotFound",
+        "Acidtwist",
+        "AkaashMaharaj"
+      ]
+    },
+    {
+      "id": "ac40f690b69e2970_trophy_image_for_end_game__23",
+      "title": "End Game '23",
+      "bio": "Unlocked by placing one of the final black, white, or grey tiles on the 2023 r/place canvas before it faded to all white.",
+      "image_url": "https://i.redd.it/cms/ac40f690b69e2970_trophy_image_for_end_game__23.png",
+      "destination_url": null,
+      "observed_profile_count": 105,
+      "example_owners": [
+        "-NotAnAdmin-",
+        "010",
+        "404NinjaNotFound",
+        "A6uh",
+        "AkaashMaharaj"
+      ]
+    },
+    {
+      "id": "a523174ebb641339_trophy_image_for_es_ist_mittwoch",
+      "title": "Es ist Mittwoch",
+      "bio": "Unlocked by joining r/Deutschemods.",
+      "image_url": "https://i.redd.it/cms/a523174ebb641339_trophy_image_for_es_ist_mittwoch.png",
+      "destination_url": null,
+      "observed_profile_count": 2,
+      "example_owners": [
+        "ButINeedThatUsername",
+        "EViLeleven"
+      ]
+    },
+    {
+      "id": "468ecca2bb17f1bc_trophy_image_for_euro_cup_2020_1st_place_predictor",
+      "title": "Euro Cup 2020 1st Place Predictor",
+      "bio": "Unlocked by getting 1st place in the 2020 Euro Cup predictions tournament.",
+      "image_url": "https://i.redd.it/cms/468ecca2bb17f1bc_trophy_image_for_euro_cup_2020_1st_place_predictor.png",
+      "destination_url": null,
+      "observed_profile_count": 1,
+      "example_owners": [
+        "TheUnrealVenom"
+      ]
+    },
+    {
+      "id": "ecae8bb7b1d9101b_trophy_image_for_euro_cup_2020_top_100_predictor",
+      "title": "Euro Cup 2020 Top 100 Predictor",
+      "bio": "Unlocked by getting 1st place in the 2020 Euro Cup predictions tournament.",
+      "image_url": "https://i.redd.it/cms/ecae8bb7b1d9101b_trophy_image_for_euro_cup_2020_top_100_predictor.png",
+      "destination_url": null,
+      "observed_profile_count": 5,
+      "example_owners": [
+        "BaronYike",
+        "Opposite_Flow_1395",
+        "Preganananant",
+        "SchoreVolker3000",
+        "sighmonsez"
+      ]
+    },
+    {
+      "id": "8649df132a6fb4fb_trophy_image_for_euro_cup_2020_top_1000_predictor",
+      "title": "Euro Cup 2020 Top 1000 Predictor",
+      "bio": "Unlocked by finished in the top 1,000 during the 2020 Euro Cup predictions tournament.",
+      "image_url": "https://i.redd.it/cms/8649df132a6fb4fb_trophy_image_for_euro_cup_2020_top_1000_predictor.png",
+      "destination_url": null,
+      "observed_profile_count": 5,
+      "example_owners": [
+        "BaconDalek",
+        "helpnxt",
+        "Palifaith",
+        "RubberToe1996",
+        "ValleyFloydJam"
+      ]
+    },
+    {
+      "id": "bd2ff285e0f3b4e1_trophy_image_for_extra_life_2019",
+      "title": "Extra Life 2019",
+      "bio": "Unlocked by donating to Children's Miracle Network Hospitals by giving an Extra Life award to a post or comment during Extra Life 2019.",
+      "image_url": "https://i.redd.it/cms/bd2ff285e0f3b4e1_trophy_image_for_extra_life_2019.png",
+      "destination_url": "https://www.reddit.com/r/announcements/comments/dpqd0z/the_extra_life_charity_award_raise_awareness_for/",
+      "observed_profile_count": 24,
+      "example_owners": [
+        "Acidtwist",
+        "Baba_Jaga_II",
+        "cyanocittaetprocyon",
+        "diliberto123",
+        "DominoBarksdale"
+      ]
+    },
+    {
+      "id": "7ea172aaaa117b22_trophy_image_for_extra_life_2020",
+      "title": "Extra Life 2020",
+      "bio": "Unlocked by donating to Children's Miracle Network Hospitals by giving an Extra Life award to a post or comment during Extra Life 2020.",
+      "image_url": "https://i.redd.it/cms/7ea172aaaa117b22_trophy_image_for_extra_life_2020.png",
+      "destination_url": "https://www.reddit.com/r/blog/comments/jp8z1v/extra_life_2020_join_us_this_saturday_for_a/",
+      "observed_profile_count": 30,
+      "example_owners": [
+        "010",
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "ancientflowers",
+        "beIIe-and-sebastian"
+      ]
+    },
+    {
+      "id": "2c6b802c62faf11b_trophy_image_for_extra_life_2021",
+      "title": "Extra Life 2021",
+      "bio": "Unlocked by helping raise money for the Children's Miracle Network Hospitals by streaming during Extra Life 2021.",
+      "image_url": "https://i.redd.it/cms/2c6b802c62faf11b_trophy_image_for_extra_life_2021.png",
+      "destination_url": null,
+      "observed_profile_count": 8,
+      "example_owners": [
+        "404NinjaNotFound",
+        "ButINeedThatUsername",
+        "GeekScientist",
+        "iltifaat_yousuf",
+        "imusntbeherebutiam"
+      ]
+    },
+    {
+      "id": "fa3f6d0a786a37f9_trophy_image_for_fantastic_voyager",
+      "title": "Fantastic Voyager",
+      "bio": "Unlocked by taking part in the fantasic journey of two redditors across the United States in 2019.",
+      "image_url": "https://i.redd.it/cms/fa3f6d0a786a37f9_trophy_image_for_fantastic_voyager.png",
+      "destination_url": "http://blog.reddit.com/2009/08/reddits-fatastic-voyage-reddit.html",
+      "observed_profile_count": 24,
+      "example_owners": [
+        "77or88",
+        "arunan",
+        "askedrelic",
+        "cdawzrd",
+        "darthnut"
+      ]
+    },
+    {
+      "id": "b93042a1c04cd53a_trophy_image_for_final_canvas__22",
+      "title": "Final Canvas '22",
+      "bio": "Unlocked by placing one of the final tiles on the 2022 r/place canvas before it faded to white.",
+      "image_url": "https://i.redd.it/cms/b93042a1c04cd53a_trophy_image_for_final_canvas__22.png",
+      "destination_url": null,
+      "observed_profile_count": 103,
+      "example_owners": [
+        "010",
+        "404NinjaNotFound",
+        "Acidtwist",
+        "AkaashMaharaj",
+        "AnOddName"
+      ]
+    },
+    {
+      "id": "ffabee4120608124_trophy_image_for_final_canvas__23",
+      "title": "Final Canvas '23",
+      "bio": "Unlocked by placing one of the final tiles on the 2023 r/place cavas before it went to black, white, and grey.",
+      "image_url": "https://i.redd.it/cms/ffabee4120608124_trophy_image_for_final_canvas__23.png",
+      "destination_url": null,
+      "observed_profile_count": 116,
+      "example_owners": [
+        "010",
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "Alen_x3",
+        "AnOddName"
+      ]
+    },
+    {
+      "id": "075549c9c4284b30_trophy_image_for_first_placer__22",
+      "title": "First Placer '22",
+      "bio": "Unlocked by placing one of the first tiles on an untouched section of the 2022 r/place canvas.",
+      "image_url": "https://i.redd.it/cms/075549c9c4284b30_trophy_image_for_first_placer__22.png",
+      "destination_url": null,
+      "observed_profile_count": 127,
+      "example_owners": [
+        "010",
+        "125RAILGUN",
+        "404NinjaNotFound",
+        "Acidtwist",
+        "AkaashMaharaj"
+      ]
+    },
+    {
+      "id": "6d92ad1c59d15eb3_trophy_image_for_first_place__23",
+      "title": "First Placer '23",
+      "bio": "Unlocked by placing one of the first tiles on an untouched section of the 2023 r/place canvas.",
+      "image_url": "https://i.redd.it/cms/6d92ad1c59d15eb3_trophy_image_for_first_place__23.png",
+      "destination_url": null,
+      "observed_profile_count": 144,
+      "example_owners": [
+        "-NotAnAdmin-",
+        "010",
+        "125RAILGUN",
+        "404NinjaNotFound",
+        "A6uh"
+      ]
+    },
+    {
+      "id": "7962eb6ec0968575_trophy_image_for_5_year_club",
+      "title": "Five-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/7962eb6ec0968575_trophy_image_for_5_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 58,
+      "example_owners": [
+        "_D-ace_",
+        "-Aviator",
+        "A_Bored_Reddit_User",
+        "advocado20",
+        "allthisforacamaro"
+      ]
+    },
+    {
+      "id": "3e0967f35c56ddbc_trophy_image_for_fourth_year_club",
+      "title": "Four-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/3e0967f35c56ddbc_trophy_image_for_fourth_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 14,
+      "example_owners": [
+        "banana_hohoho",
+        "BerserkForcesGuts",
+        "BodegaDad",
+        "BroderzYt",
+        "Double-Conclusion-42"
+      ]
+    },
+    {
+      "id": "4cf5d4fd2e68a727_trophy_image_for_friendly",
+      "title": "Friendly",
+      "bio": "Unlocked by sharing Reddit with a friend.",
+      "image_url": "https://i.redd.it/cms/4cf5d4fd2e68a727_trophy_image_for_friendly.png",
+      "destination_url": null,
+      "observed_profile_count": 83,
+      "example_owners": [
+        "-Aviator",
+        "010",
+        "AkaashMaharaj",
+        "allthisforacamaro",
+        "ameen__shaikh"
+      ]
+    },
+    {
+      "id": "a5950686ff02d606_trophy_image_for_gilding_i",
+      "title": "Gilding I",
+      "bio": "gilder",
+      "image_url": "https://i.redd.it/cms/a5950686ff02d606_trophy_image_for_gilding_i.png",
+      "destination_url": null,
+      "observed_profile_count": 46,
+      "example_owners": [
+        "Alen_x3",
+        "Ali_cicek2",
+        "benlikesmarvel",
+        "ch4os1337",
+        "ClippTube"
+      ]
+    },
+    {
+      "id": "ed35030e354b8153_trophy_image_for_gilding_ii",
+      "title": "Gilding II",
+      "bio": "euphauric",
+      "image_url": "https://i.redd.it/cms/ed35030e354b8153_trophy_image_for_gilding_ii.png",
+      "destination_url": null,
+      "observed_profile_count": 66,
+      "example_owners": [
+        "-Aviator",
+        "-LexXi-",
+        "010",
+        "A6uh",
+        "allthisforacamaro"
+      ]
+    },
+    {
+      "id": "0c5a8dc247646e2c_trophy_image_for_gilding_iii",
+      "title": "Gilding III",
+      "bio": "reddit per annum",
+      "image_url": "https://i.redd.it/cms/0c5a8dc247646e2c_trophy_image_for_gilding_iii.png",
+      "destination_url": null,
+      "observed_profile_count": 26,
+      "example_owners": [
+        "AkaashMaharaj",
+        "CapnHDawg",
+        "Cryptonaut",
+        "F0REM4N",
+        "gandalf45435"
+      ]
+    },
+    {
+      "id": "c4aabdb9db09bf21_trophy_image_for_gilding_iv",
+      "title": "Gilding IV",
+      "bio": "carat on a stick",
+      "image_url": "https://i.redd.it/cms/c4aabdb9db09bf21_trophy_image_for_gilding_iv.png",
+      "destination_url": null,
+      "observed_profile_count": 27,
+      "example_owners": [
+        "125RAILGUN",
+        "AnOddName",
+        "beIIe-and-sebastian",
+        "Bitey_the_Squirrel",
+        "BodegaDad"
+      ]
+    },
+    {
+      "id": "0b389b072c8f1bf6_trophy_image_for_gilding_ix",
+      "title": "Gilding IX",
+      "bio": "goldzilla",
+      "image_url": "https://i.redd.it/cms/0b389b072c8f1bf6_trophy_image_for_gilding_ix.png",
+      "destination_url": null,
+      "observed_profile_count": 15,
+      "example_owners": [
+        "ancientflowers",
+        "DominoBarksdale",
+        "doradiamond",
+        "ekjp",
+        "Estoye"
+      ]
+    },
+    {
+      "id": "040dc39c114bd919_trophy_image_for_gilding_v",
+      "title": "Gilding V",
+      "bio": "heart of gold",
+      "image_url": "https://i.redd.it/cms/040dc39c114bd919_trophy_image_for_gilding_v.png",
+      "destination_url": null,
+      "observed_profile_count": 28,
+      "example_owners": [
+        "Bren12310",
+        "BroderzYt",
+        "cenilecreep",
+        "diliberto123",
+        "DoTheDew"
+      ]
+    },
+    {
+      "id": "c8eda767cab407d2_trophy_image_for_gilding_vi",
+      "title": "Gilding VI",
+      "bio": "aultruist",
+      "image_url": "https://i.redd.it/cms/c8eda767cab407d2_trophy_image_for_gilding_vi.png",
+      "destination_url": null,
+      "observed_profile_count": 10,
+      "example_owners": [
+        "dumbusername",
+        "facetiously",
+        "honolulu_oahu_mod",
+        "jamjam1090",
+        "licenseplate"
+      ]
+    },
+    {
+      "id": "91ee315ba080fa0a_trophy_image_for_gilding_vii",
+      "title": "Gilding VII",
+      "bio": "pure gildanthropist",
+      "image_url": "https://i.redd.it/cms/91ee315ba080fa0a_trophy_image_for_gilding_vii.png",
+      "destination_url": null,
+      "observed_profile_count": 29,
+      "example_owners": [
+        "_-Frost-Byte-_",
+        "404NinjaNotFound",
+        "ameen__shaikh",
+        "ButINeedThatUsername",
+        "chromakode"
+      ]
+    },
+    {
+      "id": "bf515d98ef473043_trophy_image_for_gilding_viii",
+      "title": "Gilding VIII",
+      "bio": "gilding heavyweight",
+      "image_url": "https://i.redd.it/cms/bf515d98ef473043_trophy_image_for_gilding_viii.png",
+      "destination_url": null,
+      "observed_profile_count": 17,
+      "example_owners": [
+        "Anhapus",
+        "Baba_Jaga_II",
+        "Bossman1086",
+        "deuteranopia",
+        "Dhanish04"
+      ]
+    },
+    {
+      "id": "80b6afadd070e459_trophy_image_for_gilding_x",
+      "title": "Gilding X",
+      "bio": "goldcutter",
+      "image_url": "https://i.redd.it/cms/80b6afadd070e459_trophy_image_for_gilding_x.png",
+      "destination_url": null,
+      "observed_profile_count": 7,
+      "example_owners": [
+        "aSchizophrenicCat",
+        "Embasify",
+        "JangoBeastwood",
+        "kha7id",
+        "purple"
+      ]
+    },
+    {
+      "id": "2b9105d0dac2afa2_trophy_image_for_gilding_xi",
+      "title": "Gilding XI",
+      "bio": "gold aumbassador",
+      "image_url": "https://i.redd.it/cms/2b9105d0dac2afa2_trophy_image_for_gilding_xi.png",
+      "destination_url": null,
+      "observed_profile_count": 3,
+      "example_owners": [
+        "cyanocittaetprocyon",
+        "formerqwest",
+        "MagicNoodle"
+      ]
+    },
+    {
+      "id": "2608cf8e55850ccd_golden_app",
+      "title": "Golden App",
+      "bio": "Unlocked by publishing an app with significant usage.",
+      "image_url": "https://i.redd.it/cms/2608cf8e55850ccd_golden_app.png",
+      "destination_url": "https://developers.reddit.com/",
+      "observed_profile_count": 2,
+      "example_owners": [
+        "fsv",
+        "Xenc"
+      ]
+    },
+    {
+      "id": "3d21a6c0b916b299_golden_partner",
+      "title": "Golden Partner",
+      "bio": "Unlocked by being active in the Reddit Partner community program and participated in mod calls.",
+      "image_url": "https://i.redd.it/cms/3d21a6c0b916b299_golden_partner.png",
+      "destination_url": null,
+      "observed_profile_count": 17,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "BodegaDad",
+        "EponaMom",
+        "F0REM4N"
+      ]
+    },
+    {
+      "id": "88704acee086faba_trophy_image_for_golden_potato",
+      "title": "Golden Potato",
+      "bio": "Unlocked by joining r/Schrodingers and taking part in the 2023 Schrödingers event.",
+      "image_url": "https://i.redd.it/cms/88704acee086faba_trophy_image_for_golden_potato.png",
+      "destination_url": null,
+      "observed_profile_count": 145,
+      "example_owners": [
+        "-NotAnAdmin-",
+        "010",
+        "404NinjaNotFound",
+        "Acidtwist",
+        "AkaashMaharaj"
+      ]
+    },
+    {
+      "id": "6f8be624fb397bac_trophy_image_for_grmd",
+      "title": "GrMD",
+      "bio": "2013",
+      "image_url": "https://i.redd.it/cms/6f8be624fb397bac_trophy_image_for_grmd.png",
+      "destination_url": "http://blog.reddit.com/2013/06/4th-annual-global-reddit-meetup-day.html",
+      "observed_profile_count": 7,
+      "example_owners": [
+        "ekjp",
+        "facetiously",
+        "kemitche",
+        "kickme444",
+        "krispykrackers"
+      ]
+    },
+    {
+      "id": "8890f2de06450d17_trophy_image_for_heart_of_the_community",
+      "title": "Heart of the Community",
+      "bio": "Unlocked by hosting a community event funded by Reddit Community Funds.",
+      "image_url": "https://i.redd.it/cms/8890f2de06450d17_trophy_image_for_heart_of_the_community.png",
+      "destination_url": null,
+      "observed_profile_count": 4,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "EponaMom",
+        "Merari01"
+      ]
+    },
+    {
+      "id": "2647ffe8d2b99362_trophy_image_for_helper_level_1",
+      "title": "Helper Level 1",
+      "bio": "Unlocked by earning 10 karma and becoming a Helper in r/help.",
+      "image_url": "https://i.redd.it/cms/2647ffe8d2b99362_trophy_image_for_helper_level_1.png",
+      "destination_url": "https://www.reddit.com/r/help",
+      "observed_profile_count": 27,
+      "example_owners": [
+        "010",
+        "AkaashMaharaj",
+        "Ali_cicek2",
+        "beIIe-and-sebastian",
+        "BerserkForcesGuts"
+      ]
+    },
+    {
+      "id": "fddb74aa4eb3a200_trophy_image_for_helper_level_2",
+      "title": "Helper Level 2",
+      "bio": "Unlocked by earning 50 karma and becoming a Helper in r/help.",
+      "image_url": "https://i.redd.it/cms/fddb74aa4eb3a200_trophy_image_for_helper_level_2.png",
+      "destination_url": "https://www.reddit.com/r/help",
+      "observed_profile_count": 10,
+      "example_owners": [
+        "cyanocittaetprocyon",
+        "Ducati_Don",
+        "GeekScientist",
+        "Independent_Heart_15",
+        "Mrtom987"
+      ]
+    },
+    {
+      "id": "6318b950d9954cb2_trophy_image_for_helper_level_3",
+      "title": "Helper Level 3",
+      "bio": "Unlocked by earning 100 karma and becoming a Helper in r/help.",
+      "image_url": "https://i.redd.it/cms/6318b950d9954cb2_trophy_image_for_helper_level_3.png",
+      "destination_url": "https://www.reddit.com/r/help",
+      "observed_profile_count": 11,
+      "example_owners": [
+        "aSchizophrenicCat",
+        "EponaMom",
+        "Ginomania",
+        "KataGuruma-",
+        "MajorParadox"
+      ]
+    },
+    {
+      "id": "cb84c323516cc8f4_trophy_image_for_helper_level_4",
+      "title": "Helper Level 4",
+      "bio": "r/help | 2025",
+      "image_url": "https://i.redd.it/cms/cb84c323516cc8f4_trophy_image_for_helper_level_4.png",
+      "destination_url": "https://www.reddit.com/r/help",
+      "observed_profile_count": 4,
+      "example_owners": [
+        "merchlinkinbio",
+        "SkibDen",
+        "starfleetbrat",
+        "westcoastcdn19"
+      ]
+    },
+    {
+      "id": "8f88081f47a4d8fd_trophy_image_for_helper_level_5",
+      "title": "Helper Level 5",
+      "bio": "Unlocked by earning 500 karma and becoming an Experienced Helper in r/help.",
+      "image_url": "https://i.redd.it/cms/8f88081f47a4d8fd_trophy_image_for_helper_level_5.png",
+      "destination_url": "https://www.reddit.com/r/help",
+      "observed_profile_count": 3,
+      "example_owners": [
+        "BodegaDad",
+        "Rogerpocalypse",
+        "westcoastcdn19"
+      ]
+    },
+    {
+      "id": "8d1d54c4c7707469_trophy_image_for_helper_level_6",
+      "title": "Helper Level 6",
+      "bio": "Unlocked by earning 1,000 karma and becoming an Expert Helper in r/help.",
+      "image_url": "https://i.redd.it/cms/8d1d54c4c7707469_trophy_image_for_helper_level_6.png",
+      "destination_url": "https://www.reddit.com/r/help",
+      "observed_profile_count": 2,
+      "example_owners": [
+        "DoTheDew",
+        "westcoastcdn19"
+      ]
+    },
+    {
+      "id": "9b83973871bc366c_trophy_image_for_helper_level_7",
+      "title": "Helper Level 7",
+      "bio": "r/help | 2025",
+      "image_url": "https://i.redd.it/cms/9b83973871bc366c_trophy_image_for_helper_level_7.png",
+      "destination_url": "https://reddit.com/r/help",
+      "observed_profile_count": 3,
+      "example_owners": [
+        "Dhanish04",
+        "formerqwest",
+        "westcoastcdn19"
+      ]
+    },
+    {
+      "id": "2df41c6054ac7115_trophy_image_for_helper_level_8",
+      "title": "Helper Level 8",
+      "bio": "r/help | 2025",
+      "image_url": "https://i.redd.it/cms/2df41c6054ac7115_trophy_image_for_helper_level_8.png",
+      "destination_url": null,
+      "observed_profile_count": 2,
+      "example_owners": [
+        "formerqwest",
+        "westcoastcdn19"
+      ]
+    },
+    {
+      "id": "e6f28a80180f4bc5_hidden_gem",
+      "title": "Hidden Gem",
+      "bio": "Hidden Gem '25",
+      "image_url": "https://i.redd.it/cms/e6f28a80180f4bc5_hidden_gem.png",
+      "destination_url": "https://support.reddithelp.com/hc/en-us/articles/40508103784852-Hidden-Gems-Overview",
+      "observed_profile_count": 1,
+      "example_owners": [
+        "trendypeach"
+      ]
+    },
+    {
+      "id": "26ff1d46057dc16d_trophy_image_for_hochwahli_fur_alle",
+      "title": "Hochwähli Für Alle",
+      "bio": "Unlocked by upvoting 100 posts and comments in German communities as part of the r/Deutschemods scavenger hunt.",
+      "image_url": "https://i.redd.it/cms/26ff1d46057dc16d_trophy_image_for_hochwahli_fur_alle.png",
+      "destination_url": null,
+      "observed_profile_count": 1,
+      "example_owners": [
+        "ButINeedThatUsername"
+      ]
+    },
+    {
+      "id": "7ccfd65a8aced6fe_trophy_image_for_hosted_10_reddit_talks",
+      "title": "Hosted 10 Reddit Talks",
+      "bio": "Unlocked by hosting 10 Reddit Talks.",
+      "image_url": "https://i.redd.it/cms/7ccfd65a8aced6fe_trophy_image_for_hosted_10_reddit_talks.png",
+      "destination_url": "https://www.reddit.com/talk",
+      "observed_profile_count": 25,
+      "example_owners": [
+        "404NinjaNotFound",
+        "advocado20",
+        "AkaashMaharaj",
+        "ButINeedThatUsername",
+        "escobizzle"
+      ]
+    },
+    {
+      "id": "04d13e30191946ff_trophy_image_for_hosted_1st_reddit_talk",
+      "title": "Hosted 1st Reddit Talk",
+      "bio": "Unlocked by hosting at least one Reddit Talk.",
+      "image_url": "https://i.redd.it/cms/04d13e30191946ff_trophy_image_for_hosted_1st_reddit_talk.png",
+      "destination_url": "http://reddit.com/talk",
+      "observed_profile_count": 51,
+      "example_owners": [
+        "404NinjaNotFound",
+        "advocado20",
+        "AkaashMaharaj",
+        "aulbayne",
+        "BodegaDad"
+      ]
+    },
+    {
+      "id": "70931fd525a272dc_trophy_image_for_hosted_25_reddit_talks",
+      "title": "Hosted 25 Reddit Talks",
+      "bio": "Unlocked by hosting 25 Reddit Talks.",
+      "image_url": "https://i.redd.it/cms/70931fd525a272dc_trophy_image_for_hosted_25_reddit_talks.png",
+      "destination_url": "https://www.reddit.com/talk",
+      "observed_profile_count": 13,
+      "example_owners": [
+        "404NinjaNotFound",
+        "advocado20",
+        "AkaashMaharaj",
+        "ButINeedThatUsername",
+        "escobizzle"
+      ]
+    },
+    {
+      "id": "3a0645e367cd6e4b_trophy_image_for_inciteful_comment",
+      "title": "Inciteful Comment",
+      "bio": "2023-01-01",
+      "image_url": "https://i.redd.it/cms/3a0645e367cd6e4b_trophy_image_for_inciteful_comment.png",
+      "destination_url": "https://www.reddit.com/r/blog/comments/3auk69/happy_10th_birthday_to_us_celebrating_the_best_of/csg368h?context=5#csg368h",
+      "observed_profile_count": 10,
+      "example_owners": [
+        "ekjp",
+        "Gumgums66",
+        "karmanaut",
+        "krispykrackers",
+        "Merari01"
+      ]
+    },
+    {
+      "id": "df135fa7d5369325_trophy_image_for_inciteful_link",
+      "title": "Inciteful Link",
+      "bio": "2022-06-30",
+      "image_url": "https://i.redd.it/cms/df135fa7d5369325_trophy_image_for_inciteful_link.png",
+      "destination_url": "https://www.reddit.com/tb/u5ph5l",
+      "observed_profile_count": 14,
+      "example_owners": [
+        "ameen__shaikh",
+        "ekjp",
+        "hero0fwar",
+        "kickme444",
+        "krispykrackers"
+      ]
+    },
+    {
+      "id": "95fde3e9d6d41437_trophy_image_for_john_wick",
+      "title": "John Wick",
+      "bio": "Unlocked by upvoting the March 2023 promotional poster for the film John Wick.",
+      "image_url": "https://i.redd.it/cms/95fde3e9d6d41437_trophy_image_for_john_wick.png",
+      "destination_url": null,
+      "observed_profile_count": 67,
+      "example_owners": [
+        "010",
+        "404NinjaNotFound",
+        "Acidtwist",
+        "AkaashMaharaj",
+        "ameen__shaikh"
+      ]
+    },
+    {
+      "id": "0330e4aa7eb7ebf5_trophy_image_for_katze",
+      "title": "Katze",
+      "bio": "Unlocked by completing multiple moderation tasks as part of the r/Deutschemods scavenger hunt.",
+      "image_url": "https://i.redd.it/cms/0330e4aa7eb7ebf5_trophy_image_for_katze.png",
+      "destination_url": null,
+      "observed_profile_count": 1,
+      "example_owners": [
+        "ButINeedThatUsername"
+      ]
+    },
+    {
+      "id": "53836033969b3fb6_trophy_image_for_keyboardkrieger",
+      "title": "Keyboard-Krieger",
+      "bio": "Unlocked by writing 30 comments in German communities as part of the r/Deutschemods scavenger hunt.",
+      "image_url": "https://i.redd.it/cms/53836033969b3fb6_trophy_image_for_keyboardkrieger.png",
+      "destination_url": null,
+      "observed_profile_count": 2,
+      "example_owners": [
+        "ButINeedThatUsername",
+        "EViLeleven"
+      ]
+    },
+    {
+      "id": "180ca02c838472a1_trophy_image_for_king_of_the_ashes",
+      "title": "King of the Ashes",
+      "bio": "Unlocked by picking Bran (r/branwinsthethrone) during the 2019 r/gameofthrones Throne Pool event.",
+      "image_url": "https://i.redd.it/cms/180ca02c838472a1_trophy_image_for_king_of_the_ashes.png",
+      "destination_url": null,
+      "observed_profile_count": 1,
+      "example_owners": [
+        "rufenstein"
+      ]
+    },
+    {
+      "id": "86c0d4cdbfb4068d_trophy_image_for_layer",
+      "title": "LAYER",
+      "bio": "Season 2 Layer creator",
+      "image_url": "https://i.redd.it/cms/86c0d4cdbfb4068d_trophy_image_for_layer.png",
+      "destination_url": "https://www.reddit.com/r/Layer/",
+      "observed_profile_count": 51,
+      "example_owners": [
+        "-LexXi-",
+        "010",
+        "125RAILGUN",
+        "Acidtwist",
+        "AkaashMaharaj"
+      ]
+    },
+    {
+      "id": "215aa380fed69d14_trophy_image_for_mod_101",
+      "title": "Mod 101",
+      "bio": "Unlocked by completing the online mod course, \"Mod 101: Moderator Certification\".",
+      "image_url": "https://i.redd.it/cms/215aa380fed69d14_trophy_image_for_mod_101.png",
+      "destination_url": "https://modeducation.reddithelp.com/",
+      "observed_profile_count": 146,
+      "example_owners": [
+        "-Aviator",
+        "010",
+        "125RAILGUN",
+        "404NinjaNotFound",
+        "AkaashMaharaj"
+      ]
+    },
+    {
+      "id": "362f6760bbbad030_trophy_image_for_mod_201",
+      "title": "Mod 201",
+      "bio": "Unlocked by completing the online mod course, \"Mod 201: Moderator Certification\".",
+      "image_url": "https://i.redd.it/cms/362f6760bbbad030_trophy_image_for_mod_201.png",
+      "destination_url": "https://modeducation.reddithelp.com/",
+      "observed_profile_count": 131,
+      "example_owners": [
+        "-Aviator",
+        "010",
+        "125RAILGUN",
+        "404NinjaNotFound",
+        "AkaashMaharaj"
+      ]
+    },
+    {
+      "id": "0a25f38b2a58e982_mod_bootcamp_2025",
+      "title": "Mod Bootcamp 2025",
+      "bio": "Unlocked by attending New Mod Bootcamp in 2025.",
+      "image_url": "https://i.redd.it/cms/0a25f38b2a58e982_mod_bootcamp_2025.png",
+      "destination_url": "https://www.reddit.com/r/ModEvents/",
+      "observed_profile_count": 20,
+      "example_owners": [
+        "Anhapus",
+        "beIIe-and-sebastian",
+        "ButINeedThatUsername",
+        "Chazay",
+        "Cute-Organization844"
+      ]
+    },
+    {
+      "id": "c1480aab1d59f61d_mod_connect_2025",
+      "title": "Mod Connect 2025",
+      "bio": "Unlocked by attending a 2025 Mod Connect.",
+      "image_url": "https://i.redd.it/cms/c1480aab1d59f61d_mod_connect_2025.png",
+      "destination_url": "https://www.reddit.com/r/ModEvents/",
+      "observed_profile_count": 14,
+      "example_owners": [
+        "404NinjaNotFound",
+        "Cute-Organization844",
+        "cyanocittaetprocyon",
+        "F0REM4N",
+        "Gek_Lhar"
+      ]
+    },
+    {
+      "id": "e0b746ddac672b83_trophy_image_for_mod_council",
+      "title": "Mod Council",
+      "bio": "Member",
+      "image_url": "https://i.redd.it/cms/e0b746ddac672b83_trophy_image_for_mod_council.png",
+      "destination_url": "https://mods.reddithelp.com/hc/en-us/articles/4415446939917-Reddit-Mod-Council-",
+      "observed_profile_count": 24,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "cenilecreep",
+        "doradiamond",
+        "EponaMom"
+      ]
+    },
+    {
+      "id": "0babe4d5cb26d105_mod_guia_nvel_1",
+      "title": "Mod Guia Nível 1",
+      "bio": "Given to Brazilian mods who participated in the Mod Helper Program level 1.",
+      "image_url": "https://i.redd.it/cms/0babe4d5cb26d105_mod_guia_nvel_1.png",
+      "destination_url": null,
+      "observed_profile_count": 3,
+      "example_owners": [
+        "EuPombo",
+        "Ginomania",
+        "Tetizeraz"
+      ]
+    },
+    {
+      "id": "97f5aa6b2c6c8fb7_mod_hall_of_fame_2024_honoree",
+      "title": "Mod Hall of Fame 2024 Honoree",
+      "bio": "Unlocked by winning an award during Mod Hall of Fame 2024.",
+      "image_url": "https://i.redd.it/cms/97f5aa6b2c6c8fb7_mod_hall_of_fame_2024_honoree.png",
+      "destination_url": null,
+      "observed_profile_count": 3,
+      "example_owners": [
+        "AkaashMaharaj",
+        "iamdeirdre",
+        "peladodetenis"
+      ]
+    },
+    {
+      "id": "649e7968b9edcbb1_mod_hall_of_fame_2024_judge",
+      "title": "Mod Hall of Fame 2024 Judge",
+      "bio": "Unlocked by participating as a judge for Mod Hall of Fame 2024.",
+      "image_url": "https://i.redd.it/cms/649e7968b9edcbb1_mod_hall_of_fame_2024_judge.png",
+      "destination_url": null,
+      "observed_profile_count": 2,
+      "example_owners": [
+        "N3DSdude",
+        "westcoastcdn19"
+      ]
+    },
+    {
+      "id": "f505d797cd669abd_trophy_image_for_mod_insights_early_access",
+      "title": "Mod Insights Early Access",
+      "bio": "Unlocked by participating in the Mod Insights Early Access program.",
+      "image_url": "https://i.redd.it/cms/f505d797cd669abd_trophy_image_for_mod_insights_early_access.png",
+      "destination_url": null,
+      "observed_profile_count": 20,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "DesIlesLointaines",
+        "doradiamond",
+        "EponaMom"
+      ]
+    },
+    {
+      "id": "089c0462dde67a78_mod_meetup_2025",
+      "title": "Mod Meetup 2025",
+      "bio": "Unlocked by attending a 2025 Mod Meetup.",
+      "image_url": "https://i.redd.it/cms/089c0462dde67a78_mod_meetup_2025.png",
+      "destination_url": "https://www.reddit.com/r/ModEvents/",
+      "observed_profile_count": 41,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "Baba_Jaga_II",
+        "beIIe-and-sebastian",
+        "BodegaDad"
+      ]
+    },
+    {
+      "id": "mod_meetup_26-40",
+      "title": "Mod Meetup 2026",
+      "bio": null,
+      "image_url": "https://www.redditstatic.com/awards2/mod_meetup_26-40.png",
+      "destination_url": "https://www.reddit.com/r/ModEvents/",
+      "observed_profile_count": 32,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "aww_y",
+        "BodegaDad",
+        "Cute-Organization844"
+      ]
+    },
+    {
+      "id": "movies_and_tv-40",
+      "title": "Mod Meetup 2026, Movies & TV",
+      "bio": null,
+      "image_url": "https://www.redditstatic.com/awards2/movies_and_tv-40.png",
+      "destination_url": "https://www.reddit.com/r/ModEvents/",
+      "observed_profile_count": 14,
+      "example_owners": [
+        "404NinjaNotFound",
+        "aww_y",
+        "Cute-Organization844",
+        "cyanocittaetprocyon",
+        "GeekScientist"
+      ]
+    },
+    {
+      "id": "eadeb31db1f5c281_mod_world_2024",
+      "title": "Mod World 2024",
+      "bio": "Unlocked by participating in Mod World 2024.",
+      "image_url": "https://i.redd.it/cms/eadeb31db1f5c281_mod_world_2024.png",
+      "destination_url": null,
+      "observed_profile_count": 45,
+      "example_owners": [
+        "404NinjaNotFound",
+        "advocado20",
+        "AkaashMaharaj",
+        "Anhapus",
+        "Baba_Jaga_II"
+      ]
+    },
+    {
+      "id": "mod_world_2025-40",
+      "title": "Mod World 2025",
+      "bio": null,
+      "image_url": "https://www.redditstatic.com/awards2/mod_world_2025-40.png",
+      "destination_url": "https://www.reddit.com/r/ModEvents/comments/1nhoflt/mod_world_2025_two_days_two_events_twenty_years/",
+      "observed_profile_count": 73,
+      "example_owners": [
+        "404NinjaNotFound",
+        "advocado20",
+        "AkaashMaharaj",
+        "Ali_cicek2",
+        "Anhapus"
+      ]
+    },
+    {
+      "id": "a91dfc03e2317de0_mod-helferin_lvl_1",
+      "title": "Mod-Helfer:in Lvl 1",
+      "bio": "Given to German-speaking mods who participated in the Mod Helper Program level 1.",
+      "image_url": "https://i.redd.it/cms/a91dfc03e2317de0_mod-helferin_lvl_1.png",
+      "destination_url": null,
+      "observed_profile_count": 2,
+      "example_owners": [
+        "pinwale",
+        "veryfunnyusernameXD"
+      ]
+    },
+    {
+      "id": "6ee6f3ce4bb39179_mod-helferin_lvl_2",
+      "title": "Mod-Helfer:in Lvl 2",
+      "bio": "Given to German-speaking mods who participated in the Mod Helper Program level 2.",
+      "image_url": "https://i.redd.it/cms/6ee6f3ce4bb39179_mod-helferin_lvl_2.png",
+      "destination_url": null,
+      "observed_profile_count": 3,
+      "example_owners": [
+        "ButINeedThatUsername",
+        "Ginomania",
+        "VoxPorta"
+      ]
+    },
+    {
+      "id": "8144ec17cbce93da_moddit_2025",
+      "title": "Moddit 2025",
+      "bio": "Unlocked by attending a 2025 Moddit.",
+      "image_url": "https://i.redd.it/cms/8144ec17cbce93da_moddit_2025.png",
+      "destination_url": "https://www.reddit.com/r/ModEvents",
+      "observed_profile_count": 34,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "Ali_cicek2",
+        "Anhapus",
+        "beIIe-and-sebastian"
+      ]
+    },
+    {
+      "id": "moddit_26-40",
+      "title": "Moddit 2026",
+      "bio": null,
+      "image_url": "https://www.redditstatic.com/awards2/moddit_26-40.png",
+      "destination_url": "https://www.reddit.com/r/ModEvents/",
+      "observed_profile_count": 31,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "alwayswannashit_",
+        "aww_y",
+        "BodegaDad"
+      ]
+    },
+    {
+      "id": "df7c9c76c5e81448_moderator_reserves",
+      "title": "Moderator Reserves",
+      "bio": "Unlocked by participating in the Moderator Reserves program.",
+      "image_url": "https://i.redd.it/cms/df7c9c76c5e81448_moderator_reserves.png",
+      "destination_url": "https://www.reddit.com/r/ModReserves/",
+      "observed_profile_count": 27,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "BodegaDad",
+        "EponaMom",
+        "EuPombo"
+      ]
+    },
+    {
+      "id": "e9e5e6b0dbab19c2_trophy_image_for_modsupport_helper_level_1",
+      "title": "ModSupport Helper Level 1",
+      "bio": "Unlocked by earning 100 karma and becoming a Helper in r/ModSupport.",
+      "image_url": "https://i.redd.it/cms/e9e5e6b0dbab19c2_trophy_image_for_modsupport_helper_level_1.png",
+      "destination_url": "https://www.reddit.com/r/modsupport",
+      "observed_profile_count": 26,
+      "example_owners": [
+        "AkaashMaharaj",
+        "BodegaDad",
+        "cyanocittaetprocyon",
+        "Dhanish04",
+        "DominoBarksdale"
+      ]
+    },
+    {
+      "id": "54061c140ad8c4f7_trophy_image_for_modsupport_helper_level_2",
+      "title": "ModSupport Helper Level 2",
+      "bio": "Unlocked by earning 250 karma and becoming a Helper in r/ModSupport.",
+      "image_url": "https://i.redd.it/cms/54061c140ad8c4f7_trophy_image_for_modsupport_helper_level_2.png",
+      "destination_url": "https://www.reddit.com/r/ModSupport",
+      "observed_profile_count": 19,
+      "example_owners": [
+        "BodegaDad",
+        "Bossman1086",
+        "cyanocittaetprocyon",
+        "FaviFake",
+        "flattenedbricks"
+      ]
+    },
+    {
+      "id": "c302bbd912c5f96d_trophy_image_for_modsupport_helper_level_3",
+      "title": "ModSupport Helper Level 3",
+      "bio": "r/ModSupport | 2025",
+      "image_url": "https://i.redd.it/cms/c302bbd912c5f96d_trophy_image_for_modsupport_helper_level_3.png",
+      "destination_url": "https://www.reddit.com/r/ModSupport",
+      "observed_profile_count": 9,
+      "example_owners": [
+        "cyanocittaetprocyon",
+        "Femilip",
+        "GeekScientist",
+        "Merari01",
+        "Mrtom987"
+      ]
+    },
+    {
+      "id": "dee480e23cc64352_trophy_image_for_modsupport_helper_level_4",
+      "title": "ModSupport Helper Level 4",
+      "bio": "r/ModSupport | 2025",
+      "image_url": "https://i.redd.it/cms/dee480e23cc64352_trophy_image_for_modsupport_helper_level_4.png",
+      "destination_url": "https://www.reddit.com/r/ModSupport",
+      "observed_profile_count": 7,
+      "example_owners": [
+        "cyanocittaetprocyon",
+        "krispykrackers",
+        "Merari01",
+        "powerlanguage",
+        "shiruken"
+      ]
+    },
+    {
+      "id": "8881e534b3b142e4_trophy_image_for_modsupport_helper_level_5",
+      "title": "ModSupport Helper Level 5",
+      "bio": "Unlocked by earning 1,000 karma and becoming an Expert Helper in r/ModSupport.",
+      "image_url": "https://i.redd.it/cms/8881e534b3b142e4_trophy_image_for_modsupport_helper_level_5.png",
+      "destination_url": "https://www.reddit.com/r/ModSupport",
+      "observed_profile_count": 14,
+      "example_owners": [
+        "cyanocittaetprocyon",
+        "DoTheDew",
+        "fsv",
+        "liltrixxy",
+        "MajorParadox"
+      ]
+    },
+    {
+      "id": "7453198397aec92d_new_mod_all-star_25",
+      "title": "New Mod All-Star '25",
+      "bio": "Unlocked by mods who started new communities in 2025 and completed the final challenge in r/NewMods.",
+      "image_url": "https://i.redd.it/cms/7453198397aec92d_new_mod_all-star_25.png",
+      "destination_url": "https://www.reddit.com/r/NewMods",
+      "observed_profile_count": 5,
+      "example_owners": [
+        "BodegaDad",
+        "Cute-Organization844",
+        "GeekScientist",
+        "Ginomania",
+        "Rehpot_Sirhc_"
+      ]
+    },
+    {
+      "id": "mod_bootcamp_26-40",
+      "title": "New Mod Bootcamp 2026",
+      "bio": null,
+      "image_url": "https://www.redditstatic.com/awards2/mod_bootcamp_26-40.png",
+      "destination_url": "https://www.reddit.com/r/ModEvents/",
+      "observed_profile_count": 26,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "aww_y",
+        "BodegaDad",
+        "ButINeedThatUsername"
+      ]
+    },
+    {
+      "id": "fc1ae843554e0ac1_trophy_image_for_9_year_club",
+      "title": "Nine-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/fc1ae843554e0ac1_trophy_image_for_9_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 21,
+      "example_owners": [
+        "Anhapus",
+        "Baba_Jaga_II",
+        "BigBootyKim",
+        "BrymalDX",
+        "ButINeedThatUsername"
+      ]
+    },
+    {
+      "id": "38583a462c79b81e_trophy_image_for_no_throne_no_problems",
+      "title": "No Throne, No Problems",
+      "bio": "Unlocked by picking no one (r/nobodywinsthethrone) during the 2019 r/gameofthrones Throne Pool event.",
+      "image_url": "https://i.redd.it/cms/38583a462c79b81e_trophy_image_for_no_throne_no_problems.png",
+      "destination_url": null,
+      "observed_profile_count": 6,
+      "example_owners": [
+        "asjs5",
+        "its_me_elijah",
+        "jamjam1090",
+        "JonSnohthathurt",
+        "tforpatato"
+      ]
+    },
+    {
+      "id": "7a115fa8b443e9e5_trophy_image_for_not_forgotten",
+      "title": "Not Forgotten",
+      "bio": "Unlocked by taking part in the 2019 r/gameofthrones Throne Pool event.",
+      "image_url": "https://i.redd.it/cms/7a115fa8b443e9e5_trophy_image_for_not_forgotten.png",
+      "destination_url": null,
+      "observed_profile_count": 52,
+      "example_owners": [
+        "Acidtwist",
+        "Anhapus",
+        "asjs5",
+        "beIIe-and-sebastian",
+        "ButINeedThatUsername"
+      ]
+    },
+    {
+      "id": "5cce70c392bef241_trophy_image_for_first_year_club",
+      "title": "One-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/5cce70c392bef241_trophy_image_for_first_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 3,
+      "example_owners": [
+        "beamcurrent",
+        "iceeypisces",
+        "TakenButTasty"
+      ]
+    },
+    {
+      "id": "283e0877af3a5c66_trophy_image_for_open_beta_program_2024",
+      "title": "Open Beta Program 2024",
+      "bio": "Unlocked by participating in Reddit's Open Beta program in 2024.",
+      "image_url": "https://i.redd.it/cms/283e0877af3a5c66_trophy_image_for_open_beta_program_2024.png",
+      "destination_url": "https://support.reddithelp.com/hc/en-us/articles/27884222965908-Reddit-s-beta-program-for-the-official-mobile-app",
+      "observed_profile_count": 39,
+      "example_owners": [
+        "404NinjaNotFound",
+        "A6uh",
+        "ameen__shaikh",
+        "BodegaDad",
+        "ButINeedThatUsername"
+      ]
+    },
+    {
+      "id": "23a7e78ba0c9af24_open_beta_program_2025",
+      "title": "Open Beta Program 2025",
+      "bio": "Unlocked by participating in Reddit's Open Beta program in 2025.",
+      "image_url": "https://i.redd.it/cms/23a7e78ba0c9af24_open_beta_program_2025.png",
+      "destination_url": "https://support.reddithelp.com/hc/articles/27884222965908-Reddit-s-beta-program-for-the-official-mobile-app",
+      "observed_profile_count": 3,
+      "example_owners": [
+        "Ali_cicek2",
+        "Cute-Organization844",
+        "zenlon"
+      ]
+    },
+    {
+      "id": "aa81f15c076c23bf_trophy_image_for_open_sorcerer",
+      "title": "Open Sorcerer",
+      "bio": "2025-05-23",
+      "image_url": "https://i.redd.it/cms/aa81f15c076c23bf_trophy_image_for_open_sorcerer.png",
+      "destination_url": "https://github.com/reddit/socialite",
+      "observed_profile_count": 9,
+      "example_owners": [
+        "ButINeedThatUsername",
+        "chromakode",
+        "fsv",
+        "reseph",
+        "rolmos"
+      ]
+    },
+    {
+      "id": "5c02162db5508e47_trophy_image_for_oscars_predictor__21",
+      "title": "Oscars Predictor 2021",
+      "bio": "Unlocked by taking part in the 2021 Oscars predictions tournament.",
+      "image_url": "https://i.redd.it/cms/5c02162db5508e47_trophy_image_for_oscars_predictor__21.png",
+      "destination_url": "https://www.reddit.com/r/movies/comments/mpisj8/announcing_the_first_annual_rmovies_oscars/",
+      "observed_profile_count": 88,
+      "example_owners": [
+        "010",
+        "125RAILGUN",
+        "advocado20",
+        "AkaashMaharaj",
+        "allthisforacamaro"
+      ]
+    },
+    {
+      "id": "0df50306c8ca7c15_trophy_image_for_place__17",
+      "title": "Place '17",
+      "bio": "Unlocked by taking part in the 2017 r/place.",
+      "image_url": "https://i.redd.it/cms/0df50306c8ca7c15_trophy_image_for_place__17.png",
+      "destination_url": null,
+      "observed_profile_count": 82,
+      "example_owners": [
+        "A6uh",
+        "Acidtwist",
+        "AnOddName",
+        "askedrelic",
+        "BaronYike"
+      ]
+    },
+    {
+      "id": "df96292bd112450b_trophy_image_for_place_22",
+      "title": "Place '22",
+      "bio": "Unlocked by taking part in the 2022 r/place.",
+      "image_url": "https://i.redd.it/cms/df96292bd112450b_trophy_image_for_place_22.png",
+      "destination_url": null,
+      "observed_profile_count": 264,
+      "example_owners": [
+        "_-Frost-Byte-_",
+        "_D-ace_",
+        "-Aviator",
+        "-LexXi-",
+        "-NotAnAdmin-"
+      ]
+    },
+    {
+      "id": "160c89a67013e3dd_trophy_image_for_place__23",
+      "title": "Place '23",
+      "bio": "Unlocked by taking part in the 2023 r/place.",
+      "image_url": "https://i.redd.it/cms/160c89a67013e3dd_trophy_image_for_place__23.png",
+      "destination_url": null,
+      "observed_profile_count": 240,
+      "example_owners": [
+        "-LexXi-",
+        "-NotAnAdmin-",
+        "010",
+        "125RAILGUN",
+        "404NinjaNotFound"
+      ]
+    },
+    {
+      "id": "3c0fdcf55ac93216_trophy_image_for_post_guidance_early_access",
+      "title": "Post Guidance Early Access",
+      "bio": "Unlocked by participating in the Post Guidance Early Access program.",
+      "image_url": "https://i.redd.it/cms/3c0fdcf55ac93216_trophy_image_for_post_guidance_early_access.png",
+      "destination_url": null,
+      "observed_profile_count": 39,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "ameen__shaikh",
+        "AnOddName",
+        "BroderzYt"
+      ]
+    },
+    {
+      "id": "772d1cd5d3ddf44e_trophy_image_for_powerups_hero",
+      "title": "Powerups Hero",
+      "bio": "r/environment • April 2022",
+      "image_url": "https://i.redd.it/cms/772d1cd5d3ddf44e_trophy_image_for_powerups_hero.png",
+      "destination_url": "https://www.reddit.com/r/environment/powerups",
+      "observed_profile_count": 74,
+      "example_owners": [
+        "010",
+        "404NinjaNotFound",
+        "Acidtwist",
+        "advocado20",
+        "AkaashMaharaj"
+      ]
+    },
+    {
+      "id": "29502724933b9319_trophy_image_for_psbattleslive_team_alien",
+      "title": "PSBattlesLive Team Alien",
+      "bio": "Unlocked by being a part of team Alien during the PSBattlesLive tournament of 2021.",
+      "image_url": "https://i.redd.it/cms/29502724933b9319_trophy_image_for_psbattleslive_team_alien.png",
+      "destination_url": null,
+      "observed_profile_count": 18,
+      "example_owners": [
+        "Bitey_the_Squirrel",
+        "diliberto123",
+        "Ducati_Don",
+        "formerqwest",
+        "GeekScientist"
+      ]
+    },
+    {
+      "id": "4fba588f806cfc85_trophy_image_for_psbattleslive_team_mint",
+      "title": "PSBattlesLive Team Mint",
+      "bio": "Unlocked by being a part of team Mint during the PSBattlesLive tournament of 2021.",
+      "image_url": "https://i.redd.it/cms/4fba588f806cfc85_trophy_image_for_psbattleslive_team_mint.png",
+      "destination_url": null,
+      "observed_profile_count": 19,
+      "example_owners": [
+        "010",
+        "ButINeedThatUsername",
+        "Dhanish04",
+        "dumbusername",
+        "freshmemesoof"
+      ]
+    },
+    {
+      "id": "f9abf10edf657a3e_trophy_image_for_psbattleslive_team_orangered",
+      "title": "PSBattlesLive Team OrangeRed",
+      "bio": "Unlocked by being a part of team OrangeRed during the PSBattlesLive tournament of 2021.",
+      "image_url": "https://i.redd.it/cms/f9abf10edf657a3e_trophy_image_for_psbattleslive_team_orangered.png",
+      "destination_url": null,
+      "observed_profile_count": 17,
+      "example_owners": [
+        "Acidtwist",
+        "aSchizophrenicCat",
+        "boopcorgi",
+        "deeselppA",
+        "donoteatmycheese"
+      ]
+    },
+    {
+      "id": "5056d6e603e0140c_trophy_image_for_psbattleslive_team_sakura",
+      "title": "PSBattlesLive Team Sakura",
+      "bio": "Unlocked by being a part of team Sakura during the PSBattlesLive tournament of 2021.",
+      "image_url": "https://i.redd.it/cms/5056d6e603e0140c_trophy_image_for_psbattleslive_team_sakura.png",
+      "destination_url": null,
+      "observed_profile_count": 19,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "ameen__shaikh",
+        "banana_hohoho",
+        "Chazay"
+      ]
+    },
+    {
+      "id": "a93075950dc8bd92_trophy_image_for_psbattleslive_winning_team_mango",
+      "title": "PSBattlesLive Winning Team Mango",
+      "bio": "Unlocked by helping team Mango win the PSBattlesLive tournament of 2021.",
+      "image_url": "https://i.redd.it/cms/a93075950dc8bd92_trophy_image_for_psbattleslive_winning_team_mango.png",
+      "destination_url": null,
+      "observed_profile_count": 13,
+      "example_owners": [
+        "-Aviator",
+        "125RAILGUN",
+        "Anhapus",
+        "beIIe-and-sebastian",
+        "caparisme"
+      ]
+    },
+    {
+      "id": "f52009dddec2ddad_trophy_image_for_pubg",
+      "title": "PUBG",
+      "bio": "Unlocked by connecting a Reddit account to Krafton ID to access special functionality related to the PUBG: BATTLEGROUNDS PC game.",
+      "image_url": "https://i.redd.it/cms/f52009dddec2ddad_trophy_image_for_pubg.png",
+      "destination_url": null,
+      "observed_profile_count": 166,
+      "example_owners": [
+        "_-Frost-Byte-_",
+        "-Aviator",
+        "-LexXi-",
+        "010",
+        "125RAILGUN"
+      ]
+    },
+    {
+      "id": "08ad1803ea3cac3a_trophy_image_for_quantum_potato",
+      "title": "Quantum Potato",
+      "bio": "Unlocked by joining r/trdfz_v and taking part in the 2023 Schrödingers event.",
+      "image_url": "https://i.redd.it/cms/08ad1803ea3cac3a_trophy_image_for_quantum_potato.png",
+      "destination_url": null,
+      "observed_profile_count": 117,
+      "example_owners": [
+        "-NotAnAdmin-",
+        "010",
+        "404NinjaNotFound",
+        "Acidtwist",
+        "AkaashMaharaj"
+      ]
+    },
+    {
+      "id": "2a979ed056d8f2c1_trophy_image_for_queen_in_da_norf",
+      "title": "Queen in Da Norf",
+      "bio": "Unlocked by picking Sansa (r/sansawinsthethrone) during the 2019 r/gameofthrones Throne Pool event.",
+      "image_url": "https://i.redd.it/cms/2a979ed056d8f2c1_trophy_image_for_queen_in_da_norf.png",
+      "destination_url": null,
+      "observed_profile_count": 5,
+      "example_owners": [
+        "GeekScientist",
+        "lalinoir",
+        "LividGrass",
+        "shiruken",
+        "ThaanksIHateIt"
+      ]
+    },
+    {
+      "id": "17655f6ed22ed2aa_rfield_banned",
+      "title": "r/Field Banned",
+      "bio": "Unlocked by being a banned user who participated in the 2025 April Fool's event Field",
+      "image_url": "https://i.redd.it/cms/17655f6ed22ed2aa_rfield_banned.png",
+      "destination_url": "https://www.reddit.com/r/Field",
+      "observed_profile_count": 120,
+      "example_owners": [
+        "-NotAnAdmin-",
+        "125RAILGUN",
+        "404NinjaNotFound",
+        "77or88",
+        "A6uh"
+      ]
+    },
+    {
+      "id": "23c5d4af8b1ddacd_field_flamingo",
+      "title": "r/Field Flamingo",
+      "bio": "Unlocked by being a member of team Flamingo for the 2025 April Fool's event Field.",
+      "image_url": "https://i.redd.it/cms/23c5d4af8b1ddacd_field_flamingo.png",
+      "destination_url": "https://www.reddit.com/r/Field",
+      "observed_profile_count": 51,
+      "example_owners": [
+        "404NinjaNotFound",
+        "Ali_cicek2",
+        "An_Creamer",
+        "Anhapus",
+        "boopcorgi"
+      ]
+    },
+    {
+      "id": "a777154cde81085d_rfield_juicebox",
+      "title": "r/Field Juicebox",
+      "bio": "Unlocked by being a member of team Juicebox for the 2025 April Fool's event Field.",
+      "image_url": "https://i.redd.it/cms/a777154cde81085d_rfield_juicebox.png",
+      "destination_url": "https://www.reddit.com/r/Field",
+      "observed_profile_count": 53,
+      "example_owners": [
+        "_D-ace_",
+        "125RAILGUN",
+        "Acidtwist",
+        "Baba_Jaga_II",
+        "BaconDalek"
+      ]
+    },
+    {
+      "id": "b506f3dfe25cf684_rfield_lasagna",
+      "title": "r/Field Lasagna",
+      "bio": "Unlocked by being a member of team Lasagna for the 2025 April Fool's event Field.",
+      "image_url": "https://i.redd.it/cms/b506f3dfe25cf684_rfield_lasagna.png",
+      "destination_url": "https://www.reddit.com/r/Field",
+      "observed_profile_count": 43,
+      "example_owners": [
+        "-NotAnAdmin-",
+        "77or88",
+        "A6uh",
+        "AkaashMaharaj",
+        "ameen__shaikh"
+      ]
+    },
+    {
+      "id": "824673015c0a263e_rfield_sunshine",
+      "title": "r/Field Sunshine",
+      "bio": "Unlocked by being a member of team Sunshine for the 2025 April Fool's event Field.",
+      "image_url": "https://i.redd.it/cms/824673015c0a263e_rfield_sunshine.png",
+      "destination_url": "https://www.reddit.com/r/Field",
+      "observed_profile_count": 40,
+      "example_owners": [
+        "010",
+        "BigBootyKim",
+        "Bitey_the_Squirrel",
+        "BodegaDad",
+        "cyanocittaetprocyon"
+      ]
+    },
+    {
+      "id": "7a0d1a14720007a0_trophy_image_for_rally_monkey",
+      "title": "Rally Monkey",
+      "bio": "Tent number = 2",
+      "image_url": "https://i.redd.it/cms/7a0d1a14720007a0_trophy_image_for_rally_monkey.png",
+      "destination_url": "http://www.reddit.com/r/ColbertRally",
+      "observed_profile_count": 10,
+      "example_owners": [
+        "77or88",
+        "arunan",
+        "asjs5",
+        "hiS_oWn",
+        "hueypriest"
+      ]
+    },
+    {
+      "id": "494c8fe5507edbe6_trophy_image_for_reddit_gifts",
+      "title": "Reddit Gifts",
+      "bio": "Elves Exchange",
+      "image_url": "https://i.redd.it/cms/494c8fe5507edbe6_trophy_image_for_reddit_gifts.png",
+      "destination_url": "https://redditgifts.com/",
+      "observed_profile_count": 1,
+      "example_owners": [
+        "drkatherine1"
+      ]
+    },
+    {
+      "id": "da733a986d121222_trophy_image_for_reddit_gifts_20092022",
+      "title": "Reddit Gifts 2009–2022",
+      "bio": "8 Credits",
+      "image_url": "https://i.redd.it/cms/da733a986d121222_trophy_image_for_reddit_gifts_20092022.png",
+      "destination_url": "https://redditgifts.com/elves/",
+      "observed_profile_count": 88,
+      "example_owners": [
+        "010",
+        "404NinjaNotFound",
+        "77or88",
+        "Acidtwist",
+        "aennil"
+      ]
+    },
+    {
+      "id": "5b278890b6ada86d_trophy_image_for_reddit_gifts_elf",
+      "title": "Reddit Gifts Elf",
+      "bio": "Since November 2021",
+      "image_url": "https://i.redd.it/cms/5b278890b6ada86d_trophy_image_for_reddit_gifts_elf.png",
+      "destination_url": "https://redditgifts.com/elves/",
+      "observed_profile_count": 20,
+      "example_owners": [
+        "ButINeedThatUsername",
+        "chromakode",
+        "cyanocittaetprocyon",
+        "deuteranopia",
+        "drkatherine1"
+      ]
+    },
+    {
+      "id": "2cdfe0693991f82e_trophy_image_for_reddit_gifts_exchanges",
+      "title": "Reddit Gifts Exchanges",
+      "bio": "4 Exchanges",
+      "image_url": "https://i.redd.it/cms/2cdfe0693991f82e_trophy_image_for_reddit_gifts_exchanges.png",
+      "destination_url": "https://redditgifts.com/profiles/view/010/",
+      "observed_profile_count": 47,
+      "example_owners": [
+        "010",
+        "Acidtwist",
+        "aSchizophrenicCat",
+        "boopcorgi",
+        "ButINeedThatUsername"
+      ]
+    },
+    {
+      "id": "8c8693ae9c4460c9_trophy_image_for_reddit_gifts_rematcher_bronze",
+      "title": "Reddit Gifts Rematcher Bronze",
+      "bio": "Pens & Stationery x3",
+      "image_url": "https://i.redd.it/cms/8c8693ae9c4460c9_trophy_image_for_reddit_gifts_rematcher_bronze.png",
+      "destination_url": "http://www.redditgifts.com/profiles/view/010/",
+      "observed_profile_count": 11,
+      "example_owners": [
+        "010",
+        "boopcorgi",
+        "ButINeedThatUsername",
+        "cyanocittaetprocyon",
+        "Dhanish04"
+      ]
+    },
+    {
+      "id": "06da7aa419bd0475_trophy_image_for_reddit_gifts_rematcher_gold",
+      "title": "Reddit Gifts Rematcher Gold",
+      "bio": "Snacks x1",
+      "image_url": "https://i.redd.it/cms/06da7aa419bd0475_trophy_image_for_reddit_gifts_rematcher_gold.png",
+      "destination_url": "http://www.redditgifts.com/profiles/view/010/",
+      "observed_profile_count": 37,
+      "example_owners": [
+        "010",
+        "77or88",
+        "AkaashMaharaj",
+        "aSchizophrenicCat",
+        "boopcorgi"
+      ]
+    },
+    {
+      "id": "26b449c343d9cfd3_trophy_image_for_reddit_gifts_rematcher_silver",
+      "title": "Reddit Gifts Rematcher Silver",
+      "bio": "Magnets (Zero credit) 2021 x2",
+      "image_url": "https://i.redd.it/cms/26b449c343d9cfd3_trophy_image_for_reddit_gifts_rematcher_silver.png",
+      "destination_url": "http://www.redditgifts.com/profiles/view/010/",
+      "observed_profile_count": 19,
+      "example_owners": [
+        "010",
+        "77or88",
+        "boopcorgi",
+        "ButINeedThatUsername",
+        "cyanocittaetprocyon"
+      ]
+    },
+    {
+      "id": "045849e9a089a25e_trophy_image_for_reddit_mold",
+      "title": "Reddit Mold",
+      "bio": "Unlocked by being a part of Reddit Mold in 2021.",
+      "image_url": "https://i.redd.it/cms/045849e9a089a25e_trophy_image_for_reddit_mold.png",
+      "destination_url": "http://blog.reddit.com/2011/03/reddit-mold-is-now-live.html",
+      "observed_profile_count": 38,
+      "example_owners": [
+        "aennil",
+        "animalcrackers",
+        "arunan",
+        "asjs5",
+        "Bossman1086"
+      ]
+    },
+    {
+      "id": "d3c42729bd90b511_reddit_partner_communities",
+      "title": "Reddit Partner Communities",
+      "bio": "Unlocked by joining the Reddit Partner Communities program.",
+      "image_url": "https://i.redd.it/cms/d3c42729bd90b511_reddit_partner_communities.png",
+      "destination_url": "https://support.reddithelp.com/hc/en-us/articles/15484371518356-Reddit-Partner-Communities",
+      "observed_profile_count": 33,
+      "example_owners": [
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "ameen__shaikh",
+        "BodegaDad",
+        "EponaMom"
+      ]
+    },
+    {
+      "id": "bd81ab91852da94e_trophy_image_for_reddit_premium",
+      "title": "Reddit Premium",
+      "bio": "Since November 2020",
+      "image_url": "https://i.redd.it/cms/bd81ab91852da94e_trophy_image_for_reddit_premium.png",
+      "destination_url": "https://www.reddit.com/premium",
+      "observed_profile_count": 97,
+      "example_owners": [
+        "_-Frost-Byte-_",
+        "010",
+        "404NinjaNotFound",
+        "AkaashMaharaj",
+        "ameen__shaikh"
+      ]
+    },
+    {
+      "id": "10b90c224d1d2df6_trophy_image_for_reddit_silver",
+      "title": "Reddit Silver",
+      "bio": "Unlocked for mysterious admin troll-like reasons the world can only guess at.",
+      "image_url": "https://i.redd.it/cms/10b90c224d1d2df6_trophy_image_for_reddit_silver.png",
+      "destination_url": "https://www.reddit.com/r/TrophyWiki/comments/1l51k7i/first/mwdjyf9/",
+      "observed_profile_count": 53,
+      "example_owners": [
+        "AkaashMaharaj",
+        "Ali_cicek2",
+        "ameen__shaikh",
+        "Baba_Jaga_II",
+        "beIIe-and-sebastian"
+      ]
+    },
+    {
+      "id": "3ddff8e8b4ab9ab6_trophy_image_for_reddit_studio_comiccon_21_mvp",
+      "title": "Reddit Studio Comic-Con '21 MVP",
+      "bio": "Unlocked by being the 2021 Comic-Con MVP.",
+      "image_url": "https://i.redd.it/cms/3ddff8e8b4ab9ab6_trophy_image_for_reddit_studio_comiccon_21_mvp.png",
+      "destination_url": null,
+      "observed_profile_count": 1,
+      "example_owners": [
+        "CDRCody19"
+      ]
+    },
+    {
+      "id": "c59e970164278229_trophy_image_for_reddit_studio_e3_21__contributor",
+      "title": "Reddit Studio E3 '21 Contributor",
+      "bio": "Unlocked by helping out during Reddit Studio E3 2021.",
+      "image_url": "https://i.redd.it/cms/c59e970164278229_trophy_image_for_reddit_studio_e3_21__contributor.png",
+      "destination_url": null,
+      "observed_profile_count": 10,
+      "example_owners": [
+        "404NinjaNotFound",
+        "doradiamond",
+        "EponaMom",
+        "GeekScientist",
+        "Ghawblin"
+      ]
+    },
+    {
+      "id": "c7e6999f6ac6b092_trophy_image_for_reddit_talk_host_program",
+      "title": "Reddit Talk Host Program",
+      "bio": "Unlocked by being a moderator who added Reddit Talk to their community.",
+      "image_url": "https://i.redd.it/cms/c7e6999f6ac6b092_trophy_image_for_reddit_talk_host_program.png",
+      "destination_url": "https://reddit.com/talk",
+      "observed_profile_count": 12,
+      "example_owners": [
+        "404NinjaNotFound",
+        "advocado20",
+        "AkaashMaharaj",
+        "ButINeedThatUsername",
+        "EuPombo"
+      ]
+    },
+    {
+      "id": "89c1f9c04f131719_reddit_user_feedback_collective",
+      "title": "Reddit User Feedback Collective",
+      "bio": "Unlocked by giving Reddit feedback.",
+      "image_url": "https://i.redd.it/cms/89c1f9c04f131719_reddit_user_feedback_collective.png",
+      "destination_url": "https://support.reddithelp.com/hc/en-us/articles/24066967580180-What-is-the-Reddit-User-Feedback-Collective",
+      "observed_profile_count": 15,
+      "example_owners": [
+        "404NinjaNotFound",
+        "advocado20",
+        "boopcorgi",
+        "ButINeedThatUsername",
+        "EponaMom"
+      ]
+    },
+    {
+      "id": "3d38a11fb6b137e2_trophy_image_for_rpan_broadcaster",
+      "title": "RPAN Broadcaster",
+      "bio": "Unlocked for broadcating live to Reddit's Public Access Network (RPAN) during its debut in August of 2019.",
+      "image_url": "https://i.redd.it/cms/3d38a11fb6b137e2_trophy_image_for_rpan_broadcaster.png",
+      "destination_url": null,
+      "observed_profile_count": 17,
+      "example_owners": [
+        "Acidtwist",
+        "AkaashMaharaj",
+        "beIIe-and-sebastian",
+        "Dalorleon",
+        "darthnut"
+      ]
+    },
+    {
+      "id": "66307abd0589e7d1_trophy_image_for_rpan_viewer",
+      "title": "RPAN Viewer",
+      "bio": "Unlocked for watching the live debut of Reddit's Public Access Network (RPAN) in August of 2019.",
+      "image_url": "https://i.redd.it/cms/66307abd0589e7d1_trophy_image_for_rpan_viewer.png",
+      "destination_url": null,
+      "observed_profile_count": 67,
+      "example_owners": [
+        "404NinjaNotFound",
+        "77or88",
+        "Acidtwist",
+        "AkaashMaharaj",
+        "Anhapus"
+      ]
+    },
+    {
+      "id": "6f7c2242134f92f6_trophy_image_for_second",
+      "title": "Second",
+      "bio": "SECOND GUESSER",
+      "image_url": "https://i.redd.it/cms/6f7c2242134f92f6_trophy_image_for_second.png",
+      "destination_url": "https://www.reddit.com/r/Second/",
+      "observed_profile_count": 187,
+      "example_owners": [
+        "-Aviator",
+        "-LexXi-",
+        "010",
+        "125RAILGUN",
+        "404NinjaNotFound"
+      ]
+    },
+    {
+      "id": "second_winner-40",
+      "title": "Second",
+      "bio": "Second Best Second Guesser",
+      "image_url": "https://www.redditstatic.com/awards2/second_winner-40.png",
+      "destination_url": "https://www.reddit.com/r/Second/",
+      "observed_profile_count": 1,
+      "example_owners": [
+        "irate_kalypso"
+      ]
+    },
+    {
+      "id": "cf104cb74cf47e29_trophy_image_for_secret_santa_2009",
+      "title": "Secret Santa 2009",
+      "bio": "2009",
+      "image_url": "https://i.redd.it/cms/cf104cb74cf47e29_trophy_image_for_secret_santa_2009.png",
+      "destination_url": "http://redditgifts.com/gallery/secret-santa-2009/",
+      "observed_profile_count": 31,
+      "example_owners": [
+        "77or88",
+        "aennil",
+        "arunan",
+        "doubleD",
+        "Estoye"
+      ]
+    },
+    {
+      "id": "e9b451eab7ce613d_trophy_image_for_secret_santa_2010",
+      "title": "Secret Santa 2010",
+      "bio": "2011",
+      "image_url": "https://i.redd.it/cms/e9b451eab7ce613d_trophy_image_for_secret_santa_2010.png",
+      "destination_url": "http://redditgifts.com/gallery/secret-santa-2011/",
+      "observed_profile_count": 41,
+      "example_owners": [
+        "77or88",
+        "aennil",
+        "aSchizophrenicCat",
+        "asjs5",
+        "chromakode"
+      ]
+    },
+    {
+      "id": "248dba44be26d523_trophy_image_for_secret_santa_2014",
+      "title": "Secret Santa 2014",
+      "bio": "2014",
+      "image_url": "https://i.redd.it/cms/248dba44be26d523_trophy_image_for_secret_santa_2014.png",
+      "destination_url": "http://redditgifts.com/exchanges/secret-santa-2014/",
+      "observed_profile_count": 33,
+      "example_owners": [
+        "cdawzrd",
+        "DarthMewtwo",
+        "Dawn_Of_The_Dave",
+        "doubleD",
+        "drkatherine1"
+      ]
+    },
+    {
+      "id": "a013dc714a05e30f_trophy_image_for_secret_santa_2015",
+      "title": "Secret Santa 2015",
+      "bio": "2015",
+      "image_url": "https://i.redd.it/cms/a013dc714a05e30f_trophy_image_for_secret_santa_2015.png",
+      "destination_url": "http://redditgifts.com/exchanges/secret-santa-2015/",
+      "observed_profile_count": 21,
+      "example_owners": [
+        "aSchizophrenicCat",
+        "Chazay",
+        "Dawn_Of_The_Dave",
+        "drkatherine1",
+        "Gek_Lhar"
+      ]
+    },
+    {
+      "id": "67efa40d659a1d78_trophy_image_for_secret_santa_2016",
+      "title": "Secret Santa 2016",
+      "bio": "2016",
+      "image_url": "https://i.redd.it/cms/67efa40d659a1d78_trophy_image_for_secret_santa_2016.png",
+      "destination_url": "https://redditgifts.com/exchanges/secret-santa-2016/",
+      "observed_profile_count": 14,
+      "example_owners": [
+        "Dawn_Of_The_Dave",
+        "drkatherine1",
+        "Gek_Lhar",
+        "Half-BloodPrincesss",
+        "INTPLibrarian"
+      ]
+    },
+    {
+      "id": "8444ff8f1c810a2d_trophy_image_for_secret_santa_2017",
+      "title": "Secret Santa 2017",
+      "bio": "2017",
+      "image_url": "https://i.redd.it/cms/8444ff8f1c810a2d_trophy_image_for_secret_santa_2017.png",
+      "destination_url": "https://redditgifts.com/exchanges/secret-santa-2017/",
+      "observed_profile_count": 19,
+      "example_owners": [
+        "cyanocittaetprocyon",
+        "Dawn_Of_The_Dave",
+        "drkatherine1",
+        "Femilip",
+        "GolemThe3rd"
+      ]
+    },
+    {
+      "id": "193bf70c4691c691_trophy_image_for_secret_santa_2018",
+      "title": "Secret Santa 2018",
+      "bio": "2018",
+      "image_url": "https://i.redd.it/cms/193bf70c4691c691_trophy_image_for_secret_santa_2018.png",
+      "destination_url": "https://redditgifts.com/exchanges/secret-santa-2018/",
+      "observed_profile_count": 12,
+      "example_owners": [
+        "ButINeedThatUsername",
+        "drkatherine1",
+        "GeekScientist",
+        "Half-BloodPrincesss",
+        "INTPLibrarian"
+      ]
+    },
+    {
+      "id": "f215f69f3ec29888_trophy_image_for_secret_santa_2019",
+      "title": "Secret Santa 2019",
+      "bio": "2019",
+      "image_url": "https://i.redd.it/cms/f215f69f3ec29888_trophy_image_for_secret_santa_2019.png",
+      "destination_url": "https://www.redditgifts.com/exchanges/secret-santa-2019/",
+      "observed_profile_count": 16,
+      "example_owners": [
+        "ButINeedThatUsername",
+        "Dalorleon",
+        "deuteranopia",
+        "DominoBarksdale",
+        "drkatherine1"
+      ]
+    },
+    {
+      "id": "1c5cd3bf458f4069_trophy_image_for_secret_santa_2020",
+      "title": "Secret Santa 2020",
+      "bio": "2020",
+      "image_url": "https://i.redd.it/cms/1c5cd3bf458f4069_trophy_image_for_secret_santa_2020.png",
+      "destination_url": "https://www.redditgifts.com/exchanges/secret-santa-2020/",
+      "observed_profile_count": 28,
+      "example_owners": [
+        "ButINeedThatUsername",
+        "cyanocittaetprocyon",
+        "Dhanish04",
+        "DominoBarksdale",
+        "drkatherine1"
+      ]
+    },
+    {
+      "id": "c1715b5d570e2a6b_trophy_image_for_secret_santa_2021",
+      "title": "Secret Santa 2021",
+      "bio": "2021",
+      "image_url": "https://i.redd.it/cms/c1715b5d570e2a6b_trophy_image_for_secret_santa_2021.png",
+      "destination_url": "https://www.redditgifts.com/",
+      "observed_profile_count": 18,
+      "example_owners": [
+        "010",
+        "boopcorgi",
+        "ButINeedThatUsername",
+        "cyanocittaetprocyon",
+        "deuteranopia"
+      ]
+    },
+    {
+      "id": "1a74edbee9906957_trophy_image_for_sequence_cinematographer",
+      "title": "Sequence Cinematographer",
+      "bio": "Unlocked by contributing cinematic GIFs to Sequence in 2019.",
+      "image_url": "https://i.redd.it/cms/1a74edbee9906957_trophy_image_for_sequence_cinematographer.png",
+      "destination_url": "https://www.reddit.com/r/sequence/",
+      "observed_profile_count": 19,
+      "example_owners": [
+        "beIIe-and-sebastian",
+        "Estoye",
+        "GeekScientist",
+        "Gek_Lhar",
+        "haykam821"
+      ]
+    },
+    {
+      "id": "70cd162febc668ac_trophy_image_for_sequence_editor",
+      "title": "Sequence Editor",
+      "bio": "Unlocked by voting on contributions to Sequence in 2019.",
+      "image_url": "https://i.redd.it/cms/70cd162febc668ac_trophy_image_for_sequence_editor.png",
+      "destination_url": "https://www.reddit.com/r/sequence/",
+      "observed_profile_count": 50,
+      "example_owners": [
+        "Acidtwist",
+        "Anhapus",
+        "beIIe-and-sebastian",
+        "blueneuronDOTnet",
+        "Bren12310"
+      ]
+    },
+    {
+      "id": "efeafe8f9f818ddf_trophy_image_for_sequence_screenwriter",
+      "title": "Sequence Screenwriter",
+      "bio": "Unlocked by contributing cinematic text to Sequence in 2019.",
+      "image_url": "https://i.redd.it/cms/efeafe8f9f818ddf_trophy_image_for_sequence_screenwriter.png",
+      "destination_url": "https://www.reddit.com/r/sequence/",
+      "observed_profile_count": 9,
+      "example_owners": [
+        "beIIe-and-sebastian",
+        "blueneuronDOTnet",
+        "corderjones",
+        "Gek_Lhar",
+        "hero0fwar"
+      ]
+    },
+    {
+      "id": "03ba3a12dcc817dd_trophy_image_for_7_year_club",
+      "title": "Seven-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/03ba3a12dcc817dd_trophy_image_for_7_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 46,
+      "example_owners": [
+        "-LexXi-",
+        "-NotAnAdmin-",
+        "Alen_x3",
+        "Amuro_Ray_Gunner",
+        "benlikesmarvel"
+      ]
+    },
+    {
+      "id": "c050732586df01a0_trophy_image_for_shutterbug",
+      "title": "Shutterbug",
+      "bio": "tennis ball",
+      "image_url": "https://i.redd.it/cms/c050732586df01a0_trophy_image_for_shutterbug.png",
+      "destination_url": "http://i.imgur.com/zROkTh.jpg",
+      "observed_profile_count": 2,
+      "example_owners": [
+        "blueneuronDOTnet",
+        "rolmos"
+      ]
+    },
+    {
+      "id": "e00bf6b9933ec117_trophy_image_for_6_year_club",
+      "title": "Six-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/e00bf6b9933ec117_trophy_image_for_6_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 66,
+      "example_owners": [
+        "_-Frost-Byte-_",
+        "_Jefy",
+        "125RAILGUN",
+        "ameen__shaikh",
+        "An_Creamer"
+      ]
+    },
+    {
+      "id": "f98f35a7f4757c09_trophy_image_for_snapped",
+      "title": "Snapped",
+      "bio": "Unlocked by being one of those lost in The Snap, also known as The Snappening.",
+      "image_url": "https://i.redd.it/cms/f98f35a7f4757c09_trophy_image_for_snapped.png",
+      "destination_url": "https://www.reddit.com/r/inthesoulstone/",
+      "observed_profile_count": 20,
+      "example_owners": [
+        "Acidtwist",
+        "BaconDalek",
+        "BigBootyKim",
+        "ButINeedThatUsername",
+        "DarthMewtwo"
+      ]
+    },
+    {
+      "id": "cf275da84a7fa6df_trophy_image_for_solidarity_2020",
+      "title": "Solidarity 2020",
+      "bio": "Unlocked by being one of the top 4 communities in the Rise of the Undead Subbies challenge in 2019.",
+      "image_url": "https://i.redd.it/cms/cf275da84a7fa6df_trophy_image_for_solidarity_2020.png",
+      "destination_url": "https://www.reddit.com/r/announcements/comments/fub7xo/introducing_the_solidarity_award_a_100/",
+      "observed_profile_count": 7,
+      "example_owners": [
+        "Dhanish04",
+        "diliberto123",
+        "DominoBarksdale",
+        "dumbusername",
+        "jamjam1090"
+      ]
+    },
+    {
+      "id": "0d23471bb1a7cd18_trophy_image_for_spared",
+      "title": "Spared",
+      "bio": "Unlocked by being one of those spared in The Snap, also known as The Snappening.",
+      "image_url": "https://i.redd.it/cms/0d23471bb1a7cd18_trophy_image_for_spared.png",
+      "destination_url": "https://www.reddit.com/r/thanosdidnothingwrong/",
+      "observed_profile_count": 29,
+      "example_owners": [
+        "ancientflowers",
+        "AnOddName",
+        "BaronYike",
+        "Bitey_the_Squirrel",
+        "blueneuronDOTnet"
+      ]
+    },
+    {
+      "id": "44f10bce8706e126_trophy_image_for_summer_santa_2010",
+      "title": "Summer Santa 2010",
+      "bio": "2011",
+      "image_url": "https://i.redd.it/cms/44f10bce8706e126_trophy_image_for_summer_santa_2010.png",
+      "destination_url": "http://redditgifts.com/exchanges/arbitrary-day-2011/",
+      "observed_profile_count": 15,
+      "example_owners": [
+        "Estoye",
+        "facetiously",
+        "hueypriest",
+        "kemitche",
+        "kickme444"
+      ]
+    },
+    {
+      "id": "bfb65dba10690fc5_trophy_image_for_summer_santa_2012",
+      "title": "Summer Santa 2012",
+      "bio": "2013",
+      "image_url": "https://i.redd.it/cms/bfb65dba10690fc5_trophy_image_for_summer_santa_2012.png",
+      "destination_url": "http://redditgifts.com/exchanges/arbitrary-day-2013/",
+      "observed_profile_count": 16,
+      "example_owners": [
+        "ekjp",
+        "Estoye",
+        "facetiously",
+        "hero0fwar",
+        "hueypriest"
+      ]
+    },
+    {
+      "id": "5412ef62b5266db5_trophy_image_for_summer_santa_2014",
+      "title": "Summer Santa 2014",
+      "bio": "2014",
+      "image_url": "https://i.redd.it/cms/5412ef62b5266db5_trophy_image_for_summer_santa_2014.png",
+      "destination_url": "http://redditgifts.com/gallery/arbitrary-day-2014/",
+      "observed_profile_count": 11,
+      "example_owners": [
+        "ekjp",
+        "facetiously",
+        "kemitche",
+        "kickme444",
+        "liltrixxy"
+      ]
+    },
+    {
+      "id": "a5dc9ffbc4950965_trophy_image_for_summer_santa_2015",
+      "title": "Summer Santa 2015",
+      "bio": "2015",
+      "image_url": "https://i.redd.it/cms/a5dc9ffbc4950965_trophy_image_for_summer_santa_2015.png",
+      "destination_url": "https://www.redditgifts.com/gallery/#/?filterExchange=arbitrary-day-2015",
+      "observed_profile_count": 3,
+      "example_owners": [
+        "drkatherine1",
+        "reseph",
+        "rhoner"
+      ]
+    },
+    {
+      "id": "0e5258caefd8aa65_trophy_image_for_summer_santa_2016",
+      "title": "Summer Santa 2016",
+      "bio": "2016",
+      "image_url": "https://i.redd.it/cms/0e5258caefd8aa65_trophy_image_for_summer_santa_2016.png",
+      "destination_url": "https://www.redditgifts.com/gallery/#/?filterExchange=arbitrary-day-2016",
+      "observed_profile_count": 5,
+      "example_owners": [
+        "aSchizophrenicCat",
+        "Dawn_Of_The_Dave",
+        "liltrixxy",
+        "LiteraryBoner",
+        "reseph"
+      ]
+    },
+    {
+      "id": "5733b78eaa9a2b52_trophy_image_for_summer_santa_2017",
+      "title": "Summer Santa 2017",
+      "bio": "2017",
+      "image_url": "https://i.redd.it/cms/5733b78eaa9a2b52_trophy_image_for_summer_santa_2017.png",
+      "destination_url": "https://www.redditgifts.com/exchanges/#/exchange/arbitrary-day-2017/",
+      "observed_profile_count": 2,
+      "example_owners": [
+        "drkatherine1",
+        "rhoner"
+      ]
+    },
+    {
+      "id": "0b7378a76df09ea8_trophy_image_for_summer_santa_2018",
+      "title": "Summer Santa 2018",
+      "bio": "2018",
+      "image_url": "https://i.redd.it/cms/0b7378a76df09ea8_trophy_image_for_summer_santa_2018.png",
+      "destination_url": "https://www.redditgifts.com/exchanges/arbitrary-day-2018/",
+      "observed_profile_count": 5,
+      "example_owners": [
+        "AkaashMaharaj",
+        "ButINeedThatUsername",
+        "cyanocittaetprocyon",
+        "Dawn_Of_The_Dave",
+        "drkatherine1"
+      ]
+    },
+    {
+      "id": "da5494af09441426_trophy_image_for_summer_santa_2019",
+      "title": "Summer Santa 2019",
+      "bio": "2019",
+      "image_url": "https://i.redd.it/cms/da5494af09441426_trophy_image_for_summer_santa_2019.png",
+      "destination_url": "https://www.redditgifts.com/exchanges/arbitrary-day-2019/",
+      "observed_profile_count": 4,
+      "example_owners": [
+        "cyanocittaetprocyon",
+        "drkatherine1",
+        "jamjam1090",
+        "rusalka7"
+      ]
+    },
+    {
+      "id": "04d19cc33c74d73f_trophy_image_for_summer_santa_2020",
+      "title": "Summer Santa 2020",
+      "bio": "2020",
+      "image_url": "https://i.redd.it/cms/04d19cc33c74d73f_trophy_image_for_summer_santa_2020.png",
+      "destination_url": "https://www.redditgifts.com/exchanges/arbitrary-day-2020/",
+      "observed_profile_count": 7,
+      "example_owners": [
+        "ButINeedThatUsername",
+        "Dhanish04",
+        "DominoBarksdale",
+        "drkatherine1",
+        "lowballerjoe"
+      ]
+    },
+    {
+      "id": "26dd14d90e756824_trophy_image_for_summer_santa_2021",
+      "title": "Summer Santa 2021",
+      "bio": "2021",
+      "image_url": "https://i.redd.it/cms/26dd14d90e756824_trophy_image_for_summer_santa_2021.png",
+      "destination_url": "https://www.redditgifts.com/",
+      "observed_profile_count": 17,
+      "example_owners": [
+        "010",
+        "AkaashMaharaj",
+        "bbbb",
+        "boopcorgi",
+        "cyanocittaetprocyon"
+      ]
+    },
+    {
+      "id": "ac82a9ea1d0cd130_trophy_image_for_talk_madness_2022",
+      "title": "Talk Madness 2022",
+      "bio": "Unlocked by taking part in the Talk Madness 2022 event.",
+      "image_url": "https://i.redd.it/cms/ac82a9ea1d0cd130_trophy_image_for_talk_madness_2022.png",
+      "destination_url": "https://www.reddit.com/r/RedditTalk/comments/t3kafp/talk_madness_talk_more_to_get_prizes/",
+      "observed_profile_count": 38,
+      "example_owners": [
+        "404NinjaNotFound",
+        "advocado20",
+        "AkaashMaharaj",
+        "aulbayne",
+        "ButINeedThatUsername"
+      ]
+    },
+    {
+      "id": "a8c5c0bb90ac607b_trophy_image_for_team_orangered",
+      "title": "Team OrangeRed",
+      "bio": "Unlocked by emerging victorious in the great Orangered/Periwinkle clash of 2013.",
+      "image_url": "https://i.redd.it/cms/a8c5c0bb90ac607b_trophy_image_for_team_orangered.png",
+      "destination_url": null,
+      "observed_profile_count": 26,
+      "example_owners": [
+        "77or88",
+        "arunan",
+        "aSchizophrenicCat",
+        "Bossman1086",
+        "ch4os1337"
+      ]
+    },
+    {
+      "id": "394a60cffe4f9876_trophy_image_for_team_periwinkle",
+      "title": "Team Periwinkle",
+      "bio": "Unlocked by fighting valiantly in the great Orangered/Periwinkle clash of 2013.",
+      "image_url": "https://i.redd.it/cms/394a60cffe4f9876_trophy_image_for_team_periwinkle.png",
+      "destination_url": null,
+      "observed_profile_count": 24,
+      "example_owners": [
+        "AnOddName",
+        "Chazay",
+        "chromakode",
+        "Cryptonaut",
+        "Dawn_Of_The_Dave"
+      ]
+    },
+    {
+      "id": "c544b4181b25bdfb_trophy_image_for_10_year_club",
+      "title": "Ten-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/c544b4181b25bdfb_trophy_image_for_10_year_club.png",
+      "destination_url": null,
+      "observed_profile_count": 23,
+      "example_owners": [
+        "404NinjaNotFound",
+        "A6uh",
+        "Bitey_the_Squirrel",
+        "Bren12310",
+        "CB9001"
+      ]
+    },
+    {
+      "id": "78b18da56e445587_trophy_image_for_ternion_club",
+      "title": "Ternion Club",
+      "bio": "Unlocked by receiving a Ternion award on a post or comment.",
+      "image_url": "https://i.redd.it/cms/78b18da56e445587_trophy_image_for_ternion_club.png",
+      "destination_url": null,
+      "observed_profile_count": 72,
+      "example_owners": [
+        "125RAILGUN",
+        "404NinjaNotFound",
+        "Acidtwist",
+        "advocado20",
+        "AkaashMaharaj"
+      ]
+    },
+    {
+      "id": "f47007dcf81c27bc_the_incubator",
+      "title": "The Incubator",
+      "bio": "Mentor",
+      "image_url": "https://i.redd.it/cms/f47007dcf81c27bc_the_incubator.png",
+      "destination_url": null,
+      "observed_profile_count": 2,
+      "example_owners": [
+        "rolmos",
+        "westcoastcdn19"
+      ]
+    },
+    {
+      "id": "internet_awards_joined_26-40",
+      "title": "The Internet Awards - Joined the subreddit",
+      "bio": null,
+      "image_url": "https://www.redditstatic.com/awards2/internet_awards_joined_26-40.png",
+      "destination_url": "https://www.reddit.com/r/theinternetawards/",
+      "observed_profile_count": 52,
+      "example_owners": [
+        "404NinjaNotFound",
+        "Acidtwist",
+        "AkaashMaharaj",
+        "Ali_cicek2",
+        "ameen__shaikh"
+      ]
+    },
+    {
+      "id": "internet_awards_nominator_26-40",
+      "title": "The Internet Awards - Submitted a nomination",
+      "bio": null,
+      "image_url": "https://www.redditstatic.com/awards2/internet_awards_nominator_26-40.png",
+      "destination_url": "https://www.reddit.com/r/theinternetawards/",
+      "observed_profile_count": 41,
+      "example_owners": [
+        "404NinjaNotFound",
+        "Acidtwist",
+        "AkaashMaharaj",
+        "ameen__shaikh",
+        "Anhapus"
+      ]
+    },
+    {
+      "id": "internet_awards_voted_26-40",
+      "title": "The Internet Awards - Voted",
+      "bio": null,
+      "image_url": "https://www.redditstatic.com/awards2/internet_awards_voted_26-40.png",
+      "destination_url": "https://www.reddit.com/r/theinternetawards/",
+      "observed_profile_count": 66,
+      "example_owners": [
+        "404NinjaNotFound",
+        "Acidtwist",
+        "AkaashMaharaj",
+        "Anhapus",
+        "aww_y"
+      ]
+    },
+    {
+      "id": "70d039c0b4f831e7_trophy_image_for_third_year_club_trophy",
+      "title": "Three-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/70d039c0b4f831e7_trophy_image_for_third_year_club_trophy.png",
+      "destination_url": null,
+      "observed_profile_count": 11,
+      "example_owners": [
+        "Ali_cicek2",
+        "Ant0Pl",
+        "flattenedbricks",
+        "peladodetenis",
+        "Reopado"
+      ]
+    },
+    {
+      "id": "ada766efd16aeef5_trophy_image_for_translator",
+      "title": "Translator",
+      "bio": "Hungarian -- 2014-07-04",
+      "image_url": "https://i.redd.it/cms/ada766efd16aeef5_trophy_image_for_translator.png",
+      "destination_url": "https://crowdin.com/project/reddit",
+      "observed_profile_count": 5,
+      "example_owners": [
+        "domotor2",
+        "GeekScientist",
+        "kemitche",
+        "pinwale",
+        "rolmos"
+      ]
+    },
+    {
+      "id": "79f2b3c2b45631d1_trophy_image_for_trickortreater_2011",
+      "title": "Trick-or-Treater 2011",
+      "bio": "2011",
+      "image_url": "https://i.redd.it/cms/79f2b3c2b45631d1_trophy_image_for_trickortreater_2011.png",
+      "destination_url": "http://redditgifts.com/gallery/reddit-trick-or-treat-2011/",
+      "observed_profile_count": 11,
+      "example_owners": [
+        "Estoye",
+        "F0REM4N",
+        "facetiously",
+        "hueypriest",
+        "kemitche"
+      ]
+    },
+    {
+      "id": "aa037953ea11dc69_trophy_image_for_trickortreater_2014",
+      "title": "Trick-or-Treater 2014",
+      "bio": "2014",
+      "image_url": "https://i.redd.it/cms/aa037953ea11dc69_trophy_image_for_trickortreater_2014.png",
+      "destination_url": "http://redditgifts.com/exchanges/trick-or-treat-2014/",
+      "observed_profile_count": 8,
+      "example_owners": [
+        "drkatherine1",
+        "INTPLibrarian",
+        "kickme444",
+        "lalinoir",
+        "liltrixxy"
+      ]
+    },
+    {
+      "id": "5ba293858c2ef9cd_trophy_image_for_trickortreater_2015",
+      "title": "Trick-or-Treater 2015",
+      "bio": "2015",
+      "image_url": "https://i.redd.it/cms/5ba293858c2ef9cd_trophy_image_for_trickortreater_2015.png",
+      "destination_url": "http://redditgifts.com/exchanges/trick-or-treat-2015/",
+      "observed_profile_count": 6,
+      "example_owners": [
+        "Dawn_Of_The_Dave",
+        "drkatherine1",
+        "gandalf45435",
+        "INTPLibrarian",
+        "tadpole256"
+      ]
+    },
+    {
+      "id": "e42d1bdec9e2cb64_trophy_image_for_trickortreater_2016",
+      "title": "Trick-or-Treater 2016",
+      "bio": "2016",
+      "image_url": "https://i.redd.it/cms/e42d1bdec9e2cb64_trophy_image_for_trickortreater_2016.png",
+      "destination_url": "https://redditgifts.com/exchanges/trick-or-treat-exchange-2016/",
+      "observed_profile_count": 3,
+      "example_owners": [
+        "Dawn_Of_The_Dave",
+        "drkatherine1",
+        "jamjam1090"
+      ]
+    },
+    {
+      "id": "ac1be2d498237ffd_trophy_image_for_trickortreater_2017",
+      "title": "Trick-or-Treater 2017",
+      "bio": "2017",
+      "image_url": "https://i.redd.it/cms/ac1be2d498237ffd_trophy_image_for_trickortreater_2017.png",
+      "destination_url": "https://www.redditgifts.com/exchanges/trick-treat-2017/",
+      "observed_profile_count": 3,
+      "example_owners": [
+        "404NinjaNotFound",
+        "cyanocittaetprocyon",
+        "drkatherine1"
+      ]
+    },
+    {
+      "id": "ddec7f96e1646fec_trophy_image_for_trickortreater_2018",
+      "title": "Trick-or-Treater 2018",
+      "bio": "2018",
+      "image_url": "https://i.redd.it/cms/ddec7f96e1646fec_trophy_image_for_trickortreater_2018.png",
+      "destination_url": "https://www.redditgifts.com/exchanges/trick-or-treat-2018/",
+      "observed_profile_count": 1,
+      "example_owners": [
+        "drkatherine1"
+      ]
+    },
+    {
+      "id": "ff0bf025be77af74_trophy_image_for_second_year_club_trophy",
+      "title": "Two-Year Club",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/ff0bf025be77af74_trophy_image_for_second_year_club_trophy.png",
+      "destination_url": null,
+      "observed_profile_count": 3,
+      "example_owners": [
+        "alwayswannashit_",
+        "Cute-Organization844",
+        "hammertimestudio"
+      ]
+    },
+    {
+      "id": "d4585838d35ea737_trophy_image_for_undead_lich",
+      "title": "Undead Lich",
+      "bio": "Unlocked by taking part in the Rise of the Undead Subbies challenge in 2019.",
+      "image_url": "https://i.redd.it/cms/d4585838d35ea737_trophy_image_for_undead_lich.png",
+      "destination_url": null,
+      "observed_profile_count": 1,
+      "example_owners": [
+        "MajorParadox"
+      ]
+    },
+    {
+      "id": "4c705669a48bd8af_trophy_image_for_undead_zombie",
+      "title": "Undead Zombie",
+      "bio": "Unlocked by taking part in the Rise of the Undead Subbies challenge in 2019.",
+      "image_url": "https://i.redd.it/cms/4c705669a48bd8af_trophy_image_for_undead_zombie.png",
+      "destination_url": null,
+      "observed_profile_count": 15,
+      "example_owners": [
+        "ancientflowers",
+        "Anhapus",
+        "blueneuronDOTnet",
+        "cyanocittaetprocyon",
+        "F0REM4N"
+      ]
+    },
+    {
+      "id": "034d06bbd23e0a6d_trophy_image_for_verified_email",
+      "title": "Verified Email",
+      "bio": null,
+      "image_url": "https://i.redd.it/cms/034d06bbd23e0a6d_trophy_image_for_verified_email.png",
+      "destination_url": null,
+      "observed_profile_count": 419,
+      "example_owners": [
+        "_-Frost-Byte-_",
+        "_Jefy",
+        "-Aviator",
+        "-LexXi-",
+        "-NotAnAdmin-"
+      ]
+    },
+    {
+      "id": "ee7b40c167f9f0ed_trophy_image_for_wearing_is_caring",
+      "title": "Wearing is Caring",
+      "bio": "Unlocked by giving or receiving a Wearing is Caring award.",
+      "image_url": "https://i.redd.it/cms/ee7b40c167f9f0ed_trophy_image_for_wearing_is_caring.png",
+      "destination_url": null,
+      "observed_profile_count": 266,
+      "example_owners": [
+        "_-Frost-Byte-_",
+        "-Aviator",
+        "-LexXi-",
+        "010",
+        "125RAILGUN"
+      ]
+    },
+    {
+      "id": "0ff4a7db3bca21f7_trophy_image_for_wellrounded",
+      "title": "Well-Rounded",
+      "bio": "2023-01-01",
+      "image_url": "https://i.redd.it/cms/0ff4a7db3bca21f7_trophy_image_for_wellrounded.png",
+      "destination_url": null,
+      "observed_profile_count": 16,
+      "example_owners": [
+        "cyanocittaetprocyon",
+        "DrJulianBashir",
+        "f__h",
+        "Greenthund3r",
+        "hero0fwar"
+      ]
+    },
+    {
+      "id": "54507b6c21e10ed8_trophy_image_for_white_hat",
+      "title": "White Hat",
+      "bio": "anonymity bug -- 2020-11-18",
+      "image_url": "https://i.redd.it/cms/54507b6c21e10ed8_trophy_image_for_white_hat.png",
+      "destination_url": "https://github.com/reddit/reddit-public/commit/766dd00ca74a09c2d10aeb4f8801a0f6b2634aa0",
+      "observed_profile_count": 7,
+      "example_owners": [
+        "AkaashMaharaj",
+        "ButINeedThatUsername",
+        "chromakode",
+        "JangoBeastwood",
+        "rolmos"
+      ]
+    },
+    {
+      "id": "5ee535ee4525036e_trophy_image_for_wiki_wiz",
+      "title": "WikiWiz",
+      "bio": "Unlocked by completing the online mod course, \"Reddit Community Wikis\".",
+      "image_url": "https://i.redd.it/cms/5ee535ee4525036e_trophy_image_for_wiki_wiz.png",
+      "destination_url": "https://modeducation.reddithelp.com/",
+      "observed_profile_count": 75,
+      "example_owners": [
+        "010",
+        "AkaashMaharaj",
+        "ameen__shaikh",
+        "Anhapus",
+        "Ant0Pl"
+      ]
+    },
+    {
+      "id": "880ef23cbd0be2e5_trophy_image_for_xbox_live",
+      "title": "Xbox Live",
+      "bio": "Unlocked by connecting Reddit to your Xbox Live account.",
+      "image_url": "https://i.redd.it/cms/880ef23cbd0be2e5_trophy_image_for_xbox_live.png",
+      "destination_url": null,
+      "observed_profile_count": 142,
+      "example_owners": [
+        "_-Frost-Byte-_",
+        "010",
+        "A6uh",
+        "AkaashMaharaj",
+        "Ali_cicek2"
+      ]
+    }
+  ],
+  "diagnostics": {
+    "failed_information_pages": [
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f6c8nn/reddit_trophy_undead_Undead%20Serieseries/",
+        "error": "Error: no shreddit-post"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kkjpow/i_found_this_sub_just_now/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kkpih7/found_on_ukrispykrackers_trophy_case_are_these/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kkbbd8/is_there_a_reason_some_awards_give_the_recipient/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/klgdwo/what_is_the_best_award_in_your_opinion/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kk6ec9/what_do_you_think_would_make_a_good_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kjvyvu/i_am_going_to_lose_my_premium_3_days_from_now_and/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kk3ru5/i_gave_wearing_is_caring_award_will_i_get_the/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kh9w1u/reddit_award_coins_weird_thing/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kibhw0/i_got_suspended_for_stupid_reason_so_i_lost_all/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/khydqy/how_to_go_to_old_reddit/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kjupoj/some_of_the_awards_had_expired_by_now_but_i_had/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kamds6/whats_up_with_the_xbox_thing/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kb5khq/question/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kf4o1r/ally_financial_argentenium/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kdgcqx/private_trophy_subreddits/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kbn3ti/why_is_reddit_so_cagey_about_trophies/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kb9b8k/question/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/ka95ig/is_there_a_200_awards_club_was_just_on_my_profile/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/ka2kzt/how_can_i_tell_what_will_become_a_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kallve/i_got_an_argentium_several_days_ago_but_the/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/kalbeu/does_there_exist_an_award_beyond_ternion/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/ka9ql1/will_there_be_an_arbitrary_day_redditgifts_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k9xaxv/i_am_trying_to_get_xbox_live_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k95fi1/premium_trophy_question/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k92shh/will_there_be_solidarity_2021_trophy_or_event_for/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k9shfx/do_i_need_to_sign_in_with_my_microsoft_account_to/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k8vzgf/argentium_and_wearing_is_caring_trophy_question/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k8fl28/i_dont_know_much_about_throphies_but_i_get_the/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k8wli2/is_there_an_easy_way_to_get_the_argentium_award_i/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k882ei/a_question_regarding_the_premium_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k7hznf/i_recently_got_over_200_awards_on_a_post_does/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k7qd39/should_reddit_make_a_trophy_for_when_people_get/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k7sk12/how_do_i_get_xbox_live_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k7xju9/pumpkin_pie_award_problem/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k7tx44/what_award_would_you_want_yet_but_still_dont/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k3klii/if_you_make_a_post_begging_for_a_trophy_or/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k3xpxb/how_to_get_rpan_viewer_badge/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k6f6my/the_rarest_active_trophy_on_reddit/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k49m5d/does_anybody_know_if_any_16_year_trophies_exist/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k3lk63/is_there_a_wayplace_to_keep_track_of/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k5dlv3/100_awards/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k3jcln/community_awards_and_the_100_award_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k2l4uy/i_got_the_one_year_club_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k2v86y/whats_some_easier_trophies_i_can_get/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k30kc1/how_do_i_get_the_wearing_is_caring_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k3gn5s/state_of_this_sub/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k29j14/i_got_the_wearing_is_caring_award_8_days_ago_but/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jyjluj/how_does_a_person_get_the_argentium_trophy_just/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jz7p8y/rtrophywiki_lounge/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jy7y1t/do_you_get_the_wearing_caring_trophy_for/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/k0c3e4/is_the_pubg_trophy_safe_if_u_enter_your_email_is/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jztshb/anybody_know_how_to_get_two_verified_email/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jwhl4n/is_there_a_trophy_for_the_card_secret_santa_i_am/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jweoyy/how_do_you_get_the_elves_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/js0g4s/how_i_got_the_translator_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jruy7f/how_can_i_get_the_extra_life_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/ju31oo/here_are_the_titles_and_the_number_of_people_that/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jrjaws/are_there_any_up_coming_trophies/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jsb5r1/santa_award_2020_registration_going_on_it_would/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jq29rg/obtainable_awards_page/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jpcjdt/there_will_be_a_new_trophy_to_get_this_saturday/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jqy41l/extra_life_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jp3hwf/i_received_a_snap_award_will_it_show_up_in_my/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jq6hz1/wearing_is_caring_isnt_obtainable_right_now_right/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jorq34/translator_award/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jnmmtj/what_is_extra_life_and_how_is_it_obtained/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jnryqd/wearing_is_caring_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jnia2b/is_there_going_to_be_a_extra_life_2020_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/joqrm6/300_awards_from_one_post_and_still_didnt_get_100/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jo0has/hey_there_guys_new_to_this_sub_i_have_a_ton_of/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jopme7/how_do_i_get_no_throne_no_problem_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jmayn0/wearing_is_caring_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jm1y28/what_kind_of_awards_that_give_you_a_trophy_sample/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jn2ge3/can_someone_clarify_the_100_awards_trophy_to_me/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jljyyr/can_someone_explain_how_can_we_get_the_secret/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jm1j20/what_kind_of_trophies_that_would_be_displayed_on/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jn8f9q/how_do_you_get_2_verified_email/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jjoaha/the_state_of_this_subreddit/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jk0avy/trophytrading_has_moved_please_go_to/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jki85h/do_you_think_rpredictor_will_get_a_trophy_like/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jjmw82/why_everyone_is_trading_wearing_is_caring_awards/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jkb1ex/i_have_two_really_dumb_questions_about_the_100/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jl7w4c/what_is_the_wearing_is_caring_award/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jjh2b3/question_about_gilding_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jijb6j/after_how_long_will_i_receive_the_100_awards_club/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jfleya/new_trophy_for_rlayer/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jjlqte/how_do_i_get_the_i_voted_award/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jilr77/new_user_trophy/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jblwpd/tracking_new_trophies/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/j141ns/trophy_giveaway_wearing_is_caring_comment_and_ill/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f124zc/reddit_trophy_trickortreater_2011/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/fmu0fm/every_currently_obtainable_trophy_on_rtrophywiki/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/iymzhf/hey_can_you_talk_about_the_new_achievements/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/jb89ir/can_you_get_the_xbox_live_trophy_through_your/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f6c8nn/reddit_trophy_undead_series/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f11k8c/reddit_trophy_beta_team/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f11f36/reddit_trophy_summer_santa_2010/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f11ff4/reddit_trophy_secret_santa_2010/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f11n3c/reddit_trophy_css_animal/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f11d3b/reddit_trophy_secret_santa_2013/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f10peq/reddit_trophy_calendar_girl/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f0za8k/more_information_needed_on_these_posts/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f0zjt5/reddit_trophy_best_of_2009/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f0ppu4/reddit_trophy_white_hat/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f0zkb1/reddit_trophy_best_of_2010/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f0yxa2/reddit_trophy_charity_challenge_winner/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f10jxt/reddit_trophy_fantastic_voyager/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f0pnjd/rtrophywiki_guide_posting_template/",
+        "error": "Error: HTTP 429"
+      },
+      {
+        "url": "https://www.reddit.com/r/TrophyWiki/comments/f0pnre/reddit_trophy_bellwether/",
+        "error": "Error: HTTP 429"
+      }
+    ],
+    "failed_profiles": [],
+    "profiles_without_visible_trophies": [
+      {
+        "username": "[deleted]",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "1_BigPapi",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "1000100001",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "airfraid",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "allisonovo",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "alphacentaura",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Anastasia_Komori",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "blindingstars",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "bozarking",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "brentspine",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "C0LT0GRAPHY",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Caparisme",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "cattailss",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "chesty",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "ChowGamer123",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "CM016",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Cryptonaunt",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "daniandkiara",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "danpark",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Demon-Rat",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Dominoed",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "douglasmacarthur",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Draynen",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "eggycarrot",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Enovlid",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "fenderflare",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Flickto_CTO",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "garage_dragon",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "genuinely-living",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "ggitaliano",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "GingerBreadRecon",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "GreenThund3r",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "heckinpupperdoggo",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "HIFructoseCornFeces",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Hopstar",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "I_Am_Meta_man",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "J4vaman8",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "jwinterm",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "KarmaChameleonChris",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "kenzeeed",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "KrispyKrackers",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Leo_Rodriguessthis",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "LilSebs_MrsF",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "luckyaussiebob",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Lurafox",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Lyla_Park",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "MaryjaneBrewington",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "mbd27f",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Milo-The-Great",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "mindashq",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "mrsammercer",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "MustardHamsters",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "myki66",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "NiceguyNate",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "nixg",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "nuclearghost30",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Oreothedog7",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "OrionLax",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "PhilDunphy",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "PirateOldwin",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "pizza_killer_86",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "platlailonki",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "QuantumofSlice",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "rologames",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Roxven89",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Sanchokeep33",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "SardonicPill",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "SchoolInterestRemake",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "SD_tmi",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "SerRolf16",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Shady_Twin",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Sligoisthesauce",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Snowzter",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Sodypop",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Spartangaming0786",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "SpookySYN",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "sporkicide",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "swiftieofblackhill",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "tbarlow13",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "TeleportMePizza",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "the_real_giaco",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "thunde-r",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "uncle-becky",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "violentacrez",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "vooshamirite",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "WarToad",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "xenc",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "xenti3",
+        "warning": "No Trophy Case found"
+      },
+      {
+        "username": "Zuzuchic",
+        "warning": "No Trophy Case found"
+      }
+    ]
+  }
+}

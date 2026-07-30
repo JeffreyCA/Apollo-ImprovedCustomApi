@@ -8,6 +8,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <os/lock.h>
+#include <string.h>
 
 @implementation ApolloAccountCredentialEntry
 
@@ -115,13 +116,127 @@ NSString *ApolloSecretForClientId(NSString *clientId) {
 // also turned up zero callers, consistent with it never being reassigned at
 // runtime outside of NSKeyedUnarchiver's KVC-based decode).
 //
-// Resolve from disk instead: AccountManager persists `CurrentRedditAccountIndex`
+// For username-only lookup, resolve from disk instead: AccountManager persists
+// `CurrentRedditAccountIndex`
 // into the shared-group defaults whenever the active account changes, and
 // `RedditAccounts2` is the index-aligned NSKeyedArchiver([RDKClient]) array (see
 // ApolloWebJSONIdentity.xm's synthesis code for the full on-disk format notes).
 // This mirrors ApolloWebSessionStore.m's cold-start fallback, elevated here to
 // the primary (only) mechanism since the live signal can't be trusted at all.
 static NSString *const kApolloAccountCredsGroupSuite = @"group.com.christianselig.apollo";
+
+// Unarchiving RedditAccounts2 reconstructs every persisted RDKClient, including
+// its AFHTTPSessionManager/CFNetwork graph. That is far too expensive for a
+// username helper used from poll cells, headers, caches, chat, and request
+// routing. Keep one resolved value until either the archive or selected index is
+// written. A generation protects publication when a write lands while a decode
+// is in progress; the writer wins and the stale decode is never cached.
+static os_unfair_lock sApolloActiveUsernameCacheLock = OS_UNFAIR_LOCK_INIT;
+static NSString *sApolloActiveUsernameCache = nil;
+static BOOL sApolloActiveUsernameCacheValid = NO;
+static uint64_t sApolloActiveUsernameCacheGeneration = 1;
+
+void ApolloInvalidateActiveAccountUsernameCache(void) {
+    os_unfair_lock_lock(&sApolloActiveUsernameCacheLock);
+    sApolloActiveUsernameCache = nil;
+    sApolloActiveUsernameCacheValid = NO;
+    sApolloActiveUsernameCacheGeneration++;
+    os_unfair_lock_unlock(&sApolloActiveUsernameCacheLock);
+}
+
+static BOOL ApolloReadActiveUsernameCache(NSString **outUsername, uint64_t *outGeneration) {
+    os_unfair_lock_lock(&sApolloActiveUsernameCacheLock);
+    BOOL valid = sApolloActiveUsernameCacheValid;
+    NSString *username = sApolloActiveUsernameCache;
+    uint64_t generation = sApolloActiveUsernameCacheGeneration;
+    os_unfair_lock_unlock(&sApolloActiveUsernameCacheLock);
+    if (outUsername) *outUsername = username;
+    if (outGeneration) *outGeneration = generation;
+    return valid;
+}
+
+static BOOL ApolloPublishActiveUsernameCache(NSString *username, uint64_t generation) {
+    os_unfair_lock_lock(&sApolloActiveUsernameCacheLock);
+    BOOL current = generation == sApolloActiveUsernameCacheGeneration;
+    if (current) {
+        sApolloActiveUsernameCache = [username copy];
+        sApolloActiveUsernameCacheValid = YES; // nil is a valid cached result
+    }
+    os_unfair_lock_unlock(&sApolloActiveUsernameCacheLock);
+    return current;
+}
+
+// Apollo.AccountManager does not expose its Swift `accounts` array or
+// `currentAccountIndex` through ObjC. The live manager still registers both
+// fields as ivars, though, and this Apollo build uses the standard native Swift
+// Array representation: the ivar is one pointer to ContiguousArrayStorage,
+// whose count/capacity/elements begin at words 2/3/4. Reading the manager's live
+// array is important here. Unarchiving RedditAccounts2 would create a second
+// RDKClient with copied credentials, while mutations must travel through the
+// exact client Apollo owns and keeps refreshed in-process.
+//
+// Keep every assumption guarded. If a future Apollo/Swift runtime changes the
+// layout, this returns nil and callers fail closed instead of messaging an
+// invalid pointer.
+id ApolloActiveAccountClient(void) {
+    // Main-thread only. The walk below reads AccountManager's live Swift array
+    // buffer without a retain; a concurrent reassignment of `accounts` on
+    // another thread would free the storage between our reads (use-after-free).
+    // Every caller today is a main-thread UI action (the follow-button tap); this
+    // fails closed rather than trusting a future off-main caller not to exist.
+    if (![NSThread isMainThread]) return nil;
+
+    Class managerClass = objc_getClass("_TtC6Apollo14AccountManager");
+    SEL sharedSelector = NSSelectorFromString(@"shared");
+    if (!managerClass || ![managerClass respondsToSelector:sharedSelector]) return nil;
+
+    id manager = ((id (*)(id, SEL))objc_msgSend)(managerClass, sharedSelector);
+    if (!manager) return nil;
+    Ivar accountsIvar = class_getInstanceVariable(managerClass, "accounts");
+    Ivar currentIndexIvar = class_getInstanceVariable(managerClass, "currentAccountIndex");
+    if (!accountsIvar || !currentIndexIvar) return nil;
+
+    // Hopper: Optional<Int> is stored as the Int word followed by an
+    // extra-inhabitant byte; bit 0 set at +8 means nil. This is the same check
+    // AccountManager's own subscription-refresh path performs before indexing.
+    NSInteger index = 0;
+    uint8_t indexIsNil = 1;
+    uint8_t *managerBytes = (uint8_t *)(__bridge void *)manager;
+    ptrdiff_t currentIndexOffset = ivar_getOffset(currentIndexIvar);
+    memcpy(&index, managerBytes + currentIndexOffset, sizeof(index));
+    memcpy(&indexIsNil, managerBytes + currentIndexOffset + sizeof(NSInteger), sizeof(indexIsNil));
+    if ((indexIsNil & 0x1) != 0 || index < 0) return nil;
+
+    uintptr_t storageWord = 0;
+    memcpy(&storageWord, managerBytes + ivar_getOffset(accountsIvar), sizeof(storageWord));
+    // We only understand a NATIVE Swift array here: the low 3 bits are inline
+    // flags (masked off below), but a bridged/tagged _BridgeStorage word carries
+    // a discriminator in the HIGH bits (objc bridge object bit 0x40..00, or a
+    // tagged-pointer top bit). object_getClass on such a word dereferences a
+    // non-canonical pointer → crash. If `accounts` is ever backed by a bridged
+    // NSArray, bail instead of masking-and-dereferencing.
+    if (storageWord & 0xF000000000000000ULL) return nil;
+    void *storage = (void *)(storageWord & ~(uintptr_t)0x7);
+    if (!storage) return nil;
+    Class storageClass = object_getClass((__bridge id)storage);
+    const char *storageClassName = storageClass ? class_getName(storageClass) : NULL;
+    if (!storageClassName || strstr(storageClassName, "ContiguousArrayStorage") == NULL) return nil;
+
+    uintptr_t count = 0;
+    memcpy(&count, (uint8_t *)storage + (2 * sizeof(uintptr_t)), sizeof(count));
+    if (count == 0 || count > 64) return nil;
+
+    if ((uintptr_t)index >= count) return nil;
+
+    void *rawClient = NULL;
+    size_t elementOffset = (4 + (NSUInteger)index) * sizeof(uintptr_t);
+    memcpy(&rawClient, (uint8_t *)storage + elementOffset, sizeof(rawClient));
+    if (!rawClient) return nil;
+    id client = (__bridge id)rawClient;
+    Class clientClass = objc_getClass("RDKClient");
+    if (!clientClass || ![client isKindOfClass:clientClass]) return nil;
+    return client;
+}
 
 static id ApolloAccountCredsUnarchive(NSData *data) {
     if (![data isKindOfClass:[NSData class]]) return nil;
@@ -147,36 +262,60 @@ static BOOL ApolloLogIfUsernameResultChanged(NSString *newResult) {
 }
 
 NSString *ApolloActiveAccountUsername(void) {
+    NSString *cached = nil;
+    uint64_t generation = 0;
+    if (ApolloReadActiveUsernameCache(&cached, &generation)) return cached;
+
     NSUserDefaults *group = [[NSUserDefaults alloc] initWithSuiteName:kApolloAccountCredsGroupSuite];
     id accounts = ApolloAccountCredsUnarchive([group objectForKey:@"RedditAccounts2"]);
     if (![accounts isKindOfClass:[NSArray class]]) {
         if (ApolloLogIfUsernameResultChanged(nil))
             ApolloLog(@"[AccountCredentials] ApolloActiveAccountUsername: no RedditAccounts2 array");
-        return nil;
+        return ApolloPublishActiveUsernameCache(nil, generation)
+            ? nil
+            : ApolloActiveAccountUsername();
     }
     NSInteger index = [group integerForKey:@"CurrentRedditAccountIndex"];
     if (index < 0 || (NSUInteger)index >= [(NSArray *)accounts count]) {
         NSString *msg = [NSString stringWithFormat:@"index %ld out of range (count %lu)", (long)index, (unsigned long)[(NSArray *)accounts count]];
         if (ApolloLogIfUsernameResultChanged(msg))
             ApolloLog(@"[AccountCredentials] ApolloActiveAccountUsername: %@", msg);
-        return nil;
+        return ApolloPublishActiveUsernameCache(nil, generation)
+            ? nil
+            : ApolloActiveAccountUsername();
     }
     id client = ((NSArray *)accounts)[(NSUInteger)index];
     id user = nil;
     @try { user = [client valueForKey:@"currentUser"]; }
-    @catch (__unused NSException *e) { return nil; }
+    @catch (__unused NSException *e) {
+        return ApolloPublishActiveUsernameCache(nil, generation)
+            ? nil
+            : ApolloActiveAccountUsername();
+    }
     if (!user) {
         if (ApolloLogIfUsernameResultChanged(@"currentUser nil"))
             ApolloLog(@"[AccountCredentials] ApolloActiveAccountUsername: currentUser nil at index %ld", (long)index);
-        return nil;
+        return ApolloPublishActiveUsernameCache(nil, generation)
+            ? nil
+            : ApolloActiveAccountUsername();
     }
     NSString *username = nil;
     @try { username = [user valueForKey:@"username"]; }
-    @catch (__unused NSException *e) { return nil; }
+    @catch (__unused NSException *e) {
+        return ApolloPublishActiveUsernameCache(nil, generation)
+            ? nil
+            : ApolloActiveAccountUsername();
+    }
     BOOL valid = [username isKindOfClass:[NSString class]] && username.length > 0;
     if (valid && ApolloLogIfUsernameResultChanged(username))
         ApolloLog(@"[AccountCredentials] ApolloActiveAccountUsername: resolved u/%@ (index %ld)", username, (long)index);
-    return valid ? username : nil;
+    NSString *result = valid ? username : nil;
+    // If an account write raced this decode, do not publish or return the stale
+    // identity. Resolve once more against the new generation instead.
+    if (!ApolloPublishActiveUsernameCache(result, generation)) {
+        return ApolloActiveAccountUsername();
+    }
+    return result;
 }
 
 NSString *ApolloEffectiveRedditClientId(void) {
@@ -203,8 +342,8 @@ NSString *ApolloEffectiveRedirectURI(void) {
 // (the RDKClient user-install hooks in ApolloUserAvatars.xm) fires far more
 // often than "a sign-in just completed": -setCurrentUser: is invoked by
 // NSKeyedUnarchiver's KVC decode of RedditAccounts2 — which
-// ApolloActiveAccountUsername() above performs on every call, including for
-// the sign-in's own token-exchange request — and
+// ApolloActiveAccountUsername() performs whenever its invalidated cache must
+// be rebuilt, including during the sign-in's own archive/index writes — and
 // -updateCurrentUserWithNewUser: fires for every background identity refresh
 // of every stored account. A naive "first install after arming consumes"
 // design therefore spends the flag on whatever stored account decodes first

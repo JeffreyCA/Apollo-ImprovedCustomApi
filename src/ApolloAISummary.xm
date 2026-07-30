@@ -25,83 +25,11 @@
 
 #import "ApolloCommon.h"
 #import "ApolloAISummary.h"
+#import "ApolloAICloudBridge.h"
 #import "ApolloThemeRuntime.h"
 #import "ApolloState.h"
+#import "ApolloTextureDecls.h"
 #import "Tweak.h"
-
-#pragma mark - Texture declarations
-
-typedef NS_ENUM(unsigned char, ApolloAIStackDirection) {
-    ApolloAIStackDirectionHorizontal = 0,
-    ApolloAIStackDirectionVertical = 1,
-};
-
-typedef NS_ENUM(unsigned char, ApolloAIStackJustifyContent) {
-    ApolloAIStackJustifyContentStart = 0,
-};
-
-typedef NS_ENUM(unsigned char, ApolloAIStackAlignItems) {
-    ApolloAIStackAlignItemsStart = 0,
-    ApolloAIStackAlignItemsStretch = 3,
-};
-
-@class ASLayoutSpec;
-@class ASStackLayoutSpec;
-@class ASInsetLayoutSpec;
-@class ASBackgroundLayoutSpec;
-@class ASDisplayNode;
-@class ASTextNode;
-
-@interface ASDisplayNode : NSObject
-- (void)addSubnode:(ASDisplayNode *)subnode;
-- (void)setNeedsLayout;
-- (void)invalidateCalculatedLayout;
-- (UIView *)view;
-- (void)onDidLoad:(void (^)(__kindof ASDisplayNode *node))body;
-@property (nonatomic) BOOL userInteractionEnabled;
-@property (nullable, nonatomic, copy) UIColor *backgroundColor;
-@property (nonatomic) CGFloat cornerRadius;
-@property (nonatomic) BOOL clipsToBounds;
-@property (nonatomic) CGFloat borderWidth;
-@property (nullable, nonatomic) CGColorRef borderColor;
-@end
-
-@interface ASTextNode : ASDisplayNode
-@property (nonatomic, copy) NSAttributedString *attributedText;
-@property (nonatomic) NSUInteger maximumNumberOfLines;
-@end
-
-@interface ASLayoutSpec : NSObject
-@end
-
-@interface ASStackLayoutSpec : ASLayoutSpec
-@property (nonatomic) ApolloAIStackDirection direction;
-@property (nonatomic) CGFloat spacing;
-@property (nonatomic) ApolloAIStackJustifyContent justifyContent;
-@property (nonatomic) ApolloAIStackAlignItems alignItems;
-@property (nonatomic) NSUInteger flexWrap;
-@property (nonatomic) NSUInteger alignContent;
-@property (nonatomic) CGFloat lineSpacing;
-@property (nullable, nonatomic) NSArray *children;
-+ (instancetype)stackLayoutSpecWithDirection:(ApolloAIStackDirection)direction
-                                     spacing:(CGFloat)spacing
-                              justifyContent:(ApolloAIStackJustifyContent)justifyContent
-                                  alignItems:(ApolloAIStackAlignItems)alignItems
-                                    children:(NSArray *)children;
-@end
-
-@interface ASInsetLayoutSpec : ASLayoutSpec
-@property (nonatomic) UIEdgeInsets insets;
-@property (nullable, nonatomic) id child;
-+ (instancetype)insetLayoutSpecWithInsets:(UIEdgeInsets)insets child:(id)child;
-@end
-
-@interface ASBackgroundLayoutSpec : ASLayoutSpec
-+ (instancetype)backgroundLayoutSpecWithChild:(id)child background:(id)background;
-@end
-
-// ASSizeRange as emitted by Apollo's class-dumped headers.
-struct ApolloAISizeRange { CGSize min; CGSize max; };
 
 #pragma mark - FoundationModels bridge (declared, resolved at runtime)
 
@@ -124,6 +52,12 @@ maximumResponseTokens:(NSInteger)maximumResponseTokens
 @end
 
 static ApolloFoundationModels *ApolloAIBridge(void) {
+    // Cloud providers (OpenRouter/Gemini/custom) go through ApolloAICloudBridge,
+    // which exposes the identical selector surface — the cast is safe because
+    // every send below is dynamically dispatched against that shared surface.
+    if (sAISummaryProvider.length > 0 && ![sAISummaryProvider isEqualToString:@"apple"]) {
+        return (ApolloFoundationModels *)[ApolloAICloudBridge shared];
+    }
     Class cls = NSClassFromString(@"ApolloFoundationModels");
     if (!cls) return nil;
     return [cls shared];
@@ -255,6 +189,15 @@ static const NSTimeInterval kApolloAIGenerationTimeout = 90.0;
 #else
 static const NSTimeInterval kApolloAIGenerationTimeout = 30.0;
 #endif
+// Cloud models get a longer leash than on-device: reasoning models that can't
+// disable thinking (Gemini 2.5 Pro, several OpenRouter-hosted models)
+// legitimately take 30s+ before their first visible token, and the cloud
+// bridge's own 60s inter-chunk timeout should get to fire first — it produces
+// a specific error card instead of this watchdog's generic "took too long".
+static NSTimeInterval ApolloAIGenerationTimeoutSeconds(void) {
+    BOOL cloud = sAISummaryProvider.length > 0 && ![sAISummaryProvider isEqualToString:@"apple"];
+    return cloud ? MAX(kApolloAIGenerationTimeout, 75.0) : kApolloAIGenerationTimeout;
+}
 
 // Version 5 records both the selected detail and the generation backend/model.
 // This prevents a summary from one cloud model being reused after the user
@@ -276,26 +219,16 @@ static NSMutableDictionary<NSString *, NSString *> *sPostSummaryProfiles;
 static NSMutableDictionary<NSString *, NSString *> *sCommentSummaryProfiles;
 
 static NSString *ApolloAICurrentGenerationProfile(void) {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSString *provider = [defaults stringForKey:@"AISummaryProvider"];
+    NSString *provider = sAISummaryProvider;
     if (![provider isEqualToString:@"openrouter"] &&
         ![provider isEqualToString:@"gemini"] &&
         ![provider isEqualToString:@"custom"]) {
         return @"apple";
     }
-
-    NSString *model = nil;
-    NSString *endpoint = @"";
-    if ([provider isEqualToString:@"openrouter"]) {
-        model = [defaults stringForKey:@"OpenRouterAIModel"];
-        if (model.length == 0) model = @"meta-llama/llama-3.3-70b-instruct:free";
-    } else if ([provider isEqualToString:@"gemini"]) {
-        model = [defaults stringForKey:@"GeminiAIModel"];
-        if (model.length == 0) model = @"gemini-2.5-flash";
-    } else {
-        model = [defaults stringForKey:@"CustomAIModel"] ?: @"";
-        endpoint = [defaults stringForKey:@"CustomAIBaseURL"] ?: @"";
-    }
+    // Same effective model the cloud bridge would actually send (stored value or
+    // the provider default), so switching models invalidates cached summaries.
+    NSString *model = ApolloAICloudEffectiveModel() ?: @"";
+    NSString *endpoint = [provider isEqualToString:@"custom"] ? (sCustomAIBaseURL ?: @"") : @"";
     return [NSString stringWithFormat:@"%@|%@|%@", provider, model, endpoint];
 }
 
@@ -364,6 +297,29 @@ static NSMutableSet<NSString *> *sCommentGenerationScheduled;
 // loading<->error as the retry schedule and comment captures re-fire.
 static NSMutableSet<NSString *> *sPostFailed;
 static NSMutableSet<NSString *> *sCommentFailed;
+// "post|<fullName>" / "comment|<fullName>" -> the friendly error message shown
+// when the generation failed. Kept alongside sPostFailed/sCommentFailed so a
+// recycled header re-applies the SPECIFIC message (e.g. the cloud "check your
+// API key" hint) instead of degrading to the generic error body.
+static NSMutableDictionary<NSString *, NSString *> *sFailedErrorMessages;
+
+static NSString *ApolloAIFailedMessageKey(NSString *fullName, BOOL isPost) {
+    return [NSString stringWithFormat:@"%@|%@", isPost ? @"post" : @"comment", fullName];
+}
+
+static void ApolloAIRecordFailure(NSString *fullName, BOOL isPost, NSString *message) {
+    NSMutableSet *failed = isPost ? sPostFailed : sCommentFailed;
+    [failed addObject:fullName];
+    if (message.length > 0) {
+        sFailedErrorMessages[ApolloAIFailedMessageKey(fullName, isPost)] = message;
+    }
+}
+
+static void ApolloAIClearFailure(NSString *fullName, BOOL isPost) {
+    NSMutableSet *failed = isPost ? sPostFailed : sCommentFailed;
+    [failed removeObject:fullName];
+    [sFailedErrorMessages removeObjectForKey:ApolloAIFailedMessageKey(fullName, isPost)];
+}
 // fullNames whose link/article post box is currently HIDDEN — the page had no
 // usable prose to summarize (score-card / SPA / paywall stub), or the model
 // couldn't summarize the little there was. Distinct from sPostFailed: a
@@ -601,6 +557,7 @@ static void ApolloAIEnsureState(void) {
         sCommentGenerationScheduled = [NSMutableSet set];
         sPostFailed = [NSMutableSet set];
         sCommentFailed = [NSMutableSet set];
+        sFailedErrorMessages = [NSMutableDictionary dictionary];
         sPostSuppressed = [NSMutableSet set];
         sPostEmpty = [NSMutableSet set];
         sTimedOutRequests = [NSMutableSet set];
@@ -643,6 +600,7 @@ NSUInteger ApolloAIClearSummaryCache(void) {
     [sCommentGenerationScheduled removeAllObjects];
     [sPostFailed removeAllObjects];
     [sCommentFailed removeAllObjects];
+    [sFailedErrorMessages removeAllObjects];
     [sPostSuppressed removeAllObjects];
     [sPostEmpty removeAllObjects];
     [sTimedOutRequests removeAllObjects];
@@ -1736,27 +1694,6 @@ static UIColor *ApolloAISummaryThemeAccent(id headerNode) {
     return tc ? [accent resolvedColorWithTraitCollection:tc] : accent;
 }
 
-// A baseline-aligned SF Symbol as an attributed string, sized to `font` and
-// tinted `tint`. Returns nil if the symbol is unavailable so callers can fall
-// back to a plain glyph.
-static NSAttributedString *ApolloAISymbolAttachment(NSString *symbolName, UIFont *font, UIColor *tint) {
-    if (@available(iOS 13.0, *)) {
-        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithFont:font];
-        UIImage *image = [UIImage systemImageNamed:symbolName withConfiguration:cfg];
-        if (image) {
-            image = [image imageWithTintColor:tint renderingMode:UIImageRenderingModeAlwaysOriginal];
-            NSTextAttachment *attachment = [[NSTextAttachment alloc] init];
-            attachment.image = image;
-            // Center the glyph on the font's cap height so it sits on the text
-            // baseline rather than floating above it.
-            CGFloat y = (font.capHeight - image.size.height) / 2.0;
-            attachment.bounds = CGRectMake(0, y, image.size.width, image.size.height);
-            return [NSAttributedString attributedStringWithAttachment:attachment];
-        }
-    }
-    return nil;
-}
-
 static NSAttributedString *ApolloAISummaryAttributedText(NSString *title,
                                                          ApolloAIBoxState state,
                                                          NSString *bodyText,
@@ -1805,7 +1742,7 @@ static NSAttributedString *ApolloAISummaryAttributedText(NSString *title,
     NSString *symbolName = isPost ? @"sparkles" : @"text.bubble.fill";
     UIColor *iconTint = accent;
     if (state == ApolloAIBoxStateError) { symbolName = @"exclamationmark.triangle.fill"; iconTint = errorColor; }
-    NSAttributedString *iconAttachment = ApolloAISymbolAttachment(symbolName, titleFont, iconTint);
+    NSAttributedString *iconAttachment = ApolloSymbolAttachment(symbolName, titleFont, iconTint);
     if (iconAttachment) {
         [result appendAttributedString:iconAttachment];
         [result appendAttributedString:[[NSAttributedString alloc] initWithString:@"  " attributes:titleAttributes]];
@@ -1837,7 +1774,7 @@ static NSAttributedString *ApolloAISummaryAttributedText(NSString *title,
     BOOL showChevron = expanded || state == ApolloAIBoxStateReady || state == ApolloAIBoxStateError;
     if (showChevron) {
         NSAttributedString *chevronAttachment =
-            ApolloAISymbolAttachment(expanded ? @"chevron.down" : @"chevron.right", chevronFont, secondary);
+            ApolloSymbolAttachment(expanded ? @"chevron.down" : @"chevron.right", chevronFont, secondary);
         [result appendAttributedString:[[NSAttributedString alloc] initWithString:@"  " attributes:chevronAttributes]];
         if (chevronAttachment) {
             [result appendAttributedString:chevronAttachment];
@@ -2133,14 +2070,16 @@ static void ApolloAIApplyRestoredState(id headerNode, NSString *fullName) {
     } else if (ApolloAIPostCacheMatchesCurrentDetail(fullName)) {
         if (ApolloAISetBoxState(headerNode, YES, ApolloAIBoxStateReady, sPostSummaryCache[fullName])) changed = YES;
     } else if ([sPostFailed containsObject:fullName]) {
-        if (ApolloAISetBoxState(headerNode, YES, ApolloAIBoxStateError, nil)) changed = YES;
+        if (ApolloAISetBoxState(headerNode, YES, ApolloAIBoxStateError,
+                                sFailedErrorMessages[ApolloAIFailedMessageKey(fullName, YES)])) changed = YES;
     } else if ([sPostInFlight containsObject:fullName]) {
         if (ApolloAISetBoxState(headerNode, YES, ApolloAIBoxStateLoading, nil)) changed = YES;
     }
     if (ApolloAICommentCacheMatchesCurrentDetail(fullName)) {
         if (ApolloAISetBoxState(headerNode, NO, ApolloAIBoxStateReady, sCommentSummaryCache[fullName])) changed = YES;
     } else if ([sCommentFailed containsObject:fullName]) {
-        if (ApolloAISetBoxState(headerNode, NO, ApolloAIBoxStateError, nil)) changed = YES;
+        if (ApolloAISetBoxState(headerNode, NO, ApolloAIBoxStateError,
+                                sFailedErrorMessages[ApolloAIFailedMessageKey(fullName, NO)])) changed = YES;
     } else if ([sCommentInFlight containsObject:fullName]) {
         // A generation is genuinely running -> show the loading card.
         if (ApolloAISetBoxState(headerNode, NO, ApolloAIBoxStateLoading, nil)) changed = YES;
@@ -2209,7 +2148,7 @@ static void ApolloAISuppressLinkSummary(NSString *fullName) {
     if (fullName.length == 0) return;
     [sPostInFlight removeObject:fullName];
     [sPostRequestIDs removeObjectForKey:fullName];
-    [sPostFailed removeObject:fullName];        // NOT an error — don't show the triangle
+    ApolloAIClearFailure(fullName, YES);        // NOT an error — don't show the triangle
     [sBothSummaryPosts removeObject:fullName];
     if (sEnableTapToSummarize) {
         // Tap-to-Summarize: the user explicitly tapped this card, so silently
@@ -2241,9 +2180,15 @@ static NSString *ApolloAIFriendlyError(NSError *error) {
         case 7:
             return @"The model declined to summarize this content.";
         case 8:
-            return @"This thread is too long to summarize on-device.";
+            return @"This thread is too long for the model to summarize.";
         case 10:
             return @"Summaries aren't available for this language yet.";
+        case 11: // cloud only: HTTP 401/402/403
+            return @"The AI provider rejected the request. Check your API key (and account credits) in Apollo AI settings.";
+        case 12: // cloud only: unreachable / bad request / bad model
+            return @"Couldn't reach the AI service. Check your connection and provider settings, then try again.";
+        case 13: // cloud only: reasoning consumed the whole response
+            return @"The model spent its entire response thinking instead of answering. Try a different model in Apollo AI settings.";
         default:
             break;
     }
@@ -2420,7 +2365,7 @@ static void ApolloAIScheduleCommentGeneration(UIViewController *vc) {
 
 static void ApolloAIScheduleGenerationTimeout(NSString *fullName, BOOL isPost, NSString *requestID) {
     if (fullName.length == 0 || requestID.length == 0) return;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kApolloAIGenerationTimeout * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ApolloAIGenerationTimeoutSeconds() * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         NSMutableSet *inFlight = isPost ? sPostInFlight : sCommentInFlight;
         NSMutableDictionary *requestIDs = isPost ? sPostRequestIDs : sCommentRequestIDs;
@@ -2438,8 +2383,7 @@ static void ApolloAIScheduleGenerationTimeout(NSString *fullName, BOOL isPost, N
             ApolloAISuppressLinkSummary(fullName);
             return;
         }
-        NSMutableSet *failed = isPost ? sPostFailed : sCommentFailed;
-        [failed addObject:fullName];
+        ApolloAIRecordFailure(fullName, isPost, @"This summary took too long. Reopen the post to try again.");
         ApolloAISetBoxStateOnMatchingHeaders(
             fullName, isPost, ApolloAIBoxStateError,
             @"This summary took too long. Reopen the post to try again.");
@@ -2759,8 +2703,8 @@ maximumResponseTokens:responseTokens
                         ApolloAISuppressLinkSummary(fullName);
                         return;
                     }
-                    [sPostFailed addObject:fullName];
                     NSString *msg = error ? ApolloAIFriendlyError(error) : @"The model returned an empty summary.";
+                    ApolloAIRecordFailure(fullName, YES, msg);
                     ApolloLog(@"[AISummary] link summary error: %@", error ? error.localizedDescription : @"(empty)");
                     ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateError, msg);
                     if (ApolloAIAnyHeaderExpanded(fullName, YES)) {
@@ -2873,7 +2817,9 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
     // device), so we attempt anyway and let a real generation error be the gate.
     NSInteger status = [bridge availabilityStatus];
     if (status == 4) {
-        ApolloLog(@"[AISummary] FoundationModels unavailable (status=4), skipping");
+        // On-device: FoundationModels framework absent (pre-iOS 26). Cloud:
+        // provider selected but not configured yet (no API key / base URL).
+        ApolloLog(@"[AISummary] backend %@ unavailable (status=4), skipping", sAISummaryProvider);
         return;
     }
     if (status != 0) {
@@ -3036,8 +2982,8 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
                                 }
                                 return;
                             }
-                            [sPostFailed addObject:fullName];
                             NSString *msg = error ? ApolloAIFriendlyError(error) : @"The model returned an empty summary.";
+                            ApolloAIRecordFailure(fullName, YES, msg);
                             ApolloLog(@"[AISummary] post summary error: %@", error ? error.localizedDescription : @"(empty)");
                             ApolloAISetBoxStateOnMatchingHeaders(fullName, YES, ApolloAIBoxStateError, msg);
                             if (ApolloAIAnyHeaderExpanded(fullName, YES)) {
@@ -3170,8 +3116,8 @@ static void ApolloAIGenerateForController(UIViewController *vc) {
                                 }
                                 return;
                             }
-                            [sCommentFailed addObject:fullName];
                             NSString *msg = error ? ApolloAIFriendlyError(error) : @"The model returned an empty summary.";
+                            ApolloAIRecordFailure(fullName, NO, msg);
                             ApolloLog(@"[AISummary] comment summary error: %@", error ? error.localizedDescription : @"(empty)");
                             ApolloAISetBoxStateOnMatchingHeaders(fullName, NO, ApolloAIBoxStateError, msg);
                             if (ApolloAIAnyHeaderExpanded(fullName, NO)) {
@@ -3295,8 +3241,8 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
         [sCommentInFlight removeObject:fullName];
         [sPostRequestIDs removeObjectForKey:fullName];
         [sCommentRequestIDs removeObjectForKey:fullName];
-        [sPostFailed removeObject:fullName];
-        [sCommentFailed removeObject:fullName];
+        ApolloAIClearFailure(fullName, YES);
+        ApolloAIClearFailure(fullName, NO);
         // Suppression is per-view, exactly like sPostFailed above: a link we hid
         // because it had no usable prose (or failed transiently — model still
         // downloading, a flaky network, a slow fetch that timed out) gets a fresh
@@ -3484,7 +3430,7 @@ static void ApolloAILogTableStructure(UIViewController *vc) {
     ApolloAIForceHeaderRemeasure(fullName);
 }
 
-- (id)layoutSpecThatFits:(struct ApolloAISizeRange)constrainedSize {
+- (id)layoutSpecThatFits:(struct ApolloTextureSizeRange)constrainedSize {
     id originalSpec = %orig;
     if (!sEnableAISummaries) return originalSpec;
     ApolloAILogLayoutChildrenOnce((id)self, originalSpec);

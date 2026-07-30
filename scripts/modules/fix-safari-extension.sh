@@ -8,7 +8,7 @@
 # The stock extension's "Automatic" mode redirected through openinapollo.com,
 # whose auto-open relies on an iOS Smart App Banner bound to the App Store
 # Apollo. A sideloaded build is not that app, so the banner never fires. We
-# overlay direct apollo:// redirect assets from safari-extension/.
+# overlay the Apollo Reborn Universal Link assets from safari-extension/.
 
 _SAFARI_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # modules/ lives under scripts/, so the repo root is two levels up.

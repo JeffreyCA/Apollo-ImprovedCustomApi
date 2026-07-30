@@ -8,6 +8,7 @@
 #import "ApolloDeletedCommentsData.h"
 #import "ApolloLinkPreviewCache.h"
 #import "ApolloLinkPreviewFetcher.h"
+#import "ApolloLinkPreviewShapeMemory.h"
 #import "ApolloBannedProfile.h"
 #import "ApolloUserProfileCache.h"
 #import "ApolloState.h"
@@ -134,6 +135,7 @@ static char kApolloLinkPreviewAreaKey;
 static char kApolloLinkPreviewContextMenuInstalledKey;
 static char kApolloLinkPreviewContextMenuInteractionKey;
 static char kApolloLinkPreviewURLKey;
+static char kApolloLinkPreviewSourceURLStringKey;
 static char kApolloLinkPreviewImageFallbackURLKey;
 static char kApolloLinkPreviewImageFallbackScheduledKey;
 static char kApolloLinkPreviewImageFallbackInFlightKey;
@@ -1244,6 +1246,12 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
                 // dead-mark suppresses further fetches, so repeats mean a
                 // race, and reflowing again would loop the row reload.
                 ApolloLPMarkImageURLDead(imageURL);
+                // The scrape found an og:image but the file 4xx's. The fetcher
+                // recorded this PAGE host as "imaged" on the strength of that
+                // URL — retract it, so a host that habitually advertises images
+                // it never serves stops getting hero placeholders. (hostCopy is
+                // the page host, not the image CDN's.)
+                [[ApolloLinkPreviewShapeMemory sharedMemory] recordHostAdvertisedImageWasDead:hostCopy];
                 ASDisplayNode *hostNode = (ASDisplayNode *)strongImageNode;
                 for (int hops = 0; hostNode && hops < 24; hops++) {
                     if ([NSStringFromClass([hostNode class]) containsString:@"LinkButtonNode"]) break;
@@ -2222,44 +2230,47 @@ static ApolloLPContext ApolloLPContextForMode(NSInteger mode, ApolloLinkPreview 
     return ApolloLPContextSelfText;
 }
 
-static NSMutableSet<NSString *> *ApolloLPCompactPlaceholderHosts(void) {
-    static NSMutableSet<NSString *> *hosts;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        hosts = [NSMutableSet setWithArray:@[
-            @"amctheatres.com",
-            @"doi.org",
-            @"journals.sagepub.com",
-            @"nature.com",
-            @"news18.com",
-            @"nuvioapp.space",
-            @"piie.com",
-            @"zerozero.pt"
-        ]];
-    });
-    return hosts;
-}
-
-static BOOL ApolloLPShouldUseCompactPlaceholder(NSURL *url) {
+// May an as-yet-unfetched URL's PLACEHOLDER reserve a hero-sized image box?
+//
+// Both directions cost the same to COMMIT — Texture re-queries the row height
+// either way, and there is no cheap path for one of them. The asymmetry that
+// matters is in DETECTION, and it is decisive:
+//
+//   guessed hero, ended compact — the compact card sits in a row still measured
+//       ~200pt too tall. Nothing can see that by looking: a card shorter than its
+//       cell is what a normal cell looks like. Only per-node bookkeeping
+//       (V20/V23) knows, and a row reload destroys the very node holding it. The
+//       user's recording shows the result: the final compact card stretched
+//       inside a stale hero row for >1.3s, on screen and motionless.
+//   guessed compact, ended hero — the hero card draws past the bottom of its
+//       row, and that IS detectable by looking: V18's stateless geometry check
+//       (ApolloLPRunOverflowHeightCheck) measures the overflow and re-arms on
+//       every didEnterVisibleState, so it converges without needing to have
+//       remembered anything.
+//
+// So a hero box may only be reserved on POSITIVE evidence that the image will be
+// there — never as a default. The wrong guess then lands in the direction the
+// module can actually see and repair.
+//
+// The first version of this fix kept hero as the default and tried to predict
+// compact from a per-host memory. It failed in the field for an
+// obvious-in-hindsight reason: the hosts that actually strand are paywalled news
+// sites (wsj.com and reuters.com 401, jn.pt 403) which DO serve og:image on
+// their free articles, so they never looked imageless — plus every host being
+// seen for the first time. Requiring positive evidence instead makes the failure
+// structurally impossible rather than merely less likely: only a host whose every
+// observed preview carried an image gets a hero placeholder, so the reliable hero
+// cards keep their skeleton and everything else starts compact and grows.
+//
+// Observations are deliberately NOT recorded from the layout path: they come
+// from the preview fetch completion (once per URL, in ApolloLinkPreviewFetcher)
+// and from the dead-image mark (once per image URL), so nothing here runs per
+// measure. The store also refuses to learn anything about x.com / twitter.com /
+// bsky.app, whose cards have a fixed shape.
+static BOOL ApolloLPHostReliablyHasPreviewImages(NSURL *url) {
     NSString *host = ApolloLPHost(url);
     if (host.length == 0) return NO;
-
-    @synchronized (ApolloLPCompactPlaceholderHosts()) {
-        if ([ApolloLPCompactPlaceholderHosts() containsObject:host]) return YES;
-        for (NSString *knownHost in ApolloLPCompactPlaceholderHosts()) {
-            if ([host hasSuffix:[@"." stringByAppendingString:knownHost]]) return YES;
-        }
-    }
-    return NO;
-}
-
-static void ApolloLPRememberCompactPlaceholderHost(NSURL *url) {
-    NSString *host = ApolloLPHost(url);
-    if (host.length == 0) return;
-
-    @synchronized (ApolloLPCompactPlaceholderHosts()) {
-        [ApolloLPCompactPlaceholderHosts() addObject:host];
-    }
+    return [[ApolloLinkPreviewShapeMemory sharedMemory] shapeForHost:host] == ApolloLPHostShapeImaged;
 }
 
 static id ApolloLPModelFromNodeIvar(ASDisplayNode *node, const char *ivarName) {
@@ -3470,6 +3481,64 @@ static void ApolloLPRenoteDroppedRowReload(ASDisplayNode *originNode, NSString *
     ApolloLPNoteRowReloadMissForNode(originNode, host);
 }
 
+static BOOL ApolloLPScrollViewIsInteracting(UIScrollView *scrollView) {
+    return scrollView.tracking || scrollView.dragging || scrollView.decelerating;
+}
+
+static void ApolloLPScheduleTableRowReloadWhenIdle(UITableView *tableView,
+                                                    NSIndexPath *indexPath,
+                                                    ASDisplayNode *originNode,
+                                                    NSString *host) {
+    __weak ASDisplayNode *weakOriginNode = originNode;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        ASDisplayNode *strongOriginNode = weakOriginNode;
+        if (!tableView.window) {
+            ApolloLPRenoteDroppedRowReload(strongOriginNode, host, indexPath.row);
+            return;
+        }
+        if (ApolloLPScrollViewIsInteracting(tableView)) {
+            ApolloLPScheduleTableRowReloadWhenIdle(tableView, indexPath, strongOriginNode, host);
+            return;
+        }
+        @try {
+            if (![[tableView indexPathsForVisibleRows] containsObject:indexPath]) {
+                ApolloLPRenoteDroppedRowReload(strongOriginNode, host, indexPath.row);
+                return;
+            }
+            [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+        } @catch (__unused NSException *exception) {
+        }
+    });
+}
+
+static void ApolloLPScheduleCollectionItemReloadWhenIdle(UICollectionView *collectionView,
+                                                          NSIndexPath *indexPath,
+                                                          ASDisplayNode *originNode,
+                                                          NSString *host) {
+    __weak ASDisplayNode *weakOriginNode = originNode;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        ASDisplayNode *strongOriginNode = weakOriginNode;
+        if (!collectionView.window) {
+            ApolloLPRenoteDroppedRowReload(strongOriginNode, host, indexPath.item);
+            return;
+        }
+        if (ApolloLPScrollViewIsInteracting(collectionView)) {
+            ApolloLPScheduleCollectionItemReloadWhenIdle(collectionView, indexPath, strongOriginNode, host);
+            return;
+        }
+        @try {
+            if (![[collectionView indexPathsForVisibleItems] containsObject:indexPath]) {
+                ApolloLPRenoteDroppedRowReload(strongOriginNode, host, indexPath.item);
+                return;
+            }
+            [collectionView performBatchUpdates:^{
+                [collectionView reloadItemsAtIndexPaths:@[indexPath]];
+            } completion:nil];
+        } @catch (__unused NSException *exception) {
+        }
+    });
+}
+
 static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDisplayNode *originNode, NSString *host) {
     // Hard convergence budget, keyed on the preview URL (falls back to host): every
     // reload path (V12 shrink heal, V18 overflow, V20 pending mark, V23 poll) funnels
@@ -3523,23 +3592,10 @@ static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDispla
             [attempts addObject:@(now)]; // burn budget only for a SCHEDULED reload
             NSString *hostCopy = [host copy];
             NSIndexPath *indexPathCopy = [indexPath copy];
-            __weak ASDisplayNode *weakOriginNode = originNode;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                @try {
-                    if (![[tableView indexPathsForVisibleRows] containsObject:indexPathCopy]) {
-                        ApolloLPRenoteDroppedRowReload(weakOriginNode, hostCopy, indexPathCopy.row);
-                        return;
-                    }
-                    // Reload ONLY the affected row. This used to also run a full-table
-                    // relayoutItems first, which re-lays out EVERY node synchronously on
-                    // main — on big threads that pinned the main thread for seconds per
-                    // healing card ("threads get very laggy" + the 0x8BADF00D scene-update
-                    // watchdog kill in #630 round 6). The single-row reload re-measures
-                    // this row's node from scratch, which is all the healer needs.
-                    [tableView reloadRowsAtIndexPaths:@[indexPathCopy] withRowAnimation:UITableViewRowAnimationNone];
-                } @catch (__unused NSException *exception) {
-                }
-            });
+            // Reload ONLY the affected row, after active scrolling settles. A
+            // reload during tracking/deceleration steals the frame budget and can
+            // perturb touch handling; cached metadata lets the row wait safely.
+            ApolloLPScheduleTableRowReloadWhenIdle(tableView, indexPathCopy, originNode, hostCopy);
             return YES;
         }
 
@@ -3551,21 +3607,7 @@ static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDispla
             [attempts addObject:@(now)]; // burn budget only for a SCHEDULED reload
             NSString *hostCopy = [host copy];
             NSIndexPath *indexPathCopy = [indexPath copy];
-            __weak ASDisplayNode *weakOriginNode = originNode;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                @try {
-                    if (![[collectionView indexPathsForVisibleItems] containsObject:indexPathCopy]) {
-                        ApolloLPRenoteDroppedRowReload(weakOriginNode, hostCopy, indexPathCopy.item);
-                        return;
-                    }
-                    // Single-item reload only — no full-table relayoutItems (see the
-                    // table branch above; that pinned main for seconds on big threads).
-                    [collectionView performBatchUpdates:^{
-                        [collectionView reloadItemsAtIndexPaths:@[indexPathCopy]];
-                    } completion:nil];
-                } @catch (__unused NSException *exception) {
-                }
-            });
+            ApolloLPScheduleCollectionItemReloadWhenIdle(collectionView, indexPathCopy, originNode, hostCopy);
             return YES;
         }
     }
@@ -4364,26 +4406,15 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
 }
 %end
 
-// Wide-spec probe: ASStackLayoutSpec's layout stack-allocates per child, so a
-// runaway children array (a re-append loop) would eat stack with no extra
-// frames. A legitimate comment body stays well under this.
-%hook ASStackLayoutSpec
-- (id)calculateLayoutThatFits:(struct CDStruct_90e057aa)constrainedSize {
-    NSArray *probeChildren = [(id)self respondsToSelector:@selector(children)] ? [(id)self children] : nil;
-    if (probeChildren.count >= 300) {
-        static CFAbsoluteTime sLastWideLog = 0;
-        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        if (sLastWideLog == 0 || now - sLastWideLog >= 10.0) {
-            sLastWideLog = now;
-            NSString *line = [NSString stringWithFormat:@"[StackGuard] wide ASStackLayoutSpec: children=%lu",
-                              (unsigned long)probeChildren.count];
-            ApolloLog(@"%@", line);
-            ApolloAppendLoginDiag(line);
-        }
-    }
-    return %orig;
-}
-%end
+// The wide-spec probe (an ASStackLayoutSpec.calculateLayoutThatFits hook that
+// counted children per spec) was removed: it ran for EVERY Texture stack layout
+// in the app — feeds compute thousands per second across the background layout
+// threads while scrolling — and a Time Profiler pass attributed a measurable
+// slice of scroll-time CPU to its respondsToSelector/children probing alone.
+// It was a purely diagnostic tripwire that never fired in the field; the
+// protective machinery (the main-stack exhaustion checks above and the safe
+// bail + scheduled relayout in LinkButtonNode.layoutSpecThatFits below) is
+// untouched and still catches the actual failure regardless of cause.
 // ======================== END stack-guard sentinel ========================
 
 %hook _TtC6Apollo14LinkButtonNode
@@ -4443,13 +4474,22 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
         }
     }
     NSString *urlString = ApolloGetLinkButtonNodeURLString(self);
-    NSURL *url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
-    ApolloLPPrefetchRedditUserProfileIfNeeded(url);
-
+    // Atomic association policies: this runs on Texture's background layout
+    // threads while main-thread paths (context-menu, row-reload bookkeeping)
+    // read the same keys — a nonatomic get can hand back a non-retained object
+    // that a concurrent replace is deallocating.
+    NSString *cachedURLString = objc_getAssociatedObject(self, &kApolloLinkPreviewSourceURLStringKey);
+    NSURL *url = objc_getAssociatedObject(self, &kApolloLinkPreviewURLKey);
+    if (![cachedURLString isEqualToString:urlString]) {
+        url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
+        objc_setAssociatedObject(self, &kApolloLinkPreviewSourceURLStringKey, urlString, OBJC_ASSOCIATION_COPY);
+        objc_setAssociatedObject(self, &kApolloLinkPreviewURLKey, url, OBJC_ASSOCIATION_RETAIN);
+    }
     if (ApolloLPAllModesDisabled()) {
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
         return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, %orig);
     }
+    ApolloLPPrefetchRedditUserProfileIfNeeded(url);
 
     if (!url) {
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
@@ -4517,8 +4557,16 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
         }
     }
     if (!cached) {
-        BOOL compactPlaceholder = selectedMode == ApolloLinkPreviewModeCompact || ApolloLPShouldUseCompactPlaceholder(url) || ApolloLPIsRedditUserProfileURL(url) || ApolloLPIsRedditSubredditURL(url);
-        ApolloLPContext placeholderContext = compactPlaceholder ? ApolloLPContextCompact : ApolloLPContextSelfText;
+        // Reserve a hero image box ONLY on positive evidence (see
+        // ApolloLPHostReliablyHasPreviewImages); otherwise start compact, because
+        // a compact placeholder can only ever grow and a hero one can strand.
+        // Bluesky posts are excluded from the inversion: their final card is
+        // pinned to the hero shape regardless of imagery (below), so a compact
+        // placeholder for them would be a guaranteed grow on every single card.
+        BOOL heroPlaceholder = selectedMode == ApolloLinkPreviewModeFull &&
+            !ApolloLPIsRedditUserProfileURL(url) && !ApolloLPIsRedditSubredditURL(url) &&
+            (ApolloLPIsBlueskyPostURL(url) || ApolloLPHostReliablyHasPreviewImages(url));
+        ApolloLPContext placeholderContext = heroPlaceholder ? ApolloLPContextSelfText : ApolloLPContextCompact;
         NSNumber *inFlight = objc_getAssociatedObject(self, &kApolloLinkPreviewFetchInFlightKey);
         if (![inFlight boolValue]) {
             objc_setAssociatedObject(self, &kApolloLinkPreviewFetchInFlightKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -4543,6 +4591,27 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
                     }
                 });
             }];
+        }
+        // ONCE per host per launch, off the hot path: which shape we reserved and
+        // on what evidence. PR #652 stripped the old placeholder-shape logging,
+        // which is why the only way to diagnose the last round of this bug from a
+        // user report was to film the screen. One line per host is nowhere near
+        // the per-measure volume that change was targeting.
+        {
+            static NSMutableSet *sLoggedShapeHosts; static dispatch_once_t once;
+            dispatch_once(&once, ^{ sLoggedShapeHosts = [NSMutableSet set]; });
+            BOOL shouldLog = NO;
+            @synchronized (sLoggedShapeHosts) {
+                if (host.length > 0 && ![sLoggedShapeHosts containsObject:host]) {
+                    [sLoggedShapeHosts addObject:host];
+                    shouldLog = YES;
+                }
+            }
+            if (shouldLog) {
+                ApolloLog(@"[LinkPreviews] placeholder shape=%@ host=%@ verdict=%ld",
+                          placeholderContext == ApolloLPContextCompact ? @"compact" : @"hero",
+                          host, (long)[[ApolloLinkPreviewShapeMemory sharedMemory] shapeForHost:host]);
+            }
         }
         NSString *placeholderVariant = ApolloLPVariant(area, selectedMode, placeholderContext, YES);
         ApolloLPMarkRenderSignatureIfChanged((ASDisplayNode *)self, placeholderVariant, ApolloLPRenderSignature(url, nil, placeholderVariant), host);
@@ -4606,11 +4675,14 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
         context = ApolloLPContextCompact;
     }
 
-    if (!isBlueskyPost && !isRedditUser && !isRedditSubreddit && displayPreview.imageIsFallbackIcon) {
-        ApolloLPRememberCompactPlaceholderHost(url);
-    } else if (!isBlueskyPost && !isRedditUser && !isRedditSubreddit && selectedMode == ApolloLinkPreviewModeFull && context == ApolloLPContextCompact) {
-        ApolloLPRememberCompactPlaceholderHost(url);
-    }
+    // (Host shape used to be learned here, from the render decision. That ran on
+    // every measure and, worse, taught the memory the wrong thing: a card
+    // rendered compact because its comment happened to hold 2+ links, or because
+    // the user picked Compact mode, is not evidence that the HOST is imageless.
+    // Observations now come from the preview fetch itself — see
+    // ApolloLinkPreviewFetcher's finishURL: and the dead-image mark in
+    // ApolloLPStartFallbackImageFetch — which is once per URL, off the layout
+    // path, and actually about the page.)
     NSString *finalVariant = ApolloLPVariant(area, selectedMode, context, NO);
     ApolloLPMarkRenderSignatureIfChanged((ASDisplayNode *)self, finalVariant, ApolloLPRenderSignature(url, displayPreview, finalVariant), host);
     id richSpec = isBlueskyPost
@@ -4800,6 +4872,11 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
 %ctor {
     sApolloLPRegisteredLinkNodes = [NSHashTable weakObjectsHashTable];
     sApolloLPRegisteredLinkNodesQueue = dispatch_queue_create("com.apollo.linkpreviews.nodes", DISPATCH_QUEUE_SERIAL);
+
+    // One-time, off-thread: derive host verdicts from previews we have already
+    // fetched, so an existing install knows on its first launch which of ITS
+    // hosts are imageless rather than re-learning each one via a stranded row.
+    [[ApolloLinkPreviewShapeMemory sharedMemory] primeFromPreviewCacheIfNeeded];
 
     [[NSNotificationCenter defaultCenter] addObserverForName:ApolloLinkPreviewModeDidChangeNotification
                                                       object:nil

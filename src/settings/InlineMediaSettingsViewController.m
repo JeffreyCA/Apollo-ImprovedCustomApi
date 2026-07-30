@@ -1,5 +1,6 @@
 #import "InlineMediaSettingsViewController.h"
 #import "ApolloCommon.h"
+#import "ApolloDirectChatWeb.h"
 #import "ApolloMediaAutoplay.h"
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
@@ -555,7 +556,7 @@ typedef NS_ENUM(NSInteger, ApolloIMSection) {
 
 typedef NS_ENUM(NSInteger, ApolloIMMasterRow) {
     ApolloIMMasterRowPreviews = 0,   // inline media in posts + comments
-    ApolloIMMasterRowChat,           // inline media in Chat / DMs
+    ApolloIMMasterRowChat,           // inline media in Apollo's native message threads
     ApolloIMMasterRowCount,
 };
 
@@ -725,6 +726,55 @@ typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
     }
 }
 
+// The message-media toggle is scoped to the threads Apollo draws ITSELF with
+// _TtC6Apollo28PrivateMessageViewController — one bubble UI serving three
+// surfaces: legacy Direct Chat (Reddit mirrors chat rooms into the old message
+// inbox as "[direct chat room]" items), ordinary private messages, and native
+// Moderator Mail conversations (same class; see its newModmailConversation /
+// currentModmailSendMode fields).
+//
+// Reddit's modern Chat / Modmail are authenticated web surfaces that render
+// their own media, so switching either on takes that surface out of this
+// setting's reach — hence the caveat sentence. It never empties the list
+// though: private messages are always drawn natively (they exist for API-key
+// and API-key-free accounts alike, /message/* being a routable keyless path),
+// so this toggle always still governs something and must stay switchable
+// rather than being forced off and greyed out when modern Chat is on.
+//
+// Both gates are the EFFECTIVE state, not the raw defaults: they already fold
+// in the iOS 16 floor and the forced-on behaviour for API-key-free accounts,
+// so a keyless account correctly sees the Chat + Moderator Mail caveat without
+// the switches themselves having been touched.
+static NSString *ApolloIMMessageMediaFooter(void) {
+    BOOL modernChat = ApolloModernChatShouldOpen();
+    BOOL modernModmail = ApolloModernModmailShouldOpen();
+
+    NSMutableArray<NSString *> *native = [NSMutableArray array];
+    if (!modernChat) [native addObject:@"Direct Chat"];
+    [native addObject:@"private messages"];
+    if (!modernModmail) [native addObject:@"Moderator Mail"];
+
+    NSString *nativeList = native.count == 3
+        ? [NSString stringWithFormat:@"%@, %@, and %@", native[0], native[1], native[2]]
+        : (native.count == 2
+            ? [NSString stringWithFormat:@"%@ and %@", native[0], native[1]]
+            : native.firstObject);
+
+    NSMutableString *footer = [NSMutableString stringWithFormat:
+        @"Inline Media Previews renders image, GIF, and video links inside post text and comments "
+        @"instead of leaving them as plain links. Inline Media in Messages does the same inside the "
+        @"message threads Apollo draws itself — %@.", nativeList];
+
+    if (modernChat || modernModmail) {
+        BOOL both = modernChat && modernModmail;
+        [footer appendFormat:@" Reddit's modern %@ %@ %@ own media, so this setting doesn't apply there.",
+            both ? @"Chat and Moderator Mail" : (modernChat ? @"Chat" : @"Moderator Mail"),
+            both ? @"render" : @"renders",
+            both ? @"their" : @"its"];
+    }
+    return footer;
+}
+
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     switch (section) {
         case ApolloIMSectionPreview:  return @"Preview";
@@ -737,7 +787,7 @@ typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     switch (section) {
         case ApolloIMSectionMaster:
-            return @"Inline Media Previews renders image, GIF, and video links inside post text and comments instead of leaving them as plain links. Inline Media in Chat does the same for direct messages.";
+            return ApolloIMMessageMediaFooter();
         case ApolloIMSectionOptions:
             return @"Tap to Play shows a paused GIF with a play button in the bottom corner — it plays that one GIF inline and becomes a pause button, and tapping the rest of the GIF opens the fullscreen viewer as usual. Never shows a static preview (tap opens the viewer). WiFi Only autoplays on WiFi and behaves like Tap to Play on cellular.";
         default:
@@ -760,7 +810,10 @@ typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
         }
         case ApolloIMSectionMaster:
             if (indexPath.row == ApolloIMMasterRowChat) {
-                return [self switchCellLabel:@"Inline Media in Chat"
+                // Deliberately NOT disabled when modern Chat/Modmail is on: those
+                // only take their own surface out of scope, and native private
+                // message threads always remain. See ApolloIMMessageMediaFooter.
+                return [self switchCellLabel:@"Inline Media in Messages"
                                           on:sEnableChatMedia
                                      enabled:YES
                                       action:@selector(chatMediaSwitchToggled:)];
@@ -825,10 +878,11 @@ typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
                   withRowAnimation:UITableViewRowAnimationNone];
 }
 
-// Master toggle for chat media (inline images/GIFs/emoji/snoomoji + working
-// media sends + tap-to-fullscreen). Open chats re-render their cells on next
-// display/scroll, so no immediate-refresh notification is needed. Independent
-// of the posts/comments inline toggle and of Show User Profile Pictures.
+// Master toggle for message-thread media (inline images/GIFs/emoji/snoomoji +
+// working media sends + tap-to-fullscreen) in every thread Apollo draws itself.
+// Open threads re-render their cells on next display/scroll, so no immediate-
+// refresh notification is needed. Independent of the posts/comments inline
+// toggle and of Show User Profile Pictures.
 - (void)chatMediaSwitchToggled:(UISwitch *)sw {
     sEnableChatMedia = sw.on;
     [[NSUserDefaults standardUserDefaults] setBool:sEnableChatMedia forKey:UDKeyEnableChatMedia];

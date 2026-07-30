@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "version": "3.5.0",
+  "headline": "What's New in Apollo Reborn",
+  "items": [
+    { "icon": "square.grid.2x2.fill", "title": "Gallery View", "subtitle": "Browse a subreddit's photos, GIFs, and videos in a beautiful media grid." },
+    { "icon": "gearshape.fill", "title": "Redesigned Settings", "subtitle": "A cleaner layout, plus search across every setting." },
+    { "icon": "person.crop.circle.fill", "title": "Redesigned Profiles", "subtitle": "Immersive banners and a fresh look for user and subreddit profiles." },
+    { "icon": "rosette", "title": "Badge Book", "subtitle": "See achievements and trophies right on a profile." },
+    { "icon": "key.fill", "title": "Bring Your Own AI Key", "subtitle": "Use your own API key to power AI features." },
+    { "icon": "chart.bar.fill", "title": "Native Polls", "subtitle": "Vote on and create polls without leaving the app." },
+    { "icon": "bubble.left.and.bubble.right.fill", "title": "Modern Chat & Modmail", "subtitle": "Use Reddit's current conversations without leaving Apollo." },
+    { "icon": "link.circle.fill", "title": "Open Reddit Links", "subtitle": "Send Safari links straight to any sideloaded Apollo build with Link Companion." }
+  ]
+}

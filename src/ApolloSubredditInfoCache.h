@@ -26,6 +26,20 @@ FOUNDATION_EXPORT NSString *ApolloSubredditFormattedMemberCount(NSInteger subscr
 @property(nonatomic) BOOL allowsImageComments; // uploaded images/gifs ("static"/"animated")
 @property(nonatomic) BOOL allowsGifComments;   // Giphy GIFs ("giphy")
 
+// Whether the signed-in user subscribes to this subreddit, from
+// `user_is_subscriber` on about.json. Deliberately an NSNumber so "we don't
+// know" (nil) stays distinct from "known not subscribed" (@NO): reddit only
+// returns the field on an AUTHENTICATED fetch, so it is absent whenever the
+// cache had no bearer token, and absent on entries cached before this field
+// was captured. Callers must treat nil as unknown, never as "not subscribed".
+@property(nonatomic, strong, nullable) NSNumber *userIsSubscriber;
+// The (lowercased) username of the account whose authenticated fetch produced
+// userIsSubscriber. The flag is ACCOUNT-SPECIFIC while the rest of this entry
+// is shared and persists for days, so callers must treat the flag as unknown
+// unless this matches the currently active account. Absent on entries cached
+// before this field existed — which correctly reads as unknown.
+@property(nonatomic, copy, nullable) NSString *userIsSubscriberAccount;
+
 - (instancetype)initWithSubredditName:(NSString *)subredditName
                           displayName:(NSString *)displayName
                             aboutText:(NSString *)aboutText

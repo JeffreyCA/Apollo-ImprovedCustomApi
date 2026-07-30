@@ -9,6 +9,7 @@
 #import "UserDefaultConstants.h"
 
 static char kApolloSubredditIndexTableKey;
+static char kApolloSubredditIndexNotSubredditsTableKey;
 static char kApolloSubredditIndexOverlayKey;
 static char kApolloSubredditIndexLoggedKey;
 static char kApolloSubredditStarProxyKey;
@@ -95,6 +96,7 @@ static CGRect ApolloSubredditIndexProxyFrameForCell(UITableViewCell *cell, UICon
 static void ApolloSubredditIndexApplyRedditListCellPolishOnce(UITableViewCell *cell, BOOL skipLeadingMarginClamp);
 static void ApolloSubredditIndexPrepareCellForDisplay(UITableView *tableView, UITableViewCell *cell, NSIndexPath *indexPath);
 static void ApolloSubredditIndexApplyMultiredditChildStyleIfNeeded(UITableView *tableView, UITableViewCell *cell, NSIndexPath *indexPath);
+static Class ApolloSubredditIndexRedditListViewControllerClass(void);
 
 static UIViewController *ApolloSubredditIndexOwningViewController(UIView *view) {
     UIResponder *responder = view;
@@ -149,7 +151,27 @@ static BOOL ApolloSubredditIndexOwningTitleLooksLikeSubreddits(UITableView *tabl
 static BOOL ApolloSubredditIndexShouldInspectTable(UITableView *tableView) {
     if (!tableView) return NO;
     if ([objc_getAssociatedObject(tableView, &kApolloSubredditIndexTableKey) boolValue]) return YES;
-    return ApolloSubredditIndexOwningTitleLooksLikeSubreddits(tableView);
+    if ([objc_getAssociatedObject(tableView, &kApolloSubredditIndexNotSubredditsTableKey) boolValue]) return NO;
+
+    id owner = (id)tableView.dataSource;
+    if (!owner) owner = (id)tableView.delegate;
+    Class redditListClass = ApolloSubredditIndexRedditListViewControllerClass();
+    if (owner && redditListClass && ![owner isKindOfClass:redditListClass]) {
+        objc_setAssociatedObject(tableView, &kApolloSubredditIndexNotSubredditsTableKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return NO;
+    }
+
+    UIViewController *vc = ApolloSubredditIndexOwningViewController(tableView);
+    NSString *title = vc.navigationItem.title ?: vc.title;
+    if ([title isEqualToString:@"Subreddits"]) return YES;
+    // Do not cache the early detached/no-title state: Apollo can install the
+    // title after the first table layout. Once an owning controller has a
+    // different non-empty title, this table will never become the subreddit
+    // index, so every later scroll-time layout becomes one association read.
+    if (vc && title.length > 0) {
+        objc_setAssociatedObject(tableView, &kApolloSubredditIndexNotSubredditsTableKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return NO;
 }
 
 static NSArray<NSString *> *ApolloSubredditIndexTitlesForTable(UITableView *tableView) {
