@@ -8,19 +8,14 @@
 
 static NSString *const kLinkCompanionTestFlightURL = @"https://testflight.apple.com/join/afRc2ztK";
 
-// TODO: add the "Open in Apollo" Shortcut's iCloud link here.
 // The Link Companion screen was redesigned (hero + How it works + Shortcut
 // cards), and the "Get the Shortcut" card is the one-tap install of the
 // signer-independent Shortcut for people browsing in a non-Safari browser
 // (Chrome/Firefox/Edge/Brave/...), where the Safari extension and Universal
-// Link path don't apply. It stays HIDDEN until this is filled in, so shipping
-// it empty is safe.
-//
-// To enable it: build the shortcut once from the Shortcuts app (README →
-// "Build the Open in Apollo shortcut"), then Share → Copy iCloud Link and paste
-// the resulting https://www.icloud.com/shortcuts/<id> URL here. Tapping the card
-// then opens the Shortcuts app straight to an "Add Shortcut" prompt.
-static NSString *const kLinkCompanionShortcutURL = @"";
+// Link path don't apply. Tapping the card opens the Shortcuts app straight to
+// an "Add Shortcut" prompt.
+static NSString *const kLinkCompanionShortcutURL =
+    @"https://www.icloud.com/shortcuts/0f3e932177f442f786150809690e670d";
 
 static BOOL LinkCompanionShortcutConfigured(void) {
     return [kLinkCompanionShortcutURL hasPrefix:@"https://www.icloud.com/shortcuts/"];
