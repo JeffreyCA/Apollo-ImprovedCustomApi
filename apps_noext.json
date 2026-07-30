@@ -2,7 +2,7 @@
   "apps": [
     {
       "bundleIdentifier": "com.christianselig.Apollo",
-      "buildVersion": "293",
+      "buildVersion": "294",
       "developerName": "Christian Selig (& Apollo-Reborn contributors)",
       "iconURL": "https://apolloreborn.app/assets/icon.png",
       "tintColor": "#F0542D",
@@ -41,6 +41,15 @@
       "name": "Apollo for Reddit - No Extensions",
       "subtitle": "Apollo-Reborn build without app extensions",
       "versions": [
+        {
+          "version": "3.5.0",
+          "buildVersion": "294",
+          "marketingVersion": "3.5.0",
+          "date": "2026-07-30T17:03:26Z",
+          "localizedDescription": "No Extensions build.\n\nFeatures\n- Add Gallery View to subreddit menus for browsing photos, GIFs, and videos in a filterable waterfall grid with fullscreen paging, sorting, sharing, and media saving (#746: @icpryde)\n- Revamp Settings with task-focused sections, unified deep-linkable search, clearer support flows, better organization, and both always-visible and pull-to-search access (#637, #695, #758: @jordanearle, @icpryde)\n- Redesign profile and subreddit headers with immersive artwork, prominent avatars, themed stat cards, configurable New/Classic/Native densities, and much faster Social Links (#696, #697, #722, #758: @jordanearle)\n- Add a Badge Book to profiles for browsing Reddit achievements and the restored classic Trophy Case (#689: @jordanearle)\n- Add native Reddit Polls voting and creation behind an opt-in setting, with a confirmation step before casting irreversible votes (#643, #735: @jordanearle, @DeltAndy123)\n- Add modern Reddit Chat and Moderator Mail for API-Key-Free accounts while letting API-key accounts choose independently between Reddit's current experience and Apollo's legacy clients (#658, #740, #750: @icpryde)\n- Expand Apollo AI Summaries with bring-your-own-key OpenRouter, Gemini, and custom OpenAI-compatible providers plus controls for minimum post length and summary detail (#674, #687: @nickclyde, @icpryde)\n- Add a universal Open Reddit Links in Apollo flow using the Link Companion app, so Safari links can open any sideloaded or rebranded Apollo build without the custom-scheme confirmation (#685: @jordanearle)\n- Redesign the Liquid Glass App Icon picker with featured icons, browsable icon-pack cards, and more reliable active-icon detection on sideloaded installs (#668: @DeltAndy123)\n- Enable ProMotion in patched IPAs and improve scrolling smoothness by reducing main-thread work across feeds, translations, previews, avatars, and Liquid Glass navigation (#724, #731: @jordanearle, @icpryde)\n- Add Hide Feed Descriptions to compact the built-in Home, Popular, All, and Moderator rows in the subreddit list (#692: @icpryde)\n- Show a live character counter for the 25-character Message Moderators subject limit (#751: @icpryde)\n\nFixes\n- Make Imgur images, animated media, and albums work without a personal API key, with additional fallbacks for networks where Imgur is blocked (#729: @jordanearle)\n- Fix API-Key-Free posting so post flair opens correctly, user-flair emoji limits match each subreddit, newly posted comments show your flair, and multi-image galleries belong to the correct account (#669, #670, #733: @icpryde)\n- Fix rich link previews reserving full-card space for image-less sites and prevent oversized preview images from overflowing the main-thread stack during row layout (#686, #741: @icpryde)\n- Fix inline comment images shrinking after collapse and expand, and keep translated comments stable while votes update (#675, #676: @icpryde)\n- Fix modern Moderator Mail exposing half-rendered transitions or flickering the subreddit icon while typing a reply (#749: @icpryde)\n- Fix Apollo Reborn Settings backgrounds, cards, and separators retaining stale colors after appearance or theme changes (#734: @DeltAndy123)\n- Polish Liquid Glass navigation by keeping titles centered between button groups, preserving edge fades during swipe-back, balancing trailing pill padding, and keeping menu controls visible throughout their morph animation (#671, #693, #730, #753: @icpryde)\n- Fix the Info Row comment action firing a haptic or opening comments when its touch becomes a scroll gesture (#739: @icpryde)",
+          "downloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.5.0/Apollo-Reborn-3.5.0-NOEXTENSIONS.ipa",
+          "size": 83535776
+        },
         {
           "version": "3.4.2",
           "buildVersion": "293",
@@ -105,12 +114,12 @@
           "size": 79225506
         }
       ],
-      "version": "3.4.2",
-      "marketingVersion": "3.4.2",
-      "versionDate": "2026-07-17T17:35:23Z",
-      "versionDescription": "No Extensions build.\n\nFeatures\r\n- Add the Synthwave Liquid Glass app icon to the in-app icon picker (#663: @IllIIllIllIllII)\r\n\r\nFixes\r\n- Fix the Reddit account being signed out after force-quitting or backgrounding the app on sideloaded installs — the account's keychain item was written with the wrong protection class and became invisible to Apollo's own read, which then overwrote it as empty; the item is now created correctly, repaired in place on affected devices, and served from an enumeration fallback so the account survives (#677, #681, #682: @jordanearle, @DeltAndy123)\r\n- Play more short-clip host links inline: add streama.in and streamff.link aliases and follow the moved dubz and streamff CDNs (#665: @icpryde)\r\n- Speed up loading of the full Community Highlights list (#661: @icpryde)\r\n- Fix Video Hold Speed staying stuck at the hold speed after scrubbing a fullscreen video (#667: @icpryde)\r\n- Fix the Mod Queue filter menu anchoring to the wrong spot on Liquid Glass builds (#679: @JeffreyCA)\r\n- Fix Search tab suggestion padding and the Random Subreddit icon's stroke weight (#680: @icpryde)\r\n- Fix the Apollo Classic Liquid Glass icon on iOS 27 (#666: @IllIIllIllIllII)",
-      "downloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.4.2/Apollo-Reborn-3.4.2-NOEXTENSIONS.ipa",
-      "size": 80327497
+      "version": "3.5.0",
+      "marketingVersion": "3.5.0",
+      "versionDate": "2026-07-30T17:03:26Z",
+      "versionDescription": "No Extensions build.\n\nFeatures\n- Add Gallery View to subreddit menus for browsing photos, GIFs, and videos in a filterable waterfall grid with fullscreen paging, sorting, sharing, and media saving (#746: @icpryde)\n- Revamp Settings with task-focused sections, unified deep-linkable search, clearer support flows, better organization, and both always-visible and pull-to-search access (#637, #695, #758: @jordanearle, @icpryde)\n- Redesign profile and subreddit headers with immersive artwork, prominent avatars, themed stat cards, configurable New/Classic/Native densities, and much faster Social Links (#696, #697, #722, #758: @jordanearle)\n- Add a Badge Book to profiles for browsing Reddit achievements and the restored classic Trophy Case (#689: @jordanearle)\n- Add native Reddit Polls voting and creation behind an opt-in setting, with a confirmation step before casting irreversible votes (#643, #735: @jordanearle, @DeltAndy123)\n- Add modern Reddit Chat and Moderator Mail for API-Key-Free accounts while letting API-key accounts choose independently between Reddit's current experience and Apollo's legacy clients (#658, #740, #750: @icpryde)\n- Expand Apollo AI Summaries with bring-your-own-key OpenRouter, Gemini, and custom OpenAI-compatible providers plus controls for minimum post length and summary detail (#674, #687: @nickclyde, @icpryde)\n- Add a universal Open Reddit Links in Apollo flow using the Link Companion app, so Safari links can open any sideloaded or rebranded Apollo build without the custom-scheme confirmation (#685: @jordanearle)\n- Redesign the Liquid Glass App Icon picker with featured icons, browsable icon-pack cards, and more reliable active-icon detection on sideloaded installs (#668: @DeltAndy123)\n- Enable ProMotion in patched IPAs and improve scrolling smoothness by reducing main-thread work across feeds, translations, previews, avatars, and Liquid Glass navigation (#724, #731: @jordanearle, @icpryde)\n- Add Hide Feed Descriptions to compact the built-in Home, Popular, All, and Moderator rows in the subreddit list (#692: @icpryde)\n- Show a live character counter for the 25-character Message Moderators subject limit (#751: @icpryde)\n\nFixes\n- Make Imgur images, animated media, and albums work without a personal API key, with additional fallbacks for networks where Imgur is blocked (#729: @jordanearle)\n- Fix API-Key-Free posting so post flair opens correctly, user-flair emoji limits match each subreddit, newly posted comments show your flair, and multi-image galleries belong to the correct account (#669, #670, #733: @icpryde)\n- Fix rich link previews reserving full-card space for image-less sites and prevent oversized preview images from overflowing the main-thread stack during row layout (#686, #741: @icpryde)\n- Fix inline comment images shrinking after collapse and expand, and keep translated comments stable while votes update (#675, #676: @icpryde)\n- Fix modern Moderator Mail exposing half-rendered transitions or flickering the subreddit icon while typing a reply (#749: @icpryde)\n- Fix Apollo Reborn Settings backgrounds, cards, and separators retaining stale colors after appearance or theme changes (#734: @DeltAndy123)\n- Polish Liquid Glass navigation by keeping titles centered between button groups, preserving edge fades during swipe-back, balancing trailing pill padding, and keeping menu controls visible throughout their morph animation (#671, #693, #730, #753: @icpryde)\n- Fix the Info Row comment action firing a haptic or opening comments when its touch becomes a scroll gesture (#739: @icpryde)",
+      "downloadURL": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/download/v1.15.11_3.5.0/Apollo-Reborn-3.5.0-NOEXTENSIONS.ipa",
+      "size": 83535776
     }
   ],
   "news": [
@@ -185,6 +194,15 @@
       "tintColor": "#F0542D",
       "imageURL": "https://raw.githubusercontent.com/Apollo-Reborn/Apollo-Reborn/main/img/lg-icons.jpg",
       "url": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/tag/v1.15.11_3.4.2"
+    },
+    {
+      "title": "Apollo v1.15.11 / Apollo-Reborn v3.5.0 (No Extensions)",
+      "identifier": "v1.15.11_3.5.0",
+      "caption": "Apollo-Reborn update available",
+      "date": "2026-07-30T17:03:26Z",
+      "tintColor": "#F0542D",
+      "imageURL": "https://raw.githubusercontent.com/Apollo-Reborn/Apollo-Reborn/main/img/lg-icons.jpg",
+      "url": "https://github.com/Apollo-Reborn/Apollo-Reborn/releases/tag/v1.15.11_3.5.0"
     }
   ],
   "iconURL": "https://apolloreborn.app/assets/icon.png",
