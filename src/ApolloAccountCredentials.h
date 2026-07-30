@@ -74,6 +74,11 @@ NSString *ApolloEffectiveRedirectURI(void);
 // ([[RDKClient sharedClient] currentUser].username), or nil if none/unavailable.
 NSString * _Nullable ApolloActiveAccountUsername(void);
 
+// Invalidate the cached active username after either side of Apollo's persisted
+// account selection changes. Tweak.xm calls this from narrowly-scoped
+// NSUserDefaults write hooks for RedditAccounts2 / CurrentRedditAccountIndex.
+void ApolloInvalidateActiveAccountUsernameCache(void);
+
 // The live RDKClient selected by Apollo's AccountManager, or nil when there is
 // no signed-in account. Do not use RDKClient.sharedClient for account mutations:
 // that singleton is Apollo's application-only/bootstrap client and normally has

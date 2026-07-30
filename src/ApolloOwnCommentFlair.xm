@@ -75,9 +75,9 @@ static char kApolloOwnFlairSynthesizedKey;
 
 #pragma mark - Active account identity (cheap)
 
-// ApolloActiveAccountUsername() unarchives RedditAccounts2 on every call, which
-// is far too heavy for a funnel that fires for every model in every listing.
-// RDKClient holds the same identity in memory; memoize it briefly on top of that.
+// Prefer RDKClient's live identity in this especially hot per-model funnel.
+// ApolloActiveAccountUsername() is now cached too, but a live hit avoids even
+// its defaults/cache bookkeeping and keeps this path independent of disk state.
 static NSString *ApolloOwnFlairActiveUsername(void) {
     static NSString *cached = nil;
     static NSTimeInterval cachedAt = 0;

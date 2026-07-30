@@ -932,6 +932,54 @@ static void ApolloLogAccountSnapshot(NSString *reason) {
     ApolloLoginDiag(@"[AccountBlobGroups] %@ | %@", reason, ApolloAccountsBlobGroupBreakdown());
 }
 
+// Account snapshots reconstruct Apollo's archived RDKClient objects and inspect
+// the keychain. They are diagnostics, never launch-critical work. Keep them on
+// a serial utility queue after lifecycle delivery so they cannot block the main
+// thread or contend with CFNetwork/Foundation initialization from the dylib
+// constructor (the rootless 0x8BADF00D launch watchdog in #718).
+static dispatch_queue_t ApolloAccountSnapshotQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // Construct with the target atomically. Retargeting an already-active
+        // queue via dispatch_set_target_queue traps on newer libdispatch
+        // runtimes (including the Xcode 27 simulator).
+        queue = dispatch_queue_create_with_target(
+            "com.apolloreborn.account-snapshots",
+            DISPATCH_QUEUE_SERIAL_WITH_AUTORELEASE_POOL,
+            dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    });
+    return queue;
+}
+
+// Lifecycle notifications are delivered on the main queue (registration below).
+// A cold launch may emit willEnterForeground immediately before didBecomeActive;
+// skip that redundant first snapshot and take one delayed post-activation
+// baseline instead. Warm foreground transitions still retain both diagnostics.
+static BOOL sApolloAccountSnapshotCompletedFirstActivation = NO;
+
+static void ApolloScheduleAccountSnapshot(NSString *reason) {
+    NSString *capturedReason = [reason copy] ?: @"unknown";
+    BOOL didBecomeActive = [capturedReason isEqualToString:@"didBecomeActive"];
+    if (!sApolloAccountSnapshotCompletedFirstActivation &&
+        [capturedReason isEqualToString:@"willEnterForeground"]) {
+        return;
+    }
+    BOOL firstActivation = didBecomeActive && !sApolloAccountSnapshotCompletedFirstActivation;
+    if (didBecomeActive) sApolloAccountSnapshotCompletedFirstActivation = YES;
+
+    // didBecomeActive is delivered while the process-launch watchdog can still
+    // be sensitive on older devices. Give Apollo's first frame and native
+    // CFNetwork setup a clear runway before diagnostics reconstruct archived
+    // AFHTTPSessionManager objects. Warm lifecycle snapshots are already
+    // outside cold launch and can run immediately.
+    NSTimeInterval delay = firstActivation ? 5.0 : 0.0;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                   ApolloAccountSnapshotQueue(), ^{
+        ApolloLogAccountSnapshot(capturedReason);
+    });
+}
+
 // Fixes apollo-reborn#567: an iCloud-synced Valet item can miss a plain read
 // (errSecItemNotFound) but still collide on add (errSecDuplicateItem), and
 // AccountManager wipes the account instead of retrying. Broaden reads to include
@@ -1392,6 +1440,73 @@ static NSArray *const blockedUrls = @[
 
 // Cache storing subreddit list source URLs -> response body
 static NSCache<NSString *, NSString *> *subredditListCache;
+// Source URLs currently being refreshed. Access is confined to the serial
+// source queue; the cache itself is NSCache and is safe to read from Apollo's
+// request paths while NSURLSession completions populate it in the background.
+static NSMutableSet<NSString *> *subredditListFetchesInFlight;
+
+static NSArray<NSString *> *ApolloSubredditListLines(NSString *content) {
+    if (content.length == 0) return @[];
+    NSArray<NSString *> *lines =
+        [content componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
+    return [lines filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
+}
+
+static dispatch_queue_t ApolloSubredditSourceQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create_with_target(
+            "com.apolloreborn.subreddit-sources",
+            DISPATCH_QUEUE_SERIAL_WITH_AUTORELEASE_POOL,
+            dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    });
+    return queue;
+}
+
+// Warm a remote subreddit-list source without ever waiting for it. Callers use
+// the last cached value (or their local/native fallback) immediately. The
+// in-flight set prevents a burst of resource/request hooks from starting the
+// same download repeatedly while the first fetch is outstanding. Crucially,
+// URL/session/request construction also happens on the utility queue: merely
+// creating NSURLSession.sharedSession can initialize CFNetwork, so doing that
+// synchronously from the bundle-resource hook or dylib constructor would leave
+// CFNetwork work on Apollo's launch-critical main thread even without a wait.
+static void ApolloRefreshSubredditListSourceAsync(NSString *source) {
+    if (source.length == 0) return;
+    NSString *capturedSource = [source copy];
+    dispatch_async(ApolloSubredditSourceQueue(), ^{
+        NSURL *url = [NSURL URLWithString:capturedSource];
+        NSString *key = url.absoluteString;
+        if (!url || key.length == 0 || [subredditListCache objectForKey:key]) return;
+        if ([subredditListFetchesInFlight containsObject:key]) return;
+        [subredditListFetchesInFlight addObject:key];
+
+        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
+                                                               cachePolicy:NSURLRequestUseProtocolCachePolicy
+                                                           timeoutInterval:8.0];
+        [[[NSURLSession sharedSession] dataTaskWithRequest:request
+                                        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSString *content = data.length > 0
+                ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
+                : nil;
+            NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]]
+                ? (NSHTTPURLResponse *)response
+                : nil;
+            if (!error && http.statusCode == 200 && ApolloSubredditListLines(content).count > 0) {
+                [subredditListCache setObject:content forKey:key];
+                ApolloLog(@"[RandomSources] Refreshed %@", key);
+            } else {
+                ApolloLog(@"[RandomSources] Refresh failed for %@: HTTP %ld error=%@",
+                          key, (long)http.statusCode,
+                          error.localizedDescription ?: @"invalid/empty response");
+            }
+            dispatch_async(ApolloSubredditSourceQueue(), ^{
+                [subredditListFetchesInFlight removeObject:key];
+            });
+        }] resume];
+    });
+}
 // Replace Reddit API client ID. Resolved per-account (see
 // ApolloAccountCredentials.{h,m}): a pending add-account choice, else the
 // active account's stored override, else the global default — instead of
@@ -1610,9 +1725,12 @@ static const char kARCompletion = '\0';
             - Return plist as a new file
         */
         NSMutableDictionary *fallbackDict = [[NSDictionary dictionaryWithContentsOfURL:url] mutableCopy];
-        // Select random array from dict
+        // Select a random bundled list as an immediate fallback. Never make a
+        // resource lookup depend on the network: this hook runs on Apollo's
+        // launch/UI path.
         NSArray *fallbackKeys = [fallbackDict allKeys];
-        NSString *randomFallbackKey = fallbackKeys[arc4random_uniform((uint32_t)[fallbackKeys count])];
+        if (fallbackKeys.count == 0) return url;
+        NSString *randomFallbackKey = fallbackKeys[arc4random_uniform((uint32_t)fallbackKeys.count)];
         NSArray *fallbackArray = fallbackDict[randomFallbackKey];
         if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowRandNsfw]) {
             fallbackArray = [fallbackArray arrayByAddingObject:@"RandNSFW"];
@@ -1627,36 +1745,20 @@ static const char kARCompletion = '\0';
             return [NSURL fileURLWithPath:tempPath];
         };
 
-        __block NSError *error = nil;
-        __block NSString *subredditListContent = nil;
-
-        // Try fetching the subreddit list from the source URL, with timeout of 5 seconds
-        // FIXME: Blocks the UI during the splash screen
-        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-        NSURLRequest *request = [NSURLRequest requestWithURL:subredditListURL cachePolicy:NSURLRequestUseProtocolCachePolicy timeoutInterval:5.0];
-        NSURLSession *session = [NSURLSession sharedSession];
-        NSURLSessionDataTask *dataTask = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *e) {
-            if (e) {
-                error = e;
-            } else {
-                NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
-                if (httpResponse.statusCode == 200) {
-                    subredditListContent = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-                }
-            }
-            dispatch_semaphore_signal(semaphore);
-        }];
-        [dataTask resume];
-        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-
-        // Use fallback dict if there was an error
-        if (error || ![subredditListContent length]) {
+        // Constructor prefetch normally has this ready. On a cold/slow network,
+        // return the bundled fallback now and let the async refresh benefit the
+        // next lookup instead of freezing the splash screen.
+        NSString *cacheKey = subredditListURL.absoluteString;
+        NSString *subredditListContent = cacheKey.length > 0
+            ? [subredditListCache objectForKey:cacheKey]
+            : nil;
+        if (subredditListContent.length == 0) {
+            ApolloRefreshSubredditListSourceAsync(sTrendingSubredditsSource);
             return writeDict(fallbackDict);
         }
 
         // Parse into array
-        NSMutableArray<NSString *> *subreddits = [[subredditListContent componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]] mutableCopy];
-        [subreddits filterUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
+        NSMutableArray<NSString *> *subreddits = [ApolloSubredditListLines(subredditListContent) mutableCopy];
         if (subreddits.count == 0) {
             return writeDict(fallbackDict);
         }
@@ -2048,30 +2150,21 @@ static void ApolloImgurRetryAlbumViaTextProxy(NSString *albumID,
         return %orig;
     }
 
-    NSError *error = nil;
     // Check cache
     NSString *subredditListContent = [subredditListCache objectForKey:subredditListURL.absoluteString];
-    bool updateCache = false;
 
     if (!subredditListContent) {
-        // Not in cache, so fetch subreddit list from source URL
-        // FIXME: The current implementation blocks the UI, but the prefetching in initializeRandomSources() should help
-        subredditListContent = [NSString stringWithContentsOfURL:subredditListURL encoding:NSUTF8StringEncoding error:&error];
-        if (error) {
-            return %orig;
-        }
-        updateCache = true;
-    }
-
-    // Parse the content into a list of strings
-    NSArray<NSString *> *subreddits = [subredditListContent componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-    subreddits = [subreddits filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
-    if (subreddits.count == 0) {
+        // The constructor normally prewarms this cache. If it did not finish
+        // (offline/slow network), preserve Apollo's native request for this tap
+        // and refresh asynchronously for the next one.
+        ApolloRefreshSubredditListSourceAsync(subredditListURL.absoluteString);
         return %orig;
     }
 
-    if (updateCache) {
-        [subredditListCache setObject:subredditListContent forKey:subredditListURL.absoluteString];
+    // Parse the content into a list of strings
+    NSArray<NSString *> *subreddits = ApolloSubredditListLines(subredditListContent);
+    if (subreddits.count == 0) {
+        return %orig;
     }
 
     // Pick a random subreddit, then modify the request URL to use that subreddit, simulating a 302 redirect in Reddit's original API behaviour
@@ -2844,6 +2937,41 @@ static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *contr
 }
 %end
 
+// ApolloActiveAccountUsername() caches the expensive RedditAccounts2 decode.
+// Invalidate it synchronously at the two persisted selection write points so a
+// request made immediately after an account switch cannot observe the previous
+// identity. These hooks are deliberately key-scoped and otherwise transparent;
+// they compose with the theme/auto-hide NSUserDefaults hooks in other modules.
+static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
+    return [key isEqualToString:@"RedditAccounts2"] ||
+           [key isEqualToString:@"CurrentRedditAccountIndex"];
+}
+
+%hook NSUserDefaults
+
+- (void)setObject:(id)value forKey:(NSString *)key {
+    %orig;
+    if (ApolloDefaultsKeyChangesActiveAccount(key)) {
+        ApolloInvalidateActiveAccountUsernameCache();
+    }
+}
+
+- (void)setInteger:(NSInteger)value forKey:(NSString *)key {
+    %orig;
+    if (ApolloDefaultsKeyChangesActiveAccount(key)) {
+        ApolloInvalidateActiveAccountUsernameCache();
+    }
+}
+
+- (void)removeObjectForKey:(NSString *)key {
+    %orig;
+    if (ApolloDefaultsKeyChangesActiveAccount(key)) {
+        ApolloInvalidateActiveAccountUsernameCache();
+    }
+}
+
+%end
+
 // Reddit API can returns "error" as a dict (e.g. {"reason":"UNAUTHORIZED",...})
 // instead of a numeric code. Multiple Apollo code paths call [dict[@"error"] integerValue]
 // on the response, including unhookable block invokes. Adding integerValue to NSDictionary
@@ -2858,33 +2986,19 @@ static void ApolloInstallNotificationsUnavailableOverlay(UIViewController *contr
 
 // Pre-fetches random subreddit lists in background
 static void initializeRandomSources() {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSArray *sources = @[sRandNsfwSubredditsSource, sRandomSubredditsSource];
-        for (NSString *source in sources) {
-            if (![source length]) {
-                continue;
-            }
-            NSURL *subredditListURL = [NSURL URLWithString:source];
-            NSError *error = nil;
-            NSString *subredditListContent = [NSString stringWithContentsOfURL:subredditListURL encoding:NSUTF8StringEncoding error:&error];
-            if (error) {
-                continue;
-            }
-
-            NSArray<NSString *> *subreddits = [subredditListContent componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
-            subreddits = [subreddits filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
-            if (subreddits.count == 0) {
-                continue;
-            }
-
-            [subredditListCache setObject:subredditListContent forKey:subredditListURL.absoluteString];
-        }
-    });
+    // Trending uses the same cache as Random/RandNSFW. Starting all three
+    // downloads here makes the launch-time resource hook a cache-only lookup.
+    for (NSString *source in @[sRandNsfwSubredditsSource ?: @"",
+                               sRandomSubredditsSource ?: @"",
+                               sTrendingSubredditsSource ?: @""]) {
+        ApolloRefreshSubredditListSourceAsync(source);
+    }
 }
 
 // MARK: - Constructor
 %ctor {
     subredditListCache = [NSCache new];
+    subredditListFetchesInFlight = [NSMutableSet set];
 
     NSDictionary *defaultValues = @{UDKeyBlockAnnouncements: @YES,
                                     UDKeyEnableFLEX: @NO,
@@ -3552,8 +3666,8 @@ static void initializeRandomSources() {
 
     // Login-persistence diagnostics: snapshot where the account lives at each lifecycle
     // transition so a warm sign-out (wiped while only backgrounded — the "signed out by the
-    // time I got to the store" reports) is pinned to an event and a storage layer. Cheap and
-    // low-frequency; cross-references with the [KeychainTrace] write sizes.
+    // time I got to the store" reports) is pinned to an event and a storage layer. Snapshot
+    // work is scheduled off-main because it decodes archived clients and reads the keychain.
     NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
     NSDictionary<NSNotificationName, NSString *> *snapshotEvents = @{
         UIApplicationDidBecomeActiveNotification:   @"didBecomeActive",
@@ -3564,11 +3678,11 @@ static void initializeRandomSources() {
     for (NSNotificationName name in snapshotEvents) {
         NSString *reason = snapshotEvents[name];
         [nc addObserverForName:name object:nil queue:[NSOperationQueue mainQueue]
-                    usingBlock:^(NSNotification *note) { ApolloLogAccountSnapshot(reason); }];
+                    usingBlock:^(NSNotification *note) { ApolloScheduleAccountSnapshot(reason); }];
     }
-    // Session boundary in the persistent buffer so a force-quit + relaunch is legible, followed
-    // by a baseline snapshot of the on-disk state at launch (before AccountManager loads).
+    // A session boundary is safe in the constructor because it does no account
+    // decoding. The first full snapshot arrives from didBecomeActive, after
+    // Apollo/CFNetwork have finished launch initialization.
     NSString *appVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
     ApolloLoginDiag(@"===== launch (Apollo %@, tweak %@) =====", appVersion, @TWEAK_VERSION);
-    ApolloLogAccountSnapshot(@"ctor");
 }
