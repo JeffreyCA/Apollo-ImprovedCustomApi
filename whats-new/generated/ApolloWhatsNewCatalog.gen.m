@@ -18,14 +18,14 @@ static const ApolloWhatsNewReleaseEntry kWhatsNewReleases[] = {
 };
 
 static const ApolloWhatsNewItemEntry kWhatsNewItems[] = {
+    { "3.5.0", "square.grid.2x2.fill", "Gallery View", "Browse a subreddit's photos, GIFs, and videos in a beautiful media grid." },
     { "3.5.0", "gearshape.fill", "Redesigned Settings", "A cleaner layout, plus search across every setting." },
     { "3.5.0", "person.crop.circle.fill", "Redesigned Profiles", "Immersive banners and a fresh look for user and subreddit profiles." },
     { "3.5.0", "rosette", "Badge Book", "See achievements and trophies right on a profile." },
     { "3.5.0", "key.fill", "Bring Your Own AI Key", "Use your own API key to power AI features." },
     { "3.5.0", "chart.bar.fill", "Native Polls", "Vote on and create polls without leaving the app." },
-    { "3.5.0", "bubble.left.and.bubble.right.fill", "Native Chat", "A modern chat experience, built right in." },
-    { "3.5.0", "app.badge", "New Icon Picker", "Browse and apply app icons in a redesigned picker." },
-    { "3.5.0", "star.circle.fill", "Reddit Awards", "Give and see awards on posts and comments." },
+    { "3.5.0", "bubble.left.and.bubble.right.fill", "Modern Chat & Modmail", "Use Reddit's current conversations without leaving Apollo." },
+    { "3.5.0", "link.circle.fill", "Open Reddit Links", "Send Safari links straight to any sideloaded Apollo build with Link Companion." },
 };
 
 static NSString *S(const char *value) { return [NSString stringWithUTF8String:value]; }
