@@ -176,6 +176,8 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloFeedTextPostThumbnails.xm \
     $(SRC_DIR)/ApolloTweetBuddy.xm \
 	$(SRC_DIR)/ApolloVisionOSFix.xm \
+    $(SRC_DIR)/ApolloVisionOSHover.xm \
+    $(SRC_DIR)/ApolloVisionOSMultiwindow.xm \
     $(SRC_DIR)/ApolloWebAuthViewController.m \
     $(SRC_DIR)/ApolloWebJSON.m \
     $(SRC_DIR)/ApolloWebJSONIdentity.xm \
