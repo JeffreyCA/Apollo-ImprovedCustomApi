@@ -19,12 +19,18 @@ static const NSInteger kCloudErrorContextWindow = 8;
 static const NSInteger kCloudErrorAuth = 11;
 static const NSInteger kCloudErrorService = 12;
 static const NSInteger kCloudErrorReasoningOnly = 13;
+static const NSInteger kCloudErrorModelUnavailable = 14;
+static const NSInteger kCloudErrorQuota = 15;
+static const NSUInteger kCloudMaxBufferedErrorBytes = 64 * 1024;
 
 #pragma mark - Provider configuration
 
 NSString *ApolloAICloudDefaultModelForProvider(NSString *provider) {
-    if ([provider isEqualToString:@"openrouter"]) return @"meta-llama/llama-3.3-70b-instruct:free";
-    if ([provider isEqualToString:@"gemini"]) return @"gemini-2.5-flash";
+    // Provider-maintained/current targets avoid pinning users to a free model
+    // variant that can disappear without notice. OpenRouter's router selects
+    // from its live free pool; Gemini 3.6 Flash is the current stable Flash ID.
+    if ([provider isEqualToString:@"openrouter"]) return @"openrouter/free";
+    if ([provider isEqualToString:@"gemini"]) return @"gemini-3.6-flash";
     return nil; // custom: no sensible default, the user must name a model
 }
 
@@ -71,6 +77,7 @@ static NSURL *CloudEndpointURL(void) {
 
 @interface ApolloAICloudRequest : NSObject
 @property (nonatomic, copy) NSString *identifier;
+@property (nonatomic, copy) NSString *provider;
 @property (nonatomic, strong) NSURLSessionDataTask *task;
 @property (nonatomic, strong) NSURLRequest *request;         // kept for the single internal retry
 @property (nonatomic, strong) NSMutableString *accumulated;  // streamed content so far
@@ -82,6 +89,15 @@ static NSURL *CloudEndpointURL(void) {
 @property (nonatomic, copy) NSString *finishReason;       // finish_reason from the final chunk, if any
 @property (nonatomic, assign) BOOL retried;
 @property (nonatomic, assign) BOOL finished;
+// Privacy-safe wire diagnostics. These record shapes/counts only — never the
+// API key, prompt text, response text, or full request/response bodies.
+@property (nonatomic, assign) NSInteger attempt;
+@property (nonatomic, assign) NSUInteger receivedByteCount;
+@property (nonatomic, assign) NSUInteger dataCallbackCount;
+@property (nonatomic, assign) NSUInteger sseLineCount;
+@property (nonatomic, assign) NSUInteger contentChunkCount;
+@property (nonatomic, copy) NSString *responseMIMEType;
+@property (nonatomic, copy) NSString *generationIdentifier;
 @property (nonatomic, copy) void (^onPartial)(NSString *partial);
 @property (nonatomic, copy) void (^onComplete)(NSString *final, NSError *error);
 @end
@@ -180,6 +196,7 @@ maximumResponseTokens:(NSInteger)maximumResponseTokens
     NSString *apiKey = CloudAPIKey();
     NSURL *endpoint = CloudEndpointURL();
     NSString *model = ApolloAICloudEffectiveModel();
+    NSString *provider = [sAISummaryProvider copy];
     if (apiKey.length == 0 || !endpoint || model.length == 0) {
         // Normally unreachable (availabilityStatus gates first), but guard anyway.
         NSError *error = [NSError errorWithDomain:ApolloAICloudBridgeErrorDomain
@@ -260,13 +277,17 @@ maximumResponseTokens:(NSInteger)maximumResponseTokens
 
         ApolloAICloudRequest *state = [[ApolloAICloudRequest alloc] init];
         state.identifier = identifier;
+        state.provider = provider;
         state.request = request;
         state.accumulated = [NSMutableString string];
         state.lineBuffer = [NSMutableData data];
         state.onPartial = onPartial;
         state.onComplete = onComplete;
         [self startTaskForState:state];
-        ApolloLog(@"[AICloud] request %@ started (provider=%@ model=%@)", identifier, sAISummaryProvider, model);
+        ApolloLog(@"[AICloud][wire] request %@ started provider=%@ model=%@ host=%@ promptChars=%lu instructionChars=%lu maxTokens=%ld bodyBytes=%lu",
+                  identifier, provider, model, endpoint.host ?: @"?",
+                  (unsigned long)text.length, (unsigned long)instructions.length,
+                  (long)tokenBudget, (unsigned long)body.length);
     });
 }
 
@@ -277,9 +298,18 @@ maximumResponseTokens:(NSInteger)maximumResponseTokens
     state.httpStatus = 0;
     state.retryAfterHeader = nil;
     state.errorBody = nil;
+    state.attempt += 1;
+    state.receivedByteCount = 0;
+    state.dataCallbackCount = 0;
+    state.sseLineCount = 0;
+    state.contentChunkCount = 0;
+    state.responseMIMEType = nil;
+    state.generationIdentifier = nil;
     [state.lineBuffer setLength:0];
     _requestsByIdentifier[state.identifier] = state;
     _requestsByTask[@(task.taskIdentifier)] = state;
+    ApolloLog(@"[AICloud][wire] request %@ attempt=%ld task=%lu resume",
+              state.identifier, (long)state.attempt, (unsigned long)task.taskIdentifier);
     [task resume];
 }
 
@@ -301,7 +331,10 @@ maximumResponseTokens:(NSInteger)maximumResponseTokens
                                          code:code
                                      userInfo:@{NSLocalizedDescriptionKey: message ?: @"unknown error"}];
     if (code != kCloudErrorCancelled) {
-        ApolloLog(@"[AICloud] request %@ failed (code=%ld): %@", state.identifier, (long)code, message);
+        // Provider text is intentionally excluded: error bodies can echo keys,
+        // request fragments, or other service-specific sensitive data.
+        ApolloLog(@"[AICloud] request %@ failed provider=%@ code=%ld",
+                  state.identifier, state.provider ?: @"?", (long)code);
     }
     dispatch_async(dispatch_get_main_queue(), ^{ onComplete(nil, error); });
 }
@@ -326,22 +359,37 @@ maximumResponseTokens:(NSInteger)maximumResponseTokens
 
 #pragma mark Error mapping
 
-// Extracts a human-readable message from an OpenAI-style error body:
+// Extracts a human-readable message from an OpenAI-style error object:
 // {"error": {"message": "...", ...}} (string and nested-dict variants).
-static NSString *CloudErrorMessageFromBody(NSData *body) {
-    if (body.length == 0) return nil;
-    id json = [NSJSONSerialization JSONObjectWithData:body options:0 error:NULL];
-    if (![json isKindOfClass:[NSDictionary class]]) {
-        NSString *raw = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
-        return raw.length > 0 && raw.length <= 300 ? raw : nil;
+// Gemini sometimes wraps that object in a one-element top-level array, even
+// though its successful OpenAI-compat responses are ordinary dictionaries.
+static NSString *CloudErrorMessageFromJSONObject(id json) {
+    if ([json isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)json) {
+            NSString *message = CloudErrorMessageFromJSONObject(item);
+            if (message.length > 0) return message;
+        }
+        return nil;
     }
+    if (![json isKindOfClass:[NSDictionary class]]) return nil;
     id error = ((NSDictionary *)json)[@"error"];
     if ([error isKindOfClass:[NSString class]]) return error;
     if ([error isKindOfClass:[NSDictionary class]]) {
         id message = ((NSDictionary *)error)[@"message"];
         if ([message isKindOfClass:[NSString class]]) return message;
     }
+    id message = ((NSDictionary *)json)[@"message"];
+    if ([message isKindOfClass:[NSString class]]) return message;
     return nil;
+}
+
+static NSString *CloudErrorMessageFromBody(NSData *body) {
+    if (body.length == 0) return nil;
+    id json = [NSJSONSerialization JSONObjectWithData:body options:0 error:NULL];
+    NSString *message = CloudErrorMessageFromJSONObject(json);
+    if (message.length > 0) return message;
+    NSString *raw = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
+    return raw.length > 0 && raw.length <= 300 ? raw : nil;
 }
 
 static BOOL CloudMessageSuggestsContextOverflow(NSString *message) {
@@ -350,6 +398,41 @@ static BOOL CloudMessageSuggestsContextOverflow(NSString *message) {
         if ([message localizedCaseInsensitiveContainsString:needle]) return YES;
     }
     return NO;
+}
+
+static BOOL CloudMessageSuggestsAuthProblem(NSString *message) {
+    if (message.length == 0) return NO;
+    for (NSString *needle in @[@"api key", @"authentication", @"unauthorized", @"forbidden", @"billing", @"credits"]) {
+        if ([message localizedCaseInsensitiveContainsString:needle]) return YES;
+    }
+    return NO;
+}
+
+static BOOL CloudMessageSuggestsUnavailableModel(NSString *message) {
+    if (message.length == 0) return NO;
+    BOOL mentionsModel = [message localizedCaseInsensitiveContainsString:@"model"];
+    if (mentionsModel) {
+        for (NSString *needle in @[@"not found", @"not available", @"unavailable", @"does not exist",
+                                    @"unsupported", @"invalid", @"retired", @"deprecated", @"no endpoints"]) {
+            if ([message localizedCaseInsensitiveContainsString:needle]) return YES;
+        }
+    }
+    return [message localizedCaseInsensitiveContainsString:@"no endpoints found"];
+}
+
+static NSInteger CloudMappedErrorCode(NSInteger status, NSString *message, NSString *provider) {
+    if (status == 401 || status == 402 || status == 403 || CloudMessageSuggestsAuthProblem(message)) {
+        return kCloudErrorAuth;
+    }
+    if (status == 400 && CloudMessageSuggestsContextOverflow(message)) {
+        return kCloudErrorContextWindow;
+    }
+    if ((status == 404 && ![provider isEqualToString:@"custom"]) ||
+        CloudMessageSuggestsUnavailableModel(message)) {
+        return kCloudErrorModelUnavailable;
+    }
+    if (status == 429) return kCloudErrorQuota;
+    return kCloudErrorService;
 }
 
 - (void)handleHTTPFailureForState:(ApolloAICloudRequest *)state {
@@ -361,14 +444,7 @@ static BOOL CloudMessageSuggestsContextOverflow(NSString *message) {
         [self retryState:state];
         return;
     }
-    NSInteger code;
-    if (status == 401 || status == 402 || status == 403) {
-        code = kCloudErrorAuth;
-    } else if (status == 400 && CloudMessageSuggestsContextOverflow(message)) {
-        code = kCloudErrorContextWindow;
-    } else {
-        code = kCloudErrorService;
-    }
+    NSInteger code = CloudMappedErrorCode(status, message, state.provider);
     [self finishState:state final:nil errorCode:code message:message];
 }
 
@@ -422,6 +498,13 @@ static NSString *CloudVisibleTextFromRaw(NSString *raw) {
 // (reasoning-stripped) text, or a specific failure when nothing visible came.
 - (void)finishStreamForState:(ApolloAICloudRequest *)state {
     NSString *visible = CloudVisibleTextFromRaw(state.accumulated);
+    ApolloLog(@"[AICloud][wire] request %@ stream-finished attempt=%ld http=%ld mime=%@ bytes=%lu callbacks=%lu sseLines=%lu contentChunks=%lu rawChars=%lu visibleChars=%lu finishReason=%@ generation=%@",
+              state.identifier, (long)state.attempt, (long)state.httpStatus,
+              state.responseMIMEType ?: @"?", (unsigned long)state.receivedByteCount,
+              (unsigned long)state.dataCallbackCount, (unsigned long)state.sseLineCount,
+              (unsigned long)state.contentChunkCount, (unsigned long)state.accumulated.length,
+              (unsigned long)visible.length, state.finishReason ?: @"(none)",
+              state.generationIdentifier ?: @"(none)");
     if (visible.length > 0) {
         [self finishState:state final:visible errorCode:0 message:nil];
     } else if (state.accumulated.length > 0 || [state.finishReason isEqualToString:@"length"]) {
@@ -439,6 +522,7 @@ static NSString *CloudVisibleTextFromRaw(NSString *raw) {
 - (void)processSSELine:(NSString *)line forState:(ApolloAICloudRequest *)state {
     if (line.length == 0 || [line hasPrefix:@":"]) return; // keep-alive comment
     if (![line hasPrefix:@"data:"]) return;
+    state.sseLineCount += 1;
     NSString *payload = [[line substringFromIndex:5] stringByTrimmingCharactersInSet:
                          [NSCharacterSet whitespaceCharacterSet]];
     if ([payload isEqualToString:@"[DONE]"]) {
@@ -457,9 +541,8 @@ static NSString *CloudVisibleTextFromRaw(NSString *raw) {
             ? chunkError : (((NSDictionary *)chunkError)[@"message"] ?: @"provider error");
         NSInteger providerCode = [chunkError isKindOfClass:[NSDictionary class]]
             ? [((NSDictionary *)chunkError)[@"code"] integerValue] : 0;
-        BOOL authProblem = providerCode == 401 || providerCode == 402 || providerCode == 403;
         [self finishState:state final:nil
-                errorCode:(authProblem ? kCloudErrorAuth : kCloudErrorService)
+                errorCode:CloudMappedErrorCode(providerCode, [message description], state.provider)
                   message:[message description]];
         return;
     }
@@ -474,6 +557,7 @@ static NSString *CloudVisibleTextFromRaw(NSString *raw) {
     // Note: delta.reasoning / delta.reasoning_details / delta.reasoning_content
     // are deliberately ignored — chain-of-thought is never user-visible.
     if (![content isKindOfClass:[NSString class]] || [(NSString *)content length] == 0) return; // role-only chunk
+    state.contentChunkCount += 1;
     [state.accumulated appendString:content];
 
     if (state.onPartial) {
@@ -498,7 +582,18 @@ didReceiveResponse:(NSURLResponse *)response
         NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
         state.httpStatus = http.statusCode;
         state.retryAfterHeader = http.allHeaderFields[@"Retry-After"];
+        state.responseMIMEType = response.MIMEType;
+        id generationID = http.allHeaderFields[@"X-Generation-Id"];
+        if ([generationID isKindOfClass:[NSString class]]) state.generationIdentifier = generationID;
         if (http.statusCode != 200) state.errorBody = [NSMutableData data];
+        ApolloLog(@"[AICloud][wire] request %@ response attempt=%ld task=%lu http=%ld mime=%@ expectedBytes=%lld retryAfter=%@ generation=%@",
+                  state.identifier, (long)state.attempt, (unsigned long)dataTask.taskIdentifier,
+                  (long)http.statusCode, response.MIMEType ?: @"?", response.expectedContentLength,
+                  state.retryAfterHeader ?: @"(none)", state.generationIdentifier ?: @"(none)");
+    } else {
+        ApolloLog(@"[AICloud][wire] request %@ response attempt=%ld task=%lu non-HTTP class=%@",
+                  state.identifier, (long)state.attempt, (unsigned long)dataTask.taskIdentifier,
+                  NSStringFromClass(response.class));
     }
     completionHandler(NSURLSessionResponseAllow);
 }
@@ -506,9 +601,16 @@ didReceiveResponse:(NSURLResponse *)response
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data {
     ApolloAICloudRequest *state = _requestsByTask[@(dataTask.taskIdentifier)];
     if (!state || state.finished) return;
+    state.receivedByteCount += data.length;
+    state.dataCallbackCount += 1;
 
     if (state.httpStatus != 200) {
-        [state.errorBody appendData:data]; // buffered whole for error extraction
+        // Error payloads should be tiny JSON objects. Bound an untrusted custom
+        // endpoint so a large HTML/error stream cannot grow memory indefinitely.
+        NSUInteger remaining = state.errorBody.length < kCloudMaxBufferedErrorBytes
+            ? kCloudMaxBufferedErrorBytes - state.errorBody.length : 0;
+        NSUInteger length = MIN(remaining, data.length);
+        if (length > 0) [state.errorBody appendBytes:data.bytes length:length];
         return;
     }
 
@@ -537,6 +639,10 @@ didReceiveResponse:(NSURLResponse *)response
     if (!state || state.finished) return;
 
     if (error) {
+        ApolloLog(@"[AICloud][wire] request %@ completed attempt=%ld task=%lu networkError domain=%@ code=%ld bytes=%lu callbacks=%lu",
+                  state.identifier, (long)state.attempt, (unsigned long)task.taskIdentifier,
+                  error.domain, (long)error.code, (unsigned long)state.receivedByteCount,
+                  (unsigned long)state.dataCallbackCount);
         if (error.code == NSURLErrorCancelled && [error.domain isEqualToString:NSURLErrorDomain]) {
             [self finishState:state final:nil errorCode:kCloudErrorCancelled message:@"cancelled"];
         } else {
@@ -547,6 +653,13 @@ didReceiveResponse:(NSURLResponse *)response
         return;
     }
     if (state.httpStatus != 200) {
+        NSString *providerMessage = CloudErrorMessageFromBody(state.errorBody);
+        NSInteger mappedCode = CloudMappedErrorCode(state.httpStatus, providerMessage, state.provider);
+        ApolloLog(@"[AICloud][wire] request %@ completed attempt=%ld task=%lu HTTP-failure status=%ld mappedCode=%ld mime=%@ bytes=%lu callbacks=%lu parsedMessage=%d",
+                  state.identifier, (long)state.attempt, (unsigned long)task.taskIdentifier,
+                  (long)state.httpStatus, (long)mappedCode, state.responseMIMEType ?: @"?",
+                  (unsigned long)state.receivedByteCount, (unsigned long)state.dataCallbackCount,
+                  providerMessage.length > 0);
         [self handleHTTPFailureForState:state];
         return;
     }
