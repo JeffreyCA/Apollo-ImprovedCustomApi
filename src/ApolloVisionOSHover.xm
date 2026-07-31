@@ -268,6 +268,29 @@ static BOOL ApolloViewVisibleInWindow(UIView *view) {
     return NO;
 }
 
+static BOOL ApolloViewIsWithin(UIView *view, UIView *ancestor) {
+    for (UIView *v = view; v; v = v.superview) {
+        if (v == ancestor) return YES;
+    }
+    return NO;
+}
+
+// The topmost modally presented view in a window, or nil. A page/form sheet
+// (the iPad idiom visionOS compatibility runs) keeps the presenting view in the
+// window, so feed cells behind it stay visible to the pass; ghosts, appended to
+// the window last, would otherwise glow on top of a compose/share/settings
+// sheet. Targets not within this view are suppressed while it is up, so a
+// presented sheet with its own Texture content still ghosts but the feed behind
+// does not.
+static UIView *ApolloWindowPresentedView(UIWindow *window) {
+    UIViewController *presented = nil;
+    for (UIViewController *vc = window.rootViewController; vc.presentedViewController;
+         vc = vc.presentedViewController) {
+        presented = vc.presentedViewController;
+    }
+    return presented.viewIfLoaded;
+}
+
 // Top-of-window bars that float OVER the feed (the Liquid Glass build renders
 // the Posts/Inbox/Search tab bar and the nav bar at the top, so scrolled rows
 // slide underneath them). Their items glow natively, but a row ghost is a
@@ -432,9 +455,13 @@ static void ApolloGhostLayoutPass(NSArray<UIView *> *targets,
     // Row ghosts yield the top-bar band to the bars (whose items glow
     // natively); control ghosts ARE the bar items, so they are never clipped.
     CGFloat topClip = controls ? 0.0 : ApolloTopOverlayBottom(window);
+    // While a sheet is presented, only its own content ghosts — the feed behind
+    // it is suppressed so no glow lands on top of the sheet.
+    UIView *presentedView = ApolloWindowPresentedView(window);
     NSUInteger used = 0;
     for (UIView *target in targets) {
         if (target.window != window || target.bounds.size.height < 8.0) continue;
+        if (presentedView && !ApolloViewIsWithin(target, presentedView)) continue;
         if (!ApolloViewVisibleInWindow(target)) continue;
         if (!ApolloGhostScrollerSettled(target, now)) continue;
         CGRect frame = [target convertRect:target.bounds toView:window];

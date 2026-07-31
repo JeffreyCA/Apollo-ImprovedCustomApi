@@ -88,19 +88,11 @@ static UIWindowScene *ApolloForegroundWindowScene(void) {
     return fallback;
 }
 
-static UIWindow *ApolloKeyWindow(void) {
-    for (UIWindow *window in ApolloAllWindows()) {
-        if (window.isKeyWindow) return window;
-    }
-    return nil;
-}
-
-// Reproduce the current window in a new scene. Apollo's SceneDelegate does not
+// Reproduce a scene's window in a new scene. Apollo's SceneDelegate does not
 // implement -stateRestorationActivityForScene:, so this rides the
-// scene.userActivity fallback (Apollo's own handoff activity); nil activity
+// scene.userActivity fallback (Apollo's own handoff activity); a nil result
 // opens a fresh window.
-static NSUserActivity *ApolloCurrentStateActivity(void) {
-    UIWindowScene *scene = ApolloForegroundWindowScene();
+static NSUserActivity *ApolloStateActivityForScene(UIWindowScene *scene) {
     if (!scene) return nil;
     id<UISceneDelegate> delegate = scene.delegate;
     if ([delegate respondsToSelector:@selector(stateRestorationActivityForScene:)]) {
@@ -108,6 +100,10 @@ static NSUserActivity *ApolloCurrentStateActivity(void) {
         if (activity) return activity;
     }
     return scene.userActivity;
+}
+
+static NSUserActivity *ApolloCurrentStateActivity(void) {
+    return ApolloStateActivityForScene(ApolloForegroundWindowScene());
 }
 
 static void ApolloOpenWindow(NSUserActivity *activity) {
@@ -420,48 +416,77 @@ static void ApolloOpenDeepLinkInNewWindow(NSURL *url) {
     dispatch_once(&onceToken, ^{ shared = [[ApolloVisionOSWindowButtonTarget alloc] init]; });
     return shared;
 }
-- (void)duplicate:(__unused id)sender {
-    ApolloOpenWindow(ApolloCurrentStateActivity());
+// Duplicates the sender's OWN window, so each window's button reproduces that
+// window rather than whichever scene is foreground.
+- (void)duplicate:(id)sender {
+    UIWindowScene *scene = nil;
+    if ([sender isKindOfClass:[UIView class]]) scene = ((UIView *)sender).window.windowScene;
+    ApolloOpenWindow(ApolloStateActivityForScene(scene ?: ApolloForegroundWindowScene()));
 }
 @end
 
-static UIButton *gApolloWindowButton = nil;
+// One button per window (weak keys, purged with the window), mirroring the
+// per-window hover ghost pools. A single shared button placed on the key window
+// would hop between scenes as focus changed, leaving the unfocused window
+// without one — the case this feature exists for.
+static NSMapTable<UIWindow *, UIButton *> *gApolloWindowButtons = nil;
+
+// The content window of a scene: its first normal-level window with a root view
+// controller (skips keyboard / alert overlay windows).
+static UIWindow *ApolloContentWindow(UIWindowScene *scene) {
+    for (UIWindow *window in scene.windows) {
+        if (window.rootViewController && !window.hidden &&
+            window.windowLevel == UIWindowLevelNormal) {
+            return window;
+        }
+    }
+    return nil;
+}
 
 // Bottom-left: the top-right corner is Apollo's own overflow button. Left as a
 // stock UIButton with no hover style of ours — UIKit gives buttons their own
 // automatic gaze treatment.
-static void ApolloPlaceWindowButton(void) {
-    UIWindow *target = ApolloKeyWindow();
-    if (!target) return;
-
-    if (!gApolloWindowButton) {
-        UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-        UIImageSymbolConfiguration *config =
-            [UIImageSymbolConfiguration configurationWithPointSize:17.0
-                                                            weight:UIImageSymbolWeightSemibold];
-        [button setImage:[UIImage systemImageNamed:@"plus.rectangle.on.rectangle"
-                                 withConfiguration:config]
-                forState:UIControlStateNormal];
-        button.tintColor = [UIColor whiteColor];
-        button.backgroundColor = [UIColor colorWithWhite:0.15 alpha:0.85];
-        button.layer.cornerRadius = 22.0;
-        button.accessibilityLabel = @"Duplicate Window";
-        [button addTarget:[ApolloVisionOSWindowButtonTarget shared]
-                   action:@selector(duplicate:)
-         forControlEvents:UIControlEventTouchUpInside];
-        gApolloWindowButton = button;
-    }
-
-    if (gApolloWindowButton.superview != target) [target addSubview:gApolloWindowButton];
-    [target bringSubviewToFront:gApolloWindowButton];
-    gApolloWindowButton.frame =
-        CGRectMake(16.0,
-                   target.bounds.size.height - 44.0 - target.safeAreaInsets.bottom - 16.0,
-                   44.0, 44.0);
+static UIButton *ApolloMakeWindowButton(void) {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIImageSymbolConfiguration *config =
+        [UIImageSymbolConfiguration configurationWithPointSize:17.0
+                                                        weight:UIImageSymbolWeightSemibold];
+    [button setImage:[UIImage systemImageNamed:@"plus.rectangle.on.rectangle"
+                             withConfiguration:config]
+            forState:UIControlStateNormal];
+    button.tintColor = [UIColor whiteColor];
+    button.backgroundColor = [UIColor colorWithWhite:0.15 alpha:0.85];
+    button.layer.cornerRadius = 22.0;
+    button.accessibilityLabel = @"Duplicate Window";
+    [button addTarget:[ApolloVisionOSWindowButtonTarget shared]
+               action:@selector(duplicate:)
+     forControlEvents:UIControlEventTouchUpInside];
+    return button;
 }
 
-// Apollo replaces its window's contents freely, so the button is re-asserted on
-// a slow timer rather than added once.
+// Apollo replaces window contents freely, so the buttons are re-asserted on a
+// slow timer rather than added once.
+static void ApolloPlaceWindowButtons(void) {
+    if (!gApolloWindowButtons) gApolloWindowButtons = [NSMapTable weakToStrongObjectsMapTable];
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        UIWindow *target = ApolloContentWindow((UIWindowScene *)scene);
+        if (!target) continue;
+
+        UIButton *button = [gApolloWindowButtons objectForKey:target];
+        if (!button) {
+            button = ApolloMakeWindowButton();
+            [gApolloWindowButtons setObject:button forKey:target];
+        }
+        if (button.superview != target) [target addSubview:button];
+        [target bringSubviewToFront:button];
+        button.frame =
+            CGRectMake(16.0,
+                       target.bounds.size.height - 44.0 - target.safeAreaInsets.bottom - 16.0,
+                       44.0, 44.0);
+    }
+}
+
 static void ApolloStartWindowButton(void) {
     [[NSNotificationCenter defaultCenter]
         addObserverForName:UIApplicationDidBecomeActiveNotification
@@ -471,7 +496,7 @@ static void ApolloStartWindowButton(void) {
         static dispatch_once_t onceToken;
         dispatch_once(&onceToken, ^{
             [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(__unused NSTimer *timer) {
-                ApolloPlaceWindowButton();
+                ApolloPlaceWindowButtons();
             }];
         });
     }];
