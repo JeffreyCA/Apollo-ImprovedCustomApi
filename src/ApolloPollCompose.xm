@@ -35,6 +35,48 @@ static id ApolloPollComposeIvar(id object, const char *name) {
     return ivar ? object_getIvar(object, ivar) : nil;
 }
 
+// Swift Optional<Array<Dictionary<String, Any>>> and Optional<Dictionary<…>>
+// store their bridged heap object in the first word. ComposePostViewController
+// does not expose ObjC getters for either flairOptions or selectedFlairOption,
+// so read that word directly (the same runtime representation used by
+// ApolloUserFlair.xm). Never use object_getIvar here: these are Swift value
+// types, not ObjC object ivars.
+static id ApolloPollComposeRawSwiftObjectIvar(id object, const char *name) {
+    if (!object) return nil;
+    Ivar ivar = class_getInstanceVariable(object_getClass(object), name);
+    if (!ivar) return nil;
+    void *rawValue = NULL;
+    memcpy(&rawValue,
+           (const uint8_t *)(__bridge const void *)object + ivar_getOffset(ivar),
+           sizeof(rawValue));
+    return (__bridge id)rawValue;
+}
+
+static NSString *ApolloPollComposeFlairString(NSDictionary *option, NSArray<NSString *> *keys) {
+    if (![option isKindOfClass:NSDictionary.class]) return nil;
+    for (NSString *key in keys) {
+        id value = option[key];
+        if ([value isKindOfClass:NSString.class] && [value length] > 0) return value;
+    }
+    return nil;
+}
+
+static NSString *ApolloPollComposeFlairTitle(NSDictionary *option) {
+    NSString *text = ApolloPollComposeFlairString(option, @[@"text", @"flair_text", @"name"]);
+    if (text.length > 0) return text;
+    id richText = option[@"richtext"] ?: option[@"flair_richtext"];
+    if ([richText isKindOfClass:NSArray.class]) {
+        NSMutableString *joined = [NSMutableString string];
+        for (id piece in (NSArray *)richText) {
+            if (![piece isKindOfClass:NSDictionary.class]) continue;
+            NSString *pieceText = ApolloPollComposeFlairString(piece, @[@"t", @"a"]);
+            if (pieceText.length > 0) [joined appendString:pieceText];
+        }
+        if (joined.length > 0) return joined;
+    }
+    return @"Untitled Flair";
+}
+
 // Decode a Swift String stored inline as a two-word struct ivar (Swift stored
 // properties have no ObjC getter). Small strings (≤15 UTF-8 bytes) decode from
 // the packed words; everything else goes through Swift's own
@@ -244,6 +286,8 @@ UIMenu *ApolloSubmitPostTypesMenu(__unused id actionController, void (^selectRow
 @property (nonatomic, copy) NSString *username;
 @property (nonatomic, strong) NSMutableArray<NSString *> *optionTexts;
 @property (nonatomic, copy) NSString *titleText;
+@property (nonatomic, copy) NSArray<NSDictionary *> *flairOptions;
+@property (nonatomic, copy) NSDictionary *selectedFlairOption;
 @property (nonatomic) NSInteger durationDays;
 @property (nonatomic) BOOL submitting;
 @end
@@ -274,7 +318,25 @@ UIMenu *ApolloSubmitPostTypesMenu(__unused id actionController, void (^selectRow
     UIColor *accent = ApolloThemeAccentColor();
     if (accent) self.navigationController.navigationBar.tintColor = accent;
     self.tableView.backgroundColor = self.composeBackgroundColor ?: self.composeHost.view.backgroundColor;
+    [self refreshFlairOptions];
     [self revalidate];
+}
+
+- (void)refreshFlairOptions {
+    id rawOptions = ApolloPollComposeRawSwiftObjectIvar(self.composeHost, "flairOptions");
+    if ([rawOptions isKindOfClass:NSArray.class]) {
+        NSMutableArray<NSDictionary *> *valid = [NSMutableArray array];
+        for (id option in (NSArray *)rawOptions) {
+            if ([option isKindOfClass:NSDictionary.class]) [valid addObject:option];
+        }
+        self.flairOptions = valid;
+    } else {
+        self.flairOptions = @[];
+    }
+    if (!self.selectedFlairOption) {
+        id selected = ApolloPollComposeRawSwiftObjectIvar(self.composeHost, "selectedFlairOption");
+        if ([selected isKindOfClass:NSDictionary.class]) self.selectedFlairOption = selected;
+    }
 }
 
 - (NSArray<NSString *> *)filledOptions {
@@ -294,7 +356,7 @@ UIMenu *ApolloSubmitPostTypesMenu(__unused id actionController, void (^selectRow
 
 #pragma mark Table
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 3; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 4; }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     if (section == 0) return 1;
@@ -305,12 +367,14 @@ UIMenu *ApolloSubmitPostTypesMenu(__unused id actionController, void (^selectRow
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     if (section == 0) return @"Title";
     if (section == 1) return @"Options";
+    if (section == 2) return @"Flair";
     return @"Duration";
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (section == 1) return @"2 to 6 options. Empty ones are skipped.";
-    if (section == 2) return @"Voting closes this many days after posting.";
+    if (section == 2) return @"Required in communities that require post flair.";
+    if (section == 3) return @"Voting closes this many days after posting.";
     return nil;
 }
 
@@ -356,6 +420,12 @@ UIMenu *ApolloSubmitPostTypesMenu(__unused id actionController, void (^selectRow
             cell.textLabel.textColor = ApolloThemeAccentColor() ?: cell.textLabel.tintColor;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         }
+    } else if (indexPath.section == 2) {
+        cell.textLabel.text = @"Post Flair";
+        cell.detailTextLabel.text = self.selectedFlairOption
+            ? ApolloPollComposeFlairTitle(self.selectedFlairOption) : @"None";
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     } else {
         cell.textLabel.text = @"Poll Duration";
         cell.detailTextLabel.text = [NSString stringWithFormat:@"%ld %@", (long)self.durationDays,
@@ -374,11 +444,49 @@ UIMenu *ApolloSubmitPostTypesMenu(__unused id actionController, void (^selectRow
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.section == 2) {
+        [self presentFlairPickerFromCell:[tableView cellForRowAtIndexPath:indexPath]];
+        return;
+    }
     if (indexPath.section != 1 || (NSUInteger)indexPath.row != self.optionTexts.count) return;
     [self.optionTexts addObject:@""];
     // Reload the section rather than inserting: the "Add Option" row also moves
     // (or disappears at the 6-option cap), and these tiny tables reload cheaply.
     [tableView reloadSections:[NSIndexSet indexSetWithIndex:1] withRowAnimation:UITableViewRowAnimationAutomatic];
+}
+
+- (void)presentFlairPickerFromCell:(UITableViewCell *)cell {
+    [self refreshFlairOptions];
+    if (self.flairOptions.count == 0) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"No Post Flairs"
+            message:@"This community did not return any post flair choices. If its flairs are still loading, wait a moment and try again."
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+
+    UIAlertController *picker = [UIAlertController alertControllerWithTitle:@"Post Flair"
+        message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) weakSelf = self;
+    [picker addAction:[UIAlertAction actionWithTitle:@"None" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        weakSelf.selectedFlairOption = nil;
+        [weakSelf.tableView reloadSections:[NSIndexSet indexSetWithIndex:2] withRowAnimation:UITableViewRowAnimationNone];
+    }]];
+    for (NSDictionary *option in self.flairOptions) {
+        NSString *title = ApolloPollComposeFlairTitle(option);
+        [picker addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+            weakSelf.selectedFlairOption = option;
+            [weakSelf.tableView reloadSections:[NSIndexSet indexSetWithIndex:2] withRowAnimation:UITableViewRowAnimationNone];
+        }]];
+    }
+    [picker addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    UIPopoverPresentationController *popover = picker.popoverPresentationController;
+    if (popover) {
+        popover.sourceView = cell ?: self.view;
+        popover.sourceRect = cell ? cell.bounds : self.view.bounds;
+    }
+    [self presentViewController:picker animated:YES completion:nil];
 }
 
 - (void)textFieldChanged:(UITextField *)field {
@@ -397,7 +505,7 @@ UIMenu *ApolloSubmitPostTypesMenu(__unused id actionController, void (^selectRow
 
 - (void)durationChanged:(UIStepper *)stepper {
     self.durationDays = (NSInteger)stepper.value;
-    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:2] withRowAnimation:UITableViewRowAnimationNone];
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:3] withRowAnimation:UITableViewRowAnimationNone];
 }
 
 #pragma mark Submission
@@ -467,15 +575,21 @@ UIMenu *ApolloSubmitPostTypesMenu(__unused id actionController, void (^selectRow
         [self showError:@"The stored Reddit session has no modhash. Sign in again from the account switcher and retry."];
         return;
     }
-    NSDictionary *body = @{ @"sr": self.subredditName ?: @"",
-                            @"title": [self.titleText stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet],
-                            @"text": @"",
-                            @"options": self.filledOptions,
-                            @"duration": @(self.durationDays),
-                            @"api_type": @"json",
-                            @"kind": @"poll",
-                            @"resubmit": @YES,
-                            @"sendreplies": @YES };
+    NSMutableDictionary *body = [@{ @"sr": self.subredditName ?: @"",
+                                    @"title": [self.titleText stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet],
+                                    @"text": @"",
+                                    @"options": self.filledOptions,
+                                    @"duration": @(self.durationDays),
+                                    @"api_type": @"json",
+                                    @"kind": @"poll",
+                                    @"resubmit": @YES,
+                                    @"sendreplies": @YES } mutableCopy];
+    NSString *flairID = ApolloPollComposeFlairString(self.selectedFlairOption,
+        @[@"id", @"flair_id", @"template_id"]);
+    NSString *flairText = ApolloPollComposeFlairString(self.selectedFlairOption,
+        @[@"text", @"flair_text"]);
+    if (flairID.length > 0) body[@"flair_id"] = flairID;
+    if (flairText.length > 0) body[@"flair_text"] = flairText;
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kApolloPollSubmitEndpoint]];
     request.HTTPMethod = @"POST";
     NSError *serializationError = nil;
