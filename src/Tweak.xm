@@ -186,10 +186,18 @@ static OSStatus ApolloRealSecItemDelete(NSDictionary *q) {
     return ((OSStatus (*)(CFDictionaryRef))SecItemDelete_orig)((__bridge CFDictionaryRef)q);
 }
 
-// One enumeration of every generic-password keychain item (all access groups, synced included),
-// returned as attribute+data dicts (nil on failure; the status is reported via outStatus). Shared
-// by the recovery cache, the destructive-write guard, and the account diagnostics so they don't
-// each re-declare the same MatchLimitAll query.
+// One NON-INTERACTIVE enumeration of every generic-password keychain item (all access groups,
+// synced included), returned as attribute+data dicts (nil on failure; the status is reported via
+// outStatus). Shared by the recovery cache, the destructive-write guard, and the account
+// diagnostics so they don't each re-declare the same MatchLimitAll query.
+//
+// kSecUseAuthenticationUISkip is essential here. This is an internal recovery/diagnostic sweep,
+// not a user-requested secret access. Without it, Security.framework defaults to allowing UI and
+// kSecReturnData makes an unscoped MatchLimitAll query attempt to decrypt ANY visible generic
+// password. A stale or unrelated item protected by user-presence then presents "Enter iPhone
+// Passcode for Apollo". Lifecycle snapshots run this sweep more than once, so approving one
+// operation immediately led to another prompt (#770). Skipping protected rows preserves all
+// ordinary Valet recovery data while guaranteeing this background path can never authenticate.
 static NSArray<NSDictionary *> *ApolloCopyAllGenericPasswords(OSStatus *outStatus) {
     NSDictionary *q = @{
         (__bridge id)kSecClass:              (__bridge id)kSecClassGenericPassword,
@@ -197,6 +205,7 @@ static NSArray<NSDictionary *> *ApolloCopyAllGenericPasswords(OSStatus *outStatu
         (__bridge id)kSecReturnAttributes:   @YES,
         (__bridge id)kSecReturnData:         @YES,
         (__bridge id)kSecAttrSynchronizable: (__bridge id)kSecAttrSynchronizableAny,
+        (__bridge id)kSecUseAuthenticationUI: (__bridge id)kSecUseAuthenticationUISkip,
     };
     CFTypeRef result = NULL;
     OSStatus st = ApolloRealSecItemCopyMatching(q, &result);
