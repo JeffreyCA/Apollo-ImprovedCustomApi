@@ -9,6 +9,7 @@
 //
 
 #import "ApolloCommon.h"
+#import "ApolloGiphyClient.h"
 #import "ApolloImageChestResolver.h"
 #import "ApolloMediaAutoplay.h"
 #import "ApolloState.h"
@@ -631,7 +632,12 @@ static BOOL ApolloIsInlineRenderableImageURL(NSURL *url) {
     // Imgur album/gallery URLs (imgur.com/a/<id>, imgur.com/gallery/<id>) —
     // resolved asynchronously via Imgur API; URL is deferred until
     // resolution completes.
-    if (ApolloIsImgurShareURL(url) || ApolloIsImgurAlbumOrGalleryURL(url) || ApolloImageChestIsPostURL(url)) return YES;
+    // Giphy share pages are also extensionless; their terminal ID maps
+    // directly to a renderable media.giphy.com GIF.
+    if (ApolloIsImgurShareURL(url) || ApolloIsImgurAlbumOrGalleryURL(url) ||
+        ApolloImageChestIsPostURL(url) || [ApolloGiphyClient mediaURLFromPageURL:url]) {
+        return YES;
+    }
 
     NSString *ext = [[[url path] pathExtension] lowercaseString];
     static NSSet *imageExts;
@@ -1043,6 +1049,9 @@ static void ApolloFetchDashPoster(NSString *assetID, NSURL *dashURL, CGSize targ
 
 static NSURL *ApolloNormalizeInlineImageURL(NSURL *url) {
     if (![url isKindOfClass:[NSURL class]]) return url;
+
+    NSURL *giphyMediaURL = [ApolloGiphyClient mediaURLFromPageURL:url];
+    if (giphyMediaURL) return giphyMediaURL;
 
     // Imgur share URL → i.imgur.com/<id>.jpeg. The CDN serves the
     // underlying media (incl. animated GIFs) regardless of requested ext.
@@ -3027,7 +3036,7 @@ static void ApolloGateNativeInlineAnimatedImageIfNeeded(ASDisplayNode *node) {
 static BOOL ApolloTopControllerIsImageChestViewer(UIWindow *window) {
     UIViewController *vc = window.rootViewController;
     while (vc.presentedViewController) vc = vc.presentedViewController;
-    return [vc isKindOfClass:[ApolloImageChestAlbumViewController class]];
+    return [vc isMemberOfClass:[ApolloImageChestAlbumViewController class]];
 }
 
 // Apollo's app delegate clamps most screens to portrait when Smart Rotation
@@ -3416,7 +3425,7 @@ typedef NS_ENUM(NSInteger, ApolloInlineOverlayStyle) {
 @implementation ApolloInlineImageDispatcher (ApolloInlineGIFOverlay)
 - (void)inlineGIFOverlayZoneTapped:(UITapGestureRecognizer *)recognizer {
     ApolloPlayOverlayContainer *container = (ApolloPlayOverlayContainer *)recognizer.view;
-    if (![container isKindOfClass:[ApolloPlayOverlayContainer class]]) return;
+    if (![container isMemberOfClass:[ApolloPlayOverlayContainer class]]) return;
     ASNetworkImageNode *node = container.overlayImageNode;
     if (!node) return;
     if (container.overlayStyle == ApolloInlineOverlayStylePauseBadge) {
@@ -3548,7 +3557,7 @@ static void ApolloInstallOverlayWithStyleOnView(UIView *v, ASDisplayNode *node, 
     if (!v || !node) return;
     ApolloPlayOverlayContainer *existing = objc_getAssociatedObject(node, &kApolloPlayOverlayViewKey);
     if (existing) {
-        if ([existing isKindOfClass:[ApolloPlayOverlayContainer class]] &&
+        if ([existing isMemberOfClass:[ApolloPlayOverlayContainer class]] &&
             existing.overlayStyle == style && existing.superview == v) {
             return;
         }
@@ -3694,7 +3703,7 @@ static void ApolloSchedulePlayOverlayReassertMode(ASNetworkImageNode *imageNode,
                 }
             } else {
                 [view bringSubviewToFront:overlay];
-                if ([overlay isKindOfClass:[ApolloPlayOverlayContainer class]]) {
+                if ([overlay isMemberOfClass:[ApolloPlayOverlayContainer class]]) {
                     [(ApolloPlayOverlayContainer *)overlay recenter];
                 }
             }
@@ -4712,10 +4721,11 @@ static NSArray *ApolloBuildLeavesForTextNode(ASTextNode *textNode,
             id val = attrs[k];
             if (![val isKindOfClass:[NSURL class]]) continue;
             NSURL *url = (NSURL *)val;
-            if (ApolloImageChestIsPostURL(url) && imageChestPostLinkCount != 1) {
+            BOOL imageChestURL = ApolloImageChestIsPostURL(url);
+            if (imageChestURL && imageChestPostLinkCount != 1) {
                 continue;
             }
-            if (ApolloImageChestIsPostURL(url) && !ApolloImageChestCachedResolution(url)) {
+            if (imageChestURL && !ApolloImageChestCachedResolution(url)) {
                 // Avoid deleting the text/link until the public page has
                 // resolved; failed/private/deleted albums keep Apollo's normal
                 // link behavior rather than becoming a blank inline slot.
@@ -4729,7 +4739,7 @@ static NSArray *ApolloBuildLeavesForTextNode(ASTextNode *textNode,
             NSURL *urlForClassify = url;
             NSURL *metadataGIF = ApolloInlineGIFDisplayURLFromMetadata(url, hostMediaMetadata);
             if (metadataGIF) urlForClassify = metadataGIF;
-            BOOL isImage = ApolloIsInlineRenderableImageURL(urlForClassify);
+            BOOL isImage = imageChestURL || ApolloIsInlineRenderableImageURL(urlForClassify);
             BOOL isVideo = !isImage && ApolloIsInlineRenderableVideoURL(urlForClassify);
             if (!isImage && !isVideo) continue;
             if (isVideo && !metadataGIF) [videoCandidates addObject:url];
@@ -4742,7 +4752,6 @@ static NSArray *ApolloBuildLeavesForTextNode(ASTextNode *textNode,
             NSURL *normalized = ApolloNormalizeInlineImageURL(metadataGIF ?: url);
             NSString *abs = normalized.absoluteString;
             if (!abs.length || [seenAbs containsObject:abs]) continue;
-            BOOL imageChestURL = ApolloImageChestIsPostURL(url);
             BOOL bareURL = ApolloRangeTextLooksLikeBareURL(attr, fullRange, url);
             BOOL defaultGifLabel = ApolloRangeTextIsDefaultGIFLabel(attr, fullRange);
             [seenAbs addObject:abs];
@@ -5287,7 +5296,6 @@ static BOOL ApolloLinkButtonHasInlineHost(ASDisplayNode *linkButtonNode) {
     // keep Apollo's native LinkButtonNode preview so private/deleted/bad albums
     // don't turn into a blank gap.
     if (ApolloIsImgurAlbumOrGalleryURL(url) && !ApolloCachedImgurResolution(url)) return %orig;
-    if (ApolloImageChestIsPostURL(url) && !ApolloImageChestCachedResolution(url)) return %orig;
 
     // Only hide if there's a MarkdownNode body that would carry the
     // inline replacement. LinkButtonNode is sometimes measured while

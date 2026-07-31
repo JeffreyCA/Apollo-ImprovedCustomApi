@@ -1516,7 +1516,7 @@ static ASImageNodeTintColorModificationBlockFn ASImageNodeTintColorModificationB
         // icon over its green/blue-violet backgroundNode pill) — leave that
         // alone so the pill's own colour still reads as feedback. Only the
         // idle/neutral-gray icon (isActive==NO) gets the accent tint.
-        if (supernode && [supernode isKindOfClass:dualStateCls] && !MSHookIvar<BOOL>(supernode, "isActive")) {
+        if ([supernode isMemberOfClass:dualStateCls] && !MSHookIvar<BOOL>(supernode, "isActive")) {
             ASImageNodeTintColorModificationBlockFn tintFn = ASImageNodeTintColorModificationBlockPtr();
             UIColor *accent = tintFn ? ApolloThemeRuntimeColor(ApolloThemeTokenAccent) : nil;
             if (accent) {

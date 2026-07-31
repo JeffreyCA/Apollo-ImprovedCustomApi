@@ -286,7 +286,7 @@ static void OpenAccountManager(void) {
     UITabBarController *tabBarController = nil;
     if ([rootVC isKindOfClass:[UITabBarController class]]) {
         tabBarController = (UITabBarController *)rootVC;
-    } else if (rootVC.presentedViewController && [rootVC.presentedViewController isKindOfClass:[UITabBarController class]]) {
+    } else if ([rootVC.presentedViewController isKindOfClass:[UITabBarController class]]) {
         tabBarController = (UITabBarController *)rootVC.presentedViewController;
     }
 
@@ -297,13 +297,13 @@ static void OpenAccountManager(void) {
                 UINavigationController *navController = (UINavigationController *)vc;
                 // Search through the entire navigation stack, not just topViewController
                 for (UIViewController *stackVC in navController.viewControllers) {
-                    if ([stackVC isKindOfClass:profileVCClass]) {
+                    if ([stackVC isMemberOfClass:profileVCClass]) {
                         profileVC = stackVC;
                         break;
                     }
                 }
                 if (profileVC) break;
-            } else if ([vc isKindOfClass:profileVCClass]) {
+            } else if ([vc isMemberOfClass:profileVCClass]) {
                 profileVC = vc;
                 break;
             }

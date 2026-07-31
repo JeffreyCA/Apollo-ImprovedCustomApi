@@ -110,7 +110,7 @@ static dispatch_queue_t getTrackerQueue(void) {
     id value = object_getIvar(sReadPostsTracker, queueIvar);
     // Sanity-check the class: barrier semantics only mean anything on a real
     // private dispatch queue.
-    if (value && [value isKindOfClass:objc_getClass("OS_dispatch_queue")]) {
+    if ([value isKindOfClass:objc_getClass("OS_dispatch_queue")]) {
         sTrackerQueueCached = (dispatch_queue_t)value;
     } else {
         sTrackerQueueLookupFailed = YES;
@@ -589,7 +589,7 @@ static UIImage *RecentlyReadNSFWBadgeImage(CGFloat fontSize) {
                 return;
             }
             for (id thing in things) {
-                if ([thing isKindOfClass:objc_getClass("RDKLink")]) {
+                if ([thing isMemberOfClass:objc_getClass("RDKLink")]) {
                     NSString *fn = [(RDKLink *)thing fullName];
                     if (fn) linksByName[fn] = thing;
                 }
@@ -701,7 +701,7 @@ static UIImage *RecentlyReadNSFWBadgeImage(CGFloat fontSize) {
 
             NSMutableDictionary *thingsByName = [NSMutableDictionary dictionaryWithCapacity:things.count];
             for (id thing in things) {
-                if ([thing isKindOfClass:objc_getClass("RDKLink")]) {
+                if ([thing isMemberOfClass:objc_getClass("RDKLink")]) {
                     NSString *fn = [(RDKLink *)thing fullName];
                     if (fn) thingsByName[fn] = thing;
                 }

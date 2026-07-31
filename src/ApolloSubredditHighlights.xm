@@ -1094,7 +1094,7 @@ static void ApolloHLToggleCollapsed(NSString *sub); // fwd (defined after ApplyI
     CGPoint p = [gesture locationInView:sv];
     NSString *permalink = nil;
     for (UIView *v in sv.subviews) {
-        if ([v isKindOfClass:[ApolloHLCardView class]] && CGRectContainsPoint(v.frame, p)) {
+        if ([v isMemberOfClass:[ApolloHLCardView class]] && CGRectContainsPoint(v.frame, p)) {
             permalink = ((ApolloHLCardView *)v).permalink;
             break;
         }
@@ -1284,7 +1284,7 @@ UIView *ApolloHLHeaderOriginalSubstitute(NSString *subreddit, UIViewController *
 
     // Don't nest containers across rebuilds — recover the true original.
     UIView *realOriginal = realOriginalHeader;
-    if ([realOriginalHeader isKindOfClass:[ApolloHLHeaderContainerView class]]) {
+    if ([realOriginalHeader isMemberOfClass:[ApolloHLHeaderContainerView class]]) {
         realOriginal = ((ApolloHLHeaderContainerView *)realOriginalHeader).realOriginal;
     }
 
@@ -1308,7 +1308,7 @@ UIView *ApolloHLHeaderOriginalSubstitute(NSString *subreddit, UIViewController *
             ApolloHLForEachPostsVC(^(UIViewController *postsVC) {
                 if (![ApolloHLSubredditName(postsVC) isEqualToString:sub]) return;
                 ApolloHLHeaderContainerView *c = objc_getAssociatedObject(postsVC, kApolloHLContainerKey);
-                if (![c isKindOfClass:[ApolloHLHeaderContainerView class]] || c.hlCarouselView) return;
+                if (![c isMemberOfClass:[ApolloHLHeaderContainerView class]] || c.hlCarouselView) return;
                 CGFloat w = c.bounds.size.width > 0 ? c.bounds.size.width : fetchWidth;
                 [c installCarousel:ApolloHLBuildCarousel(sub, fetched, w)];
                 ApolloHLApplyStickyCountToTable(postsVC, sub); // headers mode: publish N now that the REST fetch landed
@@ -1533,7 +1533,7 @@ static void ApolloHLForEachPostsVC(void (^block)(UIViewController *postsVC)) {
         [stack removeLastObject];
         if (!vc || [seen containsObject:@((uintptr_t)vc)]) continue;
         [seen addObject:@((uintptr_t)vc)];
-        if ([vc isKindOfClass:postsClass]) block(vc);
+        if ([vc isMemberOfClass:postsClass]) block(vc);
         [stack addObjectsFromArray:vc.childViewControllers];
         if (vc.presentedViewController) [stack addObject:vc.presentedViewController];
     }
@@ -1563,7 +1563,7 @@ static void ApolloHLApplyItems(NSString *sub, NSArray<ApolloHLItem *> *items) {
             if (tv) ApolloHLInstallCarousel(postsVC, tv, items, sub); // signature change → rebuilds
         } else {
             ApolloHLHeaderContainerView *c = objc_getAssociatedObject(postsVC, kApolloHLContainerKey);
-            if (![c isKindOfClass:[ApolloHLHeaderContainerView class]]) return;
+            if (![c isMemberOfClass:[ApolloHLHeaderContainerView class]]) return;
             CGFloat w = c.bounds.size.width > 0 ? c.bounds.size.width : UIScreen.mainScreen.bounds.size.width;
             [c installCarousel:ApolloHLBuildCarousel(sub, items, w)];
             UIView *wrapper = c.superview;
@@ -1726,7 +1726,7 @@ static void ApolloHLRefreshSub(NSString *subreddit, BOOL alwaysWeb) {
                     if (tv) ApolloHLInstallCarousel(postsVC, tv, @[], subreddit); // tears down our header
                 } else {
                     ApolloHLHeaderContainerView *c = objc_getAssociatedObject(postsVC, kApolloHLContainerKey);
-                    if (![c isKindOfClass:[ApolloHLHeaderContainerView class]]) return;
+                    if (![c isMemberOfClass:[ApolloHLHeaderContainerView class]]) return;
                     [c installCarousel:nil];
                     UIView *wrapper = c.superview;
                     UITableView *tv = ApolloHLFindTableView(postsVC);

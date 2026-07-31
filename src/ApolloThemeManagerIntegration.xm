@@ -220,7 +220,7 @@ static BOOL OpenNativeThemeScreenFromHub(UIViewController *hub,
     Class appearanceClass = objc_getClass("_TtC6Apollo32SettingsAppearanceViewController");
     if (!appearanceClass) return NO;
     for (UIViewController *vc in hub.navigationController.viewControllers.reverseObjectEnumerator) {
-        if (![vc isKindOfClass:appearanceClass]) continue;
+        if (![vc isMemberOfClass:appearanceClass]) continue;
         UITableView *tableView = nil;
         if ([vc respondsToSelector:@selector(tableView)]) {
             tableView = ((UITableView *(*)(id, SEL))objc_msgSend)(vc, @selector(tableView));
@@ -239,7 +239,7 @@ static BOOL OpenNativeThemeScreenFromHub(UIViewController *hub,
             // Repair path: if viewDidLoad somehow ran without consuming the
             // pending mode, stamp it now and refilter.
             if (NativeScreenModeFor(top) != mode &&
-                [top isKindOfClass:objc_getClass("_TtC6Apollo27SettingsThemeViewController")]) {
+                [top isMemberOfClass:objc_getClass("_TtC6Apollo27SettingsThemeViewController")]) {
                 objc_setAssociatedObject(top, kNativeScreenModeKey, @(mode), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 if ([top respondsToSelector:@selector(tableView)]) {
                     UITableView *tv = ((UITableView *(*)(id, SEL))objc_msgSend)(top, @selector(tableView));

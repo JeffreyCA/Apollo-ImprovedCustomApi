@@ -305,7 +305,7 @@ static void ApolloSIPFClampShareButtonOnScreen(UIViewController *vc) {
         UIPresentationController *pc = (UIPresentationController *)self;
         id presented = [pc presentedViewController];
         Class shareVCClass = objc_getClass("_TtC6Apollo26ShareAsImageViewController");
-        if (!shareVCClass || ![presented isKindOfClass:shareVCClass]) return;
+        if (!shareVCClass || ![presented isMemberOfClass:shareVCClass]) return;
 
         UIView *presentedView = [(UIViewController *)presented view];
         if (![presentedView isKindOfClass:[UIView class]]) return;

@@ -574,7 +574,7 @@ static UIImage *ApolloSVImageFromBuffer(CVPixelBufferRef buf, CGAffineTransform 
         // Per-export draw parameters ride on the instruction (no shared file state).
         ApolloSVInstruction *inst = nil;
         id rawInst = request.videoCompositionInstruction;
-        if ([rawInst isKindOfClass:[ApolloSVInstruction class]]) inst = (ApolloSVInstruction *)rawInst;
+        if ([rawInst isMemberOfClass:[ApolloSVInstruction class]]) inst = (ApolloSVInstruction *)rawInst;
         if (!inst) {
             // Should never happen — only our instruction is installed on the video
             // composition. Fail loudly rather than composing an all-black frame, so an
@@ -1303,7 +1303,7 @@ static void ApolloSVLayoutRow(id vc) {
         if (!isfinite(frame.origin.y) || !isfinite(frame.size.height) || frame.size.height <= 1.0) return frame;
         id presented = [(UIPresentationController *)self presentedViewController];
         Class shareVCClass = objc_getClass("_TtC6Apollo26ShareAsImageViewController");
-        if (shareVCClass && [presented isKindOfClass:shareVCClass] &&
+        if (shareVCClass && [presented isMemberOfClass:shareVCClass] &&
             objc_getAssociatedObject(presented, &kApolloShareVideoSwitchKey)) {
             double pitch = ApolloSVIvarDouble(presented, "rowHeight");
             if (pitch <= 1.0 || !isfinite(pitch)) pitch = 50.0;

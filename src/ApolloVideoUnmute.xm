@@ -282,7 +282,7 @@ static AVPlayer *GetPlayerFromMediaPageVC(id mediaPageVC) {
 
     NSArray *vcs = ((NSArray *(*)(id, SEL))objc_msgSend)(mediaPageVC, @selector(viewControllers));
     id mediaVC = [vcs firstObject];
-    if (!mediaVC || ![mediaVC isKindOfClass:sMediaViewerClass]) return nil;
+    if (![mediaVC isMemberOfClass:sMediaViewerClass]) return nil;
 
     // Direct player ivar (non-shareable videos)
     AVPlayer *player = GetIvarObject(mediaVC, "player");
@@ -894,7 +894,7 @@ static void HandleCommentsRichMediaVisibilityEvent(id visibilityOwner,
     if (!sMediaPageVCClass) {
         sMediaPageVCClass = objc_getClass("_TtC6Apollo23MediaPageViewController");
     }
-    if (!toVC || !sMediaPageVCClass || ![toVC isKindOfClass:sMediaPageVCClass]) return;
+    if (!toVC || !sMediaPageVCClass || ![toVC isMemberOfClass:sMediaPageVCClass]) return;
 
     // After %orig, the transition has created a PlayerLayerContainerView for
     // shareable videos and added it to the view hierarchy with its playerLayer

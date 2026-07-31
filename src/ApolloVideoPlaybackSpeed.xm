@@ -71,7 +71,7 @@ static __weak UIViewController *sCurrentMediaViewer = nil;
 
 static UIViewController *SearchMediaViewer(UIViewController *vc, Class cls) {
     if (!vc) return nil;
-    if ([vc isKindOfClass:cls]) return vc;
+    if ([vc isMemberOfClass:cls]) return vc;
     for (UIViewController *child in vc.childViewControllers) {
         UIViewController *found = SearchMediaViewer(child, cls);
         if (found) return found;

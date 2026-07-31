@@ -2181,7 +2181,7 @@ static RDKLink *ApolloLinkFromHeaderCellNode(id cellNode) {
             if (!type || type[0] != '@') continue;
             id v = nil;
             @try { v = object_getIvar(cellNode, iv); } @catch (__unused NSException *e) { continue; }
-            if ([v isKindOfClass:rdkLink]) return (RDKLink *)v;
+            if ([v isMemberOfClass:rdkLink]) return (RDKLink *)v;
         }
     }
 
@@ -2197,7 +2197,7 @@ static RDKLink *ApolloLinkFromHeaderCellNode(id cellNode) {
             if (!type || type[0] != '@') continue;
             id v = nil;
             @try { v = object_getIvar(cellNode, ivars[i]); } @catch (__unused NSException *e) { continue; }
-            if ([v isKindOfClass:rdkLink]) {
+            if ([v isMemberOfClass:rdkLink]) {
                 free(ivars);
                 return (RDKLink *)v;
             }
@@ -2222,7 +2222,7 @@ static RDKLink *ApolloLinkFromController(UIViewController *vc) {
             if (!type || type[0] != '@') continue;
             id v = nil;
             @try { v = object_getIvar(vc, iv); } @catch (__unused NSException *e) { continue; }
-            if ([v isKindOfClass:rdkLink]) return (RDKLink *)v;
+            if ([v isMemberOfClass:rdkLink]) return (RDKLink *)v;
         }
     }
     for (Class cls = [vc class]; cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
@@ -2234,7 +2234,7 @@ static RDKLink *ApolloLinkFromController(UIViewController *vc) {
             if (!type || type[0] != '@') continue;
             id v = nil;
             @try { v = object_getIvar(vc, ivars[i]); } @catch (__unused NSException *e) { continue; }
-            if ([v isKindOfClass:rdkLink]) {
+            if ([v isMemberOfClass:rdkLink]) {
                 free(ivars);
                 return (RDKLink *)v;
             }
@@ -3856,7 +3856,7 @@ static RDKComment *ApolloCommentFromCellNode(id commentCellNode) {
 
     id comment = object_getIvar(commentCellNode, commentIvar);
     Class rdkCommentClass = NSClassFromString(@"RDKComment");
-    if (!rdkCommentClass || ![comment isKindOfClass:rdkCommentClass]) return nil;
+    if (!rdkCommentClass || ![comment isMemberOfClass:rdkCommentClass]) return nil;
     return (RDKComment *)comment;
 }
 
@@ -5636,7 +5636,7 @@ static NSAttributedString *ApolloTranslationCompactCodeMarkerAttributedString(NS
 static id ApolloPostInfoNodeFromContainerNode(id node) {
     Class piCls = objc_getClass("_TtC6Apollo12PostInfoNode");
     if (!node || !piCls) return nil;
-    if ([node isKindOfClass:piCls]) return node;
+    if ([node isMemberOfClass:piCls]) return node;
     for (Class cls = [node class]; cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
         unsigned int n = 0;
         Ivar *ivars = class_copyIvarList(cls, &n);
@@ -5645,7 +5645,7 @@ static id ApolloPostInfoNodeFromContainerNode(id node) {
             if (!type || type[0] != '@') continue;
             @try {
                 id v = object_getIvar(node, ivars[i]);
-                if ([v isKindOfClass:piCls]) { free(ivars); return v; }
+                if ([v isMemberOfClass:piCls]) { free(ivars); return v; }
             } @catch (__unused NSException *e) {}
         }
         free(ivars);
@@ -5656,7 +5656,7 @@ static id ApolloPostInfoNodeFromContainerNode(id node) {
 // Recursively scan a node's subnode subtree for a PostInfoNode (depth-limited).
 static id ApolloFindPostInfoNodeInSubtree(id node, Class piCls, int depth) {
     if (!node || depth < 0) return nil;
-    if ([node isKindOfClass:piCls]) return node;
+    if ([node isMemberOfClass:piCls]) return node;
     @try {
         SEL subnodesSel = NSSelectorFromString(@"subnodes");
         if ([node respondsToSelector:subnodesSel]) {

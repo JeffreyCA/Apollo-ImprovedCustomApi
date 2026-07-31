@@ -525,7 +525,7 @@ static UIViewController *ApolloIMVCForView(UIView *view) {
 @implementation ApolloIMSettingsTableView
 static BOOL ApolloIMViewIsInSlider(UIView *view) {
     for (UIView *v = view; v; v = v.superview) {
-        if ([v isKindOfClass:[ApolloIMDetentSlider class]]) return YES;
+        if ([v isMemberOfClass:[ApolloIMDetentSlider class]]) return YES;
     }
     return NO;
 }
@@ -580,7 +580,7 @@ typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
     // Route slider-drag touch arbitration through ApolloIMSettingsTableView so a
     // drag on the size slider scrubs it instead of scrolling the screen. The
     // subclass adds no ivars, so isa-swizzling the existing table view is safe.
-    if (![self.tableView isKindOfClass:[ApolloIMSettingsTableView class]]) {
+    if (![self.tableView isMemberOfClass:[ApolloIMSettingsTableView class]]) {
         object_setClass(self.tableView, [ApolloIMSettingsTableView class]);
     }
     // Deliver slider touches immediately (the subclass's touchesShouldBegin only

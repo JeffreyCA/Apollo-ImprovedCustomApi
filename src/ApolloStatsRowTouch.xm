@@ -263,7 +263,7 @@ static CGRect SRTClaimRect(id cell, UIView *cellView, NSArray<ApolloSRTTarget *>
     static Class headerClass;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ headerClass = NSClassFromString(@"_TtC6Apollo22CommentsHeaderCellNode"); });
-    BOOL isHeader = headerClass && [cell isKindOfClass:headerClass];
+    BOOL isHeader = headerClass && [cell isMemberOfClass:headerClass];
     CGFloat cellBottom = CGRectGetHeight(cellView.bounds);
     if (!isHeader && cellBottom - CGRectGetMaxY(u) < 44.0) bottom = cellBottom;
 
@@ -878,7 +878,7 @@ static const CGFloat kSRTTapMaxTravel = 24.0;
 // scroll actually changes.
 - (BOOL)srtCommentTapShouldBegin:(UIGestureRecognizer *)gr {
     if (!sInfoRowTapComments) return NO;
-    id cell = objc_getAssociatedObject(gr, kSRTCommentGestureCellKey);
+    id cell = SRTCellForGesture(gr);
     if (!cell) return NO;
     UIView *cellView = nil;
     @try { cellView = [(ApolloSRTNode *)cell view]; } @catch (__unused id e) {}
@@ -1234,7 +1234,7 @@ static NSIndexPath *SRTFirstCommentIndexPath(id tableNode, UITableView *tableVie
         for (NSInteger r = 0; r < rows; r++) {
             NSIndexPath *ip = [NSIndexPath indexPathForRow:r inSection:s];
             id node = ((id (*)(id, SEL, id))objc_msgSend)(tableNode, nodeSel, ip);
-            if (node && [node isKindOfClass:commentCellClass]) return ip;
+            if ([node isMemberOfClass:commentCellClass]) return ip;
         }
     }
     return nil;
@@ -1263,7 +1263,7 @@ static CGFloat SRTQuickBarTopContentY(id tableNode, UITableView *tableView) {
         for (NSInteger r = 0; r < rows; r++) {
             NSIndexPath *ip = [NSIndexPath indexPathForRow:r inSection:s];
             id node = ((id (*)(id, SEL, id))objc_msgSend)(tableNode, nodeSel, ip);
-            if (!node || ![node isKindOfClass:headerClass]) continue;
+            if (![node isMemberOfClass:headerClass]) continue;
             id quickBar = SRTIvar(node, "quickBarNode");
             CALayer *qbLayer = nil;
             @try { qbLayer = [(ApolloSRTNode *)quickBar layer]; } @catch (__unused id e) {}

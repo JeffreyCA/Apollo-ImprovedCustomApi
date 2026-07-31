@@ -326,7 +326,7 @@ static RDKComment *ApolloDeletedCommentsCommentFromCellNode(id commentCellNode) 
         comment = nil;
     }
     Class rdkCommentClass = NSClassFromString(@"RDKComment");
-    if (!rdkCommentClass || ![comment isKindOfClass:rdkCommentClass]) return nil;
+    if (!rdkCommentClass || ![comment isMemberOfClass:rdkCommentClass]) return nil;
     return (RDKComment *)comment;
 }
 
@@ -3737,7 +3737,7 @@ static void ApolloDeletedCommentsPrepareBuiltObject(id object) {
     }
 
     Class commentClass = NSClassFromString(@"RDKComment");
-    if (!commentClass || ![object isKindOfClass:commentClass]) return;
+    if (!commentClass || ![object isMemberOfClass:commentClass]) return;
     RDKComment *comment = (RDKComment *)object;
     if (!ApolloDeletedCommentsTreatmentAllowedForComment(comment)) return;
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);

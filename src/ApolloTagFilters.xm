@@ -71,7 +71,7 @@ static id ApolloTagIvarValueByName(id obj, const char *name) {
 static RDKLink *ApolloTagLinkFromCell(id cell) {
     if (!cell) return nil;
     id v = ApolloTagIvarValueByName(cell, "link");
-    if ([v isKindOfClass:objc_getClass("RDKLink")]) return (RDKLink *)v;
+    if ([v isMemberOfClass:objc_getClass("RDKLink")]) return (RDKLink *)v;
     return nil;
 }
 

@@ -4278,7 +4278,7 @@ static void ApolloInlineAvatarReapplyAfterModelUpdate(NSString *fullName) {
                                                   usingBlock:^(NSNotification *note) {
         if (!sShowUserAvatars || ![NSThread isMainThread]) return;
         id model = note.object;
-        if (![model isKindOfClass:objc_getClass("RDKComment")]) return;
+        if (![model isMemberOfClass:objc_getClass("RDKComment")]) return;
         if (![model respondsToSelector:@selector(fullName)]) return;
         NSString *fullName = ((id (*)(id, SEL))objc_msgSend)(model, @selector(fullName));
         if (![fullName isKindOfClass:[NSString class]] || fullName.length == 0) return;

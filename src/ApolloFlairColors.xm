@@ -483,9 +483,9 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
     @try {
         Class linkClass = objc_getClass("RDKLink");
         Class commentClass = objc_getClass("RDKComment");
-        if (linkClass && [model isKindOfClass:linkClass]) {
+        if (linkClass && [model isMemberOfClass:linkClass]) {
             ApolloFlairRecoverColors(model, json, YES);
-        } else if (commentClass && [model isKindOfClass:commentClass]) {
+        } else if (commentClass && [model isMemberOfClass:commentClass]) {
             ApolloFlairRecoverColors(model, json, NO);
         }
     } @catch (__unused NSException *exception) {

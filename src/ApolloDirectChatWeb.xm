@@ -3147,12 +3147,12 @@ UIViewController *ApolloCreateEmbeddedModernChatViewController(ApolloModernChatI
 
 void ApolloModernChatControllerShowInboxSection(UIViewController *controller,
                                                 ApolloModernChatInboxSection section) {
-    if (![controller isKindOfClass:[ApolloDirectChatWebViewController class]]) return;
+    if (![controller isMemberOfClass:[ApolloDirectChatWebViewController class]]) return;
     [(ApolloDirectChatWebViewController *)controller apollo_showEmbeddedInboxSection:section];
 }
 
 BOOL ApolloModernChatControllerSessionIsCurrent(UIViewController *controller) {
-    if (![controller isKindOfClass:[ApolloDirectChatWebViewController class]]) return NO;
+    if (![controller isMemberOfClass:[ApolloDirectChatWebViewController class]]) return NO;
     ApolloDirectChatWebViewController *chatController =
         (ApolloDirectChatWebViewController *)controller;
     NSString *activeUsername = ApolloActiveWebSessionUsername().lowercaseString ?: @"";
@@ -3164,7 +3164,7 @@ BOOL ApolloModernChatControllerSessionIsCurrent(UIViewController *controller) {
 }
 
 void ApolloModernChatControllerSetInboxVisible(UIViewController *controller, BOOL visible) {
-    if (![controller isKindOfClass:[ApolloDirectChatWebViewController class]]) return;
+    if (![controller isMemberOfClass:[ApolloDirectChatWebViewController class]]) return;
     ApolloDirectChatWebViewController *chatController =
         (ApolloDirectChatWebViewController *)controller;
     chatController.embeddedInboxVisible = visible;
@@ -3182,7 +3182,7 @@ void ApolloModernChatControllerSetInboxVisible(UIViewController *controller, BOO
 }
 
 void ApolloModernChatControllerRefreshEmbeddedLayout(UIViewController *controller) {
-    if (![controller isKindOfClass:[ApolloDirectChatWebViewController class]]) return;
+    if (![controller isMemberOfClass:[ApolloDirectChatWebViewController class]]) return;
     ApolloDirectChatWebViewController *chatController =
         (ApolloDirectChatWebViewController *)controller;
     [chatController.view setNeedsLayout];
@@ -3230,7 +3230,7 @@ UIViewController *ApolloCreateModernModmailViewControllerForPath(NSString *desti
     // on the legacy screen, and API-key accounts follow their explicit toggle.
     Class nativeModmailClass = objc_getClass("_TtC6Apollo26ModmailInboxViewController");
     if (nativeModmailClass &&
-        [viewController isKindOfClass:nativeModmailClass] &&
+        [viewController isMemberOfClass:nativeModmailClass] &&
         ApolloModernModmailShouldOpen()) {
         ApolloLog(@"[DirectChatWeb] Redirecting native Modmail push to modern authenticated Modmail");
         %orig(ApolloCreateModernModmailViewController(), animated);

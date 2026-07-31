@@ -577,7 +577,7 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
 
 - (UITabBarController *)tabBarController {
     if (sApolloInBarHideSwipeHandler &&
-        [self isKindOfClass:objc_getClass("_TtC6Apollo26ApolloNavigationController")]) {
+        [self isMemberOfClass:objc_getClass("_TtC6Apollo26ApolloNavigationController")]) {
         return nil;
     }
     return %orig;

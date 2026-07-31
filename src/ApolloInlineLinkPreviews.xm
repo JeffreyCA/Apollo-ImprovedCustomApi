@@ -2471,7 +2471,7 @@ static void ApolloLPStampLinkButtonAreaInTree(ASDisplayNode *root, ApolloLPArea 
     static dispatch_once_t once;
     dispatch_once(&once, ^{ linkButtonCls = objc_getClass("_TtC6Apollo14LinkButtonNode"); });
     if (!linkButtonCls) return;
-    if ([root isKindOfClass:linkButtonCls]) {
+    if ([root isMemberOfClass:linkButtonCls]) {
         NSNumber *existing = objc_getAssociatedObject(root, &kApolloLinkPreviewAreaKey);
         if (![existing isKindOfClass:[NSNumber class]]) {
             objc_setAssociatedObject(root, &kApolloLinkPreviewAreaKey, @(area), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -2514,7 +2514,7 @@ static NSUInteger ApolloLPCountEligiblePreviewLinksInTree(ASDisplayNode *root) {
     dispatch_once(&once, ^{ linkButtonCls = objc_getClass("_TtC6Apollo14LinkButtonNode"); });
 
     NSUInteger count = 0;
-    if (linkButtonCls && [root isKindOfClass:linkButtonCls]) {
+    if (linkButtonCls && [root isMemberOfClass:linkButtonCls]) {
         NSString *urlString = ApolloGetLinkButtonNodeURLString(root);
         NSURL *url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
         if (ApolloLPURLEligibleForPreviewCard(url)) count++;

@@ -233,7 +233,7 @@ static void ApolloVFNeutralizeCarriedOverCollapse(id note) {
         id oldModel = [note isKindOfClass:[NSNotification class]] ? [(NSNotification *)note object] : nil;
         id newModel = [note isKindOfClass:[NSNotification class]] ? [(NSNotification *)note userInfo][@"newModel"] : nil;
         Class commentClass = objc_getClass("RDKComment");
-        if (!commentClass || ![oldModel isKindOfClass:commentClass] || ![newModel isKindOfClass:commentClass]) return;
+        if (!commentClass || ![oldModel isMemberOfClass:commentClass] || ![newModel isMemberOfClass:commentClass]) return;
         if (![newModel respondsToSelector:@selector(collapsed)]) return;
         BOOL newCollapsed = ((BOOL (*)(id, SEL))objc_msgSend)(newModel, @selector(collapsed));
         if (!newCollapsed) return; // nothing to neutralize

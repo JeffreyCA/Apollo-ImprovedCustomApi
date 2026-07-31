@@ -545,8 +545,8 @@ void ApolloOwnCommentFlairInspectModel(id model) {
         linkClass = objc_getClass("RDKLink");
     });
 
-    BOOL isComment = commentClass && [model isKindOfClass:commentClass];
-    BOOL isLink = !isComment && linkClass && [model isKindOfClass:linkClass];
+    BOOL isComment = commentClass && [model isMemberOfClass:commentClass];
+    BOOL isLink = !isComment && linkClass && [model isMemberOfClass:linkClass];
     if (!isComment && !isLink) return;
 
     NSString *subreddit = ApolloOwnFlairStringProperty(model, @selector(subreddit));

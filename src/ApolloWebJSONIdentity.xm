@@ -464,7 +464,7 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username) {
     // Template: reuse the app-only RDKClient archive (a known-good object graph
     // Apollo itself produced), falling back to a fresh instance.
     id client = ApolloWebJSONUnarchive([group objectForKey:@"RedditApplicationOnlyAccount2"]);
-    if (![client isKindOfClass:clientClass]) client = [[clientClass alloc] init];
+    if (![client isMemberOfClass:clientClass]) client = [[clientClass alloc] init];
     if (!client) return NO;
 
     @try {

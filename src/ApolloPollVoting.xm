@@ -330,7 +330,7 @@ static void ApolloPollPublishAuthoritativeLink(RDKLink *newLink) {
                   ApolloPollPointer(newLink), ApolloPollPointer(header),
                   ApolloPollPointer(sectionController), ApolloPollPointer(sectionDelegate),
                   ApolloPollPointer(mountedLink));
-        if (!sectionController || ![sectionController isKindOfClass:sectionClass] ||
+        if (![sectionController isMemberOfClass:sectionClass] ||
             !mountedLink || ![ApolloPollCanonicalBaseID(mountedLink) isEqualToString:baseID]) {
             ApolloPollDiagnosticLog(@" authoritative counts arrived without matching mounted header post=%@ headerClass=%@ sectionClass=%@ mountedID=%@",
                       newLink.identifier, NSStringFromClass([header class]),
@@ -727,10 +727,10 @@ static UIViewController *ApolloPollPresenter(void) {
 static UIViewController *ApolloPollCommentsController(void) {
     Class commentsClass = objc_getClass("_TtC6Apollo22CommentsViewController");
     UIViewController *target = ApolloPollPresenter();
-    while (target && commentsClass && ![target isKindOfClass:commentsClass]) {
+    while (target && commentsClass && ![target isMemberOfClass:commentsClass]) {
         target = target.parentViewController;
     }
-    return [target isKindOfClass:commentsClass] ? target : nil;
+    return [target isMemberOfClass:commentsClass] ? target : nil;
 }
 
 static void ApolloPollShowError(UIViewController *presenter, NSString *message) {
@@ -770,7 +770,7 @@ static void ApolloPollValidateResultViews(UIView *view, Class resultClass, RDKPo
                                           NSUInteger *resultCount, BOOL *allValid) {
     id node = [view respondsToSelector:@selector(asyncdisplaykit_node)]
         ? [view asyncdisplaykit_node] : nil;
-    if (node && [node isKindOfClass:resultClass]) {
+    if ([node isMemberOfClass:resultClass]) {
         *resultCount += 1;
         RDKPollOption *option = ApolloPollObjectIvar(node, "option");
         if (!option || ApolloPollIntegerIvar(node, "totalVotesInPoll") != poll.totalVoteCount) {
@@ -853,7 +853,7 @@ static RDKPollOption *ApolloPollOptionAtPoint(UIView *containerView, CGPoint poi
     for (UIView *row in containerView.subviews) {
         if (!CGRectContainsPoint(row.frame, point)) continue;
         id node = [row respondsToSelector:@selector(asyncdisplaykit_node)] ? [row asyncdisplaykit_node] : nil;
-        if (node && [node isKindOfClass:optionClass]) {
+        if ([node isMemberOfClass:optionClass]) {
             return ApolloPollObjectIvar(node, "option");
         }
         if (depth > 0) {
@@ -869,7 +869,7 @@ static UIView *ApolloPollOptionViewAtPoint(UIView *pollView, CGPoint point) {
     Class optionClass = objc_getClass("_TtC6Apollo14PollOptionNode");
     while (hit && hit != pollView) {
         id node = [hit respondsToSelector:@selector(asyncdisplaykit_node)] ? [hit asyncdisplaykit_node] : nil;
-        if (node && [node isKindOfClass:optionClass]) return hit;
+        if ([node isMemberOfClass:optionClass]) return hit;
         hit = hit.superview;
     }
     return nil;
@@ -1406,7 +1406,7 @@ static void ApolloPollForEachOptionNode(UIView *containerView, NSUInteger depth,
     Class optionClass = objc_getClass("_TtC6Apollo14PollOptionNode");
     for (UIView *row in containerView.subviews) {
         id node = [row respondsToSelector:@selector(asyncdisplaykit_node)] ? [row asyncdisplaykit_node] : nil;
-        if (node && [node isKindOfClass:optionClass]) {
+        if ([node isMemberOfClass:optionClass]) {
             body(node);
             continue;
         }
@@ -1743,7 +1743,7 @@ static void ApolloPollApplyOptionTextAlignment(id optionNode) {
     if (!poll) { %orig; return; }
 
     id pollNode = sender;
-    if (![pollNode isKindOfClass:objc_getClass("_TtC6Apollo8PollNode")]) {
+    if (![pollNode isMemberOfClass:objc_getClass("_TtC6Apollo8PollNode")]) {
         pollNode = ApolloPollObjectIvar(self, "pollNode");
     }
 

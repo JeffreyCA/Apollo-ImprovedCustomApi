@@ -114,7 +114,7 @@ static NSAttributedString *ApolloMarkdownCleanBody(NSAttributedString *attribute
     Class markdownNodeClass = ApolloMarkdownNodeClass();
     if (markdownNodeClass && [(id)self respondsToSelector:@selector(delegate)]) {
         id delegate = ((id (*)(id, SEL))objc_msgSend)((id)self, @selector(delegate));
-        if ([delegate isKindOfClass:markdownNodeClass]) {
+        if ([delegate isMemberOfClass:markdownNodeClass]) {
             %orig(ApolloMarkdownCleanBody(attributedText));
             return;
         }

@@ -1384,7 +1384,7 @@ static UIViewController *ApolloMediaComposerControllerForBodyTextView(UITextView
     if (!ApolloMediaComposerTextViewIsBodyEditor(textView)) return nil;
 
     UIViewController *controller = nil;
-    if ([textView.delegate isKindOfClass:[ApolloMediaComposerBodyTextDelegate class]]) {
+    if ([textView.delegate isMemberOfClass:[ApolloMediaComposerBodyTextDelegate class]]) {
         controller = ((ApolloMediaComposerBodyTextDelegate *)textView.delegate).controller;
     }
     if (!controller && textView.tag == ApolloMediaComposerBodyTextViewTag()) {
@@ -1856,7 +1856,7 @@ static void ApolloMediaComposerConfigureTitleBodyControl(UITableViewCell *cell, 
     }
 
     ApolloMediaComposerBodyRowTapTarget *target = objc_getAssociatedObject(control, &kApolloMediaComposerBodyRowTargetKey);
-    if (![target isKindOfClass:[ApolloMediaComposerBodyRowTapTarget class]]) {
+    if (![target isMemberOfClass:[ApolloMediaComposerBodyRowTapTarget class]]) {
         target = [ApolloMediaComposerBodyRowTapTarget new];
         [control addTarget:target action:@selector(handleTap:) forControlEvents:UIControlEventTouchUpInside];
         objc_setAssociatedObject(control, &kApolloMediaComposerBodyRowTargetKey, target, OBJC_ASSOCIATION_RETAIN_NONATOMIC);

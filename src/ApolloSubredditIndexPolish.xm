@@ -156,7 +156,7 @@ static BOOL ApolloSubredditIndexShouldInspectTable(UITableView *tableView) {
     id owner = (id)tableView.dataSource;
     if (!owner) owner = (id)tableView.delegate;
     Class redditListClass = ApolloSubredditIndexRedditListViewControllerClass();
-    if (owner && redditListClass && ![owner isKindOfClass:redditListClass]) {
+    if (owner && redditListClass && ![owner isMemberOfClass:redditListClass]) {
         objc_setAssociatedObject(tableView, &kApolloSubredditIndexNotSubredditsTableKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return NO;
     }
@@ -312,7 +312,7 @@ static UIControl *ApolloSubredditIndexRedditListAccessoryButton(UITableViewCell 
     });
 
     Class cellClass = ApolloSubredditIndexRedditListTableViewCellClass();
-    if (!accessoryButtonIvar || !cellClass || ![cell isKindOfClass:cellClass]) return nil;
+    if (!accessoryButtonIvar || !cellClass || ![cell isMemberOfClass:cellClass]) return nil;
 
     id value = object_getIvar(cell, accessoryButtonIvar);
     return [value isKindOfClass:[UIControl class]] ? (UIControl *)value : nil;
@@ -641,7 +641,7 @@ static UIControl *ApolloSubredditIndexFindStarControlInView(UIView *view, UITabl
         UIView *candidate = stack.lastObject;
         [stack removeLastObject];
 
-        if ([candidate isKindOfClass:[UIControl class]] && ![candidate isKindOfClass:[ApolloSubredditStarHitProxy class]] && !candidate.hidden && candidate.alpha > 0.05) {
+        if ([candidate isKindOfClass:[UIControl class]] && ![candidate isMemberOfClass:[ApolloSubredditStarHitProxy class]] && !candidate.hidden && candidate.alpha > 0.05) {
             CGRect frameInCell = CGRectZero;
             BOOL plausibleSize = ApolloSubredditIndexStarControlFrameIsPlausible((UIControl *)candidate, cell, &frameInCell);
             CGFloat midX = CGRectGetMidX(frameInCell);
@@ -1547,7 +1547,7 @@ static void ApolloSubredditIndexPrepareCellForDisplay(UITableView *tableView, UI
     ApolloSubredditIndexApplyCellMarginsOnce(cell);
     Class redditListCellClass = ApolloSubredditIndexRedditListTableViewCellClass();
     BOOL isMultiredditChild = ApolloSubredditIndexCellIsMultiredditChild(tableView, cell, indexPath);
-    if (redditListCellClass && [cell isKindOfClass:redditListCellClass]) {
+    if (redditListCellClass && [cell isMemberOfClass:redditListCellClass]) {
         ApolloSubredditIndexApplyRedditListCellPolishOnce(cell, isMultiredditChild);
     }
     ApolloSubredditIndexApplyCellSelectionChrome(cell, tableView);
@@ -1962,7 +1962,7 @@ static void ApolloSubredditIndexRaiseNativeIndexAboveHeaders(UITableView *tableV
     Class headerFooterClass = ApolloSubredditIndexTableHeaderFooterViewClass();
     for (NSUInteger position = indexPosition + 1; position < subviews.count; position++) {
         UIView *subview = subviews[position];
-        if ((recreatedHeaderClass && [subview isKindOfClass:recreatedHeaderClass]) ||
+        if ((recreatedHeaderClass && [subview isMemberOfClass:recreatedHeaderClass]) ||
             (headerFooterClass && [subview isKindOfClass:headerFooterClass])) {
             [tableView bringSubviewToFront:indexView];
             return;
@@ -2014,7 +2014,7 @@ static Class ApolloSubredditIndexSubtitleCellClass(void) {
 
 static void ApolloSubredditIndexApplyDescriptionPreference(UITableView *tableView, UITableViewCell *cell) {
     Class subtitleCellClass = ApolloSubredditIndexSubtitleCellClass();
-    if (!subtitleCellClass || ![cell isKindOfClass:subtitleCellClass]) return;
+    if (!subtitleCellClass || ![cell isMemberOfClass:subtitleCellClass]) return;
 
     UILabel *detailLabel = cell.detailTextLabel;
     if (!detailLabel) return;
@@ -2162,7 +2162,7 @@ static void ApolloSubredditIndexApplyEnhancementStateToKnownTables(void) {
 - (void)layoutSubviews {
     %orig;
     Class redditListCellClass = ApolloSubredditIndexRedditListTableViewCellClass();
-    if (!redditListCellClass || ![(UITableViewCell *)self isKindOfClass:redditListCellClass]) return;
+    if (!redditListCellClass || ![(UITableViewCell *)self isMemberOfClass:redditListCellClass]) return;
 
     UITableView *tableView = ApolloSubredditIndexTableForCell((UITableViewCell *)self);
     // Selection highlight is a bug fix that applies on the subreddit list in every mode (#452).
@@ -2211,7 +2211,7 @@ static void ApolloSubredditIndexApplyEnhancementStateToKnownTables(void) {
 - (void)setEditing:(BOOL)editing animated:(BOOL)animated {
     %orig;
     Class redditListCellClass = ApolloSubredditIndexRedditListTableViewCellClass();
-    if (!redditListCellClass || ![(UITableViewCell *)self isKindOfClass:redditListCellClass]) return;
+    if (!redditListCellClass || ![(UITableViewCell *)self isMemberOfClass:redditListCellClass]) return;
 
     UITableView *tableView = ApolloSubredditIndexTableForCell((UITableViewCell *)self);
     if (ApolloSubredditIndexEnsureSelectionTable(tableView)) {

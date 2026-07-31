@@ -218,7 +218,7 @@ static NSString *ApolloFeedSearchQueryText(void) {
 // that rebuilt header. So those cases keep stock behavior (results below the chrome).
 static BOOL ApolloFeedSearchManagedHeader(UIScrollView *sv) {
     UIView *hdr = [sv respondsToSelector:@selector(tableHeaderView)] ? [(UITableView *)sv tableHeaderView] : nil;
-    return hdr && [hdr isKindOfClass:objc_getClass("ApolloSubredditHeaderWrapperView")];
+    return [hdr isMemberOfClass:objc_getClass("ApolloSubredditHeaderWrapperView")];
 }
 
 static CGFloat ApolloFeedSearchDesiredOffsetY(UIScrollView *sv) {

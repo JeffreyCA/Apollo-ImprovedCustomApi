@@ -225,7 +225,7 @@ static NSInteger ApolloAISettingsHystereticIndex(float raw, NSInteger current,
 @implementation ApolloAISettingsTableView
 static BOOL ApolloAISettingsViewIsInSlider(UIView *view) {
     for (UIView *candidate = view; candidate; candidate = candidate.superview) {
-        if ([candidate isKindOfClass:[ApolloAISettingsSlider class]]) return YES;
+        if ([candidate isMemberOfClass:[ApolloAISettingsSlider class]]) return YES;
     }
     return NO;
 }
@@ -359,7 +359,7 @@ static void ApolloAISaveProviderField(ApolloAIFieldTag tag, NSString *value) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Apollo AI";
-    if (![self.tableView isKindOfClass:[ApolloAISettingsTableView class]]) {
+    if (![self.tableView isMemberOfClass:[ApolloAISettingsTableView class]]) {
         object_setClass(self.tableView, [ApolloAISettingsTableView class]);
     }
     self.tableView.delaysContentTouches = NO;

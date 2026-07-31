@@ -1272,7 +1272,7 @@ static UITableView *LGRememberedTableView(id viewController) {
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (LGAlternateIconsAvailable() && LGHasFeaturedSection() && indexPath.section == LGFeaturedSectionIndex()) {
         LGFeaturedIconCell *cell = (LGFeaturedIconCell *)[tableView dequeueReusableCellWithIdentifier:kLGFeaturedCellReuseID];
-        if (!cell || ![cell isKindOfClass:[LGFeaturedIconCell class]])
+        if (![cell isMemberOfClass:[LGFeaturedIconCell class]])
             cell = [[LGFeaturedIconCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:kLGFeaturedCellReuseID];
         if (indexPath.row < sFeaturedCount) {
             const LGIconRow *row = &sFeaturedRows[indexPath.row];
@@ -1288,7 +1288,7 @@ static UITableView *LGRememberedTableView(id viewController) {
     }
     if (LGAlternateIconsAvailable() && indexPath.section == LGPacksSectionIndex()) {
         LGPackCardCell *cell = (LGPackCardCell *)[tableView dequeueReusableCellWithIdentifier:kLGPackCardReuseID];
-        if (!cell || ![cell isKindOfClass:[LGPackCardCell class]])
+        if (![cell isMemberOfClass:[LGPackCardCell class]])
             cell = [[LGPackCardCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:kLGPackCardReuseID];
         NSInteger gi = LGNonEmptyGroupIndexAt(indexPath.row);
         UITableView *sourceTable = ApolloInheritedSettingsThemeSourceTableView((UITableViewController *)(id)self);

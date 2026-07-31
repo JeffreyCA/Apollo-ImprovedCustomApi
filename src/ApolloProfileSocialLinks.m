@@ -1217,7 +1217,7 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener);
             if (!image || !strongSelf || !strongTable) return;
             ApolloSLSheetCell *live = (ApolloSLSheetCell *)[strongTable cellForRowAtIndexPath:indexPath];
             // Guard against cell reuse pointing at a different link now.
-            if ([live isKindOfClass:[ApolloSLSheetCell class]] && indexPath.row < (NSInteger)strongSelf.links.count &&
+            if ([live isMemberOfClass:[ApolloSLSheetCell class]] && indexPath.row < (NSInteger)strongSelf.links.count &&
                 [strongSelf.links[indexPath.row].url.host isEqualToString:wantHost]) {
                 live.iconBox.image = image;
                 live.iconBox.tintColor = nil;
@@ -1539,7 +1539,7 @@ static void ApolloSocialLinkOpenURL(NSURL *url, UIViewController *opener) {
 // <=3 case: tapping a name pill opens its own link.
 - (void)apollo_pillTapped:(UITapGestureRecognizer *)gesture {
     ApolloSLPillView *pill = (ApolloSLPillView *)gesture.view;
-    if (![pill isKindOfClass:[ApolloSLPillView class]] || !pill.link) return;
+    if (![pill isMemberOfClass:[ApolloSLPillView class]] || !pill.link) return;
     ApolloLog(@"[SocialLinks] open link %@", pill.link.urlString);
     ApolloSocialLinkOpenURL(pill.link.url, self.hostViewController);
 }

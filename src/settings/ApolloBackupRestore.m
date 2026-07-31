@@ -213,7 +213,7 @@ NSURL *ApolloBackupRestoreCreateBackupZip(NSError **error) {
         // Extract account usernames from group plist
         NSDictionary *groupPrefs = [NSDictionary dictionaryWithContentsOfFile:groupPlistPath];
         NSDictionary *accountDetails = groupPrefs[@"LoggedInAccountDetails"];
-        if (accountDetails && [accountDetails isKindOfClass:[NSDictionary class]] && accountDetails.count > 0) {
+        if ([accountDetails isKindOfClass:[NSDictionary class]] && accountDetails.count > 0) {
             NSArray *usernames = [accountDetails allValues];
             NSString *accountsContent = [usernames componentsJoinedByString:@"\n"];
             NSString *accountsPath = [backupDir stringByAppendingPathComponent:kAccountsFilename];

@@ -109,7 +109,7 @@ static BOOL ApolloQuickActionsOpenHomeFeed(id tabBarController) {
     UIViewController *root = nav.viewControllers.firstObject;
 
     Class listClass = objc_getClass("_TtC6Apollo24RedditListViewController");
-    if (!listClass || ![root isKindOfClass:listClass]) {
+    if (!listClass || ![root isMemberOfClass:listClass]) {
         ApolloLog(@"[QuickActions] Home: root is not RedditListViewController (%@)", root);
         return NO;
     }

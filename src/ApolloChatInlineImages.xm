@@ -696,7 +696,7 @@ static UIViewController *ApolloChatHostVC(UIView *view) {
     viewer.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
     UIViewController *host = ApolloChatHostVC(g.view);
     while (host.presentedViewController) host = host.presentedViewController;
-    if ([host isKindOfClass:[ApolloChatImageViewerVC class]]) return;   // already open
+    if ([host isMemberOfClass:[ApolloChatImageViewerVC class]]) return;   // already open
     [host presentViewController:viewer animated:YES completion:nil];
 }
 @end

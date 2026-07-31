@@ -192,7 +192,7 @@ static void ApolloSubjectCounterDecoratePresentedSheet(UIViewController *present
     if (![sheet isKindOfClass:objc_getClass("_TtC6Apollo16ActionController")]) return;
 
     id header = ApolloSubjectCounterIvar(sheet, "headerView");
-    if (![header isKindOfClass:objc_getClass("_TtC6Apollo13TextEntryView")]) return;
+    if (![header isMemberOfClass:objc_getClass("_TtC6Apollo13TextEntryView")]) return;
 
     // The 25-character sheet is the single-field one. The two-field sheets this
     // class also backs (new message, "Create Conversation") allow 100, so bail

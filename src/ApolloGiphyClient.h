@@ -19,6 +19,13 @@ typedef void (^ApolloGiphyFetchCompletion)(NSArray<ApolloGiphyGIF *> *gifs, BOOL
 
 + (NSString *)configuredAPIKey;
 
+/// Returns the canonical HTTPS GIF rendition for a valid Giphy ID.
++ (nullable NSURL *)mediaURLForGIFID:(NSString *)gifID;
+
+/// Converts an official Giphy share or embed page into its canonical GIF
+/// rendition. Returns nil for direct media URLs and unrelated Giphy pages.
++ (nullable NSURL *)mediaURLFromPageURL:(NSURL *)pageURL;
+
 + (nullable NSURLSessionDataTask *)fetchTrendingWithOffset:(NSUInteger)offset
                                                 completion:(ApolloGiphyFetchCompletion)completion;
 

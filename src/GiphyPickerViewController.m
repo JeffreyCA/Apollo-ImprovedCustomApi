@@ -407,7 +407,7 @@ static UIColor *ApolloGiphyBackgroundColorFromController(UIViewController *contr
     }
 
     for (GiphyPickerCell *cell in self.collectionView.visibleCells) {
-        if ([cell isKindOfClass:[GiphyPickerCell class]]) {
+        if ([cell isMemberOfClass:[GiphyPickerCell class]]) {
             [cell applyThemeWithTileColor:self.themeCellBackgroundColor accentColor:self.themeAccentColor];
         }
     }

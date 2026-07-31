@@ -3224,7 +3224,7 @@ static Class sPiPMediaPageVCClass = Nil;
 // it raw through object_getIvar would be unsafe.)
 static UIViewController *PiPMediaPageVCForChild(UIViewController *child) {
     UIViewController *parent = child.parentViewController;
-    while (parent && (!sPiPMediaPageVCClass || ![parent isKindOfClass:sPiPMediaPageVCClass])) {
+    while (parent && (!sPiPMediaPageVCClass || ![parent isMemberOfClass:sPiPMediaPageVCClass])) {
         parent = parent.parentViewController;
     }
     return parent;
@@ -3238,7 +3238,7 @@ static UIViewController *PiPMediaPageVCForChild(UIViewController *child) {
 static AVPlayer *PiPOwnedPlayerFromMediaPageVC(id pageVC) {
     if (!pageVC || ![pageVC respondsToSelector:@selector(viewControllers)]) return nil;
     id mediaVC = [[(UIPageViewController *)pageVC viewControllers] firstObject];
-    if (!mediaVC || (sPiPMediaViewerClass && ![mediaVC isKindOfClass:sPiPMediaViewerClass])) return nil;
+    if (!mediaVC || (sPiPMediaViewerClass && ![mediaVC isMemberOfClass:sPiPMediaViewerClass])) return nil;
     return PiPGetIvar(mediaVC, "player");
 }
 

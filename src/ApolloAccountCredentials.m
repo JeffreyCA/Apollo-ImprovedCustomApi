@@ -234,7 +234,7 @@ id ApolloActiveAccountClient(void) {
     if (!rawClient) return nil;
     id client = (__bridge id)rawClient;
     Class clientClass = objc_getClass("RDKClient");
-    if (!clientClass || ![client isKindOfClass:clientClass]) return nil;
+    if (!clientClass || ![client isMemberOfClass:clientClass]) return nil;
     return client;
 }
 

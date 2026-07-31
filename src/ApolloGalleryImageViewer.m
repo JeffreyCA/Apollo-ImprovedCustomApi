@@ -563,7 +563,7 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
     [super viewWillDisappear:animated];
     // Nothing should keep playing behind or after the viewer.
     for (UICollectionViewCell *cell in self.collectionView.visibleCells) {
-        if ([cell isKindOfClass:[ApolloGalleryViewerCell class]]) {
+        if ([cell isMemberOfClass:[ApolloGalleryViewerCell class]]) {
             [(ApolloGalleryViewerCell *)cell pausePlayback];
         }
     }
@@ -867,7 +867,7 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 // paging collection view keeps alive) gets paused, so audio can't stack up.
 - (void)apollo_syncPlayback {
     for (UICollectionViewCell *cell in self.collectionView.visibleCells) {
-        if (![cell isKindOfClass:[ApolloGalleryViewerCell class]]) continue;
+        if (![cell isMemberOfClass:[ApolloGalleryViewerCell class]]) continue;
         ApolloGalleryViewerCell *viewerCell = (ApolloGalleryViewerCell *)cell;
         NSIndexPath *indexPath = [self.collectionView indexPathForCell:cell];
         if (indexPath.item == self.currentIndex) {
@@ -967,7 +967,7 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 - (ApolloGalleryViewerCell *)apollo_currentCell {
     NSIndexPath *indexPath = [NSIndexPath indexPathForItem:self.currentIndex inSection:0];
     UICollectionViewCell *cell = [self.collectionView cellForItemAtIndexPath:indexPath];
-    return [cell isKindOfClass:[ApolloGalleryViewerCell class]] ? (ApolloGalleryViewerCell *)cell : nil;
+    return [cell isMemberOfClass:[ApolloGalleryViewerCell class]] ? (ApolloGalleryViewerCell *)cell : nil;
 }
 
 - (void)apollo_dismissPanned:(UIPanGestureRecognizer *)recognizer {

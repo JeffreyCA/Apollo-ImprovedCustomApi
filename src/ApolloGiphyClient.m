@@ -24,6 +24,53 @@ static dispatch_queue_t ApolloGiphyParseQueue(void) {
     return key.length > 0 ? key : @"";
 }
 
++ (NSURL *)mediaURLForGIFID:(NSString *)gifID {
+    if (![gifID isKindOfClass:[NSString class]] || gifID.length == 0 || gifID.length > 128) return nil;
+    static NSCharacterSet *invalidIDCharacters;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        invalidIDCharacters = [[NSCharacterSet characterSetWithCharactersInString:
+            @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"] invertedSet];
+    });
+    if ([gifID rangeOfCharacterFromSet:invalidIDCharacters].location != NSNotFound) return nil;
+    return [NSURL URLWithString:
+        [NSString stringWithFormat:@"https://media.giphy.com/media/%@/giphy.gif", gifID]];
+}
+
++ (NSURL *)mediaURLFromPageURL:(NSURL *)pageURL {
+    if (![pageURL isKindOfClass:[NSURL class]]) return nil;
+    NSString *scheme = pageURL.scheme.lowercaseString;
+    if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) return nil;
+    NSString *host = pageURL.host.lowercaseString;
+    if (![host isEqualToString:@"giphy.com"] && ![host isEqualToString:@"www.giphy.com"]) return nil;
+
+    NSArray<NSString *> *components = pageURL.path.pathComponents;
+    if (components.count != 3) return nil;
+    NSString *kind = components[1].lowercaseString;
+    NSString *pageComponent = components[2];
+    NSString *gifID = nil;
+    if ([kind isEqualToString:@"embed"]) {
+        gifID = pageComponent;
+    } else if ([kind isEqualToString:@"gifs"]) {
+        NSRange separator = [pageComponent rangeOfString:@"-" options:NSBackwardsSearch];
+        gifID = separator.location == NSNotFound
+            ? pageComponent : [pageComponent substringFromIndex:separator.location + 1];
+
+        // These are Giphy navigation routes, not the bare-ID fallback emitted
+        // by ApolloGiphyClient when an API object has no canonical page URL.
+        static NSSet<NSString *> *reservedRoutes;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            reservedRoutes = [NSSet setWithObjects:@"categories", @"search", @"trending", nil];
+        });
+        if ([reservedRoutes containsObject:gifID.lowercaseString]) return nil;
+    } else {
+        return nil;
+    }
+    if (gifID.length < 6) return nil;
+    return [self mediaURLForGIFID:gifID];
+}
+
 + (NSURL *)imageURLFromDictionary:(NSDictionary *)dict {
     if (![dict isKindOfClass:[NSDictionary class]]) return nil;
     NSString *urlString = dict[@"url"];

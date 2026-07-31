@@ -114,7 +114,7 @@ static NSString *ApolloPFNormalizedFlairLabel(id linkObj) {
 // configured rules. Returns YES if it should be hidden.
 static BOOL ApolloPFLinkMatchesRules(id linkObj) {
     Class linkCls = objc_getClass("RDKLink");
-    if (!linkCls || ![linkObj isKindOfClass:linkCls]) return NO;
+    if (!linkCls || ![linkObj isMemberOfClass:linkCls]) return NO;
     RDKLink *link = (RDKLink *)linkObj;
 
     NSString *sub = nil;
@@ -540,7 +540,7 @@ static BOOL ApolloPFResultsRowBlocked(id vc, NSIndexPath *ip) {
         if (ip.row < 0 || ip.row >= (NSInteger)subs.count) return NO;
         id sub = subs[(NSUInteger)ip.row];
         Class subCls = objc_getClass("RDKSubreddit");
-        if (!subCls || ![sub isKindOfClass:subCls] || ![sub respondsToSelector:@selector(name)]) return NO;
+        if (!subCls || ![sub isMemberOfClass:subCls] || ![sub respondsToSelector:@selector(name)]) return NO;
         NSString *name = ((NSString *(*)(id, SEL))objc_msgSend)(sub, @selector(name));
         return ApolloPFSubredditNameBlocked(name);
     } @catch (__unused id e) {
