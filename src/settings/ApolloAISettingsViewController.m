@@ -3,6 +3,7 @@
 #import "ApolloAICloudBridge.h"
 #import "ApolloAISummary.h"
 #import "ApolloCommon.h"
+#import "ApolloToast.h"
 #import "ApolloState.h"
 #import "ApolloThemeRuntime.h"
 #import "UserDefaultConstants.h"
@@ -788,11 +789,11 @@ static void ApolloAISaveProviderField(ApolloAIFieldTag tag, NSString *value) {
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     // Model selection happens on a pushed picker. Wait until its pop finishes
-    // before presenting UIKit's confirmation alert from this controller.
+    // before showing the non-blocking confirmation over this controller.
     NSString *model = self.pendingModelConfirmation;
     if (model.length == 0) return;
     self.pendingModelConfirmation = nil;
-    [self presentMessageWithTitle:@"AI Model Updated" message:model];
+    ApolloShowToastWithStyle(@"AI Model Updated", model, ApolloToastStyleSuccess, nil);
 }
 
 #pragma mark - Form
@@ -1405,10 +1406,10 @@ static void ApolloAISaveProviderField(ApolloAIFieldTag tag, NSString *value) {
         NSString *detail = removed == 1
             ? @"Removed 1 cached summary"
             : [NSString stringWithFormat:@"Removed %lu cached summaries", (unsigned long)removed];
-        // UIKit dismisses the action sheet around its handler invocation. Queue
-        // the confirmation so the system alert is not presented mid-dismissal.
+        // Let UIKit begin dismissing the action sheet before the transient toast
+        // animates over the underlying settings screen.
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self presentMessageWithTitle:@"AI Cache Cleared" message:detail];
+            ApolloShowToastWithStyle(@"AI Cache Cleared", detail, ApolloToastStyleSuccess, nil);
         });
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
