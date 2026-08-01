@@ -48,8 +48,9 @@
           }
         },
         {
+          "blend-mode" : "hard-light",
           "fill" : {
-            "solid" : "display-p3:0.94039,0.43100,0.00000,1.00000"
+            "solid" : "display-p3:1.00000,0.66009,0.24483,1.00000"
           },
           "glass" : true,
           "image-name" : "Apollo Eyes Icon.svg",
@@ -192,19 +193,6 @@
             ]
           }
         }
-      ],
-      "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 0.5
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.5
-      }
-    },
-    {
-      "layers" : [
-
       ],
       "shadow" : {
         "kind" : "neutral",
