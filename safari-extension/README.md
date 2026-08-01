@@ -1,42 +1,55 @@
-# Safari extension overlay
+# Safari manual-fallback overlay
 
-These files repair Apollo's bundled "Open in Apollo" Safari Web Extension
-(`Apollofari.appex`). They are copied **over** the originals inside the appex at
-IPA-package time by [`scripts/modules/fix-safari-extension.sh`](../scripts/modules/fix-safari-extension.sh),
-which is invoked from [`scripts/build_release_variants.sh`](../scripts/build_release_variants.sh)
-for the extension-bearing release variants, from `patch.sh --fix-safari-extension`
-(the **Build IPA** GitHub Action passes it automatically unless `no_extensions`
-is set), and standalone via [`scripts/fix-safari-extension.sh`](../scripts/fix-safari-extension.sh)
-for an already-built IPA. (The Apollo-Reborn tweak dylib can't touch
-the extension at runtime — it runs in Safari's separate process — so the fix
-ships as a static asset overlay.)
+These files convert Apollo's bundled `Apollofari.appex` into **Open in Apollo
+(Manual Fallback)**. They are copied over the stock extension at IPA-package
+time by [`scripts/modules/fix-safari-extension.sh`](../scripts/modules/fix-safari-extension.sh).
 
-## What was broken
+Automatic Safari routing is intentionally owned by the extension embedded in
+the separately installed Apollo Reborn Link Companion. That app has the stable
+Apple signing identity listed by `open.apolloreborn.app`, reproducing original
+Apollo's reliable topology: the extension initiating the navigation and the
+app owning the Universal Link are targets in the same signed container.
 
-The stock `content.js` defaulted to "Automatic" mode, which redirected to
-`https://openinapollo.com` instead of `apollo://`. That page's auto-open relies
-on an iOS Smart App Banner bound to the **App Store** Apollo (app id
-`979274575`); a sideloaded build is not that app, so the banner never fired and
-users were stranded on the interstitial. The stock `manifest.json` also
-referenced a `background.js` that doesn't exist in the bundle, and `content.js`
-used the deprecated `DOMNodeInserted` event and mishandled `/s/` share links.
+Apollo itself may be signed by any sideloading service. Its bundled extension
+therefore must not attempt automatic Universal Link navigation. Keeping it
+automatic would let two extensions race and would reintroduce the intermittent
+redirects, prompts, and Reddit fallbacks this architecture fixes.
 
-## What these files change
+## Fallback behavior
 
-- **`content.js`** — redirects to
-  `https://open.apolloreborn.app/open?url=<encoded-reddit-url>`. The separately
-  signed Apollo Reborn Opener owns that Universal Link and forwards it to Apollo
-  from native code, avoiding Safari's custom-scheme confirmation. The complete source URL is preserved, so all link
-  shapes including redd.it and `/s/` share links work.
-  Replaces `DOMNodeInserted` with a `MutationObserver` + `popstate` listener.
-  Still honors the popup's `automaticObj.isAutomatic` preference.
-- **`manifest.json`** — drops the dangling `background.js` reference. Stays on
-  Manifest V2 (Safari supports it).
+- Runs only on `reddit.com`, its subdomains, and exact bare `redd.it`.
+- Waits 750 ms before displaying a floating **Open in Apollo** anchor. A normal
+  Companion handoff leaves the page before the button can flash onscreen.
+- The anchor targets
+  `https://open.apolloreborn.app/open?url=<encoded-reddit-url>`, retaining a
+  real user gesture for the Universal Link.
+- Updates the anchor when Reddit navigates as a single-page application.
+- Never calls `window.stop()`, `location.replace()`/`assign()`, or synthetic
+  click APIs; never rewrites page links; and performs no network requests.
+- Requests neither All Websites access nor WebExtension storage permission.
+- Rejects Reddit roots, host-suffix attacks, credentialed/custom-port URLs,
+  media CDN hosts, malformed `redd.it` paths, and the Worker's one-shot
+  fallback marker.
 
-`popup.html`, `popup.js`, `popup.css`, icons, and `_locales` are left untouched
-(the overlay script doesn't replace them).
+The popup has no toggle. It only explains that Link Companion owns automatic
+opening and this extension is the manual recovery path. The IPA overlay also
+changes `CFBundleDisplayName`, so Safari Settings distinguishes **Open in Apollo
+(Manual Fallback)** from **Open in Apollo (Companion)**.
 
-The Worker is deployed from the `apolloreborn-site` repository and its AASA
-lists the opener app's stable signed application identifier. Apollo's own bundle
-ID and signing team are irrelevant. Without the opener, the Worker's Reddit
-fallback and one-shot marker prevent a redirect loop.
+## Packaging
+
+The overlay is applied automatically to extension-bearing release variants,
+by the Build IPA workflow when extensions are retained, by
+`patch.sh --fix-safari-extension`, and by the standalone
+[`scripts/fix-safari-extension.sh`](../scripts/fix-safari-extension.sh). It is a
+no-op for no-extensions variants.
+
+Run the deterministic URL and content-script safety tests with:
+
+```bash
+node --test safari-extension/link-utils.test.js safari-extension/content.test.js
+```
+
+The test suite executes the content script in a stub document and verifies that
+it does not navigate, waits before adding the anchor, and ships a Reddit-only
+manifest without automatic-routing permissions.

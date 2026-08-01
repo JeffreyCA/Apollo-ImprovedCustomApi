@@ -215,8 +215,8 @@ echo "[1/6] Building standard injected IPA..."
 # build-ipa.sh handles tweak injection (+ CydiaSubstrate arm64e strip) on the
 # already-prepared base IPA, preserving its azule/cyan fallback for stock IPAs.
 bash "${REPO_DIR}/build-ipa.sh" --ipa "$IPA_PATH" --deb "$DEB_PATH" -o "$STANDARD_IPA"
-# Everything else for the standard variant in ONE unpack/repack: repair the
-# Safari + Open-in-Apollo extensions, set versions, inject default URL schemes,
+# Everything else for the standard variant in ONE unpack/repack: install the
+# manual Safari fallback, repair the Open-in-Apollo share extension, set versions,
 # inject the widget extension. The GLASS and GLASSICONS variants are derived
 # from this IPA below and inherit all of it; the no-extensions variants have no
 # appex and omit the extension/widget modules.

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Thin IPA wrapper around the fix-safari-extension module. The bundle mutation
-# (overlay safari-extension/{content.js,manifest.json} onto Apollofari.appex,
+# (overlay the manual fallback assets onto Apollofari.appex,
 # strip its signature) lives in scripts/modules/fix-safari-extension.sh and is
 # shared with patch.sh and the apply-patches.sh orchestrator. This wrapper only
 # unpacks the IPA, calls the module, and repacks. No-op when the IPA has no
@@ -15,7 +15,7 @@ source "$SCRIPT_DIR/modules/fix-safari-extension.sh"
 usage() {
     echo "Usage: $0 <path-to-ipa>"
     echo ""
-    echo "Overlays safari-extension/{content.js,manifest.json} onto Apollofari.appex"
+    echo "Converts Apollofari.appex into a Reddit-only manual fallback button"
     echo "and removes the appex code signature so the user's signer re-seals it."
     echo "Exits 0 without changes if the IPA contains no Apollofari.appex."
 }

@@ -1,131 +1,86 @@
-// Apollo-Reborn — "Open in Apollo" Safari Web Extension content script.
+// Apollo Reborn — manual fallback Safari Web Extension.
 //
-// Redirects Reddit web pages to Apollo Reborn's Universal Link. iOS validates
-// that HTTPS link against open.apolloreborn.app's AASA file and can hand it to
-// Apollo without the confirmation sheet that custom apollo:// navigations show.
+// Automatic routing belongs exclusively to the Safari extension embedded in
+// Apollo Reborn Link Companion. Keeping this extension passive is important:
+// old sideloaded Apollo builds cannot reliably own a Universal Link domain, and
+// two automatic extensions racing to navigate the same document recreates the
+// flaky behavior this fallback is intended to recover from.
 //
-// Why this differs from the stock Apollo extension: the stock "Automatic" mode
-// routed through an external interstitial page whose auto-open relied on an iOS
-// Smart App Banner bound to the App Store build (app id 979274575). A sideloaded
-// Apollo-Reborn is not that App Store app, so the banner never recognized it and
-// users were stranded on the interstitial. The new endpoint is owned by the
-// project and has a safe Reddit redirect when no matching app is installed.
-
+// This script therefore does exactly one thing: if a Reddit page remains in
+// Safari long enough for the companion handoff not to have happened, it adds a
+// real user-tappable Universal Link. It never stops the page, changes location,
+// rewrites another link, synthesizes a click, or performs a network request.
 (function () {
     "use strict";
 
-    // Guards against re-redirecting the same URL (e.g. when the SPA mutates the
-    // DOM after we've already kicked off navigation).
-    var lastHandledURL = "";
-
-    var universalLinkOrigin = "https://open.apolloreborn.app";
-    var fallbackMarker = "apollo_reborn_no_open";
-
-    // Returns an Apollo Reborn Universal Link, or null if this isn't a Reddit
-    // content link. The original URL is carried verbatim so redd.it short links,
-    // queries, and future Reddit path shapes don't need special-case parsing.
-    function toApolloURL(href) {
-        var url;
-        try {
-            url = new URL(href);
-        } catch (e) {
-            return null;
-        }
-
-        var host = url.hostname.toLowerCase();
-        if (!(host === "reddit.com" || host.endsWith(".reddit.com") ||
-              host === "redd.it" || host.endsWith(".redd.it"))) {
-            return null;
-        }
-
-        // The Worker adds this marker before its browser fallback redirects to
-        // Reddit. Consume it once so an install whose signer stripped Associated
-        // Domains doesn't bounce forever between Reddit and the Worker.
-        if (url.searchParams.has(fallbackMarker)) {
-            url.searchParams.delete(fallbackMarker);
-            try {
-                window.history.replaceState(null, "", url.href);
-            } catch (e) {
-                // Cleaning the address bar is cosmetic; suppressing the loop is not.
-            }
-            // The MutationObserver below may run after replaceState while Reddit
-            // is still rendering. Remember the cleaned URL so that observer
-            // cannot immediately send the same fallback back to the Worker.
-            lastHandledURL = url.href;
-            return null;
-        }
-
-        // Don't hijack a bare host (e.g. https://reddit.com/ or the homepage);
-        // only act on actual content paths (/r/..., /u/..., /user/..., etc.).
-        var path = url.pathname || "/";
-        if (path === "" || path === "/") {
-            return null;
-        }
-
-        url.protocol = "https:";
-        return universalLinkOrigin + "/open?url=" + encodeURIComponent(url.href);
+    var linkUtils = globalThis.ApolloRebornLinkUtils;
+    if (!linkUtils) {
+        return;
     }
 
-    function runCheck() {
-        var href = window.location.href;
-        if (href === lastHandledURL) {
-            return; // already handled this URL
-        }
+    var promptDelayMilliseconds = 750;
+    var promptTimer = null;
+    var promptHost = null;
+    var promptLink = null;
 
-        var apolloURL = toApolloURL(href);
-        if (!apolloURL) {
+    function removePrompt() {
+        if (promptHost && promptHost.parentNode) {
+            promptHost.parentNode.removeChild(promptHost);
+        }
+        promptHost = null;
+        promptLink = null;
+    }
+
+    function renderPrompt() {
+        promptTimer = null;
+
+        var openerURL = linkUtils.toOpenerURL(window.location.href);
+        if (!openerURL || !document.documentElement) {
+            removePrompt();
             return;
         }
 
-        lastHandledURL = href;
-        window.stop();
-        window.location.replace(apolloURL);
+        if (!promptHost) {
+            promptHost = document.createElement("div");
+            promptHost.id = "apollo-reborn-open-prompt";
+
+            promptLink = document.createElement("a");
+            promptLink.id = "apollo-reborn-open-link";
+            promptLink.textContent = "Open in Apollo";
+            promptLink.setAttribute("aria-label", "Open this Reddit link in Apollo");
+
+            promptHost.appendChild(promptLink);
+            document.documentElement.appendChild(promptHost);
+        }
+
+        promptLink.href = openerURL;
     }
 
-    function start(isAutomatic) {
-        // The popup lets the user turn auto-open off. When off, leave the page
-        // alone (the toolbar action and the iOS Share sheet still work).
-        if (isAutomatic === false) {
+    function schedulePrompt() {
+        // Once visible, keep the link current across Reddit's SPA navigation.
+        // The initial delay is only to prevent a distracting flash during the
+        // companion extension's normal automatic handoff.
+        if (promptHost) {
+            renderPrompt();
             return;
         }
 
-        runCheck();
-
-        // Reddit is a single-page app: the URL can change without a full
-        // navigation. Re-check on history changes and DOM mutations. This
-        // replaces the deprecated DOMNodeInserted listener the stock script used.
-        window.addEventListener("popstate", runCheck);
-
-        var observer = new MutationObserver(function () {
-            runCheck();
-        });
-        observer.observe(document.documentElement || document, {
-            childList: true,
-            subtree: true
-        });
-    }
-
-    // The popup stores { automaticObj: { isAutomatic: bool } }; default true.
-    // Safari has shipped both callback and Promise forms of the WebExtension
-    // storage API. Support both: waiting forever for an unsupported callback
-    // form means the content script silently never runs.
-    function startFromStorage(item) {
-        var automaticObj = item && item.automaticObj;
-        var isAutomatic = (automaticObj === undefined || automaticObj === null)
-            ? true
-            : automaticObj.isAutomatic;
-        start(isAutomatic);
-    }
-
-    try {
-        var pending = browser.storage.local.get("automaticObj");
-        if (pending && typeof pending.then === "function") {
-            pending.then(startFromStorage, function () { start(true); });
-        } else {
-            browser.storage.local.get(startFromStorage);
+        // Reddit can mutate the document continuously while hydrating. Never
+        // restart an existing timer here or a busy page could postpone the
+        // fallback forever.
+        if (promptTimer !== null) {
+            return;
         }
-    } catch (e) {
-        // If storage is unavailable for any reason, default to automatic.
-        start(true);
+
+        promptTimer = window.setTimeout(renderPrompt, promptDelayMilliseconds);
     }
+
+    window.addEventListener("popstate", schedulePrompt);
+
+    var observer = new MutationObserver(function () {
+        schedulePrompt();
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+
+    schedulePrompt();
 })();
