@@ -1456,6 +1456,15 @@ static NSMutableDictionary<NSString *, NSString *> *subredditListPersistentCache
 // source queue; the cache itself is NSCache and is safe to read from Apollo's
 // request paths while NSURLSession completions populate it in the background.
 static NSMutableSet<NSString *> *subredditListFetchesInFlight;
+// Completion waiters for each in-flight source. A manual refresh can overlap
+// the constructor prefetch; coalescing them guarantees every caller finishes.
+static NSMutableDictionary<NSString *, NSMutableArray *> *subredditListFetchCompletions;
+// Whether the active request bypasses URLCache, plus forced waiters that must
+// receive a follow-up network request when they overlap a weaker prefetch.
+static NSMutableDictionary<NSString *, NSNumber *> *subredditListFetchBypassesCache;
+static NSMutableDictionary<NSString *, NSMutableArray *> *subredditListForcedFetchCompletions;
+
+typedef void (^ApolloSubredditSourceRefreshCompletion)(NSString *content, NSError *error);
 
 static NSArray<NSString *> *ApolloSubredditListLines(NSString *content) {
     if (content.length == 0) return @[];
@@ -1514,27 +1523,80 @@ static dispatch_queue_t ApolloSubredditSourceQueue(void) {
     return queue;
 }
 
+static NSError *ApolloSubredditSourceError(NSInteger code, NSString *description) {
+    return [NSError errorWithDomain:@"com.apolloreborn.subreddit-sources"
+                               code:code
+                           userInfo:@{NSLocalizedDescriptionKey:
+                                          description.length > 0
+                                              ? description
+                                              : @"The subreddit source could not be loaded."}];
+}
+
 // Warm a remote subreddit-list source without ever waiting for it. Callers use
 // the last cached value (or their local/native fallback) immediately. The
-// in-flight set prevents a burst of resource/request hooks from starting the
-// same download repeatedly while the first fetch is outstanding. Crucially,
+// in-flight coordinator prevents duplicate downloads and retains completion
+// waiters so a pull-to-refresh overlapping launch prefetch cannot hang.
 // URL/session/request construction also happens on the utility queue: merely
-// creating NSURLSession.sharedSession can initialize CFNetwork, so doing that
-// synchronously from the bundle-resource hook or dylib constructor would leave
-// CFNetwork work on Apollo's launch-critical main thread even without a wait.
-static void ApolloRefreshSubredditListSourceAsync(NSString *source, BOOL refreshCached) {
-    if (source.length == 0) return;
+// creating NSURLSession.sharedSession can initialize CFNetwork.
+static void ApolloRefreshSubredditListSourceAsync(
+    NSString *source,
+    BOOL forceRefresh,
+    NSURLRequestCachePolicy cachePolicy,
+    ApolloSubredditSourceRefreshCompletion completion
+) {
     NSString *capturedSource = [source copy];
     dispatch_async(ApolloSubredditSourceQueue(), ^{
+        if (capturedSource.length == 0) {
+            if (completion) {
+                completion(nil, ApolloSubredditSourceError(
+                    NSURLErrorBadURL, @"The subreddit source URL is empty."));
+            }
+            return;
+        }
+
         NSURL *url = [NSURL URLWithString:capturedSource];
         NSString *key = url.absoluteString;
-        if (!url || key.length == 0) return;
-        if (!refreshCached && [subredditListCache objectForKey:key]) return;
-        if ([subredditListFetchesInFlight containsObject:key]) return;
+        if (!url || key.length == 0 || url.scheme.length == 0 || url.host.length == 0) {
+            if (completion) {
+                completion(nil, ApolloSubredditSourceError(
+                    NSURLErrorBadURL, @"The subreddit source URL is invalid."));
+            }
+            return;
+        }
+
+        NSString *cached = [subredditListCache objectForKey:key];
+        if (!forceRefresh && cached.length > 0) {
+            if (completion) completion(cached, nil);
+            return;
+        }
+
+        if ([subredditListFetchesInFlight containsObject:key]) {
+            if (completion) {
+                BOOL activeBypassesCache =
+                    [subredditListFetchBypassesCache[key] boolValue];
+                if (forceRefresh && !activeBypassesCache) {
+                    NSMutableArray *forcedWaiters =
+                        subredditListForcedFetchCompletions[key];
+                    if (!forcedWaiters) {
+                        forcedWaiters = [NSMutableArray array];
+                        subredditListForcedFetchCompletions[key] = forcedWaiters;
+                    }
+                    [forcedWaiters addObject:[completion copy]];
+                } else {
+                    [subredditListFetchCompletions[key] addObject:[completion copy]];
+                }
+            }
+            return;
+        }
         [subredditListFetchesInFlight addObject:key];
+        subredditListFetchBypassesCache[key] =
+            @(cachePolicy == NSURLRequestReloadIgnoringLocalCacheData);
+        NSMutableArray *waiters = [NSMutableArray array];
+        if (completion) [waiters addObject:[completion copy]];
+        subredditListFetchCompletions[key] = waiters;
 
         NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
-                                                               cachePolicy:NSURLRequestUseProtocolCachePolicy
+                                                               cachePolicy:cachePolicy
                                                            timeoutInterval:8.0];
         [[[NSURLSession sharedSession] dataTaskWithRequest:request
                                         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -1545,33 +1607,88 @@ static void ApolloRefreshSubredditListSourceAsync(NSString *source, BOOL refresh
                 ? (NSHTTPURLResponse *)response
                 : nil;
             dispatch_async(ApolloSubredditSourceQueue(), ^{
+                NSError *resultError = error;
                 if (!error && http.statusCode == 200 &&
                     ApolloSubredditListLines(content).count > 0) {
                     [subredditListCache setObject:content forKey:key];
                     ApolloPersistSubredditSource(key, content);
                     ApolloLog(@"[RandomSources] Refreshed %@", key);
                 } else {
+                    if (!resultError) {
+                        NSString *reason = http && http.statusCode != 200
+                            ? [NSString stringWithFormat:@"The source returned HTTP %ld.",
+                                                               (long)http.statusCode]
+                            : @"The source returned no valid subreddit entries.";
+                        resultError = ApolloSubredditSourceError(
+                            NSURLErrorBadServerResponse, reason);
+                    }
                     ApolloLog(@"[RandomSources] Refresh failed for %@: HTTP %ld error=%@",
                               key, (long)http.statusCode,
-                              error.localizedDescription ?: @"invalid/empty response");
+                              resultError.localizedDescription ?: @"invalid/empty response");
                 }
+
+                NSArray *completions = [subredditListFetchCompletions[key] copy] ?: @[];
+                NSArray *forcedCompletions =
+                    [subredditListForcedFetchCompletions[key] copy] ?: @[];
+                [subredditListFetchCompletions removeObjectForKey:key];
+                [subredditListForcedFetchCompletions removeObjectForKey:key];
+                [subredditListFetchBypassesCache removeObjectForKey:key];
                 [subredditListFetchesInFlight removeObject:key];
+                for (ApolloSubredditSourceRefreshCompletion waiter in completions) {
+                    waiter(resultError ? nil : content, resultError);
+                }
+
+                if (forcedCompletions.count > 0) {
+                    ApolloRefreshSubredditListSourceAsync(
+                        key,
+                        YES,
+                        NSURLRequestReloadIgnoringLocalCacheData,
+                        ^(NSString *forcedContent, NSError *forcedError) {
+                            for (ApolloSubredditSourceRefreshCompletion waiter
+                                    in forcedCompletions) {
+                                waiter(forcedContent, forcedError);
+                            }
+                        });
+                }
             });
         }] resume];
     });
 }
 
-static NSArray<NSString *> *ApolloTrendingFallbackSubreddits(NSDictionary *fallbackDict) {
+static NSArray<NSString *> *ApolloSampleTrendingSubreddits(
+    NSArray<NSString *> *subreddits,
+    NSString *limit
+) {
+    if (subreddits.count == 0) return @[];
+    if (limit.length == 0) return [subreddits copy];
+
+    NSInteger requestedCount = MAX(0, limit.integerValue);
+    if ((NSUInteger)requestedCount >= subreddits.count) return [subreddits copy];
+
+    NSMutableArray<NSString *> *pool = [subreddits mutableCopy];
+    NSMutableArray<NSString *> *result =
+        [NSMutableArray arrayWithCapacity:(NSUInteger)requestedCount];
+    for (NSInteger i = 0; i < requestedCount; i++) {
+        NSUInteger randomIndex = arc4random_uniform((uint32_t)pool.count);
+        [result addObject:pool[randomIndex]];
+        [pool removeObjectAtIndex:randomIndex];
+    }
+    return result;
+}
+
+static NSArray<NSString *> *ApolloTrendingFallbackSubreddits(
+    NSDictionary *fallbackDict,
+    NSString *limit
+) {
     NSArray *fallbackKeys = fallbackDict.allKeys;
     if (fallbackKeys.count == 0) return @[];
 
-    if (sTrendingSubredditsLimit.length == 0) {
+    if (limit.length == 0) {
         NSString *key = fallbackKeys[arc4random_uniform((uint32_t)fallbackKeys.count)];
         NSArray *subreddits = fallbackDict[key];
         return [subreddits isKindOfClass:[NSArray class]] ? subreddits : @[];
     }
 
-    NSInteger requestedCount = MAX(0, sTrendingSubredditsLimit.integerValue);
     NSMutableOrderedSet<NSString *> *uniqueSubreddits = [NSMutableOrderedSet orderedSet];
     for (id value in fallbackDict.allValues) {
         if (![value isKindOfClass:[NSArray class]]) continue;
@@ -1582,16 +1699,42 @@ static NSArray<NSString *> *ApolloTrendingFallbackSubreddits(NSDictionary *fallb
             }
         }
     }
+    return ApolloSampleTrendingSubreddits(uniqueSubreddits.array, limit);
+}
 
-    NSUInteger count = MIN((NSUInteger)requestedCount, uniqueSubreddits.count);
-    NSMutableArray<NSString *> *pool = [uniqueSubreddits.array mutableCopy];
-    NSMutableArray<NSString *> *result = [NSMutableArray arrayWithCapacity:count];
-    for (NSUInteger i = 0; i < count; i++) {
-        NSUInteger randomIndex = arc4random_uniform((uint32_t)pool.count);
-        [result addObject:pool[randomIndex]];
-        [pool removeObjectAtIndex:randomIndex];
-    }
-    return result;
+void ApolloRefreshTrendingSubreddits(
+    ApolloTrendingSubredditsRefreshCompletion completion
+) {
+    NSString *source = [sTrendingSubredditsSource copy];
+    NSString *limit = [sTrendingSubredditsLimit copy];
+    ApolloRefreshSubredditListSourceAsync(
+        source,
+        YES,
+        NSURLRequestReloadIgnoringLocalCacheData,
+        ^(NSString *content, NSError *error) {
+            NSArray<NSString *> *sample =
+                error ? nil
+                      : ApolloSampleTrendingSubreddits(
+                            ApolloSubredditListLines(content), limit);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(sample, error);
+            });
+        });
+}
+
+void ApolloPrepareRandomNSFWSubredditSource(
+    ApolloSubredditSourcePreparationCompletion completion
+) {
+    NSString *source = [sRandNsfwSubredditsSource copy];
+    ApolloRefreshSubredditListSourceAsync(
+        source,
+        NO,
+        NSURLRequestUseProtocolCachePolicy,
+        ^(__unused NSString *content, NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(error);
+            });
+        });
 }
 // Replace Reddit API client ID. Resolved per-account (see
 // ApolloAccountCredentials.{h,m}): a pending add-account choice, else the
@@ -1814,12 +1957,10 @@ static const char kARCompletion = '\0';
         // Build an immediate local fallback. For a configured limit, sample
         // across Apollo's historical lists so the fallback has that many rows
         // instead of silently reverting to one native five-item day.
-        NSArray *fallbackArray = ApolloTrendingFallbackSubreddits(fallbackDict);
+        NSArray *fallbackArray =
+            ApolloTrendingFallbackSubreddits(fallbackDict, sTrendingSubredditsLimit);
         if (fallbackArray.count == 0 && sTrendingSubredditsLimit.integerValue != 0) {
             return url;
-        }
-        if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowRandNsfw]) {
-            fallbackArray = [fallbackArray arrayByAddingObject:@"RandNSFW"];
         }
         [fallbackDict setObject:fallbackArray forKey:[formatter stringFromDate:[NSDate date]]];
 
@@ -1839,36 +1980,28 @@ static const char kARCompletion = '\0';
             ? [subredditListCache objectForKey:cacheKey]
             : nil;
         if (subredditListContent.length == 0) {
-            ApolloRefreshSubredditListSourceAsync(sTrendingSubredditsSource, NO);
+            ApolloRefreshSubredditListSourceAsync(
+                sTrendingSubredditsSource,
+                NO,
+                NSURLRequestUseProtocolCachePolicy,
+                nil);
             ApolloLog(@"[RandomSources] Trending source not ready; using %lu bundled entries",
                       (unsigned long)fallbackArray.count);
             return writeDict(fallbackDict);
         }
 
         // Parse into array
-        NSMutableArray<NSString *> *subreddits = [ApolloSubredditListLines(subredditListContent) mutableCopy];
+        NSArray<NSString *> *subreddits =
+            ApolloSampleTrendingSubreddits(
+                ApolloSubredditListLines(subredditListContent),
+                sTrendingSubredditsLimit);
         if (subreddits.count == 0) {
-            return writeDict(fallbackDict);
+            if (sTrendingSubredditsLimit.integerValue != 0) {
+                return writeDict(fallbackDict);
+            }
         }
 
         NSMutableDictionary *dict = [NSMutableDictionary dictionary];
-        // Randomize and limit subreddits
-        bool limitSubreddits = [sTrendingSubredditsLimit length] > 0;
-        if (limitSubreddits && [sTrendingSubredditsLimit integerValue] < subreddits.count) {
-            NSUInteger count = [sTrendingSubredditsLimit integerValue];
-            NSMutableArray<NSString *> *randomSubreddits = [NSMutableArray arrayWithCapacity:count];
-            for (NSUInteger i = 0; i < count; i++) {
-                NSUInteger randomIndex = arc4random_uniform((uint32_t)subreddits.count);
-                [randomSubreddits addObject:subreddits[randomIndex]];
-                // Remove to prevent duplicates
-                [subreddits removeObjectAtIndex:randomIndex];
-            }
-            subreddits = randomSubreddits;
-        }
-
-        if ([[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowRandNsfw]) {
-            [subreddits addObject:@"RandNSFW"];
-        }
         [dict setObject:subreddits forKey:[formatter stringFromDate:[NSDate date]]];
         return writeDict(dict);
     }
@@ -2245,7 +2378,11 @@ static void ApolloImgurRetryAlbumViaTextProxy(NSString *albumID,
         // The constructor normally prewarms this cache. If it did not finish
         // (offline/slow network), preserve Apollo's native request for this tap
         // and refresh asynchronously for the next one.
-        ApolloRefreshSubredditListSourceAsync(subredditListURL.absoluteString, NO);
+        ApolloRefreshSubredditListSourceAsync(
+            subredditListURL.absoluteString,
+            NO,
+            NSURLRequestUseProtocolCachePolicy,
+            nil);
         return %orig;
     }
 
@@ -3079,7 +3216,11 @@ static void initializeRandomSources() {
     for (NSString *source in @[sRandNsfwSubredditsSource ?: @"",
                                sRandomSubredditsSource ?: @"",
                                sTrendingSubredditsSource ?: @""]) {
-        ApolloRefreshSubredditListSourceAsync(source, YES);
+        ApolloRefreshSubredditListSourceAsync(
+            source,
+            YES,
+            NSURLRequestUseProtocolCachePolicy,
+            nil);
     }
 }
 
@@ -3088,6 +3229,9 @@ static void initializeRandomSources() {
     subredditListCache = [NSCache new];
     subredditListCache.countLimit = 16;
     subredditListFetchesInFlight = [NSMutableSet set];
+    subredditListFetchCompletions = [NSMutableDictionary dictionary];
+    subredditListFetchBypassesCache = [NSMutableDictionary dictionary];
+    subredditListForcedFetchCompletions = [NSMutableDictionary dictionary];
     ApolloLoadPersistedSubredditSources();
 
     NSDictionary *defaultValues = @{UDKeyBlockAnnouncements: @YES,
