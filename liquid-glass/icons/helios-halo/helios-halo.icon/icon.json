@@ -1,8 +1,8 @@
 {
   "fill" : {
     "linear-gradient" : [
-      "display-p3:0.18720,0.09577,0.33307,1.00000",
-      "display-p3:0.15027,0.18187,1.00000,1.00000"
+      "display-p3:0.16528,0.07429,0.29833,1.00000",
+      "display-p3:0.08035,0.20881,0.96783,1.00000"
     ],
     "orientation" : {
       "start" : {
@@ -17,15 +17,16 @@
   },
   "groups" : [
     {
+      "blur-material" : 0.5,
       "layers" : [
         {
           "blend-mode-specializations" : [
             {
-              "value" : "screen"
+              "value" : "normal"
             },
             {
               "appearance" : "dark",
-              "value" : "lighten"
+              "value" : "normal"
             }
           ],
           "fill-specializations" : [
@@ -61,9 +62,11 @@
           }
         },
         {
+          "blend-mode" : "plus-lighter",
           "fill" : {
             "automatic-gradient" : "display-p3:0.89418,0.06660,0.83887,1.00000"
           },
+          "hidden" : false,
           "image-name" : "Apollo Eyes Icon.svg",
           "name" : "Apollo Eyes Icon",
           "position" : {
@@ -203,76 +206,67 @@
           }
         },
         {
-          "fill" : {
-            "automatic-gradient" : "display-p3:0.21900,0.23849,0.59134,1.00000",
-            "orientation" : {
-              "start" : {
-                "x" : 0.5,
-                "y" : 0
-              },
-              "stop" : {
-                "x" : 0.5,
-                "y" : 0.7
-              }
-            }
-          },
-          "hidden" : false,
-          "image-name" : "Apollo Ring Large.svg",
-          "name" : "Apollo Ring Large",
-          "opacity-specializations" : [
+          "fill-specializations" : [
             {
-              "value" : 0
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
             },
             {
               "appearance" : "dark",
-              "value" : 0
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
             }
           ],
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "SmallCircle.svg",
+          "name" : "SmallCircle",
+          "opacity" : 0.4,
           "position" : {
-            "scale" : 0.67,
+            "scale" : 0.93,
             "translation-in-points" : [
-              -0.017993374452316857,
-              -379.7038005709613
+              -4,
+              -384
             ]
           }
         },
         {
-          "fill" : {
-            "automatic-gradient" : "display-p3:0.21900,0.23849,0.59134,1.00000"
-          },
-          "hidden" : false,
-          "image-name" : "Apollo Ring Large.svg",
-          "name" : "Apollo Ring Large",
-          "opacity-specializations" : [
+          "fill-specializations" : [
             {
-              "value" : 0
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
             },
             {
               "appearance" : "dark",
-              "value" : 0
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "Circle.svg",
+          "name" : "Circle",
+          "opacity-specializations" : [
+            {
+              "value" : 0.4
+            },
+            {
+              "appearance" : "dark",
+              "value" : 0.4
             }
           ],
           "position" : {
-            "scale" : 1.53,
+            "scale" : 2.5,
             "translation-in-points" : [
-              0.003170664460867556,
-              -447.28017222797814
+              -0.08342234164570073,
+              -461.4302294043578
             ]
           }
         }
-      ],
-      "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 0.5
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.5
-      }
-    },
-    {
-      "layers" : [
-
       ],
       "shadow" : {
         "kind" : "neutral",

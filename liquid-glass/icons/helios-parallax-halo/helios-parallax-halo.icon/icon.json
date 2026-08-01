@@ -216,77 +216,73 @@
           }
         },
         {
-          "fill" : {
-            "automatic-gradient" : "display-p3:0.21900,0.23849,0.59134,1.00000",
-            "orientation" : {
-              "start" : {
-                "x" : 0.5,
-                "y" : 0
-              },
-              "stop" : {
-                "x" : 0.5,
-                "y" : 0.7
-              }
-            }
-          },
-          "glass" : true,
-          "hidden" : false,
-          "image-name" : "Apollo Ring Large.svg",
-          "name" : "Apollo Ring Large",
-          "opacity-specializations" : [
+          "fill-specializations" : [
             {
-              "value" : 0
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
             },
             {
               "appearance" : "dark",
-              "value" : 0
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "image-name" : "SmallCircle.svg",
+          "name" : "SmallCircle",
+          "opacity-specializations" : [
+            {
+              "value" : 1
+            },
+            {
+              "appearance" : "dark",
+              "value" : 0.4
             }
           ],
           "position" : {
-            "scale" : 0.67,
+            "scale" : 0.93,
             "translation-in-points" : [
-              -0.017993374452316857,
-              -379.7038005709613
+              -4,
+              -384
             ]
           }
         },
         {
-          "fill" : {
-            "automatic-gradient" : "display-p3:0.21900,0.23849,0.59134,1.00000"
-          },
-          "hidden" : false,
-          "image-name" : "Apollo Ring Large.svg",
-          "name" : "Apollo Ring Large",
-          "opacity-specializations" : [
+          "fill-specializations" : [
             {
-              "value" : 0
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
             },
             {
               "appearance" : "dark",
-              "value" : 0
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
+          "image-name" : "Circle.svg",
+          "name" : "Circle",
+          "opacity-specializations" : [
+            {
+              "value" : 1
+            },
+            {
+              "appearance" : "dark",
+              "value" : 0.4
             }
           ],
           "position" : {
-            "scale" : 1.53,
+            "scale" : 2.5,
             "translation-in-points" : [
-              0.003170664460867556,
-              -447.28017222797814
+              -0.1,
+              -461.4
             ]
           }
         }
-      ],
-      "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 0.5
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.5
-      }
-    },
-    {
-      "layers" : [
-
       ],
       "shadow" : {
         "kind" : "neutral",

@@ -199,20 +199,46 @@
           }
         },
         {
-          "fill" : {
-            "automatic-gradient" : "extended-gray:0.75000,1.00000",
-            "orientation" : {
-              "start" : {
-                "x" : 0.5,
-                "y" : 0
-              },
-              "stop" : {
-                "x" : 0.5,
-                "y" : 0.7
+          "fill-specializations" : [
+            {
+              "value" : {
+                "automatic-gradient" : "extended-gray:0.75000,1.00000",
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.5,
+                    "y" : 0
+                  },
+                  "stop" : {
+                    "x" : 0.5,
+                    "y" : 0.7
+                  }
+                }
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "automatic-gradient" : "display-p3:0.11631,0.11631,0.11631,1.00000",
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.5,
+                    "y" : 0
+                  },
+                  "stop" : {
+                    "x" : 0.5,
+                    "y" : 0.7
+                  }
+                }
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "extended-gray:0.00000,1.00000"
               }
             }
-          },
-          "glass" : true,
+          ],
+          "glass" : false,
           "hidden" : false,
           "image-name" : "Apollo Ring Large.svg",
           "name" : "Apollo Ring Large",
@@ -222,11 +248,11 @@
             },
             {
               "appearance" : "dark",
-              "value" : 0
+              "value" : 1
             },
             {
               "appearance" : "tinted",
-              "value" : 0
+              "value" : 1
             }
           ],
           "position" : {
@@ -251,7 +277,7 @@
               }
             }
           },
-          "glass" : true,
+          "glass" : false,
           "hidden" : false,
           "image-name" : "Apollo Ring Large.svg",
           "name" : "Apollo Ring Large",
@@ -261,11 +287,11 @@
             },
             {
               "appearance" : "dark",
-              "value" : 0
+              "value" : 1
             },
             {
               "appearance" : "tinted",
-              "value" : 0
+              "value" : 0.76
             }
           ],
           "position" : {
@@ -277,9 +303,26 @@
           }
         },
         {
-          "fill" : {
-            "automatic-gradient" : "extended-gray:0.75000,1.00000"
-          },
+          "fill-specializations" : [
+            {
+              "value" : {
+                "automatic-gradient" : "extended-gray:0.75000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "automatic-gradient" : "display-p3:0.11631,0.11631,0.11631,1.00000"
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "extended-gray:0.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : false,
           "hidden" : false,
           "image-name" : "Apollo Ring Large.svg",
           "name" : "Apollo Ring Large",
@@ -289,11 +332,11 @@
             },
             {
               "appearance" : "dark",
-              "value" : 0
+              "value" : 1
             },
             {
               "appearance" : "tinted",
-              "value" : 0
+              "value" : 1
             }
           ],
           "position" : {
@@ -308,6 +351,7 @@
           "fill" : {
             "automatic-gradient" : "extended-srgb:0.00000,0.53333,1.00000,1.00000"
           },
+          "glass" : false,
           "hidden" : false,
           "image-name" : "Apollo Ring Large.svg",
           "name" : "Apollo Ring Large",
@@ -317,11 +361,11 @@
             },
             {
               "appearance" : "dark",
-              "value" : 0
+              "value" : 1
             },
             {
               "appearance" : "tinted",
-              "value" : 0
+              "value" : 0.76
             }
           ],
           "position" : {

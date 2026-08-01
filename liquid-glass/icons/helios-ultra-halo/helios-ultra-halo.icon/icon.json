@@ -48,9 +48,28 @@
           }
         },
         {
-          "fill" : {
-            "solid" : "display-p3:0.94039,0.43100,0.00000,1.00000"
-          },
+          "blend-mode-specializations" : [
+            {
+              "value" : "hard-light"
+            },
+            {
+              "appearance" : "dark",
+              "value" : "hard-light"
+            }
+          ],
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:1.00000,0.64264,0.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "display-p3:1.00000,0.66009,0.24483,1.00000"
+              }
+            }
+          ],
           "glass" : true,
           "image-name" : "Apollo Eyes Icon.svg",
           "name" : "Apollo Eyes Icon",
@@ -194,76 +213,54 @@
         },
         {
           "fill" : {
-            "automatic-gradient" : "display-p3:0.21900,0.23849,0.59134,1.00000",
-            "orientation" : {
-              "start" : {
-                "x" : 0.5,
-                "y" : 0
-              },
-              "stop" : {
-                "x" : 0.5,
-                "y" : 0.7
-              }
-            }
+            "solid" : "extended-gray:1.00000,1.00000"
           },
-          "glass" : true,
+          "glass" : false,
           "hidden" : false,
-          "image-name" : "Apollo Ring Large.svg",
-          "name" : "Apollo Ring Large",
+          "image-name" : "SmallCircle.svg",
+          "name" : "SmallCircle",
           "opacity-specializations" : [
             {
-              "value" : 0
+              "value" : 1
             },
             {
               "appearance" : "dark",
-              "value" : 0
+              "value" : 0.4
             }
           ],
           "position" : {
-            "scale" : 0.67,
+            "scale" : 0.93,
             "translation-in-points" : [
-              -0.017993374452316857,
-              -379.7038005709613
+              -4,
+              -384
             ]
           }
         },
         {
           "fill" : {
-            "automatic-gradient" : "display-p3:0.21900,0.23849,0.59134,1.00000"
+            "solid" : "extended-gray:1.00000,1.00000"
           },
+          "glass" : false,
           "hidden" : false,
-          "image-name" : "Apollo Ring Large.svg",
-          "name" : "Apollo Ring Large",
+          "image-name" : "Circle.svg",
+          "name" : "Circle",
           "opacity-specializations" : [
             {
-              "value" : 0
+              "value" : 1
             },
             {
               "appearance" : "dark",
-              "value" : 0
+              "value" : 0.4
             }
           ],
           "position" : {
-            "scale" : 1.53,
+            "scale" : 2.5,
             "translation-in-points" : [
-              0.003170664460867556,
-              -447.28017222797814
+              -0.1,
+              -461.4
             ]
           }
         }
-      ],
-      "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 0.5
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.5
-      }
-    },
-    {
-      "layers" : [
-
       ],
       "shadow" : {
         "kind" : "neutral",
