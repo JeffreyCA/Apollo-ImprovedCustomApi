@@ -24,10 +24,16 @@ static NSString *const kValetServiceSubstring = @"com.christianselig.Apollo";
 // in the simulator, with the tweak's keychain shim (which serves these on launch).
 static NSArray<NSDictionary *> *ApolloCaptureValetKeychainItems(void) {
     NSDictionary *query = @{
-        (__bridge id)kSecClass:            (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecMatchLimit:       (__bridge id)kSecMatchLimitAll,
-        (__bridge id)kSecReturnAttributes: @YES,
-        (__bridge id)kSecReturnData:       @YES,
+        (__bridge id)kSecClass:               (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecMatchLimit:          (__bridge id)kSecMatchLimitAll,
+        (__bridge id)kSecReturnAttributes:    @YES,
+        (__bridge id)kSecReturnData:          @YES,
+        // Backup is an Apollo/Valet export, not permission to unlock some other protected
+        // generic-password item visible to this signing identity. MatchLimitAll otherwise
+        // defaults to allowing authentication UI and can unexpectedly request the device
+        // passcode. Protected rows are unrelated to Apollo's ordinary Valet stores, so skip
+        // them silently just like the recovery/diagnostic enumeration in Tweak.xm.
+        (__bridge id)kSecUseAuthenticationUI: (__bridge id)kSecUseAuthenticationUISkip,
     };
     // Keyed by service+account so mirror-only items can be merged in without duplicating a key.
     NSMutableDictionary<NSString *, NSDictionary *> *byKey = [NSMutableDictionary dictionary];
