@@ -6310,7 +6310,13 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
             objc_setAssociatedObject(navItem, kApolloGlobeStandaloneItemKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
 
-        if (globe.superview == container) return;  // already merged — don't double-shift
+        if (globe.superview == container) {
+            // The visual pill may have been rebuilt around the same custom
+            // view. Keep the title invalidation alive even though the button
+            // geometry itself is already merged.
+            ApolloSubredditRequestTitleRelayout(navItem);
+            return;  // already merged — don't double-shift
+        }
 
         CGFloat gw = kApolloGlobeMergeSlotWidth;
         CGFloat h = container.bounds.size.height > 1.0 ? container.bounds.size.height : 44.0;
@@ -6387,6 +6393,19 @@ static void ApolloApplyGlobeMergeForNavItem(UINavigationItem *navItem) {
         container.bounds = CGRectMake(0.0, 0.0, newW, cf.size.height > 1.0 ? cf.size.height : h);
         objc_setAssociatedObject(container, kApolloGlobeMergeShiftKey, @(shift), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [container setNeedsLayout];
+
+        // iOS 27 caches the UIBarButtonItem custom-view measurement more
+        // aggressively than iOS 26. Merely widening container.frame can leave
+        // the platter and title wrapper laid out for the pre-globe width, so a
+        // long subreddit title overlaps the new leading globe (#772). Re-set
+        // the item array under the merge guard to invalidate UIKit's cached
+        // measurement, then explicitly ask the subreddit title to remeasure.
+        // The platter-frame hook in ApolloLiquidGlass performs the final poke
+        // once UIKit publishes the resized visual capsule.
+        sApplyingGlobeMerge = YES;
+        navItem.rightBarButtonItems = [navItem.rightBarButtonItems copy];
+        sApplyingGlobeMerge = NO;
+        ApolloSubredditRequestTitleRelayout(navItem);
         return;
     }
 
