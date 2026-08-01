@@ -72,8 +72,8 @@
     // transform is reset. A negative bounds origin moves the rendered content
     // down without changing the table's pull threshold or content geometry.
     CGRect bounds = self.bounds;
-    if (fabs(bounds.origin.y + 16.0) > 0.5) {
-        bounds.origin.y = -16.0;
+    if (fabs(bounds.origin.y + 32.0) > 0.5) {
+        bounds.origin.y = -32.0;
         self.bounds = bounds;
     }
 }
@@ -148,9 +148,21 @@ static BOOL ApolloSearchTabIsDefaultState(UIViewController *vc) {
 static void ApolloSearchTabUpdateRefreshAvailability(UIViewController *vc) {
     UIRefreshControl *refresh = ApolloSearchTabRefreshControl(vc);
     BOOL defaultState = ApolloSearchTabIsDefaultState(vc);
-    if (refresh) refresh.enabled = defaultState;
-
     UITableView *tableView = ApolloSearchTabTableView(vc);
+    if (refresh && tableView) {
+        refresh.enabled = defaultState;
+        if (defaultState) {
+            if (tableView.refreshControl != refresh) {
+                tableView.refreshControl = refresh;
+            }
+        } else {
+            [refresh endRefreshing];
+            if (tableView.refreshControl == refresh) {
+                tableView.refreshControl = nil;
+            }
+        }
+    }
+
     NSNumber *baselineBounce =
         objc_getAssociatedObject(vc, kApolloSearchBaselineBounceKey);
     if (tableView && baselineBounce) {
