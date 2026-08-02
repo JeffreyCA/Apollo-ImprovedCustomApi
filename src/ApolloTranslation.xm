@@ -2453,6 +2453,28 @@ static CGFloat ApolloFirstVisibleCommentTopY(UIViewController *viewController, U
     return top;
 }
 
+// YES when the node lives inside a rich-link-preview card
+// (_TtC6Apollo14LinkButtonNode subtree). The card's scraped title/description
+// are translated by the rich-preview pipeline and must never be elected as
+// "the post body": when a poster pastes the article's lede as the selftext,
+// the card description holds the SAME text — and once the card is translated,
+// the (often longer) English card text outranks the untranslated body in the
+// longest-wins election, detection reads it as already-target-language, and
+// the real body silently never translates.
+static BOOL ApolloNodeIsInsideLinkPreviewCard(id node) {
+    id current = node;
+    for (int hop = 0; hop < 8 && current; hop++) {
+        if ([NSStringFromClass([current class]) containsString:@"LinkButtonNode"]) return YES;
+        if (![current respondsToSelector:NSSelectorFromString(@"supernode")]) return NO;
+        @try {
+            current = ((id (*)(id, SEL))objc_msgSend)(current, NSSelectorFromString(@"supernode"));
+        } @catch (__unused NSException *e) {
+            return NO;
+        }
+    }
+    return NO;
+}
+
 static id ApolloBestVisiblePostBodyTextNodeForController(UIViewController *viewController, UITableView *tableView, RDKLink *link) {
     if (!viewController.view) return nil;
     NSMutableArray *candidates = [NSMutableArray array];
@@ -2500,6 +2522,8 @@ static id ApolloBestVisiblePostBodyTextNodeForController(UIViewController *viewC
         // found would elect our own English UI text and translate it on
         // non-English targets.
         if (ApolloTextNodeIsTweakUI(candidate)) { dbgMetadata++; continue; }
+        // Rich-link-card scraped text belongs to the rich-preview pipeline.
+        if (ApolloNodeIsInsideLinkPreviewCard(candidate)) { dbgMetadata++; continue; }
         NSString *text = ApolloVisibleTextFromNode(candidate);
         if (text.length == 0 || ApolloPostTextLooksLikeMetadata(text, link)) { dbgMetadata++; continue; }
 
@@ -2568,6 +2592,7 @@ static id ApolloBestPostBodyTextNode(id headerCellNode, RDKLink *link, NSString 
         // post body when the model body is unreadable.
         if ([objc_getAssociatedObject(n, kApolloTitleOwnedTextNodeKey) boolValue]) continue;
         if (ApolloTextNodeIsTweakUI(n)) continue;
+        if (ApolloNodeIsInsideLinkPreviewCard(n)) continue;
         NSAttributedString *attr = nil;
         @try { attr = ((id (*)(id, SEL))objc_msgSend)(n, @selector(attributedText)); }
         @catch (__unused NSException *e) { continue; }
