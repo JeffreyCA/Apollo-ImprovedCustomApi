@@ -17,6 +17,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 // `subreddit` is the bare slug, no "r/" prefix.
 - (instancetype)initWithSubreddit:(NSString *)subreddit NS_DESIGNATED_INITIALIZER;
+// `multiredditPath` is the canonical `/user/<owner>/m/<name>` path.
+- (instancetype)initWithMultiredditPath:(NSString *)multiredditPath NS_DESIGNATED_INITIALIZER;
 - (instancetype)initWithNibName:(nullable NSString *)nibName bundle:(nullable NSBundle *)bundle NS_UNAVAILABLE;
 - (instancetype)initWithCoder:(NSCoder *)coder NS_UNAVAILABLE;
 
@@ -29,6 +31,12 @@ NS_ASSUME_NONNULL_BEGIN
 // `sourceViewController`'s navigation controller. Returns NO (and does nothing)
 // when there's no navigation controller to push onto or the slug is empty.
 + (BOOL)presentGalleryForSubreddit:(NSString *)subreddit fromViewController:(UIViewController *)sourceViewController;
+
+// `multiredditPath` is Reddit's canonical `/user/<owner>/m/<name>` path. It is
+// kept intact so public multireddits load from their actual owner rather than
+// being incorrectly rebuilt under the active account.
++ (BOOL)presentGalleryForMultiredditPath:(NSString *)multiredditPath
+                      fromViewController:(UIViewController *)sourceViewController;
 
 @end
 

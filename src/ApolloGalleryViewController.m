@@ -269,6 +269,7 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
                                            ApolloGalleryWaterfallLayoutDelegate,
                                            ApolloGalleryImageViewerDelegate>
 @property (nonatomic, copy) NSString *subreddit;
+@property (nonatomic, copy) NSString *sourceDescription;
 @property (nonatomic, strong) ApolloGalleryFeed *feed;
 @property (nonatomic, strong) UICollectionView *collectionView;
 @property (nonatomic, strong) ApolloGalleryWaterfallLayout *waterfallLayout;
@@ -290,13 +291,67 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     self = [super initWithNibName:nil bundle:nil];
     if (self) {
         _subreddit = [subreddit copy] ?: @"";
+        _sourceDescription = [@"r/" stringByAppendingString:_subreddit];
         _feed = [[ApolloGalleryFeed alloc] initWithSubreddit:_subreddit];
         _prefetchRequests = [NSMutableDictionary dictionary];
     }
     return self;
 }
 
+- (instancetype)initWithMultiredditPath:(NSString *)multiredditPath {
+    self = [super initWithNibName:nil bundle:nil];
+    if (self) {
+        _subreddit = @"";
+        NSString *name = [multiredditPath pathComponents].lastObject ?: @"multireddit";
+        _sourceDescription = [@"m/" stringByAppendingString:name];
+        _feed = [[ApolloGalleryFeed alloc] initWithMultiredditPath:multiredditPath];
+        _prefetchRequests = [NSMutableDictionary dictionary];
+    }
+    return self;
+}
+
+static NSString *ApolloGalleryNormalizedMultiredditPath(NSString *value) {
+    NSString *path = [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSMutableArray<NSString *> *components = [NSMutableArray array];
+    for (NSString *component in [path pathComponents]) {
+        if ([component isEqualToString:@"/"] || component.length == 0) continue;
+        [components addObject:component];
+    }
+    if (components.count != 4 ||
+        ![components[0].lowercaseString isEqualToString:@"user"] ||
+        ![components[2].lowercaseString isEqualToString:@"m"]) {
+        return nil;
+    }
+    return [@"/" stringByAppendingString:[components componentsJoinedByString:@"/"]];
+}
+
+static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
+                              UIViewController *sourceViewController) {
+    if (!gallery || !sourceViewController) return NO;
+    UINavigationController *navigationController = sourceViewController.navigationController;
+    if (!navigationController) {
+        ApolloLog(@"[Gallery] no navigation controller to push onto from %@", sourceViewController);
+        return NO;
+    }
+
+    // Apollo's themes paint their own backgrounds; borrow the colour from the
+    // screen we came from so the gallery doesn't flash system white/black.
+    gallery.gridBackgroundColor = sourceViewController.view.backgroundColor ?: navigationController.view.backgroundColor;
+    [navigationController pushViewController:gallery animated:YES];
+    return YES;
+}
+
 + (BOOL)presentGalleryForSubreddit:(NSString *)subreddit fromViewController:(UIViewController *)sourceViewController {
+    // GalleryMenu deliberately keeps its established call site so open PRs
+    // that defer this presentation until a Liquid Glass menu has dismissed
+    // continue to cover both feed types. A canonical multireddit path is the
+    // only non-subreddit value accepted here.
+    NSString *multiredditPath = ApolloGalleryNormalizedMultiredditPath(subreddit);
+    if (multiredditPath.length > 0) {
+        return [self presentGalleryForMultiredditPath:multiredditPath
+                                   fromViewController:sourceViewController];
+    }
+
     NSString *slug = [subreddit stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@" \t/"]];
     if ([slug.lowercaseString hasPrefix:@"r/"]) slug = [slug substringFromIndex:2];
     if (slug.length == 0 || !sourceViewController) {
@@ -304,18 +359,24 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
         return NO;
     }
 
-    UINavigationController *navigationController = sourceViewController.navigationController;
-    if (!navigationController) {
-        ApolloLog(@"[Gallery] no navigation controller to push onto from %@", sourceViewController);
+    ApolloGalleryViewController *gallery = [[ApolloGalleryViewController alloc] initWithSubreddit:slug];
+    if (!ApolloGalleryPush(gallery, sourceViewController)) return NO;
+    ApolloLog(@"[Gallery] opened for r/%@", slug);
+    return YES;
+}
+
++ (BOOL)presentGalleryForMultiredditPath:(NSString *)multiredditPath
+                      fromViewController:(UIViewController *)sourceViewController {
+    NSString *path = ApolloGalleryNormalizedMultiredditPath(multiredditPath);
+    if (path.length == 0 || !sourceViewController) {
+        ApolloLog(@"[Gallery] refusing to open: multireddit=%@ source=%@",
+                  multiredditPath, sourceViewController);
         return NO;
     }
 
-    ApolloGalleryViewController *gallery = [[ApolloGalleryViewController alloc] initWithSubreddit:slug];
-    // Apollo's themes paint their own backgrounds; borrow the colour from the
-    // screen we came from so the gallery doesn't flash system white/black.
-    gallery.gridBackgroundColor = sourceViewController.view.backgroundColor ?: navigationController.view.backgroundColor;
-    [navigationController pushViewController:gallery animated:YES];
-    ApolloLog(@"[Gallery] opened for r/%@", slug);
+    ApolloGalleryViewController *gallery = [[ApolloGalleryViewController alloc] initWithMultiredditPath:path];
+    if (!ApolloGalleryPush(gallery, sourceViewController)) return NO;
+    ApolloLog(@"[Gallery] opened for %@", gallery.sourceDescription);
     return YES;
 }
 
@@ -608,7 +669,8 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
         return;
     }
     if (errorMessage.length > 0) {
-        self.messageLabel.text = [NSString stringWithFormat:@"Couldn't load r/%@.\n%@", self.subreddit, errorMessage];
+        self.messageLabel.text = [NSString stringWithFormat:@"Couldn't load %@.\n%@",
+                                  self.sourceDescription, errorMessage];
         self.retryButton.hidden = NO;
     } else if (self.feed.allItems.count > 0) {
         // Media was found, the filter just excluded all of it — say so, rather
@@ -618,8 +680,8 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
             (unsigned long)self.feed.allItems.count];
         self.retryButton.hidden = YES;
     } else {
-        self.messageLabel.text = [NSString stringWithFormat:@"No media found in r/%@ (%@).",
-                                  self.subreddit, self.feed.sortDisplayName];
+        self.messageLabel.text = [NSString stringWithFormat:@"No media found in %@ (%@).",
+                                  self.sourceDescription, self.feed.sortDisplayName];
         self.retryButton.hidden = YES;
     }
     self.messageLabel.hidden = NO;

@@ -1,7 +1,7 @@
 // ApolloGalleryMenu.xm
 //
-// Puts "Gallery View" in a subreddit's nav-bar "..." menu, and opens
-// ApolloGalleryViewController when it's picked.
+// Puts "Gallery View" in a subreddit or multireddit's nav-bar "..." menu, and
+// opens ApolloGalleryViewController when it's picked.
 //
 // Apollo draws that menu two different ways, so the row has to be added twice:
 //
@@ -34,9 +34,9 @@
 // "..." menu. The claim is recorded on the controller so repeat builds of the
 // same sheet re-inject, and no later, unrelated sheet can pick it up.
 //
-// Multireddits, Popular/All, profile feeds and search results never get the row:
-// the subreddit is resolved through ApolloSubredditNameFromViewController
-// (ApolloSubredditHeaders.xm), which gates on Apollo's own PostsType tag.
+// Popular/All, profile feeds and search results never get the row: subreddit
+// slugs and canonical multireddit paths are resolved by ApolloSubredditHeaders,
+// whose helpers gate on Apollo's own PostsType tag.
 
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
@@ -50,6 +50,7 @@
 // single-subreddit feed, and nil for anything else (multireddit, Popular/All,
 // profile/special feeds).
 extern NSString *ApolloSubredditNameFromViewController(UIViewController *viewController);
+extern NSString *ApolloMultiredditPathFromViewController(UIViewController *viewController);
 
 static NSString *const kApolloGalleryMenuTitle = @"Gallery View";
 static NSString *const kApolloGalleryMenuSymbol = @"square.grid.2x2";
@@ -94,17 +95,31 @@ static UIViewController *ApolloGalleryMenuOwnerForController(id actionController
     return armed;
 }
 
-// Subreddit slug for a claimed controller, or nil when this sheet isn't ours or
-// the feed isn't a single subreddit.
-static NSString *ApolloGalleryMenuSubredditForController(id actionController) {
+// Bare subreddit slug or canonical multireddit path for a claimed controller.
+// Nil keeps Popular/All, profile sections, and every unrelated sheet untouched.
+static NSString *ApolloGalleryMenuListingIdentifierForController(id actionController) {
     UIViewController *owner = ApolloGalleryMenuOwnerForController(actionController);
     if (!owner) return nil;
-    return ApolloSubredditNameFromViewController(owner);
+    return ApolloSubredditNameFromViewController(owner) ?: ApolloMultiredditPathFromViewController(owner);
+}
+
+static NSString *ApolloGalleryMenuSourceDescription(NSString *listingIdentifier) {
+    if ([listingIdentifier hasPrefix:@"/user/"]) {
+        NSString *name = [listingIdentifier pathComponents].lastObject ?: @"multireddit";
+        return [@"m/" stringByAppendingString:name];
+    }
+    return listingIdentifier.length > 0 ? [@"r/" stringByAppendingString:listingIdentifier] : @"feed";
 }
 
 static void ApolloGalleryMenuOpenForController(id actionController) {
     UIViewController *owner = ApolloGalleryMenuOwnerForController(actionController);
     NSString *subreddit = owner ? ApolloSubredditNameFromViewController(owner) : nil;
+    if (subreddit.length == 0 && owner) {
+        // Keep the established presentation call below: PR #767 wraps that
+        // exact call in the Liquid Glass dismissal completion, so a canonical
+        // multireddit path automatically receives the same crash fix.
+        subreddit = ApolloMultiredditPathFromViewController(owner);
+    }
     if (subreddit.length == 0 || !owner) {
         ApolloLog(@"[GalleryMenu] Gallery View tapped but the subreddit could not be resolved");
         return;
@@ -133,13 +148,13 @@ static NSUInteger ApolloGalleryMenuInsertionIndex(NSArray<UIMenuElement *> *chil
 }
 
 // Called from ApolloNativeActionMenuBuildMenu as it converts an ActionController
-// into a UIMenu. No-op for every sheet that isn't a subreddit "..." menu.
+// into a UIMenu. No-op for every sheet that isn't a supported feed's "..." menu.
 void ApolloInjectGalleryViewMenuItemIfNeeded(NSMutableArray *children, NSString *menuTitle, id actionController) {
     (void)menuTitle;
     if (![children isKindOfClass:[NSMutableArray class]] || children.count == 0) return;
 
-    NSString *subreddit = ApolloGalleryMenuSubredditForController(actionController);
-    if (subreddit.length == 0) return;
+    NSString *listingIdentifier = ApolloGalleryMenuListingIdentifierForController(actionController);
+    if (listingIdentifier.length == 0) return;
 
     // The builder runs more than once per presentation; the claim persists on
     // the controller, so guard against inserting our section twice.
@@ -168,8 +183,9 @@ void ApolloInjectGalleryViewMenuItemIfNeeded(NSMutableArray *children, NSString 
                                    children:@[action]];
     NSUInteger index = ApolloGalleryMenuInsertionIndex(children);
     [children insertObject:section atIndex:index];
-    ApolloLog(@"[GalleryMenu] Injected '%@' for r/%@ at index %lu (glass menu)",
-              kApolloGalleryMenuTitle, subreddit, (unsigned long)index);
+    ApolloLog(@"[GalleryMenu] Injected '%@' for %@ at index %lu (glass menu)",
+              kApolloGalleryMenuTitle, ApolloGalleryMenuSourceDescription(listingIdentifier),
+              (unsigned long)index);
 }
 
 #pragma mark - Arming
@@ -179,7 +195,10 @@ void ApolloInjectGalleryViewMenuItemIfNeeded(NSMutableArray *children, NSString 
 - (void)moreOptionsBarButtonItemTappedWithSender:(id)sender {
     // Only arm for feeds a gallery makes sense for; that keeps every other
     // sheet (and every other feed type) completely untouched.
-    if (ApolloSubredditNameFromViewController((UIViewController *)self).length > 0) {
+    UIViewController *viewController = (UIViewController *)self;
+    NSString *listingIdentifier = ApolloSubredditNameFromViewController(viewController)
+        ?: ApolloMultiredditPathFromViewController(viewController);
+    if (listingIdentifier.length > 0) {
         sApolloGalleryArmedVC = (UIViewController *)self;
         sApolloGalleryArmedAt = CACurrentMediaTime();
     } else {
@@ -332,14 +351,15 @@ static void ApolloGalleryMenuCaptureRowStyle(UITableViewCell *cell) {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     NSInteger count = %orig;
-    NSString *subreddit = ApolloGalleryMenuSubredditForController(self);
-    if (subreddit.length == 0) return count;
+    NSString *listingIdentifier = ApolloGalleryMenuListingIdentifierForController(self);
+    if (listingIdentifier.length == 0) return count;
     // Only the first section grows; Apollo's "..." sheet is single-section, but
     // being explicit keeps a multi-section sheet from sprouting extra rows.
     if (section != 0) return count;
     if (ApolloGalleryMenuOriginalRowCount(self) != count) {
-        ApolloLog(@"[GalleryMenu] Added '%@' row for r/%@ (sheet, after %ld native rows)",
-                  kApolloGalleryMenuTitle, subreddit, (long)count);
+        ApolloLog(@"[GalleryMenu] Added '%@' row for %@ (sheet, after %ld native rows)",
+                  kApolloGalleryMenuTitle, ApolloGalleryMenuSourceDescription(listingIdentifier),
+                  (long)count);
     }
     objc_setAssociatedObject(self, &kApolloGalleryMenuOrigRowCountKey, @(count), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     return count + 1;

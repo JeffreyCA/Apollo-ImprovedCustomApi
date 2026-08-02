@@ -1080,6 +1080,7 @@ static void ApolloSubredditRefreshSubscriptionState(ApolloSubredditHeaderView *h
 // is a multireddit and the remaining tags are all/popular/home/profile feeds.
 static const ptrdiff_t kApolloPostsTypeTagOffset = 0x20;
 static const uint8_t kApolloPostsTypeSubreddit = 0;
+static const uint8_t kApolloPostsTypeMultireddit = 1;
 static const uint8_t kApolloPostsTypeRandom = 5;
 
 // Read the PostsType case tag. Returns NO (and leaves *tag untouched) when the
@@ -1133,6 +1134,39 @@ NSString *ApolloSubredditNameFromViewController(UIViewController *viewController
     }
 
     return nil;
+}
+
+// Resolve the canonical `/user/<owner>/m/<name>` path for a multireddit feed.
+// Gallery View uses the path rather than rebuilding it from the navigation
+// title, because public multis can belong to a user other than the active
+// account. The PostsType gate also prevents a stale currentMultireddit ivar on
+// a reused controller from exposing Gallery View on an unrelated feed.
+NSString *ApolloMultiredditPathFromViewController(UIViewController *viewController) {
+    if (!viewController) return nil;
+
+    uint8_t tag = 0;
+    if (!ApolloSubredditPostsTypeTag(viewController, &tag) || tag != kApolloPostsTypeMultireddit) return nil;
+
+    id multireddit = ApolloSubredditTypedIvar(viewController, @"currentMultireddit",
+                                              objc_getClass("RDKMultireddit"));
+    if (![multireddit respondsToSelector:@selector(path)]) return nil;
+    id pathValue = ((id (*)(id, SEL))objc_msgSend)(multireddit, @selector(path));
+    if (![pathValue isKindOfClass:[NSString class]]) return nil;
+
+    NSString *path = [(NSString *)pathValue stringByTrimmingCharactersInSet:
+        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSMutableArray<NSString *> *components = [NSMutableArray array];
+    for (NSString *component in [path pathComponents]) {
+        if ([component isEqualToString:@"/"] || component.length == 0) continue;
+        [components addObject:component];
+    }
+    if (components.count != 4 ||
+        ![components[0].lowercaseString isEqualToString:@"user"] ||
+        ![components[2].lowercaseString isEqualToString:@"m"]) {
+        ApolloLog(@"[GalleryMenu] Ignoring malformed multireddit path: %@", path);
+        return nil;
+    }
+    return [@"/" stringByAppendingString:[components componentsJoinedByString:@"/"]];
 }
 
 static UIView *ApolloSubredditFindSubviewOfClass(UIView *root, Class cls) {
