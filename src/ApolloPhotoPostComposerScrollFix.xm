@@ -84,6 +84,9 @@ static char kApolloMediaComposerNativeBodyEditorOwnerKey;
 static char kApolloMediaComposerNativeBodyEditorSavedKey;
 static char kApolloMediaComposerBodyDoneItemKey;
 static char kApolloMediaComposerBodyCancelItemKey;
+static char kApolloComposeFormBodyDoneItemKey;
+static char kApolloComposeFormBodyNavItemDoneKey;
+static char kApolloMediaComposerTitleRemeasureScheduledKey;
 static BOOL sApolloMediaComposerContextActive = NO;
 static BOOL sApolloMediaComposerPickerActive = NO;
 static BOOL sApolloMediaComposerInlineBodyPickerActive = NO;
@@ -1629,6 +1632,66 @@ static void ApolloMediaComposerDismissNativeBodyEditor(UIViewController *editor)
     }
 }
 
+// The "Text (optional)" row on the composer's Text tab pushes Apollo's native
+// ComposeViewController ("Post Text") whose right bar button is the plain "Post" text
+// button. That reads as "this button submits from here" while the Media tab's body editor
+// shows a Done checkmark that returns to the form - and the native button really does
+// submit the whole post from inside the editor when a title is already set (with no title
+// it alerts). Swap it for the same Done checkmark with save-and-return semantics: popping
+// with submitTapped == NO makes the native viewWillDisappear hand the text back to the
+// form's composingDelegate, and posting stays on the form's own Post button.
+static UIViewController *ApolloComposeFormBodyEditorFormController(UIViewController *editor) {
+    if (ApolloMediaComposerOwnerForNativeBodyEditor(editor)) return nil; // Media-tab editor: configured elsewhere
+    UINavigationController *navigationController = editor.navigationController;
+    if (!navigationController) return nil;
+    Class formClass = objc_getClass("_TtC6Apollo25ComposePostViewController");
+    if (!formClass) return nil;
+    NSArray<UIViewController *> *stack = navigationController.viewControllers;
+    NSUInteger editorIndex = [stack indexOfObjectIdenticalTo:editor];
+    if (editorIndex == NSNotFound || editorIndex == 0) return nil;
+    for (NSUInteger i = 0; i < editorIndex; i++) {
+        if ([stack[i] isKindOfClass:formClass]) return stack[i];
+    }
+    return nil;
+}
+
+static void ApolloComposeFormBodyEditorApplyDoneItem(UIViewController *editor) {
+    UIViewController *formController = ApolloComposeFormBodyEditorFormController(editor);
+    if (!formController) return;
+
+    // Same idempotency contract as ApolloMediaComposerConfigureNativeBodyEditor: create the
+    // item once, only re-assert when Apollo clobbered it, so steady-state layout passes
+    // write nothing to the nav bar (iOS 26 Liquid Glass re-measures on structural item
+    // writes; see the compose-freeze notes above).
+    UIBarButtonItem *doneItem = objc_getAssociatedObject(editor, &kApolloComposeFormBodyDoneItemKey);
+    if (![doneItem isKindOfClass:[UIBarButtonItem class]]) {
+        doneItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:editor action:@selector(apollo_textBodyDoneButtonTapped:)];
+        UIColor *accentColor = ApolloPhotoComposerAccentColor(formController) ?: editor.view.tintColor;
+        if (accentColor) doneItem.tintColor = accentColor;
+        objc_setAssociatedObject(editor, &kApolloComposeFormBodyDoneItemKey, doneItem, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        // Point Apollo's own post-button slots at our item so any native re-assertion
+        // (character counter swap etc.) keeps the checkmark instead of restoring "Post".
+        @try { [editor setValue:doneItem forKey:@"postBarButtonItem"]; } @catch (__unused NSException *e) {}
+        @try { [editor setValue:doneItem forKey:@"postWithCharactersRemainingBarButtonItem"]; } @catch (__unused NSException *e) {}
+
+        ApolloLog(@"[TextPostBody] swapped Post button for Done checkmark on form body editor form=%@",
+            NSStringFromClass(formController.class) ?: @"(unknown)");
+    }
+
+    UINavigationItem *navigationItem = editor.navigationItem;
+    // Apollo re-asserts its own "Post" item from textViewDidChange on every keystroke, and
+    // the editor's view does not lay out for nav-bar-only changes, so a lifecycle re-apply
+    // alone loses the race the moment the user types (observed: the first keystroke brought
+    // "Post" back and a checkmark-position tap submitted the post). Tag the navigation item
+    // so the UINavigationItem setter hooks below redirect every later right-item write back
+    // to the checkmark for this editor's lifetime.
+    objc_setAssociatedObject(navigationItem, &kApolloComposeFormBodyNavItemDoneKey, doneItem, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (navigationItem.rightBarButtonItem != doneItem) navigationItem.rightBarButtonItem = doneItem;
+    NSArray<UIBarButtonItem *> *rightItems = navigationItem.rightBarButtonItems;
+    if (rightItems.count != 1 || rightItems.firstObject != doneItem) navigationItem.rightBarButtonItems = @[doneItem];
+}
+
 static UISegmentedControl *ApolloMediaComposerFindPostTypeSegmentedControl(UIViewController *controller) {
     if (!controller.isViewLoaded) return nil;
 
@@ -1789,11 +1852,118 @@ static BOOL ApolloMediaComposerIsTitleRowIndexPath(NSIndexPath *indexPath) {
     return indexPath && indexPath.section == 0 && indexPath.row == 0;
 }
 
-static CGFloat ApolloMediaComposerTitleHeightWithEmbeddedBody(CGFloat originalHeight, CGFloat width) {
-    (void)width;
+static UITextView *ApolloMediaComposerTitleTextViewInCell(UITableViewCell *titleCell) {
+    if (!titleCell) return nil;
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:titleCell.contentView ?: (UIView *)titleCell];
+    NSUInteger inspected = 0;
+    while (stack.count > 0 && inspected++ < 250) {
+        UIView *view = stack.lastObject;
+        [stack removeLastObject];
+        if (view.hidden || view.alpha < 0.01) continue;
+        if ([view isKindOfClass:[UITextView class]] && !ApolloMediaComposerTextViewIsBodyEditor((UITextView *)view)) {
+            return (UITextView *)view;
+        }
+        for (UIView *subview in view.subviews) [stack addObject:subview];
+    }
+    return nil;
+}
+
+// issue #791: Apollo's title row self-sizes (the native heightForRow returns
+// UITableViewAutomaticDimension and MultilineTextEntryTableViewCell pins its UITextView to
+// all four contentView edges with zero-constant constraints, so the row's natural height IS
+// the title text view's fitting height). The old fixed 106pt (60 title + 46 body row) capped
+// the title at ~2 visible lines on the Media tab: line 3+ was clipped by the cell while the
+// caret kept moving further down. Measure the live title text instead, and only fall back to
+// the legacy constant while the title cell hasn't materialized yet (fresh composer, empty
+// title, one-line baseline where 106 was always correct).
+static CGFloat ApolloMediaComposerTitleHeightWithEmbeddedBody(UITableView *tableView, CGFloat originalHeight, CGFloat width) {
     CGFloat bodyHeight = ApolloMediaComposerEmbeddedBodyRowHeight();
-    if (originalHeight == UITableViewAutomaticDimension || originalHeight <= 0.0) return 106.0;
-    return originalHeight + bodyHeight;
+    if (originalHeight != UITableViewAutomaticDimension && originalHeight > 0.0) return originalHeight + bodyHeight;
+
+    CGFloat titleHeight = 60.0;
+    UITableViewCell *titleCell = tableView ? [tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0]] : nil;
+    UITextView *titleTextView = ApolloMediaComposerTitleTextViewInCell(titleCell);
+    if (titleTextView) {
+        CGFloat targetWidth = titleTextView.bounds.size.width;
+        if (targetWidth <= 1.0) targetWidth = width;
+        if (targetWidth > 1.0) {
+            CGSize fittingSize = [titleTextView sizeThatFits:CGSizeMake(targetWidth, CGFLOAT_MAX)];
+            // The title text view is pinned to the cell's contentView with fixed top/bottom
+            // constants (12pt each on current Apollo), so the native self-sized row equals
+            // fitting height + that vertical chrome. Derive the chrome from the live layout
+            // instead of hardcoding it: Auto Layout keeps (cell height - text view height)
+            // constant for this cell whatever height we return.
+            CGFloat verticalChrome = titleCell.bounds.size.height - titleTextView.frame.size.height;
+            if (!(verticalChrome >= 0.0 && verticalChrome <= 60.0)) verticalChrome = 24.0;
+            if (fittingSize.height > 1.0 && fittingSize.height < 2000.0) {
+                titleHeight = MAX(titleHeight, ceil(fittingSize.height) + verticalChrome);
+            }
+        }
+    }
+    return titleHeight + bodyHeight;
+}
+
+// UIKit only re-asks tableView:heightForRowAtIndexPath: on its own for self-sizing rows
+// (which is how the Text/Link tabs grow live while typing). On the Media tab the hook
+// returns a concrete height, so nothing re-queries it as the title wraps - the second half
+// of issue #791. Schedule a coalesced height-only update pass whenever the title text
+// mutates so the row keeps tracking the caret.
+static void ApolloMediaComposerScheduleTitleRowRemeasure(UIViewController *controller) {
+    controller = ApolloMediaComposerCanonicalBodyController(controller) ?: controller;
+    if (!controller) return;
+    NSNumber *scheduled = objc_getAssociatedObject(controller, &kApolloMediaComposerTitleRemeasureScheduledKey);
+    if ([scheduled boolValue]) return;
+    objc_setAssociatedObject(controller, &kApolloMediaComposerTitleRemeasureScheduledKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    __weak UIViewController *weakController = controller;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *strongController = weakController;
+        if (!strongController) return;
+        objc_setAssociatedObject(strongController, &kApolloMediaComposerTitleRemeasureScheduledKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        if (!ApolloMediaComposerShouldInsertBodyRow(strongController)) return; // non-Media tabs self-size natively
+        UITableView *tableView = ApolloMediaComposerFindPrimaryTableView(strongController);
+        if (!tableView || !tableView.window) return;
+        // Height-only pass: re-queries heightForRowAtIndexPath (our measured title height)
+        // without reloading cells, so the keyboard and first responder stay untouched.
+        [tableView beginUpdates];
+        [tableView endUpdates];
+    });
+}
+
+static UIViewController *ApolloMediaComposerOwningViewControllerForView(UIView *view) {
+    UIResponder *responder = view;
+    NSUInteger hops = 0;
+    while (responder && hops++ < 24) {
+        if ([responder isKindOfClass:[UIViewController class]]) return (UIViewController *)responder;
+        responder = responder.nextResponder;
+    }
+    return nil;
+}
+
+static void ApolloMediaComposerNudgeTitleRowHeight(UITextView *textView) {
+    if (!textView.window) return;
+    if (ApolloMediaComposerTextViewIsBodyEditor(textView)) return;
+
+    UIView *view = textView.superview;
+    UITableViewCell *cell = nil;
+    NSUInteger hops = 0;
+    while (view && hops++ < 12) {
+        if ([view isKindOfClass:[UITableViewCell class]]) { cell = (UITableViewCell *)view; break; }
+        view = view.superview;
+    }
+    if (!cell) return;
+
+    UIView *tableCandidate = cell.superview;
+    hops = 0;
+    while (tableCandidate && hops++ < 6 && ![tableCandidate isKindOfClass:[UITableView class]]) tableCandidate = tableCandidate.superview;
+    if (![tableCandidate isKindOfClass:[UITableView class]]) return;
+    UITableView *tableView = (UITableView *)tableCandidate;
+    if (!ApolloMediaComposerIsTitleRowIndexPath([tableView indexPathForCell:cell])) return;
+
+    UIViewController *controller = ApolloMediaComposerCanonicalBodyController(ApolloMediaComposerOwningViewControllerForView(tableView));
+    if (!controller || !ApolloPhotoComposerControllerIsInScope(controller)) return;
+    if (!ApolloMediaComposerShouldInsertBodyRow(controller)) return;
+    ApolloMediaComposerScheduleTitleRowRemeasure(controller);
 }
 
 static NSString *ApolloMediaComposerBodyDisplayText(UIViewController *controller, BOOL *hasBody) {
@@ -1889,6 +2059,12 @@ static void ApolloMediaComposerConfigureTitleBodyControl(UITableViewCell *cell, 
     label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCallout];
     label.frame = CGRectMake(32.0, 1.0, MAX(0.0, width - 78.0), height - 1.0);
     chevron.frame = CGRectMake(MAX(16.0, width - 42.0), 1.0, 22.0, height - 1.0);
+
+    // A row sized before the title cell existed used the legacy fallback height; now that
+    // the real title text view is measurable, settle the row (covers restored drafts and
+    // tab switches back to Media with a long title already typed). Coalesced + async, so
+    // this never reenters the data source from cellForRow.
+    ApolloMediaComposerScheduleTitleRowRemeasure(controller);
 }
 
 static BOOL ApolloMediaComposerControllerLooksLikeNativeTextEditor(UIViewController *controller) {
@@ -3249,14 +3425,14 @@ static NSInteger hooked_ApolloCompose_tableView_numberOfRowsInSection(id self, S
 static CGFloat hooked_ApolloCompose_tableView_heightForRowAtIndexPath(id self, SEL _cmd, UITableView *tableView, NSIndexPath *indexPath) {
     UIViewController *controller = (UIViewController *)self;
     CGFloat height = orig_ApolloCompose_tableView_heightForRowAtIndexPath ? orig_ApolloCompose_tableView_heightForRowAtIndexPath(self, _cmd, tableView, indexPath) : UITableViewAutomaticDimension;
-    if (ApolloMediaComposerIsTitleRowIndexPath(indexPath) && ApolloMediaComposerShouldInsertBodyRow(controller)) return ApolloMediaComposerTitleHeightWithEmbeddedBody(height, tableView.bounds.size.width);
+    if (ApolloMediaComposerIsTitleRowIndexPath(indexPath) && ApolloMediaComposerShouldInsertBodyRow(controller)) return ApolloMediaComposerTitleHeightWithEmbeddedBody(tableView, height, tableView.bounds.size.width);
     return height;
 }
 
 static CGFloat hooked_ApolloCompose_tableView_estimatedHeightForRowAtIndexPath(id self, SEL _cmd, UITableView *tableView, NSIndexPath *indexPath) {
     UIViewController *controller = (UIViewController *)self;
     CGFloat height = orig_ApolloCompose_tableView_estimatedHeightForRowAtIndexPath ? orig_ApolloCompose_tableView_estimatedHeightForRowAtIndexPath(self, _cmd, tableView, indexPath) : 72.0;
-    if (ApolloMediaComposerIsTitleRowIndexPath(indexPath) && ApolloMediaComposerShouldInsertBodyRow(controller)) return ApolloMediaComposerTitleHeightWithEmbeddedBody(height, tableView.bounds.size.width);
+    if (ApolloMediaComposerIsTitleRowIndexPath(indexPath) && ApolloMediaComposerShouldInsertBodyRow(controller)) return ApolloMediaComposerTitleHeightWithEmbeddedBody(tableView, height, tableView.bounds.size.width);
     return height;
 }
 
@@ -3308,6 +3484,8 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
     %orig;
     if (ApolloMediaComposerOwnerForNativeBodyEditor((UIViewController *)self)) {
         ApolloMediaComposerConfigureNativeBodyEditor((UIViewController *)self);
+    } else {
+        ApolloComposeFormBodyEditorApplyDoneItem((UIViewController *)self);
     }
 }
 
@@ -3315,6 +3493,8 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
     %orig;
     if (ApolloMediaComposerOwnerForNativeBodyEditor((UIViewController *)self)) {
         ApolloMediaComposerConfigureNativeBodyEditor((UIViewController *)self);
+    } else {
+        ApolloComposeFormBodyEditorApplyDoneItem((UIViewController *)self);
     }
 }
 
@@ -3324,6 +3504,8 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
         ApolloMediaComposerConfigureNativeBodyEditor((UIViewController *)self);
         UITextView *textView = ApolloMediaComposerNativeBodyTextView((UIViewController *)self);
         [textView becomeFirstResponder];
+    } else {
+        ApolloComposeFormBodyEditorApplyDoneItem((UIViewController *)self);
     }
 }
 
@@ -3331,6 +3513,8 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
     %orig;
     if (ApolloMediaComposerOwnerForNativeBodyEditor((UIViewController *)self)) {
         ApolloMediaComposerConfigureNativeBodyEditor((UIViewController *)self);
+    } else {
+        ApolloComposeFormBodyEditorApplyDoneItem((UIViewController *)self);
     }
 }
 
@@ -3362,6 +3546,47 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
     (void)sender;
     ApolloMediaComposerSaveNativeBodyEditor((UIViewController *)self, @"native-compose-cancel", YES);
     ApolloMediaComposerDismissNativeBodyEditor((UIViewController *)self);
+}
+
+%new
+- (void)apollo_textBodyDoneButtonTapped:(id)sender {
+    (void)sender;
+    // Mirror the back chevron: pop with submitTapped == NO so the native viewWillDisappear
+    // path hands the body text back to the form's composingDelegate.
+    @try { [(UIViewController *)self setValue:@NO forKey:@"submitTapped"]; } @catch (__unused NSException *e) {}
+    ApolloLog(@"[TextPostBody] Done checkmark tapped on form body editor; returning to form");
+    ApolloMediaComposerDismissNativeBodyEditor((UIViewController *)self);
+}
+
+%end
+
+// Keeps the form body editor's Done checkmark in place against Apollo's own re-assertions
+// (textViewDidChange re-sets postBarButtonItem on every keystroke). Nav items without the
+// tag pass straight through, so this is a two-instruction early-out for the rest of the app.
+%hook UINavigationItem
+
+- (void)setRightBarButtonItem:(UIBarButtonItem *)item {
+    UIBarButtonItem *doneItem = objc_getAssociatedObject(self, &kApolloComposeFormBodyNavItemDoneKey);
+    if ([doneItem isKindOfClass:[UIBarButtonItem class]] && item != doneItem) { %orig(doneItem); return; }
+    %orig;
+}
+
+- (void)setRightBarButtonItem:(UIBarButtonItem *)item animated:(BOOL)animated {
+    UIBarButtonItem *doneItem = objc_getAssociatedObject(self, &kApolloComposeFormBodyNavItemDoneKey);
+    if ([doneItem isKindOfClass:[UIBarButtonItem class]] && item != doneItem) { %orig(doneItem, animated); return; }
+    %orig;
+}
+
+- (void)setRightBarButtonItems:(NSArray<UIBarButtonItem *> *)items {
+    UIBarButtonItem *doneItem = objc_getAssociatedObject(self, &kApolloComposeFormBodyNavItemDoneKey);
+    if ([doneItem isKindOfClass:[UIBarButtonItem class]] && !(items.count == 1 && items.firstObject == doneItem)) { %orig(@[doneItem]); return; }
+    %orig;
+}
+
+- (void)setRightBarButtonItems:(NSArray<UIBarButtonItem *> *)items animated:(BOOL)animated {
+    UIBarButtonItem *doneItem = objc_getAssociatedObject(self, &kApolloComposeFormBodyNavItemDoneKey);
+    if ([doneItem isKindOfClass:[UIBarButtonItem class]] && !(items.count == 1 && items.firstObject == doneItem)) { %orig(@[doneItem], animated); return; }
+    %orig;
 }
 
 %end
@@ -3514,26 +3739,31 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
 - (void)setText:(NSString *)text {
     %orig;
     ApolloMediaComposerCaptureBodyTextViewMutation(self, @"setText:");
+    ApolloMediaComposerNudgeTitleRowHeight(self);
 }
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
     %orig;
     ApolloMediaComposerCaptureBodyTextViewMutation(self, @"setAttributedText:");
+    ApolloMediaComposerNudgeTitleRowHeight(self);
 }
 
 - (void)insertText:(NSString *)text {
     %orig;
     ApolloMediaComposerCaptureBodyTextViewMutation(self, @"insertText:");
+    ApolloMediaComposerNudgeTitleRowHeight(self);
 }
 
 - (void)deleteBackward {
     %orig;
     ApolloMediaComposerCaptureBodyTextViewMutation(self, @"deleteBackward");
+    ApolloMediaComposerNudgeTitleRowHeight(self);
 }
 
 - (void)replaceRange:(UITextRange *)range withText:(NSString *)text {
     %orig;
     ApolloMediaComposerCaptureBodyTextViewMutation(self, @"replaceRange:withText:");
+    ApolloMediaComposerNudgeTitleRowHeight(self);
 }
 
 - (BOOL)resignFirstResponder {
