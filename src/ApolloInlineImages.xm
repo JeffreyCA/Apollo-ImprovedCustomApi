@@ -19,6 +19,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
+#import <AVKit/AVKit.h>
 #import <Photos/Photos.h>
 #import <math.h>
 #import <objc/runtime.h>
@@ -147,6 +148,7 @@ struct CDStruct_90e057aa { CGSize min; CGSize max; };
 static char kApolloDecompositionMapKey;        // NSDictionary<NSValue (non-retained orig text node ptr), NSArray<id leaf>>
 static char kApolloCachedOrigChildrenKey;      // NSArray (held strongly so element pointers stay valid for compare)
 static char kApolloProvisionalDecompKey;       // NSNumber(BOOL): decomposition built while comment mediaMetadata was unreachable (don't cache)
+static char kApolloInlineGIFMetadataRetryKey;  // NSNumber(BOOL): one bounded metadata retry chain per MarkdownNode
 static char kApolloImageNodesByURLKey;         // NSMutableDictionary<NSString URL, ASNetworkImageNode> per-MarkdownNode reuse cache
 static char kApolloImageCacheKey;              // NSString stable cache key (set even before deferred image URLs resolve)
 static char kApolloImageURLKey;                // NSURL on the imageNode AND mirrored on the imageNode's view
@@ -251,6 +253,8 @@ static void ApolloInstallPlayOverlayOnView(UIView *v, ASDisplayNode *node);
 static void ApolloRemovePlayOverlayFromNode(ASDisplayNode *node);
 static void ApolloUpdateInlineGIFOverlayForNode(ASDisplayNode *node);
 static void ApolloSchedulePlayOverlayReassert(ASNetworkImageNode *imageNode, NSUInteger attempt);
+static NSDictionary *ApolloMediaMetadataForHostWithState(ASDisplayNode *hostMarkdownNode,
+                                                          BOOL *foundHostModelOut);
 static NSDictionary *ApolloMediaMetadataForHost(ASDisplayNode *hostMarkdownNode);
 
 // MARK: - Class lookups (cached)
@@ -691,7 +695,18 @@ static NSString *ApolloMediaMetadataIDFromVideoURL(NSURL *videoURL) {
 // supernode chain looking for a node with a `comment` or `link` ivar.
 // Apollo's CommentCellNode holds the RDKComment; CommentsHeaderCellNode
 // holds the RDKLink. Both models carry mediaMetadata for native uploads.
-static NSDictionary *ApolloMediaMetadataForHost(ASDisplayNode *hostMarkdownNode) {
+//
+// `foundHostModelOut` is deliberately separate from the dictionary result.
+// A newly-created MarkdownNode can briefly have no hosting model because it
+// has not joined the CommentCellNode tree yet; that state is worth retrying.
+// Native Reddit video comments, however, have a perfectly valid RDKComment
+// whose mediaMetadata is permanently nil. Conflating those two states made
+// every layout of a native-video comment provisional forever, so it rebuilt
+// its Texture leaves (and their backing stores/context-menu interactions) on
+// every pass until the process exhausted memory.
+static NSDictionary *ApolloMediaMetadataForHostWithState(ASDisplayNode *hostMarkdownNode,
+                                                          BOOL *foundHostModelOut) {
+    if (foundHostModelOut) *foundHostModelOut = NO;
     for (ASDisplayNode *n = hostMarkdownNode; n; n = n.supernode) {
         for (const char *ivarName : (const char *[]){"comment", "link"}) {
             Ivar ivar = class_getInstanceVariable([n class], ivarName);
@@ -699,11 +714,20 @@ static NSDictionary *ApolloMediaMetadataForHost(ASDisplayNode *hostMarkdownNode)
             id model = nil;
             @try { model = object_getIvar(n, ivar); } @catch (__unused NSException *e) {}
             if (!model || ![model respondsToSelector:@selector(mediaMetadata)]) continue;
+            if (foundHostModelOut) *foundHostModelOut = YES;
             id md = [model performSelector:@selector(mediaMetadata)];
             if ([md isKindOfClass:[NSDictionary class]]) return md;
+            // We found the nearest hosting model. A nil metadata property is
+            // definitive for native video comments, not evidence that the
+            // MarkdownNode is still disconnected.
+            return nil;
         }
     }
     return nil;
+}
+
+static NSDictionary *ApolloMediaMetadataForHost(ASDisplayNode *hostMarkdownNode) {
+    return ApolloMediaMetadataForHostWithState(hostMarkdownNode, NULL);
 }
 
 // Find the mediaMetadata entry for a given video URL. Tries direct id
@@ -1726,6 +1750,7 @@ static CGFloat ApolloAspectRatioFromURL(NSURL *url) {
 @end
 
 static UIViewController *ApolloTopVCFromView(UIView *v);
+static BOOL ApolloPresentRedditVideoCommentURL(NSURL *url, UIView *sourceView);
 static void ApolloOpenImageChestURLNormally(NSURL *url);
 static BOOL ApolloPresentOrResolveImageChestAlbumURL(NSURL *url, UIView *sourceView, void (^fallback)(void));
 
@@ -1795,9 +1820,10 @@ static id ApolloFindResponderForSelector(SEL sel, id imageNode) {
     NSURL *url = objc_getAssociatedObject(imageNode, &kApolloOriginalImageURLKey)
               ?: objc_getAssociatedObject(imageNode, &kApolloImageURLKey);
     if (![url isKindOfClass:[NSURL class]]) return;
+    UIView *sourceView = [imageNode respondsToSelector:@selector(view)] ? [imageNode view] : nil;
+    if (ApolloPresentRedditVideoCommentURL(url, sourceView)) return;
     if (ApolloImageChestIsPostURL(url)) {
-        UIView *view = [imageNode respondsToSelector:@selector(view)] ? [imageNode view] : nil;
-        ApolloPresentOrResolveImageChestAlbumURL(url, view, ^{
+        ApolloPresentOrResolveImageChestAlbumURL(url, sourceView, ^{
             ApolloOpenImageChestURLNormally(url);
         });
         return;
@@ -1806,8 +1832,7 @@ static id ApolloFindResponderForSelector(SEL sel, id imageNode) {
     // chrome (Share top-left, Done top-right) and save options are
     // consistent instead of falling through to the native X-button viewer.
     if (ApolloImageChestIsDirectImageURL(url)) {
-        UIView *view = [imageNode respondsToSelector:@selector(view)] ? [imageNode view] : nil;
-        if (ApolloPresentImageChestItems(@[@{ @"url": url }], view, 0)) return;
+        if (ApolloPresentImageChestItems(@[@{ @"url": url }], sourceView, 0)) return;
     }
 
     ASDisplayNode *host = ApolloInlineHostForNode(imageNode);
@@ -1845,6 +1870,71 @@ static UIViewController *ApolloTopVCFromView(UIView *v) {
     UIViewController *vc = window.rootViewController;
     while (vc.presentedViewController) vc = vc.presentedViewController;
     return vc;
+}
+
+// Native Reddit video comments expose only a player-page URL in their body:
+//   reddit.com/link/<comment>/video/<asset>/player
+// Apollo 1.15.11 recognizes that as media when laying out the comment, but its
+// Markdown tap router cannot turn the HTML player page into a playable asset,
+// so the visible play button is inert. Reddit's public CDN serves the same
+// asset as HLS; deriving that URL avoids both the legacy OAuth API and the
+// keyless WebJSON path, making playback identical in either account mode.
+static NSURL *ApolloRedditVideoCommentHLSURL(NSURL *url) {
+    if (![url isKindOfClass:[NSURL class]]) return nil;
+    NSString *host = url.host.lowercaseString ?: @"";
+    NSString *path = url.path.lowercaseString ?: @"";
+    BOOL isPlayerURL = ([host isEqualToString:@"reddit.com"] || [host hasSuffix:@".reddit.com"])
+        && [path hasPrefix:@"/link/"] && [path containsString:@"/video/"]
+        && [path hasSuffix:@"/player"];
+    if (!isPlayerURL) return nil;
+
+    NSString *assetID = ApolloMediaMetadataIDFromVideoURL(url);
+    if (assetID.length == 0) return nil;
+    return [NSURL URLWithString:[NSString stringWithFormat:
+        @"https://v.redd.it/%@/HLSPlaylist.m3u8", assetID]];
+}
+
+static BOOL ApolloPresentRedditVideoCommentURL(NSURL *url, UIView *sourceView) {
+    NSURL *streamURL = ApolloRedditVideoCommentHLSURL(url);
+    if (!streamURL) return NO;
+
+    UIViewController *top = ApolloTopVCFromView(sourceView);
+    if (!top) {
+        ApolloLog(@"[InlineImages] video comment tap: no presenting controller url=%@", url);
+        return NO;
+    }
+
+    // Apollo normally leaves the session on Ambient, which the mute switch can
+    // silence. A user explicitly pressed Play, so claim the normal movie
+    // playback category before AVKit creates its controller/player graph.
+    AVAudioSession *session = AVAudioSession.sharedInstance;
+    NSError *categoryError = nil;
+    [session setCategory:AVAudioSessionCategoryPlayback
+                    mode:AVAudioSessionModeMoviePlayback
+                 options:0
+                   error:&categoryError];
+    NSError *activeError = nil;
+    [session setActive:YES error:&activeError];
+    if (categoryError || activeError) {
+        ApolloLog(@"[InlineImages] video comment audio session warning category=%@ active=%@",
+                  categoryError.localizedDescription ?: @"nil",
+                  activeError.localizedDescription ?: @"nil");
+    }
+
+    AVPlayer *player = [AVPlayer playerWithURL:streamURL];
+    player.automaticallyWaitsToMinimizeStalling = YES;
+    AVPlayerViewController *viewer = [AVPlayerViewController new];
+    viewer.player = player;
+    viewer.showsPlaybackControls = YES;
+    viewer.allowsPictureInPicturePlayback = YES;
+    viewer.modalPresentationStyle = UIModalPresentationFullScreen;
+
+    ApolloLog(@"[InlineImages] opening native video comment asset=%@ stream=%@",
+              ApolloMediaMetadataIDFromVideoURL(url), streamURL);
+    [top presentViewController:viewer animated:YES completion:^{
+        [player play];
+    }];
+    return YES;
 }
 
 // Non-static: exported via ApolloCommon.h so other modules can open the
@@ -3884,7 +3974,20 @@ static void ApolloScheduleInlineGIFMetadataRetry(ASDisplayNode *hostMarkdownNode
     if (!hostMarkdownNode || candidateVideoURLs.count == 0) return;
     static const NSTimeInterval kDelays[] = {0.10, 0.20, 0.35, 0.60, 1.0, 2.0};
     static const NSUInteger kMaxAttempts = sizeof(kDelays) / sizeof(kDelays[0]);
-    if (attempt >= kMaxAttempts) return;
+    if (attempt == 0) {
+        // layoutSpecThatFits: can be called many times before Texture attaches
+        // an off-screen MarkdownNode to its cell. One retry chain is enough;
+        // letting every layout start six more timers magnifies any layout
+        // churn and retains needless candidate arrays/blocks.
+        if ([objc_getAssociatedObject(hostMarkdownNode, &kApolloInlineGIFMetadataRetryKey) boolValue]) return;
+        objc_setAssociatedObject(hostMarkdownNode, &kApolloInlineGIFMetadataRetryKey,
+                                 @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (attempt >= kMaxAttempts) {
+        objc_setAssociatedObject(hostMarkdownNode, &kApolloInlineGIFMetadataRetryKey,
+                                 nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
 
     __weak ASDisplayNode *weakHost = hostMarkdownNode;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kDelays[attempt] * NSEC_PER_SEC)),
@@ -3892,8 +3995,11 @@ static void ApolloScheduleInlineGIFMetadataRetry(ASDisplayNode *hostMarkdownNode
         ASDisplayNode *host = weakHost;
         if (!host) return;
 
-        NSDictionary *md = ApolloMediaMetadataForHost(host);
-        if (md.count > 0) {
+        BOOL foundHostModel = NO;
+        NSDictionary *md = ApolloMediaMetadataForHostWithState(host, &foundHostModel);
+        if (foundHostModel) {
+            objc_setAssociatedObject(host, &kApolloInlineGIFMetadataRetryKey,
+                                     nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             BOOL foundGIF = NO;
             for (NSURL *u in candidateVideoURLs) {
                 if (ApolloInlineGIFDisplayURLFromMetadata(u, md)) { foundGIF = YES; break; }
@@ -3907,11 +4013,21 @@ static void ApolloScheduleInlineGIFMetadataRetry(ASDisplayNode *hostMarkdownNode
                           host, (unsigned long)attempt);
                 return;
             }
-            // Metadata is present but none of the candidates are GIFs — they're
-            // genuine videos. Leave them as thumbnails and stop polling.
+            // The host model exists but its metadata is nil (the normal shape
+            // of Reddit's new native video comments), or its metadata contains
+            // no matching GIF. Finalize the one provisional decomposition so
+            // subsequent layout passes reuse it instead of rebuilding forever.
+            if ([objc_getAssociatedObject(host, &kApolloProvisionalDecompKey) boolValue]) {
+                objc_setAssociatedObject(host, &kApolloProvisionalDecompKey,
+                                         nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                ApolloRequestMarkdownRelayout(host);
+            }
+            ApolloLog(@"[InlineImages] video metadata resolved as definitive non-GIF host=%p metadata=%@ attempt=%lu",
+                      host, md ? @"present" : @"nil", (unsigned long)attempt);
             return;
         }
-        // Metadata still unreachable — keep trying within the window.
+        // The hosting model is still unreachable — keep trying within the
+        // bounded window. This is the only state in which retrying is useful.
         ApolloScheduleInlineGIFMetadataRetry(host, candidateVideoURLs, attempt + 1);
     });
 }
@@ -3949,9 +4065,11 @@ static NSArray *ApolloBuildLeavesForTextNode(ASTextNode *textNode,
     // redundant label beneath the inline GIF (custom alt text stays visible).
     NSMutableArray<NSNumber *> *isDefaultGifLabel = [NSMutableArray array];
     NSUInteger imageChestPostLinkCount = ApolloUniqueImageChestPostLinkCount(attr);
-    NSDictionary *hostMediaMetadata = ApolloMediaMetadataForHost(hostMarkdownNode);
-    // Original /player URLs classified as video while metadata was unavailable;
-    // used to schedule a metadata-arrival retry (see below).
+    BOOL foundHostModel = NO;
+    NSDictionary *hostMediaMetadata = ApolloMediaMetadataForHostWithState(hostMarkdownNode,
+                                                                           &foundHostModel);
+    // Original /player URLs classified as video before the hosting model was
+    // reachable; used to schedule a metadata-arrival retry (see below).
     NSMutableArray<NSURL *> *videoCandidates = [NSMutableArray array];
 
     [attr enumerateAttributesInRange:NSMakeRange(0, attr.length)
@@ -4007,17 +4125,18 @@ static NSArray *ApolloBuildLeavesForTextNode(ASTextNode *textNode,
         }
     }];
 
-    // If we classified one or more URLs as video thumbnails but couldn't reach
-    // the comment's mediaMetadata yet, the /player URL might actually be a
-    // Reddit-hosted GIF. Poll for the metadata and rebuild once it arrives so
-    // the GIF autoplays inline without the user collapsing/expanding the cell.
+    // If we classified one or more URLs as video thumbnails before the
+    // comment/link model joined the supernode chain, the /player URL might
+    // actually be a Reddit-hosted GIF. Poll for the host model and rebuild once
+    // its metadata arrives so the GIF autoplays inline without the user
+    // collapsing/expanding the cell.
     // We ALSO mark this decomposition provisional so layoutSpecThatFits: does
     // not cache it: an off-screen comment lays out during preheat (metadata
     // unreachable) and the timed poll can give up before the cell ever becomes
     // visible. Leaving the result uncached forces a fresh rebuild on the
     // display-time measurement pass — when the metadata IS reachable — so the
     // GIF is reclassified correctly the moment the user scrolls to it.
-    if (hostMediaMetadata == nil && videoCandidates.count > 0) {
+    if (!foundHostModel && videoCandidates.count > 0) {
         objc_setAssociatedObject(hostMarkdownNode, &kApolloProvisionalDecompKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         ApolloScheduleInlineGIFMetadataRetry(hostMarkdownNode, videoCandidates, 0);
     }
