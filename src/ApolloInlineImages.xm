@@ -153,6 +153,7 @@ static char kApolloImageNodesByURLKey;         // NSMutableDictionary<NSString U
 static char kApolloImageCacheKey;              // NSString stable cache key (set even before deferred image URLs resolve)
 static char kApolloImageURLKey;                // NSURL on the imageNode AND mirrored on the imageNode's view
 static char kApolloOriginalImageURLKey;        // NSURL for tap/long-press when different from the loaded URL (e.g. album URL)
+static char kApolloInlineVideoThumbnailKey;    // NSNumber(BOOL): use player-card sizing instead of tall-image sizing
 static char kApolloHostMarkdownNodeKey;        // ApolloWeakHostBox (zeroing-weak) to the host MarkdownNode/LinkButtonNode
 static char kApolloAspectRatioKey;             // NSNumber height/width — NIL if unknown (no URL params yet, no DIDLOAD yet)
 
@@ -3482,8 +3483,13 @@ static ASNetworkImageNode *ApolloMakeInlineVideoThumbnailNode(NSURL *videoURL,
 
     ASNetworkImageNode *imageNode = [[imageNodeClass alloc] init];
     imageNode.shouldRenderProgressImages = YES;
-    imageNode.contentMode = UIViewContentModeScaleAspectFill;
-    imageNode.placeholderColor = [UIColor tertiarySystemFillColor];
+    // Video-comment posters can be portrait while the initial placeholder is
+    // deliberately 16:9. Preserve the whole extracted frame during that
+    // placeholder-to-natural-ratio transition (and in height-clamped layouts)
+    // instead of zooming/cropping it to fill the temporary container.
+    imageNode.contentMode = UIViewContentModeScaleAspectFit;
+    imageNode.placeholderColor = [UIColor blackColor];
+    imageNode.backgroundColor = [UIColor blackColor];
     imageNode.placeholderEnabled = YES;
     imageNode.placeholderFadeDuration = 0.2;
     imageNode.cornerRadius = 8.0;
@@ -3501,6 +3507,8 @@ static ASNetworkImageNode *ApolloMakeInlineVideoThumbnailNode(NSURL *videoURL,
     // ratio so the layout reserves space immediately; DIDLOAD refines it
     // once the real poster loads.
     objc_setAssociatedObject(imageNode, &kApolloImageURLKey, videoURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(imageNode, &kApolloInlineVideoThumbnailKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloSetInlineHostForNode(imageNode, hostMarkdownNode);
     objc_setAssociatedObject(imageNode, &kApolloAspectRatioKey, @(9.0 / 16.0), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
@@ -3552,12 +3560,12 @@ static ASNetworkImageNode *ApolloMakeInlineVideoThumbnailNode(NSURL *videoURL,
                                     updateAspectRatioForImageNode:strong imageSize:poster.size];
                             }
                         } else if (!strong.image && !strong.URL) {
-                            strong.backgroundColor = [UIColor tertiarySystemFillColor];
+                            strong.backgroundColor = [UIColor blackColor];
                         }
                     });
                 } else {
                     ApolloLog(@"[InlineImages] video poster NOT FOUND node=%p video=%@", img, videoURL);
-                    img.backgroundColor = [UIColor tertiarySystemFillColor];
+                    img.backgroundColor = [UIColor blackColor];
                 }
             }
         }
@@ -3787,8 +3795,29 @@ static ASLayoutSpec *ApolloWrapImageNodeForLayout(ASNetworkImageNode *imageNode,
     CGFloat containerRatio = naturalRatio;
     CGFloat containerWidth = rowMaxWidth;  // default: span full row
     BOOL isLetterboxed = NO;
+    BOOL isVideoThumbnail = [objc_getAssociatedObject(imageNode,
+                                                       &kApolloInlineVideoThumbnailKey) boolValue];
 
-    if (naturalRatio > kApolloMaxContainerRatio) {
+    if (isVideoThumbnail && naturalRatio > 1.0) {
+        // A portrait video should still read as a tappable player, not as the
+        // narrow tall-image strip used for photos. Use a taller full-row card
+        // so aspect-fit keeps the complete frame while making it substantially
+        // larger than it would be inside a square. Cap at 3:2 so one preview
+        // does not take over the entire thread, and retain the shared viewport
+        // height cap on wider iPad/landscape layouts. Landscape videos retain
+        // their natural wide ratio through the normal branches below.
+        containerWidth = rowMaxWidth;
+        CGFloat sizedWidth = rowMaxWidth;
+        if (sInlineMediaSizePercent > 0 && sInlineMediaSizePercent < 100) {
+            sizedWidth *= sInlineMediaSizePercent / 100.0;
+        }
+        CGFloat screenHeight = [UIScreen mainScreen].bounds.size.height;
+        CGFloat viewportRatioCap = (screenHeight * kApolloMaxScreenHeightFraction)
+                                 / MAX(sizedWidth, 1.0);
+        CGFloat videoRatioCap = MIN(1.5, MAX(1.0, viewportRatioCap));
+        containerRatio = MIN(naturalRatio, videoRatioCap);
+        isLetterboxed = YES;
+    } else if (naturalRatio > kApolloMaxContainerRatio) {
         // Tall image. Cap height at min(row × maxContainerRatio,
         // screen × maxScreenHeightFraction). The screen term protects
         // landscape, where the row term alone produces images taller
