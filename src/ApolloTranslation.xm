@@ -782,6 +782,33 @@ static BOOL ApolloTextLooksLikeStructuredPostBody(NSString *text) {
     if (atxHeadingCount >= 1) return YES;
     if (boldOnlyHeadingCount >= 2) return YES;
 
+    // Prose-dominance gate for the two HEURISTIC arms below (label lines,
+    // isolated short lines). Those arms target line-up / spec-sheet bodies
+    // that are ~all short fragments — but they also fired on ordinary prose
+    // posts that merely OPEN with a few stat lines ("183 jogos / 10 golos"
+    // career-recap farewells), silently leaving whole posts untranslated.
+    // Real spec-sheets carry almost no prose mass, so the weak arms may only
+    // skip when prose does NOT dominate: when substantial sentence-final
+    // lines (or long wrapped paragraphs) hold at least half the visible
+    // characters, the post reads as prose and survives a translator round-
+    // trip fine. The four STRONG signals above are unaffected.
+    // ':' is included for ≥60-char lines: a long colon-terminated line is an
+    // intro-to-a-list sentence ("...será um central que:"), not a spec-sheet
+    // label — labels ("Venue: X") are short and excluded by the length floor.
+    NSCharacterSet *proseEnders = [NSCharacterSet characterSetWithCharactersInString:@".!?…:"];
+    NSUInteger proseChars = 0, totalNonBlankChars = 0;
+    for (NSUInteger i = 0; i < scanLimit; i++) {
+        NSString *line = [lines[i] stringByTrimmingCharactersInSet:ws];
+        if (line.length == 0) continue;
+        totalNonBlankChars += line.length;
+        unichar last = [line characterAtIndex:line.length - 1];
+        if (([proseEnders characterIsMember:last] && line.length >= 60) || line.length >= 200) {
+            proseChars += line.length;
+        }
+    }
+    BOOL proseDominant = totalNonBlankChars > 0 &&
+                         ((CGFloat)proseChars / (CGFloat)totalNonBlankChars) >= 0.5;
+
     // Many "Foo: bar" colon-terminated label lines (Venue:, Referee:,
     // Manager:, Starting XI:, etc.) is a strong indicator of a structured
     // post-match / spec-sheet style body even when no markdown survives.
@@ -794,7 +821,7 @@ static BOOL ApolloTextLooksLikeStructuredPostBody(NSString *text) {
         // "Word:" or "Word Word:" near start, with content after
         if (colon.location >= 2 && colon.location <= 30) {
             labelLineCount++;
-            if (labelLineCount >= 3) return YES;
+            if (labelLineCount >= 3 && !proseDominant) return YES;
         }
     }
 
@@ -824,7 +851,7 @@ static BOOL ApolloTextLooksLikeStructuredPostBody(NSString *text) {
         // in prose ("Source: <link>") and aren't section headers.
         if ([line hasPrefix:@"http"] || [line hasPrefix:@"["]) continue;
         isolatedHeaderCount++;
-        if (isolatedHeaderCount >= 2) return YES;
+        if (isolatedHeaderCount >= 2 && !proseDominant) return YES;
     }
 
     return NO;
@@ -868,6 +895,30 @@ static BOOL ApolloLinkContainsCodeOrPreformatted(RDKLink *link, NSString *visibl
            ApolloTextContainsMarkdownCode(visibleText) ||
            ApolloTextLooksLikeStructuredPostBody(link.selfText) ||
            ApolloTextLooksLikeStructuredPostBody(visibleText) ||
+           ApolloHTMLLooksLikeStructuredPostBody(link.selfTextHTML);
+}
+
+// Variant for RENDERED node text (the visible-body path, where the model
+// link is often unreadable). Markdown-code syntax never survives Apollo's
+// renderer — backtick fences are consumed, and leading indentation in the
+// attributed string is quote/list PRESENTATION, not a code block — so
+// running the raw-markdown indent heuristic on rendered text misclassified
+// every blockquote body as code and silently skipped it. Fence characters
+// are still checked (cheap, and a body that somehow shows literal fences
+// is worth skipping); the structural fingerprint (tables / label lines /
+// isolated headers) applies to rendered text unchanged.
+static BOOL ApolloRenderedTextContainsMarkdownCode(NSString *text) {
+    if (![text isKindOfClass:[NSString class]] || text.length == 0) return NO;
+    NSString *lower = text.lowercaseString;
+    return [lower containsString:@"```"] || [lower containsString:@"~~~"];
+}
+
+static BOOL ApolloLinkContainsCodeOrPreformattedRendered(RDKLink *link, NSString *renderedText) {
+    return ApolloTextContainsMarkdownCode(link.selfText) ||
+           ApolloHTMLContainsCode(link.selfTextHTML) ||
+           ApolloRenderedTextContainsMarkdownCode(renderedText) ||
+           ApolloTextLooksLikeStructuredPostBody(link.selfText) ||
+           ApolloTextLooksLikeStructuredPostBody(renderedText) ||
            ApolloHTMLLooksLikeStructuredPostBody(link.selfTextHTML);
 }
 
@@ -1554,12 +1605,19 @@ static NSUInteger ApolloRemoveNativeTranslateActions(id actionController) {
 // can't blow the stack or burn unbounded CPU on the main thread.
 static const NSUInteger kApolloMaxVisitedNodes = 256;
 
-static void ApolloCollectAttributedTextNodes(id object,
-                                             NSInteger depth,
-                                             NSHashTable *visited,
-                                             NSMutableArray *nodes) {
+// Core walk with an explicit visited budget. The default budget (256, via the
+// ApolloCollectAttributedTextNodes shim) is right for cell-scoped scans, but a
+// whole-controller scan of a media-forward thread (gallery grid + comment
+// cells) exhausts it before ever reaching the post-body text node — the walk
+// then "finds" only chrome (title / tweak UI) and the body never translates.
+// Controller-level callers pass a bigger budget + depth instead.
+static void ApolloCollectAttributedTextNodesBounded(id object,
+                                                    NSInteger depth,
+                                                    NSHashTable *visited,
+                                                    NSMutableArray *nodes,
+                                                    NSUInteger maxVisited) {
     if (!object || depth < 0) return;
-    if (visited.count >= kApolloMaxVisitedNodes) return;
+    if (visited.count >= maxVisited) return;
 
     Class displayNodeCls = NSClassFromString(@"ASDisplayNode");
     BOOL isDisplayNode = displayNodeCls && [object isKindOfClass:displayNodeCls];
@@ -1592,7 +1650,7 @@ static void ApolloCollectAttributedTextNodes(id object,
             if (![object respondsToSelector:selector]) continue;
             id node = ((id (*)(id, SEL))objc_msgSend)(object, selector);
             if (node && node != object) {
-                ApolloCollectAttributedTextNodes(node, depth - 1, visited, nodes);
+                ApolloCollectAttributedTextNodesBounded(node, depth - 1, visited, nodes, maxVisited);
             }
         }
     } @catch (__unused NSException *exception) {
@@ -1606,8 +1664,8 @@ static void ApolloCollectAttributedTextNodes(id object,
             NSArray *subnodes = ((id (*)(id, SEL))objc_msgSend)(object, subnodesSel);
             if ([subnodes isKindOfClass:[NSArray class]]) {
                 for (id subnode in subnodes) {
-                    if (visited.count >= kApolloMaxVisitedNodes) break;
-                    ApolloCollectAttributedTextNodes(subnode, depth - 1, visited, nodes);
+                    if (visited.count >= maxVisited) break;
+                    ApolloCollectAttributedTextNodesBounded(subnode, depth - 1, visited, nodes, maxVisited);
                 }
             }
         }
@@ -1626,13 +1684,21 @@ static void ApolloCollectAttributedTextNodes(id object,
             NSArray *subviews = ((id (*)(id, SEL))objc_msgSend)(object, @selector(subviews));
             if ([subviews isKindOfClass:[NSArray class]]) {
                 for (id sub in subviews) {
-                    if (visited.count >= kApolloMaxVisitedNodes) break;
-                    ApolloCollectAttributedTextNodes(sub, depth - 1, visited, nodes);
+                    if (visited.count >= maxVisited) break;
+                    ApolloCollectAttributedTextNodesBounded(sub, depth - 1, visited, nodes, maxVisited);
                 }
             }
         }
     } @catch (__unused NSException *exception) {
     }
+}
+
+// Default-budget shim — the historical entry point for cell/title-scoped scans.
+static void ApolloCollectAttributedTextNodes(id object,
+                                             NSInteger depth,
+                                             NSHashTable *visited,
+                                             NSMutableArray *nodes) {
+    ApolloCollectAttributedTextNodesBounded(object, depth, visited, nodes, kApolloMaxVisitedNodes);
 }
 
 // Returns the ASTextNode (or compatible) holding the comment body, by reading
@@ -2391,39 +2457,79 @@ static id ApolloBestVisiblePostBodyTextNodeForController(UIViewController *viewC
     if (!viewController.view) return nil;
     NSMutableArray *candidates = [NSMutableArray array];
     NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:128];
-    ApolloCollectAttributedTextNodes(viewController.view, 8, visited, candidates);
+    // This is the ONLY path that finds the post body when the RDKLink isn't
+    // readable off the controller (media-forward layouts — gallery /
+    // link-card posts), so discovery must be deterministic. Scan the
+    // NON-COMMENT cells (the post header: title/media/body) subtree-first
+    // with a generous budget: a whole-view walk instead spends its visit
+    // budget inside the media grid and however many comment subtrees happen
+    // to be mounted, which made the body node a coin flip — found on the
+    // first pass after push, lost on later passes, so the stale-key guard
+    // then blocked the returning translation from ever applying.
+    for (UITableViewCell *cell in [tableView visibleCells]) {
+        SEL nodeSelector = NSSelectorFromString(@"node");
+        id cellNode = [cell respondsToSelector:nodeSelector]
+            ? ((id (*)(id, SEL))objc_msgSend)(cell, nodeSelector) : nil;
+        if (!cellNode) cellNode = cell.contentView ?: cell;
+        if (ApolloCommentFromCellNode(cellNode)) continue;
+        ApolloCollectAttributedTextNodesBounded(cellNode, 12, visited, candidates, 768);
+    }
+    if (tableView.tableHeaderView) {
+        ApolloCollectAttributedTextNodesBounded(tableView.tableHeaderView, 12, visited, candidates, 1024);
+    }
+    // Fallback for layouts whose body doesn't live in a table cell at all.
+    if (candidates.count == 0) {
+        ApolloCollectAttributedTextNodesBounded(viewController.view, 14, visited, candidates, 1024);
+    }
 
     CGFloat firstCommentTop = ApolloFirstVisibleCommentTopY(viewController, tableView);
     if (firstCommentTop == CGFLOAT_MAX) firstCommentTop = CGRectGetHeight(viewController.view.bounds);
 
     id best = nil;
     NSInteger bestScore = NSIntegerMin;
+    // __unused: only read by the verbose-build census log below.
+    __unused NSUInteger dbgTitleOwned = 0, dbgMetadata = 0, dbgNoView = 0, dbgBelowComments = 0;
     for (id candidate in candidates) {
         // Never pick OUR translated title node as the "body": once the title is
         // swapped to the target language it no longer matches link.title, so the
         // metadata filter below can't exclude it — a long translated title would
         // masquerade as the post body (and get body-owned, double-driven).
-        if ([objc_getAssociatedObject(candidate, kApolloTitleOwnedTextNodeKey) boolValue]) continue;
+        if ([objc_getAssociatedObject(candidate, kApolloTitleOwnedTextNodeKey) boolValue]) { dbgTitleOwned++; continue; }
+        // Tweak-drawn chrome (AI summary pill, injected affordances) is never
+        // the post body — without this, a thread whose real body node isn't
+        // found would elect our own English UI text and translate it on
+        // non-English targets.
+        if (ApolloTextNodeIsTweakUI(candidate)) { dbgMetadata++; continue; }
         NSString *text = ApolloVisibleTextFromNode(candidate);
-        if (text.length == 0 || ApolloPostTextLooksLikeMetadata(text, link)) continue;
+        if (text.length == 0 || ApolloPostTextLooksLikeMetadata(text, link)) { dbgMetadata++; continue; }
 
         UIView *view = ApolloViewForTextObject(candidate);
-        if (!view || view.hidden || view.alpha < 0.01) continue;
+        if (!view || view.hidden || view.alpha < 0.01) { dbgNoView++; continue; }
         CGRect frame = [view convertRect:view.bounds toView:viewController.view];
-        if (CGRectIsEmpty(frame) || CGRectGetMaxY(frame) <= 0) continue;
+        if (CGRectIsEmpty(frame) || CGRectGetMaxY(frame) <= 0) { dbgNoView++; continue; }
 
         // Post body sits above the first comment. Avoid accidentally grabbing
         // translated comment text lower in the table while still allowing long
         // selftext that scrolls near the first comment boundary.
-        if (CGRectGetMinY(frame) >= firstCommentTop - 8.0) continue;
+        if (CGRectGetMinY(frame) >= firstCommentTop - 8.0) { dbgBelowComments++; continue; }
 
+        // Longest wins. No "fully above the fold" bonus here: every scored
+        // candidate already STARTS above the comment boundary (filter above),
+        // and a +1000 fully-above bonus let a 60-char card title outrank a
+        // long quote/selftext body whose cell extends past the screen bottom
+        // — which is precisely the multi-paragraph body this scan exists to
+        // find.
         NSInteger score = (NSInteger)text.length;
-        if (CGRectGetMaxY(frame) < firstCommentTop) score += 1000;
         if (score > bestScore) {
             bestScore = score;
             best = candidate;
         }
     }
+    ApolloTranslationVerboseLog(@"[Translation] body-scan candidates=%lu titleOwned=%lu metadata=%lu noView=%lu belowComments=%lu firstCommentTop=%.0f best=%@ bestLen=%lu",
+                                (unsigned long)candidates.count, (unsigned long)dbgTitleOwned, (unsigned long)dbgMetadata,
+                                (unsigned long)dbgNoView, (unsigned long)dbgBelowComments, firstCommentTop,
+                                best ? NSStringFromClass([best class]) : @"(nil)",
+                                (unsigned long)ApolloVisibleTextFromNode(best).length);
     return best;
 }
 
@@ -2461,6 +2567,7 @@ static id ApolloBestPostBodyTextNode(id headerCellNode, RDKLink *link, NSString 
         // matches link.title, so without this a long title masquerades as the
         // post body when the model body is unreadable.
         if ([objc_getAssociatedObject(n, kApolloTitleOwnedTextNodeKey) boolValue]) continue;
+        if (ApolloTextNodeIsTweakUI(n)) continue;
         NSAttributedString *attr = nil;
         @try { attr = ((id (*)(id, SEL))objc_msgSend)(n, @selector(attributedText)); }
         @catch (__unused NSException *e) { continue; }
@@ -4484,6 +4591,9 @@ static void ApolloMaybeTranslatePostHeaderCellNode(id headerCellNode, RDKLink *f
         // marker from the translated TITLE instead. This pass re-runs on
         // visibility/reapply events, which also heals cold-open ordering (title
         // translated before the controller link was readable).
+        ApolloTranslationVerboseLog(@"[Translation] header-body EMPTY cell=%@ link=%d visibleNode=%d visibleLen=%lu",
+                                    NSStringFromClass([headerCellNode class]), link != nil, visibleBodyNode != nil,
+                                    (unsigned long)visibleBody.length);
         ApolloInstallHeaderMarkerFromTranslatedTitle(headerCellNode);
         return;
     }
@@ -4610,10 +4720,21 @@ static void ApolloMaybeTranslateVisiblePostBodyForController(UIViewController *v
     RDKLink *link = ApolloLinkFromController(viewController);
     id textNode = ApolloBestVisiblePostBodyTextNodeForController(viewController, tableView, link);
     NSString *sourceText = ApolloVisibleTextFromNode(textNode);
+    ApolloTranslationVerboseLog(@"[Translation] visible-body vc=%@ link=%d node=%@ textLen=%lu",
+                                NSStringFromClass([viewController class]), link != nil,
+                                textNode ? NSStringFromClass([textNode class]) : @"(nil)",
+                                (unsigned long)sourceText.length);
     if (sourceText.length == 0) return;
-    if (ApolloLinkContainsCodeOrPreformatted(link, sourceText)) {
-        // Companion to the header-cell skip just above — same rule, no log
-        // here (header-cell path already logged once for this fullName).
+    if (ApolloLinkContainsCodeOrPreformattedRendered(link, sourceText)) {
+        // Companion to the header-cell skip just above — same rule adapted to
+        // rendered text; no per-fullName log here (header-cell path already
+        // logged once when it had a readable link).
+        ApolloTranslationVerboseLog(@"[Translation] visible-body SKIP structured/code: mdCodeSelf=%d htmlCode=%d mdCodeRendered=%d structSelf=%d structVis=%d structHTML=%d",
+                                    ApolloTextContainsMarkdownCode(link.selfText), ApolloHTMLContainsCode(link.selfTextHTML),
+                                    ApolloRenderedTextContainsMarkdownCode(sourceText),
+                                    ApolloTextLooksLikeStructuredPostBody(link.selfText),
+                                    ApolloTextLooksLikeStructuredPostBody(sourceText),
+                                    ApolloHTMLLooksLikeStructuredPostBody(link.selfTextHTML));
         return;
     }
 
@@ -4633,6 +4754,7 @@ static void ApolloMaybeTranslateVisiblePostBodyForController(UIViewController *v
         // Strip links so URLs don't pollute language detection.
         NSString *detectionText = ApolloProtectTranslationLinks(sourceText, NULL);
         NSString *detected = ApolloDetectDominantLanguage(detectionText);
+        ApolloTranslationVerboseLog(@"[Translation] visible-body detected=%@ target=%@", detected ?: @"(nil)", targetLanguage);
         // TAP-TO-TRANSLATE: hold + marker on detection (this path covers the
         // post-body layouts the header-cell walk misses) — don't wait for the
         // prefetch below.
@@ -6128,7 +6250,10 @@ static BOOL ApolloRefreshVisibleTranslationAppliedForController(UIViewController
 
     NSMutableArray *nodes = [NSMutableArray array];
     NSHashTable *visited = [[NSHashTable alloc] initWithOptions:NSHashTableObjectPointerPersonality capacity:128];
-    ApolloCollectAttributedTextNodes(vc.view, 8, visited, nodes);
+    // Same reach as ApolloBestVisiblePostBodyTextNodeForController: an owned
+    // post-body node in a media-forward header sits past the default 8/256
+    // walk, and an owned node this refresh can't SEE is one it can't heal.
+    ApolloCollectAttributedTextNodesBounded(vc.view, 14, visited, nodes, 1024);
 
     for (id node in nodes) {
         if (![objc_getAssociatedObject(node, kApolloTranslationOwnedTextNodeKey) boolValue]) continue;

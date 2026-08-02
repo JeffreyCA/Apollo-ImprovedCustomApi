@@ -1827,6 +1827,9 @@ static ASTextNode *ApolloAIEnsureSummaryNode(id headerNode, BOOL isPost) {
     textNode = [[textNodeClass alloc] init];
     textNode.maximumNumberOfLines = 0;
     textNode.userInteractionEnabled = YES;
+    // Tweak chrome, not post content — keeps the translation module's
+    // post-body candidate scan from ever picking the summary pill as "the body".
+    ApolloMarkTweakUITextNode(textNode);
     objc_setAssociatedObject(textNode, &kApolloAISummaryOwnerKey, headerNode, OBJC_ASSOCIATION_ASSIGN);
     objc_setAssociatedObject(textNode, &kApolloAISummaryIsPostKey, @(isPost), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     __weak ASTextNode *weakTextNode = textNode;
