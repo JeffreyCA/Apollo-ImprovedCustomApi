@@ -795,7 +795,12 @@ static BOOL ApolloTextLooksLikeStructuredPostBody(NSString *text) {
     // ':' is included for ≥60-char lines: a long colon-terminated line is an
     // intro-to-a-list sentence ("...será um central que:"), not a spec-sheet
     // label — labels ("Venue: X") are short and excluded by the length floor.
-    NSCharacterSet *proseEnders = [NSCharacterSet characterSetWithCharactersInString:@".!?…:"];
+    // Beyond ASCII, include the sentence terminators of non-Latin scripts
+    // (CJK fullwidth 。．！？：, Arabic ؟, Urdu ۔, Devanagari ।॥, Armenian ։,
+    // Ethiopic ።, Burmese ။) — without them, prose in those languages counts
+    // as zero prose mass and stat-line posts get wrongly skipped exactly the
+    // way Latin-script ones used to.
+    NSCharacterSet *proseEnders = [NSCharacterSet characterSetWithCharactersInString:@".!?…:。．｡！？：؟۔।॥։።။"];
     NSUInteger proseChars = 0, totalNonBlankChars = 0;
     for (NSUInteger i = 0; i < scanLimit; i++) {
         NSString *line = [lines[i] stringByTrimmingCharactersInSet:ws];
@@ -833,7 +838,10 @@ static BOOL ApolloTextLooksLikeStructuredPostBody(NSString *text) {
     // bare standalone "LINE-UPS", "Schalke 04", "Fortuna Düsseldorf" lines
     // surrounded by blank space. Plain prose almost never has these — every
     // paragraph is a long line ending in `.`/`!`/`?`.
-    NSCharacterSet *sentenceEnders = [NSCharacterSet characterSetWithCharactersInString:@".!?,;"];
+    // Includes non-Latin sentence/clause terminators so short prose lines in
+    // CJK / Arabic-script / Indic / etc. posts are recognized as prose here
+    // too, instead of counting toward the isolated-header skip.
+    NSCharacterSet *sentenceEnders = [NSCharacterSet characterSetWithCharactersInString:@".!?,;。．｡！？：，、；؟۔،।॥։።။"];
     NSUInteger isolatedHeaderCount = 0;
     for (NSUInteger i = 0; i < scanLimit; i++) {
         NSString *line = [lines[i] stringByTrimmingCharactersInSet:ws];
