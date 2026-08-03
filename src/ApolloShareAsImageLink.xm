@@ -153,6 +153,8 @@ static NSURL *ApolloShareLinkRewriteURLForCurrentHost(NSURL *url) {
     switch (sShareLinkHost) {
         case ShareLinkHostOldReddit:
             return ApolloShareLinkURLWithHost(url, @"old.reddit.com");
+        case ShareLinkHostFXReddit:
+            return ApolloShareLinkURLWithHost(url, @"fxreddit.com");
         case ShareLinkHostVXReddit:
             return ApolloShareLinkURLWithHost(url, @"vxreddit.com");
         case ShareLinkHostDefault:

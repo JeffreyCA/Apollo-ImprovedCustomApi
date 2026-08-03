@@ -3671,7 +3671,15 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     sCommentLinkHost = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyCommentLinkHost];
     if (sCommentLinkHost < CommentLinkHostOff || sCommentLinkHost > CommentLinkHostImgChest) sCommentLinkHost = CommentLinkHostOff;
     sShareLinkHost = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyShareLinkHost];
-    if (sShareLinkHost < ShareLinkHostDefault || sShareLinkHost > ShareLinkHostVXReddit) sShareLinkHost = ShareLinkHostDefault;
+    if (sShareLinkHost < ShareLinkHostDefault ||
+
+    sShareLinkHost > ShareLinkHostFXReddit)
+
+{
+
+    sShareLinkHost = ShareLinkHostDefault;
+
+}
     sShowUserAvatars = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowUserAvatars];
     sUseProfileAvatarTabIcon = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyUseProfileAvatarTabIcon];
     sHideTabBarTitles = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles];

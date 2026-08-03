@@ -390,6 +390,7 @@ typedef NS_ENUM(NSInteger, ShareLinkHost) {
     ShareLinkHostDefault = 0,
     ShareLinkHostOldReddit = 1,
     ShareLinkHostVXReddit = 2,
+    ShareLinkHostFXReddit = 3,
 };
 extern NSInteger sShareLinkHost;
 
