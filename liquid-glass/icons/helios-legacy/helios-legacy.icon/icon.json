@@ -61,9 +61,19 @@
           }
         },
         {
+          "blend-mode-specializations" : [
+            {
+              "value" : "plus-lighter"
+            },
+            {
+              "appearance" : "tinted",
+              "value" : "plus-lighter"
+            }
+          ],
           "fill" : {
-            "solid" : "display-p3:0.89394,0.06706,0.83891,1.00000"
+            "solid" : "display-p3:0.84511,0.06393,0.79301,1.00000"
           },
+          "glass" : true,
           "hidden" : false,
           "image-name" : "Closed Eye.svg",
           "name" : "Closed Eye",
@@ -76,6 +86,7 @@
           }
         },
         {
+          "blend-mode" : "plus-lighter",
           "fill" : {
             "solid" : "display-p3:0.89394,0.06751,0.83891,1.00000"
           },
@@ -148,6 +159,12 @@
                     "y" : 0.7
                   }
                 }
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "extended-gray:0.00000,1.00000"
               }
             }
           ],
@@ -335,7 +352,7 @@
       "specular" : true,
       "translucency" : {
         "enabled" : true,
-        "value" : 0.5
+        "value" : 0.1
       }
     }
   ],

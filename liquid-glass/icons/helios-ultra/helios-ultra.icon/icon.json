@@ -48,10 +48,28 @@
           }
         },
         {
-          "blend-mode" : "hard-light",
-          "fill" : {
-            "solid" : "display-p3:1.00000,0.66009,0.24483,1.00000"
-          },
+          "blend-mode-specializations" : [
+            {
+              "value" : "plus-lighter"
+            },
+            {
+              "appearance" : "dark",
+              "value" : "plus-lighter"
+            }
+          ],
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:1.00000,0.34134,0.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "display-p3:1.00000,0.34134,0.00000,1.00000"
+              }
+            }
+          ],
           "glass" : true,
           "image-name" : "Apollo Eyes Icon.svg",
           "name" : "Apollo Eyes Icon",
@@ -98,15 +116,18 @@
           "fill-specializations" : [
             {
               "value" : {
-                "automatic-gradient" : "extended-gray:0.00000,1.00000",
+                "linear-gradient" : [
+                  "extended-gray:0.25000,1.00000",
+                  "extended-gray:0.00000,1.00000"
+                ],
                 "orientation" : {
                   "start" : {
                     "x" : 0.5,
                     "y" : 0
                   },
                   "stop" : {
-                    "x" : 0.5,
-                    "y" : 0.7
+                    "x" : 0.5000000000000001,
+                    "y" : 1
                   }
                 }
               }
@@ -124,8 +145,8 @@
                     "y" : 0
                   },
                   "stop" : {
-                    "x" : 0.5,
-                    "y" : 0.7
+                    "x" : 0.5000000000000001,
+                    "y" : 1
                   }
                 }
               }
@@ -200,7 +221,7 @@
       },
       "translucency" : {
         "enabled" : true,
-        "value" : 0.5
+        "value" : 0.3
       }
     }
   ],

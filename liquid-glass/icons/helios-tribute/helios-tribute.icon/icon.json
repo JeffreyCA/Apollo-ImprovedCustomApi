@@ -61,16 +61,25 @@
           }
         },
         {
+          "blend-mode-specializations" : [
+            {
+              "value" : "plus-lighter"
+            },
+            {
+              "appearance" : "dark",
+              "value" : "plus-lighter"
+            }
+          ],
           "fill-specializations" : [
             {
               "value" : {
-                "solid" : "display-p3:0.68178,0.13948,0.45265,1.00000"
+                "solid" : "display-p3:0.58308,0.05558,0.34300,1.00000"
               }
             },
             {
               "appearance" : "dark",
               "value" : {
-                "solid" : "display-p3:0.68178,0.13948,0.45265,1.00000"
+                "solid" : "display-p3:0.58308,0.05558,0.34300,1.00000"
               }
             }
           ],
@@ -331,7 +340,7 @@
       "specular" : true,
       "translucency" : {
         "enabled" : true,
-        "value" : 0.5
+        "value" : 0.1
       }
     }
   ],
