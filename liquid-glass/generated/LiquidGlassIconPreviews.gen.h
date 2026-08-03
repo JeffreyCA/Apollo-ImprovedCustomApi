@@ -77,14 +77,14 @@ static const LGIconRowEntry kLGGroupEntries_classics[] = {
 static const LGIconRowEntry kLGGroupEntries_helios[] = {
     { "helios", "Helios", "IllIIllIllIllII" },
     { "helios-halo", "Helios Halo", "IllIIllIllIllII" },
-    { "helios-legacy", "Helios Legacy", "IllIIllIllIllII" },
-    { "helios-tribute", "Helios Tribute", "IllIIllIllIllII" },
-    { "helios-cryo", "Helios Cryo", "IllIIllIllIllII" },
-    { "helios-cryo-halo", "Helios Cryo Halo", "IllIIllIllIllII" },
-    { "helios-parallax", "Helios Parallax", "IllIIllIllIllII" },
-    { "helios-parallax-halo", "Helios Parallax Halo", "IllIIllIllIllII" },
-    { "helios-ultra", "Helios Ultra", "IllIIllIllIllII" },
-    { "helios-ultra-halo", "Helios Ultra Halo", "IllIIllIllIllII" },
+    { "helios-legacy", "Legacy", "IllIIllIllIllII" },
+    { "helios-tribute", "Tribute", "IllIIllIllIllII" },
+    { "helios-cryo", "Cryo", "IllIIllIllIllII" },
+    { "helios-cryo-halo", "Cryo Halo", "IllIIllIllIllII" },
+    { "helios-parallax", "Parallax", "IllIIllIllIllII" },
+    { "helios-parallax-halo", "Parallax Halo", "IllIIllIllIllII" },
+    { "helios-ultra", "Ultra", "IllIIllIllIllII" },
+    { "helios-ultra-halo", "Ultra Halo", "IllIIllIllIllII" },
 };
 
 static const LGIconRowEntry kLGGroupEntries_concepts[] = {

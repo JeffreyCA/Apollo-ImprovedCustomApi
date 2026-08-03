@@ -8,7 +8,7 @@
         {
           "blend-mode-specializations" : [
             {
-              "value" : "screen"
+              "value" : "normal"
             },
             {
               "appearance" : "dark",
@@ -48,6 +48,15 @@
           }
         },
         {
+          "blend-mode-specializations" : [
+            {
+              "value" : "plus-lighter"
+            },
+            {
+              "appearance" : "dark",
+              "value" : "plus-lighter"
+            }
+          ],
           "fill-specializations" : [
             {
               "value" : {
@@ -107,7 +116,10 @@
           "fill-specializations" : [
             {
               "value" : {
-                "solid" : "extended-gray:0.00000,1.00000"
+                "linear-gradient" : [
+                  "extended-gray:0.25000,1.00000",
+                  "extended-gray:0.00000,1.00000"
+                ]
               }
             },
             {
@@ -123,8 +135,8 @@
                     "y" : 0
                   },
                   "stop" : {
-                    "x" : 0.5,
-                    "y" : 0.7
+                    "x" : 0.5000000000000001,
+                    "y" : 1
                   }
                 }
               }
@@ -199,20 +211,7 @@
       },
       "translucency" : {
         "enabled" : true,
-        "value" : 0.5
-      }
-    },
-    {
-      "layers" : [
-
-      ],
-      "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 0.5
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.5
+        "value" : 0.3
       }
     }
   ],
