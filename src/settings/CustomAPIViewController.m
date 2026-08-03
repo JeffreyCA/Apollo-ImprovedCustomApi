@@ -293,8 +293,8 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (NSString *)shareLinkHostText {
     switch (sShareLinkHost) {
-        case ShareLinkHostOldReddit: return @"Old Reddit";
-        case ShareLinkHostVXReddit:  return @"VXReddit";
+        case ShareLinkHostOldReddit: return @"old.reddit";
+        case ShareLinkHostVXReddit:  return @"vxReddit";
         case ShareLinkHostDefault:
         default:                     return @"Reddit";
     }
@@ -310,7 +310,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)presentShareLinkHostSheetFromSourceView:(UIView *)sourceView {
     __weak typeof(self) weakSelf = self;
     ApolloSettingsPresentPicker(self, sourceView, @"Share Link Host",
-                                @[@"Reddit", @"Old Reddit", @"VXReddit"],
+                                @[@"Reddit", @"Old Reddit", @"vxReddit"],
                                 sShareLinkHost,
                                 ^(NSInteger pickedIndex) {
         [weakSelf setShareLinkHost:pickedIndex];

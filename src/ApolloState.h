@@ -384,7 +384,7 @@ typedef NS_ENUM(NSInteger, CommentLinkHost) {
 extern NSInteger sCommentLinkHost;
 
 // Share Link Host: rewrites outgoing Reddit URLs in Apollo share sheets. Default
-// preserves Apollo's original reddit.com links; Old Reddit/VXReddit swap only
+// preserves Apollo's original reddit.com links; Old Reddit/vxReddit swap only
 // the host/scheme while preserving the path and query.
 typedef NS_ENUM(NSInteger, ShareLinkHost) {
     ShareLinkHostDefault = 0,

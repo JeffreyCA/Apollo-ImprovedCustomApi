@@ -123,7 +123,7 @@ static NSString *const UDKeyCommentLinkHost = @"CommentLinkHost";
 // media-permission gating (the image button un-blocks while a link host is set).
 static NSString *const ApolloCommentLinkHostChangedNotification = @"ApolloCommentLinkHostChangedNotification";
 // Outgoing Reddit URL host for Apollo share sheets (ShareLinkHost enum). Default
-// keeps Apollo's stock reddit.com links; Old Reddit/VXReddit rewrite share URLs.
+// keeps Apollo's stock reddit.com links; Old Reddit/vxReddit rewrite share URLs.
 static NSString *const UDKeyShareLinkHost = @"ShareLinkHost";
 static NSString *const UDKeyShowUserAvatars = @"ShowUserAvatars";
 static NSString *const UDKeyUseProfileAvatarTabIcon = @"UseProfileAvatarTabIcon";
