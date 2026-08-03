@@ -193,6 +193,8 @@ static NSString *const UDKeyIconRowMagnifier = @"IconRowMagnifier";
 //                small theme-bordered card just above the icon that fades on its own
 //                after ~2s. Mutually exclusive; both off = those three icons are
 //                inert (the % / edited native popups are taken over and suppressed).
+//                These modes also choose the presentation used when holding the
+//                score on an owned comment to request author-only Comment Insights.
 //   Translation— the 🌐 marker tap beside a post's stats (feed title + comments
 //                header) that toggles the title translation (ApolloTranslation.xm,
 //                ApolloFeedMarkerTapTarget). Takes priority over Tap to Translate

@@ -15,6 +15,8 @@
 // Never compiled into device builds.
 #if APOLLO_SIM_BUILD
 
+#import "ApolloAccountCredentials.h"
+#import "ApolloCommentVoteInsights.h"
 #import "ApolloCommon.h"
 #import "UIWindow+Apollo.h"
 #import <objc/message.h>
@@ -94,6 +96,52 @@ static void ApolloSimDebugPerformTap(CGPoint point) {
     });
 }
 
+// "hold x y" command: a stationary touch held long enough to trigger ordinary
+// UILongPressGestureRecognizer interactions. This is separate from swipe so a
+// long-press test doesn't inject tiny moved phases that can trip movement limits.
+static void ApolloSimDebugPerformHold(CGPoint point) {
+    UIWindow *window = nil;
+    for (UIWindow *candidate in ApolloAllWindows()) {
+        if (candidate.isKeyWindow) { window = candidate; break; }
+    }
+    if (!window) window = ApolloAllWindows().firstObject;
+    UIView *hitView = [window hitTest:point withEvent:nil];
+    if (!window || !hitView) {
+        ApolloLog(@"[SimDebugTap] no window/hit view for hold (%.0f, %.0f)", point.x, point.y);
+        return;
+    }
+    ApolloLog(@"[SimDebugTap] holding (%.0f, %.0f) hit=%@", point.x, point.y,
+              NSStringFromClass(hitView.class));
+
+    UITouch *touch = [UITouch new];
+    if (![touch respondsToSelector:@selector(_setLocationInWindow:resetPrevious:)] ||
+        ![touch respondsToSelector:@selector(setPhase:)]) return;
+    [touch setWindow:window];
+    [touch setView:hitView];
+    [touch setTapCount:1];
+    if ([touch respondsToSelector:@selector(_setIsFirstTouchForView:)]) {
+        [touch _setIsFirstTouchForView:YES];
+    }
+    [touch _setLocationInWindow:point resetPrevious:YES];
+    [touch setPhase:UITouchPhaseBegan];
+    ApolloSimDebugSendTouch(touch);
+
+    // A real finger produces stationary samples while it is held. Supplying one
+    // gives UIKit's long-press timers a fresh event to advance against in the
+    // simulator's synthesized UIEvent stream.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [touch _setLocationInWindow:point resetPrevious:NO];
+        [touch setPhase:UITouchPhaseStationary];
+        ApolloSimDebugSendTouch(touch);
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.65 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [touch _setLocationInWindow:point resetPrevious:NO];
+        [touch setPhase:UITouchPhaseEnded];
+        ApolloSimDebugSendTouch(touch);
+        ApolloLog(@"[SimDebugTap] hold delivered");
+    });
+}
+
 // "swipe x1 y1 x2 y2" command: a real drag (began → moved steps → ended) so a
 // scroll view actually scrolls, unlike the single tap above. Reuses the same
 // synthesized-touch delivery path.
@@ -168,6 +216,18 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *contents = [NSString stringWithContentsOfFile:kApolloSimTapFile
                                                        encoding:NSUTF8StringEncoding error:nil];
+        if ([contents hasPrefix:@"insight "]) {
+            NSString *fullName = [[contents substringFromIndex:8]
+                stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            NSString *username = ApolloActiveAccountUsername();
+            ApolloFetchCommentVoteInsight(fullName, username,
+                ^(ApolloCommentVoteInsight *insight, NSError *error) {
+                    ApolloLog(@"[SimDebugTap] insight %@ ratio=%.1f upvotes=%lld error=%@",
+                              fullName, insight.upvotePercent, insight.reportedUpvotes,
+                              error.localizedDescription ?: @"none");
+                });
+            return;
+        }
         if ([contents hasPrefix:@"text "]) {
             NSString *payload = [[contents substringFromIndex:5] stringByTrimmingCharactersInSet:
                 NSCharacterSet.newlineCharacterSet];
@@ -175,7 +235,10 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
             return;
         }
         BOOL isSwipe = [contents hasPrefix:@"swipe "];
-        NSString *coordString = isSwipe ? [contents substringFromIndex:6] : contents;
+        BOOL isHold = [contents hasPrefix:@"hold "];
+        NSString *coordString = isSwipe ? [contents substringFromIndex:6]
+                              : isHold  ? [contents substringFromIndex:5]
+                                        : contents;
         NSArray<NSString *> *parts = [coordString componentsSeparatedByCharactersInSet:
             NSCharacterSet.whitespaceAndNewlineCharacterSet];
         NSMutableArray<NSString *> *numbers = [NSMutableArray array];
@@ -184,6 +247,11 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
             if (numbers.count < 4) { ApolloLog(@"[SimDebugTap] malformed swipe: %@", contents); return; }
             ApolloSimDebugPerformSwipe(CGPointMake(numbers[0].doubleValue, numbers[1].doubleValue),
                                        CGPointMake(numbers[2].doubleValue, numbers[3].doubleValue));
+            return;
+        }
+        if (isHold) {
+            if (numbers.count < 2) { ApolloLog(@"[SimDebugTap] malformed hold: %@", contents); return; }
+            ApolloSimDebugPerformHold(CGPointMake(numbers[0].doubleValue, numbers[1].doubleValue));
             return;
         }
         if (numbers.count < 2) {
@@ -199,6 +267,8 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
         ApolloSimDebugTapNotification, CFSTR("apollofix.debugtap"), NULL,
         CFNotificationSuspensionBehaviorDeliverImmediately);
     ApolloLog(@"[SimDebugTap] listening for apollofix.debugtap");
+    ApolloLog(@"[CommentInsights][parser] self-tests %@",
+              ApolloCommentVoteInsightsRunParserSelfTests() ? @"passed" : @"FAILED");
 }
 
 #endif
