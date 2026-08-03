@@ -35,21 +35,6 @@
       "blur-material" : null,
       "layers" : [
         {
-          "fill" : {
-            "solid" : "extended-gray:1.00000,1.00000"
-          },
-          "hidden" : false,
-          "image-name" : "Helmet Apollo Cropped.svg",
-          "name" : "Helmet Apollo Cropped",
-          "position" : {
-            "scale" : 1.25,
-            "translation-in-points" : [
-              7.335254031078193,
-              -80
-            ]
-          }
-        },
-        {
           "fill-specializations" : [
             {
               "value" : {
@@ -71,14 +56,24 @@
             "scale" : 0.6,
             "translation-in-points" : [
               1.2732320762362406,
-              -180
+              -176
             ]
           }
         },
         {
-          "fill" : {
-            "solid" : "display-p3:0.91676,0.20327,0.25801,1.00000"
-          },
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.91676,0.20327,0.25801,1.00000"
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "extended-gray:0.00000,1.00000"
+              }
+            }
+          ],
           "hidden" : false,
           "image-name" : "Eyes Apollo.svg",
           "name" : "Eyes Apollo",
@@ -87,6 +82,21 @@
             "translation-in-points" : [
               7,
               154.31484375
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "extended-gray:1.00000,1.00000"
+          },
+          "hidden" : false,
+          "image-name" : "Helmet Apollo Cropped.svg",
+          "name" : "Helmet Apollo Cropped",
+          "position" : {
+            "scale" : 1.25,
+            "translation-in-points" : [
+              7.335254031078193,
+              -80
             ]
           }
         },
@@ -239,13 +249,14 @@
         }
       ],
       "lighting" : "individual",
+      "name" : "Group",
       "shadow" : {
         "kind" : "neutral",
         "opacity" : 0.5
       },
       "translucency" : {
         "enabled" : true,
-        "value" : 0.5
+        "value" : 0.35
       }
     }
   ],
