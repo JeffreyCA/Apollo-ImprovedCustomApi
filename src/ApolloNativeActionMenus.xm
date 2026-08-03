@@ -46,17 +46,46 @@ static BOOL sApolloNativeActionMenuNextPresentationModeratorStyle = NO;
 @property (nonatomic, strong) UIView *morphStandInView;
 @end
 
+// The anchor view owns the presenter for exactly as long as the menu can use
+// it. Keep the reverse lookup from ActionController non-owning: the presenter's
+// UIMenu actions retain that controller, so a direct RETAIN association here
+// would close a cycle and prevent the aborted-presentation -dealloc cleanup.
+static ApolloNativeActionMenuPresenter *ApolloNativeActionMenuPresenterForController(id actionController) {
+    NSHashTable *holder = objc_getAssociatedObject(actionController,
+                                                    &kApolloNativeActionMenuPresenterKey);
+    id presenter = holder.anyObject;
+    return [presenter isKindOfClass:[ApolloNativeActionMenuPresenter class]] ? presenter : nil;
+}
+
+static void ApolloNativeActionMenuSetPresenterForController(id actionController,
+                                                             ApolloNativeActionMenuPresenter *presenter) {
+    if (!actionController) return;
+    if (!presenter) {
+        objc_setAssociatedObject(actionController, &kApolloNativeActionMenuPresenterKey, nil,
+                                 OBJC_ASSOCIATION_ASSIGN);
+        return;
+    }
+
+    NSHashTable *holder = [NSHashTable weakObjectsHashTable];
+    [holder addObject:presenter];
+    objc_setAssociatedObject(actionController, &kApolloNativeActionMenuPresenterKey, holder,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 BOOL ApolloNativeActionMenuPerformAfterDismissal(id actionController,
                                                   dispatch_block_t action) {
     if (!actionController || !action) return NO;
 
     ApolloNativeActionMenuPresenter *presenter =
-        objc_getAssociatedObject(actionController, &kApolloNativeActionMenuPresenterKey);
-    if (![presenter isKindOfClass:[ApolloNativeActionMenuPresenter class]] ||
-        !presenter.interaction) {
+        ApolloNativeActionMenuPresenterForController(actionController);
+    if (!presenter.interaction) {
         return NO;
     }
 
+    // UIKit does not guarantee whether an action handler runs before or after
+    // -willEndForConfiguration:. The animator completion intentionally reads
+    // this property at dismissal END, so even a late handler stored after
+    // dismissal begins still cannot fall through the teardown window.
     presenter.afterDismissalAction = [action copy];
     return YES;
 }
@@ -1112,10 +1141,8 @@ static id ApolloNativeActionMenuCompactMenuStyle(void) {
     UIView *standInView = self.morphStandInView;
     UIView *dismissalFallbackView = self.dismissalFallbackView;
     id actionController = self.actionController;
-    dispatch_block_t afterDismissalAction = self.afterDismissalAction;
     self.morphStandInView = nil;
     self.dismissalFallbackView = nil;
-    self.afterDismissalAction = nil;
     // Issue #249: tear down at dismissal END, not START — removing the anchor
     // (the interaction's host view) while the menu is still morphing back into
     // the source button cuts the dismissal animation short. The stand-in goes
@@ -1126,16 +1153,19 @@ static id ApolloNativeActionMenuCompactMenuStyle(void) {
             [sourceView removeInteraction:menuInteraction];
             objc_setAssociatedObject(sourceView, &kApolloNativeActionMenuControllerKey, nil, OBJC_ASSOCIATION_ASSIGN);
         }
-        if (actionController &&
-            objc_getAssociatedObject(actionController, &kApolloNativeActionMenuPresenterKey) == self) {
-            objc_setAssociatedObject(actionController, &kApolloNativeActionMenuPresenterKey, nil,
-                                     OBJC_ASSOCIATION_ASSIGN);
+        if (ApolloNativeActionMenuPresenterForController(actionController) == self) {
+            ApolloNativeActionMenuSetPresenterForController(actionController, nil);
         }
         [standInView removeFromSuperview];
         [dismissalFallbackView removeFromSuperview];
         if (removeSourceViewOnEnd) {
             [sourceView removeFromSuperview];
         }
+        // Read at dismissal END rather than capturing at dismissal START. An
+        // action handler may run between those callbacks on a future UIKit and
+        // store its work after this method has already begun.
+        dispatch_block_t afterDismissalAction = self.afterDismissalAction;
+        self.afterDismissalAction = nil;
         if (afterDismissalAction) {
             dispatch_async(dispatch_get_main_queue(), afterDismissalAction);
         }
@@ -1325,8 +1355,7 @@ static BOOL ApolloNativeActionMenuPresent(id presenter, id actionController, voi
 
     [anchorView addInteraction:interaction];
     objc_setAssociatedObject(anchorView, &kApolloNativeActionMenuControllerKey, menuPresenter, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(actionController, &kApolloNativeActionMenuPresenterKey, menuPresenter,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloNativeActionMenuSetPresenterForController(actionController, menuPresenter);
 
     // Issue #249: a programmatic presentation has no active click driver, so
     // -[UIContextMenuInteraction menuAppearance] falls back to the interaction's
