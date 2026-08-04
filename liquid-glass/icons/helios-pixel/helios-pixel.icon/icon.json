@@ -1,0 +1,142 @@
+{
+  "color-space-for-untagged-svg-colors" : "display-p3",
+  "fill" : {
+    "linear-gradient" : [
+      "display-p3:0.23152,0.52524,0.96783,1.00000",
+      "display-p3:0.89394,0.06751,0.83891,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0.7
+      }
+    }
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "PixelBall.svg",
+          "name" : "PixelBall",
+          "position" : {
+            "scale" : 0.75,
+            "translation-in-points" : [
+              0,
+              -380
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "display-p3:0.98968,0.01103,0.95855,1.00000"
+          },
+          "image-name" : "PixelEyes.svg",
+          "name" : "PixelEyes",
+          "position" : {
+            "scale" : 1.95,
+            "translation-in-points" : [
+              0,
+              154
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "linear-gradient" : [
+              "display-p3:0.18262,0.18262,0.18262,1.00000",
+              "extended-gray:0.00000,1.00000"
+            ],
+            "orientation" : {
+              "start" : {
+                "x" : 0.5,
+                "y" : 0
+              },
+              "stop" : {
+                "x" : 0.5,
+                "y" : 0.7
+              }
+            }
+          },
+          "image-name" : "PixelFace.svg",
+          "name" : "PixelFace",
+          "position" : {
+            "scale" : 1.95,
+            "translation-in-points" : [
+              1,
+              153
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "extended-gray:0.00000,1.00000"
+          },
+          "image-name" : "PixelAntenna.svg",
+          "name" : "PixelAntenna",
+          "position" : {
+            "scale" : 1.05,
+            "translation-in-points" : [
+              -1,
+              -252
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "PixelHelmet.svg",
+          "name" : "PixelHelmet",
+          "position" : {
+            "scale" : 1.84,
+            "translation-in-points" : [
+              1,
+              90
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.1
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
