@@ -104,6 +104,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloModmailLayout.xm \
     $(SRC_DIR)/ApolloModmailSubjectCounter.xm \
     $(SRC_DIR)/ApolloAutoHideTabBar.xm \
+    $(SRC_DIR)/ApolloListLayoutDiagnostics.xm \
     $(SRC_DIR)/ApolloTabBarCollapseSide.xm \
     $(SRC_DIR)/ApolloIPadTabBarBottom.xm \
     $(SRC_DIR)/ApolloScrollEdgeEffect.xm \

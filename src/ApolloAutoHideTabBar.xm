@@ -83,10 +83,22 @@ static BOOL ApolloSupportsNativeTabBarMinimize(void) {
     return supported;
 }
 
-static void ApolloApplyMinimizeBehavior(UITabBarController *tbc, ApolloTabBarMinimizeBehavior behavior) {
+static NSInteger ApolloCurrentMinimizeBehavior(UITabBarController *tbc) {
+    SEL getter = NSSelectorFromString(@"tabBarMinimizeBehavior");
+    if (!tbc || ![tbc respondsToSelector:getter]) return NSNotFound;
+    return ((NSInteger (*)(id, SEL))objc_msgSend)(tbc, getter);
+}
+
+static void ApolloApplyMinimizeBehaviorInternal(UITabBarController *tbc,
+                                                ApolloTabBarMinimizeBehavior behavior,
+                                                BOOL reconcileUIKitState) {
     if (!tbc || !ApolloSupportsNativeTabBarMinimize()) return;
     NSNumber *lastApplied = objc_getAssociatedObject(tbc, &kApolloAppliedMinimizeBehaviorKey);
-    if ([lastApplied isKindOfClass:[NSNumber class]] && lastApplied.integerValue == (NSInteger)behavior) return;
+    if ([lastApplied isKindOfClass:[NSNumber class]] &&
+        lastApplied.integerValue == (NSInteger)behavior) {
+        if (!reconcileUIKitState) return;
+        if (ApolloCurrentMinimizeBehavior(tbc) == (NSInteger)behavior) return;
+    }
 
     SEL sel = ApolloMinimizeBehaviorSetter();
     NSMethodSignature *sig = [tbc methodSignatureForSelector:sel];
@@ -98,8 +110,17 @@ static void ApolloApplyMinimizeBehavior(UITabBarController *tbc, ApolloTabBarMin
     [inv setArgument:&raw atIndex:2];
     [inv invoke];
     objc_setAssociatedObject(tbc, &kApolloAppliedMinimizeBehaviorKey, @(raw), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    ApolloLog(@"[AutoHideTabBarFix] Native tabBarMinimizeBehavior=%ld on %@",
-              (long)raw, NSStringFromClass([tbc class]));
+    ApolloLog(@"[AutoHideTabBarFix] Native tabBarMinimizeBehavior=%ld reconcile=%d on %@",
+              (long)raw, reconcileUIKitState, NSStringFromClass([tbc class]));
+}
+
+static void ApolloApplyMinimizeBehavior(UITabBarController *tbc,
+                                        ApolloTabBarMinimizeBehavior behavior) {
+    // This helper is reached from scroll callbacks and Apollo's repeated
+    // hidesBarsOnSwipe configuration. Trust our requested-value cache here:
+    // consulting UIKit's live property on every call made iOS 27 fight us
+    // between .never and .onScrollDown at display-link cadence.
+    ApolloApplyMinimizeBehaviorInternal(tbc, behavior, NO);
 }
 
 static ApolloTabBarMinimizeBehavior ApolloLastAppliedMinimizeBehavior(UITabBarController *tbc) {
@@ -203,6 +224,23 @@ static void ApolloReapplyNativeMinimizeBehavior(UITabBarController *tbc, NSStrin
     ApolloApplyMinimizeBehavior(tbc, behavior);
     ApolloLog(@"[AutoHideTabBarFix] Reapplied native minimize desired=%d idleMode=%d reason=%@",
               anyWantsMinimize, sAutoHideTabBarShowOnIdle, reason ?: @"unknown");
+}
+
+static void ApolloReconcileNativeMinimizeBehaviorAfterActivation(UITabBarController *tbc,
+                                                                 NSString *reason) {
+    if (!tbc || !ApolloSupportsNativeTabBarMinimize()) return;
+
+    BOOL anyWantsMinimize = ApolloTabBarControllerWantsNativeMinimize(tbc);
+    ApolloTabBarMinimizeBehavior behavior = anyWantsMinimize
+        ? ApolloTabBarMinimizeBehaviorOnScrollDown
+        : ApolloTabBarMinimizeBehaviorNever;
+
+    // This is the only path that compares against UIKit's live property. It
+    // runs once after activation, when iOS 27 may have restored stale policy,
+    // and never from scrolling/layout callbacks.
+    ApolloApplyMinimizeBehaviorInternal(tbc, behavior, YES);
+    ApolloLog(@"[AutoHideTabBarFix] Reconciled native minimize desired=%d reason=%@",
+              anyWantsMinimize, reason ?: @"unknown");
 }
 
 static NSString *const ApolloTabBarSlideDownAnimationKey = @"apolloTabBarSlideDown";
@@ -745,13 +783,31 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
 %end
 
 %ctor {
-    [[NSNotificationCenter defaultCenter] addObserverForName:ApolloAutoHideTabBarShowOnIdleChangedNotification
-                                                      object:nil
-                                                       queue:[NSOperationQueue mainQueue]
-                                                  usingBlock:^(__unused NSNotification *notification) {
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+    [center addObserverForName:ApolloAutoHideTabBarShowOnIdleChangedNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(__unused NSNotification *notification) {
         ApolloForEachVisibleTabBarController(^(UITabBarController *tbc) {
             ApolloCancelIdleRevealTimer(tbc);
             ApolloReapplyNativeMinimizeBehavior(tbc, @"idleModeChanged");
+        });
+    }];
+
+    // iOS 27 can restore stale tab-bar policy while foregrounding. Reconcile
+    // once, on the next main-queue turn after activation. Repeating this at
+    // will-enter, did-become, and next-turn made the glass transition restart;
+    // putting the live-property comparison in the general apply path was worse
+    // because scroll callbacks then fought UIKit every frame.
+    [center addObserverForName:UIApplicationDidBecomeActiveNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(__unused NSNotification *notification) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ApolloForEachVisibleTabBarController(^(UITabBarController *tbc) {
+                ApolloReconcileNativeMinimizeBehaviorAfterActivation(
+                    tbc, @"didBecomeActive.nextTurn");
+            });
         });
     }];
 }

@@ -169,6 +169,12 @@ NSArray<NSDictionary *> *ApolloKeychainMirrorItemsForBackup(void);
 // session that actually signed the user out. Safe to call from any thread; never logs secrets.
 void ApolloAppendLoginDiag(NSString *line);
 
+// Append an iOS 27 list/tab-bar geometry diagnostic to a bounded cross-launch
+// buffer. Export Debug Logs prepends this buffer so the foregrounding session
+// that produced a stale inset remains available even if Apollo is later killed.
+// Never include post titles, account names, URLs, or other user content.
+void ApolloAppendListLayoutDiag(NSString *line);
+
 // Dev-only login-persistence debug (see Tweak.xm): a report of where the account keychain item
 // lives (each copy's access group / size / protection class), and a FLEX-gated action that
 // poisons/restores the account item's protection class to reproduce the -25300 on demand. Both

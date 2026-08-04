@@ -37,13 +37,13 @@ static NSString *ApolloLoginDiagLogPath(void) {
                 stringByAppendingPathComponent:@"ApolloLoginDiag.log"];
 }
 
-static const NSUInteger kApolloLoginDiagMaxBytes = 256 * 1024; // ~256KB tail is plenty of sessions
+static const NSUInteger kApolloPersistentDiagMaxBytes = 256 * 1024; // ~256KB tail is plenty of sessions
 // When trimming, drop back to this (not just under the cap) so the next ~64KB of lines don't each
 // re-trigger a full read+rewrite of the file. Without the headroom, once the buffer is at capacity
 // every single append would rewrite the whole file — expensive on the keychain hot path.
-static const NSUInteger kApolloLoginDiagTrimTo = 192 * 1024;
+static const NSUInteger kApolloPersistentDiagTrimTo = 192 * 1024;
 
-void ApolloAppendLoginDiag(NSString *line) {
+static void ApolloAppendPersistentDiag(NSString *line, NSString *path) {
     if (![line isKindOfClass:[NSString class]] || line.length == 0) return;
     static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
     static NSDateFormatter *fmt = nil;
@@ -54,7 +54,6 @@ void ApolloAppendLoginDiag(NSString *line) {
         fmt.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
     }
     NSString *stamped = [NSString stringWithFormat:@"[%@] %@\n", [fmt stringFromDate:[NSDate date]], line];
-    NSString *path = ApolloLoginDiagLogPath();
     NSFileManager *fm = [NSFileManager defaultManager];
 
     @try {
@@ -70,10 +69,10 @@ void ApolloAppendLoginDiag(NSString *line) {
             [fh closeFile];
             // Trim to the tail when it grows past the cap: reload, keep the last N bytes from a
             // line boundary, rewrite. Cheap because it only fires occasionally.
-            if (end + stamped.length > kApolloLoginDiagMaxBytes) {
+            if (end + stamped.length > kApolloPersistentDiagMaxBytes) {
                 NSData *all = [NSData dataWithContentsOfFile:path];
-                if (all.length > kApolloLoginDiagMaxBytes) {
-                    NSData *tail = [all subdataWithRange:NSMakeRange(all.length - kApolloLoginDiagTrimTo, kApolloLoginDiagTrimTo)];
+                if (all.length > kApolloPersistentDiagMaxBytes) {
+                    NSData *tail = [all subdataWithRange:NSMakeRange(all.length - kApolloPersistentDiagTrimTo, kApolloPersistentDiagTrimTo)];
                     NSString *tailStr = [[NSString alloc] initWithData:tail encoding:NSUTF8StringEncoding];
                     NSRange nl = [tailStr rangeOfString:@"\n"];
                     if (nl.location != NSNotFound && nl.location + 1 < tailStr.length) {
@@ -89,9 +88,28 @@ void ApolloAppendLoginDiag(NSString *line) {
     os_unfair_lock_unlock(&lock);
 }
 
+void ApolloAppendLoginDiag(NSString *line) {
+    ApolloAppendPersistentDiag(line, ApolloLoginDiagLogPath());
+}
+
+static NSString *ApolloListLayoutDiagLogPath(void) {
+    return [[NSHomeDirectory() stringByAppendingPathComponent:@"Library"]
+                stringByAppendingPathComponent:@"ApolloListLayoutDiag.log"];
+}
+
+void ApolloAppendListLayoutDiag(NSString *line) {
+    ApolloAppendPersistentDiag(line, ApolloListLayoutDiagLogPath());
+}
+
 // The prior/persistent diagnostics tail, for the exporter to prepend. Empty string if none.
 static NSString *ApolloPersistentLoginDiagnostics(void) {
     NSString *contents = [NSString stringWithContentsOfFile:ApolloLoginDiagLogPath()
+                                                   encoding:NSUTF8StringEncoding error:nil];
+    return contents.length ? contents : @"";
+}
+
+static NSString *ApolloPersistentListLayoutDiagnostics(void) {
+    NSString *contents = [NSString stringWithContentsOfFile:ApolloListLayoutDiagLogPath()
                                                    encoding:NSUTF8StringEncoding error:nil];
     return contents.length ? contents : @"";
 }
@@ -132,19 +150,27 @@ static NSString *ApolloCollectLogsFiltered(BOOL aiOnly) {
 
         // The cross-launch login-diagnostics tail (prior sessions too) — prepended for the full
         // log so a force-quit sign-out is still diagnosable. Not included in the AI-only export.
-        NSString *persistent = aiOnly ? @"" : ApolloPersistentLoginDiagnostics();
+        NSString *persistentLogin = aiOnly ? @"" : ApolloPersistentLoginDiagnostics();
+        NSString *persistentListLayout = aiOnly ? @"" : ApolloPersistentListLayoutDiagnostics();
 
-        if (filteredEntries.count == 0 && persistent.length == 0) {
+        if (filteredEntries.count == 0 && persistentLogin.length == 0 && persistentListLayout.length == 0) {
             return aiOnly
                 ? @"No Apollo AI log entries found since app launch."
                 : @"No [ApolloFix] log entries found since app launch.";
         }
 
         NSMutableString *output = [NSMutableString new];
-        if (persistent.length) {
+        if (persistentListLayout.length) {
+            [output appendString:@"===== Persistent list/tab-bar diagnostics (spans previous sessions; survives force-quit) =====\n"];
+            [output appendString:persistentListLayout];
+            if (![persistentListLayout hasSuffix:@"\n"]) [output appendString:@"\n"];
+        }
+        if (persistentLogin.length) {
             [output appendString:@"===== Persistent login diagnostics (spans previous sessions; survives force-quit) =====\n"];
-            [output appendString:persistent];
-            if (![persistent hasSuffix:@"\n"]) [output appendString:@"\n"];
+            [output appendString:persistentLogin];
+            if (![persistentLogin hasSuffix:@"\n"]) [output appendString:@"\n"];
+        }
+        if (persistentListLayout.length || persistentLogin.length) {
             [output appendString:@"===== Current session ([ApolloFix] os_log) =====\n"];
         }
         [output appendFormat:@"%@ — %@ (%lu entries)\n\n",
