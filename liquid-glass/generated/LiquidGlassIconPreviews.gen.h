@@ -25,6 +25,7 @@ static const LGIconRowEntry kLGGroupEntries_original[] = {
     { "metalnakls", "metalnakls", "metalnakls" },
     { "harunatsu", "harunatsu", "harunatsu91202024" },
     { "apollo-classic", "Apollo Classic", "IllIIllIllIllII" },
+    { "aloppo-v2", "Aloppo", "IllIIllIllIllII" },
 };
 
 static const LGIconRowEntry kLGGroupEntries_classics[] = {
@@ -85,6 +86,7 @@ static const LGIconRowEntry kLGGroupEntries_helios[] = {
     { "helios-parallax-halo", "Parallax Halo", "IllIIllIllIllII" },
     { "helios-ultra", "Ultra", "IllIIllIllIllII" },
     { "helios-ultra-halo", "Ultra Halo", "IllIIllIllIllII" },
+    { "helios-pixel", "Pixels", "IllIIllIllIllII" },
 };
 
 static const LGIconRowEntry kLGGroupEntries_concepts[] = {
@@ -110,8 +112,8 @@ static const char *const kLGGroupCover_classics[] = {
 };
 
 static const char *const kLGGroupCover_helios[] = {
-    "helios-legacy",
-    "helios-cryo",
+    "helios-cryo-halo",
+    "helios-pixel",
     "helios",
 };
 
@@ -122,9 +124,9 @@ static const char *const kLGGroupCover_concepts[] = {
 };
 
 static const LGIconGroupDef kLGIconGroups[] = {
-    { "original", "Original", "The original Apollo icon in Liquid Glass, crafted by the community.", "", kLGGroupEntries_original, 5, kLGGroupCover_original, 3 },
+    { "original", "Original", "The original Apollo icon in Liquid Glass, crafted by the community.", "", kLGGroupEntries_original, 6, kLGGroupCover_original, 3 },
     { "classics", "Classics", "Dozens of colorful variants and one-off designs from the original Apollo app, recreated in Liquid Glass.", "jryng, bajader, lilacvibes", kLGGroupEntries_classics, 44, kLGGroupCover_classics, 3 },
-    { "helios", "Helios", "Icons inspired by the Hyper Suit 4000 icon from Apollo, and the Modern icons by paulo1manso.", "IllIIllIllIllII", kLGGroupEntries_helios, 10, kLGGroupCover_helios, 3 },
+    { "helios", "Helios", "Icons inspired by the Hyper Suit 4000 icon from Apollo, and the Modern icons by paulo1manso.", "IllIIllIllIllII", kLGGroupEntries_helios, 11, kLGGroupCover_helios, 3 },
     { "concepts", "Concepts", "A mix of standalone icon concepts, including small thematic sets too short for their own pack.", "", kLGGroupEntries_concepts, 7, kLGGroupCover_concepts, 3 },
 };
 
@@ -132,7 +134,7 @@ static const size_t kLGIconGroupCount = 4;
 
 static const LGIconRowEntry kLGFeaturedEntries[] = {
     { "jryng", "OG", "jryng" },
-    { "helios", "Helios", "IllIIllIllIllII" },
+    { "helios-pixel", "Pixels", "IllIIllIllIllII" },
     { "bajader-aperture-science", "Aperture Science", "bajader" },
     { "paulo1manso-modern", "Modern", "paulo1manso" },
     { "lilacvibes-progress", "Progress Pride", "lilacvibes" },

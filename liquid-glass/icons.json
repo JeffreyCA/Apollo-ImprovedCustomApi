@@ -1,6 +1,6 @@
 {
   "primaryIconID": "jryng",
-  "featured": ["jryng", "helios", "bajader-aperture-science", "paulo1manso-modern", "lilacvibes-progress"],
+  "featured": ["jryng", "helios-pixel", "bajader-aperture-science", "paulo1manso-modern", "lilacvibes-progress"],
   "groups": [
     {
       "id": "original", "title": "Original",
@@ -15,7 +15,7 @@
     },
     {
       "id": "helios", "title": "Helios",
-      "coverIconIDs": ["helios-legacy", "helios-cryo", "helios"],
+      "coverIconIDs": ["helios-cryo-halo", "helios-pixel", "helios"],
       "description": "Icons inspired by the Hyper Suit 4000 icon from Apollo, and the Modern icons by paulo1manso.",
       "author": "IllIIllIllIllII"
     },
@@ -31,6 +31,7 @@
     { "id": "metalnakls",               "displayName": "metalnakls",          "designer": "metalnakls", "group": "original" },
     { "id": "harunatsu",                "displayName": "harunatsu",           "designer": "harunatsu91202024", "group": "original" },
     { "id": "apollo-classic",           "displayName": "Apollo Classic",      "designer": "IllIIllIllIllII", "group": "original" },
+    { "id": "aloppo-v2",                "displayName": "Aloppo",              "designer": "IllIIllIllIllII", "group": "original" },
 
     
     { "id": "jryng-morty",              "displayName": "Wubalubadubdub",      "designer": "jryng", "group": "classics" },
@@ -97,6 +98,7 @@
     { "id": "helios-parallax",          "displayName": "Parallax",            "designer": "IllIIllIllIllII", "group": "helios" },
     { "id": "helios-parallax-halo",     "displayName": "Parallax Halo",       "designer": "IllIIllIllIllII", "group": "helios" },
     { "id": "helios-ultra",             "displayName": "Ultra",               "designer": "IllIIllIllIllII", "group": "helios" },
-    { "id": "helios-ultra-halo",        "displayName": "Ultra Halo",          "designer": "IllIIllIllIllII", "group": "helios" }
+    { "id": "helios-ultra-halo",        "displayName": "Ultra Halo",          "designer": "IllIIllIllIllII", "group": "helios" },
+    { "id": "helios-pixel",             "displayName": "Pixels",              "designer": "IllIIllIllIllII", "group": "helios" }
   ]
 }
