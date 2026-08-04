@@ -58,6 +58,15 @@ static ApolloGalleryMediaKind const ApolloGalleryMediaKindAll =
 // ApolloGalleryVideoExport recognises and re-unites with the separate DASH
 // audio before writing to Photos; everywhere else it's already self-contained.
 @property (nonatomic, copy, nullable) NSURL *videoDownloadURL;
+// External video page (currently Redgifs / Streamable / supported sports
+// hosts). Reddit commonly supplies a convenient but silent re-encoded preview
+// for these posts; Gallery keeps that preview as a fallback, then resolves the
+// host's original audio-bearing MP4 only when the item is opened.
+@property (nonatomic, readonly, copy, nullable) NSURL *hostedVideoPageURL;
+// YES until the one lazy host lookup has completed. The lookup is coalesced per
+// item, so repeated playback/layout passes never duplicate API requests.
+@property (nonatomic, readonly) BOOL needsHostedVideoResolution;
+@property (nonatomic, readonly, getter=isHostedVideoResolving) BOOL hostedVideoResolving;
 // Runtime in seconds; 0 when Reddit didn't report one.
 @property (nonatomic) NSTimeInterval duration;
 // Smaller preview used by the grid; falls back to imageURL when Reddit gave
@@ -90,6 +99,11 @@ static ApolloGalleryMediaKind const ApolloGalleryMediaKindAll =
 @property (nonatomic, readonly) BOOL playsAsVideo;
 // "0:42" / "1:23:45", or nil when the duration is unknown.
 @property (nonatomic, readonly, nullable) NSString *durationText;
+
+// Resolves hostedVideoPageURL once, preferring the original combined MP4 over
+// Reddit's silent preview. On failure videoURL remains/restores the Reddit
+// fallback. Completion is delivered on the main queue.
+- (void)resolveHostedVideoWithCompletion:(nullable void (^)(BOOL resolvedOriginal))completion;
 
 @end
 

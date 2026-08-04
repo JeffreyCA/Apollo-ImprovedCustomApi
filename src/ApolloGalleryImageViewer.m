@@ -78,6 +78,7 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
 // the way (a zoomed page must pan its own content, not turn the page).
 @property (nonatomic, readonly) BOOL isZoomed;
 - (void)configureWithItem:(ApolloGalleryItem *)item;
+- (void)replaceVideoURL:(nullable NSURL *)videoURL andPlay:(BOOL)play;
 @end
 
 @implementation ApolloGalleryViewerCell
@@ -266,7 +267,10 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
     self.imageURL = url;
     // Stash the stream URL only; playIfPossible builds the player when this
     // page actually becomes current.
-    self.videoURL = item.playsAsVideo ? item.videoURL : nil;
+    // A hosted post deliberately waits on its original MP4 instead of starting
+    // Reddit's silent preview while the host lookup is in flight.
+    self.videoURL = (item.playsAsVideo && !item.needsHostedVideoResolution)
+        ? item.videoURL : nil;
 
     // A grid thumbnail for this post is usually already decoded — show it
     // immediately so the page is never a black rectangle, then swap in the
@@ -303,6 +307,16 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
         }
         (void)data;
     }];
+}
+
+- (void)replaceVideoURL:(NSURL *)videoURL andPlay:(BOOL)play {
+    if ([self.videoURL isEqual:videoURL]) {
+        if (play) [self playIfPossible];
+        return;
+    }
+    [self teardownPlayer];
+    self.videoURL = videoURL;
+    if (play) [self playIfPossible];
 }
 
 - (void)apollo_doubleTapped:(UITapGestureRecognizer *)recognizer {
@@ -866,6 +880,21 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 // Exactly one page plays at a time: every other visible cell (the neighbours a
 // paging collection view keeps alive) gets paused, so audio can't stack up.
 - (void)apollo_syncPlayback {
+    ApolloGalleryItem *currentItem = [self apollo_currentItem];
+    if (currentItem.needsHostedVideoResolution && !currentItem.isHostedVideoResolving) {
+        __weak typeof(self) weakSelf = self;
+        [currentItem resolveHostedVideoWithCompletion:^(BOOL resolvedOriginal) {
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf || [strongSelf apollo_currentItem] != currentItem) return;
+            ApolloGalleryViewerCell *currentCell = [strongSelf apollo_currentCell];
+            [currentCell replaceVideoURL:currentItem.videoURL andPlay:YES];
+            [strongSelf apollo_updateChromeContent];
+            if (!resolvedOriginal && !currentItem.videoURL) {
+                [strongSelf apollo_showToast:@"Couldn't load video"];
+            }
+        }];
+    }
+
     for (UICollectionViewCell *cell in self.collectionView.visibleCells) {
         if (![cell isKindOfClass:[ApolloGalleryViewerCell class]]) continue;
         ApolloGalleryViewerCell *viewerCell = (ApolloGalleryViewerCell *)cell;
@@ -1126,12 +1155,15 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
                                                identifier:nil
                                                   handler:^(__kindof UIAction *a) { [weakSelf apollo_saveCurrentVideo]; }]];
         }
-        [children addObject:[UIAction actionWithTitle:@"Share Video Link"
-                                                image:[UIImage systemImageNamed:@"square.and.arrow.up"]
-                                           identifier:nil
-                                              handler:^(__kindof UIAction *a) {
-            [weakSelf apollo_presentActivityWithItems:@[item.videoURL] fromView:weakSelf.shareButton];
-        }]];
+        NSURL *shareURL = item.videoURL ?: item.hostedVideoPageURL;
+        if (shareURL) {
+            [children addObject:[UIAction actionWithTitle:@"Share Video Link"
+                                                    image:[UIImage systemImageNamed:@"square.and.arrow.up"]
+                                               identifier:nil
+                                                  handler:^(__kindof UIAction *a) {
+                [weakSelf apollo_presentActivityWithItems:@[shareURL] fromView:weakSelf.shareButton];
+            }]];
+        }
     } else {
         [children addObject:[UIAction actionWithTitle:@"Save Image"
                                                 image:[UIImage systemImageNamed:@"arrow.down.to.line"]
@@ -1173,9 +1205,12 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
                 [weakSelf apollo_saveCurrentVideo];
             }]];
         }
-        [sheet addAction:[UIAlertAction actionWithTitle:@"Share Video Link" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            [weakSelf apollo_presentActivityWithItems:@[item.videoURL] fromView:sourceView];
-        }]];
+        NSURL *shareURL = item.videoURL ?: item.hostedVideoPageURL;
+        if (shareURL) {
+            [sheet addAction:[UIAlertAction actionWithTitle:@"Share Video Link" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                [weakSelf apollo_presentActivityWithItems:@[shareURL] fromView:sourceView];
+            }]];
+        }
     } else {
         [sheet addAction:[UIAlertAction actionWithTitle:@"Save Image" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
             [weakSelf apollo_saveCurrentImage];
