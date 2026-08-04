@@ -31,6 +31,7 @@
     { "id": "metalnakls",               "displayName": "metalnakls",          "designer": "metalnakls", "group": "original" },
     { "id": "harunatsu",                "displayName": "harunatsu",           "designer": "harunatsu91202024", "group": "original" },
     { "id": "apollo-classic",           "displayName": "Apollo Classic",      "designer": "IllIIllIllIllII", "group": "original" },
+    { "id": "aloppo-v2",                "displayName": "Aloppo",              "designer": "IllIIllIllIllII", "group": "original" },
 
     
     { "id": "jryng-morty",              "displayName": "Wubalubadubdub",      "designer": "jryng", "group": "classics" },
