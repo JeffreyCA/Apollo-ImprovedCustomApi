@@ -280,6 +280,13 @@ ApolloReborn_CFLAGS += -Wno-deprecated-declarations
 # screenshots. Only ever compiled into the simulator build, never the device/
 # release build (this branch is under the APOLLO_SIM_BUILD ifeq).
 ApolloReborn_FILES += $(SRC_DIR)/ApolloSimOpenRoute.m
+# Opt-in /api/comment write diagnostics + legacy-response-shape simulator
+# (APOLLO_COMMENT_DEBUG=1 scripts/run-in-sim.sh). Used to reproduce Reddit's
+# 2026-08 legacy write-response regression against the OAuth path on demand —
+# see src/ApolloCommentDebug.xm.
+ifeq ($(APOLLO_COMMENT_DEBUG),1)
+ApolloReborn_FILES += $(SRC_DIR)/ApolloCommentDebug.xm
+endif
 else
 ApolloReborn_OBJ_FILES = $(shell find $(FFMPEG_KIT_DIR) -name '*.a')
 

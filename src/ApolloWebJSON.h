@@ -46,13 +46,14 @@ void ApolloWebJSONNoteResponse(NSURLRequest *request, NSURLResponse *response);
 // preview URL and aspect ratio instead of fabricating dimensions.
 NSData *ApolloWebJSONFixupListingMediaResponseData(NSURLResponse *response, NSData *data);
 
-// Fixes up the parsed response object for cookie-routed comment writes
-// (/api/editusertext, /api/comment). www.reddit.com returns each thing's data in
-// the legacy old-reddit {parent, content:"<html>"} shape, which Apollo can't
-// render (the just-edited/posted comment shows empty with 0 upvotes); this swaps
-// in the modern comment JSON re-fetched via info.json. Returns the input
-// unchanged outside Web JSON mode or when the shape is already modern. Called
-// from the RDKResponseSerializer hook with the serializer's output.
+// Fixes up the parsed response object for comment writes (/api/editusertext,
+// /api/comment) in EVERY auth mode. www.reddit.com always returns each thing's
+// data in the legacy old-reddit {parent, content:"<html>"} shape, and since
+// 2026-08 oauth.reddit.com has intermittently done the same to API-key (OAuth)
+// clients; Apollo renders such a comment with no author/score/timestamp. This
+// swaps in the modern comment JSON (info.json refetch, else local synthesis).
+// Returns the input unchanged when the shape is already modern. Called from the
+// RDKResponseSerializer hook with the serializer's output.
 id ApolloWebJSONFixupWriteResponseObject(NSURLResponse *response, id responseObject);
 
 // Fixes up the parsed response object for the cookie-routed moderators-list

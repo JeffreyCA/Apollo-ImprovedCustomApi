@@ -772,11 +772,12 @@ void ApolloWebJSONRepairPoisonedAccountBlobs(void) {
 
 %end
 
-// Cookie-routed comment writes (/api/editusertext, /api/comment) come back from
-// www.reddit.com in the old-reddit {parent, content:"<html>"} shape, which Apollo
-// can't render (the edited/posted comment shows empty with 0 upvotes). Rewrite the
-// serializer's output into the modern shape Apollo expects. No-op outside Web JSON
-// mode / for the modern shape — see ApolloWebJSONFixupWriteResponseObject.
+// Comment writes (/api/editusertext, /api/comment) can come back in the legacy
+// old-reddit {parent, content:"<html>"} shape — always from www.reddit.com
+// (Web JSON mode), and intermittently from oauth.reddit.com for API-key
+// accounts too — which Apollo renders as a blank comment (no author/score/
+// timestamp). Rewrite the serializer's output into the modern shape Apollo
+// expects. No-op for the modern shape — see ApolloWebJSONFixupWriteResponseObject.
 %hook RDKResponseSerializer
 - (id)responseObjectForResponse:(id)response data:(id)data error:(id *)error {
     id serializerData = data;
@@ -785,9 +786,14 @@ void ApolloWebJSONRepairPoisonedAccountBlobs(void) {
         @catch (NSException *e) { ApolloLog(@"[WebJSON] listing-media fixup failed: %@", e); }
     }
     id obj = %orig(response, serializerData, error);
+    // The write fixup runs in EVERY auth mode, not just Web JSON: since 2026-08
+    // oauth.reddit.com has intermittently returned the legacy old-reddit
+    // write-response shape to API-key (OAuth) clients too (also hit Narwhal),
+    // which renders the just-posted comment with no author/score/timestamp.
+    // The repair is a strict no-op for the modern shape.
+    @try { obj = ApolloWebJSONFixupWriteResponseObject(response, obj); }
+    @catch (NSException *e) { ApolloLog(@"[WebJSON] write-response fixup failed: %@", e); }
     if (sWebJSONEnabled) {
-        @try { obj = ApolloWebJSONFixupWriteResponseObject(response, obj); }
-        @catch (NSException *e) { ApolloLog(@"[WebJSON] write-response fixup failed: %@", e); }
         @try { obj = ApolloWebJSONFixupModeratorsResponseObject(response, obj); }
         @catch (NSException *e) { ApolloLog(@"[WebJSON] moderators-response fixup failed: %@", e); }
         // No legacy equivalent exists for this endpoint at all (see

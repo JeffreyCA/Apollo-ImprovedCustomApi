@@ -3,6 +3,7 @@
 #import "ApolloState.h"
 #import "UserDefaultConstants.h"
 #import "Defaults.h"
+#import "ApolloAccountCredentials.h" // ApolloActiveAccountUsername() — write-fixup author for API-key actives
 #import "ApolloWebSessionStore.h"
 #import "ApolloWebSessionLoginViewController.h" // silent re-harvest before the expiry prompt
 
@@ -1159,16 +1160,22 @@ static NSString *ApolloWebJSONFullnameFromLegacyContent(NSString *html) {
 }
 
 // Synchronously fetch the modern JSON `data` dict for a single thing via
-// info.json (cookie-authed, tagged so it bypasses our own rewrite + the expiry
-// counter). Called off the main thread from the response serializer.
+// info.json (tagged so it bypasses our own rewrite + the expiry counter).
+// Called off the main thread from the response serializer. Auth follows the
+// active account's mode: web-session actives use their cookie against www;
+// API-key (OAuth) actives use the captured bearer against oauth.reddit.com.
 static NSDictionary *ApolloWebJSONFetchModernThingData(NSString *fullname) {
+    if (fullname.length == 0) return nil;
     NSString *cookie = ApolloActiveWebSession().cookieHeader;
-    if (cookie.length == 0 || fullname.length == 0) return nil;
+    NSString *bearer = cookie.length == 0 ? [sLatestRedditBearerToken copy] : nil;
+    if (cookie.length == 0 && bearer.length == 0) return nil;
 
-    NSString *urlStr = [NSString stringWithFormat:@"https://www.reddit.com/api/info.json?id=%@&raw_json=1", fullname];
+    NSString *host = cookie.length > 0 ? @"https://www.reddit.com" : @"https://oauth.reddit.com";
+    NSString *urlStr = [NSString stringWithFormat:@"%@/api/info.json?id=%@&raw_json=1", host, fullname];
     NSURL *probeURL = ApolloWebJSONURLWithFragment([NSURL URLWithString:urlStr], kApolloWebJSONProbeMarker);
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:probeURL];
-    [req setValue:cookie forHTTPHeaderField:@"Cookie"];
+    if (cookie.length > 0) [req setValue:cookie forHTTPHeaderField:@"Cookie"];
+    else [req setValue:[@"Bearer " stringByAppendingString:bearer] forHTTPHeaderField:@"Authorization"];
     [req setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
     req.HTTPShouldHandleCookies = NO;
     req.timeoutInterval = 15.0;
@@ -1214,6 +1221,22 @@ static BOOL ApolloWebJSONPermalinkPartsFromLegacyContent(NSString *html, NSStrin
     return YES;
 }
 
+// Extracts the comment author from an old-reddit content blob's data-author
+// attribute. Authoritative when present — it is Reddit's own record of who the
+// write ran as, with the account's canonical capitalization.
+static NSString *ApolloWebJSONAuthorFromLegacyContent(NSString *html) {
+    if (html.length == 0) return nil;
+    static NSRegularExpression *re;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:@"data-author=\"([^\"]+)\"" options:0 error:NULL];
+    });
+    NSTextCheckingResult *m = [re firstMatchInString:html options:0 range:NSMakeRange(0, html.length)];
+    if (!m || m.numberOfRanges < 2) return nil;
+    NSString *author = [html substringWithRange:[m rangeAtIndex:1]];
+    return author.length > 0 ? author : nil;
+}
+
 // Minimal HTML-escape for synthesizing a body_html when the legacy response
 // carries no contentHTML. Reddit's own body_html wraps in <div class="md">.
 static NSString *ApolloWebJSONEscapedBodyHTML(NSString *body) {
@@ -1241,10 +1264,14 @@ static NSDictionary *ApolloWebJSONSynthesizeModernThingData(NSString *fullname, 
     NSString *bodyHTML = [legacy[@"contentHTML"] isKindOfClass:[NSString class]] ? legacy[@"contentHTML"] : nil;
     if (body.length == 0 && bodyHTML.length == 0) return nil; // nothing renderable to show
 
-    // ApolloActiveWebSessionUsername() preserves the stored capitalization,
-    // which matters because Apollo gates the Edit affordance on
-    // comment.author == currentUser.username.
-    NSString *author = ApolloActiveWebSessionUsername();
+    // Author, in trust order: Reddit's own data-author attribute in the legacy
+    // content blob, then the active web-session account, then the active
+    // API-key (OAuth) account — a comment write always runs as the foreground
+    // account. Capitalization matters because Apollo gates the Edit affordance
+    // on comment.author == currentUser.username.
+    NSString *author = ApolloWebJSONAuthorFromLegacyContent(content);
+    if (author.length == 0) author = ApolloActiveWebSessionUsername();
+    if (author.length == 0) author = ApolloActiveAccountUsername();
     if (author.length == 0) return nil;
 
     NSMutableDictionary *modern = [NSMutableDictionary dictionary];
@@ -1285,20 +1312,22 @@ static NSDictionary *ApolloWebJSONSynthesizeModernThingData(NSString *fullname, 
     return modern;
 }
 
-// www.reddit.com's old-reddit /api/editusertext and /api/comment responses return
-// each thing's `data` in the legacy shape {parent, content:"<html>"} instead of
-// the modern comment JSON ({body, body_html, score, author, …}) that
-// oauth.reddit.com returns. Apollo parses things[0].data into an RDKComment, finds
-// no body/score, and re-renders the just-edited comment empty — or, for a fresh
-// /api/comment post, inserts nothing at all (the new comment only appears after a
-// manual refresh). We detect the legacy shape and swap in the modern object:
-// primary source is an info.json refetch (authoritative fields); when that isn't
-// possible (serializer on the main thread — no sync network allowed) or comes up
-// empty (info.json can lag a seconds-old comment), we synthesize the modern dict
-// locally from the legacy fields, which always carry the submitted text. No-op
-// outside Web JSON mode, on API errors, or on the modern shape.
+// Old-reddit /api/editusertext and /api/comment responses return each thing's
+// `data` in the legacy shape {parent, content:"<html>"} instead of the modern
+// comment JSON ({body, body_html, score, author, …}). Apollo's RedditKit maps
+// only the body-ish fields from that shape (data.contentText/contentHTML), so
+// the just-posted comment renders with no author/avatar/flair, score 0, and an
+// epoch-1970 timestamp until the thread is reloaded. www.reddit.com always
+// answers this way (Web JSON mode), and since 2026-08 oauth.reddit.com has
+// intermittently served the SAME legacy shape to API-key (OAuth) clients — it
+// also hit Narwhal — so this repair runs in EVERY auth mode; it is a strict
+// no-op for the modern shape and on API errors. We detect the legacy shape and
+// swap in the modern object: primary source is an info.json refetch
+// (authoritative fields); when that isn't possible (serializer on the main
+// thread — no sync network allowed) or comes up empty (info.json can lag a
+// seconds-old comment), we synthesize the modern dict locally from the legacy
+// fields, which always carry the submitted text.
 id ApolloWebJSONFixupWriteResponseObject(NSURLResponse *response, id responseObject) {
-    if (!ApolloWebJSONHasUsableSession()) return responseObject;
     if (![response isKindOfClass:[NSHTTPURLResponse class]]) return responseObject;
 
     NSString *path = [((NSHTTPURLResponse *)response).URL.path lowercaseString] ?: @"";
