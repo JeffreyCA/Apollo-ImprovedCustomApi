@@ -20,3 +20,19 @@ public func ApolloSwiftAssignOptionalString(
     let value = utf8Value.map { String(cString: $0) }
     storage.assumingMemoryBound(to: Optional<String>.self).pointee = value
 }
+
+@_cdecl("ApolloSwiftAssignOptionalStringArray")
+public func ApolloSwiftAssignOptionalStringArray(
+    _ storage: UnsafeMutableRawPointer?,
+    _ arrayObject: UnsafeRawPointer?
+) {
+    guard let storage else { return }
+    let value: [String]?
+    if let arrayObject {
+        let array = Unmanaged<NSArray>.fromOpaque(arrayObject).takeUnretainedValue()
+        value = array.compactMap { $0 as? String }
+    } else {
+        value = nil
+    }
+    storage.assumingMemoryBound(to: Optional<[String]>.self).pointee = value
+}
