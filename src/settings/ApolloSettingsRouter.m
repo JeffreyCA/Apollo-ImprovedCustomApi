@@ -12,6 +12,7 @@
 #import "settings/ApolloOpenInAppViewController.h"
 #import "settings/ApolloLinkCompanionViewController.h"
 #import "settings/CustomAPIViewController.h"
+#import "crash/ApolloCrashReportsViewController.h"
 #import "settings/InfoRowSettingsViewController.h"
 #import "settings/InlineMediaSettingsViewController.h"
 #import "settings/SavedCategoriesViewController.h"
@@ -80,6 +81,7 @@ static void ApolloSettingsRouterEnsureRegistry(void) {
         add(@"link-companion", @"Link Companion", @"General → Open Links → Open in App", ^UIViewController *{
             return [[ApolloLinkCompanionViewController alloc] init]; // hero page, not a table
         });
+        add(@"crash-reports", @"Crash Reports", @"Apollo Reborn → Privacy", ApolloSettingsInsetGrouped([ApolloCrashReportsViewController class]));
         add(@"theme-manager", @"Theme Manager", @"Appearance", ^UIViewController *{
             return [[ApolloThemeManagerViewController alloc] init]; // default init = hub/list mode
         });

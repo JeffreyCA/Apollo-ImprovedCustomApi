@@ -11,3 +11,6 @@
 [submodule "Headers"]
 	path = Headers
 	url = https://github.com/Apollo-Reborn/Apollo-Headers
+[submodule "modules/KSCrash"]
+	path = modules/KSCrash
+	url = https://github.com/kstenerud/KSCrash.git

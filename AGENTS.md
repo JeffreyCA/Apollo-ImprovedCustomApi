@@ -121,6 +121,22 @@ screens. See `docs/settings-form-refactor-plan.md`.
 
 **Working on settings? Read `src/settings/README.md` first** — it has the 5-step add-a-setting recipe, the form-layer rules, and the Eureka facts. The hard rules: tweak-owned screens declare rows in `-buildForm` (never hand-rolled index math); Apollo's native General screen is modified ONLY through `ApolloSettingsGeneralTable`'s registry (never `%hook` its table methods — one remapper per screen); new settings do NOT get added to `ApolloBackupRestore`'s statics re-sync (restore force-exits; `%ctor` re-reads on relaunch).
 
+### Crash Reporting (`src/crash/`)
+
+Local-only crash recording built on KSCrash 2.5.1's **recording layer only** (`modules/KSCrash` submodule, pinned; only Core/RecordingCore/Recording compile — no sinks/filters/installations, so no transmission path exists in the binary). Every public KSCrash symbol AND ObjC class is namespaced via `-DKSCRASH_NAMESPACE=_ApolloReborn` (global CFLAG — required in every TU that imports KSCrash headers). Reports live under `Library/Caches/ApolloReborn/LocalCrashReports` (max 3, cleanup policy Never) and leave the device only through the user-reviewed report-form flow.
+
+| Path | Purpose |
+|------|---------|
+| `src/crash/ApolloCrashManager.{h,m}` | Installs KSCrash first thing in `%ctor` (privacy-locked: no memory introspection, no queue names, no console log, no `__cxa_throw` swap), fronts the report store (enumerate / load+sanitize / delete) |
+| `src/crash/ApolloCrashSanitizer.{h,m}` | **Allowlist** converter: raw KSCrash dict → `apollo_reborn_crash` schema; redacts free-form strings (URLs, `r/…`, `u/…`, emails, bearer/token values), hex-ifies addresses, hard caps (1MB / 128 threads / 256+64 frames / 512 images, referenced-first). Raw dicts never leave the manager |
+| `src/crash/ApolloCrashContext.{h,m}` | Enumerated recent-actions ring buffer (the API takes an enum — free-form strings are impossible by design) published into KSCrash userInfo, debounced |
+| `src/crash/ApolloCrashPromptCoordinator.{h,m}` | Once-per-report relaunch prompt (Review & Report / Not Now / Delete). "Not Now" never re-nags — prompted IDs persist in `UDKeyCrashPromptedReportIDs`; the report stays under Settings → Privacy → Crash Reports |
+| `src/crash/ApolloCrashReviewViewController.{h,m}` | Consent screen (form subclass): included/never-included lists, exact sanitized-JSON viewer, share-sheet export, optional off-by-default debug-log inclusion, Continue → report form |
+| `src/crash/ApolloCrashReportsViewController.{h,m}` | Settings screen: capture toggle (`UDKeyCrashCaptureEnabled`, default ON; KSCrash installs once per process so it takes effect next launch) + pending report list. Registered as route `crash-reports` |
+| `src/crash/ApolloCrashBugsnagNeutralize.xm` | No-ops every Bugsnag start entry point so Apollo's embedded (KSCrash-fork) recorder never installs handlers, breadcrumbs activity, or maintains device/user UUIDs — the upload-domain blocklist alone never stopped local capture |
+
+Key invariants: the local KSCrash report is deleted only on explicit user action or after report.apolloreborn.app confirms (via the `reportSubmitted` bridge message in `ApolloReportViewController`) a submission that still included the crash attachment — closing the form, losing connectivity, or removing the attachment keeps it. The report store's fixer returns `report.timestamp` as microseconds OR a 6-digit-fraction UTC string depending on path — the sanitizer normalizes both. Test end-to-end in the sim with the debug bridge: `echo "crash nsexception" > /tmp/apollofix-tap.txt && xcrun simctl spawn <DEV> notifyutil -p apollofix.debugtap` (also `abort`/`badaccess`/`overflow`), relaunch, and the prompt appears. Never test Mach-exception handling under a debugger (it changes exception ownership). Exported sanitized JSON symbolicates with the release-dSYM workflow below (instruction/image addresses + UUIDs are preserved).
+
 ### Runtime & Libraries
 
 | Path | Purpose |
@@ -128,6 +144,7 @@ screens. See `docs/settings-form-refactor-plan.md`.
 | `src/fishhook.{c,h}` | Facebook's fishhook for C function rebinding (Security framework, `swift_allocObject`) |
 | `modules/ffmpeg-kit/` | FFmpegKit static libs for v.redd.it CMAF video processing |
 | `modules/ZipArchive/` | SSZipArchive for settings backup/restore zip export |
+| `modules/KSCrash/` | KSCrash 2.5.1 (git submodule, pinned) — recording modules only; see Crash Reporting section |
 | `modules/FLEXing/` | FLEX debugging tools (git submodule) |
 
 ### Reference & Build

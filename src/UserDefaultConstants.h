@@ -17,6 +17,16 @@ static NSString *const UDKeyUseCustomOAuthSignIn = @"UseCustomOAuthSignIn";
 static NSString *const UDKeyUserAgent = @"UserAgent";
 static NSString *const UDKeyBlockAnnouncements = @"DisableApollonouncements";
 static NSString *const UDKeyEnableFLEX = @"EnableFlexDebugging";
+// Local crash recording (src/crash/). Default ON: reports only ever live on
+// device and are shared exclusively through the user-driven review flow.
+// KSCrash handlers install once per process, so flipping this takes effect on
+// the next launch (the settings row says so).
+static NSString *const UDKeyCrashCaptureEnabled = @"CrashCaptureEnabled";
+// Report IDs (NSArray<NSNumber>) the relaunch prompt has already been shown
+// for. A "Not Now" must never re-nag on every launch of a persistently
+// crashing build; the pending report stays reachable under Settings instead.
+// Not registered — absent means "never prompted".
+static NSString *const UDKeyCrashPromptedReportIDs = @"CrashPromptedReportIDs";
 // Login-persistence debug (dev-only, gated behind FLEX). Force the account keychain read to
 // miss (simulate the broken-keychain -25300), and/or disable enumeration recovery, so the
 // wipe->recover chain can be exercised on any device. Inert unless set.

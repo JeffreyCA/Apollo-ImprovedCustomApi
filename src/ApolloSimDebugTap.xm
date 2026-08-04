@@ -163,11 +163,42 @@ static void ApolloSimDebugTypeText(NSString *text) {
               (unsigned long)text.length, NSStringFromClass(responder.class));
 }
 
+// "crash <type>" command: deliberately crash the process to exercise the
+// local crash recorder (src/crash/). Types mirror the crash-capture test
+// plan: nsexception, abort, badaccess, overflow.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winfinite-recursion"
+__attribute__((noinline)) static void ApolloSimDebugRecursiveCrash(volatile NSUInteger value) {
+    volatile NSUInteger next = value + 1;
+    ApolloSimDebugRecursiveCrash(next);
+}
+#pragma clang diagnostic pop
+
+static void ApolloSimDebugPerformCrash(NSString *type) {
+    ApolloLog(@"[SimDebugTap] deliberate test crash: %@", type);
+    if ([type isEqualToString:@"nsexception"]) {
+        [@[] objectAtIndex:1];
+    } else if ([type isEqualToString:@"abort"]) {
+        abort();
+    } else if ([type isEqualToString:@"badaccess"]) {
+        *(volatile int *)0 = 1;
+    } else if ([type isEqualToString:@"overflow"]) {
+        ApolloSimDebugRecursiveCrash(0);
+    }
+    ApolloLog(@"[SimDebugTap] unknown crash type: %@", type);
+}
+
 static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *observer,
                                           CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *contents = [NSString stringWithContentsOfFile:kApolloSimTapFile
                                                        encoding:NSUTF8StringEncoding error:nil];
+        if ([contents hasPrefix:@"crash "]) {
+            NSString *payload = [[contents substringFromIndex:6] stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            ApolloSimDebugPerformCrash(payload);
+            return;
+        }
         if ([contents hasPrefix:@"text "]) {
             NSString *payload = [[contents substringFromIndex:5] stringByTrimmingCharactersInSet:
                 NSCharacterSet.newlineCharacterSet];
