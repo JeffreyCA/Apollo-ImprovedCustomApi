@@ -149,18 +149,19 @@ static NSURL *ApolloShareLinkURLWithHost(NSURL *url, NSString *host) {
     return components.URL ?: url;
 }
 
-static NSURL *ApolloShareLinkRewriteURLForCurrentHost(NSURL *url) {
-    switch (sShareLinkHost) {
-        case ShareLinkHostOldReddit:
-            return ApolloShareLinkURLWithHost(url, @"old.reddit.com");
-        case ShareLinkHostFXReddit:
-            return ApolloShareLinkURLWithHost(url, @"fxreddit.com");
-        case ShareLinkHostVXReddit:
-            return ApolloShareLinkURLWithHost(url, @"vxreddit.com");
+static NSString *ApolloShareLinkHostDomain(ShareLinkHost host) {
+    switch (host) {
+        case ShareLinkHostOldReddit: return @"old.reddit.com";
+        case ShareLinkHostVXReddit:  return @"vxreddit.com";
+        case ShareLinkHostFXReddit:  return @"fxreddit.com";
         case ShareLinkHostDefault:
-        default:
-            return url;
+        default:                     return nil;
     }
+}
+
+static NSURL *ApolloShareLinkRewriteURLForCurrentHost(NSURL *url) {
+    NSString *host = ApolloShareLinkHostDomain((ShareLinkHost)sShareLinkHost);
+    return host.length > 0 ? ApolloShareLinkURLWithHost(url, host) : url;
 }
 
 static NSString *ApolloShareLinkRewriteStringForCurrentHost(NSString *string) {

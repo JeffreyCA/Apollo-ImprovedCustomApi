@@ -291,14 +291,18 @@ typedef NS_ENUM(NSInteger, Tag) {
     });
 }
 
-- (NSString *)shareLinkHostText {
-    switch (sShareLinkHost) {
+static NSString *ApolloShareLinkHostDisplayName(ShareLinkHost host) {
+    switch (host) {
         case ShareLinkHostOldReddit: return @"old.reddit";
         case ShareLinkHostVXReddit:  return @"vxReddit";
-        case ShareLinkHostFXReddit: return @"fxreddit";
+        case ShareLinkHostFXReddit:  return @"fxreddit";
         case ShareLinkHostDefault:
         default:                     return @"Reddit";
     }
+}
+
+- (NSString *)shareLinkHostText {
+    return ApolloShareLinkHostDisplayName((ShareLinkHost)sShareLinkHost);
 }
 
 - (void)setShareLinkHost:(NSInteger)host {
@@ -310,12 +314,20 @@ typedef NS_ENUM(NSInteger, Tag) {
 
 - (void)presentShareLinkHostSheetFromSourceView:(UIView *)sourceView {
     __weak typeof(self) weakSelf = self;
-    ApolloSettingsPresentPicker(self, sourceView, @"Share Link Host",
-                                @[@"Reddit", @"Old Reddit", @"vxReddit", @"fxreddit"],
-                                sShareLinkHost,
-                                ^(NSInteger pickedIndex) {
-        [weakSelf setShareLinkHost:pickedIndex];
-    });
+    ApolloSettingsPresentPicker(
+        self,
+        sourceView,
+        @"Share Link Host",
+        @[
+            ApolloShareLinkHostDisplayName(ShareLinkHostDefault),
+            ApolloShareLinkHostDisplayName(ShareLinkHostOldReddit),
+            ApolloShareLinkHostDisplayName(ShareLinkHostVXReddit),
+            ApolloShareLinkHostDisplayName(ShareLinkHostFXReddit)
+        ],
+        sShareLinkHost,
+        ^(NSInteger pickedIndex) {
+            [weakSelf setShareLinkHost:pickedIndex];
+        });
 }
 
 - (NSString *)mediaUploadProviderText {
