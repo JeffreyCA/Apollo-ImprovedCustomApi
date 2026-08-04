@@ -3025,6 +3025,8 @@ static void initializeRandomSources() {
                                     UDKeyEnableFlairColors: @NO,
                                     UDKeyShowRecentlyReadThumbnails: @YES,
                                     UDKeyFeedTextPostThumbnails: @YES,
+                                    UDKeyFeedGalleryCarousel: @YES,
+                                    UDKeySwipeUpForComments: @YES,
                                     UDKeySportsClipsInlineVideo: @YES,
                                     UDKeyPreferredGIFFallbackFormat: @1,
                                     UDKeyUnmuteCommentsVideos: @0,
@@ -3143,6 +3145,8 @@ static void initializeRandomSources() {
     }
     sShowRecentlyReadThumbnails = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowRecentlyReadThumbnails];
     sFeedTextPostThumbnails = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFeedTextPostThumbnails];
+    sFeedGalleryCarousel = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyFeedGalleryCarousel];
+    sSwipeUpForComments = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySwipeUpForComments];
     sPreferredGIFFallbackFormat = ([[NSUserDefaults standardUserDefaults] integerForKey:UDKeyPreferredGIFFallbackFormat] == 0) ? 0 : 1;
     sReadPostMaxCount = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyReadPostMaxCount];
     sUnmuteCommentsVideos = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyUnmuteCommentsVideos];

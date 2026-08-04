@@ -17,6 +17,8 @@ BOOL sTapToRevealDeletedComments = NO;
 BOOL sPassiveDeletedComments = NO;
 BOOL sShowRecentlyReadThumbnails = YES;
 BOOL sFeedTextPostThumbnails = YES;
+BOOL sFeedGalleryCarousel = YES;
+BOOL sSwipeUpForComments = YES;
 NSInteger sPreferredGIFFallbackFormat = 1; // 0=GIF, 1=MP4
 
 NSInteger sReadPostMaxCount = 0;

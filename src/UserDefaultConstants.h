@@ -467,6 +467,21 @@ static NSString *const UDKeyHeartbeatLastDay = @"UsageHeartbeatLastDay"; // "202
 
 // Feed thumbnails for text posts with embedded images (off = native behavior).
 static NSString *const UDKeyFeedTextPostThumbnails = @"FeedTextPostThumbnails";
+// Replaces Apollo's fixed two/three-tile Reddit-gallery mosaic in large feed
+// cards with a horizontally paging image carousel. Default YES. See
+// ApolloFeedGalleryCarousel.xm.
+static NSString *const UDKeyFeedGalleryCarousel = @"FeedGalleryCarousel";
+// NSNotification name (not a defaults key): posted by the settings toggle so
+// already-measured feed cells swap presentation live; the carousel's
+// layoutSpecThatFits reads the flag on each measurement.
+static NSString *const ApolloFeedGalleryCarouselChangedNotification = @"ApolloFeedGalleryCarouselChangedNotification";
+// In the fullscreen viewer for post-backed images, galleries, GIFs, and video,
+// an upward vertical flick or comments-button tap opens a media-owned comments
+// pane. The normal downward flick still dismisses when the pane is closed.
+// Default YES. See ApolloSwipeUpComments.xm. No change notification: the flag
+// is read live at gesture/tap time, so a toggle applies immediately without
+// any cached state to invalidate (unlike the carousel above).
+static NSString *const UDKeySwipeUpForComments = @"SwipeUpForComments";
 
 // Sports-clip host links (streamff/streamin/streamain/…) play inline as native
 // video via the Streamable pipeline (off = link-preview card, stock behavior).

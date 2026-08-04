@@ -21,6 +21,10 @@ extern BOOL sTapToRevealDeletedComments;
 extern BOOL sPassiveDeletedComments;
 extern BOOL sShowRecentlyReadThumbnails;
 extern BOOL sFeedTextPostThumbnails;
+// Default-on large-feed carousel for Reddit-native multi-image galleries.
+extern BOOL sFeedGalleryCarousel;
+// Default-on fullscreen-media comments pane, opened by upward flick or button.
+extern BOOL sSwipeUpForComments;
 extern NSInteger sPreferredGIFFallbackFormat;
 
 extern NSInteger sReadPostMaxCount;
@@ -460,3 +464,18 @@ extern NSDictionary<NSString *, NSDictionary *> *sTagFilterSubredditOverrides;
 extern NSDictionary<NSString *, NSDictionary *> *sPostFilterSubreddits;
 // Lowercased subreddit-name substrings (hide any subreddit whose name contains one).
 extern NSArray<NSString *> *sPostFilterNameSubstrings;
+
+#pragma mark - Cross-module predicates
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+// Whether this CommentsViewController is the media-owned glass pane
+// (implemented in ApolloSwipeUpComments.xm). Other comment-screen features
+// (e.g. the collapse-cover machinery in ApolloCommentsCollapse.xm) branch on
+// this: the pane's cells are deliberately transparent, so stock
+// cover/animation treatments designed for the opaque screen misrender there.
+BOOL ApolloSwipeCommentsIsPaneCommentsController(UIViewController *controller);
+#ifdef __cplusplus
+}
+#endif

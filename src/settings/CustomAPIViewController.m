@@ -1483,8 +1483,28 @@ typedef NS_ENUM(NSInteger, Tag) {
     }
 }
 
-// Media group screen (ApolloMediaSettingsViewController), four sections:
-// Playback / Inline Media / Uploads / Network.
+// Media group screen (ApolloMediaSettingsViewController), five sections:
+// Browsing / Playback / Inline Media / Uploads / Network.
+- (ApolloSettingsSection *)buildMediaBrowsingSection {
+    __weak typeof(self) weakSelf = self;
+
+    ApolloSettingsRow *feedGalleries =
+        [ApolloSettingsRow switchRowWithID:@"media.feedGalleryCarousel"
+                                     title:@"Swipe Through Feed Galleries"
+                                      isOn:^BOOL { return sFeedGalleryCarousel; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf feedGalleryCarouselSwitchToggled:sender]; }];
+
+    ApolloSettingsRow *swipeComments =
+        [ApolloSettingsRow switchRowWithID:@"media.swipeUpComments"
+                                     title:@"Swipe Up for Comments"
+                                      isOn:^BOOL { return sSwipeUpForComments; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf swipeUpCommentsSwitchToggled:sender]; }];
+
+    return [ApolloSettingsSection sectionWithTitle:@"Browsing"
+                                            footer:@"Swipe through Reddit image galleries without leaving the feed. In the fullscreen media viewer, swipe upward or tap the comments button to open comments over the media."
+                                              rows:@[ feedGalleries, swipeComments ]];
+}
+
 - (ApolloSettingsSection *)buildMediaPlaybackSection {
     __weak typeof(self) weakSelf = self;
 
@@ -3219,6 +3239,17 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSUserDefaults standardUserDefaults] setBool:sFeedTextPostThumbnails forKey:UDKeyFeedTextPostThumbnails];
 }
 
+- (void)feedGalleryCarouselSwitchToggled:(UISwitch *)sender {
+    sFeedGalleryCarousel = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFeedGalleryCarousel forKey:UDKeyFeedGalleryCarousel];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloFeedGalleryCarouselChangedNotification object:nil];
+}
+
+- (void)swipeUpCommentsSwitchToggled:(UISwitch *)sender {
+    sSwipeUpForComments = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sSwipeUpForComments forKey:UDKeySwipeUpForComments];
+}
+
 - (void)keepSearchBarInPlaceSwitchToggled:(UISwitch *)sender {
     sKeepSearchBarInPlace = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sKeepSearchBarInPlace forKey:UDKeyKeepSearchBarInPlace];
@@ -3490,7 +3521,8 @@ typedef NS_ENUM(NSInteger, Tag) {
 @implementation ApolloMediaSettingsViewController
 - (NSString *)apollo_screenTitle { return @"Media"; }
 - (NSArray<ApolloSettingsSection *> *)buildForm {
-    return @[ [self buildMediaPlaybackSection],
+    return @[ [self buildMediaBrowsingSection],
+              [self buildMediaPlaybackSection],
               [self buildMediaInlineSection],
               [self buildMediaUploadsSection],
               [self buildMediaNetworkSection] ];
