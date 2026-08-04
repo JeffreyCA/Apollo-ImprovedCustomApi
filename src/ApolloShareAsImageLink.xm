@@ -153,7 +153,7 @@ static NSString *ApolloShareLinkHostDomain(ShareLinkHost host) {
     switch (host) {
         case ShareLinkHostOldReddit: return @"old.reddit.com";
         case ShareLinkHostVXReddit:  return @"vxreddit.com";
-        case ShareLinkHostFXReddit:  return @"fxreddit.com";
+        case ShareLinkHostFXReddit:  return @"fxddit.com";
         case ShareLinkHostDefault:
         default:                     return nil;
     }
