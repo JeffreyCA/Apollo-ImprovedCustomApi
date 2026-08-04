@@ -8,11 +8,12 @@
 //   2. the raw response body handed to the serializer
 //   3. the parsed objects delivered to the submitComment completion, with the
 //      fields the comment cell renders (author/created/score/fullname)
-// Plus a legacy-response-shape simulator to exercise the repair while Reddit
-// happens to be returning the modern shape: launch the app with
-//   -ApolloSimulateLegacyCommentResponse YES
-// (argument domain) and every modern /api/comment write response is converted
-// back into the legacy {parent, content, contentText, …} shape before parsing.
+// Plus simulators for both degraded response shapes, to exercise the repair
+// while Reddit happens to be returning healthy responses (argument domain):
+//   -ApolloSimulateLegacyCommentResponse YES   — full legacy old-reddit shape
+//     ({parent, content:"<html>", contentText, …})
+//   -ApolloSimulatePartialCommentResponse YES  — modern shape with the
+//     render-critical fields (author/created/score/vote/flair) stripped
 // Compiled ONLY under APOLLO_SIM_BUILD + APOLLO_COMMENT_DEBUG (see Makefile) —
 // never ships to devices.
 
@@ -158,6 +159,35 @@ static NSData *ApolloCommentDebugLegacyData(NSData *data) {
     return [NSJSONSerialization dataWithJSONObject:legacyRoot options:0 error:NULL];
 }
 
+// Strips the render-critical fields (author/created/score/vote state/flair)
+// from each modern thing while keeping the modern shape — the milder degraded
+// variant. Enabled per-launch with `-ApolloSimulatePartialCommentResponse YES`.
+static NSData *ApolloCommentDebugPartialData(NSData *data) {
+    if (data.length == 0) return nil;
+    NSDictionary *root = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+    if (![root isKindOfClass:[NSDictionary class]]) return nil;
+    NSDictionary *json = [root[@"json"] isKindOfClass:[NSDictionary class]] ? root[@"json"] : nil;
+    NSArray *things = [json[@"data"] isKindOfClass:[NSDictionary class]] ? json[@"data"][@"things"] : nil;
+    if (![things isKindOfClass:[NSArray class]] || things.count == 0) return nil;
+
+    NSArray *stripKeys = @[ @"author", @"author_fullname", @"created", @"created_utc",
+                            @"score", @"ups", @"downs", @"likes",
+                            @"author_flair_richtext", @"author_flair_text", @"author_flair_type",
+                            @"author_flair_template_id", @"author_flair_css_class" ];
+    NSMutableArray *strippedThings = [NSMutableArray array];
+    for (NSDictionary *thing in things) {
+        NSDictionary *td = [thing isKindOfClass:[NSDictionary class]] ? thing[@"data"] : nil;
+        if (![td isKindOfClass:[NSDictionary class]] || td[@"body"] == nil) return nil; // not modern — don't simulate
+        NSMutableDictionary *stripped = [td mutableCopy];
+        [stripped removeObjectsForKeys:stripKeys];
+        NSMutableDictionary *newThing = [thing mutableCopy];
+        newThing[@"data"] = stripped;
+        [strippedThings addObject:newThing];
+    }
+    NSDictionary *newRoot = @{ @"json": @{ @"errors": @[], @"data": @{ @"things": strippedThings } } };
+    return [NSJSONSerialization dataWithJSONObject:newRoot options:0 error:NULL];
+}
+
 %hook RDKResponseSerializer
 
 - (id)responseObjectForResponse:(NSURLResponse *)response data:(NSData *)data error:(NSError **)error {
@@ -171,6 +201,15 @@ static NSData *ApolloCommentDebugLegacyData(NSData *data) {
             ApolloLog(@"[CommentDebug] SIMULATING legacy /api/comment response shape (%lu -> %lu bytes)",
                       (unsigned long)data.length, (unsigned long)legacy.length);
             data = legacy;
+        }
+    }
+    if (isCommentWrite && http.statusCode == 200 &&
+        [[NSUserDefaults standardUserDefaults] boolForKey:@"ApolloSimulatePartialCommentResponse"]) {
+        NSData *partial = ApolloCommentDebugPartialData(data);
+        if (partial) {
+            ApolloLog(@"[CommentDebug] SIMULATING partial modern /api/comment response (%lu -> %lu bytes)",
+                      (unsigned long)data.length, (unsigned long)partial.length);
+            data = partial;
         }
     }
     id obj = %orig(response, data, error);

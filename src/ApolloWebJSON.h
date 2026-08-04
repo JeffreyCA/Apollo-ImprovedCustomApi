@@ -111,6 +111,13 @@ BOOL ApolloWebJSONRequestIsInternal(NSURL *url);
 // request with ApolloWebJSONProbeURL so the transport hooks leave it alone.
 NSString *ApolloWebJSONKeylessOAuthBearer(NSString *username);
 
+// Captures the posting identity for the write-response repair. Called from the
+// identity module's RDKClient submit/edit hooks with the client that issued the
+// write; the repair reads it (TTL-bounded) when a degraded response is missing
+// its author — each account owns its own RDKClient, so the submitting client's
+// currentUser is the true posting identity even for temporaryPostingAccount.
+void ApolloWebJSONNoteCommentWriteClient(id client);
+
 // Fetch-outcome feedback for ApolloWebJSONKeylessOAuthBearer callers: report a
 // 401/403 so a minted bearer proven dead (an anonymous token from a signed-out
 // session) is dropped and its account backs off instead of re-minting a doomed

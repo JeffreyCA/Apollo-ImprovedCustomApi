@@ -770,6 +770,33 @@ void ApolloWebJSONRepairPoisonedAccountBlobs(void) {
     return %orig;
 }
 
+// The write-response repair (ApolloWebJSONFixupWriteResponseObject) may need to
+// know WHO a degraded /api/comment / /api/editusertext response belongs to.
+// The active account is the wrong answer when the composer posted as a
+// different account (temporaryPostingAccount), so capture the identity at
+// submit time from the client itself — each account owns its own RDKClient,
+// making self.currentUser the true posting identity.
+
+- (id)submitComment:(id)text onLink:(id)link completion:(id)completion {
+    ApolloWebJSONNoteCommentWriteClient(self);
+    return %orig;
+}
+
+- (id)submitComment:(id)text asReplyToComment:(id)parent completion:(id)completion {
+    ApolloWebJSONNoteCommentWriteClient(self);
+    return %orig;
+}
+
+- (id)submitComment:(id)text onThingWithFullName:(id)fullName completion:(id)completion {
+    ApolloWebJSONNoteCommentWriteClient(self);
+    return %orig;
+}
+
+- (id)editComment:(id)comment newText:(id)text completion:(id)completion {
+    ApolloWebJSONNoteCommentWriteClient(self);
+    return %orig;
+}
+
 %end
 
 // Comment writes (/api/editusertext, /api/comment) can come back in the legacy

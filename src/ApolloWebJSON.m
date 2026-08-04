@@ -6,6 +6,8 @@
 #import "ApolloAccountCredentials.h" // ApolloActiveAccountUsername() — write-fixup author for API-key actives
 #import "ApolloWebSessionStore.h"
 #import "ApolloWebSessionLoginViewController.h" // silent re-harvest before the expiry prompt
+#import <objc/message.h>
+#import <os/lock.h>
 
 #import <Security/Security.h>
 
@@ -1221,6 +1223,9 @@ static BOOL ApolloWebJSONPermalinkPartsFromLegacyContent(NSString *html, NSStrin
     return YES;
 }
 
+// Defined with the write-repair helpers below; used by the legacy synthesis too.
+static NSString *ApolloWebJSONRecentCommentWriteUsername(void);
+
 // Extracts the comment author from an old-reddit content blob's data-author
 // attribute. Authoritative when present — it is Reddit's own record of who the
 // write ran as, with the account's canonical capitalization.
@@ -1265,11 +1270,13 @@ static NSDictionary *ApolloWebJSONSynthesizeModernThingData(NSString *fullname, 
     if (body.length == 0 && bodyHTML.length == 0) return nil; // nothing renderable to show
 
     // Author, in trust order: Reddit's own data-author attribute in the legacy
-    // content blob, then the active web-session account, then the active
-    // API-key (OAuth) account — a comment write always runs as the foreground
-    // account. Capitalization matters because Apollo gates the Edit affordance
-    // on comment.author == currentUser.username.
+    // content blob, then the identity captured from the submitting RDKClient
+    // (correct for non-active posting accounts), then the active web-session
+    // account, then the active API-key (OAuth) account. Capitalization matters
+    // because Apollo gates the Edit affordance on
+    // comment.author == currentUser.username.
     NSString *author = ApolloWebJSONAuthorFromLegacyContent(content);
+    if (author.length == 0) author = ApolloWebJSONRecentCommentWriteUsername();
     if (author.length == 0) author = ApolloActiveWebSessionUsername();
     if (author.length == 0) author = ApolloActiveAccountUsername();
     if (author.length == 0) return nil;
@@ -1312,6 +1319,119 @@ static NSDictionary *ApolloWebJSONSynthesizeModernThingData(NSString *fullname, 
     return modern;
 }
 
+// YES for a usable non-empty string. JSON null arrives as NSNull, which must
+// count as missing everywhere in the write-response repair.
+static BOOL ApolloWebJSONIsNonEmptyString(id value) {
+    return [value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0;
+}
+
+// The username the most recent comment/edit write ran as, captured at submit
+// time from the RDKClient that issued it (ApolloWebJSONNoteCommentWriteClient,
+// called from the identity module's submit hooks). The ACTIVE account is the
+// wrong answer when the composer's account chooser posted as someone else
+// (temporaryPostingAccount): each account owns its own RDKClient, so the
+// submitting client's currentUser IS the posting identity. TTL-bounded so a
+// stale capture can never label an unrelated later repair.
+static NSString *sApolloWebJSONLastWriteUsername = nil;
+static NSTimeInterval sApolloWebJSONLastWriteAt = 0;
+static os_unfair_lock sApolloWebJSONLastWriteLock = OS_UNFAIR_LOCK_INIT;
+
+void ApolloWebJSONNoteCommentWriteClient(id client) {
+    NSString *name = nil;
+    @try {
+        id user = [client respondsToSelector:@selector(currentUser)]
+            ? ((id (*)(id, SEL))objc_msgSend)(client, @selector(currentUser)) : nil;
+        id value = [user respondsToSelector:@selector(username)]
+            ? ((id (*)(id, SEL))objc_msgSend)(user, @selector(username)) : nil;
+        if ([value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0) name = [value copy];
+    } @catch (__unused NSException *e) { return; }
+    if (!name) return;
+    os_unfair_lock_lock(&sApolloWebJSONLastWriteLock);
+    sApolloWebJSONLastWriteUsername = name;
+    sApolloWebJSONLastWriteAt = [NSDate timeIntervalSinceReferenceDate];
+    os_unfair_lock_unlock(&sApolloWebJSONLastWriteLock);
+}
+
+// nil when no write was captured recently — callers fall back to the active
+// account. 60s comfortably covers submit -> response -> serializer.
+static NSString *ApolloWebJSONRecentCommentWriteUsername(void) {
+    os_unfair_lock_lock(&sApolloWebJSONLastWriteLock);
+    NSString *name = sApolloWebJSONLastWriteUsername;
+    BOOL fresh = name.length > 0 && ([NSDate timeIntervalSinceReferenceDate] - sApolloWebJSONLastWriteAt) < 60.0;
+    os_unfair_lock_unlock(&sApolloWebJSONLastWriteLock);
+    return fresh ? name : nil;
+}
+
+// A timestamp-ish numeric field that's absent, JSON-null, the wrong type, or
+// non-positive counts as missing (RedditKit turns all of those into the
+// epoch-1970 date the blank cell shows).
+static BOOL ApolloWebJSONTimestampMissing(id value) {
+    if (![value isKindOfClass:[NSNumber class]]) return YES;
+    return [(NSNumber *)value doubleValue] <= 0;
+}
+
+// The milder variant of the same degraded write response: a MODERN-shaped thing
+// (body present) that is missing the render-critical fields — author,
+// created/created_utc, score. RedditKit then parses a comment with no
+// author/avatar/flair, an epoch-1970 timestamp and score 0: the identical blank
+// cell the legacy shape produces. Fill ONLY the missing fields, with the same
+// optimistic values the legacy synthesis uses; anything present is never
+// overwritten. Returns nil when the thing is already complete — the
+// overwhelmingly common case, making this a strict no-op for healthy responses.
+static NSDictionary *ApolloWebJSONCompleteModernThingData(NSDictionary *td, BOOL isEdit, NSArray<NSString *> **outFilled) {
+    NSMutableArray<NSString *> *filled = [NSMutableArray array];
+    NSMutableDictionary *patched = [td mutableCopy];
+
+    if (!ApolloWebJSONIsNonEmptyString(td[@"author"])) {
+        // Trust order (no content HTML exists here, so no data-author): the
+        // identity captured from the submitting RDKClient — correct even when
+        // the composer posted as a non-active account (temporaryPostingAccount)
+        // — then the active web session, then the active account. Stored
+        // capitalization matters because the Edit affordance gates on
+        // comment.author == currentUser.username.
+        NSString *author = ApolloWebJSONRecentCommentWriteUsername();
+        if (author.length == 0) author = ApolloActiveWebSessionUsername();
+        if (author.length == 0) author = ApolloActiveAccountUsername();
+        if (author.length > 0) {
+            patched[@"author"] = author;
+            [filled addObject:@"author"];
+        }
+    }
+
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (ApolloWebJSONTimestampMissing(td[@"created_utc"])) {
+        patched[@"created_utc"] = @(now);
+        [filled addObject:@"created_utc"];
+    }
+    if (ApolloWebJSONTimestampMissing(td[@"created"])) {
+        patched[@"created"] = @(now);
+        [filled addObject:@"created"];
+    }
+
+    // A freshly created own comment always starts at score 1 with the author's
+    // self-upvote, so on /api/comment a missing score — or an explicit 0 with no
+    // vote state — is the degraded payload, not a real value. Edits keep an
+    // explicit 0: a genuinely downvoted comment can legitimately sit there.
+    id score = td[@"score"];
+    BOOL scoreMissing = ![score isKindOfClass:[NSNumber class]];
+    BOOL scoreZeroOnCreate = !isEdit && [score isKindOfClass:[NSNumber class]] && [(NSNumber *)score integerValue] == 0
+                             && ![td[@"likes"] isKindOfClass:[NSNumber class]];
+    if (scoreMissing || scoreZeroOnCreate) {
+        patched[@"score"] = @1;
+        [filled addObject:@"score"];
+        if (![td[@"ups"] isKindOfClass:[NSNumber class]] || (!isEdit && [(NSNumber *)td[@"ups"] integerValue] == 0)) {
+            patched[@"ups"] = @1;
+        }
+        if (!isEdit && ![td[@"likes"] isKindOfClass:[NSNumber class]]) {
+            patched[@"likes"] = @YES;
+        }
+    }
+
+    if (filled.count == 0) return nil;
+    if (outFilled) *outFilled = filled;
+    return patched;
+}
+
 // Old-reddit /api/editusertext and /api/comment responses return each thing's
 // `data` in the legacy shape {parent, content:"<html>"} instead of the modern
 // comment JSON ({body, body_html, score, author, …}). Apollo's RedditKit maps
@@ -1321,12 +1441,14 @@ static NSDictionary *ApolloWebJSONSynthesizeModernThingData(NSString *fullname, 
 // answers this way (Web JSON mode), and since 2026-08 oauth.reddit.com has
 // intermittently served the SAME legacy shape to API-key (OAuth) clients — it
 // also hit Narwhal — so this repair runs in EVERY auth mode; it is a strict
-// no-op for the modern shape and on API errors. We detect the legacy shape and
-// swap in the modern object: primary source is an info.json refetch
-// (authoritative fields); when that isn't possible (serializer on the main
-// thread — no sync network allowed) or comes up empty (info.json can lag a
-// seconds-old comment), we synthesize the modern dict locally from the legacy
-// fields, which always carry the submitted text.
+// no-op for the modern shape and on API errors. Two degraded variants are
+// handled: the full legacy shape is swapped for a modern object (primary source
+// is an info.json refetch — authoritative fields; when that isn't possible
+// (serializer on the main thread — no sync network allowed) or comes up empty
+// (info.json can lag a seconds-old comment), we synthesize the modern dict
+// locally from the legacy fields, which always carry the submitted text), and a
+// modern-shaped thing missing its render-critical fields gets just those fields
+// filled in place (ApolloWebJSONCompleteModernThingData above).
 id ApolloWebJSONFixupWriteResponseObject(NSURLResponse *response, id responseObject) {
     if (![response isKindOfClass:[NSHTTPURLResponse class]]) return responseObject;
 
@@ -1372,7 +1494,51 @@ id ApolloWebJSONFixupWriteResponseObject(NSURLResponse *response, id responseObj
         if (![thing isKindOfClass:[NSDictionary class]]) continue;
         NSDictionary *td = thing[@"data"];
         if (![td isKindOfClass:[NSDictionary class]]) continue;
-        if (td[@"body"] != nil || ![td[@"content"] isKindOfClass:[NSString class]]) continue; // already modern
+
+        // JSON null (NSNull) counts as body-missing: a body:null + content thing
+        // is the legacy shape (synthesis rebuilds the body from contentText).
+        BOOL hasBody = [td[@"body"] isKindOfClass:[NSString class]];
+        BOOL isLegacyShape = (!hasBody && [td[@"content"] isKindOfClass:[NSString class]]);
+        if (!isLegacyShape) {
+            if (!hasBody) continue; // neither shape — leave untouched
+            // Modern shape: fill any missing render-critical fields in place —
+            // but only on actual COMMENTS. Private-message replies also flow
+            // through /api/comment as t4 things whose healthy data legitimately
+            // carries score:0/likes:null, and they must stay untouched. Skip
+            // only on explicit evidence of a non-comment: a degraded comment
+            // payload could lose kind AND name, and missing the repair there is
+            // the costlier error (skipping re-blanks the just-posted comment).
+            NSString *kind = [thing[@"kind"] isKindOfClass:[NSString class]] ? thing[@"kind"] : nil;
+            NSString *name = ApolloWebJSONIsNonEmptyString(td[@"name"]) ? td[@"name"] : nil;
+            BOOL notComment = (kind && ![kind isEqualToString:@"t1"]) ||
+                              (name && [name rangeOfString:@"_"].location != NSNotFound && ![name hasPrefix:@"t1_"]);
+            if (notComment) continue;
+
+            NSArray<NSString *> *filledKeys = nil;
+            NSDictionary *completed = ApolloWebJSONCompleteModernThingData(td, isEdit, &filledKeys);
+            if (!completed) continue; // already complete — the common case
+
+            NSString *source = @"optimistic fill";
+            // An edited comment already exists with a real score/created —
+            // prefer the authoritative refetch over optimistic values, exactly
+            // like the legacy path does for edits.
+            if (isEdit && allowNetwork) {
+                NSString *fullname = name ?: (td[@"id"] ? [@"t1_" stringByAppendingFormat:@"%@", td[@"id"]] : nil);
+                NSDictionary *fetched = fullname.length > 0 ? ApolloWebJSONFetchModernThingData(fullname) : nil;
+                if ([fetched isKindOfClass:[NSDictionary class]]) {
+                    completed = fetched;
+                    source = @"info.json refetch";
+                }
+            }
+
+            newThings[i] = @{ @"kind": kind ?: @"t1", @"data": completed };
+            changed = YES;
+            ApolloLog(@"[WebJSON] Filled missing %@ on modern %@ thing %@ via %@ (%lu keys present)",
+                      [filledKeys componentsJoinedByString:@"+"], path,
+                      name ?: [NSString stringWithFormat:@"(id %@)", td[@"id"] ?: @"?"],
+                      source, (unsigned long)td.count);
+            continue;
+        }
 
         NSString *fullname = ApolloWebJSONFullnameFromLegacyContent(td[@"content"]);
         // The legacy dict's own "id" field is the fullname too — use it when the
