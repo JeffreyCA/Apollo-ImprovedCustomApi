@@ -166,7 +166,7 @@ static void ApolloSimDebugTypeText(NSString *text) {
 // "insetbottom N" command: ask every visible Apollo ASTableView to accept a
 // specific bottom inset. This reproduces the iOS 27 foreground write (153 -> 0)
 // without depending on the simulator exhibiting the upstream lifecycle bug.
-// ApolloListLayoutDiagnostics should guard the zero and log the correction.
+// ApolloListBottomInsetGuard should guard the zero and log the correction.
 static void ApolloSimDebugForceBottomInsetInView(UIView *view, CGFloat bottom) {
     if ([view isKindOfClass:objc_getClass("ASTableView")] && view.window) {
         UIScrollView *scrollView = (UIScrollView *)view;

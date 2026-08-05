@@ -45,47 +45,56 @@ static const NSUInteger kApolloPersistentDiagTrimTo = 192 * 1024;
 
 static void ApolloAppendPersistentDiag(NSString *line, NSString *path) {
     if (![line isKindOfClass:[NSString class]] || line.length == 0) return;
-    static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+    static dispatch_queue_t queue = nil;
     static NSDateFormatter *fmt = nil;
-    os_unfair_lock_lock(&lock);
-    if (!fmt) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // The list-layout diag can fire from inside setContentInset: during a
+        // scroll frame, so the file I/O must never run on the caller's thread.
+        // A serial utility queue keeps line order without blocking anyone; the
+        // only loss window is lines still queued at a hard crash (~ms), which
+        // the os_log copy of every line still covers.
+        queue = dispatch_queue_create("com.apollo.reborn.persistent-diag",
+            dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
         fmt = [[NSDateFormatter alloc] init];
         fmt.dateFormat = @"MM-dd HH:mm:ss.SSS";
         fmt.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
-    }
+    });
+    // Stamp on the calling thread so the timestamp is the event time, not the
+    // (slightly later) write time. NSDateFormatter is thread-safe on iOS 7+.
     NSString *stamped = [NSString stringWithFormat:@"[%@] %@\n", [fmt stringFromDate:[NSDate date]], line];
-    NSFileManager *fm = [NSFileManager defaultManager];
-
-    @try {
-        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
-        if (!fh) {
-            [fm createFileAtPath:path contents:nil
-                      attributes:@{NSFileProtectionKey: NSFileProtectionCompleteUntilFirstUserAuthentication}];
-            fh = [NSFileHandle fileHandleForWritingAtPath:path];
-        }
-        if (fh) {
-            unsigned long long end = [fh seekToEndOfFile];
-            [fh writeData:[stamped dataUsingEncoding:NSUTF8StringEncoding]];
-            [fh closeFile];
-            // Trim to the tail when it grows past the cap: reload, keep the last N bytes from a
-            // line boundary, rewrite. Cheap because it only fires occasionally.
-            if (end + stamped.length > kApolloPersistentDiagMaxBytes) {
-                NSData *all = [NSData dataWithContentsOfFile:path];
-                if (all.length > kApolloPersistentDiagMaxBytes) {
-                    NSData *tail = [all subdataWithRange:NSMakeRange(all.length - kApolloPersistentDiagTrimTo, kApolloPersistentDiagTrimTo)];
-                    NSString *tailStr = [[NSString alloc] initWithData:tail encoding:NSUTF8StringEncoding];
-                    NSRange nl = [tailStr rangeOfString:@"\n"];
-                    if (nl.location != NSNotFound && nl.location + 1 < tailStr.length) {
-                        tailStr = [tailStr substringFromIndex:nl.location + 1];
+    dispatch_async(queue, ^{
+        NSFileManager *fm = [NSFileManager defaultManager];
+        @try {
+            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+            if (!fh) {
+                [fm createFileAtPath:path contents:nil
+                          attributes:@{NSFileProtectionKey: NSFileProtectionCompleteUntilFirstUserAuthentication}];
+                fh = [NSFileHandle fileHandleForWritingAtPath:path];
+            }
+            if (fh) {
+                unsigned long long end = [fh seekToEndOfFile];
+                [fh writeData:[stamped dataUsingEncoding:NSUTF8StringEncoding]];
+                [fh closeFile];
+                // Trim to the tail when it grows past the cap: reload, keep the last N bytes from a
+                // line boundary, rewrite. Cheap because it only fires occasionally.
+                if (end + stamped.length > kApolloPersistentDiagMaxBytes) {
+                    NSData *all = [NSData dataWithContentsOfFile:path];
+                    if (all.length > kApolloPersistentDiagMaxBytes) {
+                        NSData *tail = [all subdataWithRange:NSMakeRange(all.length - kApolloPersistentDiagTrimTo, kApolloPersistentDiagTrimTo)];
+                        NSString *tailStr = [[NSString alloc] initWithData:tail encoding:NSUTF8StringEncoding];
+                        NSRange nl = [tailStr rangeOfString:@"\n"];
+                        if (nl.location != NSNotFound && nl.location + 1 < tailStr.length) {
+                            tailStr = [tailStr substringFromIndex:nl.location + 1];
+                        }
+                        [tailStr writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
                     }
-                    [tailStr writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
                 }
             }
+        } @catch (__unused NSException *e) {
+            // Diagnostics must never take the app down; a lost line is acceptable.
         }
-    } @catch (__unused NSException *e) {
-        // Diagnostics must never take the app down; a lost line is acceptable.
-    }
-    os_unfair_lock_unlock(&lock);
+    });
 }
 
 void ApolloAppendLoginDiag(NSString *line) {
@@ -99,6 +108,81 @@ static NSString *ApolloListLayoutDiagLogPath(void) {
 
 void ApolloAppendListLayoutDiag(NSString *line) {
     ApolloAppendPersistentDiag(line, ApolloListLayoutDiagLogPath());
+}
+
+#pragma mark - Liquid Glass tab bar morph state (private-ivar reads)
+
+// Single-slot Ivar caches: Apollo runs one tab bar class and one visual
+// provider class per process, and these reads sit on scroll-frame paths
+// (ApolloAutoHideTabBar's upward-reveal detection, the list bottom-inset
+// guard), where repeated class_getInstanceVariable lookups would pay a
+// runtime-lock toll per frame. Main-thread only, so plain statics suffice.
+static id ApolloTabBarVisualProvider(UITabBar *tabBar) {
+    if (!tabBar) return nil;
+    static Class barClass = Nil;
+    static Ivar providerIvar = NULL;
+    Class cls = object_getClass(tabBar);
+    if (cls != barClass) {
+        providerIvar = class_getInstanceVariable(cls, "_visualProvider");
+        barClass = cls;
+    }
+    return providerIvar ? object_getIvar(tabBar, providerIvar) : nil;
+}
+
+NSInteger ApolloTabBarVisualMorphTarget(UITabBar *tabBar, BOOL *known) {
+    if (known) *known = NO;
+    id provider = ApolloTabBarVisualProvider(tabBar);
+    if (!provider) return NSNotFound;
+
+    static Class providerClass = Nil;
+    static Ivar targetIvar = NULL;
+    static BOOL encodingIsInteger = NO;
+    Class cls = object_getClass(provider);
+    if (cls != providerClass) {
+        targetIvar = class_getInstanceVariable(cls, "_currentMorphTarget");
+        const char *encoding = targetIvar ? ivar_getTypeEncoding(targetIvar) : NULL;
+        encodingIsInteger = encoding && (encoding[0] == 'q' || encoding[0] == 'Q');
+        providerClass = cls;
+    }
+    if (!targetIvar || !encodingIsInteger) return NSNotFound;
+
+    NSInteger target = NSNotFound;
+    memcpy(&target,
+           (const uint8_t *)(__bridge const void *)provider + ivar_getOffset(targetIvar),
+           sizeof(target));
+    if (known) *known = YES;
+    return target;
+}
+
+BOOL ApolloTabBarVisualProviderBoolIvar(UITabBar *tabBar, const char *name, BOOL *known) {
+    if (known) *known = NO;
+    if (!name) return NO;
+    id provider = ApolloTabBarVisualProvider(tabBar);
+    if (!provider) return NO;
+
+    // Cache keyed on (class, name pointer): the name is a string literal at
+    // every call site, so pointer identity is stable; a rare miss on an equal
+    // but distinct literal just re-runs the lookup.
+    static Class providerClass = Nil;
+    static const char *cachedName = NULL;
+    static Ivar boolIvar = NULL;
+    Class cls = object_getClass(provider);
+    if (cls != providerClass || name != cachedName) {
+        boolIvar = class_getInstanceVariable(cls, name);
+        providerClass = cls;
+        cachedName = name;
+    }
+    if (!boolIvar) return NO;
+
+    // Swift stored Bools carry no useful ObjC type encoding (RuntimeBrowser
+    // shows `void`); UIKit's own code reads and writes exactly one byte at the
+    // exported ivar offset, so mirror that representation.
+    uint8_t value = 0;
+    memcpy(&value,
+           (const uint8_t *)(__bridge const void *)provider + ivar_getOffset(boolIvar),
+           sizeof(value));
+    if (known) *known = YES;
+    return (value & 1) != 0;
 }
 
 // The prior/persistent diagnostics tail, for the exporter to prepend. Empty string if none.

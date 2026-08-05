@@ -175,6 +175,24 @@ void ApolloAppendLoginDiag(NSString *line);
 // Never include post titles, account names, URLs, or other user content.
 void ApolloAppendListLayoutDiag(NSString *line);
 
+// iOS 26+ Liquid Glass: the tab bar's real expanded/collapsed state, read from
+// the visual provider's stored `_currentMorphTarget` (0 expanded, 1 mid-morph,
+// 2 minimized). UITabBar's own `_isMinimized` accessor is guarded by an
+// Apple-app assertion (UIKit literally checks for Photos), so calling it from a
+// sideloaded app crashes — the runtime ivar read is the only safe path.
+// Returns NSNotFound with *known = NO when the private layout is missing
+// (future iOS). Callers must treat unknown as "assume nothing" and fail OPEN
+// (accept UIKit's writes), never as "expanded" — fighting UIKit per frame on a
+// wrong guess is worse than missing one correction. Main-thread only.
+NSInteger ApolloTabBarVisualMorphTarget(UITabBar *tabBar, BOOL *known);
+
+// One-byte Swift Bool stored property on the tab bar's visual provider (e.g.
+// "isAnimatingCollapsedState"). Swift ivars carry no useful ObjC type encoding
+// (RuntimeBrowser shows `void`), so this mirrors UIKit's own one-byte
+// read/write of the exported ivar offset. *known = NO when the ivar is gone.
+// Main-thread only.
+BOOL ApolloTabBarVisualProviderBoolIvar(UITabBar *tabBar, const char *name, BOOL *known);
+
 // Dev-only login-persistence debug (see Tweak.xm): a report of where the account keychain item
 // lives (each copy's access group / size / protection class), and a FLEX-gated action that
 // poisons/restores the account item's protection class to reproduce the -25300 on demand. Both
