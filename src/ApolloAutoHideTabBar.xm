@@ -477,6 +477,12 @@ static void ApolloHideTabBar(UITabBarController *tbc, BOOL animated) {
     UITabBar *tabBar = tbc.tabBar;
     if (tabBar.hidden) return;
 
+    // Preserve the stable visible-bar baseline before the legacy hide changes
+    // safe-area geometry. The settled show verifier can then restore exactly
+    // the prior list-specific value (including comments' extra), without a
+    // permanent setContentInset observer. This retains issue #809 protection.
+    ApolloListCaptureHealthyBottomForVisibleLists(@"legacyTabBarWillHide");
+
     ApolloLog(@"[AutoHideTabBarFix] Hide (animated=%d)", animated);
 
     SEL setHiddenSelector = NSSelectorFromString(@"setTabBarHidden:animated:");

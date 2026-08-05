@@ -2,13 +2,12 @@
 //
 // Shared surface between the two iOS 26/27 Liquid Glass list-layout modules:
 //
-//   ApolloListBottomInsetGuard.xm   — the FUNCTIONAL fix (content-scroll-view
-//                                     registration + setContentInset guard +
-//                                     foreground protection window). Ships.
-//   ApolloListLayoutDiagnostics.xm  — verbose geometry snapshots for Export
-//                                     Debug Logs. Safe to drop from the
-//                                     Makefile for shipping builds with zero
-//                                     functional loss.
+//   ApolloListBottomInsetGuard.xm   — the FUNCTIONAL fix (keyboard-frame
+//                                     normalization, content-scroll-view
+//                                     registration, and settled recovery).
+//   ApolloListLayoutDiagnostics.xm  — optional investigation-only geometry
+//                                     snapshots, deliberately excluded from
+//                                     shipping builds.
 //
 // Everything declared here is implemented in ApolloListBottomInsetGuard.xm so
 // removing the diagnostics module never takes the fix with it.
@@ -52,9 +51,9 @@ UIScrollView *ApolloListTableForController(UIViewController *controller);
 
 ApolloListBottomGeometry ApolloListBottomGeometryForController(UIViewController *controller);
 
-// The last accepted healthy bottom inset for this table under the current
+// The last captured healthy bottom inset for this table under the current
 // chrome height (chrome + the table's remembered Apollo-specific extra), or 0
-// when nothing has been remembered yet.
+// when nothing has been captured yet.
 CGFloat ApolloListRememberedHealthyBottom(UIScrollView *table, CGFloat requiredChromeBottom);
 
 // Logs to the apollofix os_log stream AND the bounded cross-launch buffer that
@@ -67,11 +66,15 @@ void ApolloListLayoutLog(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
 extern NSString *const ApolloTabBarSlideDownAnimationKey;
 extern NSString *const ApolloTabBarSlideUpAnimationKey;
 
-// Actively re-assert the bottom inset of every visible tracked list whose
-// inset no longer covers a steady visible tab bar. Needed when iOS 27 changes
-// the safe area without Apollo ever writing a new inset (nothing for the
-// setContentInset: hook to intercept) — e.g. after the legacy mirror re-shows
-// the bar, or after foreground restoration.
+// Capture the currently healthy inset of visible lists at explicit lifecycle /
+// chrome boundaries. This avoids doing responder/geometry work on every
+// scroll-adjacent setContentInset: call.
+void ApolloListCaptureHealthyBottomForVisibleLists(NSString *reason);
+
+// Settled recovery fallback: re-assert the bottom inset only when a visible
+// tracked list remains below a stable visible tab bar after normal UIKit/Apollo
+// layout has had time to finish. Used by the legacy tab-bar show path (#809)
+// and once after a real foreground transition.
 void ApolloListVerifyBottomInsetForVisibleLists(NSString *reason);
 
 __END_DECLS
