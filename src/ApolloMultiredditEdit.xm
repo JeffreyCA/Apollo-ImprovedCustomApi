@@ -71,12 +71,16 @@
 - (BOOL)isEditable;
 @end
 
+@interface RedditListTableViewCell : UITableViewCell
+@end
+
 @interface RedditListViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
 // The %new methods this module adds, declared so in-module calls type-check.
 - (void)apolloMultiEditPresentEditorFor:(RDKMultireddit *)multireddit;
+- (void)apolloMultiEditPresentEditorFor:(RDKMultireddit *)multireddit prefillName:(NSString *)prefillName prefillDescription:(NSString *)prefillDescription;
 - (void)apolloMultiEditSave:(RDKMultireddit *)multireddit name:(NSString *)newName descriptionText:(NSString *)newDescription;
 - (void)apolloMultiEditShowError:(NSString *)message;
-- (void)apolloMultiEditPickIconFor:(RDKMultireddit *)multireddit;
+- (void)apolloMultiEditPickIconFor:(RDKMultireddit *)multireddit pendingName:(NSString *)pendingName pendingDescription:(NSString *)pendingDescription;
 @end
 
 // Posted by Apollo after multireddit mutations; RedditListViewController
@@ -99,8 +103,21 @@ static __weak UITableView *sMultiEditListTable = nil;
 // this table, so we also turn it back off when Edit mode ends.
 static char kApolloMultiEditSelectionEnabledKey;
 
-// Associates the multireddit being re-iconed with its PHPicker instance.
+// Associates the picker context (multireddit + the editor's unsaved field
+// values) with its PHPicker instance, so the editor can reopen exactly as the
+// user left it after picking or cancelling.
 static char kApolloMultiEditPickerTargetKey;
+
+// Associates a custom-icon cache key with a row's icon image view. Apollo's
+// icon pipeline applies the multireddit's icon (the first subreddit's avatar)
+// asynchronously, so a one-shot write from cellForRow gets overwritten a
+// moment later; the UIImageView setImage: hook below re-asserts the custom
+// icon on every attempt to replace it while the tag is present.
+static char kApolloMultiEditIconEnforceKey;
+
+// Fast path for that hook: stays NO (one static read per setImage:) until any
+// custom multireddit icon exists this session.
+static BOOL sMultiEditIconEnforcementNeeded = NO;
 
 // MARK: - Helpers
 
@@ -200,9 +217,8 @@ static UIImage *ApolloMultiEditCustomIcon(RDKMultireddit *multireddit) {
 // cached per size; the cache is dumped whenever an icon is saved or removed.
 static NSCache<NSString *, UIImage *> *sMultiEditDisplayIconCache = nil;
 
-static UIImage *ApolloMultiEditDisplayIcon(RDKMultireddit *multireddit, CGSize targetSize) {
-    NSString *key = ApolloMultiEditIconKey(multireddit);
-    if (!key || targetSize.width < 1.0 || targetSize.height < 1.0) return nil;
+static UIImage *ApolloMultiEditDisplayIconForKey(NSString *key, CGSize targetSize) {
+    if (key.length == 0 || targetSize.width < 1.0 || targetSize.height < 1.0) return nil;
 
     NSString *cacheKey = [NSString stringWithFormat:@"%@|%.0fx%.0f", key, targetSize.width, targetSize.height];
     UIImage *cached = [sMultiEditDisplayIconCache objectForKey:cacheKey];
@@ -312,6 +328,35 @@ static RDKMultireddit *ApolloMultiEditFindByTitle(NSString *title) {
 
 %end
 
+// MARK: - Custom icon enforcement
+
+// Apollo applies a multireddit row's icon (its first subreddit's avatar)
+// through an asynchronous pipeline, so writing the custom icon once from
+// cellForRow loses the race whenever the real avatar lands afterwards: the
+// row flashes back to Apollo's icon (reported with the ApolloReborn robot).
+// cellForRow instead TAGS the icon view with the custom-icon key, and this
+// hook swaps every competing image assignment for the custom icon while the
+// tag is present. Untagged image views (the entire rest of the app, and any
+// multireddit row without a custom icon) pay one static BOOL read.
+%hook UIImageView
+
+- (void)setImage:(UIImage *)image {
+    if (sMultiEditIconEnforcementNeeded) {
+        NSString *iconKey = objc_getAssociatedObject(self, &kApolloMultiEditIconEnforceKey);
+        if (iconKey.length > 0) {
+            CGSize targetSize = (image && image.size.width >= 1.0) ? image.size : self.bounds.size;
+            UIImage *display = ApolloMultiEditDisplayIconForKey(iconKey, targetSize);
+            if (display && image != display) {
+                %orig(display);
+                return;
+            }
+        }
+    }
+    %orig;
+}
+
+%end
+
 // MARK: - Subreddits list hooks
 
 %group ApolloMultiEditList
@@ -388,14 +433,21 @@ static RDKMultireddit *ApolloMultiEditFindByTitle(NSString *title) {
     NSString *title = ApolloMultiEditTrim(ApolloMultiEditCellLabel(cell, "redditTitleLabel").text);
     RDKMultireddit *multireddit = ApolloMultiEditFindByTitle(title);
 
-    if (multireddit) {
-        UIImageView *iconView = (UIImageView *)ApolloMultiEditObjectIvar(cell, "subredditIconImageView");
-        if ([iconView isKindOfClass:[UIImageView class]]) {
-            // Match the stock icon's point size (Apollo just set it in %orig)
-            // so the intrinsic-size-driven layout doesn't change.
+    UIImageView *iconView = (UIImageView *)ApolloMultiEditObjectIvar(cell, "subredditIconImageView");
+    if ([iconView isKindOfClass:[UIImageView class]]) {
+        NSString *iconKey = multireddit ? ApolloMultiEditIconKey(multireddit) : nil;
+        UIImage *stored = iconKey ? [[ApolloSubredditCustomIconCache sharedCache] cachedIconForSubreddit:iconKey] : nil;
+        // Tag (or untag — cells are reused) the icon view for the enforcement
+        // hook, then apply the icon at the stock icon's point size so the
+        // intrinsic-size-driven layout doesn't change. Apollo's own async
+        // avatar assignment for this row is swapped by the hook from here on.
+        objc_setAssociatedObject(iconView, &kApolloMultiEditIconEnforceKey,
+                                 stored ? iconKey : nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        if (stored) {
+            sMultiEditIconEnforcementNeeded = YES;
             CGSize targetSize = iconView.image.size;
             if (targetSize.width < 1.0) targetSize = iconView.bounds.size;
-            UIImage *customIcon = ApolloMultiEditDisplayIcon(multireddit, targetSize);
+            UIImage *customIcon = ApolloMultiEditDisplayIconForKey(iconKey, targetSize);
             if (customIcon) iconView.image = customIcon;
         }
     }
@@ -417,6 +469,14 @@ static RDKMultireddit *ApolloMultiEditFindByTitle(NSString *title) {
 
 %new
 - (void)apolloMultiEditPresentEditorFor:(RDKMultireddit *)multireddit {
+    [self apolloMultiEditPresentEditorFor:multireddit prefillName:nil prefillDescription:nil];
+}
+
+// prefillName/prefillDescription carry the editor's UNSAVED field contents
+// across a round trip through the icon picker (or an icon removal), so
+// typed-but-not-saved text is never lost; nil means "show the model's values".
+%new
+- (void)apolloMultiEditPresentEditorFor:(RDKMultireddit *)multireddit prefillName:(NSString *)prefillName prefillDescription:(NSString *)prefillDescription {
     NSString *currentName = [multireddit displayName].length > 0 ? [multireddit displayName] : [multireddit name];
     NSString *currentDescription = [multireddit respondsToSelector:@selector(descriptionMarkdown)]
         ? ([multireddit descriptionMarkdown] ?: @"") : @"";
@@ -425,12 +485,12 @@ static RDKMultireddit *ApolloMultiEditFindByTitle(NSString *title) {
                                                                    message:@"Renaming keeps the multireddit's URL. With no description, the list of subreddits is shown instead."
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-        textField.text = currentName;
+        textField.text = prefillName ?: currentName;
         textField.placeholder = @"Name";
         textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
     }];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-        textField.text = currentDescription;
+        textField.text = prefillDescription ?: currentDescription;
         textField.placeholder = @"Description (optional)";
     }];
 
@@ -443,17 +503,24 @@ static RDKMultireddit *ApolloMultiEditFindByTitle(NSString *title) {
         [weakSelf apolloMultiEditSave:multireddit name:newName descriptionText:newDescription];
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Choose Custom Icon…" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [weakSelf apolloMultiEditPickIconFor:multireddit];
+        // Alert actions dismiss the alert, so hand the unsaved field contents
+        // to the picker flow — the editor reopens with them afterwards.
+        [weakSelf apolloMultiEditPickIconFor:multireddit
+                                 pendingName:alert.textFields.firstObject.text
+                          pendingDescription:alert.textFields.lastObject.text];
     }]];
     if (ApolloMultiEditCustomIcon(multireddit)) {
         [alert addAction:[UIAlertAction actionWithTitle:@"Remove Custom Icon" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+            NSString *pendingName = alert.textFields.firstObject.text;
+            NSString *pendingDescription = alert.textFields.lastObject.text;
             NSString *key = ApolloMultiEditIconKey(multireddit);
             if (key) [[ApolloSubredditCustomIconCache sharedCache] removeIconForSubreddit:key];
             [sMultiEditDisplayIconCache removeAllObjects];
             ApolloLog(@"[MultiEdit] removed custom icon for %@", [multireddit path]);
-            // Apollo re-applies its own icon inside every cellForRow pass, so a
-            // plain reload restores the stock icon.
+            // The reload unTAGs the icon views (no stored icon anymore), so
+            // Apollo's own icon returns on the next configure pass.
             [(ApolloMultiEditTableView((UIViewController *)weakSelf) ?: sMultiEditListTable) reloadData];
+            [weakSelf apolloMultiEditPresentEditorFor:multireddit prefillName:pendingName prefillDescription:pendingDescription];
         }]];
     }
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
@@ -461,47 +528,64 @@ static RDKMultireddit *ApolloMultiEditFindByTitle(NSString *title) {
 }
 
 %new
-- (void)apolloMultiEditPickIconFor:(RDKMultireddit *)multireddit {
+- (void)apolloMultiEditPickIconFor:(RDKMultireddit *)multireddit pendingName:(NSString *)pendingName pendingDescription:(NSString *)pendingDescription {
     PHPickerConfiguration *configuration = [[PHPickerConfiguration alloc] init];
     configuration.filter = [PHPickerFilter imagesFilter];
     configuration.selectionLimit = 1;
     PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:configuration];
     picker.delegate = (id<PHPickerViewControllerDelegate>)self;
-    objc_setAssociatedObject(picker, &kApolloMultiEditPickerTargetKey, multireddit, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    NSMutableDictionary *context = [NSMutableDictionary dictionaryWithObject:multireddit forKey:@"multireddit"];
+    if (pendingName) context[@"name"] = [pendingName copy];
+    if (pendingDescription) context[@"description"] = [pendingDescription copy];
+    objc_setAssociatedObject(picker, &kApolloMultiEditPickerTargetKey, context, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [(UIViewController *)self presentViewController:picker animated:YES completion:nil];
 }
 
 // PHPickerViewControllerDelegate — added to the list controller via %new; the
 // picker dispatches by respondsToSelector:, so no compile-time conformance is
-// needed beyond the cast at the assignment.
+// needed beyond the cast at the assignment. Whatever happens (picked,
+// cancelled, or a failed load), the editor reopens with the unsaved field
+// contents it was carrying.
 %new
 - (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
-    RDKMultireddit *multireddit = objc_getAssociatedObject(picker, &kApolloMultiEditPickerTargetKey);
-    [picker dismissViewControllerAnimated:YES completion:nil];
-
+    NSDictionary *context = objc_getAssociatedObject(picker, &kApolloMultiEditPickerTargetKey);
+    RDKMultireddit *multireddit = context[@"multireddit"];
+    NSString *pendingName = context[@"name"];
+    NSString *pendingDescription = context[@"description"];
     NSItemProvider *provider = results.firstObject.itemProvider;
-    if (!multireddit || ![provider canLoadObjectOfClass:[UIImage class]]) return;
 
     __weak typeof(self) weakSelf = self;
-    [provider loadObjectOfClass:[UIImage class] completionHandler:^(id<NSItemProviderReading> object, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (![object isKindOfClass:[UIImage class]]) {
-                ApolloLog(@"[MultiEdit] icon load failed: %@", error);
-                return;
-            }
-            NSString *key = ApolloMultiEditIconKey(multireddit);
-            NSError *saveError = nil;
-            UIImage *scaled = ApolloMultiEditScaledIcon((UIImage *)object);
-            if (key && [[ApolloSubredditCustomIconCache sharedCache] saveIcon:scaled forSubreddit:key error:&saveError]) {
-                [sMultiEditDisplayIconCache removeAllObjects];
-                ApolloLog(@"[MultiEdit] saved custom icon for %@ (%.0fx%.0f)", [multireddit path], scaled.size.width, scaled.size.height);
-                [(ApolloMultiEditTableView((UIViewController *)weakSelf) ?: sMultiEditListTable) reloadData];
-                // Land the user back in the editor they came from.
-                [weakSelf apolloMultiEditPresentEditorFor:multireddit];
-            } else {
-                ApolloLog(@"[MultiEdit] icon save failed for %@: %@", [multireddit path], saveError);
-            }
-        });
+    void (^reopenEditor)(void) = ^{
+        if (multireddit) {
+            [weakSelf apolloMultiEditPresentEditorFor:multireddit prefillName:pendingName prefillDescription:pendingDescription];
+        }
+    };
+
+    [picker dismissViewControllerAnimated:YES completion:^{
+        if (!multireddit || ![provider canLoadObjectOfClass:[UIImage class]]) {
+            reopenEditor(); // cancelled (or unloadable) — just restore the editor
+            return;
+        }
+        [provider loadObjectOfClass:[UIImage class] completionHandler:^(id<NSItemProviderReading> object, NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if ([object isKindOfClass:[UIImage class]]) {
+                    NSString *key = ApolloMultiEditIconKey(multireddit);
+                    NSError *saveError = nil;
+                    UIImage *scaled = ApolloMultiEditScaledIcon((UIImage *)object);
+                    if (key && [[ApolloSubredditCustomIconCache sharedCache] saveIcon:scaled forSubreddit:key error:&saveError]) {
+                        [sMultiEditDisplayIconCache removeAllObjects];
+                        sMultiEditIconEnforcementNeeded = YES;
+                        ApolloLog(@"[MultiEdit] saved custom icon for %@ (%.0fx%.0f)", [multireddit path], scaled.size.width, scaled.size.height);
+                        [(ApolloMultiEditTableView((UIViewController *)weakSelf) ?: sMultiEditListTable) reloadData];
+                    } else {
+                        ApolloLog(@"[MultiEdit] icon save failed for %@: %@", [multireddit path], saveError);
+                    }
+                } else {
+                    ApolloLog(@"[MultiEdit] icon load failed: %@", error);
+                }
+                reopenEditor();
+            });
+        }];
     }];
 }
 
@@ -571,6 +655,27 @@ static RDKMultireddit *ApolloMultiEditFindByTitle(NSString *title) {
 
 %end // ApolloMultiEditList
 
+// The enforcement tag rides the cell's icon image view, and cells are reused
+// across sections — a stale tag would swap a custom icon onto whatever row
+// inherits the cell (seen: a moderator row wearing a multireddit's icon).
+// Clearing on reuse is the one reliable reset point; cellForRow then re-tags
+// only the rows that actually have a custom icon.
+%group ApolloMultiEditCell
+
+%hook RedditListTableViewCell
+
+- (void)prepareForReuse {
+    %orig;
+    UIImageView *iconView = (UIImageView *)ApolloMultiEditObjectIvar(self, "subredditIconImageView");
+    if ([iconView isKindOfClass:[UIImageView class]]) {
+        objc_setAssociatedObject(iconView, &kApolloMultiEditIconEnforceKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    }
+}
+
+%end
+
+%end // ApolloMultiEditCell
+
 %ctor {
     %init;
 
@@ -581,6 +686,13 @@ static RDKMultireddit *ApolloMultiEditFindByTitle(NSString *title) {
         ApolloLog(@"[MultiEdit] list hooks installed on %@", NSStringFromClass(listClass));
     } else {
         ApolloLog(@"[MultiEdit] RedditListViewController class missing; multireddit editing unavailable");
+    }
+
+    Class cellClass = ApolloMultiEditListCellClass();
+    if (cellClass) {
+        %init(ApolloMultiEditCell, RedditListTableViewCell = cellClass);
+    } else {
+        ApolloLog(@"[MultiEdit] RedditListTableViewCell class missing; icon reuse guard unavailable");
     }
 
     // Re-render the list when Hide Multireddit Descriptions changes.
