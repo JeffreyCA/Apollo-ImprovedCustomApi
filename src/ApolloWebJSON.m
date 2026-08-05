@@ -1224,6 +1224,14 @@ static BOOL ApolloWebJSONPermalinkPartsFromLegacyContent(NSString *html, NSStrin
 }
 
 // Defined with the write-repair helpers below; used by the legacy synthesis too.
+typedef struct {
+    NSString *username;
+    NSString *subreddit;
+    NSString *subredditFullName;
+    NSString *linkFullName;
+    NSString *parentFullName;
+} ApolloWebJSONWriteContext;
+static ApolloWebJSONWriteContext ApolloWebJSONRecentCommentWriteContext(void);
 static NSString *ApolloWebJSONRecentCommentWriteUsername(void);
 
 // Extracts the comment author from an old-reddit content blob's data-author
@@ -1296,6 +1304,23 @@ static NSDictionary *ApolloWebJSONSynthesizeModernThingData(NSString *fullname, 
     if (subreddit.length > 0) modern[@"subreddit"] = subreddit;
     if (!modern[@"link_id"] && linkId36.length > 0) modern[@"link_id"] = [@"t3_" stringByAppendingString:linkId36];
 
+    // Legacy blobs without a data-permalink (or with the link/parent fields
+    // stripped) still need the thing's location — an empty subreddit disables
+    // the own-flair backfill and the moderator shield on the inserted cell.
+    // The write context captured at submit time knows it.
+    ApolloWebJSONWriteContext ctx = ApolloWebJSONRecentCommentWriteContext();
+    if (!modern[@"subreddit"] && ctx.subreddit) modern[@"subreddit"] = ctx.subreddit;
+    if (ctx.subredditFullName) modern[@"subreddit_id"] = ctx.subredditFullName;
+    if (!modern[@"link_id"] && ctx.linkFullName) modern[@"link_id"] = ctx.linkFullName;
+    if (!modern[@"parent_id"] && !isEdit && (ctx.parentFullName ?: ctx.linkFullName)) {
+        modern[@"parent_id"] = ctx.parentFullName ?: ctx.linkFullName;
+    }
+    if (!modern[@"permalink"] && modern[@"subreddit"] && [modern[@"link_id"] isKindOfClass:[NSString class]]
+        && [modern[@"link_id"] hasPrefix:@"t3_"]) {
+        modern[@"permalink"] = [NSString stringWithFormat:@"/r/%@/comments/%@/_/%@/",
+                                modern[@"subreddit"], [modern[@"link_id"] substringFromIndex:3], modern[@"id"]];
+    }
+
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     modern[@"created"] = @(now);
     modern[@"created_utc"] = @(now);
@@ -1325,41 +1350,68 @@ static BOOL ApolloWebJSONIsNonEmptyString(id value) {
     return [value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0;
 }
 
-// The username the most recent comment/edit write ran as, captured at submit
-// time from the RDKClient that issued it (ApolloWebJSONNoteCommentWriteClient,
-// called from the identity module's submit hooks). The ACTIVE account is the
-// wrong answer when the composer's account chooser posted as someone else
-// (temporaryPostingAccount): each account owns its own RDKClient, so the
-// submitting client's currentUser IS the posting identity. TTL-bounded so a
-// stale capture can never label an unrelated later repair.
-static NSString *sApolloWebJSONLastWriteUsername = nil;
+// The context of the most recent comment/edit write, captured at submit time
+// (ApolloWebJSONNoteCommentWriteContext, called from the identity module's
+// submit hooks). The username comes from the RDKClient that issued the write —
+// the ACTIVE account is the wrong answer when the composer's account chooser
+// posted as someone else (temporaryPostingAccount): each account owns its own
+// RDKClient, so the submitting client's currentUser IS the posting identity.
+// The subreddit/link/parent fields come from the submit call's typed target
+// (link or parent comment) — the wild degraded /api/comment payload observed
+// on-device (2026-08, 36 keys) strips those alongside author/created/score,
+// and an empty model.subreddit silently disables both the own-flair backfill
+// and the moderator shield on the freshly inserted cell. TTL-bounded so a
+// stale capture can never label an unrelated later repair; single-slot, so two
+// overlapping degraded writes in different subreddits within the TTL could
+// mislabel the earlier one — the response's own fields always win when
+// present, and the same tradeoff already applies to the username capture.
+// (ApolloWebJSONWriteContext is typedef'd above the legacy synthesis, which
+// consumes the same capture.)
+static ApolloWebJSONWriteContext sApolloWebJSONLastWrite;
 static NSTimeInterval sApolloWebJSONLastWriteAt = 0;
 static os_unfair_lock sApolloWebJSONLastWriteLock = OS_UNFAIR_LOCK_INIT;
 
-void ApolloWebJSONNoteCommentWriteClient(id client) {
+static NSString *ApolloWebJSONCopiedNonEmptyString(id value) {
+    return ([value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0) ? [value copy] : nil;
+}
+
+void ApolloWebJSONNoteCommentWriteContext(id client, NSString *subreddit, NSString *subredditFullName,
+                                          NSString *linkFullName, NSString *parentFullName) {
     NSString *name = nil;
     @try {
         id user = [client respondsToSelector:@selector(currentUser)]
             ? ((id (*)(id, SEL))objc_msgSend)(client, @selector(currentUser)) : nil;
         id value = [user respondsToSelector:@selector(username)]
             ? ((id (*)(id, SEL))objc_msgSend)(user, @selector(username)) : nil;
-        if ([value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0) name = [value copy];
-    } @catch (__unused NSException *e) { return; }
-    if (!name) return;
+        name = ApolloWebJSONCopiedNonEmptyString(value);
+    } @catch (__unused NSException *e) {}
     os_unfair_lock_lock(&sApolloWebJSONLastWriteLock);
-    sApolloWebJSONLastWriteUsername = name;
+    sApolloWebJSONLastWrite.username = name;
+    sApolloWebJSONLastWrite.subreddit = ApolloWebJSONCopiedNonEmptyString(subreddit);
+    sApolloWebJSONLastWrite.subredditFullName = ApolloWebJSONCopiedNonEmptyString(subredditFullName);
+    sApolloWebJSONLastWrite.linkFullName = ApolloWebJSONCopiedNonEmptyString(linkFullName);
+    sApolloWebJSONLastWrite.parentFullName = ApolloWebJSONCopiedNonEmptyString(parentFullName);
     sApolloWebJSONLastWriteAt = [NSDate timeIntervalSinceReferenceDate];
     os_unfair_lock_unlock(&sApolloWebJSONLastWriteLock);
 }
 
-// nil when no write was captured recently — callers fall back to the active
-// account. 60s comfortably covers submit -> response -> serializer.
-static NSString *ApolloWebJSONRecentCommentWriteUsername(void) {
+// Zeroed struct when no write was captured recently — callers fall back to the
+// active account / leave fields unfilled. 60s comfortably covers
+// submit -> response -> serializer.
+static ApolloWebJSONWriteContext ApolloWebJSONRecentCommentWriteContext(void) {
     os_unfair_lock_lock(&sApolloWebJSONLastWriteLock);
-    NSString *name = sApolloWebJSONLastWriteUsername;
-    BOOL fresh = name.length > 0 && ([NSDate timeIntervalSinceReferenceDate] - sApolloWebJSONLastWriteAt) < 60.0;
+    ApolloWebJSONWriteContext ctx = sApolloWebJSONLastWrite;
+    BOOL fresh = ([NSDate timeIntervalSinceReferenceDate] - sApolloWebJSONLastWriteAt) < 60.0 && sApolloWebJSONLastWriteAt > 0;
     os_unfair_lock_unlock(&sApolloWebJSONLastWriteLock);
-    return fresh ? name : nil;
+    if (!fresh) {
+        ApolloWebJSONWriteContext empty = {nil, nil, nil, nil, nil};
+        return empty;
+    }
+    return ctx;
+}
+
+static NSString *ApolloWebJSONRecentCommentWriteUsername(void) {
+    return ApolloWebJSONRecentCommentWriteContext().username;
 }
 
 // A timestamp-ish numeric field that's absent, JSON-null, the wrong type, or
@@ -1371,13 +1423,17 @@ static BOOL ApolloWebJSONTimestampMissing(id value) {
 }
 
 // The milder variant of the same degraded write response: a MODERN-shaped thing
-// (body present) that is missing the render-critical fields — author,
-// created/created_utc, score. RedditKit then parses a comment with no
-// author/avatar/flair, an epoch-1970 timestamp and score 0: the identical blank
-// cell the legacy shape produces. Fill ONLY the missing fields, with the same
-// optimistic values the legacy synthesis uses; anything present is never
-// overwritten. Returns nil when the thing is already complete — the
-// overwhelmingly common case, making this a strict no-op for healthy responses.
+// (body present) that is missing render-critical fields — author,
+// created/created_utc, score, and (in the wild 36-key payload observed
+// 2026-08) the thing's location: subreddit/link_id/parent_id/permalink.
+// RedditKit then parses a comment with no author/avatar, an epoch-1970
+// timestamp, score 0 — and an empty subreddit, which silently disables the
+// own-flair backfill and the moderator shield on the inserted cell. Fill ONLY
+// the missing fields — identity/score with the same optimistic values the
+// legacy synthesis uses, location from the write context captured at submit
+// time; anything present is never overwritten. Returns nil when the thing is
+// already complete — the overwhelmingly common case, making this a strict
+// no-op for healthy responses.
 static NSDictionary *ApolloWebJSONCompleteModernThingData(NSDictionary *td, BOOL isEdit, NSArray<NSString *> **outFilled) {
     NSMutableArray<NSString *> *filled = [NSMutableArray array];
     NSMutableDictionary *patched = [td mutableCopy];
@@ -1424,6 +1480,45 @@ static NSDictionary *ApolloWebJSONCompleteModernThingData(NSDictionary *td, BOOL
         }
         if (!isEdit && ![td[@"likes"] isKindOfClass:[NSNumber class]]) {
             patched[@"likes"] = @YES;
+        }
+    }
+
+    // Location fields, from the write context captured at submit time. An empty
+    // model.subreddit is what silently kills the own-flair backfill and the
+    // moderator shield on the fresh cell (both key off the comment's
+    // subreddit), so this is as render-critical as author/created/score.
+    ApolloWebJSONWriteContext ctx = ApolloWebJSONRecentCommentWriteContext();
+    if (!ApolloWebJSONIsNonEmptyString(td[@"subreddit"]) && ctx.subreddit) {
+        patched[@"subreddit"] = ctx.subreddit;
+        [filled addObject:@"subreddit"];
+    }
+    if (!ApolloWebJSONIsNonEmptyString(td[@"subreddit_id"]) && ctx.subredditFullName) {
+        patched[@"subreddit_id"] = ctx.subredditFullName;
+        [filled addObject:@"subreddit_id"];
+    }
+    if (!ApolloWebJSONIsNonEmptyString(td[@"link_id"]) && ctx.linkFullName) {
+        patched[@"link_id"] = ctx.linkFullName;
+        [filled addObject:@"link_id"];
+    }
+    // A top-level comment's parent IS the link; a reply's is the parent t1.
+    // Only creates: an edit's parent is not in the context (the edited comment
+    // could be nested anywhere), and edits prefer the info.json refetch anyway.
+    if (!isEdit && !ApolloWebJSONIsNonEmptyString(td[@"parent_id"])) {
+        NSString *parent = ctx.parentFullName ?: ctx.linkFullName;
+        if (parent) {
+            patched[@"parent_id"] = parent;
+            [filled addObject:@"parent_id"];
+        }
+    }
+    if (!ApolloWebJSONIsNonEmptyString(td[@"permalink"]) && ctx.subreddit && ctx.linkFullName) {
+        // "/_/" is old-reddit's wildcard slug — Reddit resolves it for any post.
+        NSString *link36 = [ctx.linkFullName hasPrefix:@"t3_"] ? [ctx.linkFullName substringFromIndex:3] : nil;
+        NSString *own = ApolloWebJSONIsNonEmptyString(td[@"id"]) ? td[@"id"]
+                      : (ApolloWebJSONIsNonEmptyString(td[@"name"]) && [td[@"name"] hasPrefix:@"t1_"]
+                         ? [td[@"name"] substringFromIndex:3] : nil);
+        if (link36 && own) {
+            patched[@"permalink"] = [NSString stringWithFormat:@"/r/%@/comments/%@/_/%@/", ctx.subreddit, link36, own];
+            [filled addObject:@"permalink"];
         }
     }
 

@@ -111,12 +111,19 @@ BOOL ApolloWebJSONRequestIsInternal(NSURL *url);
 // request with ApolloWebJSONProbeURL so the transport hooks leave it alone.
 NSString *ApolloWebJSONKeylessOAuthBearer(NSString *username);
 
-// Captures the posting identity for the write-response repair. Called from the
+// Captures the write context for the write-response repair. Called from the
 // identity module's RDKClient submit/edit hooks with the client that issued the
-// write; the repair reads it (TTL-bounded) when a degraded response is missing
-// its author — each account owns its own RDKClient, so the submitting client's
-// currentUser is the true posting identity even for temporaryPostingAccount.
-void ApolloWebJSONNoteCommentWriteClient(id client);
+// write plus everything the call site knows about WHERE the write landed; the
+// repair reads it (TTL-bounded) when a degraded response is missing those
+// fields. The client resolves the posting identity (each account owns its own
+// RDKClient, so the submitting client's currentUser is the true posting
+// identity even for temporaryPostingAccount); subreddit/subredditFullName come
+// from the target link/parent comment, linkFullName is the t3 the comment
+// lives under, and parentFullName is the t1 being replied to (nil for
+// top-level comments and edits). Any argument may be nil — the repair fills
+// only what it has.
+void ApolloWebJSONNoteCommentWriteContext(id client, NSString *subreddit, NSString *subredditFullName,
+                                          NSString *linkFullName, NSString *parentFullName);
 
 // Fetch-outcome feedback for ApolloWebJSONKeylessOAuthBearer callers: report a
 // 401/403 so a minted bearer proven dead (an anonymous token from a signed-out

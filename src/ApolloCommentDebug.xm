@@ -170,10 +170,19 @@ static NSData *ApolloCommentDebugPartialData(NSData *data) {
     NSArray *things = [json[@"data"] isKindOfClass:[NSDictionary class]] ? json[@"data"][@"things"] : nil;
     if (![things isKindOfClass:[NSArray class]] || things.count == 0) return nil;
 
+    // Matches the wild degraded payload observed on-device 2026-08 (36 keys of
+    // the healthy ~86): identity, timestamps, votes, flair AND the thing's
+    // location (subreddit/link/permalink) are all stripped. The location keys
+    // are the ones whose absence blanks the own-flair pill and the moderator
+    // shield even after author/created/score are filled.
     NSArray *stripKeys = @[ @"author", @"author_fullname", @"created", @"created_utc",
                             @"score", @"ups", @"downs", @"likes",
                             @"author_flair_richtext", @"author_flair_text", @"author_flair_type",
-                            @"author_flair_template_id", @"author_flair_css_class" ];
+                            @"author_flair_template_id", @"author_flair_css_class",
+                            @"subreddit", @"subreddit_id", @"subreddit_name_prefixed", @"subreddit_type",
+                            @"link_id", @"parent_id", @"permalink",
+                            @"distinguished", @"is_submitter", @"author_premium", @"author_patreon_flair",
+                            @"total_awards_received", @"gilded", @"all_awardings" ];
     NSMutableArray *strippedThings = [NSMutableArray array];
     for (NSDictionary *thing in things) {
         NSDictionary *td = [thing isKindOfClass:[NSDictionary class]] ? thing[@"data"] : nil;

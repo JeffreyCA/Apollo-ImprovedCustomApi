@@ -692,6 +692,21 @@ void ApolloWebJSONRepairPoisonedAccountBlobs(void) {
               (unsigned long)repaired);
 }
 
+// The typed submit entry points tail-call submitComment:onThingWithFullName:
+// on the same thread; this flag keeps that inner call from clobbering the
+// richer write-context capture (same pattern as ApolloOwnCommentFlair's
+// typed-submit scope).
+static NSString *const kApolloWebJSONTypedWriteScopeKey = @"ApolloWebJSONTypedWriteScope";
+
+// String-typed property read tolerant of foreign/odd objects.
+static id ApolloWebJSONThingProperty(id thing, SEL selector) {
+    if (![thing respondsToSelector:selector]) return nil;
+    id value = nil;
+    @try { value = ((id (*)(id, SEL))objc_msgSend)(thing, selector); }
+    @catch (__unused NSException *e) { return nil; }
+    return [value isKindOfClass:[NSString class]] ? value : nil;
+}
+
 %hook RDKClient
 
 // When the loaded account installs its currentUser (RDKMe) without a username,
@@ -771,29 +786,58 @@ void ApolloWebJSONRepairPoisonedAccountBlobs(void) {
 }
 
 // The write-response repair (ApolloWebJSONFixupWriteResponseObject) may need to
-// know WHO a degraded /api/comment / /api/editusertext response belongs to.
+// know WHO a degraded /api/comment / /api/editusertext response belongs to and
+// WHERE it landed (the wild degraded payload strips subreddit/link_id too,
+// which blanks the own-flair pill and the moderator shield on the fresh cell).
 // The active account is the wrong answer when the composer posted as a
 // different account (temporaryPostingAccount), so capture the identity at
 // submit time from the client itself — each account owns its own RDKClient,
-// making self.currentUser the true posting identity.
+// making self.currentUser the true posting identity — and the location from
+// the typed target (link / parent comment).
 
 - (id)submitComment:(id)text onLink:(id)link completion:(id)completion {
-    ApolloWebJSONNoteCommentWriteClient(self);
-    return %orig;
+    ApolloWebJSONNoteCommentWriteContext(self,
+                                         ApolloWebJSONThingProperty(link, @selector(subreddit)),
+                                         ApolloWebJSONThingProperty(link, @selector(subredditFullName)),
+                                         ApolloWebJSONThingProperty(link, @selector(fullName)),
+                                         nil);
+    [NSThread currentThread].threadDictionary[kApolloWebJSONTypedWriteScopeKey] = @YES;
+    id result = %orig;
+    [[NSThread currentThread].threadDictionary removeObjectForKey:kApolloWebJSONTypedWriteScopeKey];
+    return result;
 }
 
 - (id)submitComment:(id)text asReplyToComment:(id)parent completion:(id)completion {
-    ApolloWebJSONNoteCommentWriteClient(self);
-    return %orig;
+    ApolloWebJSONNoteCommentWriteContext(self,
+                                         ApolloWebJSONThingProperty(parent, @selector(subreddit)),
+                                         ApolloWebJSONThingProperty(parent, @selector(subredditID)),
+                                         ApolloWebJSONThingProperty(parent, @selector(linkID)),
+                                         ApolloWebJSONThingProperty(parent, @selector(fullName)));
+    [NSThread currentThread].threadDictionary[kApolloWebJSONTypedWriteScopeKey] = @YES;
+    id result = %orig;
+    [[NSThread currentThread].threadDictionary removeObjectForKey:kApolloWebJSONTypedWriteScopeKey];
+    return result;
 }
 
 - (id)submitComment:(id)text onThingWithFullName:(id)fullName completion:(id)completion {
-    ApolloWebJSONNoteCommentWriteClient(self);
+    // Only when reached directly: the typed entry points above already captured
+    // a richer context and tail-call through here on the same thread.
+    if (![[NSThread currentThread].threadDictionary[kApolloWebJSONTypedWriteScopeKey] boolValue]) {
+        NSString *target = [fullName isKindOfClass:[NSString class]] ? fullName : nil;
+        BOOL targetIsLink = [target hasPrefix:@"t3_"];
+        ApolloWebJSONNoteCommentWriteContext(self, nil, nil,
+                                             targetIsLink ? target : nil,
+                                             targetIsLink ? nil : target);
+    }
     return %orig;
 }
 
 - (id)editComment:(id)comment newText:(id)text completion:(id)completion {
-    ApolloWebJSONNoteCommentWriteClient(self);
+    ApolloWebJSONNoteCommentWriteContext(self,
+                                         ApolloWebJSONThingProperty(comment, @selector(subreddit)),
+                                         ApolloWebJSONThingProperty(comment, @selector(subredditID)),
+                                         ApolloWebJSONThingProperty(comment, @selector(linkID)),
+                                         nil);
     return %orig;
 }
 
