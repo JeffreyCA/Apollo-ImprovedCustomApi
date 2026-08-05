@@ -63,6 +63,7 @@ NSInteger sScrollEdgeEffectStyle = ApolloScrollEdgeEffectStyleAutomatic;
 BOOL sModernSubredditDividers = YES;
 BOOL sSubredditListEnhancements = YES;
 BOOL sHideSubredditListDescriptions = NO;
+BOOL sHideMultiredditDescriptions = NO;
 BOOL sEnableFlairColors = NO;
 BOOL sEnableInlineImages = NO;
 BOOL sEnableChatMedia = NO;   // effective default YES via registerDefaults (UDKeyEnableChatMedia)
