@@ -56,6 +56,12 @@ NS_ASSUME_NONNULL_BEGIN
 // recent-actions array (from ApolloCrashContext). JSON-safe values only.
 - (void)publishUserInfoWithRecentActions:(NSArray<NSDictionary *> *)recentActions;
 
+// FLEX-gated testing aid: write a REAL report through KSCrash's user-reported
+// path WITHOUT terminating the app. Exercises the whole pipeline (store →
+// sanitize → review → submit → confirmed deletion) end to end. Returns the
+// new report's ID, or nil when the recorder isn't installed / nothing landed.
+- (nullable NSNumber *)writeTestCrashReport;
+
 @end
 
 NS_ASSUME_NONNULL_END

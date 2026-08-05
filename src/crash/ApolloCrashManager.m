@@ -76,11 +76,14 @@
     // site confirms a submission that included the crash attachment.
     configuration.reportStoreConfiguration.reportCleanupPolicy = KSCrashReportCleanupPolicyNever;
 
+    // UserReported is passive — it never hooks anything and only fires on the
+    // explicit -writeTestCrashReport call (the FLEX-gated testing aid).
     configuration.monitors =
         KSCrashMonitorTypeMachException |
         KSCrashMonitorTypeSignal |
         KSCrashMonitorTypeCPPException |
         KSCrashMonitorTypeNSException |
+        KSCrashMonitorTypeUserReported |
         KSCrashMonitorTypeSystem |
         KSCrashMonitorTypeApplicationState |
         KSCrashMonitorTypeMemoryTermination;
@@ -185,13 +188,22 @@
         return nil;
     }
 
+    // The sanitized dict keeps absent values as NSNull for a stable JSON
+    // schema — never let those reach the NSString-typed model fields
+    // (-[NSNull length] took this very screen down during testing).
+    NSDictionary *crashSection =
+        [sanitized[@"crash"] isKindOfClass:NSDictionary.class] ? sanitized[@"crash"] : @{};
+    NSString *(^stringOrNil)(id) = ^NSString *(id value) {
+        return [value isKindOfClass:NSString.class] ? value : nil;
+    };
+
     ApolloPendingCrashReport *result = [[ApolloPendingCrashReport alloc] init];
     result.reportID = reportID;
     result.sanitizedDictionary = sanitized;
     result.crashDate = [ApolloCrashSanitizer crashDateFromSanitizedReport:sanitized];
-    result.crashCategory = sanitized[@"crash"][@"category"] ?: @"unknown";
-    result.exceptionName = sanitized[@"crash"][@"exception_name"];
-    result.sanitizedReason = sanitized[@"crash"][@"sanitized_reason"];
+    result.crashCategory = stringOrNil(crashSection[@"category"]) ?: @"unknown";
+    result.exceptionName = stringOrNil(crashSection[@"exception_name"]);
+    result.sanitizedReason = stringOrNil(crashSection[@"sanitized_reason"]);
     result.humanReadableSummary = [ApolloCrashSanitizer textSummaryForSanitizedReport:sanitized];
     return result;
 }
@@ -204,6 +216,31 @@
 - (void)deleteAllReports {
     [[self reportStore] deleteAllReports];
     ApolloLog(@"[CrashCapture] deleted all local reports");
+}
+
+#pragma mark - Testing
+
+- (NSNumber *)writeTestCrashReport {
+    if (!_installed) return nil;
+    NSSet<NSNumber *> *before = [NSSet setWithArray:self.pendingReportIDs];
+    // terminateProgram:NO — the report is recorded and the app keeps running.
+    // logAllThreads:YES so the report has realistic thread/backtrace content
+    // for exercising the sanitizer and symbolication.
+    [[KSCrash sharedInstance] reportUserException:@"ApolloRebornTestReport"
+                                           reason:@"Deliberate test report from Settings — the app did not actually crash"
+                                         language:nil
+                                       lineOfCode:nil
+                                       stackTrace:nil
+                                    logAllThreads:YES
+                                 terminateProgram:NO];
+    for (NSNumber *reportID in self.pendingReportIDs) {
+        if (![before containsObject:reportID]) {
+            ApolloLog(@"[CrashCapture] wrote test report %@ (no crash)", reportID);
+            return reportID;
+        }
+    }
+    ApolloLog(@"[CrashCapture] test report requested but none appeared in the store");
+    return nil;
 }
 
 #pragma mark - userInfo
