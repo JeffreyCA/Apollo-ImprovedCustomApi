@@ -976,6 +976,16 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl);
 }
 
 - (void)updateGlassForHostView:(UIView *)hostView candidateViews:(NSArray<UIView *> *)candidateViews {
+    // The top scroll-edge effect normally supplies enough material behind the
+    // title. Add a separate capsule only when that header effect is hidden;
+    // otherwise the two glass layers stack and every title looks button-like.
+    if (sScrollEdgeEffectStyle != ApolloScrollEdgeEffectStyleHidden) {
+        [self.glassView removeFromSuperview];
+        self.glassView = nil;
+        self.glassHostView = nil;
+        return;
+    }
+
     CGRect targetFrame = [self glassFrameForHostView:hostView candidateViews:candidateViews];
     if (CGRectIsNull(targetFrame) || CGRectIsEmpty(targetFrame)) {
         [self.glassView removeFromSuperview];
@@ -1522,4 +1532,12 @@ void ApolloLGTitleCenteringModeChanged(void) {
     if (objc_getClass("_UINavigationBarPlatterView")) {
         %init(ApolloLGPlatterPoke);
     }
+    // Switching the edge/header effect does not alter title geometry, so force
+    // a refresh to install or remove the conditional title capsule immediately.
+    [[NSNotificationCenter defaultCenter] addObserverForName:@"ApolloScrollEdgeEffectStyleChangedNotification"
+                                                       object:nil
+                                                        queue:[NSOperationQueue mainQueue]
+                                                   usingBlock:^(__unused NSNotification *notification) {
+        ApolloLGTitleCenteringModeChanged();
+    }];
 }
