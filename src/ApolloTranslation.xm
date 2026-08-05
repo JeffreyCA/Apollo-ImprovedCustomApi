@@ -167,21 +167,48 @@ static NSMutableSet<NSString *> *sLoggedSkippedStructuredPostFullNames;
 // persistence on backgrounding. All writes go through helper macros below.
 static NSMutableDictionary<NSString *, NSString *> *sCommentTranslationMirror = nil;
 static NSMutableDictionary<NSString *, NSString *> *sLinkTranslationMirror = nil;
+// The NSCaches these mirror are capped (2048/256) but the mirrors themselves
+// were unbounded — an all-day session accumulated every translated body ever
+// shown. Cap them the same insertion-order way as sRawTranslationMirror below.
+static NSMutableArray<NSString *> *sCommentTranslationMirrorOrder = nil;
+static NSMutableArray<NSString *> *sLinkTranslationMirrorOrder = nil;
+static const NSUInteger kApolloTranslationMirrorCap = 4096;
+static void ApolloMirrorSetCapped(NSMutableDictionary<NSString *, NSString *> *mirror,
+                                  NSMutableArray<NSString *> *order,
+                                  NSString *key, NSString *value) {
+    @synchronized (mirror) {
+        if (!mirror[key]) [order addObject:key];
+        mirror[key] = value;
+        if (order.count > kApolloTranslationMirrorCap) {
+            NSRange oldest = NSMakeRange(0, order.count / 4);
+            for (NSString *evicted in [order subarrayWithRange:oldest]) {
+                [mirror removeObjectForKey:evicted];
+            }
+            [order removeObjectsInRange:oldest];
+        }
+    }
+}
 static inline void ApolloMirrorSetComment(NSString *key, NSString *value) {
     if (!key || !value) return;
-    @synchronized (sCommentTranslationMirror) { sCommentTranslationMirror[key] = value; }
+    ApolloMirrorSetCapped(sCommentTranslationMirror, sCommentTranslationMirrorOrder, key, value);
 }
 static inline void ApolloMirrorRemoveComment(NSString *key) {
     if (!key) return;
-    @synchronized (sCommentTranslationMirror) { [sCommentTranslationMirror removeObjectForKey:key]; }
+    @synchronized (sCommentTranslationMirror) {
+        [sCommentTranslationMirror removeObjectForKey:key];
+        [sCommentTranslationMirrorOrder removeObject:key];
+    }
 }
 static inline void ApolloMirrorSetLink(NSString *key, NSString *value) {
     if (!key || !value) return;
-    @synchronized (sLinkTranslationMirror) { sLinkTranslationMirror[key] = value; }
+    ApolloMirrorSetCapped(sLinkTranslationMirror, sLinkTranslationMirrorOrder, key, value);
 }
 static inline void ApolloMirrorRemoveLink(NSString *key) {
     if (!key) return;
-    @synchronized (sLinkTranslationMirror) { [sLinkTranslationMirror removeObjectForKey:key]; }
+    @synchronized (sLinkTranslationMirror) {
+        [sLinkTranslationMirror removeObjectForKey:key];
+        [sLinkTranslationMirrorOrder removeObject:key];
+    }
 }
 // Mirror of the raw text-keyed cache (sTranslationCache). Titles, rich link
 // previews, and post bodies key by source text rather than fullName, so they
@@ -253,8 +280,14 @@ static void ApolloClearAllTranslationCaches(void) {
         [sRawTranslationMirror removeAllObjects];
         [sRawTranslationMirrorOrder removeAllObjects];
     }
-    @synchronized (sCommentTranslationMirror) { [sCommentTranslationMirror removeAllObjects]; }
-    @synchronized (sLinkTranslationMirror) { [sLinkTranslationMirror removeAllObjects]; }
+    @synchronized (sCommentTranslationMirror) {
+        [sCommentTranslationMirror removeAllObjects];
+        [sCommentTranslationMirrorOrder removeAllObjects];
+    }
+    @synchronized (sLinkTranslationMirror) {
+        [sLinkTranslationMirror removeAllObjects];
+        [sLinkTranslationMirrorOrder removeAllObjects];
+    }
 }
 static NSMutableDictionary<NSString *, NSMutableArray *> *sPendingTranslationCallbacks;
 static __weak UIViewController *sVisibleCommentsViewController = nil;
@@ -9436,7 +9469,9 @@ static void ApolloDbgPurgeNSCaches(CFNotificationCenterRef c, void *o, CFStringR
     sLoggedSkippedCommentFullNames = [NSMutableSet set];
     sLoggedSkippedStructuredPostFullNames = [NSMutableSet set];
     sCommentTranslationMirror = [NSMutableDictionary dictionary];
+    sCommentTranslationMirrorOrder = [NSMutableArray array];
     sLinkTranslationMirror = [NSMutableDictionary dictionary];
+    sLinkTranslationMirrorOrder = [NSMutableArray array];
     sRawTranslationMirror = [NSMutableDictionary dictionary];
     sRawTranslationMirrorOrder = [NSMutableArray array];
     sPendingTranslationCallbacks = [NSMutableDictionary dictionary];
