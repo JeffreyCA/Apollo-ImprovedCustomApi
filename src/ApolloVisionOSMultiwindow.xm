@@ -75,17 +75,25 @@ static BOOL ApolloIsRunningOnVisionOS(void) {
 
 #pragma mark - Window / scene helpers
 
+// Multiple windows can stay foreground-active at once on visionOS, and
+// connectedScenes is unordered, so prefer the scene that owns the key window
+// before falling back to any foreground-active scene.
 static UIWindowScene *ApolloForegroundWindowScene(void) {
+    UIWindowScene *foreground = nil;
     UIWindowScene *fallback = nil;
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
         if (![scene isKindOfClass:[UIWindowScene class]]) continue;
         UIWindowScene *windowScene = (UIWindowScene *)scene;
-        if (windowScene.activationState == UISceneActivationStateForegroundActive) {
-            return windowScene;
+        for (UIWindow *window in windowScene.windows) {
+            if (window.isKeyWindow) return windowScene;
+        }
+        if (!foreground &&
+            windowScene.activationState == UISceneActivationStateForegroundActive) {
+            foreground = windowScene;
         }
         if (!fallback) fallback = windowScene;
     }
-    return fallback;
+    return foreground ?: fallback;
 }
 
 // Reproduce a scene's window in a new scene. Apollo's SceneDelegate does not
