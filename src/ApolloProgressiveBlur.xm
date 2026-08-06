@@ -19,8 +19,8 @@
 // *under* the effect view; filtering the top-level layer would only re-filter
 // already-processed output), with an inputMaskImage whose alpha ramps the blur
 // radius across the view's height, and inputNormalizeEdges so the effect
-// doesn't break at screen edges. A separate feather gradient on the view's own
-// layer mask fades the bottom edge out so the blur has no visible seam.
+// doesn't break at screen edges. A second gradient masks the effect view itself
+// so the bottom edge feathers smoothly into the unmodified content.
 //
 // One blur view is hosted per UINavigationBar as a sibling directly beneath
 // it. Its frame extends above the bar to cover the status-bar gap, but ends at
@@ -33,9 +33,6 @@
 // (ApolloScrollEdgeEffect.xm leaves style untouched in Blur mode, so the
 // automatic treatment shows).
 
-// The final part of the header fades to transparent. This is deliberately an
-// in-bounds feather, not an extension below the navigation bar.
-static const CGFloat kApolloBlurBottomFeather = 36.0;
 // Cover the status bar gap above the bar (~59pt on notched devices, ~26pt for
 // sheet-attached bars) but never a centered-formSheet-sized offset — a bar
 // sitting far from its window's top edge is not header chrome from y=0.
@@ -80,6 +77,7 @@ BOOL ApolloProgressiveBlurAvailable(void) {
     // make the content boundary explicit: UIKit can rebuild/resize the private
     // backdrop view during transitions and it must never sample below the bar.
     self.clipsToBounds = YES;
+    self.backgroundColor = UIColor.clearColor;
 
     _filter = ApolloNewVariableBlurFilter();
     [_filter setValue:@(kApolloBlurRadius) forKey:@"inputRadius"];
@@ -91,6 +89,7 @@ BOOL ApolloProgressiveBlurAvailable(void) {
         (id)UIColor.blackColor.CGColor,
         (id)UIColor.clearColor.CGColor,
     ];
+    _featherMask.locations = @[@0, @0.55, @1];
     self.layer.mask = _featherMask;
     return self;
 }
@@ -128,15 +127,13 @@ BOOL ApolloProgressiveBlurAvailable(void) {
 
     if (_maskedHeight != height) [self regenerateMaskForHeight:height];
 
-    // The backdrop subview samples the pixels under the view; every other
-    // subview is tint/overlay chrome that greys the blur out — keep them
-    // hidden (UIKit can re-add them on trait changes, hence every pass).
+    // The backdrop subview samples the pixels under the view. Keep the rest of
+    // UIVisualEffectView's material intact, matching the reference recipe.
     UIView *backdrop = nil;
     for (UIView *subview in self.subviews) {
         if ([NSStringFromClass(subview.class) containsString:@"Backdrop"]) {
             backdrop = subview;
-        } else {
-            subview.hidden = YES;
+            break;
         }
     }
     if (!backdrop) backdrop = self.subviews.firstObject;
@@ -151,7 +148,6 @@ BOOL ApolloProgressiveBlurAvailable(void) {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     _featherMask.frame = self.bounds;
-    _featherMask.locations = @[@0, @(MAX(0.0, height - kApolloBlurBottomFeather) / height), @1];
     [CATransaction commit];
 }
 
