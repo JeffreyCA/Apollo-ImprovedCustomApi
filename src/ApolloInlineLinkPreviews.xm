@@ -142,6 +142,8 @@ static char kApolloLinkPreviewSourceURLStringKey;
 static char kApolloLinkPreviewImageFallbackURLKey;
 static char kApolloLinkPreviewImageFallbackScheduledKey;
 static char kApolloLinkPreviewImageFallbackInFlightKey;
+// URL string this node has already spent its one self-scheduled retry on.
+static char kApolloLinkPreviewImageFallbackRetriedURLKey;
 static char kApolloLinkPreviewImageFallbackAppliedURLKey;
 static char kApolloLinkPreviewImageFallbackResizeInFlightURLKey;
 static char kApolloLinkPreviewRenderSignaturesKey;
@@ -1251,6 +1253,53 @@ static void ApolloLPApplyFallbackImage(ASNetworkImageNode *imageNode, NSURL *ima
     });
 }
 
+static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL *imageURL, NSString *host);
+
+// One self-scheduled retry per (node, URL), fired just past the transient
+// cooldown so ApolloLPStartFallbackImageFetch's own cooldown guard lets it
+// through. This is the only non-event-driven fetch trigger in the module, and
+// it exists for exactly one case: the card was on screen when its fetch failed,
+// so no further preload/visible event is coming to re-kick it.
+//
+// Deliberately not a poll — the retry is armed once per URL, and if it also
+// fails the card returns to the event-driven path (scroll away and back, or a
+// rebuild) exactly as before. Everything is re-checked at fire time, so a node
+// that has been recycled onto a different URL, has since acquired an image, has
+// scrolled out of range, or whose URL got dead-marked in the meantime spends
+// nothing.
+static void ApolloLPScheduleOneFallbackImageRetry(ASNetworkImageNode *imageNode, NSURL *imageURL, NSString *host) {
+    if (!imageNode || !ApolloLPURLIsHTTP(imageURL)) return;
+    NSString *key = imageURL.absoluteString;
+    if (key.length == 0) return;
+
+    // Already spent this node's retry on this URL.
+    NSString *retriedURL = objc_getAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackRetriedURLKey);
+    if ([retriedURL isEqualToString:key]) return;
+    objc_setAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackRetriedURLKey, key, OBJC_ASSOCIATION_COPY_NONATOMIC);
+
+    __weak ASNetworkImageNode *weakImageNode = imageNode;
+    NSURL *imageURLCopy = imageURL;
+    NSString *hostCopy = [host copy];
+    int64_t delay = (int64_t)((kApolloLPImageTransientRetryCooldown + 0.5) * NSEC_PER_SEC);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delay), dispatch_get_main_queue(), ^{
+        ASNetworkImageNode *strongImageNode = weakImageNode;
+        if (!strongImageNode) return;
+        // The node may have been recycled onto another link since the failure.
+        NSURL *currentURL = objc_getAssociatedObject(strongImageNode, &kApolloLinkPreviewImageFallbackURLKey);
+        if (![currentURL.absoluteString isEqualToString:imageURLCopy.absoluteString]) return;
+        // Texture's own loader, or a sibling card sharing the fallback cache,
+        // may have landed the image while we waited.
+        if (ApolloLPNetworkImageNodeHasImage(strongImageNode)) return;
+        // Off-screen now: the ordinary preload/visible path owns it again, and
+        // spending a fetch on a row nobody is looking at is what the
+        // fetch-range guard exists to avoid.
+        if (!ApolloLPNodeIsInFetchRange((ASDisplayNode *)strongImageNode)) return;
+        ApolloLog(@"[LinkPreviews] retrying on-screen image fetch after cooldown host=%@", hostCopy);
+        // Dead-mark, cooldown and in-flight are all re-checked inside.
+        ApolloLPStartFallbackImageFetch(strongImageNode, imageURLCopy, hostCopy);
+    });
+}
+
 static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL *imageURL, NSString *host) {
     if (!imageNode || !ApolloLPURLIsHTTP(imageURL)) return;
     // Dead-marked URLs don't get re-fetched during the cooldown — refetching
@@ -1318,6 +1367,18 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
                 // later card build may schedule again — the marker's job is to
                 // dedupe PENDING work, not to make the first failure terminal.
                 objc_setAssociatedObject(strongImageNode, &kApolloLinkPreviewImageFallbackScheduledKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+                // ...but clearing the marker only helps a card that gets ANOTHER
+                // lifecycle event. On a card already on screen when the fetch
+                // failed, didEnterPreloadState and didEnterVisibleState fired
+                // long before a 15s timeout resolved, and nothing re-enters
+                // after the cooldown — so the card stayed visibly blank until
+                // the user scrolled it away and back. Schedule exactly one
+                // retry for the cooldown deadline; every guard is re-evaluated
+                // when it fires, and a second failure falls back to the
+                // event-driven path rather than looping.
+                if (!definitivelyDead) {
+                    ApolloLPScheduleOneFallbackImageRetry(strongImageNode, imageURL, hostCopy);
+                }
             }
             ApolloLPApplyFallbackImage(strongImageNode, imageURL, image, hostCopy);
 
@@ -1355,6 +1416,12 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
 static void ApolloLPScheduleImageFallbackIfNeeded(ASNetworkImageNode *imageNode, NSURL *imageURL, NSString *host) {
     if (!imageNode || !ApolloLPURLIsHTTP(imageURL)) return;
     if (ApolloLPImageURLIsDead(imageURL)) return;
+    NSURL *previousURL = objc_getAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackURLKey);
+    if (previousURL && ![previousURL.absoluteString isEqualToString:imageURL.absoluteString]) {
+        // Recycled onto a different link: the new URL gets its own retry
+        // budget, and a marker left from the old one must not suppress it.
+        objc_setAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackRetriedURLKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    }
     objc_setAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackURLKey, imageURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     NSString *cacheKey = imageURL.absoluteString;
