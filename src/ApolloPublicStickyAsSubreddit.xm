@@ -285,7 +285,10 @@ void ApolloInjectPublicStickyAsSubredditIfNeeded(NSMutableArray *children, NSStr
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (!PSIsNotifyActionSheet(self) || indexPath.row != sSheetOrigRowCount) { %orig; return; }
+    if (!PSIsNotifyActionSheet(self) || indexPath.row != sSheetOrigRowCount) {
+        %orig;
+        return;
+    }
     // Our appended row: arm the flag, then run row 0's native handler.
     sSendNextRemovalAsSubreddit = YES;
     ApolloLog(@"[PublicStickyAsSub] (sheet) 'from Subreddit' tapped; arming + running row-0 flow");

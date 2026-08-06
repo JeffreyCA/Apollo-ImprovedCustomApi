@@ -382,8 +382,14 @@ static void ApolloVFHandleModelUpdate(id note, void (^origCall)(void)) {
 %end
 
 %hook _TtC6Apollo22CommentsHeaderCellNode
-- (void)didEnterVisibleState { %orig; ApolloVFTrackCell(self, YES); }
-- (void)didExitVisibleState  { %orig; ApolloVFTrackCell(self, NO);  }
+- (void)didEnterVisibleState {
+    %orig;
+    ApolloVFTrackCell(self, YES);
+}
+- (void)didExitVisibleState {
+    %orig;
+    ApolloVFTrackCell(self, NO);
+}
 %end
 
 // CommentsInfoNode's plain -init is intentionally unavailable in Apollo's
@@ -411,24 +417,42 @@ static void ApolloVFHandleModelUpdate(id note, void (^origCall)(void)) {
 // Feed post cells participate in the foreground heal below (their text blanks
 // the same way when the app returns from the background).
 %hook _TtC6Apollo17LargePostCellNode
-- (void)didEnterVisibleState { %orig; ApolloVFTrackCell(self, YES); }
-- (void)didExitVisibleState  { %orig; ApolloVFTrackCell(self, NO);  }
+- (void)didEnterVisibleState {
+    %orig;
+    ApolloVFTrackCell(self, YES);
+}
+- (void)didExitVisibleState {
+    %orig;
+    ApolloVFTrackCell(self, NO);
+}
 %end
 
 %hook _TtC6Apollo19CompactPostCellNode
-- (void)didEnterVisibleState { %orig; ApolloVFTrackCell(self, YES); }
-- (void)didExitVisibleState  { %orig; ApolloVFTrackCell(self, NO);  }
+- (void)didEnterVisibleState {
+    %orig;
+    ApolloVFTrackCell(self, YES);
+}
+- (void)didExitVisibleState {
+    %orig;
+    ApolloVFTrackCell(self, NO);
+}
 %end
 
 %hook _TtC6Apollo24CommentSectionController
 - (void)modelObjectUpdatedNotificationReceived:(id)note {
-    ApolloVFHandleModelUpdate(note, ^{ %orig; });
+    void (^originalUpdate)(void) = ^{
+        %orig;
+    };
+    ApolloVFHandleModelUpdate(note, originalUpdate);
 }
 %end
 
 %hook _TtC6Apollo31CommentsHeaderSectionController
 - (void)modelObjectUpdatedNotificationReceived:(id)note {
-    ApolloVFHandleModelUpdate(note, ^{ %orig; });
+    void (^originalUpdate)(void) = ^{
+        %orig;
+    };
+    ApolloVFHandleModelUpdate(note, originalUpdate);
 }
 %end
 

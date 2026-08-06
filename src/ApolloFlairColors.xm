@@ -583,17 +583,26 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
 // which path issued the grey write. Strict no-op for any flair we never colored
 // and when the feature is off.
 - (void)setBackgroundColor:(UIColor *)color {
-    if (!sEnableFlairColors) { %orig; return; }
+    if (!sEnableFlairColors) {
+        %orig;
+        return;
+    }
 
     UIColor *memo = objc_getAssociatedObject(self, &kApolloFlairNodeResolvedBackgroundKey);
     // Never-colored flair (feature was off when it rendered, or we chose not to
     // color it): pass straight through, behaves exactly like stock.
-    if (!memo) { %orig; return; }
+    if (!memo) {
+        %orig;
+        return;
+    }
     // Our own write (ApolloFlairSetBackground sets exactly this color): pass it
     // through unchanged — no substitution, so there is no write loop. (%orig is the
     // raw setter IMP and never re-enters this hook; this branch just avoids the
     // redundant corner-radius/text work below on our own writes.)
-    if ([color isEqual:memo]) { %orig; return; }
+    if ([color isEqual:memo]) {
+        %orig;
+        return;
+    }
 
     // Apollo tried to paint grey — re-impose our color and restore the pill
     // geometry ApolloFlairSetBackground normally sets.
@@ -631,7 +640,10 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
 %hook ASTextNode
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
-    if (!sEnableFlairColors) { %orig; return; }
+    if (!sEnableFlairColors) {
+        %orig;
+        return;
+    }
     %orig(ApolloFlairRecolorAttributedForNode(self, attributedText));
 }
 
@@ -640,7 +652,10 @@ static void ApolloFlairRecoverForModel(id model, NSDictionary *json) {
 %hook ASTextNode2
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
-    if (!sEnableFlairColors) { %orig; return; }
+    if (!sEnableFlairColors) {
+        %orig;
+        return;
+    }
     %orig(ApolloFlairRecolorAttributedForNode(self, attributedText));
 }
 

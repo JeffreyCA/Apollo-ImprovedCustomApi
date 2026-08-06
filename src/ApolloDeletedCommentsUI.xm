@@ -4847,10 +4847,8 @@ static BOOL ApolloDeletedCommentsRowSelectionIsStale(id adapter, NSIndexPath *in
     if (!objc_getAssociatedObject((id)self, &kApolloDeletedCommentsMarkdownOwnerRecordedKey)) {
         id ownerCell = ApolloDeletedCommentsCommentCellNodeForTextNode((id)self);
         if (ownerCell) {
-            objc_setAssociatedObject(ownerCell, kApolloDeletedCommentsCellMarkdownNodeKey,
-                                     (id)self, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            objc_setAssociatedObject((id)self, &kApolloDeletedCommentsMarkdownOwnerRecordedKey,
-                                     @YES, OBJC_ASSOCIATION_RETAIN);
+            objc_setAssociatedObject(ownerCell, kApolloDeletedCommentsCellMarkdownNodeKey, (id)self, OBJC_ASSOCIATION_ASSIGN);
+            objc_setAssociatedObject((id)self, &kApolloDeletedCommentsMarkdownOwnerRecordedKey, @YES, OBJC_ASSOCIATION_RETAIN);
         }
     }
     id deletedSpec = ApolloDeletedCommentsDeletedMarkdownLayoutSpecIfNeeded((id)self);

@@ -1266,28 +1266,100 @@ void ApolloThemeRuntimeInvalidate(void) {
 // explicitly because Logos preprocessing runs before the C preprocessor, so
 // %orig can't live inside a C macro.
 
-+ (UIColor *)systemBackgroundColor { UIColor *c = SemColor(ApolloThemeTokenBackground, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
-+ (UIColor *)secondarySystemBackgroundColor { UIColor *c = SemColor(ApolloThemeTokenSecondaryBackground, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
-+ (UIColor *)tertiarySystemBackgroundColor { UIColor *c = SemColor(ApolloThemeTokenTertiaryBackground, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
-+ (UIColor *)systemGroupedBackgroundColor { UIColor *c = SemColor(ApolloThemeTokenBackground, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
-+ (UIColor *)secondarySystemGroupedBackgroundColor { UIColor *c = SemColor(ApolloThemeTokenSecondaryBackground, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
-+ (UIColor *)tertiarySystemGroupedBackgroundColor { UIColor *c = SemColor(ApolloThemeTokenTertiaryBackground, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)systemBackgroundColor {
+    UIColor *c = SemColor(ApolloThemeTokenBackground, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
++ (UIColor *)secondarySystemBackgroundColor {
+    UIColor *c = SemColor(ApolloThemeTokenSecondaryBackground, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
++ (UIColor *)tertiarySystemBackgroundColor {
+    UIColor *c = SemColor(ApolloThemeTokenTertiaryBackground, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
++ (UIColor *)systemGroupedBackgroundColor {
+    UIColor *c = SemColor(ApolloThemeTokenBackground, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
++ (UIColor *)secondarySystemGroupedBackgroundColor {
+    UIColor *c = SemColor(ApolloThemeTokenSecondaryBackground, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
++ (UIColor *)tertiarySystemGroupedBackgroundColor {
+    UIColor *c = SemColor(ApolloThemeTokenTertiaryBackground, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
 
-+ (UIColor *)labelColor { UIColor *c = SemColor(ApolloThemeTokenLabel, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
-+ (UIColor *)secondaryLabelColor { UIColor *c = SemColor(ApolloThemeTokenSecondaryLabel, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
-+ (UIColor *)tertiaryLabelColor { UIColor *c = SemColor(ApolloThemeTokenTertiaryLabel, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
-+ (UIColor *)quaternaryLabelColor { UIColor *c = SemColor(ApolloThemeTokenQuaternaryLabel, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
-+ (UIColor *)placeholderTextColor { UIColor *c = SemColor(ApolloThemeTokenPlaceholderText, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)labelColor {
+    UIColor *c = SemColor(ApolloThemeTokenLabel, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
++ (UIColor *)secondaryLabelColor {
+    UIColor *c = SemColor(ApolloThemeTokenSecondaryLabel, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
++ (UIColor *)tertiaryLabelColor {
+    UIColor *c = SemColor(ApolloThemeTokenTertiaryLabel, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
++ (UIColor *)quaternaryLabelColor {
+    UIColor *c = SemColor(ApolloThemeTokenQuaternaryLabel, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
++ (UIColor *)placeholderTextColor {
+    UIColor *c = SemColor(ApolloThemeTokenPlaceholderText, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
 
-+ (UIColor *)separatorColor { UIColor *c = SemColor(ApolloThemeTokenSeparator, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
-+ (UIColor *)opaqueSeparatorColor { UIColor *c = SemColor(ApolloThemeTokenOpaqueSeparator, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)separatorColor {
+    UIColor *c = SemColor(ApolloThemeTokenSeparator, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
++ (UIColor *)opaqueSeparatorColor {
+    UIColor *c = SemColor(ApolloThemeTokenOpaqueSeparator, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
 
-+ (UIColor *)systemFillColor { UIColor *c = SemColor(ApolloThemeTokenFill, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
-+ (UIColor *)secondarySystemFillColor { UIColor *c = SemColor(ApolloThemeTokenSecondaryFill, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
-+ (UIColor *)tertiarySystemFillColor { UIColor *c = SemColor(ApolloThemeTokenTertiaryFill, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
-+ (UIColor *)quaternarySystemFillColor { UIColor *c = SemColor(ApolloThemeTokenQuaternaryFill, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)systemFillColor {
+    UIColor *c = SemColor(ApolloThemeTokenFill, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
++ (UIColor *)secondarySystemFillColor {
+    UIColor *c = SemColor(ApolloThemeTokenSecondaryFill, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
++ (UIColor *)tertiarySystemFillColor {
+    UIColor *c = SemColor(ApolloThemeTokenTertiaryFill, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
++ (UIColor *)quaternarySystemFillColor {
+    UIColor *c = SemColor(ApolloThemeTokenQuaternaryFill, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
 
-+ (UIColor *)linkColor { UIColor *c = SemColor(ApolloThemeTokenLink, (uintptr_t)__builtin_return_address(0)); return c ?: %orig; }
++ (UIColor *)linkColor {
+    UIColor *c = SemColor(ApolloThemeTokenLink, (uintptr_t)__builtin_return_address(0));
+    if (c) return c;
+    return %orig;
+}
 
 %end
 
@@ -1309,27 +1381,33 @@ void ApolloThemeRuntimeInvalidate(void) {
 %hook UIFont
 
 + (UIFont *)systemFontOfSize:(CGFloat)size {
-    return ThemedFont(%orig, (uintptr_t)__builtin_return_address(0));
+    UIFont *font = %orig;
+    return ThemedFont(font, (uintptr_t)__builtin_return_address(0));
 }
 
 + (UIFont *)systemFontOfSize:(CGFloat)size weight:(UIFontWeight)weight {
-    return ThemedFont(%orig, (uintptr_t)__builtin_return_address(0));
+    UIFont *font = %orig;
+    return ThemedFont(font, (uintptr_t)__builtin_return_address(0));
 }
 
 + (UIFont *)boldSystemFontOfSize:(CGFloat)size {
-    return ThemedFont(%orig, (uintptr_t)__builtin_return_address(0));
+    UIFont *font = %orig;
+    return ThemedFont(font, (uintptr_t)__builtin_return_address(0));
 }
 
 + (UIFont *)italicSystemFontOfSize:(CGFloat)size {
-    return ThemedFont(%orig, (uintptr_t)__builtin_return_address(0));
+    UIFont *font = %orig;
+    return ThemedFont(font, (uintptr_t)__builtin_return_address(0));
 }
 
 + (UIFont *)preferredFontForTextStyle:(UIFontTextStyle)style {
-    return ThemedFont(%orig, (uintptr_t)__builtin_return_address(0));
+    UIFont *font = %orig;
+    return ThemedFont(font, (uintptr_t)__builtin_return_address(0));
 }
 
 + (UIFont *)preferredFontForTextStyle:(UIFontTextStyle)style compatibleWithTraitCollection:(UITraitCollection *)traitCollection {
-    return ThemedFont(%orig, (uintptr_t)__builtin_return_address(0));
+    UIFont *font = %orig;
+    return ThemedFont(font, (uintptr_t)__builtin_return_address(0));
 }
 
 %end
@@ -1521,7 +1599,10 @@ static ASImageNodeTintColorModificationBlockFn ASImageNodeTintColorModificationB
             UIColor *accent = tintFn ? ApolloThemeRuntimeColor(ApolloThemeTokenAccent) : nil;
             if (accent) {
                 id accentBlock = tintFn(accent);
-                if (accentBlock) { %orig(accentBlock); return; }
+                if (accentBlock) {
+                    %orig(accentBlock);
+                    return;
+                }
             }
         }
     }

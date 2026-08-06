@@ -572,9 +572,12 @@ static UIImage *CustomPickerSwatch(void) {
                 break;
             }
         }
-        UITableViewCell *cell = donor
-            ? %orig(tv, donor)
-            : [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+        UITableViewCell *cell = nil;
+        if (donor) {
+            cell = %orig(tv, donor);
+        } else {
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+        }
         NSString *title = @"Use Different Themes for Light & Dark Mode";
         NSString *detail = @"Choose Light, Dark, or Both when applying a theme.";
         if ([cell.contentConfiguration isKindOfClass:UIListContentConfiguration.class]) {

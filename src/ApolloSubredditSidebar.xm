@@ -1422,7 +1422,10 @@ static NSAttributedString *ApolloSBTrimDuplicateSections(NSAttributedString *att
         id del = ((id (*)(id, SEL))objc_msgSend)((id)self, @selector(delegate));
         if ([del isKindOfClass:mdc]) {
             NSSet *titles = objc_getAssociatedObject(del, &kApolloSBWidgetTitlesKey);
-            if (titles.count) { %orig(ApolloSBTrimDuplicateSections(attributedText, titles)); return; }
+            if (titles.count) {
+                %orig(ApolloSBTrimDuplicateSections(attributedText, titles));
+                return;
+            }
             // Titles aren't stored yet — the bio renders before the async /api/widgets
             // fetch lands. Remember long blocks (descriptions, not short comments) so
             // the build can re-trim them once it knows which widgets exist.

@@ -51,10 +51,6 @@
 @property (nonatomic, getter=isHidden) BOOL hidden;
 @end
 
-@interface UIView (ApolloSRTNodeAccess)
-- (id)asyncdisplaykit_node;
-@end
-
 // RDKLink / RDKComment expose a `createdUTC` NSDate (used for the "Posted … Ago"
 // alert); declared informally so we can message any post model.
 @interface NSObject (ApolloSRTCreatedAt)
@@ -623,8 +619,18 @@ static void SRTActivateTarget(id cell, UIView *cellView, ApolloSRTTarget *target
 
 // MARK: - Shared gesture delegate (comment bubble + magnifier)
 
-// Marker keys stored on the gesture recognizer.
+@interface ApolloSRTWeakCellBox : NSObject
+@property (nonatomic, weak) id cell;
+@end
+
+@implementation ApolloSRTWeakCellBox
+@end
+
+// Marker/back-reference keys stored on the gesture recognizer. The box gives
+// each recognizer an exact, zeroing-weak owner without retaining the Texture
+// node or rediscovering it from UIKit/Texture implementation details.
 static const void *kSRTCommentGestureInstalledKey = &kSRTCommentGestureInstalledKey; // RETAIN on cell: idempotency
+static const void *kSRTGestureCellBoxKey = &kSRTGestureCellBoxKey; // RETAIN box; box.cell is weak
 static const void *kSRTGestureTypeKey = &kSRTGestureTypeKey;   // NSNumber: 1=comment tap, 2=loupe long-press
 // Per-loupe-gesture live state.
 static const void *kSRTLoupeViewKey = &kSRTLoupeViewKey;       // RETAIN: current ApolloSRTLoupeView
@@ -768,12 +774,8 @@ static void SRTDismissLoupe(UIGestureRecognizer *gr, BOOL animated) {
 static const void *kSRTWiredRequirementsKey = &kSRTWiredRequirementsKey;
 
 static id SRTCellForGesture(UIGestureRecognizer *gesture) {
-    for (UIView *view = gesture.view; view; view = view.superview) {
-        if (![view respondsToSelector:@selector(asyncdisplaykit_node)]) continue;
-        id node = [view asyncdisplaykit_node];
-        if ([NSStringFromClass([node class]) containsString:@"CellNode"]) return node;
-    }
-    return nil;
+    ApolloSRTWeakCellBox *box = objc_getAssociatedObject(gesture, kSRTGestureCellBoxKey);
+    return [box isKindOfClass:[ApolloSRTWeakCellBox class]] ? box.cell : nil;
 }
 
 static void SRTWireCornerFailureRequirements(UIGestureRecognizer *loupe, UIView *cellView) {
@@ -1148,6 +1150,8 @@ static void SRTInstallInfoRowGestures(id cell) {
     UIView *cellView = nil;
     @try { cellView = [(ApolloSRTNode *)cell view]; } @catch (__unused id e) {}
     if (!cellView) return;
+    ApolloSRTWeakCellBox *cellBox = [ApolloSRTWeakCellBox new];
+    cellBox.cell = cell;
 
     // 1) Non-consuming tap on the comment bubble -> arm jump-to-comments.
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:SRTDelegate()
@@ -1156,6 +1160,7 @@ static void SRTInstallInfoRowGestures(id cell) {
     tap.delaysTouchesBegan = NO;        // don't interfere with scrolling
     tap.delaysTouchesEnded = NO;        // don't delay the row selection
     tap.delegate = SRTDelegate();
+    objc_setAssociatedObject(tap, kSRTGestureCellBoxKey, cellBox, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(tap, kSRTGestureTypeKey, @(kSRTGestureTypeCommentTap), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [cellView addGestureRecognizer:tap];
 
@@ -1169,6 +1174,7 @@ static void SRTInstallInfoRowGestures(id cell) {
     loupe.allowableMovement = 60.0;
     loupe.cancelsTouchesInView = YES;   // own the touch while the loupe is up
     loupe.delegate = SRTDelegate();
+    objc_setAssociatedObject(loupe, kSRTGestureCellBoxKey, cellBox, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(loupe, kSRTGestureTypeKey, @(kSRTGestureTypeLoupe), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [cellView addGestureRecognizer:loupe];
 

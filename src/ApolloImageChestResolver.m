@@ -65,22 +65,19 @@ static NSMutableDictionary<NSString *, id> *ApolloImageChestResolverCache(void) 
 
 static NSMutableOrderedSet<NSString *> *ApolloImageChestResolverCacheOrder(void) {
     static NSMutableOrderedSet<NSString *> *order;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ order = [NSMutableOrderedSet orderedSet]; });
+    if (!order) order = [NSMutableOrderedSet orderedSet];
     return order;
 }
 
 static NSMutableDictionary<NSString *, NSDate *> *ApolloImageChestFailureCache(void) {
     static NSMutableDictionary<NSString *, NSDate *> *failures;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ failures = [NSMutableDictionary dictionary]; });
+    if (!failures) failures = [NSMutableDictionary dictionary];
     return failures;
 }
 
 static NSMutableOrderedSet<NSString *> *ApolloImageChestFailureCacheOrder(void) {
     static NSMutableOrderedSet<NSString *> *order;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ order = [NSMutableOrderedSet orderedSet]; });
+    if (!order) order = [NSMutableOrderedSet orderedSet];
     return order;
 }
 

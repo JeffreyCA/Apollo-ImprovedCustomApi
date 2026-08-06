@@ -214,8 +214,10 @@ NSURLRequest *ApolloImgChestRequestByAddingUserAgentIfNeeded(NSURLRequest *reque
 typedef NSDictionary ApolloImgChestCachedUpload; // {fileURL, size, filename, mimeType, post}
 
 // This directory contains only transient files whose ownership is represented
-// by the in-memory token cache below. That metadata cannot survive a relaunch,
-// so the first access clears every orphan left by a previous process.
+// by the in-memory token cache below. It deliberately lives in the containing
+// app's private Caches directory; no extension is expected to share this path or
+// keep one of these files alive. The metadata cannot survive a relaunch, so the
+// first access clears every orphan left by a previous app process.
 static NSURL *ApolloImgChestManagedDirectory(void) {
     static NSURL *directory;
     static dispatch_once_t once;
@@ -359,34 +361,104 @@ static NSMutableDictionary<NSString *, ApolloImgChestCachedUpload *> *ApolloImgC
     dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
     return cache;
 }
+static unsigned long long sApolloImgChestCacheBytes;
+static NSMutableDictionary<NSString *, NSNumber *> *sApolloImgChestPinnedFileCounts;
+static NSMutableDictionary<NSString *, NSURL *> *sApolloImgChestDeferredFileRemovals;
+
+// Snapshot creation briefly needs a cache-owned pathname to remain linkable
+// after the cache lock is released. Pin by path while resolving the entries;
+// eviction can still discard their metadata, but defers unlinking the source
+// until the snapshotter has created its hard links.
+static NSMutableDictionary<NSString *, NSNumber *> *ApolloImgChestPinnedFileCounts(void) {
+    if (!sApolloImgChestPinnedFileCounts) {
+        sApolloImgChestPinnedFileCounts = [NSMutableDictionary dictionary];
+    }
+    return sApolloImgChestPinnedFileCounts;
+}
+
+static NSMutableDictionary<NSString *, NSURL *> *ApolloImgChestDeferredFileRemovals(void) {
+    if (!sApolloImgChestDeferredFileRemovals) {
+        sApolloImgChestDeferredFileRemovals = [NSMutableDictionary dictionary];
+    }
+    return sApolloImgChestDeferredFileRemovals;
+}
+
+// All three helpers below are called only while synchronized on
+// ApolloImgChestCache().
+static void ApolloImgChestPinCachedFileLocked(NSURL *fileURL) {
+    NSString *path = [fileURL isKindOfClass:[NSURL class]] ? fileURL.path : nil;
+    if (path.length == 0) return;
+    NSUInteger count = [ApolloImgChestPinnedFileCounts()[path] unsignedIntegerValue];
+    ApolloImgChestPinnedFileCounts()[path] = @(count + 1);
+}
+
+static NSURL *ApolloImgChestPrepareCachedFileRemovalLocked(NSURL *fileURL) {
+    NSString *path = [fileURL isKindOfClass:[NSURL class]] ? fileURL.path : nil;
+    if (path.length == 0) return nil;
+    if ([ApolloImgChestPinnedFileCounts()[path] unsignedIntegerValue] > 0) {
+        ApolloImgChestDeferredFileRemovals()[path] = fileURL;
+        return nil;
+    }
+    return fileURL;
+}
+
+static NSArray<NSURL *> *ApolloImgChestUnpinCachedFilesLocked(NSArray<NSURL *> *fileURLs) {
+    NSMutableArray<NSURL *> *readyToRemove = [NSMutableArray array];
+    for (NSURL *fileURL in fileURLs) {
+        NSString *path = [fileURL isKindOfClass:[NSURL class]] ? fileURL.path : nil;
+        if (path.length == 0) continue;
+        NSUInteger count = [ApolloImgChestPinnedFileCounts()[path] unsignedIntegerValue];
+        if (count > 1) {
+            ApolloImgChestPinnedFileCounts()[path] = @(count - 1);
+            continue;
+        }
+        [ApolloImgChestPinnedFileCounts() removeObjectForKey:path];
+        NSURL *deferredURL = ApolloImgChestDeferredFileRemovals()[path];
+        if (deferredURL) {
+            [readyToRemove addObject:deferredURL];
+            [ApolloImgChestDeferredFileRemovals() removeObjectForKey:path];
+        }
+    }
+    return readyToRemove;
+}
 
 static void ApolloImgChestCacheStore(NSString *token, NSDictionary *upload) {
     if (token.length == 0 || !upload) return;
+    NSMutableArray<NSURL *> *filesToRemove = [NSMutableArray array];
     @synchronized (ApolloImgChestCache()) {
-        NSURL *replacedURL = [ApolloImgChestCache()[token][@"fileURL"] isKindOfClass:[NSURL class]]
-            ? ApolloImgChestCache()[token][@"fileURL"] : nil;
+        NSDictionary *replaced = ApolloImgChestCache()[token];
+        NSURL *replacedURL = [replaced[@"fileURL"] isKindOfClass:[NSURL class]]
+            ? replaced[@"fileURL"] : nil;
+        unsigned long long replacedSize = [replaced[@"size"] respondsToSelector:@selector(unsignedLongLongValue)]
+            ? [replaced[@"size"] unsignedLongLongValue] : 0;
+        unsigned long long newSize = [upload[@"size"] respondsToSelector:@selector(unsignedLongLongValue)]
+            ? [upload[@"size"] unsignedLongLongValue] : 0;
+        sApolloImgChestCacheBytes = sApolloImgChestCacheBytes > replacedSize
+            ? sApolloImgChestCacheBytes - replacedSize : 0;
+        sApolloImgChestCacheBytes += newSize;
         ApolloImgChestCache()[token] = upload;
         [ApolloImgChestCacheOrder() removeObject:token];
         [ApolloImgChestCacheOrder() addObject:token];
         NSURL *newURL = [upload[@"fileURL"] isKindOfClass:[NSURL class]] ? upload[@"fileURL"] : nil;
-        if (replacedURL && ![replacedURL isEqual:newURL]) ApolloImgChestRemoveManagedFile(replacedURL);
-
-        unsigned long long totalBytes = 0;
-        for (NSDictionary *entry in ApolloImgChestCache().allValues) {
-            totalBytes += [entry[@"size"] respondsToSelector:@selector(unsignedLongLongValue)]
-                ? [entry[@"size"] unsignedLongLongValue] : 0;
+        if (replacedURL && ![replacedURL isEqual:newURL]) {
+            NSURL *fileToRemove = ApolloImgChestPrepareCachedFileRemovalLocked(replacedURL);
+            if (fileToRemove) [filesToRemove addObject:fileToRemove];
         }
-        while (totalBytes > kAlbumFileCacheCapBytes && ApolloImgChestCacheOrder().count > 0) {
+        while (sApolloImgChestCacheBytes > kAlbumFileCacheCapBytes && ApolloImgChestCacheOrder().count > 0) {
             NSString *oldest = ApolloImgChestCacheOrder().firstObject;
             NSDictionary *evicted = ApolloImgChestCache()[oldest];
             unsigned long long evictedSize = [evicted[@"size"] respondsToSelector:@selector(unsignedLongLongValue)]
                 ? [evicted[@"size"] unsignedLongLongValue] : 0;
-            totalBytes = totalBytes > evictedSize ? totalBytes - evictedSize : 0;
-            ApolloImgChestRemoveManagedFile([evicted[@"fileURL"] isKindOfClass:[NSURL class]] ? evicted[@"fileURL"] : nil);
+            sApolloImgChestCacheBytes = sApolloImgChestCacheBytes > evictedSize
+                ? sApolloImgChestCacheBytes - evictedSize : 0;
+            NSURL *fileToRemove = ApolloImgChestPrepareCachedFileRemovalLocked(
+                [evicted[@"fileURL"] isKindOfClass:[NSURL class]] ? evicted[@"fileURL"] : nil);
+            if (fileToRemove) [filesToRemove addObject:fileToRemove];
             [ApolloImgChestCache() removeObjectForKey:oldest];
             [ApolloImgChestCacheOrder() removeObjectAtIndex:0];
         }
     }
+    for (NSURL *fileURL in filesToRemove) ApolloImgChestRemoveManagedFile(fileURL);
 }
 
 // Read-only lookup — it returns the cached entry without evicting it; the
@@ -399,50 +471,88 @@ static NSDictionary *_Nullable ApolloImgChestCachePeek(NSString *token) {
     }
 }
 
-// Freeze album members while holding the same lock used by cache eviction.
-// Hard links are effectively free snapshots on this volume: eviction may
-// unlink the cache-owned name afterward, while the album build keeps a stable
-// inode until its operation completes or is cancelled.
+// Freeze album members with hard links. Resolving and pinning the cache-owned
+// paths happens under the eviction lock, but all filesystem inspection/linking
+// happens after releasing it. Hard links are effectively free snapshots on
+// this volume: eviction may unlink the cache-owned name afterward, while the
+// album build keeps a stable inode until its operation completes or is cancelled.
 static NSArray<NSDictionary *> *_Nullable ApolloImgChestSnapshotCachedParts(
     NSArray<NSString *> *tokens, NSArray<NSURL *> **snapshotFilesOut, NSError **outError) {
+    NSMutableArray<NSDictionary *> *cachedParts = [NSMutableArray arrayWithCapacity:tokens.count];
+    NSMutableArray<NSURL *> *sourceFiles = [NSMutableArray arrayWithCapacity:tokens.count];
     NSMutableArray<NSDictionary *> *parts = [NSMutableArray arrayWithCapacity:tokens.count];
     NSMutableArray<NSURL *> *snapshotFiles = [NSMutableArray arrayWithCapacity:tokens.count];
     @synchronized (ApolloImgChestCache()) {
         for (NSString *token in tokens) {
             NSDictionary *cached = ApolloImgChestCache()[token];
             NSURL *sourceURL = [cached[@"fileURL"] isKindOfClass:[NSURL class]] ? cached[@"fileURL"] : nil;
+            if (!cached || !sourceURL) break;
+            [cachedParts addObject:[cached copy]];
+            [sourceFiles addObject:sourceURL];
+        }
+        if (sourceFiles.count == tokens.count) {
+            for (NSURL *sourceURL in sourceFiles) ApolloImgChestPinCachedFileLocked(sourceURL);
+        }
+    }
+
+    NSError *snapshotError = nil;
+    if (sourceFiles.count != tokens.count) {
+        snapshotError = ApolloImgChestError(@"An album image expired before it could be combined");
+    } else {
+        for (NSUInteger index = 0; index < sourceFiles.count; index++) {
+            NSURL *sourceURL = sourceFiles[index];
             if (ApolloImgChestFileSize(sourceURL).unsignedLongLongValue == 0) {
-                if (outError) *outError = ApolloImgChestError(@"An album image expired before it could be combined");
-                for (NSURL *snapshotURL in snapshotFiles) ApolloImgChestRemoveManagedFile(snapshotURL);
-                return nil;
+                snapshotError = ApolloImgChestError(@"An album image expired before it could be combined");
+                break;
             }
 
             NSURL *snapshotURL = ApolloImgChestUniqueManagedURL(sourceURL.lastPathComponent ?: @"album-image");
             NSError *linkError = nil;
             if (![[NSFileManager defaultManager] linkItemAtURL:sourceURL toURL:snapshotURL error:&linkError]) {
-                if (outError) *outError = linkError ?: ApolloImgChestError(@"Could not snapshot an album image");
-                for (NSURL *createdURL in snapshotFiles) ApolloImgChestRemoveManagedFile(createdURL);
-                return nil;
+                snapshotError = linkError ?: ApolloImgChestError(@"Could not snapshot an album image");
+                break;
             }
-            NSMutableDictionary *snapshotPart = [cached mutableCopy];
+            NSMutableDictionary *snapshotPart = [cachedParts[index] mutableCopy];
             snapshotPart[@"fileURL"] = snapshotURL;
             [parts addObject:snapshotPart];
             [snapshotFiles addObject:snapshotURL];
         }
+    }
+
+    NSArray<NSURL *> *deferredRemovals = nil;
+    if (sourceFiles.count == tokens.count) {
+        @synchronized (ApolloImgChestCache()) {
+            deferredRemovals = ApolloImgChestUnpinCachedFilesLocked(sourceFiles);
+        }
+    }
+    for (NSURL *fileURL in deferredRemovals) ApolloImgChestRemoveManagedFile(fileURL);
+
+    if (snapshotError) {
+        for (NSURL *snapshotURL in snapshotFiles) ApolloImgChestRemoveManagedFile(snapshotURL);
+        if (outError) *outError = snapshotError;
+        return nil;
     }
     if (snapshotFilesOut) *snapshotFilesOut = [snapshotFiles copy];
     return [parts copy];
 }
 
 static void ApolloImgChestCacheRemove(NSArray<NSString *> *tokens) {
+    NSMutableArray<NSURL *> *filesToRemove = [NSMutableArray arrayWithCapacity:tokens.count];
     @synchronized (ApolloImgChestCache()) {
         for (NSString *token in tokens) {
             NSDictionary *entry = ApolloImgChestCache()[token];
-            ApolloImgChestRemoveManagedFile([entry[@"fileURL"] isKindOfClass:[NSURL class]] ? entry[@"fileURL"] : nil);
+            unsigned long long size = [entry[@"size"] respondsToSelector:@selector(unsignedLongLongValue)]
+                ? [entry[@"size"] unsignedLongLongValue] : 0;
+            sApolloImgChestCacheBytes = sApolloImgChestCacheBytes > size
+                ? sApolloImgChestCacheBytes - size : 0;
+            NSURL *fileToRemove = ApolloImgChestPrepareCachedFileRemovalLocked(
+                [entry[@"fileURL"] isKindOfClass:[NSURL class]] ? entry[@"fileURL"] : nil);
+            if (fileToRemove) [filesToRemove addObject:fileToRemove];
             [ApolloImgChestCache() removeObjectForKey:token];
             [ApolloImgChestCacheOrder() removeObject:token];
         }
     }
+    for (NSURL *fileURL in filesToRemove) ApolloImgChestRemoveManagedFile(fileURL);
 }
 
 #pragma mark - ImgChest API

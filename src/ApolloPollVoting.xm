@@ -1596,7 +1596,10 @@ static void ApolloPollApplyOptionTextAlignment(id optionNode) {
 }
 
 - (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
-    if (!ApolloPollsFeatureEnabled()) { %orig; return; }
+    if (!ApolloPollsFeatureEnabled()) {
+        %orig;
+        return;
+    }
     ApolloPollClearTouchHighlight(self);
     UITouch *touch = [touches anyObject];
     UIView *pollView = ApolloPollNodeView(self);
@@ -1614,7 +1617,10 @@ static void ApolloPollApplyOptionTextAlignment(id optionNode) {
 }
 
 - (void)touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
-    if (!ApolloPollsFeatureEnabled()) { %orig; return; }
+    if (!ApolloPollsFeatureEnabled()) {
+        %orig;
+        return;
+    }
     UITouch *touch = [touches anyObject];
     UIView *view = ApolloPollNodeView(self);
     if (touch && view) {
@@ -1696,7 +1702,10 @@ static void ApolloPollApplyOptionTextAlignment(id optionNode) {
 // the section controller and owns the model refresh method used after voting.
 %hook _TtC6Apollo22CommentsHeaderCellNode
 - (void)didLoad {
-    if (!ApolloPollsFeatureEnabled()) { %orig; return; }
+    if (!ApolloPollsFeatureEnabled()) {
+        %orig;
+        return;
+    }
     // Reconcile before Apollo constructs/configures the mounted poll UI. A
     // navigation round trip creates a new RDKLink/RDKPoll, so fixing only the
     // old PollNode can never persist across that boundary.
@@ -1740,7 +1749,10 @@ static void ApolloPollApplyOptionTextAlignment(id optionNode) {
     RDKLink *link = MSHookIvar<RDKLink *>(self, "link");
     RDKPoll *poll = link.poll;
     ApolloPollReconcileRememberedVote(link, ApolloActiveAccountUsername());
-    if (!poll) { %orig; return; }
+    if (!poll) {
+        %orig;
+        return;
+    }
 
     id pollNode = sender;
     if (![pollNode isMemberOfClass:objc_getClass("_TtC6Apollo8PollNode")]) {

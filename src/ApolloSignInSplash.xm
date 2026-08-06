@@ -16,7 +16,10 @@
 
 - (void)signInSplashViewSignInButtonTappedWithSender:(id)sender {
     UIViewController *host = (UIViewController *)self;
-    ApolloWebSessionPresentSignInChooser(host, ^{ %orig; });
+    void (^originalSignIn)(void) = ^{
+        %orig;
+    };
+    ApolloWebSessionPresentSignInChooser(host, originalSignIn);
 }
 
 %end
@@ -25,7 +28,10 @@
 
 - (void)signInSplashViewSignInButtonTappedWithSender:(id)sender {
     UIViewController *host = (UIViewController *)self;
-    ApolloWebSessionPresentSignInChooser(host, ^{ %orig; });
+    void (^originalSignIn)(void) = ^{
+        %orig;
+    };
+    ApolloWebSessionPresentSignInChooser(host, originalSignIn);
 }
 
 %end

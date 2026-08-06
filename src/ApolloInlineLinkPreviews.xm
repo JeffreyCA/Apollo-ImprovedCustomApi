@@ -4500,7 +4500,8 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
     }
     if (ApolloLPAllModesDisabled()) {
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
-        return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, %orig);
+        id nativeSpec = %orig;
+        return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, nativeSpec);
     }
     ApolloLPPrefetchRedditUserProfileIfNeeded(url);
 
@@ -4531,7 +4532,8 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
     NSInteger selectedMode = ApolloLPModeForArea(area);
     if (selectedMode == ApolloLinkPreviewModeOff) {
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
-        return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, %orig);
+        id nativeSpec = %orig;
+        return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, nativeSpec);
     }
 
     if (ApolloLPShouldDeferToInlineMedia(url)) {
@@ -4635,12 +4637,14 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
             return placeholder;
         }
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
-        return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, %orig);
+        id nativeSpec = %orig;
+        return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, nativeSpec);
     }
 
     if (![cached hasUsefulMetadata]) {
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
-        return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, %orig);
+        id nativeSpec = %orig;
+        return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, nativeSpec);
     }
 
     BOOL isRedditUser = ApolloLPIsRedditUserPreview(url, cached);
@@ -4788,7 +4792,8 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
         return richSpec;
     }
     ApolloLPRestoreHostShell((ASDisplayNode *)self);
-    return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, %orig);
+    id nativeSpec = %orig;
+    return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, nativeSpec);
 }
 
 - (void)didLoad {

@@ -152,7 +152,7 @@ static char kApolloCachedOrigChildrenKey;      // NSArray (held strongly so elem
 static char kApolloProvisionalDecompKey;       // NSNumber(BOOL): decomposition built while comment mediaMetadata was unreachable (don't cache)
 static char kApolloImageNodesByURLKey;         // NSMutableDictionary<NSString URL, ASNetworkImageNode> per-MarkdownNode reuse cache
 static char kApolloImageCacheKey;              // NSString stable cache key (set even before deferred image URLs resolve)
-static char kApolloInlineMediaLeafKey;         // NSNumber BOOL — permanent identity marker for tweak-created image/video leaves
+static char kApolloInlineMediaLeafKey;         // Non-nil permanent identity marker for tweak-created image/video leaves
 static char kApolloImageURLKey;                // NSURL on the imageNode AND mirrored on the imageNode's view
 static char kApolloOriginalImageURLKey;        // NSURL for tap/long-press when different from the loaded URL (e.g. album URL)
 static char kApolloAspectRatioKey;             // NSNumber height/width — NIL if unknown (no URL params yet, no DIDLOAD yet)
@@ -191,18 +191,15 @@ static char kApolloImageChestItemsKey;         // NSArray<NSDictionary *> direct
 static ASDisplayNode *ApolloInlineHostForNode(id node) {
     ASDisplayNode *cursor =
         [node respondsToSelector:@selector(supernode)] ? [node supernode] : nil;
+    Class markdownNodeClass = objc_getClass("_TtC6Apollo12MarkdownNode");
+    Class linkButtonNodeClass = objc_getClass("_TtC6Apollo14LinkButtonNode");
     for (NSUInteger depth = 0; cursor && depth < 24; depth++, cursor = cursor.supernode) {
-        NSString *className = NSStringFromClass(cursor.class);
-        if ([className containsString:@"MarkdownNode"] ||
-            [className containsString:@"LinkButtonNode"]) {
+        if ((markdownNodeClass && [cursor isKindOfClass:markdownNodeClass]) ||
+            (linkButtonNodeClass && [cursor isKindOfClass:linkButtonNodeClass])) {
             return cursor;
         }
     }
     return nil;
-}
-
-static inline BOOL ApolloImageNodeHasInlineHost(id node) {
-    return ApolloInlineHostForNode(node) != nil;
 }
 
 // Lifetime hooks must still recognize our leaves after Texture detaches them
@@ -210,7 +207,7 @@ static inline BOOL ApolloImageNodeHasInlineHost(id node) {
 // at creation and intentionally survives image/GIF state cleanup so the same
 // cached node remains eligible when a later clearImage or re-expand occurs.
 static inline BOOL ApolloIsInlineMediaLeafNode(id node) {
-    return [objc_getAssociatedObject(node, &kApolloInlineMediaLeafKey) boolValue];
+    return objc_getAssociatedObject(node, &kApolloInlineMediaLeafKey) != nil;
 }
 
 static void ApolloApplyInlineGIFPlaybackPolicyWithCover(ASNetworkImageNode *imageNode, UIImage *cover, NSUInteger retryIndex);
@@ -365,18 +362,18 @@ static NSMutableDictionary<NSString *, id> *ApolloImgurResolverCache(void) {
     return cache;
 }
 static NSMutableOrderedSet<NSString *> *ApolloImgurResolverCacheOrder(void) {
-    static NSMutableOrderedSet<NSString *> *order; static dispatch_once_t once;
-    dispatch_once(&once, ^{ order = [NSMutableOrderedSet orderedSet]; });
+    static NSMutableOrderedSet<NSString *> *order;
+    if (!order) order = [NSMutableOrderedSet orderedSet];
     return order;
 }
 static NSMutableDictionary<NSString *, NSDate *> *ApolloImgurResolverFailures(void) {
-    static NSMutableDictionary<NSString *, NSDate *> *failures; static dispatch_once_t once;
-    dispatch_once(&once, ^{ failures = [NSMutableDictionary dictionary]; });
+    static NSMutableDictionary<NSString *, NSDate *> *failures;
+    if (!failures) failures = [NSMutableDictionary dictionary];
     return failures;
 }
 static NSMutableOrderedSet<NSString *> *ApolloImgurResolverFailureOrder(void) {
-    static NSMutableOrderedSet<NSString *> *order; static dispatch_once_t once;
-    dispatch_once(&once, ^{ order = [NSMutableOrderedSet orderedSet]; });
+    static NSMutableOrderedSet<NSString *> *order;
+    if (!order) order = [NSMutableOrderedSet orderedSet];
     return order;
 }
 static NSMutableDictionary<NSString *, NSMutableArray *> *ApolloImgurResolverPending(void) {
@@ -1690,37 +1687,43 @@ static UIImage *ApolloAlbumCreateDisplayImage(NSURL *fileURL, NSUInteger maximum
 
     __weak typeof(self) weakSelf = self;
     dispatch_async(ApolloImageChestViewerDecodeQueue(), ^{
-        __block BOOL stillNeeded = NO;
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            ApolloImageChestAlbumViewController *owner = weakSelf;
-            stillNeeded = owner && !owner.tearingDown &&
-                [owner.activeWindowIndexes containsObject:index] &&
-                [owner.imageFileURLsByIndex[index] isEqual:fileURL];
-            if (!stillNeeded) [owner.decodingImageIndexes removeObject:index];
-        });
-        if (!stillNeeded) return;
-
-        UIImage *image = ApolloAlbumCreateDisplayImage(fileURL, maximumPixelSize);
+        // The serial decode queue may have accumulated older pages. Validate
+        // on main without blocking that queue, then hop back only for work that
+        // is still visible and still points at this exact file.
         dispatch_async(dispatch_get_main_queue(), ^{
             ApolloImageChestAlbumViewController *owner = weakSelf;
-            if (!owner) return;
-            [owner.decodingImageIndexes removeObject:index];
-            if (owner.tearingDown || ![owner.activeWindowIndexes containsObject:index] ||
-                ![owner.imageFileURLsByIndex[index] isEqual:fileURL]) return;
-            if (image) {
-                [owner apollo_displayFileForPageIfActive:page decodedImage:image];
+            BOOL stillNeeded = owner && !owner.tearingDown &&
+                [owner.activeWindowIndexes containsObject:index] &&
+                [owner.imageFileURLsByIndex[index] isEqual:fileURL];
+            if (!stillNeeded) {
+                [owner.decodingImageIndexes removeObject:index];
                 return;
             }
 
-            // The temporary file may have been purged or become unreadable.
-            // Drop the stale mapping, but require an explicit retry so a source
-            // that ImageIO accepts yet cannot thumbnail cannot form a tight
-            // download/decode loop.
-            [owner.imageFileURLsByIndex removeObjectForKey:index];
-            [owner apollo_removeAcceptedFileAtURL:fileURL];
-            [owner.failedImageIndexes addObject:index];
-            UIButton *retry = (UIButton *)[owner.scrollView viewWithTag:5000 + page];
-            if ([retry isKindOfClass:[UIButton class]]) retry.hidden = NO;
+            dispatch_async(ApolloImageChestViewerDecodeQueue(), ^{
+                UIImage *image = ApolloAlbumCreateDisplayImage(fileURL, maximumPixelSize);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    ApolloImageChestAlbumViewController *currentOwner = weakSelf;
+                    if (!currentOwner) return;
+                    [currentOwner.decodingImageIndexes removeObject:index];
+                    if (currentOwner.tearingDown || ![currentOwner.activeWindowIndexes containsObject:index] ||
+                        ![currentOwner.imageFileURLsByIndex[index] isEqual:fileURL]) return;
+                    if (image) {
+                        [currentOwner apollo_displayFileForPageIfActive:page decodedImage:image];
+                        return;
+                    }
+
+                    // The temporary file may have been purged or become unreadable.
+                    // Drop the stale mapping, but require an explicit retry so a source
+                    // that ImageIO accepts yet cannot thumbnail cannot form a tight
+                    // download/decode loop.
+                    [currentOwner.imageFileURLsByIndex removeObjectForKey:index];
+                    [currentOwner apollo_removeAcceptedFileAtURL:fileURL];
+                    [currentOwner.failedImageIndexes addObject:index];
+                    UIButton *retry = (UIButton *)[currentOwner.scrollView viewWithTag:5000 + page];
+                    if ([retry isKindOfClass:[UIButton class]]) retry.hidden = NO;
+                });
+            });
         });
     });
 }
@@ -2751,15 +2754,16 @@ static BOOL ApolloPresentOrResolveImageChestAlbumURL(NSURL *url, UIView *sourceV
 // tokens, native ![gif](...) embeds, animated snoomoji) as MarkdownNode
 // children the tweak doesn't create. Those nodes were never marked as inline
 // GIFs, so the FLAnimatedImageView hooks let them animate regardless of the
-// Autoplay Inline GIFs mode. Flag any un-hosted animated node living under a
+// Autoplay Inline GIFs mode. Flag any unmarked animated node living under a
 // MarkdownNode and gate it in place (stop/start only — no cover/overlay/URL
 // reload machinery). Feed media (RichMediaNode) has no MarkdownNode ancestor
 // and stays governed by Apollo's native autoplay setting.
 static BOOL ApolloNodeDescendsFromMarkdownNode(ASDisplayNode *node) {
     ASDisplayNode *cursor = node.supernode;
+    Class markdownNodeClass = objc_getClass("_TtC6Apollo12MarkdownNode");
     int depth = 0;
     while (cursor && depth < 12) {
-        if ([NSStringFromClass([cursor class]) containsString:@"MarkdownNode"]) return YES;
+        if (markdownNodeClass && [cursor isKindOfClass:markdownNodeClass]) return YES;
         cursor = cursor.supernode;
         depth++;
     }
@@ -2825,7 +2829,7 @@ static void ApolloGateNativeInlineAnimatedImageIfNeeded(ASDisplayNode *node) {
     __weak ASDisplayNode *weakNode = node;
     dispatch_async(dispatch_get_main_queue(), ^{
         ASDisplayNode *strong = weakNode;
-        if (!strong || ApolloImageNodeHasInlineHost(strong)) return;
+        if (!strong || ApolloIsInlineMediaLeafNode(strong)) return;
         if (ApolloNodeDescendsFromMarkdownNode(strong)) {
             ApolloActivateNativeInlineGIFGate(strong);
             return;
@@ -2835,7 +2839,7 @@ static void ApolloGateNativeInlineAnimatedImageIfNeeded(ASDisplayNode *node) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             ASDisplayNode *retryNode = weakNode;
-            if (!retryNode || ApolloImageNodeHasInlineHost(retryNode)) return;
+            if (!retryNode || ApolloIsInlineMediaLeafNode(retryNode)) return;
             if (!ApolloNodeDescendsFromMarkdownNode(retryNode)) return;
             ApolloActivateNativeInlineGIFGate(retryNode);
         });
@@ -2853,17 +2857,21 @@ static void ApolloGateNativeInlineAnimatedImageIfNeeded(ASDisplayNode *node) {
 %hook ASImageNode
 
 - (void)_locked_setAnimatedImage:(id)animatedImage {
-    BOOL hosted = ApolloImageNodeHasInlineHost(self);
-    if (!hosted && animatedImage) {
+    // This callback runs while Texture holds the node lock, so ownership must
+    // be decided from our lifetime marker rather than by walking `supernode`.
+    // Native Markdown animated-image nodes are deliberately unmarked and take
+    // the lightweight native autoplay gate below.
+    BOOL managedInlineLeaf = ApolloIsInlineMediaLeafNode(self);
+    if (!managedInlineLeaf && animatedImage) {
         ApolloGateNativeInlineAnimatedImageIfNeeded((ASDisplayNode *)self);
     }
-    if (hosted && animatedImage && !ApolloInlineGIFAnimatedImageArgumentIsUsable(animatedImage)) {
+    if (managedInlineLeaf && animatedImage && !ApolloInlineGIFAnimatedImageArgumentIsUsable(animatedImage)) {
         ApolloLog(@"[InlineImages] _locked_setAnimatedImage rejecting unusable animatedImage node=%p", self);
         ApolloClearInlineGIFNodeState((ASNetworkImageNode *)self);
         return;
     }
     %orig;
-    if (!hosted) return;
+    if (!managedInlineLeaf) return;
 
     if (!animatedImage) {
         if ([objc_getAssociatedObject(self, &kApolloInlineGIFReloadInFlightKey) boolValue]) {
@@ -2946,7 +2954,9 @@ static void ApolloGateNativeInlineAnimatedImageIfNeeded(ASDisplayNode *node) {
 }
 
 - (void)dealloc {
-    if (ApolloImageNodeHasInlineHost(self)) {
+    // Texture detaches nodes before deallocation, but the creation marker
+    // survives that detach and still identifies state owned by this module.
+    if (ApolloIsInlineMediaLeafNode(self)) {
         ApolloCancelInlineGIFPendingPolicyBlocks(self);
         ApolloInlineGIFBumpGeneration(self);
         id anim = objc_getAssociatedObject(self, &kApolloInlineGIFAnimatedImageKey);

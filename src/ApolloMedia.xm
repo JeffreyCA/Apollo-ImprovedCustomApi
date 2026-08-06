@@ -755,7 +755,8 @@ static NSString *ApolloRewriteNativeGiphyTokens(NSString *text, NSDictionary *me
 
 - (NSString *)body {
     NSDictionary *metadata = self.mediaMetadata;
-    NSString *fixed = ApolloFixProcessingImgPlaceholders(%orig, metadata, nil);
+    NSString *body = %orig;
+    NSString *fixed = ApolloFixProcessingImgPlaceholders(body, metadata, nil);
     return ApolloRewriteNativeGiphyTokens(fixed, metadata);
 }
 
@@ -781,7 +782,8 @@ static NSString *ApolloRewriteNativeGiphyTokens(NSString *text, NSDictionary *me
         if (fallbackExt.length == 0) fallbackExt = @"png";
     }
 
-    NSString *fixed = ApolloFixProcessingImgPlaceholders(%orig, metadata, fallbackExt);
+    NSString *selfText = %orig;
+    NSString *fixed = ApolloFixProcessingImgPlaceholders(selfText, metadata, fallbackExt);
     return ApolloRewriteNativeGiphyTokens(fixed, metadata);
 }
 

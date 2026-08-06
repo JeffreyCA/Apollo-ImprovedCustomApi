@@ -882,10 +882,16 @@ static void recenterCancelButton(void) {
     }
     UIView *sup = [(UIView *)self superview];
     UINavigationBar *nb = sFeedSearchNavBar;
-    if (!sup || !nb || !nb.window) { %orig; return; }
+    if (!sup || !nb || !nb.window) {
+        %orig;
+        return;
+    }
 
     CGFloat windowTopY = CGRectGetMaxY([nb convertRect:nb.bounds toView:nil]); // nav bottom, window space
-    if (windowTopY <= 1.0) { %orig; return; }                                  // bar not laid out yet
+    if (windowTopY <= 1.0) {
+        %orig;
+        return;
+    } // bar not laid out yet
     CGFloat localTopY = [sup convertPoint:CGPointMake(0.0, windowTopY) fromView:nil].y;
 
     CGRect pinned = frame;

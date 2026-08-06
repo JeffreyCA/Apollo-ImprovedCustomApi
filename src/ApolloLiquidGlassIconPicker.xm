@@ -1257,7 +1257,8 @@ static UITableView *LGRememberedTableView(id viewController) {
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
     LGRememberTableView(self, tableView);
-    return LGAlternateIconsAvailable() ? %orig + LGInjectedSectionCount() : %orig;
+    NSInteger originalCount = %orig;
+    return LGAlternateIconsAvailable() ? originalCount + LGInjectedSectionCount() : originalCount;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {

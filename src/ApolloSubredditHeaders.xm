@@ -43,6 +43,10 @@ static const void *kApolloSubredditManagedTableKey = &kApolloSubredditManagedTab
 static const void *kApolloSubredditTableManagedHeaderKey = &kApolloSubredditTableManagedHeaderKey;
 // Guard so the setTableHeaderView re-wrap can call %orig without recursing.
 static const void *kApolloSubredditRewrapInProgressKey = &kApolloSubredditRewrapInProgressKey;
+// Zeroing-weak ownership path back to the live PostsViewController; used so the
+// table hook can keep controller/bookkeeping aligned when Apollo swaps the
+// native header during search transitions.
+static const void *kApolloSubredditManagedViewControllerKey = &kApolloSubredditManagedViewControllerKey;
 static const void *kApolloSubredditTeardownMarkerKey = &kApolloSubredditTeardownMarkerKey;
 static const void *kApolloSubredditBannerPickerCoordinatorKey = &kApolloSubredditBannerPickerCoordinatorKey;
 static const void *kApolloSubredditIconPickerCoordinatorKey = &kApolloSubredditIconPickerCoordinatorKey;
@@ -1488,6 +1492,14 @@ static void ApolloSubredditSyncAssociations(UITableView *tableView,
     if (tableView) {
         objc_setAssociatedObject(tableView, kApolloSubredditManagedTableKey, wrappedHeader ? @YES : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(tableView, kApolloSubredditTableManagedHeaderKey, header, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        ApolloSubredditWeakControllerBox *owner =
+            objc_getAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey);
+        if (!owner && viewController) {
+            owner = [[ApolloSubredditWeakControllerBox alloc] init];
+            objc_setAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey,
+                                     owner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        owner.viewController = viewController;
     }
     if (viewController) {
         objc_setAssociatedObject(viewController, kApolloSubredditHeaderViewKey, header, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1623,9 +1635,9 @@ static void ApolloSubredditUpdateAmbientScroll(UIViewController *viewController,
 
 static void ApolloSubredditUpdateAmbientForManagedTable(UITableView *tableView) {
     if (![objc_getAssociatedObject(tableView, kApolloSubredditManagedTableKey) boolValue]) return;
-    ApolloSubredditHeaderView *header =
-        objc_getAssociatedObject(tableView, kApolloSubredditTableManagedHeaderKey);
-    UIViewController *viewController = header.hostViewController;
+    ApolloSubredditWeakControllerBox *owner =
+        objc_getAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey);
+    UIViewController *viewController = owner.viewController;
     if (viewController) ApolloSubredditUpdateAmbientScroll(viewController, tableView);
 }
 
@@ -1808,6 +1820,7 @@ static void ApolloSubredditTearDownHeader(UIViewController *viewController, BOOL
     if (tableView) {
         objc_setAssociatedObject(tableView, kApolloSubredditManagedTableKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(tableView, kApolloSubredditTableManagedHeaderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(tableView, kApolloSubredditRewrapInProgressKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
@@ -1962,6 +1975,7 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
         objc_setAssociatedObject(viewController, kApolloSubredditNameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
         objc_setAssociatedObject(tableView, kApolloSubredditManagedTableKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(tableView, kApolloSubredditTableManagedHeaderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return;
     }
 
@@ -1983,6 +1997,7 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
             objc_setAssociatedObject(viewController, kApolloSubredditNameKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
             objc_setAssociatedObject(tableView, kApolloSubredditManagedTableKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             objc_setAssociatedObject(tableView, kApolloSubredditTableManagedHeaderKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(tableView, kApolloSubredditManagedViewControllerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         return;
     }
@@ -2265,9 +2280,9 @@ static void ApolloSubredditRefreshVisibleControllers(void) {
 - (void)reloadData {
     %orig;
     if (![objc_getAssociatedObject(self, kApolloSubredditManagedTableKey) boolValue]) return;
-    ApolloSubredditHeaderView *header =
-        objc_getAssociatedObject(self, kApolloSubredditTableManagedHeaderKey);
-    UIViewController *viewController = header.hostViewController;
+    ApolloSubredditWeakControllerBox *owner =
+        objc_getAssociatedObject(self, kApolloSubredditManagedViewControllerKey);
+    UIViewController *viewController = owner.viewController;
     if (viewController) {
         ApolloSubredditScheduleRepairPass(viewController, @"reloadData");
     }

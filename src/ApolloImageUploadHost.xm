@@ -3278,6 +3278,8 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
             ApolloImgChestAssociateOperationWithTask(operation, proxyTask);
         };
         NSURLSessionUploadTask *task = %orig(ApolloRedditUploadFastFailRequest(), bodyData ?: [NSData data], chestWrapped);
+        // Apollo resumes the returned upload task only after this hook returns,
+        // so the wrapper cannot run before its weak cancellation proxy is set.
         proxyTask = task;
         return task;
     }
@@ -3465,6 +3467,8 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
             ApolloImgChestAssociateOperationWithTask(operation, proxyTask);
         };
         NSURLSessionUploadTask *task = %orig(ApolloRedditUploadFastFailRequest(), fileURL, chestWrapped);
+        // Apollo resumes the returned upload task only after this hook returns,
+        // so the wrapper cannot run before its weak cancellation proxy is set.
         proxyTask = task;
         return task;
     }

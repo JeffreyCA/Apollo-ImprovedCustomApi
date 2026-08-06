@@ -2132,15 +2132,30 @@ static void ApolloHLCollapseOrphanSeparators(UIViewController *vc) {
 }
 
 - (void)setTableHeaderView:(UIView *)tableHeaderView {
-    if (![objc_getAssociatedObject(self, kApolloHLManagedTableKey) boolValue]) { %orig; return; }
-    if ([objc_getAssociatedObject(self, kApolloHLRewrapInProgressKey) boolValue]) { %orig; return; }
+    if (![objc_getAssociatedObject(self, kApolloHLManagedTableKey) boolValue]) {
+        %orig;
+        return;
+    }
+    if ([objc_getAssociatedObject(self, kApolloHLRewrapInProgressKey) boolValue]) {
+        %orig;
+        return;
+    }
     // Already our wrapper — nothing to do.
-    if (tableHeaderView && objc_getAssociatedObject(tableHeaderView, kApolloHLWrapperMarkerKey)) { %orig; return; }
-    if (!sCommunityHighlights || sShowSubredditHeaders) { %orig; return; }
+    if (tableHeaderView && objc_getAssociatedObject(tableHeaderView, kApolloHLWrapperMarkerKey)) {
+        %orig;
+        return;
+    }
+    if (!sCommunityHighlights || sShowSubredditHeaders) {
+        %orig;
+        return;
+    }
 
     ApolloHLCarouselView *carousel = objc_getAssociatedObject(self, kApolloHLCarouselKey);
     UIViewController *vc = carousel.hostViewController;
-    if (!vc || !carousel) { %orig; return; }
+    if (!vc || !carousel) {
+        %orig;
+        return;
+    }
 
     // Re-wrap: stack our carousel above whatever Apollo is installing.
     CGFloat width = self.bounds.size.width > 0 ? self.bounds.size.width : UIScreen.mainScreen.bounds.size.width;

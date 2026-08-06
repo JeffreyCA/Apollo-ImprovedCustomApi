@@ -59,6 +59,7 @@ static char kApolloMediaComposerBodyTextViewKey;
 static char kApolloMediaComposerBodyTextStorageKey;
 static char kApolloMediaComposerBodyLoggedInstallKey;
 static char kApolloMediaComposerBodyTextViewMarkerKey;
+static char kApolloMediaComposerBodyTextViewControllerBoxKey;
 static char kApolloMediaComposerBodyLoggedRedirectKey;
 static char kApolloMediaComposerBodyLoggedCaptureKey;
 static char kApolloMediaComposerBodyRowTargetKey;
@@ -79,6 +80,7 @@ static char kApolloMediaComposerBodyToolbarRestrictionsLoggedKey;
 static char kApolloMediaComposerBodyToolbarButtonOriginalAlphaKey;
 static char kApolloMediaComposerBodyToolbarRetriesScheduledKey;
 static char kApolloMediaComposerBodyEditorFreshOpenKey;
+static char kApolloMediaComposerNativeBodyEditorOwnerKey;
 static char kApolloMediaComposerNativeBodyEditorSavedKey;
 static char kApolloMediaComposerBodyDoneItemKey;
 static char kApolloMediaComposerBodyCancelItemKey;
@@ -106,8 +108,6 @@ static NSMutableSet<NSString *> *sApolloMediaComposerLoggedTextCandidates = nil;
 static NSMutableArray<NSMutableDictionary *> *sApolloMediaComposerPendingVideoContexts = nil;
 static __weak UIViewController *sApolloMediaComposerActiveBodyController = nil;
 static __weak UIViewController *sApolloMediaComposerLastBodyOwnerController = nil;
-static __weak UIViewController *sApolloMediaComposerNativeBodyEditor = nil;
-static __weak UIViewController *sApolloMediaComposerNativeBodyEditorOwner = nil;
 static __strong NSString *sApolloMediaComposerLastBodyText = nil;
 static NSTimeInterval sApolloMediaComposerLastBodyTextAt = 0.0;
 static BOOL sApolloMediaComposerSawBodyOwnerController = NO;
@@ -151,6 +151,13 @@ static void ApolloMediaComposerConfigureNativeBodyEditor(UIViewController *edito
 static void ApolloMediaComposerSaveNativeBodyEditor(UIViewController *editor, NSString *reason, BOOL updatePreview);
 static void ApolloMediaComposerApplyNativeEditorToolbarRestrictions(UIViewController *editor, UIViewController *ownerController, NSString *reason);
 static void ApolloMediaComposerScheduleNativeEditorToolbarRetries(UIViewController *editor, UIViewController *ownerController);
+
+@interface ApolloMediaComposerWeakControllerBox : NSObject
+@property (nonatomic, weak) UIViewController *controller;
+@end
+
+@implementation ApolloMediaComposerWeakControllerBox
+@end
 
 @interface ApolloMediaComposerBodyTextDelegate : NSObject <UITextViewDelegate>
 @property (nonatomic, weak) UIViewController *controller;
@@ -1386,12 +1393,10 @@ static BOOL ApolloMediaComposerTextViewIsBodyEditor(UITextView *textView) {
 static UIViewController *ApolloMediaComposerControllerForBodyTextView(UITextView *textView) {
     if (!ApolloMediaComposerTextViewIsBodyEditor(textView)) return nil;
 
-    UIViewController *controller = nil;
-    if ([textView.delegate isMemberOfClass:[ApolloMediaComposerBodyTextDelegate class]]) {
+    ApolloMediaComposerWeakControllerBox *box = objc_getAssociatedObject(textView, &kApolloMediaComposerBodyTextViewControllerBoxKey);
+    UIViewController *controller = [box isKindOfClass:[ApolloMediaComposerWeakControllerBox class]] ? box.controller : nil;
+    if (!controller && [textView.delegate isKindOfClass:[ApolloMediaComposerBodyTextDelegate class]]) {
         controller = ((ApolloMediaComposerBodyTextDelegate *)textView.delegate).controller;
-    }
-    if (!controller && textView.tag == ApolloMediaComposerBodyTextViewTag()) {
-        controller = sApolloMediaComposerNativeBodyEditorOwner;
     }
     if (!controller) controller = sApolloMediaComposerActiveBodyController;
     return ApolloMediaComposerCanonicalBodyController(controller) ?: controller;
@@ -1483,8 +1488,8 @@ static void ApolloMediaComposerStoreBodyText(UIViewController *controller, NSStr
 }
 
 static UIViewController *ApolloMediaComposerOwnerForNativeBodyEditor(UIViewController *editor) {
-    UIViewController *ownerController =
-        editor == sApolloMediaComposerNativeBodyEditor ? sApolloMediaComposerNativeBodyEditorOwner : nil;
+    ApolloMediaComposerWeakControllerBox *box = objc_getAssociatedObject(editor, &kApolloMediaComposerNativeBodyEditorOwnerKey);
+    UIViewController *ownerController = [box isKindOfClass:[ApolloMediaComposerWeakControllerBox class]] ? box.controller : nil;
     return ApolloMediaComposerCanonicalBodyController(ownerController) ?: ownerController;
 }
 
@@ -1520,7 +1525,10 @@ static void ApolloMediaComposerSeedNativeBodyEditorTextView(UIViewController *ed
     UITextView *textView = ApolloMediaComposerNativeBodyTextView(editor);
     if (!textView || !ownerController) return;
 
+    ApolloMediaComposerWeakControllerBox *controllerBox = [ApolloMediaComposerWeakControllerBox new];
+    controllerBox.controller = ownerController;
     objc_setAssociatedObject(textView, &kApolloMediaComposerBodyTextViewMarkerKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(textView, &kApolloMediaComposerBodyTextViewControllerBoxKey, controllerBox, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(ownerController, &kApolloMediaComposerBodyTextViewKey, textView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     textView.tag = ApolloMediaComposerBodyTextViewTag();
 
@@ -2146,7 +2154,10 @@ static NSUInteger ApolloMediaComposerMarkNativeBodyTextViewsInView(UIView *rootV
 
     if (!bestTextView || bestScore < 40) return 0;
 
+    ApolloMediaComposerWeakControllerBox *controllerBox = [ApolloMediaComposerWeakControllerBox new];
+    controllerBox.controller = ownerController;
     objc_setAssociatedObject(bestTextView, &kApolloMediaComposerBodyTextViewMarkerKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(bestTextView, &kApolloMediaComposerBodyTextViewControllerBoxKey, controllerBox, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(ownerController, &kApolloMediaComposerBodyTextViewKey, bestTextView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     NSNumber *seeded = objc_getAssociatedObject(bestTextView, &kApolloMediaComposerBodyTextViewSeededKey);
@@ -2447,8 +2458,9 @@ static void ApolloMediaComposerOpenIndependentBodyEditor(UIViewController *contr
         return;
     }
 
-    sApolloMediaComposerNativeBodyEditor = editor;
-    sApolloMediaComposerNativeBodyEditorOwner = ownerController;
+    ApolloMediaComposerWeakControllerBox *controllerBox = [ApolloMediaComposerWeakControllerBox new];
+    controllerBox.controller = ownerController;
+    objc_setAssociatedObject(editor, &kApolloMediaComposerNativeBodyEditorOwnerKey, controllerBox, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(editor, &kApolloMediaComposerNativeBodyEditorSavedKey, nil, OBJC_ASSOCIATION_ASSIGN);
     @try { [editor setValue:bodyText ?: @"" forKey:@"startingText"]; } @catch (__unused NSException *e) {}
     @try { [editor setValue:@YES forKey:@"showKeyboardOnAppearanceForTextEntryView"]; } @catch (__unused NSException *e) {}
@@ -2627,6 +2639,7 @@ static void ApolloMediaComposerClearBodyStateForController(UIViewController *con
             objc_setAssociatedObject(textView, &kApolloMediaComposerBodyTextViewSeedingKey, nil, OBJC_ASSOCIATION_ASSIGN);
         }
         objc_setAssociatedObject(textView, &kApolloMediaComposerBodyTextViewMarkerKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        objc_setAssociatedObject(textView, &kApolloMediaComposerBodyTextViewControllerBoxKey, nil, OBJC_ASSOCIATION_ASSIGN);
         objc_setAssociatedObject(textView, &kApolloMediaComposerBodyTextViewSeededKey, nil, OBJC_ASSOCIATION_ASSIGN);
         objc_setAssociatedObject(textView, &kApolloMediaComposerBodyTextViewSeedingKey, nil, OBJC_ASSOCIATION_ASSIGN);
     }
@@ -3554,25 +3567,39 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
 
 - (void)setRightBarButtonItem:(UIBarButtonItem *)item {
     UIBarButtonItem *doneItem = objc_getAssociatedObject(self, &kApolloComposeFormBodyNavItemDoneKey);
-    if ([doneItem isKindOfClass:[UIBarButtonItem class]] && item != doneItem) { %orig(doneItem); return; }
+    if ([doneItem isKindOfClass:[UIBarButtonItem class]] && item != doneItem) {
+        %orig(doneItem);
+        return;
+    }
     %orig;
 }
 
 - (void)setRightBarButtonItem:(UIBarButtonItem *)item animated:(BOOL)animated {
     UIBarButtonItem *doneItem = objc_getAssociatedObject(self, &kApolloComposeFormBodyNavItemDoneKey);
-    if ([doneItem isKindOfClass:[UIBarButtonItem class]] && item != doneItem) { %orig(doneItem, animated); return; }
+    if ([doneItem isKindOfClass:[UIBarButtonItem class]] && item != doneItem) {
+        %orig(doneItem, animated);
+        return;
+    }
     %orig;
 }
 
 - (void)setRightBarButtonItems:(NSArray<UIBarButtonItem *> *)items {
     UIBarButtonItem *doneItem = objc_getAssociatedObject(self, &kApolloComposeFormBodyNavItemDoneKey);
-    if ([doneItem isKindOfClass:[UIBarButtonItem class]] && !(items.count == 1 && items.firstObject == doneItem)) { %orig(@[doneItem]); return; }
+    if ([doneItem isKindOfClass:[UIBarButtonItem class]] &&
+        !(items.count == 1 && items.firstObject == doneItem)) {
+        %orig(@[doneItem]);
+        return;
+    }
     %orig;
 }
 
 - (void)setRightBarButtonItems:(NSArray<UIBarButtonItem *> *)items animated:(BOOL)animated {
     UIBarButtonItem *doneItem = objc_getAssociatedObject(self, &kApolloComposeFormBodyNavItemDoneKey);
-    if ([doneItem isKindOfClass:[UIBarButtonItem class]] && !(items.count == 1 && items.firstObject == doneItem)) { %orig(@[doneItem], animated); return; }
+    if ([doneItem isKindOfClass:[UIBarButtonItem class]] &&
+        !(items.count == 1 && items.firstObject == doneItem)) {
+        %orig(@[doneItem], animated);
+        return;
+    }
     %orig;
 }
 
@@ -3603,7 +3630,10 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
-    if (ApolloIsSystemShareComposeController(self)) { %orig; return; }
+    if (ApolloIsSystemShareComposeController(self)) {
+        %orig;
+        return;
+    }
     ApolloMediaComposerMarkVisibleNativeBodyTextViews(self, @"viewWillDisappear");
     UIViewController *bodyController = ApolloMediaComposerCanonicalBodyController(self);
     if (bodyController) ApolloMediaComposerRestoreOriginalPostType(bodyController, NO, @"viewWillDisappear");
@@ -3692,13 +3722,19 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
 %hook UILabel
 
 - (void)setText:(NSString *)text {
-    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
+    if (!ApolloMediaComposerShouldWidenPicker()) {
+        %orig;
+        return;
+    }
     ApolloMediaComposerLogTextCandidateOnce(@"UILabel setText:", self, text);
     %orig(ApolloPhotoComposerPlainReplacement(text));
 }
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
-    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
+    if (!ApolloMediaComposerShouldWidenPicker()) {
+        %orig;
+        return;
+    }
     ApolloMediaComposerLogTextCandidateOnce(@"UILabel setAttributedText:", self, attributedText.string);
     %orig(ApolloPhotoComposerAttributedReplacement(attributedText));
 }
@@ -3708,13 +3744,19 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
 %hook UIButton
 
 - (void)setTitle:(NSString *)title forState:(UIControlState)state {
-    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
+    if (!ApolloMediaComposerShouldWidenPicker()) {
+        %orig;
+        return;
+    }
     ApolloMediaComposerLogTextCandidateOnce(@"UIButton setTitle:forState:", self, title);
     %orig(ApolloPhotoComposerPlainReplacement(title), state);
 }
 
 - (void)setAttributedTitle:(NSAttributedString *)title forState:(UIControlState)state {
-    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
+    if (!ApolloMediaComposerShouldWidenPicker()) {
+        %orig;
+        return;
+    }
     ApolloMediaComposerLogTextCandidateOnce(@"UIButton setAttributedTitle:forState:", self, title.string);
     %orig(ApolloPhotoComposerAttributedReplacement(title), state);
 }
@@ -3764,13 +3806,19 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
 %hook ASTextNode
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
-    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
+    if (!ApolloMediaComposerShouldWidenPicker()) {
+        %orig;
+        return;
+    }
     ApolloMediaComposerLogTextCandidateOnce(@"ASTextNode setAttributedText:", self, attributedText.string);
     %orig(ApolloPhotoComposerAttributedReplacement(attributedText));
 }
 
 - (void)setText:(NSString *)text {
-    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
+    if (!ApolloMediaComposerShouldWidenPicker()) {
+        %orig;
+        return;
+    }
     ApolloMediaComposerLogTextCandidateOnce(@"ASTextNode setText:", self, text);
     %orig(ApolloPhotoComposerPlainReplacement(text));
 }
@@ -3780,13 +3828,19 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
 %hook ASTextNode2
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
-    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
+    if (!ApolloMediaComposerShouldWidenPicker()) {
+        %orig;
+        return;
+    }
     ApolloMediaComposerLogTextCandidateOnce(@"ASTextNode2 setAttributedText:", self, attributedText.string);
     %orig(ApolloPhotoComposerAttributedReplacement(attributedText));
 }
 
 - (void)setText:(NSString *)text {
-    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
+    if (!ApolloMediaComposerShouldWidenPicker()) {
+        %orig;
+        return;
+    }
     ApolloMediaComposerLogTextCandidateOnce(@"ASTextNode2 setText:", self, text);
     %orig(ApolloPhotoComposerPlainReplacement(text));
 }
@@ -3796,13 +3850,19 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
 %hook ASButtonNode
 
 - (void)setAttributedTitle:(NSAttributedString *)title forState:(UIControlState)state {
-    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
+    if (!ApolloMediaComposerShouldWidenPicker()) {
+        %orig;
+        return;
+    }
     ApolloMediaComposerLogTextCandidateOnce(@"ASButtonNode setAttributedTitle:forState:", self, title.string);
     %orig(ApolloPhotoComposerAttributedReplacement(title), state);
 }
 
 - (void)setTitle:(NSString *)title withFont:(UIFont *)font withColor:(UIColor *)color forState:(UIControlState)state {
-    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
+    if (!ApolloMediaComposerShouldWidenPicker()) {
+        %orig;
+        return;
+    }
     ApolloMediaComposerLogTextCandidateOnce(@"ASButtonNode setTitle:withFont:withColor:forState:", self, title);
     NSString *replacement = ApolloPhotoComposerPlainReplacement(title);
     if (!sApolloMediaComposerLoggedButtonTitleRewrite && [replacement isKindOfClass:[NSString class]] && ![replacement isEqualToString:title]) {
@@ -3813,7 +3873,10 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
 }
 
 - (void)setTitle:(NSString *)title withFont:(UIFont *)font withColor:(UIColor *)color withShadowColor:(UIColor *)shadowColor withShadowOffset:(CGSize)shadowOffset forState:(UIControlState)state {
-    if (!ApolloMediaComposerShouldWidenPicker()) { %orig; return; }
+    if (!ApolloMediaComposerShouldWidenPicker()) {
+        %orig;
+        return;
+    }
     ApolloMediaComposerLogTextCandidateOnce(@"ASButtonNode setTitle:withFont:withColor:withShadowColor:withShadowOffset:forState:", self, title);
     NSString *replacement = ApolloPhotoComposerPlainReplacement(title);
     if (!sApolloMediaComposerLoggedButtonTitleRewrite && [replacement isKindOfClass:[NSString class]] && ![replacement isEqualToString:title]) {
@@ -4017,9 +4080,15 @@ static void ApolloMediaComposerLogPhotoAuthStateOnce(void) {
 }
 
 - (void)setFilter:(PHPickerFilter *)filter {
-    if (!ApolloMediaComposerShouldBridgeVideoPicker()) { %orig; return; }
+    if (!ApolloMediaComposerShouldBridgeVideoPicker()) {
+        %orig;
+        return;
+    }
     PHPickerFilter *combined = ApolloMediaComposerCombinedImagesVideosFilter();
-    if (!combined) { %orig; return; }
+    if (!combined) {
+        %orig;
+        return;
+    }
     if (!sApolloMediaComposerLoggedPickerFilterRewrite) {
         sApolloMediaComposerLoggedPickerFilterRewrite = YES;
         ApolloLog(@"[MediaComposer] widening PHPickerConfiguration filter to images+videos via setFilter:");

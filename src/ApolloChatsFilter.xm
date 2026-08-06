@@ -2078,5 +2078,5 @@ static void ApolloInboxCellApplyAvatar(id cellNode) {
                 usingBlock:^(__unused NSNotification *notification) {
         ApolloApplyCombinedInboxBadge();
     }];
-    ApolloLog(@"[ChatsFilter] module loaded");
+    ChatsFilterLog(@"module loaded");
 }

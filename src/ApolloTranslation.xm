@@ -7416,7 +7416,10 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
         if (ApolloPreemptUnownedTextNodeFromVCStash(self, attributedText, &preemptSwap) ||
             ApolloPreemptUnownedCommentTextNode(self, attributedText, &preemptSwap)) {
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            @try { %orig(preemptSwap); } @catch (__unused NSException *e) {}
+            @try {
+                %orig(preemptSwap);
+            } @catch (__unused NSException *e) {
+            }
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             return;
         }
@@ -7465,7 +7468,10 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
     NSAttributedString *swap = nil;
     if (ApolloPrepareTranslatedSwapForTextNode(self, attributedText, &swap)) {
         objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        @try { %orig(swap); } @catch (__unused NSException *e) {}
+        @try {
+            %orig(swap);
+        } @catch (__unused NSException *e) {
+        }
         objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if (isTitleOwned) {
             NSString *originalBody = objc_getAssociatedObject(self, kApolloOwnedNodeOriginalBodyKey);
@@ -7494,7 +7500,10 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
         if (ApolloPreemptUnownedTextNodeFromVCStash(self, attributedText, &preemptSwap) ||
             ApolloPreemptUnownedCommentTextNode(self, attributedText, &preemptSwap)) {
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            @try { %orig(preemptSwap); } @catch (__unused NSException *e) {}
+            @try {
+                %orig(preemptSwap);
+            } @catch (__unused NSException *e) {
+            }
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             return;
         }
@@ -7532,7 +7541,10 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
     NSAttributedString *swap = nil;
     if (ApolloPrepareTranslatedSwapForTextNode(self, attributedText, &swap)) {
         objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        @try { %orig(swap); } @catch (__unused NSException *e) {}
+        @try {
+            %orig(swap);
+        } @catch (__unused NSException *e) {
+        }
         objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if (isTitleOwned) {
             NSString *originalBody = objc_getAssociatedObject(self, kApolloOwnedNodeOriginalBodyKey);
