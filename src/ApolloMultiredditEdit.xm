@@ -51,11 +51,19 @@
 //   instant UI, then com.christianselig.MultiredditsUpdatedForAccount is
 //   posted (object nil, matching Apollo's own add/remove-subreddit flows),
 //   which makes RedditListViewController refetch the authoritative list.
-// - Rows are resolved by NAME, never by index. The list re-sorts its model
-//   arrays for display, so a visible row index means nothing against the
-//   stored array (the exact lesson of the MODERATOR-section fix in
-//   ApolloHideModSubreddits.xm). The tapped cell's title label is matched
-//   against RDKMultireddit.displayName case-insensitively.
+// - Rows are resolved by MODEL, never by index and never by title. The list
+//   re-sorts its model arrays for display, so a visible row index means
+//   nothing against the stored array (the exact lesson of the
+//   MODERATOR-section fix in ApolloHideModSubreddits.xm) — and display_name
+//   is editable independently of the path, so two multireddits can share a
+//   title and a title match alone would resolve both rows to the first of
+//   them. Apollo's cellForRowAt never messages the model (verified in the
+//   binary — it renders from cached Swift storage), so a row is identified by
+//   title AND, when a title is shared, by matching each candidate's own
+//   subreddits against the subtitle Apollo rendered. The resolved model is
+//   bound to the cell and the edit-mode tap reads it back from there, so the
+//   tap never re-derives a multireddit from a title. A row that still can't
+//   be pinned to one model is left alone rather than guessed at.
 // - The model array is captured from -[RDKUser setMultireddits:] (fired by
 //   the list's own fetch) with the active client's user as fallback, so no
 //   Swift ivar of the view controller is ever read (its `multireddits` field
@@ -68,6 +76,9 @@
 - (NSString *)displayName;
 - (NSString *)path;
 - (NSString *)descriptionMarkdown;
+// The multireddit's member subreddits; Mantle's subredditsJSONTransformer
+// decides the element type, so callers must handle both objects and strings.
+- (NSArray *)subreddits;
 - (BOOL)isEditable;
 @end
 
@@ -114,6 +125,11 @@ static char kApolloMultiEditPickerTargetKey;
 // moment later; the UIImageView setImage: hook below re-asserts the custom
 // icon on every attempt to replace it while the tag is present.
 static char kApolloMultiEditIconEnforceKey;
+
+// The RDKMultireddit a MULTIREDDITS row was built from, bound to the cell in
+// cellForRow. display_name is user-editable and not unique, so it can never be
+// the row's identity; this is.
+static char kApolloMultiEditRowModelKey;
 
 // Fast path for that hook: stays NO (one static read per setImage:) until any
 // custom multireddit icon exists this session.
@@ -279,17 +295,118 @@ static NSArray<NSArray *> *ApolloMultiEditCandidateLists(void) {
     return lists;
 }
 
-static RDKMultireddit *ApolloMultiEditFindByTitle(NSString *title) {
-    if (title.length == 0) return nil;
+static NSString *ApolloMultiEditDisplayTitle(RDKMultireddit *candidate) {
+    NSString *display = nil;
+    if ([candidate respondsToSelector:@selector(displayName)]) display = [candidate displayName];
+    if (display.length == 0 && [candidate respondsToSelector:@selector(name)]) display = [candidate name];
+    return display;
+}
+
+// Every model whose rendered title matches, deduplicated by path.
+//
+// display_name is user-editable and independent of the path, so it is NOT an
+// identity: two multireddits can legitimately share one title while living at
+// different paths. Callers must treat a >1 result as unresolved rather than
+// taking the first — editing, describing or icon-tagging the wrong
+// multireddit is worse than not acting.
+static NSArray<RDKMultireddit *> *ApolloMultiEditFindAllByTitle(NSString *title) {
+    if (title.length == 0) return @[];
+    NSMutableArray<RDKMultireddit *> *matches = [NSMutableArray array];
+    NSMutableSet<NSString *> *seenPaths = [NSMutableSet set];
     for (NSArray *list in ApolloMultiEditCandidateLists()) {
         for (RDKMultireddit *candidate in list) {
-            NSString *display = nil;
-            if ([candidate respondsToSelector:@selector(displayName)]) display = [candidate displayName];
-            if (display.length == 0 && [candidate respondsToSelector:@selector(name)]) display = [candidate name];
-            if (display.length > 0 && [display caseInsensitiveCompare:title] == NSOrderedSame) return candidate;
+            NSString *display = ApolloMultiEditDisplayTitle(candidate);
+            if (display.length == 0 || [display caseInsensitiveCompare:title] != NSOrderedSame) continue;
+            // The same multireddit reached through two accounts' captured
+            // lists is one multireddit, not an ambiguity.
+            NSString *path = [candidate respondsToSelector:@selector(path)] ? [candidate path] : nil;
+            if (path.length > 0) {
+                if ([seenPaths containsObject:path]) continue;
+                [seenPaths addObject:path];
+            }
+            [matches addObject:candidate];
         }
     }
-    return nil;
+    return matches;
+}
+
+// MARK: - Row identity
+//
+// Apollo's cell carries only strings (redditTitle/subtitle — see
+// Headers/Swift/RedditListTableViewCell.swift), and its
+// tableView(_:cellForRowAt:) never messages the model: disassembling it
+// (0x10063dbb4, reached from -[… tableView:cellForRowAtIndexPath:] at
+// 0x1006401f4) shows no objc_msgSend to displayName/name/path/subreddits
+// anywhere in the function — it renders from cached Swift storage. So there is
+// no configure-time model read to piggyback on; the row's identity has to be
+// recovered from what Apollo rendered.
+//
+// The title alone cannot do it (that is the bug). The stock subtitle can: it
+// is the row's subreddit list, and two multireddits sharing a display_name
+// still differ in what they contain. So a same-titled group is disambiguated
+// by matching each candidate's own subreddits against the rendered subtitle,
+// and a group that still can't be told apart is left alone rather than
+// resolved to whichever came first.
+
+// A multireddit's subreddit names, whatever the transformed array holds
+// (RDKSubreddit objects or plain strings).
+static NSArray<NSString *> *ApolloMultiEditSubredditNames(RDKMultireddit *multireddit) {
+    if (![multireddit respondsToSelector:@selector(subreddits)]) return @[];
+    NSArray *subreddits = [multireddit subreddits];
+    if (![subreddits isKindOfClass:[NSArray class]]) return @[];
+
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (id entry in subreddits) {
+        NSString *name = nil;
+        if ([entry isKindOfClass:[NSString class]]) name = entry;
+        else if ([entry respondsToSelector:@selector(name)]) name = [entry name];
+        if (name.length == 0 && [entry respondsToSelector:@selector(displayName)]) name = [entry displayName];
+        if (name.length > 0) [names addObject:name];
+    }
+    return names;
+}
+
+// How many of the multireddit's subreddits appear in the rendered subtitle.
+static NSUInteger ApolloMultiEditSubtitleOverlap(RDKMultireddit *multireddit, NSString *subtitle) {
+    if (subtitle.length == 0) return 0;
+    NSUInteger matched = 0;
+    for (NSString *name in ApolloMultiEditSubredditNames(multireddit)) {
+        NSRange found = [subtitle rangeOfString:name options:NSCaseInsensitiveSearch];
+        if (found.location != NSNotFound) matched++;
+    }
+    return matched;
+}
+
+// The multireddit a row was rendered from, or nil when it can't be pinned down.
+//
+// `subtitle` must be the subtitle APOLLO rendered (read before this module
+// swaps in a description), since that is what identifies a row among
+// same-titled multireddits.
+static RDKMultireddit *ApolloMultiEditResolveRowModel(NSString *title, NSString *subtitle) {
+    NSArray<RDKMultireddit *> *matches = ApolloMultiEditFindAllByTitle(title);
+    if (matches.count <= 1) return matches.firstObject;
+
+    // Same title, different multireddits: let their contents decide.
+    RDKMultireddit *best = nil;
+    NSUInteger bestOverlap = 0;
+    BOOL tied = NO;
+    for (RDKMultireddit *candidate in matches) {
+        NSUInteger overlap = ApolloMultiEditSubtitleOverlap(candidate, subtitle);
+        if (overlap > bestOverlap) { best = candidate; bestOverlap = overlap; tied = NO; }
+        else if (overlap == bestOverlap && overlap > 0) tied = YES;
+    }
+    if (!best || tied) {
+        // Indistinguishable from the rendered row. Editing, describing or
+        // icon-tagging the wrong multireddit is worse than doing nothing.
+        ApolloLog(@"[MultiEdit] '%@' matches %lu multireddits and the row's subreddits don't "
+                  @"single one out — leaving this row alone",
+                  title, (unsigned long)matches.count);
+        return nil;
+    }
+    ApolloLog(@"[MultiEdit] '%@' is shared by %lu multireddits; row resolved to %@ by its subreddits",
+              title, (unsigned long)matches.count,
+              [best respondsToSelector:@selector(path)] ? [best path] : @"?");
+    return best;
 }
 
 // MARK: - Capture Apollo's multireddit fetches
@@ -399,9 +516,12 @@ static RDKMultireddit *ApolloMultiEditFindByTitle(NSString *title) {
 
     UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
     NSString *title = ApolloMultiEditTrim(ApolloMultiEditCellLabel(cell, "redditTitleLabel").text);
-    RDKMultireddit *multireddit = ApolloMultiEditFindByTitle(title);
+    // The model this exact row was built from — never a fresh title match,
+    // which would resolve two same-titled rows to the same multireddit and
+    // edit the wrong one.
+    RDKMultireddit *multireddit = objc_getAssociatedObject(cell, &kApolloMultiEditRowModelKey);
     if (!multireddit) {
-        ApolloLog(@"[MultiEdit] no multireddit model matches tapped row '%@' (%lu candidate lists)",
+        ApolloLog(@"[MultiEdit] tapped row '%@' has no bound multireddit model (%lu candidate lists)",
                   title, (unsigned long)ApolloMultiEditCandidateLists().count);
         return;
     }
@@ -431,7 +551,13 @@ static RDKMultireddit *ApolloMultiEditFindByTitle(NSString *title) {
     if (![ApolloMultiEditSectionTitle(self, tableView, indexPath.section) isEqualToString:@"MULTIREDDITS"]) return cell;
 
     NSString *title = ApolloMultiEditTrim(ApolloMultiEditCellLabel(cell, "redditTitleLabel").text);
-    RDKMultireddit *multireddit = ApolloMultiEditFindByTitle(title);
+    // Apollo's own subtitle (its subreddit list), read before the description
+    // swap below replaces it — it is what tells same-titled multireddits apart.
+    RDKMultireddit *multireddit = ApolloMultiEditResolveRowModel(title, subtitleLabel.text);
+    // Bind the model to the cell so the edit-mode tap acts on this row's
+    // multireddit rather than re-deriving one from the (non-unique) title.
+    // Cells are reused, so an unresolved row must clear the old binding.
+    objc_setAssociatedObject(cell, &kApolloMultiEditRowModelKey, multireddit, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     UIImageView *iconView = (UIImageView *)ApolloMultiEditObjectIvar(cell, "subredditIconImageView");
     if ([iconView isKindOfClass:[UIImageView class]]) {
@@ -670,6 +796,9 @@ static RDKMultireddit *ApolloMultiEditFindByTitle(NSString *title) {
     if ([iconView isKindOfClass:[UIImageView class]]) {
         objc_setAssociatedObject(iconView, &kApolloMultiEditIconEnforceKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
     }
+    // A recycled cell must not carry the previous row's multireddit — an
+    // edit-mode tap landing before cellForRow rebinds would act on it.
+    objc_setAssociatedObject(self, &kApolloMultiEditRowModelKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 %end
