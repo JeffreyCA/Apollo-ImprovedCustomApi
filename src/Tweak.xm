@@ -3540,7 +3540,15 @@ static void initializeRandomSources() {
         ApolloLog(@"[PerPostSort] exclusivity: normalized stale both-on at launch (native Remember Subreddit Sort -> OFF)");
     }
     sScrollEdgeEffectStyle = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyScrollEdgeEffectStyle];
-    if (sScrollEdgeEffectStyle < ApolloScrollEdgeEffectStyleAutomatic || sScrollEdgeEffectStyle > ApolloScrollEdgeEffectStyleHidden) {
+    if (sScrollEdgeEffectStyle == 3) {
+        // Retired Hidden mode: closest surviving intent (no hard cutoff line)
+        // is Soft. 3 stays reserved — see the enum note in ApolloState.h.
+        sScrollEdgeEffectStyle = ApolloScrollEdgeEffectStyleSoft;
+        [standardDefaults setInteger:sScrollEdgeEffectStyle forKey:UDKeyScrollEdgeEffectStyle];
+    } else if (sScrollEdgeEffectStyle != ApolloScrollEdgeEffectStyleAutomatic &&
+               sScrollEdgeEffectStyle != ApolloScrollEdgeEffectStyleSoft &&
+               sScrollEdgeEffectStyle != ApolloScrollEdgeEffectStyleHard &&
+               sScrollEdgeEffectStyle != ApolloScrollEdgeEffectStyleBlur) {
         sScrollEdgeEffectStyle = ApolloScrollEdgeEffectStyleAutomatic;
         [standardDefaults setInteger:sScrollEdgeEffectStyle forKey:UDKeyScrollEdgeEffectStyle];
     }

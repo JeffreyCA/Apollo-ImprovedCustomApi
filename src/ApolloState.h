@@ -157,16 +157,41 @@ extern BOOL sLiveCommentsFollow;
 // default OFF via registerDefaults. See ApolloPerPostCommentSort.xm.
 extern BOOL sPerPostCommentSort;
 
-// Override for UIScrollView top/bottom scroll edge effects on iOS 26+ Liquid Glass.
-// iOS 26 defaults to Soft; iOS 27 betas default to Hard, which some users find
-// jarring. See ApolloScrollEdgeEffect.xm.
+// "Header Style" (user-facing name): override for the TOP scroll edge effect on
+// iOS 26+ Liquid Glass. iOS 26 defaults to Soft; iOS 27 betas default to Hard,
+// which some users find jarring. Only the top (header) edge is governed — the
+// tab-bar/bottom edge always keeps the system's own treatment. See
+// ApolloScrollEdgeEffect.xm (Soft/Hard enforcement) and
+// ApolloProgressiveBlur.xm (Blur's tweak-drawn variable blur).
 typedef NS_ENUM(NSInteger, ApolloScrollEdgeEffectStyle) {
     ApolloScrollEdgeEffectStyleAutomatic = 0,
     ApolloScrollEdgeEffectStyleSoft      = 1,
     ApolloScrollEdgeEffectStyleHard      = 2,
-    ApolloScrollEdgeEffectStyleHidden    = 3,
+    // 3 was Hidden, retired: visually indistinguishable from Soft, so stored 3s
+    // migrate to Soft at load (Tweak.xm). Never reuse 3 for a new mode — the
+    // migration could not tell an old Hidden user from a new-mode user.
+    ApolloScrollEdgeEffectStyleBlur      = 4,
 };
 extern NSInteger sScrollEdgeEffectStyle;
+// sScrollEdgeEffectStyle with Automatic resolved to what the running OS
+// actually renders (iOS 27+ defaults Hard, iOS 26 Soft). Anything keyed on the
+// *look* of the header — the title capsule, the settings label — reads this,
+// never the raw mode. extern "C": defined in .xm (ObjC++), called from the
+// settings VC (.m).
+#ifdef __cplusplus
+extern "C" {
+#endif
+NSInteger ApolloResolvedScrollEdgeEffectStyle(void);
+// Whether the private CAFilter variableBlur primitive Blur mode renders with
+// exists at runtime; the settings picker hides the Blur option when NO.
+// Defined in ApolloProgressiveBlur.xm.
+BOOL ApolloProgressiveBlurAvailable(void);
+#ifdef __cplusplus
+}
+#endif
+// Posted (main thread) after sScrollEdgeEffectStyle changes; observers restyle
+// live UI. Defined in ApolloScrollEdgeEffect.xm.
+extern NSString *const ApolloScrollEdgeEffectStyleChangedNotification;
 // Applies sScrollEdgeEffectStyle to a scroll view's top/bottom edge effects (no-op pre-iOS 26
 // or when not Liquid Glass). Called from UIScrollView's didMoveToWindow hook in
 // ApolloAutoHideTabBar.xm — kept here to avoid a second %hook UIScrollView didMoveToWindow,
