@@ -22,18 +22,20 @@
 // doesn't break at screen edges. A separate feather gradient on the view's own
 // layer mask fades the bottom edge out so the blur has no visible seam.
 //
-// One blur view is hosted per UINavigationBar, inserted at the back of the
-// bar itself so hidden/alpha/transform chrome animations (search-in-place,
-// media viewer) carry it automatically. Its frame extends above the bar to
-// cover the status bar and below it for the feather tail; Liquid Glass bars
-// do not clip subviews. Everything degrades soft: if CAFilter or the
-// variableBlur type is missing, no view is installed and the header keeps the
-// system effect (ApolloScrollEdgeEffect.xm leaves style untouched in Blur
-// mode, so the automatic treatment shows).
+// One blur view is hosted per UINavigationBar as a sibling directly beneath
+// it. Its frame extends above the bar to cover the status-bar gap, but ends at
+// the bar's bottom edge. This boundary is important: a backdrop filter samples
+// every pixel behind its view, so extending it into content also blurs static
+// controls such as Apollo's search field and the first subreddit row. The
+// feather therefore lives entirely inside the header bounds. Everything
+// degrades soft: if CAFilter or the variableBlur type is missing, no view is
+// installed and the header keeps the system effect
+// (ApolloScrollEdgeEffect.xm leaves style untouched in Blur mode, so the
+// automatic treatment shows).
 
-// Extension below the bar's bottom edge: the blur ramp needs runway past the
-// chrome to dissolve into rather than ending at the bar's own edge.
-static const CGFloat kApolloBlurFadeTail = 36.0;
+// The final part of the header fades to transparent. This is deliberately an
+// in-bounds feather, not an extension below the navigation bar.
+static const CGFloat kApolloBlurBottomFeather = 36.0;
 // Cover the status bar gap above the bar (~59pt on notched devices, ~26pt for
 // sheet-attached bars) but never a centered-formSheet-sized offset — a bar
 // sitting far from its window's top edge is not header chrome from y=0.
@@ -74,6 +76,10 @@ BOOL ApolloProgressiveBlurAvailable(void) {
     if (!self) return nil;
 
     self.userInteractionEnabled = NO;
+    // UIVisualEffectView normally keeps its backdrop inside its bounds, but
+    // make the content boundary explicit: UIKit can rebuild/resize the private
+    // backdrop view during transitions and it must never sample below the bar.
+    self.clipsToBounds = YES;
 
     _filter = ApolloNewVariableBlurFilter();
     [_filter setValue:@(kApolloBlurRadius) forKey:@"inputRadius"];
@@ -145,7 +151,7 @@ BOOL ApolloProgressiveBlurAvailable(void) {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     _featherMask.frame = self.bounds;
-    _featherMask.locations = @[@0, @(MAX(0.0, height - kApolloBlurFadeTail) / height), @1];
+    _featherMask.locations = @[@0, @(MAX(0.0, height - kApolloBlurBottomFeather) / height), @1];
     [CATransaction commit];
 }
 
@@ -170,12 +176,13 @@ static void ApolloProgressiveBlurSyncFrame(UINavigationBar *bar, ApolloProgressi
     CGFloat topExtension =
         (topInWindow > 0 && topInWindow <= kApolloBlurMaxTopExtension) ? topInWindow : 0;
     // Sibling coordinates (bar.superview space), spanning from the top of the
-    // status bar gap through the bar plus the fade tail.
+    // status-bar gap to exactly the bar's bottom edge. Do not add a fade tail
+    // here: it would blur unrelated content immediately below the bar.
     CGRect barFrame = bar.frame;
     CGRect frame = CGRectMake(CGRectGetMinX(barFrame),
                               CGRectGetMinY(barFrame) - topExtension,
                               CGRectGetWidth(barFrame),
-                              topExtension + CGRectGetHeight(barFrame) + kApolloBlurFadeTail);
+                              topExtension + CGRectGetHeight(barFrame));
     if (!CGRectEqualToRect(blurView.frame, frame)) blurView.frame = frame;
     // Sibling hosting means bar chrome animations don't carry the blur view
     // automatically — mirror visibility.
