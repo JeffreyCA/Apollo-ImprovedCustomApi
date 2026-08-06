@@ -122,7 +122,16 @@ NSString *ApolloWebJSONKeylessOAuthBearer(NSString *username);
 // lives under, and parentFullName is the t1 being replied to (nil for
 // top-level comments and edits). Any argument may be nil — the repair fills
 // only what it has.
-void ApolloWebJSONNoteCommentWriteContext(id client, NSString *subreddit, NSString *subredditFullName,
+//
+// `body` is the submitted markdown and is what keys this capture to its own
+// response: writes can overlap (a second comment submitted while the first is
+// still in flight), and Reddit echoes the markdown back as the response thing's
+// body/contentText, so the repair can tell which outstanding write a degraded
+// response belongs to instead of taking whichever was captured last. Pass it
+// whenever the call site has it; a capture with no body still participates, it
+// just can't be matched exactly.
+void ApolloWebJSONNoteCommentWriteContext(id client, NSString *body, NSString *subreddit,
+                                          NSString *subredditFullName,
                                           NSString *linkFullName, NSString *parentFullName);
 
 // Fetch-outcome feedback for ApolloWebJSONKeylessOAuthBearer callers: report a

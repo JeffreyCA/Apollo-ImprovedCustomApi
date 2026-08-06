@@ -796,7 +796,7 @@ static id ApolloWebJSONThingProperty(id thing, SEL selector) {
 // the typed target (link / parent comment).
 
 - (id)submitComment:(id)text onLink:(id)link completion:(id)completion {
-    ApolloWebJSONNoteCommentWriteContext(self,
+    ApolloWebJSONNoteCommentWriteContext(self, text,
                                          ApolloWebJSONThingProperty(link, @selector(subreddit)),
                                          ApolloWebJSONThingProperty(link, @selector(subredditFullName)),
                                          ApolloWebJSONThingProperty(link, @selector(fullName)),
@@ -808,7 +808,7 @@ static id ApolloWebJSONThingProperty(id thing, SEL selector) {
 }
 
 - (id)submitComment:(id)text asReplyToComment:(id)parent completion:(id)completion {
-    ApolloWebJSONNoteCommentWriteContext(self,
+    ApolloWebJSONNoteCommentWriteContext(self, text,
                                          ApolloWebJSONThingProperty(parent, @selector(subreddit)),
                                          ApolloWebJSONThingProperty(parent, @selector(subredditID)),
                                          ApolloWebJSONThingProperty(parent, @selector(linkID)),
@@ -825,7 +825,7 @@ static id ApolloWebJSONThingProperty(id thing, SEL selector) {
     if (![[NSThread currentThread].threadDictionary[kApolloWebJSONTypedWriteScopeKey] boolValue]) {
         NSString *target = [fullName isKindOfClass:[NSString class]] ? fullName : nil;
         BOOL targetIsLink = [target hasPrefix:@"t3_"];
-        ApolloWebJSONNoteCommentWriteContext(self, nil, nil,
+        ApolloWebJSONNoteCommentWriteContext(self, text, nil, nil,
                                              targetIsLink ? target : nil,
                                              targetIsLink ? nil : target);
     }
@@ -833,7 +833,7 @@ static id ApolloWebJSONThingProperty(id thing, SEL selector) {
 }
 
 - (id)editComment:(id)comment newText:(id)text completion:(id)completion {
-    ApolloWebJSONNoteCommentWriteContext(self,
+    ApolloWebJSONNoteCommentWriteContext(self, text,
                                          ApolloWebJSONThingProperty(comment, @selector(subreddit)),
                                          ApolloWebJSONThingProperty(comment, @selector(subredditID)),
                                          ApolloWebJSONThingProperty(comment, @selector(linkID)),

@@ -1231,8 +1231,9 @@ typedef struct {
     NSString *linkFullName;
     NSString *parentFullName;
 } ApolloWebJSONWriteContext;
-static ApolloWebJSONWriteContext ApolloWebJSONRecentCommentWriteContext(void);
-static NSString *ApolloWebJSONRecentCommentWriteUsername(void);
+// Resolved from the markdown Reddit echoed back, so overlapping writes can't
+// cross-contaminate each other's repairs. See the pending-write store below.
+static ApolloWebJSONWriteContext ApolloWebJSONWriteContextForBody(id responseBody);
 
 // Extracts the comment author from an old-reddit content blob's data-author
 // attribute. Authoritative when present — it is Reddit's own record of who the
@@ -1277,6 +1278,11 @@ static NSDictionary *ApolloWebJSONSynthesizeModernThingData(NSString *fullname, 
     NSString *bodyHTML = [legacy[@"contentHTML"] isKindOfClass:[NSString class]] ? legacy[@"contentHTML"] : nil;
     if (body.length == 0 && bodyHTML.length == 0) return nil; // nothing renderable to show
 
+    // The submitted markdown identifies WHICH outstanding write this response
+    // belongs to, so a second comment posted while this one was in flight can't
+    // lend it its author or its thread. Resolve once and reuse below.
+    ApolloWebJSONWriteContext ctx = ApolloWebJSONWriteContextForBody(body);
+
     // Author, in trust order: Reddit's own data-author attribute in the legacy
     // content blob, then the identity captured from the submitting RDKClient
     // (correct for non-active posting accounts), then the active web-session
@@ -1284,7 +1290,7 @@ static NSDictionary *ApolloWebJSONSynthesizeModernThingData(NSString *fullname, 
     // because Apollo gates the Edit affordance on
     // comment.author == currentUser.username.
     NSString *author = ApolloWebJSONAuthorFromLegacyContent(content);
-    if (author.length == 0) author = ApolloWebJSONRecentCommentWriteUsername();
+    if (author.length == 0) author = ctx.username;
     if (author.length == 0) author = ApolloActiveWebSessionUsername();
     if (author.length == 0) author = ApolloActiveAccountUsername();
     if (author.length == 0) return nil;
@@ -1308,7 +1314,6 @@ static NSDictionary *ApolloWebJSONSynthesizeModernThingData(NSString *fullname, 
     // stripped) still need the thing's location — an empty subreddit disables
     // the own-flair backfill and the moderator shield on the inserted cell.
     // The write context captured at submit time knows it.
-    ApolloWebJSONWriteContext ctx = ApolloWebJSONRecentCommentWriteContext();
     if (!modern[@"subreddit"] && ctx.subreddit) modern[@"subreddit"] = ctx.subreddit;
     if (ctx.subredditFullName) modern[@"subreddit_id"] = ctx.subredditFullName;
     if (!modern[@"link_id"] && ctx.linkFullName) modern[@"link_id"] = ctx.linkFullName;
@@ -1350,7 +1355,7 @@ static BOOL ApolloWebJSONIsNonEmptyString(id value) {
     return [value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0;
 }
 
-// The context of the most recent comment/edit write, captured at submit time
+// The context of a comment/edit write, captured at submit time
 // (ApolloWebJSONNoteCommentWriteContext, called from the identity module's
 // submit hooks). The username comes from the RDKClient that issued the write —
 // the ACTIVE account is the wrong answer when the composer's account chooser
@@ -1360,22 +1365,79 @@ static BOOL ApolloWebJSONIsNonEmptyString(id value) {
 // (link or parent comment) — the wild degraded /api/comment payload observed
 // on-device (2026-08, 36 keys) strips those alongside author/created/score,
 // and an empty model.subreddit silently disables both the own-flair backfill
-// and the moderator shield on the freshly inserted cell. TTL-bounded so a
-// stale capture can never label an unrelated later repair; single-slot, so two
-// overlapping degraded writes in different subreddits within the TTL could
-// mislabel the earlier one — the response's own fields always win when
-// present, and the same tradeoff already applies to the username capture.
-// (ApolloWebJSONWriteContext is typedef'd above the legacy synthesis, which
-// consumes the same capture.)
-static ApolloWebJSONWriteContext sApolloWebJSONLastWrite;
-static NSTimeInterval sApolloWebJSONLastWriteAt = 0;
+// and the moderator shield on the freshly inserted cell.
+//
+// These are KEYED PER WRITE, not a single global slot. Apollo lets a comment be
+// submitted while an earlier one is still in flight (different thread, different
+// subreddit, even a different account), and the response serializer runs well
+// after submit — with one slot the second submit overwrote the first before the
+// first's degraded response was repaired, so the earlier comment could be
+// synthesized with the later post's subreddit/link/parent/permalink/author and
+// render or navigate as if it belonged to another thread.
+//
+// The correlation key is the submitted markdown, which Reddit echoes back as
+// `body` (modern shape) / `contentText` (legacy shape) — no plumbing through
+// RedditKit's request internals required. When a response can't be matched
+// (body absent or normalized beyond recognition) we fall back to the single
+// outstanding write if there is exactly one, and otherwise to only those fields
+// every outstanding write agrees on — an unmatched response never adopts one
+// candidate's thread over another's.
+@interface ApolloWebJSONPendingWrite : NSObject
+@property (nonatomic, copy, nullable) NSString *username;
+@property (nonatomic, copy, nullable) NSString *subreddit;
+@property (nonatomic, copy, nullable) NSString *subredditFullName;
+@property (nonatomic, copy, nullable) NSString *linkFullName;
+@property (nonatomic, copy, nullable) NSString *parentFullName;
+// Normalized submitted markdown; nil when the submit call had no usable text.
+@property (nonatomic, copy, nullable) NSString *bodyKey;
+@property (nonatomic) NSTimeInterval capturedAt;
+// Set once this entry has repaired a response. Kept around (not deleted) for
+// the rest of the TTL so a re-serialized retry of the same response still
+// matches it exactly, but excluded from the ambiguity set so a finished write
+// can't keep suppressing fields for a later one.
+@property (nonatomic) BOOL consumed;
+@end
+
+@implementation ApolloWebJSONPendingWrite
+@end
+
+// Bounded so a burst of writes can't grow this without limit; comment writes
+// are user-paced, so a handful of slots is far more than enough overlap.
+static NSUInteger const kApolloWebJSONMaxPendingWrites = 8;
+// Comfortably covers submit -> response -> serializer.
+static NSTimeInterval const kApolloWebJSONWriteContextTTL = 60.0;
+static NSMutableArray<ApolloWebJSONPendingWrite *> *sApolloWebJSONPendingWrites = nil;
 static os_unfair_lock sApolloWebJSONLastWriteLock = OS_UNFAIR_LOCK_INIT;
 
 static NSString *ApolloWebJSONCopiedNonEmptyString(id value) {
     return ([value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0) ? [value copy] : nil;
 }
 
-void ApolloWebJSONNoteCommentWriteContext(id client, NSString *subreddit, NSString *subredditFullName,
+// Reddit round-trips the submitted markdown, but not always byte-for-byte: line
+// endings come back normalized and trailing whitespace trimmed. Compare on a
+// canonical form so a legitimate match isn't missed (a missed match is not
+// wrong, only weaker — it drops to the unanimous-fields path).
+static NSString *ApolloWebJSONWriteBodyKey(id text) {
+    NSString *string = [text isKindOfClass:[NSString class]] ? (NSString *)text : nil;
+    if (string.length == 0) return nil;
+    NSString *normalized = [[string stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"]
+                            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return normalized.length > 0 ? normalized : nil;
+}
+
+// Caller must hold sApolloWebJSONLastWriteLock. Drops entries past the TTL.
+static void ApolloWebJSONPruneWritesLocked(void) {
+    if (sApolloWebJSONPendingWrites.count == 0) return;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    NSIndexSet *stale = [sApolloWebJSONPendingWrites indexesOfObjectsPassingTest:
+                         ^BOOL(ApolloWebJSONPendingWrite *w, NSUInteger idx, BOOL *stop) {
+        return (now - w.capturedAt) >= kApolloWebJSONWriteContextTTL;
+    }];
+    if (stale.count > 0) [sApolloWebJSONPendingWrites removeObjectsAtIndexes:stale];
+}
+
+void ApolloWebJSONNoteCommentWriteContext(id client, NSString *body, NSString *subreddit,
+                                          NSString *subredditFullName,
                                           NSString *linkFullName, NSString *parentFullName) {
     NSString *name = nil;
     @try {
@@ -1385,33 +1447,109 @@ void ApolloWebJSONNoteCommentWriteContext(id client, NSString *subreddit, NSStri
             ? ((id (*)(id, SEL))objc_msgSend)(user, @selector(username)) : nil;
         name = ApolloWebJSONCopiedNonEmptyString(value);
     } @catch (__unused NSException *e) {}
+
+    ApolloWebJSONPendingWrite *write = [ApolloWebJSONPendingWrite new];
+    write.username = name;
+    write.subreddit = ApolloWebJSONCopiedNonEmptyString(subreddit);
+    write.subredditFullName = ApolloWebJSONCopiedNonEmptyString(subredditFullName);
+    write.linkFullName = ApolloWebJSONCopiedNonEmptyString(linkFullName);
+    write.parentFullName = ApolloWebJSONCopiedNonEmptyString(parentFullName);
+    write.bodyKey = ApolloWebJSONWriteBodyKey(body);
+    write.capturedAt = [NSDate timeIntervalSinceReferenceDate];
+
     os_unfair_lock_lock(&sApolloWebJSONLastWriteLock);
-    sApolloWebJSONLastWrite.username = name;
-    sApolloWebJSONLastWrite.subreddit = ApolloWebJSONCopiedNonEmptyString(subreddit);
-    sApolloWebJSONLastWrite.subredditFullName = ApolloWebJSONCopiedNonEmptyString(subredditFullName);
-    sApolloWebJSONLastWrite.linkFullName = ApolloWebJSONCopiedNonEmptyString(linkFullName);
-    sApolloWebJSONLastWrite.parentFullName = ApolloWebJSONCopiedNonEmptyString(parentFullName);
-    sApolloWebJSONLastWriteAt = [NSDate timeIntervalSinceReferenceDate];
+    if (!sApolloWebJSONPendingWrites) sApolloWebJSONPendingWrites = [NSMutableArray array];
+    ApolloWebJSONPruneWritesLocked();
+    // Resubmitting identical text (the user retried a failed post) replaces the
+    // earlier capture rather than leaving two entries fighting over one body.
+    if (write.bodyKey) {
+        NSUInteger existing = [sApolloWebJSONPendingWrites indexOfObjectPassingTest:
+                               ^BOOL(ApolloWebJSONPendingWrite *w, NSUInteger idx, BOOL *stop) {
+            return [w.bodyKey isEqualToString:write.bodyKey];
+        }];
+        if (existing != NSNotFound) [sApolloWebJSONPendingWrites removeObjectAtIndex:existing];
+    }
+    [sApolloWebJSONPendingWrites addObject:write];
+    while (sApolloWebJSONPendingWrites.count > kApolloWebJSONMaxPendingWrites) {
+        [sApolloWebJSONPendingWrites removeObjectAtIndex:0];
+    }
     os_unfair_lock_unlock(&sApolloWebJSONLastWriteLock);
 }
 
-// Zeroed struct when no write was captured recently — callers fall back to the
-// active account / leave fields unfilled. 60s comfortably covers
-// submit -> response -> serializer.
-static ApolloWebJSONWriteContext ApolloWebJSONRecentCommentWriteContext(void) {
-    os_unfair_lock_lock(&sApolloWebJSONLastWriteLock);
-    ApolloWebJSONWriteContext ctx = sApolloWebJSONLastWrite;
-    BOOL fresh = ([NSDate timeIntervalSinceReferenceDate] - sApolloWebJSONLastWriteAt) < 60.0 && sApolloWebJSONLastWriteAt > 0;
-    os_unfair_lock_unlock(&sApolloWebJSONLastWriteLock);
-    if (!fresh) {
-        ApolloWebJSONWriteContext empty = {nil, nil, nil, nil, nil};
-        return empty;
+// Only the fields on which every candidate agrees. Two overlapping writes into
+// the same subreddit still get their subreddit filled; ones that disagree leave
+// the field empty, which is exactly the pre-location-fill behavior — a weaker
+// repair, never a wrong one.
+static ApolloWebJSONWriteContext ApolloWebJSONUnanimousContext(NSArray<ApolloWebJSONPendingWrite *> *writes) {
+    ApolloWebJSONWriteContext ctx = {nil, nil, nil, nil, nil};
+    if (writes.count == 0) return ctx;
+    ApolloWebJSONPendingWrite *first = writes.firstObject;
+    NSString *username = first.username, *subreddit = first.subreddit;
+    NSString *subredditFullName = first.subredditFullName;
+    NSString *linkFullName = first.linkFullName, *parentFullName = first.parentFullName;
+    for (ApolloWebJSONPendingWrite *w in writes) {
+        if (username && ![username isEqualToString:w.username ?: @""]) username = nil;
+        if (subreddit && ![subreddit isEqualToString:w.subreddit ?: @""]) subreddit = nil;
+        if (subredditFullName && ![subredditFullName isEqualToString:w.subredditFullName ?: @""]) subredditFullName = nil;
+        if (linkFullName && ![linkFullName isEqualToString:w.linkFullName ?: @""]) linkFullName = nil;
+        if (parentFullName && ![parentFullName isEqualToString:w.parentFullName ?: @""]) parentFullName = nil;
     }
+    ctx.username = username;
+    ctx.subreddit = subreddit;
+    ctx.subredditFullName = subredditFullName;
+    ctx.linkFullName = linkFullName;
+    ctx.parentFullName = parentFullName;
     return ctx;
 }
 
-static NSString *ApolloWebJSONRecentCommentWriteUsername(void) {
-    return ApolloWebJSONRecentCommentWriteContext().username;
+// The write context for the response now being repaired, resolved from the
+// markdown Reddit echoed back. Zeroed struct when nothing usable is
+// outstanding — callers fall back to the active account / leave fields unfilled.
+static ApolloWebJSONWriteContext ApolloWebJSONWriteContextForBody(id responseBody) {
+    NSString *key = ApolloWebJSONWriteBodyKey(responseBody);
+    ApolloWebJSONWriteContext ctx = {nil, nil, nil, nil, nil};
+
+    os_unfair_lock_lock(&sApolloWebJSONLastWriteLock);
+    ApolloWebJSONPruneWritesLocked();
+    ApolloWebJSONPendingWrite *match = nil;
+    if (key) {
+        // Newest first: a resubmit of the same text should win over an older
+        // capture that somehow survived the dedupe above.
+        for (ApolloWebJSONPendingWrite *w in [sApolloWebJSONPendingWrites reverseObjectEnumerator]) {
+            if (w.bodyKey && [w.bodyKey isEqualToString:key]) { match = w; break; }
+        }
+    }
+    NSArray<ApolloWebJSONPendingWrite *> *candidates = nil;
+    if (!match) {
+        candidates = [sApolloWebJSONPendingWrites filteredArrayUsingPredicate:
+                      [NSPredicate predicateWithBlock:^BOOL(ApolloWebJSONPendingWrite *w, NSDictionary *b) {
+            return !w.consumed;
+        }]];
+        // Everything outstanding has already repaired something: this is most
+        // likely that same response being serialized again, so still prefer the
+        // captured values over nothing.
+        if (candidates.count == 0) candidates = [sApolloWebJSONPendingWrites copy];
+        if (candidates.count == 1) match = candidates.firstObject;
+    }
+    if (match) {
+        match.consumed = YES;
+        ctx.username = match.username;
+        ctx.subreddit = match.subreddit;
+        ctx.subredditFullName = match.subredditFullName;
+        ctx.linkFullName = match.linkFullName;
+        ctx.parentFullName = match.parentFullName;
+    } else {
+        ctx = ApolloWebJSONUnanimousContext(candidates);
+    }
+    NSUInteger outstanding = sApolloWebJSONPendingWrites.count;
+    os_unfair_lock_unlock(&sApolloWebJSONLastWriteLock);
+
+    if (outstanding > 1) {
+        ApolloLog(@"[WebJSON] Write context for repair: %@ (%lu writes outstanding)",
+                  match ? @"matched by body" : @"unmatched — unanimous fields only",
+                  (unsigned long)outstanding);
+    }
+    return ctx;
 }
 
 // A timestamp-ish numeric field that's absent, JSON-null, the wrong type, or
@@ -1438,6 +1576,13 @@ static NSDictionary *ApolloWebJSONCompleteModernThingData(NSDictionary *td, BOOL
     NSMutableArray<NSString *> *filled = [NSMutableArray array];
     NSMutableDictionary *patched = [td mutableCopy];
 
+    // Which outstanding write is this? The degraded payload keeps `body` (that
+    // is what makes it "modern-shaped"), and body IS the submitted markdown, so
+    // it identifies the write even when everything else was stripped. Resolved
+    // once here and reused for both the author and the location fields — two
+    // lookups could otherwise disagree if a write landed in between.
+    ApolloWebJSONWriteContext ctx = ApolloWebJSONWriteContextForBody(td[@"body"]);
+
     if (!ApolloWebJSONIsNonEmptyString(td[@"author"])) {
         // Trust order (no content HTML exists here, so no data-author): the
         // identity captured from the submitting RDKClient — correct even when
@@ -1445,7 +1590,7 @@ static NSDictionary *ApolloWebJSONCompleteModernThingData(NSDictionary *td, BOOL
         // — then the active web session, then the active account. Stored
         // capitalization matters because the Edit affordance gates on
         // comment.author == currentUser.username.
-        NSString *author = ApolloWebJSONRecentCommentWriteUsername();
+        NSString *author = ctx.username;
         if (author.length == 0) author = ApolloActiveWebSessionUsername();
         if (author.length == 0) author = ApolloActiveAccountUsername();
         if (author.length > 0) {
@@ -1487,7 +1632,6 @@ static NSDictionary *ApolloWebJSONCompleteModernThingData(NSDictionary *td, BOOL
     // model.subreddit is what silently kills the own-flair backfill and the
     // moderator shield on the fresh cell (both key off the comment's
     // subreddit), so this is as render-critical as author/created/score.
-    ApolloWebJSONWriteContext ctx = ApolloWebJSONRecentCommentWriteContext();
     if (!ApolloWebJSONIsNonEmptyString(td[@"subreddit"]) && ctx.subreddit) {
         patched[@"subreddit"] = ctx.subreddit;
         [filled addObject:@"subreddit"];
