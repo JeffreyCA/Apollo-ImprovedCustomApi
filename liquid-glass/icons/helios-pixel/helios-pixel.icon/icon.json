@@ -42,7 +42,19 @@
               -380
             ]
           }
-        },
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 4
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    },
+    {
+      "layers" : [
         {
           "fill" : {
             "solid" : "display-p3:0.98968,0.01103,0.95855,1.00000"
@@ -56,7 +68,19 @@
               154
             ]
           }
-        },
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 4
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    },
+    {
+      "layers" : [
         {
           "fill" : {
             "linear-gradient" : [
@@ -97,7 +121,19 @@
               -252
             ]
           }
-        },
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    },
+    {
+      "layers" : [
         {
           "fill-specializations" : [
             {
@@ -125,7 +161,7 @@
       ],
       "shadow" : {
         "kind" : "neutral",
-        "opacity" : 0.5
+        "opacity" : 4
       },
       "translucency" : {
         "enabled" : true,
