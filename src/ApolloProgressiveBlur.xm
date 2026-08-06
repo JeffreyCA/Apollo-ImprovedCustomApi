@@ -37,7 +37,12 @@
 // sheet-attached bars) but never a centered-formSheet-sized offset — a bar
 // sitting far from its window's top edge is not header chrome from y=0.
 static const CGFloat kApolloBlurMaxTopExtension = 80.0;
-static const CGFloat kApolloBlurRadius = 20.0;
+// Deliberately stronger than UIKit's Soft edge treatment. Blur is an expressive
+// alternative, not a reimplementation of Soft: more of the content's colour
+// should remain visible while its detail dissolves towards the status bar.
+static const CGFloat kApolloBlurRadius = 28.0;
+static const CGFloat kApolloBlurMaterialAlphaLight = 0.32;
+static const CGFloat kApolloBlurMaterialAlphaDark = 0.22;
 
 static id ApolloNewVariableBlurFilter(void) {
     Class filterClass = objc_getClass("CAFilter");
@@ -94,10 +99,11 @@ BOOL ApolloProgressiveBlurAvailable(void) {
     return self;
 }
 
-// Vertical alpha ramp for inputMaskImage: a full-height linear white→clear
-// gradient, exactly the article's recipe — blur radius decreases continuously
-// from the top down, which is what makes the effect read as *progressive*
-// (an opaque plateau with a short drop-off reads as a fog slab instead).
+// Vertical alpha ramp for inputMaskImage: a full-height white→clear gradient.
+// The reference explicitly calls for tuning the curve after adding its second
+// feather mask. Two plain linear fades compound and shed too much blur through
+// the nav controls, so this curve holds the strongest radius near the status
+// bar before easing continuously to zero at the lower boundary.
 // Rendered at scale 1 — the blur mask needs no retina precision and the image
 // is regenerated on every height change.
 - (void)regenerateMaskForHeight:(CGFloat)height {
@@ -108,9 +114,15 @@ BOOL ApolloProgressiveBlurAvailable(void) {
         [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(64, height) format:format];
     _maskImage = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
         CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
-        CGFloat components[] = {1, 1, 1, 1,  1, 1, 1, 0};
-        CGFloat locations[] = {0, 1};
-        CGGradientRef gradient = CGGradientCreateWithColorComponents(space, components, locations, 2);
+        CGFloat components[] = {
+            1, 1, 1, 1.00,
+            1, 1, 1, 1.00,
+            1, 1, 1, 0.78,
+            1, 1, 1, 0.35,
+            1, 1, 1, 0.00,
+        };
+        CGFloat locations[] = {0, 0.28, 0.55, 0.78, 1};
+        CGGradientRef gradient = CGGradientCreateWithColorComponents(space, components, locations, 5);
         CGContextDrawLinearGradient(context.CGContext, gradient,
                                     CGPointZero, CGPointMake(0, height), 0);
         CGGradientRelease(gradient);
@@ -127,16 +139,25 @@ BOOL ApolloProgressiveBlurAvailable(void) {
 
     if (_maskedHeight != height) [self regenerateMaskForHeight:height];
 
-    // The backdrop subview samples the pixels under the view. Keep the rest of
-    // UIVisualEffectView's material intact, matching the reference recipe.
+    // The backdrop subview samples the pixels under the view. UIKit's other
+    // subviews provide its tint/frosting layer. Keep a restrained amount of
+    // that material for legibility, rather than its full opacity: full strength
+    // makes this custom treatment visually converge with the system Soft edge,
+    // while removing it entirely lets bright media become overpowering.
     UIView *backdrop = nil;
+    CGFloat materialAlpha = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark
+        ? kApolloBlurMaterialAlphaDark
+        : kApolloBlurMaterialAlphaLight;
     for (UIView *subview in self.subviews) {
         if ([NSStringFromClass(subview.class) containsString:@"Backdrop"]) {
             backdrop = subview;
-            break;
+            subview.alpha = 1;
+        } else {
+            subview.alpha = materialAlpha;
         }
     }
     if (!backdrop) backdrop = self.subviews.firstObject;
+    backdrop.alpha = 1;
 
     // Replaces UIKit's gaussian+saturate set; reassert only on change since
     // UIKit rebuilds backdrop filters on trait/window moves.
