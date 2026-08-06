@@ -1741,6 +1741,28 @@ static CGFloat ApolloAspectRatioFromURL(NSURL *url) {
 
 @end
 
+// Lifetime sentinel for the native video-comment viewer's audio session claim
+// (see ApolloReleaseVideoCommentAudioSession below). Associated with the
+// AVPlayerViewController, so its dealloc IS the viewer's end of life. That
+// covers both "tapped Done" and "sent to Picture in Picture and closed later" —
+// in the PiP case AVKit keeps the controller alive for the whole PiP session,
+// so the session stays claimed exactly as long as something is still playing.
+static void ApolloReleaseVideoCommentAudioSession(NSUInteger generation);
+
+@interface ApolloVideoCommentSessionClaim : NSObject
+@property (nonatomic) NSUInteger generation;
+@end
+
+@implementation ApolloVideoCommentSessionClaim
+- (void)dealloc {
+    NSUInteger generation = _generation;
+    // Never touch AVAudioSession from inside dealloc on an arbitrary thread.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ApolloReleaseVideoCommentAudioSession(generation);
+    });
+}
+@end
+
 // MARK: - Tap dispatcher + UIContextMenuInteraction delegate (singleton)
 
 @interface ApolloInlineImageDispatcher : NSObject <UIContextMenuInteractionDelegate>
@@ -1895,6 +1917,58 @@ static NSURL *ApolloRedditVideoCommentHLSURL(NSURL *url) {
         @"https://v.redd.it/%@/HLSPlaylist.m3u8", assetID]];
 }
 
+// Playing a video comment claims the process-wide audio session exclusively,
+// which interrupts whatever the user had going (podcast, Music). That claim has
+// to be handed back when the viewer goes away, or the interrupted app never
+// receives the resume cue and the user's audio just stays dead until something
+// else in Apollo happens to deactivate the session.
+//
+// Ownership is tracked by generation: opening a second video comment bumps it,
+// so a stale viewer's teardown can't release a claim that now belongs to a
+// newer player. Apollo's other audio owners are handled by the existing
+// AVAudioSession hooks in ApolloVideoUnmute.xm, which veto both
+// setCategory:Ambient and setActive:NO while an auto-unmuted or PiP player is
+// live — so a release that arrives at a bad moment is a no-op rather than a
+// silenced player. The category check below is the same "still ours?" guard
+// ApolloPiP's releaseHandoffSessionClaim uses.
+static NSUInteger sApolloVideoCommentSessionGeneration = 0;
+static NSString *sApolloVideoCommentPriorCategory = nil;
+static NSString *sApolloVideoCommentPriorMode = nil;
+static AVAudioSessionCategoryOptions sApolloVideoCommentPriorOptions = 0;
+
+static void ApolloReleaseVideoCommentAudioSession(NSUInteger generation) {
+    if (generation != sApolloVideoCommentSessionGeneration) {
+        ApolloLog(@"[InlineImages] video comment session release skipped — claim %lu superseded by %lu",
+                  (unsigned long)generation, (unsigned long)sApolloVideoCommentSessionGeneration);
+        return;
+    }
+
+    AVAudioSession *session = AVAudioSession.sharedInstance;
+    // Somebody else reshaped the session after we claimed it (Apollo's mute
+    // dance, a deliberate unmute, PiP). It is no longer ours to hand back.
+    if (![session.category isEqualToString:AVAudioSessionCategoryPlayback]
+        || ![session.mode isEqualToString:AVAudioSessionModeMoviePlayback]) {
+        ApolloLog(@"[InlineImages] video comment session release skipped — session now %@/%@",
+                  session.category, session.mode);
+        return;
+    }
+
+    sApolloVideoCommentSessionGeneration++; // this claim is spent either way
+    NSString *category = sApolloVideoCommentPriorCategory ?: AVAudioSessionCategoryAmbient;
+    NSString *mode = sApolloVideoCommentPriorMode ?: AVAudioSessionModeDefault;
+    [session setCategory:category mode:mode options:sApolloVideoCommentPriorOptions error:nil];
+    // NotifyOthersOnDeactivation is the whole point: it is what tells the
+    // interrupted podcast/Music session it may resume.
+    NSError *deactivateError = nil;
+    [session setActive:NO
+           withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                 error:&deactivateError];
+    ApolloLog(@"[InlineImages] video comment audio session released to %@/%@ (%@)",
+              category, mode, deactivateError.localizedDescription ?: @"ok");
+}
+
+static char kApolloVideoCommentSessionClaimKey;
+
 static BOOL ApolloPresentRedditVideoCommentURL(NSURL *url, UIView *sourceView) {
     NSURL *streamURL = ApolloRedditVideoCommentHLSURL(url);
     if (!streamURL) return NO;
@@ -1909,6 +1983,12 @@ static BOOL ApolloPresentRedditVideoCommentURL(NSURL *url, UIView *sourceView) {
     // silence. A user explicitly pressed Play, so claim the normal movie
     // playback category before AVKit creates its controller/player graph.
     AVAudioSession *session = AVAudioSession.sharedInstance;
+    // Snapshot what we are taking over from, so the viewer's teardown restores
+    // it rather than guessing at Apollo's resting state.
+    sApolloVideoCommentPriorCategory = [session.category copy];
+    sApolloVideoCommentPriorMode = [session.mode copy];
+    sApolloVideoCommentPriorOptions = session.categoryOptions;
+    NSUInteger generation = ++sApolloVideoCommentSessionGeneration;
     NSError *categoryError = nil;
     [session setCategory:AVAudioSessionCategoryPlayback
                     mode:AVAudioSessionModeMoviePlayback
@@ -1929,6 +2009,11 @@ static BOOL ApolloPresentRedditVideoCommentURL(NSURL *url, UIView *sourceView) {
     viewer.showsPlaybackControls = YES;
     viewer.allowsPictureInPicturePlayback = YES;
     viewer.modalPresentationStyle = UIModalPresentationFullScreen;
+
+    ApolloVideoCommentSessionClaim *claim = [ApolloVideoCommentSessionClaim new];
+    claim.generation = generation;
+    objc_setAssociatedObject(viewer, &kApolloVideoCommentSessionClaimKey, claim,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     ApolloLog(@"[InlineImages] opening native video comment asset=%@ stream=%@",
               ApolloMediaMetadataIDFromVideoURL(url), streamURL);
