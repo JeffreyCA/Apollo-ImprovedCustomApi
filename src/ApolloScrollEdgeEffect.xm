@@ -12,8 +12,8 @@
 // rendered where content scrolls under the nav/tab bars. iOS 26 defaults to a
 // soft gradient blur; iOS 27 betas default to a hard cutoff with a dividing
 // line, which some users find jarring. The "Header Style" setting lets users
-// override the style of the TOP (header) edge: System Default, Soft, Hard, or
-// Blur (a tweak-drawn progressive blur — see ApolloProgressiveBlur.xm).
+// choose the TOP (header) edge treatment explicitly: Soft, Hard, or Blur (a
+// tweak-drawn progressive blur — see ApolloProgressiveBlur.xm).
 //
 // Only the top edge is ever touched. Earlier builds applied the chosen style
 // to all four edges, which painted a hard band behind the tab bar in Hard

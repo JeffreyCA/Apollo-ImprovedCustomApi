@@ -1302,7 +1302,7 @@ typedef NS_ENUM(NSInteger, Tag) {
     scrollEdgeEffect.visible = ^BOOL { return IsLiquidGlass(); };
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Liquid Glass chrome behaviors."
+                                            footer:@"Liquid Glass chrome behaviors.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
                                               rows:@[ tabBarIdle, keepSearchInPlace, titleGapCentering, iPadTabBarBottom, scrollEdgeEffect ]];
 }
 
@@ -1311,13 +1311,12 @@ typedef NS_ENUM(NSInteger, Tag) {
 // through this table instead of using the enum value as the index.
 static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailable) {
     const NSInteger values[] = {
-        ApolloScrollEdgeEffectStyleAutomatic,
         ApolloScrollEdgeEffectStyleSoft,
         ApolloScrollEdgeEffectStyleHard,
         ApolloScrollEdgeEffectStyleBlur,
     };
-    NSInteger count = blurAvailable ? 4 : 3;
-    if (index < 0 || index >= count) return ApolloScrollEdgeEffectStyleAutomatic;
+    NSInteger count = blurAvailable ? 3 : 2;
+    if (index < 0 || index >= count) return ApolloScrollEdgeEffectStyleSoft;
     return values[index];
 }
 
@@ -1328,8 +1327,8 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
         case ApolloScrollEdgeEffectStyleBlur: return @"Blur";
         default:
             return ApolloResolvedScrollEdgeEffectStyle() == ApolloScrollEdgeEffectStyleHard
-                ? @"System Default (Hard)"
-                : @"System Default (Soft)";
+                ? @"Hard"
+                : @"Soft";
     }
 }
 
@@ -1341,14 +1340,11 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 }
 
 - (void)presentScrollEdgeEffectStyleSheetFromSourceView:(UIView *)sourceView {
-    NSString *systemDefault = ApolloResolvedScrollEdgeEffectStyle() == ApolloScrollEdgeEffectStyleHard
-        ? @"System Default (Hard)"
-        : @"System Default (Soft)";
     // Blur needs the private variableBlur filter; never offer a mode that
     // would render nothing.
     BOOL blurAvailable = ApolloProgressiveBlurAvailable();
     NSMutableArray<NSString *> *options =
-        [NSMutableArray arrayWithObjects:systemDefault, @"Soft", @"Hard", nil];
+        [NSMutableArray arrayWithObjects:@"Soft", @"Hard", nil];
     if (blurAvailable) [options addObject:@"Blur"];
 
     NSInteger currentIndex = 0;

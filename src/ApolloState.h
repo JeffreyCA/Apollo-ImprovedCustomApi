@@ -164,6 +164,8 @@ extern BOOL sPerPostCommentSort;
 // ApolloScrollEdgeEffect.xm (Soft/Hard enforcement) and
 // ApolloProgressiveBlur.xm (Blur's tweak-drawn variable blur).
 typedef NS_ENUM(NSInteger, ApolloScrollEdgeEffectStyle) {
+    // Retired user-facing System Default value. Load-time migration resolves
+    // stored 0s to an explicit Soft (iOS 26) or Hard (iOS 27) choice.
     ApolloScrollEdgeEffectStyleAutomatic = 0,
     ApolloScrollEdgeEffectStyleSoft      = 1,
     ApolloScrollEdgeEffectStyleHard      = 2,
@@ -173,11 +175,9 @@ typedef NS_ENUM(NSInteger, ApolloScrollEdgeEffectStyle) {
     ApolloScrollEdgeEffectStyleBlur      = 4,
 };
 extern NSInteger sScrollEdgeEffectStyle;
-// sScrollEdgeEffectStyle with Automatic resolved to what the running OS
-// actually renders (iOS 27+ defaults Hard, iOS 26 Soft). Anything keyed on the
-// *look* of the header — the title capsule, the settings label — reads this,
-// never the raw mode. extern "C": defined in .xm (ObjC++), called from the
-// settings VC (.m).
+// Resolves the retired Automatic value defensively if it is observed before
+// load-time migration. Anything keyed on the *look* of the header — such as
+// the title capsule — reads this rather than assuming the raw value is valid.
 #ifdef __cplusplus
 extern "C" {
 #endif
