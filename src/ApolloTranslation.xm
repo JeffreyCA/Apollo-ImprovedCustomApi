@@ -2507,10 +2507,6 @@ static id ApolloBestVisiblePostBodyTextNodeForController(UIViewController *viewC
     if (tableView.tableHeaderView) {
         ApolloCollectAttributedTextNodesBounded(tableView.tableHeaderView, 12, visited, candidates, 1024);
     }
-    // Fallback for layouts whose body doesn't live in a table cell at all.
-    if (candidates.count == 0) {
-        ApolloCollectAttributedTextNodesBounded(viewController.view, 14, visited, candidates, 1024);
-    }
 
     CGFloat firstCommentTop = ApolloFirstVisibleCommentTopY(viewController, tableView);
     if (firstCommentTop == CGFLOAT_MAX) firstCommentTop = CGRectGetHeight(viewController.view.bounds);
@@ -2519,42 +2515,68 @@ static id ApolloBestVisiblePostBodyTextNodeForController(UIViewController *viewC
     NSInteger bestScore = NSIntegerMin;
     // __unused: only read by the verbose-build census log below.
     __unused NSUInteger dbgTitleOwned = 0, dbgMetadata = 0, dbgNoView = 0, dbgBelowComments = 0;
-    for (id candidate in candidates) {
-        // Never pick OUR translated title node as the "body": once the title is
-        // swapped to the target language it no longer matches link.title, so the
-        // metadata filter below can't exclude it — a long translated title would
-        // masquerade as the post body (and get body-owned, double-driven).
-        if ([objc_getAssociatedObject(candidate, kApolloTitleOwnedTextNodeKey) boolValue]) { dbgTitleOwned++; continue; }
-        // Tweak-drawn chrome (AI summary pill, injected affordances) is never
-        // the post body — without this, a thread whose real body node isn't
-        // found would elect our own English UI text and translate it on
-        // non-English targets.
-        if (ApolloTextNodeIsTweakUI(candidate)) { dbgMetadata++; continue; }
-        // Rich-link-card scraped text belongs to the rich-preview pipeline.
-        if (ApolloNodeIsInsideLinkPreviewCard(candidate)) { dbgMetadata++; continue; }
-        NSString *text = ApolloVisibleTextFromNode(candidate);
-        if (text.length == 0 || ApolloPostTextLooksLikeMetadata(text, link)) { dbgMetadata++; continue; }
+    // Scoring runs over `candidates` and may run twice: the scoped scans above
+    // are the cheap, deterministic path, and the whole-controller walk below is
+    // the fallback for layouts whose body isn't in a post cell at all.
+    //
+    // The fallback used to be gated on the scoped scans collecting NOTHING —
+    // but a post header always contributes at least a title node, so the count
+    // was essentially never zero and the walk essentially never ran. For a
+    // layout whose selftext lives elsewhere in the controller, every collected
+    // candidate was then filtered out below and the body simply never
+    // translated. Gate on whether an ELIGIBLE body was actually elected
+    // instead. `visited` is shared, so the second pass only walks nodes the
+    // first pass never reached, and only scores the newly collected ones.
+    NSUInteger scoredUpTo = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 1) {
+            if (best) break; // the scoped scans found the body — nothing to widen to
+            NSUInteger before = candidates.count;
+            ApolloCollectAttributedTextNodesBounded(viewController.view, 14, visited, candidates, 1024);
+            if (candidates.count == before) break; // nothing new to score
+            ApolloTranslationVerboseLog(@"[Translation] body-scan: no eligible body from cells/header, "
+                                        @"widening to the controller view (+%lu nodes)",
+                                        (unsigned long)(candidates.count - before));
+        }
+        NSArray *pending = [candidates subarrayWithRange:NSMakeRange(scoredUpTo, candidates.count - scoredUpTo)];
+        scoredUpTo = candidates.count;
+        for (id candidate in pending) {
+            // Never pick OUR translated title node as the "body": once the title is
+            // swapped to the target language it no longer matches link.title, so the
+            // metadata filter below can't exclude it — a long translated title would
+            // masquerade as the post body (and get body-owned, double-driven).
+            if ([objc_getAssociatedObject(candidate, kApolloTitleOwnedTextNodeKey) boolValue]) { dbgTitleOwned++; continue; }
+            // Tweak-drawn chrome (AI summary pill, injected affordances) is never
+            // the post body — without this, a thread whose real body node isn't
+            // found would elect our own English UI text and translate it on
+            // non-English targets.
+            if (ApolloTextNodeIsTweakUI(candidate)) { dbgMetadata++; continue; }
+            // Rich-link-card scraped text belongs to the rich-preview pipeline.
+            if (ApolloNodeIsInsideLinkPreviewCard(candidate)) { dbgMetadata++; continue; }
+            NSString *text = ApolloVisibleTextFromNode(candidate);
+            if (text.length == 0 || ApolloPostTextLooksLikeMetadata(text, link)) { dbgMetadata++; continue; }
 
-        UIView *view = ApolloViewForTextObject(candidate);
-        if (!view || view.hidden || view.alpha < 0.01) { dbgNoView++; continue; }
-        CGRect frame = [view convertRect:view.bounds toView:viewController.view];
-        if (CGRectIsEmpty(frame) || CGRectGetMaxY(frame) <= 0) { dbgNoView++; continue; }
+            UIView *view = ApolloViewForTextObject(candidate);
+            if (!view || view.hidden || view.alpha < 0.01) { dbgNoView++; continue; }
+            CGRect frame = [view convertRect:view.bounds toView:viewController.view];
+            if (CGRectIsEmpty(frame) || CGRectGetMaxY(frame) <= 0) { dbgNoView++; continue; }
 
-        // Post body sits above the first comment. Avoid accidentally grabbing
-        // translated comment text lower in the table while still allowing long
-        // selftext that scrolls near the first comment boundary.
-        if (CGRectGetMinY(frame) >= firstCommentTop - 8.0) { dbgBelowComments++; continue; }
+            // Post body sits above the first comment. Avoid accidentally grabbing
+            // translated comment text lower in the table while still allowing long
+            // selftext that scrolls near the first comment boundary.
+            if (CGRectGetMinY(frame) >= firstCommentTop - 8.0) { dbgBelowComments++; continue; }
 
-        // Longest wins. No "fully above the fold" bonus here: every scored
-        // candidate already STARTS above the comment boundary (filter above),
-        // and a +1000 fully-above bonus let a 60-char card title outrank a
-        // long quote/selftext body whose cell extends past the screen bottom
-        // — which is precisely the multi-paragraph body this scan exists to
-        // find.
-        NSInteger score = (NSInteger)text.length;
-        if (score > bestScore) {
-            bestScore = score;
-            best = candidate;
+            // Longest wins. No "fully above the fold" bonus here: every scored
+            // candidate already STARTS above the comment boundary (filter above),
+            // and a +1000 fully-above bonus let a 60-char card title outrank a
+            // long quote/selftext body whose cell extends past the screen bottom
+            // — which is precisely the multi-paragraph body this scan exists to
+            // find.
+            NSInteger score = (NSInteger)text.length;
+            if (score > bestScore) {
+                bestScore = score;
+                best = candidate;
+            }
         }
     }
     ApolloTranslationVerboseLog(@"[Translation] body-scan candidates=%lu titleOwned=%lu metadata=%lu noView=%lu belowComments=%lu firstCommentTop=%.0f best=%@ bestLen=%lu",
