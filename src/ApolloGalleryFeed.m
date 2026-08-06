@@ -105,10 +105,11 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 }
 
 - (BOOL)shouldBlurThumbnail {
-    // Match Apollo's active-account adult-content choice rather than covering
-    // every mature tile unconditionally. Spoilers keep their independent
-    // reveal gate regardless of that preference.
-    return self.isSpoiler || (self.isNSFW && ApolloShouldBlurNSFWMedia());
+    // Spoilers keep their independent reveal gate unconditionally. NSFW blurs
+    // when either the account's Reddit adult-content pref or the tweak's own
+    // Tag Filters setting says to — resolved against this ITEM's subreddit
+    // (not the feed's) so per-subreddit overrides apply to every tile.
+    return self.isSpoiler || (self.isNSFW && ApolloShouldBlurNSFWMediaInSubreddit(self.subreddit));
 }
 
 @end

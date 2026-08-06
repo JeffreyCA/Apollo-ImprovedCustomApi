@@ -7,6 +7,7 @@
 #import "ApolloCommon.h"
 #import "ApolloTagFilters.h"
 #import "ApolloThemeRuntime.h"
+#import "TagFiltersViewController.h"
 
 #import <objc/message.h>
 
@@ -382,8 +383,13 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     [self apollo_installNavigationButtons];
     [[NSNotificationCenter defaultCenter]
         addObserver:self
-           selector:@selector(apollo_adultContentBlurPreferenceChanged:)
+           selector:@selector(apollo_nsfwBlurInputsChanged:)
                name:ApolloAdultContentBlurPreferenceDidChangeNotification
+             object:nil];
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self
+           selector:@selector(apollo_nsfwBlurInputsChanged:)
+               name:ApolloTagFiltersChangedNotification
              object:nil];
     [self apollo_beginInitialLoad];
 }
@@ -392,9 +398,10 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
-- (void)apollo_adultContentBlurPreferenceChanged:(NSNotification *)notification {
+- (void)apollo_nsfwBlurInputsChanged:(NSNotification *)notification {
     // The captured Reddit preference can arrive after Gallery's initial cells
-    // were configured, or change when the active account switches.
+    // were configured, or change when the active account switches; the Tag
+    // Filters settings can be edited while a Gallery sits in the nav stack.
     [self.collectionView reloadData];
     (void)notification;
 }

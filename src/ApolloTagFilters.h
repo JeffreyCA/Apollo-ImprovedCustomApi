@@ -10,9 +10,18 @@ FOUNDATION_EXPORT NSNotificationName const ApolloAdultContentBlurPreferenceDidCh
 extern "C" {
 #endif
 
-// Mirrors Apollo's active-account NSFW blur preference. Returns YES while the
-// value is still unknown, matching Apollo's conservative launch-time behavior.
-BOOL ApolloShouldBlurNSFWMedia(void);
+// Whether NSFW media from `subreddit` (no "r/" prefix) should be blurred.
+// ORs two independent user choices:
+//   1. The tweak's own Tag Filters NSFW setting — global toggle with the
+//      per-subreddit override winning — which the user opts into regardless
+//      of their Reddit account preference.
+//   2. Apollo's active-account Reddit "Blur mature (18+) images and media"
+//      preference. While that preference is still unknown it counts as
+//      "blur" (matching Apollo's conservative launch-time behavior), EXCEPT
+//      for keyless web-session accounts: no OAuth /me fetch ever runs for
+//      them, so unknown is permanent there and resolves to "don't blur" —
+//      the same thing Apollo's native feed shows in those sessions.
+BOOL ApolloShouldBlurNSFWMediaInSubreddit(NSString *_Nullable subreddit);
 
 #ifdef __cplusplus
 }

@@ -22,9 +22,11 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
+#import "ApolloAccountCredentials.h"
 #import "ApolloCommon.h"
 #import "ApolloState.h"
 #import "ApolloTagFilters.h"
+#import "ApolloWebJSON.h"
 #import "Tweak.h"
 #import "UIWindow+Apollo.h"
 #import "UserDefaultConstants.h"
@@ -76,6 +78,20 @@ static RDKLink *ApolloTagLinkFromCell(id cell) {
     return nil;
 }
 
+// Effective per-tag filter switch for `subreddit`: the per-subreddit override
+// when one is stored, else the global toggle. `tagKey` is @"nsfw" or
+// @"spoiler". Shared by the feed decision below and the Gallery's thumbnail
+// decision (ApolloShouldBlurNSFWMediaInSubreddit).
+static BOOL ApolloTagFilterTagOn(NSString *subreddit, NSString *tagKey, BOOL globalValue) {
+    NSString *subKey = [subreddit isKindOfClass:[NSString class]] ? subreddit.lowercaseString : nil;
+    NSDictionary *override = (subKey.length > 0) ? sTagFilterSubredditOverrides[subKey] : nil;
+    if ([override isKindOfClass:[NSDictionary class]]) {
+        id v = override[tagKey];
+        if ([v isKindOfClass:[NSNumber class]]) return [(NSNumber *)v boolValue];
+    }
+    return globalValue;
+}
+
 // Returns @"hide", @"blur", or @"none" given a link and (optional) subreddit context.
 // Per-subreddit overrides take precedence over global settings on a per-tag basis;
 // mode is also overridable per-sub.
@@ -91,17 +107,8 @@ static NSString *ApolloTagFilterDecisionForLink(RDKLink *link) {
 
     NSString *sub = nil;
     @try { sub = link.subreddit; } @catch (__unused id e) {}
-    NSString *subKey = [sub isKindOfClass:[NSString class]] ? sub.lowercaseString : nil;
-    NSDictionary *override = (subKey.length > 0) ? sTagFilterSubredditOverrides[subKey] : nil;
-
-    BOOL filterNSFW = sTagFilterNSFW;
-    BOOL filterSpoiler = sTagFilterSpoiler;
-    if ([override isKindOfClass:[NSDictionary class]]) {
-        id n = override[@"nsfw"];
-        if ([n isKindOfClass:[NSNumber class]]) filterNSFW = [(NSNumber *)n boolValue];
-        id s = override[@"spoiler"];
-        if ([s isKindOfClass:[NSNumber class]]) filterSpoiler = [(NSNumber *)s boolValue];
-    }
+    BOOL filterNSFW = ApolloTagFilterTagOn(sub, @"nsfw", sTagFilterNSFW);
+    BOOL filterSpoiler = ApolloTagFilterTagOn(sub, @"spoiler", sTagFilterSpoiler);
 
     BOOL match = (isNSFW && filterNSFW) || (isSpoiler && filterSpoiler);
     if (!match) return @"none";
@@ -223,10 +230,41 @@ static NSInteger sTagEffectiveNoProfanity = -1;
 NSNotificationName const ApolloAdultContentBlurPreferenceDidChangeNotification =
     @"ApolloAdultContentBlurPreferenceDidChangeNotification";
 
-BOOL ApolloShouldBlurNSFWMedia(void) {
-    // Unknown stays covered until Apollo finishes loading the active account,
-    // just as its native feed does during launch.
-    return sTagEffectiveNoProfanity != 0;
+// YES when the ACTIVE account authenticates through a cookie web session
+// (keyless mode): the identity layer installs a synthetic OAuth credential on
+// its client (ApolloWebJSONIdentity.xm), so no real /me fetch — and therefore
+// no pref_no_profanity capture — can ever happen for it through the OAuth
+// path. Read from the live client rather than disk so the answer tracks
+// whatever credential the transport is actually using right now.
+static BOOL ApolloTagActiveAccountIsKeyless(void) {
+    id client = ApolloActiveAccountClient();
+    SEL credentialSel = NSSelectorFromString(@"authorizationCredential");
+    SEL tokenSel = NSSelectorFromString(@"accessToken");
+    if (!client || ![client respondsToSelector:credentialSel]) return NO;
+    id credential = ((id (*)(id, SEL))objc_msgSend)(client, credentialSel);
+    if (!credential || ![credential respondsToSelector:tokenSel]) return NO;
+    // RDKOAuthCredential.accessToken is an RDKAccessToken; its own accessToken
+    // getter returns the raw bearer string.
+    id accessToken = ((id (*)(id, SEL))objc_msgSend)(credential, tokenSel);
+    if (!accessToken || ![accessToken respondsToSelector:tokenSel]) return NO;
+    id token = ((id (*)(id, SEL))objc_msgSend)(accessToken, tokenSel);
+    return [token isKindOfClass:[NSString class]] && ApolloWebJSONBearerIsSynthetic((NSString *)token);
+}
+
+BOOL ApolloShouldBlurNSFWMediaInSubreddit(NSString *subreddit) {
+    // The tweak's own Tag Filters choice is independent of the Reddit account
+    // pref: a user who opted into blurring NSFW (globally or for this
+    // subreddit) keeps that cover even with Reddit's mature-media blur off.
+    if (sTagFilterEnabled && ApolloTagFilterTagOn(subreddit, @"nsfw", sTagFilterNSFW)) return YES;
+    if (sTagEffectiveNoProfanity == 1) return YES;
+    if (sTagEffectiveNoProfanity == 0) return NO;
+    // Unknown: stay covered while Apollo is still loading the active account,
+    // just as its native feed does during launch — unless the account is
+    // keyless, where unknown is permanent (see above) and Apollo's native
+    // feed shows NSFW media uncovered (the synthesized user object carries
+    // noProfanity == NO). If a cookie-routed /me does land later and captures
+    // the real pref, the capture wins over this fallback.
+    return !ApolloTagActiveAccountIsKeyless();
 }
 
 static void ApolloTagRefreshAllVisibleCells(void);
