@@ -32,8 +32,8 @@
 //    The "Hide Multireddit Descriptions" toggle blanks the subtitle line
 //    entirely, mirroring what Hide Feed Descriptions does for the built-in
 //    feed rows.
-// 3. CUSTOM ICONS — the editor also offers "Choose Custom Icon…" (and
-//    "Remove Custom Icon"): a photo picked from the library is stored in the
+// 3. CUSTOM ICONS — the editor also offers "Choose Icon" (and "Remove
+//    Icon"): a photo picked from the library is stored in the
 //    existing subreddit custom-icon cache under a slash-free key derived from
 //    the multireddit's path (rename-stable) and drawn over the row's icon.
 //    Local-only: Reddit's API has no custom image upload for multireddits.
@@ -502,7 +502,7 @@ static RDKMultireddit *ApolloMultiEditFindByTitle(NSString *title) {
         if ([newName isEqualToString:currentName] && [newDescription isEqualToString:currentDescription]) return;
         [weakSelf apolloMultiEditSave:multireddit name:newName descriptionText:newDescription];
     }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Choose Custom Icon…" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"Choose Icon" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         // Alert actions dismiss the alert, so hand the unsaved field contents
         // to the picker flow — the editor reopens with them afterwards.
         [weakSelf apolloMultiEditPickIconFor:multireddit
@@ -510,7 +510,7 @@ static RDKMultireddit *ApolloMultiEditFindByTitle(NSString *title) {
                           pendingDescription:alert.textFields.lastObject.text];
     }]];
     if (ApolloMultiEditCustomIcon(multireddit)) {
-        [alert addAction:[UIAlertAction actionWithTitle:@"Remove Custom Icon" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        [alert addAction:[UIAlertAction actionWithTitle:@"Remove Icon" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
             NSString *pendingName = alert.textFields.firstObject.text;
             NSString *pendingDescription = alert.textFields.lastObject.text;
             NSString *key = ApolloMultiEditIconKey(multireddit);
