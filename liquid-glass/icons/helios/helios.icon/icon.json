@@ -21,11 +21,11 @@
         {
           "blend-mode-specializations" : [
             {
-              "value" : "screen"
+              "value" : "normal"
             },
             {
               "appearance" : "dark",
-              "value" : "lighten"
+              "value" : "normal"
             }
           ],
           "fill-specializations" : [
@@ -59,8 +59,21 @@
               -379.7228245577272
             ]
           }
-        },
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 4
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    },
+    {
+      "layers" : [
         {
+          "blend-mode" : "plus-lighter",
           "fill" : {
             "automatic-gradient" : "display-p3:0.89418,0.06660,0.83887,1.00000"
           },
@@ -176,7 +189,19 @@
               151.3338533137137
             ]
           }
-        },
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.1
+      }
+    },
+    {
+      "layers" : [
         {
           "fill-specializations" : [
             {
@@ -203,26 +228,14 @@
           }
         }
       ],
+      "name" : "Group",
       "shadow" : {
         "kind" : "neutral",
-        "opacity" : 0.5
+        "opacity" : 4
       },
       "translucency" : {
         "enabled" : true,
-        "value" : 0.5
-      }
-    },
-    {
-      "layers" : [
-
-      ],
-      "shadow" : {
-        "kind" : "neutral",
-        "opacity" : 0.5
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.5
+        "value" : 0.2
       }
     }
   ],

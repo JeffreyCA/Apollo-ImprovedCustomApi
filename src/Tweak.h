@@ -1,5 +1,23 @@
 #import <Foundation/Foundation.h>
 
+typedef void (^ApolloTrendingSubredditsRefreshCompletion)(NSArray<NSString *> *subreddits,
+                                                          NSError *error);
+typedef void (^ApolloSubredditSourcePreparationCompletion)(NSError *error);
+
+__BEGIN_DECLS
+FOUNDATION_EXPORT void ApolloRefreshTrendingSubreddits(
+    ApolloTrendingSubredditsRefreshCompletion completion);
+FOUNDATION_EXPORT void ApolloPrepareRandomNSFWSubredditSource(
+    ApolloSubredditSourcePreparationCompletion completion);
+__END_DECLS
+
+@interface ShareUrlTask : NSObject
+
+@property (atomic, strong) NSURLSessionDataTask *activeTask;
+@property (atomic, strong) NSMutableArray *pendingCompletions;
+@property (atomic, copy) NSString *resolvedURL;
+@end
+
 @interface RDKClient : NSObject
 + (instancetype)sharedClient;
 - (id)currentUser;

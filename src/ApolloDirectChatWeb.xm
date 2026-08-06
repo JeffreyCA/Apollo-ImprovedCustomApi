@@ -8,6 +8,7 @@
 #import "ApolloDirectChatWeb.h"
 #import "ApolloAccountCredentials.h"
 #import "ApolloCommon.h"
+#import "ApolloListLayoutSupport.h"
 #import "ApolloState.h"
 #import "ApolloThemeRuntime.h"
 #import "ApolloWebSessionLoginViewController.h"
@@ -1676,8 +1677,8 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
         // A room can be left through Reddit history, Apollo Back, a native
         // route, or a tab switch. Normalize every visual state that Apollo
         // hide-on-scroll may have left behind before handing the bar back.
-        [tabBar.layer removeAnimationForKey:@"apolloTabBarSlideDown"];
-        [tabBar.layer removeAnimationForKey:@"apolloTabBarSlideUp"];
+        [tabBar.layer removeAnimationForKey:ApolloTabBarSlideDownAnimationKey];
+        [tabBar.layer removeAnimationForKey:ApolloTabBarSlideUpAnimationKey];
         tabBar.transform = CGAffineTransformIdentity;
         tabBar.alpha = 1.0;
         tabBar.hidden = NO;
@@ -1685,6 +1686,17 @@ static NSTimeInterval ApolloChatStaleRefreshThreshold(void) {
 
     [tabBarController.view setNeedsLayout];
     [tabBarController.view layoutIfNeeded];
+
+    if (!hidesForConversation) {
+        // The bar's return just grew the bottom safe area, and iOS 27 may not
+        // re-deliver a layout signal for it — the underlying list's inset can
+        // stay at its hidden-bar value with the last rows stranded behind the
+        // bar (same no-write mechanism as the legacy mirror's re-show). Give
+        // Apollo one turn to react on its own, then verify.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ApolloListVerifyBottomInsetForVisibleLists(@"chatTabBarRestored");
+        });
+    }
     ApolloLog(@"[DirectChatWeb] %@ Inbox tab bar for %@ %@",
               hidesForConversation ? @"Hid" : @"Restored",
               self.mailboxKind == ApolloModernMailboxKindModmail ? @"Modmail" : @"Chat",

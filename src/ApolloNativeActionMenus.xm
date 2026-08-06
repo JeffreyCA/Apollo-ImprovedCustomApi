@@ -1170,6 +1170,87 @@ static UIViewController *ApolloNativeActionMenuViewControllerForView(UIView *vie
     return nil;
 }
 
+// Apollo's banned-user screen still presents its 2017-era Swift
+// ActionController when Liquid Glass is unavailable.  On some iOS 18 builds
+// that controller crashes while being presented, before the moderator can
+// choose "Edit Ban" (issue #765).  Keep Apollo's own row handlers—the code
+// that opens the contextual comment or pre-filled BanUserViewController—but
+// host those actions in UIKit's stable action sheet instead.  This is scoped
+// to this one screen and only runs when the iOS 26 native-menu replacement is
+// not active.
+static void ApolloLegacyBannedUserAppendActions(NSMutableArray<UIAction *> *actions,
+                                                 NSArray<UIMenuElement *> *elements) {
+    for (UIMenuElement *element in elements) {
+        if ([element isKindOfClass:[UIAction class]]) {
+            [actions addObject:(UIAction *)element];
+        } else if ([element isKindOfClass:[UIMenu class]]) {
+            ApolloLegacyBannedUserAppendActions(actions, ((UIMenu *)element).children);
+        }
+    }
+}
+
+static BOOL ApolloLegacyBannedUserActionMenuPresent(id presenter,
+                                                     id actionController,
+                                                     void (^completion)(void)) {
+    if (ApolloNativeActionMenusEnabled()) return NO;
+    if (![actionController isKindOfClass:objc_getClass("_TtC6Apollo16ActionController")]) return NO;
+
+    UIViewController *host = [presenter isKindOfClass:[UIViewController class]] ? presenter : nil;
+    UIViewController *content = [host isKindOfClass:[UINavigationController class]]
+        ? ((UINavigationController *)host).topViewController
+        : host;
+    if (![content isKindOfClass:objc_getClass("_TtC6Apollo34ModeratorBannedUsersViewController")]) return NO;
+    if (ApolloReadBoolIvar(actionController, "showKeyboardOnAppearanceForTextEntryView", NO)) return NO;
+    if (ApolloNativeActionMenuActionControllerHasCustomHeader(actionController)) return NO;
+
+    UIMenu *menu = ApolloNativeActionMenuBuildMenu(actionController, YES);
+    if (!menu) return NO;
+
+    NSMutableArray<UIAction *> *menuActions = [NSMutableArray array];
+    ApolloLegacyBannedUserAppendActions(menuActions, menu.children);
+    if (menuActions.count == 0) return NO;
+
+    UIView *sourceView = ApolloNativeActionMenuSelectedCellForPresenter(content)
+        ?: ApolloNativeActionMenuViewForObject(content);
+    if (!sourceView.window) return NO;
+    objc_setAssociatedObject(actionController, &kApolloNativeActionMenuSourceViewKey,
+                             sourceView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil
+                                                                   message:nil
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    for (UIAction *menuAction in menuActions) {
+        UIAction *retainedMenuAction = menuAction;
+        UIAlertActionStyle style = (menuAction.attributes & UIMenuElementAttributesDestructive)
+            ? UIAlertActionStyleDestructive
+            : UIAlertActionStyleDefault;
+        UIAlertAction *alertAction = [UIAlertAction actionWithTitle:menuAction.title
+                                                              style:style
+                                                            handler:^(__unused UIAlertAction *selectedAction) {
+            ApolloNativeActionMenuActionHandler handler =
+                ((ApolloNativeActionMenuActionHandler (*)(id, SEL))objc_msgSend)(retainedMenuAction,
+                                                                                 @selector(handler));
+            if (handler) handler(retainedMenuAction);
+        }];
+        alertAction.enabled = !(menuAction.attributes & UIMenuElementAttributesDisabled);
+        [sheet addAction:alertAction];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+
+    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
+    if (popover) {
+        popover.sourceView = sourceView;
+        popover.sourceRect = sourceView.bounds;
+    }
+
+    ApolloLog(@"[NativeActionMenu] Using UIKit fallback for banned-user actions (%lu item(s))",
+              (unsigned long)menuActions.count);
+    [host presentViewController:sheet animated:YES completion:completion];
+    return YES;
+}
+
 // Walk down the presentedViewController chain to the top-most window-backed
 // controller that can legally present a new modal. Skips the window-less
 // ActionController (which the native-menu path never actually presents).
@@ -1722,6 +1803,9 @@ static BOOL ApolloNativeActionMenuCanFallbackPresent(id presenter, id actionCont
     if (ApolloNativeActionMenuPresent(self, viewControllerToPresent, completion)) {
         return;
     }
+    if (ApolloLegacyBannedUserActionMenuPresent(self, viewControllerToPresent, completion)) {
+        return;
+    }
     %orig;
 }
 %end
@@ -1730,6 +1814,9 @@ static BOOL ApolloNativeActionMenuCanFallbackPresent(id presenter, id actionCont
 
 - (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
     if (ApolloNativeActionMenuPresent(self, viewControllerToPresent, completion)) {
+        return;
+    }
+    if (ApolloLegacyBannedUserActionMenuPresent(self, viewControllerToPresent, completion)) {
         return;
     }
 

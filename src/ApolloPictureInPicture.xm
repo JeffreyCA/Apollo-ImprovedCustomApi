@@ -61,6 +61,7 @@ extern AVPlayer *ApolloVideoUnmute_GetPlayerFromVideoNode(id videoNode);
 extern void ApolloVideoUnmute_SyncMuteButtonIcon(id richMediaNode, BOOL isMuted);
 extern void ApolloVideoUnmute_ClearProtectionIfPlayer(AVPlayer *player);
 extern BOOL ApolloVideoUnmute_IsNavigatingBack(void);
+extern void ApolloVideoUnmute_NotePlayerDeliberatelyStopped(AVPlayer *player);
 
 // Defined in PictureInPictureViewController.m (plain global — not mangled).
 extern NSString *const ApolloPictureInPictureChangedNotification;
@@ -1116,6 +1117,9 @@ static BOOL sPiPSessionHandbackInProgress = NO;
     } else if (!keepPlaying && player) {
         ApolloLog(@"[PiP] Closing — applying scrolled-away state (pause + mute)");
         [player pause];
+        // Deliberate pause — tell the search reclaim so it never resurrects
+        // this player.
+        ApolloVideoUnmute_NotePlayerDeliberatelyStopped(player);
         // Our own AVPlayer.setMuted: hook blocks mutes on the protected player;
         // drop that protection first so this mute goes through.
         ApolloVideoUnmute_ClearProtectionIfPlayer(player);

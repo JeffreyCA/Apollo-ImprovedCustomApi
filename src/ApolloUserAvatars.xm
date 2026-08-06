@@ -3,6 +3,7 @@
 #import <CoreImage/CoreImage.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <malloc/malloc.h>
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
@@ -1323,16 +1324,78 @@ static BOOL ApolloProfileUsernameIsLoggedInAccount(NSString *username) {
     return NO;
 }
 
+// One-shot registered-class set for validating candidate isa pointers by
+// identity only (no dereference). Classes never unregister, so a single
+// snapshot is safe; classes registered later (KVO subclasses etc.) miss and
+// the probe returns nil for them — a skipped read, never a crash.
+static BOOL ApolloRuntimeKnowsClass(Class candidate) {
+    static CFSetRef sKnownClasses;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        unsigned int count = 0;
+        Class *list = objc_copyClassList(&count);
+        CFMutableSetRef set = CFSetCreateMutable(NULL, count, NULL);
+        for (unsigned int i = 0; i < count; i++) {
+            CFSetAddValue(set, (__bridge const void *)list[i]);
+        }
+        free(list);
+        sKnownClasses = set;
+    });
+    return CFSetContainsValue(sKnownClasses, (__bridge const void *)candidate);
+}
+
+// Swift-class ivars carry no ObjC type encoding, so an ivar slot named e.g.
+// "username" may be an INLINE Swift struct, not an object reference — Apollo's
+// UserCommentsViewController.username is a 16-byte Swift.String whose first
+// word is the count-and-flags word (0xC00000000000000F for a bridged 15-char
+// ASCII username), which crashed objc_opt_isKindOfClass when returned as id
+// (profile-tab long-press .ips, 2026-08-05). Before treating such a word as an
+// object: it must be untagged, 8-byte aligned, plausibly heap-ranged, a live
+// malloc block, and its isa must resolve to a class the runtime knows.
+// Tagged pointers are rejected outright — an inline struct's flag word can
+// look tagged, and a genuinely tagged value in a Swift slot is rare enough
+// that skipping it (nil) is the right trade against misreading a struct.
+static BOOL ApolloWordLooksLikeObjCObject(uintptr_t raw) {
+    if (raw == 0) return NO;
+    if (raw & 0x8000000000000000ULL) return NO;
+    if (raw & 0x7) return NO;
+    if (raw < 0x100000000ULL) return NO;
+    if (malloc_size((const void *)raw) == 0) return NO;
+    Class cls = object_getClass((__bridge id)(void *)raw);
+    if (!cls) return NO;
+    return ApolloRuntimeKnowsClass(cls);
+}
+
 static id ApolloObjectIvarValue(id object, NSString *name) {
     if (!object || name.length == 0) return nil;
-    for (Class cls = [object class]; cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
+    for (Class cls = object_getClass(object); cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
         Ivar ivar = class_getInstanceVariable(cls, name.UTF8String);
         if (!ivar) continue;
-        @try {
+        const char *encoding = ivar_getTypeEncoding(ivar);
+        if (encoding && encoding[0] == '@') {
+            // ObjC-typed object ivar — the runtime vouches for it.
             return object_getIvar(object, ivar);
-        } @catch (__unused NSException *exception) {
+        }
+        if (encoding && encoding[0] != '\0') {
+            // Declared non-object ObjC type (int/BOOL/struct/...): never an id.
             return nil;
         }
+        // No encoding: Swift storage. Read the word manually and validate it
+        // before letting anyone message it.
+        ptrdiff_t offset = ivar_getOffset(ivar);
+        if (offset < 0) return nil;
+        if ((size_t)offset + sizeof(uintptr_t) > class_getInstanceSize(object_getClass(object))) return nil;
+        uintptr_t raw = 0;
+        memcpy(&raw, (const uint8_t *)(__bridge const void *)object + offset, sizeof(raw));
+        if (!ApolloWordLooksLikeObjCObject(raw)) {
+            // Non-zero garbage here is exactly the word that used to be
+            // messaged and crash — log it so field reports stay diagnosable.
+            if (raw != 0) {
+                ApolloLog(@"[UserAvatars] Skipping non-object ivar word %p (%@.%@)", (void *)raw, NSStringFromClass(cls), name);
+            }
+            return nil;
+        }
+        return (__bridge id)(void *)raw;
     }
     return nil;
 }

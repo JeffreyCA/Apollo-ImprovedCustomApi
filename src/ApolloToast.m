@@ -61,18 +61,23 @@ static void ApolloToastShowImpl(NSString *message, NSString *detail, ApolloToast
     // Replace any visible toast so rapid actions don't stack bubbles.
     ApolloToastDismiss(sApolloActiveToast, NO);
 
-    UIVisualEffectView *bubble = [[UIVisualEffectView alloc]
-        initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThickMaterial]];
+    UIView *bubble = [[UIView alloc] init];
     bubble.translatesAutoresizingMaskIntoConstraints = NO;
-    // The effect view itself must NOT clip, so its drop shadow can show; the
-    // rounded-corner clipping happens on its contentView instead (set below).
     bubble.clipsToBounds = NO;
     bubble.alpha = 0.0;
     bubble.transform = CGAffineTransformMakeTranslation(0.0, 8.0);
     [window addSubview:bubble];
     sApolloActiveToast = bubble;
 
-    UIView *content = bubble.contentView;
+    UIVisualEffectView *material = [[UIVisualEffectView alloc]
+        initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThickMaterial]];
+    material.translatesAutoresizingMaskIntoConstraints = NO;
+    material.layer.cornerRadius = 20.0;
+    material.layer.cornerCurve = kCACornerCurveContinuous;
+    material.clipsToBounds = YES;
+    [bubble addSubview:material];
+
+    UIView *content = material.contentView;
 
     UIStackView *row = [[UIStackView alloc] init];
     row.axis = UILayoutConstraintAxisHorizontal;
@@ -116,6 +121,11 @@ static void ApolloToastShowImpl(NSString *message, NSString *detail, ApolloToast
     [row addArrangedSubview:textStack];
 
     [NSLayoutConstraint activateConstraints:@[
+        [material.topAnchor constraintEqualToAnchor:bubble.topAnchor],
+        [material.bottomAnchor constraintEqualToAnchor:bubble.bottomAnchor],
+        [material.leadingAnchor constraintEqualToAnchor:bubble.leadingAnchor],
+        [material.trailingAnchor constraintEqualToAnchor:bubble.trailingAnchor],
+
         [row.topAnchor constraintEqualToAnchor:content.topAnchor constant:12.0],
         [row.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-12.0],
         [row.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:16.0],
@@ -129,13 +139,10 @@ static void ApolloToastShowImpl(NSString *message, NSString *detail, ApolloToast
         [bubble.bottomAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.bottomAnchor constant:-64.0],
     ]];
 
-    // Round the material via its contentView (the effect view is left unclipped
-    // so the shadow below can render outside its bounds).
-    content.layer.cornerRadius = 20.0;
-    content.layer.cornerCurve = kCACornerCurveContinuous;
-    content.clipsToBounds = YES;
-
-    // A subtle shadow lifts the material off busy content behind it.
+    // Keep shadow and clipping on separate layers: UIVisualEffectView's private
+    // backdrop ignores contentView clipping, so the material itself must clip.
+    bubble.layer.cornerRadius = 20.0;
+    bubble.layer.cornerCurve = kCACornerCurveContinuous;
     bubble.layer.shadowColor = UIColor.blackColor.CGColor;
     bubble.layer.shadowOpacity = 0.18;
     bubble.layer.shadowRadius = 12.0;
@@ -151,9 +158,9 @@ static void ApolloToastShowImpl(NSString *message, NSString *detail, ApolloToast
 
     // Auto-dismiss; longer messages linger a little longer.
     NSTimeInterval visible = 1.8 + MIN(2.0, (message.length + detail.length) / 40.0);
-    __weak UIVisualEffectView *weakBubble = bubble;
+    __weak UIView *weakBubble = bubble;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(visible * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIVisualEffectView *strong = weakBubble;
+        UIView *strong = weakBubble;
         if (strong && strong.superview) ApolloToastDismiss(strong, YES);
     });
 }

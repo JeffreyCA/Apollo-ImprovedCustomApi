@@ -247,17 +247,42 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
         }
                                   onSelect:nil];
 
-    return @[
+    NSMutableArray<ApolloSettingsSection *> *sections = [NSMutableArray array];
+    [sections addObject:
         [ApolloSettingsSection sectionWithTitle:@"General"
                                          footer:@"Translates comments in place, and optionally post titles. Translation Mode sets how it kicks in:\n\n• Automatic — opens everything already translated.\n• Tap to Translate — keeps the original language and shows a tappable \"Translate\" line under comments plus a language marker next to post stats; tap to translate that item, tap again to switch back.\n• Manual (Globe) — nothing is translated until you tap the globe per feed or thread.\n\nThe Details toggles control the \"Translated from …\" lines and language markers. Match App Colour tints them with your theme's accent instead of green."
-                                           rows:@[ enableBulk, translationMode, translateTitles, showDetails, titleDetails, markerColor, targetLanguage, provider ]],
+                                           rows:@[ enableBulk, translationMode, translateTitles, showDetails, titleDetails, markerColor, targetLanguage, provider ]]];
+
+    // Apollo's own Translate button (the native action-sheet item on comment/post
+    // long-press) is unrelated to the bulk pipeline above, so it gets its own
+    // section rather than a row gated on sEnableBulkTranslation. Only built at
+    // all when the OS can present Apple's sheet (iOS 17.4+) — the framework has
+    // no way to hide a whole section, so an unsupported OS would otherwise leave
+    // a header/footer floating over zero rows.
+#if APOLLO_HAS_APPLE_TRANSLATE
+    if ([ApolloAppleTranslateSheet isSupported]) {
+        ApolloSettingsRow *appleSheet =
+            [ApolloSettingsRow switchRowWithID:@"appleSheet"
+                                         title:@"Use Apple Translate Sheet"
+                                          isOn:^BOOL { return sAppleTranslateSheet; }
+                                      onToggle:^(UISwitch *sender) { [weakSelf appleTranslateSheetSwitchToggled:sender]; }];
+        [sections addObject:
+            [ApolloSettingsSection sectionWithTitle:@"Context Menu"
+                                             footer:@"Opens iOS's native Translate sheet on the Translate action instead of a Google Translate page. Unlike the Apple provider above, this isn't always on-device; iOS may send text to Apple's servers unless offline-only translation is enabled in the system Translate app."
+                                               rows:@[ appleSheet ]]];
+    }
+#endif
+
+    [sections addObject:
         [ApolloSettingsSection sectionWithTitle:@"Don't Translate"
                                          footer:@"Posts and comments detected as one of these languages will be left in their original form. Mixed-language text is still translated so embedded foreign words come through."
-                                           rows:skipRows],
+                                           rows:skipRows]];
+    [sections addObject:
         [ApolloSettingsSection sectionWithTitle:@"LibreTranslate"
                                          footer:@"Google is the default provider. If Google or LibreTranslate fails, the tweak automatically falls back to the other one. Apple (On-Device) translates privately on your device with no network — it stays Apple (no fallback) and will ask you to download a language the first time it's needed (iOS 18+). The settings below configure the LibreTranslate endpoint."
-                                           rows:@[ libreURL, libreAPIKey ]],
-    ];
+                                           rows:@[ libreURL, libreAPIKey ]]];
+
+    return sections;
 }
 
 #pragma mark - Helpers
@@ -768,6 +793,14 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     [[NSUserDefaults standardUserDefaults] setBool:sTranslationMarkerUseThemeColor forKey:UDKeyTranslationMarkerUseThemeColor];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloShowTranslationDetailsChanged" object:nil];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloRichPreviewTranslationDidUpdateNotification object:nil userInfo:ApolloRichPreviewSettingsChangeUserInfo()];
+}
+
+- (void)appleTranslateSheetSwitchToggled:(UISwitch *)sender {
+    sAppleTranslateSheet = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sAppleTranslateSheet forKey:UDKeyAppleTranslateSheet];
+    // No live-update notification needed: ApolloAppleTranslateSheet.xm reads
+    // sAppleTranslateSheet fresh at the moment Apollo presents its Translate
+    // sheet, not at some earlier cached point.
 }
 
 - (void)translatePostTitlesSwitchToggled:(UISwitch *)sender {

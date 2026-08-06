@@ -153,6 +153,12 @@ static BOOL sCancelNeedsIntro = NO;
 // Liquid Glass — the jump happens on stock Apollo too.
 static __weak UIScrollView *sFeedSearchTable     = nil;  // captured tableNode.view (ASTableView)
 static __weak UIView        *sFeedSearchToolbar   = nil;  // captured upperToolbar (the rest anchor)
+// The one ASTableViewController that owns every capture above. During an
+// interactive push/pop UIKit lays out both the source and destination
+// controllers; without an owner gate the off-screen controller can replace
+// these process-wide weak refs with its own table/toolbar and then tear down
+// the visible search session from viewWillDisappear:.
+static __weak UIViewController *sFeedSearchOwner = nil;
 static BOOL sFeedSearchActive         = NO;  // YES while a feed (!stick) search is editing
 static BOOL sFeedSearchDismissing     = NO;  // YES briefly during dismiss (relax clamp to a downward pull)
 static BOOL sFeedSearchScrolledByUser = NO;  // armed once the user drags → stop clamping so they can browse
@@ -472,6 +478,9 @@ static void recenterCancelButton(void) {
 
     // Offset stabilizer (runs regardless of Liquid Glass): arm the active flags and capture the feed
     // table + docked toolbar (the rest anchor) + field so the ASTableView inset/offset hooks engage.
+    UIViewController *owner = (UIViewController *)self;
+    if (sFeedSearchOwner && sFeedSearchOwner != owner) ApolloFeedSearchRestoreHeader();
+    sFeedSearchOwner = owner;
     sFeedSearchActive = YES;
     sFeedSearchDismissing = NO;
     sFeedSearchScrolledByUser = NO;
@@ -504,6 +513,9 @@ static void recenterCancelButton(void) {
 - (void)viewDidLayoutSubviews {
     %orig;
     if (MSHookIvar<BOOL>(self, "searchBarShouldStickToKeyboard")) return; // feed-only; skip comments search
+    // Navigation transitions lay out multiple ASTableViewControllers in the
+    // same frame. Only the focused/restored feed may refresh the shared refs.
+    if (sFeedSearchOwner != (UIViewController *)self) return;
     // Keep the offset-stabilizer refs current (runs regardless of Liquid Glass).
     id tableNode = ApolloObjectIvar(self, "tableNode");
     UIView *tv = [tableNode respondsToSelector:@selector(view)] ? [tableNode view] : nil;
@@ -532,6 +544,11 @@ static void recenterCancelButton(void) {
 }
 
 - (void)dismissSearchBarButtonTappedWithSender:(id)sender {
+    UIViewController *owner = (UIViewController *)self;
+    if (sFeedSearchOwner != owner) {
+        %orig;
+        return;
+    }
     // In-place: Apollo's teardown (sub_1002bf57c) animates the toolbar/field/button from the docked-top
     // geometry; since the nav bar never moved here, that reads as a "fly in from above". Keep our pins
     // live through the teardown (don't pre-clear), strip the implicit animations (in the toolbar hooks),
@@ -544,10 +561,13 @@ static void recenterCancelButton(void) {
         animateCancelOut();                           // fade the round-X out
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.45 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            if (gen != sFeedSearchDismissGen) return; // re-focused / re-dismissed meanwhile
+            if (gen != sFeedSearchDismissGen || sFeedSearchOwner != owner) return;
+            // Re-focused / re-dismissed or another feed took ownership.
             sFeedSearchActive = NO;
             sFeedSearchDismissing = NO;
+            sFeedSearchOwner = nil;
             sFeedSearchNavBar = nil;
+            sFeedSearchTable = nil;
             sFeedSearchToolbar = nil;
             sFeedSearchField = nil;
             sFeedSearchCancel = nil;
@@ -563,10 +583,19 @@ static void recenterCancelButton(void) {
     sFeedSearchNavBar = nil;
     sFeedSearchActive = NO;
     sFeedSearchDismissing = YES;
+    NSUInteger gen = ++sFeedSearchDismissGen;
     %orig;
     animateCancelOut(); // slide the round-X out
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ sFeedSearchDismissing = NO; });
+                   dispatch_get_main_queue(), ^{
+        if (gen != sFeedSearchDismissGen || sFeedSearchOwner != owner) return;
+        sFeedSearchDismissing = NO;
+        sFeedSearchOwner = nil;
+        sFeedSearchTable = nil;
+        sFeedSearchToolbar = nil;
+        sFeedSearchField = nil;
+        sFeedSearchCancel = nil;
+    });
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -588,7 +617,12 @@ static void recenterCancelButton(void) {
     // flag) before the appear / re-focus, so the nav stays put and the toolbar docks below it from the
     // first pass. textFieldDidBeginEditing re-arms idempotently if/when the field actually focuses.
     if (sKeepSearchBarInPlace && txt.length > 0) {
+        sFeedSearchOwner = (UIViewController *)self;
+        ++sFeedSearchDismissGen;
         sFeedSearchNavBar = [(UIViewController *)self navigationController].navigationBar;
+        id tableNode = ApolloObjectIvar(self, "tableNode");
+        UIView *tableView = [tableNode respondsToSelector:@selector(view)] ? [tableNode view] : nil;
+        if ([tableView isKindOfClass:objc_getClass("ASTableView")]) sFeedSearchTable = (UIScrollView *)tableView;
         if ([field isKindOfClass:[UIView class]]) sFeedSearchField = (UIView *)field;
         id upper = ApolloObjectIvar(self, "upperToolbar");
         if ([upper isKindOfClass:[UIView class]]) sFeedSearchToolbar = (UIView *)upper;
@@ -627,20 +661,25 @@ static void recenterCancelButton(void) {
     }
 }
 
-- (void)viewWillDisappear:(BOOL)animated {
-    // If this controller owns the captured bar and is leaving, drop the capture so a stale reference
-    // can't affect an unrelated transform later.
-    if (sFeedSearchNavBar && [(UIViewController *)self navigationController].navigationBar == sFeedSearchNavBar) {
-        sFeedSearchNavBar = nil;
-    }
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    // viewWillDisappear: also runs when an interactive swipe is cancelled.
+    // Waiting for viewDidDisappear: preserves the source feed in that case;
+    // owner scoping above prevents the destination's transition layouts from
+    // touching these refs while the gesture is in flight.
+    if (sFeedSearchOwner != (UIViewController *)self) return;
+    ApolloFeedSearchRestoreHeader();
+    sFeedSearchOwner = nil;
+    sFeedSearchNavBar = nil;
+    sFeedSearchTable = nil;
     sFeedSearchActive = NO;
     sFeedSearchDismissing = NO;
     sFeedSearchToolbar = nil;
     sFeedSearchField = nil;
     sFeedSearchCancel = nil;
+    sFeedSearchScrolledByUser = NO;
     sCancelNeedsIntro = NO;
     ++sFeedSearchDismissGen; // a pending dismiss release timer can't resurrect state after we leave
-    %orig;
 }
 
 %end

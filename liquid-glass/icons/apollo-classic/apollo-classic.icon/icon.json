@@ -1,5 +1,4 @@
 {
-  "color-space-for-untagged-svg-colors" : "display-p3",
   "fill-specializations" : [
     {
       "value" : {
@@ -26,6 +25,42 @@
   ],
   "groups" : [
     {
+      "layers" : [
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "Apollo Antenna Ball.svg",
+          "name" : "Apollo Antenna Ball",
+          "position" : {
+            "scale" : 1.45,
+            "translation-in-points" : [
+              -0.015853322304906214,
+              -320.3
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 1.4
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    },
+    {
       "blend-mode-specializations" : [
         {
           "appearance" : "dark",
@@ -34,21 +69,6 @@
       ],
       "blur-material" : null,
       "layers" : [
-        {
-          "fill" : {
-            "solid" : "extended-gray:1.00000,1.00000"
-          },
-          "hidden" : false,
-          "image-name" : "Helmet Apollo Cropped.svg",
-          "name" : "Helmet Apollo Cropped",
-          "position" : {
-            "scale" : 1.25,
-            "translation-in-points" : [
-              7.335254031078193,
-              -80
-            ]
-          }
-        },
         {
           "fill-specializations" : [
             {
@@ -66,19 +86,29 @@
           "glass" : true,
           "hidden" : false,
           "image-name" : "Antenna Apollo Cropped.svg",
-          "name" : "Antenna Apollo Cropped",
+          "name" : "Apollo Antenna",
           "position" : {
             "scale" : 0.6,
             "translation-in-points" : [
               1.2732320762362406,
-              -180
+              -176
             ]
           }
         },
         {
-          "fill" : {
-            "solid" : "display-p3:0.91676,0.20327,0.25801,1.00000"
-          },
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.91676,0.20327,0.25801,1.00000"
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "extended-gray:0.00000,1.00000"
+              }
+            }
+          ],
           "hidden" : false,
           "image-name" : "Eyes Apollo.svg",
           "name" : "Eyes Apollo",
@@ -94,9 +124,23 @@
           "fill" : {
             "solid" : "extended-gray:1.00000,1.00000"
           },
+          "image-name" : "Helmet Apollo.svg",
+          "name" : "Helmet Apollo",
+          "position" : {
+            "scale" : 1.25,
+            "translation-in-points" : [
+              7.3,
+              35
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "extended-gray:1.00000,1.00000"
+          },
           "hidden" : false,
           "image-name" : "Face Apollo Cropped.svg",
-          "name" : "Face Apollo Cropped",
+          "name" : "Face Apollo",
           "position" : {
             "scale" : 1.68,
             "translation-in-points" : [
@@ -239,13 +283,14 @@
         }
       ],
       "lighting" : "individual",
+      "name" : "Group",
       "shadow" : {
         "kind" : "neutral",
         "opacity" : 0.5
       },
       "translucency" : {
         "enabled" : true,
-        "value" : 0.5
+        "value" : 0.35
       }
     }
   ],

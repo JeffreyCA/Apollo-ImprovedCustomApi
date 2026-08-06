@@ -21,7 +21,7 @@ liquid-glass/scripts/cartool
 
 AsyncDisplayKit.framework/
 docs/
-iPhone18-3_26.1_23B85_Restore/*
+iPhone18-3_26.1_23B85_Restore/
 iOS26-Runtime-Headers/
 
 # Reborn Widgets (xcodegen) — track project.yml + Sources/ only.

@@ -23,14 +23,21 @@ static CFStringRef const kValetServiceSubstring = CFSTR("com.christianselig.Apol
 // restored backup can't sign the user back in. Pairs with ApolloReplayValetKeychainItems and,
 // in the simulator, with the tweak's keychain shim (which serves these on launch).
 static NSArray<NSDictionary *> *ApolloCaptureValetKeychainItems(void) {
+    // Backup is an Apollo/Valet export, not permission to unlock some other protected
+    // generic-password item visible to this signing identity. MatchLimitAll otherwise
+    // defaults to allowing authentication UI and can unexpectedly request the device
+    // passcode. Protected rows are unrelated to Apollo's ordinary Valet stores, so skip
+    // them silently just like the recovery/diagnostic enumeration in Tweak.xm.
     const void *queryKeys[] = {
         kSecClass, kSecMatchLimit, kSecReturnAttributes, kSecReturnData,
+        kSecUseAuthenticationUI,
     };
     const void *queryValues[] = {
         kSecClassGenericPassword, kSecMatchLimitAll, kCFBooleanTrue, kCFBooleanTrue,
+        kSecUseAuthenticationUISkip,
     };
     CFDictionaryRef query = CFDictionaryCreate(kCFAllocatorDefault,
-                                                queryKeys, queryValues, 4,
+                                                queryKeys, queryValues, 5,
                                                 &kCFTypeDictionaryKeyCallBacks,
                                                 &kCFTypeDictionaryValueCallBacks);
     // Keyed by service+account so mirror-only items can be merged in without duplicating a key.
