@@ -124,10 +124,21 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 @property (nonatomic, copy) NSString *listingPath;
 // Privacy-friendly label used only in diagnostics (r/foo or m/foo).
 @property (nonatomic, copy) NSString *sourceDescription;
-// Snapshot of the visible account's bearer at presentation time. Never use
-// sLatestRedditBearerToken for an account-scoped listing: background polling
-// can update that global with a different signed-in account's token.
-@property (nonatomic, copy, nullable) NSString *requestBearerToken;
+// The account this gallery is bound to, captured at presentation time. We pin
+// the account IDENTITY, never a credential: Reddit rotates access tokens, so a
+// copied bearer would go stale under a long-lived gallery and every later page
+// would 401. `boundAccountClient` is the exact live RDKClient Apollo owns and
+// keeps refreshed in-process, so re-reading its credential per request always
+// yields the current token. Never resolve the active account again at request
+// time either — background polling and account switches would repoint an
+// already-open gallery at a different signed-in user.
+@property (nonatomic, strong, nullable) id boundAccountClient;
+// Web-session (keyless) accounts have no OAuth credential; their per-username
+// synthetic bearer is a stable placeholder the Tweak.xm chokepoint swaps for
+// the matching cookie, so it does not rotate and is safe to hold.
+@property (nonatomic, copy, nullable) NSString *boundSyntheticBearer;
+// Diagnostics only.
+@property (nonatomic, copy, nullable) NSString *boundUsername;
 @property (nonatomic, strong) NSMutableArray<ApolloGalleryItem *> *mutableItems;
 // `mutableItems` filtered by allowedKinds, rebuilt whenever either changes.
 @property (nonatomic, strong) NSArray<ApolloGalleryItem *> *filteredItems;
@@ -148,11 +159,12 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 
 @implementation ApolloGalleryFeed
 
-// authorizationCredential -> accessToken -> accessToken on Apollo's live
-// active RDKClient. Keep this runtime-driven so the gallery does not acquire a
-// link-time dependency on RedditKit's private classes.
-static NSString *ApolloGalleryActiveAccountBearer(void) {
-    id client = ApolloActiveAccountClient();
+// authorizationCredential -> accessToken -> accessToken on a specific live
+// RDKClient. Keep this runtime-driven so the gallery does not acquire a
+// link-time dependency on RedditKit's private classes. Called fresh for every
+// request, so a token Apollo has rotated since the gallery opened is picked up
+// on the next page instead of the gallery paging with a dead credential.
+static NSString *ApolloGalleryBearerForClient(id client) {
     if (!client) return nil;
 
     SEL credentialSelector = NSSelectorFromString(@"authorizationCredential");
@@ -199,18 +211,21 @@ static NSString *ApolloGalleryActiveAccountBearer(void) {
     _listingPath = [listingPath copy] ?: @"";
     _sourceDescription = [sourceDescription copy] ?: @"feed";
     NSString *activeUsername = ApolloActiveAccountUsername();
-    _requestBearerToken = ApolloGalleryActiveAccountBearer();
-    if (_requestBearerToken.length == 0 &&
-        activeUsername.length > 0 && ApolloWebSessionFor(activeUsername) != nil) {
+    _boundUsername = [activeUsername copy];
+    // Retain the client itself rather than a copy of its token. Apollo refreshes
+    // credentials in place on this exact object, so holding it keeps us on the
+    // right account AND on a live credential for the gallery's whole lifetime.
+    _boundAccountClient = ApolloActiveAccountClient();
+    if (activeUsername.length > 0 && ApolloWebSessionFor(activeUsername) != nil) {
         // The live AccountManager can briefly be between clients while a
         // switch settles. A known primary web session still has an unambiguous
         // per-account placeholder bearer, so preserve its identity explicitly.
-        _requestBearerToken = ApolloWebJSONSyntheticBearerTokenForUsername(activeUsername);
+        _boundSyntheticBearer = ApolloWebJSONSyntheticBearerTokenForUsername(activeUsername);
     }
     ApolloLog(@"[Gallery] %@ auth bound to %@ (%@)", _sourceDescription,
               activeUsername.length > 0 ? [@"u/" stringByAppendingString:activeUsername] : @"signed out",
-              ApolloWebJSONBearerIsSynthetic(_requestBearerToken) ? @"web session" :
-                  (_requestBearerToken.length > 0 ? @"OAuth" : @"public"));
+              _boundAccountClient ? @"OAuth client" :
+                  (_boundSyntheticBearer.length > 0 ? @"web session" : @"public"));
     _mutableItems = [NSMutableArray array];
     _seenImageKeys = [NSMutableSet set];
     _sort = ApolloGallerySortHot;
@@ -364,6 +379,31 @@ static NSString *ApolloGalleryActiveAccountBearer(void) {
     return [@"/" stringByAppendingString:[escapedComponents componentsJoinedByString:@"/"]];
 }
 
+// The bearer for the NEXT request, read live from the bound account every time.
+//
+// Reddit access tokens rotate, so this is deliberately not cached: an OAuth
+// gallery left open past a refresh must page with the token Apollo holds now,
+// not the one that was current when the grid was presented. Web-session
+// accounts fall back to their synthetic placeholder, which does not rotate.
+//
+// Main thread only, for the same reason ApolloActiveAccountClient() is: a
+// credential refresh reassigns `authorizationCredential` on the main thread, so
+// reading it from a network callback could race the release of the old one.
+// Off-main callers get the value hopped over, never a stale copy.
+- (NSString *)currentBearerToken {
+    if (![NSThread isMainThread]) {
+        __block NSString *token = nil;
+        dispatch_sync(dispatch_get_main_queue(), ^{ token = [self currentBearerToken]; });
+        return token;
+    }
+    NSString *live = ApolloGalleryBearerForClient(self.boundAccountClient);
+    if (live.length > 0) return live;
+    // No live OAuth credential: either a keyless account (synthetic bearer, the
+    // normal case) or an OAuth account momentarily mid-refresh, where sending no
+    // bearer is better than sending a token we know is dead.
+    return self.boundSyntheticBearer;
+}
+
 // `useOAuthHost` picks the transport:
 //   YES -> oauth.reddit.com + Authorization: Bearer (real API-key accounts)
 //   NO  -> www.reddit.com/....json, which the Tweak.xm session chokepoint
@@ -390,7 +430,7 @@ static NSString *ApolloGalleryActiveAccountBearer(void) {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.timeoutInterval = kApolloGalleryRequestTimeout;
     if (useOAuthHost) {
-        NSString *token = self.requestBearerToken;
+        NSString *token = [self currentBearerToken];
         if (token.length > 0) {
             [request setValue:[@"Bearer " stringByAppendingString:token] forHTTPHeaderField:@"Authorization"];
         }
@@ -406,7 +446,7 @@ static NSString *ApolloGalleryActiveAccountBearer(void) {
     // Both real OAuth and per-account synthetic bearers begin at the OAuth
     // host. Web JSON recognizes the latter and rewrites it to the matching
     // user's cookie; no bearer means a signed-out public JSON request.
-    BOOL preferOAuth = self.requestBearerToken.length > 0;
+    BOOL preferOAuth = [self currentBearerToken].length > 0;
     [self fetchPageWithCursor:after useOAuthHost:preferOAuth allowRetry:YES completion:completion];
 }
 
@@ -419,6 +459,11 @@ static NSString *ApolloGalleryActiveAccountBearer(void) {
         completion(nil, @"Couldn't build the request for this feed.");
         return;
     }
+
+    // Remember what we actually sent, so a 401 can tell "the token rotated
+    // while this page was in flight" apart from "this account can't see this
+    // listing at all".
+    NSString *sentAuthorization = [request valueForHTTPHeaderField:@"Authorization"];
 
     // No retain cycle to avoid here (self never holds the task), but staying
     // weak means a torn-down feed's in-flight page can't keep it alive; the
@@ -434,15 +479,31 @@ static NSString *ApolloGalleryActiveAccountBearer(void) {
         NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]]
             ? ((NSHTTPURLResponse *)response).statusCode : -1;
 
-        // An auth failure on one transport is worth one attempt on the other:
-        // a captured bearer can be stale, and a cookie session can be missing.
+        // An auth failure is worth exactly one more attempt. Retrying always
+        // hops to the main queue first, because deciding what to retry with
+        // means re-reading the bound account's live credential.
         if (allowRetry && (status == 401 || status == 403)) {
-            ApolloLog(@"[Gallery] listing %ld on %@ host; retrying on the other host",
-                      (long)status, useOAuthHost ? @"oauth" : @"www");
-            [strongSelf fetchPageWithCursor:after
-                               useOAuthHost:!useOAuthHost
-                                 allowRetry:NO
-                                 completion:completion];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                // Prefer staying on the OAuth host when the credential has
+                // moved on since this request was built — that is a rotation
+                // landing mid-page, and the fresh token will work. Falling
+                // straight to www would drop us to an anonymous request, which
+                // cannot see private multireddits or subreddits at all.
+                NSString *fresh = [strongSelf currentBearerToken];
+                NSString *freshAuthorization = fresh.length > 0
+                    ? [@"Bearer " stringByAppendingString:fresh] : nil;
+                BOOL credentialRotated = useOAuthHost && freshAuthorization.length > 0 &&
+                    ![freshAuthorization isEqualToString:sentAuthorization ?: @""];
+                BOOL retryOnOAuthHost = credentialRotated ? YES : !useOAuthHost;
+                ApolloLog(@"[Gallery] listing %ld on %@ host; retrying on %@ host (%@)",
+                          (long)status, useOAuthHost ? @"oauth" : @"www",
+                          retryOnOAuthHost ? @"oauth" : @"www",
+                          credentialRotated ? @"credential rotated" : @"other transport");
+                [strongSelf fetchPageWithCursor:after
+                                   useOAuthHost:retryOnOAuthHost
+                                     allowRetry:NO
+                                     completion:completion];
+            });
             return;
         }
 
