@@ -124,6 +124,11 @@ typedef NS_ENUM(NSInteger, ApolloSubredditHeaderAssetKind) {
 - (void)applyInfo:(ApolloSubredditInfo *)info fallbackSubredditName:(NSString *)subredditName;
 - (void)apollo_bannerTapped;
 - (void)apollo_iconTapped;
+- (void)apollo_bannerLongPressed:(UILongPressGestureRecognizer *)recognizer;
+- (void)apollo_iconLongPressed:(UILongPressGestureRecognizer *)recognizer;
+- (void)apollo_showOptionsForAssetKind:(ApolloSubredditHeaderAssetKind)assetKind;
+- (void)apollo_viewImageForAssetKind:(ApolloSubredditHeaderAssetKind)assetKind;
+- (NSURL *)apollo_viewableImageURLForAssetKind:(ApolloSubredditHeaderAssetKind)assetKind;
 - (void)apollo_subscribeTapped;
 - (void)apollo_applySubscriptionState:(BOOL)subscribed known:(BOOL)known;
 - (void)apollo_applySubscriptionGlassWithAccent:(UIColor *)accent;
@@ -219,9 +224,11 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
         _bannerImageView.isAccessibilityElement = YES;
         _bannerImageView.accessibilityTraits = UIAccessibilityTraitButton;
         _bannerImageView.accessibilityLabel = @"Subreddit banner";
-        _bannerImageView.accessibilityHint = @"Double tap to change banner photo";
+        _bannerImageView.accessibilityHint = @"Double tap to view the banner, or double tap and hold for options";
         UITapGestureRecognizer *bannerTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_bannerTapped)];
         [_bannerImageView addGestureRecognizer:bannerTap];
+        UILongPressGestureRecognizer *bannerHold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_bannerLongPressed:)];
+        [_bannerImageView addGestureRecognizer:bannerHold];
         [self addSubview:_bannerImageView];
 
         _iconImageView = [[UIImageView alloc] init];
@@ -232,9 +239,11 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
         _iconImageView.isAccessibilityElement = YES;
         _iconImageView.accessibilityTraits = UIAccessibilityTraitButton;
         _iconImageView.accessibilityLabel = @"Subreddit icon";
-        _iconImageView.accessibilityHint = @"Double tap to change subreddit icon";
+        _iconImageView.accessibilityHint = @"Double tap to view the icon, or double tap and hold for options";
         UITapGestureRecognizer *iconTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_iconTapped)];
         [_iconImageView addGestureRecognizer:iconTap];
+        UILongPressGestureRecognizer *iconHold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_iconLongPressed:)];
+        [_iconImageView addGestureRecognizer:iconHold];
         [self addSubview:_iconImageView];
 
         _displayNameLabel = [[UILabel alloc] init];
@@ -718,70 +727,115 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
     }
 }
 
-- (void)apollo_bannerTapped {
+// The image the header is actually showing, as a URL the fullscreen viewer can
+// load: the custom override's on-disk file when one is set, else the
+// subreddit's real banner/icon URL from the info cache. Nil when only the
+// bundled default banner / placeholder icon is showing — nothing to view then.
+- (NSURL *)apollo_viewableImageURLForAssetKind:(ApolloSubredditHeaderAssetKind)assetKind {
+    NSString *subredditName = self.subredditName;
+    if (subredditName.length == 0) return nil;
+    if (assetKind == ApolloSubredditHeaderAssetKindIcon) {
+        NSURL *customURL = [[ApolloSubredditCustomIconCache sharedCache] cachedIconFileURLForSubreddit:subredditName];
+        if (customURL) return customURL;
+        return [[ApolloSubredditInfoCache sharedCache] cachedInfoForSubreddit:subredditName].iconURL;
+    }
+    NSURL *customURL = [[ApolloSubredditCustomBannerCache sharedCache] cachedBannerFileURLForSubreddit:subredditName];
+    if (customURL) return customURL;
+    return [[ApolloSubredditInfoCache sharedCache] cachedInfoForSubreddit:subredditName].bannerURL;
+}
+
+// Issue #324: open the banner/icon fullscreen in the tweak's generic zoomable
+// viewer (share/save button, long-press Save/Share menu, swipe to dismiss).
+// NSURLSession loads file:// URLs too, so custom overrides view identically.
+- (void)apollo_viewImageForAssetKind:(ApolloSubredditHeaderAssetKind)assetKind {
+    NSURL *url = [self apollo_viewableImageURLForAssetKind:assetKind];
+    if (!url) return;
+    UIView *sourceView = assetKind == ApolloSubredditHeaderAssetKindIcon ? self.iconImageView : self.bannerImageView;
+    if (!ApolloPresentImageChestItems(@[@{ @"url": url }], sourceView, 0)) {
+        ApolloLog(@"[SubredditHeaders] view image: no presenter for %@", url);
+    }
+}
+
+- (void)apollo_showOptionsForAssetKind:(ApolloSubredditHeaderAssetKind)assetKind {
     UIViewController *host = self.hostViewController;
     NSString *subredditName = self.subredditName;
     if (!host || subredditName.length == 0 || !sShowSubredditHeaders) return;
 
-    ApolloSubredditCustomBannerCache *customCache = [ApolloSubredditCustomBannerCache sharedCache];
-    BOOL hasCustom = [customCache hasCustomBannerForSubreddit:subredditName];
+    BOOL isIcon = assetKind == ApolloSubredditHeaderAssetKindIcon;
+    BOOL hasCustom = isIcon
+        ? [[ApolloSubredditCustomIconCache sharedCache] hasCustomIconForSubreddit:subredditName]
+        : [[ApolloSubredditCustomBannerCache sharedCache] hasCustomBannerForSubreddit:subredditName];
+    NSURL *viewableURL = [self apollo_viewableImageURLForAssetKind:assetKind];
 
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil
                                                                    message:nil
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf = self;
+    if (viewableURL) {
+        [sheet addAction:[UIAlertAction actionWithTitle:isIcon ? @"View Icon" : @"View Banner"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(__unused UIAlertAction *action) {
+            [weakSelf apollo_viewImageForAssetKind:assetKind];
+        }]];
+    }
     [sheet addAction:[UIAlertAction actionWithTitle:@"Choose Photo"
                                               style:UIAlertActionStyleDefault
                                             handler:^(__unused UIAlertAction *action) {
-        [weakSelf apollo_presentPhotoPickerForAssetKind:ApolloSubredditHeaderAssetKindBanner];
+        [weakSelf apollo_presentPhotoPickerForAssetKind:assetKind];
     }]];
     if (hasCustom) {
-        [sheet addAction:[UIAlertAction actionWithTitle:@"Remove Custom Banner"
+        [sheet addAction:[UIAlertAction actionWithTitle:isIcon ? @"Remove Custom Icon" : @"Remove Custom Banner"
                                                   style:UIAlertActionStyleDestructive
                                                 handler:^(__unused UIAlertAction *action) {
-            [customCache removeBannerForSubreddit:subredditName];
+            if (isIcon) {
+                [[ApolloSubredditCustomIconCache sharedCache] removeIconForSubreddit:subredditName];
+            } else {
+                [[ApolloSubredditCustomBannerCache sharedCache] removeBannerForSubreddit:subredditName];
+            }
         }]];
     }
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
 
+    UIView *sourceView = isIcon ? self.iconImageView : self.bannerImageView;
     if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
-        sheet.popoverPresentationController.sourceView = self.bannerImageView;
-        sheet.popoverPresentationController.sourceRect = self.bannerImageView.bounds;
+        sheet.popoverPresentationController.sourceView = sourceView;
+        sheet.popoverPresentationController.sourceRect = sourceView.bounds;
     }
     [host presentViewController:sheet animated:YES completion:nil];
 }
 
+// Tap views the artwork when there is any (matching how media behaves
+// elsewhere in Apollo); a sub still on the bundled default banner/placeholder
+// icon falls through to the options sheet so the photo picker stays one tap
+// away. Long-press always opens the options sheet.
+- (void)apollo_bannerTapped {
+    UIViewController *host = self.hostViewController;
+    if (!host || self.subredditName.length == 0 || !sShowSubredditHeaders) return;
+    if ([self apollo_viewableImageURLForAssetKind:ApolloSubredditHeaderAssetKindBanner]) {
+        [self apollo_viewImageForAssetKind:ApolloSubredditHeaderAssetKindBanner];
+        return;
+    }
+    [self apollo_showOptionsForAssetKind:ApolloSubredditHeaderAssetKindBanner];
+}
+
 - (void)apollo_iconTapped {
     UIViewController *host = self.hostViewController;
-    NSString *subredditName = self.subredditName;
-    if (!host || subredditName.length == 0 || !sShowSubredditHeaders) return;
-
-    ApolloSubredditCustomIconCache *customCache = [ApolloSubredditCustomIconCache sharedCache];
-    BOOL hasCustom = [customCache hasCustomIconForSubreddit:subredditName];
-
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil
-                                                                   message:nil
-                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-    __weak typeof(self) weakSelf = self;
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Choose Photo"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(__unused UIAlertAction *action) {
-        [weakSelf apollo_presentPhotoPickerForAssetKind:ApolloSubredditHeaderAssetKindIcon];
-    }]];
-    if (hasCustom) {
-        [sheet addAction:[UIAlertAction actionWithTitle:@"Remove Custom Icon"
-                                                  style:UIAlertActionStyleDestructive
-                                                handler:^(__unused UIAlertAction *action) {
-            [customCache removeIconForSubreddit:subredditName];
-        }]];
+    if (!host || self.subredditName.length == 0 || !sShowSubredditHeaders) return;
+    if ([self apollo_viewableImageURLForAssetKind:ApolloSubredditHeaderAssetKindIcon]) {
+        [self apollo_viewImageForAssetKind:ApolloSubredditHeaderAssetKindIcon];
+        return;
     }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self apollo_showOptionsForAssetKind:ApolloSubredditHeaderAssetKindIcon];
+}
 
-    if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
-        sheet.popoverPresentationController.sourceView = self.iconImageView;
-        sheet.popoverPresentationController.sourceRect = self.iconImageView.bounds;
-    }
-    [host presentViewController:sheet animated:YES completion:nil];
+- (void)apollo_bannerLongPressed:(UILongPressGestureRecognizer *)recognizer {
+    if (recognizer.state != UIGestureRecognizerStateBegan) return;
+    [self apollo_showOptionsForAssetKind:ApolloSubredditHeaderAssetKindBanner];
+}
+
+- (void)apollo_iconLongPressed:(UILongPressGestureRecognizer *)recognizer {
+    if (recognizer.state != UIGestureRecognizerStateBegan) return;
+    [self apollo_showOptionsForAssetKind:ApolloSubredditHeaderAssetKindIcon];
 }
 
 @end
