@@ -1634,34 +1634,41 @@ static NSString *SpacedThemeName(NSString *raw) {
     [self.navigationController pushViewController:editor animated:YES];
 }
 
-// Deleting can reassign activeThemeID (if the deleted theme was active) or empty
-// the theme list entirely — reload+invalidate unconditionally so the running
-// theme (or its absence) is never left showing a just-deleted theme's stale
-// colours until some unrelated trigger happens to reload it.
+// Deleting can reassign the active pointer (if the deleted theme was active)
+// or hand control back to Apollo themes entirely. The enabled->disabled
+// transition MUST go through ApolloThemeRuntimeDisable(): it restores the
+// hijacked donor AppColorTheme slot and repaints live. Just skipping the
+// reload (the old behaviour) left the deleted theme's colours on screen until
+// a force-quit, after which the app came back showing the DONOR Apollo theme
+// — issue #742's "switched to an unexpected theme (e.g. Outrun)".
 - (void)deleteThemeAndRefresh:(NSString *)themeID {
+    BOOL wasEnabled = [self store].customThemeEnabled;
     [[self store] deleteTheme:themeID];
     if ([self store].customThemeEnabled) {
         ApolloThemeRuntimeReload();
         ApolloThemeRuntimeInvalidate();
+    } else if (wasEnabled) {
+        ApolloThemeRuntimeDisable();
     }
     [self.tableView reloadData];
 }
 
+// Destructive deletion always confirms (issue #742) — inactive themes used to
+// vanish on a bare swipe. The active-theme message states the actual outcome.
 - (void)confirmDeleteThemeIDIfNeeded:(NSString *)themeID {
     ApolloThemeStore *store = [self store];
     BOOL active = store.customThemeEnabled &&
         ([store isCustomThemeID:themeID selectedForMode:ApolloThemeModeLight] ||
          [store isCustomThemeID:themeID selectedForMode:ApolloThemeModeDark]);
-    if (!active) {
-        [self deleteThemeAndRefresh:themeID];
-        return;
-    }
 
     NSDictionary *theme = [store themeWithID:themeID];
     NSString *name = [theme[@"name"] isKindOfClass:NSString.class] ? theme[@"name"] : @"this theme";
+    NSString *message = active
+        ? [NSString stringWithFormat:@"“%@” is currently active. Deleting it will switch back to Apollo themes.", name]
+        : [NSString stringWithFormat:@"Delete “%@”? This can’t be undone.", name];
     UIAlertController *alert =
-        [UIAlertController alertControllerWithTitle:@"Delete active theme?"
-                                            message:[NSString stringWithFormat:@"Delete “%@”? Apollo will switch to another theme or back to Apollo Themes.", name]
+        [UIAlertController alertControllerWithTitle:(active ? @"Delete active theme?" : @"Delete Theme")
+                                            message:message
                                      preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Delete" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {

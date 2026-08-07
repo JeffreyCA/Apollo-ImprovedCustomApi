@@ -115,6 +115,11 @@ static const void *kApolloProfileTabAvatarImageMarkerKey = &kApolloProfileTabAva
 // the visible subset in display order; cards with no data stay hidden and out of
 // the row, so the layout centres however many actually have values.
 @property(nonatomic, strong) NSArray<ApolloProfileStatCard *> *statCards;
+// Raw values behind the cards' compact text, kept for the tap-detail popup
+// (issue #797): the cards show "13.1k", the popup shows "13,102".
+@property(nonatomic) NSInteger statLinkKarma;
+@property(nonatomic) NSInteger statCommentKarma;
+@property(nonatomic) NSTimeInterval statCreatedUTC;
 @property(nonatomic, strong) ApolloProfileStatCard *postKarmaCard;
 @property(nonatomic, strong) ApolloProfileStatCard *commentKarmaCard;
 @property(nonatomic, strong) ApolloProfileStatCard *ageCard;
@@ -326,6 +331,8 @@ static UIImage *ApolloProfileTintedSymbol(NSString *name, CGFloat pointSize, UIC
 - (void)setValue:(NSString *)value caption:(NSString *)caption {
     self.valueLabel.text = value;
     self.captionLabel.text = caption;
+    self.accessibilityLabel = [NSString stringWithFormat:@"%@: %@", caption, value];
+    self.accessibilityHint = @"Double tap for details";
 }
 
 - (void)layoutSubviews {
@@ -507,11 +514,18 @@ static const void *kApolloProfileGlassAccentKey = &kApolloProfileGlassAccentKey;
         [self addSubview:_badgeBookView];
 
         // Glass stat cards. Created up front (hidden) and populated in applyProfileInfo.
+        // Tappable (issue #797): stock Apollo's karma/age text opened a detail
+        // popup with the exact counts; the cards replaced that text, so they
+        // take over the tap too.
         _postKarmaCard = [[ApolloProfileStatCard alloc] init];
         _commentKarmaCard = [[ApolloProfileStatCard alloc] init];
         _ageCard = [[ApolloProfileStatCard alloc] init];
         for (ApolloProfileStatCard *card in @[_postKarmaCard, _commentKarmaCard, _ageCard]) {
             card.hidden = YES;
+            [card addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self
+                                                                               action:@selector(apollo_statCardTapped:)]];
+            card.isAccessibilityElement = YES;
+            card.accessibilityTraits = UIAccessibilityTraitButton;
             [self addSubview:card];
         }
         _statCards = @[];
@@ -1182,9 +1196,15 @@ static UIFont *ApolloProfileClassicNameFont(void) {
         // a "0 karma" row); !sProfileShowStatCards is the viewer turning cards off.
         for (ApolloProfileStatCard *card in @[self.postKarmaCard, self.commentKarmaCard, self.ageCard]) card.hidden = YES;
         self.statCards = @[];
+        self.statLinkKarma = -1;
+        self.statCommentKarma = -1;
+        self.statCreatedUTC = 0.0;
         return;
     }
 
+    self.statLinkKarma = info.linkKarma;
+    self.statCommentKarma = info.commentKarma;
+    self.statCreatedUTC = info.createdUTC;
     if (info.linkKarma >= 0) {
         [self.postKarmaCard setValue:ApolloProfileFormatCount(info.linkKarma) caption:@"Post Karma"];
         [visible addObject:self.postKarmaCard];
@@ -1202,6 +1222,55 @@ static UIFont *ApolloProfileClassicNameFont(void) {
         card.hidden = ![visible containsObject:card];
     }
     self.statCards = visible;
+}
+
+// Stat-card tap (issue #797): show the detail popup stock Apollo offered on
+// its karma/age text — exact grouped counts, and for the age card the actual
+// join date (the card itself can only say "New" for young accounts, which
+// reporters called out as unhelpful).
+- (void)apollo_statCardTapped:(UITapGestureRecognizer *)gesture {
+    UIView *card = gesture.view;
+    NSString *title = nil, *message = nil;
+
+    NSNumberFormatter *grouped = [[NSNumberFormatter alloc] init];
+    grouped.numberStyle = NSNumberFormatterDecimalStyle;
+
+    if (card == self.postKarmaCard && self.statLinkKarma >= 0) {
+        title = @"Post Karma";
+        message = [grouped stringFromNumber:@(self.statLinkKarma)];
+    } else if (card == self.commentKarmaCard && self.statCommentKarma >= 0) {
+        title = @"Comment Karma";
+        message = [grouped stringFromNumber:@(self.statCommentKarma)];
+    } else if (card == self.ageCard && self.statCreatedUTC > 0.0) {
+        NSDate *created = [NSDate dateWithTimeIntervalSince1970:self.statCreatedUTC];
+        NSDateFormatter *joined = [[NSDateFormatter alloc] init];
+        joined.dateStyle = NSDateFormatterLongStyle;
+        joined.timeStyle = NSDateFormatterNoStyle;
+        NSDateComponentsFormatter *age = [[NSDateComponentsFormatter alloc] init];
+        age.unitsStyle = NSDateComponentsFormatterUnitsStyleFull;
+        age.allowedUnits = NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay;
+        age.maximumUnitCount = 2;
+        NSString *ago = [age stringFromDate:created toDate:[NSDate date]];
+        title = @"Reddit Age";
+        message = ago.length
+            ? [NSString stringWithFormat:@"Joined %@\n(%@ ago)", [joined stringFromDate:created], ago]
+            : [NSString stringWithFormat:@"Joined %@", [joined stringFromDate:created]];
+    }
+    if (!title) return;
+
+    // Nearest owning view controller via the responder chain — the header is
+    // a plain table header view with no controller reference of its own.
+    UIViewController *presenter = nil;
+    for (UIResponder *r = self.nextResponder; r; r = r.nextResponder) {
+        if ([r isKindOfClass:[UIViewController class]]) { presenter = (UIViewController *)r; break; }
+    }
+    if (!presenter) return;
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [presenter presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)applyProfileInfo:(ApolloUserProfileInfo *)info fallbackUsername:(NSString *)username {

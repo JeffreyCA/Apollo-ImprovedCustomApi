@@ -1317,8 +1317,21 @@ static UIView *ApolloSubredditIndexModernPressOverlay(UITableView *tableView, UI
         [container insertSubview:overlay atIndex:0];
     }
 
-    UIColor *accentColor = ApolloSubredditIndexThemeAccentColor(tableView, cell);
-    UIColor *overlayColor = [accentColor colorWithAlphaComponent:0.16];
+    // Highlight tint (issue #743): stock Apollo themes get the muted iOS-grey
+    // tap feedback they always had — the accent-derived tint only ever
+    // belonged to custom themes, and even there 0.16 read stronger than
+    // Apollo's original feedback, so it's dialled down to 0.10.
+    UIColor *overlayColor;
+    if (ApolloThemeRuntimeIsActive()) {
+        UIColor *accentColor = ApolloSubredditIndexThemeAccentColor(tableView, cell);
+        overlayColor = [accentColor colorWithAlphaComponent:0.10];
+    } else {
+        overlayColor = [UIColor systemGray4Color]; // what UIKit's default selection paints
+    }
+    // Resolve against the cell's own traits before the .CGColor write —
+    // systemGray4 is dynamic and ambient resolution can pick the wrong
+    // light/dark variant when Apollo overrides the window style.
+    overlayColor = [overlayColor resolvedColorWithTraitCollection:container.traitCollection];
     overlay.frame = container.bounds;
     overlay.backgroundColor = overlayColor;
     overlay.layer.backgroundColor = overlayColor.CGColor;

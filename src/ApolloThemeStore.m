@@ -517,29 +517,27 @@ static ApolloThemeGalleryResolver sGalleryResolver = nil;
     ApolloLog(@"ThemeStore: deleteTheme %@ (now %lu themes)", themeID, (unsigned long)themes.count);
     [self setAllThemes:themes];
     if (self.separateThemesEnabled) {
-        NSString *nextID = themes.firstObject[@"id"];
         for (ApolloThemeMode mode = ApolloThemeModeLight; mode < ApolloThemeModeCount; mode++) {
             if (![self isCustomThemeID:themeID selectedForMode:mode]) continue;
             ApolloThemeApplyTarget target = mode == ApolloThemeModeDark
                 ? ApolloThemeApplyTargetDark : ApolloThemeApplyTargetLight;
-            if (nextID) {
-                [self selectCustomTheme:nextID forTarget:target];
-            } else {
-                ApolloThemeMode otherMode = mode == ApolloThemeModeDark
-                    ? ApolloThemeModeLight : ApolloThemeModeDark;
-                [self setPointer:[self pointerForMode:otherMode] forTarget:target];
-            }
+            // Match the single-theme deletion contract and the confirmation
+            // copy: every affected appearance returns to Apollo themes. Picking
+            // themes.firstObject here reproduced issue #742 whenever another
+            // stored theme happened to sort first.
+            [self setPointer:@{ kPointerKindKey: kPointerApollo } forTarget:target];
         }
         return YES;
     }
     NSDictionary *p = [self activePointer];
     if ([p[kPointerIDKey] isEqual:themeID]) {
         if ([self storedSelectionKind] == ApolloThemeSelectionCustom) {
-            // Deleted the active theme: fall to the next stored theme, or all
-            // the way back to Apollo when the list is now empty.
-            NSString *nextID = themes.firstObject[@"id"];
-            if (nextID) [self selectCustomTheme:nextID];
-            else [self setActivePointer:@{ kPointerKindKey: kPointerApollo }];
+            // Deleted the ACTIVE theme: switch back to Apollo themes. Falling
+            // to the next stored theme (themes.firstObject) landed on whatever
+            // happened to sort first — reported as "switched to an unexpected
+            // theme" in issue #742. Apollo themes are the predictable fallback
+            // (and what the delete confirmation promises).
+            [self setActivePointer:@{ kPointerKindKey: kPointerApollo }];
         } else {
             // Only the remembered last-selection payload named it: forget it.
             NSMutableDictionary *m = [p mutableCopy];

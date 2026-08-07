@@ -104,12 +104,57 @@ static void ApplyThemeTableSeparator(UITableView *tableView) {
     }
 }
 
+static const void *kApolloThemeSearchPillKey = &kApolloThemeSearchPillKey;
+
 static void ApplyThemeSearchFieldBackground(UISearchBar *searchBar) {
-    if (!sEnabled || !searchBar) return;
-    UIColor *raised = ApolloThemeRuntimeColor(ApolloThemeTokenTertiaryBackground);
+    if (!searchBar) return;
     UITextField *field = searchBar.searchTextField;
-    if (raised && field && ![field.backgroundColor isEqual:raised]) {
-        field.backgroundColor = raised;
+    UIView *pill = field ? objc_getAssociatedObject(field, kApolloThemeSearchPillKey) : nil;
+    // The pill is tweak-owned, so UIKit has no native state transition that
+    // removes it when the custom runtime turns off. The disable invalidation
+    // re-enters here through the trait cascade; use that pass to tear down the
+    // stale themed fill immediately. Keep the association so a later re-enable
+    // can cheaply reinsert the same view.
+    if (!sEnabled) {
+        [pill removeFromSuperview];
+        return;
+    }
+    // Elevated (== card), NOT Tertiary/raised: Apollo natively paints the
+    // Search tab's whole header band with the theme's raised surface, so a
+    // raised pill would vanish into its own band. The card color keeps the
+    // pill distinct on that band (and reads like an inset control on the
+    // bars-colored toolbars other search bars sit in).
+    UIColor *pillColor = ApolloThemeRuntimeColor(ApolloThemeTokenElevatedBackground);
+    if (!pillColor || !field) return;
+    // Writing searchTextField.backgroundColor does nothing visible: the stock
+    // UISearchBar draws its pill via _UISearchBarSearchFieldBackgroundView and
+    // UISearchBarTextField never renders its own backgroundColor — so on the
+    // Search tab the themed fill silently missed (issue #748). (A themed
+    // setSearchFieldBackgroundImage: was tried first; UIKit swaps in an image
+    // background host but never renders the image.) Instead paint the capsule
+    // ourselves: an inert themed overlay stacked directly above UIKit's pill
+    // view and below the field's text/icons — same overlay pattern the rest of
+    // the tweak uses. Dynamic color, so light/dark resolves via the trait
+    // cascade; didMoveToWindow/traitCollectionDidChange keep it applied.
+    if (!pill) {
+        pill = [[UIView alloc] initWithFrame:field.bounds];
+        pill.userInteractionEnabled = NO;
+        pill.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        pill.layer.cornerRadius = IsLiquidGlass() ? 18.0 : 10.0;
+        pill.layer.cornerCurve = kCACornerCurveContinuous;
+        objc_setAssociatedObject(field, kApolloThemeSearchPillKey, pill, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    pill.backgroundColor = pillColor;
+    pill.frame = field.bounds;
+    if (pill.superview != field) {
+        // Directly above UIKit's own background view when it exists (covering
+        // its grey material), else at the very back.
+        UIView *systemPill = nil;
+        for (UIView *sub in field.subviews) {
+            if ([NSStringFromClass(sub.class) containsString:@"Background"]) { systemPill = sub; break; }
+        }
+        if (systemPill) [field insertSubview:pill aboveSubview:systemPill];
+        else [field insertSubview:pill atIndex:0];
     }
 }
 
