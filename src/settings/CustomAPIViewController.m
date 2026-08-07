@@ -6,6 +6,7 @@
 #import "ApolloUsageHeartbeat.h"
 #import "InlineMediaSettingsViewController.h"
 #import "settings/ApolloPollSettingsViewController.h"
+#import "settings/ApolloSettingsRouter.h"
 #import "InfoRowSettingsViewController.h"
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloDirectChatWeb.h"
@@ -584,6 +585,14 @@ typedef NS_ENUM(NSInteger, Tag) {
                                 push:^UIViewController * {
             return [[TagFiltersViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
+    // Instantiated through the settings router so this stays the same screen
+    // the apollo://reborn/settings/theme-manager deep link opens; the canonical
+    // entrance remains Apollo's Settings > Appearance > Theme Manager.
+    ApolloSettingsRow *themeManager =
+        [self hubDisclosureRowWithID:@"shortcut.themeManager" title:@"Theme Manager" subtitle:nil
+                                push:^UIViewController * {
+            return ApolloSettingsRouteInstantiate(@"theme-manager");
+        }];
     // Flair is intentionally a switch alias, not another screen: Appearance →
     // Flair remains the canonical native placement and the same preference is
     // changed from either entrance.
@@ -599,11 +608,12 @@ typedef NS_ENUM(NSInteger, Tag) {
     translation.iconSystemName = @"character.bubble.fill";        translation.iconTileColor = [UIColor systemTealColor];
     savedCategories.iconSystemName = @"bookmark.fill";            savedCategories.iconTileColor = [UIColor systemOrangeColor];
     tagFilters.iconSystemName = @"tag.fill";                      tagFilters.iconTileColor = [UIColor systemGreenColor];
+    themeManager.iconSystemName = @"paintbrush.fill";             themeManager.iconTileColor = [UIColor systemIndigoColor];
     colorFlairs.iconSystemName = @"paintpalette.fill";            colorFlairs.iconTileColor = [UIColor systemPinkColor];
 
     return [ApolloSettingsSection sectionWithTitle:@"Shortcuts"
                                             footer:@"Quick links to settings that also live in their own sections and in Apollo's settings."
-                                              rows:@[ openInApp, pip, translation, savedCategories, tagFilters, colorFlairs ]];
+                                              rows:@[ themeManager, openInApp, pip, translation, savedCategories, tagFilters, colorFlairs ]];
 }
 
 // Shared plain disclosure-row builder for the hub's navigation rows: title
@@ -941,6 +951,46 @@ typedef NS_ENUM(NSInteger, Tag) {
         }
                                   onSelect:nil];
 
+    // reddit.com web sign-in, surfaced outside the Polls screen (issue #847):
+    // the session powers polls, approximate vote breakdowns, and future
+    // web-only features, so it belongs where accounts live. The Polls screen
+    // keeps its own entry; both drive the same per-account session.
+    ApolloSettingsRow *webSignIn =
+        [ApolloSettingsRow customRowWithID:@"api.webSignIn"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+            cell.detailTextLabel.numberOfLines = 0;
+            NSString *username = ApolloActiveAccountUsername();
+            if (username.length == 0) {
+                cell.textLabel.text = @"reddit.com Web Sign-In";
+                cell.textLabel.textColor = [UIColor secondaryLabelColor];
+                cell.detailTextLabel.text = @"Sign in to a Reddit account first.";
+                cell.selectionStyle = UITableViewCellSelectionStyleNone;
+                return cell;
+            }
+            if (ApolloWebSessionPollFor(username).cookieHeader.length > 0) {
+                cell.textLabel.text = @"reddit.com Web Sign-In";
+                cell.detailTextLabel.text =
+                    [NSString stringWithFormat:@"Connected for u/%@ — powers polls and vote breakdowns.", username];
+                UIImageView *check = [[UIImageView alloc] initWithImage:
+                    [UIImage systemImageNamed:@"checkmark.circle.fill"]];
+                check.tintColor = [UIColor systemGreenColor];
+                [check sizeToFit];
+                cell.accessoryView = check;
+                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+                return cell;
+            }
+            cell.textLabel.text = @"Set Up reddit.com Web Sign-In";
+            cell.textLabel.textColor = [weakSelf apollo_themeAccentColor];
+            cell.detailTextLabel.text =
+                [NSString stringWithFormat:@"One quick sign-in for u/%@ — powers polls and vote breakdowns.", username];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            return cell;
+        }
+                                  onSelect:^{ [weakSelf webSignInRowTapped]; }];
+
     ApolloSettingsRow *troubleshooting =
         [ApolloSettingsRow customRowWithID:@"api.troubleshooting"
                                       cell:^UITableViewCell *(UITableView *tableView, __unused ApolloSettingsRow *row) {
@@ -969,8 +1019,52 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onSelect:^{ [weakSelf pushInstructionsViewController]; }];
 
     return [ApolloSettingsSection sectionWithTitle:@"Sign-In"
-                                            footer:@"Choose how accounts sign in, or get help setting up your keys."
-                                              rows:@[ universalOAuth, troubleshooting, setupGuide ]];
+                                            footer:@"Choose how accounts sign in, or get help setting up your keys. "
+                                                    "The reddit.com web sign-in unlocks features Reddit's API doesn't offer, "
+                                                    "like polls and approximate vote breakdowns."
+                                              rows:@[ universalOAuth, webSignIn, troubleshooting, setupGuide ]];
+}
+
+#pragma mark - reddit.com web sign-in (issue #847)
+
+// Same flow as the Polls screen's entry: sign in the ACTIVE Apollo account,
+// confirm before replacing a working session.
+- (void)webSignInRowTapped {
+    NSString *username = ApolloActiveAccountUsername();
+    if (username.length == 0) return;
+    if (ApolloWebSessionPollFor(username).cookieHeader.length == 0) {
+        [self startWebSignInForUsername:username];
+        return;
+    }
+    UIAlertController *sheet = [UIAlertController
+        alertControllerWithTitle:[NSString stringWithFormat:@"u/%@ is signed in", username]
+                         message:@"Sign in again only if web-session features (polls, vote breakdowns) have stopped working."
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Sign In Again" style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+        [self startWebSignInForUsername:username];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    UITableViewCell *cell = [self cellForRowID:@"api.webSignIn"];
+    sheet.popoverPresentationController.sourceView = cell ?: self.view;
+    sheet.popoverPresentationController.sourceRect = (cell ?: self.view).bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)startWebSignInForUsername:(NSString *)username {
+    __weak typeof(self) weakSelf = self;
+    ApolloWebSessionLoginViewController *login = [ApolloWebSessionLoginViewController
+        loginControllerForUsername:username completion:^(BOOL success) {
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            [strongSelf reloadRowWithID:@"api.webSignIn"];
+            if (success && ApolloWebSessionPollFor(username).cookieHeader.length > 0) {
+                UINotificationFeedbackGenerator *feedback = [UINotificationFeedbackGenerator new];
+                [feedback notificationOccurred:UINotificationFeedbackTypeSuccess];
+            }
+        }];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:login];
+    [self presentViewController:nav animated:YES completion:nil];
 }
 
 - (ApolloSettingsSection *)buildAPIKeysExperimentalSection {
