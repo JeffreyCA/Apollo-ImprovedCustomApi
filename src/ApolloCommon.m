@@ -1075,3 +1075,19 @@ void ApolloSetLinkPreviewCardColorHex(NSString *hex) {
 double ApolloPerfNowMs(void) {
     return CACurrentMediaTime() * 1000.0;
 }
+
+// --- Tweak-UI text node marker -------------------------------------------
+// Content scans (translation's post-body candidate walk, etc.) must never
+// treat tweak-drawn text as user content. One shared assoc key, set at node
+// creation by whichever module draws the UI.
+static char kApolloTweakUITextNodeKey;
+
+void ApolloMarkTweakUITextNode(id node) {
+    if (!node) return;
+    objc_setAssociatedObject(node, &kApolloTweakUITextNodeKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+BOOL ApolloTextNodeIsTweakUI(id node) {
+    if (!node) return NO;
+    return [objc_getAssociatedObject(node, &kApolloTweakUITextNodeKey) boolValue];
+}
