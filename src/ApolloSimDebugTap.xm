@@ -18,6 +18,8 @@
 #import "ApolloAccountCredentials.h"
 #import "ApolloCommentVoteInsights.h"
 #import "ApolloCommon.h"
+#import "ApolloState.h"
+#import "UserDefaultConstants.h"
 #import "UIWindow+Apollo.h"
 #import <objc/message.h>
 
@@ -262,6 +264,35 @@ static void ApolloSimDebugForceBottomInset(CGFloat bottom) {
     }
 }
 
+// Stamp-key accessors exported by ApolloScrollEdgeEffect.xm (both files are
+// ObjC++, so plain C++ linkage matches).
+const void *ApolloScrollEdgeEffectTopStampKey(void);
+const void *ApolloScrollEdgeEffectForcedHiddenStampKey(void);
+
+static void ApolloSimDebugDumpHeaderEffectsInView(UIView *view) {
+    if ([view isKindOfClass:[UIScrollView class]]) {
+        SEL topSelector = NSSelectorFromString(@"topEdgeEffect");
+        if ([view respondsToSelector:topSelector]) {
+            id effect = ((id (*)(id, SEL))objc_msgSend)(view, topSelector);
+            if (effect) {
+                BOOL hidden = ((BOOL (*)(id, SEL))objc_msgSend)(effect, NSSelectorFromString(@"isHidden"));
+                id style = ((id (*)(id, SEL))objc_msgSend)(effect, NSSelectorFromString(@"style"));
+                ApolloLog(@"[SimDebugTap][headerdump] scroll=%@ window=%d effect=%p hidden=%d style=%@ topStamp=%d forcedStamp=%d",
+                          NSStringFromClass(view.class), view.window != nil, effect, hidden, style,
+                          objc_getAssociatedObject(effect, ApolloScrollEdgeEffectTopStampKey()) != nil,
+                          objc_getAssociatedObject(effect, ApolloScrollEdgeEffectForcedHiddenStampKey()) != nil);
+            }
+        }
+    }
+    for (UIView *subview in view.subviews) ApolloSimDebugDumpHeaderEffectsInView(subview);
+}
+
+static void ApolloSimDebugDumpHeaderEffects(void) {
+    for (UIWindow *window in ApolloAllWindows()) {
+        if (!window.hidden) ApolloSimDebugDumpHeaderEffectsInView(window);
+    }
+}
+
 static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *observer,
                                           CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -269,6 +300,25 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
                                                        encoding:NSUTF8StringEncoding error:nil];
         if ([contents hasPrefix:@"insetbottom "]) {
             ApolloSimDebugForceBottomInset([[contents substringFromIndex:12] doubleValue]);
+            return;
+        }
+        // "headerdump" command: log every visible scroll view's topEdgeEffect
+        // state (pointer, hidden, style, tweak stamps) for header debugging.
+        if ([contents hasPrefix:@"headerdump"]) {
+            ApolloSimDebugDumpHeaderEffects();
+            return;
+        }
+        // "headerstyle N" command: switch the Header Style setting through the
+        // same path as the settings picker (global + persisted default +
+        // change notification), so mode switches — including the live
+        // install/remove machinery — can be driven from the host. simctl's
+        // `defaults write` can't reach the app container's prefs domain.
+        if ([contents hasPrefix:@"headerstyle "]) {
+            NSInteger mode = [[contents substringFromIndex:12] integerValue];
+            sScrollEdgeEffectStyle = mode;
+            [[NSUserDefaults standardUserDefaults] setInteger:mode forKey:UDKeyScrollEdgeEffectStyle];
+            [[NSNotificationCenter defaultCenter] postNotificationName:ApolloScrollEdgeEffectStyleChangedNotification object:nil];
+            ApolloLog(@"[SimDebugTap] headerstyle -> %ld", (long)mode);
             return;
         }
         if ([contents hasPrefix:@"crash "]) {

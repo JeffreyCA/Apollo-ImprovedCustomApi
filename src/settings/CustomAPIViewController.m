@@ -1290,12 +1290,12 @@ typedef NS_ENUM(NSInteger, Tag) {
         }
                                   onSelect:nil];
 
-    // Overrides UIScrollView's top/bottom edge glass (iOS 26+). Liquid Glass
-    // only — hidden otherwise rather than shown-disabled, since the row has
-    // nothing to preview/explain on a non-Glass device.
+    // Overrides the top scroll-edge glass under the nav bar (iOS 26+). Liquid
+    // Glass only — hidden otherwise rather than shown-disabled, since the row
+    // has nothing to preview/explain on a non-Glass device.
     ApolloSettingsRow *scrollEdgeEffect =
         [ApolloSettingsRow valueRowWithID:@"gen.scrollEdgeEffect"
-                                    title:@"Scroll Edge Effect"
+                                    title:@"Header Style"
                                    detail:^NSString * { return [weakSelf scrollEdgeEffectStyleText]; }
                                  onSelect:^{
             [weakSelf presentScrollEdgeEffectStyleSheetFromSourceView:[weakSelf cellForRowID:@"gen.scrollEdgeEffect"]];
@@ -1304,32 +1304,61 @@ typedef NS_ENUM(NSInteger, Tag) {
     scrollEdgeEffect.visible = ^BOOL { return IsLiquidGlass(); };
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Liquid Glass chrome behaviors."
+                                            footer:@"Liquid Glass chrome behaviors.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
                                               rows:@[ tabBarIdle, keepSearchInPlace, titleGapCentering, iPadTabBarBottom, scrollEdgeEffect ]];
 }
 
+// Display order of the Header Style picker. Raw values are NOT contiguous
+// (3 was the retired Hidden mode, Blur is 4), so the picker maps index↔value
+// through this table instead of using the enum value as the index.
+static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailable) {
+    const NSInteger values[] = {
+        ApolloScrollEdgeEffectStyleSoft,
+        ApolloScrollEdgeEffectStyleHard,
+        ApolloScrollEdgeEffectStyleBlur,
+    };
+    NSInteger count = blurAvailable ? 3 : 2;
+    if (index < 0 || index >= count) return ApolloScrollEdgeEffectStyleSoft;
+    return values[index];
+}
+
 - (NSString *)scrollEdgeEffectStyleText {
-    switch (sScrollEdgeEffectStyle) {
-        case ApolloScrollEdgeEffectStyleSoft:   return @"Soft";
-        case ApolloScrollEdgeEffectStyleHard:   return @"Hard";
-        case ApolloScrollEdgeEffectStyleHidden: return @"Hidden";
-        default:                                return @"Automatic";
+    switch (ApolloResolvedScrollEdgeEffectStyle()) {
+        case ApolloScrollEdgeEffectStyleSoft: return @"Soft";
+        case ApolloScrollEdgeEffectStyleHard: return @"Hard";
+        case ApolloScrollEdgeEffectStyleBlur: return @"Blur";
+        default: return @"Soft";
     }
 }
 
 - (void)setScrollEdgeEffectStyle:(NSInteger)style {
     sScrollEdgeEffectStyle = style;
     [[NSUserDefaults standardUserDefaults] setInteger:sScrollEdgeEffectStyle forKey:UDKeyScrollEdgeEffectStyle];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloScrollEdgeEffectStyleChangedNotification" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloScrollEdgeEffectStyleChangedNotification object:nil];
     [self reloadRowWithID:@"gen.scrollEdgeEffect"];
 }
 
 - (void)presentScrollEdgeEffectStyleSheetFromSourceView:(UIView *)sourceView {
+    // Blur needs the private variableBlur filter; never offer a mode that
+    // would render nothing.
+    BOOL blurAvailable = ApolloProgressiveBlurAvailable();
+    NSMutableArray<NSString *> *options =
+        [NSMutableArray arrayWithObjects:@"Soft", @"Hard", nil];
+    if (blurAvailable) [options addObject:@"Blur"];
+
+    NSInteger currentIndex = 0;
+    NSInteger currentStyle = ApolloResolvedScrollEdgeEffectStyle();
+    for (NSInteger i = 0; i < (NSInteger)options.count; i++) {
+        if (ApolloHeaderStylePickerValue(i, blurAvailable) == currentStyle) {
+            currentIndex = i;
+            break;
+        }
+    }
+
     __weak typeof(self) weakSelf = self;
-    ApolloSettingsPresentPicker(self, sourceView, @"Scroll Edge Effect",
-                                @[@"Automatic", @"Soft", @"Hard", @"Hidden"],
-                                sScrollEdgeEffectStyle, ^(NSInteger pickedIndex) {
-        [weakSelf setScrollEdgeEffectStyle:pickedIndex];
+    ApolloSettingsPresentPicker(self, sourceView, @"Header Style",
+                                options, currentIndex, ^(NSInteger pickedIndex) {
+        [weakSelf setScrollEdgeEffectStyle:ApolloHeaderStylePickerValue(pickedIndex, blurAvailable)];
     });
 }
 

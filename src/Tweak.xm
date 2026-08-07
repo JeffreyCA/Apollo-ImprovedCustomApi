@@ -3665,8 +3665,24 @@ static void initializeRandomSources() {
         ApolloLog(@"[PerPostSort] exclusivity: normalized stale both-on at launch (native Remember Subreddit Sort -> OFF)");
     }
     sScrollEdgeEffectStyle = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyScrollEdgeEffectStyle];
-    if (sScrollEdgeEffectStyle < ApolloScrollEdgeEffectStyleAutomatic || sScrollEdgeEffectStyle > ApolloScrollEdgeEffectStyleHidden) {
-        sScrollEdgeEffectStyle = ApolloScrollEdgeEffectStyleAutomatic;
+    NSInteger systemHeaderStyle = [NSProcessInfo processInfo].operatingSystemVersion.majorVersion >= 27
+        ? ApolloScrollEdgeEffectStyleHard
+        : ApolloScrollEdgeEffectStyleSoft;
+    if (sScrollEdgeEffectStyle == ApolloScrollEdgeEffectStyleAutomatic) {
+        // System Default was removed from the picker because it made the same
+        // option look different across OS versions. Preserve its old visual
+        // result once, then store the explicit Soft/Hard choice users now see.
+        sScrollEdgeEffectStyle = systemHeaderStyle;
+        [standardDefaults setInteger:sScrollEdgeEffectStyle forKey:UDKeyScrollEdgeEffectStyle];
+    } else if (sScrollEdgeEffectStyle == 3) {
+        // Retired Hidden mode: closest surviving intent (no hard cutoff line)
+        // is Soft. 3 stays reserved — see the enum note in ApolloState.h.
+        sScrollEdgeEffectStyle = ApolloScrollEdgeEffectStyleSoft;
+        [standardDefaults setInteger:sScrollEdgeEffectStyle forKey:UDKeyScrollEdgeEffectStyle];
+    } else if (sScrollEdgeEffectStyle != ApolloScrollEdgeEffectStyleSoft &&
+               sScrollEdgeEffectStyle != ApolloScrollEdgeEffectStyleHard &&
+               sScrollEdgeEffectStyle != ApolloScrollEdgeEffectStyleBlur) {
+        sScrollEdgeEffectStyle = systemHeaderStyle;
         [standardDefaults setInteger:sScrollEdgeEffectStyle forKey:UDKeyScrollEdgeEffectStyle];
     }
     sModernSubredditDividers = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers];

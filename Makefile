@@ -125,6 +125,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloTabBarCollapseSide.xm \
     $(SRC_DIR)/ApolloIPadTabBarBottom.xm \
     $(SRC_DIR)/ApolloScrollEdgeEffect.xm \
+    $(SRC_DIR)/ApolloProgressiveBlur.xm \
     $(SRC_DIR)/settings/ApolloSettings.xm \
     $(SRC_DIR)/ApolloRecentlyRead.xm \
     $(SRC_DIR)/ApolloHiddenContentData.m \

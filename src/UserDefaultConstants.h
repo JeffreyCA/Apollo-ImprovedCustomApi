@@ -238,8 +238,9 @@ static NSString *const UDKeyPerPostCommentSortMapping = @"PerPostCommentSortMapp
 // off, and launch/restore normalize a stale both-on to per-post. This toggle key is
 // the ONLY native default the feature ever writes. See ApolloPerPostCommentSort.xm.
 static NSString *const UDKeyApolloRememberSubredditCommentsSort = @"RememberRedditCommentsSort";
-// Override for UIScrollView top/bottom scroll edge effects (Liquid Glass, iOS 26+).
-// 0 = Automatic (default), 1 = Soft, 2 = Hard, 3 = Hidden.
+// Override for the UIScrollView top scroll edge effect (Liquid Glass, iOS 26+).
+// 0 = retired System Default (migrates to 1 on iOS 26 or 2 on iOS 27),
+// 1 = Soft, 2 = Hard, 3 = retired Hidden, 4 = Blur.
 static NSString *const UDKeyScrollEdgeEffectStyle = @"ScrollEdgeEffectStyle";
 // Render image URLs (i.redd.it, preview.redd.it, i.imgur.com, generic .png/.jpg/.jpeg/.webp)
 // inline within post selftext and comments instead of leaving them as plain text links.
