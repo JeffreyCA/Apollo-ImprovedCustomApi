@@ -15,6 +15,7 @@ typedef struct {
 
 static const ApolloWhatsNewReleaseEntry kWhatsNewReleases[] = {
     { "3.5.0", "What's New in Apollo Reborn" },
+    { "3.5.1", "What's New in Apollo Reborn" },
 };
 
 static const ApolloWhatsNewItemEntry kWhatsNewItems[] = {
@@ -26,6 +27,11 @@ static const ApolloWhatsNewItemEntry kWhatsNewItems[] = {
     { "3.5.0", "chart.bar.fill", "Native Polls", "Vote on and create polls without leaving the app." },
     { "3.5.0", "bubble.left.and.bubble.right.fill", "Modern Chat & Modmail", "Use Reddit's current conversations without leaving Apollo." },
     { "3.5.0", "link.circle.fill", "Open Reddit Links", "Send Safari links straight to any sideloaded Apollo build with Link Companion." },
+    { "3.5.1", "rectangle.stack.fill", "Swipe Through Galleries", "Swipe through every image right from the feed, with smarter sizing and seamless fullscreen transitions." },
+    { "3.5.1", "bubble.left.and.bubble.right.fill", "Comments Over Media", "Swipe up in the media viewer to read and reply while the photo or video stays on screen." },
+    { "3.5.1", "square.grid.2x2.fill", "Better Multireddits", "Browse multireddits in Gallery View, then rename them and add descriptions or custom icons." },
+    { "3.5.1", "checkmark.circle.fill", "Posting & Media Fixes", "New comments appear correctly right away, while videos, previews, uploads, saves, and shares work more reliably." },
+    { "3.5.1", "shield.fill", "Smoother, More Stable Apollo", "Major memory and crash fixes make Apollo more reliable, with smoother headers, profiles, themes, navigation, and iOS 27 layouts." },
 };
 
 static NSString *S(const char *value) { return [NSString stringWithUTF8String:value]; }
