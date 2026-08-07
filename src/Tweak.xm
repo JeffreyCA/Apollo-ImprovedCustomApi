@@ -32,6 +32,9 @@
 #import "ApolloWebSessionStore.h"
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloAccountCredentials.h"
+#import "crash/ApolloCrashManager.h"
+#import "crash/ApolloCrashContext.h"
+#import "crash/ApolloCrashPromptCoordinator.h"
 
 // MARK: - Sideload Fixes
 
@@ -3320,6 +3323,16 @@ static void initializeRandomSources() {
 
 // MARK: - Constructor
 %ctor {
+    // Local crash recording installs before anything else in the tweak (and
+    // long before Apollo's app code, whose Bugsnag start is separately
+    // no-op'd in ApolloCrashBugsnagNeutralize.xm). KSCrash handlers can only
+    // be configured once per process, so this must not move later.
+    @autoreleasepool {
+        [[ApolloCrashManager sharedManager] installCrashRecorderIfEnabled];
+        [ApolloCrashContext start];
+        [[ApolloCrashPromptCoordinator sharedCoordinator] start];
+    }
+
     subredditListCache = [NSCache new];
     subredditListCache.countLimit = 16;
     subredditListFetchesInFlight = [NSMutableSet set];
@@ -3330,6 +3343,7 @@ static void initializeRandomSources() {
 
     NSDictionary *defaultValues = @{UDKeyBlockAnnouncements: @YES,
                                     UDKeyEnableFLEX: @NO,
+                                    UDKeyCrashCaptureEnabled: @YES,
                                     UDKeyTrendingSubredditsLimit: @"5",
                                     UDKeyShowRandNsfw: @NO,
                                     UDKeyRandomSubredditsSource: defaultRandomSubredditsSource,

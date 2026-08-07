@@ -39,6 +39,8 @@
 #import "settings/ApolloThanksToViewController.h"
 #import "settings/ApolloBuyUsACoffeeViewController.h"
 #import "settings/ApolloReportViewController.h"
+#import "crash/ApolloCrashManager.h"
+#import "crash/ApolloCrashReportsViewController.h"
 #import "settings/ApolloOpenInAppViewController.h"
 #import "settings/SavedCategoriesViewController.h"
 #import "settings/ApolloSubredditLayoutViewController.h"
@@ -1936,7 +1938,23 @@ typedef NS_ENUM(NSInteger, Tag) {
     heartbeat.iconSystemName = @"waveform.path.ecg";
     heartbeat.iconTileColor = [UIColor systemPinkColor];
 
-    return [ApolloSettingsSection sectionWithTitle:@"Privacy" footer:nil rows:@[ heartbeat ]];
+    // Local crash recording (src/crash/). The pending count re-reads on every
+    // configure, so returning from the sub-screen after a delete/submit shows
+    // the fresh number without any manual reload plumbing.
+    ApolloSettingsRow *crashReports =
+        [ApolloSettingsRow disclosureRowWithID:@"privacy.crashReports"
+                                         title:@"Crash Reports"
+                                        detail:^NSString * {
+            NSInteger count = ApolloCrashManager.sharedManager.pendingReportCount;
+            return count > 0 ? [NSString stringWithFormat:@"%ld", (long)count] : nil;
+        }
+                                          push:^UIViewController * {
+            return [[ApolloCrashReportsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        }];
+    crashReports.iconSystemName = @"bandage";
+    crashReports.iconTileColor = [UIColor systemOrangeColor];
+
+    return [ApolloSettingsSection sectionWithTitle:@"Privacy" footer:nil rows:@[ heartbeat, crashReports ]];
 }
 
 - (ApolloSettingsSection *)buildAboutSection {

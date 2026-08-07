@@ -211,6 +211,31 @@ static void ApolloSimDebugTypeText(NSString *text) {
               (unsigned long)text.length, NSStringFromClass(responder.class));
 }
 
+// "crash <type>" command: deliberately crash the process to exercise the
+// local crash recorder (src/crash/). Types mirror the crash-capture test
+// plan: nsexception, abort, badaccess, overflow.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winfinite-recursion"
+__attribute__((noinline)) static void ApolloSimDebugRecursiveCrash(volatile NSUInteger value) {
+    volatile NSUInteger next = value + 1;
+    ApolloSimDebugRecursiveCrash(next);
+}
+#pragma clang diagnostic pop
+
+static void ApolloSimDebugPerformCrash(NSString *type) {
+    ApolloLog(@"[SimDebugTap] deliberate test crash: %@", type);
+    if ([type isEqualToString:@"nsexception"]) {
+        [@[] objectAtIndex:1];
+    } else if ([type isEqualToString:@"abort"]) {
+        abort();
+    } else if ([type isEqualToString:@"badaccess"]) {
+        *(volatile int *)0 = 1;
+    } else if ([type isEqualToString:@"overflow"]) {
+        ApolloSimDebugRecursiveCrash(0);
+    }
+    ApolloLog(@"[SimDebugTap] unknown crash type: %@", type);
+}
+
 // "insetbottom N" command: ask every visible Apollo ASTableView to accept a
 // specific bottom inset. This reproduces the iOS 27 foreground write (153 -> 0)
 // without depending on the simulator exhibiting the upstream lifecycle bug.
@@ -244,6 +269,12 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
                                                        encoding:NSUTF8StringEncoding error:nil];
         if ([contents hasPrefix:@"insetbottom "]) {
             ApolloSimDebugForceBottomInset([[contents substringFromIndex:12] doubleValue]);
+            return;
+        }
+        if ([contents hasPrefix:@"crash "]) {
+            NSString *payload = [[contents substringFromIndex:6] stringByTrimmingCharactersInSet:
+                NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            ApolloSimDebugPerformCrash(payload);
             return;
         }
         if ([contents hasPrefix:@"insight "]) {
