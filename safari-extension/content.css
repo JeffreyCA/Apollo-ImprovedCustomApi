@@ -1,0 +1,36 @@
+#apollo-reborn-open-prompt {
+    all: initial !important;
+    position: fixed !important;
+    left: 12px !important;
+    right: 12px !important;
+    bottom: calc(12px + env(safe-area-inset-bottom)) !important;
+    z-index: 2147483647 !important;
+    display: block !important;
+    pointer-events: none !important;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif !important;
+}
+
+#apollo-reborn-open-link {
+    all: initial !important;
+    display: block !important;
+    box-sizing: border-box !important;
+    max-width: 520px !important;
+    margin: 0 auto !important;
+    padding: 14px 18px !important;
+    border-radius: 16px !important;
+    background: #5b4ee8 !important;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28) !important;
+    color: white !important;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif !important;
+    font-size: 17px !important;
+    font-weight: 650 !important;
+    line-height: 22px !important;
+    text-align: center !important;
+    text-decoration: none !important;
+    pointer-events: auto !important;
+    -webkit-tap-highlight-color: transparent !important;
+}
+
+#apollo-reborn-open-link:active {
+    opacity: 0.78 !important;
+}

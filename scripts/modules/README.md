@@ -67,7 +67,7 @@ No new unpack/repack script, no edits to the other build paths.
 | `patch-bundle-versions` | `patch_bundle_versions_in_app` | set `CFBundleShortVersionString` / `CFBundleVersion` |
 | `enable-promotion` | `enable_promotion_in_app` | unlock adaptive refresh rates above 60 Hz on iPhone |
 | `inject-url-schemes` | `inject_url_schemes_in_app` | append `CFBundleURLTypes` schemes |
-| `fix-safari-extension` | `fix_safari_extension_in_app` | repair `Apollofari.appex` |
+| `fix-safari-extension` | `fix_safari_extension_in_app` | install the manual fallback and legacy automatic Safari extensions |
 | `fix-openin-extension` | `fix_openin_extension_in_app` | repair `OpenInUIExtension.appex` |
 | `inject-widgets` | `inject_widgets_in_app` | swap stock widget for `ApolloRebornWidgets.appex` |
 | `liquid-glass-binary` | `patch_liquid_glass_binary_in_app` | vtool SDK bump + duplicate `LC_RPATH` removal |

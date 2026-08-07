@@ -449,8 +449,21 @@ NSURL *ApolloURLByConvertingResolvedURLToApolloScheme(NSURL *url) {
     // the external-web path instead of being rewritten into an Apollo deep link.
     if ([host isEqualToString:@"reddit.com"] || [host hasSuffix:@".reddit.com"]) {
         components.host = @"reddit.com";
-    } else if ([host isEqualToString:@"redd.it"] || [host hasSuffix:@".redd.it"]) {
-        components.host = host;
+    } else if ([host isEqualToString:@"redd.it"]) {
+        // Only bare redd.it is the post shortener. i.redd.it, v.redd.it and
+        // preview.redd.it are media/CDN hosts and cannot identify a post.
+        NSArray<NSString *> *rawSegments = [components.path componentsSeparatedByString:@"/"];
+        NSMutableArray<NSString *> *segments = [NSMutableArray array];
+        for (NSString *segment in rawSegments) {
+            if (segment.length > 0) {
+                [segments addObject:segment];
+            }
+        }
+        if (segments.count != 1) {
+            return nil;
+        }
+        components.host = @"reddit.com";
+        components.path = [@"/comments/" stringByAppendingString:segments.firstObject];
     } else {
         return nil;
     }

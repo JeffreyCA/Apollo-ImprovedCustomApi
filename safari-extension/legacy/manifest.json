@@ -1,8 +1,8 @@
 {
     "manifest_version": 2,
-    "name": "Open in Apollo (Manual Fallback)",
-    "description": "Adds a manual Open in Apollo button when a Reddit page remains in Safari.",
-    "version": "1.3",
+    "name": "Open in Apollo (Legacy)",
+    "description": "Legacy automatic Reddit-to-Apollo routing for users who are not using Link Companion.",
+    "version": "1.1",
 
     "icons": {
         "48": "images/icon-48.png",
@@ -14,7 +14,6 @@
 
     "content_scripts": [{
         "js": [ "link-utils.js", "content.js" ],
-        "css": [ "content.css" ],
         "matches": [
             "*://reddit.com/*",
             "*://*.reddit.com/*",
@@ -31,5 +30,9 @@
             "32": "images/toolbar-icon-32.png",
             "38": "images/toolbar-icon-38.png"
         }
-    }
+    },
+
+    "permissions": [
+        "storage"
+    ]
 }

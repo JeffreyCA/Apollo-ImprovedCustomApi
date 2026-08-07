@@ -14,7 +14,7 @@ git submodule update --init --recursive
 make package
 
 # Build a local test IPA from the persistent Apollo base IPA
-# (--fix-safari-extension repairs the bundled "Open in Apollo" Safari extension;
+# (--fix-safari-extension packages the manual + legacy Safari extensions;
 # release builds always apply it, so local device-test IPAs should too)
 ./patch.sh ./Apollo-base.ipa --liquid-glass --fix-safari-extension -o /tmp/Apollo-base-liquid-glass.ipa
 ./build-ipa.sh --ipa /tmp/Apollo-base-liquid-glass.ipa --deb ./packages/<tweak>.deb -o ./packages/Apollo-Test.ipa

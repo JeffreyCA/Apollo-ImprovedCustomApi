@@ -16,8 +16,11 @@
 - (instancetype)initWithURL:(NSURL *)url;
 @end
 
-// Regex for opaque share links
-static NSString *const ShareLinkRegexPattern = @"^(?:https?:)?//(?:www\\.|new\\.|np\\.)?reddit\\.com/(?:r|u)/(\\w+)/s/(\\w+)$";
+// Regex for Reddit's opaque share links. These appear on every presentation
+// host (www/old/new/np/m/language subdomains), and profile links may use either
+// /u/ or /user/. Allow the harmless query/fragment Reddit appends while keeping
+// the host pinned to reddit.com and each path segment bounded.
+static NSString *const ShareLinkRegexPattern = @"^(?:https?:)?//(?:[A-Za-z0-9-]+\\.)?reddit\\.com/(?:r|u|user)/[^/?#]+/s/[A-Za-z0-9_-]+/?(?:[?#].*)?$";
 static NSRegularExpression *ShareLinkRegex;
 
 // Regex for media share links
@@ -54,27 +57,25 @@ static BOOL ApolloIsShareLinkString(NSString *urlString) {
     return match != nil;
 }
 
-// Normalize share URL for use as cache key.
-// Strips www./new./np. prefix so that e.g. "https://www.reddit.com/r/sub/s/abc"
-// and "https://reddit.com/r/sub/s/abc" (from link button display text) hit the same entry.
+// Normalize share URL for use as cache key. Reddit serves identical opaque
+// links through several presentation hosts and sometimes adds tracking query
+// items. Collapse all of those spellings so preloading and the later tap share
+// one in-flight resolution task.
 static NSString *NormalizeShareURLCacheKey(NSString *urlString) {
     if (![urlString isKindOfClass:[NSString class]] || urlString.length == 0) {
         return urlString;
     }
-    // Only normalize reddit share URLs
-    NSRange range = [urlString rangeOfString:@"://www.reddit.com/"];
-    if (range.location != NSNotFound) {
-        return [urlString stringByReplacingCharactersInRange:range withString:@"://reddit.com/"];
+    NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
+    NSString *host = [components.host lowercaseString];
+    if (!components || !([host isEqualToString:@"reddit.com"] || [host hasSuffix:@".reddit.com"])) {
+        return urlString;
     }
-    range = [urlString rangeOfString:@"://new.reddit.com/"];
-    if (range.location != NSNotFound) {
-        return [urlString stringByReplacingCharactersInRange:range withString:@"://reddit.com/"];
-    }
-    range = [urlString rangeOfString:@"://np.reddit.com/"];
-    if (range.location != NSNotFound) {
-        return [urlString stringByReplacingCharactersInRange:range withString:@"://reddit.com/"];
-    }
-    return urlString;
+
+    components.scheme = @"https";
+    components.host = @"reddit.com";
+    components.query = nil;
+    components.fragment = nil;
+    return components.string ?: urlString;
 }
 
 static NSString *ApolloDecodeBasicHTMLEntities(NSString *string) {
@@ -541,6 +542,11 @@ static NSURL *RemoveShareTrackingParams(NSURL *url) {
 static void StartShareURLResolveTask(NSURL *url) {
     if (![url isKindOfClass:[NSURL class]]) {
         return;
+    }
+    NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    if (components.host.length > 0 && components.scheme.length == 0) {
+        components.scheme = @"https";
+        url = components.URL ?: url;
     }
     NSString *urlString = [url absoluteString];
     if (![urlString isKindOfClass:[NSString class]] || urlString.length == 0) {
