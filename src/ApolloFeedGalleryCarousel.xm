@@ -95,8 +95,6 @@ static CGFloat ApolloFeedGalleryRatioForItems(NSArray<NSDictionary *> *items) {
     CGFloat median = aspects[aspects.count / 2].doubleValue;
     return MAX(kApolloFeedGalleryRatio, MIN(kApolloFeedGalleryMaxRatio, median));
 }
-static const CGFloat kApolloFeedGalleryHorizontalDominance = 1.05;
-
 // Resolved once in %ctor. If a future Apollo build ships without
 // PINRemoteImage's UIImageView category, the whole feature stays native
 // instead of crashing on an unrecognized selector (worst case in dealloc).
@@ -262,39 +260,46 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
 
 #pragma mark - Gesture-cooperative paging scroll view
 
-@interface ApolloFeedGalleryScrollView : UIScrollView <UIGestureRecognizerDelegate>
+@interface ApolloFeedGalleryScrollView : UIScrollView
 @end
 
 @implementation ApolloFeedGalleryScrollView
 
-- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
-    if (gestureRecognizer == self.panGestureRecognizer) {
-        CGPoint velocity = [(UIPanGestureRecognizer *)gestureRecognizer velocityInView:self];
-        // A near-still touch has no direction yet; give it to the feed so a
-        // slow deliberate vertical scroll started on a card never feels stuck.
-        // (With velocity ~ (0,0) the dominance ratio below would claim it.)
-        if (fabs(velocity.x) < 8.0) return NO;
-        // A vertical drag begun over media belongs to the feed. Require a small
-        // horizontal lead so diagonal scrolling does not unexpectedly page.
-        if (fabs(velocity.x) < fabs(velocity.y) * kApolloFeedGalleryHorizontalDominance) return NO;
-        // Keep the system/Apollo back gesture available from the interactive-
-        // pop edge (leading edge, which flips under RTL). Everywhere else the
-        // in-card carousel owns horizontal paging.
-        BOOL rightToLeft = self.effectiveUserInterfaceLayoutDirection ==
-            UIUserInterfaceLayoutDirectionRightToLeft;
-        CGPoint windowPoint = [gestureRecognizer locationInView:self.window];
-        CGFloat windowWidth = CGRectGetWidth(self.window.bounds);
-        BOOL fromPopEdge = rightToLeft
-            ? (velocity.x < 0.0 && windowPoint.x >= windowWidth - 24.0)
-            : (velocity.x > 0.0 && windowPoint.x <= 24.0);
-        if (fromPopEdge) return NO;
-    }
-    return [super gestureRecognizerShouldBegin:gestureRecognizer];
+- (BOOL)touchesShouldCancelInContentView:(UIView *)view {
+    // A touch landing on the page image must still be allowed to turn into a
+    // carousel drag. There is no reorder interaction to preserve here.
+    (void)view;
+    return YES;
 }
 
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
-        shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    return [otherGestureRecognizer.view isKindOfClass:[UIScrollView class]];
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (!self.window) return;
+
+    // Apply this only after the asynchronously-created Texture view reaches
+    // its real hierarchy. The previous begin-time velocity decision was made
+    // once at pan hysteresis and permanently rejected otherwise-good swipes
+    // when a finger's first few points contained vertical jitter. UIKit's
+    // nested-scroll direction lock is stable once both pans get to compete.
+    self.delaysContentTouches = NO;
+    self.canCancelContentTouches = YES;
+
+    UIPanGestureRecognizer *carouselPan = self.panGestureRecognizer;
+    NSUInteger preferredOver = 0;
+    for (UIView *ancestor = self.superview; ancestor; ancestor = ancestor.superview) {
+        for (UIGestureRecognizer *recognizer in ancestor.gestureRecognizers) {
+            if (recognizer == carouselPan) continue;
+            NSString *className = NSStringFromClass(recognizer.class);
+            BOOL competingPan = [className isEqualToString:@"UIPanGestureRecognizer"] ||
+                [className isEqualToString:@"_UISwipeActionPanGestureRecognizer"] ||
+                [className isEqualToString:@"_UIParallaxTransitionPanGestureRecognizer"];
+            if (!competingPan) continue;
+            [recognizer requireGestureRecognizerToFail:carouselPan];
+            preferredOver++;
+        }
+    }
+    ApolloLog(@"[FeedGallery] carousel attached; preferred over %lu ancestor pans",
+              (unsigned long)preferredOver);
 }
 
 @end
