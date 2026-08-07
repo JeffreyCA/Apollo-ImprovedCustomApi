@@ -2307,11 +2307,29 @@ static BOOL ApolloSubredditShouldBlockOffset(UITableView *tableView, CGPoint new
     return fabs(targetDelta - headerHeight) < 5.0;
 }
 
+// Apollo's "skip my header" scroll doubles as the resting-offset restore
+// after pull-to-refresh: the refresh spinner's inset unwind leaves the table
+// parked above its natural top, and the ONLY programmatic scroll Apollo then
+// issues is the skip-header one we block. Swallowing it whole left the table
+// stuck at the spinner gap until the next touch made UIKit re-clamp (visible
+// as the subreddit page resting ~60pt low after a refresh). When the blocked
+// call arrives with the table above natural top, complete the restore to
+// natural top ourselves — keeping the header visible, which is the point of
+// the block, without eating the settle.
+static void ApolloSubredditSettleBlockedTableToTop(UITableView *tableView) {
+    CGFloat topY = -tableView.adjustedContentInset.top;
+    if (tableView.contentOffset.y >= topY - 0.5) return;
+    ApolloLog(@"[SubredditHeaders] blocked skip-header scroll while parked at %.1f; settling to top %.1f",
+              tableView.contentOffset.y, topY);
+    [tableView setContentOffset:CGPointMake(tableView.contentOffset.x, topY) animated:YES];
+}
+
 %hook UIScrollView
 
 - (void)setContentOffset:(CGPoint)contentOffset {
     if (sShowSubredditHeaders && [self isKindOfClass:[UITableView class]] &&
         ApolloSubredditShouldBlockOffset((UITableView *)self, contentOffset)) {
+        ApolloSubredditSettleBlockedTableToTop((UITableView *)self);
         return;
     }
     %orig;
@@ -2323,6 +2341,7 @@ static BOOL ApolloSubredditShouldBlockOffset(UITableView *tableView, CGPoint new
 - (void)setContentOffset:(CGPoint)contentOffset animated:(BOOL)animated {
     if (sShowSubredditHeaders && [self isKindOfClass:[UITableView class]] &&
         ApolloSubredditShouldBlockOffset((UITableView *)self, contentOffset)) {
+        ApolloSubredditSettleBlockedTableToTop((UITableView *)self);
         return;
     }
     %orig;
