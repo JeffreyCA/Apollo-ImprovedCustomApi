@@ -5,6 +5,7 @@
 #import <objc/runtime.h>
 
 static char kApolloAccentActionCellKey;
+static char kApolloPrimaryTextCellKey;
 
 @implementation ApolloSettingsTableViewController
 
@@ -42,6 +43,11 @@ static char kApolloAccentActionCellKey;
     return ApolloThemeAccentColor() ?: self.view.tintColor ?: [UIColor systemBlueColor];
 }
 
+- (void)apollo_applyPrimaryTextColorToCell:(UITableViewCell *)cell {
+    if (!cell) return;
+    objc_setAssociatedObject(cell, &kApolloPrimaryTextCellKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 - (void)apollo_applyAccentActionTextColorToCell:(UITableViewCell *)cell {
     if (!cell) return;
     objc_setAssociatedObject(cell, &kApolloAccentActionCellKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -63,6 +69,10 @@ static char kApolloAccentActionCellKey;
 
     if ([objc_getAssociatedObject(cell, &kApolloAccentActionCellKey) boolValue]) {
         cell.textLabel.textColor = accentColor;
+    } else if (cell.textLabel.enabled &&
+               [objc_getAssociatedObject(cell, &kApolloPrimaryTextCellKey) boolValue]) {
+        UIColor *primary = ApolloThemeRuntimeColor(ApolloThemeTokenLabel);
+        if (primary) cell.textLabel.textColor = primary;
     }
 }
 

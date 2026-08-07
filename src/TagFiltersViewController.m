@@ -90,6 +90,7 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
     sw.on = on;
     [sw addTarget:self action:action forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = sw;
+    [self apollo_applyPrimaryTextColorToCell:cell];
     return cell;
 }
 
@@ -221,6 +222,7 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
     sw.enabled = enabled;
     [sw addTarget:self action:action forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = sw;
+    if (enabled) [self apollo_applyPrimaryTextColorToCell:cell];
     return cell;
 }
 
@@ -244,6 +246,7 @@ typedef NS_ENUM(NSInteger, TagFiltersSection) {
             cell.detailTextLabel.text = [self summaryForOverride:sub];
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            [self apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
         UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];

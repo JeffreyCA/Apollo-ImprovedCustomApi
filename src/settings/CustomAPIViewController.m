@@ -640,6 +640,7 @@ typedef NS_ENUM(NSInteger, Tag) {
         cell.textLabel.text = title;
         cell.textLabel.numberOfLines = 0;
         cell.detailTextLabel.text = subtitle ? subtitle() : nil;
+        [weakSelf apollo_applyPrimaryTextColorToCell:cell];
         return cell;
     }
                                      onSelect:^{
@@ -981,6 +982,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 [check sizeToFit];
                 cell.accessoryView = check;
                 cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+                [weakSelf apollo_applyPrimaryTextColorToCell:cell];
                 return cell;
             }
             cell.textLabel.text = @"Set Up reddit.com Web Sign-In";
@@ -1002,6 +1004,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             }
             cell.textLabel.text = @"Can't sign in?";
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf pushTroubleshootingViewController]; }];
@@ -1016,6 +1019,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.textLabel.numberOfLines = 0;
             }
             cell.textLabel.text = @"Giphy & Image Chest API Key Setup";
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf pushInstructionsViewController]; }];
@@ -1117,6 +1121,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
                 cell.detailTextLabel.text = @"Not signed in — tap to add a web-session account";
             }
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{
@@ -1210,6 +1215,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                 cell.selectionStyle = UITableViewCellSelectionStyleDefault;
             }
             cell.textLabel.text = @"Deleted Comments";
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf openDeletedCommentsSettings]; }];
@@ -1482,6 +1488,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.detailTextLabel.numberOfLines = 0;
             cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf openApolloAISettings]; }];
@@ -1523,6 +1530,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.detailTextLabel.numberOfLines = 0;
             cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf openInlineMediaSettings]; }];
@@ -1565,6 +1573,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.detailTextLabel.numberOfLines = 0;
             cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf openLinkPreviewSettings]; }];
@@ -1589,6 +1598,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
             cell.detailTextLabel.numberOfLines = 0;
             cell.detailTextLabel.lineBreakMode = NSLineBreakByWordWrapping;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf openPollSettings]; }];
@@ -2149,6 +2159,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.imageView.image = ApolloEmojiSettingsIcon(@"🙏", [UIColor systemIndigoColor], 29.0);
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{ [weakSelf pushThanksToViewController]; }];
@@ -2170,6 +2181,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.imageView.image = ApolloEmojiSettingsIcon(@"\U0001F4A1", [UIColor systemYellowColor], 29.0);
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{
@@ -2190,6 +2202,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.imageView.image = ApolloEmojiSettingsIcon(@"\U0001F41B", [UIColor systemRedColor], 29.0);
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{
@@ -2208,6 +2221,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             cell.imageView.image = ApolloEmojiSettingsIcon(@"\U0001F512", [UIColor systemGreenColor], 29.0);
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            [weakSelf apollo_applyPrimaryTextColorToCell:cell];
             return cell;
         }
                                   onSelect:^{
@@ -2274,6 +2288,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     textField.text = text;
     textField.accessibilityLabel = label;   // VoiceOver: tie the field to its caption
     cell.textLabel.text = label;
+    [self apollo_applyPrimaryTextColorToCell:cell];
 
     return cell;
 }
@@ -2542,6 +2557,7 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    [self apollo_applyPrimaryTextColorToCell:cell];
     if (b64Image.length > 0) {
         cell.imageView.image = [self roundedImage:[self decodeBase64ToImage:b64Image] size:29 cornerRadius:6.5];
     } else if (!cell.imageView.image) {

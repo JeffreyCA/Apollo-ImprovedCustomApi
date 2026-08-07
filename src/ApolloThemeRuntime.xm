@@ -276,6 +276,9 @@ static ApolloThemeFont CurrentFontChoice(void) {
 
 static BOOL ClassNameLooksApolloOwned(const char *name);
 static BOOL TextSinkMayUseTheme(id object, uintptr_t caller);
+static NSAttributedString *ThemedAttributedText(NSAttributedString *text,
+                                                id owner,
+                                                uintptr_t caller);
 
 // Pinned views carry a font the tweak chose deliberately in a SPECIFIC design
 // (the editor's font-picker tiles and preview rows must each render their own
@@ -283,6 +286,9 @@ static BOOL TextSinkMayUseTheme(id object, uintptr_t caller);
 // skip them.
 static const void *kApolloThemeFontPinnedKey = &kApolloThemeFontPinnedKey;
 static const void *kApolloThemeBackgroundColorPassthroughKey = &kApolloThemeBackgroundColorPassthroughKey;
+static const void *kApolloThemeOriginalAttributedTextKey =
+    &kApolloThemeOriginalAttributedTextKey;
+static __thread NSInteger sAttributedTextAssignmentBypass;
 
 void ApolloThemeRuntimeSetFontPinned(id view, BOOL pinned) {
     if (!view) return;
@@ -596,22 +602,82 @@ static UINavigationBar *NavigationBarForDescendant(UIView *view) {
     return nil;
 }
 
+static UIViewController *ChromeBarOwningViewController(UIView *bar) {
+    for (UIResponder *responder = bar; responder; responder = responder.nextResponder) {
+        if ([responder isKindOfClass:[UINavigationController class]]) {
+            UINavigationController *navigationController = (UINavigationController *)responder;
+            return navigationController.visibleViewController ?: navigationController.topViewController;
+        }
+        if ([responder isKindOfClass:[UIViewController class]]) {
+            return (UIViewController *)responder;
+        }
+    }
+    return nil;
+}
+
 // Nav/tab bars host their labels outside Apollo's view/responder chain, so
 // ownership is vetted at the bar: either the chain reaches an Apollo class,
-// or the bar's delegate is one (Apollo's own controllers).
+// the bar's delegate is one, or the owning navigation controller is currently
+// displaying one. UINavigationBar.delegate is normally the UINavigationController
+// itself, so checking only the delegate misses Apollo's Swift child controllers.
 static BOOL ChromeBarLooksApolloOwned(UIView *bar) {
     if (!([bar isKindOfClass:[UINavigationBar class]] || [bar isKindOfClass:[UITabBar class]])) return NO;
     if (ObjectChainLooksApolloOwned(bar)) return YES;
     id delegate = ((id (*)(id, SEL))objc_msgSend)(bar, @selector(delegate));
     if (delegate && ClassNameLooksApolloOwned(class_getName(object_getClass(delegate)))) return YES;
+    UIViewController *owner = ChromeBarOwningViewController(bar);
+    if (owner && ClassNameLooksApolloOwned(class_getName(object_getClass(owner)))) return YES;
     return NO;
 }
 
 // Re-derive one live text control's font into `target`'s design. Only touches
 // fonts that are Apple system designs (explicit app fonts like markdown code
 // faces survive) and skips pinned views (the editor's picker tiles).
+static BOOL AttributedTextSuppliesAllTextFonts(NSAttributedString *text) {
+    if (![text isKindOfClass:[NSAttributedString class]] || text.length == 0) return NO;
+    __block BOOL foundFont = NO;
+    __block BOOL foundUnstyledText = NO;
+    [text enumerateAttributesInRange:NSMakeRange(0, text.length)
+                             options:0
+                          usingBlock:^(NSDictionary<NSAttributedStringKey, id> *attributes,
+                                       NSRange range,
+                                       BOOL *stop) {
+        if ([attributes[NSFontAttributeName] isKindOfClass:[UIFont class]]) {
+            foundFont = YES;
+            return;
+        }
+        // Attachments use their own bounds and intentionally have no font.
+        if ([attributes[NSAttachmentAttributeName] isKindOfClass:[NSTextAttachment class]]) return;
+        foundUnstyledText = YES;
+        *stop = YES;
+    }];
+    return foundFont && !foundUnstyledText;
+}
+
+static void SetLabelAttributedTextWithoutRecapture(UILabel *label,
+                                                   NSAttributedString *text) {
+    sAttributedTextAssignmentBypass++;
+    label.attributedText = text;
+    sAttributedTextAssignmentBypass--;
+}
+
 static void RefreshFontOnTextControl(UIView *view, ApolloThemeFont target) {
     if (FontPinned(view)) return;
+    if ([view isKindOfClass:[UILabel class]] &&
+        AttributedTextSuppliesAllTextFonts(((UILabel *)view).attributedText)) {
+        UILabel *label = (UILabel *)view;
+        NSAttributedString *original = objc_getAssociatedObject(
+            label, kApolloThemeOriginalAttributedTextKey);
+        NSAttributedString *source = original ?: label.attributedText;
+        NSAttributedString *themed = sEnabled
+            ? ThemedAttributedText(source, label,
+                                   (uintptr_t)&RefreshFontOnTextControl)
+            : source;
+        if (![themed isEqualToAttributedString:label.attributedText]) {
+            SetLabelAttributedTextWithoutRecapture(label, themed);
+        }
+        return;
+    }
     UIFont *font = ((UILabel *)view).font; // UILabel/UITextField/UITextView all expose `font`
     if (![font isKindOfClass:[UIFont class]] || !FontIsThemeable(font)) return;
     sFontBypass++;
@@ -668,20 +734,73 @@ static void RethemeFontOnAttach(UIView *view) {
     if (!sEnabled || sFontBypass) return;
     if (!view.window) return;
     if (FontPinned(view)) return;
+    // An attributed label's visible font and color come from its string, while
+    // UILabel.font remains the backing line-box font. Theme the attributed
+    // runs in place, but leave that backing font untouched: replacing it can
+    // both enlarge the rendered text and collapse spacing that intentionally
+    // relies on a larger line box (Recently Read's 12pt stats inside a default
+    // 17pt label).
+    if ([view isKindOfClass:[UILabel class]] &&
+        AttributedTextSuppliesAllTextFonts(((UILabel *)view).attributedText)) {
+        if (!ObjectChainLooksApolloOwned(view)) return;
+        UILabel *label = (UILabel *)view;
+        NSAttributedString *original = objc_getAssociatedObject(
+            label, kApolloThemeOriginalAttributedTextKey);
+        NSAttributedString *source = original ?: label.attributedText;
+        NSAttributedString *themed = ThemedAttributedText(
+            source, label, (uintptr_t)&RethemeFontOnAttach);
+        if (![themed isEqualToAttributedString:label.attributedText]) {
+            SetLabelAttributedTextWithoutRecapture(label, themed);
+        }
+        return;
+    }
     UIFont *font = ((UILabel *)view).font; // UILabel/UITextField/UITextView all expose `font`
     if (![font isKindOfClass:[UIFont class]] || !FontIsThemeable(font)) return;
     sFontBypass++;
     UIFont *themed = ApolloThemeFontApply(CurrentFontChoice(), font);
-    if (themed && ![themed.fontName isEqualToString:font.fontName] && ObjectChainLooksApolloOwned(view)) {
+    if (themed && ![themed.fontName isEqualToString:font.fontName] &&
+        ObjectChainLooksApolloOwned(view)) {
         ((void (*)(id, SEL, id))objc_msgSend)(view, @selector(setFont:), themed);
     }
     sFontBypass--;
 }
 
-static void ApplyThemeFontToNavigationTitleControl(UIView *titleControl) {
-    if (!sEnabled || ![titleControl isKindOfClass:[UIView class]]) return;
+static void ApplyThemeColorToNavigationTitleLabels(UIView *view, UIColor *primaryColor) {
+    if ([view isKindOfClass:[UILabel class]]) {
+        UILabel *label = (UILabel *)view;
+        NSAttributedString *original =
+            objc_getAssociatedObject(label, kApolloThemeOriginalAttributedTextKey);
+        NSAttributedString *source = original ?: label.attributedText;
+        if (source.length > 0) {
+            NSAttributedString *base = sEnabled
+                ? ThemedAttributedText(source, label,
+                                       (uintptr_t)&ApplyThemeColorToNavigationTitleLabels)
+                : source;
+            NSMutableAttributedString *colored = [base mutableCopy];
+            [colored addAttribute:NSForegroundColorAttributeName
+                            value:primaryColor
+                            range:NSMakeRange(0, colored.length)];
+            if (![colored isEqualToAttributedString:label.attributedText]) {
+                SetLabelAttributedTextWithoutRecapture(label, colored);
+            }
+        } else if (![label.textColor isEqual:primaryColor]) {
+            label.textColor = primaryColor;
+        }
+    }
+    for (UIView *subview in view.subviews) {
+        ApplyThemeColorToNavigationTitleLabels(subview, primaryColor);
+    }
+}
+
+static void ApplyThemeToNavigationTitleControl(UIView *titleControl) {
+    if (![titleControl isKindOfClass:[UIView class]]) return;
     if (!ChromeBarLooksApolloOwned(NavigationBarForDescendant(titleControl))) return;
-    RefreshFontsInViewTree(titleControl, CurrentFontChoice(), YES);
+    ApolloThemeFont target = sEnabled ? CurrentFontChoice() : ApolloThemeFontSystem;
+    RefreshFontsInViewTree(titleControl, target, YES);
+    UIColor *primary = sEnabled
+        ? ApolloThemeRuntimeColor(ApolloThemeTokenLabel)
+        : [UIColor labelColor];
+    if (primary) ApplyThemeColorToNavigationTitleLabels(titleControl, primary);
 }
 
 // Per-thread text-sink bypass (ASDK builds nodes off the main thread, so a
@@ -1634,6 +1753,12 @@ void ApolloThemeRuntimeInvalidate(void) {
 }
 
 - (void)setAttributedText:(NSAttributedString *)attributedText {
+    if (sAttributedTextAssignmentBypass) {
+        %orig(attributedText);
+        return;
+    }
+    objc_setAssociatedObject(self, kApolloThemeOriginalAttributedTextKey,
+                             [attributedText copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     uintptr_t caller = (uintptr_t)__builtin_return_address(0);
     %orig(ThemedAttributedText(attributedText, (id)self, caller));
 }
@@ -1724,9 +1849,14 @@ static ASImageNodeTintColorModificationBlockFn ASImageNodeTintColorModificationB
 
 %hook _UINavigationBarTitleControl
 
+- (void)didMoveToWindow {
+    %orig;
+    if (self.window) ApplyThemeToNavigationTitleControl((UIView *)self);
+}
+
 - (void)layoutSubviews {
     %orig;
-    ApplyThemeFontToNavigationTitleControl((UIView *)self);
+    ApplyThemeToNavigationTitleControl((UIView *)self);
 }
 
 %end

@@ -730,12 +730,28 @@ BOOL ApolloThemeSourceTableIsStale(UITableView *sourceTable) {
     return sourceTable == nil || sourceTable.window == nil;
 }
 
+static UIColor *ApolloVisibleBackgroundColorForTable(UITableView *tableView,
+                                                      UITraitCollection *traits) {
+    // Immersive profile/subreddit screens deliberately make their table clear
+    // and render the backdrop behind it. A pushed tweak-owned screen still
+    // needs an opaque transition surface, so inherit the first visible
+    // ancestor color instead of propagating clearColor into the destination.
+    for (UIView *view = tableView; view; view = view.superview) {
+        UIColor *color = view.backgroundColor;
+        if (!color) continue;
+        UIColor *resolved = [color resolvedColorWithTraitCollection:traits ?: view.traitCollection];
+        if (resolved && CGColorGetAlpha(resolved.CGColor) >= 0.99) return color;
+    }
+    return nil;
+}
+
 void ApolloApplyInheritedSettingsTableTheme(UITableViewController *controller) {
     if (!controller) return;
 
     UITableView *source = ApolloInheritedSettingsThemeSourceTableView(controller);
     BOOL stale = ApolloThemeSourceTableIsStale(source);
-    UIColor *backgroundColor = (stale ? nil : source.backgroundColor)
+    UIColor *backgroundColor = (stale ? nil
+        : ApolloVisibleBackgroundColorForTable(source, controller.traitCollection))
         ?: ApolloThemePageBackgroundColor() ?: controller.tableView.backgroundColor;
     controller.view.backgroundColor = backgroundColor;
     controller.tableView.backgroundColor = backgroundColor;

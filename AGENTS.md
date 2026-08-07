@@ -121,6 +121,11 @@ screens. See `docs/settings-form-refactor-plan.md`.
 
 **Working on settings? Read `src/settings/README.md` first** — it has the 5-step add-a-setting recipe, the form-layer rules, and the Eureka facts. The hard rules: tweak-owned screens declare rows in `-buildForm` (never hand-rolled index math); Apollo's native General screen is modified ONLY through `ApolloSettingsGeneralTable`'s registry (never `%hook` its table methods — one remapper per screen); new settings do NOT get added to `ApolloBackupRestore`'s statics re-sync (restore force-exits; `%ctor` re-reads on relaunch).
 
+**Settings cell primary text is opt-in.** Standard form rows are marked
+automatically; normal enabled `customRow` and hand-rolled cells must call
+`apollo_applyPrimaryTextColorToCell:` before returning. Do not mark accent,
+destructive, disabled/placeholder, or intentionally secondary/tertiary rows.
+
 ### Crash Reporting (`src/crash/`)
 
 Local-only crash recording built on KSCrash 2.5.1's **recording layer only** (`modules/KSCrash` submodule, pinned; only Core/RecordingCore/Recording compile — no sinks/filters/installations, so no transmission path exists in the binary). Every public KSCrash symbol AND ObjC class is namespaced via `-DKSCRASH_NAMESPACE=_ApolloReborn` (global CFLAG — required in every TU that imports KSCrash headers). Reports live under `Library/Caches/ApolloReborn/LocalCrashReports` (max 3, cleanup policy Never) and leave the device only through the user-reviewed report-form flow.

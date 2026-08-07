@@ -835,19 +835,40 @@ static BOOL ApolloJumpBarIsSearching(UIView *jumpBar) {
     return !field.hidden && field.alpha > 0.01;
 }
 
+static BOOL ApolloViewIsProfileNavTitleView(UIView *view) {
+    return [NSStringFromClass(view.class) isEqualToString:@"ApolloProfileNavTitleView"];
+}
+
 static void ApolloCollectNavigationTitleContent(UIView *root,
                                                 UIView *excluded,
-                                                NSMutableArray<UIView *> *content) {
+                                                NSMutableArray<UIView *> *content,
+                                                BOOL includeTransparent) {
     for (UIView *subview in root.subviews) {
-        if (subview == excluded || subview.hidden || subview.alpha < 0.01) continue;
+        BOOL childIncludesTransparent = includeTransparent || ApolloViewIsProfileNavTitleView(subview);
+        if (subview == excluded || subview.hidden ||
+            (!childIncludesTransparent && subview.alpha < 0.01)) continue;
 
         if ([subview isKindOfClass:UILabel.class] ||
             [subview isKindOfClass:UIImageView.class] ||
             [subview isKindOfClass:UITextField.class]) {
             [content addObject:subview];
         }
-        ApolloCollectNavigationTitleContent(subview, excluded, content);
+        ApolloCollectNavigationTitleContent(subview, excluded, content,
+                                            childIncludesTransparent);
     }
+}
+
+static UILabel *ApolloProfileNavigationTitleLabel(UIView *root) {
+    if (ApolloViewIsProfileNavTitleView(root)) {
+        for (UIView *subview in root.subviews) {
+            if ([subview isKindOfClass:UILabel.class]) return (UILabel *)subview;
+        }
+    }
+    for (UIView *subview in root.subviews) {
+        UILabel *label = ApolloProfileNavigationTitleLabel(subview);
+        if (label) return label;
+    }
+    return nil;
 }
 
 static BOOL ApolloRecenterTitleControl(UIView *titleControl);
@@ -952,8 +973,10 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl);
         if (CGRectIsEmpty(frame)) return CGRectNull;
     } else {
         CGRect contentFrame = CGRectNull;
+        UILabel *profileTitleLabel = ApolloProfileNavigationTitleLabel(self.titleControl);
         for (UIView *view in candidateViews) {
-            if (![view isKindOfClass:UIView.class] || view.hidden || view.alpha < 0.01 ||
+            if (![view isKindOfClass:UIView.class] || view.hidden ||
+                (view != profileTitleLabel && view.alpha < 0.01) ||
                 CGRectIsEmpty(view.bounds)) continue;
             CGRect viewFrame = [view convertRect:view.bounds toView:hostView];
             contentFrame = CGRectIsNull(contentFrame) ? viewFrame : CGRectUnion(contentFrame, viewFrame);
@@ -1005,6 +1028,8 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl);
         self.glassView = [self newRegularGlassView];
         if (!self.glassView) return;
         self.glassView.frame = targetFrame;
+        UILabel *profileTitleLabel = ApolloProfileNavigationTitleLabel(self.titleControl);
+        self.glassView.alpha = profileTitleLabel ? profileTitleLabel.alpha : 1.0;
         [hostView insertSubview:self.glassView atIndex:0];
         ApolloLog(@"[NavigationTitleGlass] installed %@ capsule frame=%@",
                   NSStringFromClass(hostView.class), NSStringFromCGRect(self.glassView.frame));
@@ -1014,6 +1039,8 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl);
     if (hostView.subviews.firstObject != self.glassView) {
         [hostView sendSubviewToBack:self.glassView];
     }
+    UILabel *profileTitleLabel = ApolloProfileNavigationTitleLabel(self.titleControl);
+    self.glassView.alpha = profileTitleLabel ? profileTitleLabel.alpha : 1.0;
     if (CGRectEqualToRect(self.glassView.frame, targetFrame)) return;
     // UIKit already animates the containing navigation transition. A second,
     // independently timed frame animation made the capsule visibly trail the
@@ -1095,7 +1122,8 @@ static NSUInteger ApolloJumpBarContentMetric(UIView *jumpBar) {
     } else {
         // Plain titles, profile titles, and Apollo's dual-label title buttons
         // all ultimately expose their visible label/image content here.
-        ApolloCollectNavigationTitleContent(self.titleControl, self.glassView, glassCandidates);
+        ApolloCollectNavigationTitleContent(self.titleControl, self.glassView,
+                                            glassCandidates, NO);
     }
 
     [self updateGlassForHostView:hostView candidateViews:glassCandidates];
@@ -1155,6 +1183,27 @@ static void ApolloUpdateNavigationTitleGlass(UIView *titleControl) {
                                  controller, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     [controller scheduleTargetRefresh];
+}
+
+void ApolloNavigationTitleGlassSetContentAlpha(UIView *contentView, CGFloat alpha) {
+    if (!IsLiquidGlass() || !contentView) return;
+    UIView *titleControl = contentView;
+    while (titleControl &&
+           ![NSStringFromClass(titleControl.class) isEqualToString:@"_UINavigationBarTitleControl"]) {
+        titleControl = titleControl.superview;
+    }
+    if (!titleControl) return;
+
+    ApolloNavigationTitleGlassController *controller =
+        objc_getAssociatedObject(titleControl, &kApolloNavigationTitleGlassControllerKey);
+    if (!controller) {
+        ApolloUpdateNavigationTitleGlass(titleControl);
+    } else if (!controller.glassView) {
+        [controller scheduleTargetRefresh];
+    } else {
+        controller.glassView.alpha = alpha;
+        [controller scheduleTargetRefreshIfNeeded];
+    }
 }
 
 // Returns whether the recenter actually ran to a decision. NO means it bailed
@@ -1366,8 +1415,10 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
         objc_setAssociatedObject(self, &kApolloNavigationTitleGlassControllerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return;
     }
+    __weak UIView *weakTitleControl = (UIView *)self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        ApolloUpdateNavigationTitleGlass(self);
+        UIView *titleControl = weakTitleControl;
+        if (titleControl) ApolloUpdateNavigationTitleGlass(titleControl);
     });
 }
 
@@ -1382,8 +1433,10 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
     if (controller) {
         [controller scheduleTargetRefreshIfNeeded];
     } else {
+        __weak UIView *weakTitleControl = (UIView *)self;
         dispatch_async(dispatch_get_main_queue(), ^{
-            ApolloUpdateNavigationTitleGlass(self);
+            UIView *titleControl = weakTitleControl;
+            if (titleControl) ApolloUpdateNavigationTitleGlass(titleControl);
         });
     }
 }
