@@ -40,15 +40,17 @@ static const CGFloat kApolloBlurMaxTopExtension = 80.0;
 // Deliberately stronger than UIKit's Soft edge treatment. Blur is an expressive
 // alternative, not a reimplementation of Soft: more of the content's colour
 // should remain visible while its detail dissolves towards the status bar.
-static const CGFloat kApolloBlurRadius = 28.0;
-static const CGFloat kApolloBlurMaterialAlphaLight = 0.32;
-static const CGFloat kApolloBlurMaterialAlphaDark = 0.22;
+static const CGFloat kApolloBlurRadius = 24.0;
 
-static id ApolloNewVariableBlurFilter(void) {
+static id ApolloNewFilter(NSString *type) {
     Class filterClass = objc_getClass("CAFilter");
     SEL filterSelector = NSSelectorFromString(@"filterWithType:");
     if (!filterClass || ![filterClass respondsToSelector:filterSelector]) return nil;
-    return ((id (*)(id, SEL, id))objc_msgSend)(filterClass, filterSelector, @"variableBlur");
+    return ((id (*)(id, SEL, id))objc_msgSend)(filterClass, filterSelector, type);
+}
+
+static id ApolloNewVariableBlurFilter(void) {
+    return ApolloNewFilter(@"variableBlur");
 }
 
 // Declared in ApolloState.h; the settings picker hides the Blur option when
@@ -68,6 +70,8 @@ BOOL ApolloProgressiveBlurAvailable(void) {
 
 @implementation ApolloProgressiveBlurView {
     id _filter;               // CAFilter "variableBlur", built once
+    id _saturationFilter;     // keeps Blur vibrant and distinct from Soft
+    NSArray *_backdropFilters; // immutable filter chain; never allocate during layout
     UIImage *_maskImage;      // strong ref: CAFilter does not copy the CGImage
     CGFloat _maskedHeight;    // height _maskImage was rendered for
     CAGradientLayer *_featherMask;
@@ -87,6 +91,9 @@ BOOL ApolloProgressiveBlurAvailable(void) {
     _filter = ApolloNewVariableBlurFilter();
     [_filter setValue:@(kApolloBlurRadius) forKey:@"inputRadius"];
     [_filter setValue:@YES forKey:@"inputNormalizeEdges"];
+    _saturationFilter = ApolloNewFilter(@"colorSaturate");
+    [_saturationFilter setValue:@1.65 forKey:@"inputAmount"];
+    _backdropFilters = _saturationFilter ? @[_filter, _saturationFilter] : @[_filter];
 
     _featherMask = [CAGradientLayer layer];
     _featherMask.colors = @[
@@ -117,11 +124,11 @@ BOOL ApolloProgressiveBlurAvailable(void) {
         CGFloat components[] = {
             1, 1, 1, 1.00,
             1, 1, 1, 1.00,
-            1, 1, 1, 0.78,
-            1, 1, 1, 0.35,
+            1, 1, 1, 0.85,
+            1, 1, 1, 0.45,
             1, 1, 1, 0.00,
         };
-        CGFloat locations[] = {0, 0.28, 0.55, 0.78, 1};
+        CGFloat locations[] = {0, 0.40, 0.62, 0.82, 1};
         CGGradientRef gradient = CGGradientCreateWithColorComponents(space, components, locations, 5);
         CGContextDrawLinearGradient(context.CGContext, gradient,
                                     CGPointZero, CGPointMake(0, height), 0);
@@ -140,30 +147,26 @@ BOOL ApolloProgressiveBlurAvailable(void) {
     if (_maskedHeight != height) [self regenerateMaskForHeight:height];
 
     // The backdrop subview samples the pixels under the view. UIKit's other
-    // subviews provide its tint/frosting layer. Keep a restrained amount of
-    // that material for legibility, rather than its full opacity: full strength
-    // makes this custom treatment visually converge with the system Soft edge,
-    // while removing it entirely lets bright media become overpowering.
+    // subviews are its material tint/frosting layer; remove those completely.
+    // Even at partial opacity that material gives this mode the same pale visual
+    // signature as Soft. Blur intentionally preserves the source colours and
+    // changes only their spatial detail as they approach the status bar.
     UIView *backdrop = nil;
-    CGFloat materialAlpha = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark
-        ? kApolloBlurMaterialAlphaDark
-        : kApolloBlurMaterialAlphaLight;
     for (UIView *subview in self.subviews) {
         if ([NSStringFromClass(subview.class) containsString:@"Backdrop"]) {
             backdrop = subview;
-            subview.alpha = 1;
+            if (subview.alpha != 1) subview.alpha = 1;
         } else {
-            subview.alpha = materialAlpha;
+            if (subview.alpha != 0) subview.alpha = 0;
         }
     }
     if (!backdrop) backdrop = self.subviews.firstObject;
-    backdrop.alpha = 1;
+    if (backdrop.alpha != 1) backdrop.alpha = 1;
 
     // Replaces UIKit's gaussian+saturate set; reassert only on change since
     // UIKit rebuilds backdrop filters on trait/window moves.
-    NSArray *filters = @[_filter];
-    if (backdrop && ![backdrop.layer.filters isEqualToArray:filters]) {
-        backdrop.layer.filters = filters;
+    if (backdrop && ![backdrop.layer.filters isEqualToArray:_backdropFilters]) {
+        backdrop.layer.filters = _backdropFilters;
     }
 
     [CATransaction begin];
