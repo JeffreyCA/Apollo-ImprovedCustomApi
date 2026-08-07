@@ -1095,6 +1095,25 @@ static UIImage *ApolloDownscaledBannerImage(UIImage *image) {
     return result ?: image;
 }
 
+static BOOL ApolloImageHasAlphaChannel(UIImage *image) {
+    CGImageRef imageRef = image.CGImage;
+    if (!imageRef) return NO;
+
+    switch (CGImageGetAlphaInfo(imageRef)) {
+        case kCGImageAlphaPremultipliedLast:
+        case kCGImageAlphaPremultipliedFirst:
+        case kCGImageAlphaLast:
+        case kCGImageAlphaFirst:
+        case kCGImageAlphaOnly:
+            return YES;
+        case kCGImageAlphaNone:
+        case kCGImageAlphaNoneSkipLast:
+        case kCGImageAlphaNoneSkipFirst:
+            return NO;
+    }
+    return NO;
+}
+
 - (NSString *)bannerKeyForURL:(NSURL *)url {
     return [@"banner:" stringByAppendingString:url.absoluteString ?: @""];
 }
@@ -1175,9 +1194,12 @@ static UIImage *ApolloDownscaledBannerImage(UIImage *image) {
 
             NSURLSessionDataTask *task = [self.imageSession dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
                 UIImage *image = nil;
+                BOOL sourceHasAlpha = NO;
                 if (!error && data.length > 0) {
                     @autoreleasepool {
-                        image = ApolloDownscaledBannerImage([UIImage imageWithData:data]);
+                        UIImage *sourceImage = [UIImage imageWithData:data];
+                        sourceHasAlpha = ApolloImageHasAlphaChannel(sourceImage);
+                        image = ApolloDownscaledBannerImage(sourceImage);
                     }
                 }
                 if (!image && error) {
@@ -1192,7 +1214,12 @@ static UIImage *ApolloDownscaledBannerImage(UIImage *image) {
                         dispatch_async(self.queue, ^{ self.imageNotFoundDates[key] = [NSDate date]; });
                     }
                 } else {
-                    NSData *persistData = UIImageJPEGRepresentation(image, 0.85);
+                    // JPEG flattens transparency. Preserve alpha-bearing banner
+                    // sources as PNG so their cold-cache rendering matches the
+                    // in-memory result from the download that created the file.
+                    NSData *persistData = sourceHasAlpha
+                        ? UIImagePNGRepresentation(image)
+                        : UIImageJPEGRepresentation(image, 0.85);
                     if (persistData) {
                         dispatch_barrier_async(self.imageIOQueue, ^{ [self persistImageData:persistData forKey:key]; });
                     }

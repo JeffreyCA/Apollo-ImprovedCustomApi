@@ -1628,8 +1628,12 @@ static volatile BOOL sApolloAvatarInterfaceIsDark = NO;
 
 static void ApolloAvatarRefreshInterfaceStyle(void) {
     if (![NSThread isMainThread]) return;
-    sApolloAvatarInterfaceIsDark =
-        UIScreen.mainScreen.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+    // Apollo themes can override each window independently of the system
+    // appearance, so UIScreen alone picks the wrong placeholder fill when a
+    // dark Apollo theme is active on a light system (or vice versa).
+    UITraitCollection *traits = ApolloAllWindows().firstObject.traitCollection
+        ?: UIScreen.mainScreen.traitCollection;
+    sApolloAvatarInterfaceIsDark = traits.userInterfaceStyle == UIUserInterfaceStyleDark;
 }
 
 static CGFloat ApolloAvatarScreenScale(void) {
@@ -4477,6 +4481,10 @@ static void ApolloInlineAvatarReapplyAfterModelUpdate(NSString *fullName) {
     ApolloAvatarRefreshInterfaceStyle();
     (void)ApolloAvatarScreenScale();
     (void)ApolloAvatarPlaceholderFillColor();
+    // -init warms ApolloBannerMaxPixelDimension's UIScreen access. Pin the
+    // singleton's first construction to main before Texture background layout
+    // can reach sharedCache through a setAttributedText: hook.
+    (void)[ApolloUserProfileCache sharedCache];
     [[NSNotificationCenter defaultCenter] addObserverForName:@"com.christianselig.ModelObjectUpdated"
                                                       object:nil
                                                        queue:nil

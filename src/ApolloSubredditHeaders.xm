@@ -1395,6 +1395,10 @@ static void ApolloSubredditApplyBannerForHeader(ApolloSubredditHeaderView *heade
     if (info) {
         // A successful fetch with no banner configured — swap to the default
         // (also covers a subreddit that removed its banner).
+        // Invalidate any older fetch before installing the default: otherwise
+        // its completion still matches pendingBannerURL and can paint the
+        // removed banner back over this authoritative no-banner state.
+        header.pendingBannerURL = nil;
         ApolloSubredditApplyDefaultBanner(header);
     } else if (infoFetchFailed) {
         // Definitively failed info fetch (private/quarantined/banned/deleted
