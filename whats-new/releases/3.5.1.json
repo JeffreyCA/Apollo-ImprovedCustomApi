@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "version": "3.5.1",
+  "headline": "What's New in Apollo Reborn",
+  "items": [
+    { "icon": "rectangle.stack.fill", "title": "Swipe Through Galleries", "subtitle": "Swipe through every image right from the feed, with smarter sizing and seamless fullscreen transitions." },
+    { "icon": "bubble.left.and.bubble.right.fill", "title": "Comments Over Media", "subtitle": "Swipe up in the media viewer to read and reply while the photo or video stays on screen." },
+    { "icon": "square.grid.2x2.fill", "title": "Better Multireddits", "subtitle": "Browse multireddits in Gallery View, then rename them and add descriptions or custom icons." },
+    { "icon": "checkmark.circle.fill", "title": "Posting & Media Fixes", "subtitle": "New comments appear correctly right away, while videos, previews, uploads, saves, and shares work more reliably." },
+    { "icon": "shield.fill", "title": "Smoother, More Stable Apollo", "subtitle": "Major memory and crash fixes make Apollo more reliable, with smoother headers, profiles, themes, navigation, and iOS 27 layouts." }
+  ]
+}

@@ -4,14 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v3.5.1] - 2026-08-??
+
 ### Features
 
+- Add **Swipe Through Feed Galleries** for paging through every image directly in a feed card, with smarter sizing and seamless fullscreen transitions, plus **Swipe Up for Comments** to open the real comments screen over fullscreen media (#805: @jordanearle)
+- Expand **multireddits** with Gallery View, in-app renaming and descriptions, custom icons, and an option to hide their descriptions in the Subreddits list (#799, #837: @icpryde)
+- Add approximate **vote breakdowns** for posts and author-only insights for your own comments (#802: @jordanearle)
+- Replace **Scroll Edge Effect** with a clearer **Header Style** picker and add a progressive Blur option alongside the iOS 26 Soft and iOS 27 Hard styles (#843: @jordanearle)
+- Add private, local-only **Crash Reports** that stay on your device unless you review and explicitly attach a sanitized report to the bug form (#824: @jordanearle)
+- Add an opt-in **Apple Translate** sheet for Apollo's post and comment Translate action on supported iOS versions (#812: @DeltAndy123)
+- Add full-screen **View Banner** and **View Icon** actions to subreddit headers, with tap-and-hold access to customization options (#845: @icpryde)
+- Improve the **Search** tab with pull-to-refresh for subreddit discovery, reliable trending limits, and a separate Random NSFW Subreddit row (#788: @JeffreyCA)
+- Improve cloud **AI Summaries** with searchable Gemini and OpenRouter model browsers, working defaults, provider attribution, and clearer service errors (#778: @jordanearle)
+- Improve **Settings** discoverability with a reddit.com Web Sign-In row under Accounts & API Keys and a Theme Manager shortcut on the Apollo Reborn hub (#855: @jordanearle)
 - Add gaze and pointer hover effects plus multiwindow support when Apollo runs on **Apple Vision Pro** (#759: @rebelancap)
+- Add Original Apollo, Halo, Aloppo, and Pixels **Liquid Glass app icons**, while refreshing the Apollo Classic, Helios, and Jryng artwork for iOS 27 (#784, #800, #804, #819, #842: @IllIIllIllIllII)
+- Make **Open Reddit Links in Apollo** more reliable by moving recommended automatic Safari routing into Link Companion and retaining manual and legacy fallback extensions (#786: @jordanearle)
 
 ### Fixes
 
-- Fix lists becoming stuck beneath the floating tab bar on **iOS 27**, including comments opened from deep links and feeds loading another page (#744: @jordanearle)
-- Improve networking and media reliability by removing avoidable stalls, bounding caches and concurrent downloads, and preserving original animated album media when saving or sharing (#728: @ryannair05)
+- Improve networking and media reliability by removing avoidable stalls, bounding caches and concurrent downloads, preserving animated album media when saving or sharing, and making uploads and share-link resolution more resilient (#728: @ryannair05)
+- Fix newly posted or edited **comments** appearing blank or incomplete until the thread is reopened, including missing usernames, flair, scores, and timestamps (#808: @icpryde)
+- Fix major **crash and memory** regressions affecting video-heavy threads, translated or recovered comments, native video comments, and profile-tab long presses (#796, #823, #829, #844: @icpryde, @jordanearle)
+- Fix **Gallery and media** issues including silent hosted videos, ignored NSFW blur preferences, iOS 27 menu crashes, frozen search-result videos, and blank or permanently compact link previews (#767, #769, #781, #789, #807: @jordanearle, @JeffreyCA, @icpryde)
+- Fix **profiles, subreddit headers, and themes** flickering or laying out incorrectly, including unreadable context menus and duration pills, indistinct read posts, uneven row highlights, misaligned profile cards, stuck refresh offsets, and Pixel Pals drifting behind the Dynamic Island (#846, #848, #849, #853: @icpryde, @jordanearle)
+- Fix **posting, translation, and moderation** regressions including long composer titles, an unsafe Text editor Post button, untranslated media-post bodies, poll flair, search state, long translated titles, and incorrect moderator-row routing (#780, #793, #795, #835: @jordanearle, @icpryde)
+- Fix lists becoming stuck beneath the tab bar on **iOS 27** or hiding their final rows on standard builds, while smoothing legacy hide-bars transitions (#821: @jordanearle)
+- Prevent account recovery and Settings Backup from triggering repeated **keychain passcode prompts** (#777: @jordanearle)
 
 ## [v3.5.0] - 2026-07-??
 
@@ -732,6 +752,7 @@ There are currently a few limitations:
 ## [v1.0.0] - 2023-10-13
 - Initial release
 
+[v3.5.1]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.5.0...v1.15.11_3.5.1
 [v3.5.0]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.4.2...v1.15.11_3.5.0
 [v3.4.2]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.4.1...v1.15.11_3.4.2
 [v3.4.1]: https://github.com/Apollo-Reborn/Apollo-Reborn/compare/v1.15.11_3.4.0...v1.15.11_3.4.1
