@@ -187,6 +187,52 @@ static void ApolloSimDebugPerformSwipe(CGPoint start, CGPoint end) {
     });
 }
 
+// "press x y seconds" command: touch down, hold stationary, touch up. Drives
+// UILongPressGestureRecognizer and UIContextMenuInteraction, which idb's
+// synthesized HID events fail to trigger reliably.
+static void ApolloSimDebugPerformPress(CGPoint point, NSTimeInterval duration) {
+    UIWindow *window = nil;
+    for (UIWindow *candidate in ApolloAllWindows()) {
+        if (candidate.isKeyWindow) { window = candidate; break; }
+    }
+    if (!window) window = ApolloAllWindows().firstObject;
+    UIView *hitView = [window hitTest:point withEvent:nil];
+    if (!window || !hitView) {
+        ApolloLog(@"[SimDebugTap] no window/hit view for press (%.0f, %.0f)", point.x, point.y);
+        return;
+    }
+    UITouch *touch = [UITouch new];
+    if (![touch respondsToSelector:@selector(_setLocationInWindow:resetPrevious:)] ||
+        ![touch respondsToSelector:@selector(setPhase:)]) return;
+    [touch setWindow:window];
+    [touch setView:hitView];
+    [touch setTapCount:1];
+    if ([touch respondsToSelector:@selector(_setIsFirstTouchForView:)]) [touch _setIsFirstTouchForView:YES];
+    [touch _setLocationInWindow:point resetPrevious:YES];
+    [touch setPhase:UITouchPhaseBegan];
+    ApolloSimDebugSendTouch(touch);
+
+    // Stationary "moved" ticks keep the touch alive for recognizers that
+    // sample continuously; a long press tolerates zero movement.
+    const NSTimeInterval tick = 0.1;
+    for (NSTimeInterval elapsed = tick; elapsed < duration; elapsed += tick) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(elapsed * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [touch _setLocationInWindow:point resetPrevious:NO];
+            [touch setPhase:UITouchPhaseStationary];
+            ApolloSimDebugSendTouch(touch);
+        });
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(duration * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [touch _setLocationInWindow:point resetPrevious:NO];
+        [touch setPhase:UITouchPhaseEnded];
+        ApolloSimDebugSendTouch(touch);
+        ApolloLog(@"[SimDebugTap] press delivered (%.0f,%.0f) duration=%.2f",
+                  point.x, point.y, duration);
+    });
+}
+
 static UIResponder *ApolloSimDebugFirstResponder(UIView *view) {
     if (view.isFirstResponder) return view;
     for (UIView *subview in view.subviews) {
@@ -347,8 +393,10 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
         }
         BOOL isSwipe = [contents hasPrefix:@"swipe "];
         BOOL isHold = [contents hasPrefix:@"hold "];
+        BOOL isPress = [contents hasPrefix:@"press "];
         NSString *coordString = isSwipe ? [contents substringFromIndex:6]
                               : isHold  ? [contents substringFromIndex:5]
+                              : isPress ? [contents substringFromIndex:6]
                                         : contents;
         NSArray<NSString *> *parts = [coordString componentsSeparatedByCharactersInSet:
             NSCharacterSet.whitespaceAndNewlineCharacterSet];
@@ -363,6 +411,13 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
         if (isHold) {
             if (numbers.count < 2) { ApolloLog(@"[SimDebugTap] malformed hold: %@", contents); return; }
             ApolloSimDebugPerformHold(CGPointMake(numbers[0].doubleValue, numbers[1].doubleValue));
+            return;
+        }
+        if (isPress) {
+            if (numbers.count < 2) { ApolloLog(@"[SimDebugTap] malformed press: %@", contents); return; }
+            NSTimeInterval duration = numbers.count >= 3 ? numbers[2].doubleValue : 0.8;
+            ApolloSimDebugPerformPress(CGPointMake(numbers[0].doubleValue, numbers[1].doubleValue),
+                                       duration);
             return;
         }
         if (numbers.count < 2) {

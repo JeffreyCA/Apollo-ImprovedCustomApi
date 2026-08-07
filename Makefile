@@ -104,6 +104,8 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloState.m \
     $(SRC_DIR)/ApolloShareLinks.xm \
     $(SRC_DIR)/ApolloMedia.xm \
+    $(SRC_DIR)/ApolloFeedGalleryCarousel.xm \
+    $(SRC_DIR)/ApolloSwipeUpComments.xm \
     $(SRC_DIR)/ApolloMediaMetadata.m \
     $(SRC_DIR)/ApolloMediaAutoplay.m \
     $(SRC_DIR)/ApolloCommentsCollapse.xm \

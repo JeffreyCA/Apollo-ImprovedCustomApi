@@ -4,6 +4,7 @@
 #import <objc/runtime.h>
 
 #import "ApolloCommon.h"
+#import "ApolloState.h"
 #import "UserDefaultConstants.h"
 
 @interface RDKComment : NSObject
@@ -28,6 +29,7 @@
 static const void *kCommentsCollapseRootCoverViewKey = &kCommentsCollapseRootCoverViewKey;
 static const void *kCommentsCollapseToolbarCoverViewKey = &kCommentsCollapseToolbarCoverViewKey;
 static const void *kCommentsCollapseCoverGenerationKey = &kCommentsCollapseCoverGenerationKey;
+static const void *kCommentsCollapseTopPinKey = &kCommentsCollapseTopPinKey;
 
 // Slightly longer than the collapse animation.
 static const NSTimeInterval kCommentsCollapseCoverDuration = 0.65;
@@ -161,14 +163,63 @@ static UIView *EnsureCommentsCoverView(UIViewController *viewController, const v
     UIView *coverView = objc_getAssociatedObject(viewController, key);
     if (coverView) return coverView;
 
-    coverView = [[UIView alloc] initWithFrame:CGRectZero];
+    // Apollo's normal comments screen is opaque, so a plain fill of the table's
+    // own colour hides the leak invisibly. The media comments pane has no such
+    // colour — its table is deliberately transparent over the sheet's glass —
+    // so there the cover has to be a material instead. Host both cases in a
+    // UIVisualEffectView and let StyleCommentsCollapseCover pick.
+    coverView = [[UIVisualEffectView alloc] initWithEffect:nil];
     coverView.hidden = YES;
     coverView.userInteractionEnabled = NO;
-    coverView.opaque = YES;
+    coverView.opaque = NO;
     objc_setAssociatedObject(viewController, key, coverView,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloLog(@"[CommentsClip] Installed %@ cover", logLabel);
     return coverView;
+}
+
+// A transparent surface means the pane: cover with the same class of material a
+// navigation bar shows once content scrolls under it, so the band reads as the
+// chrome briefly picking up its scrolled state. It has to be this strong —
+// systemThinMaterial left the leaked rows plainly readable through it, which is
+// the whole bug.
+static void StyleCommentsCollapseCover(UIView *cover, UIColor *coverColor, BOOL opaqueSurface) {
+    if (![cover isKindOfClass:[UIVisualEffectView class]]) {
+        cover.backgroundColor = coverColor;
+        return;
+    }
+    UIVisualEffectView *effectView = (UIVisualEffectView *)cover;
+    if (opaqueSurface) {
+        effectView.effect = nil;
+        effectView.contentView.backgroundColor = coverColor;
+    } else {
+        effectView.effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial];
+        effectView.contentView.backgroundColor = UIColor.clearColor;
+    }
+}
+
+static BOOL CommentsCoverSurfaceIsOpaque(UIViewController *viewController, UITableView *tableView) {
+    UIColor *coverColor = GetCommentsCoverColor(viewController, tableView);
+    UIColor *resolved = [coverColor resolvedColorWithTraitCollection:viewController.view.traitCollection];
+    return CGColorGetAlpha(resolved.CGColor) > 0.001;
+}
+
+// Texture's collapse transaction can leave the list scrolled a row or so past
+// its top rest, which slides the first surviving comment under the nav bar and
+// search field and briefly exposes a stale row there. Nothing recovers that on
+// its own until the animation settles, so while the collapse is running, hold
+// the list at the rest position it started from. Writing only when the offset
+// has actually drifted makes this converge in one pass instead of fighting the
+// scroll view.
+static void EnforceCommentsCollapseTopPin(UIViewController *viewController, UITableView *tableView) {
+    if (![objc_getAssociatedObject(viewController, kCommentsCollapseTopPinKey) boolValue]) return;
+    if (!tableView || !tableView.window) return;
+
+    CGFloat topOffset = GetCommentsTableTopOffset(tableView);
+    if (tableView.contentOffset.y <= topOffset + 0.5) return;
+    ApolloLog(@"[CommentsClip] Pin top during collapse offset=%.1f -> %.1f",
+              tableView.contentOffset.y, topOffset);
+    [tableView setContentOffset:CGPointMake(tableView.contentOffset.x, topOffset) animated:NO];
 }
 
 // Keep the root and toolbar covers aligned with the current layout.
@@ -180,20 +231,25 @@ static void LayoutCommentsCollapseCover(UIViewController *viewController) {
     UIView *rootView = viewController.view;
     UIView *rootCoverView = objc_getAssociatedObject(viewController, kCommentsCollapseRootCoverViewKey);
     UIView *toolbarCoverView = objc_getAssociatedObject(viewController, kCommentsCollapseToolbarCoverViewKey);
+    if (!rootView || !rootView.window) return;
+    UITableView *tableView = GetCommentsTableView(viewController);
+    if (!tableView) return;
+
+    // The pin is about scroll position, not covers, so it runs before the
+    // cover-visibility bail on every layout pass of a collapsing screen.
+    EnforceCommentsCollapseTopPin(viewController, tableView);
 
     // Show path re-lays out covers on demand; nothing to do while hidden.
     BOOL hasVisibleCover = (rootCoverView && !rootCoverView.hidden) ||
                            (toolbarCoverView && !toolbarCoverView.hidden);
     if (!hasVisibleCover) return;
 
-    if (!rootView || !rootView.window) return;
-    UITableView *tableView = GetCommentsTableView(viewController);
-    if (!tableView) return;
-
     CGFloat navBarBottom = GetNavigationBarBottom(viewController);
+    UIColor *coverColor = GetCommentsCoverColor(viewController, tableView);
+    BOOL opaqueSurface = CommentsCoverSurfaceIsOpaque(viewController, tableView);
     if (rootCoverView) {
         rootCoverView.frame = CGRectMake(0.0, 0.0, CGRectGetWidth(rootView.bounds), navBarBottom);
-        rootCoverView.backgroundColor = GetCommentsCoverColor(viewController, tableView);
+        StyleCommentsCollapseCover(rootCoverView, coverColor, opaqueSurface);
         rootCoverView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleBottomMargin;
     }
 
@@ -219,7 +275,7 @@ static void LayoutCommentsCollapseCover(UIViewController *viewController) {
 
     if (toolbarCoverView && toolbarHostView) {
         toolbarCoverView.frame = toolbarHostView.bounds;
-        toolbarCoverView.backgroundColor = GetCommentsCoverColor(viewController, tableView);
+        StyleCommentsCollapseCover(toolbarCoverView, coverColor, opaqueSurface);
         toolbarCoverView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
         if (toolbarCoverView.superview != toolbarHostView) {
@@ -243,6 +299,13 @@ static void HideCommentsCollapseCover(UIViewController *viewController, NSUInteg
     NSNumber *currentGeneration = objc_getAssociatedObject(viewController, kCommentsCollapseCoverGenerationKey);
     if ([currentGeneration unsignedIntegerValue] != generation) return;
 
+    // Release the pin on the same generation clock as the covers, after one last
+    // enforcement so the list settles exactly at rest.
+    UITableView *tableView = GetCommentsTableView(viewController);
+    EnforceCommentsCollapseTopPin(viewController, tableView);
+    objc_setAssociatedObject(viewController, kCommentsCollapseTopPinKey, nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
     UIView *rootCoverView = objc_getAssociatedObject(viewController, kCommentsCollapseRootCoverViewKey);
     UIView *toolbarCoverView = objc_getAssociatedObject(viewController, kCommentsCollapseToolbarCoverViewKey);
     if (rootCoverView.hidden && (!toolbarCoverView || toolbarCoverView.hidden)) return;
@@ -258,14 +321,37 @@ static void ShowCommentsCollapseCover(NSString *reason) {
     UIViewController *viewController = sVisibleCommentsViewController;
     if (!viewController || !viewController.isViewLoaded || !viewController.view.window) return;
 
+    // The media pane never needs the covers: its row updates run without row
+    // animations (ApolloSwipeUpComments.xm's UITableView hooks), so there is
+    // no leaked animation to hide — and a chrome-material band flashing over
+    // the pane's glass would itself be the visual glitch.
+    if (ApolloSwipeCommentsIsPaneCommentsController(viewController)) {
+        ApolloLog(@"[CommentsClip] Skip collapse cover reason=%@: media pane", reason);
+        return;
+    }
+
     UITableView *tableView = GetCommentsTableView(viewController);
     if (!tableView) return;
+    CGFloat topOffset = GetCommentsTableTopOffset(tableView);
+    BOOL wasAtTop = tableView.contentOffset.y <= topOffset + kCommentsCollapseTopThreshold;
     if (!ShouldShowCollapseCoverForTopState(viewController, tableView)) {
         ApolloLog(@"[CommentsClip] Skip collapse cover reason=%@ offset=%.1f topOffset=%.1f",
                   reason,
                   tableView.contentOffset.y,
                   GetCommentsTableTopOffset(tableView));
         return;
+    }
+
+    NSUInteger generation = [objc_getAssociatedObject(viewController, kCommentsCollapseCoverGenerationKey) unsignedIntegerValue] + 1;
+    objc_setAssociatedObject(viewController, kCommentsCollapseCoverGenerationKey, @(generation),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    // A list that started at rest must still be at rest when the animation
+    // finishes, so hold it there for the whole collapse rather than correcting
+    // it once at the end. Deeper scroll positions are left alone.
+    if (wasAtTop) {
+        objc_setAssociatedObject(viewController, kCommentsCollapseTopPinKey, @YES,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
     UIView *rootCoverView = EnsureCommentsCoverView(viewController, kCommentsCollapseRootCoverViewKey, @"root collapse");
@@ -277,19 +363,36 @@ static void ShowCommentsCollapseCover(NSString *reason) {
     toolbarCoverView.hidden = (toolbarHostView == nil);
     LayoutCommentsCollapseCover(viewController);
 
-    NSUInteger generation = [objc_getAssociatedObject(viewController, kCommentsCollapseCoverGenerationKey) unsignedIntegerValue] + 1;
-    objc_setAssociatedObject(viewController, kCommentsCollapseCoverGenerationKey, @(generation),
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
-    ApolloLog(@"[CommentsClip] Show collapse cover reason=%@ generation=%lu navBottom=%.1f toolbarHost=%@ rootFrame=%@ toolbarFrame=%@ tableFrame=%@ tableBounds=%@",
+    ApolloLog(@"[CommentsClip] Show collapse cover reason=%@ generation=%lu opaqueSurface=%d pinTop=%d navBottom=%.1f toolbarHost=%@ rootFrame=%@ toolbarFrame=%@ tableFrame=%@ tableBounds=%@",
               reason,
               (unsigned long)generation,
+              (int)CommentsCoverSurfaceIsOpaque(viewController, tableView),
+              (int)wasAtTop,
               GetNavigationBarBottom(viewController),
               NSStringFromClass([toolbarHostView class]),
               NSStringFromCGRect(rootCoverView.frame),
               NSStringFromCGRect(toolbarCoverView.frame),
               NSStringFromCGRect(tableView.frame),
               NSStringFromCGRect(tableView.bounds));
+
+    // Re-enforce the pin every frame for the length of the animation. The
+    // controller's own layout pass is not guaranteed to run while only the
+    // table's content offset moves, and the generation check ends the chain the
+    // moment a newer collapse (or the cover timeout) supersedes this one.
+    if (wasAtTop) {
+        __weak UIViewController *weakViewController = viewController;
+        const NSTimeInterval frame = 1.0 / 60.0;
+        for (NSUInteger step = 0; step * frame < kCommentsCollapseCoverDuration; step++) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(step * frame * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                UIViewController *controller = weakViewController;
+                if (!controller) return;
+                NSNumber *current = objc_getAssociatedObject(controller, kCommentsCollapseCoverGenerationKey);
+                if ([current unsignedIntegerValue] != generation) return;
+                EnforceCommentsCollapseTopPin(controller, GetCommentsTableView(controller));
+            });
+        }
+    }
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kCommentsCollapseCoverDuration * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
@@ -311,6 +414,8 @@ static void ShowCommentsCollapseCover(NSString *reason) {
         UIView *toolbarCoverView = objc_getAssociatedObject(self, kCommentsCollapseToolbarCoverViewKey);
         rootCoverView.hidden = YES;
         toolbarCoverView.hidden = YES;
+        objc_setAssociatedObject(self, kCommentsCollapseTopPinKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         sVisibleCommentsViewController = nil;
     }
 }
