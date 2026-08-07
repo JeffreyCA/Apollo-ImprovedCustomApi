@@ -692,6 +692,21 @@ void ApolloWebJSONRepairPoisonedAccountBlobs(void) {
               (unsigned long)repaired);
 }
 
+// The typed submit entry points tail-call submitComment:onThingWithFullName:
+// on the same thread; this flag keeps that inner call from clobbering the
+// richer write-context capture (same pattern as ApolloOwnCommentFlair's
+// typed-submit scope).
+static NSString *const kApolloWebJSONTypedWriteScopeKey = @"ApolloWebJSONTypedWriteScope";
+
+// String-typed property read tolerant of foreign/odd objects.
+static id ApolloWebJSONThingProperty(id thing, SEL selector) {
+    if (![thing respondsToSelector:selector]) return nil;
+    id value = nil;
+    @try { value = ((id (*)(id, SEL))objc_msgSend)(thing, selector); }
+    @catch (__unused NSException *e) { return nil; }
+    return [value isKindOfClass:[NSString class]] ? value : nil;
+}
+
 %hook RDKClient
 
 // When the loaded account installs its currentUser (RDKMe) without a username,
@@ -770,13 +785,70 @@ void ApolloWebJSONRepairPoisonedAccountBlobs(void) {
     return %orig;
 }
 
+// The write-response repair (ApolloWebJSONFixupWriteResponseObject) may need to
+// know WHO a degraded /api/comment / /api/editusertext response belongs to and
+// WHERE it landed (the wild degraded payload strips subreddit/link_id too,
+// which blanks the own-flair pill and the moderator shield on the fresh cell).
+// The active account is the wrong answer when the composer posted as a
+// different account (temporaryPostingAccount), so capture the identity at
+// submit time from the client itself — each account owns its own RDKClient,
+// making self.currentUser the true posting identity — and the location from
+// the typed target (link / parent comment).
+
+- (id)submitComment:(id)text onLink:(id)link completion:(id)completion {
+    ApolloWebJSONNoteCommentWriteContext(self, text,
+                                         ApolloWebJSONThingProperty(link, @selector(subreddit)),
+                                         ApolloWebJSONThingProperty(link, @selector(subredditFullName)),
+                                         ApolloWebJSONThingProperty(link, @selector(fullName)),
+                                         nil);
+    [NSThread currentThread].threadDictionary[kApolloWebJSONTypedWriteScopeKey] = @YES;
+    id result = %orig;
+    [[NSThread currentThread].threadDictionary removeObjectForKey:kApolloWebJSONTypedWriteScopeKey];
+    return result;
+}
+
+- (id)submitComment:(id)text asReplyToComment:(id)parent completion:(id)completion {
+    ApolloWebJSONNoteCommentWriteContext(self, text,
+                                         ApolloWebJSONThingProperty(parent, @selector(subreddit)),
+                                         ApolloWebJSONThingProperty(parent, @selector(subredditID)),
+                                         ApolloWebJSONThingProperty(parent, @selector(linkID)),
+                                         ApolloWebJSONThingProperty(parent, @selector(fullName)));
+    [NSThread currentThread].threadDictionary[kApolloWebJSONTypedWriteScopeKey] = @YES;
+    id result = %orig;
+    [[NSThread currentThread].threadDictionary removeObjectForKey:kApolloWebJSONTypedWriteScopeKey];
+    return result;
+}
+
+- (id)submitComment:(id)text onThingWithFullName:(id)fullName completion:(id)completion {
+    // Only when reached directly: the typed entry points above already captured
+    // a richer context and tail-call through here on the same thread.
+    if (![[NSThread currentThread].threadDictionary[kApolloWebJSONTypedWriteScopeKey] boolValue]) {
+        NSString *target = [fullName isKindOfClass:[NSString class]] ? fullName : nil;
+        BOOL targetIsLink = [target hasPrefix:@"t3_"];
+        ApolloWebJSONNoteCommentWriteContext(self, text, nil, nil,
+                                             targetIsLink ? target : nil,
+                                             targetIsLink ? nil : target);
+    }
+    return %orig;
+}
+
+- (id)editComment:(id)comment newText:(id)text completion:(id)completion {
+    ApolloWebJSONNoteCommentWriteContext(self, text,
+                                         ApolloWebJSONThingProperty(comment, @selector(subreddit)),
+                                         ApolloWebJSONThingProperty(comment, @selector(subredditID)),
+                                         ApolloWebJSONThingProperty(comment, @selector(linkID)),
+                                         nil);
+    return %orig;
+}
+
 %end
 
-// Cookie-routed comment writes (/api/editusertext, /api/comment) come back from
-// www.reddit.com in the old-reddit {parent, content:"<html>"} shape, which Apollo
-// can't render (the edited/posted comment shows empty with 0 upvotes). Rewrite the
-// serializer's output into the modern shape Apollo expects. No-op outside Web JSON
-// mode / for the modern shape — see ApolloWebJSONFixupWriteResponseObject.
+// Comment writes (/api/editusertext, /api/comment) can come back in the legacy
+// old-reddit {parent, content:"<html>"} shape — always from www.reddit.com
+// (Web JSON mode), and intermittently from oauth.reddit.com for API-key
+// accounts too — which Apollo renders as a blank comment (no author/score/
+// timestamp). Rewrite the serializer's output into the modern shape Apollo
+// expects. No-op for the modern shape — see ApolloWebJSONFixupWriteResponseObject.
 %hook RDKResponseSerializer
 - (id)responseObjectForResponse:(id)response data:(id)data error:(id *)error {
     id serializerData = data;
@@ -785,9 +857,14 @@ void ApolloWebJSONRepairPoisonedAccountBlobs(void) {
         @catch (NSException *e) { ApolloLog(@"[WebJSON] listing-media fixup failed: %@", e); }
     }
     id obj = %orig(response, serializerData, error);
+    // The write fixup runs in EVERY auth mode, not just Web JSON: since 2026-08
+    // oauth.reddit.com has intermittently returned the legacy old-reddit
+    // write-response shape to API-key (OAuth) clients too (also hit Narwhal),
+    // which renders the just-posted comment with no author/score/timestamp.
+    // The repair is a strict no-op for the modern shape.
+    @try { obj = ApolloWebJSONFixupWriteResponseObject(response, obj); }
+    @catch (NSException *e) { ApolloLog(@"[WebJSON] write-response fixup failed: %@", e); }
     if (sWebJSONEnabled) {
-        @try { obj = ApolloWebJSONFixupWriteResponseObject(response, obj); }
-        @catch (NSException *e) { ApolloLog(@"[WebJSON] write-response fixup failed: %@", e); }
         @try { obj = ApolloWebJSONFixupModeratorsResponseObject(response, obj); }
         @catch (NSException *e) { ApolloLog(@"[WebJSON] moderators-response fixup failed: %@", e); }
         // No legacy equivalent exists for this endpoint at all (see
