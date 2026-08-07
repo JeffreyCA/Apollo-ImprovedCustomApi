@@ -421,17 +421,21 @@ static BOOL CloudMessageSuggestsUnavailableModel(NSString *message) {
 }
 
 static NSInteger CloudMappedErrorCode(NSInteger status, NSString *message, NSString *provider) {
-    if (status == 401 || status == 402 || status == 403 || CloudMessageSuggestsAuthProblem(message)) {
-        return kCloudErrorAuth;
+    // A provider's status is more authoritative than prose in its body.
+    // Quota responses commonly mention "billing" or "credits", which the
+    // auth heuristic below would otherwise mislabel as a bad API key.
+    if (status == 401 || status == 402 || status == 403) return kCloudErrorAuth;
+    if (status == 429) return kCloudErrorQuota;
+    if (status == 404 && ![provider isEqualToString:@"custom"]) {
+        return kCloudErrorModelUnavailable;
     }
     if (status == 400 && CloudMessageSuggestsContextOverflow(message)) {
         return kCloudErrorContextWindow;
     }
-    if ((status == 404 && ![provider isEqualToString:@"custom"]) ||
-        CloudMessageSuggestsUnavailableModel(message)) {
+    if (CloudMessageSuggestsUnavailableModel(message)) {
         return kCloudErrorModelUnavailable;
     }
-    if (status == 429) return kCloudErrorQuota;
+    if (CloudMessageSuggestsAuthProblem(message)) return kCloudErrorAuth;
     return kCloudErrorService;
 }
 

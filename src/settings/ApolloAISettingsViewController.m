@@ -352,6 +352,14 @@ static UIView *ApolloAIModelAccessory(NSString *badge, BOOL selected, UIColor *f
                                                       : @"The provider returned an invalid response.";
                 ApolloLog(@"[AICloud] model list failed provider=%@ http=%ld error=%@",
                           self.provider, (long)http.statusCode, reason);
+                if (self.models.count > 0) {
+                    // Preserve the last successful catalog. A background view
+                    // is hidden by those stale rows, so make the refresh error
+                    // visible as a transient toast instead.
+                    ApolloShowToastWithStyle(@"Couldn't Refresh Models", reason,
+                                             ApolloToastStyleError, nil);
+                    return;
+                }
                 [self showLoadingMessage:[NSString stringWithFormat:@"Couldn't load models.\n%@\n\nPull down to retry.", reason]
                                   spinning:NO];
                 return;

@@ -20,7 +20,8 @@
 //    15 = provider quota/rate limit exhausted                    [cloud-only]
 //  Code 9 (transient, retried in an unbounded loop by the caller) is never
 //  emitted: a persistent HTTP 429/5xx would loop forever against a paid API.
-//  Transient HTTP errors get ONE internal retry, then fail as code 12.
+//  Transient HTTP errors get ONE internal retry, then surface the final
+//  provider failure through the mapped cloud error code above.
 //
 
 #import <Foundation/Foundation.h>
