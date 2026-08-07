@@ -1,6 +1,7 @@
 // ApolloGalleryFeed.m — see ApolloGalleryFeed.h for the feature overview.
 
 #import "ApolloGalleryFeed.h"
+#import "ApolloTagFilters.h"
 #import "ApolloCommon.h"
 #import "ApolloHostedVideo.h"
 #import "ApolloState.h"
@@ -172,9 +173,11 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 }
 
 - (BOOL)shouldBlurThumbnail {
-    // Mirrors what the feed itself does for flagged posts: obscure the picture
-    // in the grid, show it plainly once the user opens it deliberately.
-    return self.isNSFW || self.isSpoiler;
+    // Spoilers keep their independent reveal gate unconditionally. NSFW blurs
+    // when either the account's Reddit adult-content pref or the tweak's own
+    // Tag Filters setting says to — resolved against this ITEM's subreddit
+    // (not the feed's) so per-subreddit overrides apply to every tile.
+    return self.isSpoiler || (self.isNSFW && ApolloShouldBlurNSFWMediaInSubreddit(self.subreddit));
 }
 
 @end

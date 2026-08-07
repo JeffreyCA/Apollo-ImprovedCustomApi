@@ -5,7 +5,9 @@
 #import "ApolloGalleryImageLoader.h"
 #import "ApolloGalleryImageViewer.h"
 #import "ApolloCommon.h"
+#import "ApolloTagFilters.h"
 #import "ApolloThemeRuntime.h"
+#import "TagFiltersViewController.h"
 
 #import <objc/message.h>
 
@@ -161,8 +163,8 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
         _imageView.clipsToBounds = YES;
         [self.contentView addSubview:_imageView];
 
-        // NSFW / spoiler cover. Blurring the tile keeps the grid scannable
-        // without putting the picture on screen unasked.
+        // NSFW / spoiler cover. NSFW follows Apollo's active-account adult
+        // content preference; spoilers always keep their reveal gate.
         _blurView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThickMaterialDark]];
         _blurView.frame = self.contentView.bounds;
         _blurView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -214,7 +216,7 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
 - (void)configureWithItem:(ApolloGalleryItem *)item {
     if (item.shouldBlurThumbnail) {
         self.blurView.hidden = NO;
-        self.blurLabel.text = item.isNSFW ? @"NSFW" : @"SPOILER";
+        self.blurLabel.text = item.isSpoiler ? @"SPOILER" : @"NSFW";
         [self.contentView bringSubviewToFront:self.blurView];
     }
     // No badge for an image's position within a multi-image post — every image
@@ -379,7 +381,29 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     [self.view addSubview:self.footerLabel];
 
     [self apollo_installNavigationButtons];
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self
+           selector:@selector(apollo_nsfwBlurInputsChanged:)
+               name:ApolloAdultContentBlurPreferenceDidChangeNotification
+             object:nil];
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self
+           selector:@selector(apollo_nsfwBlurInputsChanged:)
+               name:ApolloTagFiltersChangedNotification
+             object:nil];
     [self apollo_beginInitialLoad];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)apollo_nsfwBlurInputsChanged:(NSNotification *)notification {
+    // The captured Reddit preference can arrive after Gallery's initial cells
+    // were configured, or change when the active account switches; the Tag
+    // Filters settings can be edited while a Gallery sits in the nav stack.
+    [self.collectionView reloadData];
+    (void)notification;
 }
 
 - (void)viewDidLayoutSubviews {
