@@ -107,14 +107,24 @@ static void ApplyThemeTableSeparator(UITableView *tableView) {
 static const void *kApolloThemeSearchPillKey = &kApolloThemeSearchPillKey;
 
 static void ApplyThemeSearchFieldBackground(UISearchBar *searchBar) {
-    if (!sEnabled || !searchBar) return;
+    if (!searchBar) return;
+    UITextField *field = searchBar.searchTextField;
+    UIView *pill = field ? objc_getAssociatedObject(field, kApolloThemeSearchPillKey) : nil;
+    // The pill is tweak-owned, so UIKit has no native state transition that
+    // removes it when the custom runtime turns off. The disable invalidation
+    // re-enters here through the trait cascade; use that pass to tear down the
+    // stale themed fill immediately. Keep the association so a later re-enable
+    // can cheaply reinsert the same view.
+    if (!sEnabled) {
+        [pill removeFromSuperview];
+        return;
+    }
     // Elevated (== card), NOT Tertiary/raised: Apollo natively paints the
     // Search tab's whole header band with the theme's raised surface, so a
     // raised pill would vanish into its own band. The card color keeps the
     // pill distinct on that band (and reads like an inset control on the
     // bars-colored toolbars other search bars sit in).
     UIColor *pillColor = ApolloThemeRuntimeColor(ApolloThemeTokenElevatedBackground);
-    UITextField *field = searchBar.searchTextField;
     if (!pillColor || !field) return;
     // Writing searchTextField.backgroundColor does nothing visible: the stock
     // UISearchBar draws its pill via _UISearchBarSearchFieldBackgroundView and
@@ -126,7 +136,6 @@ static void ApplyThemeSearchFieldBackground(UISearchBar *searchBar) {
     // view and below the field's text/icons — same overlay pattern the rest of
     // the tweak uses. Dynamic color, so light/dark resolves via the trait
     // cascade; didMoveToWindow/traitCollectionDidChange keep it applied.
-    UIView *pill = objc_getAssociatedObject(field, kApolloThemeSearchPillKey);
     if (!pill) {
         pill = [[UIView alloc] initWithFrame:field.bounds];
         pill.userInteractionEnabled = NO;

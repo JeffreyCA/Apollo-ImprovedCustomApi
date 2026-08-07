@@ -517,18 +517,15 @@ static ApolloThemeGalleryResolver sGalleryResolver = nil;
     ApolloLog(@"ThemeStore: deleteTheme %@ (now %lu themes)", themeID, (unsigned long)themes.count);
     [self setAllThemes:themes];
     if (self.separateThemesEnabled) {
-        NSString *nextID = themes.firstObject[@"id"];
         for (ApolloThemeMode mode = ApolloThemeModeLight; mode < ApolloThemeModeCount; mode++) {
             if (![self isCustomThemeID:themeID selectedForMode:mode]) continue;
             ApolloThemeApplyTarget target = mode == ApolloThemeModeDark
                 ? ApolloThemeApplyTargetDark : ApolloThemeApplyTargetLight;
-            if (nextID) {
-                [self selectCustomTheme:nextID forTarget:target];
-            } else {
-                ApolloThemeMode otherMode = mode == ApolloThemeModeDark
-                    ? ApolloThemeModeLight : ApolloThemeModeDark;
-                [self setPointer:[self pointerForMode:otherMode] forTarget:target];
-            }
+            // Match the single-theme deletion contract and the confirmation
+            // copy: every affected appearance returns to Apollo themes. Picking
+            // themes.firstObject here reproduced issue #742 whenever another
+            // stored theme happened to sort first.
+            [self setPointer:@{ kPointerKindKey: kPointerApollo } forTarget:target];
         }
         return YES;
     }
