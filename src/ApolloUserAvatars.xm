@@ -115,6 +115,11 @@ static const void *kApolloProfileTabAvatarImageMarkerKey = &kApolloProfileTabAva
 // the visible subset in display order; cards with no data stay hidden and out of
 // the row, so the layout centres however many actually have values.
 @property(nonatomic, strong) NSArray<ApolloProfileStatCard *> *statCards;
+// Raw values behind the cards' compact text, kept for the tap-detail popup
+// (issue #797): the cards show "13.1k", the popup shows "13,102".
+@property(nonatomic) NSInteger statLinkKarma;
+@property(nonatomic) NSInteger statCommentKarma;
+@property(nonatomic) NSTimeInterval statCreatedUTC;
 @property(nonatomic, strong) ApolloProfileStatCard *postKarmaCard;
 @property(nonatomic, strong) ApolloProfileStatCard *commentKarmaCard;
 @property(nonatomic, strong) ApolloProfileStatCard *ageCard;
@@ -168,6 +173,14 @@ static void ApolloProfileScheduleInstallOrUpdateHeader(id viewControllerObject);
 static CGFloat const ApolloProfileStatsRowHeight = 66.0;
 static CGFloat const ApolloProfileStatsCardGap = 10.0;
 static CGFloat const ApolloProfileStatsTopGap = 14.0;
+// The side margin of Apollo's NATIVE profile menu table (the Posts/Comments/
+// Saved group under the header): 15pt, pixel-measured from both a standard
+// iOS 17 375pt device (issue #852's screenshots) and the iOS 26 glass sim.
+// The identity layout's own 24pt text inset reads fine for centered text but
+// left the boxed stat cards (24pt) and the avatar/Edit chrome (24/20pt)
+// visibly misaligned against those grouped rows, so all profile chrome aligns
+// to this margin instead (issue #852).
+static CGFloat const ApolloProfileGroupedMargin = 15.0;
 // Collapsed bio line cap; the "more" toggle expands past it.
 static NSInteger const ApolloProfileAboutCollapsedLines = 3;
 
@@ -257,17 +270,11 @@ static UIImage *ApolloProfileTintedSymbol(NSString *name, CGFloat pointSize, UIC
     _effectView.clipsToBounds = YES;
     _effectView.layer.cornerRadius = 18.0;
     _effectView.layer.cornerCurve = kCACornerCurveContinuous;
-    // Faint white rim only — reads as a glass edge on dark, disappears on light.
-    // The hard separator stroke it replaces looked like an empty outlined box on
-    // the pale melt. Separation instead comes from the soft shadow on `self`.
-    _effectView.layer.borderWidth = 1.0;
-    _effectView.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.12].CGColor;
     [self addSubview:_effectView];
 
     // Soft ambient shadow lifts the card off the banner melt without a visible
     // outline. Cast from `self` (the effect view clips its own rounded bounds).
     self.layer.shadowColor = UIColor.blackColor.CGColor;
-    self.layer.shadowOpacity = 0.12;
     self.layer.shadowRadius = 7.0;
     self.layer.shadowOffset = CGSizeMake(0.0, 3.0);
 
@@ -283,13 +290,49 @@ static UIImage *ApolloProfileTintedSymbol(NSString *name, CGFloat pointSize, UIC
     _captionLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
     _captionLabel.textColor = [UIColor secondaryLabelColor];
     _captionLabel.textAlignment = NSTextAlignmentCenter;
+    // "Comment Karma" doesn't fit a third-of-a-13-mini card at full size —
+    // shrink like the value label instead of truncating (issue #852).
+    _captionLabel.adjustsFontSizeToFitWidth = YES;
+    _captionLabel.minimumScaleFactor = 0.75;
     [_effectView.contentView addSubview:_captionLabel];
+
+    [self apollo_applyCardStyle];
     return self;
+}
+
+// Mode-dependent chrome. Dark (and real Liquid Glass, which adapts on its own)
+// keeps the translucent glass card: material + faint white rim + a lifted
+// shadow. Light mode on non-glass builds goes FLAT instead — solid (theme)
+// card background, no rim, whisper of a shadow — because the grey blur
+// material plus a white rim plus a 0.12 black halo read as a smudged outline
+// on a white page and matched nothing else on the screen (issue #852; also the
+// "Liquid Glass UI on Standard" half of #797). The flat card matches the
+// native inset-grouped rows directly below it.
+- (void)apollo_applyCardStyle {
+    BOOL dark = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
+    if (dark || IsLiquidGlass()) {
+        self.effectView.effect = ApolloProfileCardEffect();
+        self.effectView.backgroundColor = [UIColor clearColor];
+        // Faint white rim — reads as a glass edge on dark. The hard separator
+        // stroke it replaces looked like an empty outlined box on the pale melt.
+        self.effectView.layer.borderWidth = 1.0;
+        self.effectView.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.12].CGColor;
+        // Lift the shadow in dark mode where a black shadow reads weakly.
+        self.layer.shadowOpacity = dark ? 0.28 : 0.12;
+    } else {
+        self.effectView.effect = nil;
+        UIColor *bg = ApolloThemeCardBackgroundColor() ?: [UIColor secondarySystemGroupedBackgroundColor];
+        self.effectView.backgroundColor = [bg resolvedColorWithTraitCollection:self.traitCollection];
+        self.effectView.layer.borderWidth = 0.0;
+        self.layer.shadowOpacity = 0.08;
+    }
 }
 
 - (void)setValue:(NSString *)value caption:(NSString *)caption {
     self.valueLabel.text = value;
     self.captionLabel.text = caption;
+    self.accessibilityLabel = [NSString stringWithFormat:@"%@: %@", caption, value];
+    self.accessibilityHint = @"Double tap for details";
 }
 
 - (void)layoutSubviews {
@@ -305,10 +348,7 @@ static UIImage *ApolloProfileTintedSymbol(NSString *name, CGFloat pointSize, UIC
     [super traitCollectionDidChange:previousTraitCollection];
     self.valueLabel.textColor = [UIColor labelColor];
     self.captionLabel.textColor = [UIColor secondaryLabelColor];
-    self.effectView.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.12].CGColor;
-    // Lift the shadow slightly in dark mode where a black shadow reads weakly.
-    BOOL dark = self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark;
-    self.layer.shadowOpacity = dark ? 0.28 : 0.12;
+    [self apollo_applyCardStyle];
 }
 
 @end
@@ -474,11 +514,18 @@ static const void *kApolloProfileGlassAccentKey = &kApolloProfileGlassAccentKey;
         [self addSubview:_badgeBookView];
 
         // Glass stat cards. Created up front (hidden) and populated in applyProfileInfo.
+        // Tappable (issue #797): stock Apollo's karma/age text opened a detail
+        // popup with the exact counts; the cards replaced that text, so they
+        // take over the tap too.
         _postKarmaCard = [[ApolloProfileStatCard alloc] init];
         _commentKarmaCard = [[ApolloProfileStatCard alloc] init];
         _ageCard = [[ApolloProfileStatCard alloc] init];
         for (ApolloProfileStatCard *card in @[_postKarmaCard, _commentKarmaCard, _ageCard]) {
             card.hidden = YES;
+            [card addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self
+                                                                               action:@selector(apollo_statCardTapped:)]];
+            card.isAccessibilityElement = YES;
+            card.accessibilityTraits = UIAccessibilityTraitButton;
             [self addSubview:card];
         }
         _statCards = @[];
@@ -713,7 +760,10 @@ static UIFont *ApolloProfileClassicNameFont(void) {
 // cascade below picks up the new alignment and starts below whichever of the
 // avatar or the name column reaches further down.
 - (void)apollo_applyClassicIdentityOverrides:(ApolloIdentityHeaderLayout *)identity forWidth:(CGFloat)width {
-    CGFloat margin = ApolloIdentityHeaderSideInset();
+    // The native-group margin, not the layout's 24pt text inset: Classic's
+    // leading avatar (and the body column beneath it) line up with the Edit
+    // pill and the grouped rows below the header (issue #852).
+    CGFloat margin = ApolloProfileGroupedMargin;
     CGFloat diameter = ApolloIdentityHeaderAvatarDiameter();
     BOOL rtl = self.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft;
     CGFloat avatarX = rtl ? (width - margin - diameter) : margin;
@@ -741,12 +791,30 @@ static UIFont *ApolloProfileClassicNameFont(void) {
     // Dynamic Type size (a centered stack would grow back upward into the
     // banner once stackHeight exceeded the ~48pt visible/below-banner half).
     CGFloat stackY = CGRectGetHeight(identity->bannerFrame);
+    if (stackY <= 0.0) {
+        // Banner disabled: there is no seam, and "flush at y=0" pinned the name
+        // to the header's top edge while the avatar hung below it (issue #851).
+        // With everything on solid background, center the visible name/subname
+        // stack on the avatar — the same vertical anchor the Edit pill uses —
+        // clamped so huge Dynamic Type stacks grow downward, never above the
+        // avatar's top.
+        CGFloat stackHeight = nameHeight + (self.usernameLabel.hidden ? 0.0 : (1.0 + subnameHeight));
+        stackY = MAX(CGRectGetMinY(avatarFrame),
+                     floor(CGRectGetMidY(avatarFrame) - stackHeight / 2.0));
+    }
     CGRect nameFrame = CGRectMake(nameX, stackY, nameWidth, nameHeight);
     CGRect subnameFrame = CGRectMake(nameX, CGRectGetMaxY(nameFrame) + 1.0, nameWidth, subnameHeight);
 
     identity->avatarFrame = avatarFrame;
     identity->nameFrame = nameFrame;
     identity->subnameFrame = subnameFrame;
+    // Classic moves the entire body stack onto the native 15pt grouped
+    // margins. Widen the column by the 9pt recovered on each side instead of
+    // only moving its origin: otherwise LTR ends 18pt short on the trailing
+    // edge, while RTL over-expands toward the leading edge. The max-width
+    // column on iPad keeps its cap plus the same symmetric 18pt adjustment.
+    identity->bodyWidth = MIN(width - 2.0 * margin,
+                              identity->bodyWidth + 2.0 * (ApolloIdentityHeaderSideInset() - margin));
     // bodyX is a frame origin (always the rect's left edge, even in RTL) — in
     // RTL the body column hugs the right margin instead, so its origin sits
     // `bodyWidth` in from that margin rather than at `margin` itself.
@@ -939,13 +1007,21 @@ static UIFont *ApolloProfileClassicNameFont(void) {
         y += badgeH;
     }
 
-    // Glass stat cards
+    // Glass stat cards. The row hugs the 15pt inset-grouped margin rather than
+    // the text column's inset, so the card edges line up with the native
+    // Posts/Comments/Saved group directly below the header (issue #852). The
+    // symmetric widening keeps the row centered (and RTL-safe); on iPad the
+    // capped, centered body column just gains the same few points per side.
     NSUInteger cardCount = self.statCards.count;
     if (cardCount > 0) {
         y += ApolloProfileStatsTopGap;
         if (apply) {
+            CGFloat delta = MAX(0.0, MIN(bodyX - ApolloProfileGroupedMargin,
+                                         ApolloIdentityHeaderSideInset() - ApolloProfileGroupedMargin));
+            CGFloat rowX = bodyX - delta;
+            CGFloat rowW = bodyWidth + delta * 2.0;
             CGFloat totalGap = ApolloProfileStatsCardGap * (cardCount - 1);
-            CGFloat cardW = floor((bodyWidth - totalGap) / cardCount);
+            CGFloat cardW = floor((rowW - totalGap) / cardCount);
             // RTL mirrors reading order, exactly like the Follow/Message row above:
             // statCards[0] (post karma) is the card that reads first, which is the
             // trailing (right) slot in RTL. The last physical slot still absorbs the
@@ -953,8 +1029,8 @@ static UIFont *ApolloProfileClassicNameFont(void) {
             BOOL rtl = self.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft;
             for (NSUInteger i = 0; i < cardCount; i++) {
                 NSUInteger slot = rtl ? (cardCount - 1 - i) : i;
-                CGFloat cardX = bodyX + (CGFloat)slot * (cardW + ApolloProfileStatsCardGap);
-                CGFloat thisWidth = (slot == cardCount - 1) ? (bodyX + bodyWidth - cardX) : cardW;
+                CGFloat cardX = rowX + (CGFloat)slot * (cardW + ApolloProfileStatsCardGap);
+                CGFloat thisWidth = (slot == cardCount - 1) ? (rowX + rowW - cardX) : cardW;
                 self.statCards[i].frame = CGRectMake(cardX, y, thisWidth, ApolloProfileStatsRowHeight);
             }
         }
@@ -1002,7 +1078,8 @@ static UIFont *ApolloProfileClassicNameFont(void) {
     CGFloat editButtonWidth = [self apollo_editButtonWidth];
     CGFloat editButtonHeight = ApolloProfileEditButtonHeight();
     BOOL editRTL = self.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft;
-    CGFloat editButtonX = editRTL ? 20.0 : (width - editButtonWidth - 20.0);
+    CGFloat editButtonX = editRTL ? ApolloProfileGroupedMargin
+                                  : (width - editButtonWidth - ApolloProfileGroupedMargin);
     self.editProfileButton.frame = CGRectMake(editButtonX,
                                               CGRectGetMidY(identity.avatarFrame) - editButtonHeight / 2.0,
                                               editButtonWidth, editButtonHeight);
@@ -1119,9 +1196,15 @@ static UIFont *ApolloProfileClassicNameFont(void) {
         // a "0 karma" row); !sProfileShowStatCards is the viewer turning cards off.
         for (ApolloProfileStatCard *card in @[self.postKarmaCard, self.commentKarmaCard, self.ageCard]) card.hidden = YES;
         self.statCards = @[];
+        self.statLinkKarma = -1;
+        self.statCommentKarma = -1;
+        self.statCreatedUTC = 0.0;
         return;
     }
 
+    self.statLinkKarma = info.linkKarma;
+    self.statCommentKarma = info.commentKarma;
+    self.statCreatedUTC = info.createdUTC;
     if (info.linkKarma >= 0) {
         [self.postKarmaCard setValue:ApolloProfileFormatCount(info.linkKarma) caption:@"Post Karma"];
         [visible addObject:self.postKarmaCard];
@@ -1139,6 +1222,55 @@ static UIFont *ApolloProfileClassicNameFont(void) {
         card.hidden = ![visible containsObject:card];
     }
     self.statCards = visible;
+}
+
+// Stat-card tap (issue #797): show the detail popup stock Apollo offered on
+// its karma/age text — exact grouped counts, and for the age card the actual
+// join date (the card itself can only say "New" for young accounts, which
+// reporters called out as unhelpful).
+- (void)apollo_statCardTapped:(UITapGestureRecognizer *)gesture {
+    UIView *card = gesture.view;
+    NSString *title = nil, *message = nil;
+
+    NSNumberFormatter *grouped = [[NSNumberFormatter alloc] init];
+    grouped.numberStyle = NSNumberFormatterDecimalStyle;
+
+    if (card == self.postKarmaCard && self.statLinkKarma >= 0) {
+        title = @"Post Karma";
+        message = [grouped stringFromNumber:@(self.statLinkKarma)];
+    } else if (card == self.commentKarmaCard && self.statCommentKarma >= 0) {
+        title = @"Comment Karma";
+        message = [grouped stringFromNumber:@(self.statCommentKarma)];
+    } else if (card == self.ageCard && self.statCreatedUTC > 0.0) {
+        NSDate *created = [NSDate dateWithTimeIntervalSince1970:self.statCreatedUTC];
+        NSDateFormatter *joined = [[NSDateFormatter alloc] init];
+        joined.dateStyle = NSDateFormatterLongStyle;
+        joined.timeStyle = NSDateFormatterNoStyle;
+        NSDateComponentsFormatter *age = [[NSDateComponentsFormatter alloc] init];
+        age.unitsStyle = NSDateComponentsFormatterUnitsStyleFull;
+        age.allowedUnits = NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay;
+        age.maximumUnitCount = 2;
+        NSString *ago = [age stringFromDate:created toDate:[NSDate date]];
+        title = @"Reddit Age";
+        message = ago.length
+            ? [NSString stringWithFormat:@"Joined %@\n(%@ ago)", [joined stringFromDate:created], ago]
+            : [NSString stringWithFormat:@"Joined %@", [joined stringFromDate:created]];
+    }
+    if (!title) return;
+
+    // Nearest owning view controller via the responder chain — the header is
+    // a plain table header view with no controller reference of its own.
+    UIViewController *presenter = nil;
+    for (UIResponder *r = self.nextResponder; r; r = r.nextResponder) {
+        if ([r isKindOfClass:[UIViewController class]]) { presenter = (UIViewController *)r; break; }
+    }
+    if (!presenter) return;
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [presenter presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)applyProfileInfo:(ApolloUserProfileInfo *)info fallbackUsername:(NSString *)username {

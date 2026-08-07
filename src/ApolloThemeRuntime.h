@@ -50,6 +50,12 @@ UIColor *ApolloThemePageBackgroundColor(void);
 // own last-resort (typically UIColor.separatorColor).
 UIColor *ApolloThemeSeparatorColor(void);
 
+// Correct a RESOLVED color that was derived from a theme token under the wrong
+// appearance (ambient resolution vs the themed window — see issue #810):
+// returns the matching token's value for `traits`' light/dark mode, or nil
+// when the color is not a theme token value / needs no correction.
+UIColor *ApolloThemeRuntimeReresolveColor(UIColor *color, UITraitCollection *traits);
+
 // Re-derive a caller-provided system font in the active theme's system design.
 // Returns `base` unchanged when the theme runtime is inactive or the active
 // theme uses the default system font.

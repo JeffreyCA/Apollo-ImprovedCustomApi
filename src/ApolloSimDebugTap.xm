@@ -61,12 +61,20 @@ static void ApolloSimDebugSendTouch(UITouch *touch) {
 }
 
 static void ApolloSimDebugPerformTap(CGPoint point) {
+    // Hit-test every visible window from topmost down, not just the key
+    // window: alert/overlay windows sit above it, and key-window-only taps
+    // sailed straight through their chrome into the app underneath.
+    UIView *hitView = nil;
     UIWindow *window = nil;
-    for (UIWindow *candidate in ApolloAllWindows()) {
-        if (candidate.isKeyWindow) { window = candidate; break; }
+    NSArray<UIWindow *> *ordered = [ApolloAllWindows() sortedArrayUsingComparator:^NSComparisonResult(UIWindow *a, UIWindow *b) {
+        if (a.windowLevel == b.windowLevel) return NSOrderedSame;
+        return a.windowLevel > b.windowLevel ? NSOrderedAscending : NSOrderedDescending;
+    }];
+    for (UIWindow *candidate in ordered) {
+        if (candidate.hidden) continue;
+        UIView *hit = [candidate hitTest:point withEvent:nil];
+        if (hit) { window = candidate; hitView = hit; break; }
     }
-    if (!window) window = ApolloAllWindows().firstObject;
-    UIView *hitView = [window hitTest:point withEvent:nil];
     if (!window || !hitView) {
         ApolloLog(@"[SimDebugTap] no window/hit view for (%.0f, %.0f)", point.x, point.y);
         return;
@@ -233,6 +241,40 @@ static void ApolloSimDebugPerformPress(CGPoint point, NSTimeInterval duration) {
     });
 }
 
+// "dump" command: write the full view hierarchy of every window (class, frame
+// in window coords, hidden/alpha/backgroundColor) to /tmp/apollofix-dump.txt so
+// the host can inspect z-order and geometry without a debugger attached.
+static void ApolloSimDebugDumpView(UIView *view, UIWindow *window, NSInteger depth, NSMutableString *out) {
+    CGRect winFrame = [view.superview convertRect:view.frame toView:window];
+    NSString *pad = [@"" stringByPaddingToLength:MIN(depth, 40) * 2 withString:@" " startingAtIndex:0];
+    UIColor *bg = view.backgroundColor;
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    NSString *bgDesc = @"nil";
+    if (bg && [bg getRed:&r green:&g blue:&b alpha:&a]) {
+        bgDesc = [NSString stringWithFormat:@"rgba(%.2f,%.2f,%.2f,%.2f)", r, g, b, a];
+    } else if (bg) {
+        bgDesc = bg.description;
+    }
+    [out appendFormat:@"%@%@ frame=(%.1f,%.1f,%.1f,%.1f)%@ alpha=%.2f bg=%@\n",
+        pad, NSStringFromClass(view.class),
+        winFrame.origin.x, winFrame.origin.y, winFrame.size.width, winFrame.size.height,
+        view.hidden ? @" HIDDEN" : @"", view.alpha, bgDesc];
+    for (UIView *subview in view.subviews) {
+        ApolloSimDebugDumpView(subview, window, depth + 1, out);
+    }
+}
+
+static void ApolloSimDebugDumpHierarchy(void) {
+    NSMutableString *out = [NSMutableString string];
+    for (UIWindow *window in ApolloAllWindows()) {
+        [out appendFormat:@"=== window %@ hidden=%d level=%.0f ===\n",
+            NSStringFromClass(window.class), window.hidden, (double)window.windowLevel];
+        ApolloSimDebugDumpView(window, window, 0, out);
+    }
+    [out writeToFile:@"/tmp/apollofix-dump.txt" atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    ApolloLog(@"[SimDebugTap] hierarchy dump written (%lu bytes)", (unsigned long)out.length);
+}
+
 static UIResponder *ApolloSimDebugFirstResponder(UIView *view) {
     if (view.isFirstResponder) return view;
     for (UIView *subview in view.subviews) {
@@ -346,6 +388,10 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
                                                        encoding:NSUTF8StringEncoding error:nil];
         if ([contents hasPrefix:@"insetbottom "]) {
             ApolloSimDebugForceBottomInset([[contents substringFromIndex:12] doubleValue]);
+            return;
+        }
+        if ([contents hasPrefix:@"dump"]) {
+            ApolloSimDebugDumpHierarchy();
             return;
         }
         // "headerdump" command: log every visible scroll view's topEdgeEffect

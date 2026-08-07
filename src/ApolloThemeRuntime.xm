@@ -13,6 +13,12 @@
 
 @class ASDisplayNode;
 
+// ASSizeRange ABI stand-in (two by-value CGSizes) so Logos can hook
+// -layoutSpecThatFits:; matches ApolloTextureDecls.h's ApolloTextureSizeRange
+// (not imported here — its ASTextNode/ASDisplayNode interfaces would collide
+// with this file's local declarations).
+struct ApolloThemeSizeRange { CGSize min; CGSize max; };
+
 @interface ASDisplayNode : NSObject
 - (ASDisplayNode *)supernode;
 @property (nonatomic, strong) UIColor *backgroundColor;
@@ -98,12 +104,57 @@ static void ApplyThemeTableSeparator(UITableView *tableView) {
     }
 }
 
+static const void *kApolloThemeSearchPillKey = &kApolloThemeSearchPillKey;
+
 static void ApplyThemeSearchFieldBackground(UISearchBar *searchBar) {
-    if (!sEnabled || !searchBar) return;
-    UIColor *raised = ApolloThemeRuntimeColor(ApolloThemeTokenTertiaryBackground);
+    if (!searchBar) return;
     UITextField *field = searchBar.searchTextField;
-    if (raised && field && ![field.backgroundColor isEqual:raised]) {
-        field.backgroundColor = raised;
+    UIView *pill = field ? objc_getAssociatedObject(field, kApolloThemeSearchPillKey) : nil;
+    // The pill is tweak-owned, so UIKit has no native state transition that
+    // removes it when the custom runtime turns off. The disable invalidation
+    // re-enters here through the trait cascade; use that pass to tear down the
+    // stale themed fill immediately. Keep the association so a later re-enable
+    // can cheaply reinsert the same view.
+    if (!sEnabled) {
+        [pill removeFromSuperview];
+        return;
+    }
+    // Elevated (== card), NOT Tertiary/raised: Apollo natively paints the
+    // Search tab's whole header band with the theme's raised surface, so a
+    // raised pill would vanish into its own band. The card color keeps the
+    // pill distinct on that band (and reads like an inset control on the
+    // bars-colored toolbars other search bars sit in).
+    UIColor *pillColor = ApolloThemeRuntimeColor(ApolloThemeTokenElevatedBackground);
+    if (!pillColor || !field) return;
+    // Writing searchTextField.backgroundColor does nothing visible: the stock
+    // UISearchBar draws its pill via _UISearchBarSearchFieldBackgroundView and
+    // UISearchBarTextField never renders its own backgroundColor — so on the
+    // Search tab the themed fill silently missed (issue #748). (A themed
+    // setSearchFieldBackgroundImage: was tried first; UIKit swaps in an image
+    // background host but never renders the image.) Instead paint the capsule
+    // ourselves: an inert themed overlay stacked directly above UIKit's pill
+    // view and below the field's text/icons — same overlay pattern the rest of
+    // the tweak uses. Dynamic color, so light/dark resolves via the trait
+    // cascade; didMoveToWindow/traitCollectionDidChange keep it applied.
+    if (!pill) {
+        pill = [[UIView alloc] initWithFrame:field.bounds];
+        pill.userInteractionEnabled = NO;
+        pill.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        pill.layer.cornerRadius = IsLiquidGlass() ? 18.0 : 10.0;
+        pill.layer.cornerCurve = kCACornerCurveContinuous;
+        objc_setAssociatedObject(field, kApolloThemeSearchPillKey, pill, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    pill.backgroundColor = pillColor;
+    pill.frame = field.bounds;
+    if (pill.superview != field) {
+        // Directly above UIKit's own background view when it exists (covering
+        // its grey material), else at the very back.
+        UIView *systemPill = nil;
+        for (UIView *sub in field.subviews) {
+            if ([NSStringFromClass(sub.class) containsString:@"Background"]) { systemPill = sub; break; }
+        }
+        if (systemPill) [field insertSubview:pill aboveSubview:systemPill];
+        else [field insertSubview:pill atIndex:0];
     }
 }
 
@@ -397,11 +448,14 @@ typedef struct { uint32_t rgb; ApolloThemeToken token; } TextPaletteEntry;
 // which ends in UIColor initWithRed:green:blue:alpha:. We intentionally use the
 // constants only at text render sinks, never as global constructor remaps.
 static const TextPaletteEntry kTextPaletteEntries[] = {
-    // role 0: primary. Read-state primary is intentionally routed to secondary.
+    // role 0: primary. Read-state primary (0x303030 light / 0xD0D1D6 dark —
+    // the dimmed title Apollo renders once a post is read) routes to secondary
+    // so custom themes keep a visible read/unread distinction (issue #716);
+    // mapping it to Label made read posts identical to unread ones.
     { 0x000000, ApolloThemeTokenLabel },
-    { 0x303030, ApolloThemeTokenLabel },
+    { 0x303030, ApolloThemeTokenSecondaryLabel },
     { 0xEEEFF5, ApolloThemeTokenLabel },
-    { 0xD0D1D6, ApolloThemeTokenLabel },
+    { 0xD0D1D6, ApolloThemeTokenSecondaryLabel },
     { 0x999999, ApolloThemeTokenSecondaryLabel },
     { 0x939499, ApolloThemeTokenSecondaryLabel },
     { 0x86868A, ApolloThemeTokenSecondaryLabel },
@@ -630,8 +684,19 @@ static void ApplyThemeFontToNavigationTitleControl(UIView *titleControl) {
     RefreshFontsInViewTree(titleControl, CurrentFontChoice(), YES);
 }
 
+// Per-thread text-sink bypass (ASDK builds nodes off the main thread, so a
+// plain global would leak the bypass across concurrently-initializing nodes).
+// Incremented around code whose text must keep its original colors — currently
+// SmallInfoOverlayNode, the GIF/gallery duration pill (issue #710): its text
+// sits on an always-dark blurred pill that never follows the theme, but its
+// near-white color collides with the dark-mode text palette constants, so the
+// remap sank it to the theme's Label token — dark, and therefore unreadable on
+// the pill, whenever a light custom theme was active.
+static __thread NSInteger sTextSinkBypass;
+
 static BOOL TextSinkMayUseTheme(id object, uintptr_t caller) {
     if (!sEnabled) return NO;
+    if (sTextSinkBypass > 0) return NO;
     if (CallerMayUseThemeRuntime(caller)) return YES;
     return ObjectChainLooksApolloOwned(object);
 }
@@ -684,6 +749,52 @@ uint64_t ApolloThemeRuntimeEpoch(void) {
     uint64_t e = sEpoch;
     os_unfair_lock_unlock(&sLock);
     return e;
+}
+
+// For explicit, already-RESOLVED colors that were derived from a theme token
+// under the WRONG appearance: ambient resolution (kModeCurrent /
+// UITraitCollection.currentTraitCollection) during context-menu preview
+// building follows the SYSTEM style, not Apollo's themed window, so a dark
+// themed feed can get a light-variant platter color (issue #810). Find the
+// token whose light-or-dark value matches the resolved RGB and return that
+// token's value for `traits`' mode; nil when the color isn't a theme token
+// value (caller keeps the original) or no correction is needed.
+UIColor *ApolloThemeRuntimeReresolveColor(UIColor *color, UITraitCollection *traits) {
+    if (!sEnabled || !color || !traits) return nil;
+    CGFloat r = 0, g = 0, b = 0, a = 1;
+    if (!ColorComponents(color, &r, &g, &b, &a) || a < 0.99) return nil;
+    uint32_t rgb = ApolloThemeRGBKeyFromComponents(r, g, b);
+    ApolloThemeMode target = (traits.userInterfaceStyle == UIUserInterfaceStyleDark)
+        ? ApolloThemeModeDark : ApolloThemeModeLight;
+    // Surface tokens ONLY. A platter background is always a surface color;
+    // scanning text/separator/fill tokens invites value collisions with
+    // catastrophic corrections — e.g. a legitimately dark-resolved #000000
+    // platter also matches Label's LIGHT value and would be "corrected" to the
+    // near-white dark Label color.
+    static const ApolloThemeToken kSurfaceTokens[] = {
+        ApolloThemeTokenBackground,
+        ApolloThemeTokenSecondaryBackground,
+        ApolloThemeTokenTertiaryBackground,
+        ApolloThemeTokenElevatedBackground,
+        ApolloThemeTokenBarBackground,
+    };
+    uint32_t out = rgb;
+    BOOL found = NO;
+    os_unfair_lock_lock(&sLock);
+    for (NSUInteger i = 0; i < sizeof(kSurfaceTokens) / sizeof(kSurfaceTokens[0]); i++) {
+        ApolloThemeToken t = kSurfaceTokens[i];
+        if (sTokens[ApolloThemeModeLight][t] == rgb || sTokens[ApolloThemeModeDark][t] == rgb) {
+            out = sTokens[target][t];
+            found = YES;
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&sLock);
+    if (!found || out == rgb) return nil;
+    sBypassHook++;
+    UIColor *corrected = ApolloThemeUIColorFromRGB(out);
+    sBypassHook--;
+    return corrected;
 }
 
 static UIColor *ThemedTextColorForSourceColor(UIColor *source, id owner, uintptr_t caller) {
@@ -1687,6 +1798,28 @@ static ASImageNodeTintColorModificationBlockFn ASImageNodeTintColorModificationB
 - (void)didLoad {
     %orig;
     ApplyThemeThinSeparatorNode(self);
+}
+
+%end
+
+// The GIF/gallery duration pill (issue #710 — see sTextSinkBypass). Its text
+// is set from init and (re)referenced while building the layout spec; bypass
+// the text remap inside both so the pill keeps Apollo's original near-white
+// text on its always-dark backdrop instead of the theme's Label color.
+%hook _TtC6Apollo20SmallInfoOverlayNode
+
+- (id)init {
+    sTextSinkBypass++;
+    id result = %orig;
+    sTextSinkBypass--;
+    return result;
+}
+
+- (id)layoutSpecThatFits:(struct ApolloThemeSizeRange)fits {
+    sTextSinkBypass++;
+    id result = %orig;
+    sTextSinkBypass--;
+    return result;
 }
 
 %end
