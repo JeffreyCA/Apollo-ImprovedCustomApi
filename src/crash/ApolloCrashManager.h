@@ -13,7 +13,6 @@ NS_ASSUME_NONNULL_BEGIN
 // "signal" | "mach" | "nsexception" | "cpp_exception" | "memory_termination" | "user" | "unknown"
 @property (nonatomic, copy) NSString *crashCategory;
 @property (nonatomic, copy, nullable) NSString *exceptionName;
-@property (nonatomic, copy, nullable) NSString *sanitizedReason;
 // The full allowlisted outgoing report (JSON-safe).
 @property (nonatomic, copy) NSDictionary *sanitizedDictionary;
 // Short human-readable summary (crash type + top frames) for lists/summary.txt.

@@ -10,7 +10,6 @@ static const NSUInteger kMaxFramesCrashedThread = 256;
 static const NSUInteger kMaxFramesOtherThread = 64;
 static const NSUInteger kMaxFramesOtherThreadTight = 16;
 static const NSUInteger kMaxBinaryImages = 512;
-static const NSUInteger kMaxReasonLength = 500;
 static const NSUInteger kMaxRecentActions = 20;
 
 static NSString *ARHexAddress(id value) {
@@ -34,39 +33,63 @@ static NSArray *ARArray(id value) {
     return [value isKindOfClass:NSArray.class] ? value : nil;
 }
 
-@implementation ApolloCrashSanitizer
-
-#pragma mark - Redaction
-
-+ (NSString *)sanitizedDiagnosticString:(NSString *)input {
-    if (![input isKindOfClass:NSString.class] || input.length == 0) return nil;
-
-    NSString *result = input;
-    // Order matters: URLs first (they can contain r/… and u/… path segments),
-    // then Reddit identifiers, then credentials.
-    NSArray<NSArray<NSString *> *> *rules = @[
-        @[ @"https?://[^\\s\\]\\[\\)\\(<>]+", @"<url>" ],
-        @[ @"(?:^|(?<=\\s))/?r/[A-Za-z0-9_]+", @"<subreddit>" ],
-        @[ @"(?:^|(?<=\\s))/?(?:u|user)/[A-Za-z0-9_-]+", @"<user>" ],
-        @[ @"[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", @"<email>" ],
-        @[ @"(bearer\\s+)[A-Za-z0-9._~+/-]+=*", @"$1<redacted>" ],
-        @[ @"(access_token|refresh_token|api[_-]?key|client[_-]?secret)[\"'=:\\s]+[^\\s,\"'}]+", @"$1=<redacted>" ],
-    ];
-    for (NSArray<NSString *> *rule in rules) {
-        NSRegularExpression *regex =
-            [NSRegularExpression regularExpressionWithPattern:rule[0]
-                                                      options:NSRegularExpressionCaseInsensitive
-                                                        error:nil];
-        result = [regex stringByReplacingMatchesInString:result
-                                                 options:0
-                                                   range:NSMakeRange(0, result.length)
-                                            withTemplate:rule[1]];
-    }
-    if (result.length > kMaxReasonLength) {
-        result = [[result substringToIndex:kMaxReasonLength] stringByAppendingString:@"… <truncated>"];
-    }
-    return result;
+static NSString *ARAllowlistedCrashCategory(id value) {
+    NSString *category = ARString(value);
+    static NSSet<NSString *> *allowed;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        allowed = [NSSet setWithArray:@[
+            @"signal", @"mach", @"nsexception", @"cpp_exception",
+            @"memory_termination", @"deadlock", @"user",
+        ]];
+    });
+    return [allowed containsObject:category] ? category : @"unknown";
 }
+
+// NSException names are application-controlled strings. Only Foundation's
+// documented system identifiers are safe to expose; custom names are omitted
+// instead of trying to redact arbitrary text after the fact.
+static NSString *ARAllowlistedSystemExceptionName(id value) {
+    NSString *name = ARString(value);
+    static NSSet<NSString *> *allowed;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        allowed = [NSSet setWithArray:@[
+            NSGenericException,
+            NSRangeException,
+            NSInvalidArgumentException,
+            NSInternalInconsistencyException,
+            NSMallocException,
+            NSObjectInaccessibleException,
+            NSObjectNotAvailableException,
+            NSDestinationInvalidException,
+            NSPortTimeoutException,
+            NSInvalidSendPortException,
+            NSInvalidReceivePortException,
+            NSPortSendException,
+            NSPortReceiveException,
+            NSOldStyleException,
+        ]];
+    });
+    return [allowed containsObject:name] ? name : nil;
+}
+
+static BOOL ARIsAllowlistedRecentAction(NSString *event) {
+    static NSSet<NSString *> *allowed;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        allowed = [NSSet setWithArray:@[
+            @"app_became_active", @"app_resigned_active", @"app_entered_background",
+            @"memory_warning", @"opened_feed", @"opened_post", @"opened_comments",
+            @"opened_gallery", @"opened_media_viewer", @"started_video", @"opened_profile",
+            @"opened_settings", @"opened_composer", @"presented_share_sheet",
+            @"changed_comment_sort",
+        ]];
+    });
+    return [allowed containsObject:event];
+}
+
+@implementation ApolloCrashSanitizer
 
 #pragma mark - Sections
 
@@ -87,61 +110,47 @@ static NSArray *ARArray(id value) {
     return [formatter stringFromDate:date];
 }
 
-// crash.error → outgoing "crash" section. Every field here is a reviewed,
-// technical, non-content value; the only free-form strings pass through
-// +sanitizedDiagnosticString.
+// crash.error → outgoing "crash" section. Free-form exception reasons,
+// diagnoses and custom exception names are never copied at all: redaction
+// cannot prove that arbitrary account/content text has been removed.
 + (NSDictionary *)crashSectionFromRaw:(NSDictionary *)rawReport {
     NSDictionary *crash = ARDict(rawReport[@"crash"]);
     NSDictionary *error = ARDict(crash[@"error"]);
     NSMutableDictionary *out = [NSMutableDictionary dictionary];
 
     out[@"timestamp"] = [self iso8601TimestampFromRaw:ARDict(rawReport[@"report"])[@"timestamp"]] ?: [NSNull null];
-    out[@"category"] = ARString(error[@"type"]) ?: @"unknown";
+    out[@"category"] = ARAllowlistedCrashCategory(error[@"type"]);
     out[@"address"] = ARHexAddress(error[@"address"]) ?: [NSNull null];
 
     NSDictionary *nsexception = ARDict(error[@"nsexception"]);
-    NSDictionary *cppException = ARDict(error[@"cpp_exception"]);
-    NSString *exceptionName = ARString(nsexception[@"name"]) ?: ARString(cppException[@"name"]);
-    out[@"exception_name"] = exceptionName ?: [NSNull null];
-    out[@"sanitized_reason"] = [self sanitizedDiagnosticString:ARString(error[@"reason"])] ?: [NSNull null];
+    NSString *exceptionName = ARAllowlistedSystemExceptionName(nsexception[@"name"]);
+    if (exceptionName) out[@"exception_name"] = exceptionName;
 
     NSDictionary *signal = ARDict(error[@"signal"]);
     if (signal) {
         out[@"signal"] = @{
-            @"name": ARString(signal[@"name"]) ?: [NSNull null],
             @"code": ARNumber(signal[@"code"]) ?: [NSNull null],
-            @"code_name": ARString(signal[@"code_name"]) ?: [NSNull null],
         };
     }
     NSDictionary *mach = ARDict(error[@"mach"]);
     if (mach) {
         out[@"mach_exception"] = @{
             @"exception": ARNumber(mach[@"exception"]) ?: [NSNull null],
-            @"exception_name": ARString(mach[@"exception_name"]) ?: [NSNull null],
             @"code": ARNumber(mach[@"code"]) ?: [NSNull null],
             @"subcode": ARNumber(mach[@"subcode"]) ?: [NSNull null],
         };
     }
 
-    // Likely-jetsam reports: numeric memory state only (level/pressure are
-    // short enum strings like "critical").
+    // Likely-jetsam reports: numeric memory state only. Even KSCrash's enum
+    // labels are unnecessary raw strings when the numeric values suffice.
     NSDictionary *memoryTermination = ARDict(error[@"memory_termination"]);
     if (memoryTermination) {
         NSMutableDictionary *memory = [NSMutableDictionary dictionary];
         for (NSString *key in @[ @"memory_footprint", @"memory_limit", @"memory_remaining" ]) {
             memory[key] = ARNumber(memoryTermination[key]) ?: [NSNull null];
         }
-        for (NSString *key in @[ @"memory_level", @"memory_pressure" ]) {
-            NSString *value = ARString(memoryTermination[key]);
-            if (value.length > 0 && value.length <= 32) memory[key] = value;
-        }
         out[@"memory_termination"] = memory;
     }
-
-    // KSCrash's machine-generated diagnosis ("possible null pointer
-    // dereference", zombie hints). Technical, but free-form — redact it.
-    NSString *diagnosis = [self sanitizedDiagnosticString:ARString(crash[@"diagnosis"])];
-    if (diagnosis) out[@"diagnosis"] = diagnosis;
 
     return out;
 }
@@ -263,7 +272,7 @@ static NSArray *ARArray(id value) {
         // Re-allowlist even our own data: only the enumerated event name and
         // its coarse age survive the round-trip through KSCrash userInfo.
         NSString *event = ARString(action[@"event"]);
-        if (event.length == 0 || event.length > 40) continue;
+        if (!ARIsAllowlistedRecentAction(event)) continue;
         [out addObject:@{
             @"event": event,
             @"age_seconds": ARNumber(action[@"age_seconds"]) ?: [NSNull null],
@@ -358,10 +367,6 @@ static NSArray *ARArray(id value) {
                       ARString(crash[@"category"]) ?: @"unknown",
                       ARString(crash[@"exception_name"])
                           ? [NSString stringWithFormat:@" (%@)", crash[@"exception_name"]] : @""]];
-    NSString *reason = ARString(crash[@"sanitized_reason"]);
-    if (reason) [lines addObject:[NSString stringWithFormat:@"Reason: %@", reason]];
-    NSString *diagnosis = ARString(crash[@"diagnosis"]);
-    if (diagnosis) [lines addObject:[NSString stringWithFormat:@"Diagnosis: %@", diagnosis]];
     [lines addObject:[NSString stringWithFormat:@"Apollo Reborn: %@ (%@, %@)",
                       ARString(environment[@"apollo_reborn_version"]) ?: @"unknown",
                       ARString(environment[@"build_variant"]) ?: @"unknown",

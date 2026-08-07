@@ -128,7 +128,7 @@ Local-only crash recording built on KSCrash 2.5.1's **recording layer only** (`m
 | Path | Purpose |
 |------|---------|
 | `src/crash/ApolloCrashManager.{h,m}` | Installs KSCrash first thing in `%ctor` (privacy-locked: no memory introspection, no queue names, no console log, no `__cxa_throw` swap), fronts the report store (enumerate / load+sanitize / delete) |
-| `src/crash/ApolloCrashSanitizer.{h,m}` | **Allowlist** converter: raw KSCrash dict → `apollo_reborn_crash` schema; redacts free-form strings (URLs, `r/…`, `u/…`, emails, bearer/token values), hex-ifies addresses, hard caps (1MB / 128 threads / 256+64 frames / 512 images, referenced-first). Raw dicts never leave the manager |
+| `src/crash/ApolloCrashSanitizer.{h,m}` | **Allowlist** converter: raw KSCrash dict → `apollo_reborn_crash` schema; omits all free-form exception text and permits only known system exception/action identifiers, hex-ifies addresses, hard caps (1MB / 128 threads / 256+64 frames / 512 images, referenced-first). Raw dicts never leave the manager |
 | `src/crash/ApolloCrashContext.{h,m}` | Enumerated recent-actions ring buffer (the API takes an enum — free-form strings are impossible by design) published into KSCrash userInfo, debounced |
 | `src/crash/ApolloCrashPromptCoordinator.{h,m}` | Once-per-report relaunch prompt (Review & Report / Not Now / Delete). "Not Now" never re-nags — prompted IDs persist in `UDKeyCrashPromptedReportIDs`; the report stays under Settings → Privacy → Crash Reports |
 | `src/crash/ApolloCrashReviewViewController.{h,m}` | Consent screen (form subclass): included/never-included lists, exact sanitized-JSON viewer, share-sheet export, optional off-by-default debug-log inclusion, Continue → report form |

@@ -239,7 +239,6 @@
                                                         timeStyle:NSDateFormatterShortStyle]];
     }
     if (self.report.exceptionName.length > 0) [lines addObject:self.report.exceptionName];
-    if (self.report.sanitizedReason.length > 0) [lines addObject:self.report.sanitizedReason];
     NSDictionary *environment = self.report.sanitizedDictionary[@"environment"];
     if ([environment isKindOfClass:NSDictionary.class]) {
         [lines addObject:[NSString stringWithFormat:@"Apollo Reborn %@ (%@)",

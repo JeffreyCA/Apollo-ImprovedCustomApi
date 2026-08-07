@@ -29,6 +29,7 @@
 @implementation ApolloCrashManager {
     BOOL _installed;
     NSDictionary *_baseUserInfo;
+    KSCrashReportStore *_standaloneReportStore;
 }
 
 + (instancetype)sharedManager {
@@ -54,6 +55,16 @@
     return [cacheRoot stringByAppendingPathComponent:@"ApolloReborn/LocalCrashReports"];
 }
 
+- (KSCrashReportStoreConfiguration *)reportStoreConfiguration {
+    KSCrashReportStoreConfiguration *configuration = [[KSCrashReportStoreConfiguration alloc] init];
+    configuration.reportsPath = [[self crashStoragePath]
+        stringByAppendingPathComponent:KSCrashReportStore.defaultInstallSubfolder];
+    configuration.appName = @"ApolloReborn";
+    configuration.maxReportCount = 3;
+    configuration.reportCleanupPolicy = KSCrashReportCleanupPolicyNever;
+    return configuration;
+}
+
 - (void)installCrashRecorderIfEnabled {
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     // Explicit objectForKey check: install runs in %ctor and must not depend
@@ -68,13 +79,11 @@
     KSCrashConfiguration *configuration = [[KSCrashConfiguration alloc] init];
     configuration.installPath = [self crashStoragePath];
 
-    configuration.reportStoreConfiguration.appName = @"ApolloReborn";
+    configuration.reportStoreConfiguration = [self reportStoreConfiguration];
     // A handful of pending reports is plenty; dozens of stale crashes have no
     // diagnostic value and just accumulate risk surface.
-    configuration.reportStoreConfiguration.maxReportCount = 3;
     // Reports are deleted ONLY by explicit user action or after the report
     // site confirms a submission that included the crash attachment.
-    configuration.reportStoreConfiguration.reportCleanupPolicy = KSCrashReportCleanupPolicyNever;
 
     // UserReported is passive — it never hooks anything and only fires on the
     // explicit -writeTestCrashReport call (the FLEX-gated testing aid).
@@ -150,7 +159,25 @@
 #pragma mark - Report store
 
 - (KSCrashReportStore *)reportStore {
-    return _installed ? [KSCrash sharedInstance].reportStore : nil;
+    KSCrashReportStore *installedStore = _installed ? [KSCrash sharedInstance].reportStore : nil;
+    if (installedStore) return installedStore;
+
+    // Disabling future capture must not hide reports already on disk. Keep a
+    // store-only reader pointed at the same Reports directory; it installs no
+    // crash handlers and is also available if recorder installation failed.
+    @synchronized (self) {
+        if (!_standaloneReportStore) {
+            [self configureStorageProtection];
+            NSError *error = nil;
+            _standaloneReportStore =
+                [KSCrashReportStore storeWithConfiguration:[self reportStoreConfiguration] error:&error];
+            if (!_standaloneReportStore) {
+                ApolloLog(@"[CrashCapture] report store unavailable: %@",
+                          error.localizedDescription ?: @"unknown error");
+            }
+        }
+        return _standaloneReportStore;
+    }
 }
 
 - (NSArray<NSNumber *> *)pendingReportIDs {
@@ -203,7 +230,6 @@
     result.crashDate = [ApolloCrashSanitizer crashDateFromSanitizedReport:sanitized];
     result.crashCategory = stringOrNil(crashSection[@"category"]) ?: @"unknown";
     result.exceptionName = stringOrNil(crashSection[@"exception_name"]);
-    result.sanitizedReason = stringOrNil(crashSection[@"sanitized_reason"]);
     result.humanReadableSummary = [ApolloCrashSanitizer textSummaryForSanitizedReport:sanitized];
     return result;
 }

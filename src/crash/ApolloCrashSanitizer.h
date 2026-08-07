@@ -10,7 +10,8 @@ NS_ASSUME_NONNULL_BEGIN
 // Explicitly absent from the output: Reddit account data, subreddit names,
 // post/comment content or IDs, search terms, URLs, OAuth/API secrets, the
 // bundle identifier, container paths, device hashes, locale and timezone,
-// thread/queue names, raw stack memory, and anything introspected.
+// thread/queue names, raw stack memory, exception reasons/diagnoses, custom
+// exception names, and anything introspected.
 @interface ApolloCrashSanitizer : NSObject
 
 // nil when the raw report is structurally unusable.
@@ -20,11 +21,6 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSString *)textSummaryForSanitizedReport:(NSDictionary *)sanitizedReport;
 
 + (nullable NSDate *)crashDateFromSanitizedReport:(NSDictionary *)sanitizedReport;
-
-// Aggressive redaction for free-form diagnostic strings (exception reasons,
-// diagnoses): URLs, r/…, u/…, emails, bearer/token values, 500-char cap.
-// Returns nil for empty input. Exposed for reuse and testability.
-+ (nullable NSString *)sanitizedDiagnosticString:(nullable NSString *)input;
 
 @end
 
