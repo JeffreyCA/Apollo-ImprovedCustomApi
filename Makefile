@@ -80,6 +80,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloMarkdownBodyCleanup.xm \
     $(SRC_DIR)/ApolloGiphyClient.m \
     $(SRC_DIR)/GiphyPickerViewController.m \
+    $(SRC_DIR)/ApolloCommentVoteInsights.m \
     $(SRC_DIR)/ApolloCreatedAtAlert.xm \
     $(SRC_DIR)/ApolloDeletedCommentsData.m \
     $(SRC_DIR)/ApolloDeletedCommentsUI.xm \
