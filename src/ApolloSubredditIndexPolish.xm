@@ -1278,13 +1278,17 @@ static BOOL ApolloSubredditIndexTableAlreadyRecognised(UITableView *tableView) {
 }
 
 static UIView *ApolloSubredditIndexModernSelectionBackground(UITableView *tableView, UITableViewCell *cell) {
+    // Deliberately TRANSPARENT: its only job is to suppress UIKit's default
+    // grey selection chrome so the in-contentView press overlay is the single
+    // source of highlight tint. It used to carry its own accent fill (0.10),
+    // but that layer is masked by the opaque cell background on regular rows
+    // and only ever showed on the Home/Popular/All meta rows (which have no
+    // opaque backdrop) — stacking with the 0.16 press overlay and making those
+    // rows visibly brighter than the rest of the list (issue #714).
     UIView *view = [[UIView alloc] initWithFrame:CGRectZero];
     view.userInteractionEnabled = NO;
     view.opaque = NO;
-    UIColor *accentColor = ApolloSubredditIndexThemeAccentColor(tableView, cell);
-    UIColor *overlayColor = [accentColor colorWithAlphaComponent:0.10];
-    view.backgroundColor = overlayColor;
-    view.layer.backgroundColor = overlayColor.CGColor;
+    view.backgroundColor = UIColor.clearColor;
     view.layer.borderWidth = 0.0;
     view.layer.shadowOpacity = 0.0;
     view.layer.sublayers = nil;
