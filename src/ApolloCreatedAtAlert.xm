@@ -227,7 +227,7 @@ static NSString *ApolloRelativeAgoString(NSDate *date) {
 // be shown.
 static BOOL ApolloApproximateVoteCounts(long long score, double displayedPercent,
                                         long long *outUpvotes, long long *outDownvotes) {
-    if (displayedPercent < 60 || displayedPercent > 100 || score < 0) return NO;
+    if (displayedPercent < 60 || displayedPercent > 100 || score <= 0) return NO;
 
     double proportion = (double)displayedPercent / 100.0;
     double denominator = 2.0 * proportion - 1.0;
@@ -277,13 +277,23 @@ static BOOL ApolloPostVoteDetailLines(long long score, double pct, BOOL condense
     if (pct < 0 || pct > 100) return NO;
     NSString *percentText = ApolloFormattedVotePercent(pct);
     *outLine1 = [NSString stringWithFormat:@"%@%% Upvoted", percentText];
+    long roundedPercent = lround(pct);
+    NSString *ratio = [NSString stringWithFormat:@"~%ld:%ld upvote to downvote ratio",
+        roundedPercent, 100L - roundedPercent];
 
     long long upvotes = 0, downvotes = 0;
     BOOL hasCounts = ApolloApproximateVoteCounts(score, pct, &upvotes, &downvotes);
     if (!hasCounts) {
-        *outLine2 = condensed ? nil : [NSString stringWithFormat:
-            @"%@%% of voters upvoted this post.%@", percentText,
-            pct < 60 ? @" Vote totals are not shown below 60% because rounded ratios become unreliable near 50%." : @""];
+        if (condensed) {
+            *outLine2 = ratio;
+        } else {
+            NSString *reason = score <= 0
+                ? @"Upvote and downvote totals are not shown when the score is zero or negative because Reddit does not expose enough information to estimate them."
+                : @"Upvote and downvote totals are not shown below 60% because they become inaccurate as the upvote percentage approaches 50%.";
+            *outLine2 = [NSString stringWithFormat:
+                @"%@%% of voters upvoted this post.\n\n%@\n\n%@",
+                percentText, ratio, reason];
+        }
         return YES;
     }
 
@@ -293,13 +303,12 @@ static BOOL ApolloPostVoteDetailLines(long long score, double pct, BOOL condense
         upvoteCount, upvotes == 1 ? @"upvote" : @"upvotes",
         downvoteCount, downvotes == 1 ? @"downvote" : @"downvotes"];
     if (condensed) {
-        *outLine2 = counts;
+        *outLine2 = [NSString stringWithFormat:@"%@\n%@", counts, ratio];
     } else {
-        long roundedPercent = lround(pct);
         *outLine2 = [NSString stringWithFormat:
-            @"%@%% of voters upvoted this post.\n\n%@\n~%ld:%ld upvote to downvote ratio\n\n"
-            @"Counts are approximate because Reddit rounds vote ratios and may fuzz vote data.",
-            percentText, counts, roundedPercent, 100L - roundedPercent];
+            @"%@%% of voters upvoted this post.\n\n%@\n\n%@\n\n"
+            @"Counts are approximate because Reddit rounds the upvote percentage and fuzzes the displayed score.",
+            percentText, counts, ratio];
     }
     return YES;
 }
