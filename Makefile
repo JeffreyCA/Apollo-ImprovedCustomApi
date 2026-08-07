@@ -25,6 +25,21 @@ SSZIPARCHIVE_FILES = $(wildcard $(SSZIPARCHIVE_DIR)/*.m) \
     $(wildcard $(SSZIPARCHIVE_DIR)/minizip/*.c) \
     $(wildcard $(SSZIPARCHIVE_DIR)/minizip/compat/*.c)
 
+# KSCrash local crash recording (src/crash/). Only the recording layer is
+# compiled — Core, RecordingCore, Recording — never the Sinks/Installations/
+# Filters/BootTime/DiscSpace modules, so the library has no reporting or
+# transmission capability at all. Pinned via the modules/KSCrash submodule
+# (2.5.1); the explicit per-module find below cannot pick up sources from
+# modules an upstream bump might add.
+KSCRASH_DIR := $(MODULES_DIR)/KSCrash
+KSCRASH_CORE_DIR := $(KSCRASH_DIR)/Sources/KSCrashCore
+KSCRASH_RECORDING_CORE_DIR := $(KSCRASH_DIR)/Sources/KSCrashRecordingCore
+KSCRASH_RECORDING_DIR := $(KSCRASH_DIR)/Sources/KSCrashRecording
+
+KSCRASH_FILES := \
+    $(shell find $(KSCRASH_CORE_DIR) $(KSCRASH_RECORDING_CORE_DIR) $(KSCRASH_RECORDING_DIR) \
+        -type f \( -name '*.c' -o -name '*.m' -o -name '*.mm' -o -name '*.cpp' \) | sort)
+
 ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloFoundationModels.swift \
     $(SRC_DIR)/ApolloAISummary.xm \
@@ -34,6 +49,7 @@ ApolloReborn_FILES = \
     $(WHATS_NEW_GEN_M) \
     $(SRC_DIR)/Tweak.xm \
     $(SRC_DIR)/ApolloCommon.m \
+    $(SRC_DIR)/ApolloMemoryDiagnostics.m \
     $(SRC_DIR)/settings/ApolloSettingsTableViewController.m \
     $(SRC_DIR)/settings/ApolloSettingsForm.m \
     $(SRC_DIR)/settings/ApolloContributors.m \
@@ -80,6 +96,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloMarkdownBodyCleanup.xm \
     $(SRC_DIR)/ApolloGiphyClient.m \
     $(SRC_DIR)/GiphyPickerViewController.m \
+    $(SRC_DIR)/ApolloCommentVoteInsights.m \
     $(SRC_DIR)/ApolloCreatedAtAlert.xm \
     $(SRC_DIR)/ApolloDeletedCommentsData.m \
     $(SRC_DIR)/ApolloDeletedCommentsUI.xm \
@@ -87,6 +104,8 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloState.m \
     $(SRC_DIR)/ApolloShareLinks.xm \
     $(SRC_DIR)/ApolloMedia.xm \
+    $(SRC_DIR)/ApolloFeedGalleryCarousel.xm \
+    $(SRC_DIR)/ApolloSwipeUpComments.xm \
     $(SRC_DIR)/ApolloMediaMetadata.m \
     $(SRC_DIR)/ApolloMediaAutoplay.m \
     $(SRC_DIR)/ApolloCommentsCollapse.xm \
@@ -108,6 +127,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloTabBarCollapseSide.xm \
     $(SRC_DIR)/ApolloIPadTabBarBottom.xm \
     $(SRC_DIR)/ApolloScrollEdgeEffect.xm \
+    $(SRC_DIR)/ApolloProgressiveBlur.xm \
     $(SRC_DIR)/settings/ApolloSettings.xm \
     $(SRC_DIR)/ApolloRecentlyRead.xm \
     $(SRC_DIR)/ApolloHiddenContentData.m \
@@ -141,6 +161,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloSubredditIndexPolish.xm \
     $(SRC_DIR)/ApolloQuickActions.xm \
     $(SRC_DIR)/ApolloHideModSubreddits.xm \
+    $(SRC_DIR)/ApolloMultiredditEdit.xm \
     $(SRC_DIR)/ApolloSubredditSidebar.xm \
     $(SRC_DIR)/ApolloTagFilters.xm \
     $(SRC_DIR)/ApolloThemeTokens.m \
@@ -179,6 +200,8 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloFeedTextPostThumbnails.xm \
     $(SRC_DIR)/ApolloTweetBuddy.xm \
 	$(SRC_DIR)/ApolloVisionOSFix.xm \
+    $(SRC_DIR)/ApolloVisionOSHover.xm \
+    $(SRC_DIR)/ApolloVisionOSMultiwindow.xm \
     $(SRC_DIR)/ApolloWebAuthViewController.m \
     $(SRC_DIR)/ApolloWebJSON.m \
     $(SRC_DIR)/ApolloWebJSONIdentity.xm \
@@ -215,6 +238,15 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/Defaults.m \
     $(SRC_DIR)/UIWindow+Apollo.m \
     $(SRC_DIR)/fishhook.c \
+    $(SRC_DIR)/crash/ApolloCrashManager.m \
+    $(SRC_DIR)/crash/ApolloCrashContext.m \
+    $(SRC_DIR)/crash/ApolloCrashSanitizer.m \
+    $(SRC_DIR)/crash/ApolloCrashAttachment.m \
+    $(SRC_DIR)/crash/ApolloCrashPromptCoordinator.m \
+    $(SRC_DIR)/crash/ApolloCrashReviewViewController.m \
+    $(SRC_DIR)/crash/ApolloCrashReportsViewController.m \
+    $(SRC_DIR)/crash/ApolloCrashBugsnagNeutralize.xm \
+    $(KSCRASH_FILES) \
     $(SSZIPARCHIVE_FILES)
 ApolloReborn_FRAMEWORKS = UIKit Security AVFoundation AVKit OSLog NaturalLanguage ImageIO StoreKit Photos PhotosUI SafariServices SystemConfiguration WebKit AuthenticationServices CoreImage Vision LinkPresentation SwiftUI UniformTypeIdentifiers Metal QuartzCore CoreMotion
 ApolloReborn_LIBRARIES = z iconv
@@ -247,6 +279,26 @@ endif
 # loads on older iOS, where the Apple provider is gated off at runtime.
 ApolloReborn_LDFLAGS += -weak_framework Translation
 ApolloReborn_CFLAGS = -fobjc-arc -Wno-error=unguarded-availability-new -Wno-error=deprecated-declarations -Wno-module-import-in-extern-c -I$(THEOS_PROJECT_DIR)/$(SRC_DIR) -I$(THEOS_PROJECT_DIR)/liquid-glass/generated -I$(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/generated -I$(THEOS_PROJECT_DIR)/$(WHATS_NEW_DIR)/generated -I$(THEOS_PROJECT_DIR)/$(MODULES_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR) -I$(THEOS_PROJECT_DIR)/$(SSZIPARCHIVE_DIR)/minizip -DHAVE_ARC4RANDOM_BUF -DHAVE_ICONV -DHAVE_INTTYPES_H -DHAVE_PKCRYPT -DHAVE_STDINT_H -DHAVE_WZAES -DHAVE_ZLIB -DZLIB_COMPAT
+
+# KSCrash include paths (public `include/` dirs plus module roots for private
+# headers and the Monitors subdir). KSCRASH_NAMESPACE suffixes every public
+# KSCrash symbol AND ObjC class (KSCrash -> KSCrash_ApolloReborn, via
+# KSCrashNamespace.h token pasting), so a second KSCrash copy in the process —
+# Apollo's own Bugsnag vendors a fork — can never collide at the symbol level.
+# The define is global so the src/crash/ consumers see the same renamed classes.
+ApolloReborn_CFLAGS += \
+    -I$(THEOS_PROJECT_DIR)/$(KSCRASH_CORE_DIR)/include \
+    -I$(THEOS_PROJECT_DIR)/$(KSCRASH_RECORDING_CORE_DIR)/include \
+    -I$(THEOS_PROJECT_DIR)/$(KSCRASH_RECORDING_CORE_DIR) \
+    -I$(THEOS_PROJECT_DIR)/$(KSCRASH_RECORDING_DIR)/include \
+    -I$(THEOS_PROJECT_DIR)/$(KSCRASH_RECORDING_DIR) \
+    -I$(THEOS_PROJECT_DIR)/$(KSCRASH_RECORDING_DIR)/Monitors \
+    -DKSCRASH_NAMESPACE=_ApolloReborn
+
+# No explicit -std/-fexceptions for KSCrash's C++ sources: clang's defaults
+# (gnu++17, exceptions on) already satisfy them, and Theos feeds CCFLAGS to
+# the Swift module-interface build, where a C++ -std flag is a hard error.
+ApolloReborn_LIBRARIES += c++
 
 ApolloReborn_BUNDLE_RESOURCE_DIRS = resources
 
@@ -283,6 +335,13 @@ ApolloReborn_CFLAGS += -Wno-deprecated-declarations
 # screenshots. Only ever compiled into the simulator build, never the device/
 # release build (this branch is under the APOLLO_SIM_BUILD ifeq).
 ApolloReborn_FILES += $(SRC_DIR)/ApolloSimOpenRoute.m
+# Opt-in /api/comment write diagnostics + legacy-response-shape simulator
+# (APOLLO_COMMENT_DEBUG=1 scripts/run-in-sim.sh). Used to reproduce Reddit's
+# 2026-08 legacy write-response regression against the OAuth path on demand —
+# see src/ApolloCommentDebug.xm.
+ifeq ($(APOLLO_COMMENT_DEBUG),1)
+ApolloReborn_FILES += $(SRC_DIR)/ApolloCommentDebug.xm
+endif
 else
 ApolloReborn_OBJ_FILES = $(shell find $(FFMPEG_KIT_DIR) -name '*.a')
 
@@ -302,8 +361,10 @@ before-all:: generate_version_h generate_theme_gallery_catalog generate_whats_ne
 generate_version_h:
 	@echo "Generating Version.h from control file"
 	@version=$$(grep '^Version:' $(CONTROL_FILE) | cut -d' ' -f2); \
+	commit=$$(git -C $(THEOS_PROJECT_DIR) rev-parse --short HEAD 2>/dev/null || echo unknown); \
 	mkdir -p $(THEOS_PROJECT_DIR)/$(SRC_DIR); \
-	echo "#define TWEAK_VERSION \"v$${version}\"" > $(THEOS_PROJECT_DIR)/$(SRC_DIR)/Version.h
+	{ echo "#define TWEAK_VERSION \"v$${version}\""; \
+	  echo "#define APOLLO_GIT_COMMIT \"$${commit}\""; } > $(THEOS_PROJECT_DIR)/$(SRC_DIR)/Version.h
 
 THEME_GALLERY_SOURCES := $(wildcard $(THEOS_PROJECT_DIR)/$(THEME_GALLERY_DIR)/themes/*.json)
 

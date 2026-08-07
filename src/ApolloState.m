@@ -17,6 +17,8 @@ BOOL sTapToRevealDeletedComments = NO;
 BOOL sPassiveDeletedComments = NO;
 BOOL sShowRecentlyReadThumbnails = YES;
 BOOL sFeedTextPostThumbnails = YES;
+BOOL sFeedGalleryCarousel = YES;
+BOOL sSwipeUpForComments = YES;
 NSInteger sPreferredGIFFallbackFormat = 1; // 0=GIF, 1=MP4
 
 NSInteger sReadPostMaxCount = 0;
@@ -56,13 +58,14 @@ BOOL sLGTitleGapCentering = YES;   // effective default ON via registerDefaults 
 BOOL sIconRowMagnifier = YES;   // effective default ON via registerDefaults (UDKeyIconRowMagnifier)
 BOOL sInfoRowTapUpvote = YES;      // effective default ON via registerDefaults (UDKeyInfoRowTapUpvote)
 BOOL sInfoRowTapComments = YES;    // effective default ON via registerDefaults (UDKeyInfoRowTapComments)
-BOOL sInfoRowPopupMode = YES;      // info icons (%/time/edited) → popup alert; default ON (UDKeyInfoRowPopupMode)
-BOOL sInfoRowOverlayMode = NO;     // info icons → transient overlay; default OFF (UDKeyInfoRowOverlayMode)
+BOOL sInfoRowPopupMode = YES;      // info details + comment insights → popup; default ON (UDKeyInfoRowPopupMode)
+BOOL sInfoRowOverlayMode = NO;     // info details + comment insights → overlay; default OFF (UDKeyInfoRowOverlayMode)
 BOOL sInfoRowTapTranslation = YES; // effective default ON via registerDefaults (UDKeyInfoRowTapTranslation)
 NSInteger sScrollEdgeEffectStyle = ApolloScrollEdgeEffectStyleAutomatic;
 BOOL sModernSubredditDividers = YES;
 BOOL sSubredditListEnhancements = YES;
 BOOL sHideSubredditListDescriptions = NO;
+BOOL sHideMultiredditDescriptions = NO;
 BOOL sEnableFlairColors = NO;
 BOOL sEnableInlineImages = NO;
 BOOL sEnableChatMedia = NO;   // effective default YES via registerDefaults (UDKeyEnableChatMedia)

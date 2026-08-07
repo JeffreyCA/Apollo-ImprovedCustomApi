@@ -24,4 +24,5 @@ BOOL ApolloPresentInfoDetail(ApolloInfoKind kind, id link, id comment, UIView *a
 
 // Low-level transient overlay used by the above (two prebuilt text lines); added as
 // a subview of anchorView (the cell) so it stays glued to the row and scrolls with it.
-void ApolloPresentInfoOverlay(NSString *line1, NSString *line2, UIView *anchorView, CGRect anchorRectInWindow);
+void ApolloPresentInfoOverlay(NSString *line1, NSString *line2, UIView *anchorView,
+                              CGRect anchorRectInWindow);

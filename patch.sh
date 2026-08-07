@@ -53,7 +53,7 @@ print_usage() {
     echo "  -o, --output <file>           Output IPA filename (default: Apollo-Patched.ipa)"
     echo "  --remove-code-signature       Remove code signature from the binary"
     echo "  --liquid-glass                Apply Liquid Glass patch for iOS 26"
-    echo "  --fix-safari-extension        Repair the bundled 'Open in Apollo' Safari extension"
+    echo "  --fix-safari-extension        Install the manual + legacy Safari extensions"
     echo "  --fix-openin-extension        Repair the bundled 'Open in Apollo' share-sheet action"
     echo "                                (needs the openin-extension dylib; run 'make package' first)"
     echo "  --liquid-glass-icons          Bundle the Liquid Glass icon catalog only,"

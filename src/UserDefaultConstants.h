@@ -17,6 +17,16 @@ static NSString *const UDKeyUseCustomOAuthSignIn = @"UseCustomOAuthSignIn";
 static NSString *const UDKeyUserAgent = @"UserAgent";
 static NSString *const UDKeyBlockAnnouncements = @"DisableApollonouncements";
 static NSString *const UDKeyEnableFLEX = @"EnableFlexDebugging";
+// Local crash recording (src/crash/). Default ON: reports only ever live on
+// device and are shared exclusively through the user-driven review flow.
+// KSCrash handlers install once per process, so flipping this takes effect on
+// the next launch (the settings row says so).
+static NSString *const UDKeyCrashCaptureEnabled = @"CrashCaptureEnabled";
+// Report IDs (NSArray<NSNumber>) the relaunch prompt has already been shown
+// for. A "Not Now" must never re-nag on every launch of a persistently
+// crashing build; the pending report stays reachable under Settings instead.
+// Not registered — absent means "never prompted".
+static NSString *const UDKeyCrashPromptedReportIDs = @"CrashPromptedReportIDs";
 // Login-persistence debug (dev-only, gated behind FLEX). Force the account keychain read to
 // miss (simulate the broken-keychain -25300), and/or disable enumeration recovery, so the
 // wipe->recover chain can be exercised on any device. Inert unless set.
@@ -42,6 +52,11 @@ static NSString *const ApolloModernSubredditDividersChangedNotification = @"Apol
 // Default NO. See ApolloSubredditIndexPolish.xm.
 static NSString *const UDKeyHideSubredditListDescriptions = @"HideSubredditListDescriptions";
 static NSString *const ApolloHideSubredditListDescriptionsChangedNotification = @"ApolloHideSubredditListDescriptionsChangedNotification";
+// Blank the subtitle line under multireddit rows in the subreddit list (which
+// otherwise shows the multireddit's description, or the subreddits it
+// contains). Default NO. See ApolloMultiredditEdit.xm.
+static NSString *const UDKeyHideMultiredditDescriptions = @"HideMultiredditDescriptions";
+static NSString *const ApolloHideMultiredditDescriptionsChangedNotification = @"ApolloHideMultiredditDescriptionsChangedNotification";
 // Color post (link) and user/author flairs with Reddit's assigned colors. Default NO.
 static NSString *const UDKeyEnableFlairColors = @"EnableFlairColors";
 static NSString *const ApolloFlairColorsChangedNotification = @"ApolloFlairColorsChangedNotification";
@@ -193,6 +208,8 @@ static NSString *const UDKeyIconRowMagnifier = @"IconRowMagnifier";
 //                small theme-bordered card just above the icon that fades on its own
 //                after ~2s. Mutually exclusive; both off = those three icons are
 //                inert (the % / edited native popups are taken over and suppressed).
+//                These modes also choose the presentation used when holding the
+//                score on an owned comment to request author-only Comment Insights.
 //   Translation— the 🌐 marker tap beside a post's stats (feed title + comments
 //                header) that toggles the title translation (ApolloTranslation.xm,
 //                ApolloFeedMarkerTapTarget). Takes priority over Tap to Translate
@@ -221,8 +238,9 @@ static NSString *const UDKeyPerPostCommentSortMapping = @"PerPostCommentSortMapp
 // off, and launch/restore normalize a stale both-on to per-post. This toggle key is
 // the ONLY native default the feature ever writes. See ApolloPerPostCommentSort.xm.
 static NSString *const UDKeyApolloRememberSubredditCommentsSort = @"RememberRedditCommentsSort";
-// Override for UIScrollView top/bottom scroll edge effects (Liquid Glass, iOS 26+).
-// 0 = Automatic (default), 1 = Soft, 2 = Hard, 3 = Hidden.
+// Override for the UIScrollView top scroll edge effect (Liquid Glass, iOS 26+).
+// 0 = retired System Default (migrates to 1 on iOS 26 or 2 on iOS 27),
+// 1 = Soft, 2 = Hard, 3 = retired Hidden, 4 = Blur.
 static NSString *const UDKeyScrollEdgeEffectStyle = @"ScrollEdgeEffectStyle";
 // Render image URLs (i.redd.it, preview.redd.it, i.imgur.com, generic .png/.jpg/.jpeg/.webp)
 // inline within post selftext and comments instead of leaving them as plain text links.
@@ -475,6 +493,21 @@ static NSString *const UDKeyHeartbeatLastDay = @"UsageHeartbeatLastDay"; // "202
 
 // Feed thumbnails for text posts with embedded images (off = native behavior).
 static NSString *const UDKeyFeedTextPostThumbnails = @"FeedTextPostThumbnails";
+// Replaces Apollo's fixed two/three-tile Reddit-gallery mosaic in large feed
+// cards with a horizontally paging image carousel. Default YES. See
+// ApolloFeedGalleryCarousel.xm.
+static NSString *const UDKeyFeedGalleryCarousel = @"FeedGalleryCarousel";
+// NSNotification name (not a defaults key): posted by the settings toggle so
+// already-measured feed cells swap presentation live; the carousel's
+// layoutSpecThatFits reads the flag on each measurement.
+static NSString *const ApolloFeedGalleryCarouselChangedNotification = @"ApolloFeedGalleryCarouselChangedNotification";
+// In the fullscreen viewer for post-backed images, galleries, GIFs, and video,
+// an upward vertical flick or comments-button tap opens a media-owned comments
+// pane. The normal downward flick still dismisses when the pane is closed.
+// Default YES. See ApolloSwipeUpComments.xm. No change notification: the flag
+// is read live at gesture/tap time, so a toggle applies immediately without
+// any cached state to invalidate (unlike the carousel above).
+static NSString *const UDKeySwipeUpForComments = @"SwipeUpForComments";
 
 // Sports-clip host links (streamff/streamin/streamain/…) play inline as native
 // video via the Streamable pipeline (off = link-preview card, stock behavior).

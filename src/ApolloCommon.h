@@ -255,4 +255,11 @@ NSString *ApolloDebugPoisonAccountAccessibility(void);
 // No-op for any other menu, and for feeds that aren't a single subreddit.
 // Called from ApolloNativeActionMenuBuildMenu as it converts the action sheet.
 void ApolloInjectGalleryViewMenuItemIfNeeded(NSMutableArray *children, NSString *menuTitle, id actionController);
+
+// Marks a tweak-created text node/label as our own UI chrome (AI summary pill,
+// injected affordances, ...). Content pipelines that scan the view/node tree
+// for USER content (e.g. translation's post-body candidate scan) must skip
+// marked objects — otherwise tweak UI can be mistaken for the post body.
+void ApolloMarkTweakUITextNode(id node);
+BOOL ApolloTextNodeIsTweakUI(id node);
 __END_DECLS

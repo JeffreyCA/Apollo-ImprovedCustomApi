@@ -6,6 +6,7 @@
 #import "ApolloUsageHeartbeat.h"
 #import "InlineMediaSettingsViewController.h"
 #import "settings/ApolloPollSettingsViewController.h"
+#import "settings/ApolloSettingsRouter.h"
 #import "InfoRowSettingsViewController.h"
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloDirectChatWeb.h"
@@ -39,6 +40,8 @@
 #import "settings/ApolloThanksToViewController.h"
 #import "settings/ApolloBuyUsACoffeeViewController.h"
 #import "settings/ApolloReportViewController.h"
+#import "crash/ApolloCrashManager.h"
+#import "crash/ApolloCrashReportsViewController.h"
 #import "settings/ApolloOpenInAppViewController.h"
 #import "settings/SavedCategoriesViewController.h"
 #import "settings/ApolloSubredditLayoutViewController.h"
@@ -584,6 +587,14 @@ typedef NS_ENUM(NSInteger, Tag) {
                                 push:^UIViewController * {
             return [[TagFiltersViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
+    // Instantiated through the settings router so this stays the same screen
+    // the apollo://reborn/settings/theme-manager deep link opens; the canonical
+    // entrance remains Apollo's Settings > Appearance > Theme Manager.
+    ApolloSettingsRow *themeManager =
+        [self hubDisclosureRowWithID:@"shortcut.themeManager" title:@"Theme Manager" subtitle:nil
+                                push:^UIViewController * {
+            return ApolloSettingsRouteInstantiate(@"theme-manager");
+        }];
     // Flair is intentionally a switch alias, not another screen: Appearance →
     // Flair remains the canonical native placement and the same preference is
     // changed from either entrance.
@@ -599,11 +610,12 @@ typedef NS_ENUM(NSInteger, Tag) {
     translation.iconSystemName = @"character.bubble.fill";        translation.iconTileColor = [UIColor systemTealColor];
     savedCategories.iconSystemName = @"bookmark.fill";            savedCategories.iconTileColor = [UIColor systemOrangeColor];
     tagFilters.iconSystemName = @"tag.fill";                      tagFilters.iconTileColor = [UIColor systemGreenColor];
+    themeManager.iconSystemName = @"paintbrush.fill";             themeManager.iconTileColor = [UIColor systemIndigoColor];
     colorFlairs.iconSystemName = @"paintpalette.fill";            colorFlairs.iconTileColor = [UIColor systemPinkColor];
 
     return [ApolloSettingsSection sectionWithTitle:@"Shortcuts"
                                             footer:@"Quick links to settings that also live in their own sections and in Apollo's settings."
-                                              rows:@[ openInApp, pip, translation, savedCategories, tagFilters, colorFlairs ]];
+                                              rows:@[ themeManager, openInApp, pip, translation, savedCategories, tagFilters, colorFlairs ]];
 }
 
 // Shared plain disclosure-row builder for the hub's navigation rows: title
@@ -941,6 +953,46 @@ typedef NS_ENUM(NSInteger, Tag) {
         }
                                   onSelect:nil];
 
+    // reddit.com web sign-in, surfaced outside the Polls screen (issue #847):
+    // the session powers polls, approximate vote breakdowns, and future
+    // web-only features, so it belongs where accounts live. The Polls screen
+    // keeps its own entry; both drive the same per-account session.
+    ApolloSettingsRow *webSignIn =
+        [ApolloSettingsRow customRowWithID:@"api.webSignIn"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+            cell.detailTextLabel.numberOfLines = 0;
+            NSString *username = ApolloActiveAccountUsername();
+            if (username.length == 0) {
+                cell.textLabel.text = @"reddit.com Web Sign-In";
+                cell.textLabel.textColor = [UIColor secondaryLabelColor];
+                cell.detailTextLabel.text = @"Sign in to a Reddit account first.";
+                cell.selectionStyle = UITableViewCellSelectionStyleNone;
+                return cell;
+            }
+            if (ApolloWebSessionPollFor(username).cookieHeader.length > 0) {
+                cell.textLabel.text = @"reddit.com Web Sign-In";
+                cell.detailTextLabel.text =
+                    [NSString stringWithFormat:@"Connected for u/%@ — powers polls and vote breakdowns.", username];
+                UIImageView *check = [[UIImageView alloc] initWithImage:
+                    [UIImage systemImageNamed:@"checkmark.circle.fill"]];
+                check.tintColor = [UIColor systemGreenColor];
+                [check sizeToFit];
+                cell.accessoryView = check;
+                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+                return cell;
+            }
+            cell.textLabel.text = @"Set Up reddit.com Web Sign-In";
+            cell.textLabel.textColor = [weakSelf apollo_themeAccentColor];
+            cell.detailTextLabel.text =
+                [NSString stringWithFormat:@"One quick sign-in for u/%@ — powers polls and vote breakdowns.", username];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            return cell;
+        }
+                                  onSelect:^{ [weakSelf webSignInRowTapped]; }];
+
     ApolloSettingsRow *troubleshooting =
         [ApolloSettingsRow customRowWithID:@"api.troubleshooting"
                                       cell:^UITableViewCell *(UITableView *tableView, __unused ApolloSettingsRow *row) {
@@ -969,8 +1021,52 @@ typedef NS_ENUM(NSInteger, Tag) {
                                   onSelect:^{ [weakSelf pushInstructionsViewController]; }];
 
     return [ApolloSettingsSection sectionWithTitle:@"Sign-In"
-                                            footer:@"Choose how accounts sign in, or get help setting up your keys."
-                                              rows:@[ universalOAuth, troubleshooting, setupGuide ]];
+                                            footer:@"Choose how accounts sign in, or get help setting up your keys. "
+                                                    "The reddit.com web sign-in unlocks features Reddit's API doesn't offer, "
+                                                    "like polls and approximate vote breakdowns."
+                                              rows:@[ universalOAuth, webSignIn, troubleshooting, setupGuide ]];
+}
+
+#pragma mark - reddit.com web sign-in (issue #847)
+
+// Same flow as the Polls screen's entry: sign in the ACTIVE Apollo account,
+// confirm before replacing a working session.
+- (void)webSignInRowTapped {
+    NSString *username = ApolloActiveAccountUsername();
+    if (username.length == 0) return;
+    if (ApolloWebSessionPollFor(username).cookieHeader.length == 0) {
+        [self startWebSignInForUsername:username];
+        return;
+    }
+    UIAlertController *sheet = [UIAlertController
+        alertControllerWithTitle:[NSString stringWithFormat:@"u/%@ is signed in", username]
+                         message:@"Sign in again only if web-session features (polls, vote breakdowns) have stopped working."
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Sign In Again" style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *action) {
+        [self startWebSignInForUsername:username];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    UITableViewCell *cell = [self cellForRowID:@"api.webSignIn"];
+    sheet.popoverPresentationController.sourceView = cell ?: self.view;
+    sheet.popoverPresentationController.sourceRect = (cell ?: self.view).bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)startWebSignInForUsername:(NSString *)username {
+    __weak typeof(self) weakSelf = self;
+    ApolloWebSessionLoginViewController *login = [ApolloWebSessionLoginViewController
+        loginControllerForUsername:username completion:^(BOOL success) {
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            [strongSelf reloadRowWithID:@"api.webSignIn"];
+            if (success && ApolloWebSessionPollFor(username).cookieHeader.length > 0) {
+                UINotificationFeedbackGenerator *feedback = [UINotificationFeedbackGenerator new];
+                [feedback notificationOccurred:UINotificationFeedbackTypeSuccess];
+            }
+        }];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:login];
+    [self presentViewController:nav animated:YES completion:nil];
 }
 
 - (ApolloSettingsSection *)buildAPIKeysExperimentalSection {
@@ -1288,12 +1384,12 @@ typedef NS_ENUM(NSInteger, Tag) {
         }
                                   onSelect:nil];
 
-    // Overrides UIScrollView's top/bottom edge glass (iOS 26+). Liquid Glass
-    // only — hidden otherwise rather than shown-disabled, since the row has
-    // nothing to preview/explain on a non-Glass device.
+    // Overrides the top scroll-edge glass under the nav bar (iOS 26+). Liquid
+    // Glass only — hidden otherwise rather than shown-disabled, since the row
+    // has nothing to preview/explain on a non-Glass device.
     ApolloSettingsRow *scrollEdgeEffect =
         [ApolloSettingsRow valueRowWithID:@"gen.scrollEdgeEffect"
-                                    title:@"Scroll Edge Effect"
+                                    title:@"Header Style"
                                    detail:^NSString * { return [weakSelf scrollEdgeEffectStyleText]; }
                                  onSelect:^{
             [weakSelf presentScrollEdgeEffectStyleSheetFromSourceView:[weakSelf cellForRowID:@"gen.scrollEdgeEffect"]];
@@ -1302,32 +1398,61 @@ typedef NS_ENUM(NSInteger, Tag) {
     scrollEdgeEffect.visible = ^BOOL { return IsLiquidGlass(); };
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Liquid Glass chrome behaviors."
+                                            footer:@"Liquid Glass chrome behaviors.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
                                               rows:@[ tabBarIdle, keepSearchInPlace, titleGapCentering, iPadTabBarBottom, scrollEdgeEffect ]];
 }
 
+// Display order of the Header Style picker. Raw values are NOT contiguous
+// (3 was the retired Hidden mode, Blur is 4), so the picker maps index↔value
+// through this table instead of using the enum value as the index.
+static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailable) {
+    const NSInteger values[] = {
+        ApolloScrollEdgeEffectStyleSoft,
+        ApolloScrollEdgeEffectStyleHard,
+        ApolloScrollEdgeEffectStyleBlur,
+    };
+    NSInteger count = blurAvailable ? 3 : 2;
+    if (index < 0 || index >= count) return ApolloScrollEdgeEffectStyleSoft;
+    return values[index];
+}
+
 - (NSString *)scrollEdgeEffectStyleText {
-    switch (sScrollEdgeEffectStyle) {
-        case ApolloScrollEdgeEffectStyleSoft:   return @"Soft";
-        case ApolloScrollEdgeEffectStyleHard:   return @"Hard";
-        case ApolloScrollEdgeEffectStyleHidden: return @"Hidden";
-        default:                                return @"Automatic";
+    switch (ApolloResolvedScrollEdgeEffectStyle()) {
+        case ApolloScrollEdgeEffectStyleSoft: return @"Soft";
+        case ApolloScrollEdgeEffectStyleHard: return @"Hard";
+        case ApolloScrollEdgeEffectStyleBlur: return @"Blur";
+        default: return @"Soft";
     }
 }
 
 - (void)setScrollEdgeEffectStyle:(NSInteger)style {
     sScrollEdgeEffectStyle = style;
     [[NSUserDefaults standardUserDefaults] setInteger:sScrollEdgeEffectStyle forKey:UDKeyScrollEdgeEffectStyle];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloScrollEdgeEffectStyleChangedNotification" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloScrollEdgeEffectStyleChangedNotification object:nil];
     [self reloadRowWithID:@"gen.scrollEdgeEffect"];
 }
 
 - (void)presentScrollEdgeEffectStyleSheetFromSourceView:(UIView *)sourceView {
+    // Blur needs the private variableBlur filter; never offer a mode that
+    // would render nothing.
+    BOOL blurAvailable = ApolloProgressiveBlurAvailable();
+    NSMutableArray<NSString *> *options =
+        [NSMutableArray arrayWithObjects:@"Soft", @"Hard", nil];
+    if (blurAvailable) [options addObject:@"Blur"];
+
+    NSInteger currentIndex = 0;
+    NSInteger currentStyle = ApolloResolvedScrollEdgeEffectStyle();
+    for (NSInteger i = 0; i < (NSInteger)options.count; i++) {
+        if (ApolloHeaderStylePickerValue(i, blurAvailable) == currentStyle) {
+            currentIndex = i;
+            break;
+        }
+    }
+
     __weak typeof(self) weakSelf = self;
-    ApolloSettingsPresentPicker(self, sourceView, @"Scroll Edge Effect",
-                                @[@"Automatic", @"Soft", @"Hard", @"Hidden"],
-                                sScrollEdgeEffectStyle, ^(NSInteger pickedIndex) {
-        [weakSelf setScrollEdgeEffectStyle:pickedIndex];
+    ApolloSettingsPresentPicker(self, sourceView, @"Header Style",
+                                options, currentIndex, ^(NSInteger pickedIndex) {
+        [weakSelf setScrollEdgeEffectStyle:ApolloHeaderStylePickerValue(pickedIndex, blurAvailable)];
     });
 }
 
@@ -1483,8 +1608,28 @@ typedef NS_ENUM(NSInteger, Tag) {
     }
 }
 
-// Media group screen (ApolloMediaSettingsViewController), four sections:
-// Playback / Inline Media / Uploads / Network.
+// Media group screen (ApolloMediaSettingsViewController), five sections:
+// Browsing / Playback / Inline Media / Uploads / Network.
+- (ApolloSettingsSection *)buildMediaBrowsingSection {
+    __weak typeof(self) weakSelf = self;
+
+    ApolloSettingsRow *feedGalleries =
+        [ApolloSettingsRow switchRowWithID:@"media.feedGalleryCarousel"
+                                     title:@"Swipe Through Feed Galleries"
+                                      isOn:^BOOL { return sFeedGalleryCarousel; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf feedGalleryCarouselSwitchToggled:sender]; }];
+
+    ApolloSettingsRow *swipeComments =
+        [ApolloSettingsRow switchRowWithID:@"media.swipeUpComments"
+                                     title:@"Swipe Up for Comments"
+                                      isOn:^BOOL { return sSwipeUpForComments; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf swipeUpCommentsSwitchToggled:sender]; }];
+
+    return [ApolloSettingsSection sectionWithTitle:@"Browsing"
+                                            footer:@"Swipe through Reddit image galleries without leaving the feed. In the fullscreen media viewer, swipe upward or tap the comments button to open comments over the media."
+                                              rows:@[ feedGalleries, swipeComments ]];
+}
+
 - (ApolloSettingsSection *)buildMediaPlaybackSection {
     __weak typeof(self) weakSelf = self;
 
@@ -1700,6 +1845,15 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return sHideSubredditListDescriptions; }
                                   onToggle:^(UISwitch *sender) { [weakSelf hideSubredditListDescriptionsSwitchToggled:sender]; }];
 
+    // Sibling of Hide Feed Descriptions for the MULTIREDDITS section's rows
+    // (which otherwise show a custom description, or the joined subreddit
+    // list). Also independent of the enhancements master.
+    ApolloSettingsRow *hideMultiredditDescriptions =
+        [ApolloSettingsRow switchRowWithID:@"sub.hideMultiredditDescriptions"
+                                     title:@"Hide Multireddit Descriptions"
+                                      isOn:^BOOL { return sHideMultiredditDescriptions; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf hideMultiredditDescriptionsSwitchToggled:sender]; }];
+
     // Pushes the dedicated Subreddit Layout screen — the single customize
     // screen for everything subreddit-page-related: Density (New, Classic, or
     // Apollo's native header), the Apollo Reborn header show switches, and
@@ -1714,8 +1868,8 @@ typedef NS_ENUM(NSInteger, Tag) {
         }];
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Enhance the subreddit list with dividers, and customize subreddit pages. Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts."
-                                              rows:@[ enhancements, modernDividers, hideDescriptions, subredditLayout ]];
+                                            footer:@"Enhance the subreddit list with dividers, and customize subreddit pages. Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts. Multireddits show the subreddits they contain, or a custom description — tap a multireddit while editing the list to rename it or change its description. Hide Multireddit Descriptions blanks that line entirely."
+                                              rows:@[ enhancements, modernDividers, hideDescriptions, hideMultiredditDescriptions, subredditLayout ]];
 }
 
 - (NSString *)subredditLayoutSummaryText {
@@ -1927,7 +2081,23 @@ typedef NS_ENUM(NSInteger, Tag) {
     heartbeat.iconSystemName = @"waveform.path.ecg";
     heartbeat.iconTileColor = [UIColor systemPinkColor];
 
-    return [ApolloSettingsSection sectionWithTitle:@"Privacy" footer:nil rows:@[ heartbeat ]];
+    // Local crash recording (src/crash/). The pending count re-reads on every
+    // configure, so returning from the sub-screen after a delete/submit shows
+    // the fresh number without any manual reload plumbing.
+    ApolloSettingsRow *crashReports =
+        [ApolloSettingsRow disclosureRowWithID:@"privacy.crashReports"
+                                         title:@"Crash Reports"
+                                        detail:^NSString * {
+            NSInteger count = ApolloCrashManager.sharedManager.pendingReportCount;
+            return count > 0 ? [NSString stringWithFormat:@"%ld", (long)count] : nil;
+        }
+                                          push:^UIViewController * {
+            return [[ApolloCrashReportsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        }];
+    crashReports.iconSystemName = @"bandage";
+    crashReports.iconTileColor = [UIColor systemOrangeColor];
+
+    return [ApolloSettingsSection sectionWithTitle:@"Privacy" footer:nil rows:@[ heartbeat, crashReports ]];
 }
 
 - (ApolloSettingsSection *)buildAboutSection {
@@ -3170,6 +3340,12 @@ typedef NS_ENUM(NSInteger, Tag) {
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloHideSubredditListDescriptionsChangedNotification object:nil];
 }
 
+- (void)hideMultiredditDescriptionsSwitchToggled:(UISwitch *)sender {
+    sHideMultiredditDescriptions = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sHideMultiredditDescriptions forKey:UDKeyHideMultiredditDescriptions];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloHideMultiredditDescriptionsChangedNotification object:nil];
+}
+
 - (void)showRecentlyReadThumbnailsSwitchToggled:(UISwitch *)sender {
     sShowRecentlyReadThumbnails = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sShowRecentlyReadThumbnails forKey:UDKeyShowRecentlyReadThumbnails];
@@ -3217,6 +3393,17 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (void)textPostThumbnailsSwitchToggled:(UISwitch *)sender {
     sFeedTextPostThumbnails = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sFeedTextPostThumbnails forKey:UDKeyFeedTextPostThumbnails];
+}
+
+- (void)feedGalleryCarouselSwitchToggled:(UISwitch *)sender {
+    sFeedGalleryCarousel = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sFeedGalleryCarousel forKey:UDKeyFeedGalleryCarousel];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloFeedGalleryCarouselChangedNotification object:nil];
+}
+
+- (void)swipeUpCommentsSwitchToggled:(UISwitch *)sender {
+    sSwipeUpForComments = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sSwipeUpForComments forKey:UDKeySwipeUpForComments];
 }
 
 - (void)keepSearchBarInPlaceSwitchToggled:(UISwitch *)sender {
@@ -3490,7 +3677,8 @@ typedef NS_ENUM(NSInteger, Tag) {
 @implementation ApolloMediaSettingsViewController
 - (NSString *)apollo_screenTitle { return @"Media"; }
 - (NSArray<ApolloSettingsSection *> *)buildForm {
-    return @[ [self buildMediaPlaybackSection],
+    return @[ [self buildMediaBrowsingSection],
+              [self buildMediaPlaybackSection],
               [self buildMediaInlineSection],
               [self buildMediaUploadsSection],
               [self buildMediaNetworkSection] ];

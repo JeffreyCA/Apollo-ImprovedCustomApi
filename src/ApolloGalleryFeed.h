@@ -12,16 +12,15 @@
 // cursor, turn each post into zero or more ApolloGalleryItems, and hand the
 // new items back. It has no UI dependencies.
 //
-// Auth: both supported modes work without any special-casing here.
-//   • API-key (OAuth) accounts — sLatestRedditBearerToken is a live bearer, so
-//     the request goes to oauth.reddit.com with an Authorization header, the
-//     same way ApolloSubredditHighlights fetches.
-//   • Keyless (web-session) accounts — the identity layer never populates
-//     sLatestRedditBearerToken with a real token, so we address
-//     www.reddit.com/...json instead; the __NSCFLocalSessionTask chokepoint in
-//     Tweak.xm hands that to ApolloWebJSONRewriteRequest, which attaches the
-//     harvested session cookie (listing reads are a routable path). Nothing
-//     here has to know which mode is active.
+// Auth: the feed snapshots the active account's own bearer when it is created.
+//   • API-key (OAuth) accounts — the request goes to oauth.reddit.com with that
+//     account's real Authorization bearer.
+//   • Keyless (web-session) accounts — the request carries that account's
+//     per-user synthetic bearer; the __NSCFLocalSessionTask chokepoint in
+//     Tweak.xm hands it to ApolloWebJSONRewriteRequest, which selects the same
+//     user's harvested cookie. This matters when several accounts are signed
+//     in and background polling has made the process-wide latest bearer belong
+//     to somebody other than the visible account.
 //   • Signed out / neither — the www.reddit.com public JSON is used as-is.
 // If the first attempt comes back 401/403 the fetch retries once on the other
 // host, so a stale captured bearer can't strand the gallery.
@@ -124,13 +123,15 @@ typedef NS_ENUM(NSInteger, ApolloGalleryTopWindow) {
     ApolloGalleryTopWindowAll,
 };
 
-// A subreddit's media feed. Not thread-safe: drive it from the main thread
-// (completions are always delivered there).
+// A subreddit's or multireddit's media feed. Not thread-safe: drive it from the
+// main thread (completions are always delivered there).
 @interface ApolloGalleryFeed : NSObject
 
 - (instancetype)initWithSubreddit:(NSString *)subreddit NS_DESIGNATED_INITIALIZER;
+- (instancetype)initWithMultiredditPath:(NSString *)multiredditPath NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
 
+// Populated for a single-subreddit feed and empty for a multireddit feed.
 @property (nonatomic, readonly, copy) NSString *subreddit;
 // The items the UI should show: everything fetched so far, minus the kinds the
 // filter excludes. Filtering happens here rather than at parse time so toggling

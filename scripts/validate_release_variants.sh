@@ -105,6 +105,53 @@ require_widget_variant() {
     rm -rf "$work"
 }
 
+require_safari_extensions() {
+    local ipa="$1"
+    local name="$2"
+    local work app_dir app_id manual legacy manual_id legacy_id manual_name legacy_name
+
+    if ! contains_path "$ipa" '^Payload/[^/]+\.app/PlugIns/Apollofari\.appex/'; then
+        echo "Error: $name is missing Apollofari.appex" >&2
+        exit 1
+    fi
+    if ! contains_path "$ipa" '^Payload/[^/]+\.app/PlugIns/ApollofariLegacy\.appex/'; then
+        echo "Error: $name is missing ApollofariLegacy.appex" >&2
+        exit 1
+    fi
+
+    work="$(mktemp -d)"
+    unzip -q "$ipa" -d "$work"
+    app_dir="$(find "$work/Payload" -maxdepth 1 -name '*.app' -type d -print -quit)"
+    manual="$app_dir/PlugIns/Apollofari.appex"
+    legacy="$app_dir/PlugIns/ApollofariLegacy.appex"
+
+    app_id="$(plutil -extract CFBundleIdentifier raw -o - "$app_dir/Info.plist" 2>/dev/null || true)"
+    manual_id="$(plutil -extract CFBundleIdentifier raw -o - "$manual/Info.plist" 2>/dev/null || true)"
+    legacy_id="$(plutil -extract CFBundleIdentifier raw -o - "$legacy/Info.plist" 2>/dev/null || true)"
+    manual_name="$(plutil -extract CFBundleDisplayName raw -o - "$manual/Info.plist" 2>/dev/null || true)"
+    legacy_name="$(plutil -extract CFBundleDisplayName raw -o - "$legacy/Info.plist" 2>/dev/null || true)"
+
+    if [[ "$manual_id" != "${app_id}.Apollofari" ||
+          "$legacy_id" != "${app_id}.ApollofariLegacy" ]]; then
+        echo "Error: $name has invalid Safari extension bundle identifiers:" >&2
+        echo "  app:    $app_id" >&2
+        echo "  manual: $manual_id" >&2
+        echo "  legacy: $legacy_id" >&2
+        rm -rf "$work"
+        exit 1
+    fi
+    if [[ "$manual_name" != "Open in Apollo (Manual Fallback)" ||
+          "$legacy_name" != "Open in Apollo (Legacy)" ]]; then
+        echo "Error: $name has invalid Safari extension display names:" >&2
+        echo "  manual: $manual_name" >&2
+        echo "  legacy: $legacy_name" >&2
+        rm -rf "$work"
+        exit 1
+    fi
+
+    rm -rf "$work"
+}
+
 require_no_extensions_variant() {
     local ipa="$1"
     local name="$2"
@@ -150,6 +197,10 @@ require_file "$NOEXT_GLASS_ICONS_IPA" "GLASS Icons No Extensions"
 require_widget_variant "$STANDARD_IPA" "standard"
 require_widget_variant "$GLASS_IPA" "GLASS"
 require_widget_variant "$GLASS_ICONS_IPA" "GLASS Icons"
+
+require_safari_extensions "$STANDARD_IPA" "standard"
+require_safari_extensions "$GLASS_IPA" "GLASS"
+require_safari_extensions "$GLASS_ICONS_IPA" "GLASS Icons"
 
 require_no_extensions_variant "$NOEXT_IPA" "No Extensions"
 require_no_extensions_variant "$NOEXT_GLASS_IPA" "GLASS No Extensions"

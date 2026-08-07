@@ -46,13 +46,14 @@ void ApolloWebJSONNoteResponse(NSURLRequest *request, NSURLResponse *response);
 // preview URL and aspect ratio instead of fabricating dimensions.
 NSData *ApolloWebJSONFixupListingMediaResponseData(NSURLResponse *response, NSData *data);
 
-// Fixes up the parsed response object for cookie-routed comment writes
-// (/api/editusertext, /api/comment). www.reddit.com returns each thing's data in
-// the legacy old-reddit {parent, content:"<html>"} shape, which Apollo can't
-// render (the just-edited/posted comment shows empty with 0 upvotes); this swaps
-// in the modern comment JSON re-fetched via info.json. Returns the input
-// unchanged outside Web JSON mode or when the shape is already modern. Called
-// from the RDKResponseSerializer hook with the serializer's output.
+// Fixes up the parsed response object for comment writes (/api/editusertext,
+// /api/comment) in EVERY auth mode. www.reddit.com always returns each thing's
+// data in the legacy old-reddit {parent, content:"<html>"} shape, and since
+// 2026-08 oauth.reddit.com has intermittently done the same to API-key (OAuth)
+// clients; Apollo renders such a comment with no author/score/timestamp. This
+// swaps in the modern comment JSON (info.json refetch, else local synthesis).
+// Returns the input unchanged when the shape is already modern. Called from the
+// RDKResponseSerializer hook with the serializer's output.
 id ApolloWebJSONFixupWriteResponseObject(NSURLResponse *response, id responseObject);
 
 // Fixes up the parsed response object for the cookie-routed moderators-list
@@ -109,6 +110,29 @@ BOOL ApolloWebJSONRequestIsInternal(NSURL *url);
 // bounded by short timeouts — background queues only. Callers must mark their
 // request with ApolloWebJSONProbeURL so the transport hooks leave it alone.
 NSString *ApolloWebJSONKeylessOAuthBearer(NSString *username);
+
+// Captures the write context for the write-response repair. Called from the
+// identity module's RDKClient submit/edit hooks with the client that issued the
+// write plus everything the call site knows about WHERE the write landed; the
+// repair reads it (TTL-bounded) when a degraded response is missing those
+// fields. The client resolves the posting identity (each account owns its own
+// RDKClient, so the submitting client's currentUser is the true posting
+// identity even for temporaryPostingAccount); subreddit/subredditFullName come
+// from the target link/parent comment, linkFullName is the t3 the comment
+// lives under, and parentFullName is the t1 being replied to (nil for
+// top-level comments and edits). Any argument may be nil — the repair fills
+// only what it has.
+//
+// `body` is the submitted markdown and is what keys this capture to its own
+// response: writes can overlap (a second comment submitted while the first is
+// still in flight), and Reddit echoes the markdown back as the response thing's
+// body/contentText, so the repair can tell which outstanding write a degraded
+// response belongs to instead of taking whichever was captured last. Pass it
+// whenever the call site has it; a capture with no body still participates, it
+// just can't be matched exactly.
+void ApolloWebJSONNoteCommentWriteContext(id client, NSString *body, NSString *subreddit,
+                                          NSString *subredditFullName,
+                                          NSString *linkFullName, NSString *parentFullName);
 
 // Fetch-outcome feedback for ApolloWebJSONKeylessOAuthBearer callers: report a
 // 401/403 so a minted bearer proven dead (an anonymous token from a signed-out

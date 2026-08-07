@@ -3,7 +3,7 @@ name: Build IPA
 # Build a sideload-ready Apollo IPA on GitHub Actions. Optionally injects the
 # tweak (inject_tweak / no_extensions) and applies patch.sh patches
 # (liquid_glass, liquid_glass_icons, url_schemes, remove_code_signature).
-# Extension-bearing builds always get the Safari extension repair
+# Extension-bearing builds always get the manual + legacy Safari overlays
 # (patch.sh --fix-safari-extension).
 #
 # IMPORTANT: The Apollo IPA you provide MUST be DECRYPTED. App Store IPAs are
@@ -243,10 +243,8 @@ jobs:
             CMD_ARGS="${CMD_ARGS} --remove-code-signature"
             NEEDS_PATCH="true"
           fi
-          # Always repair the bundled "Open in Apollo" Safari extension when the
-          # IPA keeps its extensions — the stock one strands users on
-          # openinapollo.com (see safari-extension/README.md). The module skips
-          # gracefully if the IPA has no Apollofari.appex.
+          # Package the passive manual fallback and the separately labelled,
+          # opt-in legacy automatic opener whenever extensions are retained.
           if [ "${{ github.event.inputs.no_extensions }}" != "true" ]; then
             CMD_ARGS="${CMD_ARGS} --fix-safari-extension"
             NEEDS_PATCH="true"
@@ -281,6 +279,14 @@ jobs:
               exit 1
             fi
           else
+            if ! unzip -Z1 "$IPA" | grep -Eq '^Payload/[^/]+\.app/PlugIns/Apollofari\.appex/'; then
+              echo "Error: output IPA is missing the manual Safari extension" >&2
+              exit 1
+            fi
+            if ! unzip -Z1 "$IPA" | grep -Eq '^Payload/[^/]+\.app/PlugIns/ApollofariLegacy\.appex/'; then
+              echo "Error: output IPA is missing the legacy Safari extension" >&2
+              exit 1
+            fi
             if ! unzip -Z1 "$IPA" | grep -Eq '^Payload/[^/]+\.app/PlugIns/ApolloRebornWidgets\.appex/'; then
               echo "Error: output IPA is missing ApolloRebornWidgets.appex" >&2
               exit 1

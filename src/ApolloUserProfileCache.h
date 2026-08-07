@@ -65,6 +65,14 @@ extern NSString * const ApolloUserProfileUsernameKey;
 - (UIImage *)cachedImageForURL:(NSURL *)url;
 - (void)requestImageForURL:(NSURL *)url completion:(void (^)(UIImage *image))completion;
 
+// Banner-sized artwork (profile/subreddit banners). Decoded at ~display
+// resolution into a separate small cache: a native-size banner decode can run
+// ~19MB for a 4000px source, and two of those used to evict essentially every
+// avatar from the shared image cache. Disk-cached as the downscaled re-encode,
+// so >2MB sources still persist (the avatar path skips anything that large).
+- (UIImage *)cachedBannerImageForURL:(NSURL *)url;
+- (void)requestBannerImageForURL:(NSURL *)url completion:(void (^)(UIImage *image))completion;
+
 - (void)clearAllCaches;
 
 - (BOOL)cachedIsSuspendedForUsername:(NSString *)username;

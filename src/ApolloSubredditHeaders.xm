@@ -109,6 +109,17 @@ typedef NS_ENUM(NSInteger, ApolloSubredditHeaderAssetKind) {
 @property(nonatomic, copy) NSString *subredditName;
 @property(nonatomic) BOOL usesCustomBanner;
 @property(nonatomic) BOOL usesCustomIcon;
+// Provenance of the banner image currently displayed (custom asset, fetched
+// URL, or the shared default), stamped at the moment the image is applied.
+// The ambient blur cache key must describe the image actually on screen —
+// deriving it from info.bannerURL let a failed fetch stamp the shared
+// default-banner singleton with a real subreddit's URL, poisoning the blur
+// cache for every header showing the default.
+@property(nonatomic, copy) NSString *bannerProvenanceKey;
+// The banner URL this header most recently started fetching. Completions
+// compare against it so an older in-flight fetch can't paint over a newer
+// banner (same guard as the profile header's currentBannerURL).
+@property(nonatomic, strong) NSURL *pendingBannerURL;
 @property(nonatomic) BOOL subscriptionStateKnown;
 @property(nonatomic) BOOL subscribed;
 @property(nonatomic) BOOL subscriptionRequestInFlight;
@@ -124,6 +135,11 @@ typedef NS_ENUM(NSInteger, ApolloSubredditHeaderAssetKind) {
 - (void)applyInfo:(ApolloSubredditInfo *)info fallbackSubredditName:(NSString *)subredditName;
 - (void)apollo_bannerTapped;
 - (void)apollo_iconTapped;
+- (void)apollo_bannerLongPressed:(UILongPressGestureRecognizer *)recognizer;
+- (void)apollo_iconLongPressed:(UILongPressGestureRecognizer *)recognizer;
+- (void)apollo_showOptionsForAssetKind:(ApolloSubredditHeaderAssetKind)assetKind;
+- (void)apollo_viewImageForAssetKind:(ApolloSubredditHeaderAssetKind)assetKind;
+- (NSURL *)apollo_viewableImageURLForAssetKind:(ApolloSubredditHeaderAssetKind)assetKind;
 - (void)apollo_subscribeTapped;
 - (void)apollo_applySubscriptionState:(BOOL)subscribed known:(BOOL)known;
 - (void)apollo_applySubscriptionGlassWithAccent:(UIColor *)accent;
@@ -219,9 +235,11 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
         _bannerImageView.isAccessibilityElement = YES;
         _bannerImageView.accessibilityTraits = UIAccessibilityTraitButton;
         _bannerImageView.accessibilityLabel = @"Subreddit banner";
-        _bannerImageView.accessibilityHint = @"Double tap to change banner photo";
+        _bannerImageView.accessibilityHint = @"Double tap to view the banner, or double tap and hold for options";
         UITapGestureRecognizer *bannerTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_bannerTapped)];
         [_bannerImageView addGestureRecognizer:bannerTap];
+        UILongPressGestureRecognizer *bannerHold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_bannerLongPressed:)];
+        [_bannerImageView addGestureRecognizer:bannerHold];
         [self addSubview:_bannerImageView];
 
         _iconImageView = [[UIImageView alloc] init];
@@ -232,9 +250,11 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
         _iconImageView.isAccessibilityElement = YES;
         _iconImageView.accessibilityTraits = UIAccessibilityTraitButton;
         _iconImageView.accessibilityLabel = @"Subreddit icon";
-        _iconImageView.accessibilityHint = @"Double tap to change subreddit icon";
+        _iconImageView.accessibilityHint = @"Double tap to view the icon, or double tap and hold for options";
         UITapGestureRecognizer *iconTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_iconTapped)];
         [_iconImageView addGestureRecognizer:iconTap];
+        UILongPressGestureRecognizer *iconHold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(apollo_iconLongPressed:)];
+        [_iconImageView addGestureRecognizer:iconHold];
         [self addSubview:_iconImageView];
 
         _displayNameLabel = [[UILabel alloc] init];
@@ -664,7 +684,7 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
     void (^completion)(NSError *error) = ^(NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             ApolloSubredditHeaderView *strongSelf = weakSelf;
-            if (!strongSelf || ![strongSelf.subredditName isEqualToString:subredditName]) return;
+            if (!strongSelf || !ApolloSubredditNamesEqual(strongSelf.subredditName, subredditName)) return;
             strongSelf.subscriptionRequestInFlight = NO;
             BOOL succeeded = ![error isKindOfClass:[NSError class]];
             BOOL finalState = succeeded ? desiredState : oldState;
@@ -718,70 +738,115 @@ static NSInteger const ApolloSubredditAboutCollapsedLines = 3;
     }
 }
 
-- (void)apollo_bannerTapped {
+// The image the header is actually showing, as a URL the fullscreen viewer can
+// load: the custom override's on-disk file when one is set, else the
+// subreddit's real banner/icon URL from the info cache. Nil when only the
+// bundled default banner / placeholder icon is showing — nothing to view then.
+- (NSURL *)apollo_viewableImageURLForAssetKind:(ApolloSubredditHeaderAssetKind)assetKind {
+    NSString *subredditName = self.subredditName;
+    if (subredditName.length == 0) return nil;
+    if (assetKind == ApolloSubredditHeaderAssetKindIcon) {
+        NSURL *customURL = [[ApolloSubredditCustomIconCache sharedCache] cachedIconFileURLForSubreddit:subredditName];
+        if (customURL) return customURL;
+        return [[ApolloSubredditInfoCache sharedCache] cachedInfoForSubreddit:subredditName].iconURL;
+    }
+    NSURL *customURL = [[ApolloSubredditCustomBannerCache sharedCache] cachedBannerFileURLForSubreddit:subredditName];
+    if (customURL) return customURL;
+    return [[ApolloSubredditInfoCache sharedCache] cachedInfoForSubreddit:subredditName].bannerURL;
+}
+
+// Issue #324: open the banner/icon fullscreen in the tweak's generic zoomable
+// viewer (share/save button, long-press Save/Share menu, swipe to dismiss).
+// NSURLSession loads file:// URLs too, so custom overrides view identically.
+- (void)apollo_viewImageForAssetKind:(ApolloSubredditHeaderAssetKind)assetKind {
+    NSURL *url = [self apollo_viewableImageURLForAssetKind:assetKind];
+    if (!url) return;
+    UIView *sourceView = assetKind == ApolloSubredditHeaderAssetKindIcon ? self.iconImageView : self.bannerImageView;
+    if (!ApolloPresentImageChestItems(@[@{ @"url": url }], sourceView, 0)) {
+        ApolloLog(@"[SubredditHeaders] view image: no presenter for %@", url);
+    }
+}
+
+- (void)apollo_showOptionsForAssetKind:(ApolloSubredditHeaderAssetKind)assetKind {
     UIViewController *host = self.hostViewController;
     NSString *subredditName = self.subredditName;
     if (!host || subredditName.length == 0 || !sShowSubredditHeaders) return;
 
-    ApolloSubredditCustomBannerCache *customCache = [ApolloSubredditCustomBannerCache sharedCache];
-    BOOL hasCustom = [customCache hasCustomBannerForSubreddit:subredditName];
+    BOOL isIcon = assetKind == ApolloSubredditHeaderAssetKindIcon;
+    BOOL hasCustom = isIcon
+        ? [[ApolloSubredditCustomIconCache sharedCache] hasCustomIconForSubreddit:subredditName]
+        : [[ApolloSubredditCustomBannerCache sharedCache] hasCustomBannerForSubreddit:subredditName];
+    NSURL *viewableURL = [self apollo_viewableImageURLForAssetKind:assetKind];
 
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil
                                                                    message:nil
                                                             preferredStyle:UIAlertControllerStyleActionSheet];
     __weak typeof(self) weakSelf = self;
+    if (viewableURL) {
+        [sheet addAction:[UIAlertAction actionWithTitle:isIcon ? @"View Icon" : @"View Banner"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(__unused UIAlertAction *action) {
+            [weakSelf apollo_viewImageForAssetKind:assetKind];
+        }]];
+    }
     [sheet addAction:[UIAlertAction actionWithTitle:@"Choose Photo"
                                               style:UIAlertActionStyleDefault
                                             handler:^(__unused UIAlertAction *action) {
-        [weakSelf apollo_presentPhotoPickerForAssetKind:ApolloSubredditHeaderAssetKindBanner];
+        [weakSelf apollo_presentPhotoPickerForAssetKind:assetKind];
     }]];
     if (hasCustom) {
-        [sheet addAction:[UIAlertAction actionWithTitle:@"Remove Custom Banner"
+        [sheet addAction:[UIAlertAction actionWithTitle:isIcon ? @"Remove Custom Icon" : @"Remove Custom Banner"
                                                   style:UIAlertActionStyleDestructive
                                                 handler:^(__unused UIAlertAction *action) {
-            [customCache removeBannerForSubreddit:subredditName];
+            if (isIcon) {
+                [[ApolloSubredditCustomIconCache sharedCache] removeIconForSubreddit:subredditName];
+            } else {
+                [[ApolloSubredditCustomBannerCache sharedCache] removeBannerForSubreddit:subredditName];
+            }
         }]];
     }
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
 
+    UIView *sourceView = isIcon ? self.iconImageView : self.bannerImageView;
     if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
-        sheet.popoverPresentationController.sourceView = self.bannerImageView;
-        sheet.popoverPresentationController.sourceRect = self.bannerImageView.bounds;
+        sheet.popoverPresentationController.sourceView = sourceView;
+        sheet.popoverPresentationController.sourceRect = sourceView.bounds;
     }
     [host presentViewController:sheet animated:YES completion:nil];
 }
 
+// Tap views the artwork when there is any (matching how media behaves
+// elsewhere in Apollo); a sub still on the bundled default banner/placeholder
+// icon falls through to the options sheet so the photo picker stays one tap
+// away. Long-press always opens the options sheet.
+- (void)apollo_bannerTapped {
+    UIViewController *host = self.hostViewController;
+    if (!host || self.subredditName.length == 0 || !sShowSubredditHeaders) return;
+    if ([self apollo_viewableImageURLForAssetKind:ApolloSubredditHeaderAssetKindBanner]) {
+        [self apollo_viewImageForAssetKind:ApolloSubredditHeaderAssetKindBanner];
+        return;
+    }
+    [self apollo_showOptionsForAssetKind:ApolloSubredditHeaderAssetKindBanner];
+}
+
 - (void)apollo_iconTapped {
     UIViewController *host = self.hostViewController;
-    NSString *subredditName = self.subredditName;
-    if (!host || subredditName.length == 0 || !sShowSubredditHeaders) return;
-
-    ApolloSubredditCustomIconCache *customCache = [ApolloSubredditCustomIconCache sharedCache];
-    BOOL hasCustom = [customCache hasCustomIconForSubreddit:subredditName];
-
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil
-                                                                   message:nil
-                                                            preferredStyle:UIAlertControllerStyleActionSheet];
-    __weak typeof(self) weakSelf = self;
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Choose Photo"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(__unused UIAlertAction *action) {
-        [weakSelf apollo_presentPhotoPickerForAssetKind:ApolloSubredditHeaderAssetKindIcon];
-    }]];
-    if (hasCustom) {
-        [sheet addAction:[UIAlertAction actionWithTitle:@"Remove Custom Icon"
-                                                  style:UIAlertActionStyleDestructive
-                                                handler:^(__unused UIAlertAction *action) {
-            [customCache removeIconForSubreddit:subredditName];
-        }]];
+    if (!host || self.subredditName.length == 0 || !sShowSubredditHeaders) return;
+    if ([self apollo_viewableImageURLForAssetKind:ApolloSubredditHeaderAssetKindIcon]) {
+        [self apollo_viewImageForAssetKind:ApolloSubredditHeaderAssetKindIcon];
+        return;
     }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self apollo_showOptionsForAssetKind:ApolloSubredditHeaderAssetKindIcon];
+}
 
-    if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
-        sheet.popoverPresentationController.sourceView = self.iconImageView;
-        sheet.popoverPresentationController.sourceRect = self.iconImageView.bounds;
-    }
-    [host presentViewController:sheet animated:YES completion:nil];
+- (void)apollo_bannerLongPressed:(UILongPressGestureRecognizer *)recognizer {
+    if (recognizer.state != UIGestureRecognizerStateBegan) return;
+    [self apollo_showOptionsForAssetKind:ApolloSubredditHeaderAssetKindBanner];
+}
+
+- (void)apollo_iconLongPressed:(UILongPressGestureRecognizer *)recognizer {
+    if (recognizer.state != UIGestureRecognizerStateBegan) return;
+    [self apollo_showOptionsForAssetKind:ApolloSubredditHeaderAssetKindIcon];
 }
 
 @end
@@ -908,6 +973,12 @@ static BOOL ApolloSubredditNamesEqual(NSString *left, NSString *right) {
     NSString *normalizedRight = ApolloNormalizedSubredditName(right);
     if (normalizedLeft.length == 0 || normalizedRight.length == 0) return NO;
     return [normalizedLeft caseInsensitiveCompare:normalizedRight] == NSOrderedSame;
+}
+
+static BOOL ApolloSubredditURLsMatch(NSURL *left, NSURL *right) {
+    if (left == right) return YES;
+    if (!left || !right) return NO;
+    return [left.absoluteString isEqualToString:right.absoluteString];
 }
 
 static BOOL ApolloSubredditIsLikelyObjectPointer(id value) {
@@ -1080,6 +1151,7 @@ static void ApolloSubredditRefreshSubscriptionState(ApolloSubredditHeaderView *h
 // is a multireddit and the remaining tags are all/popular/home/profile feeds.
 static const ptrdiff_t kApolloPostsTypeTagOffset = 0x20;
 static const uint8_t kApolloPostsTypeSubreddit = 0;
+static const uint8_t kApolloPostsTypeMultireddit = 1;
 static const uint8_t kApolloPostsTypeRandom = 5;
 
 // Read the PostsType case tag. Returns NO (and leaves *tag untouched) when the
@@ -1133,6 +1205,39 @@ NSString *ApolloSubredditNameFromViewController(UIViewController *viewController
     }
 
     return nil;
+}
+
+// Resolve the canonical `/user/<owner>/m/<name>` path for a multireddit feed.
+// Gallery View uses the path rather than rebuilding it from the navigation
+// title, because public multis can belong to a user other than the active
+// account. The PostsType gate also prevents a stale currentMultireddit ivar on
+// a reused controller from exposing Gallery View on an unrelated feed.
+NSString *ApolloMultiredditPathFromViewController(UIViewController *viewController) {
+    if (!viewController) return nil;
+
+    uint8_t tag = 0;
+    if (!ApolloSubredditPostsTypeTag(viewController, &tag) || tag != kApolloPostsTypeMultireddit) return nil;
+
+    id multireddit = ApolloSubredditTypedIvar(viewController, @"currentMultireddit",
+                                              objc_getClass("RDKMultireddit"));
+    if (![multireddit respondsToSelector:@selector(path)]) return nil;
+    id pathValue = ((id (*)(id, SEL))objc_msgSend)(multireddit, @selector(path));
+    if (![pathValue isKindOfClass:[NSString class]]) return nil;
+
+    NSString *path = [(NSString *)pathValue stringByTrimmingCharactersInSet:
+        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSMutableArray<NSString *> *components = [NSMutableArray array];
+    for (NSString *component in [path pathComponents]) {
+        if ([component isEqualToString:@"/"] || component.length == 0) continue;
+        [components addObject:component];
+    }
+    if (components.count != 4 ||
+        ![components[0].lowercaseString isEqualToString:@"user"] ||
+        ![components[2].lowercaseString isEqualToString:@"m"]) {
+        ApolloLog(@"[GalleryMenu] Ignoring malformed multireddit path: %@", path);
+        return nil;
+    }
+    return [@"/" stringByAppendingString:[components componentsJoinedByString:@"/"]];
 }
 
 static UIView *ApolloSubredditFindSubviewOfClass(UIView *root, Class cls) {
@@ -1265,13 +1370,21 @@ static UIColor *ApolloSubredditBannerBackgroundColor(void) {
 static void ApolloSubredditApplyLoadingBanner(ApolloSubredditHeaderView *header) {
     if (!header) return;
     header.bannerImageView.image = nil;
+    header.bannerProvenanceKey = nil;
+    header.pendingBannerURL = nil;
     header.bannerImageView.backgroundColor = ApolloSubredditBannerBackgroundColor();
     ApolloSubredditSyncAmbient(header);
 }
 
 static void ApolloSubredditApplyDefaultBanner(ApolloSubredditHeaderView *header) {
     if (!header) return;
-    header.bannerImageView.image = ApolloSubredditDefaultBanner();
+    UIImage *defaultBanner = ApolloSubredditDefaultBanner();
+    header.bannerImageView.image = defaultBanner;
+    // The default banner is a shared singleton: a constant provenance key means
+    // every header showing it shares one blur cache entry, and no header can
+    // stamp it with a real subreddit's URL.
+    header.bannerProvenanceKey = [NSString stringWithFormat:@"subreddit-default:%@",
+                                  ApolloImmersiveBannerInstanceIdentity(defaultBanner)];
     header.bannerImageView.backgroundColor = [UIColor clearColor];
     ApolloSubredditSyncAmbient(header);
 }
@@ -1300,6 +1413,12 @@ static void ApolloSubredditApplyBannerForHeader(ApolloSubredditHeaderView *heade
     UIImage *customBanner = [customCache cachedBannerForSubreddit:subredditName];
     if (customBanner) {
         header.bannerImageView.image = customBanner;
+        // Instance identity, NOT the raw pointer — a recycled heap address
+        // would alias a newly-selected custom image to the dead one's blur.
+        header.bannerProvenanceKey = [NSString stringWithFormat:@"subreddit-custom:%@:%@",
+                                      ApolloNormalizedSubredditName(subredditName).lowercaseString ?: @"unknown",
+                                      ApolloImmersiveBannerInstanceIdentity(customBanner)];
+        header.pendingBannerURL = nil;
         header.bannerImageView.backgroundColor = [UIColor clearColor];
         header.usesCustomBanner = YES;
         ApolloSubredditSyncAmbient(header);
@@ -1309,45 +1428,74 @@ static void ApolloSubredditApplyBannerForHeader(ApolloSubredditHeaderView *heade
     header.usesCustomBanner = NO;
     if (info.bannerURL) {
         ApolloUserProfileCache *imageCache = [ApolloUserProfileCache sharedCache];
-        UIImage *banner = [imageCache cachedImageForURL:info.bannerURL];
+        UIImage *banner = [imageCache cachedBannerImageForURL:info.bannerURL];
         if (banner) {
             header.bannerImageView.image = banner;
+            header.bannerProvenanceKey = info.bannerURL.absoluteString;
+            header.pendingBannerURL = nil;
             header.bannerImageView.backgroundColor = [UIColor clearColor];
             ApolloSubredditSyncAmbient(header);
             return;
         }
 
-        ApolloSubredditApplyLoadingBanner(header);
+        // Keep whatever banner is already on screen while the refetch runs
+        // (the icon path has always done this) — blanking here made the whole
+        // immersive backdrop blink off and back on every info notification
+        // whose image had been evicted from the cache. A stale-subreddit image
+        // can't linger: the subreddit-changed path blanks explicitly before
+        // reloading.
+        if (!header.bannerImageView.image) {
+            ApolloSubredditApplyLoadingBanner(header);
+        }
 
         __weak ApolloSubredditHeaderView *weakHeader = header;
         NSURL *bannerURL = info.bannerURL;
-        [imageCache requestImageForURL:bannerURL completion:^(UIImage *image) {
+        header.pendingBannerURL = bannerURL;
+        [imageCache requestBannerImageForURL:bannerURL completion:^(UIImage *image) {
             ApolloSubredditHeaderView *strongHeader = weakHeader;
             // The header can be repointed to a different subreddit while this
             // fetch is in flight (fast back-and-forth navigation reuses the
             // same header instance) — without this check a slow fetch for the
             // previous subreddit would silently paint over the new one.
             if (!strongHeader || !ApolloSubredditNamesEqual(strongHeader.subredditName, subredditName)) return;
+            // Same idea for the URL: the subreddit can change its banner while
+            // an older fetch is still in flight — only the most recently
+            // requested URL may land (profile-header guard, ported).
+            if (!ApolloSubredditURLsMatch(strongHeader.pendingBannerURL, bannerURL)) return;
             if (strongHeader.usesCustomBanner) return;
             if ([[ApolloSubredditCustomBannerCache sharedCache] hasCustomBannerForSubreddit:subredditName]) return;
             if (image) {
                 strongHeader.bannerImageView.image = image;
+                strongHeader.bannerProvenanceKey = bannerURL.absoluteString;
+                strongHeader.pendingBannerURL = nil;
                 strongHeader.bannerImageView.backgroundColor = [UIColor clearColor];
                 ApolloSubredditSyncAmbient(strongHeader);
-            } else {
+            } else if (!strongHeader.bannerImageView.image) {
+                // Fetch failed and nothing usable is on screen. If we kept an
+                // older banner above, keep showing it instead of downgrading
+                // to the default.
                 ApolloSubredditApplyDefaultBanner(strongHeader);
             }
         }];
         return;
     }
 
-    if (info || infoFetchFailed) {
-        // A successful fetch with no banner configured, or a definitively
-        // failed info fetch (private/quarantined/banned/deleted subreddit,
-        // network error) — either way, stop showing the loading placeholder
-        // forever and fall back to the default banner.
+    if (info) {
+        // A successful fetch with no banner configured — swap to the default
+        // (also covers a subreddit that removed its banner).
+        // Invalidate any older fetch before installing the default: otherwise
+        // its completion still matches pendingBannerURL and can paint the
+        // removed banner back over this authoritative no-banner state.
+        header.pendingBannerURL = nil;
         ApolloSubredditApplyDefaultBanner(header);
-    } else {
+    } else if (infoFetchFailed) {
+        // Definitively failed info fetch (private/quarantined/banned/deleted
+        // subreddit, network error): stop showing the loading placeholder, but
+        // never downgrade a banner that's already on screen for this subreddit.
+        if (!header.bannerImageView.image) ApolloSubredditApplyDefaultBanner(header);
+    } else if (!header.bannerImageView.image) {
+        // First load only — never blank an already-visible banner just because
+        // a refresh pass came through with no cached info yet.
         ApolloSubredditApplyLoadingBanner(header);
     }
 }
@@ -1547,25 +1695,18 @@ static void ApolloSubredditSyncAmbient(ApolloSubredditHeaderView *header) {
     }
     UIImage *banner = header.bannerImageView.image;
     if (banner) {
-        NSString *workKey = nil;
-        if (header.usesCustomBanner) {
-            // A newly-selected custom image must not reuse the previous custom
-            // image's backdrop merely because the subreddit name is unchanged.
-            // Instance identity, NOT the raw pointer — a recycled heap address
-            // would alias the new image to the dead one's cached blur.
-            workKey = [NSString stringWithFormat:@"subreddit-custom:%@:%@",
-                       header.subredditName.lowercaseString ?: @"unknown",
+        // The provenance key is stamped at the moment each banner image is
+        // applied (custom asset / fetched URL / shared default), so it always
+        // describes the image actually on screen. Re-deriving it here from
+        // info.bannerURL used to stamp the shared default-banner singleton
+        // with a real subreddit's URL whenever a banner fetch failed,
+        // poisoning the immersive blur cache for that URL globally.
+        NSString *workKey = header.bannerProvenanceKey;
+        if (workKey.length == 0) {
+            // Unknown provenance (shouldn't happen, but stay safe): instance
+            // identity never aliases two different images.
+            workKey = [NSString stringWithFormat:@"subreddit-fallback:%@",
                        ApolloImmersiveBannerInstanceIdentity(banner)];
-        } else {
-            ApolloSubredditInfo *info = [[ApolloSubredditInfoCache sharedCache]
-                cachedInfoForSubreddit:header.subredditName];
-            workKey = info.bannerURL.absoluteString;
-            if (workKey.length == 0) {
-                // Default/placeholder assets can vary with appearance. Instance
-                // identity is safer than sharing a stale blur between variants.
-                workKey = [NSString stringWithFormat:@"subreddit-fallback:%@",
-                           ApolloImmersiveBannerInstanceIdentity(banner)];
-            }
         }
         ApolloImmersiveSetBannerCacheKey(banner, workKey);
     }
@@ -1858,7 +1999,10 @@ static BOOL ApolloSubredditNeedsInstall(UIViewController *viewController) {
     if (header.hidden || wrappedHeader.hidden || header.alpha < 0.99 || wrappedHeader.alpha < 0.99) return YES;
 
     NSString *installedName = objc_getAssociatedObject(viewController, kApolloSubredditNameKey);
-    if (![installedName isEqualToString:subredditName]) return YES;
+    // Case-insensitive: the name arrives from the nav title first ("denver")
+    // and from currentSubreddit ("Denver") a beat later — a case-only
+    // difference is the same subreddit and must not read as "needs install".
+    if (!ApolloSubredditNamesEqual(installedName, subredditName)) return YES;
 
     CGFloat width = tableView.bounds.size.width;
     if (width > 0 && fabs(CGRectGetWidth(wrappedHeader.frame) - width) > 0.5) return YES;
@@ -2080,7 +2224,10 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
     ApolloSubredditSyncAssociations(tableView, viewController, header, wrappedHeader, originalHeader);
 
     NSString *storedSubredditName = objc_getAssociatedObject(viewController, kApolloSubredditNameKey);
-    BOOL subredditChanged = ![storedSubredditName isEqualToString:subredditName];
+    // Case-insensitive (see ApolloSubredditNeedsInstall): a nav-title/ivar
+    // case-only mismatch used to read as a subreddit change and wipe the
+    // freshly-loaded icon/banner/info mid-load on most subreddit opens.
+    BOOL subredditChanged = !ApolloSubredditNamesEqual(storedSubredditName, subredditName);
     if (subredditChanged) {
         // The subreddit name (and thus ApolloSubredditTitleShouldTruncate's
         // eligibility) only becomes known here, asynchronously, well after the
@@ -2140,7 +2287,10 @@ static void ApolloSubredditRefreshBannerInTree(UIViewController *viewController,
     if (!viewController || subredditName.length == 0 || [visited containsObject:viewController]) return;
     [visited addObject:viewController];
 
-    if ([ApolloSubredditNameFromViewController(viewController) isEqualToString:subredditName]) {
+    // Case-insensitive: the caches post lowercased names, this VC's name may
+    // be display-cased — a mismatch left second visible instances (iPad split
+    // view, another tab) showing the stale custom asset.
+    if (ApolloSubredditNamesEqual(ApolloSubredditNameFromViewController(viewController), subredditName)) {
         ApolloSubredditHeaderView *header = objc_getAssociatedObject(viewController, kApolloSubredditHeaderViewKey);
         if (header) {
             ApolloSubredditInfo *info = [[ApolloSubredditInfoCache sharedCache] cachedInfoForSubreddit:subredditName];
@@ -2172,7 +2322,8 @@ static void ApolloSubredditRefreshIconInTree(UIViewController *viewController,
     if (!viewController || subredditName.length == 0 || [visited containsObject:viewController]) return;
     [visited addObject:viewController];
 
-    if ([ApolloSubredditNameFromViewController(viewController) isEqualToString:subredditName]) {
+    // Case-insensitive for the same reason as the banner walker above.
+    if (ApolloSubredditNamesEqual(ApolloSubredditNameFromViewController(viewController), subredditName)) {
         ApolloSubredditHeaderView *header = objc_getAssociatedObject(viewController, kApolloSubredditHeaderViewKey);
         if (header) {
             ApolloSubredditInfo *info = [[ApolloSubredditInfoCache sharedCache] cachedInfoForSubreddit:subredditName];
@@ -2307,11 +2458,29 @@ static BOOL ApolloSubredditShouldBlockOffset(UITableView *tableView, CGPoint new
     return fabs(targetDelta - headerHeight) < 5.0;
 }
 
+// Apollo's "skip my header" scroll doubles as the resting-offset restore
+// after pull-to-refresh: the refresh spinner's inset unwind leaves the table
+// parked above its natural top, and the ONLY programmatic scroll Apollo then
+// issues is the skip-header one we block. Swallowing it whole left the table
+// stuck at the spinner gap until the next touch made UIKit re-clamp (visible
+// as the subreddit page resting ~60pt low after a refresh). When the blocked
+// call arrives with the table above natural top, complete the restore to
+// natural top ourselves — keeping the header visible, which is the point of
+// the block, without eating the settle.
+static void ApolloSubredditSettleBlockedTableToTop(UITableView *tableView) {
+    CGFloat topY = -tableView.adjustedContentInset.top;
+    if (tableView.contentOffset.y >= topY - 0.5) return;
+    ApolloLog(@"[SubredditHeaders] blocked skip-header scroll while parked at %.1f; settling to top %.1f",
+              tableView.contentOffset.y, topY);
+    [tableView setContentOffset:CGPointMake(tableView.contentOffset.x, topY) animated:YES];
+}
+
 %hook UIScrollView
 
 - (void)setContentOffset:(CGPoint)contentOffset {
     if (sShowSubredditHeaders && [self isKindOfClass:[UITableView class]] &&
         ApolloSubredditShouldBlockOffset((UITableView *)self, contentOffset)) {
+        ApolloSubredditSettleBlockedTableToTop((UITableView *)self);
         return;
     }
     %orig;
@@ -2323,6 +2492,7 @@ static BOOL ApolloSubredditShouldBlockOffset(UITableView *tableView, CGPoint new
 - (void)setContentOffset:(CGPoint)contentOffset animated:(BOOL)animated {
     if (sShowSubredditHeaders && [self isKindOfClass:[UITableView class]] &&
         ApolloSubredditShouldBlockOffset((UITableView *)self, contentOffset)) {
+        ApolloSubredditSettleBlockedTableToTop((UITableView *)self);
         return;
     }
     %orig;

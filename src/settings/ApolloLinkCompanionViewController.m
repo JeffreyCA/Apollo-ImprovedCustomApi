@@ -8,12 +8,13 @@
 
 static NSString *const kLinkCompanionTestFlightURL = @"https://testflight.apple.com/join/afRc2ztK";
 
-// The Link Companion screen was redesigned (hero + How it works + Shortcut
-// cards), and the "Get the Shortcut" card is the one-tap install of the
-// signer-independent Shortcut for people browsing in a non-Safari browser
-// (Chrome/Firefox/Edge/Brave/...), where the Safari extension and Universal
-// Link path don't apply. Tapping the card opens the Shortcuts app straight to
-// an "Add Shortcut" prompt.
+// The Link Companion screen explains the Safari extension choices: the
+// Companion extension is the recommended automatic router, while Apollo's
+// bundled manual extension is a passive fallback that is safe to leave enabled.
+// A separately labelled legacy automatic extension remains opt-in. The
+// "Get the Shortcut" card remains the signer-independent path for people using
+// a non-Safari browser (Chrome/Firefox/Edge/Brave/...), where Safari extensions
+// do not run. Tapping it opens Shortcuts directly at the Add Shortcut sheet.
 static NSString *const kLinkCompanionShortcutURL =
     @"https://www.icloud.com/shortcuts/0f3e932177f442f786150809690e670d";
 
@@ -159,7 +160,7 @@ static const NSUInteger kHeroRingCount = 3;
 
     UILabel *subtitle = [[UILabel alloc] init];
     subtitle.translatesAutoresizingMaskIntoConstraints = NO;
-    subtitle.text = @"Install once — then Reddit links in Safari open straight in Apollo, no pop-ups.";
+    subtitle.text = @"Install the companion and enable its Safari extension once — then Reddit links open straight in Apollo, no pop-ups.";
     subtitle.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
     subtitle.textColor = [UIColor secondaryLabelColor];
     subtitle.textAlignment = NSTextAlignmentCenter;
@@ -456,7 +457,7 @@ static UIView *LinkCompanionMakeStep(NSString *number, NSString *title, NSString
 
     UILabel *installCaption = [[UILabel alloc] init];
     installCaption.translatesAutoresizingMaskIntoConstraints = NO;
-    installCaption.text = @"Free · about a minute to set up · no account required";
+    installCaption.text = @"Free · one-time Safari permission · no account required";
     installCaption.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
     installCaption.textColor = [UIColor secondaryLabelColor];
     installCaption.textAlignment = NSTextAlignmentCenter;
@@ -486,9 +487,10 @@ static UIView *LinkCompanionMakeStep(NSString *number, NSString *title, NSString
     [howCard addSubview:steps];
 
     NSArray<NSArray<NSString *> *> *stepData = @[
-        @[ @"1", @"Install Link Companion", @"Open the TestFlight build and launch it once." ],
-        @[ @"2", @"Turn the extension on", @"Settings → Apps → Safari → Extensions → Open in Apollo. Allow Reddit, set to Always." ],
-        @[ @"3", @"Tap any Reddit link", @"It opens straight in Apollo — no pop-ups." ],
+        @[ @"1", @"Install Link Companion", @"Install the latest TestFlight build and open it once." ],
+        @[ @"2", @"Enable automatic opening", @"In Settings, open Apps → Safari → Extensions → Open in Apollo (Companion). Set Website Access to All Websites → Allow. On older iOS versions, Safari appears directly in Settings." ],
+        @[ @"3", @"Choose one automatic opener", @"Use Open in Apollo (Companion), or enable Open in Apollo (Legacy) if you prefer the former Apollo-bundled approach — never both. Open in Apollo (Manual Fallback) is passive and safe to leave enabled with either choice." ],
+        @[ @"4", @"Open any Reddit link", @"Reddit links that reach Safari — from websites, Google, or Messages — now open automatically in Apollo." ],
     ];
     NSUInteger si = 0;
     for (NSArray<NSString *> *s in stepData) {
