@@ -42,6 +42,11 @@ static NSString *const ApolloModernSubredditDividersChangedNotification = @"Apol
 // Default NO. See ApolloSubredditIndexPolish.xm.
 static NSString *const UDKeyHideSubredditListDescriptions = @"HideSubredditListDescriptions";
 static NSString *const ApolloHideSubredditListDescriptionsChangedNotification = @"ApolloHideSubredditListDescriptionsChangedNotification";
+// Blank the subtitle line under multireddit rows in the subreddit list (which
+// otherwise shows the multireddit's description, or the subreddits it
+// contains). Default NO. See ApolloMultiredditEdit.xm.
+static NSString *const UDKeyHideMultiredditDescriptions = @"HideMultiredditDescriptions";
+static NSString *const ApolloHideMultiredditDescriptionsChangedNotification = @"ApolloHideMultiredditDescriptionsChangedNotification";
 // Color post (link) and user/author flairs with Reddit's assigned colors. Default NO.
 static NSString *const UDKeyEnableFlairColors = @"EnableFlairColors";
 static NSString *const ApolloFlairColorsChangedNotification = @"ApolloFlairColorsChangedNotification";
@@ -193,6 +198,8 @@ static NSString *const UDKeyIconRowMagnifier = @"IconRowMagnifier";
 //                small theme-bordered card just above the icon that fades on its own
 //                after ~2s. Mutually exclusive; both off = those three icons are
 //                inert (the % / edited native popups are taken over and suppressed).
+//                These modes also choose the presentation used when holding the
+//                score on an owned comment to request author-only Comment Insights.
 //   Translation— the 🌐 marker tap beside a post's stats (feed title + comments
 //                header) that toggles the title translation (ApolloTranslation.xm,
 //                ApolloFeedMarkerTapTarget). Takes priority over Tap to Translate
@@ -272,6 +279,14 @@ static NSString *const UDKeyLibreTranslateURL = @"LibreTranslateURL";
 static NSString *const UDKeyLibreTranslateAPIKey = @"LibreTranslateAPIKey";
 // Array<String> of 2-letter language codes to leave untranslated (detected source language).
 static NSString *const UDKeyTranslationSkipLanguages = @"TranslationSkipLanguages";
+// Redirects Apollo's OWN Translate button (the native action-sheet item on
+// comments/posts, which normally opens Apollo's Google Translate web view) to
+// iOS's on-device Translate sheet instead. Independent of UDKeyTranslationProvider,
+// which governs the tweak's separate bulk in-place translation backend, not this
+// button. Requires iOS 17.4+ (Translation.framework's .translationPresentation);
+// has no effect while Bulk Translation is on, since that already removes the
+// native Translate action from the sheet. Default OFF via registerDefaults.
+static NSString *const UDKeyAppleTranslateSheet = @"AppleTranslateSheet";
 
 // On-device AI summaries (Apple FoundationModels, iOS 26+). Off by default.
 static NSString *const UDKeyEnableAISummaries = @"EnableAISummaries";

@@ -1,10 +1,10 @@
 {
   "primaryIconID": "jryng",
-  "featured": ["jryng", "helios-pixel", "bajader-aperture-science", "paulo1manso-modern", "lilacvibes-progress"],
+  "featured": ["halo", "helios-pixel", "bajader-aperture-science", "paulo1manso-modern", "lilacvibes-progress"],
   "groups": [
     {
       "id": "original", "title": "Original",
-      "coverIconIDs": ["igerman00", "jryng", "harunatsu"],
+      "coverIconIDs": ["harunatsu", "halo-glass", "apollo-glass"],
       "description": "The original Apollo icon in Liquid Glass, crafted by the community."
     },
     {
@@ -26,9 +26,13 @@
     }
   ],
   "icons": [
-    { "id": "igerman00",                "displayName": "Canon",               "designer": "iGerman00", "group": "original" },
-    { "id": "jryng",                    "displayName": "OG",                  "designer": "jryng", "group": "original" },
-    { "id": "metalnakls",               "displayName": "metalnakls",          "designer": "metalnakls", "group": "original" },
+    { "id": "apollo",                   "displayName": "Apollo",              "designer": "IllIIllIllIllII", "group": "original" },
+    { "id": "apollo-glass",             "displayName": "Apollo Glass",        "designer": "IllIIllIllIllII", "group": "original" },
+    { "id": "halo",                     "displayName": "Halo",                "designer": "IllIIllIllIllII", "group": "original" },
+    { "id": "halo-glass",               "displayName": "Halo Glass",          "designer": "IllIIllIllIllII", "group": "original" },
+    { "id": "igerman00",                "displayName": "Canon",               "designer": "iGerman00",       "group": "original" },
+    { "id": "jryng",                    "displayName": "OG",                  "designer": "jryng",           "group": "original" },
+    { "id": "metalnakls",               "displayName": "metalnakls",          "designer": "metalnakls",      "group": "original" },
     { "id": "harunatsu",                "displayName": "harunatsu",           "designer": "harunatsu91202024", "group": "original" },
     { "id": "apollo-classic",           "displayName": "Apollo Classic",      "designer": "IllIIllIllIllII", "group": "original" },
     { "id": "aloppo-v2",                "displayName": "Aloppo",              "designer": "IllIIllIllIllII", "group": "original" },

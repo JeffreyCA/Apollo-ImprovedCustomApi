@@ -23,6 +23,37 @@ os_log_t ApolloFixLog(void) {
     return log;
 }
 
+#pragma mark - Row-measure re-entrancy guard
+
+// See ApolloCommon.h. Main-thread only: row-height queries are delivered on
+// the main thread, and the recursion this guards against exists only there
+// (background Texture measures never sit inside UIKit row-data validation).
+// Off-main callers get NO / no-op so they behave exactly as before.
+static NSInteger sApolloRowMeasureDepth = 0;
+
+BOOL ApolloRowMeasureInProgress(void) {
+    return [NSThread isMainThread] && sApolloRowMeasureDepth > 0;
+}
+
+void ApolloRowMeasureWillBegin(void) {
+    if (![NSThread isMainThread]) return;
+    sApolloRowMeasureDepth++;
+    // A depth beyond 1 means a geometry query escaped into a measure pass and
+    // UIKit re-entered row validation — the #831/#833 stack-overflow geometry.
+    // The guards should make this unreachable; log loudly (but bounded) if a
+    // new edge ever appears so field reports pinpoint it.
+    static NSInteger sLoggedNestedMeasures = 0;
+    if (sApolloRowMeasureDepth > 1 && sLoggedNestedMeasures < 8) {
+        sLoggedNestedMeasures++;
+        ApolloLog(@"[RowMeasure] NESTED row-height pass (depth %ld) - a table geometry call leaked into a measure pass", (long)sApolloRowMeasureDepth);
+    }
+}
+
+void ApolloRowMeasureDidEnd(void) {
+    if (![NSThread isMainThread]) return;
+    if (sApolloRowMeasureDepth > 0) sApolloRowMeasureDepth--;
+}
+
 #pragma mark - Persistent login diagnostics (cross-launch)
 
 // The os_log export (ApolloCollectLogs) only sees the current process, so a force-quit
@@ -1043,4 +1074,20 @@ void ApolloSetLinkPreviewCardColorHex(NSString *hex) {
 
 double ApolloPerfNowMs(void) {
     return CACurrentMediaTime() * 1000.0;
+}
+
+// --- Tweak-UI text node marker -------------------------------------------
+// Content scans (translation's post-body candidate walk, etc.) must never
+// treat tweak-drawn text as user content. One shared assoc key, set at node
+// creation by whichever module draws the UI.
+static char kApolloTweakUITextNodeKey;
+
+void ApolloMarkTweakUITextNode(id node) {
+    if (!node) return;
+    objc_setAssociatedObject(node, &kApolloTweakUITextNodeKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+BOOL ApolloTextNodeIsTweakUI(id node) {
+    if (!node) return NO;
+    return [objc_getAssociatedObject(node, &kApolloTweakUITextNodeKey) boolValue];
 }

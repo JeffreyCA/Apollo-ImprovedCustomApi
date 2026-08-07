@@ -57,6 +57,9 @@ typedef NS_ENUM(unsigned char, ApolloLinkPreviewStackAlignItems) {
 - (BOOL)isNodeLoaded;
 - (void)setNeedsDisplay;
 - (void)onDidLoad:(void(^)(__kindof ASDisplayNode *node))body;
+// Texture ASInterfaceState bitmask: MeasureLayout=1<<0, Preload=1<<1,
+// Display=1<<2, Visible=1<<3. Thread-safe accessor (lock-guarded in Texture).
+@property (nonatomic, readonly) NSUInteger interfaceState;
 @property (nullable, nonatomic, copy) UIColor *backgroundColor;
 @property (nonatomic) CGFloat cornerRadius;
 @property (nonatomic) BOOL clipsToBounds;
@@ -139,6 +142,8 @@ static char kApolloLinkPreviewSourceURLStringKey;
 static char kApolloLinkPreviewImageFallbackURLKey;
 static char kApolloLinkPreviewImageFallbackScheduledKey;
 static char kApolloLinkPreviewImageFallbackInFlightKey;
+// URL string this node has already spent its one self-scheduled retry on.
+static char kApolloLinkPreviewImageFallbackRetriedURLKey;
 static char kApolloLinkPreviewImageFallbackAppliedURLKey;
 static char kApolloLinkPreviewImageFallbackResizeInFlightURLKey;
 static char kApolloLinkPreviewRenderSignaturesKey;
@@ -1119,6 +1124,70 @@ static BOOL ApolloLPImageURLIsDead(NSURL *url) {
     }
 }
 
+// V25: TRANSIENT image-fetch failures (timeout, 5xx, offline, non-image body
+// on a 2xx) used to be terminal for the card: the one-shot scheduled marker
+// was never cleared, so a single failed fetch left the node image-less for its
+// whole life — the "hero image missing until you open the post and come back"
+// report (opening the post worked only because the comments-view card
+// re-fetched into the shared bitmap cache). Failures now clear the marker and
+// stamp a short per-URL cooldown; retries are event-driven — the next
+// didEnterPreloadState / didEnterVisibleState / card build past the cooldown
+// re-kicks the fetch — never polled.
+static const NSTimeInterval kApolloLPImageTransientRetryCooldown = 8.0;
+
+static NSMutableDictionary<NSString *, NSDate *> *ApolloLPTransientImageFailures(void) {
+    static NSMutableDictionary *map;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ map = [NSMutableDictionary dictionary]; });
+    return map;
+}
+
+static void ApolloLPMarkImageURLTransientFailure(NSURL *url) {
+    NSString *key = url.absoluteString;
+    if (key.length == 0) return;
+    @synchronized (ApolloLPTransientImageFailures()) {
+        ApolloLPTransientImageFailures()[key] = [NSDate date];
+    }
+}
+
+static void ApolloLPClearImageURLTransientFailure(NSURL *url) {
+    NSString *key = url.absoluteString;
+    if (key.length == 0) return;
+    @synchronized (ApolloLPTransientImageFailures()) {
+        [ApolloLPTransientImageFailures() removeObjectForKey:key];
+    }
+}
+
+static BOOL ApolloLPImageURLInTransientCooldown(NSURL *url) {
+    NSString *key = url.absoluteString;
+    if (key.length == 0) return NO;
+    @synchronized (ApolloLPTransientImageFailures()) {
+        NSDate *failedAt = ApolloLPTransientImageFailures()[key];
+        if (!failedAt) return NO;
+        if ([[NSDate date] timeIntervalSinceDate:failedAt] > kApolloLPImageTransientRetryCooldown) {
+            [ApolloLPTransientImageFailures() removeObjectForKey:key];
+            return NO;
+        }
+        return YES;
+    }
+}
+
+// Is the node inside Texture's data range (preload/display/visible)? Cards are
+// measured for WHOLE insert batches at once — rows many screens below the fold
+// included — and firing a network fetch for every measured card front-loaded
+// dozens of concurrent requests whose timeouts were this bug's main trigger.
+// Fetch only near-range cards; didEnterPreloadState kicks the rest as they
+// approach. Nodes that can't report a state keep the old fetch-always behavior.
+static BOOL ApolloLPNodeIsInFetchRange(ASDisplayNode *node) {
+    if (![node respondsToSelector:@selector(interfaceState)]) return YES;
+    @try {
+        NSUInteger state = node.interfaceState;
+        return (state & (0x2 | 0x4 | 0x8)) != 0; // Preload | Display | Visible
+    } @catch (__unused NSException *exception) {
+        return YES;
+    }
+}
+
 // Tail of the fallback apply — displayImage must already be display-sized.
 // Re-runs the liveness guards because it also fires after an async resize,
 // by which point the node may have moved to another URL or grown an image.
@@ -1184,12 +1253,62 @@ static void ApolloLPApplyFallbackImage(ASNetworkImageNode *imageNode, NSURL *ima
     });
 }
 
+static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL *imageURL, NSString *host);
+
+// One self-scheduled retry per (node, URL), fired just past the transient
+// cooldown so ApolloLPStartFallbackImageFetch's own cooldown guard lets it
+// through. This is the only non-event-driven fetch trigger in the module, and
+// it exists for exactly one case: the card was on screen when its fetch failed,
+// so no further preload/visible event is coming to re-kick it.
+//
+// Deliberately not a poll — the retry is armed once per URL, and if it also
+// fails the card returns to the event-driven path (scroll away and back, or a
+// rebuild) exactly as before. Everything is re-checked at fire time, so a node
+// that has been recycled onto a different URL, has since acquired an image, has
+// scrolled out of range, or whose URL got dead-marked in the meantime spends
+// nothing.
+static void ApolloLPScheduleOneFallbackImageRetry(ASNetworkImageNode *imageNode, NSURL *imageURL, NSString *host) {
+    if (!imageNode || !ApolloLPURLIsHTTP(imageURL)) return;
+    NSString *key = imageURL.absoluteString;
+    if (key.length == 0) return;
+
+    // Already spent this node's retry on this URL.
+    NSString *retriedURL = objc_getAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackRetriedURLKey);
+    if ([retriedURL isEqualToString:key]) return;
+    objc_setAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackRetriedURLKey, key, OBJC_ASSOCIATION_COPY_NONATOMIC);
+
+    __weak ASNetworkImageNode *weakImageNode = imageNode;
+    NSURL *imageURLCopy = imageURL;
+    NSString *hostCopy = [host copy];
+    int64_t delay = (int64_t)((kApolloLPImageTransientRetryCooldown + 0.5) * NSEC_PER_SEC);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delay), dispatch_get_main_queue(), ^{
+        ASNetworkImageNode *strongImageNode = weakImageNode;
+        if (!strongImageNode) return;
+        // The node may have been recycled onto another link since the failure.
+        NSURL *currentURL = objc_getAssociatedObject(strongImageNode, &kApolloLinkPreviewImageFallbackURLKey);
+        if (![currentURL.absoluteString isEqualToString:imageURLCopy.absoluteString]) return;
+        // Texture's own loader, or a sibling card sharing the fallback cache,
+        // may have landed the image while we waited.
+        if (ApolloLPNetworkImageNodeHasImage(strongImageNode)) return;
+        // Off-screen now: the ordinary preload/visible path owns it again, and
+        // spending a fetch on a row nobody is looking at is what the
+        // fetch-range guard exists to avoid.
+        if (!ApolloLPNodeIsInFetchRange((ASDisplayNode *)strongImageNode)) return;
+        ApolloLog(@"[LinkPreviews] retrying on-screen image fetch after cooldown host=%@", hostCopy);
+        // Dead-mark, cooldown and in-flight are all re-checked inside.
+        ApolloLPStartFallbackImageFetch(strongImageNode, imageURLCopy, hostCopy);
+    });
+}
+
 static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL *imageURL, NSString *host) {
     if (!imageNode || !ApolloLPURLIsHTTP(imageURL)) return;
     // Dead-marked URLs don't get re-fetched during the cooldown — refetching
     // on every re-render loops: 404 -> reflow -> row reload -> re-render ->
     // fetch -> 404 ... (one reload per second, visible as flickering cells).
     if (ApolloLPImageURLIsDead(imageURL)) return;
+    // Transiently-failed URLs wait out a short cooldown so preload/visible
+    // re-entries can't hammer a struggling host or an offline link.
+    if (ApolloLPImageURLInTransientCooldown(imageURL)) return;
     NSString *key = imageURL.absoluteString;
     if (key.length == 0) return;
 
@@ -1209,7 +1328,6 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
     __weak ASNetworkImageNode *weakImageNode = imageNode;
     NSString *hostCopy = [host copy];
     [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        (void)error;
         UIImage *image = data.length > 0 ? [UIImage imageWithData:data scale:UIScreen.mainScreen.scale] : nil;
         BOOL definitivelyDead = NO;
         if (image) {
@@ -1223,6 +1341,7 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
             image = ApolloLPDisplaySizedImage(image);
             NSUInteger cost = (NSUInteger)(image.size.width * image.size.height * image.scale * image.scale * 4.0);
             [ApolloLPFallbackImageCache() setObject:image forKey:key cost:cost];
+            ApolloLPClearImageURLTransientFailure(imageURL);
         } else {
             NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
             // 4xx = the file genuinely isn't there (clip hosts publish og:image
@@ -1230,12 +1349,37 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
             // 5xx don't dead-mark, so flaky connectivity can't compact-ify
             // every card.
             definitivelyDead = httpResponse.statusCode >= 400 && httpResponse.statusCode < 500;
+            if (!definitivelyDead) {
+                ApolloLPMarkImageURLTransientFailure(imageURL);
+            }
+            ApolloLog(@"[LinkPreviews] image fetch failed host=%@ status=%ld bytes=%lu err=%@ (%@)",
+                      hostCopy, (long)httpResponse.statusCode, (unsigned long)data.length,
+                      error.localizedDescription ?: @"decode",
+                      definitivelyDead ? @"dead-marked" : @"will retry on approach");
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
             ASNetworkImageNode *strongImageNode = weakImageNode;
             if (!strongImageNode) return;
             objc_setAssociatedObject(strongImageNode, &kApolloLinkPreviewImageFallbackInFlightKey, @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            if (!image) {
+                // Failed fetch: release the one-shot scheduled marker so a
+                // later card build may schedule again — the marker's job is to
+                // dedupe PENDING work, not to make the first failure terminal.
+                objc_setAssociatedObject(strongImageNode, &kApolloLinkPreviewImageFallbackScheduledKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+                // ...but clearing the marker only helps a card that gets ANOTHER
+                // lifecycle event. On a card already on screen when the fetch
+                // failed, didEnterPreloadState and didEnterVisibleState fired
+                // long before a 15s timeout resolved, and nothing re-enters
+                // after the cooldown — so the card stayed visibly blank until
+                // the user scrolled it away and back. Schedule exactly one
+                // retry for the cooldown deadline; every guard is re-evaluated
+                // when it fires, and a second failure falls back to the
+                // event-driven path rather than looping.
+                if (!definitivelyDead) {
+                    ApolloLPScheduleOneFallbackImageRetry(strongImageNode, imageURL, hostCopy);
+                }
+            }
             ApolloLPApplyFallbackImage(strongImageNode, imageURL, image, hostCopy);
 
             if (definitivelyDead && !ApolloLPImageURLIsDead(imageURL)) {
@@ -1272,6 +1416,12 @@ static void ApolloLPStartFallbackImageFetch(ASNetworkImageNode *imageNode, NSURL
 static void ApolloLPScheduleImageFallbackIfNeeded(ASNetworkImageNode *imageNode, NSURL *imageURL, NSString *host) {
     if (!imageNode || !ApolloLPURLIsHTTP(imageURL)) return;
     if (ApolloLPImageURLIsDead(imageURL)) return;
+    NSURL *previousURL = objc_getAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackURLKey);
+    if (previousURL && ![previousURL.absoluteString isEqualToString:imageURL.absoluteString]) {
+        // Recycled onto a different link: the new URL gets its own retry
+        // budget, and a marker left from the old one must not suppress it.
+        objc_setAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackRetriedURLKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    }
     objc_setAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackURLKey, imageURL, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
     NSString *cacheKey = imageURL.absoluteString;
@@ -1307,7 +1457,16 @@ static void ApolloLPScheduleImageFallbackIfNeeded(ASNetworkImageNode *imageNode,
             }
             return;
         }
-        ApolloLPStartFallbackImageFetch(strongImageNode, imageURLCopy, hostCopy);
+        if (ApolloLPNodeIsInFetchRange((ASDisplayNode *)strongImageNode)) {
+            ApolloLPStartFallbackImageFetch(strongImageNode, imageURLCopy, hostCopy);
+        } else {
+            // Below-fold card measured with the rest of its insert batch:
+            // don't spend a fetch (and possibly a burst timeout) on a row
+            // that may never scroll on screen. Clear the scheduled marker so
+            // the arm is spendable again; didEnterPreloadState kicks the
+            // fetch when the row actually approaches.
+            objc_setAssociatedObject(strongImageNode, &kApolloLinkPreviewImageFallbackScheduledKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        }
         // One bounded late re-check: if Texture's loader lands the image after
         // the 900ms window (slow CDN) and no further layout pass happens, the
         // card would stay on the default anchor with no face scan. Not broken,
@@ -3540,6 +3699,11 @@ static void ApolloLPScheduleCollectionItemReloadWhenIdle(UICollectionView *colle
 }
 
 static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDisplayNode *originNode, NSString *host) {
+    // No table geometry (indexPathForCell: below) while a row-height pass is on
+    // the stack — that nests a full row-data re-validation per row and
+    // overflows the main stack (#831/#833 geometry). Report "not handled":
+    // callers renote and the healers retry once the pass has unwound.
+    if (ApolloRowMeasureInProgress()) return NO;
     // Hard convergence budget, keyed on the preview URL (falls back to host): every
     // reload path (V12 shrink heal, V18 overflow, V20 pending mark, V23 poll) funnels
     // through here, and a row whose height never converges used to reload FOREVER —
@@ -4393,16 +4557,24 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
     ApolloAppendLoginDiag(line);
 }
 
-// Row-measure entry: purely observational (a height must be returned either
-// way), but this is the earliest point the exhaustion is visible when the hog
-// sits below the ASDK layout recursion.
+// Row-measure entry. Besides the observational exhaustion report, this is the
+// chokepoint that marks "a row-height pass is on the stack" for
+// ApolloRowMeasureInProgress() (ApolloCommon.h): geometry-querying tweak code
+// reachable from a measure (the translation preempt, the link-preview row
+// healer) declines while the flag is up, which is what breaks the
+// query→re-validate→re-measure recursion behind the #831/#833 crashes.
 %hook ASTableView
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     size_t diagUsed = 0, diagSize = 0;
     if (ApolloLPMainStackNearlyExhausted(&diagUsed, &diagSize)) {
         ApolloLPStackGuardReport("heightForRow", diagUsed, diagSize);
     }
-    return %orig;
+    ApolloRowMeasureWillBegin();
+    @try {
+        return %orig;
+    } @finally {
+        ApolloRowMeasureDidEnd();
+    }
 }
 %end
 
@@ -4416,6 +4588,67 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
 // bail + scheduled relayout in LinkButtonNode.layoutSpecThatFits below) is
 // untouched and still catches the actual failure regardless of cause.
 // ======================== END stack-guard sentinel ========================
+
+// V25: the recovery half of the retry design. For every card image/avatar node
+// that is still image-less, either repaint it from the shared bitmap cache
+// (another screen — typically the comments header card — may have fetched it
+// meanwhile) or re-kick the network fetch. Runs on preload/visible ENTRY only:
+// event-driven, at most one fetch per URL in flight, dead/cooldown-guarded
+// inside ApolloLPStartFallbackImageFetch.
+static void ApolloLPRecoverMissingCardImages(ASDisplayNode *hostNode) {
+    for (NSDictionary *bundle in ApolloLPNodeBundlesSnapshot(hostNode)) {
+        NSString *pageHost = ApolloLPHost(bundle[@"url"]);
+        for (NSString *key in @[@"image", @"avatar"]) {
+            ASNetworkImageNode *imageNode = bundle[key];
+            NSURL *fallbackURL = imageNode ? objc_getAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackURLKey) : nil;
+            if (!fallbackURL.absoluteString.length) continue;
+            if (ApolloLPNetworkImageNodeHasImage(imageNode)) continue;
+            UIImage *cached = [ApolloLPFallbackImageCache() objectForKey:fallbackURL.absoluteString];
+            if (cached) {
+                ApolloLPApplyFallbackImage(imageNode, fallbackURL, cached, pageHost);
+            } else {
+                ApolloLPStartFallbackImageFetch(imageNode, fallbackURL, pageHost);
+            }
+        }
+    }
+}
+
+// V25: one background refetch per URL per launch for cached previews that are
+// the residue of a blocked fetch (bot-wall title, or slug-title + favicon with
+// no description — reuters/wsj-style 401s used to cache these for their whole
+// 7-day TTL, pinning the host to a compact favicon card). The stale card still
+// renders this pass; when the refetch lands something better, the DidCache
+// notification + node invalidation re-render it in place.
+static BOOL ApolloLPMarkWeakCacheRefetchAttempted(NSURL *url) {
+    NSString *key = url.absoluteString;
+    if (key.length == 0) return NO;
+    static NSMutableSet<NSString *> *attempted;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ attempted = [NSMutableSet set]; });
+    @synchronized (attempted) {
+        if ([attempted containsObject:key]) return NO;
+        [attempted addObject:key];
+        return YES;
+    }
+}
+
+static void ApolloLPKickWeakCachedPreviewRefetch(NSURL *url, ApolloLinkPreview *cached) {
+    NSString *weakReason = [ApolloLinkPreviewFetcher refetchReasonForCachedPreview:cached url:url];
+    if (!weakReason) return;
+    if (!ApolloLPMarkWeakCacheRefetchAttempted(url)) return;
+    ApolloLog(@"[LinkPreviews] healing weak cached preview host=%@ reason=%@", ApolloLPHost(url), weakReason);
+    [ApolloLinkPreviewFetcher requestPreviewForURL:url completion:^(ApolloLinkPreview *preview) {
+        if (!preview || ![preview hasUsefulMetadata]) return;
+        // Same signal path as a first fetch: cached-preview consumers reload,
+        // registered link nodes re-measure against the healed cache entry.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:ApolloLinkPreviewDidCacheNotification
+                                                                object:nil
+                                                              userInfo:@{@"url": url}];
+            ApolloLPInvalidateRegisteredLinkPreviewNodesForURL(url, @"weak-cache-heal");
+        });
+    }];
+}
 
 %hook _TtC6Apollo14LinkButtonNode
 
@@ -4440,15 +4673,7 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
 
 - (void)didEnterPreloadState {
     %orig;
-    for (NSDictionary *bundle in ApolloLPNodeBundlesSnapshot((ASDisplayNode *)self)) {
-        ASNetworkImageNode *imageNode = bundle[@"image"];
-        NSURL *fallbackURL = imageNode ? objc_getAssociatedObject(imageNode, &kApolloLinkPreviewImageFallbackURLKey) : nil;
-        if (!fallbackURL.absoluteString.length) continue;
-        UIImage *cached = [ApolloLPFallbackImageCache() objectForKey:fallbackURL.absoluteString];
-        if (cached && !ApolloLPNetworkImageNodeHasImage(imageNode)) {
-            ApolloLPApplyFallbackImage(imageNode, fallbackURL, cached, ApolloLPHost(fallbackURL));
-        }
-    }
+    ApolloLPRecoverMissingCardImages((ASDisplayNode *)self);
 }
 
 - (id)layoutSpecThatFits:(struct CDStruct_90e057aa)constrainedSize {
@@ -4491,7 +4716,9 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
     }
     ApolloLPPrefetchRedditUserProfileIfNeeded(url);
 
-    if (!url) {
+    // Empty-host URLs ("https:///message/compose/?to=...") can never fetch or
+    // render a meaningful card — let Apollo's native link UI handle them.
+    if (!url || url.host.length == 0) {
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
         return %orig;
     }
@@ -4555,6 +4782,9 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
             }
             cached = nil;
         }
+    }
+    if (cached && [cached hasUsefulMetadata]) {
+        ApolloLPKickWeakCachedPreviewRefetch(url, cached);
     }
     if (!cached) {
         // Reserve a hero image box ONLY on positive evidence (see
@@ -4819,6 +5049,11 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
         });
     }
     ApolloLPScheduleOverflowHeightCheck((ASDisplayNode *)self, @"visible-check");
+    // V25: a card the user is LOOKING at with a blank image area is the
+    // reported bug — belt-and-suspenders recovery on top of the preload-entry
+    // kick (covers a fetch that failed while the row sat in the preload
+    // buffer). Cooldown-guarded, so this cannot loop.
+    ApolloLPRecoverMissingCardImages((ASDisplayNode *)self);
 }
 
 %end

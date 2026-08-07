@@ -12,6 +12,24 @@
 __BEGIN_DECLS
 os_log_t ApolloFixLog(void);
 NSString *ApolloCollectLogs(void);
+
+// --- Row-measure re-entrancy guard (issues #831/#833/#838/#839/#841) ---
+// Main-thread depth of UITableView row-height passes currently on the stack
+// (maintained by the ASTableView tableView:heightForRowAtIndexPath: hook in
+// ApolloInlineLinkPreviews.xm). While a pass is in progress, UIKit is inside
+// its row-data (re)validation (-[UISectionRowData refreshWithSection:...] /
+// endUpdates); calling ANY UITableView geometry query (indexPathForCell:,
+// rectForRowAtIndexPath:, indexPathsForVisibleRows, ...) from tweak code at
+// that moment makes UIKit start a NESTED full-section validation — one extra
+// ~48-frame nesting level per row — until the main thread's 1MB stack
+// overflows (EXC_BAD_ACCESS on a stack-guard address, crashing whatever
+// innocent code runs at the boundary). Any tweak code that can run inside a
+// row measure (layoutSpecThatFits:, text-setter hooks, ...) must check
+// ApolloRowMeasureInProgress() before touching table geometry and decline or
+// defer instead.
+BOOL ApolloRowMeasureInProgress(void);
+void ApolloRowMeasureWillBegin(void);
+void ApolloRowMeasureDidEnd(void);
 NSString *ApolloCollectAILogs(void);
 BOOL IsLiquidGlass(void);
 NSURL *ApolloURLByConvertingResolvedURLToApolloScheme(NSURL *url);
@@ -206,4 +224,11 @@ NSString *ApolloDebugPoisonAccountAccessibility(void);
 // No-op for any other menu, and for feeds that aren't a single subreddit.
 // Called from ApolloNativeActionMenuBuildMenu as it converts the action sheet.
 void ApolloInjectGalleryViewMenuItemIfNeeded(NSMutableArray *children, NSString *menuTitle, id actionController);
+
+// Marks a tweak-created text node/label as our own UI chrome (AI summary pill,
+// injected affordances, ...). Content pipelines that scan the view/node tree
+// for USER content (e.g. translation's post-body candidate scan) must skip
+// marked objects — otherwise tweak UI can be mistaken for the post body.
+void ApolloMarkTweakUITextNode(id node);
+BOOL ApolloTextNodeIsTweakUI(id node);
 __END_DECLS

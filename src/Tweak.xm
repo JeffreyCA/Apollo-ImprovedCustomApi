@@ -1419,10 +1419,24 @@ static int uname_replacement(struct utsname *buf) {
     });
 
     NSString *machine = @(buf->machine);
+#if APOLLO_SIM_BUILD
+    // The simulator's uname reports the host arch ("arm64"), so Apollo's
+    // device mapper sees "unknown" and hides Pixel Pals. Substitute the
+    // simulated device's identifier so the same remap table below applies.
+    if (![machine hasPrefix:@"iPhone"]) {
+        const char *simModel = getenv("SIMULATOR_MODEL_IDENTIFIER");
+        if (simModel) machine = @(simModel);
+    }
+#endif
     NSString *remap = modelRemap[machine];
     if (remap) {
         strlcpy(buf->machine, remap.UTF8String, sizeof(buf->machine));
     }
+#if APOLLO_SIM_BUILD
+    else if (![@(buf->machine) isEqualToString:machine]) {
+        strlcpy(buf->machine, machine.UTF8String, sizeof(buf->machine));
+    }
+#endif
     return ret;
 }
 
@@ -2826,9 +2840,16 @@ static void ApolloImgurRetryAlbumViaTextProxy(NSString *albumID,
 //   sub_10030afa0: FauxCutOutView y=11.5, w=125, h=37
 //   sub_10030c880: PixelPalView y=-2.0
 //   sub_10030d6c4: tap overlay y=11.0, w=125, h=37, cornerRadius=18.5
-// On devices with different safe area insets, compute the correct DI Y position.
-// The gap between DI bottom and safe area scales proportionally with safeTop.
-// Y is floored to the nearest half-pixel to match the baseline's sub-pixel alignment.
+// The island's real position varies per device AND per iOS release, and the
+// safe-area top is not a reliable proxy for it (issue #826: iPhone Air on
+// iOS 27 reports a taller safe area while the physical island stayed put, so
+// the old proportional model over-shifted the whole pal cluster down behind
+// the island pill). Instead, read the physical cutout rect the same way
+// UIKit's own status bar does when laying out around the island
+// (-[_UIStatusBarVisualProvider_DynamicSplit sensorAreaRect], iOS 16+):
+// -[UIScreen _exclusionArea].rect, converted into the current coordinate
+// space with nativeScale/scale. The old proportional model stays as the
+// fallback if the private API ever disappears.
 //
 // --- Pixel Pals freeze guard (issue #305) ---
 // Tapping the Dynamic Island Pixel Pals area (pixelPalTappedWithTapGestureRecognizer:)
@@ -2848,6 +2869,77 @@ static void ApolloImgurRetryAlbumViaTextProxy(NSString *albumID,
 // ("preventing the pixel pal menu from opening with any media or website open
 // should fix everything") and is a strict superset of Apollo's intended
 // behaviour (the menu is already meant to be unreachable while media is open).
+// Reads the physical Dynamic Island cutout rect in the app's logical
+// coordinate space via -[UIScreen _exclusionArea] (private, island devices
+// only — nil on notch/older hardware). This is the exact source and
+// conversion UIKit's status bar uses, so it tracks new devices and iOS
+// releases without a per-device table, and is correct under Display Zoom
+// (nativeScale != scale), which the proportional fallback has to bail on.
+static BOOL ApolloDynamicIslandRect(CGRect *outRect) {
+    UIScreen *screen = [UIScreen mainScreen];
+    SEL exclusionSel = NSSelectorFromString(@"_exclusionArea");
+    if (![screen respondsToSelector:exclusionSel]) return NO;
+    id area = ((id (*)(id, SEL))objc_msgSend)(screen, exclusionSel);
+    SEL rectSel = NSSelectorFromString(@"rect");
+    if (!area || ![area respondsToSelector:rectSel]) return NO;
+    CGRect rect = ((CGRect (*)(id, SEL))objc_msgSend)(area, rectSel);
+    // Mirror -[_UIStatusBarVisualProvider_DynamicSplit sensorAreaRect]'s
+    // conversion into the current (Display Zoom) coordinate space.
+    CGFloat nativeScale = screen.nativeScale;
+    CGFloat scale = screen.scale;
+    if (nativeScale > 0 && scale > 0 && nativeScale != scale) {
+        CGFloat zoom = nativeScale / scale;
+        rect.origin.x *= zoom;
+        rect.origin.y *= zoom;
+        rect.size.width *= zoom;
+        rect.size.height *= zoom;
+    }
+    // Sanity: a small pill near the top of the screen, or the API changed.
+    if (CGRectIsEmpty(rect) ||
+        rect.origin.y < 0.0 || rect.origin.y > 40.0 ||
+        rect.size.height < 20.0 || rect.size.height > 60.0 ||
+        rect.size.width < 60.0 || rect.size.width > CGRectGetWidth(screen.bounds) * 0.6) {
+        return NO;
+    }
+    *outRect = rect;
+    return YES;
+}
+
+// Vertical shift to add to Apollo's hardcoded 14 Pro DI element positions so
+// they line up with this device's actual island. 0 when no correction applies.
+static CGFloat ApolloPixelPalShift(UIWindow *window) {
+    CGFloat nativeScale = [UIScreen mainScreen].nativeScale;
+    CGFloat halfPx = 0.5 / (nativeScale > 0 ? nativeScale : 3.0);
+
+    CGRect island;
+    if (ApolloDynamicIslandRect(&island)) {
+        // Center Apollo's 37pt faux pill on the real cutout; floor to the
+        // nearest half-pixel to match the baseline's sub-pixel alignment.
+        CGFloat correctY = floor((CGRectGetMidY(island) - 37.0 / 2.0) / halfPx) * halfPx;
+        CGFloat shift = correctY - 11.5;
+        static dispatch_once_t logOnce;
+        dispatch_once(&logOnce, ^{
+            ApolloLog(@"[PixelPals] island cutout {%.2f, %.2f, %.2f, %.2f} safeTop=%.1f → shift %.3f",
+                      island.origin.x, island.origin.y, island.size.width, island.size.height,
+                      window.safeAreaInsets.top, shift);
+        });
+        // Baseline devices land within a half-point of Apollo's own 11.5;
+        // leave them untouched.
+        return fabs(shift) < 0.75 ? 0.0 : shift;
+    }
+
+    // Fallback (pre-iOS-16 UIKit internals changed): proportional model —
+    // gap between DI bottom and safe area scales with safeTop. Wrong on
+    // devices where the safe area moved independently of the island (#826),
+    // but better than nothing.
+    if (nativeScale != [UIScreen mainScreen].scale) return 0.0;
+    CGFloat safeTop = window.safeAreaInsets.top;
+    if (safeTop < 50.0 || fabs(safeTop - 59.0) < 0.5) return 0.0;
+    CGFloat scaledGap = 10.5 * safeTop / 59.0;
+    CGFloat correctY = floor((safeTop - 37.0 - scaledGap) / halfPx) * halfPx;
+    return correctY - 11.5;
+}
+
 static BOOL ApolloPixelPalsBlockedByModal(UIWindow *window) {
     Class overlayCls = objc_getClass("_TtC6Apollo29PixelPalOverlayViewController");
     UIViewController *vc = window.rootViewController;
@@ -2880,18 +2972,9 @@ static BOOL ApolloPixelPalsBlockedByModal(UIWindow *window) {
     %orig;
 
     UIWindow *window = (UIWindow *)self;
-    CGFloat nativeScale = [UIScreen mainScreen].nativeScale;
-    if (nativeScale != [UIScreen mainScreen].scale) return;
-
-    CGFloat safeTop = window.safeAreaInsets.top;
-    if (safeTop < 50.0 || fabs(safeTop - 59.0) < 0.5) return;
-
-    // Compute correct Y: gap scales proportionally, floor to half-pixel.
-    // Baseline (14 Pro): safeTop=59, y=11.5, gap=10.5, y at half-pixel (34.5px@3x).
-    CGFloat scaledGap = 10.5 * safeTop / 59.0;
-    CGFloat halfPx = 0.5 / nativeScale;
-    CGFloat correctY = floor((safeTop - 37.0 - scaledGap) / halfPx) * halfPx;
-    CGFloat shift = correctY - 11.5;
+    CGFloat shift = ApolloPixelPalShift(window);
+    if (shift == 0.0) return;
+    CGFloat correctY = 11.5 + shift;
 
     // Shift FauxCutOutView — %orig sets y=11.5 via sub_10030afa0
     Ivar fauxIvar = class_getInstanceVariable(object_getClass(self), "fauxCutOutView");
@@ -2909,8 +2992,8 @@ static BOOL ApolloPixelPalsBlockedByModal(UIWindow *window) {
         fauxView.layer.cornerRadius = CGRectGetHeight(fauxView.bounds) * 0.5;
         fauxView.layer.cornerCurve = kCACornerCurveContinuous;
 
-        ApolloLog(@"[PixelPals] FauxCutOutView y: 11.5 → %.3f (safeTop=%.1f, gap=%.3f, shift=%.3f)",
-                  correctY, safeTop, scaledGap, shift);
+        ApolloLog(@"[PixelPals] FauxCutOutView y: 11.5 → %.3f (safeTop=%.1f, shift=%.3f)",
+                  correctY, window.safeAreaInsets.top, shift);
     }
 
     // Shift PixelPalView — %orig sets y=-2.0 via sub_10030c880
@@ -2932,20 +3015,13 @@ static BOOL ApolloPixelPalsBlockedByModal(UIWindow *window) {
     %orig;
 
     UIWindow *window = (UIWindow *)self;
-    CGFloat safeTop = window.safeAreaInsets.top;
-    if (safeTop < 50.0 || fabs(safeTop - 59.0) < 0.5) return;
-    CGFloat nativeScale = [UIScreen mainScreen].nativeScale;
-    if (nativeScale != [UIScreen mainScreen].scale) return;
+    CGFloat shift = ApolloPixelPalShift(window);
+    if (shift == 0.0) return;
 
     if (![view isMemberOfClass:[UIView class]]) return;
     CGRect f = view.frame;
     if (fabs(f.size.width - 125.0) > 0.5 || fabs(f.size.height - 37.0) > 0.5) return;
     if (!view.clipsToBounds || view.layer.cornerRadius < 18.0) return;
-
-    CGFloat scaledGap = 10.5 * safeTop / 59.0;
-    CGFloat halfPx = 0.5 / nativeScale;
-    CGFloat correctY = floor((safeTop - 37.0 - scaledGap) / halfPx) * halfPx;
-    CGFloat shift = correctY - 11.5;
 
     ApolloLog(@"[PixelPals] Tap overlay y: %.1f → %.3f", f.origin.y, f.origin.y + shift);
     f.origin.y += shift;
@@ -3312,6 +3388,7 @@ static void initializeRandomSources() {
                                     UDKeyLibreTranslateURL: @"https://libretranslate.de/translate",
                                     UDKeyLibreTranslateAPIKey: @"",
                                     UDKeyTranslationSkipLanguages: @[],
+                                    UDKeyAppleTranslateSheet: @NO,
                                     UDKeyEnableAISummaries: @NO,
                                     UDKeyEnableAIPostSummaries: @YES,
                                     UDKeyEnableAICommentSummaries: @YES,
@@ -3427,6 +3504,22 @@ static void initializeRandomSources() {
         sOpenRouterAIModel = loadKey(UDKeyOpenRouterAIModel);
         sGeminiAPIKey = loadKey(UDKeyGeminiAPIKey);
         sGeminiAIModel = loadKey(UDKeyGeminiAIModel);
+        // 3.5.0 exposed these defaults as editable placeholders, so some users
+        // saved them explicitly. Both providers have since retired those exact
+        // IDs. Clear only the known former defaults so the bridge adopts its
+        // maintained replacement without touching a deliberate custom choice.
+        if ([sOpenRouterAIModel isEqualToString:@"meta-llama/llama-3.3-70b-instruct:free"]) {
+            sOpenRouterAIModel = nil;
+            [standardDefaults removeObjectForKey:UDKeyOpenRouterAIModel];
+            ApolloLog(@"[AICloud] Migrated retired OpenRouter default to current free router");
+        }
+        NSString *normalizedGeminiModel = [sGeminiAIModel lowercaseString];
+        if ([normalizedGeminiModel isEqualToString:@"gemini-2.5-flash"] ||
+            [normalizedGeminiModel isEqualToString:@"models/gemini-2.5-flash"]) {
+            sGeminiAIModel = nil;
+            [standardDefaults removeObjectForKey:UDKeyGeminiAIModel];
+            ApolloLog(@"[AICloud] Migrated retired Gemini default to current stable Flash model");
+        }
         sCustomAIAPIKey = loadKey(UDKeyCustomAIAPIKey);
         sCustomAIModel = loadKey(UDKeyCustomAIModel);
         sCustomAIBaseURL = loadKey(UDKeyCustomAIBaseURL);
@@ -3563,6 +3656,7 @@ static void initializeRandomSources() {
     sModernSubredditDividers = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyModernSubredditDividers];
     sSubredditListEnhancements = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeySubredditListEnhancements];
     sHideSubredditListDescriptions = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideSubredditListDescriptions];
+    sHideMultiredditDescriptions = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideMultiredditDescriptions];
     sEnableFlairColors = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableFlairColors];
     sEnableBulkTranslation = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyEnableBulkTranslation];
     sAutoTranslateOnAppear = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAutoTranslateOnAppear];
@@ -3618,6 +3712,8 @@ static void initializeRandomSources() {
         }
         sTranslationSkipLanguages = [clean copy];
     }
+
+    sAppleTranslateSheet = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAppleTranslateSheet];
 
     // Web JSON: read the flag here, but defer the keychain-backed
     // cookie/modhash/username hydration until AFTER the SecItem fishhooks are
