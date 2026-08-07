@@ -224,7 +224,7 @@ static BOOL ApolloTagMediaIsVideo(id richMediaNode) {
 // hop to main (where the parsed object is fully populated); decisions run
 // from cell didLoad/layout on main.
 static NSMutableDictionary<NSString *, NSNumber *> *sTagNoProfanityByUser = nil;
-static NSString *sTagActiveUsername = nil;
+static NSString *sTagEffectiveUsername = nil;
 static NSInteger sTagEffectiveNoProfanity = -1;
 
 NSNotificationName const ApolloAdultContentBlurPreferenceDidChangeNotification =
@@ -282,12 +282,12 @@ static NSString *ApolloTagNormalizedUsername(id userObject) {
     return name.length > 0 ? [name lowercaseString] : nil;
 }
 
-// Live lookup for sessions restored with a signed-in user before any
-// -[RDKClient setCurrentUser:] fires under our hook.
+// Resolve identity from AccountManager's SELECTED live client. RDKClient's
+// sharedClient is the application-only/bootstrap client, and remembering the
+// last client that received -setCurrentUser: lets background refreshes for an
+// inactive account overwrite the Gallery decision.
 static NSString *ApolloTagLiveActiveUsername(void) {
-    Class clientClass = objc_getClass("RDKClient");
-    if (!clientClass || ![clientClass respondsToSelector:@selector(sharedClient)]) return nil;
-    id client = ((id (*)(id, SEL))objc_msgSend)(clientClass, @selector(sharedClient));
+    id client = ApolloActiveAccountClient();
     if (!client || ![client respondsToSelector:@selector(currentUser)]) return nil;
     id currentUser = ((id (*)(id, SEL))objc_msgSend)(client, @selector(currentUser));
     return currentUser ? ApolloTagNormalizedUsername(currentUser) : nil;
@@ -297,14 +297,16 @@ static NSString *ApolloTagLiveActiveUsername(void) {
 // EFFECTIVE change (capture for the active account, or an account switch)
 // re-evaluates visible cells — a statically-visible feed gets no layout pass
 // of its own when /me lands or the account flips.
-static void ApolloTagRecomputeEffectiveNoProfanity(void) {
-    if (sTagActiveUsername.length == 0) sTagActiveUsername = ApolloTagLiveActiveUsername();
-    NSNumber *captured = sTagActiveUsername.length > 0 ? sTagNoProfanityByUser[sTagActiveUsername] : nil;
+static void ApolloTagRecomputeEffectiveNoProfanity(BOOL forceRefresh) {
+    NSString *activeUsername = ApolloTagLiveActiveUsername();
+    NSNumber *captured = activeUsername.length > 0 ? sTagNoProfanityByUser[activeUsername] : nil;
     NSInteger effective = captured ? (captured.boolValue ? 1 : 0) : -1;
-    if (effective == sTagEffectiveNoProfanity) return;
+    BOOL identityChanged = ![sTagEffectiveUsername isEqualToString:activeUsername];
+    if (!forceRefresh && !identityChanged && effective == sTagEffectiveNoProfanity) return;
+    sTagEffectiveUsername = [activeUsername copy];
     sTagEffectiveNoProfanity = effective;
     ApolloLog(@"[TagFilters] Effective pref_no_profanity=%ld for u/%@ (blur mature media)",
-              (long)effective, sTagActiveUsername ?: @"(unknown)");
+              (long)effective, activeUsername ?: @"(unknown)");
     [[NSNotificationCenter defaultCenter]
         postNotificationName:ApolloAdultContentBlurPreferenceDidChangeNotification
                       object:nil];
@@ -745,23 +747,22 @@ static void ApolloTagRefreshAllVisibleCells(void) {
             sTagNoProfanityByUser[username] = @(value);
             ApolloLog(@"[TagFilters] Captured pref_no_profanity=%d for u/%@ (blur mature media)", value, username);
         }
-        ApolloTagRecomputeEffectiveNoProfanity();
+        ApolloTagRecomputeEffectiveNoProfanity(NO);
     });
 }
 
 %end
 
-// Account switches move the effective pref to the new account's captured
-// value (or back to unknown if it was never captured for them).
+// A current-user install can belong to any stored client. Re-resolve through
+// AccountManager instead of treating the receiver as proof that it is active.
 %hook RDKClient
 
 - (void)setCurrentUser:(id)user {
     %orig;
-    id newUser = user;
     dispatch_async(dispatch_get_main_queue(), ^{
-        sTagActiveUsername = newUser ? ApolloTagNormalizedUsername(newUser) : nil;
-        ApolloTagRecomputeEffectiveNoProfanity();
+        ApolloTagRecomputeEffectiveNoProfanity(NO);
     });
+    (void)user;
 }
 
 %end
@@ -824,4 +825,22 @@ static void ApolloTagRefreshAllVisibleCells(void) {
                                                   usingBlock:^(NSNotification *note) {
         ApolloTagRefreshAllVisibleCells();
     }];
+
+    // Apollo posts these after selecting an existing AccountManager client.
+    // No -setCurrentUser: call is required for that path, so observe both
+    // native account-change names and force a refresh even when the two
+    // accounts happen to have the same captured preference. The forced pass
+    // also covers an unknown OAuth account <-> unknown keyless account switch,
+    // whose conservative fallback differs despite both caching as -1.
+    for (NSNotificationName name in @[
+        @"com.christianselig.RedditCurrentAccountChanged",
+        @"com.christianselig.RedditAccountChanged",
+    ]) {
+        [[NSNotificationCenter defaultCenter] addObserverForName:name
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(__unused NSNotification *note) {
+            ApolloTagRecomputeEffectiveNoProfanity(YES);
+        }];
+    }
 }
