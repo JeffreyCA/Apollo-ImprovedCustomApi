@@ -176,8 +176,9 @@ typedef NS_ENUM(NSInteger, ApolloScrollEdgeEffectStyle) {
 };
 extern NSInteger sScrollEdgeEffectStyle;
 // Resolves the retired Automatic value defensively if it is observed before
-// load-time migration. Anything keyed on the *look* of the header — such as
-// the title capsule — reads this rather than assuming the raw value is valid.
+// load-time migration, and resolves Blur to the OS-equivalent Soft/Hard style
+// when its private filter is unavailable. Anything keyed on the *look* of the
+// header reads this rather than assuming the raw preference can render.
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -192,10 +193,11 @@ BOOL ApolloProgressiveBlurAvailable(void);
 // Posted (main thread) after sScrollEdgeEffectStyle changes; observers restyle
 // live UI. Defined in ApolloScrollEdgeEffect.xm.
 extern NSString *const ApolloScrollEdgeEffectStyleChangedNotification;
-// Applies sScrollEdgeEffectStyle to a scroll view's top/bottom edge effects (no-op pre-iOS 26
-// or when not Liquid Glass). Called from UIScrollView's didMoveToWindow hook in
-// ApolloAutoHideTabBar.xm — kept here to avoid a second %hook UIScrollView didMoveToWindow,
-// which the Logos internal generator silently drops as a duplicate symbol.
+// Applies the resolved header style to a scroll view's top edge effect (no-op
+// pre-iOS 26 or when not Liquid Glass). Called from UIScrollView's
+// didMoveToWindow hook in ApolloAutoHideTabBar.xm — kept here to avoid a
+// second %hook UIScrollView didMoveToWindow, which the Logos internal
+// generator silently drops as a duplicate symbol.
 void ApolloApplyScrollEdgeEffectStyle(UIScrollView *scrollView);
 // Applies the selected style to every scroll view owned by an Apollo list
 // controller. Home, Profile, Comments, and similar screens all inherit Apollo's

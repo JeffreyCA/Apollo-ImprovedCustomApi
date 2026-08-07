@@ -1321,14 +1321,11 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 }
 
 - (NSString *)scrollEdgeEffectStyleText {
-    switch (sScrollEdgeEffectStyle) {
+    switch (ApolloResolvedScrollEdgeEffectStyle()) {
         case ApolloScrollEdgeEffectStyleSoft: return @"Soft";
         case ApolloScrollEdgeEffectStyleHard: return @"Hard";
         case ApolloScrollEdgeEffectStyleBlur: return @"Blur";
-        default:
-            return ApolloResolvedScrollEdgeEffectStyle() == ApolloScrollEdgeEffectStyleHard
-                ? @"Hard"
-                : @"Soft";
+        default: return @"Soft";
     }
 }
 
@@ -1348,8 +1345,9 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     if (blurAvailable) [options addObject:@"Blur"];
 
     NSInteger currentIndex = 0;
+    NSInteger currentStyle = ApolloResolvedScrollEdgeEffectStyle();
     for (NSInteger i = 0; i < (NSInteger)options.count; i++) {
-        if (ApolloHeaderStylePickerValue(i, blurAvailable) == sScrollEdgeEffectStyle) {
+        if (ApolloHeaderStylePickerValue(i, blurAvailable) == currentStyle) {
             currentIndex = i;
             break;
         }

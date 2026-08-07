@@ -28,10 +28,9 @@
 // every pixel behind its view, so extending it into content also blurs static
 // controls such as Apollo's search field and the first subreddit row. The
 // feather therefore lives entirely inside the header bounds. Everything
-// degrades soft: if CAFilter or the variableBlur type is missing, no view is
-// installed and the header keeps the system effect
-// (ApolloScrollEdgeEffect.xm leaves style untouched in Blur mode, so the
-// automatic treatment shows).
+// fails safely: if CAFilter or the variableBlur type is missing, no view is
+// installed and ApolloResolvedScrollEdgeEffectStyle() makes every consumer
+// use the OS-equivalent Soft/Hard treatment instead.
 
 // Cover the status bar gap above the bar (~59pt on notched devices, ~26pt for
 // sheet-attached bars) but never a centered-formSheet-sized offset — a bar
@@ -213,10 +212,9 @@ static void ApolloProgressiveBlurSyncFrame(UINavigationBar *bar, ApolloProgressi
 static void ApolloProgressiveBlurUpdateForBar(UINavigationBar *bar) {
     ApolloProgressiveBlurView *blurView = objc_getAssociatedObject(bar, &kApolloProgressiveBlurViewKey);
     BOOL wanted = IsLiquidGlass() &&
-                  sScrollEdgeEffectStyle == ApolloScrollEdgeEffectStyleBlur &&
+                  ApolloResolvedScrollEdgeEffectStyle() == ApolloScrollEdgeEffectStyleBlur &&
                   bar.window != nil &&
-                  bar.superview != nil &&
-                  ApolloProgressiveBlurAvailable();
+                  bar.superview != nil;
     if (!wanted) {
         if (blurView) {
             [blurView removeFromSuperview];
@@ -273,7 +271,7 @@ static void ApolloProgressiveBlurScheduleSync(UINavigationBar *bar) {
 - (void)layoutSubviews {
     %orig;
     if (!IsLiquidGlass()) return;
-    if (sScrollEdgeEffectStyle != ApolloScrollEdgeEffectStyleBlur &&
+    if (ApolloResolvedScrollEdgeEffectStyle() != ApolloScrollEdgeEffectStyleBlur &&
         !objc_getAssociatedObject(self, &kApolloProgressiveBlurViewKey)) return;
     ApolloProgressiveBlurScheduleSync(self);
 }

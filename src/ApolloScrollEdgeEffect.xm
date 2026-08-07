@@ -43,6 +43,13 @@ const void *ApolloScrollEdgeEffectForcedHiddenStampKey(void) { return &kApolloSc
 
 NSInteger ApolloResolvedScrollEdgeEffectStyle(void) {
     NSInteger mode = sScrollEdgeEffectStyle;
+    // Blur depends on a private CAFilter. A restored preference can contain
+    // raw value 4 even when the picker hides it on this runtime; treat that
+    // exactly like the retired Automatic value so the native edge effect,
+    // title capsule and settings UI all agree on a usable system fallback.
+    if (mode == ApolloScrollEdgeEffectStyleBlur && !ApolloProgressiveBlurAvailable()) {
+        mode = ApolloScrollEdgeEffectStyleAutomatic;
+    }
     if (mode != ApolloScrollEdgeEffectStyleAutomatic) return mode;
     static BOOL sSystemDefaultsHard;
     static dispatch_once_t once;
@@ -152,7 +159,7 @@ static void ApolloApplyHeaderStyleToTopEdge(UIScrollView *scrollView, NSInteger 
 // duplicate symbol that the Logos internal generator silently drops).
 void ApolloApplyScrollEdgeEffectStyle(UIScrollView *scrollView) {
     if (!IsLiquidGlass()) return;
-    ApolloApplyHeaderStyleToTopEdge(scrollView, sScrollEdgeEffectStyle);
+    ApolloApplyHeaderStyleToTopEdge(scrollView, ApolloResolvedScrollEdgeEffectStyle());
 }
 
 static void ApolloApplyScrollEdgeEffectStyleToViewTree(UIView *view) {
@@ -218,7 +225,7 @@ static void ApolloApplyScrollEdgeEffectStyleToAllScrollViews(void) {
 %hook ApolloRuntimeScrollEdgeEffect
 
 - (void)setStyle:(id)style {
-    NSInteger mode = sScrollEdgeEffectStyle;
+    NSInteger mode = ApolloResolvedScrollEdgeEffectStyle();
     id selectedStyle = style;
     if (IsLiquidGlass() &&
         objc_getAssociatedObject(self, &kApolloScrollEdgeEffectIsTopKey) &&
@@ -235,7 +242,7 @@ static void ApolloApplyScrollEdgeEffectStyleToAllScrollViews(void) {
 
 - (void)setHidden:(BOOL)hidden {
     if (IsLiquidGlass() &&
-        sScrollEdgeEffectStyle == ApolloScrollEdgeEffectStyleBlur &&
+        ApolloResolvedScrollEdgeEffectStyle() == ApolloScrollEdgeEffectStyleBlur &&
         objc_getAssociatedObject(self, &kApolloScrollEdgeEffectIsTopKey)) {
         if (!hidden) {
             // The caller wanted it visible and we are overriding — exactly the
