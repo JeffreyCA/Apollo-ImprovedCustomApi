@@ -12,6 +12,24 @@
 __BEGIN_DECLS
 os_log_t ApolloFixLog(void);
 NSString *ApolloCollectLogs(void);
+
+// --- Row-measure re-entrancy guard (issues #831/#833/#838/#839/#841) ---
+// Main-thread depth of UITableView row-height passes currently on the stack
+// (maintained by the ASTableView tableView:heightForRowAtIndexPath: hook in
+// ApolloInlineLinkPreviews.xm). While a pass is in progress, UIKit is inside
+// its row-data (re)validation (-[UISectionRowData refreshWithSection:...] /
+// endUpdates); calling ANY UITableView geometry query (indexPathForCell:,
+// rectForRowAtIndexPath:, indexPathsForVisibleRows, ...) from tweak code at
+// that moment makes UIKit start a NESTED full-section validation — one extra
+// ~48-frame nesting level per row — until the main thread's 1MB stack
+// overflows (EXC_BAD_ACCESS on a stack-guard address, crashing whatever
+// innocent code runs at the boundary). Any tweak code that can run inside a
+// row measure (layoutSpecThatFits:, text-setter hooks, ...) must check
+// ApolloRowMeasureInProgress() before touching table geometry and decline or
+// defer instead.
+BOOL ApolloRowMeasureInProgress(void);
+void ApolloRowMeasureWillBegin(void);
+void ApolloRowMeasureDidEnd(void);
 NSString *ApolloCollectAILogs(void);
 BOOL IsLiquidGlass(void);
 NSURL *ApolloURLByConvertingResolvedURLToApolloScheme(NSURL *url);
@@ -168,6 +186,30 @@ NSArray<NSDictionary *> *ApolloKeychainMirrorItemsForBackup(void);
 // Mirrors the line into a file that survives force-quit, so Export Debug Logs carries the
 // session that actually signed the user out. Safe to call from any thread; never logs secrets.
 void ApolloAppendLoginDiag(NSString *line);
+
+// Append an iOS 27 list/tab-bar geometry diagnostic to a bounded cross-launch
+// buffer. Export Debug Logs prepends this buffer so the foregrounding session
+// that produced a stale inset remains available even if Apollo is later killed.
+// Never include post titles, account names, URLs, or other user content.
+void ApolloAppendListLayoutDiag(NSString *line);
+
+// iOS 26+ Liquid Glass: the tab bar's real expanded/collapsed state, read from
+// the visual provider's stored `_currentMorphTarget` (0 expanded, 1 mid-morph,
+// 2 minimized). UITabBar's own `_isMinimized` accessor is guarded by an
+// Apple-app assertion (UIKit literally checks for Photos), so calling it from a
+// sideloaded app crashes — the runtime ivar read is the only safe path.
+// Returns NSNotFound with *known = NO when the private layout is missing
+// (future iOS). Callers must treat unknown as "assume nothing" and fail OPEN
+// (accept UIKit's writes), never as "expanded" — fighting UIKit per frame on a
+// wrong guess is worse than missing one correction. Main-thread only.
+NSInteger ApolloTabBarVisualMorphTarget(UITabBar *tabBar, BOOL *known);
+
+// One-byte Swift Bool stored property on the tab bar's visual provider (e.g.
+// "isAnimatingCollapsedState"). Swift ivars carry no useful ObjC type encoding
+// (RuntimeBrowser shows `void`), so this mirrors UIKit's own one-byte
+// read/write of the exported ivar offset. *known = NO when the ivar is gone.
+// Main-thread only.
+BOOL ApolloTabBarVisualProviderBoolIvar(UITabBar *tabBar, const char *name, BOOL *known);
 
 // Dev-only login-persistence debug (see Tweak.xm): a report of where the account keychain item
 // lives (each copy's access group / size / protection class), and a FLEX-gated action that

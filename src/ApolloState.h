@@ -367,6 +367,9 @@ extern NSString *sLibreTranslateURL;
 extern NSString *sLibreTranslateAPIKey;
 // Lowercased 2-letter language codes the user has opted out of translating.
 extern NSArray<NSString *> *sTranslationSkipLanguages;
+// Redirects Apollo's own Translate button to iOS's on-device Translate sheet
+// instead of Apollo's Google Translate web view. See UDKeyAppleTranslateSheet.
+extern BOOL sAppleTranslateSheet;
 
 #ifdef __OBJC__
 // Whether the on-device Apple translation backend (ApolloAppleTranslation.swift,

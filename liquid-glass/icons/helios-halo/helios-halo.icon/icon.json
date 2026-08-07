@@ -17,7 +17,6 @@
   },
   "groups" : [
     {
-      "blur-material" : 0.5,
       "layers" : [
         {
           "blend-mode-specializations" : [
@@ -60,7 +59,20 @@
               -379.7228245577272
             ]
           }
-        },
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 4
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    },
+    {
+      "blur-material" : null,
+      "layers" : [
         {
           "blend-mode" : "plus-lighter",
           "fill" : {
@@ -179,7 +191,20 @@
               151.3338533137137
             ]
           }
-        },
+        }
+      ],
+      "name" : "Group",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.1
+      }
+    },
+    {
+      "layers" : [
         {
           "fill-specializations" : [
             {
@@ -204,7 +229,20 @@
               94.8126990563893
             ]
           }
-        },
+        }
+      ],
+      "name" : "Group",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 4
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    },
+    {
+      "layers" : [
         {
           "fill-specializations" : [
             {
@@ -270,11 +308,11 @@
       ],
       "shadow" : {
         "kind" : "neutral",
-        "opacity" : 0.5
+        "opacity" : 0.6
       },
       "translucency" : {
         "enabled" : true,
-        "value" : 0.5
+        "value" : 0.2
       }
     }
   ],

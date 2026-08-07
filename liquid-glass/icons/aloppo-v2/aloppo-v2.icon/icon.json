@@ -1,0 +1,213 @@
+{
+  "color-space-for-untagged-svg-colors" : "display-p3",
+  "fill" : {
+    "linear-gradient" : [
+      "display-p3:0.32905,0.66189,0.96782,1.00000",
+      "display-p3:0.43059,0.35600,0.96393,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0.7
+      }
+    }
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "WarpedHelmet.svg",
+          "name" : "WarpedHelmet",
+          "position" : {
+            "scale" : 1.51,
+            "translation-in-points" : [
+              83.6,
+              -71.5
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "WarpedFace.svg",
+          "name" : "WarpedFace",
+          "position" : {
+            "scale" : 2.3,
+            "translation-in-points" : [
+              229.5,
+              170.9
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "Body Apollo.svg",
+          "name" : "Body Apollo",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              4.4,
+              430.5
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.32908,0.58746,0.97173,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "display-p3:0.75000,0.75000,0.75000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "Apollo Ring Large.svg",
+          "name" : "Apollo Ring Large",
+          "opacity-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : 0.2
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0.1
+            }
+          ],
+          "position" : {
+            "scale" : 0.67,
+            "translation-in-points" : [
+              -1.4,
+              -324
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.30177,0.49559,0.89849,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "display-p3:0.50000,0.50000,0.50000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "Apollo Ring Large.svg",
+          "name" : "Apollo Ring Large",
+          "opacity-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : 0.2
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0.1
+            }
+          ],
+          "position" : {
+            "scale" : 0.98,
+            "translation-in-points" : [
+              -1.4,
+              -324
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.29706,0.38558,0.81352,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "display-p3:0.25000,0.25000,0.25000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "Apollo Ring Large.svg",
+          "name" : "Apollo Ring Large",
+          "opacity-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : 0.2
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0.1
+            }
+          ],
+          "position" : {
+            "scale" : 1.29,
+            "translation-in-points" : [
+              -1.4,
+              -324
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

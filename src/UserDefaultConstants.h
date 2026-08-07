@@ -273,6 +273,14 @@ static NSString *const UDKeyLibreTranslateURL = @"LibreTranslateURL";
 static NSString *const UDKeyLibreTranslateAPIKey = @"LibreTranslateAPIKey";
 // Array<String> of 2-letter language codes to leave untranslated (detected source language).
 static NSString *const UDKeyTranslationSkipLanguages = @"TranslationSkipLanguages";
+// Redirects Apollo's OWN Translate button (the native action-sheet item on
+// comments/posts, which normally opens Apollo's Google Translate web view) to
+// iOS's on-device Translate sheet instead. Independent of UDKeyTranslationProvider,
+// which governs the tweak's separate bulk in-place translation backend, not this
+// button. Requires iOS 17.4+ (Translation.framework's .translationPresentation);
+// has no effect while Bulk Translation is on, since that already removes the
+// native Translate action from the sheet. Default OFF via registerDefaults.
+static NSString *const UDKeyAppleTranslateSheet = @"AppleTranslateSheet";
 
 // On-device AI summaries (Apple FoundationModels, iOS 26+). Off by default.
 static NSString *const UDKeyEnableAISummaries = @"EnableAISummaries";

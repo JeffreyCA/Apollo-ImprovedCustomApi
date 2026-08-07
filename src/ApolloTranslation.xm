@@ -5188,6 +5188,15 @@ static id ApolloCommentCellNodeForTextNode(id textNode) {
 // height makes the preview overflow and appear to jump up the screen.
 static BOOL ApolloCommentCellNodeIsBackedByActiveCommentsTable(id commentCellNode, UIViewController *commentsVC) {
     if (!commentCellNode || !commentsVC || ![NSThread isMainThread]) return NO;
+    // NEVER query table geometry while UIKit is inside a row-height pass. The
+    // indexPathForCell: below re-validates the table's row data; issued from
+    // inside a measure (deleted-comments sets its replacement body/chip text
+    // in layoutSpecThatFits: → the global setAttributedText: hook → the
+    // comment preempt → here) it nests a full re-validation per row until the
+    // main stack overflows — the #831/#833 crash cycle. Declining is safe:
+    // the sync preempt falls through to the deferred retry, which runs
+    // between runloop turns where this returns real answers again.
+    if (ApolloRowMeasureInProgress()) return NO;
     @try {
         UITableView *commentsTable = GetCommentsTableView(commentsVC);
         if (!commentsTable) return NO;

@@ -109,6 +109,7 @@ NSString *sTranslationProvider = nil;
 NSString *sLibreTranslateURL = nil;
 NSString *sLibreTranslateAPIKey = nil;
 NSArray<NSString *> *sTranslationSkipLanguages = nil;
+BOOL sAppleTranslateSheet = NO;
 
 BOOL sWebJSONEnabled = NO;
 BOOL sPollsFeatureEnabled = NO;
