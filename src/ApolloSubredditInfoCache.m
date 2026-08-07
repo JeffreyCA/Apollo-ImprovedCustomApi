@@ -1,6 +1,7 @@
 #import "ApolloSubredditInfoCache.h"
 
 #import "ApolloAccountCredentials.h"   // ApolloActiveAccountUsername() — userIsSubscriber stamping
+#import "ApolloCommon.h"               // ApolloLog
 #import "ApolloState.h"
 
 NSString * const ApolloSubredditInfoUpdatedNotification = @"ApolloSubredditInfoUpdatedNotification";
@@ -57,12 +58,47 @@ NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
 
 @end
 
+// Retry budget + backoff for transient failures (network blips, 429, 5xx) —
+// ported from ApolloUserProfileCache's fetch discipline.
+static NSInteger const ApolloSubredditInfoMaxFetchAttempts = 3;
+static NSTimeInterval ApolloSubredditInfoRetryBackoffForAttempt(NSInteger attempt) {
+    return attempt == 0 ? 1.0 : 3.0;
+}
+
+// How long a permanently-failed subreddit (private/banned/deleted → 403/404,
+// unparseable body) is negative-cached before another fetch may run.
+// Memory-only: a transient upstream failure must not persist across launches.
+static NSTimeInterval const ApolloSubredditInfoNotFoundTTL = 10.0 * 60.0;
+
+static BOOL ApolloSubredditInfoErrorIsTransient(NSError *error) {
+    if (![error.domain isEqualToString:NSURLErrorDomain]) return NO;
+    switch (error.code) {
+        case NSURLErrorTimedOut:
+        case NSURLErrorCannotFindHost:
+        case NSURLErrorCannotConnectToHost:
+        case NSURLErrorNetworkConnectionLost:
+        case NSURLErrorDNSLookupFailed:
+        case NSURLErrorNotConnectedToInternet:
+        case NSURLErrorSecureConnectionFailed:
+            return YES;
+        default:
+            return NO;
+    }
+}
+
 @interface ApolloSubredditInfoCache ()
 @property(nonatomic, strong) NSCache<NSString *, ApolloSubredditInfo *> *infoCache;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, ApolloSubredditInfo *> *diskInfo;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSMutableArray<void (^)(ApolloSubredditInfo *)> *> *infoCompletions;
+// Negative cache for permanent misses (touched only on `queue`).
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSDate *> *notFoundDates;
+// Keys with a non-forced request in flight when a forced one arrived: the
+// in-flight response may be HTTP-cache-stale, so one forced fetch reruns after
+// it finishes instead of being silently swallowed by the coalescer.
+@property(nonatomic, strong) NSMutableSet<NSString *> *pendingForcedKeys;
 @property(nonatomic, strong) NSURLSession *session;
 @property(nonatomic) dispatch_queue_t queue;
+- (void)startFetchForKey:(NSString *)key cached:(ApolloSubredditInfo *)cached forced:(BOOL)forced attempt:(NSInteger)attempt;
 @end
 
 @implementation ApolloSubredditInfoCache
@@ -84,6 +120,8 @@ NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
         _infoCache.countLimit = ApolloSubredditInfoDiskCacheMaxEntries;
         _diskInfo = [NSMutableDictionary dictionary];
         _infoCompletions = [NSMutableDictionary dictionary];
+        _notFoundDates = [NSMutableDictionary dictionary];
+        _pendingForcedKeys = [NSMutableSet set];
 
         NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
         configuration.requestCachePolicy = NSURLRequestReturnCacheDataElseLoad;
@@ -307,6 +345,10 @@ NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
 - (ApolloSubredditInfo *)infoFromResponseData:(NSData *)data fallbackSubredditName:(NSString *)fallbackSubredditName {
     if (!data.length) return nil;
     id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    // Root must be a dictionary before keyed subscripting — an array root
+    // (error payloads do this) would raise unrecognized-selector. Same guard
+    // the profile cache carries.
+    if (![json isKindOfClass:[NSDictionary class]]) return nil;
     NSDictionary *dataDict = [json[@"data"] isKindOfClass:[NSDictionary class]] ? json[@"data"] : nil;
     if (!dataDict) return nil;
 
@@ -374,17 +416,33 @@ NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
 
 - (void)finishRequestForKey:(NSString *)key info:(ApolloSubredditInfo *)info {
     dispatch_async(self.queue, ^{
+        // `info == diskInfo[key]` means the fetch failed and fell back to the
+        // entry we already had — re-persisting and re-broadcasting it would
+        // fire a disk write + full controller-tree reinstall per failed
+        // refetch (a storm on flaky networks) for data nothing changed.
+        BOOL unchanged = (info != nil && info == self.diskInfo[key]);
         if (info) {
-            self.diskInfo[key] = info;
             [self.infoCache setObject:info forKey:key];
-            [self saveDiskCacheLocked];
+            if (!unchanged) {
+                self.diskInfo[key] = info;
+                [self saveDiskCacheLocked];
+            }
         }
 
         NSArray<void (^)(ApolloSubredditInfo *)> *callbacks = [self.infoCompletions[key] copy];
         [self.infoCompletions removeObjectForKey:key];
 
+        // A forced request that arrived while a non-forced fetch was already
+        // in flight reruns now with the HTTP cache bypassed.
+        BOOL rerunForced = [self.pendingForcedKeys containsObject:key];
+        [self.pendingForcedKeys removeObject:key];
+        if (rerunForced) {
+            self.infoCompletions[key] = [NSMutableArray array];
+            [self startFetchForKey:key cached:(info ?: self.diskInfo[key]) forced:YES attempt:0];
+        }
+
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (info) {
+            if (info && !unchanged) {
                 [[NSNotificationCenter defaultCenter] postNotificationName:ApolloSubredditInfoUpdatedNotification
                                                                     object:self
                                                                   userInfo:@{ApolloSubredditNameKey: key}];
@@ -394,6 +452,70 @@ NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
             }
         });
     });
+}
+
+// Runs on `queue`. Owns status-code inspection, transient-failure backoff and
+// the permanent-miss negative cache (all ported from ApolloUserProfileCache).
+- (void)startFetchForKey:(NSString *)key cached:(ApolloSubredditInfo *)cached forced:(BOOL)forced attempt:(NSInteger)attempt {
+    NSMutableURLRequest *request = [[self requestForSubreddit:key] mutableCopy];
+    if (forced) {
+        // The session policy is ReturnCacheDataElseLoad; without this a
+        // "refetch" (post-Join subscriber sync, pull-to-refresh) happily
+        // serves days-old HTTP-cached about.json.
+        request.cachePolicy = NSURLRequestReloadIgnoringLocalAndRemoteCacheData;
+    }
+
+    __weak typeof(self) weakSelf = self;
+    void (^retryOrGiveUp)(NSString *) = ^(NSString *reason) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (attempt + 1 < ApolloSubredditInfoMaxFetchAttempts) {
+            NSTimeInterval backoff = ApolloSubredditInfoRetryBackoffForAttempt(attempt);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(backoff * NSEC_PER_SEC)), strongSelf.queue, ^{
+                [strongSelf startFetchForKey:key cached:cached forced:forced attempt:attempt + 1];
+            });
+        } else {
+            ApolloLog(@"[SubredditHeaders] Info fetch r/%@ %@ — gave up after %ld attempts",
+                      key, reason, (long)ApolloSubredditInfoMaxFetchAttempts);
+            [strongSelf finishRequestForKey:key info:cached];
+        }
+    };
+
+    NSURLSessionDataTask *task = [self.session dataTaskWithRequest:request
+                                                 completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (error) {
+            if (ApolloSubredditInfoErrorIsTransient(error)) {
+                retryOrGiveUp([NSString stringWithFormat:@"network error (%@)", error.localizedDescription]);
+                return;
+            }
+            [strongSelf finishRequestForKey:key info:cached];
+            return;
+        }
+
+        NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        NSInteger statusCode = http ? http.statusCode : 200;
+        if (statusCode == 429 || statusCode >= 500) {
+            retryOrGiveUp([NSString stringWithFormat:@"HTTP %ld", (long)statusCode]);
+            return;
+        }
+        if (statusCode < 200 || statusCode >= 300) {
+            // Permanent (403 private/quarantined, 404 banned/deleted): stop
+            // refetching on every visit for a while.
+            ApolloLog(@"[SubredditHeaders] Info fetch r/%@ returned HTTP %ld", key, (long)statusCode);
+            dispatch_async(strongSelf.queue, ^{ strongSelf.notFoundDates[key] = [NSDate date]; });
+            [strongSelf finishRequestForKey:key info:cached];
+            return;
+        }
+
+        ApolloSubredditInfo *info = [strongSelf infoFromResponseData:data fallbackSubredditName:key];
+        if (!info) {
+            dispatch_async(strongSelf.queue, ^{ strongSelf.notFoundDates[key] = [NSDate date]; });
+        }
+        [strongSelf finishRequestForKey:key info:(info ?: cached)];
+    }];
+    [task resume];
 }
 
 - (void)enqueueRequestForSubreddit:(NSString *)subredditName forceRefresh:(BOOL)forceRefresh completion:(void (^)(ApolloSubredditInfo *info))completion {
@@ -410,21 +532,29 @@ NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
     }
 
     dispatch_async(self.queue, ^{
+        // Negative cache: a recently-confirmed private/banned/deleted
+        // subreddit doesn't get refetched on every visit. A forced refresh
+        // punches through (and clears the entry so the retry is honest).
+        NSDate *notFoundAt = self.notFoundDates[key];
+        if (notFoundAt) {
+            if (!forceRefresh && -[notFoundAt timeIntervalSinceNow] < ApolloSubredditInfoNotFoundTTL) {
+                if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(cached); });
+                return;
+            }
+            [self.notFoundDates removeObjectForKey:key];
+        }
+
         BOOL hadRequest = (self.infoCompletions[key] != nil);
         if (!self.infoCompletions[key]) self.infoCompletions[key] = [NSMutableArray array];
         if (completion) [self.infoCompletions[key] addObject:[completion copy]];
-        if (hadRequest) return;
+        if (hadRequest) {
+            // Don't silently swallow a forced refresh in the coalescer — the
+            // in-flight non-forced request may serve HTTP-cache-stale data.
+            if (forceRefresh) [self.pendingForcedKeys addObject:key];
+            return;
+        }
 
-        NSURLSessionDataTask *task = [self.session dataTaskWithRequest:[self requestForSubreddit:key]
-                                                     completionHandler:^(NSData *data, __unused NSURLResponse *response, NSError *error) {
-            ApolloSubredditInfo *info = nil;
-            if (!error) info = [self infoFromResponseData:data fallbackSubredditName:key];
-            if (!info && cached) {
-                info = cached;
-            }
-            [self finishRequestForKey:key info:info];
-        }];
-        [task resume];
+        [self startFetchForKey:key cached:cached forced:forceRefresh attempt:0];
     });
 }
 
@@ -452,6 +582,7 @@ NSString *ApolloSubredditFormattedMemberCount(NSInteger subscriberCount) {
     dispatch_async(self.queue, ^{
         [self.infoCache removeAllObjects];
         [self.diskInfo removeAllObjects];
+        [self.notFoundDates removeAllObjects];
         [[NSFileManager defaultManager] removeItemAtPath:[self cachePath] error:nil];
     });
 }

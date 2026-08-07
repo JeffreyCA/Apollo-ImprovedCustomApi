@@ -14,6 +14,21 @@ static NSTimeInterval const ApolloUserProfileCacheTTL = 7.0 * 24.0 * 60.0 * 60.0
 static NSUInteger const ApolloUserProfileDiskCacheMaxEntries = 2000;
 static NSInteger const ApolloUserProfileCacheSchemaVersion = 2;
 
+// Longest pixel dimension worth keeping for banner art: the device's longest
+// screen side in pixels (covers rotation and the immersive backdrop's needs).
+// Warmed from -init on the main thread so off-queue callers never touch
+// UIScreen themselves.
+static CGFloat ApolloBannerMaxPixelDimension(void) {
+    static CGFloat dimension = 0.0;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        CGSize bounds = UIScreen.mainScreen.bounds.size;
+        CGFloat scale = UIScreen.mainScreen.scale > 0.0 ? UIScreen.mainScreen.scale : 2.0;
+        dimension = MAX(bounds.width, bounds.height) * scale;
+    });
+    return dimension;
+}
+
 static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
     if (!image || image.images.count > 0 || image.size.width <= 0.0 || image.size.height <= 0.0) return image;
 
@@ -51,9 +66,21 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
 
 @end
 
+// How long a permanently-failed image URL (404/403/undecodable body) is
+// negative-cached before another fetch may be attempted. Memory-only.
+static NSTimeInterval const ApolloUserProfileImageNotFoundTTL = 15.0 * 60.0;
+
 @interface ApolloUserProfileCache ()
 @property(nonatomic, strong) NSCache<NSString *, ApolloUserProfileInfo *> *infoCache;
 @property(nonatomic, strong) NSCache<NSString *, UIImage *> *imageCache;
+// Banner art lives in its own small cache (see the header note) so its bulk
+// can never evict avatars. Keys are "banner:"-prefixed URL strings, which also
+// keeps its in-flight coalescing distinct inside the shared imageCompletions.
+@property(nonatomic, strong) NSCache<NSString *, UIImage *> *bannerCache;
+// Image-URL negative cache (touched only on `queue`): info fetches have had a
+// not-found sentinel for a while, but failed image URLs used to refetch once
+// per cell per reapply, forever.
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSDate *> *imageNotFoundDates;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, ApolloUserProfileInfo *> *diskInfo;
 // Immutable point-in-time view of diskInfo. Render/preload callers read this
 // without synchronously entering the serial persistence/network queue.
@@ -107,10 +134,16 @@ static UIImage *ApolloDecodedAvatarImage(UIImage *image) {
         _imageCache.countLimit = 800;
         _imageCache.totalCostLimit = 40 * 1024 * 1024;
 
+        _bannerCache = [[NSCache alloc] init];
+        _bannerCache.countLimit = 8;
+        _bannerCache.totalCostLimit = 32 * 1024 * 1024;
+        (void)ApolloBannerMaxPixelDimension(); // warm the UIScreen read on main
+
         _diskInfo = [NSMutableDictionary dictionary];
         _infoSnapshot = @{};
         _infoCompletions = [NSMutableDictionary dictionary];
         _imageCompletions = [NSMutableDictionary dictionary];
+        _imageNotFoundDates = [NSMutableDictionary dictionary];
         _batchRequestedFullNames = [NSMutableSet set];
 
         NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
@@ -613,6 +646,11 @@ static NSTimeInterval ApolloUserProfileRetryBackoffForAttempt(NSInteger attempt)
     ApolloUserProfileInfo *sentinel = [ApolloUserProfileInfo new];
     sentinel.fetchedAt = [NSDate date];
     sentinel.suspensionChecked = YES;
+    // [ApolloUserProfileInfo new] bypasses the designated init's -1 "unknown"
+    // karma defaults — without these, deleted users' stat cards render
+    // "0 Post Karma" instead of staying hidden.
+    sentinel.linkKarma = -1;
+    sentinel.commentKarma = -1;
     [self.infoCache setObject:sentinel forKey:key];
 }
 
@@ -959,6 +997,18 @@ static NSTimeInterval ApolloUserProfileRetryBackoffForAttempt(NSInteger attempt)
     }
 
     dispatch_async(self.queue, ^{
+        // Negative cache: a URL that recently failed permanently (deleted CDN
+        // asset, undecodable bytes) short-circuits instead of refiring a
+        // network fetch from every cell on every reapply.
+        NSDate *notFoundAt = self.imageNotFoundDates[key];
+        if (notFoundAt) {
+            if (-[notFoundAt timeIntervalSinceNow] < ApolloUserProfileImageNotFoundTTL) {
+                if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(nil); });
+                return;
+            }
+            [self.imageNotFoundDates removeObjectForKey:key];
+        }
+
         NSMutableArray<void (^)(UIImage *)> *callbacks = self.imageCompletions[key];
         if (callbacks) {
             if (completion) [callbacks addObject:[completion copy]];
@@ -999,10 +1049,155 @@ static NSTimeInterval ApolloUserProfileRetryBackoffForAttempt(NSInteger attempt)
                 if (!image && error) {
                     ApolloLog(@"[UserAvatars] Failed to load image %@: %@", key, error.localizedDescription);
                 }
+                if (!image) {
+                    // Negative-cache only permanent failures — transient
+                    // network errors and 429/5xx must stay retryable.
+                    NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+                    NSInteger statusCode = http ? http.statusCode : 0;
+                    BOOL transient = (error && ApolloUserProfileErrorIsTransient(error)) ||
+                        statusCode == 429 || statusCode >= 500;
+                    if (!transient) {
+                        dispatch_async(self.queue, ^{ self.imageNotFoundDates[key] = [NSDate date]; });
+                    }
+                }
                 if (persistData) {
                     dispatch_barrier_async(self.imageIOQueue, ^{ [self persistImageData:persistData forKey:key]; });
                 }
                 [self finishImageRequestForKey:key image:image];
+            }];
+            [task resume];
+        });
+    });
+}
+
+#pragma mark - Banner images
+
+// Downscale banner art to at most the device's longest screen side (in
+// pixels) while force-decoding it. Sources at or below that size just get the
+// normal decode.
+static UIImage *ApolloDownscaledBannerImage(UIImage *image) {
+    if (!image || image.size.width <= 0.0 || image.size.height <= 0.0) return image;
+    CGFloat maxDimension = ApolloBannerMaxPixelDimension();
+    CGFloat pixelWidth = image.size.width * image.scale;
+    CGFloat pixelHeight = image.size.height * image.scale;
+    CGFloat longest = MAX(pixelWidth, pixelHeight);
+    if (maxDimension <= 0.0 || longest <= maxDimension) return ApolloDecodedAvatarImage(image);
+
+    CGFloat ratio = maxDimension / longest;
+    CGSize target = CGSizeMake(MAX(1.0, floor(pixelWidth * ratio)), MAX(1.0, floor(pixelHeight * ratio)));
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
+    format.scale = 1.0;
+    format.opaque = NO;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:target format:format];
+    UIImage *result = [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *context) {
+        [image drawInRect:CGRectMake(0.0, 0.0, target.width, target.height)];
+    }];
+    return result ?: image;
+}
+
+- (NSString *)bannerKeyForURL:(NSURL *)url {
+    return [@"banner:" stringByAppendingString:url.absoluteString ?: @""];
+}
+
+- (UIImage *)cachedBannerImageForURL:(NSURL *)url {
+    if (![url isKindOfClass:[NSURL class]]) return nil;
+    return [self.bannerCache objectForKey:[self bannerKeyForURL:url]];
+}
+
+- (void)finishBannerImageRequestForKey:(NSString *)key image:(UIImage *)image {
+    dispatch_async(self.queue, ^{
+        if (image) {
+            NSUInteger cost = (NSUInteger)MAX(1.0, image.size.width * image.size.height * image.scale * image.scale * 4.0);
+            [self.bannerCache setObject:image forKey:key cost:cost];
+        }
+
+        NSArray<void (^)(UIImage *)> *callbacks = [self.imageCompletions[key] copy];
+        [self.imageCompletions removeObjectForKey:key];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            for (void (^callback)(UIImage *) in callbacks) {
+                callback(image);
+            }
+        });
+    });
+}
+
+// Same shape as requestImageForURL, but decodes at display scale into
+// bannerCache and disk-persists the downscaled re-encode (so >2MB originals
+// still survive cold starts instead of re-downloading every launch).
+- (void)requestBannerImageForURL:(NSURL *)url completion:(void (^)(UIImage *image))completion {
+    if (![url isKindOfClass:[NSURL class]]) {
+        if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(nil); });
+        return;
+    }
+    NSString *key = [self bannerKeyForURL:url];
+    UIImage *cached = [self.bannerCache objectForKey:key];
+    if (cached) {
+        if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(cached); });
+        return;
+    }
+
+    dispatch_async(self.queue, ^{
+        NSDate *notFoundAt = self.imageNotFoundDates[key];
+        if (notFoundAt) {
+            if (-[notFoundAt timeIntervalSinceNow] < ApolloUserProfileImageNotFoundTTL) {
+                if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(nil); });
+                return;
+            }
+            [self.imageNotFoundDates removeObjectForKey:key];
+        }
+
+        NSMutableArray<void (^)(UIImage *)> *callbacks = self.imageCompletions[key];
+        if (callbacks) {
+            if (completion) [callbacks addObject:[completion copy]];
+            return;
+        }
+
+        callbacks = [NSMutableArray array];
+        if (completion) [callbacks addObject:[completion copy]];
+        self.imageCompletions[key] = callbacks;
+
+        NSString *diskPath = [self imageDiskPathForKey:key];
+        dispatch_async(self.imageIOQueue, ^{
+            NSData *diskData = [NSData dataWithContentsOfFile:diskPath];
+            if (diskData.length > 0) {
+                UIImage *diskImage = nil;
+                @autoreleasepool {
+                    // Disk entries were already downscaled before persisting;
+                    // the call is a plain decode for them.
+                    diskImage = ApolloDownscaledBannerImage([UIImage imageWithData:diskData]);
+                }
+                if (diskImage) {
+                    [[NSFileManager defaultManager] setAttributes:@{NSFileModificationDate: [NSDate date]} ofItemAtPath:diskPath error:nil];
+                    [self finishBannerImageRequestForKey:key image:diskImage];
+                    return;
+                }
+            }
+
+            NSURLSessionDataTask *task = [self.imageSession dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+                UIImage *image = nil;
+                if (!error && data.length > 0) {
+                    @autoreleasepool {
+                        image = ApolloDownscaledBannerImage([UIImage imageWithData:data]);
+                    }
+                }
+                if (!image && error) {
+                    ApolloLog(@"[UserAvatars] Failed to load banner %@: %@", key, error.localizedDescription);
+                }
+                if (!image) {
+                    NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+                    NSInteger statusCode = http ? http.statusCode : 0;
+                    BOOL transient = (error && ApolloUserProfileErrorIsTransient(error)) ||
+                        statusCode == 429 || statusCode >= 500;
+                    if (!transient) {
+                        dispatch_async(self.queue, ^{ self.imageNotFoundDates[key] = [NSDate date]; });
+                    }
+                } else {
+                    NSData *persistData = UIImageJPEGRepresentation(image, 0.85);
+                    if (persistData) {
+                        dispatch_barrier_async(self.imageIOQueue, ^{ [self persistImageData:persistData forKey:key]; });
+                    }
+                }
+                [self finishBannerImageRequestForKey:key image:image];
             }];
             [task resume];
         });
@@ -1018,6 +1213,8 @@ static NSTimeInterval ApolloUserProfileRetryBackoffForAttempt(NSInteger attempt)
         self.diskSaveScheduled = NO;
         [self.infoCache removeAllObjects];
         [self.imageCache removeAllObjects];
+        [self.bannerCache removeAllObjects];
+        [self.imageNotFoundDates removeAllObjects];
         // Reset the batch-prefetch dedupe set so already-seen users get re-warmed
         // through the fast user_data_by_account_ids path after a clear.
         [self.batchRequestedFullNames removeAllObjects];
