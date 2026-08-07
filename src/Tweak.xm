@@ -1924,6 +1924,24 @@ static const char kARCompletion = '\0';
     return customUA;
 }
 
+// #785: "Go to user" with a trailing space after the username crashes. Apollo
+// interpolates the raw search text into "user/<name>/about.json", and the
+// malformed request's response reaches +[RDKObjectBuilder objectFromJSON:] as a
+// plain NSString, which traps on `json[@"kind"]` (unrecognized selector). Trim
+// whitespace/newlines so the request targets the user the person actually typed.
+- (id)userWithUsername:(NSString *)username completion:(id)completion {
+    if ([username isKindOfClass:[NSString class]]) {
+        NSString *trimmed = [username stringByTrimmingCharactersInSet:
+                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length > 0 && ![trimmed isEqualToString:username]) {
+            ApolloLog(@"[GoToUser] Trimmed username (len %lu -> %lu) before user lookup",
+                      (unsigned long)username.length, (unsigned long)trimmed.length);
+            return %orig(trimmed, completion);
+        }
+    }
+    return %orig;
+}
+
 // Defensive guard: bail out if the response isn't a dictionary. Apollo otherwise
 // crashes with "unrecognized selector" when it does `response[@"kind"]` on a string.
 - (NSArray *)objectsFromListingResponse:(id)response {
