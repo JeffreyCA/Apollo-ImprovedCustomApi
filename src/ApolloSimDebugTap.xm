@@ -61,12 +61,20 @@ static void ApolloSimDebugSendTouch(UITouch *touch) {
 }
 
 static void ApolloSimDebugPerformTap(CGPoint point) {
+    // Hit-test every visible window from topmost down, not just the key
+    // window: alert/overlay windows sit above it, and key-window-only taps
+    // sailed straight through their chrome into the app underneath.
+    UIView *hitView = nil;
     UIWindow *window = nil;
-    for (UIWindow *candidate in ApolloAllWindows()) {
-        if (candidate.isKeyWindow) { window = candidate; break; }
+    NSArray<UIWindow *> *ordered = [ApolloAllWindows() sortedArrayUsingComparator:^NSComparisonResult(UIWindow *a, UIWindow *b) {
+        if (a.windowLevel == b.windowLevel) return NSOrderedSame;
+        return a.windowLevel > b.windowLevel ? NSOrderedAscending : NSOrderedDescending;
+    }];
+    for (UIWindow *candidate in ordered) {
+        if (candidate.hidden) continue;
+        UIView *hit = [candidate hitTest:point withEvent:nil];
+        if (hit) { window = candidate; hitView = hit; break; }
     }
-    if (!window) window = ApolloAllWindows().firstObject;
-    UIView *hitView = [window hitTest:point withEvent:nil];
     if (!window || !hitView) {
         ApolloLog(@"[SimDebugTap] no window/hit view for (%.0f, %.0f)", point.x, point.y);
         return;

@@ -535,11 +535,12 @@ static ApolloThemeGalleryResolver sGalleryResolver = nil;
     NSDictionary *p = [self activePointer];
     if ([p[kPointerIDKey] isEqual:themeID]) {
         if ([self storedSelectionKind] == ApolloThemeSelectionCustom) {
-            // Deleted the active theme: fall to the next stored theme, or all
-            // the way back to Apollo when the list is now empty.
-            NSString *nextID = themes.firstObject[@"id"];
-            if (nextID) [self selectCustomTheme:nextID];
-            else [self setActivePointer:@{ kPointerKindKey: kPointerApollo }];
+            // Deleted the ACTIVE theme: switch back to Apollo themes. Falling
+            // to the next stored theme (themes.firstObject) landed on whatever
+            // happened to sort first — reported as "switched to an unexpected
+            // theme" in issue #742. Apollo themes are the predictable fallback
+            // (and what the delete confirmation promises).
+            [self setActivePointer:@{ kPointerKindKey: kPointerApollo }];
         } else {
             // Only the remembered last-selection payload named it: forget it.
             NSMutableDictionary *m = [p mutableCopy];
