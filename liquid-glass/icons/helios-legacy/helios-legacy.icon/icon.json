@@ -42,7 +42,7 @@
             }
           ],
           "image-name" : "Apollo Antenna Ball copy.svg",
-          "name" : "Apollo Antenna Ball copy",
+          "name" : "Apollo Antenna Ball",
           "opacity-specializations" : [
             {
               "value" : 1
@@ -61,9 +61,19 @@
           }
         },
         {
+          "blend-mode-specializations" : [
+            {
+              "value" : "plus-lighter"
+            },
+            {
+              "appearance" : "tinted",
+              "value" : "plus-lighter"
+            }
+          ],
           "fill" : {
-            "solid" : "display-p3:0.89394,0.06706,0.83891,1.00000"
+            "solid" : "display-p3:1.00000,0.07339,0.94602,1.00000"
           },
+          "glass" : true,
           "hidden" : false,
           "image-name" : "Closed Eye.svg",
           "name" : "Closed Eye",
@@ -76,9 +86,11 @@
           }
         },
         {
+          "blend-mode" : "plus-lighter",
           "fill" : {
-            "solid" : "display-p3:0.89394,0.06751,0.83891,1.00000"
+            "solid" : "display-p3:1.00000,0.07339,0.94602,1.00000"
           },
+          "glass" : true,
           "hidden" : false,
           "image-name" : "Closed Eye.svg",
           "name" : "Closed Eye",
@@ -89,7 +101,19 @@
               140
             ]
           }
-        },
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 4
+      },
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0.2
+      }
+    },
+    {
+      "layers" : [
         {
           "fill-specializations" : [
             {
@@ -105,7 +129,7 @@
             }
           ],
           "image-name" : "Apollo Antenna Icon 2.svg",
-          "name" : "Apollo Antenna Icon 2",
+          "name" : "Apollo Antenna Icon",
           "opacity-specializations" : [
             {
               "appearance" : "dark",
@@ -149,6 +173,12 @@
                   }
                 }
               }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "extended-gray:0.00000,1.00000"
+              }
             }
           ],
           "glass" : false,
@@ -183,7 +213,21 @@
               151.3338533137137
             ]
           }
-        },
+        }
+      ],
+      "lighting" : "individual",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.1
+      }
+    },
+    {
+      "layers" : [
         {
           "fill-specializations" : [
             {
@@ -208,7 +252,19 @@
               94.8126990563893
             ]
           }
-        },
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 4
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    },
+    {
+      "layers" : [
         {
           "fill-specializations" : [
             {
@@ -327,15 +383,13 @@
           }
         }
       ],
-      "lighting" : "individual",
       "shadow" : {
         "kind" : "neutral",
-        "opacity" : 0.5
+        "opacity" : 0.6
       },
-      "specular" : true,
       "translucency" : {
         "enabled" : true,
-        "value" : 0.5
+        "value" : 0.2
       }
     }
   ],

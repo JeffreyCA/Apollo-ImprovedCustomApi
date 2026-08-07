@@ -1,6 +1,6 @@
 // ApolloSearchTabFixes.xm
 //
-// Two Search-tab polish fixes for stock Apollo bugs (Apollo-Reborn issues #646 and #647):
+// Search-tab fixes and enhancements:
 //
 // ── #646: suggestions list rests flush against the search bar (legacy/non-Liquid-Glass) ──
 //
@@ -35,6 +35,14 @@
 // +0.33pt per side). Same glyph, same weave gaps, matched weight. The asset is referenced
 // only by SearchViewController's cell provider (xrefs: 0x1002b3ab4 / 0x1002b4d58 /
 // 0x1002b50e8), so patching it at the cell is complete coverage.
+//
+// ── Trending pull-to-refresh + Random NSFW action ──
+//
+// Hopper confirms the default state is section 2 = the Swift Optional<[String]>
+// `trendingSubreddits` ivar and section 3 = one Random Subreddit row. Pull-to-refresh
+// replaces that Swift value through ApolloSwiftIvarBridge, then reloads the native section.
+// Random NSFW extends section 3 to two rows and still routes through the tweak's custom
+// /r/randnsfw request rewrite; Reddit's original endpoint no longer exists.
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -42,9 +50,43 @@
 #import <objc/runtime.h>
 
 #import "ApolloCommon.h"
+#import "ApolloState.h"
+#import "ApolloToast.h"
+#import "Tweak.h"
+#import "UserDefaultConstants.h"
 
 @interface _TtC6Apollo20SearchViewController : UIViewController
+- (void)apollo_refreshTrendingSubreddits:(UIRefreshControl *)refreshControl;
 @end
+
+@interface ApolloSearchRefreshControl : UIRefreshControl
+@end
+
+@implementation ApolloSearchRefreshControl
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    if (!IsLiquidGlass()) return;
+
+    // UIRefreshControl owns its transform while spinning, so a caller-applied
+    // transform is reset. A negative bounds origin moves the rendered content
+    // down without changing the table's pull threshold or content geometry.
+    CGRect bounds = self.bounds;
+    if (fabs(bounds.origin.y + 32.0) > 0.5) {
+        bounds.origin.y = -32.0;
+        self.bounds = bounds;
+    }
+}
+
+@end
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern void ApolloSwiftAssignOptionalStringArray(void *storage, const void *arrayObject);
+#ifdef __cplusplus
+}
+#endif
 
 // MARK: - #646 helpers
 
@@ -53,6 +95,13 @@
 static const CGFloat kApolloSearchSuggestionsGap = 16.0;
 
 static const void *kApolloSearchBaselineInsetKey = &kApolloSearchBaselineInsetKey;
+static const void *kApolloSearchBaselineBounceKey = &kApolloSearchBaselineBounceKey;
+static const void *kApolloSearchRefreshControlKey = &kApolloSearchRefreshControlKey;
+static const void *kApolloSearchRefreshInFlightKey = &kApolloSearchRefreshInFlightKey;
+static const void *kApolloSearchRandomNSFWActiveKey = &kApolloSearchRandomNSFWActiveKey;
+static const void *kApolloSearchRandomNSFWSuppressedKey = &kApolloSearchRandomNSFWSuppressedKey;
+static const void *kApolloSearchRandomNSFWInFlightKey = &kApolloSearchRandomNSFWInFlightKey;
+static NSString *const kApolloRandomNSFWTitle = @"Random NSFW Subreddit";
 
 // The controller's grouped UITableView. SearchViewController subclasses
 // ApolloTableViewController, whose `tableView` ivar is ObjC-visible; fall back to a subview
@@ -70,6 +119,189 @@ static UITableView *ApolloSearchTabTableView(UIViewController *vc) {
         if ([v isKindOfClass:[UITableView class]]) return (UITableView *)v;
     }
     return nil;
+}
+
+static UISearchBar *ApolloSearchTabSearchBar(UIViewController *vc) {
+    UIView *titleView = vc.navigationItem.titleView;
+    if ([titleView isKindOfClass:[UISearchBar class]]) return (UISearchBar *)titleView;
+
+    for (Class cls = object_getClass(vc); cls; cls = class_getSuperclass(cls)) {
+        Ivar ivar = class_getInstanceVariable(cls, "searchBar");
+        if (!ivar) continue;
+        id value = object_getIvar(vc, ivar);
+        return [value isKindOfClass:[UISearchBar class]] ? value : nil;
+    }
+    return nil;
+}
+
+static UIRefreshControl *ApolloSearchTabRefreshControl(UIViewController *vc) {
+    UIRefreshControl *refresh =
+        objc_getAssociatedObject(vc, kApolloSearchRefreshControlKey);
+    if (refresh) return refresh;
+    return ApolloSearchTabTableView(vc).refreshControl;
+}
+
+static BOOL ApolloSearchTabIsDefaultState(UIViewController *vc) {
+    return ApolloSearchTabSearchBar(vc).text.length == 0;
+}
+
+static void ApolloSearchTabUpdateRefreshAvailability(UIViewController *vc) {
+    UIRefreshControl *refresh = ApolloSearchTabRefreshControl(vc);
+    BOOL defaultState = ApolloSearchTabIsDefaultState(vc);
+    UITableView *tableView = ApolloSearchTabTableView(vc);
+    if (refresh && tableView) {
+        refresh.enabled = defaultState;
+        if (defaultState) {
+            if (tableView.refreshControl != refresh) {
+                tableView.refreshControl = refresh;
+            }
+        } else {
+            [refresh endRefreshing];
+            if (tableView.refreshControl == refresh) {
+                tableView.refreshControl = nil;
+            }
+        }
+    }
+
+    NSNumber *baselineBounce =
+        objc_getAssociatedObject(vc, kApolloSearchBaselineBounceKey);
+    if (tableView && baselineBounce) {
+        tableView.alwaysBounceVertical =
+            defaultState ? YES : baselineBounce.boolValue;
+    }
+}
+
+static BOOL ApolloSearchTabAssignTrendingSubreddits(
+    UIViewController *vc,
+    NSArray<NSString *> *subreddits
+) {
+    if (!vc || !subreddits) return NO;
+    for (Class cls = object_getClass(vc); cls; cls = class_getSuperclass(cls)) {
+        Ivar ivar = class_getInstanceVariable(cls, "trendingSubreddits");
+        if (!ivar) continue;
+        uint8_t *base = (uint8_t *)(__bridge void *)vc;
+        void *storage = base + ivar_getOffset(ivar);
+        ApolloSwiftAssignOptionalStringArray(
+            storage, (__bridge const void *)subreddits);
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL ApolloSearchTabRandomNSFWEnabled(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyShowRandNsfw];
+}
+
+static BOOL ApolloSearchTabRandomNSFWActive(UIViewController *vc) {
+    NSNumber *active = objc_getAssociatedObject(vc, kApolloSearchRandomNSFWActiveKey);
+    return active ? active.boolValue : ApolloSearchTabRandomNSFWEnabled();
+}
+
+static BOOL ApolloSearchTabRandomNSFWSuppressed(UIViewController *vc) {
+    return [objc_getAssociatedObject(vc, kApolloSearchRandomNSFWSuppressedKey) boolValue];
+}
+
+static BOOL ApolloSearchTabIsRandomNSFWIndexPath(
+    UIViewController *vc,
+    NSIndexPath *indexPath
+) {
+    return indexPath.section == 3 &&
+           indexPath.row == 1 &&
+           ApolloSearchTabRandomNSFWActive(vc) &&
+           !ApolloSearchTabRandomNSFWSuppressed(vc);
+}
+
+static void ApolloSearchTabSyncRandomNSFWSection(UIViewController *vc) {
+    BOOL desired = ApolloSearchTabRandomNSFWEnabled();
+    BOOL active = ApolloSearchTabRandomNSFWActive(vc);
+    if (desired == active) return;
+    UITableView *tableView = ApolloSearchTabTableView(vc);
+    if (tableView.numberOfSections <= 3) return;
+
+    if (!ApolloSearchTabIsDefaultState(vc)) {
+        objc_setAssociatedObject(vc, kApolloSearchRandomNSFWActiveKey, @(desired),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(vc, kApolloSearchRandomNSFWSuppressedKey, @YES,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return;
+    }
+
+    NSIndexPath *extraRow = [NSIndexPath indexPathForRow:1 inSection:3];
+    if (desired) {
+        objc_setAssociatedObject(vc, kApolloSearchRandomNSFWActiveKey, @YES,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(vc, kApolloSearchRandomNSFWSuppressedKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [tableView insertRowsAtIndexPaths:@[extraRow]
+                         withRowAnimation:UITableViewRowAnimationNone];
+    } else {
+        objc_setAssociatedObject(vc, kApolloSearchRandomNSFWSuppressedKey, @YES,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(vc, kApolloSearchRandomNSFWActiveKey, @NO,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [tableView deleteRowsAtIndexPaths:@[extraRow]
+                         withRowAnimation:UITableViewRowAnimationNone];
+    }
+}
+
+static BOOL ApolloSearchTabNativeSearching(UIViewController *vc) {
+    for (Class cls = object_getClass(vc); cls; cls = class_getSuperclass(cls)) {
+        Ivar ivar = class_getInstanceVariable(cls, "searching");
+        if (!ivar) continue;
+        uint8_t value = 0;
+        memcpy(&value,
+               (uint8_t *)(__bridge void *)vc + ivar_getOffset(ivar),
+               sizeof(value));
+        return (value & 1) != 0;
+    }
+    return !ApolloSearchTabIsDefaultState(vc);
+}
+
+// Apollo's native text-change batch inserts/deletes exactly one section-3 row.
+// Remove our extra row before entering search, then restore it after Apollo has
+// inserted its native row when returning to the default state.
+static void ApolloSearchTabPrepareForModeTransition(
+    UIViewController *vc,
+    BOOL nextDefaultState
+) {
+    BOOL wasSearching = ApolloSearchTabNativeSearching(vc);
+    BOOL enteringSearch = !wasSearching && !nextDefaultState;
+    if (!enteringSearch ||
+        !ApolloSearchTabRandomNSFWActive(vc) ||
+        ApolloSearchTabRandomNSFWSuppressed(vc)) {
+        if (!nextDefaultState) {
+            objc_setAssociatedObject(vc, kApolloSearchRandomNSFWSuppressedKey, @YES,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        return;
+    }
+
+    UITableView *tableView = ApolloSearchTabTableView(vc);
+    if (tableView.numberOfSections <= 3) return;
+    objc_setAssociatedObject(vc, kApolloSearchRandomNSFWSuppressedKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [tableView deleteRowsAtIndexPaths:@[
+        [NSIndexPath indexPathForRow:1 inSection:3]
+    ] withRowAnimation:UITableViewRowAnimationNone];
+}
+
+static void ApolloSearchTabFinishModeTransition(
+    UIViewController *vc,
+    BOOL nextDefaultState
+) {
+    if (!nextDefaultState ||
+        !ApolloSearchTabRandomNSFWActive(vc) ||
+        !ApolloSearchTabRandomNSFWSuppressed(vc)) {
+        return;
+    }
+
+    UITableView *tableView = ApolloSearchTabTableView(vc);
+    if (tableView.numberOfSections <= 3) return;
+    objc_setAssociatedObject(vc, kApolloSearchRandomNSFWSuppressedKey, nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [tableView insertRowsAtIndexPaths:@[
+        [NSIndexPath indexPathForRow:1 inSection:3]
+    ] withRowAnimation:UITableViewRowAnimationNone];
 }
 
 // Re-anchor the table's top inset for the current mode. `searching` == the bar has text
@@ -169,23 +401,135 @@ static UIImage *ApolloThickenedTemplateIcon(UIImage *src) {
 
 %hook _TtC6Apollo20SearchViewController
 
+// MARK: Trending refresh
+
+- (void)viewDidLoad {
+    %orig;
+
+    UITableView *tableView = ApolloSearchTabTableView(self);
+    if (tableView && !ApolloSearchTabRefreshControl(self)) {
+        objc_setAssociatedObject(self, kApolloSearchBaselineBounceKey,
+                                 @(tableView.alwaysBounceVertical),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        UIRefreshControl *refresh = [[ApolloSearchRefreshControl alloc] init];
+        [refresh addTarget:self
+                    action:@selector(apollo_refreshTrendingSubreddits:)
+          forControlEvents:UIControlEventValueChanged];
+        tableView.refreshControl = refresh;
+        objc_setAssociatedObject(self, kApolloSearchRefreshControlKey, refresh,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    objc_setAssociatedObject(self, kApolloSearchRandomNSFWActiveKey,
+                             @(ApolloSearchTabRandomNSFWEnabled()),
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(self, kApolloSearchRandomNSFWSuppressedKey, nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloSearchTabUpdateRefreshAvailability(self);
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    ApolloSearchTabSyncRandomNSFWSection(self);
+    ApolloSearchTabUpdateRefreshAvailability(self);
+}
+
+%new
+- (void)apollo_refreshTrendingSubreddits:(UIRefreshControl *)refreshControl {
+    if (!ApolloSearchTabIsDefaultState(self)) {
+        [refreshControl endRefreshing];
+        return;
+    }
+    if ([objc_getAssociatedObject(self, kApolloSearchRefreshInFlightKey) boolValue]) {
+        return;
+    }
+    objc_setAssociatedObject(self, kApolloSearchRefreshInFlightKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    __weak UIViewController *weakSelf = self;
+    __weak UIRefreshControl *weakRefresh = refreshControl;
+    ApolloRefreshTrendingSubreddits(
+        ^(NSArray<NSString *> *subreddits, NSError *error) {
+            UIViewController *controller = weakSelf;
+            [weakRefresh endRefreshing];
+            if (!controller) return;
+            objc_setAssociatedObject(controller, kApolloSearchRefreshInFlightKey, nil,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+            if (error) {
+                ApolloLog(@"[SearchTabFixes] trending refresh failed: %@",
+                          error.localizedDescription);
+                ApolloShowToastWithStyle(
+                    @"Couldn't Refresh Trending Subreddits",
+                    error.localizedDescription,
+                    ApolloToastStyleError,
+                    nil);
+                return;
+            }
+
+            if (!ApolloSearchTabAssignTrendingSubreddits(controller, subreddits ?: @[])) {
+                ApolloLog(@"[SearchTabFixes] trendingSubreddits ivar unavailable");
+                ApolloShowToastWithStyle(
+                    @"Couldn't Refresh Trending Subreddits",
+                    @"Apollo's trending list storage was unavailable.",
+                    ApolloToastStyleError,
+                    nil);
+                return;
+            }
+
+            UITableView *tableView = ApolloSearchTabTableView(controller);
+            if (ApolloSearchTabIsDefaultState(controller) &&
+                tableView.numberOfSections > 2) {
+                [tableView reloadSections:[NSIndexSet indexSetWithIndex:2]
+                         withRowAnimation:UITableViewRowAnimationAutomatic];
+            }
+            ApolloLog(@"[SearchTabFixes] refreshed %lu trending subreddit(s)",
+                      (unsigned long)subreddits.count);
+        });
+}
+
 // MARK: #646 — re-anchor on every state change that swaps the table's content mode.
 
 - (void)searchBar:(UISearchBar *)bar textDidChange:(NSString *)text {
+    BOOL nextDefaultState = text.length == 0;
+    ApolloSearchTabPrepareForModeTransition(self, nextDefaultState);
     %orig;
+    ApolloSearchTabFinishModeTransition(self, nextDefaultState);
     ApolloSearchTabApplyTopInset(self, bar);
+    ApolloSearchTabUpdateRefreshAvailability(self);
 }
 
 - (void)searchBarCancelButtonClicked:(UISearchBar *)bar {
+    ApolloSearchTabPrepareForModeTransition(self, YES);
     %orig;
+    ApolloSearchTabFinishModeTransition(self, YES);
     ApolloSearchTabApplyTopInset(self, bar);
+    ApolloSearchTabUpdateRefreshAvailability(self);
 }
 
-// MARK: #647 — swap in the weight-matched icon on the Random Subreddit row.
+// MARK: Random action group
+
+- (NSInteger)tableView:(UITableView *)tableView
+ numberOfRowsInSection:(NSInteger)section {
+    NSInteger count = %orig;
+    if (section == 3 &&
+        count == 1 &&
+        ApolloSearchTabRandomNSFWActive(self) &&
+        !ApolloSearchTabRandomNSFWSuppressed(self)) {
+        return 2;
+    }
+    return count;
+}
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = %orig;
+    if (ApolloSearchTabIsRandomNSFWIndexPath(self, indexPath)) {
+        cell.textLabel.text = kApolloRandomNSFWTitle;
+        cell.accessibilityLabel = kApolloRandomNSFWTitle;
+    }
+
+    // #647 — swap in the weight-matched icon on both random-action rows.
     if ([cell.reuseIdentifier isEqualToString:@"RandomSubredditCell"]) {
+        cell.accessibilityLabel = cell.textLabel.text;
         UIImage *src = cell.imageView.image;
         // Idempotent: a re-dequeued cell already showing our output is left alone.
         if (src && !objc_getAssociatedObject(src, kApolloThickenedIconMarkerKey)) {
@@ -199,6 +543,56 @@ static UIImage *ApolloThickenedTemplateIcon(UIImage *src) {
         }
     }
     return cell;
+}
+
+- (void)tableView:(UITableView *)tableView
+ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (!ApolloSearchTabIsRandomNSFWIndexPath(self, indexPath)) {
+        %orig;
+        return;
+    }
+
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (sRandNsfwSubredditsSource.length == 0) {
+        ApolloShowToastWithStyle(
+            @"Random NSFW Source Required",
+            @"Configure a Random NSFW source in Apollo Reborn settings.",
+            ApolloToastStyleError,
+            nil);
+        return;
+    }
+    if ([objc_getAssociatedObject(self, kApolloSearchRandomNSFWInFlightKey) boolValue]) {
+        return;
+    }
+    objc_setAssociatedObject(self, kApolloSearchRandomNSFWInFlightKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    __weak UIViewController *weakSelf = self;
+    ApolloPrepareRandomNSFWSubredditSource(^(NSError *error) {
+        UIViewController *controller = weakSelf;
+        if (!controller) return;
+        objc_setAssociatedObject(controller, kApolloSearchRandomNSFWInFlightKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (error) {
+            ApolloLog(@"[SearchTabFixes] Random NSFW source unavailable: %@",
+                      error.localizedDescription);
+            ApolloShowToastWithStyle(
+                @"Couldn't Load Random NSFW Subreddit",
+                error.localizedDescription,
+                ApolloToastStyleError,
+                nil);
+            return;
+        }
+
+        NSURL *url = [NSURL URLWithString:@"https://reddit.com/r/randnsfw"];
+        if (!ApolloRouteResolvedURLViaApolloScheme(url)) {
+            ApolloShowToastWithStyle(
+                @"Couldn't Open Random NSFW Subreddit",
+                @"Apollo's native subreddit router was unavailable.",
+                ApolloToastStyleError,
+                nil);
+        }
+    });
 }
 
 %end

@@ -1,10 +1,12 @@
 #import <UIKit/UIKit.h>
 
-// A transient, self-dismissing toast rendered over the key window — the tweak's
+// A compact, transient toast rendered over the key window — the tweak's
 // replacement for confirmation-only UIAlertControllers ("Copied", "Backup
 // Complete", …) that made the user tap OK to acknowledge something they never
-// needed to decide on. Reserve UIAlertController for real decisions (destructive
-// confirmations, error recovery, text entry); use a toast for "it's done".
+// needed to decide on. Its Apple-style pill follows the active Apollo theme,
+// dismisses itself, and can be swiped down. Reserve UIAlertController for real
+// decisions (destructive confirmations, error recovery, text entry); use a
+// toast for "it's done".
 //
 // Safe to call from any thread and before the UI is up (it hops to main and
 // finds the key window itself). Showing a new toast replaces any visible one.

@@ -44,6 +44,7 @@
 
 #import "ApolloCommon.h"
 #import "ApolloGalleryViewController.h"
+#import "ApolloNativeActionMenus.h"
 #import "ApolloThemeRuntime.h"
 
 // Defined in ApolloSubredditHeaders.xm — resolves the slug for a genuine
@@ -124,7 +125,17 @@ static void ApolloGalleryMenuOpenForController(id actionController) {
         ApolloLog(@"[GalleryMenu] Gallery View tapped but the subreddit could not be resolved");
         return;
     }
-    [ApolloGalleryViewController presentGalleryForSubreddit:subreddit fromViewController:owner];
+
+    dispatch_block_t openGallery = ^{
+        [ApolloGalleryViewController presentGalleryForSubreddit:subreddit
+                                             fromViewController:owner];
+    };
+    if (ApolloNativeActionMenuPerformAfterDismissal(actionController, openGallery)) {
+        ApolloLog(@"[GalleryMenu] Waiting for the glass menu to dismiss before opening r/%@",
+                  subreddit);
+        return;
+    }
+    openGallery();
 }
 
 #pragma mark - Liquid Glass menu injection
