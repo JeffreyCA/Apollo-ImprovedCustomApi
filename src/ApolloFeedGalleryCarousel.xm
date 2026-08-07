@@ -289,11 +289,20 @@ static NSArray<NSDictionary *> *ApolloFeedGalleryItems(id albumNode) {
     for (UIView *ancestor = self.superview; ancestor; ancestor = ancestor.superview) {
         for (UIGestureRecognizer *recognizer in ancestor.gestureRecognizers) {
             if (recognizer == carouselPan) continue;
-            NSString *className = NSStringFromClass(recognizer.class);
-            BOOL competingPan = [className isEqualToString:@"UIPanGestureRecognizer"] ||
-                [className isEqualToString:@"_UISwipeActionPanGestureRecognizer"] ||
-                [className isEqualToString:@"_UIParallaxTransitionPanGestureRecognizer"];
-            if (!competingPan) continue;
+            if (![recognizer isKindOfClass:[UIPanGestureRecognizer class]]) continue;
+            // Do not gate the feed's own scroll pan: doing so eats vertical
+            // drags that start over a gallery. Do not gate navigation's edge or
+            // content-back pans either: UIKit implements both as
+            // UIScreenEdgePanGestureRecognizer subclasses and dynamically
+            // arbitrates them against scroll views at their leading boundary.
+            // Keeping that native arbitration means page 2+ swipes to the
+            // previous image, while a navigation-originated swipe at page 1 can
+            // go back. A permanent failure requirement would instead make every
+            // carousel on the screen block navigation, even when untouched.
+            if ([recognizer isKindOfClass:[UIScreenEdgePanGestureRecognizer class]]) continue;
+            UIView *recognizerView = recognizer.view;
+            if ([recognizerView isKindOfClass:[UIScrollView class]] &&
+                recognizer == ((UIScrollView *)recognizerView).panGestureRecognizer) continue;
             [recognizer requireGestureRecognizerToFail:carouselPan];
             preferredOver++;
         }
