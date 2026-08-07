@@ -370,7 +370,11 @@ static void ApolloImmersiveRequestBackdrop(UIImage *banner, void (^completion)(U
     [_contentContainer.layer addSublayer:_veilLayer];
 
     // Top layer: the sharp banner, alpha-feathered at its bottom edge so it
-    // melts into the blur instead of a hard seam.
+    // melts into the blur instead of a hard seam. The clip spans the chrome +
+    // banner region, but layout sizes the image itself to the real banner
+    // strip; the chrome above shows the blurred continuation. Aspect-filling
+    // one tall chrome+banner rectangle made the crop depend on the search-bar
+    // inset and visibly jumped whenever that inset changed (#766).
     _sharpClip = [[UIView alloc] init];
     _sharpClip.clipsToBounds = YES;
     _sharpClip.userInteractionEnabled = NO;
@@ -481,7 +485,9 @@ static void ApolloImmersiveRequestBackdrop(UIImage *banner, void (^completion)(U
     self.backdropView.frame = CGRectMake(0.0, 0.0, width, extendedHeight);
 
     self.sharpClip.frame = CGRectMake(0.0, 0.0, width, regionHeight);
-    self.sharpView.frame = self.sharpClip.bounds;
+    CGFloat bannerTop = MIN(regionHeight, MAX(0.0, self.topInset));
+    CGFloat bannerHeight = MAX(1.0, regionHeight - bannerTop);
+    self.sharpView.frame = CGRectMake(0.0, bannerTop, width, bannerHeight);
     CGFloat featherStart = MAX(0.0, 1.0 - ApolloImmersiveSharpFeatherHeight / MAX(1.0, regionHeight));
     self.sharpFeatherMask.frame = self.sharpClip.bounds;
     self.sharpFeatherMask.locations = @[@(featherStart), @1.0];

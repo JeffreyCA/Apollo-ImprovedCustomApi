@@ -2,11 +2,11 @@
 
 // Draws a profile or subreddit banner through the table's adjusted top inset
 // so the artwork continues behind the navigation bar without changing the
-// existing header's layout. Two layers: the sharp banner owns the chrome +
-// banner strip (`regionHeight`), then dissolves into a blurred continuation
-// of itself that sits behind the identity text and resolves to the theme
-// page color exactly at `extendedHeight` (the bottom of the identity header),
-// where the first opaque cells begin.
+// existing header's layout. Two layers: a blurred continuation owns the
+// chrome + identity region, while the sharp image uses the actual banner strip
+// inside `regionHeight` (below `topInset`) and dissolves into the blur. The blur
+// resolves to the theme page color exactly at `extendedHeight` (the bottom of
+// the identity header), where the first opaque cells begin.
 @interface ApolloImmersiveHeaderBackgroundView : UIView
 
 @property(nonatomic, assign) CGFloat contentTranslation;

@@ -3540,6 +3540,11 @@ static void ApolloLPScheduleCollectionItemReloadWhenIdle(UICollectionView *colle
 }
 
 static BOOL ApolloLPInvokeRowReloadIfPossible(ASDisplayNode *startNode, ASDisplayNode *originNode, NSString *host) {
+    // No table geometry (indexPathForCell: below) while a row-height pass is on
+    // the stack — that nests a full row-data re-validation per row and
+    // overflows the main stack (#831/#833 geometry). Report "not handled":
+    // callers renote and the healers retry once the pass has unwound.
+    if (ApolloRowMeasureInProgress()) return NO;
     // Hard convergence budget, keyed on the preview URL (falls back to host): every
     // reload path (V12 shrink heal, V18 overflow, V20 pending mark, V23 poll) funnels
     // through here, and a row whose height never converges used to reload FOREVER —
@@ -4393,16 +4398,24 @@ static void ApolloLPStackGuardReport(const char *where, size_t used, size_t size
     ApolloAppendLoginDiag(line);
 }
 
-// Row-measure entry: purely observational (a height must be returned either
-// way), but this is the earliest point the exhaustion is visible when the hog
-// sits below the ASDK layout recursion.
+// Row-measure entry. Besides the observational exhaustion report, this is the
+// chokepoint that marks "a row-height pass is on the stack" for
+// ApolloRowMeasureInProgress() (ApolloCommon.h): geometry-querying tweak code
+// reachable from a measure (the translation preempt, the link-preview row
+// healer) declines while the flag is up, which is what breaks the
+// query→re-validate→re-measure recursion behind the #831/#833 crashes.
 %hook ASTableView
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     size_t diagUsed = 0, diagSize = 0;
     if (ApolloLPMainStackNearlyExhausted(&diagUsed, &diagSize)) {
         ApolloLPStackGuardReport("heightForRow", diagUsed, diagSize);
     }
-    return %orig;
+    ApolloRowMeasureWillBegin();
+    @try {
+        return %orig;
+    } @finally {
+        ApolloRowMeasureDidEnd();
+    }
 }
 %end
 

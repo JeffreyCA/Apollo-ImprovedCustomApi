@@ -2,6 +2,7 @@
 
 #import "ApolloGalleryFeed.h"
 #import "ApolloCommon.h"
+#import "ApolloHostedVideo.h"
 #import "ApolloState.h"
 
 // How many pictures one "batch" should try to gather before the UI is told to
@@ -71,6 +72,15 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 
 #pragma mark - ApolloGalleryItem
 
+@interface ApolloGalleryItem ()
+@property (nonatomic, readwrite, copy, nullable) NSURL *hostedVideoPageURL;
+@property (nonatomic, readwrite, getter=isHostedVideoResolving) BOOL hostedVideoResolving;
+@property (nonatomic) BOOL hostedVideoResolutionAttempted;
+@property (nonatomic) BOOL hostedVideoResolvedOriginal;
+@property (nonatomic, copy, nullable) NSURL *hostedVideoFallbackDownloadURL;
+@property (nonatomic, strong) NSMutableArray *hostedVideoResolveCompletions;
+@end
+
 @implementation ApolloGalleryItem
 
 - (instancetype)init {
@@ -83,7 +93,65 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 }
 
 - (BOOL)playsAsVideo {
-    return self.videoURL != nil;
+    return self.videoURL != nil || self.hostedVideoPageURL != nil;
+}
+
+- (BOOL)needsHostedVideoResolution {
+    return self.hostedVideoPageURL != nil && !self.hostedVideoResolutionAttempted;
+}
+
+- (void)resolveHostedVideoWithCompletion:(void (^)(BOOL resolvedOriginal))completion {
+    if (!self.hostedVideoPageURL) {
+        if (completion) completion(NO);
+        return;
+    }
+    if (self.hostedVideoResolutionAttempted) {
+        if (completion) completion(self.hostedVideoResolvedOriginal);
+        return;
+    }
+
+    if (!self.hostedVideoResolveCompletions) {
+        self.hostedVideoResolveCompletions = [NSMutableArray array];
+    }
+    if (completion) [self.hostedVideoResolveCompletions addObject:[completion copy]];
+    if (self.hostedVideoResolving) return;
+
+    self.hostedVideoResolving = YES;
+    NSURL *pageURL = self.hostedVideoPageURL;
+    ApolloLog(@"[Gallery] resolving original hosted video for %@", pageURL.host ?: @"unknown host");
+    __weak typeof(self) weakSelf = self;
+    ApolloHostedVideoResolve(pageURL, ^(NSURL *mp4URL, NSURL *posterURL,
+                                        CGSize pixelSize, BOOL hasAudio) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+
+        BOOL resolved = (mp4URL != nil);
+        if (resolved) {
+            // Hosted MP4s are self-contained, including their audio track.
+            strongSelf.videoURL = mp4URL;
+            strongSelf.videoDownloadURL = mp4URL;
+            if (!strongSelf.imageURL && posterURL) strongSelf.imageURL = posterURL;
+            if (CGSizeEqualToSize(strongSelf.pixelSize, CGSizeZero) &&
+                pixelSize.width > 0.0 && pixelSize.height > 0.0) {
+                strongSelf.pixelSize = pixelSize;
+            }
+        } else {
+            // Keep playback working even if the host API is unavailable. The
+            // Reddit preview may be silent, but it is still better than a dead
+            // tile; saving follows the same fallback after this attempt.
+            strongSelf.videoDownloadURL = strongSelf.hostedVideoFallbackDownloadURL;
+        }
+        strongSelf.hostedVideoResolvedOriginal = resolved;
+        strongSelf.hostedVideoResolutionAttempted = YES;
+        strongSelf.hostedVideoResolving = NO;
+
+        ApolloLog(@"[Gallery] hosted video %@ (original=%d audio=%d)",
+                  resolved ? @"ready" : @"fell back to Reddit preview",
+                  (int)resolved, (int)hasAudio);
+        NSArray *callbacks = [strongSelf.hostedVideoResolveCompletions copy];
+        [strongSelf.hostedVideoResolveCompletions removeAllObjects];
+        for (void (^callback)(BOOL) in callbacks) callback(resolved);
+    });
 }
 
 - (NSString *)durationText {
@@ -504,7 +572,9 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
             // Key on the stream for playables: two posts of the same video can
             // carry differently-signed poster URLs, and every v.redd.it poster
             // is unique even when the clip isn't.
-            NSString *key = item.videoURL.absoluteString ?: item.imageURL.absoluteString;
+            NSString *key = item.hostedVideoPageURL.absoluteString
+                ?: item.videoURL.absoluteString
+                ?: item.imageURL.absoluteString;
             if (key.length == 0 || [self.seenImageKeys containsObject:key]) continue;
             [self.seenImageKeys addObject:key];
             [self.mutableItems addObject:item];
@@ -665,6 +735,14 @@ static NSURL *ApolloGalleryDirectVideoURL(NSURL *url) {
 - (ApolloGalleryItem *)videoItemFromPost:(NSDictionary *)post {
     NSDictionary *previewImage = ApolloGalleryDict(ApolloGalleryArray(ApolloGalleryDict(post[@"preview"])[@"images"]).firstObject);
     NSDictionary *previewSource = ApolloGalleryDict(previewImage[@"source"]);
+    NSURL *direct = ApolloGalleryURL(post[@"url_overridden_by_dest"]) ?: ApolloGalleryURL(post[@"url"]);
+    NSURL *directVideo = direct ? ApolloGalleryDirectVideoURL(direct) : nil;
+    ApolloHostedVideoKind hostedKind = ApolloHostedVideoKindForURL(direct);
+    // A CDN URL can belong to a supported host while already pointing at a
+    // self-contained MP4. It needs no page/API resolution (and its path is not
+    // a valid host video ID), so only classify actual hosted pages here.
+    BOOL isHostedDirectVideo = directVideo && hostedKind != ApolloHostedVideoNone;
+    BOOL isHostedVideo = !directVideo && hostedKind != ApolloHostedVideoNone;
 
     NSDictionary *redditVideo = ApolloGalleryDict(ApolloGalleryDict(post[@"media"])[@"reddit_video"])
                                 ?: ApolloGalleryDict(ApolloGalleryDict(post[@"secure_media"])[@"reddit_video"]);
@@ -683,6 +761,12 @@ static NSURL *ApolloGalleryDirectVideoURL(NSURL *url) {
         // recognises a v.redd.it URL and muxes the DASH audio back in.
         downloadable = ApolloGalleryURL(redditVideo[@"fallback_url"]);
         if (ApolloGalleryVideoIsSilentLoop(redditVideo)) kind = ApolloGalleryMediaKindGIF;
+    } else if (isHostedDirectVideo) {
+        // Some host links already are the combined CDN MP4. Prefer it over
+        // Reddit's silent preview without spending an API request.
+        stream = directVideo;
+        downloadable = directVideo;
+        kind = ApolloGalleryMediaKindVideo;
     } else if (previewVideo) {
         // An external GIF/short clip Reddit re-hosted; nearly always silent.
         stream = ApolloGalleryVideoStreamURL(previewVideo);
@@ -690,8 +774,6 @@ static NSURL *ApolloGalleryDirectVideoURL(NSURL *url) {
         kind = ApolloGalleryVideoIsSilentLoop(previewVideo) ? ApolloGalleryMediaKindGIF : ApolloGalleryMediaKindVideo;
         downloadable = ApolloGalleryURL(previewVideo[@"fallback_url"]);
     } else {
-        NSURL *direct = ApolloGalleryURL(post[@"url_overridden_by_dest"]) ?: ApolloGalleryURL(post[@"url"]);
-        NSURL *directVideo = direct ? ApolloGalleryDirectVideoURL(direct) : nil;
         if (directVideo) {
             stream = directVideo;
             // A standalone mp4 is self-contained, so it can be saved as-is.
@@ -701,20 +783,41 @@ static NSURL *ApolloGalleryDirectVideoURL(NSURL *url) {
                 ? ApolloGalleryMediaKindGIF : ApolloGalleryMediaKindVideo;
         }
     }
-    if (!stream) return nil;
+    // Redgifs/Streamable links commonly include Reddit's convenient
+    // reddit_video_preview, but that preview is deliberately silent and
+    // re-encoded. Keep it only as an instant fallback; the viewer lazily asks
+    // ApolloHostedVideo for the host's original combined MP4 when opened.
+    if (!stream && !isHostedVideo) return nil;
 
     ApolloGalleryItem *item = [[ApolloGalleryItem alloc] init];
-    item.kind = kind;
+    item.kind = isHostedVideo ? ApolloGalleryMediaKindVideo : kind;
     item.videoURL = stream;
-    item.videoDownloadURL = downloadable;
+    if (isHostedVideo) {
+        item.hostedVideoPageURL = direct;
+        item.hostedVideoFallbackDownloadURL = downloadable;
+        // Do not expose "Save Video" until the audio-bearing original has
+        // resolved (or the one attempt fails and restores this fallback).
+        item.videoDownloadURL = nil;
+    } else {
+        item.videoDownloadURL = downloadable;
+    }
     item.duration = duration;
-    // The poster frame. Video posts always carry a preview; without one there's
-    // nothing to draw in the grid, so skip the post entirely.
+    // The poster frame. Reddit usually supplies preview.images; external hosts
+    // can instead put the still under oembed.thumbnail_url. Never resolve the
+    // host API just to populate the scrolling grid—that would fan one listing
+    // page out into dozens of requests.
     NSURL *poster = previewSource ? ApolloGalleryURL(previewSource[@"url"]) : nil;
+    NSDictionary *oembed = ApolloGalleryDict(ApolloGalleryDict(post[@"secure_media"])[@"oembed"])
+        ?: ApolloGalleryDict(ApolloGalleryDict(post[@"media"])[@"oembed"]);
+    if (!poster) poster = ApolloGalleryURL(oembed[@"thumbnail_url"]);
+    if (!poster) poster = ApolloGalleryURL(post[@"thumbnail"]);
     if (!poster) return nil;
     item.imageURL = poster;
-    item.pixelSize = CGSizeMake(ApolloGalleryNumber(previewSource[@"width"]),
-                                ApolloGalleryNumber(previewSource[@"height"]));
+    CGFloat posterWidth = ApolloGalleryNumber(previewSource[@"width"])
+        ?: ApolloGalleryNumber(oembed[@"thumbnail_width"]);
+    CGFloat posterHeight = ApolloGalleryNumber(previewSource[@"height"])
+        ?: ApolloGalleryNumber(oembed[@"thumbnail_height"]);
+    item.pixelSize = CGSizeMake(posterWidth, posterHeight);
     item.thumbnailURL = ApolloGalleryBestThumbnail(ApolloGalleryArray(previewImage[@"resolutions"]), @"url",
                                                    kApolloGalleryThumbnailTargetWidth) ?: poster;
     return item;
