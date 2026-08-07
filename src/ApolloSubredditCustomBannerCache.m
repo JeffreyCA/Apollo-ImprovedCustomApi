@@ -153,6 +153,16 @@ static NSUInteger const ApolloSubredditCustomBannerMaxBytes = 1572864; // 1.5 MB
     return exists;
 }
 
+- (NSURL *)cachedBannerFileURLForSubreddit:(NSString *)subredditName {
+    NSString *path = [self filePathForSubreddit:subredditName];
+    if (path.length == 0) return nil;
+    __block BOOL exists = NO;
+    dispatch_sync(self.queue, ^{
+        exists = [[NSFileManager defaultManager] fileExistsAtPath:path];
+    });
+    return exists ? [NSURL fileURLWithPath:path] : nil;
+}
+
 - (BOOL)saveBanner:(UIImage *)image forSubreddit:(NSString *)subredditName error:(NSError **)error {
     NSString *key = [self normalizedSubredditName:subredditName];
     NSString *path = [self filePathForSubreddit:subredditName];

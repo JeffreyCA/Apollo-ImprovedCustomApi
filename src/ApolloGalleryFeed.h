@@ -12,16 +12,15 @@
 // cursor, turn each post into zero or more ApolloGalleryItems, and hand the
 // new items back. It has no UI dependencies.
 //
-// Auth: both supported modes work without any special-casing here.
-//   • API-key (OAuth) accounts — sLatestRedditBearerToken is a live bearer, so
-//     the request goes to oauth.reddit.com with an Authorization header, the
-//     same way ApolloSubredditHighlights fetches.
-//   • Keyless (web-session) accounts — the identity layer never populates
-//     sLatestRedditBearerToken with a real token, so we address
-//     www.reddit.com/...json instead; the __NSCFLocalSessionTask chokepoint in
-//     Tweak.xm hands that to ApolloWebJSONRewriteRequest, which attaches the
-//     harvested session cookie (listing reads are a routable path). Nothing
-//     here has to know which mode is active.
+// Auth: the feed snapshots the active account's own bearer when it is created.
+//   • API-key (OAuth) accounts — the request goes to oauth.reddit.com with that
+//     account's real Authorization bearer.
+//   • Keyless (web-session) accounts — the request carries that account's
+//     per-user synthetic bearer; the __NSCFLocalSessionTask chokepoint in
+//     Tweak.xm hands it to ApolloWebJSONRewriteRequest, which selects the same
+//     user's harvested cookie. This matters when several accounts are signed
+//     in and background polling has made the process-wide latest bearer belong
+//     to somebody other than the visible account.
 //   • Signed out / neither — the www.reddit.com public JSON is used as-is.
 // If the first attempt comes back 401/403 the fetch retries once on the other
 // host, so a stale captured bearer can't strand the gallery.
@@ -58,6 +57,15 @@ static ApolloGalleryMediaKind const ApolloGalleryMediaKindAll =
 // ApolloGalleryVideoExport recognises and re-unites with the separate DASH
 // audio before writing to Photos; everywhere else it's already self-contained.
 @property (nonatomic, copy, nullable) NSURL *videoDownloadURL;
+// External video page (currently Redgifs / Streamable / supported sports
+// hosts). Reddit commonly supplies a convenient but silent re-encoded preview
+// for these posts; Gallery keeps that preview as a fallback, then resolves the
+// host's original audio-bearing MP4 only when the item is opened.
+@property (nonatomic, readonly, copy, nullable) NSURL *hostedVideoPageURL;
+// YES until the one lazy host lookup has completed. The lookup is coalesced per
+// item, so repeated playback/layout passes never duplicate API requests.
+@property (nonatomic, readonly) BOOL needsHostedVideoResolution;
+@property (nonatomic, readonly, getter=isHostedVideoResolving) BOOL hostedVideoResolving;
 // Runtime in seconds; 0 when Reddit didn't report one.
 @property (nonatomic) NSTimeInterval duration;
 // Smaller preview used by the grid; falls back to imageURL when Reddit gave
@@ -91,6 +99,11 @@ static ApolloGalleryMediaKind const ApolloGalleryMediaKindAll =
 // "0:42" / "1:23:45", or nil when the duration is unknown.
 @property (nonatomic, readonly, nullable) NSString *durationText;
 
+// Resolves hostedVideoPageURL once, preferring the original combined MP4 over
+// Reddit's silent preview. On failure videoURL remains/restores the Reddit
+// fallback. Completion is delivered on the main queue.
+- (void)resolveHostedVideoWithCompletion:(nullable void (^)(BOOL resolvedOriginal))completion;
+
 @end
 
 // Listing sorts offered by the gallery's own sort menu. `top` and `controversial`
@@ -110,13 +123,15 @@ typedef NS_ENUM(NSInteger, ApolloGalleryTopWindow) {
     ApolloGalleryTopWindowAll,
 };
 
-// A subreddit's media feed. Not thread-safe: drive it from the main thread
-// (completions are always delivered there).
+// A subreddit's or multireddit's media feed. Not thread-safe: drive it from the
+// main thread (completions are always delivered there).
 @interface ApolloGalleryFeed : NSObject
 
 - (instancetype)initWithSubreddit:(NSString *)subreddit NS_DESIGNATED_INITIALIZER;
+- (instancetype)initWithMultiredditPath:(NSString *)multiredditPath NS_DESIGNATED_INITIALIZER;
 - (instancetype)init NS_UNAVAILABLE;
 
+// Populated for a single-subreddit feed and empty for a multireddit feed.
 @property (nonatomic, readonly, copy) NSString *subreddit;
 // The items the UI should show: everything fetched so far, minus the kinds the
 // filter excludes. Filtering happens here rather than at parse time so toggling

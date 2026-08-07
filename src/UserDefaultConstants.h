@@ -17,6 +17,16 @@ static NSString *const UDKeyUseCustomOAuthSignIn = @"UseCustomOAuthSignIn";
 static NSString *const UDKeyUserAgent = @"UserAgent";
 static NSString *const UDKeyBlockAnnouncements = @"DisableApollonouncements";
 static NSString *const UDKeyEnableFLEX = @"EnableFlexDebugging";
+// Local crash recording (src/crash/). Default ON: reports only ever live on
+// device and are shared exclusively through the user-driven review flow.
+// KSCrash handlers install once per process, so flipping this takes effect on
+// the next launch (the settings row says so).
+static NSString *const UDKeyCrashCaptureEnabled = @"CrashCaptureEnabled";
+// Report IDs (NSArray<NSNumber>) the relaunch prompt has already been shown
+// for. A "Not Now" must never re-nag on every launch of a persistently
+// crashing build; the pending report stays reachable under Settings instead.
+// Not registered — absent means "never prompted".
+static NSString *const UDKeyCrashPromptedReportIDs = @"CrashPromptedReportIDs";
 // Login-persistence debug (dev-only, gated behind FLEX). Force the account keychain read to
 // miss (simulate the broken-keychain -25300), and/or disable enumeration recovery, so the
 // wipe->recover chain can be exercised on any device. Inert unless set.
@@ -42,6 +52,11 @@ static NSString *const ApolloModernSubredditDividersChangedNotification = @"Apol
 // Default NO. See ApolloSubredditIndexPolish.xm.
 static NSString *const UDKeyHideSubredditListDescriptions = @"HideSubredditListDescriptions";
 static NSString *const ApolloHideSubredditListDescriptionsChangedNotification = @"ApolloHideSubredditListDescriptionsChangedNotification";
+// Blank the subtitle line under multireddit rows in the subreddit list (which
+// otherwise shows the multireddit's description, or the subreddits it
+// contains). Default NO. See ApolloMultiredditEdit.xm.
+static NSString *const UDKeyHideMultiredditDescriptions = @"HideMultiredditDescriptions";
+static NSString *const ApolloHideMultiredditDescriptionsChangedNotification = @"ApolloHideMultiredditDescriptionsChangedNotification";
 // Color post (link) and user/author flairs with Reddit's assigned colors. Default NO.
 static NSString *const UDKeyEnableFlairColors = @"EnableFlairColors";
 static NSString *const ApolloFlairColorsChangedNotification = @"ApolloFlairColorsChangedNotification";
@@ -193,6 +208,8 @@ static NSString *const UDKeyIconRowMagnifier = @"IconRowMagnifier";
 //                small theme-bordered card just above the icon that fades on its own
 //                after ~2s. Mutually exclusive; both off = those three icons are
 //                inert (the % / edited native popups are taken over and suppressed).
+//                These modes also choose the presentation used when holding the
+//                score on an owned comment to request author-only Comment Insights.
 //   Translation— the 🌐 marker tap beside a post's stats (feed title + comments
 //                header) that toggles the title translation (ApolloTranslation.xm,
 //                ApolloFeedMarkerTapTarget). Takes priority over Tap to Translate
@@ -221,8 +238,9 @@ static NSString *const UDKeyPerPostCommentSortMapping = @"PerPostCommentSortMapp
 // off, and launch/restore normalize a stale both-on to per-post. This toggle key is
 // the ONLY native default the feature ever writes. See ApolloPerPostCommentSort.xm.
 static NSString *const UDKeyApolloRememberSubredditCommentsSort = @"RememberRedditCommentsSort";
-// Override for UIScrollView top/bottom scroll edge effects (Liquid Glass, iOS 26+).
-// 0 = Automatic (default), 1 = Soft, 2 = Hard, 3 = Hidden.
+// Override for the UIScrollView top scroll edge effect (Liquid Glass, iOS 26+).
+// 0 = retired System Default (migrates to 1 on iOS 26 or 2 on iOS 27),
+// 1 = Soft, 2 = Hard, 3 = retired Hidden, 4 = Blur.
 static NSString *const UDKeyScrollEdgeEffectStyle = @"ScrollEdgeEffectStyle";
 // Render image URLs (i.redd.it, preview.redd.it, i.imgur.com, generic .png/.jpg/.jpeg/.webp)
 // inline within post selftext and comments instead of leaving them as plain text links.
@@ -271,6 +289,14 @@ static NSString *const UDKeyLibreTranslateURL = @"LibreTranslateURL";
 static NSString *const UDKeyLibreTranslateAPIKey = @"LibreTranslateAPIKey";
 // Array<String> of 2-letter language codes to leave untranslated (detected source language).
 static NSString *const UDKeyTranslationSkipLanguages = @"TranslationSkipLanguages";
+// Redirects Apollo's OWN Translate button (the native action-sheet item on
+// comments/posts, which normally opens Apollo's Google Translate web view) to
+// iOS's on-device Translate sheet instead. Independent of UDKeyTranslationProvider,
+// which governs the tweak's separate bulk in-place translation backend, not this
+// button. Requires iOS 17.4+ (Translation.framework's .translationPresentation);
+// has no effect while Bulk Translation is on, since that already removes the
+// native Translate action from the sheet. Default OFF via registerDefaults.
+static NSString *const UDKeyAppleTranslateSheet = @"AppleTranslateSheet";
 
 // On-device AI summaries (Apple FoundationModels, iOS 26+). Off by default.
 static NSString *const UDKeyEnableAISummaries = @"EnableAISummaries";

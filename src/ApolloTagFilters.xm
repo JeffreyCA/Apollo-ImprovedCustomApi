@@ -22,8 +22,11 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
+#import "ApolloAccountCredentials.h"
 #import "ApolloCommon.h"
 #import "ApolloState.h"
+#import "ApolloTagFilters.h"
+#import "ApolloWebJSON.h"
 #import "Tweak.h"
 #import "UIWindow+Apollo.h"
 #import "UserDefaultConstants.h"
@@ -75,6 +78,20 @@ static RDKLink *ApolloTagLinkFromCell(id cell) {
     return nil;
 }
 
+// Effective per-tag filter switch for `subreddit`: the per-subreddit override
+// when one is stored, else the global toggle. `tagKey` is @"nsfw" or
+// @"spoiler". Shared by the feed decision below and the Gallery's thumbnail
+// decision (ApolloShouldBlurNSFWMediaInSubreddit).
+static BOOL ApolloTagFilterTagOn(NSString *subreddit, NSString *tagKey, BOOL globalValue) {
+    NSString *subKey = [subreddit isKindOfClass:[NSString class]] ? subreddit.lowercaseString : nil;
+    NSDictionary *override = (subKey.length > 0) ? sTagFilterSubredditOverrides[subKey] : nil;
+    if ([override isKindOfClass:[NSDictionary class]]) {
+        id v = override[tagKey];
+        if ([v isKindOfClass:[NSNumber class]]) return [(NSNumber *)v boolValue];
+    }
+    return globalValue;
+}
+
 // Returns @"hide", @"blur", or @"none" given a link and (optional) subreddit context.
 // Per-subreddit overrides take precedence over global settings on a per-tag basis;
 // mode is also overridable per-sub.
@@ -90,17 +107,8 @@ static NSString *ApolloTagFilterDecisionForLink(RDKLink *link) {
 
     NSString *sub = nil;
     @try { sub = link.subreddit; } @catch (__unused id e) {}
-    NSString *subKey = [sub isKindOfClass:[NSString class]] ? sub.lowercaseString : nil;
-    NSDictionary *override = (subKey.length > 0) ? sTagFilterSubredditOverrides[subKey] : nil;
-
-    BOOL filterNSFW = sTagFilterNSFW;
-    BOOL filterSpoiler = sTagFilterSpoiler;
-    if ([override isKindOfClass:[NSDictionary class]]) {
-        id n = override[@"nsfw"];
-        if ([n isKindOfClass:[NSNumber class]]) filterNSFW = [(NSNumber *)n boolValue];
-        id s = override[@"spoiler"];
-        if ([s isKindOfClass:[NSNumber class]]) filterSpoiler = [(NSNumber *)s boolValue];
-    }
+    BOOL filterNSFW = ApolloTagFilterTagOn(sub, @"nsfw", sTagFilterNSFW);
+    BOOL filterSpoiler = ApolloTagFilterTagOn(sub, @"spoiler", sTagFilterSpoiler);
 
     BOOL match = (isNSFW && filterNSFW) || (isSpoiler && filterSpoiler);
     if (!match) return @"none";
@@ -216,8 +224,48 @@ static BOOL ApolloTagMediaIsVideo(id richMediaNode) {
 // hop to main (where the parsed object is fully populated); decisions run
 // from cell didLoad/layout on main.
 static NSMutableDictionary<NSString *, NSNumber *> *sTagNoProfanityByUser = nil;
-static NSString *sTagActiveUsername = nil;
+static NSString *sTagEffectiveUsername = nil;
 static NSInteger sTagEffectiveNoProfanity = -1;
+
+NSNotificationName const ApolloAdultContentBlurPreferenceDidChangeNotification =
+    @"ApolloAdultContentBlurPreferenceDidChangeNotification";
+
+// YES when the ACTIVE account authenticates through a cookie web session
+// (keyless mode): the identity layer installs a synthetic OAuth credential on
+// its client (ApolloWebJSONIdentity.xm), so no real /me fetch — and therefore
+// no pref_no_profanity capture — can ever happen for it through the OAuth
+// path. Read from the live client rather than disk so the answer tracks
+// whatever credential the transport is actually using right now.
+static BOOL ApolloTagActiveAccountIsKeyless(void) {
+    id client = ApolloActiveAccountClient();
+    SEL credentialSel = NSSelectorFromString(@"authorizationCredential");
+    SEL tokenSel = NSSelectorFromString(@"accessToken");
+    if (!client || ![client respondsToSelector:credentialSel]) return NO;
+    id credential = ((id (*)(id, SEL))objc_msgSend)(client, credentialSel);
+    if (!credential || ![credential respondsToSelector:tokenSel]) return NO;
+    // RDKOAuthCredential.accessToken is an RDKAccessToken; its own accessToken
+    // getter returns the raw bearer string.
+    id accessToken = ((id (*)(id, SEL))objc_msgSend)(credential, tokenSel);
+    if (!accessToken || ![accessToken respondsToSelector:tokenSel]) return NO;
+    id token = ((id (*)(id, SEL))objc_msgSend)(accessToken, tokenSel);
+    return [token isKindOfClass:[NSString class]] && ApolloWebJSONBearerIsSynthetic((NSString *)token);
+}
+
+BOOL ApolloShouldBlurNSFWMediaInSubreddit(NSString *subreddit) {
+    // The tweak's own Tag Filters choice is independent of the Reddit account
+    // pref: a user who opted into blurring NSFW (globally or for this
+    // subreddit) keeps that cover even with Reddit's mature-media blur off.
+    if (sTagFilterEnabled && ApolloTagFilterTagOn(subreddit, @"nsfw", sTagFilterNSFW)) return YES;
+    if (sTagEffectiveNoProfanity == 1) return YES;
+    if (sTagEffectiveNoProfanity == 0) return NO;
+    // Unknown: stay covered while Apollo is still loading the active account,
+    // just as its native feed does during launch — unless the account is
+    // keyless, where unknown is permanent (see above) and Apollo's native
+    // feed shows NSFW media uncovered (the synthesized user object carries
+    // noProfanity == NO). If a cookie-routed /me does land later and captures
+    // the real pref, the capture wins over this fallback.
+    return !ApolloTagActiveAccountIsKeyless();
+}
 
 static void ApolloTagRefreshAllVisibleCells(void);
 
@@ -234,12 +282,12 @@ static NSString *ApolloTagNormalizedUsername(id userObject) {
     return name.length > 0 ? [name lowercaseString] : nil;
 }
 
-// Live lookup for sessions restored with a signed-in user before any
-// -[RDKClient setCurrentUser:] fires under our hook.
+// Resolve identity from AccountManager's SELECTED live client. RDKClient's
+// sharedClient is the application-only/bootstrap client, and remembering the
+// last client that received -setCurrentUser: lets background refreshes for an
+// inactive account overwrite the Gallery decision.
 static NSString *ApolloTagLiveActiveUsername(void) {
-    Class clientClass = objc_getClass("RDKClient");
-    if (!clientClass || ![clientClass respondsToSelector:@selector(sharedClient)]) return nil;
-    id client = ((id (*)(id, SEL))objc_msgSend)(clientClass, @selector(sharedClient));
+    id client = ApolloActiveAccountClient();
     if (!client || ![client respondsToSelector:@selector(currentUser)]) return nil;
     id currentUser = ((id (*)(id, SEL))objc_msgSend)(client, @selector(currentUser));
     return currentUser ? ApolloTagNormalizedUsername(currentUser) : nil;
@@ -249,14 +297,19 @@ static NSString *ApolloTagLiveActiveUsername(void) {
 // EFFECTIVE change (capture for the active account, or an account switch)
 // re-evaluates visible cells — a statically-visible feed gets no layout pass
 // of its own when /me lands or the account flips.
-static void ApolloTagRecomputeEffectiveNoProfanity(void) {
-    if (sTagActiveUsername.length == 0) sTagActiveUsername = ApolloTagLiveActiveUsername();
-    NSNumber *captured = sTagActiveUsername.length > 0 ? sTagNoProfanityByUser[sTagActiveUsername] : nil;
+static void ApolloTagRecomputeEffectiveNoProfanity(BOOL forceRefresh) {
+    NSString *activeUsername = ApolloTagLiveActiveUsername();
+    NSNumber *captured = activeUsername.length > 0 ? sTagNoProfanityByUser[activeUsername] : nil;
     NSInteger effective = captured ? (captured.boolValue ? 1 : 0) : -1;
-    if (effective == sTagEffectiveNoProfanity) return;
+    BOOL identityChanged = ![sTagEffectiveUsername isEqualToString:activeUsername];
+    if (!forceRefresh && !identityChanged && effective == sTagEffectiveNoProfanity) return;
+    sTagEffectiveUsername = [activeUsername copy];
     sTagEffectiveNoProfanity = effective;
     ApolloLog(@"[TagFilters] Effective pref_no_profanity=%ld for u/%@ (blur mature media)",
-              (long)effective, sTagActiveUsername ?: @"(unknown)");
+              (long)effective, activeUsername ?: @"(unknown)");
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:ApolloAdultContentBlurPreferenceDidChangeNotification
+                      object:nil];
     ApolloTagRefreshAllVisibleCells();
 }
 
@@ -694,23 +747,22 @@ static void ApolloTagRefreshAllVisibleCells(void) {
             sTagNoProfanityByUser[username] = @(value);
             ApolloLog(@"[TagFilters] Captured pref_no_profanity=%d for u/%@ (blur mature media)", value, username);
         }
-        ApolloTagRecomputeEffectiveNoProfanity();
+        ApolloTagRecomputeEffectiveNoProfanity(NO);
     });
 }
 
 %end
 
-// Account switches move the effective pref to the new account's captured
-// value (or back to unknown if it was never captured for them).
+// A current-user install can belong to any stored client. Re-resolve through
+// AccountManager instead of treating the receiver as proof that it is active.
 %hook RDKClient
 
 - (void)setCurrentUser:(id)user {
     %orig;
-    id newUser = user;
     dispatch_async(dispatch_get_main_queue(), ^{
-        sTagActiveUsername = newUser ? ApolloTagNormalizedUsername(newUser) : nil;
-        ApolloTagRecomputeEffectiveNoProfanity();
+        ApolloTagRecomputeEffectiveNoProfanity(NO);
     });
+    (void)user;
 }
 
 %end
@@ -773,4 +825,22 @@ static void ApolloTagRefreshAllVisibleCells(void) {
                                                   usingBlock:^(NSNotification *note) {
         ApolloTagRefreshAllVisibleCells();
     }];
+
+    // Apollo posts these after selecting an existing AccountManager client.
+    // No -setCurrentUser: call is required for that path, so observe both
+    // native account-change names and force a refresh even when the two
+    // accounts happen to have the same captured preference. The forced pass
+    // also covers an unknown OAuth account <-> unknown keyless account switch,
+    // whose conservative fallback differs despite both caching as -1.
+    for (NSNotificationName name in @[
+        @"com.christianselig.RedditCurrentAccountChanged",
+        @"com.christianselig.RedditAccountChanged",
+    ]) {
+        [[NSNotificationCenter defaultCenter] addObserverForName:name
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(__unused NSNotification *note) {
+            ApolloTagRecomputeEffectiveNoProfanity(YES);
+        }];
+    }
 }

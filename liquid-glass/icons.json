@@ -1,10 +1,10 @@
 {
   "primaryIconID": "jryng",
-  "featured": ["jryng", "helios", "bajader-aperture-science", "paulo1manso-modern", "lilacvibes-progress"],
+  "featured": ["halo", "helios-pixel", "bajader-aperture-science", "paulo1manso-modern", "lilacvibes-progress"],
   "groups": [
     {
       "id": "original", "title": "Original",
-      "coverIconIDs": ["igerman00", "jryng", "harunatsu"],
+      "coverIconIDs": ["harunatsu", "halo-glass", "apollo-glass"],
       "description": "The original Apollo icon in Liquid Glass, crafted by the community."
     },
     {
@@ -15,7 +15,7 @@
     },
     {
       "id": "helios", "title": "Helios",
-      "coverIconIDs": ["helios-legacy", "helios-cryo", "helios"],
+      "coverIconIDs": ["helios-cryo-halo", "helios-pixel", "helios"],
       "description": "Icons inspired by the Hyper Suit 4000 icon from Apollo, and the Modern icons by paulo1manso.",
       "author": "IllIIllIllIllII"
     },
@@ -26,11 +26,16 @@
     }
   ],
   "icons": [
-    { "id": "igerman00",                "displayName": "Canon",               "designer": "iGerman00", "group": "original" },
-    { "id": "jryng",                    "displayName": "OG",                  "designer": "jryng", "group": "original" },
-    { "id": "metalnakls",               "displayName": "metalnakls",          "designer": "metalnakls", "group": "original" },
+    { "id": "apollo",                   "displayName": "Apollo",              "designer": "IllIIllIllIllII", "group": "original" },
+    { "id": "apollo-glass",             "displayName": "Apollo Glass",        "designer": "IllIIllIllIllII", "group": "original" },
+    { "id": "halo",                     "displayName": "Halo",                "designer": "IllIIllIllIllII", "group": "original" },
+    { "id": "halo-glass",               "displayName": "Halo Glass",          "designer": "IllIIllIllIllII", "group": "original" },
+    { "id": "igerman00",                "displayName": "Canon",               "designer": "iGerman00",       "group": "original" },
+    { "id": "jryng",                    "displayName": "OG",                  "designer": "jryng",           "group": "original" },
+    { "id": "metalnakls",               "displayName": "metalnakls",          "designer": "metalnakls",      "group": "original" },
     { "id": "harunatsu",                "displayName": "harunatsu",           "designer": "harunatsu91202024", "group": "original" },
     { "id": "apollo-classic",           "displayName": "Apollo Classic",      "designer": "IllIIllIllIllII", "group": "original" },
+    { "id": "aloppo-v2",                "displayName": "Aloppo",              "designer": "IllIIllIllIllII", "group": "original" },
 
     
     { "id": "jryng-morty",              "displayName": "Wubalubadubdub",      "designer": "jryng", "group": "classics" },
@@ -90,13 +95,14 @@
     
     { "id": "helios",                   "displayName": "Helios",              "designer": "IllIIllIllIllII", "group": "helios" },
     { "id": "helios-halo",              "displayName": "Helios Halo",         "designer": "IllIIllIllIllII", "group": "helios" },
-    { "id": "helios-legacy",            "displayName": "Helios Legacy",       "designer": "IllIIllIllIllII", "group": "helios" },
-    { "id": "helios-tribute",           "displayName": "Helios Tribute",      "designer": "IllIIllIllIllII", "group": "helios" },
-    { "id": "helios-cryo",              "displayName": "Helios Cryo",         "designer": "IllIIllIllIllII", "group": "helios" },
-    { "id": "helios-cryo-halo",         "displayName": "Helios Cryo Halo",    "designer": "IllIIllIllIllII", "group": "helios" },
-    { "id": "helios-parallax",          "displayName": "Helios Parallax",     "designer": "IllIIllIllIllII", "group": "helios" },
-    { "id": "helios-parallax-halo",     "displayName": "Helios Parallax Halo","designer": "IllIIllIllIllII", "group": "helios" },
-    { "id": "helios-ultra",             "displayName": "Helios Ultra",        "designer": "IllIIllIllIllII", "group": "helios" },
-    { "id": "helios-ultra-halo",        "displayName": "Helios Ultra Halo",   "designer": "IllIIllIllIllII", "group": "helios" }
+    { "id": "helios-legacy",            "displayName": "Legacy",              "designer": "IllIIllIllIllII", "group": "helios" },
+    { "id": "helios-tribute",           "displayName": "Tribute",             "designer": "IllIIllIllIllII", "group": "helios" },
+    { "id": "helios-cryo",              "displayName": "Cryo",                "designer": "IllIIllIllIllII", "group": "helios" },
+    { "id": "helios-cryo-halo",         "displayName": "Cryo Halo",           "designer": "IllIIllIllIllII", "group": "helios" },
+    { "id": "helios-parallax",          "displayName": "Parallax",            "designer": "IllIIllIllIllII", "group": "helios" },
+    { "id": "helios-parallax-halo",     "displayName": "Parallax Halo",       "designer": "IllIIllIllIllII", "group": "helios" },
+    { "id": "helios-ultra",             "displayName": "Ultra",               "designer": "IllIIllIllIllII", "group": "helios" },
+    { "id": "helios-ultra-halo",        "displayName": "Ultra Halo",          "designer": "IllIIllIllIllII", "group": "helios" },
+    { "id": "helios-pixel",             "displayName": "Pixels",              "designer": "IllIIllIllIllII", "group": "helios" }
   ]
 }

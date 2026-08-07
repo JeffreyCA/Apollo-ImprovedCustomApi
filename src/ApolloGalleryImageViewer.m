@@ -74,10 +74,15 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
 // view is showing the grid's downsampled thumbnail as a placeholder — which
 // Save/Share must never export.
 @property (nonatomic) BOOL fullImageLoaded;
+// Page size the zoom geometry was last computed for. The zoomView autoresizes
+// with the cell, so comparing bounds against its frame can never detect a
+// rotation — by the time layoutSubviews runs they already agree.
+@property (nonatomic) CGSize zoomGeometrySize;
 // Raised while a zoom is active so the pager and the dismiss pan stay out of
 // the way (a zoomed page must pan its own content, not turn the page).
 @property (nonatomic, readonly) BOOL isZoomed;
 - (void)configureWithItem:(ApolloGalleryItem *)item;
+- (void)replaceVideoURL:(nullable NSURL *)videoURL andPlay:(BOOL)play;
 @end
 
 @implementation ApolloGalleryViewerCell
@@ -139,6 +144,7 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
     [self teardownPlayer];
     self.imageView.image = nil;
     self.fullImageLoaded = NO;
+    self.zoomGeometrySize = CGSizeZero;
     self.zoomView.zoomScale = 1.0;
     self.zoomView.contentInset = UIEdgeInsetsZero;
     self.zoomView.panGestureRecognizer.enabled = NO;
@@ -152,7 +158,7 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGRect bounds = self.contentView.bounds;
-    BOOL boundsChanged = !CGSizeEqualToSize(bounds.size, self.zoomView.frame.size);
+    BOOL boundsChanged = !CGSizeEqualToSize(bounds.size, self.zoomGeometrySize);
     self.zoomView.frame = bounds;
     // The player sits above the poster and fills the page; AVPlayerLayer's own
     // aspect-fit gravity handles letterboxing, so it doesn't ride the zoom view.
@@ -174,6 +180,7 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
     UIImage *image = self.imageView.image;
     CGSize bounds = self.zoomView.bounds.size;
     if (bounds.width <= 0.0 || bounds.height <= 0.0) return;
+    self.zoomGeometrySize = bounds;
 
     self.zoomView.zoomScale = 1.0;
     if (!image || image.size.width <= 0.0 || image.size.height <= 0.0) {
@@ -266,7 +273,10 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
     self.imageURL = url;
     // Stash the stream URL only; playIfPossible builds the player when this
     // page actually becomes current.
-    self.videoURL = item.playsAsVideo ? item.videoURL : nil;
+    // A hosted post deliberately waits on its original MP4 instead of starting
+    // Reddit's silent preview while the host lookup is in flight.
+    self.videoURL = (item.playsAsVideo && !item.needsHostedVideoResolution)
+        ? item.videoURL : nil;
 
     // A grid thumbnail for this post is usually already decoded — show it
     // immediately so the page is never a black rectangle, then swap in the
@@ -303,6 +313,16 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
         }
         (void)data;
     }];
+}
+
+- (void)replaceVideoURL:(NSURL *)videoURL andPlay:(BOOL)play {
+    if ([self.videoURL isEqual:videoURL]) {
+        if (play) [self playIfPossible];
+        return;
+    }
+    [self teardownPlayer];
+    self.videoURL = videoURL;
+    if (play) [self playIfPossible];
 }
 
 - (void)apollo_doubleTapped:(UITapGestureRecognizer *)recognizer {
@@ -852,6 +872,12 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView {
     if (scrollView != self.collectionView) return;
+    // Mid-rotation this fires with transitional geometry — the old offset
+    // divided by the new width — which lands on an unrelated page and clobbers
+    // currentIndex before viewDidLayoutSubviews can re-anchor on it. Page math
+    // is only meaningful once the bounds match the size the layout was
+    // prepared for; until then, keep the page the user was on.
+    if (!CGSizeEqualToSize(scrollView.bounds.size, self.lastLaidOutSize)) return;
     CGFloat width = MAX(self.collectionView.bounds.size.width, 1.0);
     NSInteger page = (NSInteger)llround(scrollView.contentOffset.x / width);
     page = MAX(0, MIN(page, (NSInteger)self.feed.items.count - 1));
@@ -866,6 +892,21 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 // Exactly one page plays at a time: every other visible cell (the neighbours a
 // paging collection view keeps alive) gets paused, so audio can't stack up.
 - (void)apollo_syncPlayback {
+    ApolloGalleryItem *currentItem = [self apollo_currentItem];
+    if (currentItem.needsHostedVideoResolution && !currentItem.isHostedVideoResolving) {
+        __weak typeof(self) weakSelf = self;
+        [currentItem resolveHostedVideoWithCompletion:^(BOOL resolvedOriginal) {
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf || [strongSelf apollo_currentItem] != currentItem) return;
+            ApolloGalleryViewerCell *currentCell = [strongSelf apollo_currentCell];
+            [currentCell replaceVideoURL:currentItem.videoURL andPlay:YES];
+            [strongSelf apollo_updateChromeContent];
+            if (!resolvedOriginal && !currentItem.videoURL) {
+                [strongSelf apollo_showToast:@"Couldn't load video"];
+            }
+        }];
+    }
+
     for (UICollectionViewCell *cell in self.collectionView.visibleCells) {
         if (![cell isKindOfClass:[ApolloGalleryViewerCell class]]) continue;
         ApolloGalleryViewerCell *viewerCell = (ApolloGalleryViewerCell *)cell;
@@ -1126,12 +1167,15 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
                                                identifier:nil
                                                   handler:^(__kindof UIAction *a) { [weakSelf apollo_saveCurrentVideo]; }]];
         }
-        [children addObject:[UIAction actionWithTitle:@"Share Video Link"
-                                                image:[UIImage systemImageNamed:@"square.and.arrow.up"]
-                                           identifier:nil
-                                              handler:^(__kindof UIAction *a) {
-            [weakSelf apollo_presentActivityWithItems:@[item.videoURL] fromView:weakSelf.shareButton];
-        }]];
+        NSURL *shareURL = item.videoURL ?: item.hostedVideoPageURL;
+        if (shareURL) {
+            [children addObject:[UIAction actionWithTitle:@"Share Video Link"
+                                                    image:[UIImage systemImageNamed:@"square.and.arrow.up"]
+                                               identifier:nil
+                                                  handler:^(__kindof UIAction *a) {
+                [weakSelf apollo_presentActivityWithItems:@[shareURL] fromView:weakSelf.shareButton];
+            }]];
+        }
     } else {
         [children addObject:[UIAction actionWithTitle:@"Save Image"
                                                 image:[UIImage systemImageNamed:@"arrow.down.to.line"]
@@ -1173,9 +1217,12 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherG
                 [weakSelf apollo_saveCurrentVideo];
             }]];
         }
-        [sheet addAction:[UIAlertAction actionWithTitle:@"Share Video Link" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            [weakSelf apollo_presentActivityWithItems:@[item.videoURL] fromView:sourceView];
-        }]];
+        NSURL *shareURL = item.videoURL ?: item.hostedVideoPageURL;
+        if (shareURL) {
+            [sheet addAction:[UIAlertAction actionWithTitle:@"Share Video Link" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                [weakSelf apollo_presentActivityWithItems:@[shareURL] fromView:sourceView];
+            }]];
+        }
     } else {
         [sheet addAction:[UIAlertAction actionWithTitle:@"Save Image" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
             [weakSelf apollo_saveCurrentImage];

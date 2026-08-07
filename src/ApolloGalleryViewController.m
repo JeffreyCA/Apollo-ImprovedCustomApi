@@ -5,7 +5,9 @@
 #import "ApolloGalleryImageLoader.h"
 #import "ApolloGalleryImageViewer.h"
 #import "ApolloCommon.h"
+#import "ApolloTagFilters.h"
 #import "ApolloThemeRuntime.h"
+#import "TagFiltersViewController.h"
 
 #import <objc/message.h>
 
@@ -161,8 +163,8 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
         _imageView.clipsToBounds = YES;
         [self.contentView addSubview:_imageView];
 
-        // NSFW / spoiler cover. Blurring the tile keeps the grid scannable
-        // without putting the picture on screen unasked.
+        // NSFW / spoiler cover. NSFW follows Apollo's active-account adult
+        // content preference; spoilers always keep their reveal gate.
         _blurView = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThickMaterialDark]];
         _blurView.frame = self.contentView.bounds;
         _blurView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -214,7 +216,7 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
 - (void)configureWithItem:(ApolloGalleryItem *)item {
     if (item.shouldBlurThumbnail) {
         self.blurView.hidden = NO;
-        self.blurLabel.text = item.isNSFW ? @"NSFW" : @"SPOILER";
+        self.blurLabel.text = item.isSpoiler ? @"SPOILER" : @"NSFW";
         [self.contentView bringSubviewToFront:self.blurView];
     }
     // No badge for an image's position within a multi-image post — every image
@@ -269,6 +271,7 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
                                            ApolloGalleryWaterfallLayoutDelegate,
                                            ApolloGalleryImageViewerDelegate>
 @property (nonatomic, copy) NSString *subreddit;
+@property (nonatomic, copy) NSString *sourceDescription;
 @property (nonatomic, strong) ApolloGalleryFeed *feed;
 @property (nonatomic, strong) UICollectionView *collectionView;
 @property (nonatomic, strong) ApolloGalleryWaterfallLayout *waterfallLayout;
@@ -290,13 +293,67 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     self = [super initWithNibName:nil bundle:nil];
     if (self) {
         _subreddit = [subreddit copy] ?: @"";
+        _sourceDescription = [@"r/" stringByAppendingString:_subreddit];
         _feed = [[ApolloGalleryFeed alloc] initWithSubreddit:_subreddit];
         _prefetchRequests = [NSMutableDictionary dictionary];
     }
     return self;
 }
 
+- (instancetype)initWithMultiredditPath:(NSString *)multiredditPath {
+    self = [super initWithNibName:nil bundle:nil];
+    if (self) {
+        _subreddit = @"";
+        NSString *name = [multiredditPath pathComponents].lastObject ?: @"multireddit";
+        _sourceDescription = [@"m/" stringByAppendingString:name];
+        _feed = [[ApolloGalleryFeed alloc] initWithMultiredditPath:multiredditPath];
+        _prefetchRequests = [NSMutableDictionary dictionary];
+    }
+    return self;
+}
+
+static NSString *ApolloGalleryNormalizedMultiredditPath(NSString *value) {
+    NSString *path = [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSMutableArray<NSString *> *components = [NSMutableArray array];
+    for (NSString *component in [path pathComponents]) {
+        if ([component isEqualToString:@"/"] || component.length == 0) continue;
+        [components addObject:component];
+    }
+    if (components.count != 4 ||
+        ![components[0].lowercaseString isEqualToString:@"user"] ||
+        ![components[2].lowercaseString isEqualToString:@"m"]) {
+        return nil;
+    }
+    return [@"/" stringByAppendingString:[components componentsJoinedByString:@"/"]];
+}
+
+static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
+                              UIViewController *sourceViewController) {
+    if (!gallery || !sourceViewController) return NO;
+    UINavigationController *navigationController = sourceViewController.navigationController;
+    if (!navigationController) {
+        ApolloLog(@"[Gallery] no navigation controller to push onto from %@", sourceViewController);
+        return NO;
+    }
+
+    // Apollo's themes paint their own backgrounds; borrow the colour from the
+    // screen we came from so the gallery doesn't flash system white/black.
+    gallery.gridBackgroundColor = sourceViewController.view.backgroundColor ?: navigationController.view.backgroundColor;
+    [navigationController pushViewController:gallery animated:YES];
+    return YES;
+}
+
 + (BOOL)presentGalleryForSubreddit:(NSString *)subreddit fromViewController:(UIViewController *)sourceViewController {
+    // GalleryMenu deliberately keeps its established call site so open PRs
+    // that defer this presentation until a Liquid Glass menu has dismissed
+    // continue to cover both feed types. A canonical multireddit path is the
+    // only non-subreddit value accepted here.
+    NSString *multiredditPath = ApolloGalleryNormalizedMultiredditPath(subreddit);
+    if (multiredditPath.length > 0) {
+        return [self presentGalleryForMultiredditPath:multiredditPath
+                                   fromViewController:sourceViewController];
+    }
+
     NSString *slug = [subreddit stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@" \t/"]];
     if ([slug.lowercaseString hasPrefix:@"r/"]) slug = [slug substringFromIndex:2];
     if (slug.length == 0 || !sourceViewController) {
@@ -304,18 +361,24 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
         return NO;
     }
 
-    UINavigationController *navigationController = sourceViewController.navigationController;
-    if (!navigationController) {
-        ApolloLog(@"[Gallery] no navigation controller to push onto from %@", sourceViewController);
+    ApolloGalleryViewController *gallery = [[ApolloGalleryViewController alloc] initWithSubreddit:slug];
+    if (!ApolloGalleryPush(gallery, sourceViewController)) return NO;
+    ApolloLog(@"[Gallery] opened for r/%@", slug);
+    return YES;
+}
+
++ (BOOL)presentGalleryForMultiredditPath:(NSString *)multiredditPath
+                      fromViewController:(UIViewController *)sourceViewController {
+    NSString *path = ApolloGalleryNormalizedMultiredditPath(multiredditPath);
+    if (path.length == 0 || !sourceViewController) {
+        ApolloLog(@"[Gallery] refusing to open: multireddit=%@ source=%@",
+                  multiredditPath, sourceViewController);
         return NO;
     }
 
-    ApolloGalleryViewController *gallery = [[ApolloGalleryViewController alloc] initWithSubreddit:slug];
-    // Apollo's themes paint their own backgrounds; borrow the colour from the
-    // screen we came from so the gallery doesn't flash system white/black.
-    gallery.gridBackgroundColor = sourceViewController.view.backgroundColor ?: navigationController.view.backgroundColor;
-    [navigationController pushViewController:gallery animated:YES];
-    ApolloLog(@"[Gallery] opened for r/%@", slug);
+    ApolloGalleryViewController *gallery = [[ApolloGalleryViewController alloc] initWithMultiredditPath:path];
+    if (!ApolloGalleryPush(gallery, sourceViewController)) return NO;
+    ApolloLog(@"[Gallery] opened for %@", gallery.sourceDescription);
     return YES;
 }
 
@@ -379,7 +442,29 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     [self.view addSubview:self.footerLabel];
 
     [self apollo_installNavigationButtons];
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self
+           selector:@selector(apollo_nsfwBlurInputsChanged:)
+               name:ApolloAdultContentBlurPreferenceDidChangeNotification
+             object:nil];
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self
+           selector:@selector(apollo_nsfwBlurInputsChanged:)
+               name:ApolloTagFiltersChangedNotification
+             object:nil];
     [self apollo_beginInitialLoad];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)apollo_nsfwBlurInputsChanged:(NSNotification *)notification {
+    // The captured Reddit preference can arrive after Gallery's initial cells
+    // were configured, or change when the active account switches; the Tag
+    // Filters settings can be edited while a Gallery sits in the nav stack.
+    [self.collectionView reloadData];
+    (void)notification;
 }
 
 - (void)viewDidLayoutSubviews {
@@ -413,6 +498,79 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
     if (width <= 0.0) return kApolloGalleryMinColumns;
     NSInteger columns = (NSInteger)floor(width / kApolloGalleryTargetTileWidth);
     return MAX(kApolloGalleryMinColumns, MIN(kApolloGalleryMaxColumns, columns));
+}
+
+// Rotation reshuffles the whole waterfall — a different column count and
+// column width move every tile to a new y — so carrying the raw point offset
+// across lands the user on unrelated tiles. Anchor on the topmost visible tile
+// (lowest index still on screen: the waterfall places items in listing order)
+// and put it back at the same relative position in the new layout.
+- (void)viewWillTransitionToSize:(CGSize)size
+       withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+
+    UICollectionView *collectionView = self.collectionView;
+    if (!collectionView || self.feed.items.count == 0) return;
+
+    CGFloat visibleTop = collectionView.contentOffset.y + collectionView.adjustedContentInset.top;
+    // Pinned at the top: leave the offset to UIKit so the grid stays flush
+    // under the bar instead of anchoring partway into tile 0.
+    if (visibleTop <= 1.0) return;
+
+    NSIndexPath *anchorPath = nil;
+    CGFloat anchorFraction = 0.0;
+    for (NSIndexPath *indexPath in [collectionView indexPathsForVisibleItems]) {
+        if (anchorPath && indexPath.item >= anchorPath.item) continue;
+        UICollectionViewLayoutAttributes *attributes =
+            [self.waterfallLayout layoutAttributesForItemAtIndexPath:indexPath];
+        // "Visible" includes cells fully underneath the nav bar; skip those.
+        if (!attributes || CGRectGetMaxY(attributes.frame) <= visibleTop) continue;
+        anchorPath = indexPath;
+        CGFloat height = MAX(CGRectGetHeight(attributes.frame), 1.0);
+        anchorFraction = (visibleTop - CGRectGetMinY(attributes.frame)) / height;
+        anchorFraction = MAX(0.0, MIN(anchorFraction, 1.0));
+    }
+    if (!anchorPath) return;
+
+    NSIndexPath *path = anchorPath;
+    CGFloat fraction = anchorFraction;
+    __weak typeof(self) weakSelf = self;
+    [coordinator animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+        [weakSelf apollo_scrollToAnchorItem:path fraction:fraction forWidth:size.width];
+        (void)context;
+    } completion:nil];
+}
+
+- (void)apollo_scrollToAnchorItem:(NSIndexPath *)anchorPath
+                         fraction:(CGFloat)fraction
+                         forWidth:(CGFloat)width {
+    UICollectionView *collectionView = self.collectionView;
+    if (anchorPath.item >= [collectionView numberOfItemsInSection:0]) return;
+
+    // Commit the new-geometry layout before reading the anchor's new frame.
+    // Setting the column count here (rather than waiting for
+    // viewDidLayoutSubviews) makes the single layoutIfNeeded below produce the
+    // final tile positions instead of an intermediate old-column-count pass.
+    NSInteger columns = [self apollo_columnCountForWidth:width];
+    if (columns != self.waterfallLayout.columnCount) {
+        self.waterfallLayout.columnCount = columns;
+        [self.waterfallLayout invalidateLayout];
+    }
+    [collectionView layoutIfNeeded];
+
+    UICollectionViewLayoutAttributes *attributes =
+        [self.waterfallLayout layoutAttributesForItemAtIndexPath:anchorPath];
+    if (!attributes) return;
+
+    UIEdgeInsets insets = collectionView.adjustedContentInset;
+    CGFloat target = CGRectGetMinY(attributes.frame)
+                     + fraction * CGRectGetHeight(attributes.frame)
+                     - insets.top;
+    CGFloat maxOffset = collectionView.collectionViewLayout.collectionViewContentSize.height
+                        - collectionView.bounds.size.height + insets.bottom;
+    target = MIN(target, MAX(maxOffset, -insets.top));
+    target = MAX(target, -insets.top);
+    [collectionView setContentOffset:CGPointMake(0.0, target) animated:NO];
 }
 
 - (UIColor *)apollo_accentColor {
@@ -608,7 +766,8 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
         return;
     }
     if (errorMessage.length > 0) {
-        self.messageLabel.text = [NSString stringWithFormat:@"Couldn't load r/%@.\n%@", self.subreddit, errorMessage];
+        self.messageLabel.text = [NSString stringWithFormat:@"Couldn't load %@.\n%@",
+                                  self.sourceDescription, errorMessage];
         self.retryButton.hidden = NO;
     } else if (self.feed.allItems.count > 0) {
         // Media was found, the filter just excluded all of it — say so, rather
@@ -618,8 +777,8 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
             (unsigned long)self.feed.allItems.count];
         self.retryButton.hidden = YES;
     } else {
-        self.messageLabel.text = [NSString stringWithFormat:@"No media found in r/%@ (%@).",
-                                  self.subreddit, self.feed.sortDisplayName];
+        self.messageLabel.text = [NSString stringWithFormat:@"No media found in %@ (%@).",
+                                  self.sourceDescription, self.feed.sortDisplayName];
         self.retryButton.hidden = YES;
     }
     self.messageLabel.hidden = NO;
@@ -789,3 +948,44 @@ static NSString *const kApolloGalleryCellID = @"ApolloGalleryTile";
 }
 
 @end
+
+#if APOLLO_SIM_BUILD
+// simctl has no rotate command, so orientation bugs can't be exercised from
+// the CLI without help. `xcrun simctl spawn <dev> notifyutil -p
+// apollofix.rotate` toggles the foreground scene between portrait and
+// landscape. Sim builds only; device builds never compile this.
+static void ApolloGalleryDebugRotate(CFNotificationCenterRef center, void *observer,
+                                     CFNotificationName name, const void *object,
+                                     CFDictionaryRef userInfo) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (@available(iOS 16.0, *)) {
+            UIWindowScene *scene = nil;
+            for (UIScene *candidate in UIApplication.sharedApplication.connectedScenes) {
+                if ([candidate isKindOfClass:[UIWindowScene class]] &&
+                    candidate.activationState == UISceneActivationStateForegroundActive) {
+                    scene = (UIWindowScene *)candidate;
+                    break;
+                }
+            }
+            if (!scene) return;
+            BOOL portrait = UIInterfaceOrientationIsPortrait(scene.interfaceOrientation);
+            UIWindowSceneGeometryPreferencesIOS *preferences =
+                [[UIWindowSceneGeometryPreferencesIOS alloc]
+                    initWithInterfaceOrientations:(portrait ? UIInterfaceOrientationMaskLandscapeRight
+                                                            : UIInterfaceOrientationMaskPortrait)];
+            [scene requestGeometryUpdateWithPreferences:preferences errorHandler:^(NSError *error) {
+                ApolloLog(@"[GalleryDebug] rotate failed: %@", error);
+            }];
+            ApolloLog(@"[GalleryDebug] rotate -> %@", portrait ? @"landscape" : @"portrait");
+        }
+    });
+}
+
+__attribute__((constructor))
+static void ApolloGalleryDebugRotateInstall(void) {
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+                                    ApolloGalleryDebugRotate,
+                                    CFSTR("apollofix.rotate"), NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+}
+#endif

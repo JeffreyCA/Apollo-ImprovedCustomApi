@@ -3,9 +3,11 @@
 #import "ApolloAICloudBridge.h"
 #import "ApolloAISummary.h"
 #import "ApolloCommon.h"
-#import "ApolloState.h"
 #import "ApolloToast.h"
+#import "ApolloState.h"
+#import "ApolloThemeRuntime.h"
 #import "UserDefaultConstants.h"
+#import "settings/ApolloSettingsTableViewController.h"
 
 #import <math.h>
 #import <QuartzCore/QuartzCore.h>
@@ -21,6 +23,423 @@ static UIViewController *ApolloAISettingsViewControllerForView(UIView *view) {
     }
     return nil;
 }
+
+#pragma mark - Cloud model browser
+
+static BOOL ApolloAIGeminiModelLooksLikeTextChat(NSString *modelID) {
+    NSString *lower = modelID.lowercaseString;
+    if ([lower hasPrefix:@"models/"]) lower = [lower substringFromIndex:7];
+    // Gemini's OpenAI catalog currently includes 2.x IDs that new API projects
+    // receive a 404 for at generation time. Keep those legacy-only entries out
+    // of the picker; current Gemini 3.x/aliases and text Gemma models remain.
+    if ([lower hasPrefix:@"gemini-2."]) return NO;
+    if (![lower hasPrefix:@"gemini-"] && ![lower hasPrefix:@"gemma-"]) return NO;
+    for (NSString *needle in @[@"embedding", @"image", @"imagen", @"veo", @"lyria",
+                                @"tts", @"live", @"audio", @"robotics", @"computer-use"]) {
+        if ([lower containsString:needle]) return NO;
+    }
+    return YES;
+}
+
+static NSString *ApolloAIGeminiModelBadge(NSString *modelID) {
+    NSString *lower = modelID.lowercaseString;
+    if ([lower containsString:@"experimental"] || [lower containsString:@"-exp-"] ||
+        [lower hasSuffix:@"-exp"]) return @"Experimental";
+    if ([lower containsString:@"preview"]) return @"Preview";
+    if ([lower hasSuffix:@"-latest"]) return @"Latest";
+    return nil;
+}
+
+// OpenRouter publishes each charge dimension as a decimal string in USD. For
+// text summaries, a model is only genuinely free when every applicable text
+// charge is zero; a zero prompt/completion price must not hide a per-request or
+// reasoning charge. Missing optional dimensions mean that charge does not
+// apply to the model.
+static BOOL ApolloAIOpenRouterPricingIsFree(NSString *modelID, NSDictionary *pricing) {
+    if ([modelID isEqualToString:@"openrouter/free"] || [modelID hasSuffix:@":free"]) return YES;
+    if (![pricing isKindOfClass:[NSDictionary class]]) return NO;
+    for (NSString *key in @[@"prompt", @"completion", @"request", @"internal_reasoning"]) {
+        id value = pricing[key];
+        if (value && [value doubleValue] != 0.0) return NO;
+    }
+    return pricing[@"prompt"] != nil && pricing[@"completion"] != nil;
+}
+
+static NSString *ApolloAIOpenRouterDisplayName(NSString *name) {
+    // OpenRouter currently appends "(free)" to many display names. The picker
+    // already conveys that status with a dedicated pill, so keeping both wastes
+    // scarce title width and causes otherwise-short model names to truncate.
+    if ([name.lowercaseString hasSuffix:@" (free)"]) {
+        return [name substringToIndex:name.length - @" (free)".length];
+    }
+    return name;
+}
+
+// Compact model-status accessory. The fill follows the effective Apollo theme
+// accent (including custom themes) and remains dynamic across light/dark mode.
+// Free gets the stronger filled treatment; informational lifecycle/Paid tags
+// use a quieter accent wash so a long list does not become visually noisy.
+@interface ApolloAIModelBadgeLabel : UILabel
+- (instancetype)initWithText:(NSString *)text filled:(BOOL)filled fallbackTint:(UIColor *)fallbackTint;
+@end
+
+@implementation ApolloAIModelBadgeLabel
+
+- (instancetype)initWithText:(NSString *)text filled:(BOOL)filled fallbackTint:(UIColor *)fallbackTint {
+    if ((self = [super initWithFrame:CGRectZero])) {
+        UIColor *accent = ApolloThemeAccentColor() ?: fallbackTint ?: UIColor.systemBlueColor;
+        self.text = text.uppercaseString;
+        self.font = [UIFont systemFontOfSize:10.0 weight:UIFontWeightBold];
+        self.textAlignment = NSTextAlignmentCenter;
+        self.layer.cornerRadius = 9.0;
+        self.layer.cornerCurve = kCACornerCurveContinuous;
+        self.layer.masksToBounds = YES;
+        self.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+            UIColor *resolved = [accent resolvedColorWithTraitCollection:traits];
+            return filled ? resolved : [resolved colorWithAlphaComponent:0.16];
+        }];
+        self.textColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+            UIColor *resolved = [accent resolvedColorWithTraitCollection:traits];
+            if (!filled) return resolved;
+            return ApolloColorIsLight(resolved) ? UIColor.blackColor : UIColor.whiteColor;
+        }];
+        [self sizeToFit];
+        CGRect frame = self.frame;
+        frame.size.width = MAX(40.0, ceil(frame.size.width) + 14.0);
+        frame.size.height = 18.0;
+        self.frame = frame;
+    }
+    return self;
+}
+
+- (void)drawTextInRect:(CGRect)rect {
+    [super drawTextInRect:UIEdgeInsetsInsetRect(rect, UIEdgeInsetsMake(0.0, 7.0, 0.0, 7.0))];
+}
+
+@end
+
+static UIView *ApolloAIModelAccessory(NSString *badge, BOOL selected, UIColor *fallbackTint) {
+    if (badge.length == 0 && !selected) return nil;
+    UIColor *accent = ApolloThemeAccentColor() ?: fallbackTint ?: UIColor.systemBlueColor;
+    ApolloAIModelBadgeLabel *pill = badge.length > 0
+        ? [[ApolloAIModelBadgeLabel alloc] initWithText:badge
+                                                filled:[badge isEqualToString:@"Free"]
+                                          fallbackTint:accent]
+        : nil;
+    UIImageView *checkmark = nil;
+    if (selected) {
+        UIImageConfiguration *configuration =
+            [UIImageSymbolConfiguration configurationWithPointSize:15.0 weight:UIImageSymbolWeightSemibold];
+        checkmark = [[UIImageView alloc]
+            initWithImage:[UIImage systemImageNamed:@"checkmark" withConfiguration:configuration]];
+        checkmark.tintColor = accent;
+        [checkmark sizeToFit];
+    }
+
+    CGFloat gap = pill && checkmark ? 8.0 : 0.0;
+    CGFloat width = CGRectGetWidth(pill.frame) + gap + CGRectGetWidth(checkmark.frame);
+    CGFloat height = MAX(CGRectGetHeight(pill.frame), CGRectGetHeight(checkmark.frame));
+    UIView *accessory = [[UIView alloc] initWithFrame:CGRectMake(0.0, 0.0, width, height)];
+    if (pill) {
+        CGRect frame = pill.frame;
+        frame.origin.y = floor((height - CGRectGetHeight(frame)) * 0.5);
+        pill.frame = frame;
+        [accessory addSubview:pill];
+    }
+    if (checkmark) {
+        CGRect frame = checkmark.frame;
+        frame.origin.x = pill ? CGRectGetMaxX(pill.frame) + gap : 0.0;
+        frame.origin.y = floor((height - CGRectGetHeight(frame)) * 0.5);
+        checkmark.frame = frame;
+        [accessory addSubview:checkmark];
+    }
+    return accessory;
+}
+
+// A provider-backed, searchable model browser. The response comes from the
+// exact API/key Apollo will use for generation, so this avoids maintaining a
+// second hard-coded catalog that becomes stale whenever providers retire IDs.
+// The manual Model field remains available for aliases and custom endpoints.
+@interface ApolloAIModelPickerViewController : ApolloSettingsTableViewController <UISearchResultsUpdating>
+@property (nonatomic, copy) NSString *provider;
+@property (nonatomic, copy) NSString *apiKey;
+@property (nonatomic, copy) NSString *currentModel;
+@property (nonatomic, copy) void (^onPick)(NSString *model);
+@property (nonatomic, strong) NSArray<NSDictionary *> *models;
+@property (nonatomic, strong) NSArray<NSDictionary *> *filteredModels;
+@property (nonatomic, strong) UISearchController *modelSearchController;
+@property (nonatomic, strong) NSURLSessionDataTask *modelTask;
+@property (nonatomic) NSUInteger modelRequestGeneration;
+@end
+
+@implementation ApolloAIModelPickerViewController
+
+- (instancetype)initWithProvider:(NSString *)provider
+                           apiKey:(NSString *)apiKey
+                     currentModel:(NSString *)currentModel
+                           onPick:(void (^)(NSString *model))onPick {
+    if ((self = [super initWithStyle:UITableViewStyleInsetGrouped])) {
+        _provider = [provider copy];
+        _apiKey = [apiKey copy];
+        _currentModel = [currentModel copy];
+        _onPick = [onPick copy];
+        _models = @[];
+        _filteredModels = @[];
+    }
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = [self.provider isEqualToString:@"openrouter"]
+        ? @"OpenRouter Models" : @"Gemini Models";
+    self.tableView.rowHeight = UITableViewAutomaticDimension;
+    self.tableView.estimatedRowHeight = 58.0;
+
+    UISearchController *search = [[UISearchController alloc] initWithSearchResultsController:nil];
+    search.obscuresBackgroundDuringPresentation = NO;
+    search.searchResultsUpdater = self;
+    search.searchBar.placeholder = @"Search models";
+    self.modelSearchController = search;
+    self.navigationItem.searchController = search;
+    self.navigationItem.hidesSearchBarWhenScrolling = NO;
+    self.definesPresentationContext = YES;
+
+    UIRefreshControl *refresh = [[UIRefreshControl alloc] init];
+    [refresh addTarget:self action:@selector(refreshModels) forControlEvents:UIControlEventValueChanged];
+    self.refreshControl = refresh;
+    [self refreshModels];
+}
+
+- (void)dealloc {
+    [self.modelTask cancel];
+}
+
+- (void)showLoadingMessage:(NSString *)message spinning:(BOOL)spinning {
+    UIView *container = [[UIView alloc] initWithFrame:self.tableView.bounds];
+    UIStackView *stack = [[UIStackView alloc] init];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.alignment = UIStackViewAlignmentCenter;
+    stack.spacing = 12.0;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [container addSubview:stack];
+
+    if (spinning) {
+        UIActivityIndicatorView *indicator = [[UIActivityIndicatorView alloc]
+            initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+        [indicator startAnimating];
+        [stack addArrangedSubview:indicator];
+    }
+    UILabel *label = [[UILabel alloc] init];
+    label.text = message;
+    label.textColor = [UIColor secondaryLabelColor];
+    label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    label.adjustsFontForContentSizeCategory = YES;
+    label.numberOfLines = 0;
+    label.textAlignment = NSTextAlignmentCenter;
+    [stack addArrangedSubview:label];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+        [stack.centerYAnchor constraintEqualToAnchor:container.centerYAnchor constant:-40.0],
+        [stack.leadingAnchor constraintGreaterThanOrEqualToAnchor:container.leadingAnchor constant:28.0],
+        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:container.trailingAnchor constant:-28.0],
+    ]];
+    self.tableView.backgroundView = container;
+}
+
+- (void)refreshModels {
+    self.modelRequestGeneration += 1;
+    NSUInteger requestGeneration = self.modelRequestGeneration;
+    [self.modelTask cancel];
+    if (!self.refreshControl.refreshing) {
+        [self showLoadingMessage:@"Loading models…" spinning:YES];
+    }
+
+    NSURL *url = nil;
+    if ([self.provider isEqualToString:@"gemini"]) {
+        url = [NSURL URLWithString:@"https://generativelanguage.googleapis.com/v1beta/openai/models"];
+    } else if ([self.provider isEqualToString:@"openrouter"]) {
+        // The user-scoped endpoint respects their provider/privacy preferences.
+        url = [NSURL URLWithString:@"https://openrouter.ai/api/v1/models/user"];
+    }
+    if (!url || self.apiKey.length == 0) {
+        [self.refreshControl endRefreshing];
+        [self showLoadingMessage:@"Enter an API key before browsing models." spinning:NO];
+        return;
+    }
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+    request.timeoutInterval = 20.0;
+    [request setValue:[@"Bearer " stringByAppendingString:self.apiKey]
+   forHTTPHeaderField:@"Authorization"];
+    [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
+
+    __weak __typeof(self) weakSelf = self;
+    self.modelTask = [[NSURLSession sharedSession] dataTaskWithRequest:request
+        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]]
+            ? (NSHTTPURLResponse *)response : nil;
+        id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+        NSArray *rawModels = [json isKindOfClass:[NSDictionary class]]
+            && [((NSDictionary *)json)[@"data"] isKindOfClass:[NSArray class]]
+            ? ((NSDictionary *)json)[@"data"] : nil;
+        NSMutableArray<NSDictionary *> *parsed = [NSMutableArray array];
+        if (http.statusCode == 200 && rawModels) {
+            for (id raw in rawModels) {
+                if (![raw isKindOfClass:[NSDictionary class]]) continue;
+                NSString *modelID = [raw[@"id"] isKindOfClass:[NSString class]] ? raw[@"id"] : nil;
+                if (modelID.length == 0) continue;
+                if ([weakSelf.provider isEqualToString:@"gemini"] &&
+                    !ApolloAIGeminiModelLooksLikeTextChat(modelID)) continue;
+                if ([weakSelf.provider isEqualToString:@"gemini"] && [modelID hasPrefix:@"models/"]) {
+                    modelID = [modelID substringFromIndex:7];
+                }
+                if ([weakSelf.provider isEqualToString:@"openrouter"]) {
+                    // Treat provider JSON as untrusted. A null/non-dictionary
+                    // architecture must not receive keyed-subscripting messages
+                    // and crash the settings screen.
+                    NSDictionary *architecture = [raw[@"architecture"] isKindOfClass:[NSDictionary class]]
+                        ? raw[@"architecture"] : nil;
+                    NSArray *outputs = [architecture[@"output_modalities"] isKindOfClass:[NSArray class]]
+                        ? architecture[@"output_modalities"] : nil;
+                    if (outputs && ![outputs containsObject:@"text"]) continue;
+                }
+                NSString *name = [raw[@"name"] isKindOfClass:[NSString class]] ? raw[@"name"] : nil;
+                if (name.length == 0 && [raw[@"display_name"] isKindOfClass:[NSString class]]) {
+                    name = raw[@"display_name"];
+                }
+                if (name.length == 0) name = modelID;
+                NSString *badge = nil;
+                if ([weakSelf.provider isEqualToString:@"openrouter"]) {
+                    name = ApolloAIOpenRouterDisplayName(name);
+                    NSDictionary *pricing = [raw[@"pricing"] isKindOfClass:[NSDictionary class]]
+                        ? raw[@"pricing"] : nil;
+                    badge = ApolloAIOpenRouterPricingIsFree(modelID, pricing) ? @"Free" : @"Paid";
+                } else {
+                    badge = ApolloAIGeminiModelBadge(modelID);
+                }
+                NSMutableDictionary *model = [@{ @"id": modelID, @"name": name } mutableCopy];
+                if (badge.length > 0) model[@"badge"] = badge;
+                [parsed addObject:model];
+            }
+            if ([weakSelf.provider isEqualToString:@"openrouter"]) {
+                // Stable partition: free models first, while preserving the
+                // provider's ordering within the Free and Paid groups.
+                NSMutableArray<NSDictionary *> *ordered =
+                    [NSMutableArray arrayWithCapacity:parsed.count];
+                for (NSDictionary *model in parsed) {
+                    if ([model[@"badge"] isEqualToString:@"Free"]) [ordered addObject:model];
+                }
+                for (NSDictionary *model in parsed) {
+                    if (![model[@"badge"] isEqualToString:@"Free"]) [ordered addObject:model];
+                }
+                parsed = ordered;
+            }
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __typeof(self) self = weakSelf;
+            if (!self) return;
+            // A pull-to-refresh can cancel request A and start B before A's
+            // completion reaches the main queue. Only the newest generation may
+            // clear B's spinner or replace B's eventual results/error state.
+            if (requestGeneration != self.modelRequestGeneration) return;
+            [self.refreshControl endRefreshing];
+            self.modelTask = nil;
+            if (http.statusCode != 200 || error || !rawModels) {
+                NSString *reason = error.localizedDescription;
+                if (reason.length == 0) reason = http ? [NSString stringWithFormat:@"Provider returned HTTP %ld", (long)http.statusCode]
+                                                      : @"The provider returned an invalid response.";
+                ApolloLog(@"[AICloud] model list failed provider=%@ http=%ld error=%@",
+                          self.provider, (long)http.statusCode, reason);
+                if (self.models.count > 0) {
+                    // Preserve the last successful catalog. A background view
+                    // is hidden by those stale rows, so make the refresh error
+                    // visible as a transient toast instead.
+                    ApolloShowToastWithStyle(@"Couldn't Refresh Models", reason,
+                                             ApolloToastStyleError, nil);
+                    return;
+                }
+                [self showLoadingMessage:[NSString stringWithFormat:@"Couldn't load models.\n%@\n\nPull down to retry.", reason]
+                                  spinning:NO];
+                return;
+            }
+            ApolloLog(@"[AICloud] model list loaded provider=%@ count=%lu",
+                      self.provider, (unsigned long)parsed.count);
+            self.models = parsed;
+            if (parsed.count == 0) {
+                [self showLoadingMessage:@"No compatible text models are available for this key."
+                                  spinning:NO];
+            } else {
+                self.tableView.backgroundView = nil;
+            }
+            [self updateSearchResultsForSearchController:self.modelSearchController];
+        });
+    }];
+    [self.modelTask resume];
+}
+
+- (void)updateSearchResultsForSearchController:(UISearchController *)searchController {
+    NSString *query = [searchController.searchBar.text
+        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (query.length == 0) {
+        self.filteredModels = self.models;
+    } else {
+        NSPredicate *predicate =
+            [NSPredicate predicateWithBlock:^BOOL(NSDictionary *model, __unused NSDictionary *bindings) {
+                return [model[@"id"] localizedCaseInsensitiveContainsString:query] ||
+                    [model[@"name"] localizedCaseInsensitiveContainsString:query];
+            }];
+        self.filteredModels = [self.models filteredArrayUsingPredicate:predicate];
+    }
+    if (self.filteredModels.count == 0 && self.models.count > 0) {
+        UILabel *label = [[UILabel alloc] init];
+        label.text = @"No matching models";
+        label.textColor = [UIColor secondaryLabelColor];
+        label.textAlignment = NSTextAlignmentCenter;
+        self.tableView.backgroundView = label;
+    } else if (self.models.count > 0) {
+        self.tableView.backgroundView = nil;
+    }
+    [self.tableView reloadData];
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    return self.filteredModels.count;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    if ([self.provider isEqualToString:@"openrouter"]) {
+        return @"Free and Paid labels use OpenRouter’s current live pricing. Free-model availability and rate limits can vary.";
+    }
+    return @"Google does not report per-model free-tier eligibility in its model catalog. Preview, Experimental, and Latest labels describe model lifecycle only.";
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *identifier = @"ApolloAIModelCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:identifier];
+    NSDictionary *model = self.filteredModels[indexPath.row];
+    NSString *modelID = model[@"id"];
+    NSString *name = model[@"name"];
+    NSString *badge = model[@"badge"];
+    cell.textLabel.text = name;
+    cell.detailTextLabel.text = modelID;
+    cell.detailTextLabel.numberOfLines = 2;
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.accessoryView = ApolloAIModelAccessory(badge,
+        [modelID isEqualToString:self.currentModel], tableView.tintColor);
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    NSString *modelID = self.filteredModels[indexPath.row][@"id"];
+    if (self.onPick) self.onPick(modelID);
+    [self.navigationController popViewControllerAnimated:YES];
+}
+
+@end
 
 // Apollo installs a full-width back-swipe recognizer above settings screens.
 // Claim touches that begin on an enabled slider so that recognizer cannot
@@ -352,6 +771,9 @@ static void ApolloAISaveProviderField(ApolloAIFieldTag tag, NSString *value) {
 @end
 
 @interface ApolloAISettingsViewController () <UITextFieldDelegate>
+@property (nonatomic, copy) NSString *pendingModelConfirmation;
+- (void)presentModelPicker;
+- (void)presentMessageWithTitle:(NSString *)title message:(NSString *)message;
 @end
 
 @implementation ApolloAISettingsViewController
@@ -370,6 +792,16 @@ static void ApolloAISaveProviderField(ApolloAIFieldTag tag, NSString *value) {
     // Availability can change while the screen is off-stack (e.g. the model
     // finishes downloading) — re-read every row's state on each appearance.
     [self.tableView reloadData];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    // Model selection happens on a pushed picker. Wait until its pop finishes
+    // before showing the non-blocking confirmation over this controller.
+    NSString *model = self.pendingModelConfirmation;
+    if (model.length == 0) return;
+    self.pendingModelConfirmation = nil;
+    ApolloShowToastWithStyle(@"AI Model Updated", model, ApolloToastStyleSuccess, nil);
 }
 
 #pragma mark - Form
@@ -509,6 +941,25 @@ static void ApolloAISaveProviderField(ApolloAIFieldTag tag, NSString *value) {
                                   onSelect:nil];
     providerModel.visible = ^BOOL { return ApolloAIIsCloudProvider(); };
 
+    ApolloSettingsRow *providerModels =
+        [ApolloSettingsRow valueRowWithID:@"provider.models"
+                                    title:@"Browse Available Models"
+                                   detail:^NSString * {
+            return ApolloAIStoredAPIKey().length > 0 ? @"Live List" : @"API Key Required";
+        }
+                                 onSelect:^{ [weakSelf presentModelPicker]; }];
+    providerModels.visible = ^BOOL {
+        return [sAISummaryProvider isEqualToString:@"openrouter"] ||
+            [sAISummaryProvider isEqualToString:@"gemini"];
+    };
+    providerModels.configure = ^(UITableViewCell *cell) {
+        BOOL enabled = ApolloAIStoredAPIKey().length > 0;
+        cell.textLabel.enabled = enabled;
+        cell.detailTextLabel.textColor = enabled ? [UIColor secondaryLabelColor] : [UIColor tertiaryLabelColor];
+        cell.accessoryType = enabled ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+        cell.selectionStyle = enabled ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
+    };
+
     ApolloSettingsRow *providerBaseURL =
         [ApolloSettingsRow customRowWithID:@"provider.baseURL"
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
@@ -576,7 +1027,7 @@ static void ApolloAISaveProviderField(ApolloAIFieldTag tag, NSString *value) {
                                            rows:@[ master ]],
         [ApolloSettingsSection sectionWithTitle:@"Provider"
                                          footer:providerFooter
-                                           rows:@[ provider, providerKey, providerModel, providerBaseURL ]],
+                                           rows:@[ provider, providerKey, providerModel, providerModels, providerBaseURL ]],
         [ApolloSettingsSection sectionWithTitle:@"Summaries"
                                          footer:@"Minimum Post Length applies to Reddit text-post bodies; linked articles remain eligible independently. Brief gives the essentials, Balanced matches the standard summary, and In-depth adds useful context without reproducing the source.\n\nWhen Opening a Thread controls how enabled summaries appear:\n\n• Generate on Open — summaries generate as you open a thread and wait, collapsed, until you tap them.\n• Open Automatically — summaries generate and expand on their own.\n• Tap to Summarize — nothing generates until you tap a summary card, which then opens once it's ready."
                                            rows:@[ postSummaries, postThreshold, postDetail, commentSummaries, commentDetail, summaryMode ]],
@@ -694,6 +1145,36 @@ static void ApolloAISaveProviderField(ApolloAIFieldTag tag, NSString *value) {
     });
 }
 
+- (void)presentModelPicker {
+    [self.view endEditing:YES]; // commit a key/model still being edited
+    NSString *apiKey = ApolloAIStoredAPIKey();
+    if (apiKey.length == 0) {
+        [self presentMessageWithTitle:@"API Key Required"
+                              message:@"Enter your provider key before loading its model list."];
+        return;
+    }
+    if (![sAISummaryProvider isEqualToString:@"openrouter"] &&
+        ![sAISummaryProvider isEqualToString:@"gemini"]) return;
+
+    NSString *provider = [sAISummaryProvider copy];
+    __weak __typeof(self) weakSelf = self;
+    ApolloAIModelPickerViewController *picker = [[ApolloAIModelPickerViewController alloc]
+        initWithProvider:provider
+                  apiKey:apiKey
+            currentModel:ApolloAICloudEffectiveModel()
+                  onPick:^(NSString *model) {
+        // The provider can't change while this pushed picker is on top, but
+        // retain the guard so an unusual programmatic navigation can't save a
+        // model into the wrong provider's slot.
+        if (![sAISummaryProvider isEqualToString:provider]) return;
+        ApolloAISaveProviderField(ApolloAIFieldTagModel, model);
+        [weakSelf reloadRowWithID:@"provider.model"];
+        [weakSelf reloadRowWithID:@"availability"];
+        weakSelf.pendingModelConfirmation = model;
+    }];
+    [self.navigationController pushViewController:picker animated:YES];
+}
+
 - (void)providerPicked:(NSString *)provider {
     sAISummaryProvider = [provider copy];
     [[NSUserDefaults standardUserDefaults] setObject:sAISummaryProvider forKey:UDKeyAISummaryProvider];
@@ -731,6 +1212,9 @@ static void ApolloAISaveProviderField(ApolloAIFieldTag tag, NSString *value) {
     // Availability row (never the Provider section itself, which would tear
     // down this very text field mid-edit-session).
     [self reloadRowWithID:@"availability"];
+    if (textField.tag == ApolloAIFieldTagAPIKey) {
+        [self reloadRowWithID:@"provider.models"];
+    }
 }
 
 // Every Summaries row's enabled state hangs off the master switch, so re-read
@@ -902,6 +1386,15 @@ static void ApolloAISaveProviderField(ApolloAIFieldTag tag, NSString *value) {
 
 #pragma mark - Actions
 
+- (void)presentMessageWithTitle:(NSString *)title message:(NSString *)message {
+    UIAlertController *alert =
+        [UIAlertController alertControllerWithTitle:title
+                                            message:message
+                                     preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 - (void)masterToggled:(UISwitch *)sender {
     sEnableAISummaries = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sEnableAISummaries forKey:UDKeyEnableAISummaries];
@@ -921,9 +1414,11 @@ static void ApolloAISaveProviderField(ApolloAIFieldTag tag, NSString *value) {
         NSString *detail = removed == 1
             ? @"Removed 1 cached summary"
             : [NSString stringWithFormat:@"Removed %lu cached summaries", (unsigned long)removed];
-        // Pure success confirmation — a toast doesn't demand a second tap the
-        // way the old OK alert did.
-        ApolloShowToastWithStyle(@"AI Cache Cleared", detail, ApolloToastStyleSuccess, nil);
+        // Let UIKit begin dismissing the action sheet before the transient toast
+        // animates over the underlying settings screen.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ApolloShowToastWithStyle(@"AI Cache Cleared", detail, ApolloToastStyleSuccess, nil);
+        });
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     alert.popoverPresentationController.sourceView = cell ?: self.view;

@@ -1,5 +1,16 @@
 #import <Foundation/Foundation.h>
 
+typedef void (^ApolloTrendingSubredditsRefreshCompletion)(NSArray<NSString *> *subreddits,
+                                                          NSError *error);
+typedef void (^ApolloSubredditSourcePreparationCompletion)(NSError *error);
+
+__BEGIN_DECLS
+FOUNDATION_EXPORT void ApolloRefreshTrendingSubreddits(
+    ApolloTrendingSubredditsRefreshCompletion completion);
+FOUNDATION_EXPORT void ApolloPrepareRandomNSFWSubredditSource(
+    ApolloSubredditSourcePreparationCompletion completion);
+__END_DECLS
+
 @interface ShareUrlTask : NSObject
 
 @property (atomic, strong) dispatch_group_t dispatchGroup;

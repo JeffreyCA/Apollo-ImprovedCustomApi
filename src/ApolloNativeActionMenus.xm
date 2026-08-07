@@ -1,4 +1,5 @@
 #import "ApolloCommon.h"
+#import "ApolloNativeActionMenus.h"
 #import "ApolloNativeActionMetadata.h"
 #import "ApolloThemeRuntime.h"
 
@@ -11,6 +12,7 @@ static char kApolloNativeActionMenuControllerKey;
 static char kApolloNativeActionMenuInvokingActionKey;
 static char kApolloNativeActionMenuWrappedModeratorActionKey;
 static char kApolloNativeActionMenuLifecycleFallbackKey;
+static char kApolloNativeActionMenuPresenterKey;
 static char kApolloNativeActionMenuSourceViewKey;
 static char kApolloNativeActionMenuWrappedSourceActionKey;
 
@@ -30,11 +32,63 @@ static BOOL sApolloNativeActionMenuNextPresentationModeratorStyle = NO;
 @property (nonatomic, weak) UIView *morphSourceView;
 @property (nonatomic, strong) UIContextMenuInteraction *interaction;
 @property (nonatomic, assign) BOOL removeSourceViewOnEnd;
+@property (nonatomic, weak) id actionController;
+@property (nonatomic, copy) dispatch_block_t afterDismissalAction;
+// Keep the presentation window and anchor point for the menu's short lifetime.
+// A selected action may push another controller before UIKit asks for its
+// dismissal preview, detaching the nav-bar proxy from the window on iOS 27.
+@property (nonatomic, strong) UIWindow *presentationWindow;
+@property (nonatomic, assign) CGPoint presentationAnchorCenter;
+@property (nonatomic, strong) UIView *dismissalFallbackView;
 // Empty throwaway view pinned over morphSourceView; this is what UIKit portals
 // into the glass platter, so the real control keeps drawing. See
 // ApolloNativeActionMenuCreateMorphStandIn().
 @property (nonatomic, strong) UIView *morphStandInView;
 @end
+
+// The anchor view owns the presenter for exactly as long as the menu can use
+// it. Keep the reverse lookup from ActionController non-owning: the presenter's
+// UIMenu actions retain that controller, so a direct RETAIN association here
+// would close a cycle and prevent the aborted-presentation -dealloc cleanup.
+static ApolloNativeActionMenuPresenter *ApolloNativeActionMenuPresenterForController(id actionController) {
+    NSHashTable *holder = objc_getAssociatedObject(actionController,
+                                                    &kApolloNativeActionMenuPresenterKey);
+    id presenter = holder.anyObject;
+    return [presenter isKindOfClass:[ApolloNativeActionMenuPresenter class]] ? presenter : nil;
+}
+
+static void ApolloNativeActionMenuSetPresenterForController(id actionController,
+                                                             ApolloNativeActionMenuPresenter *presenter) {
+    if (!actionController) return;
+    if (!presenter) {
+        objc_setAssociatedObject(actionController, &kApolloNativeActionMenuPresenterKey, nil,
+                                 OBJC_ASSOCIATION_ASSIGN);
+        return;
+    }
+
+    NSHashTable *holder = [NSHashTable weakObjectsHashTable];
+    [holder addObject:presenter];
+    objc_setAssociatedObject(actionController, &kApolloNativeActionMenuPresenterKey, holder,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+BOOL ApolloNativeActionMenuPerformAfterDismissal(id actionController,
+                                                  dispatch_block_t action) {
+    if (!actionController || !action) return NO;
+
+    ApolloNativeActionMenuPresenter *presenter =
+        ApolloNativeActionMenuPresenterForController(actionController);
+    if (!presenter.interaction) {
+        return NO;
+    }
+
+    // UIKit does not guarantee whether an action handler runs before or after
+    // -willEndForConfiguration:. The animator completion intentionally reads
+    // this property at dismissal END, so even a late handler stored after
+    // dismissal begins still cannot fall through the teardown window.
+    presenter.afterDismissalAction = [action copy];
+    return YES;
+}
 
 static BOOL ApolloNativeActionMenusEnabled(void) {
     if (@available(iOS 26.0, *)) {
@@ -910,6 +964,7 @@ static UITargetedPreview *ApolloNativeActionMenuStandInPreview(UIView *standIn) 
 // opened), so a stale copy can't ride along on a recycled cell.
 - (void)dealloc {
     [_morphStandInView removeFromSuperview];
+    [_dismissalFallbackView removeFromSuperview];
 }
 
 - (UIContextMenuConfiguration *)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction configurationForMenuAtLocation:(__unused CGPoint)location {
@@ -1011,6 +1066,45 @@ static id ApolloNativeActionMenuCompactMenuStyle(void) {
     UIView *sourceView = self.sourceView;
     if (!sourceView) return nil;
 
+    // iOS 27 throws if initWithView:parameters: is handed a view that is no
+    // longer in a window. A menu action can legitimately navigate before UIKit
+    // requests this dismissal preview, which detaches a nav-bar source and its
+    // proxy. Preserve the invisible-preview behavior by substituting a
+    // temporary 1pt anchor in the original presentation window.
+    if (!sourceView.window) {
+        UIWindow *window = self.presentationWindow;
+        if (!window) {
+            for (UIWindow *candidate in ApolloAllWindows()) {
+                if (candidate.isKeyWindow) {
+                    window = candidate;
+                    break;
+                }
+            }
+        }
+        if (!window) {
+            ApolloLog(@"[NativeActionMenu] No window for dismissal preview");
+            return nil;
+        }
+
+        UIView *fallback = self.dismissalFallbackView;
+        if (!fallback.window) {
+            [fallback removeFromSuperview];
+            CGPoint center = self.presentationAnchorCenter;
+            fallback = [[UIView alloc] initWithFrame:CGRectMake(center.x - 0.5,
+                                                                center.y - 0.5,
+                                                                1.0,
+                                                                1.0)];
+            fallback.backgroundColor = UIColor.clearColor;
+            fallback.opaque = NO;
+            fallback.userInteractionEnabled = NO;
+            fallback.accessibilityElementsHidden = YES;
+            [window addSubview:fallback];
+            self.dismissalFallbackView = fallback;
+            ApolloLog(@"[NativeActionMenu] Original dismissal anchor detached; using window fallback");
+        }
+        sourceView = fallback;
+    }
+
     UIPreviewParameters *parameters = [UIPreviewParameters new];
     parameters.backgroundColor = UIColor.clearColor;
     parameters.visiblePath = [UIBezierPath bezierPathWithRect:CGRectZero];
@@ -1043,22 +1137,37 @@ static id ApolloNativeActionMenuCompactMenuStyle(void) {
 
     UIView *sourceView = self.sourceView;
     UIContextMenuInteraction *menuInteraction = self.interaction;
-    if (!sourceView || !menuInteraction) return;
-
     BOOL removeSourceViewOnEnd = self.removeSourceViewOnEnd;
     UIView *standInView = self.morphStandInView;
+    UIView *dismissalFallbackView = self.dismissalFallbackView;
+    id actionController = self.actionController;
     self.morphStandInView = nil;
+    self.dismissalFallbackView = nil;
     // Issue #249: tear down at dismissal END, not START — removing the anchor
     // (the interaction's host view) while the menu is still morphing back into
     // the source button cuts the dismissal animation short. The stand-in goes
     // at the same point: it is what the collapsing platter is portaling, and
     // pulling it early would empty the platter mid-animation.
     void (^teardown)(void) = ^{
-        [sourceView removeInteraction:menuInteraction];
-        objc_setAssociatedObject(sourceView, &kApolloNativeActionMenuControllerKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        if (sourceView && menuInteraction) {
+            [sourceView removeInteraction:menuInteraction];
+            objc_setAssociatedObject(sourceView, &kApolloNativeActionMenuControllerKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        }
+        if (ApolloNativeActionMenuPresenterForController(actionController) == self) {
+            ApolloNativeActionMenuSetPresenterForController(actionController, nil);
+        }
         [standInView removeFromSuperview];
+        [dismissalFallbackView removeFromSuperview];
         if (removeSourceViewOnEnd) {
             [sourceView removeFromSuperview];
+        }
+        // Read at dismissal END rather than capturing at dismissal START. An
+        // action handler may run between those callbacks on a future UIKit and
+        // store its work after this method has already begun.
+        dispatch_block_t afterDismissalAction = self.afterDismissalAction;
+        self.afterDismissalAction = nil;
+        if (afterDismissalAction) {
+            dispatch_async(dispatch_get_main_queue(), afterDismissalAction);
         }
     };
     if (animator) {
@@ -1170,6 +1279,87 @@ static UIViewController *ApolloNativeActionMenuViewControllerForView(UIView *vie
     return nil;
 }
 
+// Apollo's banned-user screen still presents its 2017-era Swift
+// ActionController when Liquid Glass is unavailable.  On some iOS 18 builds
+// that controller crashes while being presented, before the moderator can
+// choose "Edit Ban" (issue #765).  Keep Apollo's own row handlers—the code
+// that opens the contextual comment or pre-filled BanUserViewController—but
+// host those actions in UIKit's stable action sheet instead.  This is scoped
+// to this one screen and only runs when the iOS 26 native-menu replacement is
+// not active.
+static void ApolloLegacyBannedUserAppendActions(NSMutableArray<UIAction *> *actions,
+                                                 NSArray<UIMenuElement *> *elements) {
+    for (UIMenuElement *element in elements) {
+        if ([element isKindOfClass:[UIAction class]]) {
+            [actions addObject:(UIAction *)element];
+        } else if ([element isKindOfClass:[UIMenu class]]) {
+            ApolloLegacyBannedUserAppendActions(actions, ((UIMenu *)element).children);
+        }
+    }
+}
+
+static BOOL ApolloLegacyBannedUserActionMenuPresent(id presenter,
+                                                     id actionController,
+                                                     void (^completion)(void)) {
+    if (ApolloNativeActionMenusEnabled()) return NO;
+    if (![actionController isKindOfClass:objc_getClass("_TtC6Apollo16ActionController")]) return NO;
+
+    UIViewController *host = [presenter isKindOfClass:[UIViewController class]] ? presenter : nil;
+    UIViewController *content = [host isKindOfClass:[UINavigationController class]]
+        ? ((UINavigationController *)host).topViewController
+        : host;
+    if (![content isKindOfClass:objc_getClass("_TtC6Apollo34ModeratorBannedUsersViewController")]) return NO;
+    if (ApolloReadBoolIvar(actionController, "showKeyboardOnAppearanceForTextEntryView", NO)) return NO;
+    if (ApolloNativeActionMenuActionControllerHasCustomHeader(actionController)) return NO;
+
+    UIMenu *menu = ApolloNativeActionMenuBuildMenu(actionController, YES);
+    if (!menu) return NO;
+
+    NSMutableArray<UIAction *> *menuActions = [NSMutableArray array];
+    ApolloLegacyBannedUserAppendActions(menuActions, menu.children);
+    if (menuActions.count == 0) return NO;
+
+    UIView *sourceView = ApolloNativeActionMenuSelectedCellForPresenter(content)
+        ?: ApolloNativeActionMenuViewForObject(content);
+    if (!sourceView.window) return NO;
+    objc_setAssociatedObject(actionController, &kApolloNativeActionMenuSourceViewKey,
+                             sourceView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil
+                                                                   message:nil
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    for (UIAction *menuAction in menuActions) {
+        UIAction *retainedMenuAction = menuAction;
+        UIAlertActionStyle style = (menuAction.attributes & UIMenuElementAttributesDestructive)
+            ? UIAlertActionStyleDestructive
+            : UIAlertActionStyleDefault;
+        UIAlertAction *alertAction = [UIAlertAction actionWithTitle:menuAction.title
+                                                              style:style
+                                                            handler:^(__unused UIAlertAction *selectedAction) {
+            ApolloNativeActionMenuActionHandler handler =
+                ((ApolloNativeActionMenuActionHandler (*)(id, SEL))objc_msgSend)(retainedMenuAction,
+                                                                                 @selector(handler));
+            if (handler) handler(retainedMenuAction);
+        }];
+        alertAction.enabled = !(menuAction.attributes & UIMenuElementAttributesDisabled);
+        [sheet addAction:alertAction];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+
+    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
+    if (popover) {
+        popover.sourceView = sourceView;
+        popover.sourceRect = sourceView.bounds;
+    }
+
+    ApolloLog(@"[NativeActionMenu] Using UIKit fallback for banned-user actions (%lu item(s))",
+              (unsigned long)menuActions.count);
+    [host presentViewController:sheet animated:YES completion:completion];
+    return YES;
+}
+
 // Walk down the presentedViewController chain to the top-most window-backed
 // controller that can legally present a new modal. Skips the window-less
 // ActionController (which the native-menu path never actually presents).
@@ -1222,6 +1412,12 @@ static BOOL ApolloNativeActionMenuPresent(id presenter, id actionController, voi
     ApolloNativeActionMenuPresenter *menuPresenter = [ApolloNativeActionMenuPresenter new];
     menuPresenter.menu = menu;
     menuPresenter.sourceView = anchorView;
+    menuPresenter.actionController = actionController;
+    menuPresenter.presentationWindow = anchorView.window;
+    menuPresenter.presentationAnchorCenter =
+        [anchorView convertPoint:CGPointMake(CGRectGetMidX(anchorView.bounds),
+                                             CGRectGetMidY(anchorView.bounds))
+                          toView:anchorView.window];
     BOOL morphable = ApolloNativeActionMenuViewShouldMorph(sourceView);
     menuPresenter.morphSourceView = morphable ? sourceView : nil;
     menuPresenter.removeSourceViewOnEnd = removeAnchorViewOnEnd;
@@ -1240,6 +1436,7 @@ static BOOL ApolloNativeActionMenuPresent(id presenter, id actionController, voi
 
     [anchorView addInteraction:interaction];
     objc_setAssociatedObject(anchorView, &kApolloNativeActionMenuControllerKey, menuPresenter, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloNativeActionMenuSetPresenterForController(actionController, menuPresenter);
 
     // Issue #249: a programmatic presentation has no active click driver, so
     // -[UIContextMenuInteraction menuAppearance] falls back to the interaction's
@@ -1722,6 +1919,9 @@ static BOOL ApolloNativeActionMenuCanFallbackPresent(id presenter, id actionCont
     if (ApolloNativeActionMenuPresent(self, viewControllerToPresent, completion)) {
         return;
     }
+    if (ApolloLegacyBannedUserActionMenuPresent(self, viewControllerToPresent, completion)) {
+        return;
+    }
     %orig;
 }
 %end
@@ -1730,6 +1930,9 @@ static BOOL ApolloNativeActionMenuCanFallbackPresent(id presenter, id actionCont
 
 - (void)presentViewController:(UIViewController *)viewControllerToPresent animated:(BOOL)flag completion:(void (^)(void))completion {
     if (ApolloNativeActionMenuPresent(self, viewControllerToPresent, completion)) {
+        return;
+    }
+    if (ApolloLegacyBannedUserActionMenuPresent(self, viewControllerToPresent, completion)) {
         return;
     }
 

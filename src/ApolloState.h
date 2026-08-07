@@ -140,10 +140,11 @@ extern BOOL sIconRowMagnifier;
 // See ApolloStatsRowTouch.xm, ApolloCreatedAtAlert.xm, ApolloTranslation.xm.
 extern BOOL sInfoRowTapUpvote;
 extern BOOL sInfoRowTapComments;
-// The tappable "info" icons — % upvoted, timestamp, and edited — all share one
-// display style, chosen by these two mutually-exclusive toggles: Popup = the
-// dismissable alert; Overlay = the small auto-fading card above the icon. With both
-// off, direct taps use Apollo's stock behavior; picking one in the loupe does nothing.
+// The tappable "info" icons — % upvoted, timestamp, and edited — plus owned-comment
+// insights all share one display style, chosen by these two mutually-exclusive
+// toggles: Popup = the dismissable alert; Overlay = the small auto-fading card above
+// the icon/score. With both off, direct taps use Apollo's stock behavior, the comment
+// score hold stays native, and picking an info icon in the loupe does nothing.
 // Popup defaults ON; the settings UI + a load-time clamp keep them exclusive.
 extern BOOL sInfoRowPopupMode;
 extern BOOL sInfoRowOverlayMode;
@@ -157,20 +158,47 @@ extern BOOL sLiveCommentsFollow;
 // default OFF via registerDefaults. See ApolloPerPostCommentSort.xm.
 extern BOOL sPerPostCommentSort;
 
-// Override for UIScrollView top/bottom scroll edge effects on iOS 26+ Liquid Glass.
-// iOS 26 defaults to Soft; iOS 27 betas default to Hard, which some users find
-// jarring. See ApolloScrollEdgeEffect.xm.
+// "Header Style" (user-facing name): override for the TOP scroll edge effect on
+// iOS 26+ Liquid Glass. iOS 26 defaults to Soft; iOS 27 betas default to Hard,
+// which some users find jarring. Only the top (header) edge is governed — the
+// tab-bar/bottom edge always keeps the system's own treatment. See
+// ApolloScrollEdgeEffect.xm (Soft/Hard enforcement) and
+// ApolloProgressiveBlur.xm (Blur's tweak-drawn variable blur).
 typedef NS_ENUM(NSInteger, ApolloScrollEdgeEffectStyle) {
+    // Retired user-facing System Default value. Load-time migration resolves
+    // stored 0s to an explicit Soft (iOS 26) or Hard (iOS 27) choice.
     ApolloScrollEdgeEffectStyleAutomatic = 0,
     ApolloScrollEdgeEffectStyleSoft      = 1,
     ApolloScrollEdgeEffectStyleHard      = 2,
-    ApolloScrollEdgeEffectStyleHidden    = 3,
+    // 3 was Hidden, retired: visually indistinguishable from Soft, so stored 3s
+    // migrate to Soft at load (Tweak.xm). Never reuse 3 for a new mode — the
+    // migration could not tell an old Hidden user from a new-mode user.
+    ApolloScrollEdgeEffectStyleBlur      = 4,
 };
 extern NSInteger sScrollEdgeEffectStyle;
-// Applies sScrollEdgeEffectStyle to a scroll view's top/bottom edge effects (no-op pre-iOS 26
-// or when not Liquid Glass). Called from UIScrollView's didMoveToWindow hook in
-// ApolloAutoHideTabBar.xm — kept here to avoid a second %hook UIScrollView didMoveToWindow,
-// which the Logos internal generator silently drops as a duplicate symbol.
+// Resolves the retired Automatic value defensively if it is observed before
+// load-time migration, and resolves Blur to the OS-equivalent Soft/Hard style
+// when its private filter is unavailable. Anything keyed on the *look* of the
+// header reads this rather than assuming the raw preference can render.
+#ifdef __cplusplus
+extern "C" {
+#endif
+NSInteger ApolloResolvedScrollEdgeEffectStyle(void);
+// Whether the private CAFilter variableBlur primitive Blur mode renders with
+// exists at runtime; the settings picker hides the Blur option when NO.
+// Defined in ApolloProgressiveBlur.xm.
+BOOL ApolloProgressiveBlurAvailable(void);
+#ifdef __cplusplus
+}
+#endif
+// Posted (main thread) after sScrollEdgeEffectStyle changes; observers restyle
+// live UI. Defined in ApolloScrollEdgeEffect.xm.
+extern NSString *const ApolloScrollEdgeEffectStyleChangedNotification;
+// Applies the resolved header style to a scroll view's top edge effect (no-op
+// pre-iOS 26 or when not Liquid Glass). Called from UIScrollView's
+// didMoveToWindow hook in ApolloAutoHideTabBar.xm — kept here to avoid a
+// second %hook UIScrollView didMoveToWindow, which the Logos internal
+// generator silently drops as a duplicate symbol.
 void ApolloApplyScrollEdgeEffectStyle(UIScrollView *scrollView);
 // Applies the selected style to every scroll view owned by an Apollo list
 // controller. Home, Profile, Comments, and similar screens all inherit Apollo's
@@ -193,6 +221,9 @@ extern BOOL sSubredditListEnhancements;
 // Hide the description subtitles under the subreddit list's built-in feed rows
 // (see UDKeyHideSubredditListDescriptions). Independent of the enhancements master.
 extern BOOL sHideSubredditListDescriptions;
+// Blank the subtitle line under multireddit rows (see
+// UDKeyHideMultiredditDescriptions). Independent of the enhancements master.
+extern BOOL sHideMultiredditDescriptions;
 
 // Color post (link) flairs and user/author flairs using Reddit's assigned
 // colors (filled pill + matching text color). When NO, Apollo's default grey
@@ -366,6 +397,9 @@ extern NSString *sLibreTranslateURL;
 extern NSString *sLibreTranslateAPIKey;
 // Lowercased 2-letter language codes the user has opted out of translating.
 extern NSArray<NSString *> *sTranslationSkipLanguages;
+// Redirects Apollo's own Translate button to iOS's on-device Translate sheet
+// instead of Apollo's Google Translate web view. See UDKeyAppleTranslateSheet.
+extern BOOL sAppleTranslateSheet;
 
 #ifdef __OBJC__
 // Whether the on-device Apple translation backend (ApolloAppleTranslation.swift,

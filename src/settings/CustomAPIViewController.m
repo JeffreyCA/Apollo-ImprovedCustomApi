@@ -39,6 +39,8 @@
 #import "settings/ApolloThanksToViewController.h"
 #import "settings/ApolloBuyUsACoffeeViewController.h"
 #import "settings/ApolloReportViewController.h"
+#import "crash/ApolloCrashManager.h"
+#import "crash/ApolloCrashReportsViewController.h"
 #import "settings/ApolloOpenInAppViewController.h"
 #import "settings/SavedCategoriesViewController.h"
 #import "settings/ApolloSubredditLayoutViewController.h"
@@ -1288,12 +1290,12 @@ typedef NS_ENUM(NSInteger, Tag) {
         }
                                   onSelect:nil];
 
-    // Overrides UIScrollView's top/bottom edge glass (iOS 26+). Liquid Glass
-    // only — hidden otherwise rather than shown-disabled, since the row has
-    // nothing to preview/explain on a non-Glass device.
+    // Overrides the top scroll-edge glass under the nav bar (iOS 26+). Liquid
+    // Glass only — hidden otherwise rather than shown-disabled, since the row
+    // has nothing to preview/explain on a non-Glass device.
     ApolloSettingsRow *scrollEdgeEffect =
         [ApolloSettingsRow valueRowWithID:@"gen.scrollEdgeEffect"
-                                    title:@"Scroll Edge Effect"
+                                    title:@"Header Style"
                                    detail:^NSString * { return [weakSelf scrollEdgeEffectStyleText]; }
                                  onSelect:^{
             [weakSelf presentScrollEdgeEffectStyleSheetFromSourceView:[weakSelf cellForRowID:@"gen.scrollEdgeEffect"]];
@@ -1302,32 +1304,61 @@ typedef NS_ENUM(NSInteger, Tag) {
     scrollEdgeEffect.visible = ^BOOL { return IsLiquidGlass(); };
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Liquid Glass chrome behaviors."
+                                            footer:@"Liquid Glass chrome behaviors.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
                                               rows:@[ tabBarIdle, keepSearchInPlace, titleGapCentering, iPadTabBarBottom, scrollEdgeEffect ]];
 }
 
+// Display order of the Header Style picker. Raw values are NOT contiguous
+// (3 was the retired Hidden mode, Blur is 4), so the picker maps index↔value
+// through this table instead of using the enum value as the index.
+static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailable) {
+    const NSInteger values[] = {
+        ApolloScrollEdgeEffectStyleSoft,
+        ApolloScrollEdgeEffectStyleHard,
+        ApolloScrollEdgeEffectStyleBlur,
+    };
+    NSInteger count = blurAvailable ? 3 : 2;
+    if (index < 0 || index >= count) return ApolloScrollEdgeEffectStyleSoft;
+    return values[index];
+}
+
 - (NSString *)scrollEdgeEffectStyleText {
-    switch (sScrollEdgeEffectStyle) {
-        case ApolloScrollEdgeEffectStyleSoft:   return @"Soft";
-        case ApolloScrollEdgeEffectStyleHard:   return @"Hard";
-        case ApolloScrollEdgeEffectStyleHidden: return @"Hidden";
-        default:                                return @"Automatic";
+    switch (ApolloResolvedScrollEdgeEffectStyle()) {
+        case ApolloScrollEdgeEffectStyleSoft: return @"Soft";
+        case ApolloScrollEdgeEffectStyleHard: return @"Hard";
+        case ApolloScrollEdgeEffectStyleBlur: return @"Blur";
+        default: return @"Soft";
     }
 }
 
 - (void)setScrollEdgeEffectStyle:(NSInteger)style {
     sScrollEdgeEffectStyle = style;
     [[NSUserDefaults standardUserDefaults] setInteger:sScrollEdgeEffectStyle forKey:UDKeyScrollEdgeEffectStyle];
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"ApolloScrollEdgeEffectStyleChangedNotification" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloScrollEdgeEffectStyleChangedNotification object:nil];
     [self reloadRowWithID:@"gen.scrollEdgeEffect"];
 }
 
 - (void)presentScrollEdgeEffectStyleSheetFromSourceView:(UIView *)sourceView {
+    // Blur needs the private variableBlur filter; never offer a mode that
+    // would render nothing.
+    BOOL blurAvailable = ApolloProgressiveBlurAvailable();
+    NSMutableArray<NSString *> *options =
+        [NSMutableArray arrayWithObjects:@"Soft", @"Hard", nil];
+    if (blurAvailable) [options addObject:@"Blur"];
+
+    NSInteger currentIndex = 0;
+    NSInteger currentStyle = ApolloResolvedScrollEdgeEffectStyle();
+    for (NSInteger i = 0; i < (NSInteger)options.count; i++) {
+        if (ApolloHeaderStylePickerValue(i, blurAvailable) == currentStyle) {
+            currentIndex = i;
+            break;
+        }
+    }
+
     __weak typeof(self) weakSelf = self;
-    ApolloSettingsPresentPicker(self, sourceView, @"Scroll Edge Effect",
-                                @[@"Automatic", @"Soft", @"Hard", @"Hidden"],
-                                sScrollEdgeEffectStyle, ^(NSInteger pickedIndex) {
-        [weakSelf setScrollEdgeEffectStyle:pickedIndex];
+    ApolloSettingsPresentPicker(self, sourceView, @"Header Style",
+                                options, currentIndex, ^(NSInteger pickedIndex) {
+        [weakSelf setScrollEdgeEffectStyle:ApolloHeaderStylePickerValue(pickedIndex, blurAvailable)];
     });
 }
 
@@ -1700,6 +1731,15 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return sHideSubredditListDescriptions; }
                                   onToggle:^(UISwitch *sender) { [weakSelf hideSubredditListDescriptionsSwitchToggled:sender]; }];
 
+    // Sibling of Hide Feed Descriptions for the MULTIREDDITS section's rows
+    // (which otherwise show a custom description, or the joined subreddit
+    // list). Also independent of the enhancements master.
+    ApolloSettingsRow *hideMultiredditDescriptions =
+        [ApolloSettingsRow switchRowWithID:@"sub.hideMultiredditDescriptions"
+                                     title:@"Hide Multireddit Descriptions"
+                                      isOn:^BOOL { return sHideMultiredditDescriptions; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf hideMultiredditDescriptionsSwitchToggled:sender]; }];
+
     // Pushes the dedicated Subreddit Layout screen — the single customize
     // screen for everything subreddit-page-related: Density (New, Classic, or
     // Apollo's native header), the Apollo Reborn header show switches, and
@@ -1714,8 +1754,8 @@ typedef NS_ENUM(NSInteger, Tag) {
         }];
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Enhance the subreddit list with dividers, and customize subreddit pages. Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts."
-                                              rows:@[ enhancements, modernDividers, hideDescriptions, subredditLayout ]];
+                                            footer:@"Enhance the subreddit list with dividers, and customize subreddit pages. Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts. Multireddits show the subreddits they contain, or a custom description — tap a multireddit while editing the list to rename it or change its description. Hide Multireddit Descriptions blanks that line entirely."
+                                              rows:@[ enhancements, modernDividers, hideDescriptions, hideMultiredditDescriptions, subredditLayout ]];
 }
 
 - (NSString *)subredditLayoutSummaryText {
@@ -1927,7 +1967,23 @@ typedef NS_ENUM(NSInteger, Tag) {
     heartbeat.iconSystemName = @"waveform.path.ecg";
     heartbeat.iconTileColor = [UIColor systemPinkColor];
 
-    return [ApolloSettingsSection sectionWithTitle:@"Privacy" footer:nil rows:@[ heartbeat ]];
+    // Local crash recording (src/crash/). The pending count re-reads on every
+    // configure, so returning from the sub-screen after a delete/submit shows
+    // the fresh number without any manual reload plumbing.
+    ApolloSettingsRow *crashReports =
+        [ApolloSettingsRow disclosureRowWithID:@"privacy.crashReports"
+                                         title:@"Crash Reports"
+                                        detail:^NSString * {
+            NSInteger count = ApolloCrashManager.sharedManager.pendingReportCount;
+            return count > 0 ? [NSString stringWithFormat:@"%ld", (long)count] : nil;
+        }
+                                          push:^UIViewController * {
+            return [[ApolloCrashReportsViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+        }];
+    crashReports.iconSystemName = @"bandage";
+    crashReports.iconTileColor = [UIColor systemOrangeColor];
+
+    return [ApolloSettingsSection sectionWithTitle:@"Privacy" footer:nil rows:@[ heartbeat, crashReports ]];
 }
 
 - (ApolloSettingsSection *)buildAboutSection {
@@ -3168,6 +3224,12 @@ typedef NS_ENUM(NSInteger, Tag) {
     sHideSubredditListDescriptions = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sHideSubredditListDescriptions forKey:UDKeyHideSubredditListDescriptions];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloHideSubredditListDescriptionsChangedNotification object:nil];
+}
+
+- (void)hideMultiredditDescriptionsSwitchToggled:(UISwitch *)sender {
+    sHideMultiredditDescriptions = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sHideMultiredditDescriptions forKey:UDKeyHideMultiredditDescriptions];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloHideMultiredditDescriptionsChangedNotification object:nil];
 }
 
 - (void)showRecentlyReadThumbnailsSwitchToggled:(UISwitch *)sender {
