@@ -794,6 +794,13 @@ static UIFont *ApolloProfileClassicNameFont(void) {
     identity->avatarFrame = avatarFrame;
     identity->nameFrame = nameFrame;
     identity->subnameFrame = subnameFrame;
+    // Classic moves the entire body stack onto the native 15pt grouped
+    // margins. Widen the column by the 9pt recovered on each side instead of
+    // only moving its origin: otherwise LTR ends 18pt short on the trailing
+    // edge, while RTL over-expands toward the leading edge. The max-width
+    // column on iPad keeps its cap plus the same symmetric 18pt adjustment.
+    identity->bodyWidth = MIN(width - 2.0 * margin,
+                              identity->bodyWidth + 2.0 * (ApolloIdentityHeaderSideInset() - margin));
     // bodyX is a frame origin (always the rect's left edge, even in RTL) — in
     // RTL the body column hugs the right margin instead, so its origin sits
     // `bodyWidth` in from that margin rather than at `margin` itself.
@@ -986,7 +993,7 @@ static UIFont *ApolloProfileClassicNameFont(void) {
         y += badgeH;
     }
 
-    // Glass stat cards. The row hugs the 20pt inset-grouped margin rather than
+    // Glass stat cards. The row hugs the 15pt inset-grouped margin rather than
     // the text column's inset, so the card edges line up with the native
     // Posts/Comments/Saved group directly below the header (issue #852). The
     // symmetric widening keeps the row centered (and RTL-safe); on iPad the
