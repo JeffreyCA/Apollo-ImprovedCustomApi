@@ -3428,6 +3428,22 @@ static void initializeRandomSources() {
         sOpenRouterAIModel = loadKey(UDKeyOpenRouterAIModel);
         sGeminiAPIKey = loadKey(UDKeyGeminiAPIKey);
         sGeminiAIModel = loadKey(UDKeyGeminiAIModel);
+        // 3.5.0 exposed these defaults as editable placeholders, so some users
+        // saved them explicitly. Both providers have since retired those exact
+        // IDs. Clear only the known former defaults so the bridge adopts its
+        // maintained replacement without touching a deliberate custom choice.
+        if ([sOpenRouterAIModel isEqualToString:@"meta-llama/llama-3.3-70b-instruct:free"]) {
+            sOpenRouterAIModel = nil;
+            [standardDefaults removeObjectForKey:UDKeyOpenRouterAIModel];
+            ApolloLog(@"[AICloud] Migrated retired OpenRouter default to current free router");
+        }
+        NSString *normalizedGeminiModel = [sGeminiAIModel lowercaseString];
+        if ([normalizedGeminiModel isEqualToString:@"gemini-2.5-flash"] ||
+            [normalizedGeminiModel isEqualToString:@"models/gemini-2.5-flash"]) {
+            sGeminiAIModel = nil;
+            [standardDefaults removeObjectForKey:UDKeyGeminiAIModel];
+            ApolloLog(@"[AICloud] Migrated retired Gemini default to current stable Flash model");
+        }
         sCustomAIAPIKey = loadKey(UDKeyCustomAIAPIKey);
         sCustomAIModel = loadKey(UDKeyCustomAIModel);
         sCustomAIBaseURL = loadKey(UDKeyCustomAIBaseURL);
