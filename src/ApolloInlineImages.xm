@@ -1598,19 +1598,25 @@ static CGFloat ApolloAspectRatioFromURL(NSURL *url) {
 
 - (void)apollo_dismissPanned:(UIPanGestureRecognizer *)recognizer {
     CGPoint translation = [recognizer translationInView:self.view.superview ?: self.view];
-    CGFloat dy = MAX(0.0, translation.y);
+    // Signed: the viewer follows the finger and dismisses in either vertical
+    // direction, matching Apollo's native media viewer (issue #324 asked for
+    // swipe-up dismiss specifically).
+    CGFloat dy = translation.y;
     switch (recognizer.state) {
         case UIGestureRecognizerStateBegan:
             [self apollo_setControlsVisible:NO animated:YES reschedule:NO];
             break;
         case UIGestureRecognizerStateChanged:
             self.view.transform = CGAffineTransformMakeTranslation(0.0, dy);
-            self.view.alpha = 1.0 - MIN(dy / 600.0, 0.4);
+            self.view.alpha = 1.0 - MIN(fabs(dy) / 600.0, 0.4);
             break;
         case UIGestureRecognizerStateEnded:
         case UIGestureRecognizerStateCancelled: {
             CGFloat velocity = [recognizer velocityInView:self.view].y;
-            if (recognizer.state == UIGestureRecognizerStateEnded && (dy > 140.0 || velocity > 900.0)) {
+            // Dismiss when the drag distance OR flick velocity clears the
+            // threshold in the same vertical direction (up or down).
+            if (recognizer.state == UIGestureRecognizerStateEnded &&
+                (fabs(dy) > 140.0 || fabs(velocity) > 900.0)) {
                 [self dismissViewControllerAnimated:YES completion:nil];
             } else {
                 [UIView animateWithDuration:0.25
@@ -1726,12 +1732,13 @@ static CGFloat ApolloAspectRatioFromURL(NSURL *url) {
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
     if (gestureRecognizer != self.dismissPan) return YES;
-    // Swipe-down dismiss only engages on a clearly downward drag while the
-    // current image isn't zoomed — horizontal drags page, zoomed drags pan.
+    // Swipe dismiss engages on a clearly vertical drag (either direction,
+    // like Apollo's native media viewer) while the current image isn't
+    // zoomed — horizontal drags page, zoomed drags pan.
     UIScrollView *zoom = (UIScrollView *)[self.scrollView viewWithTag:4000 + [self apollo_currentPageIndex]];
     if ([zoom isKindOfClass:[UIScrollView class]] && zoom.zoomScale > zoom.minimumZoomScale + 0.01) return NO;
     CGPoint velocity = [self.dismissPan velocityInView:self.view];
-    return velocity.y > 0.0 && fabs(velocity.y) > fabs(velocity.x) * 1.5;
+    return fabs(velocity.y) > fabs(velocity.x) * 1.5;
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
