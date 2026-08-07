@@ -1700,6 +1700,15 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       isOn:^BOOL { return sHideSubredditListDescriptions; }
                                   onToggle:^(UISwitch *sender) { [weakSelf hideSubredditListDescriptionsSwitchToggled:sender]; }];
 
+    // Sibling of Hide Feed Descriptions for the MULTIREDDITS section's rows
+    // (which otherwise show a custom description, or the joined subreddit
+    // list). Also independent of the enhancements master.
+    ApolloSettingsRow *hideMultiredditDescriptions =
+        [ApolloSettingsRow switchRowWithID:@"sub.hideMultiredditDescriptions"
+                                     title:@"Hide Multireddit Descriptions"
+                                      isOn:^BOOL { return sHideMultiredditDescriptions; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf hideMultiredditDescriptionsSwitchToggled:sender]; }];
+
     // Pushes the dedicated Subreddit Layout screen — the single customize
     // screen for everything subreddit-page-related: Density (New, Classic, or
     // Apollo's native header), the Apollo Reborn header show switches, and
@@ -1714,8 +1723,8 @@ typedef NS_ENUM(NSInteger, Tag) {
         }];
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Enhance the subreddit list with dividers, and customize subreddit pages. Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts."
-                                              rows:@[ enhancements, modernDividers, hideDescriptions, subredditLayout ]];
+                                            footer:@"Enhance the subreddit list with dividers, and customize subreddit pages. Hide Feed Descriptions removes the subtitles under Home, Popular, All and Moderator Posts. Multireddits show the subreddits they contain, or a custom description — tap a multireddit while editing the list to rename it or change its description. Hide Multireddit Descriptions blanks that line entirely."
+                                              rows:@[ enhancements, modernDividers, hideDescriptions, hideMultiredditDescriptions, subredditLayout ]];
 }
 
 - (NSString *)subredditLayoutSummaryText {
@@ -3168,6 +3177,12 @@ typedef NS_ENUM(NSInteger, Tag) {
     sHideSubredditListDescriptions = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sHideSubredditListDescriptions forKey:UDKeyHideSubredditListDescriptions];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloHideSubredditListDescriptionsChangedNotification object:nil];
+}
+
+- (void)hideMultiredditDescriptionsSwitchToggled:(UISwitch *)sender {
+    sHideMultiredditDescriptions = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:sHideMultiredditDescriptions forKey:UDKeyHideMultiredditDescriptions];
+    [[NSNotificationCenter defaultCenter] postNotificationName:ApolloHideMultiredditDescriptionsChangedNotification object:nil];
 }
 
 - (void)showRecentlyReadThumbnailsSwitchToggled:(UISwitch *)sender {

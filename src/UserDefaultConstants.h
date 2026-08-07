@@ -42,6 +42,11 @@ static NSString *const ApolloModernSubredditDividersChangedNotification = @"Apol
 // Default NO. See ApolloSubredditIndexPolish.xm.
 static NSString *const UDKeyHideSubredditListDescriptions = @"HideSubredditListDescriptions";
 static NSString *const ApolloHideSubredditListDescriptionsChangedNotification = @"ApolloHideSubredditListDescriptionsChangedNotification";
+// Blank the subtitle line under multireddit rows in the subreddit list (which
+// otherwise shows the multireddit's description, or the subreddits it
+// contains). Default NO. See ApolloMultiredditEdit.xm.
+static NSString *const UDKeyHideMultiredditDescriptions = @"HideMultiredditDescriptions";
+static NSString *const ApolloHideMultiredditDescriptionsChangedNotification = @"ApolloHideMultiredditDescriptionsChangedNotification";
 // Color post (link) and user/author flairs with Reddit's assigned colors. Default NO.
 static NSString *const UDKeyEnableFlairColors = @"EnableFlairColors";
 static NSString *const ApolloFlairColorsChangedNotification = @"ApolloFlairColorsChangedNotification";

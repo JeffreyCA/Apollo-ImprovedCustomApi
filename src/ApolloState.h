@@ -194,6 +194,9 @@ extern BOOL sSubredditListEnhancements;
 // Hide the description subtitles under the subreddit list's built-in feed rows
 // (see UDKeyHideSubredditListDescriptions). Independent of the enhancements master.
 extern BOOL sHideSubredditListDescriptions;
+// Blank the subtitle line under multireddit rows (see
+// UDKeyHideMultiredditDescriptions). Independent of the enhancements master.
+extern BOOL sHideMultiredditDescriptions;
 
 // Color post (link) flairs and user/author flairs using Reddit's assigned
 // colors (filled pill + matching text color). When NO, Apollo's default grey
