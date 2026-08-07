@@ -3326,6 +3326,7 @@ static void initializeRandomSources() {
                                     UDKeyLibreTranslateURL: @"https://libretranslate.de/translate",
                                     UDKeyLibreTranslateAPIKey: @"",
                                     UDKeyTranslationSkipLanguages: @[],
+                                    UDKeyAppleTranslateSheet: @NO,
                                     UDKeyEnableAISummaries: @NO,
                                     UDKeyEnableAIPostSummaries: @YES,
                                     UDKeyEnableAICommentSummaries: @YES,
@@ -3616,6 +3617,8 @@ static void initializeRandomSources() {
         }
         sTranslationSkipLanguages = [clean copy];
     }
+
+    sAppleTranslateSheet = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyAppleTranslateSheet];
 
     // Web JSON: read the flag here, but defer the keychain-backed
     // cookie/modhash/username hydration until AFTER the SecItem fishhooks are

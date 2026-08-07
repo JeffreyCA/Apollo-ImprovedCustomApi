@@ -59,7 +59,19 @@
               -379.7228245577272
             ]
           }
-        },
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 4
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    },
+    {
+      "layers" : [
         {
           "blend-mode" : "plus-lighter",
           "fill" : {
@@ -177,7 +189,19 @@
               151.3338533137137
             ]
           }
-        },
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.1
+      }
+    },
+    {
+      "layers" : [
         {
           "fill-specializations" : [
             {
@@ -204,13 +228,14 @@
           }
         }
       ],
+      "name" : "Group",
       "shadow" : {
         "kind" : "neutral",
-        "opacity" : 0.5
+        "opacity" : 4
       },
       "translucency" : {
         "enabled" : true,
-        "value" : 0.1
+        "value" : 0.2
       }
     }
   ],

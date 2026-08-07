@@ -20,6 +20,10 @@ typedef struct {
 } LGIconGroupDef;
 
 static const LGIconRowEntry kLGGroupEntries_original[] = {
+    { "apollo", "Apollo", "IllIIllIllIllII" },
+    { "apollo-glass", "Apollo Glass", "IllIIllIllIllII" },
+    { "halo", "Halo", "IllIIllIllIllII" },
+    { "halo-glass", "Halo Glass", "IllIIllIllIllII" },
     { "igerman00", "Canon", "iGerman00" },
     { "jryng", "OG", "jryng" },
     { "metalnakls", "metalnakls", "metalnakls" },
@@ -100,9 +104,9 @@ static const LGIconRowEntry kLGGroupEntries_concepts[] = {
 };
 
 static const char *const kLGGroupCover_original[] = {
-    "igerman00",
-    "jryng",
     "harunatsu",
+    "halo-glass",
+    "apollo-glass",
 };
 
 static const char *const kLGGroupCover_classics[] = {
@@ -124,7 +128,7 @@ static const char *const kLGGroupCover_concepts[] = {
 };
 
 static const LGIconGroupDef kLGIconGroups[] = {
-    { "original", "Original", "The original Apollo icon in Liquid Glass, crafted by the community.", "", kLGGroupEntries_original, 6, kLGGroupCover_original, 3 },
+    { "original", "Original", "The original Apollo icon in Liquid Glass, crafted by the community.", "", kLGGroupEntries_original, 10, kLGGroupCover_original, 3 },
     { "classics", "Classics", "Dozens of colorful variants and one-off designs from the original Apollo app, recreated in Liquid Glass.", "jryng, bajader, lilacvibes", kLGGroupEntries_classics, 44, kLGGroupCover_classics, 3 },
     { "helios", "Helios", "Icons inspired by the Hyper Suit 4000 icon from Apollo, and the Modern icons by paulo1manso.", "IllIIllIllIllII", kLGGroupEntries_helios, 11, kLGGroupCover_helios, 3 },
     { "concepts", "Concepts", "A mix of standalone icon concepts, including small thematic sets too short for their own pack.", "", kLGGroupEntries_concepts, 7, kLGGroupCover_concepts, 3 },
@@ -133,7 +137,7 @@ static const LGIconGroupDef kLGIconGroups[] = {
 static const size_t kLGIconGroupCount = 4;
 
 static const LGIconRowEntry kLGFeaturedEntries[] = {
-    { "jryng", "OG", "jryng" },
+    { "halo", "Halo", "IllIIllIllIllII" },
     { "helios-pixel", "Pixels", "IllIIllIllIllII" },
     { "bajader-aperture-science", "Aperture Science", "bajader" },
     { "paulo1manso-modern", "Modern", "paulo1manso" },

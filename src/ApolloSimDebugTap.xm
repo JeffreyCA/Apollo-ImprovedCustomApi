@@ -188,11 +188,41 @@ static void ApolloSimDebugPerformCrash(NSString *type) {
     ApolloLog(@"[SimDebugTap] unknown crash type: %@", type);
 }
 
+// "insetbottom N" command: ask every visible Apollo ASTableView to accept a
+// specific bottom inset. This reproduces the iOS 27 foreground write (153 -> 0)
+// without depending on the simulator exhibiting the upstream lifecycle bug.
+// ApolloListBottomInsetGuard should guard the zero and log the correction.
+static void ApolloSimDebugForceBottomInsetInView(UIView *view, CGFloat bottom) {
+    if ([view isKindOfClass:objc_getClass("ASTableView")] && view.window) {
+        UIScrollView *scrollView = (UIScrollView *)view;
+        UIEdgeInsets inset = scrollView.contentInset;
+        CGFloat before = inset.bottom;
+        inset.bottom = bottom;
+        scrollView.contentInset = inset;
+        ApolloLog(@"[SimDebugTap] insetbottom requested=%.1f before=%.1f after=%.1f table=%@",
+                  bottom, before, scrollView.contentInset.bottom,
+                  NSStringFromClass(scrollView.class));
+    }
+    for (UIView *subview in view.subviews) {
+        ApolloSimDebugForceBottomInsetInView(subview, bottom);
+    }
+}
+
+static void ApolloSimDebugForceBottomInset(CGFloat bottom) {
+    for (UIWindow *window in ApolloAllWindows()) {
+        if (!window.hidden) ApolloSimDebugForceBottomInsetInView(window, bottom);
+    }
+}
+
 static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *observer,
                                           CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString *contents = [NSString stringWithContentsOfFile:kApolloSimTapFile
                                                        encoding:NSUTF8StringEncoding error:nil];
+        if ([contents hasPrefix:@"insetbottom "]) {
+            ApolloSimDebugForceBottomInset([[contents substringFromIndex:12] doubleValue]);
+            return;
+        }
         if ([contents hasPrefix:@"crash "]) {
             NSString *payload = [[contents substringFromIndex:6] stringByTrimmingCharactersInSet:
                 NSCharacterSet.whitespaceAndNewlineCharacterSet];
