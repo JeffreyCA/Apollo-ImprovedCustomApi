@@ -32,6 +32,9 @@
 #import "ApolloWebSessionStore.h"
 #import "ApolloWebSessionLoginViewController.h"
 #import "ApolloAccountCredentials.h"
+#import "crash/ApolloCrashManager.h"
+#import "crash/ApolloCrashContext.h"
+#import "crash/ApolloCrashPromptCoordinator.h"
 
 // MARK: - Sideload Fixes
 
@@ -1924,6 +1927,24 @@ static const char kARCompletion = '\0';
     return customUA;
 }
 
+// #785: "Go to user" with a trailing space after the username crashes. Apollo
+// interpolates the raw search text into "user/<name>/about.json", and the
+// malformed request's response reaches +[RDKObjectBuilder objectFromJSON:] as a
+// plain NSString, which traps on `json[@"kind"]` (unrecognized selector). Trim
+// whitespace/newlines so the request targets the user the person actually typed.
+- (id)userWithUsername:(NSString *)username completion:(id)completion {
+    if ([username isKindOfClass:[NSString class]]) {
+        NSString *trimmed = [username stringByTrimmingCharactersInSet:
+                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length > 0 && ![trimmed isEqualToString:username]) {
+            ApolloLog(@"[GoToUser] Trimmed username (len %lu -> %lu) before user lookup",
+                      (unsigned long)username.length, (unsigned long)trimmed.length);
+            return %orig(trimmed, completion);
+        }
+    }
+    return %orig;
+}
+
 // Defensive guard: bail out if the response isn't a dictionary. Apollo otherwise
 // crashes with "unrecognized selector" when it does `response[@"kind"]` on a string.
 - (NSArray *)objectsFromListingResponse:(id)response {
@@ -3302,6 +3323,16 @@ static void initializeRandomSources() {
 
 // MARK: - Constructor
 %ctor {
+    // Local crash recording installs before anything else in the tweak (and
+    // long before Apollo's app code, whose Bugsnag start is separately
+    // no-op'd in ApolloCrashBugsnagNeutralize.xm). KSCrash handlers can only
+    // be configured once per process, so this must not move later.
+    @autoreleasepool {
+        [[ApolloCrashManager sharedManager] installCrashRecorderIfEnabled];
+        [ApolloCrashContext start];
+        [[ApolloCrashPromptCoordinator sharedCoordinator] start];
+    }
+
     subredditListCache = [NSCache new];
     subredditListCache.countLimit = 16;
     subredditListFetchesInFlight = [NSMutableSet set];
@@ -3312,6 +3343,7 @@ static void initializeRandomSources() {
 
     NSDictionary *defaultValues = @{UDKeyBlockAnnouncements: @YES,
                                     UDKeyEnableFLEX: @NO,
+                                    UDKeyCrashCaptureEnabled: @YES,
                                     UDKeyTrendingSubredditsLimit: @"5",
                                     UDKeyShowRandNsfw: @NO,
                                     UDKeyRandomSubredditsSource: defaultRandomSubredditsSource,

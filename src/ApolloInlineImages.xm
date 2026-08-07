@@ -11,6 +11,7 @@
 #import "ApolloCommon.h"
 #import "ApolloImageChestResolver.h"
 #import "ApolloMediaAutoplay.h"
+#import "ApolloMemoryDiagnostics.h"
 #import "ApolloState.h"
 #import "Tweak.h"
 #import "UserDefaultConstants.h"
@@ -809,16 +810,57 @@ static NSURL *ApolloDashURLFromMediaMetadata(NSDictionary *mediaMetadata, NSURL 
 
 // Cache: assetID → UIImage (success) | NSNull (failed, don't retry)
 // Pending callbacks coalesce concurrent fetches for the same asset.
-static NSMutableDictionary *sApolloDashPosterCache;
+//
+// Memory (issues #806/#814/#820, the 8/2026 OOM wave): this cache used to be a
+// plain NSMutableDictionary of decoded full-resolution posters held for the
+// whole session — JetsamEvent reports showed Apollo at 550-750MB. It is now an
+// NSCache costed in decoded bytes (auto-evicts under system pressure), posters
+// are downscaled before caching (they render at comment width, never full
+// video resolution), and at most kApolloDashPosterMaxConcurrentFetches
+// MPD-download + AVAssetImageGenerator pipelines run at once — fast-scrolling
+// a video-heavy thread used to spawn one 5-frame decoder per video node with
+// no cap, which is exactly the allocation-failure spike in the crash reports.
+static NSCache<NSString *, id> *sApolloDashPosterCache;
 static NSMutableDictionary<NSString *, NSMutableArray *> *sApolloDashPosterPending;
+// FIFO of @[assetID, dashURL] waiting for a fetch slot; guarded by the queue.
+static NSMutableArray<NSArray *> *sApolloDashPosterWaiting;
+static NSUInteger sApolloDashPosterInFlight;
 static dispatch_queue_t sApolloDashPosterQueue;
+static const NSUInteger kApolloDashPosterMaxConcurrentFetches = 2;
 static void ApolloDashPosterInit(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        sApolloDashPosterCache = [NSMutableDictionary dictionary];
+        sApolloDashPosterCache = [NSCache new];
+        sApolloDashPosterCache.name = @"ApolloDashPosterCache";
+        sApolloDashPosterCache.countLimit = 48;
+        sApolloDashPosterCache.totalCostLimit = 48 * 1024 * 1024; // decoded bytes
         sApolloDashPosterPending = [NSMutableDictionary dictionary];
+        sApolloDashPosterWaiting = [NSMutableArray array];
         sApolloDashPosterQueue = dispatch_queue_create("ca.jeffrey.apollo.dashposter", DISPATCH_QUEUE_SERIAL);
+        ApolloMemoryRegisterPurgeHandler(@"dash-posters", ^{
+            [sApolloDashPosterCache removeAllObjects];
+        });
     });
+}
+
+// Posters display at comment width; cap the longest side so a 1080p-only DASH
+// rep doesn't pin ~8MB of decoded RGBA per video for the cache's lifetime.
+static UIImage *ApolloDashPosterDownscaled(UIImage *img) {
+    static const CGFloat kMaxSide = 720.0;
+    CGFloat w = img.size.width, h = img.size.height;
+    if (w <= 0 || h <= 0 || (w <= kMaxSide && h <= kMaxSide)) return img;
+    CGFloat scale = kMaxSide / MAX(w, h);
+    CGSize target = CGSizeMake(round(w * scale), round(h * scale));
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat preferredFormat];
+    fmt.scale = 1.0; // pixel-exact target; the node scales for display
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:target format:fmt];
+    return [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *ctx) {
+        [img drawInRect:CGRectMake(0, 0, target.width, target.height)];
+    }];
+}
+
+static NSUInteger ApolloDashPosterCost(UIImage *img) {
+    return (NSUInteger)(img.size.width * img.scale * img.size.height * img.scale * 4);
 }
 
 // Find the lowest-bitrate video MP4 Representation in a DASH MPD. Reddit
@@ -869,6 +911,32 @@ static BOOL ApolloImageIsMostlyBlack(UIImage *img) {
 // fade in from a logo/black intro, so frame at t=0 is usually black.
 // Calls back on main queue with the UIImage (or nil on failure).
 // Coalesces concurrent calls for the same assetID.
+static void ApolloDashPosterStartFetch(NSString *assetID, NSURL *dashURL);
+
+// Serial-queue only. Finishes one fetch: caches the result, flushes callbacks,
+// frees the slot and starts the next waiting fetch (FIFO).
+static void ApolloDashPosterFinishFetch(NSString *assetID, UIImage *result) {
+    if (result) {
+        [sApolloDashPosterCache setObject:result forKey:assetID cost:ApolloDashPosterCost(result)];
+    } else {
+        [sApolloDashPosterCache setObject:[NSNull null] forKey:assetID cost:1];
+    }
+    NSArray *cbs = [sApolloDashPosterPending[assetID] copy];
+    [sApolloDashPosterPending removeObjectForKey:assetID];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (void (^c)(UIImage *) in cbs) c(result);
+    });
+
+    if (sApolloDashPosterInFlight > 0) sApolloDashPosterInFlight--;
+    while (sApolloDashPosterInFlight < kApolloDashPosterMaxConcurrentFetches &&
+           sApolloDashPosterWaiting.count > 0) {
+        NSArray *next = sApolloDashPosterWaiting.firstObject;
+        [sApolloDashPosterWaiting removeObjectAtIndex:0];
+        sApolloDashPosterInFlight++;
+        ApolloDashPosterStartFetch(next[0], next[1]);
+    }
+}
+
 static void ApolloFetchDashPoster(NSString *assetID, NSURL *dashURL,
                                    void (^completion)(UIImage *poster)) {
     if (!assetID.length || !dashURL || !completion) {
@@ -879,7 +947,7 @@ static void ApolloFetchDashPoster(NSString *assetID, NSURL *dashURL,
     void (^cb)(UIImage *) = [completion copy];
 
     dispatch_async(sApolloDashPosterQueue, ^{
-        id cached = sApolloDashPosterCache[assetID];
+        id cached = [sApolloDashPosterCache objectForKey:assetID];
         if (cached) {
             UIImage *out = (cached == [NSNull null]) ? nil : (UIImage *)cached;
             dispatch_async(dispatch_get_main_queue(), ^{ cb(out); });
@@ -889,93 +957,105 @@ static void ApolloFetchDashPoster(NSString *assetID, NSURL *dashURL,
         if (pending) { [pending addObject:cb]; return; }
         sApolloDashPosterPending[assetID] = [NSMutableArray arrayWithObject:cb];
 
-        void (^deliver)(UIImage *) = ^(UIImage *result) {
-            dispatch_async(sApolloDashPosterQueue, ^{
-                sApolloDashPosterCache[assetID] = result ?: (id)[NSNull null];
-                NSArray *cbs = [sApolloDashPosterPending[assetID] copy];
-                [sApolloDashPosterPending removeObjectForKey:assetID];
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    for (void (^c)(UIImage *) in cbs) c(result);
-                });
-            });
-        };
+        if (sApolloDashPosterInFlight >= kApolloDashPosterMaxConcurrentFetches) {
+            [sApolloDashPosterWaiting addObject:@[assetID, dashURL]];
+            return;
+        }
+        sApolloDashPosterInFlight++;
+        ApolloDashPosterStartFetch(assetID, dashURL);
+    });
+}
 
-        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:dashURL
+// One MPD download + frame-extraction pipeline. Callers hold a fetch slot;
+// every exit path must go through deliver() exactly once to release it.
+static void ApolloDashPosterStartFetch(NSString *assetID, NSURL *dashURL) {
+    void (^deliver)(UIImage *) = ^(UIImage *result) {
+        dispatch_async(sApolloDashPosterQueue, ^{
+            ApolloDashPosterFinishFetch(assetID, result);
+        });
+    };
+
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:dashURL
                                                            cachePolicy:NSURLRequestUseProtocolCachePolicy
                                                        timeoutInterval:8.0];
-        NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
-            completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-            NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]]
-                ? ((NSHTTPURLResponse *)response).statusCode : 0;
-            if (error || status < 200 || status >= 300 || data.length == 0) {
-                ApolloLog(@"[InlineImages] DASH MPD fetch FAIL asset=%@ status=%ld err=%@",
-                          assetID, (long)status, error.localizedDescription ?: @"nil");
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]]
+            ? ((NSHTTPURLResponse *)response).statusCode : 0;
+        if (error || status < 200 || status >= 300 || data.length == 0) {
+            ApolloLog(@"[InlineImages] DASH MPD fetch FAIL asset=%@ status=%ld err=%@",
+                      assetID, (long)status, error.localizedDescription ?: @"nil");
+            deliver(nil);
+            return;
+        }
+        NSURL *mp4URL = ApolloLowestDashMP4URL(data, dashURL);
+        if (!mp4URL) {
+            ApolloLog(@"[InlineImages] DASH parse FAIL asset=%@", assetID);
+            deliver(nil);
+            return;
+        }
+        AVURLAsset *asset = [AVURLAsset URLAssetWithURL:mp4URL options:nil];
+        [asset loadValuesAsynchronouslyForKeys:@[@"tracks", @"duration"] completionHandler:^{
+            if ([asset statusOfValueForKey:@"tracks" error:nil] != AVKeyValueStatusLoaded) {
+                ApolloLog(@"[InlineImages] DASH asset load FAIL asset=%@", assetID);
                 deliver(nil);
                 return;
             }
-            NSURL *mp4URL = ApolloLowestDashMP4URL(data, dashURL);
-            if (!mp4URL) {
-                ApolloLog(@"[InlineImages] DASH parse FAIL asset=%@", assetID);
-                deliver(nil);
-                return;
+            AVAssetImageGenerator *gen = [[AVAssetImageGenerator alloc] initWithAsset:asset];
+            gen.appliesPreferredTrackTransform = YES;
+            gen.requestedTimeToleranceBefore = CMTimeMakeWithSeconds(0.5, 600);
+            gen.requestedTimeToleranceAfter = CMTimeMakeWithSeconds(0.5, 600);
+
+            Float64 durSec = CMTIME_IS_NUMERIC(asset.duration)
+                ? CMTimeGetSeconds(asset.duration) : 0;
+            NSMutableArray<NSValue *> *times = [NSMutableArray array];
+            for (NSNumber *t in @[@3.0, @5.0, @1.5, @0.5, @0.0]) {
+                Float64 v = t.doubleValue;
+                if (durSec <= 0 || v < durSec) {
+                    [times addObject:[NSValue valueWithCMTime:CMTimeMakeWithSeconds(v, 600)]];
+                }
             }
-            AVURLAsset *asset = [AVURLAsset URLAssetWithURL:mp4URL options:nil];
-            [asset loadValuesAsynchronouslyForKeys:@[@"tracks", @"duration"] completionHandler:^{
-                if ([asset statusOfValueForKey:@"tracks" error:nil] != AVKeyValueStatusLoaded) {
-                    ApolloLog(@"[InlineImages] DASH asset load FAIL asset=%@", assetID);
-                    deliver(nil);
-                    return;
-                }
-                AVAssetImageGenerator *gen = [[AVAssetImageGenerator alloc] initWithAsset:asset];
-                gen.appliesPreferredTrackTransform = YES;
-                gen.requestedTimeToleranceBefore = CMTimeMakeWithSeconds(0.5, 600);
-                gen.requestedTimeToleranceAfter = CMTimeMakeWithSeconds(0.5, 600);
+            if (times.count == 0) [times addObject:[NSValue valueWithCMTime:kCMTimeZero]];
 
-                Float64 durSec = CMTIME_IS_NUMERIC(asset.duration)
-                    ? CMTimeGetSeconds(asset.duration) : 0;
-                NSMutableArray<NSValue *> *times = [NSMutableArray array];
-                for (NSNumber *t in @[@3.0, @5.0, @1.5, @0.5, @0.0]) {
-                    Float64 v = t.doubleValue;
-                    if (durSec <= 0 || v < durSec) {
-                        [times addObject:[NSValue valueWithCMTime:CMTimeMakeWithSeconds(v, 600)]];
-                    }
-                }
-                if (times.count == 0) [times addObject:[NSValue valueWithCMTime:kCMTimeZero]];
+            __block BOOL delivered = NO;
+            __block UIImage *darkFallback = nil;
+            __block NSInteger remaining = (NSInteger)times.count;
+            __block AVAssetImageGenerator *retainedGen = gen;
 
-                __block BOOL delivered = NO;
-                __block UIImage *darkFallback = nil;
-                __block NSInteger remaining = (NSInteger)times.count;
-                __block AVAssetImageGenerator *retainedGen = gen;
-
-                [gen generateCGImagesAsynchronouslyForTimes:times
-                    completionHandler:^(CMTime requested, CGImageRef cgImage,
-                                        CMTime actualT, AVAssetImageGeneratorResult res,
-                                        NSError *genError) {
-                    @synchronized (retainedGen ?: (id)@"x") {
-                        if (delivered) return;
-                        remaining--;
-                        if (res == AVAssetImageGeneratorSucceeded && cgImage) {
-                            UIImage *ui = [UIImage imageWithCGImage:cgImage];
-                            BOOL dark = ApolloImageIsMostlyBlack(ui);
-                            if (!dark) {
-                                delivered = YES;
-                                retainedGen = nil;
-                                deliver(ui);
-                                return;
-                            }
-                            if (!darkFallback) darkFallback = ui;
-                        }
-                        if (remaining <= 0 && !delivered) {
+            [gen generateCGImagesAsynchronouslyForTimes:times
+                completionHandler:^(CMTime requested, CGImageRef cgImage,
+                                    CMTime actualT, AVAssetImageGeneratorResult res,
+                                    NSError *genError) {
+                @synchronized (retainedGen ?: (id)@"x") {
+                    if (delivered) return;
+                    remaining--;
+                    if (res == AVAssetImageGeneratorSucceeded && cgImage) {
+                        UIImage *ui = [UIImage imageWithCGImage:cgImage];
+                        BOOL dark = ApolloImageIsMostlyBlack(ui);
+                        if (!dark) {
                             delivered = YES;
+                            // The first usable frame completes this pipeline.
+                            // Stop the remaining candidate-time decodes before
+                            // releasing our FIFO slot, otherwise the next
+                            // queued generator overlaps work with this one and
+                            // defeats the two-decoder memory cap.
+                            [retainedGen cancelAllCGImageGeneration];
                             retainedGen = nil;
-                            deliver(darkFallback);
+                            deliver(ApolloDashPosterDownscaled(ui));
+                            return;
                         }
+                        if (!darkFallback) darkFallback = ui;
                     }
-                }];
+                    if (remaining <= 0 && !delivered) {
+                        delivered = YES;
+                        retainedGen = nil;
+                        deliver(ApolloDashPosterDownscaled(darkFallback));
+                    }
+                }
             }];
         }];
-        [task resume];
-    });
+    }];
+    [task resume];
 }
 
 static NSURL *ApolloNormalizeInlineImageURL(NSURL *url) {
