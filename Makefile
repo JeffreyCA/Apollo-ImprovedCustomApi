@@ -95,6 +95,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloMarkdownBodyCleanup.xm \
     $(SRC_DIR)/ApolloGiphyClient.m \
     $(SRC_DIR)/GiphyPickerViewController.m \
+    $(SRC_DIR)/ApolloCommentVoteInsights.m \
     $(SRC_DIR)/ApolloCreatedAtAlert.xm \
     $(SRC_DIR)/ApolloDeletedCommentsData.m \
     $(SRC_DIR)/ApolloDeletedCommentsUI.xm \
@@ -156,6 +157,7 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloSubredditIndexPolish.xm \
     $(SRC_DIR)/ApolloQuickActions.xm \
     $(SRC_DIR)/ApolloHideModSubreddits.xm \
+    $(SRC_DIR)/ApolloMultiredditEdit.xm \
     $(SRC_DIR)/ApolloSubredditSidebar.xm \
     $(SRC_DIR)/ApolloTagFilters.xm \
     $(SRC_DIR)/ApolloThemeTokens.m \
@@ -194,6 +196,8 @@ ApolloReborn_FILES = \
     $(SRC_DIR)/ApolloFeedTextPostThumbnails.xm \
     $(SRC_DIR)/ApolloTweetBuddy.xm \
 	$(SRC_DIR)/ApolloVisionOSFix.xm \
+    $(SRC_DIR)/ApolloVisionOSHover.xm \
+    $(SRC_DIR)/ApolloVisionOSMultiwindow.xm \
     $(SRC_DIR)/ApolloWebAuthViewController.m \
     $(SRC_DIR)/ApolloWebJSON.m \
     $(SRC_DIR)/ApolloWebJSONIdentity.xm \

@@ -140,10 +140,11 @@ extern BOOL sIconRowMagnifier;
 // See ApolloStatsRowTouch.xm, ApolloCreatedAtAlert.xm, ApolloTranslation.xm.
 extern BOOL sInfoRowTapUpvote;
 extern BOOL sInfoRowTapComments;
-// The tappable "info" icons — % upvoted, timestamp, and edited — all share one
-// display style, chosen by these two mutually-exclusive toggles: Popup = the
-// dismissable alert; Overlay = the small auto-fading card above the icon. With both
-// off, direct taps use Apollo's stock behavior; picking one in the loupe does nothing.
+// The tappable "info" icons — % upvoted, timestamp, and edited — plus owned-comment
+// insights all share one display style, chosen by these two mutually-exclusive
+// toggles: Popup = the dismissable alert; Overlay = the small auto-fading card above
+// the icon/score. With both off, direct taps use Apollo's stock behavior, the comment
+// score hold stays native, and picking an info icon in the loupe does nothing.
 // Popup defaults ON; the settings UI + a load-time clamp keep them exclusive.
 extern BOOL sInfoRowPopupMode;
 extern BOOL sInfoRowOverlayMode;
@@ -193,6 +194,9 @@ extern BOOL sSubredditListEnhancements;
 // Hide the description subtitles under the subreddit list's built-in feed rows
 // (see UDKeyHideSubredditListDescriptions). Independent of the enhancements master.
 extern BOOL sHideSubredditListDescriptions;
+// Blank the subtitle line under multireddit rows (see
+// UDKeyHideMultiredditDescriptions). Independent of the enhancements master.
+extern BOOL sHideMultiredditDescriptions;
 
 // Color post (link) flairs and user/author flairs using Reddit's assigned
 // colors (filled pill + matching text color). When NO, Apollo's default grey

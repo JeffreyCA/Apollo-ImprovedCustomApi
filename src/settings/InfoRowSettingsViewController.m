@@ -91,7 +91,7 @@
     }];
     translation.enabled = ^BOOL { return [weakSelf translationMarkerAvailable]; };
 
-    NSString *actionsFooter = @"Choose what the info-row icons do when tapped. Comments still opens the post when off; it just no longer jumps straight to the comments.\n\nPopup and Overlay control how % upvoted, timestamp and edited reveal their full details. Pick one style or neither.";
+    NSString *actionsFooter = @"Choose what the info-row icons do when tapped. Comments still opens the post when off; it just no longer jumps straight to the comments.\n\nPopup and Overlay control how % upvoted, timestamp and edited reveal their full details. Pick one style or neither.\n\nHold the score on one of your own comments for Reddit's author-only Comment Insights. Apollo shows Reddit-reported upvotes and ratio, and calculates downvotes only when the ratio is reliable. This uses the Reddit web session shared by Chat and Polls.";
     if ([self translationMarkerAvailable]) {
         actionsFooter = [actionsFooter stringByAppendingString:@"\n\nTranslation controls the 🌐 marker beside a post's stats. The Translate line under comment text remains controlled from Translation settings."];
     } else {

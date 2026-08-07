@@ -719,14 +719,38 @@ static NSString *ApolloLinkPreviewBrowserUserAgent(void) {
 + (void)fetchBlueskyPreviewForURL:(NSURL *)url completion:(ApolloLinkPreviewCompletion)completion;
 + (NSString *)crossrefSummaryFromMessage:(NSDictionary *)message;
 + (void)fetchCrossrefPreviewForURL:(NSURL *)url completion:(ApolloLinkPreviewCompletion)completion;
++ (void)fetchRedditInfoPreviewForURL:(NSURL *)url completion:(ApolloLinkPreviewCompletion)completion;
++ (void)fetchRedditInfoPreviewForExactURL:(NSURL *)url completion:(ApolloLinkPreviewCompletion)completion;
 + (void)fetchHTMLPreviewForURL:(NSURL *)url completion:(ApolloLinkPreviewCompletion)completion;
 + (void)fetchHTMLPreviewForURL:(NSURL *)url allowRange:(BOOL)allowRange browserFallback:(BOOL)browserFallback completion:(ApolloLinkPreviewCompletion)completion;
 @end
 
 @implementation ApolloLinkPreviewFetcher
 
++ (NSString *)refetchReasonForCachedPreview:(ApolloLinkPreview *)preview url:(NSURL *)url {
+    if (!preview) return nil;
+    if (ApolloLinkPreviewIsCachedBotWall(preview)) return @"bot-wall";
+    if (ApolloLinkPreviewIsWeakAcademicPreview(preview, url)) return @"weak-academic";
+    BOOL weakGeneric = preview.imageIsFallbackIcon
+        && preview.desc.length == 0
+        && [preview.title isEqualToString:ApolloLinkPreviewTitleFromURL(url)];
+    if (weakGeneric) return @"weak-generic";
+    return nil;
+}
+
 + (void)requestPreviewForURL:(NSURL *)url completion:(void (^)(ApolloLinkPreview *preview))completion {
     if (!ApolloLinkPreviewURLIsHTTP(url)) {
+        if (completion) completion(nil);
+        return;
+    }
+    // Scheme-relative garbage like "https:///message/compose/?to=/r/ios"
+    // (a site-relative link that never got resolved against its page) parses as
+    // an http(s) URL with an EMPTY host. It can never fetch — and worse, the
+    // failure path used to synthesize a slug-title card ("Message Compose")
+    // for it. Negative-cache it so the native link UI shows instead.
+    if (url.host.length == 0) {
+        ApolloLog(@"[LinkPreviews] rejecting empty-host URL %@", url.absoluteString);
+        [[ApolloLinkPreviewCache sharedCache] markNoMetadataForURL:url];
         if (completion) completion(nil);
         return;
     }
@@ -736,11 +760,7 @@ static NSString *ApolloLinkPreviewBrowserUserAgent(void) {
     if ([logHost hasPrefix:@"www."]) logHost = [logHost substringFromIndex:4];
     ApolloLog(@"[LinkPreviews] requestPreview host=%@ cached=%@", logHost, cached ? @"YES" : @"NO");
     if (cached) {
-        BOOL botWall = ApolloLinkPreviewIsCachedBotWall(cached);
-        BOOL weakAcademic = ApolloLinkPreviewIsWeakAcademicPreview(cached, url);
-        BOOL weakGeneric = cached.imageIsFallbackIcon
-            && cached.desc.length == 0
-            && [cached.title isEqualToString:ApolloLinkPreviewTitleFromURL(url)];
+        NSString *weakReason = [self refetchReasonForCachedPreview:cached url:url];
         BOOL staleBluesky = ApolloBlueskyPostPartsFromURL(url)
             && (![cached.previewKind isEqualToString:@"bluesky-post-v2"] || cached.postText.length == 0);
         BOOL staleRedditUser = ApolloRedditUsernameFromProfileURL(url).length > 0
@@ -756,12 +776,12 @@ static NSString *ApolloLinkPreviewBrowserUserAgent(void) {
             && [cached.previewKind isEqualToString:@"reddit-user-profile"]
             && ((redditProfileInfo && !redditProfileInfo.suspensionChecked)
                 || (ApolloBannedProfileCachedIsSuspended(redditUsername) != previewSaysBanned));
-        if (!botWall && !weakAcademic && !weakGeneric && !staleBluesky && !staleRedditUser && !staleRedditSubreddit && !staleRedditUserSuspension) {
+        if (!weakReason && !staleBluesky && !staleRedditUser && !staleRedditSubreddit && !staleRedditUserSuspension) {
             if (completion) completion(cached);
             return;
         }
         ApolloLog(@"[LinkPreviews] refetching cached preview host=%@ reason=%@",
-                  logHost, botWall ? @"bot-wall" : (weakAcademic ? @"weak-academic" : (weakGeneric ? @"weak-generic" : (staleBluesky ? @"stale-bluesky" : (staleRedditUserSuspension ? @"stale-reddit-user-suspension" : (staleRedditUser ? @"stale-reddit-user" : @"stale-reddit-subreddit"))))));
+                  logHost, weakReason ?: (staleBluesky ? @"stale-bluesky" : (staleRedditUserSuspension ? @"stale-reddit-user-suspension" : (staleRedditUser ? @"stale-reddit-user" : @"stale-reddit-subreddit"))));
         if (staleRedditUserSuspension && redditUsername.length > 0) {
             [[ApolloLinkPreviewCache sharedCache] removePreviewsForRedditUsername:redditUsername];
         }
@@ -1337,6 +1357,116 @@ static NSString *ApolloLinkPreviewBrowserUserAgent(void) {
     }] resume];
 }
 
+// The URL with its host's "www." prefix toggled (added when absent, stripped
+// when present), or nil when no meaningful sibling exists. The LinkButtonNode
+// URL is display-derived on iOS 26 — the rendered text drops the scheme and
+// "www." — while Reddit's api/info matches the SUBMITTED URL exactly, so a
+// bare-host lookup misses the www-host submission and vice versa.
+static NSURL *ApolloLinkPreviewWWWSiblingURL(NSURL *url) {
+    NSString *host = url.host;
+    if (host.length == 0) return nil;
+    NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:YES];
+    if (!components) return nil;
+    components.host = [host.lowercaseString hasPrefix:@"www."]
+        ? [host substringFromIndex:4]
+        : [@"www." stringByAppendingString:host];
+    return components.URL;
+}
+
+// Last-resort metadata for a page whose own fetch is bot-walled (reuters.com,
+// wsj.com, ... answer non-browser clients with 401/403): ask Reddit what IT
+// knows about the URL. api/info?url= returns every submission of that exact
+// URL, and each carries the preview image Reddit's own scraper captured
+// server-side at submit time — no client-side bot wall involved — plus the
+// submission title, which for news posts is normally the article headline.
++ (void)fetchRedditInfoPreviewForURL:(NSURL *)url completion:(ApolloLinkPreviewCompletion)completion {
+    if (ApolloLinkPreviewHostIs(url, @"reddit.com") || ApolloLinkPreviewHostIs(url, @"redd.it")) {
+        completion(nil);
+        return;
+    }
+    NSURL *sibling = ApolloLinkPreviewWWWSiblingURL(url);
+    [self fetchRedditInfoPreviewForExactURL:url completion:^(ApolloLinkPreview *preview) {
+        if (preview || !sibling) {
+            completion(preview);
+            return;
+        }
+        [self fetchRedditInfoPreviewForExactURL:sibling completion:completion];
+    }];
+}
+
++ (void)fetchRedditInfoPreviewForExactURL:(NSURL *)url completion:(ApolloLinkPreviewCompletion)completion {
+    // Form-strict escaping: the URL goes in a query VALUE, so its own '&', '=',
+    // '?' and '+' must all be percent-encoded (URLQueryAllowedCharacterSet
+    // would leave them bare and truncate the lookup at the first '&').
+    static NSCharacterSet *valueAllowed;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSMutableCharacterSet *allowed = [[NSCharacterSet alphanumericCharacterSet] mutableCopy];
+        [allowed addCharactersInString:@"-._~"];
+        valueAllowed = [allowed copy];
+    });
+    NSString *escaped = [url.absoluteString stringByAddingPercentEncodingWithAllowedCharacters:valueAllowed];
+    if (escaped.length == 0) {
+        completion(nil);
+        return;
+    }
+
+    NSString *urlString = sLatestRedditBearerToken.length > 0
+        ? [NSString stringWithFormat:@"https://oauth.reddit.com/api/info.json?raw_json=1&url=%@", escaped]
+        : [NSString stringWithFormat:@"https://www.reddit.com/api/info.json?raw_json=1&url=%@", escaped];
+    NSMutableURLRequest *request = ApolloLinkPreviewRequest([NSURL URLWithString:urlString], 10.0);
+    if (sLatestRedditBearerToken.length > 0) {
+        [request setValue:[@"Bearer " stringByAppendingString:sLatestRedditBearerToken] forHTTPHeaderField:@"Authorization"];
+    }
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSHTTPURLResponse *httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        if (error || !data || httpResponse.statusCode < 200 || httpResponse.statusCode >= 300) {
+            ApolloLog(@"[LinkPreviews] Reddit info lookup failed host=%@ status=%ld err=%@",
+                      ApolloLinkPreviewHost(url), (long)httpResponse.statusCode, error.localizedDescription);
+            completion(nil);
+            return;
+        }
+
+        NSDictionary *json = ApolloLinkPreviewDictionaryValue([NSJSONSerialization JSONObjectWithData:data options:0 error:nil]);
+        NSArray *children = ApolloLinkPreviewArrayValue(ApolloLinkPreviewDictionaryValue(json[@"data"])[@"children"]);
+        NSDictionary *bestPost = nil;
+        NSString *bestImage = nil;
+        for (id child in children) {
+            NSDictionary *post = ApolloLinkPreviewDictionaryValue(ApolloLinkPreviewDictionaryValue(child)[@"data"]);
+            if (!post) continue;
+            NSString *image = ApolloRedditPreviewImageStringFromPost(post);
+            if (image.length == 0) continue;
+            bestPost = post;
+            bestImage = image;
+            break;
+        }
+        if (!bestPost) {
+            ApolloLog(@"[LinkPreviews] Reddit info lookup: no submission with preview host=%@ children=%lu",
+                      ApolloLinkPreviewHost(url), (unsigned long)children.count);
+            completion(nil);
+            return;
+        }
+
+        ApolloLinkPreview *preview = [ApolloLinkPreview new];
+        preview.siteName = ApolloLinkPreviewHost(url);
+        preview.title = ApolloLinkPreviewCleanString(bestPost[@"title"]) ?: ApolloLinkPreviewTitleFromURL(url);
+        preview.imageURL = ApolloLinkPreviewURLFromString(bestImage, url);
+        NSDictionary *source = ApolloLinkPreviewDictionaryValue(ApolloLinkPreviewDictionaryValue(ApolloLinkPreviewArrayValue(ApolloLinkPreviewDictionaryValue(bestPost[@"preview"])[@"images"]).firstObject)[@"source"]);
+        if ([source[@"width"] respondsToSelector:@selector(doubleValue)] && [source[@"height"] respondsToSelector:@selector(doubleValue)]) {
+            preview.imageSize = CGSizeMake([source[@"width"] doubleValue], [source[@"height"] doubleValue]);
+        }
+        preview.fetchedAt = [NSDate date];
+        if (preview.imageURL.absoluteString.length == 0) {
+            completion(nil);
+            return;
+        }
+        ApolloLog(@"[LinkPreviews] Reddit info harvested preview host=%@ image=%.0fx%.0f",
+                  ApolloLinkPreviewHost(url), preview.imageSize.width, preview.imageSize.height);
+        completion(preview);
+    }] resume];
+}
+
 + (NSString *)crossrefSummaryFromMessage:(NSDictionary *)message {
     NSString *publisher = ApolloLinkPreviewFirstString(message[@"publisher"]);
     NSString *container = ApolloLinkPreviewFirstString(message[@"container-title"]);
@@ -1455,6 +1585,45 @@ static NSString *ApolloLinkPreviewBrowserUserAgent(void) {
     [self fetchHTMLPreviewForURL:url allowRange:YES browserFallback:NO completion:completion];
 }
 
+// The page itself is unreachable (bot wall, hard 4xx, challenge interstitial).
+// Try the Reddit-harvested preview before settling for the slug-title +
+// favicon fallback card.
++ (void)deliverUnreachablePagePreviewForURL:(NSURL *)url reason:(NSString *)reason completion:(ApolloLinkPreviewCompletion)completion {
+    [self fetchRedditInfoPreviewForURL:url completion:^(ApolloLinkPreview *harvested) {
+        completion(harvested ?: ApolloLinkPreviewFallbackPreviewForURL(url, reason));
+    }];
+}
+
+// Head-truncation for oversized pages: og/twitter/meta tags live in <head>, so
+// a 12MB page (indexca.se serves one) still yields full metadata from its
+// first slice — rejecting it outright threw the metadata away. Cutting at a
+// byte boundary can split a multi-byte UTF-8 sequence, and NSString's UTF-8
+// decode fails on ANY malformed byte, which would silently reroute the whole
+// page through the Latin-1 fallback (mojibake titles) — so back off past any
+// trailing partial sequence first.
+static NSData *ApolloLinkPreviewHeadSliceOfData(NSData *data) {
+    if (data.length <= ApolloLinkPreviewMaxHTMLBytes) return data;
+    NSUInteger length = ApolloLinkPreviewMaxHTMLBytes;
+    const uint8_t *bytes = data.bytes;
+    // Walk back over up to 3 continuation bytes (0b10xxxxxx); if the byte
+    // before them starts a sequence that the cut left incomplete, drop it too.
+    NSUInteger continuations = 0;
+    while (continuations < 3 && length > 0 && (bytes[length - 1] & 0xC0) == 0x80) {
+        continuations++;
+        length--;
+    }
+    if (length > 0) {
+        uint8_t lead = bytes[length - 1];
+        NSUInteger expected = (lead & 0xE0) == 0xC0 ? 1 : (lead & 0xF0) == 0xE0 ? 2 : (lead & 0xF8) == 0xF0 ? 3 : 0;
+        if (expected > 0 && expected != continuations) {
+            length--;
+        } else if (expected > 0 && expected == continuations) {
+            length += continuations; // the sequence was complete after all
+        }
+    }
+    return [data subdataWithRange:NSMakeRange(0, length)];
+}
+
 + (void)fetchHTMLPreviewForURL:(NSURL *)url allowRange:(BOOL)allowRange browserFallback:(BOOL)browserFallback completion:(ApolloLinkPreviewCompletion)completion {
     NSMutableURLRequest *request = ApolloLinkPreviewRequest(url, browserFallback ? 18.0 : 12.0);
     if (allowRange) {
@@ -1463,16 +1632,22 @@ static NSString *ApolloLinkPreviewBrowserUserAgent(void) {
     if (browserFallback) {
         [request setValue:ApolloLinkPreviewBrowserUserAgent() forHTTPHeaderField:@"User-Agent"];
         [request setValue:@"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" forHTTPHeaderField:@"Accept"];
+        [request setValue:@"en-US,en;q=0.9" forHTTPHeaderField:@"Accept-Language"];
     }
 
     [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
         NSString *contentType = [[httpResponse allHeaderFields][@"Content-Type"] lowercaseString];
-        if (error || !data || httpResponse.statusCode < 200 || httpResponse.statusCode >= 300 || data.length > ApolloLinkPreviewMaxHTMLBytes || (contentType.length > 0 && ![contentType containsString:@"text/html"])) {
+        if (error || !data || httpResponse.statusCode < 200 || httpResponse.statusCode >= 300 || (contentType.length > 0 && ![contentType containsString:@"text/html"])) {
             ApolloLog(@"[LinkPreviews] HTML fetch failed %@ status=%ld type=%@ bytes=%lu err=%@",
                       url.absoluteString, (long)httpResponse.statusCode, contentType ?: @"",
                       (unsigned long)data.length, error.localizedDescription);
-            if (!browserFallback && (error || httpResponse.statusCode == 0 || data.length == 0)) {
+            // Bot walls answer non-browser clients with a live 4xx (reuters
+            // 401, wsj 401, jn.pt 403), not a dead connection — so any 4xx/5xx
+            // earns the browser-shaped retry too, not just connection-level
+            // failures. One retry total; the browser attempt's own failure
+            // falls through to the Reddit-harvest / favicon path below.
+            if (!browserFallback && (error || httpResponse.statusCode == 0 || httpResponse.statusCode >= 400 || data.length == 0)) {
                 ApolloLog(@"[LinkPreviews] HTML retrying full browser fetch host=%@", ApolloLinkPreviewHost(url));
                 [self fetchHTMLPreviewForURL:url allowRange:NO browserFallback:YES completion:completion];
                 return;
@@ -1481,15 +1656,18 @@ static NSString *ApolloLinkPreviewBrowserUserAgent(void) {
                 [self fetchCrossrefPreviewForURL:url completion:^(ApolloLinkPreview *preview) {
                     completion(preview ?: ApolloLinkPreviewFallbackPreviewForURL(url, nil));
                 }];
+            } else if (httpResponse.statusCode >= 400) {
+                [self deliverUnreachablePagePreviewForURL:url reason:nil completion:completion];
             } else {
                 completion(ApolloLinkPreviewFallbackPreviewForURL(url, contentType.length > 0 ? contentType : nil));
             }
             return;
         }
 
-        NSString *html = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        NSData *headSlice = ApolloLinkPreviewHeadSliceOfData(data);
+        NSString *html = [[NSString alloc] initWithData:headSlice encoding:NSUTF8StringEncoding];
         if (html.length == 0) {
-            html = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
+            html = [[NSString alloc] initWithData:headSlice encoding:NSISOLatin1StringEncoding];
         }
 
         NSDictionary<NSString *, NSString *> *meta = [self metaValuesFromHTML:html];
@@ -1531,15 +1709,21 @@ static NSString *ApolloLinkPreviewBrowserUserAgent(void) {
 
         // If we landed on a Cloudflare / Reddit verification gate, treat the
         // result as empty so Apollo's native card paints instead of "Please
-        // wait for verification" everywhere.
+        // wait for verification" everywhere. A gate served to the app UA may
+        // still open for a browser-shaped client, so spend the one retry on it
+        // before falling back to Crossref / Reddit-harvest / favicon.
         if (ApolloLinkPreviewIsBlockedPage(preview.title, html)) {
             ApolloLog(@"[LinkPreviews] blocked-page sniff matched %@ title=%@", url.absoluteString, preview.title);
+            if (!browserFallback) {
+                [self fetchHTMLPreviewForURL:url allowRange:NO browserFallback:YES completion:completion];
+                return;
+            }
             if (ApolloLinkPreviewDOIFromURL(url).length > 0) {
                 [self fetchCrossrefPreviewForURL:url completion:^(ApolloLinkPreview *crossrefPreview) {
                     completion(crossrefPreview ?: ApolloLinkPreviewFallbackPreviewForURL(url, nil));
                 }];
             } else {
-                completion(ApolloLinkPreviewFallbackPreviewForURL(url, nil));
+                [self deliverUnreachablePagePreviewForURL:url reason:nil completion:completion];
             }
             return;
         }

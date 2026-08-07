@@ -1695,12 +1695,27 @@ static UIColor *ApolloAISummaryThemeAccent(id headerNode) {
     return tc ? [accent resolvedColorWithTraitCollection:tc] : accent;
 }
 
+// The profile is captured when generation starts and persisted with the cached
+// summary (e.g. "gemini|gemini-3.6-flash|"). Derive attribution from that
+// stored profile rather than today's global setting, so a completed/cached card
+// can never claim it came from a provider that did not generate it.
+static NSString *ApolloAISummaryProviderAttribution(NSString *generationProfile) {
+    NSString *provider = [[generationProfile componentsSeparatedByString:@"|"] firstObject];
+    if ([provider isEqualToString:@"apple"]) return @"on device";
+    if (provider.length == 0) return nil;
+    if ([provider isEqualToString:@"gemini"]) return @"with Gemini";
+    if ([provider isEqualToString:@"openrouter"]) return @"via OpenRouter";
+    if ([provider isEqualToString:@"custom"]) return @"via Custom Provider";
+    return nil;
+}
+
 static NSAttributedString *ApolloAISummaryAttributedText(NSString *title,
                                                          ApolloAIBoxState state,
                                                          NSString *bodyText,
                                                          BOOL expanded,
                                                          BOOL isPost,
                                                          NSUInteger sourceCount,
+                                                         NSString *generationProfile,
                                                          UIColor *accent) {
     if (state == ApolloAIBoxStateNone) return nil;
 
@@ -1804,11 +1819,17 @@ static NSAttributedString *ApolloAISummaryAttributedText(NSString *title,
     }
     if (state == ApolloAIBoxStateReady) {
         // Quiet trust/expectation footer so the summary isn't mistaken for the
-        // author's own words.
+        // author's own words. Provider attribution also tells users whether
+        // their content stayed on-device or was sent to their configured cloud
+        // service, without adding another icon or visual row to the card.
+        NSString *attribution = ApolloAISummaryProviderAttribution(generationProfile);
+        NSString *origin = attribution.length > 0
+            ? [NSString stringWithFormat:@"AI-generated %@", attribution]
+            : @"AI-generated";
         NSString *caption = (!isPost && sourceCount > 0)
-            ? [NSString stringWithFormat:@"\n\nAI-generated · Based on %lu representative comments · may be inaccurate",
-                                         (unsigned long)sourceCount]
-            : @"\n\nAI-generated · may be inaccurate";
+            ? [NSString stringWithFormat:@"\n\n%@ · Based on %lu representative comments · may be inaccurate",
+                                         origin, (unsigned long)sourceCount]
+            : [NSString stringWithFormat:@"\n\n%@ · may be inaccurate", origin];
         [result appendAttributedString:[[NSAttributedString alloc] initWithString:caption
                                                                        attributes:captionAttributes]];
     }
@@ -1827,6 +1848,9 @@ static ASTextNode *ApolloAIEnsureSummaryNode(id headerNode, BOOL isPost) {
     textNode = [[textNodeClass alloc] init];
     textNode.maximumNumberOfLines = 0;
     textNode.userInteractionEnabled = YES;
+    // Tweak chrome, not post content — keeps the translation module's
+    // post-body candidate scan from ever picking the summary pill as "the body".
+    ApolloMarkTweakUITextNode(textNode);
     objc_setAssociatedObject(textNode, &kApolloAISummaryOwnerKey, headerNode, OBJC_ASSOCIATION_ASSIGN);
     objc_setAssociatedObject(textNode, &kApolloAISummaryIsPostKey, @(isPost), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     __weak ASTextNode *weakTextNode = textNode;
@@ -1882,6 +1906,8 @@ static void ApolloAIRenderSummaryNode(id headerNode, BOOL isPost) {
         : objc_getAssociatedObject(headerNode, summaryKey);
     NSString *fullName = objc_getAssociatedObject(headerNode, &kApolloAIHeaderFullNameKey);
     NSUInteger sourceCount = isPost ? 0 : [sCommentSummarySourceCounts[fullName] unsignedIntegerValue];
+    NSString *generationProfile = isPost ? sPostSummaryProfiles[fullName]
+                                         : sCommentSummaryProfiles[fullName];
     ASTextNode *textNode = ApolloAIEnsureSummaryNode(headerNode, isPost);
     NSString *title;
     if (isPost) {
@@ -1898,7 +1924,8 @@ static void ApolloAIRenderSummaryNode(id headerNode, BOOL isPost) {
         title = @"Discussion so far";
     }
     textNode.attributedText = ApolloAISummaryAttributedText(
-        title, state, body, expanded, isPost, sourceCount, ApolloAISummaryThemeAccent(headerNode));
+        title, state, body, expanded, isPost, sourceCount, generationProfile,
+        ApolloAISummaryThemeAccent(headerNode));
     // Clamp the chevron-less collapsed states (idle / loading / empty) to a single
     // line so a long title + "· Tap to summarize" subtitle can't wrap. Ready/Error
     // collapsed cards KEEP their trailing chevron, so leave them unclamped — at large
@@ -2190,6 +2217,10 @@ static NSString *ApolloAIFriendlyError(NSError *error) {
             return @"Couldn't reach the AI service. Check your connection and provider settings, then try again.";
         case 13: // cloud only: reasoning consumed the whole response
             return @"The model spent its entire response thinking instead of answering. Try a different model in Apollo AI settings.";
+        case 14: // cloud only: retired, missing, or unavailable model
+            return @"That AI model is no longer available. Choose a current model in Apollo AI settings.";
+        case 15: // cloud only: provider quota/rate limit
+            return @"The AI provider's free quota or rate limit has been reached. Try again later or check your provider usage.";
         default:
             break;
     }
