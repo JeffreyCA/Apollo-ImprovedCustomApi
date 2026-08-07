@@ -1,0 +1,38 @@
+{
+    "manifest_version": 2,
+    "name": "Open in Apollo (Legacy)",
+    "description": "Legacy automatic Reddit-to-Apollo routing for users who are not using Link Companion.",
+    "version": "1.1",
+
+    "icons": {
+        "48": "images/icon-48.png",
+        "96": "images/icon-96.png",
+        "128": "images/icon-128.png",
+        "256": "images/icon-256.png",
+        "512": "images/icon-512.png"
+    },
+
+    "content_scripts": [{
+        "js": [ "link-utils.js", "content.js" ],
+        "matches": [
+            "*://reddit.com/*",
+            "*://*.reddit.com/*",
+            "*://redd.it/*"
+        ],
+        "run_at": "document_end"
+    }],
+
+    "browser_action": {
+        "default_popup": "popup.html",
+        "default_icon": {
+            "16": "images/toolbar-icon-16.png",
+            "19": "images/toolbar-icon-19.png",
+            "32": "images/toolbar-icon-32.png",
+            "38": "images/toolbar-icon-38.png"
+        }
+    },
+
+    "permissions": [
+        "storage"
+    ]
+}

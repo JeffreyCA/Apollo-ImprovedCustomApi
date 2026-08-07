@@ -141,10 +141,10 @@ Notifications can be delivered two ways — pick the one that matches your Apple
 
 There are a few ways to open Reddit links in Apollo, depending on your browser and which IPA variant you installed.
 
-### Safari — Link Companion with a built-in manual fallback
+### Safari — Link Companion with bundled fallback choices
 
 The separately installed Apollo Reborn Link Companion includes **Open in Apollo
-(Companion)**, the sole automatic Safari extension. It routes Reddit links
+(Companion)**, the recommended automatic Safari extension. It routes Reddit links
 through `https://open.apolloreborn.app/open?url=…`; the same signed companion app
 owns that Universal Link and forwards it to Apollo from native code, avoiding
 Safari's `apollo://` confirmation.
@@ -162,6 +162,13 @@ floating **Open in Apollo** link. This supplies a recovery path without racing
 the Companion extension. The fallback is included in the **standard** and
 **Liquid Glass** IPA variants.
 
+Those IPAs also retain the former automatic implementation as **Open in Apollo
+(Legacy)**. It is an opt-in alternative for people who prefer Apollo's bundled
+extension and do not want to install Link Companion. Enable either **Legacy** or
+**Companion**, never both: two automatic extensions can compete for the same
+navigation. The manual fallback is passive and is safe to leave enabled with
+either choice.
+
 > [!IMPORTANT]
 > Install and launch the project-signed Link Companion before enabling its
 > automatic extension. Apollo itself can keep any sideloaded bundle ID and
@@ -177,11 +184,12 @@ unwrapped before the tap. Direct media URLs (`i.redd.it`, `v.redd.it`, and
 preview hosts) intentionally stay in Safari because they do not contain a post
 ID that can be routed safely.
 
-For links tapped in Messages: if iOS sends the link to Safari, the Companion
-extension opens it automatically; the Apollo extension supplies the button if
-that handoff does not happen. If another installed app claims `reddit.com`
-before Safari loads, no Safari extension can run; use **Share → Open in Apollo**
-(or the Shortcut fallback) from the link.
+For links tapped in Messages: if iOS sends the link to Safari, the Companion can
+open it automatically; the manual Apollo extension supplies the button if that
+handoff does not happen. The Legacy extension only runs once a Reddit page has
+loaded in Safari. If another installed app claims `reddit.com` before Safari
+loads, no Safari extension can run; use **Share → Open in Apollo** (or the
+Shortcut fallback) from the link.
 
 ### Safari — userscript (works with any variant)
 
@@ -261,11 +269,11 @@ Available patches:
 
 - **`--liquid-glass`** - enables the iOS 26 Liquid Glass UI and installs a pack of Liquid Glass icons that can be switched between in the tweak's in-app icon picker.
 - **`--liquid-glass-icons`** - installs the Liquid Glass icon catalog **only**, without the iOS 26 UI chrome (skips the `vtool` build-version bump that opts the app into the iOS 26 runtime, so legacy UIKit behaviors like the bottom-tab swipe gesture are preserved). Mutually exclusive with `--liquid-glass`.
-- **`--fix-safari-extension`** - converts the bundled Safari Web Extension (`Apollofari.appex`) into the passive, Reddit-only **Open in Apollo (Manual Fallback)** button. Automatic routing belongs to Link Companion. See [`safari-extension/README.md`](safari-extension/README.md). Official release IPAs already include this; use it when patching an IPA yourself.
+- **`--fix-safari-extension`** - converts `Apollofari.appex` into the passive, Reddit-only **Open in Apollo (Manual Fallback)** and adds the former automatic implementation as the opt-in **Open in Apollo (Legacy)**. See [`safari-extension/README.md`](safari-extension/README.md). Official release IPAs already include both; use it when patching an IPA yourself.
 - **`--url-schemes <list>`** - adds comma-separated URL schemes to `CFBundleURLTypes` (see [Custom Redirect URI](#custom-redirect-uri), obsolete on v3.1.0+).
 - **`--remove-code-signature`** - strips the existing code signature.
 
-To run via GitHub Actions, fork this repo and trigger **Actions** > **Build IPA**. It can inject the tweak (`inject_tweak`), strip extensions (`no_extensions`), apply Liquid Glass (`liquid_glass`) or Liquid Glass icons only (`liquid_glass_icons`), add URL schemes, and remove the code signature in one run, from an Apollo IPA URL. The passive Safari fallback overlay is applied automatically whenever extensions are kept.
+To run via GitHub Actions, fork this repo and trigger **Actions** > **Build IPA**. It can inject the tweak (`inject_tweak`), strip extensions (`no_extensions`), apply Liquid Glass (`liquid_glass`) or Liquid Glass icons only (`liquid_glass_icons`), add URL schemes, and remove the code signature in one run, from an Apollo IPA URL. The manual and legacy Safari extensions are packaged automatically whenever extensions are kept.
 
 ## Sideloadly
 

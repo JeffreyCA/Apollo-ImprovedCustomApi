@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # Thin IPA wrapper around the fix-safari-extension module. The bundle mutation
-# (overlay the manual fallback assets onto Apollofari.appex,
-# strip its signature) lives in scripts/modules/fix-safari-extension.sh and is
-# shared with patch.sh and the apply-patches.sh orchestrator. This wrapper only
-# unpacks the IPA, calls the module, and repacks. No-op when the IPA has no
+# (convert Apollofari.appex to the manual fallback, add ApollofariLegacy.appex,
+# and strip their signatures) lives in scripts/modules/fix-safari-extension.sh
+# and is shared with patch.sh and the apply-patches.sh orchestrator. This wrapper
+# only unpacks the IPA, calls the module, and repacks. No-op when the IPA has no
 # Apollofari.appex (the no-extensions variants).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -15,8 +15,8 @@ source "$SCRIPT_DIR/modules/fix-safari-extension.sh"
 usage() {
     echo "Usage: $0 <path-to-ipa>"
     echo ""
-    echo "Converts Apollofari.appex into a Reddit-only manual fallback button"
-    echo "and removes the appex code signature so the user's signer re-seals it."
+    echo "Installs the Reddit-only manual fallback and a separate legacy automatic"
+    echo "extension, then removes their signatures so the user's signer re-seals them."
     echo "Exits 0 without changes if the IPA contains no Apollofari.appex."
 }
 

@@ -8,9 +8,10 @@
 
 static NSString *const kLinkCompanionTestFlightURL = @"https://testflight.apple.com/join/afRc2ztK";
 
-// The Link Companion screen explains the two-extension architecture: the
-// Companion extension is the sole automatic router, while Apollo's bundled
-// extension is a passive manual fallback that is safe to leave enabled. The
+// The Link Companion screen explains the Safari extension choices: the
+// Companion extension is the recommended automatic router, while Apollo's
+// bundled manual extension is a passive fallback that is safe to leave enabled.
+// A separately labelled legacy automatic extension remains opt-in. The
 // "Get the Shortcut" card remains the signer-independent path for people using
 // a non-Safari browser (Chrome/Firefox/Edge/Brave/...), where Safari extensions
 // do not run. Tapping it opens Shortcuts directly at the Add Shortcut sheet.
@@ -488,7 +489,7 @@ static UIView *LinkCompanionMakeStep(NSString *number, NSString *title, NSString
     NSArray<NSArray<NSString *> *> *stepData = @[
         @[ @"1", @"Install Link Companion", @"Install the latest TestFlight build and open it once." ],
         @[ @"2", @"Enable automatic opening", @"In Settings, open Apps → Safari → Extensions → Open in Apollo (Companion). Set Website Access to All Websites → Allow. On older iOS versions, Safari appears directly in Settings." ],
-        @[ @"3", @"Keep the manual fallback", @"Open in Apollo (Manual Fallback) from the Apollo app is safe to leave enabled. It never redirects automatically; it only shows a button if the companion does not open. If the older extension is still named Apollofari or just Open in Apollo, update Apollo or turn it off." ],
+        @[ @"3", @"Choose one automatic opener", @"Use Open in Apollo (Companion), or enable Open in Apollo (Legacy) if you prefer the former Apollo-bundled approach — never both. Open in Apollo (Manual Fallback) is passive and safe to leave enabled with either choice." ],
         @[ @"4", @"Open any Reddit link", @"Reddit links that reach Safari — from websites, Google, or Messages — now open automatically in Apollo." ],
     ];
     NSUInteger si = 0;

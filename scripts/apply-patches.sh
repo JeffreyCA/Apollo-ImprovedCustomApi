@@ -19,7 +19,7 @@ set -euo pipefail
 #   stamp-build-variant:<variant>  set ARBuildVariant (usage-heartbeat "c" field)
 #   enable-promotion              unlock adaptive refresh rates above 60 Hz on iPhone
 #   inject-url-schemes:<csv>       append URL schemes to CFBundleURLTypes
-#   fix-safari-extension           convert Apollofari.appex to a manual fallback
+#   fix-safari-extension           install manual + legacy Safari extensions
 #   fix-openin-extension[:<dylib>] repair OpenInUIExtension.appex
 #   inject-widgets[:<appex>]       remove stock widget, inject ApolloRebornWidgets.appex
 #   liquid-glass-binary            vtool SDK bump + LC_RPATH cleanup
