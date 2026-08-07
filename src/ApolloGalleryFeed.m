@@ -1,10 +1,14 @@
 // ApolloGalleryFeed.m — see ApolloGalleryFeed.h for the feature overview.
 
 #import "ApolloGalleryFeed.h"
+#import "ApolloAccountCredentials.h"
 #import "ApolloTagFilters.h"
 #import "ApolloCommon.h"
 #import "ApolloHostedVideo.h"
 #import "ApolloState.h"
+#import "ApolloWebJSON.h"
+#import "ApolloWebSessionStore.h"
+#import <objc/message.h>
 
 // How many pictures one "batch" should try to gather before the UI is told to
 // stop. Reddit listings mix text/link/video posts in, so a batch usually spans
@@ -186,6 +190,26 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 
 @interface ApolloGalleryFeed ()
 @property (nonatomic, copy) NSString *subreddit;
+// Root listing path without the sort component: `/r/apolloapp` for a
+// subreddit, `/user/name/m/favourites` for a multireddit.
+@property (nonatomic, copy) NSString *listingPath;
+// Privacy-friendly label used only in diagnostics (r/foo or m/foo).
+@property (nonatomic, copy) NSString *sourceDescription;
+// The account this gallery is bound to, captured at presentation time. We pin
+// the account IDENTITY, never a credential: Reddit rotates access tokens, so a
+// copied bearer would go stale under a long-lived gallery and every later page
+// would 401. `boundAccountClient` is the exact live RDKClient Apollo owns and
+// keeps refreshed in-process, so re-reading its credential per request always
+// yields the current token. Never resolve the active account again at request
+// time either — background polling and account switches would repoint an
+// already-open gallery at a different signed-in user.
+@property (nonatomic, strong, nullable) id boundAccountClient;
+// Web-session (keyless) accounts have no OAuth credential; their per-username
+// synthetic bearer is a stable placeholder the Tweak.xm chokepoint swaps for
+// the matching cookie, so it does not rotate and is safe to hold.
+@property (nonatomic, copy, nullable) NSString *boundSyntheticBearer;
+// Diagnostics only.
+@property (nonatomic, copy, nullable) NSString *boundUsername;
 @property (nonatomic, strong) NSMutableArray<ApolloGalleryItem *> *mutableItems;
 // `mutableItems` filtered by allowedKinds, rebuilt whenever either changes.
 @property (nonatomic, strong) NSArray<ApolloGalleryItem *> *filteredItems;
@@ -206,22 +230,83 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 
 @implementation ApolloGalleryFeed
 
+// authorizationCredential -> accessToken -> accessToken on a specific live
+// RDKClient. Keep this runtime-driven so the gallery does not acquire a
+// link-time dependency on RedditKit's private classes. Called fresh for every
+// request, so a token Apollo has rotated since the gallery opened is picked up
+// on the next page instead of the gallery paging with a dead credential.
+static NSString *ApolloGalleryBearerForClient(id client) {
+    if (!client) return nil;
+
+    SEL credentialSelector = NSSelectorFromString(@"authorizationCredential");
+    SEL tokenSelector = NSSelectorFromString(@"accessToken");
+    if (![client respondsToSelector:credentialSelector]) return nil;
+    id credential = ((id (*)(id, SEL))objc_msgSend)(client, credentialSelector);
+    if (![credential respondsToSelector:tokenSelector]) return nil;
+    id accessToken = ((id (*)(id, SEL))objc_msgSend)(credential, tokenSelector);
+    if (![accessToken respondsToSelector:tokenSelector]) return nil;
+    id token = ((id (*)(id, SEL))objc_msgSend)(accessToken, tokenSelector);
+    return [token isKindOfClass:[NSString class]] && [(NSString *)token length] > 0
+        ? [(NSString *)token copy]
+        : nil;
+}
+
 - (instancetype)initWithSubreddit:(NSString *)subreddit {
+    NSString *slug = [subreddit copy] ?: @"";
     self = [super init];
     if (self) {
-        _subreddit = [subreddit copy] ?: @"";
-        _mutableItems = [NSMutableArray array];
-        _seenImageKeys = [NSMutableSet set];
-        _sort = ApolloGallerySortHot;
-        _topWindow = ApolloGalleryTopWindowWeek;
-        // Every gallery opens showing everything. The filter is deliberately
-        // NOT persisted: it lives on this feed object, and each gallery visit
-        // creates a fresh feed — so "videos only" in one subreddit can't leak
-        // into the next, or into next week.
-        _allowedKinds = ApolloGalleryMediaKindAll;
-        _filteredItems = @[];
+        [self configureWithListingPath:[@"/r/" stringByAppendingString:slug]
+                             subreddit:slug
+                      sourceDescription:[@"r/" stringByAppendingString:slug]];
     }
     return self;
+}
+
+- (instancetype)initWithMultiredditPath:(NSString *)multiredditPath {
+    NSString *path = [multiredditPath copy] ?: @"";
+    NSArray<NSString *> *components = [path pathComponents];
+    NSString *name = components.lastObject ?: @"multireddit";
+    self = [super init];
+    if (self) {
+        [self configureWithListingPath:path
+                             subreddit:@""
+                      sourceDescription:[@"m/" stringByAppendingString:name]];
+    }
+    return self;
+}
+
+- (void)configureWithListingPath:(NSString *)listingPath
+                       subreddit:(NSString *)subreddit
+                sourceDescription:(NSString *)sourceDescription {
+    _subreddit = [subreddit copy] ?: @"";
+    _listingPath = [listingPath copy] ?: @"";
+    _sourceDescription = [sourceDescription copy] ?: @"feed";
+    NSString *activeUsername = ApolloActiveAccountUsername();
+    _boundUsername = [activeUsername copy];
+    // Retain the client itself rather than a copy of its token. Apollo refreshes
+    // credentials in place on this exact object, so holding it keeps us on the
+    // right account AND on a live credential for the gallery's whole lifetime.
+    _boundAccountClient = ApolloActiveAccountClient();
+    if (activeUsername.length > 0 && ApolloWebSessionFor(activeUsername) != nil) {
+        // The live AccountManager can briefly be between clients while a
+        // switch settles. A known primary web session still has an unambiguous
+        // per-account placeholder bearer, so preserve its identity explicitly.
+        _boundSyntheticBearer = ApolloWebJSONSyntheticBearerTokenForUsername(activeUsername);
+    }
+    ApolloLog(@"[Gallery] %@ auth bound to %@ (%@)", _sourceDescription,
+              activeUsername.length > 0 ? [@"u/" stringByAppendingString:activeUsername] : @"signed out",
+              _boundAccountClient ? @"OAuth client" :
+                  (_boundSyntheticBearer.length > 0 ? @"web session" : @"public"));
+    _mutableItems = [NSMutableArray array];
+    _seenImageKeys = [NSMutableSet set];
+    _sort = ApolloGallerySortHot;
+    _topWindow = ApolloGalleryTopWindowWeek;
+    // Every gallery opens showing everything. The filter is deliberately NOT
+    // persisted: it lives on this feed object, and each gallery visit creates
+    // a fresh feed — so "videos only" in one feed can't leak into the next, or
+    // into next week.
+    _allowedKinds = ApolloGalleryMediaKindAll;
+    _filteredItems = @[];
 }
 
 - (NSArray<ApolloGalleryItem *> *)items {
@@ -353,10 +438,41 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 
 #pragma mark Requests
 
-- (NSString *)escapedSubreddit {
+- (NSString *)escapedListingPath {
     NSMutableCharacterSet *allowed = [[NSCharacterSet alphanumericCharacterSet] mutableCopy];
     [allowed addCharactersInString:@"_-"];
-    return [self.subreddit stringByAddingPercentEncodingWithAllowedCharacters:allowed] ?: self.subreddit;
+    NSMutableArray<NSString *> *escapedComponents = [NSMutableArray array];
+    for (NSString *component in [self.listingPath pathComponents]) {
+        if ([component isEqualToString:@"/"] || component.length == 0) continue;
+        NSString *escaped = [component stringByAddingPercentEncodingWithAllowedCharacters:allowed];
+        if (escaped.length > 0) [escapedComponents addObject:escaped];
+    }
+    return [@"/" stringByAppendingString:[escapedComponents componentsJoinedByString:@"/"]];
+}
+
+// The bearer for the NEXT request, read live from the bound account every time.
+//
+// Reddit access tokens rotate, so this is deliberately not cached: an OAuth
+// gallery left open past a refresh must page with the token Apollo holds now,
+// not the one that was current when the grid was presented. Web-session
+// accounts fall back to their synthetic placeholder, which does not rotate.
+//
+// Main thread only, for the same reason ApolloActiveAccountClient() is: a
+// credential refresh reassigns `authorizationCredential` on the main thread, so
+// reading it from a network callback could race the release of the old one.
+// Off-main callers get the value hopped over, never a stale copy.
+- (NSString *)currentBearerToken {
+    if (![NSThread isMainThread]) {
+        __block NSString *token = nil;
+        dispatch_sync(dispatch_get_main_queue(), ^{ token = [self currentBearerToken]; });
+        return token;
+    }
+    NSString *live = ApolloGalleryBearerForClient(self.boundAccountClient);
+    if (live.length > 0) return live;
+    // No live OAuth credential: either a keyless account (synthetic bearer, the
+    // normal case) or an OAuth account momentarily mid-refresh, where sending no
+    // bearer is better than sending a token we know is dead.
+    return self.boundSyntheticBearer;
 }
 
 // `useOAuthHost` picks the transport:
@@ -365,7 +481,7 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 //          rewrites onto the harvested web-session cookie for keyless accounts
 //          and leaves alone (public JSON) when nobody is signed in.
 - (NSURLRequest *)requestForCursor:(NSString *)after useOAuthHost:(BOOL)useOAuthHost {
-    NSString *escaped = [self escapedSubreddit];
+    NSString *escapedPath = [self escapedListingPath];
     NSMutableString *query = [NSMutableString stringWithFormat:@"limit=%ld&raw_json=1",
                               (long)kApolloGalleryListingLimit];
     if (self.sort == ApolloGallerySortTop) {
@@ -376,8 +492,8 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
     }
 
     NSString *urlString = useOAuthHost
-        ? [NSString stringWithFormat:@"https://oauth.reddit.com/r/%@/%@?%@", escaped, [self sortPathComponent], query]
-        : [NSString stringWithFormat:@"https://www.reddit.com/r/%@/%@.json?%@", escaped, [self sortPathComponent], query];
+        ? [NSString stringWithFormat:@"https://oauth.reddit.com%@/%@?%@", escapedPath, [self sortPathComponent], query]
+        : [NSString stringWithFormat:@"https://www.reddit.com%@/%@.json?%@", escapedPath, [self sortPathComponent], query];
 
     NSURL *url = [NSURL URLWithString:urlString];
     if (!url) return nil;
@@ -385,7 +501,7 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.timeoutInterval = kApolloGalleryRequestTimeout;
     if (useOAuthHost) {
-        NSString *token = [sLatestRedditBearerToken copy];
+        NSString *token = [self currentBearerToken];
         if (token.length > 0) {
             [request setValue:[@"Bearer " stringByAppendingString:token] forHTTPHeaderField:@"Authorization"];
         }
@@ -398,9 +514,10 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 // `data` dictionary, or nil plus an error message.
 - (void)fetchPageWithCursor:(NSString *)after
                  completion:(void (^)(NSDictionary *_Nullable listing, NSString *_Nullable errorMessage))completion {
-    // A real captured bearer means this install is running API keys; without
-    // one we're either keyless (cookie rewrite downstream) or signed out.
-    BOOL preferOAuth = sLatestRedditBearerToken.length > 0;
+    // Both real OAuth and per-account synthetic bearers begin at the OAuth
+    // host. Web JSON recognizes the latter and rewrites it to the matching
+    // user's cookie; no bearer means a signed-out public JSON request.
+    BOOL preferOAuth = [self currentBearerToken].length > 0;
     [self fetchPageWithCursor:after useOAuthHost:preferOAuth allowRetry:YES completion:completion];
 }
 
@@ -410,9 +527,14 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
                  completion:(void (^)(NSDictionary *_Nullable listing, NSString *_Nullable errorMessage))completion {
     NSURLRequest *request = [self requestForCursor:after useOAuthHost:useOAuthHost];
     if (!request) {
-        completion(nil, @"Couldn't build the request for this subreddit.");
+        completion(nil, @"Couldn't build the request for this feed.");
         return;
     }
+
+    // Remember what we actually sent, so a 401 can tell "the token rotated
+    // while this page was in flight" apart from "this account can't see this
+    // listing at all".
+    NSString *sentAuthorization = [request valueForHTTPHeaderField:@"Authorization"];
 
     // No retain cycle to avoid here (self never holds the task), but staying
     // weak means a torn-down feed's in-flight page can't keep it alive; the
@@ -428,25 +550,41 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
         NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]]
             ? ((NSHTTPURLResponse *)response).statusCode : -1;
 
-        // An auth failure on one transport is worth one attempt on the other:
-        // a captured bearer can be stale, and a cookie session can be missing.
+        // An auth failure is worth exactly one more attempt. Retrying always
+        // hops to the main queue first, because deciding what to retry with
+        // means re-reading the bound account's live credential.
         if (allowRetry && (status == 401 || status == 403)) {
-            ApolloLog(@"[Gallery] listing %ld on %@ host; retrying on the other host",
-                      (long)status, useOAuthHost ? @"oauth" : @"www");
-            [strongSelf fetchPageWithCursor:after
-                               useOAuthHost:!useOAuthHost
-                                 allowRetry:NO
-                                 completion:completion];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                // Prefer staying on the OAuth host when the credential has
+                // moved on since this request was built — that is a rotation
+                // landing mid-page, and the fresh token will work. Falling
+                // straight to www would drop us to an anonymous request, which
+                // cannot see private multireddits or subreddits at all.
+                NSString *fresh = [strongSelf currentBearerToken];
+                NSString *freshAuthorization = fresh.length > 0
+                    ? [@"Bearer " stringByAppendingString:fresh] : nil;
+                BOOL credentialRotated = useOAuthHost && freshAuthorization.length > 0 &&
+                    ![freshAuthorization isEqualToString:sentAuthorization ?: @""];
+                BOOL retryOnOAuthHost = credentialRotated ? YES : !useOAuthHost;
+                ApolloLog(@"[Gallery] listing %ld on %@ host; retrying on %@ host (%@)",
+                          (long)status, useOAuthHost ? @"oauth" : @"www",
+                          retryOnOAuthHost ? @"oauth" : @"www",
+                          credentialRotated ? @"credential rotated" : @"other transport");
+                [strongSelf fetchPageWithCursor:after
+                                   useOAuthHost:retryOnOAuthHost
+                                     allowRetry:NO
+                                     completion:completion];
+            });
             return;
         }
 
         if (error) {
-            ApolloLog(@"[Gallery] listing r/%@ failed: %@", strongSelf.subreddit, error.localizedDescription);
+            ApolloLog(@"[Gallery] listing %@ failed: %@", strongSelf.sourceDescription, error.localizedDescription);
             completion(nil, error.localizedDescription ?: @"Network error.");
             return;
         }
         if (status < 200 || status >= 300) {
-            ApolloLog(@"[Gallery] listing r/%@ HTTP %ld", strongSelf.subreddit, (long)status);
+            ApolloLog(@"[Gallery] listing %@ HTTP %ld", strongSelf.sourceDescription, (long)status);
             completion(nil, [NSString stringWithFormat:@"Reddit returned HTTP %ld.", (long)status]);
             return;
         }
@@ -454,7 +592,7 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
         id json = data.length > 0 ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
         NSDictionary *listing = ApolloGalleryDict(ApolloGalleryDict(json)[@"data"]);
         if (!listing) {
-            ApolloLog(@"[Gallery] listing r/%@ unparseable (%lu bytes)", strongSelf.subreddit, (unsigned long)data.length);
+            ApolloLog(@"[Gallery] listing %@ unparseable (%lu bytes)", strongSelf.sourceDescription, (unsigned long)data.length);
             completion(nil, @"Couldn't read Reddit's response.");
             return;
         }
@@ -511,8 +649,8 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
             // would underflow to ~2^64 and the UI would try to insert it as a
             // range), fail the batch closed instead.
             if (strongSelf.filteredItems.count < startIndex) {
-                ApolloLog(@"[Gallery] r/%@ batch start %lu is beyond filtered count %lu; dropping batch",
-                          strongSelf.subreddit, (unsigned long)startIndex,
+                ApolloLog(@"[Gallery] %@ batch start %lu is beyond filtered count %lu; dropping batch",
+                          strongSelf.sourceDescription, (unsigned long)startIndex,
                           (unsigned long)strongSelf.filteredItems.count);
                 strongSelf.loading = NO;
                 if (completion) completion(NSMakeRange(strongSelf.filteredItems.count, 0), nil);
@@ -534,8 +672,8 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
 
             if (noMorePages || tooManyEmptyPages) {
                 strongSelf.exhausted = YES;
-                ApolloLog(@"[Gallery] r/%@ exhausted (cursor=%@ emptyPages=%ld shown=%lu of %lu)",
-                          strongSelf.subreddit, nextCursor ?: @"nil",
+                ApolloLog(@"[Gallery] %@ exhausted (cursor=%@ emptyPages=%ld shown=%lu of %lu)",
+                          strongSelf.sourceDescription, nextCursor ?: @"nil",
                           (long)strongSelf.consecutiveEmptyPages,
                           (unsigned long)strongSelf.filteredItems.count,
                           (unsigned long)strongSelf.mutableItems.count);
@@ -544,8 +682,8 @@ static BOOL ApolloGalleryURLLooksLikeImage(NSURL *url) {
             if (strongSelf.exhausted || batchSatisfied || outOfPageBudget) {
                 strongSelf.loading = NO;
                 NSRange added = NSMakeRange(startIndex, gainedThisBatch);
-                ApolloLog(@"[Gallery] r/%@ %@ batch: +%lu shown (%lu shown / %lu fetched; photo %lu gif %lu video %lu)",
-                          strongSelf.subreddit, [strongSelf sortDisplayName],
+                ApolloLog(@"[Gallery] %@ %@ batch: +%lu shown (%lu shown / %lu fetched; photo %lu gif %lu video %lu)",
+                          strongSelf.sourceDescription, [strongSelf sortDisplayName],
                           (unsigned long)gainedThisBatch,
                           (unsigned long)strongSelf.filteredItems.count,
                           (unsigned long)strongSelf.mutableItems.count,

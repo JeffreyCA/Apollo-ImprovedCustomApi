@@ -74,6 +74,10 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
 // view is showing the grid's downsampled thumbnail as a placeholder — which
 // Save/Share must never export.
 @property (nonatomic) BOOL fullImageLoaded;
+// Page size the zoom geometry was last computed for. The zoomView autoresizes
+// with the cell, so comparing bounds against its frame can never detect a
+// rotation — by the time layoutSubviews runs they already agree.
+@property (nonatomic) CGSize zoomGeometrySize;
 // Raised while a zoom is active so the pager and the dismiss pan stay out of
 // the way (a zoomed page must pan its own content, not turn the page).
 @property (nonatomic, readonly) BOOL isZoomed;
@@ -140,6 +144,7 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
     [self teardownPlayer];
     self.imageView.image = nil;
     self.fullImageLoaded = NO;
+    self.zoomGeometrySize = CGSizeZero;
     self.zoomView.zoomScale = 1.0;
     self.zoomView.contentInset = UIEdgeInsetsZero;
     self.zoomView.panGestureRecognizer.enabled = NO;
@@ -153,7 +158,7 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGRect bounds = self.contentView.bounds;
-    BOOL boundsChanged = !CGSizeEqualToSize(bounds.size, self.zoomView.frame.size);
+    BOOL boundsChanged = !CGSizeEqualToSize(bounds.size, self.zoomGeometrySize);
     self.zoomView.frame = bounds;
     // The player sits above the poster and fills the page; AVPlayerLayer's own
     // aspect-fit gravity handles letterboxing, so it doesn't ride the zoom view.
@@ -175,6 +180,7 @@ static void ApolloGalleryViewerActivateAudioSession(void) {
     UIImage *image = self.imageView.image;
     CGSize bounds = self.zoomView.bounds.size;
     if (bounds.width <= 0.0 || bounds.height <= 0.0) return;
+    self.zoomGeometrySize = bounds;
 
     self.zoomView.zoomScale = 1.0;
     if (!image || image.size.width <= 0.0 || image.size.height <= 0.0) {
@@ -866,6 +872,12 @@ static UIButton *ApolloGalleryChromeButton(UIImage *symbol, NSString *title, UIV
 
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView {
     if (scrollView != self.collectionView) return;
+    // Mid-rotation this fires with transitional geometry — the old offset
+    // divided by the new width — which lands on an unrelated page and clobbers
+    // currentIndex before viewDidLayoutSubviews can re-anchor on it. Page math
+    // is only meaningful once the bounds match the size the layout was
+    // prepared for; until then, keep the page the user was on.
+    if (!CGSizeEqualToSize(scrollView.bounds.size, self.lastLaidOutSize)) return;
     CGFloat width = MAX(self.collectionView.bounds.size.width, 1.0);
     NSInteger page = (NSInteger)llround(scrollView.contentOffset.x / width);
     page = MAX(0, MIN(page, (NSInteger)self.feed.items.count - 1));
