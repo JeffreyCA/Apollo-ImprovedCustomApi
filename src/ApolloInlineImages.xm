@@ -1009,6 +1009,12 @@ static void ApolloDashPosterStartFetch(NSString *assetID, NSURL *dashURL) {
                         BOOL dark = ApolloImageIsMostlyBlack(ui);
                         if (!dark) {
                             delivered = YES;
+                            // The first usable frame completes this pipeline.
+                            // Stop the remaining candidate-time decodes before
+                            // releasing our FIFO slot, otherwise the next
+                            // queued generator overlaps work with this one and
+                            // defeats the two-decoder memory cap.
+                            [retainedGen cancelAllCGImageGeneration];
                             retainedGen = nil;
                             deliver(ApolloDashPosterDownscaled(ui));
                             return;
