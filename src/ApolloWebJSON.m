@@ -1231,9 +1231,14 @@ typedef struct {
     NSString *linkFullName;
     NSString *parentFullName;
 } ApolloWebJSONWriteContext;
-// Resolved from the markdown Reddit echoed back, so overlapping writes can't
-// cross-contaminate each other's repairs. See the pending-write store below.
-static ApolloWebJSONWriteContext ApolloWebJSONWriteContextForBody(id responseBody);
+// Resolved from the markdown Reddit echoed back, plus any location fields the
+// degraded payload happened to keep (they distinguish two overlapping writes
+// whose markdown is identical), so overlapping writes can't cross-contaminate
+// each other's repairs. See the pending-write store below.
+static ApolloWebJSONWriteContext ApolloWebJSONWriteContextForResponse(id responseBody,
+                                                                      NSString *subredditHint,
+                                                                      NSString *linkHint,
+                                                                      NSString *parentHint);
 
 // Extracts the comment author from an old-reddit content blob's data-author
 // attribute. Authoritative when present — it is Reddit's own record of who the
@@ -1278,10 +1283,26 @@ static NSDictionary *ApolloWebJSONSynthesizeModernThingData(NSString *fullname, 
     NSString *bodyHTML = [legacy[@"contentHTML"] isKindOfClass:[NSString class]] ? legacy[@"contentHTML"] : nil;
     if (body.length == 0 && bodyHTML.length == 0) return nil; // nothing renderable to show
 
+    NSString *legacyParent = ([legacy[@"parent"] isKindOfClass:[NSString class]]
+                              && [(NSString *)legacy[@"parent"] length] > 0) ? legacy[@"parent"] : nil;
+    NSString *legacyLink = ([legacy[@"link"] isKindOfClass:[NSString class]]
+                            && [(NSString *)legacy[@"link"] length] > 0) ? legacy[@"link"] : nil;
+    NSString *permalink = nil, *subreddit = nil, *linkId36 = nil;
+    ApolloWebJSONPermalinkPartsFromLegacyContent(content, &permalink, &subreddit, &linkId36);
+
     // The submitted markdown identifies WHICH outstanding write this response
     // belongs to, so a second comment posted while this one was in flight can't
-    // lend it its author or its thread. Resolve once and reuse below.
-    ApolloWebJSONWriteContext ctx = ApolloWebJSONWriteContextForBody(body);
+    // lend it its author or its thread. Whatever location the legacy dict still
+    // carries goes along as identity hints — they are what tells two
+    // overlapping writes apart when their markdown is identical. The parent
+    // hint is creates-only: an edited comment's real parent was never captured
+    // (the edit context has no parentFullName), so it could only contradict
+    // falsely. Resolve once and reuse below.
+    NSString *linkHint = legacyLink ?: (linkId36.length > 0 ? [@"t3_" stringByAppendingString:linkId36] : nil);
+    ApolloWebJSONWriteContext ctx = ApolloWebJSONWriteContextForResponse(body,
+                                                                         subreddit.length > 0 ? subreddit : nil,
+                                                                         linkHint,
+                                                                         isEdit ? nil : legacyParent);
 
     // Author, in trust order: Reddit's own data-author attribute in the legacy
     // content blob, then the identity captured from the submitting RDKClient
@@ -1301,11 +1322,9 @@ static NSDictionary *ApolloWebJSONSynthesizeModernThingData(NSString *fullname, 
     modern[@"author"] = author;
     modern[@"body"] = body.length > 0 ? body : @"";
     modern[@"body_html"] = bodyHTML.length > 0 ? bodyHTML : ApolloWebJSONEscapedBodyHTML(body ?: @"");
-    if ([legacy[@"parent"] isKindOfClass:[NSString class]]) modern[@"parent_id"] = legacy[@"parent"];
-    if ([legacy[@"link"] isKindOfClass:[NSString class]]) modern[@"link_id"] = legacy[@"link"];
+    if (legacyParent) modern[@"parent_id"] = legacyParent;
+    if (legacyLink) modern[@"link_id"] = legacyLink;
 
-    NSString *permalink = nil, *subreddit = nil, *linkId36 = nil;
-    ApolloWebJSONPermalinkPartsFromLegacyContent(content, &permalink, &subreddit, &linkId36);
     if (permalink.length > 0) modern[@"permalink"] = permalink;
     if (subreddit.length > 0) modern[@"subreddit"] = subreddit;
     if (!modern[@"link_id"] && linkId36.length > 0) modern[@"link_id"] = [@"t3_" stringByAppendingString:linkId36];
@@ -1377,11 +1396,17 @@ static BOOL ApolloWebJSONIsNonEmptyString(id value) {
 //
 // The correlation key is the submitted markdown, which Reddit echoes back as
 // `body` (modern shape) / `contentText` (legacy shape) — no plumbing through
-// RedditKit's request internals required. When a response can't be matched
-// (body absent or normalized beyond recognition) we fall back to the single
-// outstanding write if there is exactly one, and otherwise to only those fields
-// every outstanding write agrees on — an unmatched response never adopts one
-// candidate's thread over another's.
+// RedditKit's request internals required. Duplicate bodies are PRESERVED, not
+// deduped: two overlapping writes can legitimately carry identical markdown
+// (a "Thanks" posted in two different threads), and evicting the earlier
+// capture would hand the first response the second write's context. An
+// ambiguous key is resolved only by response-side identity — location fields
+// the degraded payload happened to keep that positively contradict a candidate
+// rule it out — and when that can't narrow the set to one, the repair uses
+// only the fields every remaining candidate agrees on. The same unanimity
+// fallback covers a response that can't be matched at all (body absent or
+// normalized beyond recognition): a response never adopts one candidate's
+// thread over another's.
 @interface ApolloWebJSONPendingWrite : NSObject
 @property (nonatomic, copy, nullable) NSString *username;
 @property (nonatomic, copy, nullable) NSString *subreddit;
@@ -1460,15 +1485,13 @@ void ApolloWebJSONNoteCommentWriteContext(id client, NSString *body, NSString *s
     os_unfair_lock_lock(&sApolloWebJSONLastWriteLock);
     if (!sApolloWebJSONPendingWrites) sApolloWebJSONPendingWrites = [NSMutableArray array];
     ApolloWebJSONPruneWritesLocked();
-    // Resubmitting identical text (the user retried a failed post) replaces the
-    // earlier capture rather than leaving two entries fighting over one body.
-    if (write.bodyKey) {
-        NSUInteger existing = [sApolloWebJSONPendingWrites indexOfObjectPassingTest:
-                               ^BOOL(ApolloWebJSONPendingWrite *w, NSUInteger idx, BOOL *stop) {
-            return [w.bodyKey isEqualToString:write.bodyKey];
-        }];
-        if (existing != NSNotFound) [sApolloWebJSONPendingWrites removeObjectAtIndex:existing];
-    }
+    // An entry with the same body may already be pending — keep BOTH. Evicting
+    // it would hand the earlier write's response the newer write's context
+    // whenever two overlapping writes carry identical markdown (a "Thanks"
+    // posted in two different threads); the resolver treats a duplicated key
+    // as ambiguous instead. The retry case the old eviction served (user
+    // resubmitted a failed post) still repairs fully: identical retries carry
+    // identical context, so the unanimity fallback returns every field.
     [sApolloWebJSONPendingWrites addObject:write];
     while (sApolloWebJSONPendingWrites.count > kApolloWebJSONMaxPendingWrites) {
         [sApolloWebJSONPendingWrites removeObjectAtIndex:0];
@@ -1502,35 +1525,81 @@ static ApolloWebJSONWriteContext ApolloWebJSONUnanimousContext(NSArray<ApolloWeb
     return ctx;
 }
 
+// YES when the response-side identity hints positively rule this candidate
+// out: a location field the degraded payload kept that differs from what was
+// captured at submit time cannot belong to this write. A nil on either side
+// proves nothing and never disqualifies — silence is not evidence.
+static BOOL ApolloWebJSONWriteContradictsHints(ApolloWebJSONPendingWrite *w,
+                                               NSString *subredditHint,
+                                               NSString *linkHint,
+                                               NSString *parentHint) {
+    if (subredditHint && w.subreddit
+        && [subredditHint caseInsensitiveCompare:w.subreddit] != NSOrderedSame) return YES;
+    if (linkHint && w.linkFullName && ![linkHint isEqualToString:w.linkFullName]) return YES;
+    // What the repair itself would write as parent_id for a create: the parent
+    // comment for a reply, the link itself for a top-level comment. Callers
+    // pass a nil parentHint for edits — an edited comment's real parent was
+    // never captured, so it could only contradict falsely.
+    NSString *effectiveParent = w.parentFullName ?: w.linkFullName;
+    if (parentHint && effectiveParent && ![parentHint isEqualToString:effectiveParent]) return YES;
+    return NO;
+}
+
 // The write context for the response now being repaired, resolved from the
-// markdown Reddit echoed back. Zeroed struct when nothing usable is
-// outstanding — callers fall back to the active account / leave fields unfilled.
-static ApolloWebJSONWriteContext ApolloWebJSONWriteContextForBody(id responseBody) {
+// markdown Reddit echoed back plus whatever location fields the payload kept
+// (the identity hints). Zeroed struct when nothing usable is outstanding —
+// callers fall back to the active account / leave fields unfilled.
+static ApolloWebJSONWriteContext ApolloWebJSONWriteContextForResponse(id responseBody,
+                                                                      NSString *subredditHint,
+                                                                      NSString *linkHint,
+                                                                      NSString *parentHint) {
     NSString *key = ApolloWebJSONWriteBodyKey(responseBody);
     ApolloWebJSONWriteContext ctx = {nil, nil, nil, nil, nil};
 
     os_unfair_lock_lock(&sApolloWebJSONLastWriteLock);
     ApolloWebJSONPruneWritesLocked();
-    ApolloWebJSONPendingWrite *match = nil;
-    if (key) {
-        // Newest first: a resubmit of the same text should win over an older
-        // capture that somehow survived the dedupe above.
-        for (ApolloWebJSONPendingWrite *w in [sApolloWebJSONPendingWrites reverseObjectEnumerator]) {
-            if (w.bodyKey && [w.bodyKey isEqualToString:key]) { match = w; break; }
-        }
-    }
+
+    // Candidate set, narrowest first: every entry whose captured markdown
+    // matches the echoed body — duplicates included, and consumed entries too,
+    // so a re-serialized retry of the same response still resolves. When
+    // nothing matches by body, every write still awaiting its response; when
+    // all of those have already repaired something, everything outstanding
+    // (most likely one of those responses being serialized again).
     NSArray<ApolloWebJSONPendingWrite *> *candidates = nil;
-    if (!match) {
+    BOOL matchedByBody = NO;
+    if (key) {
+        candidates = [sApolloWebJSONPendingWrites filteredArrayUsingPredicate:
+                      [NSPredicate predicateWithBlock:^BOOL(ApolloWebJSONPendingWrite *w, NSDictionary *b) {
+            return w.bodyKey && [w.bodyKey isEqualToString:key];
+        }]];
+        matchedByBody = candidates.count > 0;
+    }
+    if (!matchedByBody) {
         candidates = [sApolloWebJSONPendingWrites filteredArrayUsingPredicate:
                       [NSPredicate predicateWithBlock:^BOOL(ApolloWebJSONPendingWrite *w, NSDictionary *b) {
             return !w.consumed;
         }]];
-        // Everything outstanding has already repaired something: this is most
-        // likely that same response being serialized again, so still prefer the
-        // captured values over nothing.
         if (candidates.count == 0) candidates = [sApolloWebJSONPendingWrites copy];
-        if (candidates.count == 1) match = candidates.firstObject;
     }
+
+    // Response-side identity narrows further: drop candidates the kept
+    // location fields positively contradict. This is what tells apart two
+    // overlapping writes whose markdown is identical (a "Thanks" posted in two
+    // different threads) when the payload retained any of its location.
+    if (candidates.count > 0 && (subredditHint || linkHint || parentHint)) {
+        candidates = [candidates filteredArrayUsingPredicate:
+                      [NSPredicate predicateWithBlock:^BOOL(ApolloWebJSONPendingWrite *w, NSDictionary *b) {
+            return !ApolloWebJSONWriteContradictsHints(w, subredditHint, linkHint, parentHint);
+        }]];
+    }
+
+    // Adopt a candidate's full context only when exactly one is left. Anything
+    // else — an ambiguous duplicated body the hints couldn't split, or no
+    // survivors at all — never picks one: only the fields every survivor
+    // agrees on are used, so identical retries still repair fully and two
+    // same-body writes from one account still get the right author, while the
+    // fields that differ stay empty. A weaker repair, never a wrong one.
+    ApolloWebJSONPendingWrite *match = candidates.count == 1 ? candidates.firstObject : nil;
     if (match) {
         match.consumed = YES;
         ctx.username = match.username;
@@ -1546,7 +1615,8 @@ static ApolloWebJSONWriteContext ApolloWebJSONWriteContextForBody(id responseBod
 
     if (outstanding > 1) {
         ApolloLog(@"[WebJSON] Write context for repair: %@ (%lu writes outstanding)",
-                  match ? @"matched by body" : @"unmatched — unanimous fields only",
+                  match ? (matchedByBody ? @"uniquely matched by body" : @"sole surviving candidate")
+                        : @"ambiguous — unanimous fields only",
                   (unsigned long)outstanding);
     }
     return ctx;
@@ -1578,10 +1648,18 @@ static NSDictionary *ApolloWebJSONCompleteModernThingData(NSDictionary *td, BOOL
 
     // Which outstanding write is this? The degraded payload keeps `body` (that
     // is what makes it "modern-shaped"), and body IS the submitted markdown, so
-    // it identifies the write even when everything else was stripped. Resolved
-    // once here and reused for both the author and the location fields — two
-    // lookups could otherwise disagree if a write landed in between.
-    ApolloWebJSONWriteContext ctx = ApolloWebJSONWriteContextForBody(td[@"body"]);
+    // it identifies the write even when everything else was stripped. Any
+    // location field it DID keep goes along as an identity hint — that is what
+    // tells two overlapping writes apart when their markdown is identical
+    // (parent hint creates-only: an edited comment's real parent was never
+    // captured, so it could only contradict falsely). Resolved once here and
+    // reused for both the author and the location fields — two lookups could
+    // otherwise disagree if a write landed in between.
+    ApolloWebJSONWriteContext ctx = ApolloWebJSONWriteContextForResponse(
+        td[@"body"],
+        ApolloWebJSONIsNonEmptyString(td[@"subreddit"]) ? td[@"subreddit"] : nil,
+        ApolloWebJSONIsNonEmptyString(td[@"link_id"]) ? td[@"link_id"] : nil,
+        (!isEdit && ApolloWebJSONIsNonEmptyString(td[@"parent_id"])) ? td[@"parent_id"] : nil);
 
     if (!ApolloWebJSONIsNonEmptyString(td[@"author"])) {
         // Trust order (no content HTML exists here, so no data-author): the
