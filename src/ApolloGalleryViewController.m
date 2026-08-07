@@ -500,6 +500,79 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
     return MAX(kApolloGalleryMinColumns, MIN(kApolloGalleryMaxColumns, columns));
 }
 
+// Rotation reshuffles the whole waterfall — a different column count and
+// column width move every tile to a new y — so carrying the raw point offset
+// across lands the user on unrelated tiles. Anchor on the topmost visible tile
+// (lowest index still on screen: the waterfall places items in listing order)
+// and put it back at the same relative position in the new layout.
+- (void)viewWillTransitionToSize:(CGSize)size
+       withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+
+    UICollectionView *collectionView = self.collectionView;
+    if (!collectionView || self.feed.items.count == 0) return;
+
+    CGFloat visibleTop = collectionView.contentOffset.y + collectionView.adjustedContentInset.top;
+    // Pinned at the top: leave the offset to UIKit so the grid stays flush
+    // under the bar instead of anchoring partway into tile 0.
+    if (visibleTop <= 1.0) return;
+
+    NSIndexPath *anchorPath = nil;
+    CGFloat anchorFraction = 0.0;
+    for (NSIndexPath *indexPath in [collectionView indexPathsForVisibleItems]) {
+        if (anchorPath && indexPath.item >= anchorPath.item) continue;
+        UICollectionViewLayoutAttributes *attributes =
+            [self.waterfallLayout layoutAttributesForItemAtIndexPath:indexPath];
+        // "Visible" includes cells fully underneath the nav bar; skip those.
+        if (!attributes || CGRectGetMaxY(attributes.frame) <= visibleTop) continue;
+        anchorPath = indexPath;
+        CGFloat height = MAX(CGRectGetHeight(attributes.frame), 1.0);
+        anchorFraction = (visibleTop - CGRectGetMinY(attributes.frame)) / height;
+        anchorFraction = MAX(0.0, MIN(anchorFraction, 1.0));
+    }
+    if (!anchorPath) return;
+
+    NSIndexPath *path = anchorPath;
+    CGFloat fraction = anchorFraction;
+    __weak typeof(self) weakSelf = self;
+    [coordinator animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+        [weakSelf apollo_scrollToAnchorItem:path fraction:fraction forWidth:size.width];
+        (void)context;
+    } completion:nil];
+}
+
+- (void)apollo_scrollToAnchorItem:(NSIndexPath *)anchorPath
+                         fraction:(CGFloat)fraction
+                         forWidth:(CGFloat)width {
+    UICollectionView *collectionView = self.collectionView;
+    if (anchorPath.item >= [collectionView numberOfItemsInSection:0]) return;
+
+    // Commit the new-geometry layout before reading the anchor's new frame.
+    // Setting the column count here (rather than waiting for
+    // viewDidLayoutSubviews) makes the single layoutIfNeeded below produce the
+    // final tile positions instead of an intermediate old-column-count pass.
+    NSInteger columns = [self apollo_columnCountForWidth:width];
+    if (columns != self.waterfallLayout.columnCount) {
+        self.waterfallLayout.columnCount = columns;
+        [self.waterfallLayout invalidateLayout];
+    }
+    [collectionView layoutIfNeeded];
+
+    UICollectionViewLayoutAttributes *attributes =
+        [self.waterfallLayout layoutAttributesForItemAtIndexPath:anchorPath];
+    if (!attributes) return;
+
+    UIEdgeInsets insets = collectionView.adjustedContentInset;
+    CGFloat target = CGRectGetMinY(attributes.frame)
+                     + fraction * CGRectGetHeight(attributes.frame)
+                     - insets.top;
+    CGFloat maxOffset = collectionView.collectionViewLayout.collectionViewContentSize.height
+                        - collectionView.bounds.size.height + insets.bottom;
+    target = MIN(target, MAX(maxOffset, -insets.top));
+    target = MAX(target, -insets.top);
+    [collectionView setContentOffset:CGPointMake(0.0, target) animated:NO];
+}
+
 - (UIColor *)apollo_accentColor {
     return ApolloThemeAccentColor() ?: self.view.tintColor ?: UIColor.systemBlueColor;
 }
@@ -875,3 +948,44 @@ static BOOL ApolloGalleryPush(ApolloGalleryViewController *gallery,
 }
 
 @end
+
+#if APOLLO_SIM_BUILD
+// simctl has no rotate command, so orientation bugs can't be exercised from
+// the CLI without help. `xcrun simctl spawn <dev> notifyutil -p
+// apollofix.rotate` toggles the foreground scene between portrait and
+// landscape. Sim builds only; device builds never compile this.
+static void ApolloGalleryDebugRotate(CFNotificationCenterRef center, void *observer,
+                                     CFNotificationName name, const void *object,
+                                     CFDictionaryRef userInfo) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (@available(iOS 16.0, *)) {
+            UIWindowScene *scene = nil;
+            for (UIScene *candidate in UIApplication.sharedApplication.connectedScenes) {
+                if ([candidate isKindOfClass:[UIWindowScene class]] &&
+                    candidate.activationState == UISceneActivationStateForegroundActive) {
+                    scene = (UIWindowScene *)candidate;
+                    break;
+                }
+            }
+            if (!scene) return;
+            BOOL portrait = UIInterfaceOrientationIsPortrait(scene.interfaceOrientation);
+            UIWindowSceneGeometryPreferencesIOS *preferences =
+                [[UIWindowSceneGeometryPreferencesIOS alloc]
+                    initWithInterfaceOrientations:(portrait ? UIInterfaceOrientationMaskLandscapeRight
+                                                            : UIInterfaceOrientationMaskPortrait)];
+            [scene requestGeometryUpdateWithPreferences:preferences errorHandler:^(NSError *error) {
+                ApolloLog(@"[GalleryDebug] rotate failed: %@", error);
+            }];
+            ApolloLog(@"[GalleryDebug] rotate -> %@", portrait ? @"landscape" : @"portrait");
+        }
+    });
+}
+
+__attribute__((constructor))
+static void ApolloGalleryDebugRotateInstall(void) {
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+                                    ApolloGalleryDebugRotate,
+                                    CFSTR("apollofix.rotate"), NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
+}
+#endif
