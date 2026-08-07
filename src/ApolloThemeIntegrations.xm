@@ -130,7 +130,10 @@ static void ColorListCell(UITableViewCell *cell) {
 }
 
 %hook UITableViewCell
-- (void)layoutSubviews { %orig; ColorListCell(self); }
+- (void)layoutSubviews {
+    %orig;
+    ColorListCell(self);
+}
 - (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated {
     %orig;
     if (ApolloThemeRuntimeIsActive() && ListCellOwner(self)) [self setNeedsLayout];
@@ -162,7 +165,10 @@ static void ColorListCell(UITableViewCell *cell) {
 // Filters & Blocks uses ApolloSubtitleTableViewCell, which doesn't route its
 // layoutSubviews through the base hook.
 %hook _TtC6Apollo27ApolloSubtitleTableViewCell
-- (void)layoutSubviews { %orig; ColorListCell((UITableViewCell *)self); }
+- (void)layoutSubviews {
+    %orig;
+    ColorListCell((UITableViewCell *)self);
+}
 - (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated {
     %orig;
     if (ApolloThemeRuntimeIsActive()) [(UITableViewCell *)self setNeedsLayout];
@@ -194,7 +200,11 @@ static void ApplyAccentImageView(id cell) {
 // layoutSubviews/setSelected: itself, so route selection colouring through here
 // rather than relying on the base-class hooks firing.
 %hook _TtC6Apollo21IconTextTableViewCell
-- (void)layoutSubviews { %orig; ApplyAccentImageView(self); ColorListCell((UITableViewCell *)self); }
+- (void)layoutSubviews {
+    %orig;
+    ApplyAccentImageView(self);
+    ColorListCell((UITableViewCell *)self);
+}
 - (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated {
     %orig; ApplyAccentImageView(self);
     if (ApolloThemeRuntimeIsActive()) [(UITableViewCell *)self setNeedsLayout];
@@ -206,9 +216,18 @@ static void ApplyAccentImageView(id cell) {
 %end
 
 %hook _TtC6Apollo23IconActionTableViewCell
-- (void)layoutSubviews { %orig; ApplyAccentImageView(self); }
-- (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated { %orig; ApplyAccentImageView(self); }
-- (void)setSelected:(BOOL)selected animated:(BOOL)animated { %orig; ApplyAccentImageView(self); }
+- (void)layoutSubviews {
+    %orig;
+    ApplyAccentImageView(self);
+}
+- (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated {
+    %orig;
+    ApplyAccentImageView(self);
+}
+- (void)setSelected:(BOOL)selected animated:(BOOL)animated {
+    %orig;
+    ApplyAccentImageView(self);
+}
 %end
 
 // ---------------------------------------------------------------------------
@@ -273,14 +292,26 @@ static void ApplyNodeHighlight(id node, BOOL highlighted) {
 }
 
 %hook _TtC6Apollo22ProfileFeatureCellNode
-- (void)setHighlighted:(BOOL)highlighted { %orig; ApplyNodeHighlight(self, highlighted); }
+- (void)setHighlighted:(BOOL)highlighted {
+    %orig;
+    ApplyNodeHighlight(self, highlighted);
+}
 %end
 %hook _TtC6Apollo17LargePostCellNode
-- (void)setHighlighted:(BOOL)highlighted { %orig; ApplyNodeHighlight(self, highlighted); }
+- (void)setHighlighted:(BOOL)highlighted {
+    %orig;
+    ApplyNodeHighlight(self, highlighted);
+}
 %end
 %hook _TtC6Apollo19CompactPostCellNode
-- (void)setHighlighted:(BOOL)highlighted { %orig; ApplyNodeHighlight(self, highlighted); }
+- (void)setHighlighted:(BOOL)highlighted {
+    %orig;
+    ApplyNodeHighlight(self, highlighted);
+}
 %end
 %hook _TtC6Apollo15CommentCellNode
-- (void)setHighlighted:(BOOL)highlighted { %orig; ApplyNodeHighlight(self, highlighted); }
+- (void)setHighlighted:(BOOL)highlighted {
+    %orig;
+    ApplyNodeHighlight(self, highlighted);
+}
 %end

@@ -7,6 +7,7 @@
 #import <objc/message.h>
 
 #import "ApolloCommon.h"
+#import "ApolloGiphyClient.h"
 #import "ApolloMediaAutoplay.h"
 #import "ApolloState.h"
 #import "ApolloMediaMetadata.h"
@@ -550,20 +551,6 @@ static NSString *ApolloExtractGiphyIDFromToken(NSString *token) {
     return giphyID.length > 0 ? giphyID : nil;
 }
 
-static BOOL ApolloIsValidGiphyID(NSString *giphyID) {
-    if (![giphyID isKindOfClass:[NSString class]] || giphyID.length == 0) {
-        return NO;
-    }
-    // Giphy IDs are alphanumeric with possible underscores/dashes
-    for (NSUInteger i = 0; i < giphyID.length; i++) {
-        unichar c = [giphyID characterAtIndex:i];
-        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-')) {
-            return NO;
-        }
-    }
-    return YES;
-}
-
 static NSDictionary *ApolloFixInvalidGiphyMetadata(NSDictionary *orig, NSUInteger *outSynthesizedCount) {
     if (outSynthesizedCount) {
         *outSynthesizedCount = 0;
@@ -591,16 +578,15 @@ static NSDictionary *ApolloFixInvalidGiphyMetadata(NSDictionary *orig, NSUIntege
         }
 
         NSString *giphyID = ApolloExtractGiphyIDFromToken(key);
-        if (!ApolloIsValidGiphyID(giphyID)) {
-            continue;
-        }
+        NSURL *gifMediaURL = [ApolloGiphyClient mediaURLForGIFID:giphyID];
+        if (!gifMediaURL) continue;
 
         if (!fixed) {
             fixed = [orig mutableCopy];
         }
 
         NSString *extURL = [NSString stringWithFormat:@"https://giphy.com/gifs/%@", giphyID];
-        NSString *gifURL = [NSString stringWithFormat:@"https://media.giphy.com/media/%@/giphy.gif", giphyID];
+        NSString *gifURL = gifMediaURL.absoluteString;
         NSString *thumbURL = [NSString stringWithFormat:@"https://media.giphy.com/media/%@/200w_s.gif", giphyID];
 
         fixed[key] = @{
@@ -769,7 +755,8 @@ static NSString *ApolloRewriteNativeGiphyTokens(NSString *text, NSDictionary *me
 
 - (NSString *)body {
     NSDictionary *metadata = self.mediaMetadata;
-    NSString *fixed = ApolloFixProcessingImgPlaceholders(%orig, metadata, nil);
+    NSString *body = %orig;
+    NSString *fixed = ApolloFixProcessingImgPlaceholders(body, metadata, nil);
     return ApolloRewriteNativeGiphyTokens(fixed, metadata);
 }
 
@@ -795,7 +782,8 @@ static NSString *ApolloRewriteNativeGiphyTokens(NSString *text, NSDictionary *me
         if (fallbackExt.length == 0) fallbackExt = @"png";
     }
 
-    NSString *fixed = ApolloFixProcessingImgPlaceholders(%orig, metadata, fallbackExt);
+    NSString *selfText = %orig;
+    NSString *fixed = ApolloFixProcessingImgPlaceholders(selfText, metadata, fallbackExt);
     return ApolloRewriteNativeGiphyTokens(fixed, metadata);
 }
 

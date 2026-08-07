@@ -566,7 +566,7 @@ static BOOL ApolloNativeActionMenuActionControllerIsModeratorOnly(id actionContr
 // ApolloNativeActionMenuBuildModeratorReportSections), so it is not treated as
 // an opaque custom header here.
 static BOOL ApolloNativeActionMenuActionControllerHasCustomHeader(id actionController) {
-    if ([actionController isKindOfClass:objc_getClass("_TtC6Apollo26ModeratorReportsController")]) {
+    if ([actionController isMemberOfClass:objc_getClass("_TtC6Apollo26ModeratorReportsController")]) {
         return NO;
     }
     return ApolloReadObjectIvar(actionController, "headerView") != nil;
@@ -675,7 +675,7 @@ static UIAction *ApolloNativeActionMenuAction(NSString *title, NSString *subtitl
 }
 
 static void ApolloNativeActionMenuSortSavedCategoriesIfNeeded(id presenter, id actionController) {
-    if (![presenter isKindOfClass:objc_getClass("_TtC6Apollo32SavedPostsCommentsViewController")]) {
+    if (![presenter isMemberOfClass:objc_getClass("_TtC6Apollo32SavedPostsCommentsViewController")]) {
         return;
     }
 
@@ -759,7 +759,7 @@ static NSString *ApolloNativeActionMenuReportSectionHeader(id controller, NSInte
 }
 
 static NSArray<UIMenuElement *> *ApolloNativeActionMenuBuildModeratorReportSections(id actionController) {
-    if (![actionController isKindOfClass:objc_getClass("_TtC6Apollo26ModeratorReportsController")]) {
+    if (![actionController isMemberOfClass:objc_getClass("_TtC6Apollo26ModeratorReportsController")]) {
         return nil;
     }
 

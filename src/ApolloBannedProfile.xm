@@ -235,7 +235,7 @@ static NSString *ApolloBannedProfileUsernameFromViewController(UIViewController 
 
     for (UIViewController *controller in viewController.navigationController.viewControllers.reverseObjectEnumerator) {
         if (controller == viewController) continue;
-        if (sProfileViewControllerClass && [controller isKindOfClass:sProfileViewControllerClass]) {
+        if (sProfileViewControllerClass && [controller isMemberOfClass:sProfileViewControllerClass]) {
             NSString *username = ApolloBannedProfileUsernameFromViewControllerDirect(controller);
             if (username.length > 0) return username;
         }
@@ -573,7 +573,7 @@ static void ApolloBannedProfileApplyHeaderSuspendedAppearance(UIViewController *
     while (stack.count > 0) {
         UIView *view = stack.lastObject;
         [stack removeLastObject];
-        if ([view isKindOfClass:headerClass]) {
+        if ([view isMemberOfClass:headerClass]) {
             view.hidden = suspended;
             continue;
         }

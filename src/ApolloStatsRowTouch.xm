@@ -259,7 +259,7 @@ static CGRect SRTClaimRect(id cell, UIView *cellView, NSArray<ApolloSRTTarget *>
     static Class headerClass;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ headerClass = NSClassFromString(@"_TtC6Apollo22CommentsHeaderCellNode"); });
-    BOOL isHeader = headerClass && [cell isKindOfClass:headerClass];
+    BOOL isHeader = headerClass && [cell isMemberOfClass:headerClass];
     CGFloat cellBottom = CGRectGetHeight(cellView.bounds);
     if (!isHeader && cellBottom - CGRectGetMaxY(u) < 44.0) bottom = cellBottom;
 
@@ -619,9 +619,18 @@ static void SRTActivateTarget(id cell, UIView *cellView, ApolloSRTTarget *target
 
 // MARK: - Shared gesture delegate (comment bubble + magnifier)
 
-// Marker/back-ref keys stored on the gesture recognizer.
-static const void *kSRTCommentGestureCellKey = &kSRTCommentGestureCellKey;   // ASSIGN: owning cell node
+@interface ApolloSRTWeakCellBox : NSObject
+@property (nonatomic, weak) id cell;
+@end
+
+@implementation ApolloSRTWeakCellBox
+@end
+
+// Marker/back-reference keys stored on the gesture recognizer. The box gives
+// each recognizer an exact, zeroing-weak owner without retaining the Texture
+// node or rediscovering it from UIKit/Texture implementation details.
 static const void *kSRTCommentGestureInstalledKey = &kSRTCommentGestureInstalledKey; // RETAIN on cell: idempotency
+static const void *kSRTGestureCellBoxKey = &kSRTGestureCellBoxKey; // RETAIN box; box.cell is weak
 static const void *kSRTGestureTypeKey = &kSRTGestureTypeKey;   // NSNumber: 1=comment tap, 2=loupe long-press
 // Per-loupe-gesture live state.
 static const void *kSRTLoupeViewKey = &kSRTLoupeViewKey;       // RETAIN: current ApolloSRTLoupeView
@@ -764,6 +773,11 @@ static void SRTDismissLoupe(UIGestureRecognizer *gr, BOOL animated) {
 // loupe naturally; once the loupe begins, the scroll-lock takes over anyway).
 static const void *kSRTWiredRequirementsKey = &kSRTWiredRequirementsKey;
 
+static id SRTCellForGesture(UIGestureRecognizer *gesture) {
+    ApolloSRTWeakCellBox *box = objc_getAssociatedObject(gesture, kSRTGestureCellBoxKey);
+    return [box isKindOfClass:[ApolloSRTWeakCellBox class]] ? box.cell : nil;
+}
+
 static void SRTWireCornerFailureRequirements(UIGestureRecognizer *loupe, UIView *cellView) {
     NSHashTable *wired = objc_getAssociatedObject(loupe, kSRTWiredRequirementsKey);
     if (!wired) {
@@ -796,7 +810,7 @@ static void SRTWireCornerFailureRequirements(UIGestureRecognizer *loupe, UIView 
 
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr shouldReceiveTouch:(UITouch *)touch {
-    id cell = objc_getAssociatedObject(gr, kSRTCommentGestureCellKey);
+    id cell = SRTCellForGesture(gr);
     NSNumber *type = objc_getAssociatedObject(gr, kSRTGestureTypeKey);
     if (!cell) return NO;
     if (type.integerValue == kSRTGestureTypeLoupe) {
@@ -866,7 +880,7 @@ static const CGFloat kSRTTapMaxTravel = 24.0;
 // scroll actually changes.
 - (BOOL)srtCommentTapShouldBegin:(UIGestureRecognizer *)gr {
     if (!sInfoRowTapComments) return NO;
-    id cell = objc_getAssociatedObject(gr, kSRTCommentGestureCellKey);
+    id cell = SRTCellForGesture(gr);
     if (!cell) return NO;
     UIView *cellView = nil;
     @try { cellView = [(ApolloSRTNode *)cell view]; } @catch (__unused id e) {}
@@ -917,7 +931,7 @@ static const CGFloat kSRTHoldMaxTravel  = 40.0;
     NSNumber *type = objc_getAssociatedObject(gr, kSRTGestureTypeKey);
     if (type.integerValue == kSRTGestureTypeCommentTap) return [self srtCommentTapShouldBegin:gr];
     if (type.integerValue != kSRTGestureTypeLoupe) return YES;
-    id cell = objc_getAssociatedObject(gr, kSRTCommentGestureCellKey);
+    id cell = SRTCellForGesture(gr);
     if (!sIconRowMagnifier || !cell) return NO;
 
     // The feed is already scrolling under this touch — that's a swipe, not a hold.
@@ -1033,7 +1047,7 @@ static const CGFloat kSRTCancelSlopY = 64.0;
 }
 
 - (void)srtLoupeLongPress:(UILongPressGestureRecognizer *)gr {
-    id cell = objc_getAssociatedObject(gr, kSRTCommentGestureCellKey);
+    id cell = SRTCellForGesture(gr);
     if (!cell) return;
     UIView *cellView = nil;
     @try { cellView = [(ApolloSRTNode *)cell view]; } @catch (__unused id e) {}
@@ -1136,6 +1150,8 @@ static void SRTInstallInfoRowGestures(id cell) {
     UIView *cellView = nil;
     @try { cellView = [(ApolloSRTNode *)cell view]; } @catch (__unused id e) {}
     if (!cellView) return;
+    ApolloSRTWeakCellBox *cellBox = [ApolloSRTWeakCellBox new];
+    cellBox.cell = cell;
 
     // 1) Non-consuming tap on the comment bubble -> arm jump-to-comments.
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:SRTDelegate()
@@ -1144,9 +1160,7 @@ static void SRTInstallInfoRowGestures(id cell) {
     tap.delaysTouchesBegan = NO;        // don't interfere with scrolling
     tap.delaysTouchesEnded = NO;        // don't delay the row selection
     tap.delegate = SRTDelegate();
-    // Unsafe-unretained back-ref: the gesture lives inside the cell's view, so it
-    // never outlives the cell — no retain cycle, always valid while the gr exists.
-    objc_setAssociatedObject(tap, kSRTCommentGestureCellKey, cell, OBJC_ASSOCIATION_ASSIGN);
+    objc_setAssociatedObject(tap, kSRTGestureCellBoxKey, cellBox, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(tap, kSRTGestureTypeKey, @(kSRTGestureTypeCommentTap), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [cellView addGestureRecognizer:tap];
 
@@ -1160,7 +1174,7 @@ static void SRTInstallInfoRowGestures(id cell) {
     loupe.allowableMovement = 60.0;
     loupe.cancelsTouchesInView = YES;   // own the touch while the loupe is up
     loupe.delegate = SRTDelegate();
-    objc_setAssociatedObject(loupe, kSRTCommentGestureCellKey, cell, OBJC_ASSOCIATION_ASSIGN);
+    objc_setAssociatedObject(loupe, kSRTGestureCellBoxKey, cellBox, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(loupe, kSRTGestureTypeKey, @(kSRTGestureTypeLoupe), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [cellView addGestureRecognizer:loupe];
 
@@ -1226,7 +1240,7 @@ static NSIndexPath *SRTFirstCommentIndexPath(id tableNode, UITableView *tableVie
         for (NSInteger r = 0; r < rows; r++) {
             NSIndexPath *ip = [NSIndexPath indexPathForRow:r inSection:s];
             id node = ((id (*)(id, SEL, id))objc_msgSend)(tableNode, nodeSel, ip);
-            if (node && [node isKindOfClass:commentCellClass]) return ip;
+            if ([node isMemberOfClass:commentCellClass]) return ip;
         }
     }
     return nil;
@@ -1255,7 +1269,7 @@ static CGFloat SRTQuickBarTopContentY(id tableNode, UITableView *tableView) {
         for (NSInteger r = 0; r < rows; r++) {
             NSIndexPath *ip = [NSIndexPath indexPathForRow:r inSection:s];
             id node = ((id (*)(id, SEL, id))objc_msgSend)(tableNode, nodeSel, ip);
-            if (!node || ![node isKindOfClass:headerClass]) continue;
+            if (![node isMemberOfClass:headerClass]) continue;
             id quickBar = SRTIvar(node, "quickBarNode");
             CALayer *qbLayer = nil;
             @try { qbLayer = [(ApolloSRTNode *)quickBar layer]; } @catch (__unused id e) {}
@@ -1429,8 +1443,8 @@ static BOOL SRTShouldSuppressMenu(id interaction, CGPoint location) {
     for (UIView *v = iview; v && !cell; v = v.superview) {
         for (UIGestureRecognizer *g in v.gestureRecognizers) {
             if ([objc_getAssociatedObject(g, kSRTGestureTypeKey) integerValue] == kSRTGestureTypeLoupe) {
-                cell = objc_getAssociatedObject(g, kSRTCommentGestureCellKey);
-                cellView = v;
+                cell = SRTCellForGesture(g);
+                cellView = g.view;
                 break;
             }
         }

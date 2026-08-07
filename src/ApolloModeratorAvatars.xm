@@ -117,7 +117,7 @@ static void ApolloModAvatarApplyToCell(UITableViewCell *cell) {
     UITableViewCell *cell = %orig;
     if (!sShowUserAvatars) return cell;
     Class subtitleCellClass = NSClassFromString(@"Apollo.ApolloSubtitleTableViewCell");
-    if (!subtitleCellClass || ![cell isKindOfClass:subtitleCellClass]) return cell;
+    if (!subtitleCellClass || ![cell isMemberOfClass:subtitleCellClass]) return cell;
     ApolloModAvatarApplyToCell(cell);
     return cell;
 }

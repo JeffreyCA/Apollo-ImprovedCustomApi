@@ -471,7 +471,7 @@ static UIImage *ApolloWhatsNewCurrentAppIcon(void) {
 // the markSeen-less debug path) makes the first chain to commit the only one.
 static void ApolloWhatsNewAttemptPresentation(NSString *headline, NSArray<NSDictionary *> *items, NSArray<NSNumber *> *remainingDelays, NSString *versionGate, void (^markSeen)(void)) {
     UIViewController *top = ApolloWhatsNewTopViewController();
-    if ([top isKindOfClass:[ApolloWhatsNewViewController class]]) {
+    if ([top isMemberOfClass:[ApolloWhatsNewViewController class]]) {
         ApolloLog(@"[WhatsNew] A What's New sheet is already up — not stacking another.");
         return;
     }

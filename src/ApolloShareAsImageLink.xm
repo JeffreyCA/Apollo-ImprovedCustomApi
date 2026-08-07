@@ -320,8 +320,8 @@ static BOOL ApolloShareLinkAlreadyHasLinkSource(NSArray *items) {
     if (![items isKindOfClass:[NSArray class]]) return NO;
     Class svLinkClass = objc_getClass("ApolloSVLinkItemSource"); // ApolloShareAsVideo's link source, if loaded
     for (id item in items) {
-        if ([item isKindOfClass:[ApolloShareLinkItemSource class]]) return YES;
-        if (svLinkClass && [item isKindOfClass:svLinkClass]) return YES;
+        if ([item isMemberOfClass:[ApolloShareLinkItemSource class]]) return YES;
+        if (svLinkClass && [item isMemberOfClass:svLinkClass]) return YES;
     }
     return NO;
 }
@@ -376,7 +376,7 @@ static BOOL ApolloShareLinkAlreadyHasLinkSource(NSArray *items) {
         }
         id presented = [(UIPresentationController *)self presentedViewController];
         Class shareVCClass = objc_getClass("_TtC6Apollo26ShareAsImageViewController");
-        if (shareVCClass && [presented isKindOfClass:shareVCClass]) {
+        if (shareVCClass && [presented isMemberOfClass:shareVCClass]) {
             double pitch = ApolloShareLinkIvarDouble(presented, "rowHeight");
             if (pitch <= 1.0 || !isfinite(pitch)) pitch = 50.0;
             // Grow upward but clamp the top to the container (never negative), and

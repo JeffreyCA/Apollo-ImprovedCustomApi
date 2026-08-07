@@ -73,7 +73,7 @@ static BOOL DeferReclaimIfInteractivePop(id self_, BOOL animated) {
     BOOL poppingComments = NO;
     if (coordinator && [coordinator isInteractive]) {
         id fromVC = [coordinator viewControllerForKey:UITransitionContextFromViewControllerKey];
-        poppingComments = sCommentsVCClass && [fromVC isKindOfClass:sCommentsVCClass];
+        poppingComments = sCommentsVCClass && [fromVC isMemberOfClass:sCommentsVCClass];
     }
 
     if (!poppingComments || sCommittedPopRunningReclaim) return NO;

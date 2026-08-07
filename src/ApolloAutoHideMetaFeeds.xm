@@ -146,7 +146,7 @@ static BOOL ApolloAHOnMetaFeed(void) {
     Class postsClass = objc_getClass("_TtC6Apollo19PostsViewController");
     if (!postsClass) return NO;
     for (UIViewController *leaf in ApolloAHVisibleLeaves()) {
-        if ([leaf isKindOfClass:postsClass] && ApolloAHTypeIsMetaFeed(leaf)) return YES;
+        if ([leaf isMemberOfClass:postsClass] && ApolloAHTypeIsMetaFeed(leaf)) return YES;
     }
     return NO;
 }

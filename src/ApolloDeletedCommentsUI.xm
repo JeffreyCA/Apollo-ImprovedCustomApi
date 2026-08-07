@@ -48,10 +48,9 @@ static const void *kApolloDeletedCommentsHiddenFullNameKey = &kApolloDeletedComm
 static const void *kApolloDeletedCommentsHiddenTextNodeKey = &kApolloDeletedCommentsHiddenTextNodeKey;
 static const void *kApolloDeletedCommentsHiddenTextNodesKey = &kApolloDeletedCommentsHiddenTextNodesKey;
 static const void *kApolloDeletedCommentsSuppressNextCollapseKey = &kApolloDeletedCommentsSuppressNextCollapseKey;
-static const void *kApolloDeletedCommentsBodyOwnerCellKey = &kApolloDeletedCommentsBodyOwnerCellKey;
-// Reverse of BodyOwnerCellKey: the cell -> its MarkdownNode (captured when the
-// MarkdownNode's layoutSpecThatFits hook runs, which is the only place we have a
-// guaranteed-correct reference to that node, independent of ivar-name lookup).
+// The cell -> its MarkdownNode, captured when the MarkdownNode's
+// layoutSpecThatFits hook runs. The cell owns the node, so retaining this
+// forward reference does not introduce a cycle.
 static const void *kApolloDeletedCommentsCellMarkdownNodeKey = &kApolloDeletedCommentsCellMarkdownNodeKey;
 static char kApolloDeletedCommentsMarkdownOwnerRecordedKey;
 static const void *kApolloDeletedCommentsBodyReplacementTextNodeKey = &kApolloDeletedCommentsBodyReplacementTextNodeKey;
@@ -327,7 +326,7 @@ static RDKComment *ApolloDeletedCommentsCommentFromCellNode(id commentCellNode) 
         comment = nil;
     }
     Class rdkCommentClass = NSClassFromString(@"RDKComment");
-    if (!rdkCommentClass || ![comment isKindOfClass:rdkCommentClass]) return nil;
+    if (!rdkCommentClass || ![comment isMemberOfClass:rdkCommentClass]) return nil;
     return (RDKComment *)comment;
 }
 
@@ -2998,12 +2997,9 @@ static void ApolloDeletedCommentsScheduleRevealToggleForTextNode(id cellNode, id
 static id ApolloDeletedCommentsCommentCellNodeForTextNode(id textNode) {
     if (!textNode || ![textNode respondsToSelector:@selector(supernode)]) return nil;
     id current = textNode;
-    id fallbackOwnerCell = nil;
     for (NSUInteger i = 0; current && i < 10; i++) {
         const char *className = class_getName(object_getClass(current));
         if (className && strstr(className, "CommentCellNode")) return current;
-        id ownerCell = objc_getAssociatedObject(current, kApolloDeletedCommentsBodyOwnerCellKey);
-        if (ownerCell && !fallbackOwnerCell) fallbackOwnerCell = ownerCell;
         if (![current respondsToSelector:@selector(supernode)]) break;
         @try {
             current = ((id (*)(id, SEL))objc_msgSend)(current, @selector(supernode));
@@ -3011,7 +3007,7 @@ static id ApolloDeletedCommentsCommentCellNodeForTextNode(id textNode) {
             break;
         }
     }
-    return fallbackOwnerCell;
+    return nil;
 }
 
 static BOOL __attribute__((unused)) ApolloDeletedCommentsTextNodeBelongsToRecoveredComment(id textNode) {
@@ -3538,7 +3534,6 @@ static NSDictionary *ApolloDeletedCommentsRegularizedBodyAttributes(NSDictionary
 
 static id __attribute__((unused)) ApolloDeletedCommentsDeletedMarkdownLayoutSpecIfNeeded(id markdownNode) {
     id cellNode = ApolloDeletedCommentsCommentCellNodeForTextNode(markdownNode);
-    if (!cellNode) cellNode = objc_getAssociatedObject(markdownNode, kApolloDeletedCommentsBodyOwnerCellKey);
     RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode(cellNode);
     if (!comment || !ApolloDeletedCommentsCellNodeShouldShowDeletedTreatment(cellNode)) return nil;
     if (ApolloDeletedCommentsCommentIsCollapsed(comment)) return nil;
@@ -3742,7 +3737,7 @@ static void ApolloDeletedCommentsPrepareBuiltObject(id object) {
     }
 
     Class commentClass = NSClassFromString(@"RDKComment");
-    if (!commentClass || ![object isKindOfClass:commentClass]) return;
+    if (!commentClass || ![object isMemberOfClass:commentClass]) return;
     RDKComment *comment = (RDKComment *)object;
     if (!ApolloDeletedCommentsTreatmentAllowedForComment(comment)) return;
     NSString *fullName = ApolloDeletedCommentsFullNameForComment(comment);
@@ -4583,10 +4578,6 @@ static void ApolloDeletedCommentsAdoptRawDeletedStubIfNeeded(id cellNode) {
     // ResolvedRecoveredBodyForComment and the body/bodyHTML getter hooks, so it does not
     // depend on the model being pre-normalized here.
     RDKComment *comment = ApolloDeletedCommentsCommentFromCellNode((id)self);
-    id bodyNode = ApolloDeletedCommentsKnownBodyContainerNode((id)self);
-    if (bodyNode) {
-        objc_setAssociatedObject(bodyNode, kApolloDeletedCommentsBodyOwnerCellKey, (id)self, OBJC_ASSOCIATION_ASSIGN);
-    }
     id spec = %orig;
     if (ApolloDeletedCommentsFeatureActive() &&
         !ApolloDeletedCommentsCommentIsCollapsed(comment) &&

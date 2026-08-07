@@ -142,7 +142,7 @@ static NSString *const kGroupSuiteName = @"group.com.christianselig.apollo";
 - (NSArray<NSString *> *)sortedCategoryNames {
     NSDictionary *db = [self readSavedCategoriesDatabase];
     NSDictionary *categories = db[@"categories"];
-    if (!categories || ![categories isKindOfClass:[NSDictionary class]]) return @[];
+    if (![categories isKindOfClass:[NSDictionary class]]) return @[];
     return [[categories allKeys] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
 }
 

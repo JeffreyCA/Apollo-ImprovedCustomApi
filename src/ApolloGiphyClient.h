@@ -12,22 +12,26 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
-typedef void (^ApolloGiphyDownloadCompletion)(NSData *_Nullable data, NSError *_Nullable error);
-typedef void (^ApolloGiphyFetchCompletion)(NSArray<ApolloGiphyGIF *> *gifs, BOOL hasMore, NSError *_Nullable error);
+typedef void (^ApolloGiphyFetchCompletion)(NSArray<ApolloGiphyGIF *> *gifs, BOOL hasMore,
+                                           NSUInteger nextOffset, NSError *_Nullable error);
 
 @interface ApolloGiphyClient : NSObject
 
 + (NSString *)configuredAPIKey;
 
-+ (void)downloadGIFData:(ApolloGiphyGIF *)gif
-             completion:(ApolloGiphyDownloadCompletion)completion;
+/// Returns the canonical HTTPS GIF rendition for a valid Giphy ID.
++ (nullable NSURL *)mediaURLForGIFID:(NSString *)gifID;
 
-+ (void)fetchTrendingWithOffset:(NSUInteger)offset
-                     completion:(ApolloGiphyFetchCompletion)completion;
+/// Converts an official Giphy share or embed page into its canonical GIF
+/// rendition. Returns nil for direct media URLs and unrelated Giphy pages.
++ (nullable NSURL *)mediaURLFromPageURL:(NSURL *)pageURL;
 
-+ (void)searchWithQuery:(NSString *)query
-                 offset:(NSUInteger)offset
-             completion:(ApolloGiphyFetchCompletion)completion;
++ (nullable NSURLSessionDataTask *)fetchTrendingWithOffset:(NSUInteger)offset
+                                                completion:(ApolloGiphyFetchCompletion)completion;
+
++ (nullable NSURLSessionDataTask *)searchWithQuery:(NSString *)query
+                                            offset:(NSUInteger)offset
+                                        completion:(ApolloGiphyFetchCompletion)completion;
 
 @end
 

@@ -126,48 +126,49 @@ NSURL *ApolloWebJSONProbeURL(NSURL *url) {
 // "Valet queries" — those whose service contains "com.christianselig.Apollo" —
 // so an ad-hoc-signed sim app (no keychain entitlement) can read/write here
 // without securityd rejecting it with errSecMissingEntitlement (-34018).
-static NSString *const kWebJSONKeychainService = @"com.christianselig.Apollo.webjson";
-static NSString *const kWebJSONKeychainAccountCookie   = @"sessionCookieHeader";
-static NSString *const kWebJSONKeychainAccountModhash  = @"sessionModhash";
-static NSString *const kWebJSONKeychainAccountUsername = @"sessionUsername";
+static CFStringRef const kWebJSONKeychainService = CFSTR("com.christianselig.Apollo.webjson");
+static CFStringRef const kWebJSONKeychainAccountCookie   = CFSTR("sessionCookieHeader");
+static CFStringRef const kWebJSONKeychainAccountModhash  = CFSTR("sessionModhash");
+static CFStringRef const kWebJSONKeychainAccountUsername = CFSTR("sessionUsername");
 
-static NSString *ApolloWebJSONKeychainRead(NSString *account) {
-    NSDictionary *query = @{
-        (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: kWebJSONKeychainService,
-        (__bridge id)kSecAttrAccount: account,
-        (__bridge id)kSecReturnData:  (__bridge id)kCFBooleanTrue,
-        (__bridge id)kSecMatchLimit:  (__bridge id)kSecMatchLimitOne,
-    };
+static NSString *ApolloWebJSONKeychainRead(CFStringRef account) {
+    CFDictionaryRef query =
+        ApolloCreateGenericPasswordDataQuery(kWebJSONKeychainService, account);
     CFTypeRef result = NULL;
-    OSStatus st = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-    if (st != errSecSuccess || !result) return nil;
-    NSData *data = (__bridge_transfer NSData *)result;
+    OSStatus st = SecItemCopyMatching(query, &result);
+    CFRelease(query);
+    if (st != errSecSuccess || !result) {
+        if (result) CFRelease(result);
+        return nil;
+    }
+    if (CFGetTypeID(result) != CFDataGetTypeID()) {
+        CFRelease(result);
+        ApolloLog(@"[WebJSON] Keychain read returned a non-data value");
+        return nil;
+    }
+    NSData *data = CFBridgingRelease(result);
     NSString *value = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     return value.length > 0 ? value : nil;
 }
 
-static void ApolloWebJSONKeychainWrite(NSString *account, NSString *value) {
-    NSDictionary *match = @{
-        (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: kWebJSONKeychainService,
-        (__bridge id)kSecAttrAccount: account,
-    };
+static void ApolloWebJSONKeychainWrite(CFStringRef account, NSString *value) {
     if (value.length == 0) {
-        SecItemDelete((__bridge CFDictionaryRef)match);
+        CFDictionaryRef match =
+            ApolloCreateGenericPasswordIdentity(kWebJSONKeychainService, account);
+        SecItemDelete(match);
+        CFRelease(match);
         return;
     }
     NSData *data = [value dataUsingEncoding:NSUTF8StringEncoding];
-    NSDictionary *update = @{ (__bridge id)kSecValueData: data };
-    OSStatus st = SecItemUpdate((__bridge CFDictionaryRef)match, (__bridge CFDictionaryRef)update);
-    if (st == errSecItemNotFound) {
-        NSMutableDictionary *add = [match mutableCopy];
-        add[(__bridge id)kSecValueData] = data;
-        add[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
-        st = SecItemAdd((__bridge CFDictionaryRef)add, NULL);
+    if (!data) {
+        ApolloLog(@"[WebJSON] Keychain value could not be encoded as UTF-8");
+        return;
     }
+    OSStatus st = ApolloUpsertGenericPasswordData(kWebJSONKeychainService, account, data,
+                                                   kSecAttrAccessibleAfterFirstUnlock);
     if (st != errSecSuccess) {
-        ApolloLog(@"[WebJSON] Keychain write for %@ failed (OSStatus %d)", account, (int)st);
+        ApolloLog(@"[WebJSON] Keychain write for %@ failed (OSStatus %d)",
+                  (__bridge NSString *)account, (int)st);
     }
 }
 
@@ -380,8 +381,8 @@ NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request) {
             // it (an active web session exists) — otherwise this is just the
             // normal OAuth path and logging would fire for every request.
             if (ApolloActiveWebSession() != nil) {
-                ApolloLog(@"[WebJSON] Foreign real bearer (u/%@) on %@ %@ — leaving on oauth path",
-                          owner ?: @"unknown", request.HTTPMethod ?: @"GET", url.path);
+                ApolloLogDebug(@"[WebJSON] Foreign real bearer (u/%@) on %@ %@ — leaving on oauth path",
+                               owner ?: @"unknown", request.HTTPMethod ?: @"GET", url.path);
             }
             return nil;
         }
@@ -413,7 +414,7 @@ NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request) {
         [modMutable setValue:session.cookieHeader forHTTPHeaderField:@"Cookie"];
         modMutable.HTTPShouldHandleCookies = NO;
         [modMutable setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
-        ApolloLog(@"[WebJSON] Rewrote moderators GET %@ -> %@ for u/%@", url.absoluteString, modURL.absoluteString, sessionUsername);
+        ApolloLogDebug(@"[WebJSON] Rewrote moderators GET %@ -> %@ for u/%@", url.absoluteString, modURL.absoluteString, sessionUsername);
         return modMutable;
     }
 
@@ -491,10 +492,10 @@ NSURLRequest *ApolloWebJSONRewriteRequest(NSURLRequest *request) {
 
     [mutable setValue:([sUserAgent length] > 0 ? sUserAgent : defaultUserAgent) forHTTPHeaderField:@"User-Agent"];
 
-    ApolloLog(@"[WebJSON] Rewrote %@ %@ -> %@ for u/%@ (%@%@)",
-              method, url.absoluteString, rewrittenURL.absoluteString, sessionUsername,
-              isWrite ? @"write" : @"read",
-              (isWrite && session.modhash.length > 0) ? @", modhash" : @"");
+    ApolloLogDebug(@"[WebJSON] Rewrote %@ %@ -> %@ for u/%@ (%@%@)",
+                   method, url.absoluteString, rewrittenURL.absoluteString, sessionUsername,
+                   isWrite ? @"write" : @"read",
+                   (isWrite && session.modhash.length > 0) ? @", modhash" : @"");
     return mutable;
 }
 
@@ -1139,8 +1140,8 @@ NSData *ApolloWebJSONFixupListingMediaResponseData(NSURLResponse *response, NSDa
     NSData *fixed = [NSJSONSerialization dataWithJSONObject:root options:0 error:NULL];
     if (!fixed) return data;
 
-    ApolloLog(@"[WebJSON] Hydrated image metadata for %lu direct Reddit post%@ in %@",
-              (unsigned long)repaired, repaired == 1 ? @"" : @"s", responseURL.path);
+    ApolloLogDebug(@"[WebJSON] Hydrated image metadata for %lu direct Reddit post%@ in %@",
+                   (unsigned long)repaired, repaired == 1 ? @"" : @"s", responseURL.path);
     return fixed;
 }
 

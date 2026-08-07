@@ -230,7 +230,7 @@ static BOOL LCFQuickBarTopContentY(UIViewController *vc, UITableView *tv, CGFloa
     if ([tv numberOfSections] < 1 || [tv numberOfRowsInSection:0] < 1) return NO;
     NSIndexPath *ip0 = [NSIndexPath indexPathForRow:0 inSection:0];
     id header = ((id (*)(id, SEL, id))objc_msgSend)(tableNode, nodeSel, ip0);
-    if (![header isKindOfClass:NSClassFromString(@"_TtC6Apollo22CommentsHeaderCellNode")]) return NO;
+    if (![header isMemberOfClass:NSClassFromString(@"_TtC6Apollo22CommentsHeaderCellNode")]) return NO;
     id qb = LCFObjectIvar(header, "quickBarNode");
     SEL boundsSel = NSSelectorFromString(@"bounds");
     SEL convSel = NSSelectorFromString(@"convertRect:toNode:");

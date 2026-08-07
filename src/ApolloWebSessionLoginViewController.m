@@ -147,7 +147,7 @@ static const NSTimeInterval kReharvestTimeout = 25.0;
     UIViewController *top = [[self _apolloKeyWindow] visibleViewController];
     if (!top) { if (completion) completion(NO); return; }
     // Already in the login flow (or some other modal we shouldn't interrupt).
-    if ([top isKindOfClass:[ApolloWebSessionLoginViewController class]]) {
+    if ([top isMemberOfClass:[ApolloWebSessionLoginViewController class]]) {
         if (completion) completion(NO);
         return;
     }

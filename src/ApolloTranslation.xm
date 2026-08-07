@@ -31,7 +31,7 @@
 #endif
 
 #if APOLLO_TRANSLATION_VERBOSE_LOGS
-#define ApolloTranslationVerboseLog(fmt, ...) ApolloLog(fmt, ##__VA_ARGS__)
+#define ApolloTranslationVerboseLog(fmt, ...) ApolloLogDebug(fmt, ##__VA_ARGS__)
 #else
 #define ApolloTranslationVerboseLog(fmt, ...) do {} while (0)
 #endif
@@ -2288,7 +2288,7 @@ static RDKLink *ApolloLinkFromHeaderCellNode(id cellNode) {
             if (!type || type[0] != '@') continue;
             id v = nil;
             @try { v = object_getIvar(cellNode, iv); } @catch (__unused NSException *e) { continue; }
-            if ([v isKindOfClass:rdkLink]) return (RDKLink *)v;
+            if ([v isMemberOfClass:rdkLink]) return (RDKLink *)v;
         }
     }
 
@@ -2304,7 +2304,7 @@ static RDKLink *ApolloLinkFromHeaderCellNode(id cellNode) {
             if (!type || type[0] != '@') continue;
             id v = nil;
             @try { v = object_getIvar(cellNode, ivars[i]); } @catch (__unused NSException *e) { continue; }
-            if ([v isKindOfClass:rdkLink]) {
+            if ([v isMemberOfClass:rdkLink]) {
                 free(ivars);
                 return (RDKLink *)v;
             }
@@ -2329,7 +2329,7 @@ static RDKLink *ApolloLinkFromController(UIViewController *vc) {
             if (!type || type[0] != '@') continue;
             id v = nil;
             @try { v = object_getIvar(vc, iv); } @catch (__unused NSException *e) { continue; }
-            if ([v isKindOfClass:rdkLink]) return (RDKLink *)v;
+            if ([v isMemberOfClass:rdkLink]) return (RDKLink *)v;
         }
     }
     for (Class cls = [vc class]; cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
@@ -2341,7 +2341,7 @@ static RDKLink *ApolloLinkFromController(UIViewController *vc) {
             if (!type || type[0] != '@') continue;
             id v = nil;
             @try { v = object_getIvar(vc, ivars[i]); } @catch (__unused NSException *e) { continue; }
-            if ([v isKindOfClass:rdkLink]) {
+            if ([v isMemberOfClass:rdkLink]) {
                 free(ivars);
                 return (RDKLink *)v;
             }
@@ -4051,7 +4051,7 @@ static RDKComment *ApolloCommentFromCellNode(id commentCellNode) {
 
     id comment = object_getIvar(commentCellNode, commentIvar);
     Class rdkCommentClass = NSClassFromString(@"RDKComment");
-    if (!rdkCommentClass || ![comment isKindOfClass:rdkCommentClass]) return nil;
+    if (!rdkCommentClass || ![comment isMemberOfClass:rdkCommentClass]) return nil;
     return (RDKComment *)comment;
 }
 
@@ -5855,7 +5855,7 @@ static NSAttributedString *ApolloTranslationCompactCodeMarkerAttributedString(NS
 static id ApolloPostInfoNodeFromContainerNode(id node) {
     Class piCls = objc_getClass("_TtC6Apollo12PostInfoNode");
     if (!node || !piCls) return nil;
-    if ([node isKindOfClass:piCls]) return node;
+    if ([node isMemberOfClass:piCls]) return node;
     for (Class cls = [node class]; cls && cls != [NSObject class]; cls = class_getSuperclass(cls)) {
         unsigned int n = 0;
         Ivar *ivars = class_copyIvarList(cls, &n);
@@ -5864,7 +5864,7 @@ static id ApolloPostInfoNodeFromContainerNode(id node) {
             if (!type || type[0] != '@') continue;
             @try {
                 id v = object_getIvar(node, ivars[i]);
-                if ([v isKindOfClass:piCls]) { free(ivars); return v; }
+                if ([v isMemberOfClass:piCls]) { free(ivars); return v; }
             } @catch (__unused NSException *e) {}
         }
         free(ivars);
@@ -5875,7 +5875,7 @@ static id ApolloPostInfoNodeFromContainerNode(id node) {
 // Recursively scan a node's subnode subtree for a PostInfoNode (depth-limited).
 static id ApolloFindPostInfoNodeInSubtree(id node, Class piCls, int depth) {
     if (!node || depth < 0) return nil;
-    if ([node isKindOfClass:piCls]) return node;
+    if ([node isMemberOfClass:piCls]) return node;
     @try {
         SEL subnodesSel = NSSelectorFromString(@"subnodes");
         if ([node respondsToSelector:subnodesSel]) {
@@ -7629,7 +7629,10 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
         if (ApolloPreemptUnownedTextNodeFromVCStash(self, attributedText, &preemptSwap) ||
             ApolloPreemptUnownedCommentTextNode(self, attributedText, &preemptSwap)) {
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            @try { %orig(preemptSwap); } @catch (__unused NSException *e) {}
+            @try {
+                %orig(preemptSwap);
+            } @catch (__unused NSException *e) {
+            }
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             return;
         }
@@ -7678,7 +7681,10 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
     NSAttributedString *swap = nil;
     if (ApolloPrepareTranslatedSwapForTextNode(self, attributedText, &swap)) {
         objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        @try { %orig(swap); } @catch (__unused NSException *e) {}
+        @try {
+            %orig(swap);
+        } @catch (__unused NSException *e) {
+        }
         objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if (isTitleOwned) {
             NSString *originalBody = objc_getAssociatedObject(self, kApolloOwnedNodeOriginalBodyKey);
@@ -7707,7 +7713,10 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
         if (ApolloPreemptUnownedTextNodeFromVCStash(self, attributedText, &preemptSwap) ||
             ApolloPreemptUnownedCommentTextNode(self, attributedText, &preemptSwap)) {
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            @try { %orig(preemptSwap); } @catch (__unused NSException *e) {}
+            @try {
+                %orig(preemptSwap);
+            } @catch (__unused NSException *e) {
+            }
             objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             return;
         }
@@ -7745,7 +7754,10 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
     NSAttributedString *swap = nil;
     if (ApolloPrepareTranslatedSwapForTextNode(self, attributedText, &swap)) {
         objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        @try { %orig(swap); } @catch (__unused NSException *e) {}
+        @try {
+            %orig(swap);
+        } @catch (__unused NSException *e) {
+        }
         objc_setAssociatedObject(self, kApolloOwnedNodeReentrancyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if (isTitleOwned) {
             NSString *originalBody = objc_getAssociatedObject(self, kApolloOwnedNodeOriginalBodyKey);
@@ -9893,24 +9905,24 @@ static void ApolloDbgPurgeNSCaches(CFNotificationCenterRef c, void *o, CFStringR
             @"Tjen def. Fernandez", @"I love Dua Lipa's new album",
             @"Roger Federer wins again", @"Bonjour tout le monde",
             @"voy a casa", @"Che bella giornata", @"Bonjour" ];
-        ApolloLog(@"[Translation][NameTest] provider=%@ — proper-noun protection self-test", sTranslationProvider ?: @"(nil)");
+        ApolloLogDebug(@"[Translation][NameTest] provider=%@ — proper-noun protection self-test", sTranslationProvider ?: @"(nil)");
         for (NSString *title in titles) {
             NSDictionary<NSString *, NSString *> *names = nil;
             NSString *protectedText = ApolloProtectTranslationNames(title, &names);
             BOOL onlyNames = names.count > 0 && ApolloProtectedTextIsOnlyProtectedTokens(protectedText, names, @{});
             BOOL titleHeuristic = ApolloTitleLooksLikeProperNouns(title);
             BOOL willSkip = onlyNames || titleHeuristic;
-            ApolloLog(@"[Translation][NameTest] \"%@\" -> ner=[%@] titleHeuristic=%d => %@",
-                title,
-                names.count ? [names.allValues componentsJoinedByString:@", "] : @"none",
-                titleHeuristic,
-                willSkip ? @"SKIP (left untranslated)" : @"translate");
+            ApolloLogDebug(@"[Translation][NameTest] \"%@\" -> ner=[%@] titleHeuristic=%d => %@",
+                           title,
+                           names.count ? [names.allValues componentsJoinedByString:@", "] : @"none",
+                           titleHeuristic,
+                           willSkip ? @"SKIP (left untranslated)" : @"translate");
         }
         NSString *probe = @"Dua Lipa";
         ApolloRequestTranslation(ApolloTranslationCacheKey(probe, @"en"), probe, @"en", ^(NSString *translated, NSError *error) {
-            ApolloLog(@"[Translation][NameTest] end-to-end \"%@\" => \"%@\" (err=%@) — %@",
-                probe, translated ?: @"(nil)", error ? @(error.code) : @"none",
-                [translated isEqualToString:probe] ? @"PASS name preserved" : @"CHECK");
+            ApolloLogDebug(@"[Translation][NameTest] end-to-end \"%@\" => \"%@\" (err=%@) — %@",
+                           probe, translated ?: @"(nil)", error ? @(error.code) : @"none",
+                           [translated isEqualToString:probe] ? @"PASS name preserved" : @"CHECK");
         });
     });
 #endif

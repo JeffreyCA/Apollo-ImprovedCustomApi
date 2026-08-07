@@ -224,7 +224,7 @@ static NSString *ApolloFeedSearchQueryText(void) {
 // that rebuilt header. So those cases keep stock behavior (results below the chrome).
 static BOOL ApolloFeedSearchManagedHeader(UIScrollView *sv) {
     UIView *hdr = [sv respondsToSelector:@selector(tableHeaderView)] ? [(UITableView *)sv tableHeaderView] : nil;
-    return hdr && [hdr isKindOfClass:objc_getClass("ApolloSubredditHeaderWrapperView")];
+    return [hdr isMemberOfClass:objc_getClass("ApolloSubredditHeaderWrapperView")];
 }
 
 static CGFloat ApolloFeedSearchDesiredOffsetY(UIScrollView *sv) {
@@ -882,10 +882,16 @@ static void recenterCancelButton(void) {
     }
     UIView *sup = [(UIView *)self superview];
     UINavigationBar *nb = sFeedSearchNavBar;
-    if (!sup || !nb || !nb.window) { %orig; return; }
+    if (!sup || !nb || !nb.window) {
+        %orig;
+        return;
+    }
 
     CGFloat windowTopY = CGRectGetMaxY([nb convertRect:nb.bounds toView:nil]); // nav bottom, window space
-    if (windowTopY <= 1.0) { %orig; return; }                                  // bar not laid out yet
+    if (windowTopY <= 1.0) {
+        %orig;
+        return;
+    } // bar not laid out yet
     CGFloat localTopY = [sup convertPoint:CGPointMake(0.0, windowTopY) fromView:nil].y;
 
     CGRect pinned = frame;

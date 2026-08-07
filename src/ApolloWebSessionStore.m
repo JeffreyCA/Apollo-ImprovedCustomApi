@@ -16,7 +16,7 @@
 // as a literal rather than shared via a header — this mirrors how
 // kApolloGroupSuite/kApolloGroupSuiteName are independently re-declared in
 // several files in this codebase rather than centralized.
-static NSString *const kWebSessionKeychainService = @"com.christianselig.Apollo.webjson";
+static CFStringRef const kWebSessionKeychainService = CFSTR("com.christianselig.Apollo.webjson");
 
 // Per-account item names: "websession:<lowercased-username>:cookie"/"…:modhash".
 static NSString *ApolloWebSessionKeychainAccountName(NSString *suffix, NSString *username) {
@@ -24,40 +24,44 @@ static NSString *ApolloWebSessionKeychainAccountName(NSString *suffix, NSString 
 }
 
 static NSString *ApolloWebSessionKeychainRead(NSString *account) {
-    NSDictionary *query = @{
-        (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: kWebSessionKeychainService,
-        (__bridge id)kSecAttrAccount: account,
-        (__bridge id)kSecReturnData:  (__bridge id)kCFBooleanTrue,
-        (__bridge id)kSecMatchLimit:  (__bridge id)kSecMatchLimitOne,
-    };
+    CFDictionaryRef query =
+        ApolloCreateGenericPasswordDataQuery(kWebSessionKeychainService,
+                                             (__bridge CFStringRef)account);
     CFTypeRef result = NULL;
-    OSStatus st = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-    if (st != errSecSuccess || !result) return nil;
-    NSData *data = (__bridge_transfer NSData *)result;
+    OSStatus st = SecItemCopyMatching(query, &result);
+    CFRelease(query);
+    if (st != errSecSuccess || !result) {
+        if (result) CFRelease(result);
+        return nil;
+    }
+    if (CFGetTypeID(result) != CFDataGetTypeID()) {
+        CFRelease(result);
+        ApolloLog(@"[WebSessionStore] Keychain read returned a non-data value");
+        return nil;
+    }
+    NSData *data = CFBridgingRelease(result);
     NSString *value = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     return value.length > 0 ? value : nil;
 }
 
 static void ApolloWebSessionKeychainWrite(NSString *account, NSString *value) {
-    NSDictionary *match = @{
-        (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: kWebSessionKeychainService,
-        (__bridge id)kSecAttrAccount: account,
-    };
     if (value.length == 0) {
-        SecItemDelete((__bridge CFDictionaryRef)match);
+        CFDictionaryRef match =
+            ApolloCreateGenericPasswordIdentity(kWebSessionKeychainService,
+                                                (__bridge CFStringRef)account);
+        SecItemDelete(match);
+        CFRelease(match);
         return;
     }
     NSData *data = [value dataUsingEncoding:NSUTF8StringEncoding];
-    NSDictionary *update = @{ (__bridge id)kSecValueData: data };
-    OSStatus st = SecItemUpdate((__bridge CFDictionaryRef)match, (__bridge CFDictionaryRef)update);
-    if (st == errSecItemNotFound) {
-        NSMutableDictionary *add = [match mutableCopy];
-        add[(__bridge id)kSecValueData] = data;
-        add[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
-        st = SecItemAdd((__bridge CFDictionaryRef)add, NULL);
+    if (!data) {
+        ApolloLog(@"[WebSessionStore] Keychain value could not be encoded as UTF-8");
+        return;
     }
+    OSStatus st =
+        ApolloUpsertGenericPasswordData(kWebSessionKeychainService,
+                                       (__bridge CFStringRef)account, data,
+                                       kSecAttrAccessibleAfterFirstUnlock);
     if (st != errSecSuccess) {
         ApolloLog(@"[WebSessionStore] Keychain write for %@ failed (OSStatus %d)", account, (int)st);
     }
@@ -145,8 +149,8 @@ void ApolloWebSessionSet(NSString *username, NSString *cookieHeader, NSString *m
     // Promote to primary: in the primary index, out of the poll-only one.
     ApolloWebSessionUpdateIndexNamed(kUDKeyWebSessionPollOnlyIndex, key, NO);
     ApolloWebSessionUpdateIndex(key, YES);
-    ApolloLog(@"[WebSessionStore] Stored web session for u/%@ (%lu cookie bytes, modhash %@)",
-              username, (unsigned long)cookieHeader.length, modhash.length > 0 ? @"present" : @"absent");
+    ApolloLogDebug(@"[WebSessionStore] Stored web session for u/%@ (%lu cookie bytes, modhash %@)",
+                   username, (unsigned long)cookieHeader.length, modhash.length > 0 ? @"present" : @"absent");
 }
 
 void ApolloWebSessionSetPollOnly(NSString *username, NSString *cookieHeader, NSString *modhash) {
@@ -164,8 +168,8 @@ void ApolloWebSessionSetPollOnly(NSString *username, NSString *cookieHeader, NSS
     ApolloWebSessionKeychainWrite(ApolloWebSessionKeychainAccountName(@"modhash", key), modhash ?: @"");
     ApolloWebSessionUpdateIndex(key, NO);
     ApolloWebSessionUpdateIndexNamed(kUDKeyWebSessionPollOnlyIndex, key, YES);
-    ApolloLog(@"[WebSessionStore] Stored poll-only web session for u/%@ (%lu cookie bytes, modhash %@)",
-              username, (unsigned long)cookieHeader.length, modhash.length > 0 ? @"present" : @"absent");
+    ApolloLogDebug(@"[WebSessionStore] Stored poll-only web session for u/%@ (%lu cookie bytes, modhash %@)",
+                   username, (unsigned long)cookieHeader.length, modhash.length > 0 ? @"present" : @"absent");
 }
 
 void ApolloWebSessionRemove(NSString *username) {

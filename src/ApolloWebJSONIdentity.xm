@@ -297,22 +297,16 @@ static void ApolloWebJSONFulfillTokenCompletion(id completion) {
 // token (the cookie carries auth at the chokepoint). RDKClient.encodeWithCoder
 // persists currentUser, so the username shows immediately.
 static NSString *const kApolloGroupSuite = @"group.com.christianselig.apollo";
-static NSString *const kApolloAccountsKeychainKey = @"2RedditAccounts2";
+static CFStringRef const kApolloAccountsKeychainKey = CFSTR("2RedditAccounts2");
 // Valet's generic-password service for the shared-group store (read from a live
 // keychain). Contains the Apollo base id so the simulator's virtualized Valet
 // (Tweak.xm, IsValetQuery) intercepts it too.
-static NSString *const kApolloValetAccountsService =
-    @"VAL_VALValet_initWithSharedAccessGroupIdentifier:accessibility:_com.christianselig.Apollo_AccessibleAfterFirstUnlock";
+static CFStringRef const kApolloValetAccountsService =
+    CFSTR("VAL_VALValet_initWithSharedAccessGroupIdentifier:accessibility:_com.christianselig.Apollo_AccessibleAfterFirstUnlock");
 
 // Writes a Valet-shaped generic-password item (mirrors ApolloReplayValetKeychainItems:
 // the SecItem* shims strip the access group on device and virtualize it in the sim).
-static void ApolloWebJSONWriteValetItem(NSString *account, NSData *data) {
-    NSDictionary *identity = @{
-        (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: kApolloValetAccountsService,
-        (__bridge id)kSecAttrAccount: account,
-    };
-    NSMutableDictionary *add = [identity mutableCopy];
+static void ApolloWebJSONWriteValetItem(CFStringRef account, NSData *data) {
     // MANDATORY. Valet encodes its accessibility into the service name above
     // (…_AccessibleAfterFirstUnlock) AND passes kSecAttrAccessible on every read. Omit it here
     // and SecItemAdd defaults the item to kSecAttrAccessibleWhenUnlocked, which a read filters on
@@ -324,14 +318,13 @@ static void ApolloWebJSONWriteValetItem(NSString *account, NSData *data) {
     // out writes an empty array over it), so the item is created exactly once per device and every
     // later write is an update — and an update never changes the protection class. Whichever
     // writer creates it first decides its fate permanently.
-    add[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlock;
-    add[(__bridge id)kSecValueData] = data;
-    OSStatus st = SecItemAdd((__bridge CFDictionaryRef)add, NULL);
-    if (st == errSecDuplicateItem) {
-        SecItemUpdate((__bridge CFDictionaryRef)identity,
-                      (__bridge CFDictionaryRef)@{ (__bridge id)kSecValueData: data });
-    } else if (st != errSecSuccess) {
-        ApolloLog(@"[WebJSON][identity] Valet write for %@ failed (OSStatus %d)", account, (int)st);
+    OSStatus st = ApolloUpsertGenericPasswordData(kApolloValetAccountsService,
+                                                   account,
+                                                   data,
+                                                   kSecAttrAccessibleAfterFirstUnlock);
+    if (st != errSecSuccess) {
+        ApolloLog(@"[WebJSON][identity] Valet write for %@ failed (OSStatus %d)",
+                  (__bridge NSString *)account, (int)st);
     }
 }
 
@@ -402,18 +395,25 @@ static void ApolloWebJSONBackfillUsernameOnUser(id user) {
 // append can read-modify-write rather than clobber existing accounts' secrets.
 static NSArray<NSDictionary *> *ApolloWebJSONReadValetAccountsArray(BOOL *outReadFailed) {
     if (outReadFailed) *outReadFailed = NO;
-    NSDictionary *query = @{
-        (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: kApolloValetAccountsService,
-        (__bridge id)kSecAttrAccount: kApolloAccountsKeychainKey,
-        (__bridge id)kSecReturnData:  (__bridge id)kCFBooleanTrue,
-        (__bridge id)kSecMatchLimit:  (__bridge id)kSecMatchLimitOne,
-    };
+    CFDictionaryRef query =
+        ApolloCreateGenericPasswordDataQuery(kApolloValetAccountsService,
+                                             kApolloAccountsKeychainKey);
     CFTypeRef result = NULL;
-    OSStatus st = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-    if (st == errSecItemNotFound) return @[];
+    OSStatus st = SecItemCopyMatching(query, &result);
+    CFRelease(query);
+    if (st == errSecItemNotFound) {
+        if (result) CFRelease(result);
+        return @[];
+    }
     if (st != errSecSuccess || !result) {
+        if (result) CFRelease(result);
         if (outReadFailed) *outReadFailed = YES;
+        return nil;
+    }
+    if (CFGetTypeID(result) != CFDataGetTypeID()) {
+        CFRelease(result);
+        if (outReadFailed) *outReadFailed = YES;
+        ApolloLog(@"[WebJSON][identity] Valet read returned a non-data value");
         return nil;
     }
     NSData *data = (__bridge_transfer NSData *)result;
@@ -464,7 +464,7 @@ BOOL ApolloWebJSONSynthesizeSignedInAccount(NSString *username) {
     // Template: reuse the app-only RDKClient archive (a known-good object graph
     // Apollo itself produced), falling back to a fresh instance.
     id client = ApolloWebJSONUnarchive([group objectForKey:@"RedditApplicationOnlyAccount2"]);
-    if (![client isKindOfClass:clientClass]) client = [[clientClass alloc] init];
+    if (![client isMemberOfClass:clientClass]) client = [[clientClass alloc] init];
     if (!client) return NO;
 
     @try {
@@ -756,7 +756,7 @@ static id ApolloWebJSONThingProperty(id thing, SEL selector) {
 - (id)retrieveAccessTokenForApplicationOnlyWithCompletion:(id)completion {
     if (ApolloWebJSONShouldActForClient(self)) {
         ApolloWebJSONInstallSyntheticCredentialIfNeeded(self);
-        ApolloLog(@"[WebJSON][identity] Short-circuited app-only token mint (cookie session)");
+        ApolloLogDebug(@"[WebJSON][identity] Short-circuited app-only token mint (cookie session)");
         ApolloWebJSONFulfillTokenCompletion(completion);
         return nil;
     }
@@ -766,8 +766,8 @@ static id ApolloWebJSONThingProperty(id thing, SEL selector) {
 - (id)retrieveAccessTokenWithCompletion:(id)completion {
     if (ApolloWebJSONShouldActForClient(self)) {
         ApolloWebJSONInstallSyntheticCredentialIfNeeded(self);
-        ApolloLog(@"[WebJSON][identity] Short-circuited token retrieval (cookie session) for u/%@",
-                  ApolloWebJSONClientUsername(self) ?: @"(anonymous)");
+        ApolloLogDebug(@"[WebJSON][identity] Short-circuited token retrieval (cookie session) for u/%@",
+                       ApolloWebJSONClientUsername(self) ?: @"(anonymous)");
         ApolloWebJSONFulfillTokenCompletion(completion);
         return nil;
     }
@@ -777,8 +777,8 @@ static id ApolloWebJSONThingProperty(id thing, SEL selector) {
 - (id)refreshAccessTokenWithCompletion:(id)completion {
     if (ApolloWebJSONShouldActForClient(self)) {
         ApolloWebJSONInstallSyntheticCredentialIfNeeded(self);
-        ApolloLog(@"[WebJSON][identity] Short-circuited token refresh (cookie session) for u/%@",
-                  ApolloWebJSONClientUsername(self) ?: @"(anonymous)");
+        ApolloLogDebug(@"[WebJSON][identity] Short-circuited token refresh (cookie session) for u/%@",
+                       ApolloWebJSONClientUsername(self) ?: @"(anonymous)");
         ApolloWebJSONFulfillTokenCompletion(completion);
         return nil;
     }

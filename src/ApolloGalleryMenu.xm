@@ -410,7 +410,10 @@ static BOOL ApolloGalleryMenuIsOurRow(id actionController, NSIndexPath *indexPat
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (!ApolloGalleryMenuIsOurRow(self, indexPath)) { %orig; return; }
+    if (!ApolloGalleryMenuIsOurRow(self, indexPath)) {
+        %orig;
+        return;
+    }
 
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     __strong id actionController = self;

@@ -3,6 +3,8 @@
 #import "ApolloCommon.h"
 #import "ApolloState.h"
 
+static const NSTimeInterval kApolloImageChestFailureCacheLifetime = 60.0;
+
 static NSString *ApolloImageChestCacheKeyForURL(NSURL *url) {
     NSString *postID = ApolloImageChestPostIDFromURL(url);
     return postID.length > 0 ? [@"imgchest:" stringByAppendingString:postID] : nil;
@@ -61,11 +63,66 @@ static NSMutableDictionary<NSString *, id> *ApolloImageChestResolverCache(void) 
     return cache;
 }
 
+static NSMutableOrderedSet<NSString *> *ApolloImageChestResolverCacheOrder(void) {
+    static NSMutableOrderedSet<NSString *> *order;
+    if (!order) order = [NSMutableOrderedSet orderedSet];
+    return order;
+}
+
+static NSMutableDictionary<NSString *, NSDate *> *ApolloImageChestFailureCache(void) {
+    static NSMutableDictionary<NSString *, NSDate *> *failures;
+    if (!failures) failures = [NSMutableDictionary dictionary];
+    return failures;
+}
+
+static NSMutableOrderedSet<NSString *> *ApolloImageChestFailureCacheOrder(void) {
+    static NSMutableOrderedSet<NSString *> *order;
+    if (!order) order = [NSMutableOrderedSet orderedSet];
+    return order;
+}
+
 static NSMutableDictionary<NSString *, NSMutableArray *> *ApolloImageChestResolverPending(void) {
     static NSMutableDictionary<NSString *, NSMutableArray *> *pending;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ pending = [NSMutableDictionary dictionary]; });
     return pending;
+}
+
+// Must be called while holding ApolloImageChestResolverLock().
+static BOOL ApolloImageChestFreshFailureForKey(NSString *cacheKey) {
+    NSDate *cached = ApolloImageChestFailureCache()[cacheKey];
+    if (![cached isKindOfClass:[NSDate class]]) return NO;
+    if ([[NSDate date] timeIntervalSinceDate:cached] < kApolloImageChestFailureCacheLifetime) return YES;
+    [ApolloImageChestFailureCache() removeObjectForKey:cacheKey];
+    [ApolloImageChestFailureCacheOrder() removeObject:cacheKey];
+    return NO;
+}
+
+static void ApolloImageChestStoreResolution(NSString *cacheKey, NSDictionary *result) {
+    if (result) {
+        ApolloImageChestResolverCache()[cacheKey] = result;
+        [ApolloImageChestResolverCacheOrder() removeObject:cacheKey];
+        [ApolloImageChestResolverCacheOrder() addObject:cacheKey];
+        [ApolloImageChestFailureCache() removeObjectForKey:cacheKey];
+        [ApolloImageChestFailureCacheOrder() removeObject:cacheKey];
+        while (ApolloImageChestResolverCacheOrder().count > 256) {
+            NSString *oldest = ApolloImageChestResolverCacheOrder().firstObject;
+            [ApolloImageChestResolverCacheOrder() removeObjectAtIndex:0];
+            [ApolloImageChestResolverCache() removeObjectForKey:oldest];
+        }
+        return;
+    }
+
+    [ApolloImageChestResolverCache() removeObjectForKey:cacheKey];
+    [ApolloImageChestResolverCacheOrder() removeObject:cacheKey];
+    ApolloImageChestFailureCache()[cacheKey] = [NSDate date];
+    [ApolloImageChestFailureCacheOrder() removeObject:cacheKey];
+    [ApolloImageChestFailureCacheOrder() addObject:cacheKey];
+    while (ApolloImageChestFailureCacheOrder().count > 128) {
+        NSString *oldest = ApolloImageChestFailureCacheOrder().firstObject;
+        [ApolloImageChestFailureCacheOrder() removeObjectAtIndex:0];
+        [ApolloImageChestFailureCache() removeObjectForKey:oldest];
+    }
 }
 
 static NSString *ApolloImageChestHTMLEntityDecode(NSString *string) {
@@ -184,7 +241,7 @@ static NSDictionary *ApolloImageChestResultFromHTMLData(NSData *data, NSString *
 static void ApolloDeliverImageChestResolution(NSString *cacheKey, NSDictionary *result) {
     NSArray *callbacks = nil;
     @synchronized (ApolloImageChestResolverLock()) {
-        ApolloImageChestResolverCache()[cacheKey] = result ?: (id)[NSNull null];
+        ApolloImageChestStoreResolution(cacheKey, result);
         callbacks = [ApolloImageChestResolverPending()[cacheKey] copy];
         [ApolloImageChestResolverPending() removeObjectForKey:cacheKey];
     }
@@ -211,7 +268,7 @@ BOOL ApolloImageChestCachedFailureExists(NSURL *url) {
     if (cacheKey.length == 0) return NO;
 
     @synchronized (ApolloImageChestResolverLock()) {
-        return ApolloImageChestResolverCache()[cacheKey] == [NSNull null];
+        return ApolloImageChestFreshFailureForKey(cacheKey);
     }
 }
 
@@ -241,8 +298,8 @@ static void ApolloFetchImageChestPublicPage(NSString *postID, NSString *cacheKey
             return;
         }
 
-        ApolloLog(@"[ImageChest] public resolved post=%@ count=%@ url=%@",
-                  postID, result[@"count"] ?: @"?", result[@"url"]);
+        ApolloLogDebug(@"[ImageChest] public resolved post=%@ count=%@ url=%@",
+                       postID, result[@"count"] ?: @"?", result[@"url"]);
         ApolloDeliverImageChestResolution(cacheKey, result);
     }];
     [task resume];
@@ -269,8 +326,8 @@ static void ApolloFetchImageChestAPIThenFallback(NSString *postID, NSString *cac
             ? ApolloImageChestResultFromAPIData(data, postID)
             : nil;
         if (result) {
-            ApolloLog(@"[ImageChest] api resolved post=%@ count=%@ url=%@",
-                      postID, result[@"count"] ?: @"?", result[@"url"]);
+            ApolloLogDebug(@"[ImageChest] api resolved post=%@ count=%@ url=%@",
+                           postID, result[@"count"] ?: @"?", result[@"url"]);
             ApolloDeliverImageChestResolution(cacheKey, result);
             return;
         }
@@ -299,7 +356,7 @@ void ApolloImageChestResolveURL(NSURL *url, void (^completion)(NSDictionary *res
         id cached = ApolloImageChestResolverCache()[cacheKey];
         if ([cached isKindOfClass:[NSDictionary class]]) {
             cachedResult = cached;
-        } else if (cached == [NSNull null]) {
+        } else if (ApolloImageChestFreshFailureForKey(cacheKey)) {
             hasCachedFailure = YES;
         } else {
             NSMutableArray *pending = ApolloImageChestResolverPending()[cacheKey];
@@ -318,6 +375,6 @@ void ApolloImageChestResolveURL(NSURL *url, void (^completion)(NSDictionary *res
     }
     if (!shouldStartFetch) return;
 
-    ApolloLog(@"[ImageChest] resolve START post=%@ apiToken=%d", postID, sImageChestAPIToken.length > 0);
+    ApolloLogDebug(@"[ImageChest] resolve START post=%@ apiToken=%d", postID, sImageChestAPIToken.length > 0);
     ApolloFetchImageChestAPIThenFallback(postID, cacheKey);
 }

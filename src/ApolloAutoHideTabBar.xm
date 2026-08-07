@@ -65,7 +65,6 @@ static char kApolloCustomRevealStartedAtKey;
 static char kApolloScrollGestureTokenKey;
 static char kApolloUpwardRevealDistanceKey;
 static char kApolloAutoHidePanObserverAttachedKey;
-static char kApolloScrollViewTabBarControllerBoxKey;
 
 static NSString *const ApolloAutoHideTabBarShowOnIdleChangedNotification = @"ApolloAutoHideTabBarShowOnIdleChangedNotification";
 static const NSTimeInterval ApolloIdleRevealDelaySeconds = 30.0;
@@ -73,13 +72,6 @@ static const NSTimeInterval ApolloIdleRevealRearmDelaySeconds = 0.5;
 static const NSTimeInterval ApolloIdleRevealRescheduleInterval = 0.25;
 static const CGFloat ApolloUpwardRevealDistanceThreshold = 120.0;
 static NSUInteger sApolloScrollGestureToken = 0;
-
-@interface ApolloAutoHideWeakTabBarControllerBox : NSObject
-@property (nonatomic, weak) UITabBarController *controller;
-@end
-
-@implementation ApolloAutoHideWeakTabBarControllerBox
-@end
 
 static SEL ApolloMinimizeBehaviorSetter(void) {
     return NSSelectorFromString(@"setTabBarMinimizeBehavior:");
@@ -662,9 +654,6 @@ static void ApolloScheduleIdleRevealTimer(UITabBarController *tbc) {
 
 static UITabBarController *ApolloTabBarControllerForScrollView(UIScrollView *scrollView) {
     if (!scrollView) return nil;
-    ApolloAutoHideWeakTabBarControllerBox *cachedBox = objc_getAssociatedObject(scrollView, &kApolloScrollViewTabBarControllerBoxKey);
-    UITabBarController *cachedTBC = cachedBox.controller;
-    if (cachedTBC) return cachedTBC;
 
     UIResponder *responder = scrollView;
     while ((responder = responder.nextResponder)) {
@@ -672,10 +661,7 @@ static UITabBarController *ApolloTabBarControllerForScrollView(UIScrollView *scr
         UIViewController *vc = (UIViewController *)responder;
         while (vc) {
             if ([vc isKindOfClass:[UITabBarController class]]) {
-                ApolloAutoHideWeakTabBarControllerBox *box = [ApolloAutoHideWeakTabBarControllerBox new];
-                box.controller = (UITabBarController *)vc;
-                objc_setAssociatedObject(scrollView, &kApolloScrollViewTabBarControllerBoxKey, box, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                return box.controller;
+                return (UITabBarController *)vc;
             }
             vc = vc.parentViewController;
         }
@@ -790,7 +776,7 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
 
 - (UITabBarController *)tabBarController {
     if (sApolloInBarHideSwipeHandler &&
-        [self isKindOfClass:objc_getClass("_TtC6Apollo26ApolloNavigationController")]) {
+        [self isMemberOfClass:objc_getClass("_TtC6Apollo26ApolloNavigationController")]) {
         return nil;
     }
     return %orig;
@@ -864,9 +850,6 @@ static BOOL sApolloInBarHideSwipeHandler = NO;
 
 - (void)didMoveToWindow {
     %orig;
-    if (objc_getAssociatedObject((UIScrollView *)self, &kApolloScrollViewTabBarControllerBoxKey)) {
-        objc_setAssociatedObject((UIScrollView *)self, &kApolloScrollViewTabBarControllerBoxKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
     if (self.window) {
         ApolloApplyScrollEdgeEffectStyle(self);
         ApolloEnsureAutoHidePanObserver(self);

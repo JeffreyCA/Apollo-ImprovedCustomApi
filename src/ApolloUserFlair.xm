@@ -2907,7 +2907,7 @@ static BOOL ApolloUserFlairPresenterHasFlairSelector(UIViewController *presenter
     if (presenter.presentedViewController) [candidates addObject:presenter.presentedViewController];
 
     for (UIViewController *candidate in candidates) {
-        if ([candidate isKindOfClass:flairClass]) return YES;
+        if ([candidate isMemberOfClass:flairClass]) return YES;
     }
     return NO;
 }

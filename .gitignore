@@ -34,3 +34,4 @@ widgets/Info.plist
 # Local iOS Simulator working dir (scripts/run-in-sim.sh)
 .sim/
 widgets/build/
+/.agents

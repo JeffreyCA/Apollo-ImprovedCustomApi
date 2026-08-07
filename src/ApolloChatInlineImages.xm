@@ -20,6 +20,7 @@
 #import "ApolloUserProfileCache.h"
 #import "ApolloState.h"
 #import "ApolloImageChestResolver.h"
+#import <ImageIO/ImageIO.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -28,7 +29,7 @@
 // Off by default; flip to 1 for verbose per-render snoomoji/image/tap tracing.
 #define APOLLO_CHAT_IMG_DEBUG 0
 #if APOLLO_CHAT_IMG_DEBUG
-  #define ChatImgLog(fmt, ...) ApolloLog(@"[ChatImg] " fmt, ##__VA_ARGS__)
+  #define ChatImgLog(fmt, ...) ApolloLogDebug(@"[ChatImg] " fmt, ##__VA_ARGS__)
 #else
   #define ChatImgLog(fmt, ...) do {} while (0)
 #endif
@@ -40,6 +41,7 @@ static char kApolloChatContainerTapKey;  // on the bubble container: tap-to-full
 static char kApolloChatStickerInsetKey;  // on the image view: NSNumber inset (snoomoji art breathing room)
 static char kApolloChatImgURLKey;        // on cell: NSString URL currently shown (reuse guard)
 static char kApolloChatImgMediaSizeKey;  // on cell: NSValue CGSize of the rendered bubble
+static char kApolloChatMediaWaiterKey;   // on cell: cancellable registration in the shared loader
 static char kApolloChatImgSizeMapKey;    // on VC:  NSMutableDictionary "section.item" -> NSValue CGSize
 static char kApolloChatAvatarUserKey;    // on cell: NSString author we've stamped an avatar for
 
@@ -47,11 +49,30 @@ static char kApolloChatAvatarUserKey;    // on cell: NSString author we've stamp
 static const CGFloat kApolloChatImgMaxWidth  = 232.0;
 static const CGFloat kApolloChatImgMaxHeight = 320.0;
 static const CGFloat kApolloChatImgMinWidth  = 120.0;
+static const NSUInteger kApolloChatMaximumResponseBytes = 25 * 1024 * 1024;
+static const NSUInteger kApolloChatMaximumAnimatedFrames = 500;
+static const unsigned long long kApolloChatMaximumSourcePixels = 80ULL * 1000ULL * 1000ULL;
+static const unsigned long long kApolloChatMaximumSourceDimension = 32768;
+static const NSUInteger kApolloChatStaticDecodeMaximumPixelSize = 4096;
 
 #pragma mark - URL helpers
 
+static BOOL ApolloChatIsRedditUploadedMediaHost(NSString *host) {
+    if (![host isKindOfClass:[NSString class]]) return NO;
+    // Keep the bucket name and amazonaws.com boundary exact while accepting
+    // accelerate, regional, and dual-stack S3 endpoint shapes.
+    if (![host hasPrefix:@"reddit-uploaded-media.s3"] ||
+        ![host hasSuffix:@".amazonaws.com"]) return NO;
+    NSUInteger separatorIndex = @"reddit-uploaded-media.s3".length;
+    if (host.length <= separatorIndex) return NO;
+    unichar separator = [host characterAtIndex:separatorIndex];
+    return separator == '.' || separator == '-';
+}
+
 static BOOL ApolloChatIsImageURL(NSURL *url) {
     if (![url isKindOfClass:[NSURL class]]) return NO;
+    NSString *scheme = url.scheme.lowercaseString ?: @"";
+    if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) return NO;
     NSString *host = url.host.lowercaseString ?: @"";
     NSString *path = url.path.lowercaseString ?: @"";
     NSString *ext = path.pathExtension;
@@ -59,7 +80,7 @@ static BOOL ApolloChatIsImageURL(NSURL *url) {
     if ([query containsString:@"format=mp4"]) return NO;
     // Reddit chat media is served from the Matrix homeserver with no file extension:
     //   https://matrix.redditspace.com/_matrix/media/v3/download/reddit.com/<mediaId>
-    if ([host containsString:@"matrix.redditspace.com"] && [path containsString:@"/_matrix/media/"]) {
+    if ([host isEqualToString:@"matrix.redditspace.com"] && [path containsString:@"/_matrix/media/"]) {
         return YES;
     }
     if ([ext isEqualToString:@"png"] || [ext isEqualToString:@"jpg"] ||
@@ -67,13 +88,16 @@ static BOOL ApolloChatIsImageURL(NSURL *url) {
         [ext isEqualToString:@"gif"]) {
         return YES;
     }
-    static NSArray *imageHosts;
+    static NSArray<NSString *> *imageHosts;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         imageHosts = @[@"i.redd.it", @"preview.redd.it", @"external-preview.redd.it",
-                       @"i.imgur.com", @"reddit-uploaded-media", @"redditmedia.com"];
+                       @"i.imgur.com", @"redditmedia.com"];
     });
-    for (NSString *h in imageHosts) if ([host containsString:h]) return YES;
+    if (ApolloChatIsRedditUploadedMediaHost(host)) return YES;
+    for (NSString *imageHost in imageHosts) {
+        if ([host isEqualToString:imageHost] || [host hasSuffix:[@"." stringByAppendingString:imageHost]]) return YES;
+    }
     return NO;
 }
 
@@ -196,12 +220,103 @@ static Class ApolloFLAnimatedImageViewClass(void) {
     return c;
 }
 
-// url -> loaded media (an FLAnimatedImage for animated gifs, else a UIImage).
-static NSMutableDictionary *ApolloChatMediaCache(void) {
-    static NSMutableDictionary *m; static dispatch_once_t once;
-    dispatch_once(&once, ^{ m = [NSMutableDictionary dictionary]; });
-    return m;
+// URL -> loaded media (an FLAnimatedImage for animated GIFs, else UIImage).
+// NSCache makes decoded residency pressure-aware and bounds the normal case.
+static NSCache<NSString *, id> *ApolloChatMediaCache(void) {
+    static NSCache<NSString *, id> *cache; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [NSCache new];
+        cache.totalCostLimit = 64 * 1024 * 1024;
+        cache.countLimit = 60;
+    });
+    return cache;
 }
+
+static NSUInteger ApolloChatApproximateBitmapCost(UIImage *image) {
+    CGImageRef cgImage = image.CGImage;
+    if (cgImage) return CGImageGetBytesPerRow(cgImage) * CGImageGetHeight(cgImage);
+    CGFloat scale = image.scale > 0 ? image.scale : UIScreen.mainScreen.scale;
+    return (NSUInteger)ceil(image.size.width * scale) * (NSUInteger)ceil(image.size.height * scale) * 4;
+}
+
+static NSUInteger ApolloChatSaturatingAdd(NSUInteger left, NSUInteger right) {
+    return left > NSUIntegerMax - right ? NSUIntegerMax : left + right;
+}
+
+// FLAnimatedImage predraws/cache-manages a working set of frames. Charging the
+// compressed transfer size badly understates that residency, so account for a
+// conservative ten-frame working set plus the original bytes retained by the
+// animated image object. Static images are charged by decoded bitmap bytes.
+static NSUInteger ApolloChatDecodedMediaCost(id media, NSUInteger sourceBytes) {
+    if ([media isKindOfClass:[UIImage class]]) {
+        return ApolloChatApproximateBitmapCost((UIImage *)media);
+    }
+    Class animatedClass = ApolloFLAnimatedImageClass();
+    if (!animatedClass || ![media isKindOfClass:animatedClass]) return sourceBytes;
+
+    NSUInteger frameCount = [media respondsToSelector:@selector(frameCount)]
+        ? ((NSUInteger (*)(id, SEL))objc_msgSend)(media, @selector(frameCount)) : 1;
+    UIImage *firstFrame = [media respondsToSelector:@selector(imageLazilyCachedAtIndex:)]
+        ? ((id (*)(id, SEL, NSUInteger))objc_msgSend)(media, @selector(imageLazilyCachedAtIndex:), (NSUInteger)0) : nil;
+    NSUInteger frameBytes = firstFrame ? ApolloChatApproximateBitmapCost(firstFrame) : sourceBytes;
+    NSUInteger residentFrames = MAX((NSUInteger)1, MIN(frameCount, (NSUInteger)10));
+    NSUInteger decodedBytes = frameBytes > NSUIntegerMax / residentFrames
+        ? NSUIntegerMax : frameBytes * residentFrames;
+    return ApolloChatSaturatingAdd(sourceBytes, decodedBytes);
+}
+
+// Main-queue-owned single-flight state. Each visible cell owns a waiter; reuse
+// removes that waiter, drops a queued load when it was the last consumer, and
+// cancels an active transfer when nobody else still needs it.
+@class ApolloChatMediaLoad;
+@class ApolloChatMediaWaiter;
+
+typedef void (^ApolloChatMediaCompletion)(id media, ApolloChatMediaWaiter *waiter);
+
+@interface ApolloChatMediaWaiter : NSObject
+@property (nonatomic, weak) ApolloChatMediaLoad *load;
+@property (nonatomic, copy) ApolloChatMediaCompletion completion;
+@end
+
+@interface ApolloChatMediaLoad : NSObject
+@property (nonatomic, strong) NSURL *url;
+@property (nonatomic, copy) NSString *key;
+@property (nonatomic, strong) NSMutableArray<ApolloChatMediaWaiter *> *waiters;
+@property (nonatomic, strong) NSURLSessionDataTask *task;
+@property (nonatomic) BOOL active;
+@end
+
+@implementation ApolloChatMediaWaiter
+@end
+
+@implementation ApolloChatMediaLoad
+- (instancetype)init {
+    self = [super init];
+    if (self) _waiters = [NSMutableArray array];
+    return self;
+}
+@end
+
+static NSMutableDictionary<NSString *, ApolloChatMediaLoad *> *sApolloChatMediaLoadsByURL;
+static NSMutableDictionary<NSString *, ApolloChatMediaLoad *> *ApolloChatMediaLoadsByURL(void) {
+    if (!sApolloChatMediaLoadsByURL) {
+        sApolloChatMediaLoadsByURL = [NSMutableDictionary dictionary];
+    }
+    return sApolloChatMediaLoadsByURL;
+}
+
+static NSMutableArray<ApolloChatMediaLoad *> *sApolloChatQueuedMediaLoads;
+static NSMutableArray<ApolloChatMediaLoad *> *ApolloChatQueuedMediaLoads(void) {
+    if (!sApolloChatQueuedMediaLoads) {
+        sApolloChatQueuedMediaLoads = [NSMutableArray array];
+    }
+    return sApolloChatQueuedMediaLoads;
+}
+
+static NSUInteger sApolloChatActiveMediaLoads;
+static const NSUInteger kApolloChatMaximumConcurrentMediaLoads = 3;
+static const NSUInteger kApolloChatMaximumQueuedMediaLoads = 48;
+static void ApolloChatPumpMediaLoads(void);
 
 // Draw a (possibly multi-codepoint) emoji string into a transparent image. Used to render a
 // pure-emoji message as a sticker overlay — Apollo "jumbo-blanks" a lone-emoji bubble and its
@@ -232,10 +347,10 @@ static NSURL *ApolloChatEmojiStickerURL(NSString *emoji) {
     NSURL *url = enc.length ? [NSURL URLWithString:[@"x-apollo-emoji:///" stringByAppendingString:enc]] : nil;
     if (!url) return nil;
     NSString *key = url.absoluteString;
-    if (!ApolloChatMediaCache()[key]) {
+    if (![ApolloChatMediaCache() objectForKey:key]) {
         UIImage *img = ApolloChatRasterizeEmoji(emoji);
         if (!img) return nil;
-        ApolloChatMediaCache()[key] = img;
+        [ApolloChatMediaCache() setObject:img forKey:key cost:ApolloChatApproximateBitmapCost(img)];
     }
     return url;
 }
@@ -244,6 +359,105 @@ static BOOL ApolloDataIsGIF(NSData *d) {
     if (d.length < 6) return NO;
     const unsigned char *b = (const unsigned char *)d.bytes;
     return b[0] == 'G' && b[1] == 'I' && b[2] == 'F';   // GIF87a / GIF89a
+}
+
+static dispatch_queue_t ApolloChatMediaDecodeQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("com.apolloreborn.chat-media-decode", DISPATCH_QUEUE_SERIAL);
+        dispatch_set_target_queue(queue, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    });
+    return queue;
+}
+
+static BOOL ApolloChatReadSourceDimensions(CGImageSourceRef source,
+                                           unsigned long long *widthOut,
+                                           unsigned long long *heightOut) {
+    if (!source) return NO;
+    CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+    if (!properties) return NO;
+    CFNumberRef widthNumber = (CFNumberRef)CFDictionaryGetValue(properties, kCGImagePropertyPixelWidth);
+    CFNumberRef heightNumber = (CFNumberRef)CFDictionaryGetValue(properties, kCGImagePropertyPixelHeight);
+    long long widthValue = 0;
+    long long heightValue = 0;
+    BOOL valid = widthNumber && CFGetTypeID(widthNumber) == CFNumberGetTypeID() &&
+        heightNumber && CFGetTypeID(heightNumber) == CFNumberGetTypeID() &&
+        CFNumberGetValue(widthNumber, kCFNumberLongLongType, &widthValue) &&
+        CFNumberGetValue(heightNumber, kCFNumberLongLongType, &heightValue);
+    CFRelease(properties);
+    if (!valid || widthValue <= 0 || heightValue <= 0) return NO;
+    if (widthOut) *widthOut = (unsigned long long)widthValue;
+    if (heightOut) *heightOut = (unsigned long long)heightValue;
+    return YES;
+}
+
+static CFDictionaryRef ApolloChatThumbnailOptions(void) {
+    static CFDictionaryRef options;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSInteger maximumPixelSize = (NSInteger)kApolloChatStaticDecodeMaximumPixelSize;
+        CFNumberRef maximumPixelNumber = CFNumberCreate(kCFAllocatorDefault,
+                                                         kCFNumberNSIntegerType,
+                                                         &maximumPixelSize);
+        const void *keys[] = {
+            kCGImageSourceCreateThumbnailFromImageAlways,
+            kCGImageSourceCreateThumbnailWithTransform,
+            kCGImageSourceShouldCacheImmediately,
+            kCGImageSourceThumbnailMaxPixelSize,
+        };
+        const void *values[] = {
+            kCFBooleanTrue, kCFBooleanTrue, kCFBooleanTrue, maximumPixelNumber,
+        };
+        options = CFDictionaryCreate(kCFAllocatorDefault, keys, values, 4,
+                                     &kCFTypeDictionaryKeyCallBacks,
+                                     &kCFTypeDictionaryValueCallBacks);
+        CFRelease(maximumPixelNumber);
+    });
+    return options;
+}
+
+static id ApolloChatDecodeMediaData(NSData *data) {
+    if (data.length == 0) return nil;
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
+    if (!source) return nil;
+
+    size_t frameCount = CGImageSourceGetCount(source);
+    if (frameCount == 0 || frameCount > kApolloChatMaximumAnimatedFrames) {
+        CFRelease(source);
+        return nil;
+    }
+    unsigned long long width = 0;
+    unsigned long long height = 0;
+    BOOL dimensionsValid = ApolloChatReadSourceDimensions(source, &width, &height);
+    BOOL sourceAllowed = dimensionsValid &&
+        width <= kApolloChatMaximumSourceDimension &&
+        height <= kApolloChatMaximumSourceDimension &&
+        height <= kApolloChatMaximumSourcePixels / width;
+    if (!sourceAllowed) {
+        CFRelease(source);
+        return nil;
+    }
+
+    id media = nil;
+    Class animatedClass = ApolloFLAnimatedImageClass();
+    if (animatedClass && frameCount > 1 && ApolloDataIsGIF(data)) {
+        id (*initFn)(id, SEL, NSData *, NSUInteger, BOOL) =
+            (id (*)(id, SEL, NSData *, NSUInteger, BOOL))objc_msgSend;
+        media = initFn([animatedClass alloc],
+                       @selector(initWithAnimatedGIFData:optimalFrameCacheSize:predrawingEnabled:),
+                       data, (NSUInteger)0, YES);
+    }
+    if (!media) {
+        CGImageRef thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0,
+                                                                    ApolloChatThumbnailOptions());
+        if (thumbnail) {
+            media = [UIImage imageWithCGImage:thumbnail];
+            CGImageRelease(thumbnail);
+        }
+    }
+    CFRelease(source);
+    return media;
 }
 
 // Put either an animated gif or a static image on the (FLAnimatedImageView) media view.
@@ -275,37 +489,144 @@ static void ApolloChatClearMedia(UIImageView *iv) {
         ((void (*)(id, SEL, id))objc_msgSend)(iv, @selector(setAnimatedImage:), nil);
 }
 
+static void ApolloChatCancelMediaWaiter(ApolloChatMediaWaiter *waiter) {
+    if (!waiter) return;
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ ApolloChatCancelMediaWaiter(waiter); });
+        return;
+    }
+    ApolloChatMediaLoad *load = waiter.load;
+    waiter.load = nil;
+    waiter.completion = nil;
+    if (!load) return;
+    [load.waiters removeObjectIdenticalTo:waiter];
+    if (load.waiters.count > 0) return;
+
+    if (ApolloChatMediaLoadsByURL()[load.key] == load) {
+        [ApolloChatMediaLoadsByURL() removeObjectForKey:load.key];
+    }
+    [ApolloChatQueuedMediaLoads() removeObjectIdenticalTo:load];
+    if (load.active && load.task.state != NSURLSessionTaskStateCompleted &&
+        load.task.state != NSURLSessionTaskStateCanceling) {
+        [load.task cancel];
+    }
+    ApolloChatPumpMediaLoads();
+}
+
+static void ApolloChatCancelCellMediaWaiter(id cell) {
+    ApolloChatMediaWaiter *waiter =
+        objc_getAssociatedObject(cell, &kApolloChatMediaWaiterKey);
+    if (!waiter) return;
+    objc_setAssociatedObject(cell, &kApolloChatMediaWaiterKey, nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ApolloChatCancelMediaWaiter(waiter);
+}
+
+static void ApolloChatDropQueuedMediaLoad(ApolloChatMediaLoad *load) {
+    if (!load || load.active) return;
+    [ApolloChatQueuedMediaLoads() removeObjectIdenticalTo:load];
+    if (ApolloChatMediaLoadsByURL()[load.key] == load) {
+        [ApolloChatMediaLoadsByURL() removeObjectForKey:load.key];
+    }
+    NSArray<ApolloChatMediaWaiter *> *waiting = [load.waiters copy];
+    [load.waiters removeAllObjects];
+    for (ApolloChatMediaWaiter *waiter in waiting) {
+        ApolloChatMediaCompletion callback = waiter.completion;
+        waiter.load = nil;
+        waiter.completion = nil;
+        if (callback) callback(nil, waiter);
+    }
+}
+
 // Fetch raw bytes once (cached), sniff the gif magic, and hand back an FLAnimatedImage
-// (animated) or a decoded UIImage (static). Completion runs on the main queue.
-static void ApolloChatLoadMedia(NSURL *url, void (^completion)(id media)) {
+// (animated) or a decoded UIImage (static). The returned waiter is owned by the
+// requesting cell and can be removed on reuse without disrupting other cells.
+static ApolloChatMediaWaiter *ApolloChatLoadMedia(NSURL *url,
+                                                   ApolloChatMediaCompletion completion) {
+    NSCAssert([NSThread isMainThread], @"Chat media state is main-queue owned");
     NSString *key = url.absoluteString;
-    id cached = ApolloChatMediaCache()[key];
-    if (cached) { if (completion) completion(cached); return; }
-    NSURLSessionDataTask *t = [NSURLSession.sharedSession dataTaskWithURL:url
-                                                       completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-        id media = nil;
-        if (data.length) {
-            Class fl = ApolloFLAnimatedImageClass();
-            if (fl && ApolloDataIsGIF(data)) {
-                id (*initFn)(id, SEL, NSData *, NSUInteger, BOOL) =
-                    (id (*)(id, SEL, NSData *, NSUInteger, BOOL))objc_msgSend;
-                media = initFn([fl alloc], @selector(initWithAnimatedGIFData:optimalFrameCacheSize:predrawingEnabled:),
-                               data, (NSUInteger)0, YES);
-            }
-            if (!media) media = [UIImage imageWithData:data];   // png/jpg/webp, or gif fallback
-        }
-        // The expensive decode above runs on NSURLSession's background queue, but the cache WRITE is
-        // hopped onto the main queue: ApolloChatMediaCache is a plain NSMutableDictionary read (and
-        // written for emoji stickers) from cellForItem on the main thread, and several image loads can
-        // complete concurrently on different background queues. Mutating it off-main races those reads
-        // and can corrupt the dictionary / crash during a rehash, so every cache mutation happens on
-        // the one (main) thread. (Reported by @nickclyde in review.)
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (media) ApolloChatMediaCache()[key] = media;
-            if (completion) completion(media);
-        });
-    }];
-    [t resume];
+    if (key.length == 0) {
+        if (completion) completion(nil, nil);
+        return nil;
+    }
+    id cached = [ApolloChatMediaCache() objectForKey:key];
+    if (cached) {
+        if (completion) completion(cached, nil);
+        return nil;
+    }
+
+    ApolloChatMediaLoad *load = ApolloChatMediaLoadsByURL()[key];
+    if (!load) {
+        load = [ApolloChatMediaLoad new];
+        load.url = url;
+        load.key = key;
+        ApolloChatMediaLoadsByURL()[key] = load;
+        [ApolloChatQueuedMediaLoads() addObject:load];
+    }
+
+    ApolloChatMediaWaiter *waiter = [ApolloChatMediaWaiter new];
+    waiter.load = load;
+    waiter.completion = [completion copy];
+    [load.waiters addObject:waiter];
+    while (ApolloChatQueuedMediaLoads().count > kApolloChatMaximumQueuedMediaLoads) {
+        ApolloChatDropQueuedMediaLoad(ApolloChatQueuedMediaLoads().firstObject);
+    }
+    ApolloChatPumpMediaLoads();
+    return waiter;
+}
+
+static void ApolloChatPumpMediaLoads(void) {
+    NSCAssert([NSThread isMainThread], @"Chat media state is main-queue owned");
+    while (sApolloChatActiveMediaLoads < kApolloChatMaximumConcurrentMediaLoads &&
+           ApolloChatQueuedMediaLoads().count > 0) {
+        ApolloChatMediaLoad *load = ApolloChatQueuedMediaLoads().firstObject;
+        [ApolloChatQueuedMediaLoads() removeObjectAtIndex:0];
+        if (load.waiters.count == 0 || ApolloChatMediaLoadsByURL()[load.key] != load) continue;
+
+        NSURL *url = load.url;
+        NSString *key = load.key;
+        load.active = YES;
+        sApolloChatActiveMediaLoads++;
+
+        NSURLRequest *request = [NSURLRequest requestWithURL:url
+                                                cachePolicy:NSURLRequestReturnCacheDataElseLoad
+                                            timeoutInterval:20.0];
+        load.task = ApolloStartBoundedDataRequest(request, kApolloChatMaximumResponseBytes,
+            ^NSError *(NSHTTPURLResponse *response) {
+                NSString *mimeType = response.MIMEType.lowercaseString ?: @"";
+                if (mimeType.length == 0 || [mimeType hasPrefix:@"image/"] ||
+                    [mimeType isEqualToString:@"application/octet-stream"] ||
+                    [mimeType isEqualToString:@"binary/octet-stream"]) {
+                    return nil;
+                }
+                return [NSError errorWithDomain:@"ApolloChatMediaError" code:1
+                                        userInfo:@{NSLocalizedDescriptionKey: @"The chat media response was not an image."}];
+            }, ApolloChatMediaDecodeQueue(),
+            ^(NSData *data, __unused NSHTTPURLResponse *response, NSError *error) {
+                id media = error ? nil : ApolloChatDecodeMediaData(data);
+                NSUInteger cost = media ? ApolloChatDecodedMediaCost(media, data.length) : 0;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    NSArray<ApolloChatMediaWaiter *> *waiting = [load.waiters copy] ?: @[];
+                    [load.waiters removeAllObjects];
+                    if (load.active && sApolloChatActiveMediaLoads > 0) {
+                        sApolloChatActiveMediaLoads--;
+                    }
+                    load.active = NO;
+                    load.task = nil;
+                    if (ApolloChatMediaLoadsByURL()[key] == load) {
+                        [ApolloChatMediaLoadsByURL() removeObjectForKey:key];
+                    }
+                    if (media) [ApolloChatMediaCache() setObject:media forKey:key cost:cost];
+                    ApolloChatPumpMediaLoads();
+                    for (ApolloChatMediaWaiter *waiter in waiting) {
+                        ApolloChatMediaCompletion callback = waiter.completion;
+                        waiter.load = nil;
+                        waiter.completion = nil;
+                        if (callback) callback(media, waiter);
+                    }
+                });
+            });
+    }
 }
 
 #pragma mark - rendering
@@ -313,10 +634,34 @@ static void ApolloChatLoadMedia(NSURL *url, void (^completion)(id media)) {
 // Persistent URL -> bubble CGSize cache. Lets re-renders during scroll size the
 // bubble deterministically (independent of async image-load timing), so a recycled
 // cell never flashes a mis-sized (white-cropped) image.
-static NSMutableDictionary *ApolloChatSizeByURL(void) {
-    static NSMutableDictionary *m; static dispatch_once_t once;
-    dispatch_once(&once, ^{ m = [NSMutableDictionary dictionary]; });
-    return m;
+static NSMutableDictionary<NSString *, NSValue *> *ApolloChatSizeByURL(void) {
+    static NSMutableDictionary<NSString *, NSValue *> *sizes;
+    if (!sizes) sizes = [NSMutableDictionary dictionary];
+    return sizes;
+}
+
+static NSMutableOrderedSet<NSString *> *ApolloChatSizeURLOrder(void) {
+    static NSMutableOrderedSet<NSString *> *order;
+    if (!order) order = [NSMutableOrderedSet orderedSet];
+    return order;
+}
+
+static NSValue *ApolloChatKnownSizeForURL(NSString *urlString) {
+    NSCAssert([NSThread isMainThread], @"Chat size state is main-queue owned");
+    return urlString.length ? ApolloChatSizeByURL()[urlString] : nil;
+}
+
+static void ApolloChatStoreKnownSize(NSString *urlString, NSValue *sizeValue) {
+    NSCAssert([NSThread isMainThread], @"Chat size state is main-queue owned");
+    if (urlString.length == 0 || !sizeValue) return;
+    ApolloChatSizeByURL()[urlString] = sizeValue;
+    [ApolloChatSizeURLOrder() removeObject:urlString];
+    [ApolloChatSizeURLOrder() addObject:urlString];
+    while (ApolloChatSizeURLOrder().count > 500) {
+        NSString *oldest = ApolloChatSizeURLOrder().firstObject;
+        [ApolloChatSizeURLOrder() removeObjectAtIndex:0];
+        [ApolloChatSizeByURL() removeObjectForKey:oldest];
+    }
 }
 
 // Deferred, coalesced layout invalidation. invalidateLayout called synchronously from
@@ -470,7 +815,7 @@ static UIViewController *ApolloChatHostVC(UIView *view) {
     viewer.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
     UIViewController *host = ApolloChatHostVC(g.view);
     while (host.presentedViewController) host = host.presentedViewController;
-    if ([host isKindOfClass:[ApolloChatImageViewerVC class]]) return;   // already open
+    if ([host isMemberOfClass:[ApolloChatImageViewerVC class]]) return;   // already open
     [host presentViewController:viewer animated:YES completion:nil];
 }
 @end
@@ -482,6 +827,13 @@ static void ApolloChatRenderImageInCell(id vc, id cell, NSURL *url, NSIndexPath 
     if (!container) return;
     NSString *urlStr = url.absoluteString;
     NSString *ipKey = ApolloChatIndexKey(ip);
+    ApolloChatMediaWaiter *existingWaiter =
+        objc_getAssociatedObject(cell, &kApolloChatMediaWaiterKey);
+    BOOL alreadyWaitingForURL = [existingWaiter.load.key isEqualToString:urlStr];
+    if (existingWaiter && !alreadyWaitingForURL) {
+        ApolloChatCancelCellMediaWaiter(cell);
+        existingWaiter = nil;
+    }
 
     // Tap-to-fullscreen: the recognizer lives on the bubble CONTAINER (added once), because Apollo
     // re-stacks subviews over our overlay so a gesture on the iv never gets the touch. The handler
@@ -524,8 +876,8 @@ static void ApolloChatRenderImageInCell(id vc, id cell, NSURL *url, NSIndexPath 
     iv.frame = container.bounds;
     objc_setAssociatedObject(cell, &kApolloChatImgURLKey, urlStr, OBJC_ASSOCIATION_COPY_NONATOMIC);
 
-    id cachedMedia = ApolloChatMediaCache()[urlStr];
-    NSValue *knownSize = ApolloChatSizeByURL()[urlStr];
+    id cachedMedia = [ApolloChatMediaCache() objectForKey:urlStr];
+    NSValue *knownSize = ApolloChatKnownSizeForURL(urlStr);
     // Unicode emoji (our synthetic x-apollo-emoji:// scheme) render at normal text-emoji size with
     // built-in (rasterized) padding; Reddit snoomoji art renders larger and is inset within the
     // bubble so the tightly-cropped art sits centered with breathing room instead of edge-cramped.
@@ -561,26 +913,35 @@ static void ApolloChatRenderImageInCell(id vc, id cell, NSURL *url, NSIndexPath 
     }
 
     if (cachedMedia) {
+        if (existingWaiter) ApolloChatCancelCellMediaWaiter(cell);
         ApolloChatSetMedia(iv, cachedMedia);
         ApolloChatMessageLabel(cell).hidden = YES;
         if (!knownSize) {
             NSValue *mv = [NSValue valueWithCGSize:(sticker ? ApolloChatStickerSize((UIImage *)cachedMedia, stickerH) : ApolloChatMediaSize((UIImage *)cachedMedia))];
-            ApolloChatSizeByURL()[urlStr] = mv;
+            ApolloChatStoreKnownSize(urlStr, mv);
             applySize(cell, mv);
             ApolloChatScheduleReflow(collectionView);
         }
         return;
     }
+    if (alreadyWaitingForURL) return;
 
     // Load asynchronously (gif-aware); commit size + media together when it arrives.
     __weak UIImageView *weakIV = iv;
     __weak id weakCell = cell, weakCV = collectionView;
-    ApolloChatLoadMedia(url, ^(id media) {
+    ApolloChatMediaWaiter *waiter = ApolloChatLoadMedia(
+        url, ^(id media, ApolloChatMediaWaiter *completedWaiter) {
         UIImageView *sIV = weakIV; id sCell = weakCell;
+        if (sCell && objc_getAssociatedObject(sCell, &kApolloChatMediaWaiterKey) == completedWaiter) {
+            objc_setAssociatedObject(sCell, &kApolloChatMediaWaiterKey, nil,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        } else {
+            return;
+        }
         if (!media || !sIV || !sCell) return;
         if (![objc_getAssociatedObject(sCell, &kApolloChatImgURLKey) isEqualToString:urlStr]) return; // recycled
         NSValue *mv = [NSValue valueWithCGSize:(sticker ? ApolloChatStickerSize((UIImage *)media, stickerH) : ApolloChatMediaSize((UIImage *)media))];
-        ApolloChatSizeByURL()[urlStr] = mv;
+        ApolloChatStoreKnownSize(urlStr, mv);
         objc_setAssociatedObject(sCell, &kApolloChatImgMediaSizeKey, mv, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         if (weakCV) ApolloChatSizeMap(weakCV)[ipKey] = mv;
         ApolloChatSetMedia(sIV, media);
@@ -589,9 +950,14 @@ static void ApolloChatRenderImageInCell(id vc, id cell, NSURL *url, NSIndexPath 
         ApolloChatMessageLabel(sCell).hidden = YES;
         ApolloChatScheduleReflow(weakCV);
     });
+    if (waiter) {
+        objc_setAssociatedObject(cell, &kApolloChatMediaWaiterKey, waiter,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
 }
 
 static void ApolloChatClearImageInCell(id cell) {
+    ApolloChatCancelCellMediaWaiter(cell);
     UIImageView *iv = objc_getAssociatedObject(cell, &kApolloChatImgViewKey);
     if (iv) { ApolloChatClearMedia(iv); [iv removeFromSuperview]; }
     objc_setAssociatedObject(cell, &kApolloChatImgViewKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -918,6 +1284,7 @@ static BOOL ApolloChatRunIsEmoji(NSString *s) {
 // media sizing onto a text bubble (which made text wrap at the narrow image width).
 - (void)prepareForReuse {
     %orig;
+    ApolloChatCancelCellMediaWaiter(self);
     UIImageView *iv = objc_getAssociatedObject(self, &kApolloChatImgViewKey);
     if (iv) { ApolloChatClearMedia(iv); [iv removeFromSuperview]; }
     objc_setAssociatedObject(self, &kApolloChatImgViewKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -999,7 +1366,8 @@ static BOOL ApolloChatRunIsEmoji(NSString *s) {
     return cell;
 }
 - (CGSize)collectionView:(id)collectionView layout:(id)layout sizeForItemAtIndexPath:(id)indexPath {
-    return ApolloChatSizeOverride(self, collectionView, %orig, indexPath);
+    CGSize originalSize = %orig;
+    return ApolloChatSizeOverride(self, collectionView, originalSize, indexPath);
 }
 %end
 
@@ -1010,7 +1378,8 @@ static BOOL ApolloChatRunIsEmoji(NSString *s) {
     return cell;
 }
 - (CGSize)collectionView:(id)collectionView layout:(id)layout sizeForItemAtIndexPath:(id)indexPath {
-    return ApolloChatSizeOverride(self, collectionView, %orig, indexPath);
+    CGSize originalSize = %orig;
+    return ApolloChatSizeOverride(self, collectionView, originalSize, indexPath);
 }
 %end
 

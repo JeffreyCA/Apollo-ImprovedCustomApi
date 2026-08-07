@@ -2630,7 +2630,7 @@ static void ApolloLPStampLinkButtonAreaInTree(ASDisplayNode *root, ApolloLPArea 
     static dispatch_once_t once;
     dispatch_once(&once, ^{ linkButtonCls = objc_getClass("_TtC6Apollo14LinkButtonNode"); });
     if (!linkButtonCls) return;
-    if ([root isKindOfClass:linkButtonCls]) {
+    if ([root isMemberOfClass:linkButtonCls]) {
         NSNumber *existing = objc_getAssociatedObject(root, &kApolloLinkPreviewAreaKey);
         if (![existing isKindOfClass:[NSNumber class]]) {
             objc_setAssociatedObject(root, &kApolloLinkPreviewAreaKey, @(area), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -2673,7 +2673,7 @@ static NSUInteger ApolloLPCountEligiblePreviewLinksInTree(ASDisplayNode *root) {
     dispatch_once(&once, ^{ linkButtonCls = objc_getClass("_TtC6Apollo14LinkButtonNode"); });
 
     NSUInteger count = 0;
-    if (linkButtonCls && [root isKindOfClass:linkButtonCls]) {
+    if (linkButtonCls && [root isMemberOfClass:linkButtonCls]) {
         NSString *urlString = ApolloGetLinkButtonNodeURLString(root);
         NSURL *url = urlString.length > 0 ? [NSURL URLWithString:urlString] : nil;
         if (ApolloLPURLEligibleForPreviewCard(url)) count++;
@@ -4712,7 +4712,8 @@ static void ApolloLPKickWeakCachedPreviewRefetch(NSURL *url, ApolloLinkPreview *
     }
     if (ApolloLPAllModesDisabled()) {
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
-        return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, %orig);
+        id nativeSpec = %orig;
+        return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, nativeSpec);
     }
     ApolloLPPrefetchRedditUserProfileIfNeeded(url);
 
@@ -4745,7 +4746,8 @@ static void ApolloLPKickWeakCachedPreviewRefetch(NSURL *url, ApolloLinkPreview *
     NSInteger selectedMode = ApolloLPModeForArea(area);
     if (selectedMode == ApolloLinkPreviewModeOff) {
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
-        return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, %orig);
+        id nativeSpec = %orig;
+        return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, nativeSpec);
     }
 
     if (ApolloLPShouldDeferToInlineMedia(url)) {
@@ -4852,12 +4854,14 @@ static void ApolloLPKickWeakCachedPreviewRefetch(NSURL *url, ApolloLinkPreview *
             return placeholder;
         }
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
-        return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, %orig);
+        id nativeSpec = %orig;
+        return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, nativeSpec);
     }
 
     if (![cached hasUsefulMetadata]) {
         ApolloLPRestoreHostShell((ASDisplayNode *)self);
-        return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, %orig);
+        id nativeSpec = %orig;
+        return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, nativeSpec);
     }
 
     BOOL isRedditUser = ApolloLPIsRedditUserPreview(url, cached);
@@ -5005,7 +5009,8 @@ static void ApolloLPKickWeakCachedPreviewRefetch(NSURL *url, ApolloLinkPreview *
         return richSpec;
     }
     ApolloLPRestoreHostShell((ASDisplayNode *)self);
-    return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, %orig);
+    id nativeSpec = %orig;
+    return ApolloLPNativeLinkSpecWithBannedHintIfNeeded(self, url, nativeSpec);
 }
 
 - (void)didLoad {

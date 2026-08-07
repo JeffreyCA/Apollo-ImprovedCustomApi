@@ -2072,7 +2072,7 @@ static void ApolloSubredditInstallOrUpdateHeader(UIViewController *viewControlle
     dispatch_once(&onceToken, ^{
         postsVCClass = NSClassFromString(@"_TtC6Apollo19PostsViewController");
     });
-    if (postsVCClass && ![viewController isKindOfClass:postsVCClass]) return;
+    if (postsVCClass && ![viewController isMemberOfClass:postsVCClass]) return;
 
     UITableView *tableView = ApolloSubredditFindTableView(viewController);
     if (!tableView) return;
@@ -2353,7 +2353,7 @@ static void ApolloSubredditRefreshViewControllersInTree(UIViewController *viewCo
     if (!viewController || [visited containsObject:viewController]) return;
     [visited addObject:viewController];
 
-    BOOL isPostsVC = sPostsViewControllerClass && [viewController isKindOfClass:sPostsViewControllerClass];
+    BOOL isPostsVC = sPostsViewControllerClass && [viewController isMemberOfClass:sPostsViewControllerClass];
     BOOL alreadyWrapped = objc_getAssociatedObject(viewController, kApolloSubredditWrappedHeaderKey) != nil;
     if (isPostsVC || alreadyWrapped) {
         ApolloSubredditInstallOrUpdateHeader(viewController);
@@ -2590,7 +2590,7 @@ static void ApolloSubredditSettleBlockedTableToTop(UITableView *tableView) {
 BOOL ApolloSubredditTitleShouldTruncate(UIViewController *viewController) {
     if (!viewController || !sShowSubredditHeaders) return NO;
     if (ApolloSubredditShouldSkipViewController(viewController)) return NO;
-    if (sPostsViewControllerClass && ![viewController isKindOfClass:sPostsViewControllerClass]) return NO;
+    if (sPostsViewControllerClass && ![viewController isMemberOfClass:sPostsViewControllerClass]) return NO;
     NSString *name = ApolloSubredditNameFromViewController(viewController);
     return name.length > 0;
 }

@@ -293,7 +293,7 @@ void ApolloRedditCaptureBearerTokenFromAuthorization(NSString *authorization, NS
     if (ApolloWebJSONBearerIsSynthetic(token)) return;
 
     sLatestRedditBearerToken = [token copy];
-    ApolloLog(@"[RedditUpload] Captured Reddit bearer token from %@", source ?: @"unknown source");
+    ApolloLogDebug(@"[RedditUpload] Captured Reddit bearer token from %@", source ?: @"unknown source");
 }
 
 void ApolloRedditCaptureBearerTokenFromAuthorizationForURL(NSString *authorization, NSURL *url, NSString *source) {
@@ -3248,8 +3248,13 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
         NSData *chestData = bodyData ?: [NSData data];
         NSURL *requestURL = request.URL;
         ApolloLog(@"[ImgChestUpload] Intercepting Imgur data upload (%lu bytes)", (unsigned long)chestData.length);
-        void (^chestWrapped)(NSData *, NSURLResponse *, NSError *) = ^(__unused NSData *d, __unused NSURLResponse *r, __unused NSError *e) {
-            ApolloImgChestUploadData(chestData, chestFilename, chestMIMEType, ^(NSURL *link, NSError *uploadError) {
+        __block __weak NSURLSessionUploadTask *proxyTask = nil;
+        void (^chestWrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *d, NSURLResponse *r, NSError *e) {
+            if ([e.domain isEqualToString:NSURLErrorDomain] && e.code == NSURLErrorCancelled) {
+                completionHandler(d, r, e);
+                return;
+            }
+            ApolloImgChestUploadOperation *operation = ApolloImgChestUploadData(chestData, chestFilename, chestMIMEType, ^(NSURL *link, NSError *uploadError) {
                 if (!link) {
                     completionHandler(nil, nil, uploadError);
                     return;
@@ -3270,8 +3275,13 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
                                                                     headerFields:@{@"Content-Type": @"application/json"}];
                 completionHandler(synthetic, fake, nil);
             });
+            ApolloImgChestAssociateOperationWithTask(operation, proxyTask);
         };
-        return %orig(ApolloRedditUploadFastFailRequest(), bodyData ?: [NSData data], chestWrapped);
+        NSURLSessionUploadTask *task = %orig(ApolloRedditUploadFastFailRequest(), bodyData ?: [NSData data], chestWrapped);
+        // Apollo resumes the returned upload task only after this hook returns,
+        // so the wrapper cannot run before its weak cancellation proxy is set.
+        proxyTask = task;
+        return task;
     }
 
     // Comment Link Host = Imgur (or Image Chest unavailable / video, with an Imgur
@@ -3414,17 +3424,26 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
         BOOL chestForCommentLink = commentLinkImgChest;
         NSString *chestFilename = fileURL.lastPathComponent.length > 0 ? fileURL.lastPathComponent : @"apollo-upload.jpg";
         NSString *chestMIMEType = ApolloMediaMIMETypeForFilename(chestFilename, [request valueForHTTPHeaderField:@"Content-Type"]);
-        NSData *chestData = [NSData dataWithContentsOfURL:fileURL];
-        if (!ApolloImgChestUploadAvailable() || ApolloMediaMIMETypeIsVideo(chestMIMEType) || chestData.length == 0) {
+        NSNumber *chestFileSize = nil;
+        [fileURL getResourceValue:&chestFileSize forKey:NSURLFileSizeKey error:nil];
+        if (![chestFileSize isKindOfClass:[NSNumber class]]) {
+            chestFileSize = [[[NSFileManager defaultManager] attributesOfItemAtPath:fileURL.path error:nil] objectForKey:NSFileSize];
+        }
+        if (!ApolloImgChestUploadAvailable() || ApolloMediaMIMETypeIsVideo(chestMIMEType) || chestFileSize.unsignedLongLongValue == 0) {
             ApolloLog(@"[ImgChestUpload] %@ — falling back to Imgur (fromFile)",
                       !ApolloImgChestUploadAvailable() ? @"no ImgChest API key"
-                          : (chestData.length == 0 ? @"could not read file" : @"video uploads not supported by ImgChest"));
+                          : (chestFileSize.unsignedLongLongValue == 0 ? @"missing or empty file" : @"video uploads not supported by ImgChest"));
             return %orig;
         }
         NSURL *requestURL = request.URL;
-        ApolloLog(@"[ImgChestUpload] Intercepting Imgur file upload (%lu bytes, %@)", (unsigned long)chestData.length, chestFilename);
-        void (^chestWrapped)(NSData *, NSURLResponse *, NSError *) = ^(__unused NSData *d, __unused NSURLResponse *r, __unused NSError *e) {
-            ApolloImgChestUploadData(chestData, chestFilename, chestMIMEType, ^(NSURL *link, NSError *uploadError) {
+        ApolloLog(@"[ImgChestUpload] Intercepting Imgur file upload (%@ bytes, %@)", chestFileSize, chestFilename);
+        __block __weak NSURLSessionUploadTask *proxyTask = nil;
+        void (^chestWrapped)(NSData *, NSURLResponse *, NSError *) = ^(NSData *d, NSURLResponse *r, NSError *e) {
+            if ([e.domain isEqualToString:NSURLErrorDomain] && e.code == NSURLErrorCancelled) {
+                completionHandler(d, r, e);
+                return;
+            }
+            ApolloImgChestUploadOperation *operation = ApolloImgChestUploadFile(fileURL, chestFilename, chestMIMEType, ^(NSURL *link, NSError *uploadError) {
                 if (!link) {
                     completionHandler(nil, nil, uploadError);
                     return;
@@ -3445,8 +3464,13 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
                                                                     headerFields:@{@"Content-Type": @"application/json"}];
                 completionHandler(synthetic, fake, nil);
             });
+            ApolloImgChestAssociateOperationWithTask(operation, proxyTask);
         };
-        return %orig(ApolloRedditUploadFastFailRequest(), fileURL, chestWrapped);
+        NSURLSessionUploadTask *task = %orig(ApolloRedditUploadFastFailRequest(), fileURL, chestWrapped);
+        // Apollo resumes the returned upload task only after this hook returns,
+        // so the wrapper cannot run before its weak cancellation proxy is set.
+        proxyTask = task;
+        return task;
     }
 
     // Comment Link Host = Imgur (or Image Chest unavailable / video, with an Imgur
@@ -3554,6 +3578,7 @@ static void ApolloCompleteRedditNativeMediaUpload(NSData *mediaData, NSURL *medi
 - (void)cancel {
     ApolloRedditNativeUploadAttempt *attempt = objc_getAssociatedObject(self, &kApolloRedditNativeUploadAttemptKey);
     if (attempt) [attempt cancelWithReason:@"NSURLSessionTask cancel"];
+    ApolloImgChestCancelOperationAssociatedWithTask(self);
     %orig;
 }
 
@@ -3644,7 +3669,7 @@ static void ApolloUploadsApplyThumb(UITableViewCell *cell, NSString *key, UIImag
         thumbView.contentMode = UIViewContentModeScaleAspectFill;
         thumbView.clipsToBounds = YES;
         thumbView.image = image;
-        ApolloLog(@"[ImgChestUpload] uploads thumbnail set (view=%@ frame=%@)",
+        ApolloLogDebug(@"[ImgChestUpload] uploads thumbnail set (view=%@ frame=%@)",
                   NSStringFromClass([thumbView class]), NSStringFromCGRect(thumbView.frame));
     });
 }
@@ -3851,7 +3876,7 @@ static bool hooked_CGImageDestinationAddImage(CGImageDestinationRef destination,
     CFDictionaryRef newProperties = ApolloCopyOptionsWithReplacement(properties, kCGImageDestinationLossyCompressionQuality, fullRef);
     CFRelease(fullRef);
 
-    ApolloLog(@"[ImageUploadHost] Bumping Apollo's image-prep JPEG quality from 0.75 to 1.0 for full-fidelity upload");
+    ApolloLogDebug(@"[ImageUploadHost] Bumping Apollo's image-prep JPEG quality from 0.75 to 1.0 for full-fidelity upload");
     bool result = orig_CGImageDestinationAddImage(destination, image, newProperties);
     if (newProperties) CFRelease(newProperties);
     return result;

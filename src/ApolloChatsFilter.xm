@@ -26,7 +26,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 
-#define ChatsFilterLog(fmt, ...) ApolloLog(@"[ChatsFilter] " fmt, ##__VA_ARGS__)
+#define ChatsFilterLog(fmt, ...) ApolloLogDebug(@"[ChatsFilter] " fmt, ##__VA_ARGS__)
 
 // Row discovery must be scoped to each InboxListViewController. Apollo can keep
 // more than one Boxes controller alive while accounts/tabs change; global row
@@ -1309,7 +1309,7 @@ static void ApolloWarnIfUnhandledRowDelegates(id vc) {
         ];
         for (NSString *sel in risky) {
             if ([vc respondsToSelector:NSSelectorFromString(sel)])
-                ChatsFilterLog(@"WARNING: InboxListViewController now implements %@ — the Direct Chat row shift may mis-index it; remap it too.", sel);
+                ApolloLog(@"[ChatsFilter] WARNING: InboxListViewController now implements %@ — the Direct Chat row shift may mis-index it; remap it too.", sel);
         }
     });
 }
