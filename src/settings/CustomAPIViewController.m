@@ -1324,6 +1324,12 @@ typedef NS_ENUM(NSInteger, Tag) {
 - (ApolloSettingsSection *)buildInterfaceSection {
     __weak typeof(self) weakSelf = self;
 
+    ApolloSettingsRow *iconOnlyTabBar =
+        [ApolloSettingsRow switchRowWithID:@"profiles.iconOnlyTabBar"
+                                     title:@"Icon-Only Tab Bar"
+                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles]; }
+                                  onToggle:^(UISwitch *sender) { [weakSelf iconOnlyTabBarSwitchToggled:sender]; }];
+
     ApolloSettingsRow *tabBarIdle =
         [ApolloSettingsRow customRowWithID:@"gen.tabBarIdle"
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
@@ -1398,8 +1404,8 @@ typedef NS_ENUM(NSInteger, Tag) {
     scrollEdgeEffect.visible = ^BOOL { return IsLiquidGlass(); };
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Liquid Glass chrome behaviors.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
-                                              rows:@[ tabBarIdle, keepSearchInPlace, titleGapCentering, iPadTabBarBottom, scrollEdgeEffect ]];
+                                            footer:@"Customize tab-bar labels and Liquid Glass chrome behaviors.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
+                                              rows:@[ iconOnlyTabBar, tabBarIdle, keepSearchInPlace, titleGapCentering, iPadTabBarBottom, scrollEdgeEffect ]];
 }
 
 // Display order of the Header Style picker. Raw values are NOT contiguous
@@ -1768,12 +1774,6 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
             return [[ApolloProfileLayoutViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
         }];
 
-    ApolloSettingsRow *iconOnlyTabBar =
-        [ApolloSettingsRow switchRowWithID:@"profiles.iconOnlyTabBar"
-                                     title:@"Icon-Only Tab Bar"
-                                      isOn:^BOOL { return [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyHideTabBarTitles]; }
-                                  onToggle:^(UISwitch *sender) { [weakSelf iconOnlyTabBarSwitchToggled:sender]; }];
-
     // Mirror of Apollo's native "Hide Username on Tab Bar" switch (relocated
     // here from General → Other, which now hides it — see
     // ApolloSettingsNativeInjections.xm). Same key, and the native change
@@ -1792,8 +1792,8 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     hideUsernameTab.enabled = ^BOOL { return !sHideTabBarTitles; };
 
     return [ApolloSettingsSection sectionWithTitle:nil
-                                            footer:@"Customize profile pictures, profile pages and the tab bar. Icon-Only Tab Bar hides every tab's text label (Hide Username on Tab Bar only hides yours), while keeping each icon's accessibility name."
-                                              rows:@[ userAvatars, profileTabAvatar, iconOnlyTabBar, hideUsernameTab, profileLayout ]];
+                                            footer:@"Customize profile pictures and profile pages. Hide Username on Tab Bar hides only your profile-tab label; Interface → Icon-Only Tab Bar hides every tab label."
+                                              rows:@[ userAvatars, profileTabAvatar, hideUsernameTab, profileLayout ]];
 }
 
 - (NSString *)profileLayoutSummaryText {
@@ -3436,10 +3436,9 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
 
 - (void)iconOnlyTabBarSwitchToggled:(UISwitch *)sender {
     // Enabling also clears the native Hide Username key (see
-    // ApolloSetHideTabBarTitlesEnabled), so the sibling row below must re-read
-    // its switch state and enablement either way.
+    // ApolloSetHideTabBarTitlesEnabled). The profile-specific row re-reads
+    // that state whenever its screen appears.
     ApolloSetHideTabBarTitlesEnabled(sender.isOn);
-    [self reloadRowWithID:@"profiles.hideUsernameTab"];
 }
 
 - (void)hideUsernameTabSwitchToggled:(UISwitch *)sender {
