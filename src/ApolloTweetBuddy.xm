@@ -22,7 +22,7 @@
 @end
 
 static NSString *const kApolloTweetBaseURL = @"https://apollogur.download/api/tweet/";
-static NSString *const kXHomepageURL = @"https://x.com/";
+static NSString *const kXGuestActivateURL = @"https://api.x.com/1.1/guest/activate.json";
 static NSString *const kXGraphQLURL = @"https://api.x.com/graphql/zy39CwTyYhU-_0LP7dljjg/TweetResultByRestId";
 static NSString *const kXBearerToken = @"Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 static NSString *const kHandledKey = @"ApolloTweetProtocolHandled";
@@ -171,7 +171,12 @@ static NSDictionary *ApolloTweetBuddyTransformResult(NSDictionary *result) {
             return;
         }
 
-        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kXHomepageURL]];
+        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kXGuestActivateURL]];
+        request.HTTPMethod = @"POST";
+        [request setValue:kXBearerToken forHTTPHeaderField:@"authorization"];
+        // Also hands back guest_id / personalization_id tracking cookies; keep
+        // them out of Apollo's shared jar.
+        request.HTTPShouldHandleCookies = NO;
         [NSURLProtocol setProperty:@YES forKey:kHandledKey inRequest:request];
 
         [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -180,17 +185,22 @@ static NSDictionary *ApolloTweetBuddyTransformResult(NSDictionary *result) {
                 return;
             }
 
-            NSString *html = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-            NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"gt=([0-9]+);" options:0 error:nil];
-            NSTextCheckingResult *match = [regex firstMatchInString:html options:0 range:NSMakeRange(0, html.length)];
-            if (!match || match.numberOfRanges < 2) {
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            id rawToken = [json isKindOfClass:[NSDictionary class]] ? json[@"guest_token"] : nil;
+            // A string today; tolerate a bare number rather than failing the fetch.
+            NSString *token = nil;
+            if ([rawToken isKindOfClass:[NSString class]]) {
+                token = rawToken;
+            } else if ([rawToken isKindOfClass:[NSNumber class]]) {
+                token = [rawToken stringValue];
+            }
+            if (token.length == 0) {
                 completion(nil, [NSError errorWithDomain:@"ApolloTweetProtocol"
                                                     code:-2
-                                                userInfo:@{NSLocalizedDescriptionKey: @"Could not find gt= in x.com HTML"}]);
+                                                userInfo:@{NSLocalizedDescriptionKey: @"No guest_token in guest/activate.json response"}]);
                 return;
             }
 
-            NSString *token = [html substringWithRange:[match rangeAtIndex:1]];
             dispatch_async(sTokenQueue, ^{
                 sGuestToken = token;
                 sTokenFetchDate = [NSDate date];
@@ -218,6 +228,8 @@ static NSDictionary *ApolloTweetBuddyTransformResult(NSDictionary *result) {
     [request setValue:@"application/json" forHTTPHeaderField:@"content-type"];
     [request setValue:@"https://x.com" forHTTPHeaderField:@"Origin"];
     [request setValue:@"https://x.com/" forHTTPHeaderField:@"Referer"];
+    // Sets the same tracking cookies as the activate call, on every preview.
+    request.HTTPShouldHandleCookies = NO;
     [NSURLProtocol setProperty:@YES forKey:kHandledKey inRequest:request];
 
     [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
