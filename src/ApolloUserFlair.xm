@@ -28,6 +28,36 @@ static char kApolloUserFlairOptionDisplayFlairsKey;
 
 static const NSUInteger kApolloUserFlairMaxLength = 64;
 
+// The emoji catalogue is a cross-thread invariant: Texture/own-flair recovery
+// can read it on arbitrary queues while network/WebKit paths update it. One
+// private monitor guards both the catalogue and its partial-key set.
+// The WebKit in-flight map, by contrast, is strictly main-thread-owned.
+static NSObject *sApolloUserFlairEmojiCacheLock;
+static NSObject *sApolloUserFlairCapturedOptionsLock;
+static NSMutableDictionary<NSString *, NSArray *> *sApolloUserFlairEmojiListCache;
+static NSMutableSet<NSString *> *sApolloUserFlairPartialEmojiCacheKeys;
+static NSMutableDictionary<NSString *, id> *sApolloUserFlairWebEmojiFetches;
+static NSObject *sApolloUserFlairSpriteCacheLock;
+static NSCache<NSString *, UIImage *> *sApolloUserFlairSheetCache;
+static NSMutableDictionary<NSString *, NSString *> *sApolloUserFlairSpriteFileCache;
+static NSMutableDictionary<NSString *, UIImage *> *sApolloUserFlairSpriteImageByPath;
+static NSMutableArray<NSString *> *sApolloUserFlairSpriteCacheOrder;
+
+__attribute__((constructor))
+static void ApolloUserFlairInitializeSharedState(void) {
+    sApolloUserFlairEmojiCacheLock = [NSObject new];
+    sApolloUserFlairEmojiListCache = [NSMutableDictionary new];
+    sApolloUserFlairPartialEmojiCacheKeys = [NSMutableSet new];
+    sApolloUserFlairWebEmojiFetches = [NSMutableDictionary new];
+    sApolloUserFlairCapturedOptionsLock = [NSObject new];
+    sApolloUserFlairSpriteCacheLock = [NSObject new];
+    sApolloUserFlairSheetCache = [NSCache new];
+    sApolloUserFlairSheetCache.countLimit = 8;
+    sApolloUserFlairSpriteFileCache = [NSMutableDictionary new];
+    sApolloUserFlairSpriteImageByPath = [NSMutableDictionary new];
+    sApolloUserFlairSpriteCacheOrder = [NSMutableArray new];
+}
+
 // The flair selector's flair options live in section 1 of its table.
 static const NSInteger kApolloUserFlairOptionsSection = 1;
 
@@ -728,20 +758,14 @@ static NSRegularExpression *ApolloUserFlairEmojiTokenRegex(void) {
 // Cache of the user-flair-allowed emoji list per subreddit (lowercased key).
 // Each item: @{ @"name": <token without colons>, @"url": <png url> }.
 static NSMutableDictionary<NSString *, NSArray *> *ApolloUserFlairEmojiListCache(void) {
-    static NSMutableDictionary *cache = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
-    return cache;
+    return sApolloUserFlairEmojiListCache;
 }
 
 // Old Reddit's flair selector embeds only the emoji used by its visible
 // templates. Keep track of those cache entries as partial so opening the editor
 // still fetches Reddit's complete user-flair-allowed emoji catalogue.
 static NSMutableSet<NSString *> *ApolloUserFlairPartialEmojiCacheKeys(void) {
-    static NSMutableSet *keys = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ keys = [NSMutableSet set]; });
-    return keys;
+    return sApolloUserFlairPartialEmojiCacheKeys;
 }
 
 static NSMutableDictionary<NSString *, id> *ApolloUserFlairWebEmojiFetches(void);
@@ -895,6 +919,7 @@ static NSArray<NSHTTPCookie *> *ApolloUserFlairCookiesFromHeader(NSString *heade
 
 - (void)finishWithItems:(NSArray *)items status:(NSInteger)status
           responseLength:(NSUInteger)responseLength reason:(NSString *)reason {
+    NSCAssert([NSThread isMainThread], @"Web emoji fetch completion must run on main");
     if (self.finished) return;
     self.finished = YES;
 
@@ -914,7 +939,9 @@ static NSArray<NSHTTPCookie *> *ApolloUserFlairCookiesFromHeader(NSString *heade
     }
     NSArray *result = validResponse ? emojis : self.fallback;
     if (validResponse) {
-        @synchronized (ApolloUserFlairEmojiListCache()) {
+        NS_VALID_UNTIL_END_OF_SCOPE NSArray *retiredEmojis = nil;
+        @synchronized (sApolloUserFlairEmojiCacheLock) {
+            retiredEmojis = ApolloUserFlairEmojiListCache()[self.cacheKey];
             ApolloUserFlairEmojiListCache()[self.cacheKey] = emojis;
             [ApolloUserFlairPartialEmojiCacheKeys() removeObject:self.cacheKey];
         }
@@ -929,9 +956,7 @@ static NSArray<NSHTTPCookie *> *ApolloUserFlairCookiesFromHeader(NSString *heade
     [self.web removeFromSuperview];
     self.web = nil;
     NSMutableDictionary *fetches = ApolloUserFlairWebEmojiFetches();
-    @synchronized (fetches) {
-        if (fetches[self.cacheKey] == self) [fetches removeObjectForKey:self.cacheKey];
-    }
+    if (fetches[self.cacheKey] == self) [fetches removeObjectForKey:self.cacheKey];
     NSArray *callbacks = [self.completions copy];
     [self.completions removeAllObjects];
     for (void (^callback)(NSArray *) in callbacks) callback(result ?: @[]);
@@ -947,26 +972,24 @@ static NSArray<NSHTTPCookie *> *ApolloUserFlairCookiesFromHeader(NSString *heade
 @end
 
 static NSMutableDictionary<NSString *, id> *ApolloUserFlairWebEmojiFetches(void) {
-    static NSMutableDictionary *fetches;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ fetches = [NSMutableDictionary dictionary]; });
-    return fetches;
+    NSCAssert([NSThread isMainThread], @"Web emoji fetch ownership is main-thread confined");
+    return sApolloUserFlairWebEmojiFetches;
 }
 
 static void ApolloUserFlairFetchEmojisViaWeb(NSString *subreddit, NSArray *fallback,
                                               void (^completion)(NSArray *emojis)) {
     dispatch_block_t start = ^{
+        NSCAssert([NSThread isMainThread], @"Web emoji fetch start must run on main");
         NSString *key = subreddit.lowercaseString;
         NSMutableDictionary *fetches = ApolloUserFlairWebEmojiFetches();
-        ApolloUserFlairWebEmojiFetch *fetch;
-        @synchronized (fetches) { fetch = fetches[key]; }
+        ApolloUserFlairWebEmojiFetch *fetch = fetches[key];
         if (fetch) {
             [fetch addCompletion:completion];
             return;
         }
         fetch = [[ApolloUserFlairWebEmojiFetch alloc] initWithSubreddit:subreddit fallback:fallback];
         [fetch addCompletion:completion];
-        @synchronized (fetches) { fetches[key] = fetch; }
+        fetches[key] = fetch;
         [fetch start];
     };
     if ([NSThread isMainThread]) start();
@@ -978,7 +1001,7 @@ static void ApolloUserFlairFetchEmojis(NSString *subreddit, void (^completion)(N
     if (key.length == 0) { if (completion) completion(@[]); return; }
     NSArray *cached;
     BOOL cachedIsPartial = NO;
-    @synchronized (ApolloUserFlairEmojiListCache()) {
+    @synchronized (sApolloUserFlairEmojiCacheLock) {
         cached = ApolloUserFlairEmojiListCache()[key];
         cachedIsPartial = [ApolloUserFlairPartialEmojiCacheKeys() containsObject:key];
     }
@@ -1026,8 +1049,10 @@ static void ApolloUserFlairFetchEmojis(NSString *subreddit, void (^completion)(N
                   @"no", validCatalogue ? @"yes" : @"no", error ? @"yes" : @"no");
         dispatch_async(dispatch_get_main_queue(), ^{
             NSArray *result = emojis;
-            @synchronized (ApolloUserFlairEmojiListCache()) {
+            NS_VALID_UNTIL_END_OF_SCOPE NSArray *retiredEmojis = nil;
+            @synchronized (sApolloUserFlairEmojiCacheLock) {
                 if (validCatalogue && http.statusCode == 200) {
+                    retiredEmojis = ApolloUserFlairEmojiListCache()[key];
                     ApolloUserFlairEmojiListCache()[key] = emojis;
                     [ApolloUserFlairPartialEmojiCacheKeys() removeObject:key];
                 } else if (cached.count > 0) {
@@ -1691,25 +1716,17 @@ static NSNumber *ApolloUserFlairRowKey(NSInteger section, NSInteger row) {
     return @((((long long)section) << 32) | ((long long)row & 0xffffffffLL));
 }
 
-static NSMutableDictionary<NSNumber *, id> *ApolloUserFlairCapturedOptions(UIViewController *controller, BOOL create) {
-    if (!controller) return nil;
-    @synchronized (controller) {
-        NSMutableDictionary *options = objc_getAssociatedObject(controller, &kApolloUserFlairCapturedOptionsKey);
-        if (!options && create) {
-            options = [NSMutableDictionary dictionary];
-            objc_setAssociatedObject(controller, &kApolloUserFlairCapturedOptionsKey, options, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        }
-        return options;
-    }
-}
-
 static void ApolloUserFlairCaptureOptionIfNeeded(id option) {
     UIViewController *controller = tApolloUserFlairCaptureController;
     if (!controller || tApolloUserFlairCaptureSection == NSNotFound || tApolloUserFlairCaptureRow == NSNotFound || !option) return;
 
     NSNumber *key = ApolloUserFlairRowKey(tApolloUserFlairCaptureSection, tApolloUserFlairCaptureRow);
-    @synchronized (controller) {
-        NSMutableDictionary *options = ApolloUserFlairCapturedOptions(controller, YES);
+    @synchronized (sApolloUserFlairCapturedOptionsLock) {
+        NSMutableDictionary *options = objc_getAssociatedObject(controller, &kApolloUserFlairCapturedOptionsKey);
+        if (!options) {
+            options = [NSMutableDictionary dictionary];
+            objc_setAssociatedObject(controller, &kApolloUserFlairCapturedOptionsKey, options, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
         options[key] = option;
     }
 }
@@ -1717,8 +1734,8 @@ static void ApolloUserFlairCaptureOptionIfNeeded(id option) {
 static id ApolloUserFlairCapturedOptionAtIndexPath(UIViewController *controller, NSIndexPath *indexPath) {
     if (!controller || !indexPath) return nil;
     NSNumber *key = ApolloUserFlairRowKey(indexPath.section, indexPath.row);
-    @synchronized (controller) {
-        return ApolloUserFlairCapturedOptions(controller, NO)[key];
+    @synchronized (sApolloUserFlairCapturedOptionsLock) {
+        return [objc_getAssociatedObject(controller, &kApolloUserFlairCapturedOptionsKey) objectForKey:key];
     }
 }
 
@@ -1953,7 +1970,9 @@ static NSArray *ApolloUserFlairPiecesFromFlairTextWithEmojiMap(NSString *flairTe
 static NSArray *ApolloUserFlairPiecesFromFlairText(NSString *flairText, NSString *subredditLowercase) {
     NSDictionary *map = nil;
     NSArray *emojis = nil;
-    @synchronized (ApolloUserFlairEmojiListCache()) { emojis = ApolloUserFlairEmojiListCache()[subredditLowercase]; }
+    @synchronized (sApolloUserFlairEmojiCacheLock) {
+        emojis = ApolloUserFlairEmojiListCache()[subredditLowercase];
+    }
     if (emojis.count) {
         NSMutableDictionary *m = [NSMutableDictionary dictionary];
         for (NSDictionary *e in emojis) { if (e[@"name"] && e[@"url"]) m[e[@"name"]] = e[@"url"]; }
@@ -1987,8 +2006,10 @@ void ApolloUserFlairEnsureEmojisForSubreddit(NSString *subreddit, void (^complet
     NSString *key = subreddit.lowercaseString;
     NSArray *cached = nil;
     BOOL partial = NO;
-    @synchronized (ApolloUserFlairEmojiListCache()) { cached = ApolloUserFlairEmojiListCache()[key]; }
-    @synchronized (ApolloUserFlairPartialEmojiCacheKeys()) { partial = [ApolloUserFlairPartialEmojiCacheKeys() containsObject:key]; }
+    @synchronized (sApolloUserFlairEmojiCacheLock) {
+        cached = ApolloUserFlairEmojiListCache()[key];
+        partial = [ApolloUserFlairPartialEmojiCacheKeys() containsObject:key];
+    }
     if (cached && !partial) { completion(); return; }
 
     ApolloUserFlairFetchEmojis(subreddit, ^(__unused NSArray *emojis) { completion(); });
@@ -2346,9 +2367,11 @@ static NSArray *ApolloUserFlairWebOptionsFromHTML(NSData *data, NSString *subred
     }
     NSString *cacheKey = subreddit.lowercaseString;
     if (cacheKey.length > 0) {
-        @synchronized (ApolloUserFlairEmojiListCache()) {
+        NS_VALID_UNTIL_END_OF_SCOPE NSArray *retiredEmojis = nil;
+        @synchronized (sApolloUserFlairEmojiCacheLock) {
             BOOL existingIsPartial = [ApolloUserFlairPartialEmojiCacheKeys() containsObject:cacheKey];
             if (!ApolloUserFlairEmojiListCache()[cacheKey] || existingIsPartial) {
+                retiredEmojis = ApolloUserFlairEmojiListCache()[cacheKey];
                 ApolloUserFlairEmojiListCache()[cacheKey] = cachedEmojis;
                 [ApolloUserFlairPartialEmojiCacheKeys() addObject:cacheKey];
             }
@@ -2663,29 +2686,52 @@ static NSString *ApolloUserFlairPrettifyClass(NSString *cssClass) {
 }
 
 static NSCache<NSString *, UIImage *> *ApolloUserFlairSheetCache(void) {
-    static NSCache *c = nil; static dispatch_once_t o;
-    dispatch_once(&o, ^{ c = [NSCache new]; c.countLimit = 8; });
-    return c;
+    return sApolloUserFlairSheetCache;
 }
 
-// css_class -> cropped sprite file:// URL (so the native flair cell can load it).
+// sheet/region identity -> synthetic file:// URL. These URLs are identifiers
+// consumed by our ASNetworkImageNode hook; no filesystem access is required.
 static NSMutableDictionary<NSString *, NSString *> *ApolloUserFlairSpriteFileCache(void) {
-    static NSMutableDictionary *d = nil; static dispatch_once_t o;
-    dispatch_once(&o, ^{ d = [NSMutableDictionary dictionary]; });
-    return d;
+    return sApolloUserFlairSpriteFileCache;
 }
 
-// Filename prefix that marks our locally-cropped sprite files, recognised by the
-// ASNetworkImageNode hook below (its HTTP-only downloader can't load file:// URLs,
-// so we intercept and set the in-memory cropped UIImage directly).
+// Filename prefix that marks our synthetic sprite identifiers, recognised by
+// the ASNetworkImageNode hook below (its HTTP-only downloader cannot load them,
+// so we intercept and install the in-memory crop directly).
 static NSString *const kApolloUserFlairSpriteFilePrefix = @"apolloflair_";
+static const NSUInteger kApolloUserFlairSpriteCacheLimit = 256;
 
-// file path -> cropped UIImage, so the image-node hook serves the exact crop
-// without re-decoding from disk (and at the right scale).
+// Synthetic file path -> cropped UIImage, so the image-node hook serves the
+// exact crop without encoding or touching the filesystem.
 static NSMutableDictionary<NSString *, UIImage *> *ApolloUserFlairSpriteImageByPath(void) {
-    static NSMutableDictionary *d = nil; static dispatch_once_t o;
-    dispatch_once(&o, ^{ d = [NSMutableDictionary dictionary]; });
-    return d;
+    return sApolloUserFlairSpriteImageByPath;
+}
+
+// FIFO is sufficient here: selector rows rebuild their synthetic identifier on
+// demand, and already-visible image nodes retain the UIImage they display.
+// The cap prevents browsing several flair-heavy communities from pinning every
+// crop for the rest of the process.
+static NSMutableArray<NSString *> *ApolloUserFlairSpriteCacheOrder(void) {
+    return sApolloUserFlairSpriteCacheOrder;
+}
+
+static NSString *ApolloUserFlairSpriteCacheKey(NSDictionary *region, NSString *cssClass) {
+    if (![region isKindOfClass:[NSDictionary class]] || cssClass.length == 0) return nil;
+    NSString *sheetURL = [region[@"url"] isKindOfClass:[NSString class]] ? region[@"url"] : nil;
+    if (sheetURL.length == 0) return nil;
+    return [NSString stringWithFormat:@"%@|%@|%@|%@|%@|%@",
+        sheetURL, cssClass, region[@"x"] ?: @0, region[@"y"] ?: @0,
+        region[@"w"] ?: @0, region[@"h"] ?: @0];
+}
+
+static NSString *ApolloUserFlairCachedSpriteIdentifier(NSDictionary *spriteMap, NSString *cssClass) {
+    NSDictionary *region = [spriteMap[cssClass] isKindOfClass:[NSDictionary class]]
+        ? spriteMap[cssClass] : nil;
+    NSString *cacheKey = ApolloUserFlairSpriteCacheKey(region, cssClass);
+    if (cacheKey.length == 0) return nil;
+    @synchronized (sApolloUserFlairSpriteCacheLock) {
+        return ApolloUserFlairSpriteFileCache()[cacheKey];
+    }
 }
 
 static NSString *ApolloUserFlairFirstGroup(NSString *str, NSString *pattern) {
@@ -2762,16 +2808,17 @@ static NSDictionary *ApolloUserFlairParseSpriteCSS(NSString *css, NSArray *image
     return map.count ? map : nil;
 }
 
-// Crop css_class's sprite from its (already-downloaded) sheet, write a temp PNG, and
-// return a file:// URL. nil if the sheet isn't cached yet or the region is invalid.
-static NSString *ApolloUserFlairSpriteFileForClass(UIViewController *controller, NSString *cssClass) {
+// Lazily crop a row's sprite from its already-downloaded sheet. These are tiny
+// legacy flair icons, so doing one crop when a row is actually requested is
+// cheaper than pre-rendering hundreds the user may never scroll to.
+static NSString *ApolloUserFlairBuildSpriteIdentifier(NSDictionary *spriteMap, NSString *cssClass) {
     if (cssClass.length == 0) return nil;
-    NSString *cached;
-    @synchronized (ApolloUserFlairSpriteFileCache()) { cached = ApolloUserFlairSpriteFileCache()[cssClass]; }
+    NSString *cached = ApolloUserFlairCachedSpriteIdentifier(spriteMap, cssClass);
     if (cached) return cached;
-    NSDictionary *spriteMap = objc_getAssociatedObject(controller, &kApolloUserFlairSpriteMapKey);
     NSDictionary *region = spriteMap[cssClass];
     if (![region isKindOfClass:[NSDictionary class]]) return nil;
+    NSString *cacheKey = ApolloUserFlairSpriteCacheKey(region, cssClass);
+    if (cacheKey.length == 0) return nil;
     UIImage *sheet = [ApolloUserFlairSheetCache() objectForKey:region[@"url"]];
     if (!sheet || !sheet.CGImage) return nil;
     CGFloat scale = sheet.scale > 0 ? sheet.scale : 1.0;
@@ -2784,16 +2831,33 @@ static NSString *ApolloUserFlairSpriteFileForClass(UIViewController *controller,
     if (!crop) return nil;
     UIImage *img = [UIImage imageWithCGImage:crop scale:scale orientation:UIImageOrientationUp];
     CGImageRelease(crop);
-    NSData *png = UIImagePNGRepresentation(img);
-    if (!png) return nil;
+    if (!img) return nil;
     NSString *safe = [cssClass stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet alphanumericCharacterSet]] ?: @"f";
-    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@%@.png", kApolloUserFlairSpriteFilePrefix, safe]];
-    if (![png writeToFile:path atomically:YES]) return nil;
-    // Keep the exact crop in memory so the ASNetworkImageNode hook can serve it
-    // directly (its HTTP downloader can't load file:// URLs).
-    @synchronized (ApolloUserFlairSpriteImageByPath()) { ApolloUserFlairSpriteImageByPath()[path] = img; }
-    NSString *fileURL = [[NSURL fileURLWithPath:path] absoluteString];
-    @synchronized (ApolloUserFlairSpriteFileCache()) { ApolloUserFlairSpriteFileCache()[cssClass] = fileURL; }
+    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"%@%@-%@.png", kApolloUserFlairSpriteFilePrefix, safe, [NSUUID UUID].UUIDString]];
+    NSString *fileURL = [[NSURL fileURLWithPath:path isDirectory:NO] absoluteString];
+    NS_VALID_UNTIL_END_OF_SCOPE NSString *retiredIdentifier = nil;
+    NS_VALID_UNTIL_END_OF_SCOPE UIImage *retiredImage = nil;
+    @synchronized (sApolloUserFlairSpriteCacheLock) {
+        // Render work is serial, but keep the publication transaction coherent
+        // with arbitrary Texture readers: an exposed URL always has an image.
+        NSString *existing = ApolloUserFlairSpriteFileCache()[cacheKey];
+        if (existing) return existing;
+        ApolloUserFlairSpriteImageByPath()[path] = img;
+        ApolloUserFlairSpriteFileCache()[cacheKey] = fileURL;
+        [ApolloUserFlairSpriteCacheOrder() addObject:cacheKey];
+        if (ApolloUserFlairSpriteCacheOrder().count > kApolloUserFlairSpriteCacheLimit) {
+            NSString *evictedKey = ApolloUserFlairSpriteCacheOrder().firstObject;
+            [ApolloUserFlairSpriteCacheOrder() removeObjectAtIndex:0];
+            retiredIdentifier = ApolloUserFlairSpriteFileCache()[evictedKey];
+            [ApolloUserFlairSpriteFileCache() removeObjectForKey:evictedKey];
+            NSString *evictedPath = [NSURL URLWithString:retiredIdentifier].path;
+            if (evictedPath.length > 0) {
+                retiredImage = ApolloUserFlairSpriteImageByPath()[evictedPath];
+                [ApolloUserFlairSpriteImageByPath() removeObjectForKey:evictedPath];
+            }
+        }
+    }
     return fileURL;
 }
 
@@ -2882,7 +2946,7 @@ static void ApolloUserFlairFetchSpriteData(UIViewController *controller, NSStrin
                 dispatch_group_notify(grp, dispatch_get_main_queue(), ^{
                     UIViewController *c2 = wc; if (!c2) return;
                     objc_setAssociatedObject(c2, &kApolloUserFlairSpriteMapKey, spriteMap, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                    reload(); // now sprites can crop+render
+                    reload(); // visible row builds lazily create only their own crops
                 });
             }] resume];
         });
@@ -3066,7 +3130,8 @@ static BOOL ApolloUserFlairPresenterHasFlairSelector(UIViewController *presenter
             }
             if (cssClass) {
                 NSString *name = ApolloUserFlairPrettifyClass(cssClass);
-                NSString *spriteFile = ApolloUserFlairSpriteFileForClass((UIViewController *)self, cssClass);
+                NSDictionary *spriteMap = objc_getAssociatedObject((UIViewController *)self, &kApolloUserFlairSpriteMapKey);
+                NSString *spriteFile = ApolloUserFlairBuildSpriteIdentifier(spriteMap, cssClass);
                 // The selector cell renders an option's `flairs` pieces (it ignores
                 // textRepresentation), so build the row from pieces: the real cropped
                 // sprite (when the stylesheet parsed) followed by the prettified class
@@ -3271,18 +3336,16 @@ static BOOL ApolloUserFlairPresenterHasFlairSelector(UIViewController *presenter
 
 %end
 
-// Our cropped old-reddit sprites live on disk as file:// URLs, but Apollo's flair
-// emoji images load through ASNetworkImageNode's HTTP-only downloader, which can't
-// fetch file:// (the request silently produces no image — blank rows). Intercept the
-// URL setter: when it's one of our sprite files, set the cached cropped UIImage
-// directly and skip the network path entirely. Real (https) emoji URLs are untouched.
+// Our cropped old-reddit sprites use synthetic file:// URLs, but Apollo's flair
+// emoji images load through ASNetworkImageNode's HTTP-only downloader. Intercept
+// those identifiers, install the in-memory crop directly, and skip the network
+// path entirely. Real (https) emoji URLs are untouched.
 static BOOL ApolloUserFlairTrySetSpriteImage(id imageNode, NSURL *url) {
     if (![url isKindOfClass:[NSURL class]] || !url.isFileURL) return NO;
     NSString *path = url.path;
     if (![[path lastPathComponent] hasPrefix:kApolloUserFlairSpriteFilePrefix]) return NO;
     UIImage *img = nil;
-    @synchronized (ApolloUserFlairSpriteImageByPath()) { img = ApolloUserFlairSpriteImageByPath()[path]; }
-    if (!img) img = [UIImage imageWithContentsOfFile:path];
+    @synchronized (sApolloUserFlairSpriteCacheLock) { img = ApolloUserFlairSpriteImageByPath()[path]; }
     if (!img) return NO;
     if ([imageNode respondsToSelector:@selector(setImage:)]) {
         ((void (*)(id, SEL, UIImage *))objc_msgSend)(imageNode, @selector(setImage:), img);

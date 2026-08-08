@@ -290,13 +290,13 @@ static BOOL ApolloMediaComposerRecentlyUsedInlineBodyPicker(void) {
     return age >= 0.0 && age <= 45.0;
 }
 
-static NSString *ApolloMediaComposerVideoContextDebugSummaryLocked(BOOL inlineActive, BOOL inlineRecent) {
+static NSString *ApolloMediaComposerVideoContextDebugSummaryLocked(BOOL inlineActive,
+                                                                    BOOL inlineRecent,
+                                                                    BOOL consumedFileExists) {
     NSTimeInterval now = ApolloMediaComposerNow();
     NSTimeInterval selectedAge = sApolloMediaComposerLastSelectedVideoAt > 0.0 ? now - sApolloMediaComposerLastSelectedVideoAt : -1.0;
     NSTimeInterval consumedAge = sApolloMediaComposerLastConsumedAt > 0.0 ? now - sApolloMediaComposerLastConsumedAt : -1.0;
     NSTimeInterval clearAge = sApolloMediaComposerLastVideoContextClearAt > 0.0 ? now - sApolloMediaComposerLastVideoContextClearAt : -1.0;
-    NSURL *consumedURL = [sApolloMediaComposerLastConsumedVideoContext[@"fileURL"] isKindOfClass:[NSURL class]] ? sApolloMediaComposerLastConsumedVideoContext[@"fileURL"] : nil;
-    BOOL consumedFileExists = consumedURL.path.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:consumedURL.path];
     return [NSString stringWithFormat:@"pending=%lu expecting=%@ selectedAge=%.1f consumed=%@ consumedAge=%.1f consumedFile=%@ clear=%@ clearAge=%.1f inlineActive=%@ inlineRecent=%@ inlineReason=%@",
         (unsigned long)sApolloMediaComposerPendingVideoContexts.count,
         sApolloMediaComposerExpectingVideoUpload ? @"yes" : @"no",
@@ -314,9 +314,23 @@ static NSString *ApolloMediaComposerVideoContextDebugSummaryLocked(BOOL inlineAc
 extern "C" NSString *ApolloMediaComposerVideoContextDebugSummary(void) {
     BOOL inlineActive = ApolloMediaComposerInlineBodyPickerIsActive();
     BOOL inlineRecent = ApolloMediaComposerRecentlyUsedInlineBodyPicker();
+    NSURL *checkedConsumedURL = nil;
     @synchronized(ApolloMediaComposerVideoBridgeLock()) {
         ApolloMediaComposerPrunePendingVideoContextsLocked(@"debug-summary");
-        return ApolloMediaComposerVideoContextDebugSummaryLocked(inlineActive, inlineRecent);
+        id fileURL = sApolloMediaComposerLastConsumedVideoContext[@"fileURL"];
+        if ([fileURL isKindOfClass:[NSURL class]]) checkedConsumedURL = fileURL;
+    }
+    BOOL consumedFileExists = checkedConsumedURL.path.length > 0 &&
+        [[NSFileManager defaultManager] fileExistsAtPath:checkedConsumedURL.path];
+    @synchronized(ApolloMediaComposerVideoBridgeLock()) {
+        NSURL *currentURL = [sApolloMediaComposerLastConsumedVideoContext[@"fileURL"] isKindOfClass:[NSURL class]]
+            ? sApolloMediaComposerLastConsumedVideoContext[@"fileURL"]
+            : nil;
+        if (currentURL != checkedConsumedURL && ![currentURL isEqual:checkedConsumedURL]) {
+            consumedFileExists = NO;
+        }
+        return ApolloMediaComposerVideoContextDebugSummaryLocked(
+            inlineActive, inlineRecent, consumedFileExists);
     }
 }
 
@@ -379,11 +393,20 @@ static BOOL ApolloMediaComposerURLIsOwnedTempFile(NSURL *url) {
 static void ApolloMediaComposerRemoveOwnedTempURL(NSURL *url, NSString *reason) {
     if (!ApolloMediaComposerURLIsOwnedTempFile(url)) return;
     NSError *error = nil;
-    if ([[NSFileManager defaultManager] fileExistsAtPath:url.path] &&
-        ![[NSFileManager defaultManager] removeItemAtURL:url error:&error]) {
+    if (![[NSFileManager defaultManager] removeItemAtURL:url error:&error] &&
+        !([error.domain isEqualToString:NSCocoaErrorDomain] && error.code == NSFileNoSuchFileError)) {
         ApolloLog(@"[MediaComposer] failed to remove temp media file %@ reason=%@ error=%@",
             url.lastPathComponent ?: @"(missing)", reason ?: @"(unknown)", error.localizedDescription ?: @"unknown");
     }
+}
+
+static dispatch_queue_t ApolloMediaComposerCleanupQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create_with_target("com.apolloreborn.media-composer-cleanup", DISPATCH_QUEUE_SERIAL, dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0));
+    });
+    return queue;
 }
 
 static void ApolloMediaComposerBreakPosterPayloadCycle(NSMutableDictionary *context) {
@@ -396,12 +419,22 @@ static void ApolloMediaComposerBreakPosterPayloadCycle(NSMutableDictionary *cont
 
 static void ApolloMediaComposerCleanupVideoContext(NSMutableDictionary *context, BOOL deleteFiles, NSString *reason) {
     if (![context isKindOfClass:[NSMutableDictionary class]]) return;
+    // Every caller currently owns the bridge monitor. Snapshot the resources,
+    // update the in-memory context there, and defer filesystem work. Temp-file
+    // existence/removal can block and must not serialize picker/upload state.
+    NSURL *fileURL = deleteFiles && [context[@"fileURL"] isKindOfClass:[NSURL class]]
+        ? context[@"fileURL"] : nil;
+    NSURL *posterFileURL = deleteFiles && [context[@"posterFileURL"] isKindOfClass:[NSURL class]]
+        ? context[@"posterFileURL"] : nil;
+    NSString *cleanupReason = reason ?: @"cleanup";
     ApolloMediaComposerBreakPosterPayloadCycle(context);
-    if (deleteFiles) {
-        ApolloMediaComposerRemoveOwnedTempURL(context[@"fileURL"], reason);
-        ApolloMediaComposerRemoveOwnedTempURL(context[@"posterFileURL"], reason);
-    }
     [context removeObjectForKey:@"posterData"];
+    if (deleteFiles) {
+        dispatch_async(ApolloMediaComposerCleanupQueue(), ^{
+            ApolloMediaComposerRemoveOwnedTempURL(fileURL, cleanupReason);
+            ApolloMediaComposerRemoveOwnedTempURL(posterFileURL, cleanupReason);
+        });
+    }
 }
 
 static void ApolloMediaComposerScheduleRecentlyConsumedCleanup(NSTimeInterval consumedAt) {
@@ -587,7 +620,8 @@ static NSURL *ApolloMediaComposerCopyVideoFileToStableTempURL(NSURL *sourceURL, 
     if (![sourceURL isKindOfClass:[NSURL class]]) return nil;
     NSString *extension = ApolloMediaComposerVideoExtensionForTypeIdentifier(typeIdentifier, sourceURL);
     NSString *filename = [[@"apollo-selected-video-" stringByAppendingString:NSUUID.UUID.UUIDString] stringByAppendingPathExtension:extension ?: @"mp4"];
-    NSURL *targetURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:filename]];
+    NSURL *targetURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:filename]
+                                  isDirectory:NO];
     NSError *copyError = nil;
     [[NSFileManager defaultManager] removeItemAtURL:targetURL error:nil];
     if (![[NSFileManager defaultManager] copyItemAtURL:sourceURL toURL:targetURL error:&copyError]) {
@@ -695,7 +729,9 @@ static NSMutableDictionary *ApolloMediaComposerConsumeContextLocked(NSMutableDic
 // returns a context if (a) we are still inside the retry window and (b) the
 // underlying video file is still on disk. On success refreshes consumedAt so
 // repeated retries within the window all work.
-static NSMutableDictionary *ApolloMediaComposerReclaimRecentlyConsumedContextLocked(void) {
+static NSMutableDictionary *ApolloMediaComposerReclaimRecentlyConsumedContextLocked(
+    NSURL *checkedFileURL,
+    BOOL checkedFileExists) {
     NSMutableDictionary *recent = sApolloMediaComposerLastConsumedVideoContext;
     if (![recent isKindOfClass:[NSMutableDictionary class]]) return nil;
     NSTimeInterval age = ApolloMediaComposerNow() - sApolloMediaComposerLastConsumedAt;
@@ -706,11 +742,20 @@ static NSMutableDictionary *ApolloMediaComposerReclaimRecentlyConsumedContextLoc
         return nil;
     }
     NSURL *fileURL = recent[@"fileURL"];
-    if (![fileURL isKindOfClass:[NSURL class]] || !fileURL.path ||
-        ![[NSFileManager defaultManager] fileExistsAtPath:fileURL.path]) {
-        ApolloLog(@"[MediaComposer] recently-consumed video context file missing before retry path=%@ age=%.1fs", fileURL.path ?: @"(missing)", age);
-        sApolloMediaComposerLastConsumedVideoContext = nil;
-        sApolloMediaComposerLastConsumedAt = 0.0;
+    // File existence was resolved before entering the bridge monitor. If the
+    // reclaim slot changed meanwhile, conservatively refuse this attempt; a
+    // subsequent retry will validate the new candidate.
+    BOOL sameCheckedFile = [fileURL isKindOfClass:[NSURL class]] &&
+        [checkedFileURL isKindOfClass:[NSURL class]] &&
+        [fileURL isEqual:checkedFileURL];
+    if (!sameCheckedFile || !checkedFileExists) {
+        ApolloLog(@"[MediaComposer] recently-consumed video context reclaim refused reason=%@ path=%@ age=%.1fs",
+            sameCheckedFile ? @"file-missing" : @"slot-changed",
+            fileURL.path ?: @"(missing)", age);
+        if (sameCheckedFile) {
+            sApolloMediaComposerLastConsumedVideoContext = nil;
+            sApolloMediaComposerLastConsumedAt = 0.0;
+        }
         return nil;
     }
     sApolloMediaComposerLastConsumedAt = ApolloMediaComposerNow();
@@ -738,65 +783,106 @@ extern "C" NSDictionary *ApolloMediaComposerConsumePendingVideoUploadContext(NSD
     BOOL inlineBodyPickerScope = inlineBodyPickerActive || inlineBodyPickerRecent;
 
     NSMutableDictionary *associatedContext = objc_getAssociatedObject(posterData, &kApolloMediaComposerPosterPayloadContextKey);
+    // The associated payload is the normal path. Consume it before touching a
+    // poster file URL so a successful upload never pays for avoidable disk I/O.
+    NSMutableDictionary *resolvedContext = nil;
+    if (associatedContext) {
+        @synchronized(ApolloMediaComposerVideoBridgeLock()) {
+            ApolloMediaComposerPrunePendingVideoContextsLocked(@"consume");
+            resolvedContext = ApolloMediaComposerConsumeContextLocked(associatedContext);
+        }
+        if (resolvedContext) return resolvedContext;
+    }
+
+    // Fallback matching may need the file contents. Keep that blocking read
+    // outside the bridge monitor after the common associated-context path.
+    NSData *fileData = nil;
+    if (posterData.length > 0) fileData = posterData;
+    else if ([posterFileURL isKindOfClass:[NSURL class]]) fileData = [NSData dataWithContentsOfURL:posterFileURL];
+
+    NSURL *checkedReclaimFileURL = nil;
+    BOOL shouldAttemptRetry = fileData.length > 0;
+
     @synchronized(ApolloMediaComposerVideoBridgeLock()) {
         ApolloMediaComposerPrunePendingVideoContextsLocked(@"consume");
-        NSMutableDictionary *consumed = ApolloMediaComposerConsumeContextLocked(associatedContext);
-        if (consumed) return consumed;
-
-        NSData *fileData = nil;
-        if (posterData.length > 0) fileData = posterData;
-        else if ([posterFileURL isKindOfClass:[NSURL class]]) fileData = [NSData dataWithContentsOfURL:posterFileURL];
 
         NSMutableDictionary *fallback = nil;
         BOOL sawComparablePosterPayload = NO;
-        for (NSMutableDictionary *context in [sApolloMediaComposerPendingVideoContexts copy]) {
-            if ([context[@"consumed"] boolValue]) continue;
-            NSData *contextPosterData = context[@"posterData"];
-            if ([contextPosterData isKindOfClass:[NSData class]] && contextPosterData.length > 0) sawComparablePosterPayload = YES;
-            if (fileData.length > 0 && [contextPosterData isKindOfClass:[NSData class]] && [contextPosterData isEqualToData:fileData]) {
-                return ApolloMediaComposerConsumeContextLocked(context);
+        BOOL matchedPendingContext = NO;
+        if (!resolvedContext) {
+            for (NSMutableDictionary *context in [sApolloMediaComposerPendingVideoContexts copy]) {
+                if ([context[@"consumed"] boolValue]) continue;
+                NSData *contextPosterData = context[@"posterData"];
+                if ([contextPosterData isKindOfClass:[NSData class]] && contextPosterData.length > 0) {
+                    sawComparablePosterPayload = YES;
+                }
+                if (fileData.length > 0 && [contextPosterData isKindOfClass:[NSData class]] &&
+                    [contextPosterData isEqualToData:fileData]) {
+                    matchedPendingContext = YES;
+                    resolvedContext = ApolloMediaComposerConsumeContextLocked(context);
+                    break;
+                }
+                if (!fallback) fallback = context;
             }
-            if (!fallback) fallback = context;
         }
 
-        if (sApolloMediaComposerPendingVideoContexts.count == 1 && fallback) {
+        if (!resolvedContext && !matchedPendingContext &&
+            sApolloMediaComposerPendingVideoContexts.count == 1 && fallback) {
             NSNumber *createdAt = fallback[@"createdAt"];
             NSTimeInterval age = [createdAt isKindOfClass:[NSNumber class]] ? (ApolloMediaComposerNow() - createdAt.doubleValue) : (kApolloMediaComposerVideoContextFallbackMaxAge + 1.0);
             if (age >= 0.0 && age <= kApolloMediaComposerVideoContextFallbackMaxAge && ApolloMediaComposerPendingVideoContextIsComplete(fallback)) {
                 ApolloLog(@"[MediaComposer] using only pending selected-video context for upload fallback payload=%@ comparable=%@ age=%.1fs inlineScope=%@ inlineReason=%@",
                     fileData.length > 0 ? @"yes" : @"no", sawComparablePosterPayload ? @"yes" : @"no", age,
                     inlineBodyPickerScope ? @"yes" : @"no", sApolloMediaComposerInlineBodyPickerReason ?: @"(none)");
-                return ApolloMediaComposerConsumeContextLocked(fallback);
+                matchedPendingContext = YES;
+                resolvedContext = ApolloMediaComposerConsumeContextLocked(fallback);
             }
         }
 
-        if (inlineBodyPickerScope) {
+        if (!resolvedContext && matchedPendingContext) {
+            // Preserve the original terminal behavior if a matched context was
+            // rejected as stale while being consumed.
+            shouldAttemptRetry = NO;
+        } else if (!resolvedContext && inlineBodyPickerScope) {
             ApolloLog(@"[MediaComposer] selected-video fallback refused during inline body picker scope pending=%lu reason=%@",
                 (unsigned long)sApolloMediaComposerPendingVideoContexts.count, sApolloMediaComposerInlineBodyPickerReason ?: @"(unknown)");
-            return nil;
-        }
-
-        if (fileData.length > 0 && sawComparablePosterPayload) {
+            shouldAttemptRetry = NO;
+        } else if (!resolvedContext && fileData.length > 0 && sawComparablePosterPayload) {
             ApolloLog(@"[MediaComposer] selected-video fallback refused mismatched poster payload pending=%lu payloadLen=%lu", (unsigned long)sApolloMediaComposerPendingVideoContexts.count, (unsigned long)fileData.length);
-            return nil;
+            shouldAttemptRetry = NO;
         }
 
-        // V19: Cancel + retry recovery. Apollo keeps its in-memory poster JPEG when
-        // the user cancels an upload, but we already removed the matching video
-        // context from the pending array on the first try. If a poster-only upload
-        // arrives within the retry window and the on-disk video file is still there,
-        // reclaim it so the retry uploads as `kind=video` instead of `kind=image`.
-        if (fileData.length > 0) {
-            NSMutableDictionary *reclaimed = ApolloMediaComposerReclaimRecentlyConsumedContextLocked();
-            if (reclaimed) {
-                NSTimeInterval age = ApolloMediaComposerNow() - sApolloMediaComposerLastConsumedAt;
-                ApolloLog(@"[MediaComposer] reclaimed recently-consumed video context for retry age=%.1fs payloadLen=%lu pending=%lu",
-                    age, (unsigned long)fileData.length, (unsigned long)sApolloMediaComposerPendingVideoContexts.count);
-                return reclaimed;
+        // Only snapshot the retry slot after every normal matching path failed.
+        // This avoids adding a filesystem metadata probe to successful uploads.
+        if (!resolvedContext && shouldAttemptRetry) {
+            id candidate = sApolloMediaComposerLastConsumedVideoContext[@"fileURL"];
+            if ([candidate isKindOfClass:[NSURL class]]) {
+                checkedReclaimFileURL = candidate;
             }
-            ApolloLog(@"[MediaComposer] no selected-video context available for upload payloadLen=%lu summary=%@",
-                (unsigned long)fileData.length, ApolloMediaComposerVideoContextDebugSummaryLocked(inlineBodyPickerActive, inlineBodyPickerRecent));
         }
+    }
+
+    if (resolvedContext || !shouldAttemptRetry) return resolvedContext;
+
+    // V19 cancel + retry recovery. The file probe is both slow and independent
+    // of bridge state, so perform it after the normal path and outside the
+    // monitor. The reclaim helper verifies that the slot still names this URL.
+    BOOL checkedReclaimFileExists = checkedReclaimFileURL.path.length > 0 &&
+        [[NSFileManager defaultManager] fileExistsAtPath:checkedReclaimFileURL.path];
+    @synchronized(ApolloMediaComposerVideoBridgeLock()) {
+        NSMutableDictionary *reclaimed = ApolloMediaComposerReclaimRecentlyConsumedContextLocked(
+            checkedReclaimFileURL,
+            checkedReclaimFileExists);
+        if (reclaimed) {
+            NSTimeInterval age = ApolloMediaComposerNow() - sApolloMediaComposerLastConsumedAt;
+            ApolloLog(@"[MediaComposer] reclaimed recently-consumed video context for retry age=%.1fs payloadLen=%lu pending=%lu",
+                age, (unsigned long)fileData.length, (unsigned long)sApolloMediaComposerPendingVideoContexts.count);
+            return reclaimed;
+        }
+        ApolloLog(@"[MediaComposer] no selected-video context available for upload payloadLen=%lu summary=%@",
+            (unsigned long)fileData.length,
+            ApolloMediaComposerVideoContextDebugSummaryLocked(
+                inlineBodyPickerActive, inlineBodyPickerRecent, checkedReclaimFileExists));
     }
     return nil;
 }
@@ -3266,7 +3352,7 @@ static void ApolloPhotoComposerApplyScrollFix(UICollectionView *collectionView) 
     collectionView.alwaysBounceHorizontal = YES;
 
     Class originalClass = object_getClass(collectionView);
-    NSString *subclassName = [NSString stringWithFormat:@"ApolloComposerStripScrollFix_%@", NSStringFromClass(originalClass)];
+    NSString *subclassName = [@"ApolloComposerStripScrollFix_" stringByAppendingString:NSStringFromClass(originalClass)];
     Class subclass = objc_getClass(subclassName.UTF8String);
     if (!subclass) {
         subclass = objc_allocateClassPair(originalClass, subclassName.UTF8String, 0);
@@ -3995,7 +4081,8 @@ static void ApolloMediaComposerInstallComposeTableHooks(void) {
             }
             UIImage *poster = ApolloMediaComposerPosterImageForVideoURL(stableURL);
             NSData *posterData = poster ? UIImageJPEGRepresentation(poster, 0.92) : nil;
-            NSURL *posterURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:[[ @"apollo-selected-video-poster-" stringByAppendingString:NSUUID.UUID.UUIDString] stringByAppendingPathExtension:@"jpg"]]];
+            NSURL *posterURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:[[ @"apollo-selected-video-poster-" stringByAppendingString:NSUUID.UUID.UUIDString] stringByAppendingPathExtension:@"jpg"]]
+                                           isDirectory:NO];
             NSError *writeError = nil;
             BOOL wrote = [posterData writeToURL:posterURL options:NSDataWritingAtomic error:&writeError];
             ApolloMediaComposerAttachContextToPosterImage(poster, context);
@@ -4156,6 +4243,8 @@ static void ApolloMediaComposerLogPhotoAuthStateOnce(void) {
 %ctor {
     dlopen("/System/Library/Frameworks/Photos.framework/Photos", RTLD_LAZY);
     dlopen("/System/Library/Frameworks/PhotosUI.framework/PhotosUI", RTLD_LAZY);
+    // Construct the cleanup lane before any bridge monitor can call into it.
+    (void)ApolloMediaComposerCleanupQueue();
     ApolloMediaComposerInstallComposeTableHooks();
     rebind_symbols((struct rebinding[2]) {
         {"UIImageJPEGRepresentation", (void *)hooked_UIImageJPEGRepresentation, (void **)&orig_UIImageJPEGRepresentation},

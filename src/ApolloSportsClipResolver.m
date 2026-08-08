@@ -371,7 +371,7 @@ static void SCResolveDubz(NSString *clipID, void (^completion)(NSDictionary *)) 
 // clips, so storage is only a legacy fallback for the rare entry without an
 // external_url.
 static void SCResolveStreamff(NSString *clipID, void (^completion)(NSDictionary *)) {
-    NSURL *api = [NSURL URLWithString:[NSString stringWithFormat:@"https://ffedge.streamff.com/share/%@", clipID]];
+    NSURL *api = [NSURL URLWithString:[@"https://ffedge.streamff.com/share/" stringByAppendingString:clipID]];
     SCFetch(api, @"GET", ^(NSData *data, NSHTTPURLResponse *http) {
         NSArray *arr = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
         NSDictionary *info = [arr isKindOfClass:[NSArray class]] && arr.count > 0 &&
@@ -404,7 +404,7 @@ static void SCResolveStreamff(NSString *clipID, void (^completion)(NSDictionary 
 // streamain: the watch page only holds an iframe; the embed page's <video>
 // carries the CDN URL in a data-link attribute (path is unrelated to the id).
 static void SCResolveStreamain(NSString *clipID, void (^completion)(NSDictionary *)) {
-    NSURL *embed = [NSURL URLWithString:[NSString stringWithFormat:@"https://streamain.com/embed/%@", clipID]];
+    NSURL *embed = [NSURL URLWithString:[@"https://streamain.com/embed/" stringByAppendingString:clipID]];
     SCFetch(embed, @"GET", ^(NSData *data, NSHTTPURLResponse *http) {
         NSString *html = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
         NSURL *mp4 = SCURLFromString(SCFirstCapture(html, @"data-link=[\"']([^\"']+)[\"']"));
@@ -422,7 +422,7 @@ static void SCResolveStreamain(NSString *clipID, void (^completion)(NSDictionary
 
 // bangr: og:video is reliable; the predictable CDN URL covers a page-fetch miss.
 static void SCResolveBangr(NSString *clipID, void (^completion)(NSDictionary *)) {
-    NSURL *page = [NSURL URLWithString:[NSString stringWithFormat:@"https://bangr.im/v/%@", clipID]];
+    NSURL *page = [NSURL URLWithString:[@"https://bangr.im/v/" stringByAppendingString:clipID]];
     SCFetch(page, @"GET", ^(NSData *data, NSHTTPURLResponse *http) {
         NSString *html = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
         NSURL *mp4 = SCURLFromString(SCMetaContent(html, @"og:video:secure_url"))
@@ -438,7 +438,7 @@ static void SCResolveBangr(NSString *clipID, void (^completion)(NSDictionary *))
 // dropr: og:video only (CDN filename is unrelated to the slug); a page without
 // og:video is the permanent "Video is processing" takedown/stuck state.
 static void SCResolveDropr(NSString *clipID, NSString *originalURL, void (^completion)(NSDictionary *)) {
-    NSURL *page = SCURLFromString(originalURL) ?: [NSURL URLWithString:[NSString stringWithFormat:@"https://dropr.co/v/%@", clipID]];
+    NSURL *page = SCURLFromString(originalURL) ?: [NSURL URLWithString:[@"https://dropr.co/v/" stringByAppendingString:clipID]];
     SCFetch(page, @"GET", ^(NSData *data, NSHTTPURLResponse *http) {
         NSString *html = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
         NSURL *mp4 = SCURLFromString(SCMetaContent(html, @"og:video:secure_url"))

@@ -87,11 +87,15 @@ static dispatch_queue_t ApolloImgChestMultipartQueue(void) {
 }
 
 - (BOOL)adoptTaskIfActive:(NSURLSessionTask *)task {
+    NS_VALID_UNTIL_END_OF_SCOPE NSURLSessionTask *retiredTask = nil;
     @synchronized (self) {
         if (self.cancelled || self.finished) return NO;
-        self.activeTask = task;
-        return YES;
+        if (self.activeTask != task) {
+            retiredTask = self.activeTask;
+            self.activeTask = task;
+        }
     }
+    return YES;
 }
 
 - (void)addCleanupFile:(NSURL *)fileURL {
@@ -110,12 +114,14 @@ static dispatch_queue_t ApolloImgChestMultipartQueue(void) {
 }
 
 - (BOOL)finishOnce {
+    NS_VALID_UNTIL_END_OF_SCOPE NSURLSessionTask *retiredTask = nil;
     @synchronized (self) {
         if (self.finished) return NO;
         self.finished = YES;
+        retiredTask = self.activeTask;
         self.activeTask = nil;
-        return YES;
     }
+    return YES;
 }
 
 @end
@@ -140,25 +146,78 @@ static NSObject *ApolloUploadRegistryLock(void) {
     return lock;
 }
 
-static NSMutableDictionary<NSString *, NSDictionary *> *ApolloUploadRegistryCopy(void) {
-    NSDictionary *stored = [[NSUserDefaults standardUserDefaults] dictionaryForKey:kUploadRegistryDefaultsKey];
-    return stored ? [stored mutableCopy] : [NSMutableDictionary dictionary];
+static dispatch_queue_t ApolloUploadRegistryPersistenceQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("com.apolloreborn.upload-registry-persistence", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+// Protected by ApolloUploadRegistryLock. Bursts such as an album merge may
+// update dozens of member tokens; persist the newest full snapshot rather than
+// serializing every intermediate dictionary to defaults.
+static NSDictionary *sApolloUploadRegistryPendingSnapshot = nil;
+static BOOL sApolloUploadRegistryPersistenceScheduled = NO;
+
+static void ApolloUploadRegistrySchedulePersistenceLocked(void) {
+    if (sApolloUploadRegistryPersistenceScheduled) return;
+    sApolloUploadRegistryPersistenceScheduled = YES;
+
+    dispatch_async(ApolloUploadRegistryPersistenceQueue(), ^{
+        for (;;) {
+            NSDictionary *snapshotToWrite = nil;
+            @synchronized (ApolloUploadRegistryLock()) {
+                snapshotToWrite = sApolloUploadRegistryPendingSnapshot;
+                sApolloUploadRegistryPendingSnapshot = nil;
+            }
+            if (snapshotToWrite) {
+                [[NSUserDefaults standardUserDefaults] setObject:snapshotToWrite
+                                                          forKey:kUploadRegistryDefaultsKey];
+            }
+
+            @synchronized (ApolloUploadRegistryLock()) {
+                if (!sApolloUploadRegistryPendingSnapshot) {
+                    sApolloUploadRegistryPersistenceScheduled = NO;
+                    return;
+                }
+            }
+        }
+    });
+}
+
+static NSMutableDictionary<NSString *, NSDictionary *> *ApolloUploadRegistry(void) {
+    static NSMutableDictionary *registry;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSDictionary *stored = [[NSUserDefaults standardUserDefaults]
+            dictionaryForKey:kUploadRegistryDefaultsKey];
+        registry = stored ? [stored mutableCopy] : [NSMutableDictionary dictionary];
+    });
+    return registry;
 }
 
 static void ApolloUploadRegistrySet(NSString *token, NSDictionary *_Nullable entry) {
     if (token.length == 0) return;
+    NS_VALID_UNTIL_END_OF_SCOPE NSDictionary *retiredEntry = nil;
+    NS_VALID_UNTIL_END_OF_SCOPE NSDictionary *retiredPendingSnapshot = nil;
     @synchronized (ApolloUploadRegistryLock()) {
-        NSMutableDictionary *registry = ApolloUploadRegistryCopy();
+        NSMutableDictionary *registry = ApolloUploadRegistry();
+        retiredEntry = registry[token];
         if (entry) registry[token] = entry;
         else [registry removeObjectForKey:token];
-        [[NSUserDefaults standardUserDefaults] setObject:registry forKey:kUploadRegistryDefaultsKey];
+        NSDictionary *snapshot = [registry copy];
+        retiredPendingSnapshot = sApolloUploadRegistryPendingSnapshot;
+        sApolloUploadRegistryPendingSnapshot = snapshot;
+        ApolloUploadRegistrySchedulePersistenceLocked();
     }
 }
 
 static NSDictionary *_Nullable ApolloUploadRegistryEntry(NSString *token) {
     if (token.length == 0) return nil;
     @synchronized (ApolloUploadRegistryLock()) {
-        NSDictionary *entry = ApolloUploadRegistryCopy()[token];
+        NSDictionary *entry = ApolloUploadRegistry()[token];
         return [entry isKindOfClass:[NSDictionary class]] ? entry : nil;
     }
 }
@@ -259,7 +318,7 @@ static NSURL *ApolloImgChestUniqueManagedURL(NSString *filename) {
     NSString *extension = filename.lastPathComponent.pathExtension;
     NSString *name = [NSUUID UUID].UUIDString;
     if (extension.length > 0) name = [name stringByAppendingPathExtension:extension];
-    return [ApolloImgChestManagedDirectory() URLByAppendingPathComponent:name];
+    return [ApolloImgChestManagedDirectory() URLByAppendingPathComponent:name isDirectory:NO];
 }
 
 static NSURL *ApolloImgChestCopyFileIntoManagedStorage(NSURL *sourceURL, NSString *filename,
@@ -615,8 +674,9 @@ static NSURL *ApolloImgChestMultipartFile(NSString *boundary,
                                           NSArray<NSDictionary *> *imageParts,
                                           ApolloImgChestUploadOperation *operation,
                                           NSError **outError) {
-    NSURL *bodyURL = [ApolloImgChestManagedDirectory() URLByAppendingPathComponent:
-        [[NSUUID UUID].UUIDString stringByAppendingPathExtension:@"multipart"]];
+    NSURL *bodyURL = [ApolloImgChestManagedDirectory()
+        URLByAppendingPathComponent:[[NSUUID UUID].UUIDString stringByAppendingPathExtension:@"multipart"]
+                         isDirectory:NO];
     if (![[NSFileManager defaultManager] createFileAtPath:bodyURL.path contents:nil attributes:nil]) {
         if (outError) *outError = ApolloImgChestError(@"Could not create multipart body file");
         return nil;
@@ -634,7 +694,7 @@ static NSURL *ApolloImgChestMultipartFile(NSString *boundary,
         }
         success = ApolloImgChestAppendString(output, [NSString stringWithFormat:@"--%@\r\n", boundary], outError)
             && ApolloImgChestAppendString(output, [NSString stringWithFormat:@"Content-Disposition: form-data; name=\"%@\"\r\n\r\n", name], outError)
-            && ApolloImgChestAppendString(output, [NSString stringWithFormat:@"%@\r\n", fields[name]], outError);
+            && ApolloImgChestAppendString(output, [fields[name] stringByAppendingString:@"\r\n"], outError);
     }
     for (NSDictionary *part in imageParts) {
         if (!success) break;
@@ -705,13 +765,13 @@ static void ApolloImgChestCreatePost(NSArray<NSDictionary *> *imageParts,
         if ([operation finishOnce]) completion(nil, ApolloImgChestError(@"No Image Chest API key configured"));
         return;
     }
-    NSString *boundary = [NSString stringWithFormat:@"apollo-imgchest-%@", [NSUUID UUID].UUIDString];
+    NSString *boundary = [@"apollo-imgchest-" stringByAppendingString:[NSUUID UUID].UUIDString];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:[kImgChestAPIBase stringByAppendingString:@"/post"]]];
     request.HTTPMethod = @"POST";
     request.timeoutInterval = 120.0;
     [request setValue:[@"Bearer " stringByAppendingString:sImageChestAPIToken] forHTTPHeaderField:@"Authorization"];
     [request setValue:@"application/json" forHTTPHeaderField:@"Accept"];
-    [request setValue:[NSString stringWithFormat:@"multipart/form-data; boundary=%@", boundary] forHTTPHeaderField:@"Content-Type"];
+    [request setValue:[@"multipart/form-data; boundary=" stringByAppendingString:boundary] forHTTPHeaderField:@"Content-Type"];
     // "hidden" = unlisted: reachable by link, not listed publicly.
     NSError *bodyError = nil;
     NSURL *multipartURL = ApolloImgChestMultipartFile(boundary, @{ @"privacy": @"hidden" }, imageParts, operation, &bodyError);

@@ -89,6 +89,9 @@ static BOOL ApolloSubredditInfoErrorIsTransient(NSError *error) {
 @interface ApolloSubredditInfoCache ()
 @property(nonatomic, strong) NSCache<NSString *, ApolloSubredditInfo *> *infoCache;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, ApolloSubredditInfo *> *diskInfo;
+// Render/preload callers read this immutable point-in-time view without
+// synchronously entering the persistence/network state queue.
+@property(atomic, strong) NSDictionary<NSString *, ApolloSubredditInfo *> *infoSnapshot;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSMutableArray<void (^)(ApolloSubredditInfo *)> *> *infoCompletions;
 // Negative cache for permanent misses (touched only on `queue`).
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSDate *> *notFoundDates;
@@ -98,6 +101,11 @@ static BOOL ApolloSubredditInfoErrorIsTransient(NSError *error) {
 @property(nonatomic, strong) NSMutableSet<NSString *> *pendingForcedKeys;
 @property(nonatomic, strong) NSURLSession *session;
 @property(nonatomic) dispatch_queue_t queue;
+@property(nonatomic) dispatch_queue_t ioQueue;
+@property(nonatomic) BOOL diskSaveScheduled;
+@property(nonatomic) NSUInteger diskSaveGeneration;
+- (void)publishInfoSnapshotLocked;
+- (void)scheduleDiskCacheSaveLocked;
 - (void)startFetchForKey:(NSString *)key cached:(ApolloSubredditInfo *)cached forced:(BOOL)forced attempt:(NSInteger)attempt;
 @end
 
@@ -116,9 +124,11 @@ static BOOL ApolloSubredditInfoErrorIsTransient(NSError *error) {
     self = [super init];
     if (self) {
         _queue = dispatch_queue_create("com.apollofix.subredditInfoCache", DISPATCH_QUEUE_SERIAL);
+        _ioQueue = dispatch_queue_create_with_target("com.apollofix.subredditInfoCache.io", DISPATCH_QUEUE_SERIAL, dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0));
         _infoCache = [[NSCache alloc] init];
         _infoCache.countLimit = ApolloSubredditInfoDiskCacheMaxEntries;
         _diskInfo = [NSMutableDictionary dictionary];
+        _infoSnapshot = @{};
         _infoCompletions = [NSMutableDictionary dictionary];
         _notFoundDates = [NSMutableDictionary dictionary];
         _pendingForcedKeys = [NSMutableSet set];
@@ -291,16 +301,39 @@ static BOOL ApolloSubredditInfoErrorIsTransient(NSError *error) {
     }
 
     [self pruneDiskInfoLocked];
+    [self publishInfoSnapshotLocked];
+}
+
+- (void)publishInfoSnapshotLocked {
+    self.infoSnapshot = [self.diskInfo copy] ?: @{};
 }
 
 - (void)saveDiskCacheLocked {
     [self pruneDiskInfoLocked];
-    NSMutableDictionary *root = [NSMutableDictionary dictionary];
-    for (NSString *key in self.diskInfo) {
-        root[key] = [self dictionaryForInfo:self.diskInfo[key]];
-    }
-    NSData *data = [NSJSONSerialization dataWithJSONObject:root options:0 error:nil];
-    if (data.length) [data writeToFile:[self cachePath] atomically:YES];
+    [self publishInfoSnapshotLocked];
+    NSDictionary<NSString *, ApolloSubredditInfo *> *snapshot = [self.diskInfo copy] ?: @{};
+    dispatch_async(self.ioQueue, ^{
+        // Model-to-plist conversion can walk hundreds of entries and allocate
+        // heavily. The state queue publishes the immutable object snapshot;
+        // serialization and path/filesystem work stay on the background I/O lane.
+        NSMutableDictionary *root = [NSMutableDictionary dictionaryWithCapacity:snapshot.count];
+        for (NSString *key in snapshot) {
+            root[key] = [self dictionaryForInfo:snapshot[key]];
+        }
+        NSData *data = [NSJSONSerialization dataWithJSONObject:root options:0 error:nil];
+        if (data.length) [data writeToFile:[self cachePath] atomically:YES];
+    });
+}
+
+- (void)scheduleDiskCacheSaveLocked {
+    if (self.diskSaveScheduled) return;
+    self.diskSaveScheduled = YES;
+    NSUInteger generation = self.diskSaveGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)), self.queue, ^{
+        if (!self.diskSaveScheduled || generation != self.diskSaveGeneration) return;
+        self.diskSaveScheduled = NO;
+        [self saveDiskCacheLocked];
+    });
 }
 
 - (ApolloSubredditInfo *)cachedInfoForSubreddit:(NSString *)subredditName {
@@ -310,11 +343,8 @@ static BOOL ApolloSubredditInfoErrorIsTransient(NSError *error) {
     ApolloSubredditInfo *info = [self.infoCache objectForKey:key];
     if (info) return info;
 
-    __block ApolloSubredditInfo *diskInfo = nil;
-    dispatch_sync(self.queue, ^{
-        diskInfo = self.diskInfo[key];
-        if (diskInfo) [self.infoCache setObject:diskInfo forKey:key];
-    });
+    ApolloSubredditInfo *diskInfo = self.infoSnapshot[key];
+    if (diskInfo) [self.infoCache setObject:diskInfo forKey:key];
     return diskInfo;
 }
 
@@ -425,7 +455,8 @@ static BOOL ApolloSubredditInfoErrorIsTransient(NSError *error) {
             [self.infoCache setObject:info forKey:key];
             if (!unchanged) {
                 self.diskInfo[key] = info;
-                [self saveDiskCacheLocked];
+                [self publishInfoSnapshotLocked];
+                [self scheduleDiskCacheSaveLocked];
             }
         }
 
@@ -583,7 +614,14 @@ static BOOL ApolloSubredditInfoErrorIsTransient(NSError *error) {
         [self.infoCache removeAllObjects];
         [self.diskInfo removeAllObjects];
         [self.notFoundDates removeAllObjects];
-        [[NSFileManager defaultManager] removeItemAtPath:[self cachePath] error:nil];
+        [self.pendingForcedKeys removeAllObjects];
+        [self publishInfoSnapshotLocked];
+        self.diskSaveGeneration++;
+        self.diskSaveScheduled = NO;
+        NSString *path = [self cachePath];
+        dispatch_async(self.ioQueue, ^{
+            [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+        });
     });
 }
 

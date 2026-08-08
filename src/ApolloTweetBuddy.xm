@@ -23,6 +23,9 @@ static const NSTimeInterval kGuestTokenMaxAge = 9000.0;
 static NSString *sGuestToken = nil;
 static NSDate *sTokenFetchDate = nil;
 static dispatch_queue_t sTokenQueue;
+static dispatch_queue_t sTokenDeliveryQueue;
+static NSMutableArray<void (^)(NSString *, NSError *)> *sTokenCompletions;
+static BOOL sTokenFetchInFlight = NO;
 
 static NSDictionary *ApolloTweetBuddyTransformResult(NSDictionary *result) {
     NSDictionary *legacy = result[@"legacy"];
@@ -101,37 +104,59 @@ static NSDictionary *ApolloTweetBuddyTransformResult(NSDictionary *result) {
 - (void)stopLoading {}
 
 + (void)resolveGuestToken:(void (^)(NSString *token, NSError *error))completion {
+    if (!completion) return;
     dispatch_async(sTokenQueue, ^{
         if (sGuestToken && sTokenFetchDate && [[NSDate date] timeIntervalSinceDate:sTokenFetchDate] < kGuestTokenMaxAge) {
-            completion(sGuestToken, nil);
+            NSString *token = sGuestToken;
+            dispatch_async(sTokenDeliveryQueue, ^{
+                completion(token, nil);
+            });
             return;
         }
+
+        [sTokenCompletions addObject:[completion copy]];
+        if (sTokenFetchInFlight) return;
+        sTokenFetchInFlight = YES;
 
         NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kXHomepageURL]];
         [NSURLProtocol setProperty:@YES forKey:kHandledKey inRequest:request];
 
         [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-            if (error || !data) {
-                completion(nil, error);
-                return;
+            NSString *token = nil;
+            NSError *finalError = error;
+            if (!finalError && data.length > 0) {
+                NSString *html = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"gt=([0-9]+);" options:0 error:nil];
+                NSTextCheckingResult *match = [regex firstMatchInString:html options:0 range:NSMakeRange(0, html.length)];
+                if (match && match.numberOfRanges >= 2) {
+                    token = [html substringWithRange:[match rangeAtIndex:1]];
+                } else {
+                    finalError = [NSError errorWithDomain:@"ApolloTweetProtocol"
+                                                     code:-2
+                                                 userInfo:@{NSLocalizedDescriptionKey: @"Could not find gt= in x.com HTML"}];
+                }
+            } else if (!finalError) {
+                finalError = [NSError errorWithDomain:@"ApolloTweetProtocol"
+                                                 code:-2
+                                             userInfo:@{NSLocalizedDescriptionKey: @"x.com returned an empty response"}];
             }
 
-            NSString *html = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-            NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"gt=([0-9]+);" options:0 error:nil];
-            NSTextCheckingResult *match = [regex firstMatchInString:html options:0 range:NSMakeRange(0, html.length)];
-            if (!match || match.numberOfRanges < 2) {
-                completion(nil, [NSError errorWithDomain:@"ApolloTweetProtocol"
-                                                    code:-2
-                                                userInfo:@{NSLocalizedDescriptionKey: @"Could not find gt= in x.com HTML"}]);
-                return;
-            }
-
-            NSString *token = [html substringWithRange:[match rangeAtIndex:1]];
             dispatch_async(sTokenQueue, ^{
-                sGuestToken = token;
-                sTokenFetchDate = [NSDate date];
+                if (token.length > 0) {
+                    sGuestToken = token;
+                    sTokenFetchDate = [NSDate date];
+                }
+                NSArray<void (^)(NSString *, NSError *)> *callbacks = [sTokenCompletions copy];
+                [sTokenCompletions removeAllObjects];
+                sTokenFetchInFlight = NO;
+                // Never invoke foreign completion blocks while the token-state
+                // owner queue is occupied.
+                dispatch_async(sTokenDeliveryQueue, ^{
+                    for (void (^callback)(NSString *, NSError *) in callbacks) {
+                        callback(token, finalError);
+                    }
+                });
             });
-            completion(token, nil);
         }] resume];
     });
 }
@@ -207,6 +232,9 @@ static NSDictionary *ApolloTweetBuddyTransformResult(NSDictionary *result) {
 %end
 
 %ctor {
+    sTokenCompletions = [NSMutableArray new];
     sTokenQueue = dispatch_queue_create("com.apollo.tweetbuddy.tokenqueue", DISPATCH_QUEUE_SERIAL);
+    // Keep completion ordering serial, but separate from token-state ownership.
+    sTokenDeliveryQueue = dispatch_queue_create("com.apollo.tweetbuddy.token-delivery", DISPATCH_QUEUE_SERIAL);
     ApolloLog(@"[TweetBuddy] ApolloTweetProtocol ready");
 }

@@ -4,6 +4,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <malloc/malloc.h>
+#import <stdatomic.h>
 
 #import "ApolloCommon.h"
 #import "ApolloState.h"
@@ -1254,7 +1255,7 @@ static UIFont *ApolloProfileClassicNameFont(void) {
         title = @"Reddit Age";
         message = ago.length
             ? [NSString stringWithFormat:@"Joined %@\n(%@ ago)", [joined stringFromDate:created], ago]
-            : [NSString stringWithFormat:@"Joined %@", [joined stringFromDate:created]];
+            : [@"Joined " stringByAppendingString:[joined stringFromDate:created]];
     }
     if (!title) return;
 
@@ -1756,7 +1757,7 @@ static UIBezierPath *ApolloHexagonPath(CGRect rect) {
 // dynamic-color resolution are off-limits. Scale is read once; the placeholder
 // fill is pre-resolved for both styles and picked by a flag the main-thread
 // entry points keep fresh. Both are warmed from %ctor on the main thread.
-static volatile BOOL sApolloAvatarInterfaceIsDark = NO;
+static atomic_bool sApolloAvatarInterfaceIsDark;
 
 static void ApolloAvatarRefreshInterfaceStyle(void) {
     if (![NSThread isMainThread]) return;
@@ -1765,7 +1766,9 @@ static void ApolloAvatarRefreshInterfaceStyle(void) {
     // dark Apollo theme is active on a light system (or vice versa).
     UITraitCollection *traits = ApolloAllWindows().firstObject.traitCollection
         ?: UIScreen.mainScreen.traitCollection;
-    sApolloAvatarInterfaceIsDark = traits.userInterfaceStyle == UIUserInterfaceStyleDark;
+    atomic_store_explicit(&sApolloAvatarInterfaceIsDark,
+                          traits.userInterfaceStyle == UIUserInterfaceStyleDark,
+                          memory_order_relaxed);
 }
 
 static CGFloat ApolloAvatarScreenScale(void) {
@@ -1787,7 +1790,9 @@ static UIColor *ApolloAvatarPlaceholderFillColor(void) {
         darkFill = [UIColor.secondarySystemFillColor resolvedColorWithTraitCollection:
                     [UITraitCollection traitCollectionWithUserInterfaceStyle:UIUserInterfaceStyleDark]];
     });
-    return sApolloAvatarInterfaceIsDark ? darkFill : lightFill;
+    return atomic_load_explicit(&sApolloAvatarInterfaceIsDark, memory_order_relaxed)
+        ? darkFill
+        : lightFill;
 }
 
 static void ApolloDrawAvatarSourceImage(UIImage *sourceImage, CGRect rect) {
@@ -3789,7 +3794,7 @@ static void ApolloProfileOpenMessageComposer(NSString *username) {
     NSString *recipient = ApolloAvatarNormalizedUsername(username);
     if (recipient.length == 0) return;
     NSString *encoded = [recipient stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]] ?: recipient;
-    NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"apollo://www.reddit.com/message/compose?to=%@", encoded]];
+    NSURL *url = [NSURL URLWithString:[@"apollo://www.reddit.com/message/compose?to=" stringByAppendingString:encoded]];
     if (!url) return;
 
     ApolloLog(@"[UserAvatars] Message: opening compose for u/%@ -> %@", recipient, url.absoluteString);

@@ -6,6 +6,7 @@
 #include <dlfcn.h>
 #include <float.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #import "ApolloCommon.h"
@@ -295,7 +296,7 @@ static __weak UIViewController *sVisibleCommentsViewController = nil;
 // us walk *all* off-screen / preloaded text nodes on toggle-off, instead of
 // only those whose UITableViewCells happen to be in `visibleCells`.
 static NSHashTable<id> *sOwnedTextNodes = nil;
-static dispatch_queue_t sOwnedTextNodesQueue = NULL;
+static NSObject *sOwnedTextNodesLock = nil;
 static BOOL sPendingVisibleFeedTitleApplied = NO;
 static NSMutableDictionary<NSString *, NSNumber *> *sFeedTitleModeByFeedKey = nil;
 static BOOL sLastFeedTitleModeKnown = NO;
@@ -2102,7 +2103,6 @@ static void ApolloApplyTranslationToCellNode(id commentCellNode, RDKComment *com
     // overwrites the node (e.g. on vote/score-flair refresh).
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [comment.body copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloRegisterOwnedTextNode(textNode);
 
@@ -2769,7 +2769,6 @@ static void ApolloApplyTranslationToHeaderCellNode(id headerCellNode, RDKLink *l
     // Same vote-resilience marker pattern as comment cells.
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [body copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloRegisterOwnedTextNode(textNode);
 
     // EXACT no-op gate (see comment apply): the vote-time headerReapply
@@ -2886,7 +2885,6 @@ static void ApolloApplyTranslationToPostTextNode(id owner, id textNode, NSString
     NSAttributedString *translatedAttr = ApolloTranslatedAttributedStringPreservingVisualLinks(current, translatedText);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [sourceText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloRegisterOwnedTextNode(textNode);
 
     // EXACT no-op gate (see comment apply): skip the write + relayout when the
@@ -6992,12 +6990,10 @@ static void ApolloScheduleThreadTranslationReconcileForController(UIViewControll
                 ApolloForceVisibleCommentsTableRelayoutForController(strongVC);
             } else {
                 ApolloRestoreVisibleCommentsForController(strongVC);
-                // Skip the global restore walk when nothing remains to
-                // restore \u2014 avoids the four-deep storm of full-registry walks
-                // per toggle that the user sees as swipe-back / toggle lag.
-                if (sOwnedTextNodes && sOwnedTextNodes.count > 0) {
-                    ApolloRestoreAllOwnedTextNodes();
-                }
+                // The restore helper takes one cheap empty-registry snapshot.
+                // Avoid a separate lock-free hint: publishing a marker and a
+                // weak-table membership are one logical state transition.
+                ApolloRestoreAllOwnedTextNodes();
                 ApolloClearVisibleTranslationApplied(strongVC);
                 ApolloForceVisibleCommentsTableRelayoutForController(strongVC);
             }
@@ -7051,16 +7047,23 @@ static BOOL ApolloTextMatchesSourceOrVisualDisplay(NSString *incomingText, NSStr
 }
 
 static void ApolloClearTranslationOwnershipForTextNode(id textNode) {
-    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (textNode && sOwnedTextNodes) {
+        @synchronized (sOwnedTextNodesLock) {
+            // Removal and marker clearing are the inverse of registration's
+            // single publication transaction. Whichever operation acquires
+            // the monitor last determines the coherent final state.
+            objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey,
+                                     nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [sOwnedTextNodes removeObject:textNode];
+        }
+    } else {
+        objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey,
+                                 nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
     objc_setAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    if (textNode && sOwnedTextNodes) {
-        dispatch_sync(sOwnedTextNodesQueue, ^{
-            [sOwnedTextNodes removeObject:textNode];
-        });
-    }
 }
 
 // Add `textNode` to the global weak registry. Called from
@@ -7070,9 +7073,14 @@ static void ApolloClearTranslationOwnershipForTextNode(id textNode) {
 // UITableViewCell is currently off-screen.
 static void ApolloRegisterOwnedTextNode(id textNode) {
     if (!textNode || !sOwnedTextNodes) return;
-    dispatch_sync(sOwnedTextNodesQueue, ^{
+    @synchronized (sOwnedTextNodesLock) {
+        // The marker and registry membership are one publication. A restore
+        // snapshot can therefore observe both or neither, never a tagged node
+        // that is still absent from the registry.
+        objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey,
+                                 (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [sOwnedTextNodes addObject:textNode];
-    });
+    }
 }
 
 // Walk every text node we've ever stamped with the ownership marker and
@@ -7117,24 +7125,27 @@ static void ApolloTapModeStripDecorations(void) {
 static void ApolloRestoreAllOwnedTextNodes(void) {
     ApolloTapModeStripDecorations();
     if (!sOwnedTextNodes) return;
-    // Cheap fast-path: nothing's been stamped, nothing to do. Avoids the
-    // hashtable snapshot + full log line on every gateOK=NO refresh of
-    // ApolloUpdateTranslationUIForController and on toggle reconciles after
-    // the immediate pass already drained the registry.
-    if (sOwnedTextNodes.count == 0) return;
     NSArray *snapshot = nil;
-    {
-        __block NSArray *capture = nil;
-        dispatch_sync(sOwnedTextNodesQueue, ^{
-            capture = [sOwnedTextNodes allObjects];
-        });
-        snapshot = capture;
+    @synchronized (sOwnedTextNodesLock) {
+        NSMutableArray *owned = [NSMutableArray array];
+        for (id textNode in sOwnedTextNodes) {
+            if (![objc_getAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey) boolValue]) continue;
+            objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey,
+                                     nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [owned addObject:textNode];
+        }
+        snapshot = [owned copy];
+        // Registrations arriving after this transaction remain in the table
+        // and reapply the marker; the loop below detects that newer ownership.
+        [sOwnedTextNodes removeAllObjects];
     }
+    if (snapshot.count == 0) return;
     NSUInteger restored = 0, skippedNoOriginal = 0, skippedReuse = 0, skippedTitleStaleReuse = 0;
     for (id textNode in snapshot) {
         if (!textNode) continue;
-        // Only act if still tagged.
-        if (![objc_getAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey) boolValue]) continue;
+        // A concurrent registration after our snapshot is newer than this
+        // restore transaction. Leave its marker and payload intact.
+        if ([objc_getAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey) boolValue]) continue;
 
         BOOL isTitleOwned = [objc_getAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey) boolValue];
         NSString *cachedTranslated = objc_getAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey);
@@ -7142,7 +7153,6 @@ static void ApolloRestoreAllOwnedTextNodes(void) {
 
         // Drop ownership keys FIRST so the global setAttributedText: hook
         // won't re-swap when we write the original below.
-        objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, nil, OBJC_ASSOCIATION_COPY_NONATOMIC);
@@ -7259,12 +7269,6 @@ static void ApolloRestoreAllOwnedTextNodes(void) {
         } @catch (__unused NSException *e) {}
     }
 
-    // Drain dead weak entries.
-    dispatch_sync(sOwnedTextNodesQueue, ^{
-        // NSHashTable handles weak entries automatically; a no-op iteration
-        // suffices to compact in some implementations. Nothing else needed.
-        (void)[sOwnedTextNodes count];
-    });
     ApolloLog(@"[Translation] RestoreAllOwnedTextNodes total=%lu restored=%lu skippedNoOriginal=%lu skippedReuse=%lu skippedTitleStaleReuse=%lu",
               (unsigned long)snapshot.count,
               (unsigned long)restored,
@@ -7479,7 +7483,6 @@ static BOOL ApolloPreemptUnownedCommentTextNode(id textNode, NSAttributedString 
     // that is what Apollo hands rebuilt nodes, so future matches are exact.
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [incomingText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translated copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloCommentOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (!objc_getAssociatedObject(textNode, kApolloOriginalAttributedTextKey)) {
         objc_setAssociatedObject(textNode, kApolloOriginalAttributedTextKey, [incoming copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -7587,7 +7590,6 @@ static BOOL ApolloPreemptUnownedTextNodeFromVCStash(id textNode, NSAttributedStr
     // Adopt ownership so the normal prepareSwap path handles future updates.
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [body copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translated copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     // Register in the global owned-nodes set so toggle-off's
     // ApolloRestoreAllOwnedTextNodes walk will restore us even when the
     // header is scrolled offscreen and the visible-cells walk skips us.
@@ -8216,7 +8218,6 @@ static void ApolloApplyTranslationToTitleNode(id titleNode, id textNode, NSStrin
     // bypass the per-thread translated-mode gate. Cache stays CLEAN (marker-free).
     objc_setAssociatedObject(textNode, kApolloOwnedNodeOriginalBodyKey, [sourceText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloOwnedNodeTranslatedTextKey, [translatedText copy], OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(textNode, kApolloTranslationOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(textNode, kApolloTitleOwnedTextNodeKey, (id)kCFBooleanTrue, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ApolloRegisterOwnedTextNode(textNode);
 
@@ -9214,7 +9215,7 @@ static NSString *const kApolloTranslationDiskCacheVersion = @"v1";
 static NSURL *ApolloTranslationDiskCacheURL(void) {
     NSURL *dir = [[[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask] firstObject];
     if (!dir) return nil;
-    return [dir URLByAppendingPathComponent:@"apollo-translation-cache-v1.plist"];
+    return [dir URLByAppendingPathComponent:@"apollo-translation-cache-v1.plist" isDirectory:NO];
 }
 
 static NSString *ApolloCurrentTranslationTag(void) {
@@ -9679,7 +9680,7 @@ static void ApolloDbgPurgeNSCaches(CFNotificationCenterRef c, void *o, CFStringR
     sRichPreviewTranslationInFlightKeys = [NSMutableSet set];
     sFeedTitleModeByFeedKey = [NSMutableDictionary dictionary];
     sOwnedTextNodes = [NSHashTable hashTableWithOptions:(NSPointerFunctionsWeakMemory | NSPointerFunctionsObjectPointerPersonality)];
-    sOwnedTextNodesQueue = dispatch_queue_create("ca.jeffrey.apollo.translation.ownednodes", DISPATCH_QUEUE_SERIAL);
+    sOwnedTextNodesLock = [NSObject new];
 
     // Hydrate disk cache early so any cells laid out during the first frame
     // already see translations.

@@ -108,8 +108,13 @@ static NSString *ApolloOwnFlairActiveUsername(void) {
     // before RDKClient's currentUser does.
     if (username.length == 0) username = ApolloActiveWebSessionUsername();
 
+    // NSString copy can execute arbitrary Objective-C code; do it before the
+    // unfair lock. The cached username is tiny and replaced only at TTL expiry.
+    NSString *newCached = [username copy];
+    NS_VALID_UNTIL_END_OF_SCOPE NSString *retiredCached = nil;
     os_unfair_lock_lock(&lock);
-    cached = [username copy];
+    retiredCached = cached;
+    cached = newCached;
     cachedAt = now;
     os_unfair_lock_unlock(&lock);
     return username;
@@ -418,7 +423,7 @@ static void ApolloOwnFlairPrefetch(NSString *username, NSString *subreddit) {
 
         NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:ApolloWebJSONProbeURL(url)];
         request.HTTPMethod = @"POST";
-        request.HTTPBody = [[NSString stringWithFormat:@"name=%@", username] dataUsingEncoding:NSUTF8StringEncoding];
+        request.HTTPBody = [[@"name=" stringByAppendingString:username] dataUsingEncoding:NSUTF8StringEncoding];
         [request setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
         [request setValue:[@"Bearer " stringByAppendingString:bearer] forHTTPHeaderField:@"Authorization"];
         request.timeoutInterval = 15.0;

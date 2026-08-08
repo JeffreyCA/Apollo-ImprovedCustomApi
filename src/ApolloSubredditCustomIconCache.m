@@ -11,7 +11,15 @@ static NSUInteger const ApolloSubredditCustomIconMaxBytes = 512000; // 500 KB
 
 @interface ApolloSubredditCustomIconCache ()
 @property(nonatomic, strong) NSCache<NSString *, UIImage *> *imageCache;
-@property(nonatomic) dispatch_queue_t queue;
+@property(nonatomic) dispatch_queue_t ioQueue;
+@property(atomic, copy) NSSet<NSString *> *storedKeys;
+@property(nonatomic, strong) NSObject *storedKeysLock;
+@property(nonatomic, copy) NSString *storagePath;
+- (void)ensureStorageDirectory;
+- (void)cacheImage:(UIImage *)image forKey:(NSString *)key;
+- (void)publishStoredKey:(NSString *)key present:(BOOL)present;
+- (void)replaceStoredKeys:(NSSet<NSString *> *)keys;
+- (void)postChangedNotificationForSubreddit:(nullable NSString *)subredditName;
 @end
 
 @implementation ApolloSubredditCustomIconCache
@@ -28,10 +36,36 @@ static NSUInteger const ApolloSubredditCustomIconMaxBytes = 512000; // 500 KB
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _queue = dispatch_queue_create("com.apollofix.subredditCustomIconCache", DISPATCH_QUEUE_SERIAL);
+        _ioQueue = dispatch_queue_create("com.apollofix.subredditCustomIconCache.io", DISPATCH_QUEUE_SERIAL);
         _imageCache = [[NSCache alloc] init];
         _imageCache.countLimit = 200;
         _imageCache.totalCostLimit = 20 * 1024 * 1024;
+        _storedKeysLock = [NSObject new];
+        _storedKeys = [NSSet set];
+
+        NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
+        NSString *cacheRoot = paths.firstObject ?: NSTemporaryDirectory();
+        _storagePath = [cacheRoot stringByAppendingPathComponent:@"ApolloFix/SubredditCustomIcons"];
+
+        // Inventory the filenames away from the first header/chat-cell render,
+        // but do not decode every custom icon at launch. NSCache is deliberately
+        // bounded and purgeable; eager decoding would immediately refill it
+        // with images the user may never view. Individual misses rehydrate on
+        // this same serial queue below.
+        dispatch_async(_ioQueue, ^{
+            [self ensureStorageDirectory];
+            NSArray<NSString *> *files = [[NSFileManager defaultManager]
+                contentsOfDirectoryAtPath:self.storagePath error:nil] ?: @[];
+            NSMutableSet<NSString *> *keys = [NSMutableSet set];
+            for (NSString *file in files) {
+                if (![file.pathExtension.lowercaseString isEqualToString:@"png"]) continue;
+                NSString *key = file.stringByDeletingPathExtension.lowercaseString;
+                if (key.length == 0) continue;
+                [keys addObject:key];
+            }
+            [self replaceStoredKeys:keys];
+            if (keys.count > 0) [self postChangedNotificationForSubreddit:nil];
+        });
     }
     return self;
 }
@@ -46,17 +80,42 @@ static NSUInteger const ApolloSubredditCustomIconMaxBytes = 512000; // 500 KB
 }
 
 - (NSString *)storageDirectory {
-    NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
-    NSString *cacheRoot = paths.firstObject ?: NSTemporaryDirectory();
-    NSString *directory = [cacheRoot stringByAppendingPathComponent:@"ApolloFix/SubredditCustomIcons"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
-    return directory;
+    return self.storagePath;
+}
+
+- (void)ensureStorageDirectory {
+    [[NSFileManager defaultManager] createDirectoryAtPath:self.storagePath
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:nil];
 }
 
 - (NSString *)filePathForSubreddit:(NSString *)subredditName {
     NSString *key = [self normalizedSubredditName:subredditName];
     if (key.length == 0) return nil;
-    return [[self storageDirectory] stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.png", key]];
+    return [[self storageDirectory] stringByAppendingPathComponent:[key stringByAppendingString:@".png"]];
+}
+
+- (void)cacheImage:(UIImage *)image forKey:(NSString *)key {
+    if (!image || key.length == 0) return;
+    NSUInteger cost = (NSUInteger)(image.size.width * image.size.height * image.scale * image.scale * 4);
+    [self.imageCache setObject:image forKey:key cost:cost];
+}
+
+- (void)publishStoredKey:(NSString *)key present:(BOOL)present {
+    if (key.length == 0) return;
+    @synchronized (self.storedKeysLock) {
+        NSMutableSet<NSString *> *keys = [self.storedKeys mutableCopy] ?: [NSMutableSet set];
+        if (present) [keys addObject:key];
+        else [keys removeObject:key];
+        self.storedKeys = [keys copy];
+    }
+}
+
+- (void)replaceStoredKeys:(NSSet<NSString *> *)keys {
+    @synchronized (self.storedKeysLock) {
+        self.storedKeys = [keys copy] ?: [NSSet set];
+    }
 }
 
 - (UIImage *)normalizedIconImageFromImage:(UIImage *)image targetDimension:(CGFloat)targetDimension {
@@ -101,11 +160,13 @@ static NSUInteger const ApolloSubredditCustomIconMaxBytes = 512000; // 500 KB
 
 - (void)postChangedNotificationForSubreddit:(NSString *)subredditName {
     NSString *key = [self normalizedSubredditName:subredditName];
-    if (key.length == 0) return;
+    NSDictionary *userInfo = key.length > 0
+        ? @{ApolloSubredditCustomIconSubredditNameKey: key}
+        : nil;
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:ApolloSubredditCustomIconChangedNotification
                                                             object:self
-                                                          userInfo:@{ApolloSubredditCustomIconSubredditNameKey: key}];
+                                                          userInfo:userInfo];
     });
 }
 
@@ -116,40 +177,42 @@ static NSUInteger const ApolloSubredditCustomIconMaxBytes = 512000; // 500 KB
     UIImage *memory = [self.imageCache objectForKey:key];
     if (memory) return memory;
 
-    __block UIImage *diskImage = nil;
-    dispatch_sync(self.queue, ^{
+    // NSCache may evict under pressure. Rehydrate asynchronously and let the
+    // existing change notification repaint interested headers; never make a
+    // scrolling/layout hook wait on the filesystem or image decode.
+    if ([self.storedKeys containsObject:key]) dispatch_async(self.ioQueue, ^{
+        if ([self.imageCache objectForKey:key]) return;
         NSString *path = [self filePathForSubreddit:key];
-        if (!path || ![[NSFileManager defaultManager] fileExistsAtPath:path]) return;
         NSData *data = [NSData dataWithContentsOfFile:path];
-        if (!data.length) return;
-        diskImage = [UIImage imageWithData:data scale:[UIScreen mainScreen].scale];
+        if (!data.length) {
+            [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+            [self publishStoredKey:key present:NO];
+            [self postChangedNotificationForSubreddit:key];
+            return;
+        }
+        UIImage *diskImage = [UIImage imageWithData:data scale:UIScreen.mainScreen.scale];
+        if (!diskImage) {
+            [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+            [self publishStoredKey:key present:NO];
+            [self postChangedNotificationForSubreddit:key];
+            return;
+        }
+        [self cacheImage:diskImage forKey:key];
+        [self postChangedNotificationForSubreddit:key];
     });
-
-    if (diskImage) {
-        NSUInteger cost = (NSUInteger)(diskImage.size.width * diskImage.size.height * diskImage.scale * diskImage.scale * 4);
-        [self.imageCache setObject:diskImage forKey:key cost:cost];
-    }
-    return diskImage;
+    return nil;
 }
 
 - (BOOL)hasCustomIconForSubreddit:(NSString *)subredditName {
-    NSString *path = [self filePathForSubreddit:subredditName];
-    if (path.length == 0) return NO;
-    __block BOOL exists = NO;
-    dispatch_sync(self.queue, ^{
-        exists = [[NSFileManager defaultManager] fileExistsAtPath:path];
-    });
-    return exists;
+    NSString *key = [self normalizedSubredditName:subredditName];
+    return key.length > 0 && [self.storedKeys containsObject:key];
 }
 
 - (NSURL *)cachedIconFileURLForSubreddit:(NSString *)subredditName {
+    NSString *key = [self normalizedSubredditName:subredditName];
+    if (key.length == 0 || ![self.storedKeys containsObject:key]) return nil;
     NSString *path = [self filePathForSubreddit:subredditName];
-    if (path.length == 0) return nil;
-    __block BOOL exists = NO;
-    dispatch_sync(self.queue, ^{
-        exists = [[NSFileManager defaultManager] fileExistsAtPath:path];
-    });
-    return exists ? [NSURL fileURLWithPath:path] : nil;
+    return path.length > 0 ? [NSURL fileURLWithPath:path isDirectory:NO] : nil;
 }
 
 - (BOOL)saveIcon:(UIImage *)image forSubreddit:(NSString *)subredditName error:(NSError **)error {
@@ -176,8 +239,10 @@ static NSUInteger const ApolloSubredditCustomIconMaxBytes = 512000; // 500 KB
     }
 
     __block BOOL ok = NO;
-    dispatch_sync(self.queue, ^{
+    dispatch_sync(self.ioQueue, ^{
+        [self ensureStorageDirectory];
         ok = [png writeToFile:path atomically:YES];
+        if (ok) [self publishStoredKey:key present:YES];
     });
     if (!ok) {
         if (error) {
@@ -189,10 +254,7 @@ static NSUInteger const ApolloSubredditCustomIconMaxBytes = 512000; // 500 KB
     }
 
     UIImage *stored = [UIImage imageWithData:png scale:[UIScreen mainScreen].scale];
-    if (stored) {
-        NSUInteger cost = (NSUInteger)(stored.size.width * stored.size.height * stored.scale * stored.scale * 4);
-        [self.imageCache setObject:stored forKey:key cost:cost];
-    }
+    if (stored) [self cacheImage:stored forKey:key];
 
     ApolloLog(@"[SubredditHeaders] saved custom icon subreddit=%@ bytes=%lu", key, (unsigned long)png.length);
     [self postChangedNotificationForSubreddit:key];
@@ -206,49 +268,68 @@ static NSUInteger const ApolloSubredditCustomIconMaxBytes = 512000; // 500 KB
 
     [self.imageCache removeObjectForKey:key];
 
-    __block BOOL removed = NO;
-    dispatch_sync(self.queue, ^{
-        if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
-            removed = [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    BOOL existed = [self.storedKeys containsObject:key];
+    [self publishStoredKey:key present:NO];
+    if (existed) [self postChangedNotificationForSubreddit:key];
+    dispatch_async(self.ioQueue, ^{
+        NSError *removeError = nil;
+        BOOL removed = [[NSFileManager defaultManager] removeItemAtPath:path error:&removeError];
+        if (!removed && [removeError.domain isEqualToString:NSCocoaErrorDomain] &&
+            removeError.code == NSFileNoSuchFileError) {
+            removed = YES;
         }
-    });
-
-    if (removed) {
+        if (!removed) {
+            if (existed) {
+                [self publishStoredKey:key present:YES];
+                [self postChangedNotificationForSubreddit:key];
+            }
+            ApolloLog(@"[SubredditHeaders] failed to remove custom icon subreddit=%@ error=%@",
+                key, removeError.localizedDescription ?: @"unknown");
+            return;
+        }
+        // The startup inventory block may have published this key after the
+        // caller's optimistic removal but before this queued delete ran.
+        [self publishStoredKey:key present:NO];
         ApolloLog(@"[SubredditHeaders] removed custom icon subreddit=%@", key);
-        [self postChangedNotificationForSubreddit:key];
-    }
-    return removed;
+    });
+    return existed;
 }
 
 - (void)clearAllCustomIcons {
     [self.imageCache removeAllObjects];
-    dispatch_sync(self.queue, ^{
+    [self replaceStoredKeys:[NSSet set]];
+    [self postChangedNotificationForSubreddit:nil];
+    dispatch_async(self.ioQueue, ^{
         NSString *directory = [self storageDirectory];
         NSArray<NSString *> *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:directory error:nil];
+        NSMutableSet<NSString *> *failedKeys = [NSMutableSet set];
         for (NSString *file in files) {
             if ([file.pathExtension.lowercaseString isEqualToString:@"png"]) {
-                [[NSFileManager defaultManager] removeItemAtPath:[directory stringByAppendingPathComponent:file] error:nil];
+                NSString *key = file.stringByDeletingPathExtension.lowercaseString;
+                NSError *removeError = nil;
+                BOOL removed = [[NSFileManager defaultManager]
+                    removeItemAtPath:[directory stringByAppendingPathComponent:file] error:&removeError];
+                if (!removed && [removeError.domain isEqualToString:NSCocoaErrorDomain] &&
+                    removeError.code == NSFileNoSuchFileError) {
+                    removed = YES;
+                }
+                if (!removed) {
+                    if (key.length > 0) [failedKeys addObject:key];
+                    ApolloLog(@"[SubredditHeaders] failed clearing custom icon file=%@ error=%@",
+                        file, removeError.localizedDescription ?: @"unknown");
+                } else if (key.length > 0) {
+                    [self publishStoredKey:key present:NO];
+                }
             }
         }
-    });
-    ApolloLog(@"[SubredditHeaders] cleared all custom icons");
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:ApolloSubredditCustomIconChangedNotification
-                                                            object:self
-                                                          userInfo:nil];
+        for (NSString *key in failedKeys) [self publishStoredKey:key present:YES];
+        ApolloLog(@"[SubredditHeaders] cleared all custom icons");
+        if (failedKeys.count > 0) [self postChangedNotificationForSubreddit:nil];
     });
 }
 
 - (NSUInteger)customIconCount {
-    __block NSUInteger count = 0;
-    dispatch_sync(self.queue, ^{
-        NSString *directory = [self storageDirectory];
-        NSArray<NSString *> *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:directory error:nil];
-        for (NSString *file in files) {
-            if ([file.pathExtension.lowercaseString isEqualToString:@"png"]) count += 1;
-        }
-    });
-    return count;
+    return self.storedKeys.count;
 }
 
 @end

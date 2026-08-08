@@ -1293,9 +1293,11 @@ void ApolloSetLinkPreviewCardColorHex(NSString *hex) {
     UIColor *color = ApolloColorFromHexString(hex);
     // Canonicalize to "RRGGBB" uppercase so persistence + UI display stay tidy.
     sLinkPreviewCardColorHex = color ? ApolloHexStringFromColor(color) : nil;
-    // Publish the render snapshot AFTER the string, so a background reader that
-    // observes a non-zero packed value already has a consistent RGB to draw.
-    sLinkPreviewCardColorPacked = color ? ApolloPackedColorFromHexString(sLinkPreviewCardColorHex) : 0;
+    // Background renderers consume only this self-contained packed value; the
+    // NSString remains main-thread settings state.
+    __atomic_store_n(&sLinkPreviewCardColorPacked,
+                     color ? ApolloPackedColorFromHexString(sLinkPreviewCardColorHex) : 0,
+                     __ATOMIC_RELAXED);
 }
 
 double ApolloPerfNowMs(void) {
