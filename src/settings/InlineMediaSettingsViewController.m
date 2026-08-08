@@ -624,6 +624,7 @@ typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
     sw.enabled = enabled;
     [sw addTarget:self action:action forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = sw;
+    if (enabled) [self apollo_applyPrimaryTextColorToCell:cell];
     return cell;
 }
 
@@ -635,6 +636,7 @@ typedef NS_ENUM(NSInteger, ApolloIMOptionsRow) {
     cell.textLabel.enabled = enabled;
     cell.detailTextLabel.text = detail;
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    if (enabled) [self apollo_applyPrimaryTextColorToCell:cell];
     return cell;
 }
 

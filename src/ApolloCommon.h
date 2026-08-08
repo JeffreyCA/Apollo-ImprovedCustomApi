@@ -127,6 +127,9 @@ NSArray<UIWindow *> *ApolloAllWindows(void);
 // Re-centers every live nav bar title after the LG title-centering mode toggle
 // changes (defined in ApolloLiquidGlass.xm; no-op off Liquid Glass).
 void ApolloLGTitleCenteringModeChanged(void);
+// Keeps the Liquid Glass title capsule in sync with a custom title view's
+// independently-faded content (defined in ApolloLiquidGlass.xm; no-op off LG).
+void ApolloNavigationTitleGlassSetContentAlpha(UIView *contentView, CGFloat alpha);
 
 // Apollo's main ApolloTabBarController, found via the scene/app delegate's
 // tabBarController ivar or by walking window root VCs. Returns nil while the

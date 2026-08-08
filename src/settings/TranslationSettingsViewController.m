@@ -188,6 +188,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
                 cell.selectionStyle = UITableViewCellSelectionStyleDefault;
                 cell.textLabel.text = [weakSelf displayNameForLanguageCode:code];
                 cell.detailTextLabel.text = code.uppercaseString;
+                [weakSelf apollo_applyPrimaryTextColorToCell:cell];
                 UIButton *trash = [UIButton buttonWithType:UIButtonTypeSystem];
                 if (@available(iOS 13.0, *)) {
                     [trash setImage:[UIImage systemImageNamed:@"trash"] forState:UIControlStateNormal];
@@ -436,6 +437,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *ApolloTranslationLanguag
     textField.placeholder = placeholder;
     textField.text = text;
     textField.secureTextEntry = secureEntry;
+    [self apollo_applyPrimaryTextColorToCell:cell];
 
     return cell;
 }
