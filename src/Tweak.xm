@@ -3639,6 +3639,8 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
                                     UDKeyPictureInPictureSkipSeconds: @10,
                                     UDKeyPictureInPictureProgressBar: @NO,
                                     UDKeyTagFilterEnabled: @NO,
+                                    UDKeyNSFWBlurOverride: @0,
+                                    UDKeyNSFWGateExplainerEnabled: @YES,
                                     UDKeyTagFilterMode: @"blur",
                                     UDKeyTagFilterNSFW: @YES,
                                     UDKeyTagFilterSpoiler: @YES,
@@ -3995,6 +3997,8 @@ static BOOL ApolloDefaultsKeyChangesActiveAccount(NSString *key) {
     sPiPProgressBar = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyPictureInPictureProgressBar];
 
     // Tag filter feature hydration.
+    sNSFWBlurOverride = [[NSUserDefaults standardUserDefaults] integerForKey:UDKeyNSFWBlurOverride];
+    if (sNSFWBlurOverride < 0 || sNSFWBlurOverride > 2) sNSFWBlurOverride = 0;
     sTagFilterEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyTagFilterEnabled];
     sTagFilterNSFW = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyTagFilterNSFW];
     sTagFilterSpoiler = [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyTagFilterSpoiler];

@@ -378,6 +378,15 @@ static NSString *const UDKeyTagFilterSpoiler = @"TagFilterSpoiler";        // gl
 //   "mode"    -> NSString       ("hide" | "blur"; overrides global mode)
 // Missing keys fall back to global settings.
 static NSString *const UDKeyTagFilterSubredditOverrides = @"TagFilterSubredditOverrides";
+// Local override for Apollo's native NSFW media blur (media blurred, title
+// visible — driven by the account's pref_no_profanity). 0 = follow the Reddit
+// account setting (default), 1 = always blur, 2 = never blur. Independent of
+// Tag Filters; never synced to Reddit (Apollo only PATCHes media prefs).
+static NSString *const UDKeyNSFWBlurOverride = @"NSFWBlurOverride";
+// Whether the "Mature Content Blocked" explainer sheet may be shown when an
+// OAuth account hits Reddit's third-party NSFW listing gate. Default YES;
+// the sheet's "Don't Show Again" writes NO.
+static NSString *const UDKeyNSFWGateExplainerEnabled = @"NSFWGateExplainerEnabled";
 
 // Post filters (Reborn) — device-wide content filters layered onto Apollo's
 // native Filters & Blocks screen. Independent of Apollo's account-synced filter
