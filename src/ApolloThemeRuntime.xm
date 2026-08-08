@@ -134,8 +134,7 @@ static void ApplyThemeSearchFieldBackground(UISearchBar *searchBar) {
     // background host but never renders the image.) Instead paint the capsule
     // ourselves: an inert themed overlay stacked directly above UIKit's pill
     // view and below the field's text/icons — same overlay pattern the rest of
-    // the tweak uses. Dynamic color, so light/dark resolves via the trait
-    // cascade; didMoveToWindow/traitCollectionDidChange keep it applied.
+    // the tweak uses.
     if (!pill) {
         pill = [[UIView alloc] initWithFrame:field.bounds];
         pill.userInteractionEnabled = NO;
@@ -144,14 +143,31 @@ static void ApplyThemeSearchFieldBackground(UISearchBar *searchBar) {
         pill.layer.cornerCurve = kCACornerCurveContinuous;
         objc_setAssociatedObject(field, kApolloThemeSearchPillKey, pill, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    pill.backgroundColor = pillColor;
+    // Resolve the dynamic color EXPLICITLY against the search BAR's traits
+    // instead of assigning it dynamic and trusting the pill's own trait
+    // environment. Under iOS 27 Liquid Glass the field hosts inserted
+    // subviews in a container whose effective style can disagree with the
+    // bar, and the dynamic color then resolves the LIGHT card variant on a
+    // dark themed Search tab (3.5.1 regression report — near-white pill,
+    // unreadable placeholder). The bar itself always carries the correct
+    // themed style, and both apply points (didMoveToWindow /
+    // traitCollectionDidChange:) re-run this on every trait change, so a
+    // statically resolved color stays current across light/dark flips.
+    pill.backgroundColor = [pillColor resolvedColorWithTraitCollection:searchBar.traitCollection];
     pill.frame = field.bounds;
     if (pill.superview != field) {
         // Directly above UIKit's own background view when it exists (covering
-        // its grey material), else at the very back.
+        // its grey material), else at the very back. The name scan also
+        // accepts effect/glass hosts: iOS 27's Liquid Glass field can draw
+        // its material through a view without "Background" in the class name,
+        // and a pill inserted at index 0 would sit UNDER that material and
+        // wash out.
         UIView *systemPill = nil;
         for (UIView *sub in field.subviews) {
-            if ([NSStringFromClass(sub.class) containsString:@"Background"]) { systemPill = sub; break; }
+            if (sub == pill) continue;
+            NSString *cls = NSStringFromClass(sub.class);
+            if ([cls containsString:@"Background"] || [cls containsString:@"Glass"]
+                || [sub isKindOfClass:UIVisualEffectView.class]) { systemPill = sub; break; }
         }
         if (systemPill) [field insertSubview:pill aboveSubview:systemPill];
         else [field insertSubview:pill atIndex:0];
