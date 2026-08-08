@@ -400,15 +400,6 @@ static void ApolloMediaComposerRemoveOwnedTempURL(NSURL *url, NSString *reason) 
     }
 }
 
-static dispatch_queue_t ApolloMediaComposerCleanupQueue(void) {
-    static dispatch_queue_t queue;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        queue = dispatch_queue_create_with_target("com.apolloreborn.media-composer-cleanup", DISPATCH_QUEUE_SERIAL, dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0));
-    });
-    return queue;
-}
-
 static void ApolloMediaComposerBreakPosterPayloadCycle(NSMutableDictionary *context) {
     if (![context isKindOfClass:[NSMutableDictionary class]]) return;
     NSData *posterData = [context[@"posterData"] isKindOfClass:[NSData class]] ? context[@"posterData"] : nil;
@@ -430,7 +421,7 @@ static void ApolloMediaComposerCleanupVideoContext(NSMutableDictionary *context,
     ApolloMediaComposerBreakPosterPayloadCycle(context);
     [context removeObjectForKey:@"posterData"];
     if (deleteFiles) {
-        dispatch_async(ApolloMediaComposerCleanupQueue(), ^{
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
             ApolloMediaComposerRemoveOwnedTempURL(fileURL, cleanupReason);
             ApolloMediaComposerRemoveOwnedTempURL(posterFileURL, cleanupReason);
         });
@@ -4244,7 +4235,6 @@ static void ApolloMediaComposerLogPhotoAuthStateOnce(void) {
     dlopen("/System/Library/Frameworks/Photos.framework/Photos", RTLD_LAZY);
     dlopen("/System/Library/Frameworks/PhotosUI.framework/PhotosUI", RTLD_LAZY);
     // Construct the cleanup lane before any bridge monitor can call into it.
-    (void)ApolloMediaComposerCleanupQueue();
     ApolloMediaComposerInstallComposeTableHooks();
     rebind_symbols((struct rebinding[2]) {
         {"UIImageJPEGRepresentation", (void *)hooked_UIImageJPEGRepresentation, (void **)&orig_UIImageJPEGRepresentation},

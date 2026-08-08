@@ -146,78 +146,25 @@ static NSObject *ApolloUploadRegistryLock(void) {
     return lock;
 }
 
-static dispatch_queue_t ApolloUploadRegistryPersistenceQueue(void) {
-    static dispatch_queue_t queue;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        queue = dispatch_queue_create("com.apolloreborn.upload-registry-persistence", DISPATCH_QUEUE_SERIAL);
-    });
-    return queue;
-}
-
-// Protected by ApolloUploadRegistryLock. Bursts such as an album merge may
-// update dozens of member tokens; persist the newest full snapshot rather than
-// serializing every intermediate dictionary to defaults.
-static NSDictionary *sApolloUploadRegistryPendingSnapshot = nil;
-static BOOL sApolloUploadRegistryPersistenceScheduled = NO;
-
-static void ApolloUploadRegistrySchedulePersistenceLocked(void) {
-    if (sApolloUploadRegistryPersistenceScheduled) return;
-    sApolloUploadRegistryPersistenceScheduled = YES;
-
-    dispatch_async(ApolloUploadRegistryPersistenceQueue(), ^{
-        for (;;) {
-            NSDictionary *snapshotToWrite = nil;
-            @synchronized (ApolloUploadRegistryLock()) {
-                snapshotToWrite = sApolloUploadRegistryPendingSnapshot;
-                sApolloUploadRegistryPendingSnapshot = nil;
-            }
-            if (snapshotToWrite) {
-                [[NSUserDefaults standardUserDefaults] setObject:snapshotToWrite
-                                                          forKey:kUploadRegistryDefaultsKey];
-            }
-
-            @synchronized (ApolloUploadRegistryLock()) {
-                if (!sApolloUploadRegistryPendingSnapshot) {
-                    sApolloUploadRegistryPersistenceScheduled = NO;
-                    return;
-                }
-            }
-        }
-    });
-}
-
-static NSMutableDictionary<NSString *, NSDictionary *> *ApolloUploadRegistry(void) {
-    static NSMutableDictionary *registry;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        NSDictionary *stored = [[NSUserDefaults standardUserDefaults]
-            dictionaryForKey:kUploadRegistryDefaultsKey];
-        registry = stored ? [stored mutableCopy] : [NSMutableDictionary dictionary];
-    });
-    return registry;
+static NSMutableDictionary<NSString *, NSDictionary *> *ApolloUploadRegistryCopy(void) {
+    NSDictionary *stored = [[NSUserDefaults standardUserDefaults] dictionaryForKey:kUploadRegistryDefaultsKey];
+    return stored ? [stored mutableCopy] : [NSMutableDictionary dictionary];
 }
 
 static void ApolloUploadRegistrySet(NSString *token, NSDictionary *_Nullable entry) {
     if (token.length == 0) return;
-    NS_VALID_UNTIL_END_OF_SCOPE NSDictionary *retiredEntry = nil;
-    NS_VALID_UNTIL_END_OF_SCOPE NSDictionary *retiredPendingSnapshot = nil;
     @synchronized (ApolloUploadRegistryLock()) {
-        NSMutableDictionary *registry = ApolloUploadRegistry();
-        retiredEntry = registry[token];
+        NSMutableDictionary *registry = ApolloUploadRegistryCopy();
         if (entry) registry[token] = entry;
         else [registry removeObjectForKey:token];
-        NSDictionary *snapshot = [registry copy];
-        retiredPendingSnapshot = sApolloUploadRegistryPendingSnapshot;
-        sApolloUploadRegistryPendingSnapshot = snapshot;
-        ApolloUploadRegistrySchedulePersistenceLocked();
+        [[NSUserDefaults standardUserDefaults] setObject:registry forKey:kUploadRegistryDefaultsKey];
     }
 }
 
 static NSDictionary *_Nullable ApolloUploadRegistryEntry(NSString *token) {
     if (token.length == 0) return nil;
     @synchronized (ApolloUploadRegistryLock()) {
-        NSDictionary *entry = ApolloUploadRegistry()[token];
+        NSDictionary *entry = ApolloUploadRegistryCopy()[token];
         return [entry isKindOfClass:[NSDictionary class]] ? entry : nil;
     }
 }
