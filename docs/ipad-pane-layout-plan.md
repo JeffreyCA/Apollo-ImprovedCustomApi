@@ -491,6 +491,31 @@ region, and Texture measures correctly with no changes to Apollo or ASDK.
 does any tweak-drawn UI placed in the secondary column. The rule is: never let
 Texture content size itself from a view that the sidebar overlaps.
 
+**But it is configuration-dependent, not universal.** The full-width-secondary
+behavior above was measured on a **two-column** pane. On a **three-column** pane
+with the primary hidden (the portrait downgrade), the same dump shows the
+secondary properly *tiled* beside the feed:
+
+```
+supplementary  _UISplitViewControllerAdaptiveColumnView  (0.0,   0, 351.0, 1312)
+secondary      _UISplitViewControllerAdaptiveColumnView  (351.5, 0, 680.5, 1312)
+separator                                                (351.0, 0,   0.5, 1312)
+```
+
+The column host stays correct either way — when nothing overlaps, the safe area
+*is* the full bounds, so pinning to it is a no-op. Do not assume one behavior
+and design around it; read the frames.
+
+**Measure column geometry from a hierarchy dump, never from a screenshot.** An
+apparent "the feed column is only ~260pt and cramped in portrait" bug was chased
+and a whole adaptive-width mechanism written for it, before a dump showed the
+column was 351pt all along — exactly the configured
+`minimumSupplementaryColumnWidth`. The 260 came from eyeballing cell padding as
+the column edge, and from `primaryColumnWidth` (413), which reports the *hidden*
+column and is irrelevant while it is hidden. The mechanism was reverted. Use
+`echo dump > /tmp/apollofix-tap.txt` and read `_UISplitViewControllerAdaptiveColumnView`
+frames.
+
 ### 5.3 Full-width chrome assumptions — **largest hidden cost**
 
 - 19 tweak modules touch `navigationBar`.
