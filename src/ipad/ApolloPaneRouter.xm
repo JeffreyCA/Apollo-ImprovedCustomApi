@@ -112,7 +112,30 @@ static ApolloPaneColumn ApolloPaneColumnForViewController(UIViewController *view
     // iPad) is a single merged stack and must behave exactly like today's app.
     if (pane.isCollapsed) { %orig; return; }
 
-    ApolloPaneColumn column = ApolloPaneColumnForViewController(viewController);
+    // CONTENT ONLY EVER MOVES RIGHTWARD.
+    //
+    // Cross-column routing applies only to pushes that START in the list column.
+    // Anything pushed from the detail column stays there and behaves like a
+    // normal navigation stack: push, back button, pop.
+    //
+    // Without this the layout teleports content leftward and destroys your place.
+    // Tapping a subreddit link inside a comment thread pushed a
+    // PostsViewController, the table sent it to the LIST column, and re-homing
+    // there means setViewControllers: — which replaces the whole left stack. The
+    // Home tab's [subreddit list, feed] became [new feed], so the subreddit list,
+    // the feed you were reading and every back button went with it. That is why
+    // there was no way back to the home feed, and why the direction felt wrong:
+    // you tapped something on the right and watched the left half of the app get
+    // replaced.
+    //
+    // The detail column is now the browsing stack — the thing you tapped opens
+    // where you were looking, and back always returns — while the list column
+    // stays the stable context you navigated from.
+    BOOL fromListColumn = (self == [pane apollo_navigationControllerForColumn:ApolloPaneColumnPrimary]);
+
+    ApolloPaneColumn column = fromListColumn
+        ? ApolloPaneColumnForViewController(viewController)
+        : ApolloPaneColumnInPlace;
 
     // An index root sends EVERYTHING it pushes to the detail column, so the index
     // itself stays put. This deliberately overrides the destination table rather
@@ -124,8 +147,7 @@ static ApolloPaneColumn ApolloPaneColumnForViewController(UIViewController *view
     // Still limited to pushes coming FROM the list column: a settings page or a
     // saved-posts list pushing deeper is already in the detail column and stays
     // there rather than re-homing onto itself.
-    if (self == [pane apollo_navigationControllerForColumn:ApolloPaneColumnPrimary] &&
-        ApolloPaneIsIndexRootController(self.topViewController)) {
+    if (fromListColumn && ApolloPaneIsIndexRootController(self.topViewController)) {
         column = ApolloPaneColumnSecondary;
     }
 
