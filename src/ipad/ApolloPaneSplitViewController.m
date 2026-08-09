@@ -88,19 +88,26 @@
 }
 
 - (void)apollo_applyTheme {
-    // CLEAR, so the empty detail column is exactly the same colour as every
-    // other column rather than a colour we chose for it.
+    // The empty detail column takes Apollo's own page background, so it matches
+    // the list column beside it under every theme.
     //
-    // This used to paint ApolloThemePageBackgroundColor(). That helper does not
-    // always agree with what Apollo actually draws: with a *tinted* theme and
-    // Apollo's pure-black dark mode on, the helper returns the theme's tint
-    // (measured: #0B1F28) while every real Apollo screen renders #000000. The
-    // detail column was then a teal panel sitting beside a black feed — a large
-    // part of why the layout read as disconnected windows rather than one app.
-    //
-    // Deferring to whatever is behind cannot disagree, because it *is* whatever
-    // the rest of the app is sitting on.
-    self.view.backgroundColor = UIColor.clearColor;
+    // This was briefly changed to clearColor on the strength of a bad
+    // measurement: a pixel sampled at (1100,800) in an open comment thread read
+    // #000000, which was taken as "Apollo's pages are black and the helper
+    // disagrees". That sample landed on a COMMENT CELL, not the page. Sampling
+    // the list column's actual page area under a themed palette gives #191926,
+    // and clearColor left the detail column black beside it.
+    UIColor *page = ApolloThemePageBackgroundColor();
+    self.view.backgroundColor = page ?: UIColor.clearColor;
+    static BOOL loggedPage = NO;
+    if (!loggedPage) {
+        loggedPage = YES;
+        UIColor *resolved = [page resolvedColorWithTraitCollection:self.traitCollection];
+        CGFloat r = 0, g = 0, b = 0, a = 0;
+        [resolved getRed:&r green:&g blue:&b alpha:&a];
+        ApolloLog(@"[PanePlaceholder] page background #%02X%02X%02X (alpha %.2f)",
+                  (unsigned)(r * 255), (unsigned)(g * 255), (unsigned)(b * 255), a);
+    }
     UIColor *accent = ApolloThemeAccentColor() ?: self.view.tintColor;
     _iconView.tintColor = [accent colorWithAlphaComponent:0.45];
     _label.textColor = UIColor.secondaryLabelColor;
@@ -311,10 +318,25 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
     if (list.isViewLoaded && list.view.superview && !split.isCollapsed) {
         CGRect listFrame = [list.view.superview convertRect:list.view.frame toView:self.view];
         if (!CGRectIsEmpty(listFrame)) {
-            // Pull the view up by the bar's own offset so the two BARS align,
-            // not the two view origins.
-            top = CGRectGetMinY(listFrame) - nav.navigationBar.frame.origin.y;
             bottom = height - CGRectGetMaxY(listFrame);
+
+            // Align the two NAVIGATION BARS, not the two view origins.
+            //
+            // The list column's bar is not always flush with the top of its
+            // column, and how far in it sits depends on the mode: with the
+            // sidebar showing, column and bar both start at y=32; with the
+            // sidebar collapsed to the floating tab bar, the column starts at
+            // y=86 and its bar at y=140, 54pt inside. Matching view origins got
+            // the sidebar case right and then put our bar 54pt ABOVE the list's
+            // in the tab bar case. So take the list bar's real position as the
+            // target and back out our own bar's offset within its view.
+            UINavigationBar *listBar = [list isKindOfClass:[UINavigationController class]]
+                ? ((UINavigationController *)list).navigationBar : nil;
+            CGFloat targetBarY = CGRectGetMinY(listFrame);
+            if (listBar && !listBar.isHidden && listBar.superview) {
+                targetBarY = CGRectGetMinY([listBar.superview convertRect:listBar.frame toView:self.view]);
+            }
+            top = targetBarY - nav.navigationBar.frame.origin.y;
         }
     }
 
@@ -440,10 +462,28 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
     // Keep the tab's original title/icon on the tab bar item: the tab bar reads
     // the child's tabBarItem, and the child is now this pane rather than the
     // navigation controller Apollo configured.
+    // Keep the tab's original title and icon. ORDER AND SOURCE BOTH MATTER.
+    //
+    // -[UIViewController setTitle:] writes through to the tab bar item, so
+    // assigning `title` after `tabBarItem` overwrites the item's label. And the
+    // navigation controller's own title is the wrong source for it: on the
+    // profile tab Apollo names the controller "Comments" while its tab bar item
+    // is the account name, so copying the controller title renamed the profile
+    // destination to "Comments" in both the tab bar and the sidebar.
+    //
+    //   tab 0  navTitle=(null)    itemTitle=Posts
+    //   tab 1  navTitle=(null)    itemTitle=Inbox
+    //   tab 2  navTitle=Comments  itemTitle=corderjones   <- the one that broke
+    //   tab 3  navTitle=(null)    itemTitle=Search
+    //   tab 4  navTitle=(null)    itemTitle=Settings
+    //
+    // The tab bar item is what the user has always seen, so it is the source of
+    // truth; the item is assigned last so it wins outright.
+    self.title = rootNav.tabBarItem.title ?: rootNav.title;
     self.tabBarItem = rootNav.tabBarItem;
-    self.title = rootNav.title;
 
     self.delegate = self;
+    [self apollo_applyGroundTheme];
 
     ApolloLog(@"[PaneSplit] tab %ld configured listRoot=%@ depth=%lu",
               (long)self.apollo_tabIndex,
@@ -475,6 +515,22 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
 // One-shot diagnostic: what UIKit actually resolved, versus what we asked for.
 // preferredDisplayMode/preferredSplitBehavior are requests, and UIKit overrides
 // both when the available width cannot honor them.
+// The ground the floating columns sit on.
+//
+// On iPhone the tab bar controller's own background is never visible. On iPadOS
+// 26 it is: the sidebar floats over it, and it shows in the margins around and
+// between the columns. Left alone it is UIKit's black, which is why the app read
+// as "not themeable" — Apollo's pages were #191926 under the active palette
+// while the ground behind them stayed #000000.
+- (void)apollo_applyGroundTheme {
+    self.view.backgroundColor = ApolloThemePageBackgroundColor() ?: self.view.backgroundColor;
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    [self apollo_applyGroundTheme];
+}
+
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     if (_apollo_loggedResolvedLayout) return;
