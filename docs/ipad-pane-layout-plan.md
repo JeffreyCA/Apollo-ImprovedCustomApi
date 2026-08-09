@@ -1,0 +1,387 @@
+# iPad Pane Layout — Engineering Plan
+
+Branch: `je/ipad-pane-layout` (experimental, off `main`)
+
+Tracking issues: [#225](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/225) (iPad support),
+[#635](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/635) (tab bar over search bar),
+[#782](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/782) (jump bar hover jank),
+[#387](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/387) (floating menu placement — closed, stopgap shipped as #557).
+
+> This is the largest UI change the tweak has attempted. The plan is deliberately
+> staged so that every phase is independently shippable and independently
+> revertable, and so that the riskiest assumption is tested before any
+> architecture is committed to.
+
+---
+
+## 1. What we are building
+
+A three-column, opt-in iPad layout:
+
+```
+┌────────────┬───────────────────┬──────────────────────┐
+│  SIDEBAR   │   POST LIST       │   COMMENTS / DETAIL  │
+│            │                   │                      │
+│ ◉ Home     │ r/apple      ⌄ ⋯  │  ← Post title        │
+│ ○ Search   │ ───────────────── │  ══════════════════  │
+│ ○ Profile  │ ▸ Post one        │  [ media / body ]    │
+│ ○ Inbox    │ ▸ Post two        │                      │
+│ ○ Settings │ ▸ Post three      │  ┌ u/abc   ▲ 42      │
+│ ────────── │ ▸ Post four       │  │ comment text…     │
+│ ⭐ Home    │ ▸ Post five       │  │ ┌ u/def  ▲ 12     │
+│ 🔥 Popular │ ▸ Post six        │  │ │ reply text…     │
+│ 🌐 All     │ ▸ Post seven      │  └ u/ghi   ▲ 3       │
+│ ────────── │ ▸ Post eight      │                      │
+│ r/apple    │ ▸ Post nine       │  ┌ u/jkl   ▲ 8       │
+│ r/ios      │ ▸ Post ten        │  │ comment text…     │
+└────────────┴───────────────────┴──────────────────────┘
+```
+
+Non-goals for this branch: a bespoke iPad *visual* design language, a Mac
+Catalyst build, or reimplementing any Apollo screen. Every column hosts a real
+Apollo view controller.
+
+### Design principles
+
+1. **Opt-in and reversible.** Default OFF, iPad-only, iPhone code paths never
+   execute the new code. A user who never enables it must not be able to tell
+   this shipped.
+2. **Reuse Apollo's real view controllers.** We re-host, never reimplement. The
+   subreddit list keeps its section index, edit mode, multireddits and
+   drag-reorder because it *is* `RedditListViewController`.
+3. **Compact width must equal today's app.** `UISplitViewController` collapse
+   already folds a triple-column layout into a single navigation stack —
+   sidebar → list → detail — which is exactly today's push hierarchy. The
+   fallback is free and correct, and it covers Slide Over, small Stage Manager
+   windows, and portrait on smaller iPads.
+4. **Allowlist routing, never blocklist.** Only view controller classes we have
+   explicitly classified get routed to a different column. Everything else
+   pushes in place, i.e. behaves exactly as it does today. Apollo has ~90 view
+   controllers and the tweak adds its own; an allowlist is the only safe default.
+5. **`ApolloTabBarController` keeps its identity and index space.** It stays the
+   window's root view controller with the same five children in the same order.
+   This is what keeps deep links, quick actions, the settings router, the crash
+   prompt coordinator and `ApolloMainTabBarController()` working.
+
+---
+
+## 2. Ground truth (verified, not assumed)
+
+Everything in this section was confirmed against the shipping binary,
+`Apollo.app/Info.plist`, or the existing tweak source.
+
+### App capabilities
+
+| Fact | Value | Source | Why it matters |
+|---|---|---|---|
+| `UIDeviceFamily` | `[1, 2]` | `Apollo.app/Info.plist` | Apollo is already a native iPad app, not in compatibility mode. |
+| `UIRequiresFullScreen` | absent | `Apollo.app/Info.plist` | Multitasking is already on, so Apollo **already survives compact width on iPad today**. The compact fallback is proven code, not new risk. |
+| `UIApplicationSupportsMultipleScenes` | `true` | `Apollo.app/Info.plist` | Stage Manager / multi-window is available for free later. |
+| `MinimumOSVersion` | `15.0` | `Apollo.app/Info.plist` | The real floor is iOS 15, not the tweak's 14.0 target. |
+
+### Container hierarchy
+
+Recovered from `-[SceneDelegate scene:willConnectToSession:options:]`
+(`sub_1000879c0`) and the tab bar factory (`sub_100087244`):
+
+- `sub_100087244()` builds `ApolloTabBarController` and sets exactly **five**
+  `ApolloNavigationController` children.
+- The scene delegate then does `[window setRootViewController:tabBarController]`,
+  stores it in its own `tabBarController` ivar, and calls `makeKeyAndVisible`.
+- **Consequence:** hooking `scene:willConnectToSession:options:` and
+  post-processing after `%orig` is a clean install point. The scene delegate's
+  `tabBarController` ivar still points at the real tab bar controller, so
+  `ApolloMainTabBarController()` keeps working untouched.
+- Tab index 2 is Profile (`-[ApolloTabBarController goToProfileTab]` →
+  `setSelectedIndex:2`), matching `ApolloProfileTabIndex` in `ApolloUserAvatars.xm`.
+- Tab 0's root is `RedditListViewController` — asserted with `isMemberOfClass:`
+  by `ApolloQuickActions.xm`.
+- Tab 0 can launch with a **two-deep** stack (subreddit list + a restored
+  `PostsViewController`). That restore state maps one-to-one onto
+  sidebar + list columns, which is a useful signal that the split is natural.
+- The factory calls `loadViewIfNeeded` and `waitUntilAllUpdatesAreProcessed` on
+  several roots — Apollo pre-warms these synchronously at launch, so any
+  restructuring must happen *after* `%orig` returns.
+
+### UIKit API availability
+
+| API | Introduced | Usable here? |
+|---|---|---|
+| `UISplitViewController(style: .tripleColumn)` | iOS 14 | **Yes** — this is the backbone. Covers the whole iOS 15+ floor. |
+| `UITabBarController.mode` / `.sidebar` | **iOS 18** | Optional enhancement only. Cannot be the backbone. |
+| `UITab` / `UITabGroup` / `UISearchTab` | **iOS 18** | Not used — see below. |
+
+**Why not build on `mode = .tabSidebar`.** It renders a sidebar from static
+`UITab`/`UITabGroup` objects. Apollo's sidebar content is the *subreddit list*:
+dynamic, sectioned, editable, reorderable, with multireddits and a section index.
+Expressing that as `UITab` objects would mean reimplementing subscription
+management, which violates principle 2 and would regress behavior users rely on.
+It is also iOS 18+, so it could never be the only path. We may offer it later as
+a cosmetic variant for the destinations rail specifically.
+
+---
+
+## 3. Architecture
+
+### Topology
+
+One `UISplitViewController` **per tab**, replacing that tab's navigation
+controller as the tab bar controller's child:
+
+```
+UIWindow.rootViewController
+└── ApolloTabBarController                    ← unchanged object, tabBar hidden when panes are on
+    ├── tab 0  ApolloPaneSplitViewController  (.tripleColumn)
+    │            ├─ .primary        ApolloPaneSidebarViewController
+    │            │                    ├─ destinations rail  (tweak-drawn: Home/Search/Profile/Inbox/Settings)
+    │            │                    └─ RedditListViewController      ← embedded child, Apollo's real VC
+    │            ├─ .supplementary  ApolloNavigationController         ← list stack (PostsViewController…)
+    │            └─ .secondary      ApolloNavigationController         ← detail stack (CommentsViewController…)
+    ├── tab 1  ApolloPaneSplitViewController  (Search:  results  → post → comments)
+    ├── tab 2  ApolloPaneSplitViewController  (Profile: sections → list → detail)
+    ├── tab 3  ApolloPaneSplitViewController  (Inbox:   mailboxes → thread list → message)
+    └── tab 4  ApolloPaneSplitViewController  (Settings: sections → detail)
+```
+
+**Why per-tab rather than one global split view.** Each tab keeps its own
+column state, so leaving Inbox and coming back restores the subreddit and post
+you were reading. It also means the tab bar controller's children array is the
+only thing that changes shape, which keeps the audit surface to one list of call
+sites (§5).
+
+**The destinations rail is duplicated per tab and that is deliberate.** It is
+cheap tweak-drawn UI, stateless apart from the selected index, and pinned to the
+same position in every sidebar — so switching tabs reads as "the lower part of
+the sidebar changed", not as a rail flicker. `UITabBarController` swaps children
+without animation, so there is no cross-fade to suppress. If this reads badly in
+the spike, the fallback is a single shared rail view moved between sidebars.
+
+**No `.compact` column is set.** `UISplitViewController` collapses a triple
+column by pushing supplementary and secondary onto the primary's navigation
+controller, which reproduces today's push hierarchy exactly. Setting an explicit
+compact controller would mean maintaining a second layout by hand.
+
+### Column routing
+
+A single interception point classifies pushes and redirects them.
+
+`ApolloSwipeUpComments.xm` already proves this technique in this codebase: it
+hooks `-[UINavigationController pushViewController:animated:]`, recognizes
+`_TtC6Apollo22CommentsViewController`, intercepts it before it lands, and
+re-presents it somewhere else. The pane router is the same mechanism with a
+class table instead of a single class.
+
+| Class | Column | Notes |
+|---|---|---|
+| `RedditListViewController` (drill-in, e.g. multireddit) | primary | Pushed within the sidebar's own stack. |
+| `PostsViewController`, `LitePostsViewController` | supplementary | Replaces the list column; clears the detail column. |
+| `SearchViewController` results, `SubredditSearchResultsViewController`, `PostsSearchResultsViewController` | supplementary | |
+| `InboxListViewController`, `ModmailInboxViewController`, `ModQueueViewController` | supplementary | |
+| `CommentsViewController` | secondary | The headline case. |
+| `PrivateMessageViewController`, `MessagesViewController` | secondary | |
+| `ProfileViewController`, `UserCommentsViewController` | secondary | When pushed from a comment/post author. |
+| `SubredditSidebarViewController`, `SubredditRulesViewController` | secondary | |
+| **everything else** | **push in place** | Default. Settings sub-screens, composers, media viewers, web views, and every tweak-owned VC keep today's behavior until explicitly classified. |
+
+Rules:
+- Pushing a list-class VC clears the secondary column to its placeholder.
+- Pushing a detail-class VC **replaces** the secondary stack rather than
+  appending, unless it was pushed *from within* the secondary column (e.g.
+  tapping a link inside comments), in which case it appends.
+- Modal presentations are never rerouted.
+
+### Where the code lives
+
+New directory `src/ipad/`:
+
+| File | Purpose |
+|---|---|
+| `ApolloPaneLayout.{h,m}` | Feature gate, capability check, change notification, the `sPaneLayoutEnabled` state read. Single source of truth for "are panes active right now". |
+| `ApolloPaneInstall.xm` | Hooks `-[SceneDelegate scene:willConnectToSession:options:]`; builds/tears down the split controllers after `%orig`. |
+| `ApolloPaneSplitViewController.{h,m}` | `UISplitViewController` subclass + delegate: collapse/expand behavior, column widths, placeholder detail VC, theming. |
+| `ApolloPaneSidebarViewController.{h,m}` | Destinations rail + embedded tab root VC. Accent from `ApolloThemeAccentColor()`. |
+| `ApolloPaneRouter.xm` | The push interception and column classification table. |
+| `ApolloPaneChrome.xm` | Per-column nav bar / immersive header / scroll-edge reconciliation (§5.3). |
+
+### Settings gate
+
+Follows the existing `IPadTabBarBottom` pattern end to end:
+
+- `UserDefaultConstants.h`: `UDKeyIPadPaneLayout` + `ApolloIPadPaneLayoutChangedNotification`
+- `ApolloState.{h,m}`: `extern BOOL sIPadPaneLayout;` default `NO`
+- `Tweak.xm`: `registerDefaults` entry + `%ctor` read
+- `settings/CustomAPIViewController.m`: an iPad-only row under General, hidden
+  entirely on iPhone (same `userInterfaceIdiom` guard as the existing row).
+
+Because installation happens at scene connect, toggling requires a relaunch.
+Present it as an explicit "Requires restart" row with a confirm-and-restart
+action rather than pretending it applies live. When panes are ON, the existing
+"Move Tab Bar to Bottom" row is hidden — it is meaningless without the floating
+pill.
+
+---
+
+## 4. Phases
+
+Each phase is independently shippable and independently revertable.
+
+### Phase 0 — Spike (throwaway code, do not merge)
+
+Purpose: falsify the riskiest assumptions before committing to architecture.
+Force panes on for the Home tab only, hardcoded, no settings, no polish.
+
+Inner loop:
+```bash
+SIM_DEVICE_TYPE="iPad Pro 13-inch (M5)" scripts/run-in-sim.sh --glass --dark
+```
+(iPad simulators are present; `run-in-sim.sh` already parameterizes the device
+type, so no script changes are needed to start.)
+
+Exit criteria — all must hold before Phase 1 begins:
+
+1. `RedditListViewController` renders and behaves in a ~320pt primary column:
+   section index titles, edit mode, swipe actions, multireddits.
+2. `PostsViewController` (an `ASTableNode`) re-measures correctly when its column
+   width changes, including a Stage Manager drag-resize, without visible cell
+   corruption.
+3. `CommentsViewController` renders in the secondary column with correct comment
+   indentation at reduced width.
+4. Collapse to compact (Slide Over) and re-expand does not lose the navigation
+   stack or crash.
+5. Frame rate during a continuous Stage Manager resize is acceptable, and memory
+   with three live columns is measured and recorded.
+
+If (2) or (5) fail, stop and reassess: ASDK re-measure cost under continuous
+resize is the assumption most likely to sink this design, and it is cheaper to
+learn now.
+
+### Phase 1 — Foundation (no visible change)
+
+- Settings key, state, gate, iPad-only row, relaunch flow.
+- `ApolloPaneLayout` capability check.
+- Install/uninstall of split controllers at scene connect.
+- **The hierarchy-assumption audit (§5.1)** — the ~15 call sites, routed through
+  one shared helper.
+- Routing table present but empty: *every* push still lands in place.
+
+Ship state: with the toggle on, the app looks essentially like today (single
+wide column) but is structurally split. This isolates "did the container change
+break anything" from "did the routing break anything", which is the single most
+valuable thing this phase buys.
+
+### Phase 2 — Home tab
+
+Sidebar rail + subreddit list, posts column, comments column. Placeholder detail
+state. Selection persistence when switching tabs.
+
+### Phase 3 — Remaining tabs
+
+Search, Profile, Inbox, Settings — one at a time, each behind the same gate.
+Inbox and Modmail carry their own selector and compose flows and should be last.
+
+### Phase 4 — iPad-native polish
+
+This is what stops it feeling like a stretched iPhone app, and much of it is
+cheap because Apollo already implements the hard part:
+
+- **Keyboard.** `ApolloNavigationController` already exposes `keyCommands` for
+  `selectNextCell`, `goIntoCell`, `goBack`, `pageUp`, `scrollToTop`,
+  `goToJumpBar`, `openMedia`. With panes these become genuinely desktop-class —
+  they just need to target the focused column via the responder chain.
+- **Pointer.** Hover states on rows and the jump bar. Fixes
+  [#782](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/782), whose hover
+  handling currently drops the Liquid Glass effect and clips the title.
+- **Context menus and drag & drop.** Drag a subreddit onto the list column; drag
+  a post into a new window.
+- **Multi-window.** `UIApplicationSupportsMultipleScenes` is already true — "open
+  post in new window" is largely plumbing.
+
+### Phase 5 — Adaptivity hardening + regression sweep
+
+Slide Over, all Stage Manager sizes, both rotations, iPad multitasking splits,
+and a full iPhone regression pass to prove the dormant path is really dormant.
+
+---
+
+## 5. Known costs and risks
+
+### 5.1 Hierarchy assumptions (bounded, mechanical)
+
+Roughly 15 call sites assume `tabBarController.viewControllers[i]` is a
+`UINavigationController`. Confirmed in: `ApolloDirectChatWeb.xm` (several),
+`ApolloUserAvatars.xm`, `ApolloQuickActions.xm`, `ApolloLiquidGlass.xm`,
+`Tweak.xm`, `ApolloAutoHideTabBar.xm`, `ApolloAutoHideMetaFeeds.xm`,
+`ApolloImageUploadHost.xm`, `ApolloSwipeUpComments.xm`,
+`ApolloBadgeBookViewController.m`, `UIWindow+Apollo.m`, `ApolloPictureInPicture.xm`.
+
+Fix: add one helper to `ApolloCommon` that unwraps a tab child to its active
+navigation controller (identity today, split-view-aware when panes are on), and
+route every site through it. Mechanical, enumerable, and testable on iPhone
+where it must be a no-op.
+
+### 5.2 ASDK re-measure under column resize — **highest risk**
+
+Apollo's feed and comments are `ASTableNode`-backed; cells measure against a
+constrained width. Column resize means continuous re-measure. Mitigating
+evidence: `PostsViewController` and `CommentsViewController` both carry a
+`restoredViewWidth` ivar, so Apollo already reasons about width changes, and the
+app already runs resizable on iPad today. Still, this is the assumption Phase 0
+exists to test, and it interacts badly with the memory pressure recorded in the
+August 2026 OOM wave — three live ASDK columns is strictly more node graph than
+one.
+
+### 5.3 Full-width chrome assumptions — **largest hidden cost**
+
+- 19 tweak modules touch `navigationBar`.
+- 33 tweak modules read `UIScreen.mainScreen`.
+
+Modules that assume a single full-width nav bar need per-column awareness:
+`ApolloImmersiveHeaderBackground`, `ApolloProgressiveBlur`,
+`ApolloScrollEdgeEffect`, `ApolloLiquidGlass` (title centering),
+`ApolloAutoHideTabBar`, `ApolloSubredditHeaders`, `ApolloSearchInPlace`.
+
+This is very likely a bigger line-count cost than the split view controller
+itself. `ApolloPaneChrome.xm` exists to hold the reconciliation, and the
+`UIScreen.mainScreen` readers should migrate to the owning view's window/traits
+regardless of this project — that migration is independently correct.
+
+### 5.4 Gesture conflicts
+
+`ApolloNavigationController` installs left *and* right screen-edge pan
+recognizers and a nav-bar pan for hide-on-swipe. Inside a narrow column these
+compete with `UISplitViewController`'s own show/hide gestures. Expect to scope
+Apollo's recognizers per column.
+
+### 5.5 Entry points that must keep working
+
+Deep links (`apollo://`), Siri intents, home-screen quick actions
+(`ApolloQuickActions`), the settings router, the crash prompt coordinator, and
+push notification taps all target the tab bar controller and then walk into a
+navigation controller. All are covered by §5.1's helper, but each needs an
+explicit smoke test — a deep link that lands in the wrong column is a worse bug
+than one that fails outright.
+
+### 5.6 What panes do *not* fix
+
+[#635](https://github.com/Apollo-Reborn/Apollo-Reborn/issues/635) (search bar
+under the floating tab bar) disappears when panes are ON, because the floating
+pill is hidden. It **still affects every iPad user who leaves panes OFF**, which
+is the default. Folding it into this work means those users stay broken until
+they opt in. If that becomes unacceptable before Phase 2 lands, pull it back out
+as a standalone fix — `ApolloSearchHeaderOverlapFix.xm` already exists as the
+natural home.
+
+---
+
+## 6. Open questions
+
+1. **Sidebar destinations rail styling** — a compact icon rail, a full-width
+   list, or a segmented control at the top of the sidebar? Decide from the
+   Phase 0 spike screenshots rather than on paper.
+2. **Detail column empty state.** Apollo has no "no post selected" artwork.
+   Options: a themed empty state, or auto-select the first post on load (Mail's
+   behavior). Auto-select costs a network fetch on every subreddit change.
+3. **Does the sidebar persist across tabs visually?** Per-tab duplication is the
+   plan; verify it reads as stable in the spike.
+4. **iOS 18+ `mode = .tabSidebar`** as an alternative destinations rail — worth
+   revisiting only after Phase 3, and only if the hand-rolled rail feels wrong.
