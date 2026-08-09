@@ -1,0 +1,459 @@
+{
+  "color-space-for-untagged-svg-colors" : "display-p3",
+  "fill-specializations" : [
+    {
+      "value" : {
+        "linear-gradient" : [
+          "display-p3:0.32837,0.66187,0.97270,1.00000",
+          "display-p3:0.42550,0.35501,0.96490,1.00000"
+        ]
+      }
+    },
+    {
+      "appearance" : "dark",
+      "value" : "system-dark"
+    }
+  ],
+  "groups" : [
+    {
+      "hidden" : false,
+      "layers" : [
+        {
+          "blend-mode" : "plus-lighter",
+          "fill" : {
+            "solid" : "extended-gray:1.00000,1.00000"
+          },
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "apollo_antennaball.svg",
+          "name" : "Ball",
+          "opacity" : 1,
+          "position" : {
+            "scale" : 1.75,
+            "translation-in-points" : [
+              0,
+              -152
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 2.4
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    },
+    {
+      "blur-material-specializations" : [
+        {
+          "value" : 0.24
+        },
+        {
+          "appearance" : "tinted",
+          "value" : 0.24
+        }
+      ],
+      "hidden" : false,
+      "layers" : [
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.32836,0.30490,0.74370,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:0.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "Face.svg",
+          "name" : "Face",
+          "position" : {
+            "scale" : 1.85,
+            "translation-in-points" : [
+              0,
+              434
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "display-p3:0.69546,0.15296,0.47658,1.00000"
+          },
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "Eyes 3.svg",
+          "name" : "Eyes",
+          "position" : {
+            "scale" : 1.9,
+            "translation-in-points" : [
+              0,
+              407
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.18367,0.09566,0.34133,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:0.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "stem.svg",
+          "name" : "Stem",
+          "position" : {
+            "scale" : 3.4,
+            "translation-in-points" : [
+              0.020926385442521678,
+              2
+            ]
+          }
+        },
+        {
+          "fill" : {
+            "solid" : "extended-gray:1.00000,1.00000"
+          },
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "Apollo Helmet Space.svg",
+          "name" : "Apollo Helmet Space",
+          "position" : {
+            "scale" : 1.35,
+            "translation-in-points" : [
+              0,
+              431
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.16927,0.18592,0.45711,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:0.00000,1.00000"
+              }
+            }
+          ],
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "Antenna.svg",
+          "name" : "Radio_Antenna",
+          "position" : {
+            "scale" : 1.83,
+            "translation-in-points" : [
+              0,
+              156
+            ]
+          }
+        }
+      ],
+      "lighting-specializations" : [
+        {
+          "value" : "individual"
+        },
+        {
+          "appearance" : "tinted",
+          "value" : "individual"
+        }
+      ],
+      "shadow-specializations" : [
+        {
+          "value" : {
+            "kind" : "neutral",
+            "opacity" : 0.6
+          }
+        },
+        {
+          "appearance" : "tinted",
+          "value" : {
+            "kind" : "layer-color",
+            "opacity" : 1
+          }
+        }
+      ],
+      "specular-specializations" : [
+        {
+          "value" : true
+        },
+        {
+          "appearance" : "tinted",
+          "value" : false
+        }
+      ],
+      "translucency-specializations" : [
+        {
+          "value" : {
+            "enabled" : true,
+            "value" : 0.2
+          }
+        },
+        {
+          "appearance" : "tinted",
+          "value" : {
+            "enabled" : true,
+            "value" : 0.49
+          }
+        }
+      ]
+    },
+    {
+      "layers" : [
+        {
+          "fill" : {
+            "solid" : "extended-gray:1.00000,1.00000"
+          },
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "Helmet 2.svg",
+          "name" : "Helmet",
+          "position" : {
+            "scale" : 1.85,
+            "translation-in-points" : [
+              1,
+              389
+            ]
+          }
+        }
+      ],
+      "name" : "Group",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 1.6
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    },
+    {
+      "hidden" : false,
+      "layers" : [
+        {
+          "blend-mode-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : "normal"
+            }
+          ],
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.33028,0.60754,0.97124,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:0.75000,1.00000"
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "extended-gray:0.75000,1.00000"
+              }
+            }
+          ],
+          "glass" : true,
+          "hidden-specializations" : [
+            {
+              "value" : true
+            },
+            {
+              "idiom" : "square",
+              "value" : false
+            }
+          ],
+          "image-name" : "apollo_ring_large.svg",
+          "name" : "apollo_ring_large",
+          "opacity-specializations" : [
+            {
+              "value" : 1
+            },
+            {
+              "appearance" : "dark",
+              "value" : 0.2
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0.29
+            }
+          ],
+          "position" : {
+            "scale" : 0.65,
+            "translation-in-points" : [
+              0,
+              -157
+            ]
+          }
+        },
+        {
+          "blend-mode-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : "normal"
+            }
+          ],
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.33894,0.53066,0.96831,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:0.50000,1.00000"
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "extended-gray:0.50000,1.00000"
+              }
+            }
+          ],
+          "glass" : true,
+          "hidden-specializations" : [
+            {
+              "value" : true
+            },
+            {
+              "idiom" : "square",
+              "value" : false
+            }
+          ],
+          "image-name" : "apollo_ring_large.svg",
+          "name" : "apollo_ring_large",
+          "opacity-specializations" : [
+            {
+              "value" : 1
+            },
+            {
+              "appearance" : "dark",
+              "value" : 0.2
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0.29
+            }
+          ],
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0,
+              -157
+            ]
+          }
+        },
+        {
+          "blend-mode-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : "normal"
+            }
+          ],
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.39282,0.42795,0.96588,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-gray:0.25000,1.00000"
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "extended-gray:0.25000,1.00000"
+              }
+            }
+          ],
+          "glass" : true,
+          "hidden-specializations" : [
+            {
+              "value" : true
+            },
+            {
+              "idiom" : "square",
+              "value" : false
+            }
+          ],
+          "image-name" : "apollo_ring_large.svg",
+          "name" : "apollo_ring_large",
+          "opacity-specializations" : [
+            {
+              "value" : 1
+            },
+            {
+              "appearance" : "dark",
+              "value" : 0.2
+            },
+            {
+              "appearance" : "tinted",
+              "value" : 0.5
+            }
+          ],
+          "position" : {
+            "scale" : 1.37,
+            "translation-in-points" : [
+              0,
+              -157
+            ]
+          }
+        },
+        {
+          "hidden" : true,
+          "image-name" : "duck.png",
+          "name" : "duck",
+          "position" : {
+            "scale" : 5.69,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.6
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.2
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
