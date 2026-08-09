@@ -343,20 +343,31 @@ If (2) or (5) fail, stop and reassess: ASDK re-measure cost under continuous
 resize is the assumption most likely to sink this design, and it is cheaper to
 learn now.
 
-> **Status (implementation started, branch `je/ipad-pane-layout`).** Phase 1 is
-> built and Phase 2 has landed for the detail column, in a **two-column** shape
-> rather than three: each tab's existing navigation controller became the split
-> controller's primary column, with a themed detail column beside it, and
-> `CommentsViewController` routes into that detail column. Verified on an iPad
-> Pro 13" simulator with a signed-in account. Phase 0's spike was folded into
-> Phase 1 rather than thrown away — the container work was the same either way,
-> and the exit criteria are being answered against real code.
+> **Status (branch `je/ipad-pane-layout`).** Phases 1 and 2 are built. Phase 0's
+> spike was folded into Phase 1 rather than thrown away — the container work was
+> the same either way, so the exit criteria are being answered against real code.
 >
-> Still open from Phase 0's criteria: **the Stage Manager drag-resize
-> measurement (§5.2) has not been taken yet.** Everything else in §4 below is
-> unchanged. The sidebar/destinations rail and the third column are next; until
-> then the floating tab bar stays, which means the layout is closer to the
-> "2 panes, tab bar stays" shape than the chosen end state.
+> **Working today**, verified on an iPad Pro 13" simulator with a signed-in
+> account: the Home tab runs three columns (subreddits → feed → comments), the
+> other four run two, tapping a post opens its thread beside the feed, and a
+> sidebar toggle reaches the subreddit list in portrait. The floating tab bar is
+> still present — the destinations rail that would replace it is not built.
+>
+> Phase 0 exit criteria:
+> | # | Criterion | Status |
+> |---|---|---|
+> | 1 | Subreddit list behaves in a narrow column | **Pass** — favorites, multireddits, moderator sections, A–Z index, Edit all intact |
+> | 2 | Feed re-measures on width change | **Partially** — correct at each discrete width; the continuous drag-resize case is untested |
+> | 3 | Comments render at reduced width | **Pass** — after the column-host fix (§5.2a) |
+> | 4 | Collapse/expand keeps the stack | **Untested** — needs Slide Over or a small Stage Manager window |
+> | 5 | Resize frame rate + three-column memory measured | **Not done** |
+>
+> Criteria 2, 4 and 5 all need a real device or a driven window resize, which the
+> simulator inner loop cannot produce. **They remain the outstanding risk**, and
+> §5.2 is still the assumption this design hangs on.
+>
+> Also verified: iPhone is completely untouched with the layout code compiled in
+> — zero pane log lines across a full launch and a normal single-column UI.
 
 ### Phase 1 — Foundation (no visible change)
 
