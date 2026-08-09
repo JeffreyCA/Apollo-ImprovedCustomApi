@@ -44,6 +44,11 @@ NS_ASSUME_NONNULL_BEGIN
 // respondsToSelector:, so ApolloCommon needs no dependency on this class.
 - (nullable UIViewController *)apollo_preferredContentColumnController;
 
+// Tell the pane its detail column's content changed, so it can reclaim the
+// sidebar's width for reading and hand it back when the column empties again.
+// Called by the router after it re-homes something, and internally on clear.
+- (void)apollo_detailContentDidChange;
+
 @end
 
 NS_ASSUME_NONNULL_END

@@ -105,6 +105,7 @@ static ApolloPaneColumn ApolloPaneColumnForViewController(UIViewController *view
 
     ApolloPaneSplitViewController *pane =
         (ApolloPaneSplitViewController *)ApolloPaneSplitControllerFor(self);
+
     if (!pane) { %orig; return; }
 
     // Collapsed (Slide Over, a narrow Stage Manager window, portrait on a small
@@ -128,7 +129,28 @@ static ApolloPaneColumn ApolloPaneColumnForViewController(UIViewController *view
         column = ApolloPaneColumnSecondary;
     }
 
-    if (column == ApolloPaneColumnInPlace) { %orig; return; }
+    if (column == ApolloPaneColumnInPlace) {
+        %orig;
+        // Guarantee a way back out of the detail column.
+        //
+        // Some Apollo screens are designed to be a TAB ROOT and supply their own
+        // leading bar items, so when one is pushed they render no back button at
+        // all. On iPhone that never happens — you reach them by selecting a tab,
+        // never by pushing. In the detail column it does: tapping your own
+        // username inside a comment thread pushes ProfileViewController onto the
+        // thread, and the result is a screen with the thread still underneath it
+        // and no affordance to return. That is the "stuck in a second profile"
+        // report, and it is not a routing problem — the push lands in exactly
+        // the right column.
+        //
+        // leftItemsSupplementBackButton keeps the screen's own items (the
+        // profile's hide/history buttons) rather than replacing them.
+        if (self.viewControllers.count > 1) {
+            viewController.navigationItem.hidesBackButton = NO;
+            viewController.navigationItem.leftItemsSupplementBackButton = YES;
+        }
+        return;
+    }
 
     UINavigationController *destination = [pane apollo_navigationControllerForColumn:column];
 
@@ -165,32 +187,12 @@ static ApolloPaneColumn ApolloPaneColumnForViewController(UIViewController *view
     }
     sPaneRouterReentrant = NO;
 
+    // The detail column just filled, so the pane can reclaim the sidebar's width
+    // for it.
+    [pane apollo_detailContentDidChange];
+
     ApolloLog(@"[PaneRouter] routed %@ to column %ld (tab %ld)",
               NSStringFromClass([viewController class]), (long)column, (long)pane.apollo_tabIndex);
-}
-
-// DIAGNOSTIC: Apollo does not always navigate through pushViewController:.
-// Tapping your own username in a comment thread replaces the detail column's
-// stack outright — the thread disappears with no back button and the router
-// never sees it — so something else is driving that navigation. Log the other
-// two entry points to find out which.
-- (void)setViewControllers:(NSArray<UIViewController *> *)viewControllers animated:(BOOL)animated {
-    if (ApolloPaneLayoutActive() && !sPaneRouterReentrant && ApolloPaneSplitControllerFor(self)) {
-        NSMutableArray<NSString *> *names = [NSMutableArray array];
-        for (UIViewController *vc in viewControllers) [names addObject:NSStringFromClass([vc class])];
-        ApolloLog(@"[PaneRouter] setViewControllers on %p: [%@] (was [%@])",
-                  self, [names componentsJoinedByString:@", "],
-                  [[self.viewControllers valueForKey:@"class"] componentsJoinedByString:@", "]);
-    }
-    %orig;
-}
-
-- (void)showViewController:(UIViewController *)vc sender:(id)sender {
-    if (ApolloPaneLayoutActive() && ApolloPaneSplitControllerFor(self)) {
-        ApolloLog(@"[PaneRouter] showViewController %@ on %p",
-                  NSStringFromClass([vc class]), self);
-    }
-    %orig;
 }
 
 %end

@@ -356,6 +356,9 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
 
 @interface ApolloPaneSplitViewController () <UISplitViewControllerDelegate> {
     BOOL _apollo_loggedResolvedLayout;
+    UIView *_apollo_grabber;
+    BOOL _apollo_sidebarManaged;      // we last set the sidebar's visibility
+    BOOL _apollo_sidebarWeSetHidden;  // ...to this
 }
 @property (nonatomic, strong) UINavigationController *apollo_primaryNav;   // the list column
 @property (nonatomic, strong) UINavigationController *apollo_detailNav;
@@ -511,6 +514,12 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
     self.delegate = self;
     [self apollo_applyGroundTheme];
 
+    // The columns are resizable by dragging the separator, but UIKit only
+    // reveals a grabber on pointer HOVER — with touch there is no hint at all
+    // that the divider does anything, so the capability goes unnoticed.
+    // A permanently visible grabber is the affordance.
+    [self apollo_installColumnGrabber];
+
     ApolloLog(@"[PaneSplit] tab %ld configured listRoot=%@ depth=%lu",
               (long)self.apollo_tabIndex,
               NSStringFromClass([rootNav.viewControllers.firstObject class]),
@@ -541,6 +550,50 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
 // One-shot diagnostic: what UIKit actually resolved, versus what we asked for.
 // preferredDisplayMode/preferredSplitBehavior are requests, and UIKit overrides
 // both when the available width cannot honor them.
+// A visible grabber on the column divider.
+//
+// Deliberately NOT a hit-testable control: UIKit's own separator already owns
+// the drag, and putting a view in front of it would break the resize rather than
+// advertise it. This is a pure marker — userInteractionEnabled = NO — pinned to
+// the divider so touches pass straight through to the real thing.
+//
+// The divider's own view is private and re-created across layouts, so the
+// grabber is positioned in viewDidLayoutSubviews against the list column's
+// trailing edge instead of being added as its subview.
+- (void)apollo_installColumnGrabber {
+    if (_apollo_grabber) return;
+
+    UIView *grabber = [[UIView alloc] initWithFrame:CGRectZero];
+    grabber.userInteractionEnabled = NO;
+    grabber.layer.cornerRadius = 2.5;
+    grabber.alpha = 0.55;
+    [self.view addSubview:grabber];
+    _apollo_grabber = grabber;
+    [self apollo_applyGrabberTheme];
+}
+
+- (void)apollo_applyGrabberTheme {
+    UIColor *accent = ApolloThemeAccentColor() ?: _apollo_grabber.tintColor;
+    _apollo_grabber.backgroundColor = accent ?: UIColor.separatorColor;
+}
+
+- (void)apollo_layoutColumnGrabber {
+    UIViewController *list = [self viewControllerForColumn:UISplitViewControllerColumnPrimary];
+    if (!_apollo_grabber || !list.isViewLoaded || !list.view.superview || self.isCollapsed) {
+        _apollo_grabber.hidden = YES;
+        return;
+    }
+    CGRect listFrame = [list.view.superview convertRect:list.view.frame toView:self.view];
+    if (CGRectIsEmpty(listFrame)) { _apollo_grabber.hidden = YES; return; }
+
+    static const CGFloat kWidth = 5.0, kHeight = 44.0;
+    _apollo_grabber.hidden = NO;
+    _apollo_grabber.frame = CGRectMake(CGRectGetMaxX(listFrame) - kWidth / 2.0,
+                                       CGRectGetMidY(listFrame) - kHeight / 2.0,
+                                       kWidth, kHeight);
+    [self.view bringSubviewToFront:_apollo_grabber];
+}
+
 // The ground the floating columns sit on.
 //
 // On iPhone the tab bar controller's own background is never visible. On iPadOS
@@ -555,10 +608,56 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
 - (void)traitCollectionDidChange:(UITraitCollection *)previous {
     [super traitCollectionDidChange:previous];
     [self apollo_applyGroundTheme];
+    [self apollo_applyGrabberTheme];
+}
+
+// Gives the reading pane the sidebar's width once there is something to read.
+//
+// The sidebar is a third region competing with two content columns: measured at
+// 1376pt landscape it takes 270 of them, leaving 480/616. Collapsing it to the
+// floating tab bar hands that 270 back — the same tab measures 480/886, a 44%
+// wider detail column — and the destinations stay one tap away in the tab bar,
+// so nothing becomes unreachable.
+//
+// Only ever fights the user once. If the sidebar's visibility is not what we
+// last set it to, the user changed it themselves through UIKit's own toggle, and
+// this stops managing it for the rest of the session — an auto-collapse that
+// keeps undoing a deliberate choice is worse than no auto-collapse at all.
+- (void)apollo_reconcileSidebarForDetailContent {
+    if (@available(iOS 18.0, *)) {
+        UITabBarController *tabBarController = self.tabBarController;
+        UITabBarControllerSidebar *sidebar = tabBarController.sidebar;
+        if (!sidebar || tabBarController.selectedViewController != self) return;
+        if (self.isCollapsed) return;
+
+        BOOL shouldHide = !self.apollo_detailIsEmpty;
+        if (sidebar.isHidden == shouldHide) return;
+
+        // The user moved it themselves since we last did; leave it alone.
+        if (_apollo_sidebarManaged && sidebar.isHidden != _apollo_sidebarWeSetHidden) return;
+
+        // ASYMMETRIC ON PURPOSE: only ever restore what we hid.
+        //
+        // UIKit persists the sidebar/tab-bar choice across launches, so a
+        // symmetric rule would force the sidebar back open on every launch with
+        // an empty detail column — overriding a preference the user set
+        // deliberately, using UIKit's own control, possibly sessions ago.
+        // Hiding is ours to do because the detail column filling is our event;
+        // showing is only ours to undo.
+        if (!shouldHide && !(_apollo_sidebarManaged && _apollo_sidebarWeSetHidden)) return;
+
+        sidebar.hidden = shouldHide;
+        _apollo_sidebarManaged = shouldHide;
+        _apollo_sidebarWeSetHidden = shouldHide;
+        ApolloLog(@"[PaneSplit] tab %ld sidebar %@ (detail %@)",
+                  (long)self.apollo_tabIndex, shouldHide ? @"hidden" : @"shown",
+                  shouldHide ? @"filled" : @"empty");
+    }
 }
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
+    [self apollo_layoutColumnGrabber];
     if (_apollo_loggedResolvedLayout) return;
     if (CGRectIsEmpty(self.view.bounds)) return;
     _apollo_loggedResolvedLayout = YES;
@@ -612,6 +711,11 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
                                                                symbolName:self.apollo_emptySymbol]
     ] animated:NO];
     ApolloLog(@"[PaneSplit] tab %ld detail column cleared", (long)self.apollo_tabIndex);
+    [self apollo_detailContentDidChange];
+}
+
+- (void)apollo_detailContentDidChange {
+    [self apollo_reconcileSidebarForDetailContent];
 }
 
 #pragma mark - UISplitViewControllerDelegate
