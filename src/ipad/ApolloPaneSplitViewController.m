@@ -3,7 +3,7 @@
 #import "ApolloPaneSplitViewController.h"
 #import <objc/runtime.h>
 #import "../ApolloCommon.h"        // ApolloLog
-#import "../ApolloThemeRuntime.h"  // ApolloThemeAccentColor / PageBackground / Separator
+#import "../ApolloThemeRuntime.h"  // ApolloThemeAccentColor
 
 #pragma mark - Detail placeholder
 
@@ -88,7 +88,19 @@
 }
 
 - (void)apollo_applyTheme {
-    self.view.backgroundColor = ApolloThemePageBackgroundColor() ?: UIColor.systemBackgroundColor;
+    // CLEAR, so the empty detail column is exactly the same colour as every
+    // other column rather than a colour we chose for it.
+    //
+    // This used to paint ApolloThemePageBackgroundColor(). That helper does not
+    // always agree with what Apollo actually draws: with a *tinted* theme and
+    // Apollo's pure-black dark mode on, the helper returns the theme's tint
+    // (measured: #0B1F28) while every real Apollo screen renders #000000. The
+    // detail column was then a teal panel sitting beside a black feed — a large
+    // part of why the layout read as disconnected windows rather than one app.
+    //
+    // Deferring to whatever is behind cannot disagree, because it *is* whatever
+    // the rest of the app is sitting on.
+    self.view.backgroundColor = UIColor.clearColor;
     UIColor *accent = ApolloThemeAccentColor() ?: self.view.tintColor;
     _iconView.tintColor = [accent colorWithAlphaComponent:0.45];
     _label.textColor = UIColor.secondaryLabelColor;
@@ -143,7 +155,22 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = ApolloThemePageBackgroundColor() ?: UIColor.systemBackgroundColor;
+
+    // CLEAR, deliberately — this view must never paint.
+    //
+    // It is laid out at the FULL window width (iPadOS 26 gives the secondary
+    // column the whole window and floats the other columns over it), while the
+    // navigation controller inside it is inset to the visible column. Giving it
+    // a background therefore does not tint "the detail column", it tints the
+    // entire window: behind the floating sidebar, in the gap between columns,
+    // and above the list column.
+    //
+    // That is exactly what went wrong. It painted ApolloThemePageBackgroundColor(),
+    // which is black under a pure-black theme and so looked correct — until a
+    // themed palette made it #0B1F28 and the whole app turned teal behind
+    // Apollo's own black screens. Only the controllers actually occupying a
+    // column may paint; this one is scaffolding.
+    self.view.backgroundColor = UIColor.clearColor;
 
     UINavigationController *nav = self.hostedNavigationController;
     if (!nav) return;
@@ -151,14 +178,76 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
     [self addChildViewController:nav];
     nav.view.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:nav.view];
+    // ALL FOUR edges pin to the safe area, vertically as well as horizontally.
+    //
+    // Leading/trailing is the Texture fix (see the class comment). Top/bottom
+    // used to pin to the view so the nav bar could extend under the status bar
+    // "as Apollo expects" — that was wrong, and it is what made the app read as
+    // three separate windows rather than one.
+    //
+    // Measured on an iPad Pro 13" landscape, the three navigation bars were:
+    //
+    //   sidebar   (10, 32, 270, 54)
+    //   list      (280, 32, 480, 54)
+    //   detail    (760, 86, 616, 54)   ← 54pt lower than both its neighbours
+    //
+    // UIKit positions the sidebar and the list column inside already-inset
+    // column views, so their bars start at the column's own top. The secondary
+    // column view spans the full window (0,0,1376,1032), so pinning the nav
+    // controller to its top told that controller it began at the very top of the
+    // screen and it applied the whole status-bar inset a second time. Pinning to
+    // the safe area gives it the same origin UIKit gave the other two, and the
+    // three bars line up.
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
-        [nav.view.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor],
-        [nav.view.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor],
-        [nav.view.topAnchor constraintEqualToAnchor:self.view.topAnchor],
-        [nav.view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [nav.view.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [nav.view.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [nav.view.topAnchor constraintEqualToAnchor:safe.topAnchor],
+        [nav.view.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],
     ]];
     [nav didMoveToParentViewController:self];
 }
+
+// UISplitViewController wraps any column view controller that is not already a
+// navigation controller in one of its own. This host is a plain UIViewController,
+// so the detail column ends up with TWO navigation bars stacked:
+//
+//   UIKit's wrapper bar   (0, 32, 1376, 54)   full width, empty, invisible
+//   Apollo's real bar     (760, 96, 616, 54)  pushed below it
+//
+// The wrapper bar is never seen, but it still reports itself through the safe
+// area — 86pt of top inset — which is what pushed Apollo's bar 54pt below the
+// sidebar's and the list column's bars and made the three columns read as three
+// separate windows. Its full-width background band was painting across the whole
+// app too.
+//
+// Hiding it costs nothing: the wrapper has no items, no title and no back
+// button, because everything the user interacts with lives on the real
+// navigation controller inside this host.
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    if (self.navigationController && !self.navigationController.navigationBarHidden) {
+        [self.navigationController setNavigationBarHidden:YES animated:NO];
+    }
+}
+
+// KNOWN REMAINING NIT, and what it is NOT.
+//
+// The detail column's navigation bar still sits 10pt lower than the sidebar's
+// and the list column's:
+//
+//   sidebar  bar (10, 32, 270, 54)   background (10, 32, 270, 54)
+//   list     bar (280, 32, 480, 54)  background (280, 32, 480, 54)
+//   detail   bar (760, 42, 616, 54)  background (760, 32, 616, 64)
+//
+// It is NOT a safe-area inset. An additionalSafeAreaInsets cancellation was
+// written, hooked to viewSafeAreaInsetsDidChange (viewDidLayoutSubviews alone
+// runs before the insets settle), and it never fired once —
+// `nav.view.safeAreaInsets.top` is genuinely 0. The extra 10pt lives inside
+// Apollo's own navigation bar layout: its bar background is 64pt tall here
+// against 54pt in the other two columns. Chasing it means going into the Liquid
+// Glass bar code, which is a separate concern with its own regression surface,
+// so it is recorded rather than guessed at.
 
 // The hosted navigation controller owns the chrome; forwarding these keeps the
 // host transparent to UIKit rather than having it answer for an empty view.

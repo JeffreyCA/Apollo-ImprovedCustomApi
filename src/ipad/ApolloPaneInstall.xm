@@ -122,6 +122,14 @@ static BOOL ApolloPaneInstallIntoTabBarController(UITabBarController *tabBarCont
                   (long)tabBarController.mode,
                   tabBarController.sidebar,
                   tabBarController.sidebar ? tabBarController.sidebar.isHidden : -1);
+
+        // NOT ATTEMPTED AGAIN: `sidebar.preferredLayout`.
+        // -[UITabBarControllerSidebar _resolvedLayout] maps preferredLayout 0
+        // (automatic) to 1 on iPad, and 1 is the FLOATING glass card. Layout 2
+        // is what non-Solarium macOS and visionOS resolve to, so it looked like
+        // the attached-sidebar switch. Setting it is a no-op here: the sidebar
+        // stayed at (10,32,270,990) with its _UIDuoShadowView. The floating
+        // treatment on iPadOS 26 is not reachable through this property.
     } else {
         ApolloLog(@"[PaneInstall] iOS < 18: no tab sidebar; keeping the tab bar beside the panes");
     }
