@@ -343,6 +343,21 @@ If (2) or (5) fail, stop and reassess: ASDK re-measure cost under continuous
 resize is the assumption most likely to sink this design, and it is cheaper to
 learn now.
 
+> **Status (implementation started, branch `je/ipad-pane-layout`).** Phase 1 is
+> built and Phase 2 has landed for the detail column, in a **two-column** shape
+> rather than three: each tab's existing navigation controller became the split
+> controller's primary column, with a themed detail column beside it, and
+> `CommentsViewController` routes into that detail column. Verified on an iPad
+> Pro 13" simulator with a signed-in account. Phase 0's spike was folded into
+> Phase 1 rather than thrown away — the container work was the same either way,
+> and the exit criteria are being answered against real code.
+>
+> Still open from Phase 0's criteria: **the Stage Manager drag-resize
+> measurement (§5.2) has not been taken yet.** Everything else in §4 below is
+> unchanged. The sidebar/destinations rail and the third column are next; until
+> then the floating tab bar stays, which means the layout is closer to the
+> "2 panes, tab bar stays" shape than the chosen end state.
+
 ### Phase 1 — Foundation (no visible change)
 
 - Settings key, state, gate, iPad-only row, relaunch flow.
@@ -429,6 +444,34 @@ resizes step through discrete widths (display-mode changes) far more often than
 they animate continuously — continuous re-measure mainly bites during Stage
 Manager window drags, where a debounce (re-measure on drag end, letterbox during)
 is an accepted pattern.
+
+### 5.2a iPadOS 26 floats the sidebar over a FULL-WIDTH secondary — **confirmed, and it bites Texture immediately**
+
+Found while building Phase 1, from a live hierarchy dump on an iPad Pro 13":
+
+```
+secondary  _UISplitViewControllerAdaptiveColumnView  (0, 0, 1032, 1312)   ← full window
+primary    _UISplitViewControllerAdaptiveColumnView  (10, 86,  413, 1216) ← inset glass panel
+```
+
+The secondary column is laid out at the **full window width** and the sidebar
+floats over it as a Liquid Glass panel. This is the iPadOS 26 design, not a
+misconfiguration — `preferredSplitBehavior = .tile` does not change it.
+
+UIKit expects content to respect the resulting left safe-area inset. **Texture
+does not**: `ASTableView` measures its nodes against its own bounds, not its
+adjusted content inset. Every comment measured 1032pt wide, got pushed right by
+the inset, and ran off the right edge of the screen.
+
+Fix shipped: `ApolloPaneColumnHostViewController` wraps the detail column's
+navigation controller and pins it leading/trailing to the safe area (top/bottom
+still to the view, so the nav bar keeps extending under the status bar). The
+navigation controller's view is then genuinely only as wide as the uncovered
+region, and Texture measures correctly with no changes to Apollo or ASDK.
+
+**Generalize this.** Any column we add later inherits the same problem, and so
+does any tweak-drawn UI placed in the secondary column. The rule is: never let
+Texture content size itself from a view that the sidebar overlaps.
 
 ### 5.3 Full-width chrome assumptions — **largest hidden cost**
 
