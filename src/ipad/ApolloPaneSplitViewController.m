@@ -420,6 +420,11 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
     } else if ([rootClass hasSuffix:@"SearchViewController"]) {
         message = @"Search Reddit";
         symbol = @"magnifyingglass";
+    } else if ([rootClass hasSuffix:@"ProfileViewController"]) {
+        // The profile's detail column holds whatever row you picked — a post
+        // list, trophies, friends — so it cannot promise a post.
+        message = @"Nothing Selected";
+        symbol = @"person.crop.circle";
     }
 
     self.apollo_detailNav = [self apollo_makeNavigationControllerWithRoot:

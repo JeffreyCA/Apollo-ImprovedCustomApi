@@ -71,6 +71,14 @@ static BOOL sPaneRouterReentrant = NO;
 static BOOL ApolloPaneIsIndexRootController(UIViewController *viewController) {
     static const char *kIndexRoots[] = {
         "_TtC6Apollo22SettingsViewController",
+        // Profile is an index by product decision rather than by structure. Its
+        // rows DO lead to post lists, so this knowingly costs one thing: a post
+        // opened from Saved (or Posts, Comments, Upvoted…) replaces that list in
+        // the detail column rather than opening beside it, because the list is
+        // already occupying the only column a thread could go to. Back returns
+        // to it. Bought in exchange for the profile card never leaving screen,
+        // which is what the tab is for.
+        "_TtC6Apollo21ProfileViewController",
     };
     for (size_t i = 0; i < sizeof(kIndexRoots) / sizeof(kIndexRoots[0]); i++) {
         Class cls = objc_getClass(kIndexRoots[i]);
