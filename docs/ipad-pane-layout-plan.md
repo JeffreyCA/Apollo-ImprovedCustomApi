@@ -506,7 +506,37 @@ itself. `ApolloPaneChrome.xm` exists to hold the reconciliation, and the
 `UIScreen.mainScreen` readers should migrate to the owning view's window/traits
 regardless of this project — that migration is independently correct.
 
-### 5.4 Gesture conflicts — now concrete
+### 5.4a Testing constraint: the simulator runs against a LIVE account
+
+The sim inner loop restores a real signed-in Reddit session, so **any scripted
+gesture that lands on a post or comment performs a real action on that account**.
+This was learned the hard way: a swipe issued to test column-boundary gestures
+was consumed by Apollo's swipe-to-vote and cast a genuine downvote, and the
+scripted tap bridge could not reliably reach the ASDK action button to undo it
+(taps land on `_ASDisplayView` without activating the node).
+
+Rules for the rest of this work:
+- Gesture and interaction testing on feed/comment content needs a **throwaway
+  Reddit account**, not the developer's own session.
+- The tap bridge is fine for navigation chrome (tab bar, nav bar buttons,
+  toggles) — those are idempotent. It is not safe for content rows.
+- Prefer read-only verification (screenshots, hierarchy dumps, resolved-layout
+  logs) over driving interactions whenever it answers the question.
+
+### 5.4 Gesture conflicts — partly disproved by testing
+
+**Update from measurement.** The prediction below was pessimistic. A leading-edge
+drag *inside the detail column* did **not** trigger Apollo's interactive pop —
+the gesture was consumed by Apollo's own swipe-to-vote on the comment row. So
+the "every interior boundary has an Apollo edge recognizer on each side of it"
+concern did not reproduce at the feed/detail boundary.
+
+That is one boundary, one direction, on one layout, and the test could not be
+repeated safely (§5.4a). Treat the analysis below as **unvalidated** rather than
+either confirmed or refuted, and finish it on device with a throwaway account
+before Phase 4.
+
+The original analysis:
 
 `ApolloNavigationController` installs a left screen-edge pan (interactive pop),
 a **right screen-edge pan (go forward — confirmed: it re-pushes the tail of the
