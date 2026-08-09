@@ -145,11 +145,33 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
 @property (nonatomic, strong, readonly) UINavigationController *hostedNavigationController;
 @end
 
-@implementation ApolloPaneColumnHostViewController
+@implementation ApolloPaneColumnHostViewController {
+    NSLayoutConstraint *_topConstraint;
+    NSLayoutConstraint *_bottomConstraint;
+}
 
 - (instancetype)initWithNavigationController:(UINavigationController *)navigationController {
     self = [super initWithNibName:nil bundle:nil];
-    if (self) _hostedNavigationController = navigationController;
+    if (self) {
+        _hostedNavigationController = navigationController;
+
+        // The same tab-bar reservation the pane itself has to opt out of (see
+        // the pane's configure method), one level further down.
+        //
+        // UISplitViewController wraps this host in a navigation controller of
+        // its own, and THAT controller applies the identical
+        // -[UITabBarController _frameForViewController:] rule to its child: it
+        // subtracts the opaque tab bar's height unless the child extends under
+        // it. The pane opting in did not help, because this host is a separate
+        // controller that never inherited the flag.
+        //
+        // Measured: the host's view came out (0,0,1376,968) inside a 1032pt
+        // wrapper, so the detail column ended at 968 while the list column ended
+        // at 1022 — the comment list stopping 54pt above the bottom of the
+        // screen with a band of background under it.
+        self.edgesForExtendedLayout = UIRectEdgeAll;
+        self.extendedLayoutIncludesOpaqueBars = YES;
+    }
     return self;
 }
 
@@ -198,12 +220,24 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
     // screen and it applied the whole status-bar inset a second time. Pinning to
     // the safe area gives it the same origin UIKit gave the other two, and the
     // three bars line up.
+    // Leading/trailing follow the safe area — that is the Texture fix, and it is
+    // the only thing the safe area gets to decide here.
+    //
+    // Top/bottom are driven manually against the LIST column's real frame (see
+    // apollo_matchListColumnGeometry). The safe area is the wrong input for
+    // them: it produced a detail column running 32→1012 against the list
+    // column's 32→1022, and it cannot express the 10pt the navigation bar
+    // inserts above itself.
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    _topConstraint = [nav.view.topAnchor constraintEqualToAnchor:self.view.topAnchor
+                                                        constant:self.view.safeAreaInsets.top];
+    _bottomConstraint = [self.view.bottomAnchor constraintEqualToAnchor:nav.view.bottomAnchor
+                                                              constant:self.view.safeAreaInsets.bottom];
     [NSLayoutConstraint activateConstraints:@[
         [nav.view.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
         [nav.view.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
-        [nav.view.topAnchor constraintEqualToAnchor:safe.topAnchor],
-        [nav.view.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],
+        _topConstraint,
+        _bottomConstraint,
     ]];
     [nav didMoveToParentViewController:self];
 }
@@ -231,23 +265,62 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
     }
 }
 
-// KNOWN REMAINING NIT, and what it is NOT.
+// Lines the detail column up with the list column exactly, top and bottom.
 //
-// The detail column's navigation bar still sits 10pt lower than the sidebar's
-// and the list column's:
+// WHY NOT THE SAFE AREA. Both navigation controllers report a top safe-area
+// inset of ZERO, and yet:
 //
-//   sidebar  bar (10, 32, 270, 54)   background (10, 32, 270, 54)
-//   list     bar (280, 32, 480, 54)  background (280, 32, 480, 54)
-//   detail   bar (760, 42, 616, 54)  background (760, 32, 616, 64)
+//   list    view {0,0,480,990}     bar at y=0    (column starts at 32 → bar at 32)
+//   detail  view {760,32,616,980}  bar at y=10   (→ bar at 42)
 //
-// It is NOT a safe-area inset. An additionalSafeAreaInsets cancellation was
-// written, hooked to viewSafeAreaInsetsDidChange (viewDidLayoutSubviews alone
-// runs before the insets settle), and it never fired once —
-// `nav.view.safeAreaInsets.top` is genuinely 0. The extra 10pt lives inside
-// Apollo's own navigation bar layout: its bar background is 64pt tall here
-// against 54pt in the other two columns. Chasing it means going into the Liquid
-// Glass bar code, which is a separate concern with its own regression surface,
-// so it is recorded rather than guessed at.
+// The 10pt is not an inset we can cancel — it is where Apollo's navigation
+// controller puts its own bar. UIKit's split view positions the list column's
+// navigation controller itself and gets y=0; the same class, parented into this
+// host, lays its bar at y=10. So the fix is not to argue with the bar but to
+// offset the view by exactly the gap the bar leaves, measured each layout.
+//
+// The bottom is the same idea from the other side: the safe area put the detail
+// column's bottom at 1012 against the list column's 1022, which is the band of
+// empty background under the comment list. Matching the list column's maxY
+// removes it, and matching is more robust than any constant since it tracks
+// whatever inset the platform applies to that column.
+//
+// Both values are read from the real frame every layout pass, and written only
+// when they actually change, so this cannot oscillate.
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    [self apollo_matchListColumnGeometry];
+}
+
+- (void)apollo_matchListColumnGeometry {
+    UINavigationController *nav = self.hostedNavigationController;
+    if (!nav.isViewLoaded || !_topConstraint || !_bottomConstraint) return;
+
+    CGFloat height = self.view.bounds.size.height;
+    if (height <= 0.0) return;
+
+    // Fall back to the safe area whenever the list column cannot be measured —
+    // collapsed, mid-transition, or not yet loaded.
+    CGFloat top = self.view.safeAreaInsets.top;
+    CGFloat bottom = self.view.safeAreaInsets.bottom;
+
+    UISplitViewController *split = self.splitViewController;
+    UIViewController *list = [split isKindOfClass:[UISplitViewController class]]
+        ? [split viewControllerForColumn:UISplitViewControllerColumnPrimary]
+        : nil;
+    if (list.isViewLoaded && list.view.superview && !split.isCollapsed) {
+        CGRect listFrame = [list.view.superview convertRect:list.view.frame toView:self.view];
+        if (!CGRectIsEmpty(listFrame)) {
+            // Pull the view up by the bar's own offset so the two BARS align,
+            // not the two view origins.
+            top = CGRectGetMinY(listFrame) - nav.navigationBar.frame.origin.y;
+            bottom = height - CGRectGetMaxY(listFrame);
+        }
+    }
+
+    if (fabs(_topConstraint.constant - top) > 0.5) _topConstraint.constant = top;
+    if (fabs(_bottomConstraint.constant - bottom) > 0.5) _bottomConstraint.constant = bottom;
+}
 
 // The hosted navigation controller owns the chrome; forwarding these keeps the
 // host transparent to UIKit rather than having it answer for an empty view.
