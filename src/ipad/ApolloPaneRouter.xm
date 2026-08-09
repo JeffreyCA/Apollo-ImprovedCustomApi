@@ -169,6 +169,30 @@ static ApolloPaneColumn ApolloPaneColumnForViewController(UIViewController *view
               NSStringFromClass([viewController class]), (long)column, (long)pane.apollo_tabIndex);
 }
 
+// DIAGNOSTIC: Apollo does not always navigate through pushViewController:.
+// Tapping your own username in a comment thread replaces the detail column's
+// stack outright — the thread disappears with no back button and the router
+// never sees it — so something else is driving that navigation. Log the other
+// two entry points to find out which.
+- (void)setViewControllers:(NSArray<UIViewController *> *)viewControllers animated:(BOOL)animated {
+    if (ApolloPaneLayoutActive() && !sPaneRouterReentrant && ApolloPaneSplitControllerFor(self)) {
+        NSMutableArray<NSString *> *names = [NSMutableArray array];
+        for (UIViewController *vc in viewControllers) [names addObject:NSStringFromClass([vc class])];
+        ApolloLog(@"[PaneRouter] setViewControllers on %p: [%@] (was [%@])",
+                  self, [names componentsJoinedByString:@", "],
+                  [[self.viewControllers valueForKey:@"class"] componentsJoinedByString:@", "]);
+    }
+    %orig;
+}
+
+- (void)showViewController:(UIViewController *)vc sender:(id)sender {
+    if (ApolloPaneLayoutActive() && ApolloPaneSplitControllerFor(self)) {
+        ApolloLog(@"[PaneRouter] showViewController %@ on %p",
+                  NSStringFromClass([vc class]), self);
+    }
+    %orig;
+}
+
 %end
 
 %end
