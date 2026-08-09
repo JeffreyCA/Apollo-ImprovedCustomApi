@@ -75,11 +75,74 @@
 
 @end
 
+#pragma mark - Column host
+
+// Insets a column's navigation controller to the part of the column the sidebar
+// is not covering.
+//
+// WHY THIS EXISTS. On iPadOS 26 a split view controller lays the secondary
+// column out at the FULL window width and floats the sidebar over it as a glass
+// panel — verified from a live hierarchy dump on an iPad Pro 13":
+//
+//   secondary  _UISplitViewControllerAdaptiveColumnView  (0, 0, 1032, 1312)
+//   primary    _UISplitViewControllerAdaptiveColumnView  (10, 86, 413, 1216)
+//
+// UIKit expects content to respect the resulting left safe-area inset. Apollo's
+// screens are Texture (AsyncDisplayKit) table nodes, and ASTableView measures
+// its nodes against its own bounds, not its adjusted content inset — so every
+// comment measured 1032pt wide, got pushed right by the inset, and ran off the
+// right edge of the screen.
+//
+// Rather than fight ASTableView's measurement, give the navigation controller a
+// view that is genuinely only as wide as the visible column. Leading/trailing
+// pin to the safe area (the uncovered region); top/bottom pin to the view so
+// the navigation bar still extends under the status bar as Apollo expects.
+@interface ApolloPaneColumnHostViewController : UIViewController
+- (instancetype)initWithNavigationController:(UINavigationController *)navigationController;
+@property (nonatomic, strong, readonly) UINavigationController *hostedNavigationController;
+@end
+
+@implementation ApolloPaneColumnHostViewController
+
+- (instancetype)initWithNavigationController:(UINavigationController *)navigationController {
+    self = [super initWithNibName:nil bundle:nil];
+    if (self) _hostedNavigationController = navigationController;
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = ApolloThemePageBackgroundColor() ?: UIColor.systemBackgroundColor;
+
+    UINavigationController *nav = self.hostedNavigationController;
+    if (!nav) return;
+
+    [self addChildViewController:nav];
+    nav.view.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:nav.view];
+    [NSLayoutConstraint activateConstraints:@[
+        [nav.view.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor],
+        [nav.view.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor],
+        [nav.view.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [nav.view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+    ]];
+    [nav didMoveToParentViewController:self];
+}
+
+// The hosted navigation controller owns the chrome; forwarding these keeps the
+// host transparent to UIKit rather than having it answer for an empty view.
+- (UIViewController *)childViewControllerForStatusBarStyle { return self.hostedNavigationController; }
+- (UIViewController *)childViewControllerForStatusBarHidden { return self.hostedNavigationController; }
+- (UIViewController *)childViewControllerForHomeIndicatorAutoHidden { return self.hostedNavigationController; }
+
+@end
+
 #pragma mark - Pane split controller
 
 @interface ApolloPaneSplitViewController () <UISplitViewControllerDelegate>
 @property (nonatomic, strong) UINavigationController *apollo_primaryNav;
 @property (nonatomic, strong) UINavigationController *apollo_detailNav;
+@property (nonatomic, strong) UIViewController *apollo_detailHost;
 @end
 
 @implementation ApolloPaneSplitViewController
@@ -100,7 +163,12 @@
     self.apollo_detailNav = [self apollo_makeDetailNavigationController];
 
     [self setViewController:rootNav forColumn:UISplitViewControllerColumnPrimary];
-    [self setViewController:self.apollo_detailNav forColumn:UISplitViewControllerColumnSecondary];
+    // The secondary column is the full-width one the sidebar floats over, so it
+    // is the one that needs the safe-area host (see ApolloPaneColumnHostViewController).
+    // The primary column is already laid out as its own inset panel.
+    self.apollo_detailHost =
+        [[ApolloPaneColumnHostViewController alloc] initWithNavigationController:self.apollo_detailNav];
+    [self setViewController:self.apollo_detailHost forColumn:UISplitViewControllerColumnSecondary];
 
     // Tile, never overlay: a detail pane that floats over the list re-creates
     // the blown-up-iPhone feel this layout exists to remove.

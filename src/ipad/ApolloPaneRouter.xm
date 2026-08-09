@@ -1,0 +1,132 @@
+// ApolloPaneRouter.xm
+//
+// Decides which column a pushed view controller belongs in, and redirects it
+// there. This is the only file that changes where navigation lands.
+//
+// ALLOWLIST, NEVER BLOCKLIST. Only classes named in kPaneRoutes are moved;
+// everything else pushes in place, exactly as it does today. Apollo ships ~90
+// view controllers and the tweak adds its own, so an allowlist is the only
+// default that cannot silently break a screen nobody thought about.
+//
+// WHY HOOK THE OBJC SHIM. `-[ApolloNavigationController pushViewController:
+// animated:]` is a thin Objective-C shim over one Swift body (sub_10015c720,
+// recovered with Hopper). Logos hooks the shim, so returning early means
+// Apollo's Swift body never runs on the wrong navigation controller. That body
+// also **silently drops a push when the controller is already in the stack** —
+// which is why a reroute must never leave the controller in the source stack,
+// and why we re-home it with setViewControllers: rather than splicing arrays.
+//
+// Full design + RE notes: docs/ipad-pane-layout-plan.md
+
+#import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+#import "ApolloPaneLayout.h"
+#import "ApolloPaneSplitViewController.h"
+#import "../ApolloCommon.h"
+
+typedef struct {
+    const char *className;
+    ApolloPaneColumn column;
+} ApolloPaneRoute;
+
+// Matched with isKindOfClass:, so subclasses inherit their parent's column.
+//
+// The comment-LIST controllers are deliberately absent: despite their names,
+// AllSubredditComments / SavedPostsComments / UserComments are feeds whose rows
+// open a real CommentsViewController, so they belong wherever they are pushed
+// and their selections route to the detail column on their own.
+static const ApolloPaneRoute kPaneRoutes[] = {
+    // The headline case: a post's comment thread opens beside its feed.
+    { "_TtC6Apollo22CommentsViewController", ApolloPaneColumnSecondary },
+
+    // Feeds. Routed as content so that opening a new one clears whatever thread
+    // is sitting in the detail column — a comment thread beside an unrelated
+    // feed is worse than an empty pane.
+    { "_TtC6Apollo19PostsViewController",     ApolloPaneColumnSupplementary },
+    { "_TtC6Apollo23LitePostsViewController", ApolloPaneColumnSupplementary },
+};
+
+// Re-entrancy guard: our own re-homing must never be re-classified. Main thread
+// only, like every UIKit navigation call this hook sits on.
+static BOOL sPaneRouterReentrant = NO;
+
+static ApolloPaneColumn ApolloPaneColumnForViewController(UIViewController *viewController) {
+    if (!viewController) return ApolloPaneColumnInPlace;
+    for (size_t i = 0; i < sizeof(kPaneRoutes) / sizeof(kPaneRoutes[0]); i++) {
+        Class cls = objc_getClass(kPaneRoutes[i].className);
+        if (cls && [viewController isKindOfClass:cls]) return kPaneRoutes[i].column;
+    }
+    return ApolloPaneColumnInPlace;
+}
+
+%group ApolloPaneRouterGroup
+
+%hook UINavigationController
+
+- (void)pushViewController:(UIViewController *)viewController animated:(BOOL)animated {
+    if (!ApolloPaneLayoutActive() || sPaneRouterReentrant) { %orig; return; }
+
+    ApolloPaneSplitViewController *pane =
+        (ApolloPaneSplitViewController *)ApolloPaneSplitControllerFor(self);
+    if (!pane) { %orig; return; }
+
+    // Collapsed (Slide Over, a narrow Stage Manager window, portrait on a small
+    // iPad) is a single merged stack and must behave exactly like today's app.
+    if (pane.isCollapsed) { %orig; return; }
+
+    ApolloPaneColumn column = ApolloPaneColumnForViewController(viewController);
+    if (column == ApolloPaneColumnInPlace) { %orig; return; }
+
+    UINavigationController *destination = [pane apollo_navigationControllerForColumn:column];
+
+    // Already in the right column. A feed arriving here means the user moved to
+    // different content, so the stale thread beside it goes.
+    if (!destination || destination == self) {
+        if (column != ApolloPaneColumnSecondary) [pane apollo_clearDetailColumn];
+        %orig;
+        return;
+    }
+
+    // Cross-column. Re-home rather than push: this REPLACES the destination
+    // stack, so opening a second post swaps the thread instead of burying the
+    // first one under a back button, and the placeholder disappears with it.
+    //
+    // setViewControllers: is plain UIKit — Apollo overrides pushViewController:
+    // and the pop family, but not this — so the one thing Apollo's push body
+    // would have done that still matters here is applied by hand below.
+    // The rest of that body (its duplicate guard, the interactive-transition
+    // `pushing` flag, the hidden-nav-bar re-show timer loop) is specific to an
+    // animated push onto an existing stack and does not apply to replacing a
+    // column's root.
+    viewController.extendedLayoutIncludesOpaqueBars = YES;
+
+    sPaneRouterReentrant = YES;
+    @try {
+        [destination setViewControllers:@[ viewController ] animated:NO];
+    } @catch (NSException *exception) {
+        ApolloLog(@"[PaneRouter] re-homing %@ threw: %@; falling back to an in-place push",
+                  NSStringFromClass([viewController class]), exception);
+        sPaneRouterReentrant = NO;
+        %orig;
+        return;
+    }
+    sPaneRouterReentrant = NO;
+
+    ApolloLog(@"[PaneRouter] routed %@ to column %ld (tab %ld)",
+              NSStringFromClass([viewController class]), (long)column, (long)pane.apollo_tabIndex);
+}
+
+%end
+
+%end
+
+%ctor {
+    // iPhone never installs this, and neither does an iPad with the layout off:
+    // ApolloPaneLayoutActive() would be NO for the whole process anyway, so the
+    // hook would be pure overhead on Apollo's hottest navigation path.
+    if (!ApolloPaneLayoutEnabled()) return;
+
+    %init(ApolloPaneRouterGroup);
+    ApolloLog(@"[PaneRouter] installed with %lu routed classes",
+              (unsigned long)(sizeof(kPaneRoutes) / sizeof(kPaneRoutes[0])));
+}
