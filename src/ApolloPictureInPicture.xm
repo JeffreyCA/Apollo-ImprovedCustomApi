@@ -251,12 +251,14 @@ static BOOL PiPIsVideoMidpointVisible(id videoNode, id cellNode) {
         if (tab.tabBar.window) {
             bottomY -= tab.tabBar.bounds.size.height;
         }
-        UIViewController *selected = tab.selectedViewController;
-        if ([selected isKindOfClass:[UINavigationController class]]) {
-            UINavigationBar *navBar = ((UINavigationController *)selected).navigationBar;
-            if (navBar.window) {
-                topY = CGRectGetMaxY([navBar convertRect:navBar.bounds toView:nil]);
-            }
+        // Unwraps the iPad pane layout's split view controller; identity
+        // otherwise. Any column's bar gives the same top inset — they are laid
+        // out at the same y — so the primary column's is enough.
+        UINavigationController *selectedNav =
+            ApolloNavigationControllerForTabChild(tab.selectedViewController);
+        UINavigationBar *navBar = selectedNav.navigationBar;
+        if (navBar.window) {
+            topY = CGRectGetMaxY([navBar convertRect:navBar.bounds toView:nil]);
         }
     }
 

@@ -93,12 +93,10 @@ static BOOL ApolloQuickActionsOpenHomeFeed(id tabBarController) {
     }
 
     UIViewController *selected = [(UITabBarController *)tabBarController selectedViewController];
-    UINavigationController *nav = nil;
-    if ([selected isKindOfClass:UINavigationController.class]) {
-        nav = (UINavigationController *)selected;
-    } else if ([selected.navigationController isKindOfClass:UINavigationController.class]) {
-        nav = selected.navigationController;
-    }
+    // Unwraps the iPad pane layout's split view controller; identity otherwise.
+    // The Home tab's root list lives in the primary column, which is what the
+    // RedditListViewController assertion below expects.
+    UINavigationController *nav = ApolloNavigationControllerForTabChild(selected);
     if (!nav) {
         ApolloLog(@"[QuickActions] Home: no navigation controller for selected tab %@", selected);
         return NO;
@@ -198,12 +196,8 @@ static BOOL ApolloQuickActionsOpenModernMailboxNow(NSDictionary<NSString *, NSSt
 
     if (![tabBarController isKindOfClass:[UITabBarController class]]) return NO;
     UIViewController *selected = [(UITabBarController *)tabBarController selectedViewController];
-    UINavigationController *navigationController = nil;
-    if ([selected isKindOfClass:[UINavigationController class]]) {
-        navigationController = (UINavigationController *)selected;
-    } else if ([selected.navigationController isKindOfClass:[UINavigationController class]]) {
-        navigationController = selected.navigationController;
-    }
+    // Unwraps the iPad pane layout's split view controller; identity otherwise.
+    UINavigationController *navigationController = ApolloNavigationControllerForTabChild(selected);
     if (!navigationController) return NO;
 
     NSString *kind = route[@"kind"];

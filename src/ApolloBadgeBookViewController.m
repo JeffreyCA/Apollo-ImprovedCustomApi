@@ -1401,6 +1401,12 @@ static UIViewController *ApolloBBSimContentVC(void) {
     while (1) {
         if ([vc isKindOfClass:[UITabBarController class]]) vc = ((UITabBarController *)vc).selectedViewController;
         else if ([vc isKindOfClass:[UINavigationController class]]) vc = ((UINavigationController *)vc).topViewController;
+        // The iPad pane layout inserts a split view controller under each tab.
+        else if ([vc isKindOfClass:[UISplitViewController class]]) {
+            UIViewController *column = ApolloContentColumnForSplitViewController((UISplitViewController *)vc);
+            if (!column || column == vc) break;
+            vc = column;
+        }
         else break;
     }
     return vc;

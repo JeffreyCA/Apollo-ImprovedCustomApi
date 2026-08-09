@@ -122,6 +122,12 @@ extern NSInteger sTabBarCollapseSide;
 // bottom (classic) instead of the top-center pill. Opt-in; default OFF via
 // registerDefaults. Temporary stopgap for issue #387. See ApolloIPadTabBarBottom.xm.
 extern BOOL sIPadTabBarBottom;
+// iPad only. When ON, each tab's navigation stack is hosted inside a
+// multi-column UISplitViewController (sidebar → content → detail) instead of a
+// single full-width stack. Opt-in; default OFF via registerDefaults
+// (UDKeyIPadPaneLayout). Read once at %ctor — installation happens at scene
+// connect, so changing it needs a relaunch. See src/ipad/ApolloPaneLayout.h.
+extern BOOL sIPadPaneLayout;
 // When ON, neutralizes Apollo's feed/subreddit search takeover (nav-hide + fade + toolbar
 // dock/grow); the field stays put and results populate the feed in place. Liquid Glass only;
 // mutually exclusive with the default nav-hide mode. See ApolloSearchInPlace.xm.

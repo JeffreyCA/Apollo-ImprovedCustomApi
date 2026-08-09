@@ -1231,6 +1231,115 @@ UIViewController *ApolloMainTabBarController(void) {
     return ApolloTabBarControllerIvarOn(application.delegate);
 }
 
+// Deliberately implemented with plain UIKit rather than by asking the pane
+// module: ApolloCommon is included by nearly every file, and a dependency on
+// src/ipad/ would drag the iPad layout into translation units that must stay
+// free of it. Class-shape matching is enough — no gate check is needed, because
+// a tab child is only ever a split view controller when the layout installed.
+static UINavigationController *ApolloNavigationControllerForSplitColumn(UISplitViewController *split,
+                                                                        UISplitViewControllerColumn column) {
+    UIViewController *columnController = nil;
+    if ([split respondsToSelector:@selector(viewControllerForColumn:)]) {
+        @try {
+            columnController = [split viewControllerForColumn:column];
+        } @catch (NSException *exception) {
+            ApolloLog(@"[Common] viewControllerForColumn: threw on %@: %@", split, exception);
+        }
+    }
+    // A split controller built with the legacy `viewControllers` API answers nil
+    // for every column. Fall back to positional lookup so such a controller
+    // still resolves instead of silently returning nothing.
+    if (!columnController) {
+        NSArray<UIViewController *> *children = split.viewControllers;
+        NSUInteger index = (column == UISplitViewControllerColumnSecondary) ? 1 : 0;
+        if (index < children.count) columnController = children[index];
+    }
+    return [columnController isKindOfClass:[UINavigationController class]]
+        ? (UINavigationController *)columnController
+        : nil;
+}
+
+BOOL ApolloViewControllerContains(UIViewController *ancestor, UIViewController *descendant) {
+    if (!ancestor || !descendant) return NO;
+    for (UIViewController *node = descendant; node != nil; node = node.parentViewController) {
+        if (node == ancestor) return YES;
+    }
+    return NO;
+}
+
+BOOL ApolloSelectTabContainingViewController(UITabBarController *tabBarController,
+                                             UIViewController *descendant) {
+    if (![tabBarController isKindOfClass:[UITabBarController class]] || !descendant) return NO;
+
+    // Climb to whichever ancestor is the tab bar controller's own child: that is
+    // the navigation controller itself in the stock layout, and the enclosing
+    // split view controller under the pane layout.
+    for (UIViewController *node = descendant; node != nil; node = node.parentViewController) {
+        if (node.parentViewController == tabBarController) {
+            tabBarController.selectedViewController = node;
+            return YES;
+        }
+    }
+    ApolloLog(@"[Common] %@ is not inside any tab of %@; selection unchanged",
+              NSStringFromClass([descendant class]), NSStringFromClass([tabBarController class]));
+    return NO;
+}
+
+UIViewController *ApolloContentColumnForSplitViewController(UISplitViewController *split) {
+    if (![split isKindOfClass:[UISplitViewController class]]) return split;
+
+    SEL preferred = NSSelectorFromString(@"apollo_preferredContentColumnController");
+    if ([split respondsToSelector:preferred]) {
+        @try {
+            UIViewController *column = ((UIViewController *(*)(id, SEL))objc_msgSend)(split, preferred);
+            if (column) return column;
+        } @catch (NSException *exception) {
+            ApolloLog(@"[Common] preferred content column threw on %@: %@", split, exception);
+        }
+    }
+
+    // Any other split view controller: the trailing column is the detail one.
+    UIViewController *fallback = split.viewControllers.lastObject ?: split.viewControllers.firstObject;
+    return fallback ?: split;
+}
+
+UINavigationController *ApolloNavigationControllerForTabChild(UIViewController *child) {
+    if (!child) return nil;
+    if ([child isKindOfClass:[UINavigationController class]]) return (UINavigationController *)child;
+    if ([child isKindOfClass:[UISplitViewController class]]) {
+        return ApolloNavigationControllerForSplitColumn((UISplitViewController *)child,
+                                                        UISplitViewControllerColumnPrimary);
+    }
+    // Not a container we recognize — fall back to the controller's own
+    // navigation controller, which covers a plain view controller hosted
+    // directly in a tab.
+    return child.navigationController;
+}
+
+NSArray<UINavigationController *> *ApolloAllNavigationControllersForTabChild(UIViewController *child) {
+    if (!child) return @[];
+
+    if ([child isKindOfClass:[UISplitViewController class]]) {
+        UISplitViewController *split = (UISplitViewController *)child;
+        NSMutableArray<UINavigationController *> *navs = [NSMutableArray arrayWithCapacity:3];
+        const UISplitViewControllerColumn columns[] = {
+            UISplitViewControllerColumnPrimary,
+            UISplitViewControllerColumnSupplementary,
+            UISplitViewControllerColumnSecondary,
+        };
+        for (size_t i = 0; i < sizeof(columns) / sizeof(columns[0]); i++) {
+            UINavigationController *nav = ApolloNavigationControllerForSplitColumn(split, columns[i]);
+            // A two-column install answers the same controller for more than one
+            // column; de-duplicate so walkers do not visit a stack twice.
+            if (nav && ![navs containsObject:nav]) [navs addObject:nav];
+        }
+        return navs;
+    }
+
+    UINavigationController *nav = ApolloNavigationControllerForTabChild(child);
+    return nav ? @[ nav ] : @[];
+}
+
 #pragma mark - Color Helpers
 
 UIColor *ApolloColorFromHexString(NSString *hex) {

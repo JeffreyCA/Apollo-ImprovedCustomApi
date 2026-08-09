@@ -302,12 +302,11 @@ static BOOL ApolloNavWantsNativeTabBarMinimize(UINavigationController *nav) {
 static BOOL ApolloTabBarControllerWantsNativeMinimize(UITabBarController *tbc) {
     if (!tbc) return NO;
     for (UIViewController *child in tbc.viewControllers) {
-        UINavigationController *nav = nil;
-        if ([child isKindOfClass:[UINavigationController class]]) {
-            nav = (UINavigationController *)child;
-        }
-        if (nav && ApolloNavWantsNativeTabBarMinimize(nav)) {
-            return YES;
+        // Every column, not just one: with the iPad pane layout a tab holds
+        // more than one navigation controller, and any of them wanting the
+        // native minimize behavior is enough.
+        for (UINavigationController *nav in ApolloAllNavigationControllersForTabChild(child)) {
+            if (ApolloNavWantsNativeTabBarMinimize(nav)) return YES;
         }
     }
     return NO;

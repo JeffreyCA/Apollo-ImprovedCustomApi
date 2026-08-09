@@ -1395,6 +1395,32 @@ typedef NS_ENUM(NSInteger, Tag) {
             return cell ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
         }
                                   onSelect:nil];
+    // Meaningless once the pane layout hides the floating pill entirely.
+    iPadTabBarBottom.visible = ^BOOL {
+        return !(UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad &&
+                 [[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIPadPaneLayout]);
+    };
+
+    // Experimental multi-column iPad layout. Hidden outright on iPhone rather
+    // than shown-disabled: it is a whole-app restructure with nothing to
+    // preview or explain on a device that will never run it.
+    // Installation happens at scene connect, so the handler confirms and
+    // restarts instead of pretending the change is live.
+    ApolloSettingsRow *iPadPaneLayout =
+        [ApolloSettingsRow customRowWithID:@"gen.iPadPaneLayout"
+                                      cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
+            UITableViewCell *cell = [weakSelf switchCellWithIdentifier:@"Cell_Gen_IPadPaneLayout"
+                                                                 label:@"Multi-Column Layout"
+                                                                detail:@"Experimental. Shows subreddits, posts and comments side by side instead of one at a time. Apollo restarts to apply."
+                                                                    on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIPadPaneLayout]
+                                                               enabled:YES
+                                                                action:@selector(iPadPaneLayoutSwitchToggled:)];
+            return cell ?: [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        }
+                                  onSelect:nil];
+    iPadPaneLayout.visible = ^BOOL {
+        return UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad;
+    };
 
     // Overrides the top scroll-edge glass under the nav bar (iOS 26+). Liquid
     // Glass only — hidden otherwise rather than shown-disabled, since the row
@@ -1411,7 +1437,7 @@ typedef NS_ENUM(NSInteger, Tag) {
 
     return [ApolloSettingsSection sectionWithTitle:nil
                                             footer:@"Customize tab-bar labels and Liquid Glass chrome behaviors.\n\nHeader Style: Soft is the iOS 26 default; Hard is the iOS 27 default."
-                                              rows:@[ iconOnlyTabBar, tabBarIdle, keepSearchInPlace, titleGapCentering, iPadTabBarBottom, scrollEdgeEffect ]];
+                                              rows:@[ iconOnlyTabBar, tabBarIdle, keepSearchInPlace, titleGapCentering, iPadPaneLayout, iPadTabBarBottom, scrollEdgeEffect ]];
 }
 
 // Display order of the Header Style picker. Raw values are NOT contiguous
@@ -3393,6 +3419,35 @@ static NSInteger ApolloHeaderStylePickerValue(NSInteger index, BOOL blurAvailabl
     sIPadTabBarBottom = sender.isOn;
     [[NSUserDefaults standardUserDefaults] setBool:sIPadTabBarBottom forKey:UDKeyIPadTabBarBottom];
     [[NSNotificationCenter defaultCenter] postNotificationName:ApolloIPadTabBarBottomChangedNotification object:nil];
+}
+
+// The split controllers are built during scene connect, which already happened
+// for this process, so there is no live path — quit & reopen is the honest
+// option. The default is written FIRST so the choice survives either way: quit
+// now, or next time the user relaunches for any reason. `sIPadPaneLayout` is
+// deliberately NOT updated here — it must keep describing the layout this
+// process actually installed, or every module that gates on it starts lying.
+- (void)iPadPaneLayoutSwitchToggled:(UISwitch *)sender {
+    BOOL on = sender.isOn;
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:UDKeyIPadPaneLayout];
+    // "Move Tab Bar to Bottom" is hidden while the pane layout is on.
+    [self visibilityDidChange];
+
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Restart to Apply"
+                         message:on
+            ? @"The multi-column layout is set up when Apollo launches, so it needs to quit and reopen to take effect."
+            : @"Apollo needs to quit and reopen to return to the single-column layout."
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Quit Apollo"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *action) {
+        exit(0);
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Later"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)proxyImgurDDGSwitchToggled:(UISwitch *)sender {

@@ -148,9 +148,8 @@ BOOL ApolloSettingsRouteOpenNow(NSString *routeId) {
 
     if (![tabBarController isKindOfClass:UITabBarController.class]) return NO;
     UIViewController *selected = [(UITabBarController *)tabBarController selectedViewController];
-    UINavigationController *nav = [selected isKindOfClass:UINavigationController.class]
-        ? (UINavigationController *)selected
-        : selected.navigationController;
+    // Unwraps the iPad pane layout's split view controller; identity otherwise.
+    UINavigationController *nav = ApolloNavigationControllerForTabChild(selected);
     if (!nav) return NO;
 
     // A modal over the settings tab (e.g. account switcher) would swallow the

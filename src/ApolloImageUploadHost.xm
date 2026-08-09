@@ -197,6 +197,11 @@ static UIViewController *ApolloRedditVisibleControllerFromController(UIViewContr
         UIViewController *selected = ((UITabBarController *)current).selectedViewController;
         if (selected) return ApolloRedditVisibleControllerFromController(selected);
     }
+    // The iPad pane layout inserts a split view controller under each tab.
+    if ([current isKindOfClass:[UISplitViewController class]]) {
+        UIViewController *column = ApolloContentColumnForSplitViewController((UISplitViewController *)current);
+        if (column && column != current) return ApolloRedditVisibleControllerFromController(column);
+    }
     return current;
 }
 
