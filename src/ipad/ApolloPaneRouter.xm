@@ -113,12 +113,17 @@ static ApolloPaneColumn ApolloPaneColumnForViewController(UIViewController *view
 
     ApolloPaneColumn column = ApolloPaneColumnForViewController(viewController);
 
-    // An index root sends everything it pushes to the detail column, so the
-    // index itself stays put. Only when the push is coming FROM the list column
-    // — a settings sub-screen pushing deeper is already in the detail column and
-    // must stay there.
-    if (column == ApolloPaneColumnInPlace &&
-        self == [pane apollo_navigationControllerForColumn:ApolloPaneColumnPrimary] &&
+    // An index root sends EVERYTHING it pushes to the detail column, so the index
+    // itself stays put. This deliberately overrides the destination table rather
+    // than only filling in for it: the profile's "Posts" row pushes a
+    // PostsViewController, which the table maps to the list column, so gating
+    // this on the table having no opinion left that row — and only that row —
+    // still replacing the profile card.
+    //
+    // Still limited to pushes coming FROM the list column: a settings page or a
+    // saved-posts list pushing deeper is already in the detail column and stays
+    // there rather than re-homing onto itself.
+    if (self == [pane apollo_navigationControllerForColumn:ApolloPaneColumnPrimary] &&
         ApolloPaneIsIndexRootController(self.topViewController)) {
         column = ApolloPaneColumnSecondary;
     }

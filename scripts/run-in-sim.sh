@@ -306,6 +306,42 @@ if [[ -n "$BACKUP_ZIP" ]]; then
     xcrun simctl uninstall "$DEV" "$BUNDLE_ID" >/dev/null 2>&1 || true
 fi
 
+# ----------------------------------------------------------------------------
+# 3b. Bake the tweak into the app bundle so it survives a cold launch.
+# ----------------------------------------------------------------------------
+# DYLD_INSERT_LIBRARIES (via SIMCTL_CHILD_) only applies to the single process
+# `simctl launch` spawns — environment variables belong to a process, not to an
+# app. Quitting Apollo and reopening it from the home screen therefore used to
+# give you stock Apollo with the tweak silently absent, which is easy to mistake
+# for "my change did nothing".
+#
+# So install it properly instead: drop the dylib into Frameworks/ (already an
+# rpath, and already signed as nested code) and add a real LC_LOAD_DYLIB to the
+# main binary. Then dyld loads it however the app is started — icon tap, cold
+# boot, or this script — which also matches how the device build behaves.
+#
+# The load command only needs adding once and the helper is idempotent, but the
+# dylib file itself is replaced on every run, so the app is re-signed each time.
+INJECTED=0
+BAKED_DYLIB="$APP_DIR/Frameworks/ApolloReborn.dylib"
+if cp "$DYLIB_DST" "$BAKED_DYLIB" 2>/dev/null; then
+    install_name_tool -id "@rpath/ApolloReborn.dylib" "$BAKED_DYLIB" 2>/dev/null || true
+    codesign -f -s - "$BAKED_DYLIB" >/dev/null 2>&1
+    if python3 "$(dirname "$0")/macho-add-load-dylib.py" \
+            "$APP_DIR/Apollo" "@rpath/ApolloReborn.dylib"; then
+        codesign -f -s - "$APP_DIR" >/dev/null 2>&1
+        INJECTED=1
+    fi
+fi
+
+if [[ "$INJECTED" != 1 ]]; then
+    # Not fatal: fall back to the old per-launch injection so the script still
+    # works, but say so, because the difference is invisible until you quit the
+    # app and wonder where the tweak went.
+    echo "  (could not bake the dylib into the bundle; falling back to per-launch" >&2
+    echo "   injection — the tweak will NOT survive quitting and reopening Apollo)" >&2
+fi
+
 log "Installing app"
 xcrun simctl install "$DEV" "$APP_DIR"
 xcrun simctl terminate "$DEV" "$BUNDLE_ID" >/dev/null 2>&1 || true
@@ -358,12 +394,19 @@ if [[ "$DO_LOGS" == 1 ]]; then
     LOG_PID="$(cat "$WORK_DIR/logpid" 2>/dev/null || true)"
 fi
 
-log "Launching $BUNDLE_ID with ApolloReborn.dylib injected"
-DYLIB_INJECT="/tmp/ApolloRebornSim-${BUNDLE_ID//[^A-Za-z0-9_.-]/_}.dylib"
-cp "$DYLIB_DST" "$DYLIB_INJECT"
-codesign -f -s - "$DYLIB_INJECT" >/dev/null 2>&1
-SIMCTL_CHILD_DYLD_INSERT_LIBRARIES="$DYLIB_INJECT" \
+if [[ "$INJECTED" == 1 ]]; then
+    # The load command does the work; injecting as well would load the dylib
+    # twice in one process and run every %ctor twice, double-installing hooks.
+    log "Launching $BUNDLE_ID (tweak linked into the bundle)"
     xcrun simctl launch "$DEV" "$BUNDLE_ID"
+else
+    log "Launching $BUNDLE_ID with ApolloReborn.dylib injected"
+    DYLIB_INJECT="/tmp/ApolloRebornSim-${BUNDLE_ID//[^A-Za-z0-9_.-]/_}.dylib"
+    cp "$DYLIB_DST" "$DYLIB_INJECT"
+    codesign -f -s - "$DYLIB_INJECT" >/dev/null 2>&1
+    SIMCTL_CHILD_DYLD_INSERT_LIBRARIES="$DYLIB_INJECT" \
+        xcrun simctl launch "$DEV" "$BUNDLE_ID"
+fi
 
 # ----------------------------------------------------------------------------
 # 5. Optional: idb UI smoke test (accessibility tree + screenshot).
