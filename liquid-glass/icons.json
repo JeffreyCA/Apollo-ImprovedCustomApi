@@ -9,13 +9,13 @@
     },
     {
       "id": "classics", "title": "Classics",
-      "coverIconIDs": ["galactic-zoomer", "burnt-orange", "antenna"],
+      "coverIconIDs": ["white", "crimson", "galactic-zoomer"],
       "description": "Dozens of colorful variants and one-off designs from the original Apollo app, recreated in Liquid Glass.",
       "author": "jryng, IllIIllIllIllII"
     },
     {
       "id": "helios", "title": "Helios",
-      "coverIconIDs": ["helios-cryo-halo", "helios-pixel", "helios"],
+      "coverIconIDs": ["helios-legacy", "helios-cryo", "helios"],
       "description": "Icons inspired by the Hyper Suit 4000 icon from Apollo, and the Modern icons by paulo1manso.",
       "author": "IllIIllIllIllII"
     },

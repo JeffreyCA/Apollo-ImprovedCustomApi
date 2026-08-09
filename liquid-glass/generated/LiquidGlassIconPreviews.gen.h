@@ -113,14 +113,14 @@ static const char *const kLGGroupCover_original[] = {
 };
 
 static const char *const kLGGroupCover_classics[] = {
+    "white",
+    "crimson",
     "galactic-zoomer",
-    "burnt-orange",
-    "antenna",
 };
 
 static const char *const kLGGroupCover_helios[] = {
-    "helios-cryo-halo",
-    "helios-pixel",
+    "helios-legacy",
+    "helios-cryo",
     "helios",
 };
 

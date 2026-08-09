@@ -69,13 +69,45 @@
       "hidden" : false,
       "layers" : [
         {
-          "image-name" : "Antenna.svg",
-          "name" : "Antenna",
+          "fill-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : {
+                "automatic-gradient" : "display-p3:0.32322,0.70909,0.85794,1.00000"
+              }
+            }
+          ],
+          "image-name" : "Apollo Antenna Ball.svg",
+          "name" : "Apollo Antenna Ball",
           "position" : {
-            "scale" : 0.53,
+            "scale" : 1.34,
             "translation-in-points" : [
-              -1.04999722406978,
-              -321.38099222050846
+              0,
+              -386
+            ]
+          }
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.19804,0.28917,0.54544,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "display-p3:0.17011,0.11285,0.28932,1.00000"
+              }
+            }
+          ],
+          "image-name" : "Stem.svg",
+          "name" : "Stem",
+          "position" : {
+            "scale" : 3.03,
+            "translation-in-points" : [
+              0,
+              -276
             ]
           }
         }
@@ -124,7 +156,8 @@
               }
             }
           ],
-          "glass" : true,
+          "glass" : false,
+          "hidden" : false,
           "image-name" : "アセット 8.svg",
           "name" : "アセット 8",
           "position" : {
