@@ -29,7 +29,6 @@
 #import <objc/runtime.h>
 #import "ApolloCommon.h"
 #import "Tweak.h"   // RDKLink, RDKComment
-#import "ipad/ApolloPaneLayout.h"   // ApolloPaneLayoutEnabled
 
 // RedditKit accessors not in Tweak.h's shared surface; resolved at runtime
 // against Apollo's own classes.
@@ -291,14 +290,14 @@ static NSURL *ApolloActiveDeepLink(void) {
 static void ApolloDeliverURLToScene(UIWindowScene *scene, NSURL *url) {
     id<UISceneDelegate> delegate = scene.delegate;
     if (![delegate respondsToSelector:@selector(scene:continueUserActivity:)]) {
-        ApolloLog(@"[Multiwindow] new scene's delegate (%@) has no continueUserActivity:; "
+        ApolloLog(@"[VisionOSMultiwindow] new scene's delegate (%@) has no continueUserActivity:; "
                   @"window opens without the target", NSStringFromClass([delegate class]));
         return;
     }
     NSUserActivity *activity =
         [[NSUserActivity alloc] initWithActivityType:NSUserActivityTypeBrowsingWeb];
     activity.webpageURL = url;
-    ApolloLog(@"[Multiwindow] handing %@ to the new scene", url.absoluteString);
+    ApolloLog(@"[VisionOSMultiwindow] handing %@ to the new scene", url.absoluteString);
     [delegate scene:scene continueUserActivity:activity];
 }
 
@@ -307,7 +306,7 @@ static void ApolloDeliverURLToScene(UIWindowScene *scene, NSURL *url) {
 // unreliable; polling connectedScenes cannot miss.
 static void ApolloAwaitNewScene(NSHashTable<UIScene *> *existing, NSURL *url, int attemptsLeft) {
     if (attemptsLeft <= 0) {
-        ApolloLog(@"[Multiwindow] no new scene appeared within 8s; %@ not delivered",
+        ApolloLog(@"[VisionOSMultiwindow] no new scene appeared within 8s; %@ not delivered",
                   url.absoluteString);
         return;
     }
@@ -520,32 +519,16 @@ static void ApolloStartWindowButton(void) {
     }];
 }
 
+// visionOS ONLY. This was briefly extended to iPad as an answer to "a fourth
+// tiled column will not fit, so use separate windows instead" — reverted at the
+// user's request. iPad is a strict no-op again, exactly as before.
 %ctor {
-    // visionOS gets everything, as before. iPad now gets the window-opening
-    // affordances too — none of the machinery below is actually visionOS
-    // specific: Apollo's handoff opener, the Texture node lookup and the
-    // context-menu hook all behave the same on iPad, and multiple windows are
-    // arguably more useful there than a fourth tiled column would be (a 13"
-    // iPad in landscape cannot fit four columns above Apollo's ~340pt cell
-    // floor — see docs/ipad-pane-layout-plan.md).
-    //
-    // Gated on the iPad pane layout rather than on the idiom alone. Multiwindow
-    // does not depend on panes, so this is deliberately conservative: it keeps
-    // the experimental branch's blast radius at zero for anyone who has not
-    // opted in, and it can be ungated on its own once it has had real use.
-    BOOL vision = ApolloIsRunningOnVisionOS();
-    BOOL pad = ApolloPaneLayoutEnabled();
-    if (!vision && !pad) return;
+    if (!ApolloIsRunningOnVisionOS()) return;
 
     %init(ApolloVisionOSKeyCommands);
     %init(ApolloVisionOSTouchTrace);
     %init(ApolloVisionOSContextMenu);
+    ApolloStartWindowButton();
 
-    // visionOS only. The floating duplicate button exists because the Vision Pro
-    // is usually driven without a keyboard and its window bar offers no app
-    // commands. An iPad has a context menu, a keyboard when one is attached, and
-    // — with the pane layout on — no spare corner to put it in.
-    if (vision) ApolloStartWindowButton();
-
-    ApolloLog(@"[Multiwindow] active (%@)", vision ? @"visionOS" : @"iPad + pane layout");
+    ApolloLog(@"[VisionOSMultiwindow] active on visionOS");
 }
