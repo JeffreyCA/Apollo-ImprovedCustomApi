@@ -681,6 +681,41 @@ Rules distilled from the binary findings above plus Apple's iPad guidance
   making the focused column's nav controller first responder, not by
   duplicating the commands.
 
+## 6a. Blocked decision: the destinations rail conflicts with portrait
+
+**This is the last structural gap to the chosen design, and it cannot be built
+as drawn.** Flagging rather than guessing, because every resolution is a real
+product tradeoff.
+
+The chosen layout puts the five destinations (Home / Search / Profile / Inbox /
+Settings) at the top of the sidebar and retires the floating tab bar. That works
+in landscape. It does not work in portrait, and the reason is measured, not
+theoretical:
+
+> UIKit downgrades a three-column pane to `oneBesideSecondary` at 1032pt and
+> **hides the primary column** (§ "split view API traps"). The sidebar is the
+> primary column. So in portrait the sidebar — and therefore the destinations
+> rail inside it — is not on screen.
+
+With the floating tab bar also removed, **portrait would have no way to switch
+tabs at all**. The sidebar toggle reveals the subreddit list, but a user who has
+not discovered it is stranded in one tab.
+
+Three ways out, with the tradeoff each buys:
+
+| Option | Behavior | Cost |
+|---|---|---|
+| **1. Adaptive tab bar** *(recommended)* | Rail lives in the sidebar; the floating tab bar is hidden exactly when the sidebar is visible and shown when it is not. `willChangeToDisplayMode:` already reports that flip precisely. | A tab bar that appears/disappears on rotation is unusual, though it mirrors how the sidebar itself behaves. |
+| **2. iOS 18+ `mode = .tabSidebar`** | UIKit's own adaptive tab-bar/sidebar control handles the whole problem natively. | Yields four columns in landscape (tab sidebar + subreddits + feed + comments), which does not fit 1366pt — the separate subreddit column would have to go. Also iOS 18+ only, so option 1 or 3 is still needed below that. |
+| **3. Keep the floating tab bar, ship no rail** | What is on the branch today. | Least "native iPad" of the three, but nothing is broken and it needs no new code. |
+
+Recommendation: **option 1**. It preserves the chosen design where there is room
+for it, degrades to today's working behavior where there is not, and the exact
+signal it needs is already wired up.
+
+Until this is settled the branch stays on option 3, which is a coherent shipping
+state rather than a half-built rail.
+
 ## 7. Open questions
 
 1. **Sidebar destinations rail styling** — a compact icon rail, a full-width
