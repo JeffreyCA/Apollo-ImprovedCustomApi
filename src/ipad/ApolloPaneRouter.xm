@@ -39,11 +39,13 @@ static const ApolloPaneRoute kPaneRoutes[] = {
     // The headline case: a post's comment thread opens beside its feed.
     { "_TtC6Apollo22CommentsViewController", ApolloPaneColumnSecondary },
 
-    // Feeds. Routed as content so that opening a new one clears whatever thread
-    // is sitting in the detail column — a comment thread beside an unrelated
-    // feed is worse than an empty pane.
-    { "_TtC6Apollo19PostsViewController",     ApolloPaneColumnSupplementary },
-    { "_TtC6Apollo23LitePostsViewController", ApolloPaneColumnSupplementary },
+    // Feeds belong in the list column, which is where they are already being
+    // pushed — a subreddit list pushing to a feed is Apollo's own structure and
+    // it survives the pane layout untouched. They are listed anyway so that
+    // opening a new feed CLEARS whatever thread is sitting in the detail column:
+    // a comment thread beside an unrelated feed is worse than an empty pane.
+    { "_TtC6Apollo19PostsViewController",     ApolloPaneColumnPrimary },
+    { "_TtC6Apollo23LitePostsViewController", ApolloPaneColumnPrimary },
 };
 
 // Re-entrancy guard: our own re-homing must never be re-classified. Main thread
@@ -111,11 +113,6 @@ static ApolloPaneColumn ApolloPaneColumnForViewController(UIViewController *view
         return;
     }
     sPaneRouterReentrant = NO;
-
-    // The incoming controller brought its own navigation item, so the sidebar
-    // toggle has to be re-applied or portrait loses its way back to the
-    // subreddit list.
-    if (column != ApolloPaneColumnSecondary) [pane apollo_refreshSidebarToggle];
 
     ApolloLog(@"[PaneRouter] routed %@ to column %ld (tab %ld)",
               NSStringFromClass([viewController class]), (long)column, (long)pane.apollo_tabIndex);

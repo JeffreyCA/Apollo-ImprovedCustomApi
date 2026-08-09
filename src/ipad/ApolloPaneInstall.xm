@@ -91,6 +91,41 @@ static BOOL ApolloPaneInstallIntoTabBarController(UITabBarController *tabBarCont
     tabBarController.viewControllers = converted;
     if (selected < converted.count) tabBarController.selectedIndex = selected;
 
+    // THE FIXED SIDEBAR.
+    //
+    // This one line is what makes the layout read as an iPad app rather than a
+    // stretched iPhone one. `mode = .tabSidebar` replaces the floating tab bar
+    // with UIKit's own sidebar: a single persistent list of destinations that is
+    // identical on every tab, with a system-drawn toggle back to the tab bar and
+    // the platform's own selection, hover, drag and keyboard behavior for free.
+    //
+    // It also removes a whole tier of competing chrome. Before this, the app
+    // showed a floating tab bar AND a per-tab sidebar column AND our own sidebar
+    // toggle button, three navigation surfaces stacked on one screen.
+    //
+    // VERIFIED, and worth recording because the documentation does not say so:
+    // this works with tabs that came from the LEGACY `viewControllers` array.
+    // Apollo never adopted the iOS 18 `tabs`/`UITab` API — it assigns five
+    // navigation controllers the old way — and UIKit still synthesizes the tab
+    // model and renders a full sidebar from them (confirmed on an iPad Pro 13"
+    // simulator: mode resolved to 2, a live UITabBarControllerSidebar, hidden=0,
+    // all five destinations listed with their titles, icons and inbox badge).
+    // Had this required `tabs`, the alternative would have been rebuilding
+    // Apollo's tab model by hand, which is a far larger and more fragile change.
+    //
+    // iOS 17 and earlier have no tab sidebar. Those keep the floating tab bar
+    // beside the two-column panes, which is a coherent, if less native, layout —
+    // the feature degrades rather than becoming unavailable.
+    if (@available(iOS 18.0, *)) {
+        tabBarController.mode = UITabBarControllerModeTabSidebar;
+        ApolloLog(@"[PaneInstall] tab sidebar on: mode=%ld sidebar=%@ hidden=%d",
+                  (long)tabBarController.mode,
+                  tabBarController.sidebar,
+                  tabBarController.sidebar ? tabBarController.sidebar.isHidden : -1);
+    } else {
+        ApolloLog(@"[PaneInstall] iOS < 18: no tab sidebar; keeping the tab bar beside the panes");
+    }
+
     ApolloLog(@"[PaneInstall] installed panes on %lu/%lu tabs (selected=%lu)",
               (unsigned long)wrapped, (unsigned long)children.count, (unsigned long)selected);
     return YES;

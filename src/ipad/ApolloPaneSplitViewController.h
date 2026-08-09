@@ -25,10 +25,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) NSInteger apollo_tabIndex;
 
 // The navigation controller for a column, or nil when that column is not
-// installed. `ApolloPaneColumnSupplementary` currently resolves to the primary
-// column's controller — the two-column install has no separate feed column yet
-// (see ApolloPaneLayout.h), so callers can already be written against the
-// three-column vocabulary.
+// installed. Every pane is two columns — list and detail — because the app's
+// fixed sidebar belongs to the tab bar controller, not to any one tab.
+// `ApolloPaneColumnSupplementary` therefore resolves to the list column too.
 - (nullable UINavigationController *)apollo_navigationControllerForColumn:(ApolloPaneColumn)column;
 
 // YES when the detail column is showing nothing but its placeholder. The router
@@ -44,12 +43,6 @@ NS_ASSUME_NONNULL_BEGIN
 // Discovered by ApolloContentColumnForSplitViewController via
 // respondsToSelector:, so ApolloCommon needs no dependency on this class.
 - (nullable UIViewController *)apollo_preferredContentColumnController;
-
-// Re-applies the sidebar toggle to the content column's root. The router calls
-// this after replacing that root, because the incoming controller carries its
-// own navigation item and would otherwise leave portrait with no way back to
-// the subreddit list. No-op on two-column panes.
-- (void)apollo_refreshSidebarToggle;
 
 @end
 
