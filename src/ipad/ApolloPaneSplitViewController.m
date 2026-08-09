@@ -339,11 +339,15 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
     if (_apollo_loggedResolvedLayout) return;
     if (CGRectIsEmpty(self.view.bounds)) return;
     _apollo_loggedResolvedLayout = YES;
+    // supplementaryColumnWidth THROWS on a double-column split view
+    // ("supplementaryColumnWidth properties unsupported for style =
+    // DoubleColumn"), so it is only safe to read on three-column panes.
+    // apollo_contentNav is non-nil exactly for those.
     ApolloLog(@"[PaneSplit] tab %ld resolved displayMode=%ld splitBehavior=%ld width=%.0f "
-              @"primaryW=%.0f supplementaryW=%.0f",
+              @"primaryW=%.0f supplementaryW=%@",
               (long)self.apollo_tabIndex, (long)self.displayMode, (long)self.splitBehavior,
-              self.view.bounds.size.width,
-              self.primaryColumnWidth, self.supplementaryColumnWidth);
+              self.view.bounds.size.width, self.primaryColumnWidth,
+              self.apollo_contentNav ? @(self.supplementaryColumnWidth) : @"n/a");
 }
 
 // Without this the sidebar becomes unreachable in portrait.

@@ -381,6 +381,30 @@ static void ApolloSimDebugDumpHeaderEffects(void) {
     }
 }
 
+// Overriding the child's traits from its parent is the supported way to force a
+// size class on one subtree; passing nil restores inheritance. Matching on
+// UISplitViewController keeps this generic — no dependency on src/ipad/.
+static void ApolloSimDebugForceCompactSplitColumns(BOOL compact) {
+    UIViewController *tabBarController = ApolloMainTabBarController();
+    if (![tabBarController isKindOfClass:[UITabBarController class]]) {
+        ApolloLog(@"[SimDebugTap] compact: no tab bar controller");
+        return;
+    }
+
+    UITraitCollection *override = compact
+        ? [UITraitCollection traitCollectionWithHorizontalSizeClass:UIUserInterfaceSizeClassCompact]
+        : nil;
+
+    NSUInteger applied = 0;
+    for (UIViewController *child in [(UITabBarController *)tabBarController viewControllers]) {
+        if (![child isKindOfClass:[UISplitViewController class]]) continue;
+        [tabBarController setOverrideTraitCollection:override forChildViewController:child];
+        applied++;
+    }
+    ApolloLog(@"[SimDebugTap] compact=%d applied to %lu split controller(s)",
+              compact, (unsigned long)applied);
+}
+
 static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *observer,
                                           CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -392,6 +416,17 @@ static void ApolloSimDebugTapNotification(CFNotificationCenterRef center, void *
         }
         if ([contents hasPrefix:@"dump"]) {
             ApolloSimDebugDumpHierarchy();
+            return;
+        }
+        // "compact on|off": force every split view controller under the tab bar
+        // to a compact horizontal size class, which is what makes a
+        // UISplitViewController collapse. Slide Over and small Stage Manager
+        // windows are the real-world trigger and neither can be driven from a
+        // script, so this is the only way to exercise the iPad pane layout's
+        // collapse/expand path in the simulator loop.
+        if ([contents hasPrefix:@"compact "]) {
+            BOOL on = [[contents substringFromIndex:8] hasPrefix:@"on"];
+            ApolloSimDebugForceCompactSplitColumns(on);
             return;
         }
         // "headerdump" command: log every visible scroll view's topEdgeEffect

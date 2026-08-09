@@ -359,10 +359,17 @@ learn now.
 > | 1 | Subreddit list behaves in a narrow column | **Pass** — favorites, multireddits, moderator sections, A–Z index, Edit all intact |
 > | 2 | Feed re-measures on width change | **Partially** — correct at each discrete width; the continuous drag-resize case is untested |
 > | 3 | Comments render at reduced width | **Pass** — after the column-host fix (§5.2a) |
-> | 4 | Collapse/expand keeps the stack | **Untested** — needs Slide Over or a small Stage Manager window |
+> | 4 | Collapse/expand keeps the stack | **Pass** — both cases, via the `compact on\|off` sim command |
 > | 5 | Resize frame rate + three-column memory measured | **Not done** |
 >
-> Criteria 2, 4 and 5 all need a real device or a driven window resize, which the
+> Criterion 4 is now testable without Slide Over: `echo "compact on" >
+> /tmp/apollofix-tap.txt` (see `ApolloSimDebugTap.xm`) forces a compact
+> horizontal size class onto every pane, which is exactly what makes a split view
+> collapse. Verified in both directions — a pane with a thread open collapses
+> onto the secondary column and comes back intact, and a pane with an empty
+> detail collapses onto the primary without dragging its placeholder along.
+>
+> Criteria 2 and 5 still need a real device or a driven window resize, which the
 > simulator inner loop cannot produce. **They remain the outstanding risk**, and
 > §5.2 is still the assumption this design hangs on.
 >
@@ -542,6 +549,26 @@ natural home.
 
 Rules distilled from the binary findings above plus Apple's iPad guidance
 (the tab-bar/sidebar and desktop-class articles). These bind Phases 1–4.
+
+**Split view API traps (learned the hard way)**
+- `supplementaryColumnWidth` and its preferred/min/max siblings **throw** on a
+  double-column split view: `"UISplitViewController supplementaryColumnWidth
+  properties unsupported for style = DoubleColumn"`. Reading one in shared code
+  that runs for every pane crashes the app the first time a two-column tab lays
+  out. Guard every access on the pane actually being three-column.
+- `oneBesideSecondary` means *one*: in a three-column layout it shows one of
+  primary/supplementary and **hides the other**. Three-column panes need
+  `twoBesideSecondary`.
+- UIKit treats `preferredDisplayMode` as a request and silently downgrades
+  `twoBesideSecondary` → `oneBesideSecondary` when the width cannot take three
+  tiles (measured: honored at 1366pt landscape, downgraded at 1032pt portrait on
+  a 13" iPad). The downgrade hides the **primary** column, so any layout relying
+  on three columns must ship a `showColumn:`/`hideColumn:` toggle or the sidebar
+  becomes unreachable. Log the *resolved* `displayMode`/`splitBehavior` rather
+  than trusting the preference.
+- `displayModeButtonItem` renders as an empty capsule inside Apollo's Liquid
+  Glass navigation bar — present and tappable, but with no glyph. Use an explicit
+  `UIBarButtonItem` with your own symbol and accent.
 
 **Split view configuration**
 - `UISplitViewController(style: .tripleColumn)`, `preferredSplitBehavior = .tile`,
