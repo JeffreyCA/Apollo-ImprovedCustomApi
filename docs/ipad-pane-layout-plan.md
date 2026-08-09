@@ -103,6 +103,93 @@ Recovered from `-[SceneDelegate scene:willConnectToSession:options:]`
   several roots — Apollo pre-warms these synchronously at launch, so any
   restructuring must happen *after* `%orig` returns.
 
+### Push pipeline internals (`sub_10015c720`)
+
+`-[ApolloNavigationController pushViewController:animated:]` is a thin ObjC shim
+over one Swift body, `sub_10015c720`. Decompiled, it:
+
+1. **Silently drops duplicate pushes** — if the incoming VC is already in
+   `viewControllers`, the whole body no-ops. A router that moves a VC between
+   columns must remove it from the source stack first, or later Apollo-side
+   pushes of that same instance will silently do nothing.
+2. Sets `extendedLayoutIncludesOpaqueBars = YES` on every pushed VC before
+   calling super.
+3. Sets the `pushing` ivar, which the custom `ApolloNavigationAnimator` and the
+   interactive-pop machinery read.
+4. If the nav bar is hidden and the `HideBarsOnScroll` default is set, it
+   schedules ~100 escalating `asyncAfter` re-layout attempts on the main queue.
+   With hide-bars active in three columns, these timer storms run per column.
+
+**Consequence for the router:** reroute by *calling the destination column's
+navigation controller's normal `pushViewController:`*, never by splicing
+`viewControllers` arrays. That way Apollo's own body runs on the destination —
+dedupe, extended-layout, `pushing` flag, nav-bar re-show — and every per-nav
+invariant stays coherent. (This is also why the ObjC-level hook is the right
+interception point: Logos hooks the shim, so a reroute can return without ever
+running Apollo's Swift body on the wrong nav.)
+
+### Forward stack: `poppedViewControllers` + `goForward`
+
+Confirmed by decompiling `-[ApolloNavigationController goForward]`: every pop
+appends to a per-nav `poppedViewControllers` array, and `goForward` re-pushes
+its tail through the same push body. This powers keyboard "go forward" **and the
+right-screen-edge pan gesture**. Two consequences:
+
+- **Per-column forward stacks.** If the router clears the secondary column when
+  a new list loads, those cleared VCs land in that column's forward stack.
+  Policy needed: clear the forward stack on cross-column reroutes (recommended —
+  a "forward" that re-pushes a comments VC for a post no longer in the list
+  column is disorienting), or accept per-column forward history.
+- **The gesture conflict is now concrete, not hypothetical** (see §5.4): Apollo
+  installs pans on *both* edges of every nav controller, so every interior
+  column boundary in a triple-column layout has an Apollo recognizer on each
+  side of it, plus UIKit's own split-view show/hide gesture.
+
+### Width-change handling — what Apollo actually does
+
+Searched the full procedure list: **no** `viewWillTransitionToSize:` and **no**
+`traitCollectionDidChange:` overrides exist on `ASTableViewController`,
+`PostsViewController`, or `CommentsViewController`. (Only
+`ApolloNavigationController` and `MediaViewerController` implement the former.)
+All width adaptation in the content controllers is passive:
+`viewDidLayoutSubviews` re-frames overlays (dark overlay, jump-bar dropdown —
+both computed from `view.bounds` with a max-width clamp and centering, so they
+are already column-relative), and the actual cell re-measure is Texture
+framework behavior — `ASTableView.layoutSubviews` re-measures every node when
+its constrained width changes (`AsyncDisplayKit.framework` is embedded in
+`Apollo.app/Frameworks/`).
+
+Two readings of this:
+
+- **Good:** there is no custom rotation/resize code in the content controllers
+  to fight. Resize correctness comes for free from Texture.
+- **Correction to an earlier claim:** the `restoredViewWidth` ivars on
+  Posts/Comments/Inbox are **state-restoration** bookkeeping (scale the saved
+  scroll offset when the restored width differs), *not* live-resize support.
+  They are evidence Apollo tolerates width differences across launches, not
+  evidence the live re-measure is cheap. The entire live-resize cost is
+  Texture's full re-measure, there is no incremental path, and Phase 0's
+  measurement of it is *the* number this project hangs on.
+
+### Custom presentation controllers are window-anchored
+
+Apollo ships ~20 custom `UIPresentationController` subclasses (ActionController,
+SubredditSelector, Sourdough, FlairAlert, TipJar, AccountManager, …).
+Decompiled `ActionControllerPresentationController
+frameOfPresentedViewInContainerView`: it sizes from **`containerView.bounds`**
+(the window in a standard presentation) with a max-width clamp (`fminnm`) and
+`(containerWidth − width) / 2` centering. So in the pane layout, action menus
+and card sheets present **centered over the whole window**, not over the source
+column. Not a crash risk — the max-width clamp means they don't stretch — but a
+UX note: long-press menus on a post in the list column appear window-centered.
+Acceptable for v1; column-anchored presentation would mean re-parenting Apollo's
+presentation controllers and is explicitly out of scope.
+
+Related standard-iPad requirement for tweak-drawn UI: `UIActivityViewController`
+and alert-sheet presentations on iPad require a popover `sourceView`/`sourceRect`
+or they throw. Apollo handles its own; every *tweak* share-sheet call site that
+becomes reachable from a new column context needs a popover source audit.
+
 ### UIKit API availability
 
 | API | Introduced | Usable here? |
@@ -177,6 +264,7 @@ class table instead of a single class.
 | `PostsViewController`, `LitePostsViewController` | supplementary | Replaces the list column; clears the detail column. |
 | `SearchViewController` results, `SubredditSearchResultsViewController`, `PostsSearchResultsViewController` | supplementary | |
 | `InboxListViewController`, `ModmailInboxViewController`, `ModQueueViewController` | supplementary | |
+| `AllSubredditCommentsViewController`, `SavedPostsCommentsViewController`, `UserCommentsViewController` | supplementary | Comment *lists*, not comment threads — despite the names. Tapping a row in them opens a real `CommentsViewController`, which routes secondary. |
 | `CommentsViewController` | secondary | The headline case. |
 | `PrivateMessageViewController`, `MessagesViewController` | secondary | |
 | `ProfileViewController`, `UserCommentsViewController` | secondary | When pushed from a comment/post author. |
@@ -322,13 +410,25 @@ where it must be a no-op.
 ### 5.2 ASDK re-measure under column resize — **highest risk**
 
 Apollo's feed and comments are `ASTableNode`-backed; cells measure against a
-constrained width. Column resize means continuous re-measure. Mitigating
-evidence: `PostsViewController` and `CommentsViewController` both carry a
-`restoredViewWidth` ivar, so Apollo already reasons about width changes, and the
-app already runs resizable on iPad today. Still, this is the assumption Phase 0
-exists to test, and it interacts badly with the memory pressure recorded in the
-August 2026 OOM wave — three live ASDK columns is strictly more node graph than
-one.
+constrained width. Column resize means Texture re-measures **every node** in the
+table (`ASTableView.layoutSubviews` on constrained-width change — framework
+behavior, no incremental path). The binary confirms there is no custom resize
+handling to help or hinder: no `viewWillTransitionToSize:` or
+`traitCollectionDidChange:` on any content controller (§2). The
+`restoredViewWidth` ivars are state-restoration offset-scaling, not live-resize
+support — the app tolerating width *differences across launches* is weaker
+evidence than previously stated. What does still count in our favor: Apollo runs
+resizable on iPad today, so single-column live resize (Slide Over, Split View)
+already exercises this path in production. What's new in the pane layout is
+*three* live node graphs re-measuring on one drag — which interacts badly with
+the memory pressure recorded in the August 2026 OOM wave. Phase 0 exists to put
+a number on exactly this.
+
+One cheap mitigation if the spike shows churn: `UISplitViewController` column
+resizes step through discrete widths (display-mode changes) far more often than
+they animate continuously — continuous re-measure mainly bites during Stage
+Manager window drags, where a debounce (re-measure on drag end, letterbox during)
+is an accepted pattern.
 
 ### 5.3 Full-width chrome assumptions — **largest hidden cost**
 
@@ -345,12 +445,23 @@ itself. `ApolloPaneChrome.xm` exists to hold the reconciliation, and the
 `UIScreen.mainScreen` readers should migrate to the owning view's window/traits
 regardless of this project — that migration is independently correct.
 
-### 5.4 Gesture conflicts
+### 5.4 Gesture conflicts — now concrete
 
-`ApolloNavigationController` installs left *and* right screen-edge pan
-recognizers and a nav-bar pan for hide-on-swipe. Inside a narrow column these
-compete with `UISplitViewController`'s own show/hide gestures. Expect to scope
-Apollo's recognizers per column.
+`ApolloNavigationController` installs a left screen-edge pan (interactive pop),
+a **right screen-edge pan (go forward — confirmed: it re-pushes the tail of the
+per-nav `poppedViewControllers` array)**, and a nav-bar pan for hide-on-swipe.
+In a triple-column layout every interior column boundary therefore has an Apollo
+recognizer on each side of it — the supplementary column's *right*-edge
+(go-forward) pan sits exactly on the boundary with the secondary column, whose
+*left*-edge (pop) pan sits on the same line — plus `UISplitViewController`'s own
+`presentsWithGesture` show/hide pan on the primary edge. "Screen-edge" pans are
+actually view-edge relative, so they will fire at column boundaries, not just
+screen edges. Plan: disable Apollo's edge pans on interior edges (keep pop on
+the leftmost visible column, drop go-forward inside columns — ⌘] still covers
+it), and decide `presentsWithGesture` explicitly rather than inheriting it.
+Also define the router's forward-stack policy: clear `poppedViewControllers` on
+cross-column reroutes so "go forward" never resurrects a detail VC whose list
+context is gone.
 
 ### 5.5 Entry points that must keep working
 
@@ -373,7 +484,68 @@ natural home.
 
 ---
 
-## 6. Open questions
+## 6. Implementation best practices
+
+Rules distilled from the binary findings above plus Apple's iPad guidance
+(the tab-bar/sidebar and desktop-class articles). These bind Phases 1–4.
+
+**Split view configuration**
+- `UISplitViewController(style: .tripleColumn)`, `preferredSplitBehavior = .tile`,
+  `preferredDisplayMode = .twoBesideSecondary`. Never `.overlay` for the
+  supplementary column — content panes that float over other content re-create
+  the "blown-up iPhone app" feel this project exists to kill.
+- Set `presentsWithGesture` deliberately (likely `false`), because Apollo's own
+  edge pans occupy the same edges (§5.4).
+- Let the system collapse/expand do the work. Implement
+  `splitViewController(_:topColumnForCollapsingToProposedTopColumn:)` only to
+  choose the surviving top VC; do not hand-merge stacks. On expand, rebuild
+  columns from the router's classification of the collapsed stack.
+- Hide the tab bar via the tab bar controller (`hidesBottomBarWhenPushed` /
+  LG minimize APIs are irrelevant here) — the `ApolloTabBarController` object
+  itself must keep existing untouched (§3).
+
+**Routing**
+- Intercept at the ObjC shim (`pushViewController:animated:`) and reroute by
+  calling the destination nav's normal push — never splice `viewControllers`
+  arrays. Apollo's Swift push body (dedupe, `extendedLayoutIncludesOpaqueBars`,
+  `pushing` flag, nav-bar re-show loop) must run on whichever nav actually hosts
+  the VC (§2).
+- Remove a VC from its source stack *before* pushing it elsewhere, or Apollo's
+  duplicate-push guard silently eats later pushes of the same instance (§2).
+- Never reroute modals, and never reroute during an in-flight transition
+  (`pushing`/`popping` ivars are readable via `MSHookIvar` inside hooks).
+- Clear the destination column's `poppedViewControllers` on cross-column
+  reroutes (§5.4).
+
+**Presentation**
+- Tweak-drawn share sheets / alert-sheet presentations reachable from new column
+  contexts must set popover `sourceView`/`sourceRect` (iPad hard requirement).
+- Apollo's own card presentations center over the window, not the column (§2) —
+  leave as-is for v1.
+
+**Sizing & chrome**
+- New tweak UI in panes must derive geometry from the owning view's bounds /
+  window, never `UIScreen.mainScreen` — and §5.3's migration moves existing
+  modules the same way.
+- Per-column nav bars each resolve their own traits; resolve dynamic colors
+  against the column's own view (`resolvedColorWithTraitCollection:`), the same
+  rule the theme runtime already enforces for `.CGColor` uses.
+- Readable width: cap the secondary column's content at ~`UIView.
+  readableContentGuide` behavior for very wide windows rather than letting
+  comments stretch edge-to-edge on a 13" landscape iPad.
+
+**Desktop-class polish (Phase 4, iOS 16+ where available)**
+- `UIFindInteraction` for comments search (`isFindInteractionEnabled` on the
+  scroll view) instead of extending Apollo's hand-rolled search toolbar.
+- `UINavigationItem.style = .browser` on the supplementary/secondary columns'
+  nav items is worth an experiment for density; it is cosmetic and safely
+  gated on `respondsToSelector:`.
+- Keyboard focus follows the responder chain — route Apollo's existing
+  `keyCommands` (`selectNextCell`, `goIntoCell`, `goBack`, `pageUp`, …) by
+  making the focused column's nav controller first responder, not by
+  duplicating the commands.
+
+## 7. Open questions
 
 1. **Sidebar destinations rail styling** — a compact icon rail, a full-width
    list, or a segmented control at the top of the sidebar? Decide from the
