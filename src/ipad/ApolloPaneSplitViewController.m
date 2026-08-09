@@ -360,6 +360,8 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
 @property (nonatomic, strong) UINavigationController *apollo_primaryNav;   // the list column
 @property (nonatomic, strong) UINavigationController *apollo_detailNav;
 @property (nonatomic, strong) UIViewController *apollo_detailHost;
+@property (nonatomic, copy) NSString *apollo_emptyMessage;
+@property (nonatomic, copy) NSString *apollo_emptySymbol;
 @end
 
 @implementation ApolloPaneSplitViewController
@@ -402,9 +404,28 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
 // not cosmetic, and they go away by letting the sidebar be the only sidebar.
 - (void)apollo_configureWithRootNavigationController:(UINavigationController *)rootNav {
     self.apollo_primaryNav = rootNav;
+
+    // The empty state names what THIS tab puts in the detail column. "No Post
+    // Selected" beside a settings index or a search field is just wrong, and it
+    // was a large part of why those two tabs read as nonsense on iPad.
+    NSString *message = @"No Post Selected";
+    NSString *symbol = @"text.bubble";
+    NSString *rootClass = NSStringFromClass([rootNav.viewControllers.firstObject class]) ?: @"";
+    if ([rootClass hasSuffix:@"SettingsViewController"]) {
+        message = @"No Setting Selected";
+        symbol = @"gearshape";
+    } else if ([rootClass hasSuffix:@"InboxListViewController"]) {
+        message = @"No Message Selected";
+        symbol = @"envelope";
+    } else if ([rootClass hasSuffix:@"SearchViewController"]) {
+        message = @"Search Reddit";
+        symbol = @"magnifyingglass";
+    }
+
     self.apollo_detailNav = [self apollo_makeNavigationControllerWithRoot:
-        [[ApolloPaneDetailPlaceholderViewController alloc] initWithMessage:@"No Post Selected"
-                                                               symbolName:@"text.bubble"]];
+        [[ApolloPaneDetailPlaceholderViewController alloc] initWithMessage:message symbolName:symbol]];
+    self.apollo_emptyMessage = message;
+    self.apollo_emptySymbol = symbol;
 
     [self setViewController:rootNav forColumn:UISplitViewControllerColumnPrimary];
     // The secondary column is the full-width one the sidebar floats over, so it
@@ -582,8 +603,8 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
 - (void)apollo_clearDetailColumn {
     if (self.apollo_detailIsEmpty) return;
     [self.apollo_detailNav setViewControllers:@[
-        [[ApolloPaneDetailPlaceholderViewController alloc] initWithMessage:@"No Post Selected"
-                                                               symbolName:@"text.bubble"]
+        [[ApolloPaneDetailPlaceholderViewController alloc] initWithMessage:self.apollo_emptyMessage
+                                                               symbolName:self.apollo_emptySymbol]
     ] animated:NO];
     ApolloLog(@"[PaneSplit] tab %ld detail column cleared", (long)self.apollo_tabIndex);
 }
@@ -634,8 +655,8 @@ static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
 - (void)splitViewControllerDidExpand:(UISplitViewController *)svc {
     if (self.apollo_detailNav.viewControllers.count == 0) {
         [self.apollo_detailNav setViewControllers:@[
-            [[ApolloPaneDetailPlaceholderViewController alloc] initWithMessage:@"No Post Selected"
-                                                                   symbolName:@"text.bubble"]
+            [[ApolloPaneDetailPlaceholderViewController alloc] initWithMessage:self.apollo_emptyMessage
+                                                                   symbolName:self.apollo_emptySymbol]
         ] animated:NO];
         ApolloLog(@"[PaneSplit] tab %ld expanded; restored detail placeholder", (long)self.apollo_tabIndex);
     }

@@ -52,6 +52,33 @@ static const ApolloPaneRoute kPaneRoutes[] = {
 // only, like every UIKit navigation call this hook sits on.
 static BOOL sPaneRouterReentrant = NO;
 
+// SOURCE-BASED ROUTING, for tabs whose root is an index rather than a feed.
+//
+// Settings is the case that needs it. Its rows do not lead to posts, so nothing
+// downstream ever needs the detail column, and drilling in place left an index
+// in a 480pt column beside an empty pane the width of the screen — while the
+// native iPad shape for exactly this content is index on the left, the selected
+// page on the right.
+//
+// This is deliberately NOT applied to Home or Search, even though their roots
+// are also lists. Their rows lead to FEEDS, whose posts then need the detail
+// column for comments; sending the feed there instead would leave comments
+// nowhere to go but on top of the feed. Those tabs keep feed-in-place, and only
+// the comment thread crosses over.
+//
+// Matched on the pushing controller's CURRENT top, not on the tab index, so a
+// settings screen reached from somewhere else does not accidentally re-home.
+static BOOL ApolloPaneIsIndexRootController(UIViewController *viewController) {
+    static const char *kIndexRoots[] = {
+        "_TtC6Apollo22SettingsViewController",
+    };
+    for (size_t i = 0; i < sizeof(kIndexRoots) / sizeof(kIndexRoots[0]); i++) {
+        Class cls = objc_getClass(kIndexRoots[i]);
+        if (cls && [viewController isMemberOfClass:cls]) return YES;
+    }
+    return NO;
+}
+
 static ApolloPaneColumn ApolloPaneColumnForViewController(UIViewController *viewController) {
     if (!viewController) return ApolloPaneColumnInPlace;
     for (size_t i = 0; i < sizeof(kPaneRoutes) / sizeof(kPaneRoutes[0]); i++) {
@@ -77,6 +104,17 @@ static ApolloPaneColumn ApolloPaneColumnForViewController(UIViewController *view
     if (pane.isCollapsed) { %orig; return; }
 
     ApolloPaneColumn column = ApolloPaneColumnForViewController(viewController);
+
+    // An index root sends everything it pushes to the detail column, so the
+    // index itself stays put. Only when the push is coming FROM the list column
+    // — a settings sub-screen pushing deeper is already in the detail column and
+    // must stay there.
+    if (column == ApolloPaneColumnInPlace &&
+        self == [pane apollo_navigationControllerForColumn:ApolloPaneColumnPrimary] &&
+        ApolloPaneIsIndexRootController(self.topViewController)) {
+        column = ApolloPaneColumnSecondary;
+    }
+
     if (column == ApolloPaneColumnInPlace) { %orig; return; }
 
     UINavigationController *destination = [pane apollo_navigationControllerForColumn:column];
