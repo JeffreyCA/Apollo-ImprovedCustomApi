@@ -212,41 +212,77 @@ a cosmetic variant for the destinations rail specifically.
 
 ### Topology
 
-One `UISplitViewController` **per tab**, replacing that tab's navigation
-controller as the tab bar controller's child:
+The app has exactly **one** persistent navigation surface, and it belongs to the
+tab bar controller rather than to any tab. `UITabBarController.mode =
+.tabSidebar` turns the floating tab bar into UIKit's own sidebar; each tab then
+contributes only a list and a detail column.
 
 ```
 UIWindow.rootViewController
-└── ApolloTabBarController                    ← unchanged object, tabBar hidden when panes are on
-    ├── tab 0  ApolloPaneSplitViewController  (.tripleColumn)
-    │            ├─ .primary        ApolloPaneSidebarViewController
-    │            │                    ├─ destinations rail  (tweak-drawn: Home/Search/Profile/Inbox/Settings)
-    │            │                    └─ RedditListViewController      ← embedded child, Apollo's real VC
-    │            ├─ .supplementary  ApolloNavigationController         ← list stack (PostsViewController…)
-    │            └─ .secondary      ApolloNavigationController         ← detail stack (CommentsViewController…)
-    ├── tab 1  ApolloPaneSplitViewController  (Search:  results  → post → comments)
-    ├── tab 2  ApolloPaneSplitViewController  (Profile: sections → list → detail)
-    ├── tab 3  ApolloPaneSplitViewController  (Inbox:   mailboxes → thread list → message)
-    └── tab 4  ApolloPaneSplitViewController  (Settings: sections → detail)
+└── ApolloTabBarController                    ← unchanged object
+    │   mode = .tabSidebar                    ← UIKit draws the sidebar: FIXED, identical on every tab
+    ├── tab 0  ApolloPaneSplitViewController  (.doubleColumn)
+    │            ├─ .primary    ApolloNavigationController  ← the tab's OWN stack, verbatim
+    │            │                (RedditListViewController → PostsViewController → …)
+    │            └─ .secondary  ApolloNavigationController  ← detail stack (CommentsViewController…)
+    ├── tab 1  ApolloPaneSplitViewController  (Inbox:    thread list → message)
+    ├── tab 2  ApolloPaneSplitViewController  (Profile:  sections   → detail)
+    ├── tab 3  ApolloPaneSplitViewController  (Search:   results    → post)
+    └── tab 4  ApolloPaneSplitViewController  (Settings: sections   → detail)
 ```
 
-**Why per-tab rather than one global split view.** Each tab keeps its own
-column state, so leaving Inbox and coming back restores the subreddit and post
-you were reading. It also means the tab bar controller's children array is the
-only thing that changes shape, which keeps the audit surface to one list of call
-sites (§5).
+Which reads on screen as three stable regions:
 
-**The destinations rail is duplicated per tab and that is deliberate.** It is
-cheap tweak-drawn UI, stateless apart from the selected index, and pinned to the
-same position in every sidebar — so switching tabs reads as "the lower part of
-the sidebar changed", not as a rail flicker. `UITabBarController` swaps children
-without animation, so there is no cross-fade to suppress. If this reads badly in
-the spike, the fallback is a single shared rail view moved between sidebars.
+```
+[ sidebar: destinations ] [ list ]              [ detail ]
+   UIKit, never changes     the tab's own stack   comment thread
+```
 
-**No `.compact` column is set.** `UISplitViewController` collapses a triple
-column by pushing supplementary and secondary onto the primary's navigation
-controller, which reproduces today's push hierarchy exactly. Setting an explicit
-compact controller would mean maintaining a second layout by hand.
+**Why the sidebar is UIKit's and not ours.** `mode = .tabSidebar` brings the
+platform's own selection, hover, drag-and-drop and keyboard behavior, a system
+toggle back to the floating tab bar, and — critically — automatic adaptation:
+in portrait UIKit collapses the sidebar back into a floating tab bar with a
+reveal button, so the destinations are never unreachable. A hand-drawn rail in a
+split view column could not do that (see §6a, which is why it was blocked).
+
+**Verified, and worth recording because the documentation does not say so:**
+this works with tabs that came from the **legacy `viewControllers` array**.
+Apollo never adopted the iOS 18 `tabs`/`UITab` API — it assigns five navigation
+controllers the old way — and UIKit still synthesizes the tab model and renders a
+full sidebar from them. Confirmed on an iPad Pro 13" simulator: mode resolved to
+2, a live `UITabBarControllerSidebar`, `hidden=0`, all five destinations with
+their titles, icons and the inbox badge. Had it required `tabs`, the alternative
+would have been rebuilding Apollo's tab model by hand.
+
+**Why every pane is two columns.** With destinations in the sidebar, a third
+column would be a *fourth* region on screen. The Home tab briefly had one — a
+subreddit-list column — and the result was four columns plus a floating tab bar
+plus our own sidebar-toggle button: three navigation surfaces competing at once,
+and a left pane whose contents changed identity per tab. It also duplicated
+Apollo's existing "Home ⌄" title menu, which already switches subreddits. The
+tab's navigation controller now goes into the list column verbatim, so the
+subreddit list pushes to a feed *inside that one column* exactly as on iPhone.
+
+**Why per-tab split views rather than one global one.** Each tab keeps its own
+column state, so leaving Inbox and coming back restores the post you were
+reading. It also means the tab bar controller's children array is the only thing
+that changes shape, which keeps the audit surface to one list of call sites (§5).
+
+**No `.compact` column is set.** `UISplitViewController` collapses a double
+column by pushing the secondary onto the primary's navigation controller, which
+reproduces today's push hierarchy exactly. Setting an explicit compact controller
+would mean maintaining a second layout by hand.
+
+**Panes must set `extendedLayoutIncludesOpaqueBars`.** Recovered from UIKit's
+`-[UITabBarController _frameForViewController:]`: the tab bar's height is
+subtracted from a child's frame unless the tab bar is hidden, the child extends
+under the bottom edge, or — for an *opaque* tab bar, which Apollo's is — the
+child sets `extendedLayoutIncludesOpaqueBars`. Apollo sets that flag on
+everything it pushes, so its stock screens run full height. A pane is a
+controller we construct, so it never inherited the flag and UIKit reserved room
+for a tab bar that sidebar mode had already taken off screen — a dead 64pt strip
+along the bottom of every column. Confirmed both ways: the stock hierarchy gives
+the tab child the full 1032pt, and the pane went 968 → 1032 once the flag was set.
 
 ### Column routing
 
@@ -258,18 +294,26 @@ hooks `-[UINavigationController pushViewController:animated:]`, recognizes
 re-presents it somewhere else. The pane router is the same mechanism with a
 class table instead of a single class.
 
+With two columns the table gets much shorter than the three-column draft needed:
+anything list-shaped simply stays in the list column, which is where Apollo was
+already pushing it. Only genuinely detail-shaped screens are redirected.
+
 | Class | Column | Notes |
 |---|---|---|
-| `RedditListViewController` (drill-in, e.g. multireddit) | primary | Pushed within the sidebar's own stack. |
-| `PostsViewController`, `LitePostsViewController` | supplementary | Replaces the list column; clears the detail column. |
-| `SearchViewController` results, `SubredditSearchResultsViewController`, `PostsSearchResultsViewController` | supplementary | |
-| `InboxListViewController`, `ModmailInboxViewController`, `ModQueueViewController` | supplementary | |
-| `AllSubredditCommentsViewController`, `SavedPostsCommentsViewController`, `UserCommentsViewController` | supplementary | Comment *lists*, not comment threads — despite the names. Tapping a row in them opens a real `CommentsViewController`, which routes secondary. |
-| `CommentsViewController` | secondary | The headline case. |
-| `PrivateMessageViewController`, `MessagesViewController` | secondary | |
-| `ProfileViewController`, `UserCommentsViewController` | secondary | When pushed from a comment/post author. |
-| `SubredditSidebarViewController`, `SubredditRulesViewController` | secondary | |
-| **everything else** | **push in place** | Default. Settings sub-screens, composers, media viewers, web views, and every tweak-owned VC keep today's behavior until explicitly classified. |
+| `CommentsViewController` | secondary | The headline case, and the only class routed across columns today. |
+| `PostsViewController`, `LitePostsViewController` | list (in place) | Listed only so that opening a new feed **clears** a stale thread from the detail column. |
+| **everything else** | **push in place** | Default. Subreddit drill-ins, settings sub-screens, composers, media viewers, web views, and every tweak-owned VC keep today's behavior until explicitly classified. |
+
+Candidates deliberately **not** yet added, because each needs its own testing
+pass and an untested entry is worse than an unrouted one:
+`PrivateMessageViewController` / `MessagesViewController` (secondary),
+`ProfileViewController` when pushed from an author (secondary),
+`SubredditSidebarViewController` / `SubredditRulesViewController` (secondary).
+
+Note the comment *list* controllers — `AllSubredditCommentsViewController`,
+`SavedPostsCommentsViewController`, `UserCommentsViewController` — must stay in
+place despite their names. They are feeds whose rows open a real
+`CommentsViewController`, which routes to the detail column on its own.
 
 Rules:
 - Pushing a list-class VC clears the secondary column to its placeholder.
@@ -286,8 +330,8 @@ New directory `src/ipad/`:
 |---|---|
 | `ApolloPaneLayout.{h,m}` | Feature gate, capability check, change notification, the `sPaneLayoutEnabled` state read. Single source of truth for "are panes active right now". |
 | `ApolloPaneInstall.xm` | Hooks `-[SceneDelegate scene:willConnectToSession:options:]`; builds/tears down the split controllers after `%orig`. |
-| `ApolloPaneSplitViewController.{h,m}` | `UISplitViewController` subclass + delegate: collapse/expand behavior, column widths, placeholder detail VC, theming. |
-| `ApolloPaneSidebarViewController.{h,m}` | Destinations rail + embedded tab root VC. Accent from `ApolloThemeAccentColor()`. |
+| `ApolloPaneSplitViewController.{h,m}` | `UISplitViewController` subclass + delegate: collapse/expand behavior, column widths, placeholder detail VC, safe-area column host, theming. |
+| ~~`ApolloPaneSidebarViewController.{h,m}`~~ | **Not needed.** UIKit's tab sidebar replaced the hand-drawn rail entirely. |
 | `ApolloPaneRouter.xm` | The push interception and column classification table. |
 | `ApolloPaneChrome.xm` | Per-column nav bar / immersive header / scroll-edge reconciliation (§5.3). |
 
@@ -390,15 +434,23 @@ wide column) but is structurally split. This isolates "did the container change
 break anything" from "did the routing break anything", which is the single most
 valuable thing this phase buys.
 
-### Phase 2 — Home tab
+### Phase 2 — Home tab — **done**
 
-Sidebar rail + subreddit list, posts column, comments column. Placeholder detail
-state. Selection persistence when switching tabs.
+Tab sidebar on, Home running list + detail, placeholder detail state, selection
+persistence when switching tabs. Verified on an iPad Pro 13" simulator:
+sidebar 270pt, list column 280–760, detail 760–1376, tapping a post routes
+`CommentsViewController` to the detail column, collapse/expand preserves the
+open thread and its scroll position, and portrait falls back to UIKit's floating
+tab bar with a sidebar reveal button.
 
-### Phase 3 — Remaining tabs
+### Phase 3 — Remaining tabs — **structurally done, routing not extended**
 
-Search, Profile, Inbox, Settings — one at a time, each behind the same gate.
-Inbox and Modmail carry their own selector and compose flows and should be last.
+All five tabs are panes and all five lay out correctly; switching tabs leaves
+the sidebar untouched and replaces only the content. What is *not* done is
+extending the routing table beyond `CommentsViewController` — Inbox messages,
+author profiles and subreddit sidebars still push in place rather than opening
+in the detail column (see §3, "candidates deliberately not yet added"). Inbox
+and Modmail carry their own selector and compose flows and should be last.
 
 ### Phase 4 — iPad-native polish
 
@@ -606,11 +658,18 @@ Rules distilled from the binary findings above plus Apple's iPad guidance
 (the tab-bar/sidebar and desktop-class articles). These bind Phases 1–4.
 
 **Split view API traps (learned the hard way)**
+
+The first three were found while the Home tab was still three-column. That
+column is gone (§3, §6a), so they no longer bite this branch — kept because they
+are real UIKit behavior and the next person to reach for a triple column will
+hit all three.
+
 - `supplementaryColumnWidth` and its preferred/min/max siblings **throw** on a
   double-column split view: `"UISplitViewController supplementaryColumnWidth
   properties unsupported for style = DoubleColumn"`. Reading one in shared code
   that runs for every pane crashes the app the first time a two-column tab lays
-  out. Guard every access on the pane actually being three-column.
+  out. Guard every access on the pane actually being three-column. *(Still live:
+  every pane is double-column now, so this property must never be read at all.)*
 - `oneBesideSecondary` means *one*: in a three-column layout it shows one of
   primary/supplementary and **hides the other**. Three-column panes need
   `twoBesideSecondary`.
@@ -619,17 +678,22 @@ Rules distilled from the binary findings above plus Apple's iPad guidance
   tiles (measured: honored at 1366pt landscape, downgraded at 1032pt portrait on
   a 13" iPad). The downgrade hides the **primary** column, so any layout relying
   on three columns must ship a `showColumn:`/`hideColumn:` toggle or the sidebar
-  becomes unreachable. Log the *resolved* `displayMode`/`splitBehavior` rather
-  than trusting the preference.
+  becomes unreachable. This is what killed the hand-drawn destinations rail
+  (§6a). Log the *resolved* `displayMode`/`splitBehavior` rather than trusting
+  the preference.
 - `displayModeButtonItem` renders as an empty capsule inside Apollo's Liquid
-  Glass navigation bar — present and tappable, but with no glyph. Use an explicit
-  `UIBarButtonItem` with your own symbol and accent.
+  Glass navigation bar — present and tappable, but with no glyph. If you ever
+  need a column toggle of your own, use an explicit `UIBarButtonItem` with your
+  own symbol and accent. *(Not needed today: UIKit's tab sidebar draws its own.)*
 
 **Split view configuration**
-- `UISplitViewController(style: .tripleColumn)`, `preferredSplitBehavior = .tile`,
-  `preferredDisplayMode = .twoBesideSecondary`. Never `.overlay` for the
-  supplementary column — content panes that float over other content re-create
-  the "blown-up iPhone app" feel this project exists to kill.
+- `UISplitViewController(style: .doubleColumn)`, `preferredSplitBehavior = .tile`,
+  `preferredDisplayMode = .oneBesideSecondary`. Never `.overlay` for the list
+  column — content panes that float over other content re-create the
+  "blown-up iPhone app" feel this project exists to kill.
+- Set `edgesForExtendedLayout = .all` **and**
+  `extendedLayoutIncludesOpaqueBars = true` on the pane, or UIKit reserves the
+  tab bar's height and leaves a dead strip at the bottom (§3).
 - Set `presentsWithGesture` deliberately (likely `false`), because Apollo's own
   edge pans occupy the same edges (§5.4).
 - Let the system collapse/expand do the work. Implement
@@ -681,50 +745,58 @@ Rules distilled from the binary findings above plus Apple's iPad guidance
   making the focused column's nav controller first responder, not by
   duplicating the commands.
 
-## 6a. Blocked decision: the destinations rail conflicts with portrait
+## 6a. RESOLVED: the destinations rail — UIKit's tab sidebar, option 2
 
-**This is the last structural gap to the chosen design, and it cannot be built
-as drawn.** Flagging rather than guessing, because every resolution is a real
-product tradeoff.
+This section previously recorded a blocked decision: a hand-drawn destinations
+rail placed in a split view's primary column **disappears in portrait**, because
+UIKit downgrades a three-column pane to `oneBesideSecondary` at 1032pt and hides
+the primary column. With the floating tab bar retired there would have been no
+way to switch tabs at all. Three options were tabled; option 1 (hide the tab bar
+exactly when the sidebar is visible) was recommended, and the branch sat on
+option 3 (no rail) in the meantime.
 
-The chosen layout puts the five destinations (Home / Search / Profile / Inbox /
-Settings) at the top of the sidebar and retires the floating tab bar. That works
-in landscape. It does not work in portrait, and the reason is measured, not
-theoretical:
+**Option 2 won, and the objection recorded against it was wrong.** The
+objection was that `mode = .tabSidebar` "yields four columns in landscape (tab
+sidebar + subreddits + feed + comments), which does not fit 1366pt". That is
+true, and it is not a cost of the tab sidebar — it is a cost of *also* keeping a
+subreddit column. Dropping that column is an improvement on its own terms (it
+duplicated Apollo's "Home ⌄" title menu), so the constraint dissolved rather
+than had to be paid.
 
-> UIKit downgrades a three-column pane to `oneBesideSecondary` at 1032pt and
-> **hides the primary column** (§ "split view API traps"). The sidebar is the
-> primary column. So in portrait the sidebar — and therefore the destinations
-> rail inside it — is not on screen.
+What UIKit's sidebar gives that a hand-drawn rail could not:
 
-With the floating tab bar also removed, **portrait would have no way to switch
-tabs at all**. The sidebar toggle reveals the subreddit list, but a user who has
-not discovered it is stranded in one tab.
+- **Portrait solves itself.** UIKit collapses the sidebar into a floating tab
+  bar with a reveal button — verified on an iPad Pro 13" in portrait. No custom
+  adaptation logic, and no rotation-triggered appear/disappear to explain away,
+  which was option 1's main cost.
+- The system toggle between sidebar and tab bar, plus platform selection,
+  hover, drag-and-drop and keyboard behavior, none of it written by us.
+- One fixed sidebar for the whole app instead of a rail duplicated per tab —
+  which was the other complaint about the original design.
 
-Three ways out, with the tradeoff each buys:
-
-| Option | Behavior | Cost |
-|---|---|---|
-| **1. Adaptive tab bar** *(recommended)* | Rail lives in the sidebar; the floating tab bar is hidden exactly when the sidebar is visible and shown when it is not. `willChangeToDisplayMode:` already reports that flip precisely. | A tab bar that appears/disappears on rotation is unusual, though it mirrors how the sidebar itself behaves. |
-| **2. iOS 18+ `mode = .tabSidebar`** | UIKit's own adaptive tab-bar/sidebar control handles the whole problem natively. | Yields four columns in landscape (tab sidebar + subreddits + feed + comments), which does not fit 1366pt — the separate subreddit column would have to go. Also iOS 18+ only, so option 1 or 3 is still needed below that. |
-| **3. Keep the floating tab bar, ship no rail** | What is on the branch today. | Least "native iPad" of the three, but nothing is broken and it needs no new code. |
-
-Recommendation: **option 1**. It preserves the chosen design where there is room
-for it, degrades to today's working behavior where there is not, and the exact
-signal it needs is already wired up.
-
-Until this is settled the branch stays on option 3, which is a coherent shipping
-state rather than a half-built rail.
+The one genuine limit stands: **the tab sidebar is iOS 18+**. iOS 14–17 iPads
+keep the floating tab bar beside the two-column panes. That is a coherent
+layout, just a less native one, so the feature degrades rather than becoming
+unavailable. Option 1 remains the fallback if that ever needs improving.
 
 ## 7. Open questions
 
-1. **Sidebar destinations rail styling** — a compact icon rail, a full-width
-   list, or a segmented control at the top of the sidebar? Decide from the
-   Phase 0 spike screenshots rather than on paper.
+1. ~~**Sidebar destinations rail styling.**~~ **Answered:** UIKit draws it
+   (§6a). Nothing to style; it follows the platform.
 2. **Detail column empty state.** Apollo has no "no post selected" artwork.
-   Options: a themed empty state, or auto-select the first post on load (Mail's
-   behavior). Auto-select costs a network fetch on every subreddit change.
-3. **Does the sidebar persist across tabs visually?** Per-tab duplication is the
-   plan; verify it reads as stable in the spike.
-4. **iOS 18+ `mode = .tabSidebar`** as an alternative destinations rail — worth
-   revisiting only after Phase 3, and only if the hand-rolled rail feels wrong.
+   Currently a themed symbol + label. The alternative is auto-selecting the
+   first post on load (Mail's behavior), which costs a network fetch on every
+   subreddit change. Unresolved, but the current state is shippable.
+3. ~~**Does the sidebar persist across tabs visually?**~~ **Answered:** there is
+   now literally one sidebar, owned by the tab bar controller, so the question
+   no longer applies. Verified: switching to Inbox leaves the sidebar untouched
+   and replaces only the content.
+4. ~~**iOS 18+ `mode = .tabSidebar`** as an alternative destinations rail.~~
+   **Answered:** it is not the alternative, it is the design (§6a).
+5. **Should the subreddit list move into the sidebar?** UIKit renders a
+   `UITabGroup`'s `children` as an expandable sidebar section, which is how
+   Music lists playlists — the native home for "your communities". It would
+   require projecting Apollo's favorites/multireddits into `UITab` objects and
+   would lose the real list's Edit mode, A–Z index and sections. Not attempted;
+   the list works well in the list column today. Revisit only if the sidebar
+   feels sparse in use.

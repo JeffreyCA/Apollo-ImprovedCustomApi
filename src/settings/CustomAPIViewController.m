@@ -1411,7 +1411,7 @@ typedef NS_ENUM(NSInteger, Tag) {
                                       cell:^UITableViewCell *(__unused UITableView *tableView, __unused ApolloSettingsRow *row) {
             UITableViewCell *cell = [weakSelf switchCellWithIdentifier:@"Cell_Gen_IPadPaneLayout"
                                                                  label:@"Multi-Column Layout"
-                                                                detail:@"Experimental. Shows subreddits, posts and comments side by side instead of one at a time. Apollo restarts to apply."
+                                                                detail:@"Experimental. Puts your tabs in a sidebar and opens comments beside the post list instead of on top of it. Apollo restarts to apply."
                                                                     on:[[NSUserDefaults standardUserDefaults] boolForKey:UDKeyIPadPaneLayout]
                                                                enabled:YES
                                                                 action:@selector(iPadPaneLayoutSwitchToggled:)];
