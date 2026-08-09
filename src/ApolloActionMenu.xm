@@ -454,7 +454,13 @@ void ApolloActionMenuInjectMenuElements(NSMutableArray<UIMenuElement *> *childre
     }
 
     NSInteger slotIndex = indexPath.row - nativeCount;
-    if (slotIndex < 0 || (NSUInteger)slotIndex >= state.specs.count) { %orig; return; } // fail-soft
+    if (slotIndex < 0 || (NSUInteger)slotIndex >= state.specs.count) {
+        // Keep the Logos directive on its own line. Logos 2.4.1 consumes the
+        // remainder of a line containing %orig, which previously dropped the
+        // return and closing brace from generated Objective-C++.
+        %orig;
+        return;
+    }
 
     ApolloActionMenuSpec *spec = state.specs[(NSUInteger)slotIndex];
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
