@@ -112,6 +112,11 @@ static ApolloPaneColumn ApolloPaneColumnForViewController(UIViewController *view
     }
     sPaneRouterReentrant = NO;
 
+    // The incoming controller brought its own navigation item, so the sidebar
+    // toggle has to be re-applied or portrait loses its way back to the
+    // subreddit list.
+    if (column != ApolloPaneColumnSecondary) [pane apollo_refreshSidebarToggle];
+
     ApolloLog(@"[PaneRouter] routed %@ to column %ld (tab %ld)",
               NSStringFromClass([viewController class]), (long)column, (long)pane.apollo_tabIndex);
 }

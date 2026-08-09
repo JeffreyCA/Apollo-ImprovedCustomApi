@@ -45,6 +45,12 @@ NS_ASSUME_NONNULL_BEGIN
 // respondsToSelector:, so ApolloCommon needs no dependency on this class.
 - (nullable UIViewController *)apollo_preferredContentColumnController;
 
+// Re-applies the sidebar toggle to the content column's root. The router calls
+// this after replacing that root, because the incoming controller carries its
+// own navigation item and would otherwise leave portrait with no way back to
+// the subreddit list. No-op on two-column panes.
+- (void)apollo_refreshSidebarToggle;
+
 @end
 
 NS_ASSUME_NONNULL_END

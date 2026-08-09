@@ -12,11 +12,32 @@
 // the theme runtime so it matches whatever palette is active, with system
 // fallbacks for the stock (no custom theme) case.
 @interface ApolloPaneDetailPlaceholderViewController : UIViewController
+- (instancetype)initWithMessage:(NSString *)message symbolName:(NSString *)symbolName;
 @end
 
 @implementation ApolloPaneDetailPlaceholderViewController {
     UIImageView *_iconView;
     UILabel *_label;
+    NSString *_message;
+    NSString *_symbolName;
+}
+
+- (instancetype)initWithMessage:(NSString *)message symbolName:(NSString *)symbolName {
+    self = [super initWithNibName:nil bundle:nil];
+    if (self) {
+        _message = [message copy];
+        _symbolName = [symbolName copy];
+    }
+    return self;
+}
+
+- (instancetype)initWithNibName:(NSString *)nib bundle:(NSBundle *)bundle {
+    self = [super initWithNibName:nib bundle:bundle];
+    if (self) {
+        _message = @"No Post Selected";
+        _symbolName = @"text.bubble";
+    }
+    return self;
 }
 
 - (void)viewDidLoad {
@@ -28,12 +49,12 @@
     stack.spacing = 12.0;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
 
-    _iconView = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"text.bubble"]];
+    _iconView = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:_symbolName ?: @"text.bubble"]];
     _iconView.contentMode = UIViewContentModeScaleAspectFit;
     [_iconView.heightAnchor constraintEqualToConstant:44.0].active = YES;
 
     _label = [[UILabel alloc] init];
-    _label.text = @"No Post Selected";
+    _label.text = _message ?: @"No Post Selected";
     _label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
     _label.adjustsFontForContentSizeCategory = YES;
     _label.textAlignment = NSTextAlignmentCenter;
@@ -74,6 +95,16 @@
 }
 
 @end
+
+// A column holding nothing but its placeholder is "empty" for every decision
+// the split controller makes: which column to collapse onto, whether a stale
+// thread needs clearing, and where a content-seeking walk should descend.
+static BOOL ApolloPaneStackIsPlaceholderOnly(UINavigationController *nav) {
+    NSArray<UIViewController *> *stack = nav.viewControllers;
+    if (stack.count == 0) return YES;
+    if (stack.count > 1) return NO;
+    return [stack.firstObject isKindOfClass:[ApolloPaneDetailPlaceholderViewController class]];
+}
 
 #pragma mark - Column host
 
@@ -139,8 +170,11 @@
 
 #pragma mark - Pane split controller
 
-@interface ApolloPaneSplitViewController () <UISplitViewControllerDelegate>
+@interface ApolloPaneSplitViewController () <UISplitViewControllerDelegate> {
+    BOOL _apollo_loggedResolvedLayout;
+}
 @property (nonatomic, strong) UINavigationController *apollo_primaryNav;
+@property (nonatomic, strong) UINavigationController *apollo_contentNav;   // nil in a two-column pane
 @property (nonatomic, strong) UINavigationController *apollo_detailNav;
 @property (nonatomic, strong) UIViewController *apollo_detailHost;
 @end
@@ -151,16 +185,63 @@
                                                   tabIndex:(NSInteger)tabIndex {
     if (!rootNavigationController) return nil;
 
+    // Column count follows the tab's actual hierarchy depth rather than a fixed
+    // choice. Only the Home tab has a genuine three-level structure
+    // (subreddits -> feed -> comments), so only it gets three columns; giving
+    // Settings or Profile an empty middle column would be a pane with nothing
+    // to put in it. Detected from the root's class, not the tab index, so a
+    // reordered tab bar cannot silently mis-shape a pane.
+    BOOL wantsThreeColumns = NO;
+    Class subredditListClass = objc_getClass("_TtC6Apollo24RedditListViewController");
+    if (subredditListClass) {
+        wantsThreeColumns =
+            [rootNavigationController.viewControllers.firstObject isMemberOfClass:subredditListClass];
+    }
+
     ApolloPaneSplitViewController *pane =
-        [[self alloc] initWithStyle:UISplitViewControllerStyleDoubleColumn];
+        [[self alloc] initWithStyle:wantsThreeColumns ? UISplitViewControllerStyleTripleColumn
+                                                      : UISplitViewControllerStyleDoubleColumn];
     pane->_apollo_tabIndex = tabIndex;
-    [pane apollo_configureWithRootNavigationController:rootNavigationController];
+    [pane apollo_configureWithRootNavigationController:rootNavigationController
+                                        threeColumns:wantsThreeColumns];
     return pane;
 }
 
-- (void)apollo_configureWithRootNavigationController:(UINavigationController *)rootNav {
+- (void)apollo_configureWithRootNavigationController:(UINavigationController *)rootNav
+                                        threeColumns:(BOOL)threeColumns {
     self.apollo_primaryNav = rootNav;
-    self.apollo_detailNav = [self apollo_makeDetailNavigationController];
+    self.apollo_detailNav = [self apollo_makeNavigationControllerWithRoot:
+        [[ApolloPaneDetailPlaceholderViewController alloc] initWithMessage:@"No Post Selected"
+                                                               symbolName:@"text.bubble"]];
+
+    if (threeColumns) {
+        // Split the tab's existing stack across the sidebar and content columns.
+        // Apollo restores the last-viewed subreddit at launch, so this stack is
+        // routinely [RedditListViewController, PostsViewController] — exactly
+        // the two columns we want, already populated.
+        //
+        // The stack is truncated on the source nav BEFORE the feed is re-homed:
+        // Apollo's push body silently drops a controller that is already in the
+        // destination stack, and leaving it in two stacks at once is precisely
+        // the state that makes later pushes vanish (plan doc §2).
+        NSArray<UIViewController *> *stack = rootNav.viewControllers;
+        NSArray<UIViewController *> *carried =
+            stack.count > 1 ? [stack subarrayWithRange:NSMakeRange(1, stack.count - 1)] : @[];
+        if (carried.count > 0) [rootNav setViewControllers:@[ stack.firstObject ] animated:NO];
+
+        self.apollo_contentNav = carried.count > 0
+            ? [self apollo_makeNavigationControllerWithRoot:carried.firstObject]
+            : [self apollo_makeNavigationControllerWithRoot:
+                  [[ApolloPaneDetailPlaceholderViewController alloc] initWithMessage:@"No Subreddit Selected"
+                                                                          symbolName:@"list.bullet"]];
+        // Anything deeper than the first carried controller keeps its order on
+        // top of the content column rather than being dropped on the floor.
+        if (carried.count > 1) {
+            [self.apollo_contentNav setViewControllers:carried animated:NO];
+        }
+        [self setViewController:self.apollo_contentNav forColumn:UISplitViewControllerColumnSupplementary];
+        [self apollo_applySidebarToggleToTopOf:self.apollo_contentNav];
+    }
 
     [self setViewController:rootNav forColumn:UISplitViewControllerColumnPrimary];
     // The secondary column is the full-width one the sidebar floats over, so it
@@ -173,7 +254,12 @@
     // Tile, never overlay: a detail pane that floats over the list re-creates
     // the blown-up-iPhone feel this layout exists to remove.
     self.preferredSplitBehavior = UISplitViewControllerSplitBehaviorTile;
-    self.preferredDisplayMode = UISplitViewControllerDisplayModeOneBesideSecondary;
+    // `oneBesideSecondary` means exactly that: in a three-column layout it shows
+    // ONE of primary/supplementary and hides the other, which left the subreddit
+    // list with no way to reach it. Three-column panes need twoBesideSecondary.
+    self.preferredDisplayMode = threeColumns
+        ? UISplitViewControllerDisplayModeTwoBesideSecondary
+        : UISplitViewControllerDisplayModeOneBesideSecondary;
 
     // UIKit's default primary width (~320pt) is sized for a sidebar of short
     // labels, not for Apollo's feed. At that width post cells wrap hard and the
@@ -184,9 +270,23 @@
     // The bounds matter more than the fraction: 40% of an 11" iPad in portrait
     // would be too narrow to read, and 40% of a Stage Manager window stretched
     // across a large display would be absurdly wide.
-    self.preferredPrimaryColumnWidthFraction = 0.40;
-    self.minimumPrimaryColumnWidth = 360.0;
-    self.maximumPrimaryColumnWidth = 500.0;
+    if (threeColumns) {
+        // Sidebar stays narrow — it holds subreddit names, not post cells. The
+        // feed column carries the bounds that matter, since Apollo's post cells
+        // are tuned around iPhone Pro Max width and degrade below ~340pt.
+        // On a 13" iPad this lands at roughly 260 / 350 / 420 in portrait and
+        // 300 / 465 / 600 in landscape.
+        self.preferredPrimaryColumnWidthFraction = 0.22;
+        self.minimumPrimaryColumnWidth = 260.0;
+        self.maximumPrimaryColumnWidth = 320.0;
+        self.preferredSupplementaryColumnWidthFraction = 0.34;
+        self.minimumSupplementaryColumnWidth = 340.0;
+        self.maximumSupplementaryColumnWidth = 470.0;
+    } else {
+        self.preferredPrimaryColumnWidthFraction = 0.40;
+        self.minimumPrimaryColumnWidth = 360.0;
+        self.maximumPrimaryColumnWidth = 500.0;
+    }
 
     // Apollo installs its own screen-edge pans on every navigation controller
     // (left = interactive pop, right = "go forward", re-pushing from the per-nav
@@ -204,18 +304,17 @@
 
     self.delegate = self;
 
-    ApolloLog(@"[PaneSplit] tab %ld configured (primary=%@ detail=%@)",
-              (long)self.apollo_tabIndex, NSStringFromClass([rootNav class]),
-              NSStringFromClass([self.apollo_detailNav class]));
+    ApolloLog(@"[PaneSplit] tab %ld configured columns=%d primaryRoot=%@ contentRoot=%@",
+              (long)self.apollo_tabIndex, threeColumns ? 3 : 2,
+              NSStringFromClass([rootNav.viewControllers.firstObject class]),
+              NSStringFromClass([self.apollo_contentNav.viewControllers.firstObject class]));
 }
 
 // Prefer Apollo's own navigation controller subclass so the detail column
 // inherits its nav bar theming, transition animator and key commands rather
 // than looking like a foreign UIKit screen bolted on beside Apollo's chrome.
 // Falls back to a stock navigation controller if the class ever moves.
-- (UINavigationController *)apollo_makeDetailNavigationController {
-    UIViewController *placeholder = [[ApolloPaneDetailPlaceholderViewController alloc] init];
-
+- (UINavigationController *)apollo_makeNavigationControllerWithRoot:(UIViewController *)placeholder {
     Class apolloNav = objc_getClass("_TtC6Apollo26ApolloNavigationController");
     if (apolloNav) {
         @try {
@@ -232,16 +331,82 @@
     return [[UINavigationController alloc] initWithRootViewController:placeholder];
 }
 
+// One-shot diagnostic: what UIKit actually resolved, versus what we asked for.
+// preferredDisplayMode/preferredSplitBehavior are requests, and UIKit overrides
+// both when the available width cannot honor them.
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    if (_apollo_loggedResolvedLayout) return;
+    if (CGRectIsEmpty(self.view.bounds)) return;
+    _apollo_loggedResolvedLayout = YES;
+    ApolloLog(@"[PaneSplit] tab %ld resolved displayMode=%ld splitBehavior=%ld width=%.0f "
+              @"primaryW=%.0f supplementaryW=%.0f",
+              (long)self.apollo_tabIndex, (long)self.displayMode, (long)self.splitBehavior,
+              self.view.bounds.size.width,
+              self.primaryColumnWidth, self.supplementaryColumnWidth);
+}
+
+// Without this the sidebar becomes unreachable in portrait.
+//
+// We ask for `twoBesideSecondary`, and UIKit honors it in landscape (1366pt) but
+// downgrades to `oneBesideSecondary` in portrait (1032pt) — confirmed from a
+// resolved-layout log on an iPad Pro 13". The downgrade hides the PRIMARY
+// column, so the subreddit list simply disappears with no affordance to bring it
+// back. `displayModeButtonItem` is UIKit's supported toggle for exactly this.
+//
+// `leftItemsSupplementBackButton` keeps Apollo's own back button when the feed
+// column has drilled deeper, rather than the toggle replacing it.
+- (void)apollo_refreshSidebarToggle {
+    if (!self.apollo_contentNav) return;
+    [self apollo_applySidebarToggleToTopOf:self.apollo_contentNav];
+}
+
+- (void)apollo_applySidebarToggleToTopOf:(UINavigationController *)nav {
+    UIViewController *top = nav.viewControllers.firstObject;
+    if (!top) return;
+
+    // Deliberately NOT `self.displayModeButtonItem`. UIKit's system item renders
+    // as an empty capsule inside Apollo's Liquid Glass navigation bar — the
+    // control is there and tappable, but its glyph never appears, so the only
+    // route back to the subreddit list is invisible. An explicit item with our
+    // own symbol and the theme accent is legible in both bar styles.
+    UIBarButtonItem *toggle =
+        [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"sidebar.leading"]
+                                         style:UIBarButtonItemStylePlain
+                                        target:self
+                                        action:@selector(apollo_sidebarToggleTapped)];
+    toggle.accessibilityLabel = @"Show Subreddits";
+    toggle.tintColor = ApolloThemeAccentColor();
+    top.navigationItem.leftItemsSupplementBackButton = YES;
+    top.navigationItem.leftBarButtonItem = toggle;
+}
+
+// showColumn:/hideColumn: rather than assigning a display mode: they resolve to
+// the right presentation for the current width on their own — an overlay when
+// the sidebar cannot be tiled, a third tiled column when it can.
+- (void)apollo_sidebarToggleTapped {
+    BOOL primaryVisible = (self.displayMode == UISplitViewControllerDisplayModeTwoBesideSecondary ||
+                           self.displayMode == UISplitViewControllerDisplayModeTwoOverSecondary ||
+                           self.displayMode == UISplitViewControllerDisplayModeTwoDisplaceSecondary);
+    if (primaryVisible) {
+        [self hideColumn:UISplitViewControllerColumnPrimary];
+    } else {
+        [self showColumn:UISplitViewControllerColumnPrimary];
+    }
+    ApolloLog(@"[PaneSplit] tab %ld sidebar toggle: wasVisible=%d displayMode=%ld",
+              (long)self.apollo_tabIndex, primaryVisible, (long)self.displayMode);
+}
+
 #pragma mark - Column access
 
 - (UINavigationController *)apollo_navigationControllerForColumn:(ApolloPaneColumn)column {
     switch (column) {
-        // The two-column install has no separate feed column yet, so lists live
-        // alongside the sidebar's stack. Callers written against the
-        // three-column vocabulary keep working when that column arrives.
         case ApolloPaneColumnPrimary:
-        case ApolloPaneColumnSupplementary:
             return self.apollo_primaryNav;
+        // Tabs without a genuine three-level hierarchy have no separate feed
+        // column, so their lists belong alongside the sidebar's own stack.
+        case ApolloPaneColumnSupplementary:
+            return self.apollo_contentNav ?: self.apollo_primaryNav;
         case ApolloPaneColumnSecondary:
             return self.apollo_detailNav;
         case ApolloPaneColumnInPlace:
@@ -251,23 +416,24 @@
 }
 
 - (BOOL)apollo_detailIsEmpty {
-    NSArray<UIViewController *> *stack = self.apollo_detailNav.viewControllers;
-    if (stack.count == 0) return YES;
-    if (stack.count > 1) return NO;
-    return [stack.firstObject isKindOfClass:[ApolloPaneDetailPlaceholderViewController class]];
+    return ApolloPaneStackIsPlaceholderOnly(self.apollo_detailNav);
 }
 
 - (UIViewController *)apollo_preferredContentColumnController {
-    // Collapsed, both columns have merged into the primary's stack, so that is
+    // Collapsed, every column has merged into the primary's stack, so that is
     // unambiguously where the user is looking.
     if (self.isCollapsed) return self.apollo_primaryNav;
-    return self.apollo_detailIsEmpty ? self.apollo_primaryNav : self.apollo_detailNav;
+    if (!self.apollo_detailIsEmpty) return self.apollo_detailNav;
+    // Fall back through the columns in most-detailed order.
+    return self.apollo_contentNav ?: self.apollo_primaryNav;
 }
 
 - (void)apollo_clearDetailColumn {
     if (self.apollo_detailIsEmpty) return;
-    [self.apollo_detailNav setViewControllers:@[ [[ApolloPaneDetailPlaceholderViewController alloc] init] ]
-                                     animated:NO];
+    [self.apollo_detailNav setViewControllers:@[
+        [[ApolloPaneDetailPlaceholderViewController alloc] initWithMessage:@"No Post Selected"
+                                                               symbolName:@"text.bubble"]
+    ] animated:NO];
     ApolloLog(@"[PaneSplit] tab %ld detail column cleared", (long)self.apollo_tabIndex);
 }
 
@@ -279,17 +445,32 @@
 // collapse into a "No Post Selected" screen with their feed hidden behind it.
 - (UISplitViewControllerColumn)splitViewController:(UISplitViewController *)svc
         topColumnForCollapsingToProposedTopColumn:(UISplitViewControllerColumn)proposedTopColumn {
-    BOOL detailHasContent = !self.apollo_detailIsEmpty;
-    ApolloLog(@"[PaneSplit] tab %ld collapsing, detailHasContent=%d",
-              (long)self.apollo_tabIndex, detailHasContent);
-    return detailHasContent ? UISplitViewControllerColumnSecondary : UISplitViewControllerColumnPrimary;
+    // Land on the deepest column the user has actually reached, so collapsing
+    // feels like the single stack they navigated rather than a jump backwards.
+    if (!self.apollo_detailIsEmpty) {
+        ApolloLog(@"[PaneSplit] tab %ld collapsing onto secondary", (long)self.apollo_tabIndex);
+        return UISplitViewControllerColumnSecondary;
+    }
+    if (self.apollo_contentNav && !ApolloPaneStackIsPlaceholderOnly(self.apollo_contentNav)) {
+        ApolloLog(@"[PaneSplit] tab %ld collapsing onto supplementary", (long)self.apollo_tabIndex);
+        return UISplitViewControllerColumnSupplementary;
+    }
+    ApolloLog(@"[PaneSplit] tab %ld collapsing onto primary", (long)self.apollo_tabIndex);
+    return UISplitViewControllerColumnPrimary;
 }
 
 // UIKit merges the columns' navigation stacks on collapse, which would drag the
 // placeholder along with them. Strip it afterwards rather than trying to
 // predict the merge: the result is the same whichever way UIKit combines them.
 - (void)splitViewControllerDidCollapse:(UISplitViewController *)svc {
+    // UIKit merges onto whichever navigation controller survived as the top
+    // column, which is not necessarily the primary one.
     UINavigationController *nav = self.apollo_primaryNav;
+    for (UINavigationController *candidate in @[ self.apollo_detailNav,
+                                                 self.apollo_contentNav ?: self.apollo_primaryNav,
+                                                 self.apollo_primaryNav ]) {
+        if (candidate.viewControllers.count > 1) { nav = candidate; break; }
+    }
     NSArray<UIViewController *> *stack = nav.viewControllers;
     NSMutableArray<UIViewController *> *cleaned = [NSMutableArray arrayWithCapacity:stack.count];
     for (UIViewController *vc in stack) {
@@ -307,9 +488,18 @@
 // view controller the column renders as a black rectangle.
 - (void)splitViewControllerDidExpand:(UISplitViewController *)svc {
     if (self.apollo_detailNav.viewControllers.count == 0) {
-        [self.apollo_detailNav setViewControllers:@[ [[ApolloPaneDetailPlaceholderViewController alloc] init] ]
-                                         animated:NO];
+        [self.apollo_detailNav setViewControllers:@[
+            [[ApolloPaneDetailPlaceholderViewController alloc] initWithMessage:@"No Post Selected"
+                                                                   symbolName:@"text.bubble"]
+        ] animated:NO];
         ApolloLog(@"[PaneSplit] tab %ld expanded; restored detail placeholder", (long)self.apollo_tabIndex);
+    }
+    if (self.apollo_contentNav && self.apollo_contentNav.viewControllers.count == 0) {
+        [self.apollo_contentNav setViewControllers:@[
+            [[ApolloPaneDetailPlaceholderViewController alloc] initWithMessage:@"No Subreddit Selected"
+                                                                   symbolName:@"list.bullet"]
+        ] animated:NO];
+        ApolloLog(@"[PaneSplit] tab %ld expanded; restored content placeholder", (long)self.apollo_tabIndex);
     }
 }
 
