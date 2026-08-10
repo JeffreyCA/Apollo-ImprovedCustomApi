@@ -1307,6 +1307,32 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
 
     const CGFloat kEdgePadding = 8.0;
 
+    UIViewController *topVC = ApolloOwningTopViewController(titleControl);
+
+    // Trailing-cluster reservation (ApolloCommon.h): screens that strip their
+    // right bar buttons in place (Inbox while its Chat hub is up) hold a
+    // reservation on their navigation item so the title doesn't re-balance
+    // against the suddenly-empty trailing side and slide. Record the trailing
+    // content edge whenever one is really there (as an inset from the bar's
+    // trailing edge, so a rotation mid-hold still resolves correctly), and
+    // while the hold is set with no real trailing content, treat the recorded
+    // edge as still present. Both centering arms below then compute the exact
+    // geometry they computed with the buttons up — gap midpoint and overlap
+    // clamp alike — which is what keeps the title still in either
+    // Balance-Title mode.
+    UINavigationItem *navItem = topVC.navigationItem;
+    if (navItem) {
+        if (foundRight) {
+            ApolloNavItemNoteTrailingContentInset(navItem, CGRectGetWidth(bar.bounds) - rightLimit);
+        } else if (ApolloNavItemTrailingReservationHold(navItem)) {
+            CGFloat reservedInset = ApolloNavItemTrailingContentInset(navItem);
+            if (reservedInset > 0) {
+                rightLimit = CGRectGetWidth(bar.bounds) - reservedInset;
+                foundRight = YES;
+            }
+        }
+    }
+
     // Subreddit headers only (see the MARK above): size the JumpBar to its
     // actual content before centering, instead of leaving it at whatever
     // fixed width Apollo's own layout handed it (measured: exactly 156pt when
@@ -1314,7 +1340,6 @@ static BOOL ApolloRecenterTitleControl(UIView *titleControl) {
     // never content-dependent on its own). Measured fresh via -sizeThatFits:
     // every pass — never cached, never read from a possibly-mid-transition
     // frame — because that's the one thing here that's immune to timing.
-    UIViewController *topVC = ApolloOwningTopViewController(titleControl);
     if (topVC && ApolloSubredditTitleShouldTruncate(topVC)) {
         UIView *jumpBar = ApolloFindJumpBar(titleControl);
         CGFloat availableWidth = (rightLimit - kEdgePadding) - (leftLimit + kEdgePadding);

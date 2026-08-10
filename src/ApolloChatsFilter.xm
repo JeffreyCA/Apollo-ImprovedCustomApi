@@ -81,6 +81,7 @@ static char kInboxAllStatusObserverKey;
 static char kInboxAllChatHubKey;
 static char kInboxAllChatHubVisibleKey;
 static char kInboxAllOriginalRightItemsKey;
+static char kInboxAllSwipeLeftKey;
 
 // Apollo owns the Inbox badge for notification/message counts. Keep that raw
 // value separately and render Chat as an additive overlay so either producer
@@ -721,6 +722,14 @@ typedef NS_ENUM(NSInteger, ApolloInboxMode) {
 static ApolloInboxChatHubViewController *ApolloEnsureInboxChatHub(UIViewController *host);
 static void ApolloSetInboxChatHubVisible(UIViewController *host, BOOL visible, BOOL animated);
 static void ApolloDismantleInboxChatHub(UIViewController *host, NSString *reason);
+static void ApolloInboxWireBackPanPrecedence(UIViewController *controller, UIPanGestureRecognizer *backPan);
+
+// Chat -> Notifications back-pan: the association carries the host controller
+// and doubles as the marker the shared gesture delegate uses to tell this pan
+// apart from the plain Notifications -> Chat swipe.
+static char kInboxChatBackPanHostKey;
+// Recognizers already wired to require the back-pan's failure (weak set).
+static char kInboxChatBackPanWiredKey;
 
 @implementation ApolloInboxChatHubViewController
 
@@ -902,6 +911,15 @@ static ApolloInboxChatHubViewController *ApolloEnsureInboxChatHub(UIViewControll
     return hub;
 }
 
+static UIPanGestureRecognizer *ApolloInboxFindBackPan(UIViewController *host) {
+    for (UIGestureRecognizer *recognizer in host.viewIfLoaded.gestureRecognizers) {
+        if (objc_getAssociatedObject(recognizer, &kInboxChatBackPanHostKey)) {
+            return (UIPanGestureRecognizer *)recognizer;
+        }
+    }
+    return nil;
+}
+
 static void ApolloSetInboxChatHubVisible(UIViewController *host, BOOL visible, BOOL animated) {
     if (!host) return;
     if (![NSThread isMainThread]) {
@@ -949,10 +967,24 @@ static void ApolloSetInboxChatHubVisible(UIViewController *host, BOOL visible, B
         objc_setAssociatedObject(host, &kInboxAllOriginalRightItemsKey,
                                  [savedRightItems copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+    // Stripping the right buttons must not let the Liquid Glass recenter
+    // re-balance the "Inbox" title against an empty trailing side — the title
+    // visibly slid toward screen center on every Notifications -> Chat switch
+    // and back again on the return. Hold the trailing reservation BEFORE the
+    // strip (so a recenter pass mid-removal already holds the old edge) and
+    // release it only AFTER the restore (so no pass between the two sees a
+    // bare bar). No-op off-glass and under the pre-26 nav bar.
+    if (visible) ApolloNavItemSetTrailingReservationHold(host.navigationItem, YES);
     [host.navigationItem setRightBarButtonItems:visible ? nil : (savedRightItems.count ? savedRightItems : nil)
                                        animated:animated];
+    if (!visible) ApolloNavItemSetTrailingReservationHold(host.navigationItem, NO);
 
     if (visible) {
+        // The install-time wiring runs before the host view joins the
+        // navigation container, so Apollo's full-width pop pans (they live on
+        // the nav controller's UILayoutContainerView) are only reachable now
+        // — re-wire so they yield to the back-pan while Chat is up.
+        ApolloInboxWireBackPanPrecedence(host, ApolloInboxFindBackPan(host));
         // Align the persistent Chat overlay to the live sticky Notifications
         // switcher before making it visible.
         [hub apollo_alignModeSwitcherWithHostSwitcher:notificationsSwitcher];
@@ -1074,6 +1106,47 @@ static UIRefreshControl *ApolloInboxRefreshControl(UITableView *tableView) {
 // normal spot; the switcher fades back in when the list returns to rest.
 // The table carries a flag plus a reference to its switcher so this scroll
 // hook can drive the fade with one associated-object read per frame.
+// MARK: - Chat -> Notifications back-pan precedence
+//
+// Apollo pops screens with full-width swipe-back PANS on the navigation
+// container (plus the system interactive pop) — which is why a left-to-right
+// drag on the Notifications list already means "back". While the Chat hub is
+// visible the same drag must mean "back to Notifications" instead, so the
+// hub's back-pan (installed in ApolloInstallInboxModeSwitcher) is wired here
+// as a failure requirement into every pan on the host's ancestor chain: when
+// the back-pan begins (chat visible, mid-screen, decisively rightward — see
+// the shared delegate's gestureRecognizerShouldBegin:), Apollo's pop pans sit
+// it out; in every other situation the back-pan fails on the spot and they
+// behave exactly as stock. Scroll views' own pans are spared (the delegate
+// already recognizes simultaneously with them). A pan — not a discrete swipe
+// recognizer — because WebKit's deferring gates release held recognizers with
+// the touch history accumulated so far, which lets a pan begin late but
+// leaves a discrete swipe dead (verified with real HID swipes over the hub).
+static void ApolloInboxWireBackPanPrecedence(UIViewController *controller, UIPanGestureRecognizer *backPan) {
+    if (!backPan) return;
+    NSHashTable *wired = objc_getAssociatedObject(backPan, &kInboxChatBackPanWiredKey);
+    if (!wired) {
+        wired = [NSHashTable weakObjectsHashTable];
+        objc_setAssociatedObject(backPan, &kInboxChatBackPanWiredKey, wired, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    UIGestureRecognizer *pop = controller.navigationController.interactivePopGestureRecognizer;
+    if (pop && ![wired containsObject:pop]) {
+        [pop requireGestureRecognizerToFail:backPan];
+        [wired addObject:pop];
+    }
+    for (UIView *view = controller.viewIfLoaded; view; view = view.superview) {
+        UIGestureRecognizer *scrollPan =
+            [view isKindOfClass:[UIScrollView class]] ? ((UIScrollView *)view).panGestureRecognizer : nil;
+        for (UIGestureRecognizer *recognizer in view.gestureRecognizers) {
+            if (recognizer == backPan || recognizer == scrollPan || recognizer == pop) continue;
+            if ([wired containsObject:recognizer]) continue;
+            if (![recognizer isKindOfClass:[UIPanGestureRecognizer class]]) continue;
+            [recognizer requireGestureRecognizerToFail:backPan];
+            [wired addObject:recognizer];
+        }
+    }
+}
+
 %hook ASTableView
 - (void)setContentOffset:(CGPoint)contentOffset {
     %orig(contentOffset);
@@ -1155,6 +1228,59 @@ static void ApolloInboxEnsureRefreshHaptic(UITableView *tableView) {
     objc_setAssociatedObject(refreshControl, &kInboxRefreshHapticKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+// Delegate for the inbox mode-swipe recognizers. Both live on the host view
+// above two scroll surfaces (the notifications ASTableView and the Chat hub's
+// WKWebView scroll view), whose pan recognizers begin on ANY drag — and once a
+// pan has begun, UIKit's default exclusivity blocks a still-tracking swipe
+// from ever reaching Recognized (verified: synthesized began/moved/ended
+// swipes through -[UIApplication sendEvent:] never fired the handler without
+// this). Allowing simultaneous recognition lets the swipe complete alongside
+// the pan; the pop-gesture failure requirement set at install time still
+// takes precedence over simultaneity, so edge-pops stay exclusive.
+@interface ApolloInboxSwipeGestureDelegate : NSObject <UIGestureRecognizerDelegate>
+@end
+
+@implementation ApolloInboxSwipeGestureDelegate
+
++ (instancetype)shared {
+    static ApolloInboxSwipeGestureDelegate *shared;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ shared = [ApolloInboxSwipeGestureDelegate new]; });
+    return shared;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+    shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    return YES;
+}
+
+// The Chat -> Notifications back-pan must fail INSTANTLY whenever it doesn't
+// apply — every pan on the host's ancestor chain (Apollo's full-width
+// swipe-back, the interactive pop) waits on its failure, so a lingering
+// Possible state here would add drag to ordinary back-swipes. NOTE:
+// translationInView: is still zero inside gestureRecognizerShouldBegin: —
+// only the velocity direction is usable (learned on #805).
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    UIViewController *host = objc_getAssociatedObject(gestureRecognizer, &kInboxChatBackPanHostKey);
+    if (!host) return YES;   // the Notifications -> Chat swipe: no begin gating
+    if (![gestureRecognizer isKindOfClass:[UIPanGestureRecognizer class]]) return YES;
+    if (![objc_getAssociatedObject(host, &kInboxAllChatHubVisibleKey) boolValue]) return NO;
+    UIPanGestureRecognizer *pan = (UIPanGestureRecognizer *)gestureRecognizer;
+    // Leave the left edge band to the system back gestures (interactive pop,
+    // the chat web view's own history-back), exactly like stock.
+    if ([pan locationInView:pan.view].x < 44.0) return NO;
+    CGPoint velocity = [pan velocityInView:pan.view];
+    if (velocity.x <= 0.0 || fabs(velocity.x) <= fabs(velocity.y)) return NO;
+    // Inside a conversation a rightward flick must never yank the user out to
+    // Notifications (rooms keep their own back affordances, and the GIF
+    // picker's grid scrolls horizontally).
+    ApolloInboxChatHubViewController *hub = objc_getAssociatedObject(host, &kInboxAllChatHubKey);
+    if (!hub || ApolloModernChatControllerIsOnConversationRoute(hub.chatController)) return NO;
+    return YES;
+}
+
+@end
+
 static void ApolloInstallInboxModeSwitcher(id controller) {
     if (!ApolloInboxControllerIsAll(controller)) return;
     UITableView *tableView = ApolloInboxControllerTableView(controller);
@@ -1180,6 +1306,16 @@ static void ApolloInstallInboxModeSwitcher(id controller) {
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(tableView, &kInboxAllSwitcherTableKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(tableView, &kInboxAllSwitcherRefKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // The mode-swipe recognizers exist only alongside the switcher.
+        UISwipeGestureRecognizer *staleLeft = objc_getAssociatedObject(controller, &kInboxAllSwipeLeftKey);
+        [staleLeft.view removeGestureRecognizer:staleLeft];
+        objc_setAssociatedObject(controller, &kInboxAllSwipeLeftKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        UIView *staleHostView = ((UIViewController *)controller).viewIfLoaded;
+        for (UIGestureRecognizer *recognizer in [staleHostView.gestureRecognizers copy]) {
+            if (objc_getAssociatedObject(recognizer, &kInboxChatBackPanHostKey)) {
+                [staleHostView removeGestureRecognizer:recognizer];
+            }
+        }
         return;
     }
 
@@ -1244,6 +1380,49 @@ static void ApolloInstallInboxModeSwitcher(id controller) {
         objc_setAssociatedObject(tableView, &kInboxAllSwitcherRefKey, switcher, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         ChatsFilterLog(@"installed sticky Notifications / Chat switcher in Inbox (All)");
     }
+    // Swipe between the two modes like adjacent pages: right-to-left on
+    // Notifications reveals Chat. A discrete directional swipe on the HOST
+    // view covers the notifications list without touching its own pan/scroll
+    // handling (a vertical scroll never reads as a directional swipe); the
+    // simultaneous-recognition delegate is what lets it complete alongside
+    // the table's pan. The reverse (Chat -> Notifications) swipe is NOT a
+    // recognizer: over the Chat hub's WKWebView, WebKit's deferring gesture
+    // gates starve ancestor recognizers (verified with both synthesized and
+    // real HID swipes), so that direction is detected by the sendEvent
+    // tracker below instead. Left-to-right on Notifications intentionally
+    // stays unhandled so the navigation controller's edge-pop keeps meaning
+    // "back".
+    UISwipeGestureRecognizer *swipeLeft = objc_getAssociatedObject(controller, &kInboxAllSwipeLeftKey);
+    if (!swipeLeft) {
+        swipeLeft = [[UISwipeGestureRecognizer alloc]
+            initWithTarget:controller action:NSSelectorFromString(@"apollo_inboxModeSwiped:")];
+        swipeLeft.direction = UISwipeGestureRecognizerDirectionLeft;
+        swipeLeft.delegate = [ApolloInboxSwipeGestureDelegate shared];
+        [hostView addGestureRecognizer:swipeLeft];
+        objc_setAssociatedObject(controller, &kInboxAllSwipeLeftKey, swipeLeft, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    // Chat -> Notifications is a PAN (see ApolloInboxWireBackPanPrecedence for
+    // why a discrete swipe cannot work over the hub's web view). The shared
+    // delegate's gestureRecognizerShouldBegin: keeps it failing everywhere it
+    // doesn't apply, so the precedence wiring below never slows stock pops.
+    UIPanGestureRecognizer *backPan = nil;
+    for (UIGestureRecognizer *recognizer in hostView.gestureRecognizers) {
+        if (objc_getAssociatedObject(recognizer, &kInboxChatBackPanHostKey)) {
+            backPan = (UIPanGestureRecognizer *)recognizer;
+            break;
+        }
+    }
+    if (!backPan) {
+        backPan = [[UIPanGestureRecognizer alloc]
+            initWithTarget:controller action:NSSelectorFromString(@"apollo_inboxChatBackPanned:")];
+        backPan.maximumNumberOfTouches = 1;
+        backPan.delegate = [ApolloInboxSwipeGestureDelegate shared];
+        objc_setAssociatedObject(backPan, &kInboxChatBackPanHostKey, controller, OBJC_ASSOCIATION_ASSIGN);
+        [hostView addGestureRecognizer:backPan];
+    }
+    // Re-wire every install pass: cheap, idempotent, and it catches pop/pan
+    // recognizers that attach to the navigation container after first install.
+    ApolloInboxWireBackPanPrecedence((UIViewController *)controller, backPan);
     BOOL chatVisible = [objc_getAssociatedObject(controller, &kInboxAllChatHubVisibleKey) boolValue];
     ApolloInboxChatHubViewController *hub = objc_getAssociatedObject(controller, &kInboxAllChatHubKey);
     // The host switcher is the single live mode control in BOTH modes; it and
@@ -1597,6 +1776,18 @@ static NSArray *ApolloChatFilterOutChats(NSArray *messages) {
     if ([objc_getAssociatedObject(self, &kChatFilterKey) boolValue]) sChatFilterActive = NO;
 }
 
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    // Only now is the host view attached under the navigation controller's
+    // UILayoutContainerView, where Apollo's full-width pop pans live — the
+    // install-time wiring pass cannot reach them (see
+    // ApolloInboxWireBackPanPrecedence). Idempotent per recognizer.
+    if (ApolloInboxControllerIsAll(self) && ApolloModernChatShouldOpen()) {
+        ApolloInboxWireBackPanPrecedence((UIViewController *)self,
+                                         ApolloInboxFindBackPan((UIViewController *)self));
+    }
+}
+
 // Apollo notifies every inbox surface on account switches. The persistent
 // Chat hub is seeded with one account's cookies, so it must be destroyed at
 // this exact moment — keeping it would show (and compose as) the previous
@@ -1639,6 +1830,32 @@ static NSArray *ApolloChatFilterOutChats(NSArray *messages) {
     }
     if (sender.selectedMode != ApolloInboxModeChat || !ApolloModernChatShouldOpen()) return;
     ChatsFilterLog(@"Inbox (All) switching in place from Notifications to Chat hub");
+    ApolloSetInboxChatHubVisible((UIViewController *)self, YES, YES);
+}
+
+%new
+- (void)apollo_inboxChatBackPanned:(UIPanGestureRecognizer *)pan {
+    if (pan.state != UIGestureRecognizerStateEnded) return;
+    // The delegate already vetted chat visibility, the edge band, direction,
+    // and the conversation route at begin time; here only judge whether the
+    // finished drag reads as a deliberate back-swipe.
+    CGPoint translation = [pan translationInView:pan.view];
+    CGPoint velocity = [pan velocityInView:pan.view];
+    BOOL far = translation.x > 60.0 && fabs(translation.x) > 2.0 * fabs(translation.y);
+    BOOL flick = velocity.x > 300.0 && translation.x > 20.0;
+    if (!far && !flick) return;
+    if (![objc_getAssociatedObject(self, &kInboxAllChatHubVisibleKey) boolValue]) return;
+    ChatsFilterLog(@"Inbox (All) swipe: Chat hub -> Notifications");
+    ApolloSetInboxChatHubVisible((UIViewController *)self, NO, YES);
+}
+
+%new
+- (void)apollo_inboxModeSwiped:(UISwipeGestureRecognizer *)recognizer {
+    if (recognizer.state != UIGestureRecognizerStateEnded) return;
+    if (!ApolloInboxControllerIsAll(self) || !ApolloModernChatShouldOpen()) return;
+    BOOL chatVisible = [objc_getAssociatedObject(self, &kInboxAllChatHubVisibleKey) boolValue];
+    if (chatVisible) return;   // already on Chat
+    ChatsFilterLog(@"Inbox (All) swipe: Notifications -> Chat hub");
     ApolloSetInboxChatHubVisible((UIViewController *)self, YES, YES);
 }
 
