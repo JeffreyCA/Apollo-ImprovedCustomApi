@@ -1031,8 +1031,8 @@ static void LGSetAlternateIconName(NSString *name, void (^completion)(NSError *e
 // hostView is used to find a presentation context for an error alert (works
 // for either a UITableView or UICollectionView, since both are UIViews).
 static void LGApplyAlternateIcon(UIView *hostView, NSString *iconID, void (^completion)(BOOL success)) {
-    if (!iconID || ![UIApplication.sharedApplication supportsAlternateIcons]) return;
-    ApolloLog(@"[LGIconPicker] requesting alternate icon=%@", iconID);
+    if (![UIApplication.sharedApplication supportsAlternateIcons]) return;
+    ApolloLog(@"[LGIconPicker] requesting alternate icon=%@", iconID ?: @"(default)");
     __weak UIView *weakHost = hostView;
     LGSetAlternateIconName(iconID, ^(NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1476,6 +1476,15 @@ static UITableView *LGRememberedTableView(id viewController) {
     }
     if (LGAlternateIconsAvailable()) {
         NSIndexPath *r = LGRemapIndexPathToOriginal(indexPath);
+        // Bypass Apollo's redundant "Having issues setting?" alert for Default.
+        if (r.section == 0 && r.row == 0) {
+            [tableView deselectRowAtIndexPath:indexPath animated:YES];
+            __weak UITableView *weakTV = tableView;
+            LGApplyAlternateIcon(tableView, nil, ^(BOOL success) {
+                if (success) [weakTV reloadData];
+            });
+            return;
+        }
         LG_REMAP_SCOPE(tableView, r.section, indexPath.section);
         %orig(tableView, r);
         // The tapped row belongs to Apollo's own (non-glass) icon list, so
